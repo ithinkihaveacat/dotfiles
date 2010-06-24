@@ -1,6 +1,6 @@
 # -*- sh -*-
 
-export CONFIG="$HOME/.config"
+export CONFIGROOT=${CONFIGROOT:-$(dirname $(dirname $(readlink $BASH_SOURCE)))}
 
 export OS='unix'
 export PLATFORM=`"$HOME/.platform"`
@@ -20,9 +20,9 @@ function sourceif {
 
 if [ -z "$PATH_SET" ]; then
 
-    sourceif "$CONFIG/$OS/path"
-    sourceif "$CONFIG/$OS/$PLATFORM/path"
-    sourceif "$CONFIG/$OS/$PLATFORM/$HOSTNAME/path"
+    sourceif "$CONFIGROOT/$OS/path"
+    sourceif "$CONFIGROOT/$OS/$PLATFORM/path"
+    sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/path"
 
     export PATH="$LPATH:$PATH"
 
@@ -32,15 +32,15 @@ fi
 
 # Set other options
 
-sourceif "$CONFIG/$OS/$PLATFORM/$HOSTNAME/begin"
+sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/begin"
 
-sourceif "$CONFIG/$OS/config"
-sourceif "$CONFIG/$OS/$PLATFORM/config"
-sourceif "$CONFIG/$OS/$PLATFORM/$HOSTNAME/config"
+sourceif "$CONFIGROOT/$OS/config"
+sourceif "$CONFIGROOT/$OS/$PLATFORM/config"
+sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/config"
 
 # For each program that exists, create special configuration
 
-for p in $CONFIG/programs/* ; do
+for p in $CONFIGROOT/programs/* ; do
 
   if [ -d $p ]; then
     continue

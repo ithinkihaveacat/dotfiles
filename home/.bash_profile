@@ -1,5 +1,7 @@
 # -*- sh -*-
 
+export CONFIGROOT=${CONFIGROOT:-$(dirname $(dirname $(readlink $BASH_SOURCE)))}
+
 OS='unix'
 PLATFORM=`"$HOME/.platform"`
 HOSTNAME=`hostname | tr '.' ' ' | awk '{ print $1 }'`
@@ -14,6 +16,6 @@ function sourceif {
 
 sourceif "$HOME/.bashrc"
 
-sourceif "$CONFIG/$OS/login"
-sourceif "$CONFIG/$OS/$PLATFORM/login"
-sourceif "$CONFIG/$OS/$PLATFORM/$HOSTNAME/login"
+sourceif "$CONFIGROOT/$OS/login"
+sourceif "$CONFIGROOT/$OS/$PLATFORM/login"
+sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/login"
