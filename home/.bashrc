@@ -8,29 +8,31 @@ export HOSTNAME=`hostname | tr '.' ' ' | awk '{ print $1 }'`
 # set this early, because often used in setting the path
 export LOCAL="$HOME/local-$PLATFORM"
 
-# Source the parameter, if it exists
+export PATH0
+export PATH1=$PATH
 
+# Source the parameter, if it exists
 function sourceif {
     if [ -f "$1" ]; then
         source "$1"
     fi
-}  
+}
+
+# Returns colon-separated string; $(makepath foo bar) -> foo:bar 
+function makepath {
+    local IFS=:
+    echo "$*"
+}    
 
 # Set path
 
-if [ -z "$PATH_SET" ]; then
+sourceif "$CONFIGROOT/$OS/path"
+sourceif "$CONFIGROOT/$OS/$PLATFORM/path"
+sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/path"
 
-    sourceif "$CONFIGROOT/$OS/path"
-    sourceif "$CONFIGROOT/$OS/$PLATFORM/path"
-    sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/path"
+export PATH=$(makepath $PATH0 $PATH1)
 
-    export PATH="$LPATH:$PATH"
-
-    export PATH_SET="y"  
-
-fi
-
-# Set other options
+# Set general options
 
 sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/begin"
 
@@ -38,16 +40,16 @@ sourceif "$CONFIGROOT/$OS/config"
 sourceif "$CONFIGROOT/$OS/$PLATFORM/config"
 sourceif "$CONFIGROOT/$OS/$PLATFORM/$HOSTNAME/config"
 
-# For each program that exists, create special configuration
+# Set application-specific/conditional options
 
 for p in $CONFIGROOT/programs/* ; do
 
-  if [ -d $p ]; then
-    continue
-  fi
-  
-  if ( which $(basename $p) >/dev/null ); then
+  if type -t $(basename $p) >/dev/null ; then
     source $p
   fi
 
 done  
+
+# Set path again (potentially modified by programs/*)
+
+export PATH=$(makepath $PATH0 $PATH1)
