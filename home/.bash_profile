@@ -18,7 +18,7 @@ case $PLATFORM in
     
 esac
 
-export CONFIGROOT="$HOME/${CONFIGROOT:-$(dirname $(dirname $($READLINK $BASH_SOURCE)))}"
+export CONFIGROOT="${CONFIGROOT:-$HOME/$(dirname $(dirname $($READLINK $BASH_SOURCE)))}"
 
 # @TODO Figure out why $READLINK gets exported, and stop that from happening
 
