@@ -9,7 +9,7 @@ export HOSTNAME=${HOSTNAME:-$(hostname | tr '.' ' ' | awk '{ print $1 }')}
 case $PLATFORM in
 
   darwin)
-    READLINK="stat -f '%N'"
+    READLINK="greadlink -f"
     ;;
     
   *)
