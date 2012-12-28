@@ -12,7 +12,7 @@ will be wiped out!
 
 It's safe to run `install` multiple times.  (It's idempotent.)
 
-# Manual Changes
+### Manual Changes
 
 System Preferences > Keyboard > Keyboard Shortcuts > Services
 
