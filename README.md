@@ -23,3 +23,9 @@ Input
 
 * Change keybinding for "Move focus to the next window" to ⌘ §.
 (Cmd-§.)
+
+### To Do
+
+Go through
+<http://blog.flowblok.id.au/2013-02/shell-startup-scripts.html> and
+copy anything useful.
