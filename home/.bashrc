@@ -70,3 +70,6 @@ done
 # Set path again (potentially modified by programs/*)
 
 export PATH=$(makepath $PATH0 $PATH1)
+
+### Added by the Heroku Toolbelt
+export PATH="/usr/local/heroku/bin:$PATH"
