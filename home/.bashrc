@@ -67,6 +67,7 @@ for p in $CONFIGROOT/programs/* ; do
 
 done
 
+_Z_CMD="c"
 sourceif "$CONFIGROOT/etc/z.sh"
 
 # Set path again (potentially modified by programs/*)
