@@ -397,3 +397,7 @@ __git_ps1 ()
 		fi
 	fi
 }
+tf_format" "$c${b##refs/heads/}${f:+ $f}$r$p"
+		fi
+	fi
+}

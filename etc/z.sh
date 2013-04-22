@@ -222,3 +222,7 @@ elif complete &> /dev/null; then
   }
  }
 fi
+   PROMPT_COMMAND='_z --add "$(pwd '$_Z_RESOLVE_SYMLINKS' 2>/dev/null)" 2>/dev/null;'"$PROMPT_COMMAND"
+  }
+ }
+fi
