@@ -282,6 +282,8 @@ __git_ps1 ()
 				r="|MERGING"
 			elif [ -f "$g/CHERRY_PICK_HEAD" ]; then
 				r="|CHERRY-PICKING"
+			elif [ -f "$g/REVERT_HEAD" ]; then
+				r="|REVERTING"
 			elif [ -f "$g/BISECT_LOG" ]; then
 				r="|BISECTING"
 			fi
@@ -338,7 +340,7 @@ __git_ps1 ()
 			   [ "$(git config --bool bash.showUntrackedFiles)" != "false" ] &&
 			   [ -n "$(git ls-files --others --exclude-standard)" ]
 			then
-				u="%"
+				u="%${ZSH_VERSION+%}"
 			fi
 
 			if [ -n "${GIT_PS1_SHOWUPSTREAM-}" ]; then
@@ -394,10 +396,6 @@ __git_ps1 ()
 		else
 			# NO color option unless in PROMPT_COMMAND mode
 			printf -- "$printf_format" "$c${b##refs/heads/}${f:+ $f}$r$p"
-		fi
-	fi
-}
-tf_format" "$c${b##refs/heads/}${f:+ $f}$r$p"
 		fi
 	fi
 }

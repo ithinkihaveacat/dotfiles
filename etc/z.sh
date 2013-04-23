@@ -27,6 +27,10 @@ case $- in
    *) echo 'ERROR: z.sh is meant to be sourced, not directly executed.'
 esac
 
+[ -d "${_Z_DATA:-$HOME/.z}" ] && {
+    echo "ERROR: z.sh's datafile (${_Z_DATA:-$HOME/.z}) is a directory."
+}
+
 _z() {
 
  local datafile="${_Z_DATA:-$HOME/.z}"
@@ -49,7 +53,7 @@ _z() {
 
   # maintain the file
   local tempfile
-  tempfile="$(mktemp $datafile.XXXXXX)" || return
+  tempfile="$(mktemp "$datafile.XXXXXX")" || return
   while read line; do
    [ -d "${line%%\|*}" ] && echo $line
   done < "$datafile" | awk -v path="$*" -v now="$(date +%s)" -F"|" '
@@ -218,10 +222,6 @@ elif complete &> /dev/null; then
  [ "$_Z_NO_PROMPT_COMMAND" ] || {
   # bash populate directory list. avoid clobbering other PROMPT_COMMANDs.
   echo $PROMPT_COMMAND | grep -q "_z --add" || {
-   PROMPT_COMMAND='_z --add "$(pwd '$_Z_RESOLVE_SYMLINKS' 2>/dev/null)" 2>/dev/null;'"$PROMPT_COMMAND"
-  }
- }
-fi
    PROMPT_COMMAND='_z --add "$(pwd '$_Z_RESOLVE_SYMLINKS' 2>/dev/null)" 2>/dev/null;'"$PROMPT_COMMAND"
   }
  }
