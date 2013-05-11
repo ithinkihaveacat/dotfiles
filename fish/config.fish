@@ -1,5 +1,24 @@
-function dir
-  ls -l $argv
+type -t gls > /dev/null
+switch $status
+
+  case 0
+    function ls
+      command gls -FBh $argv
+    end
+
+    function dir
+      command gls -lFBh $argv
+    end  
+    
+  case '*'
+    function ls
+      command ls -FBh $argv
+    end
+
+    function dir
+      command ls -lFBh $argv
+    end  
+
 end
 
 # Remove greeting
