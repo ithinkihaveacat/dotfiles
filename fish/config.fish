@@ -1,4 +1,6 @@
-alias dir="ls -l"
+function dir
+  ls -l $argv
+end  
 
 # https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_git_prompt.fish
 set -g __fish_git_prompt_showupstream "auto"
