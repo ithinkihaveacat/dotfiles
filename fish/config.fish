@@ -4,30 +4,6 @@ set -g GITROOT "git@github.com:ithinkihaveacat"
 set -g GREP_OPTIONS "--exclude=.svn --exclude=.git --binary-files=without-match"
 set -g TZ "Europe/London"
 
-# Create ls and dir aliases
-type -t gls > /dev/null
-switch $status
-
-  case 0
-    function ls
-      command gls -FBh --color=auto $argv
-    end
-
-    function dir
-      command gls -lFBh --color=auto $argv
-    end  
-    
-  case '*'
-    function ls
-      command ls -FBh --color=auto $argv
-    end
-
-    function dir
-      command ls -lFBh --color=auto $argv
-    end  
-
-end
-
 # Remove greeting
 set fish_greeting
 
