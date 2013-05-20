@@ -61,4 +61,4 @@ set -g fish_color_escape      $cyan
 
 set -g fish_color_hostname    $cyan
 set -g fish_color_cwd         $yellow
-set -g fish_color_git         $magenta
+set -g fish_color_git         $green

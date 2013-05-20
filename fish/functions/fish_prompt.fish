@@ -1,11 +1,12 @@
 function fish_prompt --description 'Write out the prompt'
     
+    # Use after set_color to reset bold
     if not set -q __fish_prompt_color_normal
         set -g __fish_prompt_color_normal (set_color normal)
     end
 
     if not set -q __fish_prompt_color_hostname
-        set -g __fish_prompt_color_hostname (set_color $fish_color_normal)
+        set -g __fish_prompt_color_hostname (set_color -o $fish_color_hostname)
     end
 
     if not set -q __fish_prompt_color_cwd
