@@ -1,8 +1,8 @@
 # -*- sh -*-
 
-set -g GITROOT "git@github.com:ithinkihaveacat"
-set -g GREP_OPTIONS "--exclude=.svn --exclude=.git --binary-files=without-match"
-set -g TZ "Europe/London"
+set -x GITROOT "git@github.com:ithinkihaveacat"
+set -x GREP_OPTIONS "--exclude=.svn --exclude=.git --binary-files=without-match"
+set -x TZ "Europe/London"
 
 # Remove greeting
 set fish_greeting
