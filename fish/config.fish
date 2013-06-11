@@ -5,6 +5,8 @@ set -x GREP_OPTIONS "--exclude=.svn --exclude=.git --binary-files=without-match"
 set -x LESS "-XMcifR"
 set -x TZ "Europe/London"
 
+set -g CDPATH . ~ ~/workspace
+
 # Remove greeting
 set fish_greeting
 
