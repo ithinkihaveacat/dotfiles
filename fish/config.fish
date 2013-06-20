@@ -1,6 +1,7 @@
 # -*- sh -*-
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
+set -x GIT_COMPOSER_STALE "warn"
 set -x GREP_OPTIONS "--exclude=.svn --exclude=.git --binary-files=without-match"
 set -x LESS "-XMcifR"
 set -x TZ "Europe/London"
