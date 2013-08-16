@@ -1,5 +1,9 @@
 # -*- sh -*-
 
+if status --is-login
+  set -x PATH $CONFIGROOT/bin $PATH
+end
+
 set -x GITROOT "git@github.com:ithinkihaveacat"
 set -x GIT_COMPOSER_STALE "warn"
 set -x GREP_OPTIONS "--exclude-dir=.svn --exclude-dir=.git --binary-files=without-match"
