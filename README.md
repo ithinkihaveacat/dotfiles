@@ -1,4 +1,16 @@
-## Installation Instructions
+### About
+
+Config files for various tools I use, or have used in the past, such as [fish](http://fishshell.com/), [git](http://git-scm.com/), [jed](http://www.jedsoft.org/jed/) and [Sublime Text](http://www.sublimetext.com/).
+
+It's very unlikely that anyone will want to use this directly; the more interesting directories are:
+
+* [fish](fish) - configuration and startup files for fish shell.
+* [bin](bin) - mostly git commands that are a bit too long or complicated to be embedded into [.gitconfig](home/.gitconfig).
+* [templates/hooks](templates/hooks) - git hooks; these are installed via [`git updatehooks`](bin/git-updatehooks).
+
+Note that there's a lot of bash config files scattered about the place--I used to use bash but have no switched to fish, but am keeping it around for the memories, such as the [list of operatings systems](unix) that have been "supported" at some point in the past...
+
+### Installation
 
 ````sh
 $ cd $HOME
@@ -24,3 +36,8 @@ System Preferences > Keyboard > Keyboard Shortcuts > Services
 Go through
 <http://blog.flowblok.id.au/2013-02/shell-startup-scripts.html> and
 copy anything useful.
+
+### Author
+
+Michael Stillwell<br/>
+mjs@beebo.org
