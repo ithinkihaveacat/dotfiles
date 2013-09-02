@@ -8,7 +8,7 @@ It's very unlikely that anyone will want to use this directly; the more interest
 * [bin](bin) - mostly git commands that are a bit too long or complicated to be embedded into [.gitconfig](home/.gitconfig).
 * [templates/hooks](templates/hooks) - git hooks; these are installed via [`git updatehooks`](bin/git-updatehooks).
 
-Note that there's a lot of bash config files scattered about the place--I used to use bash but have now switched to fish, but am keeping it around for the memories, such as the [list of operatings systems](unix) that have been "supported" at some point in the past...
+Note that there's a lot of bash config files scattered about the place--I used to use bash but have now switched to fish, but am keeping it around for the memories, such as the [list of operating systems](unix) that have been "supported" at some point in the past...
 
 ### Installation
 
