@@ -10,6 +10,11 @@ It's very unlikely that anyone will want to use this directly; the more interest
 
 Note that there's a lot of bash config files scattered about the place--I used to use bash but have now switched to fish, but am keeping it around for the memories, such as the [list of operating systems](unix) that have been "supported" at some point in the past...
 
+### Prerequisites
+
+* Ability to write to `/usr/local`.
+* `readlink` or `greadlink`. (On OS X, `brew install coreutils`.)
+
 ### Installation
 
 ````sh
@@ -17,6 +22,7 @@ $ cd $HOME
 $ git clone git@github.com:ithinkihaveacat/dotfiles.git .dotfiles
 $ cd $HOME/.dotfiles
 $ ./update
+# On OS X, logout and login again
 ````
 
 Note that `update` may be destructive--if you have "unmanaged" files in
@@ -27,7 +33,7 @@ It's safe to run `update` multiple times.  (It's idempotent.)
 
 ### Manual Changes
 
-System Preferences > Keyboard > Keyboard Shortcuts > Services
+System Preferences > Keyboard > Keyboard Shortcuts > Services > File and Folders
 
 * Enable "New Terminal at Folder"
 
