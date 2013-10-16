@@ -37,6 +37,8 @@ System Preferences > Keyboard > Keyboard Shortcuts > Services > File and Folders
 
 * Enable "New Terminal at Folder"
 
+On OS X, import `etc/Solarized Dark.terminal` into Terminal.app.
+
 ### To Do
 
 Go through
