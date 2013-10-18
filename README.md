@@ -57,6 +57,10 @@ It's safe to run `update` multiple times.  (It's idempotent.)
 
 ### Manual Changes
 
+#### Sublime Text
+
+[Install Package Control](https://sublime.wbond.net/installation).
+
 #### OS X
 
 ##### "New Terminal at Folder"
@@ -65,7 +69,9 @@ System Preferences > Keyboard > Keyboard Shortcuts > Services > File and Folders
 
 * Enable "New Terminal at Folder"
 
-##### subl (Sublime Text command-line client)
+##### Sublime Text
+
+Symlink `subl`:
 
 ````sh
 $ ln -s "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl" /usr/local/bin/subl
