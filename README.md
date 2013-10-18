@@ -10,11 +10,6 @@ It's very unlikely that anyone will want to use this directly; the more interest
 
 Note that there's a lot of bash config files scattered about the place--I used to use bash but have now switched to fish, but am keeping it around for the memories, such as the [list of operating systems](unix) that have been "supported" at some point in the past...
 
-### Prerequisites
-
-* Ability to write to `/usr/local`.
-* `readlink` or `greadlink`. (On OS X, `brew install coreutils`.)
-
 ### Installation
 
 ````sh
