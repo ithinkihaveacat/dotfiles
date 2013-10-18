@@ -10,6 +10,35 @@ It's very unlikely that anyone will want to use this directly; the more interest
 
 Note that there's a lot of bash config files scattered about the place--I used to use bash but have now switched to fish, but am keeping it around for the memories, such as the [list of operating systems](unix) that have been "supported" at some point in the past...
 
+### Prerequisites
+
+#### [homebrew](http://brew.sh/)
+
+homebrew needs write permission to `/usr/local`, although this can be limited to just install symlinks. If you only want symlinks in `/usr/local`, do something like:
+
+````sh
+$ mkdir -p $HOME/local
+$ cd $HOME/local
+$ mkdir homebrew && curl -L https://github.com/mxcl/homebrew/tarball/master | tar xz --strip 1 -C homebrew
+$ sudo ln -s $HOME/local/homebrew/bin/brew /usr/local/bin/brew
+````
+
+Then, make certain directores in `/usr/local` writable:
+
+````sh
+$ sudo chown $USER /usr/local /usr/local/bin /usr/local/share /usr/local/etc /usr/local/share/man
+````
+
+(You may need to do this every time you `brew install`, if something is changing the permissions in `/usr/local`.)
+
+#### [fish](http://fishshell.com/)
+
+OS X:
+
+````sh
+$ brew install fish
+````
+
 ### Installation
 
 ````sh
