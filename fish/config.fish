@@ -13,6 +13,7 @@ set -x GIT_COMPOSER_STALE "warn"
 
 # fish config
 
+mkdir -p ~/workspace
 set -g CDPATH . ~ ~/workspace
 
 # http://fishshell.com/docs/2.0/#variables-special
