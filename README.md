@@ -57,11 +57,19 @@ It's safe to run `update` multiple times.  (It's idempotent.)
 
 ### Manual Changes
 
+#### OS X
+
+##### "New Terminal at Folder"
+
 System Preferences > Keyboard > Keyboard Shortcuts > Services > File and Folders
 
 * Enable "New Terminal at Folder"
 
-On OS X, import `etc/Solarized Dark.terminal` into Terminal.app.
+##### subl (Sublime Text command-line client)
+
+````sh
+$ ln -s "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl" /usr/local/bin/subl
+````
 
 ### To Do
 
