@@ -28,4 +28,5 @@ set -g __fish_git_prompt_showstashstate "1"
 set -g __fish_git_prompt_showdirtystate "1"
 
 . $HOME/.config/fish/solarized.fish
+mkdir -p ~/.rubies
 . $HOME/.config/fish/rubies.fish
