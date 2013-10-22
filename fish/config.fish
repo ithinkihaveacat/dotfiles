@@ -1,5 +1,7 @@
 # -*- sh -*-
 
+set -xg PATH /usr/local/sbin /usr/local/bin $PATH
+
 # tool config
 
 set -x GREP_OPTIONS "--exclude-dir=.svn --exclude-dir=.git --binary-files=without-match"
