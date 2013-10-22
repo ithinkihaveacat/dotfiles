@@ -77,6 +77,18 @@ Symlink `subl`:
 $ ln -s "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl" /usr/local/bin/subl
 ````
 
+#### Terminal Configuration
+
+Import `etc/Solarized Dark.terminal`.
+
+#### Ubuntu
+
+##### Solarized Terminal
+
+Run the following `gconftool` commands to set the terminal colours correctly:
+
+<http://stackoverflow.com/a/7734960>
+
 ### To Do
 
 Go through
