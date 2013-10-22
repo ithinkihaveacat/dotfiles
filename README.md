@@ -12,7 +12,9 @@ Note that there's a lot of bash config files scattered about the place--I used t
 
 ### Prerequisites
 
-#### [homebrew](http://brew.sh/)
+#### OS X
+
+##### [homebrew](http://brew.sh/)
 
 homebrew needs write permission to `/usr/local`, although this can be limited to just install symlinks. If you only want symlinks in `/usr/local`, do something like:
 
@@ -31,9 +33,7 @@ $ sudo chown $USER /usr/local /usr/local/bin /usr/local/share /usr/local/etc /us
 
 (You may need to do this every time you `brew install`, if something is changing the permissions in `/usr/local`.)
 
-#### [fish](http://fishshell.com/)
-
-OS X:
+##### [fish](http://fishshell.com/)
 
 ````sh
 $ brew install fish
