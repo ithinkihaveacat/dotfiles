@@ -81,13 +81,23 @@ $ ln -s "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl" /usr/lo
 
 Import `etc/Solarized Dark.terminal`.
 
-#### Ubuntu
+#### Ubuntu Terminal
 
-##### Solarized Terminal
+##### Change Colour Scheme
 
-Run the following `gconftool` commands to set the terminal colours correctly:
+Run the following `gconftool` commands to set
+[Solarized](http://ethanschoonover.com/solarized) colours correctly:
 
 <http://stackoverflow.com/a/7734960>
+
+#### Change Font
+
+Use "Profile Preferences" to change the default font.
+
+#### Make Alt Available
+
+Open "Keyboard Shortcuts" and unselect "Enable menu access keys".
+(Otherwise Alt is used for accessing the menu.)
 
 ### To Do
 
