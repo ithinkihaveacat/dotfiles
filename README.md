@@ -60,7 +60,7 @@ Probably best to [install from source](http://php.net/downloads.php).
 You probably want to enable a few extensions when you `./configure`:
 
 ````sh
-$ ./configure --with-curl --enable-zip
+$ ./configure --with-curl --with-zlib --with-openssl --enable-zip
 ````
 
 ### Installation
