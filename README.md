@@ -101,6 +101,15 @@ Symlink `subl`:
 $ ln -s "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl" /usr/local/bin/subl
 ````
 
+#### Ubuntu
+
+Get emacs keybindings across all gtk apps
+([source](http://superuser.com/a/348609):
+
+````sh
+$ gsettings set org.gnome.desktop.interface gtk-key-theme "Emacs"
+````
+
 #### Terminal Configuration
 
 Import `etc/Solarized Dark.terminal`.
