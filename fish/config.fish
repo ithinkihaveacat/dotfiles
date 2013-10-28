@@ -1,7 +1,5 @@
 # -*- sh -*-
 
-set -xg PATH /usr/local/sbin /usr/local/bin $PATH
-
 # tool config
 
 set -x GREP_OPTIONS "--exclude-dir=.svn --exclude-dir=.git --binary-files=without-match"
@@ -18,10 +16,10 @@ set -x GIT_COMPOSER_STALE "warn"
 mkdir -p ~/workspace
 set -g CDPATH . ~ ~/workspace
 
-# http://fishshell.com/docs/2.0/#variables-special
-set fish_user_paths $HOME/.config/fish/../bin
+# http://fishshell.com/docs/2.1/#variables-special
+set fish_user_paths /usr/local/sbin /usr/local/bin $HOME/.config/fish/../bin
 
-# http://fishshell.com/docs/2.0/#variables-special
+# http://fishshell.com/docs/2.1/#variables-special
 set fish_greeting
 
 # https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_git_prompt.fish
@@ -30,5 +28,6 @@ set -g __fish_git_prompt_showstashstate "1"
 set -g __fish_git_prompt_showdirtystate "1"
 
 . $HOME/.config/fish/solarized.fish
+
 mkdir -p ~/.rubies
 . $HOME/.config/fish/rubies.fish
