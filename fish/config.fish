@@ -10,6 +10,7 @@ set -x TZ "Europe/London"
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
 set -x GIT_COMPOSER_STALE "warn"
+set -X EDITOR "jed"
 
 # fish config
 
