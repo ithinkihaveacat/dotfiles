@@ -18,7 +18,7 @@ mkdir -p ~/workspace
 set -g CDPATH . ~ ~/workspace
 
 # http://fishshell.com/docs/2.1/#variables-special
-set fish_user_paths /usr/local/sbin /usr/local/bin $HOME/.config/fish/../bin
+set fish_user_paths /usr/local/sbin /usr/local/bin $HOME/local/bin $HOME/.dotfiles/fish/../bin
 
 # http://fishshell.com/docs/2.1/#variables-special
 set fish_greeting
