@@ -14,8 +14,14 @@ set -X EDITOR "jed"
 
 # fish config
 
-mkdir -p ~/workspace
-set -g CDPATH . ~ ~/workspace
+set -g CDPATH . ~
+if test -d ~/workspace
+  set -g CDPATH $CDPATH ~/workspace
+end
+
+if test -d ~/citc
+  set -g CDPATH $CDPATH ~/citc
+end
 
 # http://fishshell.com/docs/2.1/#variables-special
 set fish_user_paths /usr/local/sbin /usr/local/bin $HOME/local/bin $HOME/.dotfiles/fish/../bin
