@@ -18,13 +18,16 @@ set -g CDPATH . ~
 if test -d ~/workspace
   set -g CDPATH $CDPATH ~/workspace
 end
-
 if test -d ~/citc
   set -g CDPATH $CDPATH ~/citc
 end
 
 # http://fishshell.com/docs/2.1/#variables-special
-set fish_user_paths /usr/local/sbin /usr/local/bin $HOME/local/bin $HOME/.dotfiles/fish/../bin
+set fish_user_paths /usr/local/sbin /usr/local/bin ~/local/bin ~/.dotfiles/fish/../bin
+
+if test -d ~/local/google-cloud-sdk/bin
+  set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/bin
+end
 
 # http://fishshell.com/docs/2.1/#variables-special
 set fish_greeting
