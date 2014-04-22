@@ -4,7 +4,6 @@ function notify -a body -a title -d "Posts a notification using the Notification
     set body done
   end
   if [ -z "$title" ]
-    echo here
     set title Terminal
   end
   osascript -e "display notification \"$body\" with title \"$title\""
