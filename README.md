@@ -130,12 +130,6 @@ Use "Profile Preferences" to change the default font.
 Open "Keyboard Shortcuts" and unselect "Enable menu access keys".
 (Otherwise Alt is used for accessing the menu.)
 
-# To Do
-
-Go through
-<http://blog.flowblok.id.au/2013-02/shell-startup-scripts.html> and
-copy anything useful.
-
 # Author
 
 <mjs@beebo.org>
