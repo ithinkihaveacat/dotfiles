@@ -87,13 +87,16 @@ It's safe to run `update` multiple times.  (It's idempotent.)
 
 ### Sublime Text
 
-[Install Package Control](https://sublime.wbond.net/installation).
+[Install Package Control](https://sublime.wbond.net/installation). The actual
+packages to install are stored in [`etc/subl/Package Control.sublime-settings`](Package Control.sublime-settings); Package Control
+will pick this up and install the appropriate packages as soon as it itself is
+installed.
 
 ## OS X
 
 ### Configure Terminal
 
-Import `etc/Solarized Dark.terminal`.
+Import [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal).
 
 ### "New Terminal at Folder"
 
