@@ -10,7 +10,11 @@ set -x TZ "Europe/London"
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
 set -x GIT_COMPOSER_STALE "warn"
-set -X EDITOR "jed"
+
+if which atom >/dev/null
+  set -x EDITOR "atom --new-window --wait"
+  set -x VISUAL "$EDITOR"
+end
 
 # fish config
 
