@@ -75,7 +75,7 @@ $ ./update
 # On OS X, logout and login again
 ````
 
-Note that `update` may be destructive--if you have "unmanaged" files in
+Note that `update` may be destructive&#8212;if you have "unmanaged" files in
 locations such as `~/Library/KeyBindings` or `~/Library/Fonts`, they will be
 wiped out!
 
