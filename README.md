@@ -31,25 +31,19 @@ $ brew install fish
 
 ### Don't have [homebrew](http://brew.sh/)?
 
-homebrew needs write permission to `/usr/local`, although this can be limited to
-just install symlinks. If you only want symlinks in `/usr/local`, do something
-like:
+#### If you want to install into `/usr/local` ...
 
-````sh
-$ mkdir -p $HOME/local
-$ cd $HOME/local
-$ mkdir homebrew && curl -L https://github.com/mxcl/homebrew/tarball/master | tar xz --strip 1 -C homebrew
-$ sudo ln -s $HOME/local/homebrew/bin/brew /usr/local/bin/brew
-````
+See <http://brew.sh>.
 
-Then, make certain directories in `/usr/local` writable:
+#### If you want to install somewhere else ...
 
-````sh
-$ sudo chown $USER /usr/local /usr/local/bin /usr/local/share /usr/local/etc /usr/local/share/man
-````
+See <https://github.com/Homebrew/homebrew/wiki/Installation#untar-anywhere-and-then-symlink-the-brew-command-elsewhere>
 
-(You may need to do this every time you `brew install`, if something is changing
-the permissions in `/usr/local`.)
+Note that the binaries are symlinked into whatever directory `brew` is
+installed into. (So if `brew` is symlinked into `/usr/local/bin`, then
+all executables `brew` installs will be symlinked into there as well.)
+This can be useful if you want to install `brew` in your home
+directory, but symlink binaries into `/usr/local/bin`.
 
 ### Other Platforms
 
