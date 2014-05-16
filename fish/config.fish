@@ -9,7 +9,7 @@ set -x TZ "Europe/London"
 # personal config
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
-set -x GIT_COMPOSER_STALE "warn"
+# set -x GIT_COMPOSER_STALE "warn"
 
 if which atom >/dev/null
   set -x EDITOR "atom --new-window --wait"
@@ -34,7 +34,7 @@ if test -d ~/local/google-cloud-sdk/bin
 end
 
 # http://fishshell.com/docs/2.1/#variables-special
-set fish_greeting
+set --erase fish_greeting
 
 # https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_git_prompt.fish
 set -g __fish_git_prompt_showupstream "auto"
