@@ -9,7 +9,6 @@ set -x TZ "Europe/London"
 # personal config
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
-set -x GIT_COMPOSER_STALE "warn"
 
 if which atom >/dev/null
   set -x EDITOR "atom --new-window --wait"
