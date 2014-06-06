@@ -32,6 +32,10 @@ if test -d ~/local/homebrew/bin
   set fish_user_paths ~/local/homebrew/bin $fish_user_paths
 end
 
+if test -d ~/local/homebrew/sbin
+  set fish_user_paths ~/local/homebrew/sbin $fish_user_paths
+end
+
 if test -d ~/local/google-cloud-sdk/bin
   set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/bin
 end
