@@ -8,5 +8,7 @@ function people.get -d "Google+ people.get API call"
   if test ( count $argv ) -gt 1
     set qs "?access_token=$argv[2]"
   end
-  curl -s "https://www.googleapis.com/plus/v1/people/$userId$qs"
+  set url "https://www.googleapis.com/plus/v1/people/$userId$qs"
+  echo "# $url"
+  curl -s $url
 end
