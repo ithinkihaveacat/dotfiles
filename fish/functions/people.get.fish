@@ -1,6 +1,6 @@
 function people.get -d "Google+ people.get API call"
   if test ( count $argv ) -eq 0
-    echo "usage: $_ userId [access_token]"
+    echo "usage: $_ user_id [access_token]"
     return
   end
   # example 112077979967606528699
