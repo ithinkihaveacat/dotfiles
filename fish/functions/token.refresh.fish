@@ -1,6 +1,6 @@
 # https://developers.google.com/accounts/docs/OAuth2WebServer#refresh
 
-function token.refresh -d "Return an access token given a refresh token"
+function token.refresh -d "Get a Google access token from a refresh token"
   if test ( count $argv ) -eq 0
     echo "usage: $_ client_id client_secret refresh_token"
     return

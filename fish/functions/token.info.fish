@@ -1,4 +1,4 @@
-function token.info -d "Return information about a Google OAuth access token"
+function token.info -d "Get information about a Google access token"
   if test ( count $argv ) -eq 0
     echo "usage: $_ access_token"
     return
