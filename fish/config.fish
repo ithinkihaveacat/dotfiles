@@ -40,6 +40,11 @@ if test -d ~/local/google-cloud-sdk/bin
   set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/bin
 end
 
+# gem install $name --user-install
+if test -d ~/.gem/ruby/*/bin
+  set fish_user_paths $fish_user_paths ~/.gem/ruby/*/bin
+end
+
 # http://fishshell.com/docs/2.1/#variables-special
 set --erase fish_greeting
 
