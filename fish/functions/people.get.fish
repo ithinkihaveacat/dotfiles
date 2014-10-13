@@ -1,4 +1,5 @@
-function people.get -d "Google+ people.get API call"
+# https://developers.google.com/+/api/latest/people/get
+function people.get -d "Google+ People: get"
   if test ( count $argv ) -eq 0
     echo "usage: $_ user_id [access_token]"
     return
