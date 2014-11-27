@@ -36,7 +36,7 @@ See <http://brew.sh>.
 
 #### If you want to install somewhere else ...
 
-See <https://github.com/Homebrew/homebrew/wiki/Installation#untar-anywhere-and-then-symlink-the-brew-command-elsewhere>
+See <https://github.com/Homebrew/homebrew/blob/master/share/doc/homebrew/Installation.md#alternative-installs>
 
 Note that the binaries are symlinked into whatever directory `brew` is
 installed into. (So if `brew` is symlinked into `/usr/local/bin`, then
@@ -72,7 +72,7 @@ Note that `update` may be destructive&#8212;if you have "unmanaged" files in
 locations such as `~/Library/KeyBindings` or `~/Library/Fonts`, they will be
 wiped out!
 
-It's safe to run `update` multiple times.  (It's idempotent.)
+(Though it is safe to run `update` multiple times.)
 
 # Manual Changes
 
