@@ -1,4 +1,4 @@
-function gam-icons -d "Generate icons in different sizes"
+function make.gam-icons -d "Generate icons in different sizes"
   if test ( count $argv ) -ne 1
     echo "usage: $_ color"
     return
