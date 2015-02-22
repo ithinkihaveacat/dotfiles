@@ -1,5 +1,5 @@
 function fish_prompt --description 'Write out the prompt'
-    
+
     # Use after set_color to reset bold
     if not set -q __fish_prompt_color_normal
         set -g __fish_prompt_color_normal (set_color normal)
@@ -18,8 +18,10 @@ function fish_prompt --description 'Write out the prompt'
     end
 
     if not set -q __fish_prompt_hostname
-        if hostname | grep -q lon.corp.google.com
+        if hostname | grep -q corp.google.com
           set -g __fish_prompt_hostname (hostname -s|cut -d \- -f 1)@goobuntu
+        else if begin ; hostname | grep -q syd ; end
+          set -g __fish_prompt_hostname syd@gandi
         else
           set -g __fish_prompt_hostname (hostname -s|cut -d \- -f 1)
         end
