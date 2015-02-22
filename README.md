@@ -1,9 +1,9 @@
-# About
+## About
 
 Config files for various tools I use, or have used in the past, such as
 [fish](http://fishshell.com/), [git](http://git-scm.com/),
-[jed](http://www.jedsoft.org/jed/) and [Sublime
-Text](http://www.sublimetext.com/).
+[jed](http://www.jedsoft.org/jed/), [Sublime
+Text](http://www.sublimetext.com/) and [Atom](https://atom.io/).
 
 It's very unlikely that anyone will want to use this directly; the more
 interesting directories are:
@@ -18,47 +18,58 @@ to use bash but have now switched to fish, but am keeping it around for the
 memories, such as the [list of operating systems](unix) that have been
 "supported" at some point in the past...
 
-# Prerequisites
+## Prerequisites
 
-## [fish](http://fishshell.com/)
+> **Getting locale-related errors when going through these steps?**
+>
+> 1. Generate missing locales: `locale-gen fi_FI.UTF-8`
 
-### OS X
+### [git](http://git-scm.com/)
 
-````sh
-$ brew install fish
-````
+Ubuntu | OS X
+-------|-----
+`sudo apt-get install git-core`|Install [Xcode](https://developer.apple.com/xcode/downloads/)
 
-### Don't have [homebrew](http://brew.sh/)?
+> No `sudo`? (If, for example, you're on a Gandi VPS.)
+>
+> 1. Login as root: `ssh root@server`
+> 1. Install `sudo`: `apt-get install sudo`
+> 1. Edit `/etc/sudoers`: `visudo`
+> 1. Add the line: `mjs ALL=(ALL) NOPASSWD:ALL`
 
-#### If you want to install into `/usr/local` ...
+### [fish](http://fishshell.com/)
 
-See <http://brew.sh>.
+Ubuntu | OS X
+-------|-----
+`sudo apt-get install fish ; sudo chsh mjs -s /usr/bin/fish`|`brew install fish`
 
-#### If you want to install somewhere else ...
-
-See <https://github.com/Homebrew/homebrew/blob/master/share/doc/homebrew/Installation.md#alternative-installs>
-
-Note that the binaries are symlinked into whatever directory `brew` is
+> **Need latest version?**
+>
+> 1. Check version: `apt-cache show fish`
+> 1. Install `apt-add-repository`: `sudo apt-get install software-properties-common python-software-properties`
+> 1. Add fish PPA: <https://launchpad.net/~fish-shell/+archive/ubuntu/release-2>
+>
+> **No [`brew`](http://brew.sh/)?**
+>
+> *If you want to install into `/usr/local` ...*
+>
+> See <http://brew.sh>.
+>
+> *If you want to install somewhere else ...*
+>
+> See [alternative installs](https://github.com/Homebrew/homebrew/blob/master/share/doc/homebrew/Installation.md#alternative-installs).
+>
+> Note that the binaries are symlinked into whatever directory `brew` is
 installed into. (So if `brew` is symlinked into `/usr/local/bin`, then
 all executables `brew` installs will be symlinked into there as well.)
 This can be useful if you want to install `brew` in your home
 directory, but symlink binaries into `/usr/local/bin`.
+>
+> *Other Platforms*
+>
+> See <http://fishshell.com/>.
 
-### Other Platforms
-
-See <http://fishshell.com/>.
-
-## [PHP](http://php.net) (Optional)
-
-Probably best to [install from source](http://php.net/downloads.php).
-
-You'll probably want to enable a few extensions when you `./configure`:
-
-````sh
-$ ./configure --with-curl --with-zlib --with-openssl --enable-zip
-````
-
-# Installation
+## Installation
 
 ````sh
 $ cd $HOME
@@ -74,32 +85,42 @@ wiped out!
 
 (Though it is safe to run `update` multiple times.)
 
-# Manual Changes
+## Manual Changes
 
-## All Platforms
+### All Platforms
 
-### Sublime Text
+#### [PHP](http://php.net)
+
+Probably best to [install from source](http://php.net/downloads.php).
+
+You'll probably want to enable a few extensions when you `./configure`:
+
+````sh
+$ ./configure --with-curl --with-zlib --with-openssl --enable-zip
+````
+
+#### Sublime Text
 
 [Install Package Control](https://sublime.wbond.net/installation). The actual
 packages to install are stored in [`etc/subl/Package Control.sublime-settings`](Package Control.sublime-settings); Package Control
 will pick this up and install the appropriate packages as soon as it itself is
 installed.
 
-## OS X
+### OS X
 
-### Configure Terminal
+#### Configure Terminal
 
 Import [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal).
 
-### "New Terminal at Folder"
+#### "New Terminal at Folder"
 
 System Preferences > Keyboard > Keyboard Shortcuts > Services > File and Folders
 
 * Enable "New Terminal at Folder"
 
-## Ubuntu
+### Ubuntu
 
-### Emacs Keybindings
+#### Emacs Keybindings
 
 Get emacs keybindings across all gtk apps
 ([source](http://superuser.com/a/348609)):
@@ -108,24 +129,24 @@ Get emacs keybindings across all gtk apps
 $ gsettings set org.gnome.desktop.interface gtk-key-theme "Emacs"
 ````
 
-### Ubuntu Terminal
+#### Ubuntu Terminal
 
-#### Change Colour Scheme
+##### Change Colour Scheme
 
 Run the following `gconftool` commands to set
 [Solarized](http://ethanschoonover.com/solarized) colours correctly:
 
 <http://stackoverflow.com/a/7734960>
 
-#### Change Font
+##### Change Font
 
 Use "Profile Preferences" to change the default font.
 
-#### Make Alt Available
+##### Make Alt Available
 
 Open "Keyboard Shortcuts" and unselect "Enable menu access keys".
 (Otherwise Alt is used for accessing the menu.)
 
-# Author
+## Author
 
 <mjs@beebo.org>
