@@ -18,7 +18,7 @@ function fish_prompt --description 'Write out the prompt'
     end
 
     if not set -q __fish_prompt_hostname
-        if hostname | grep -q corp.google.com
+        if test -d /etc/goobuntu
           set -g __fish_prompt_hostname (hostname -s|cut -d \- -f 1)@goobuntu
         else if begin ; hostname | grep -q syd ; end
           set -g __fish_prompt_hostname syd@gandi
