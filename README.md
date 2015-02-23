@@ -61,7 +61,7 @@ Ubuntu | OS X
 >
 > Note that the binaries are symlinked into whatever directory `brew` is
 installed into. (So if `brew` is symlinked into `/usr/local/bin`, then
-all executables `brew` installs will be symlinked into there as well.)
+all executables installed by `brew` will be symlinked into there as well.)
 This can be useful if you want to install `brew` in your home
 directory, but symlink binaries into `/usr/local/bin`.
 >
