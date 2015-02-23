@@ -106,6 +106,30 @@ packages to install are stored in [`etc/subl/Package Control.sublime-settings`](
 will pick this up and install the appropriate packages as soon as it itself is
 installed.
 
+#### [jed](http://www.jedsoft.org/jed/)
+
+`jed` has stopped building via `brew`, though maybe it's because I'm installing
+to somewhere other than `/usr/local`.
+
+If you have problems with the packages, you can do this manually via something
+like:
+
+````sh
+# slang
+wget http://www.jedsoft.org/releases/slang/slang-2.3.0.tar.gz
+# extract
+./configure --prefix=$HOME/local --libdir=$HOME/local/homebrew/lib --includedir=$HOME/local/homebrew/include --without-x --without-png
+make
+make install
+
+# jed
+wget http://www.jedsoft.org/releases/jed/jed-0.99-19.tar.gz
+# extract
+./configure --prefix=$HOME/local --libdir=$HOME/local/homebrew/lib --includedir=$HOME/local/homebrew/include --without-x
+make
+make install
+````
+
 ### OS X
 
 #### Configure Terminal
