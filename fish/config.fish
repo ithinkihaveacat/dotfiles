@@ -18,7 +18,7 @@ end
 
 if which atom >/dev/null
   set -x EDITOR "atom --new-window --wait"
-  set -x VISUAL "atom --new-window"
+  set -x VISUAL "atom --new-window --wait"
 end
 
 # fish config
