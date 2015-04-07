@@ -21,6 +21,8 @@ if which atom >/dev/null
   set -x VISUAL "atom --new-window --wait"
 end
 
+set -x GIT_EDITOR "vim"
+
 # fish config
 
 set -g CDPATH . ~
