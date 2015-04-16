@@ -142,6 +142,10 @@ System Preferences > Keyboard > Keyboard Shortcuts > Services > File and Folders
 
 * Enable "New Terminal at Folder"
 
+#### Add Lock Screen to Menu Bar
+
+For some reason this is configured via "Keychain Access" preferences.
+
 ### Ubuntu
 
 #### Emacs Keybindings
