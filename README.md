@@ -150,6 +150,10 @@ Configure via "Keychain Access" preferences.
 
 Configure via the "Sound" system preference panel.
 
+#### Disable spelling correction
+
+Disable "Correct spelling automatically" in the "Keyboard | Text" system preference panel.
+
 ### Ubuntu
 
 #### Emacs Keybindings
