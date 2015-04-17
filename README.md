@@ -142,9 +142,13 @@ System Preferences > Keyboard > Keyboard Shortcuts > Services > File and Folders
 
 * Enable "New Terminal at Folder"
 
-#### Add Lock Screen to Menu Bar
+#### Add Lock Screen option to Menu Bar
 
-For some reason this is configured via "Keychain Access" preferences.
+Configure via "Keychain Access" preferences.
+
+#### Add Volume Controls to Menu Bar
+
+Configure via the "Sound" system preference panel.
 
 ### Ubuntu
 
