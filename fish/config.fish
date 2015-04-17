@@ -69,3 +69,8 @@ set -g __fish_git_prompt_showdirtystate "1"
 
 # mkdir -p ~/.rubies
 # . $HOME/.config/fish/rubies.fish
+
+# https://github.com/zimbatm/direnv
+if type direnv >/dev/null
+  eval (direnv hook fish)
+end
