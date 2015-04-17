@@ -16,7 +16,7 @@ if begin ; test -x /usr/libexec/java_home ; and /usr/libexec/java_home -v 1.7 >/
   set -x JAVA_HOME (/usr/libexec/java_home -v 1.7)
 end
 
-if which atom >/dev/null
+if type atom >/dev/null
   set -x EDITOR "atom --new-window --wait"
   set -x VISUAL "atom --new-window --wait"
 end
