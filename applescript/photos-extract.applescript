@@ -14,7 +14,7 @@
 -- photos). Basically, I'm not at all comfortable that this script will
 -- always behave properly: be careful & take backups!
 
--- Paste into Script Editor for syntax highlighting, better debugging, etc.
+-- Open with Script Editor for syntax highlighting, better debugging, etc.
 
 -- Extracting metadata from photos takes a really long time, so we do this
 -- once and then use the cached results, instead of in the nested loops below.
@@ -29,10 +29,10 @@ using terms from application "Photos"
 end using terms from
 
 tell application "Photos"
-
+	
 	set src to "Src"
 	set dst to "Dst"
-
+	
 	try
 		count of every media item of container src
 		count of every media item of container dst
@@ -40,20 +40,20 @@ tell application "Photos"
 		log "error: Photos.app not ready, or album " & src & " or " & dst & " does not exist"
 		return
 	end try
-
+	
 	log "Processing " & (count of every media item of container src) & " photos in album " & src
-
+	
 	log "Collecting metadata ..."
 	set metadata to my AlbumMetadata(container src) -- not sure why we need to do "container" in the caller but whatevs...
 	log "... done!"
-
+	
 	set picks to {}
 	repeat with f in metadata
 		if keywords of f contains "Stack Pick" then
 			set end of picks to f
 		end if
 	end repeat
-
+	
 	set other to {}
 	repeat with f in picks
 		repeat with g in metadata
@@ -64,9 +64,9 @@ tell application "Photos"
 			end if
 		end repeat
 	end repeat
-
+	
 	log "Adding " & (count of other) & " photos to album " & dst & " ..."
 	add other to container dst
 	log "... done!"
-
+	
 end tell
