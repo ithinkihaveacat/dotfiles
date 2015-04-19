@@ -16,13 +16,6 @@ if begin ; test -x /usr/libexec/java_home ; and /usr/libexec/java_home -v 1.7 >/
   set -x JAVA_HOME (/usr/libexec/java_home -v 1.7)
 end
 
-if type atom >/dev/null
-  set -x EDITOR "atom --new-window --wait"
-  set -x VISUAL "atom --new-window --wait"
-end
-
-set -x GIT_EDITOR "vim"
-
 # fish config
 
 set -g CDPATH . ~
@@ -65,8 +58,6 @@ set -g __fish_git_prompt_showupstream "auto"
 set -g __fish_git_prompt_showstashstate "1"
 set -g __fish_git_prompt_showdirtystate "1"
 
-. $HOME/.config/fish/solarized.fish
-
 # mkdir -p ~/.rubies
 # . $HOME/.config/fish/rubies.fish
 
@@ -74,3 +65,11 @@ set -g __fish_git_prompt_showdirtystate "1"
 if type direnv >/dev/null
   eval (direnv hook fish)
 end
+
+if type jed >/dev/null
+  set -x EDITOR "jed"
+end
+
+set -x GIT_EDITOR "jed"
+
+. $HOME/.config/fish/solarized.fish
