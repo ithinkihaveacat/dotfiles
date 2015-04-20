@@ -1,4 +1,4 @@
-function e -d "Search for filename in $PATH, edit with $EDITOR"
+function e -d 'Search for filename in $PATH, edit with $EDITOR'
   if test ( count $argv ) -ne 1
     echo "usage: $_ filename"
     return
