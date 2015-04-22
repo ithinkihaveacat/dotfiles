@@ -70,6 +70,10 @@ if type jed >/dev/null
   set -x EDITOR "jed"
 end
 
+if type atom >/dev/null
+  set -x VISUAL "atom --new-window --wait"
+end
+
 set -x GIT_EDITOR "jed"
 
 . $HOME/.config/fish/solarized.fish
