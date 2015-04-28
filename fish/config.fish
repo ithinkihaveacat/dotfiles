@@ -69,10 +69,6 @@ if type jed >/dev/null
   set -x EDITOR "jed"
 end
 
-if type atom >/dev/null
-  set -x VISUAL "atom --new-window --wait"
-end
-
 if type go >/dev/null
   set -x GOPATH ~/local/go
   mkdir -p $GOPATH
@@ -80,7 +76,5 @@ if type go >/dev/null
     set fish_user_paths $fish_user_paths $GOPATH/bin
   end
 end
-
-set -x GIT_EDITOR "jed"
 
 . $HOME/.config/fish/solarized.fish
