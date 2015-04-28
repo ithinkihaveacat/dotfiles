@@ -9,7 +9,6 @@ set -x TZ "Europe/London"
 # personal config
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
-set -x GITONBORGROOT "sso://user/stillers"
 
 set -x ANDROID_HOME "$HOME/workspace/sdk"
 if begin ; test -x /usr/libexec/java_home ; and /usr/libexec/java_home -v 1.7 >/dev/null ; end
