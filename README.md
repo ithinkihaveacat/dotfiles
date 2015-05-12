@@ -127,6 +127,10 @@ make install
 
 ### OS X
 
+(See [this
+script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx)
+for some tips on how to change some of these settings automatically.)
+
 #### Configure Terminal
 
 Import [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal).
