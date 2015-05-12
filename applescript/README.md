@@ -1,6 +1,6 @@
 ## About
 
-Some random AppleScript scripts.
+Some random AppleScript scripts. (Note that there are others in the `bin` directory.)
 
 ## Tips
 
