@@ -182,6 +182,11 @@ Use "Profile Preferences" to change the default font.
 Open "Keyboard Shortcuts" and unselect "Enable menu access keys".
 (Otherwise Alt is used for accessing the menu.)
 
+## Manually Installing Binaries?
+
+Put them in `~/local/bin`, and man pages (if you have them) in
+`~/local/man/man?`. (`man --path` lists the man page search path.)
+
 ## Author
 
 <mjs@beebo.org>
