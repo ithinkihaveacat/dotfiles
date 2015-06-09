@@ -153,6 +153,10 @@ Configure via the "Sound" system preference panel.
 
 Disable "Correct spelling automatically" in the "Keyboard | Text" system preference panel.
 
+### Disable local Time Machine backups
+
+    $ sudo tmutil disablelocal
+
 ### Ubuntu
 
 #### Emacs Keybindings
