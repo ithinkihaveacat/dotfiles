@@ -23,7 +23,18 @@ if test -d ~/citc
 end
 
 # http://fishshell.com/docs/2.1/#variables-special
-set fish_user_paths /usr/local/sbin /usr/local/bin ~/.dotfiles/fish/../bin
+
+if test -d /usr/local/sbin
+  set fish_user_paths /usr/local/sbin $fish_user_paths
+end
+
+if test -d /usr/local/bin
+  set fish_user_paths /usr/local/bin $fish_user_paths
+end
+
+if test -d ~/.dotfiles/fish/../bin
+  set fish_user_paths ~/.dotfiles/fish/../bin $fish_user_paths
+end
 
 if test -d ~/local/homebrew/bin
   set fish_user_paths ~/local/homebrew/bin $fish_user_paths
