@@ -137,7 +137,7 @@ for some tips on how to change some of these settings automatically.)
 
 #### Configure Terminal
 
-Import [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal).
+Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile.
 
 #### "New Terminal at Folder"
 
