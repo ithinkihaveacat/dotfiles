@@ -31,6 +31,10 @@ Ubuntu | OS X
 > 1. Install `sudo`: `apt-get install sudo`
 > 1. Edit `/etc/sudoers`: `visudo`
 > 1. Add the line: `mjs ALL=(ALL) NOPASSWD:ALL`
+>
+> Don't want to install Xcode?
+>
+> Run `git` and install the command-line tools. (Also saves a lot of diskspace.)
 
 ### [fish](http://fishshell.com/)
 
