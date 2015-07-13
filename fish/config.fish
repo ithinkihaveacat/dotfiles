@@ -89,4 +89,4 @@ if type go >/dev/null
   end
 end
 
-. $HOME/.config/fish/solarized.fish
+source $HOME/.config/fish/solarized.fish
