@@ -23,7 +23,7 @@ function fish_prompt --description 'Write out the prompt'
         else if begin ; hostname | grep -q syd ; end
           set -g __fish_prompt_hostname syd@gandi
         else
-          set -g __fish_prompt_hostname (hostname -s|cut -d \- -f 1)
+          set -g __fish_prompt_hostname (hostname -s|cut -d \- -f 1|tr A-Z a-z)
         end
     end
 
