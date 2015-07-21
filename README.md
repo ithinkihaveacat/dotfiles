@@ -98,13 +98,6 @@ You'll probably want to enable a few extensions when you `./configure`:
 $ ./configure --with-curl --with-zlib --with-openssl --enable-zip
 ````
 
-#### Sublime Text
-
-[Install Package Control](https://sublime.wbond.net/installation). The actual
-packages to install are stored in [`etc/subl/Package Control.sublime-settings`](Package Control.sublime-settings); Package Control
-will pick this up and install the appropriate packages as soon as it itself is
-installed.
-
 #### [jed](http://www.jedsoft.org/jed/)
 
 `jed` has stopped building via `brew`, though maybe it's because I'm installing
