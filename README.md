@@ -186,7 +186,8 @@ Open "Keyboard Shortcuts" and unselect "Enable menu access keys".
 ## Manually Installing Binaries?
 
 Put them in `~/local/bin`, and man pages (if you have them) in
-`~/local/man/man?`. (`man --path` lists the man page search path.)
+`~/local/share/man/man?`. (`man --path` lists the man page search
+path.)
 
 ## Author
 
