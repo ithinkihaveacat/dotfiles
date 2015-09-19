@@ -81,6 +81,10 @@ if type jed >/dev/null
   set -x EDITOR "jed"
 end
 
+if type atom >/dev/null
+  set -x VISUAL "atom"
+end
+
 if type go >/dev/null
   set -x GOPATH ~/local/go
   mkdir -p $GOPATH
