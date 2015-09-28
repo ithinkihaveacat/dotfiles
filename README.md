@@ -72,7 +72,9 @@ directory, but symlink binaries into `/usr/local/bin`.
 
 ````sh
 $ cd $HOME
-$ git clone git@github.com:ithinkihaveacat/dotfiles.git .dotfiles
+$ git clone https://github.com/ithinkihaveacat/dotfiles.git .dotfiles
+# Pull from ro repo, push to rw
+$ git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
 $ cd $HOME/.dotfiles
 $ ./update
 # On OS X, logout and login again
