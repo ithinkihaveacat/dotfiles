@@ -14,7 +14,7 @@ function token.get -d "Gets an access token via OpenID Connect"
   end
 
   if test ( count $argv ) -eq 0
-    echo "usage: $_ scope # e.g. $_ profile"
+    echo "usage: $_ scope # e.g. $_ email profile"
     return
   end
 
