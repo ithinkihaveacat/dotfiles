@@ -9,5 +9,7 @@ function make.gam-icons -d "Generate icons in different sizes"
   convert -size 96x96 xc:$argv[1] 96x96.png
   convert -size 128x128 xc:$argv[1] 128x128.png
   convert -size 440x280 xc:$argv[1] 440x280.png
+  convert -size 920x680 xc:$argv[1] 920x680.png
   convert -size 1280x800 xc:$argv[1] 1280x800.png
+  convert -size 1400x560 xc:$argv[1] 1400x560.png
 end
