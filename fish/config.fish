@@ -48,6 +48,10 @@ if test -d ~/local/google-cloud-sdk/bin
   set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/bin
 end
 
+if test -d ~/local/google-cloud-sdk/platform/google_appengine
+  set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/platform/google_appengine
+end
+
 if test -d $ANDROID_HOME/platform-tools
   set fish_user_paths $fish_user_paths $ANDROID_HOME/platform-tools
 end
