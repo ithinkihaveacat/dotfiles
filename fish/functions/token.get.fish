@@ -1,4 +1,4 @@
-function token.get -d "Gets an access token via OpenID Connect"
+function token.get -d "Gets OpenID Connect tokens and assertions"
 
   # set -xU CLIENT_ID "212696220856-2mrcaejro9o098rpdod53kpld0athcuf.apps.googleusercontent.com"
   # set -xU CLIENT_SECRET "xK0v4Ldw_8BUWnrTQJn3YbEG"
