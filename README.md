@@ -134,19 +134,12 @@ for some tips on how to change some of these settings automatically.)
 
 Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile.
 
-#### "New Terminal at Folder"
+#### Configure keyboard
 
-System Preferences > Keyboard > Shortcuts > Services > File and Folders
-
-* Enable "New Terminal at Folder"
-
-#### Make ⌘V paste plain text
-
-System Preferences > Keyboard > Shortcuts
-
-* Configure the "Paste and Match Style" menu item map to ⌘V.
-
-(Helps, but doesn't work everywhere.)
+* Open System Preferences > Keyboard
+  * Open Shortcuts > Services > File and Folders, enable "New Terminal at Folder".
+  * Open Shortcuts, add mapping from ⌘V to the "Paste and Match Style" menu item. (Helps, though it doesn't work everywhere.)
+  * Open Text, disable "Correct spelling automatically". 
 
 #### Add Lock Screen option to Menu Bar
 
@@ -155,10 +148,6 @@ Configure via "Keychain Access" preferences.
 #### Add Volume Controls to Menu Bar
 
 Configure via the "Sound" system preference panel.
-
-#### Disable spelling correction
-
-Disable "Correct spelling automatically" in the "Keyboard | Text" system preference panel.
 
 #### Disable local Time Machine backups
 
