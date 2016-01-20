@@ -110,14 +110,14 @@ like:
 
 ````sh
 # slang
-wget http://www.jedsoft.org/snapshots/slang-pre2.3.1-22.tar.gz
+wget http://www.jedsoft.org/snapshots/slang-pre2.3.1-40.tar.gz
 # extract
 ./configure --prefix=$HOME/local --libdir=$HOME/local/homebrew/lib --includedir=$HOME/local/homebrew/include --without-x --without-png
 make
 make install
 
 # jed
-wget http://www.jedsoft.org/snapshots/jed-pre0.99.20-104.tar.gz
+wget http://www.jedsoft.org/snapshots/jed-pre0.99.20-111.tar.gz
 # extract
 ./configure --prefix=$HOME/local --libdir=$HOME/local/homebrew/lib --includedir=$HOME/local/homebrew/include --without-x
 make
