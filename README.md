@@ -132,14 +132,14 @@ for some tips on how to change some of these settings automatically.)
 
 #### Configure Terminal
 
-Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile.
+Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile. (See [this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx) for some information on how to do this automatically.)
 
 #### Configure keyboard
 
 * Open System Preferences > Keyboard
   * Open Shortcuts > Services > File and Folders, enable "New Terminal at Folder".
   * Open Shortcuts, add mapping from ⌘V to the "Paste and Match Style" menu item. (Helps, though it doesn't work everywhere.)
-  * Open Text, disable "Correct spelling automatically". 
+  * Open Text, disable "Correct spelling automatically".
 
 #### Add Lock Screen option to Menu Bar
 
