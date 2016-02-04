@@ -138,7 +138,6 @@ Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile.
 
 * Open System Preferences > Keyboard
   * Open Shortcuts > Services > File and Folders, enable "New Terminal at Folder".
-  * Open Shortcuts, add mapping from ⌘V to the "Paste and Match Style" menu item. (Helps, though it doesn't work everywhere.)
   * Open Text, disable "Correct spelling automatically".
 
 #### Add Lock Screen option to Menu Bar
