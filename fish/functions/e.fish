@@ -15,12 +15,12 @@ function e -d 'Edit file, searching in a few different places'
     return
   end
 
-  switch (type -t $argv[1])
+  switch ( type -t $argv[1] )
 
     case file
 
-      if file (type -p $argv[1]) | grep text >/dev/null
-        eval $EDITOR (type -p $argv[1])
+      if file ( type -p $argv[1] ) | grep text >/dev/null
+        eval $EDITOR ( type -p $argv[1] )
       else
         echo "error: '$argv[1]' is not a text file"
       end
