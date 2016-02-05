@@ -5,7 +5,7 @@ function dig-diff -d "Compares cached and uncached DNS records"
     return
   end
 
-  set -l NS (dig +short $argv[1] ns | head -1 | rev | cut -c 2- | rev)
+  set -l NS (dig +short $argv[1] ns | sort | head -1 | rev | cut -c 2- | rev)
 
   set -l ARGS --minimal --new-line-format='+%L' --old-line-format='-%L' --unchanged-line-format='%L'
   set -l DIG1 dig -t ANY +noall +nottl +answer $argv[1]
