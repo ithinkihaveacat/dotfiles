@@ -5,8 +5,13 @@ function e -d 'Edit file, searching in a few different places'
     return
   end
 
+  if test -f $argv[1]
+    eval $EDITOR $argv[1]
+    return
+  end
+
   if not type -qt $argv[1]
-    echo "$_: '$argv[1]' not found"
+    echo "$_: '$argv[1]' not found, or not a file"
     return
   end
 
