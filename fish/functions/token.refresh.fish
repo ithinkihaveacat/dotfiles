@@ -20,7 +20,7 @@ function token.refresh -d "Get access token from a refresh token"
     return
   end
 
-  set URI "https://accounts.google.com/o/oauth2/token"
+  set URI "https://www.googleapis.com/oauth2/v4/token"
 
   curl -s $URI -d client_id=$CLIENT_ID -d client_secret=$CLIENT_SECRET -d refresh_token=$argv[1] -d grant_type=refresh_token
 
