@@ -52,6 +52,13 @@ if test -d ~/local/google-cloud-sdk/platform/google_appengine
   set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/platform/google_appengine
 end
 
+# 1. Download *.tar.gz JRE from
+#    http://www.oracle.com/technetwork/java/javase/downloads/index.html
+# 2. Extract to ~/local.
+if test -d ~/local/jre*/Contents/Home/bin
+  set fish_user_paths $fish_user_paths ~/local/jre*/Contents/Home/bin
+end
+
 if test -d $ANDROID_HOME/platform-tools
   set fish_user_paths $fish_user_paths $ANDROID_HOME/platform-tools
 end
