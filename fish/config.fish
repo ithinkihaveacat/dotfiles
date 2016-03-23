@@ -93,7 +93,7 @@ if type jed >/dev/null
 end
 
 if type atom >/dev/null
-  set -x VISUAL "atom"
+  set -x VISUAL "jed" # or "atom -w"
 end
 
 if type go >/dev/null
