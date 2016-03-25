@@ -44,6 +44,10 @@ if test -d ~/local/homebrew/sbin
   set fish_user_paths ~/local/homebrew/sbin $fish_user_paths
 end
 
+if test -d ~/local/bin
+  set fish_user_paths $fish_user_paths ~/local/bin
+end
+
 if test -d ~/local/google-cloud-sdk/bin
   set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/bin
 end
@@ -61,10 +65,6 @@ end
 
 if test -d $ANDROID_HOME/platform-tools
   set fish_user_paths $fish_user_paths $ANDROID_HOME/platform-tools
-end
-
-if test -d ~/local/bin
-  set fish_user_paths $fish_user_paths ~/local/bin
 end
 
 # gem install $name --user-install
