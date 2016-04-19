@@ -56,6 +56,11 @@ if test -d ~/local/google-cloud-sdk/platform/google_appengine
   set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/platform/google_appengine
 end
 
+# For Ubuntu; apt-get install golang-*-go
+if test -d /usr/lib/go-*/bin
+  set fish_user_paths $fish_user_paths /usr/lib/go-*/bin
+end
+
 # 1. Download *.tar.gz JRE from
 #    http://www.oracle.com/technetwork/java/javase/downloads/index.html
 # 2. Extract to ~/local.
