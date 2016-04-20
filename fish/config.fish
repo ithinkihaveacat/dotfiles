@@ -10,8 +10,6 @@ set -x TZ "Europe/London"
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
 
-set -x ANDROID_HOME "$HOME/workspace/sdk"
-
 # fish config
 
 set -g CDPATH . ~
@@ -24,24 +22,16 @@ end
 
 # http://fishshell.com/docs/2.1/#variables-special
 
-if test -d /usr/local/sbin
-  set fish_user_paths /usr/local/sbin $fish_user_paths
-end
-
-if test -d /usr/local/bin
-  set fish_user_paths /usr/local/bin $fish_user_paths
-end
-
 if test -d ~/.dotfiles/fish/../bin
-  set fish_user_paths ~/.dotfiles/fish/../bin $fish_user_paths
+  set fish_user_paths $fish_user_paths ~/.dotfiles/fish/../bin
 end
 
 if test -d ~/local/homebrew/bin
-  set fish_user_paths ~/local/homebrew/bin $fish_user_paths
+  set fish_user_paths $fish_user_paths ~/local/homebrew/bin
 end
 
 if test -d ~/local/homebrew/sbin
-  set fish_user_paths ~/local/homebrew/sbin $fish_user_paths
+  set fish_user_paths $fish_user_paths ~/local/homebrew/sbin
 end
 
 if test -d ~/local/bin
@@ -56,25 +46,70 @@ if test -d ~/local/google-cloud-sdk/platform/google_appengine
   set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/platform/google_appengine
 end
 
-# For Ubuntu; apt-get install golang-*-go
-if test -d /usr/lib/go-*/bin
-  set fish_user_paths $fish_user_paths /usr/lib/go-*/bin
-end
-
 # 1. Download *.tar.gz JRE from
+# java
+#
+# 1. Choose JRE from
 #    http://www.oracle.com/technetwork/java/javase/downloads/index.html
-# 2. Extract to ~/local.
+# 2. Download the *.tar.gz
+# 3. Extract to ~/local.
 if test -d ~/local/jre*/Contents/Home/bin
   set fish_user_paths $fish_user_paths ~/local/jre*/Contents/Home/bin
 end
 
-if test -d $ANDROID_HOME/platform-tools
+# ghc
+#
+# Install via:
+#
+#   $ brew cask install ghc
+#
+# Then:
+#
+#   $ cabal update
+#   $ cabal install pandoc
+if test -d /opt/homebrew-cask/Caskroom/ghc/*/ghc-*.app/Contents/bin
+  set fish_user_paths $fish_user_paths /opt/homebrew-cask/Caskroom/ghc/*/ghc-*.app/Contents/bin
+end
+if test -d ~/.cabal/bin
+  set fish_user_paths $fish_user_paths ~/.cabal/bin
+end
+
+# Android
+if test -d ~/workspace/sdk
+  set -x ANDROID_HOME ~/workspace/sdk
   set fish_user_paths $fish_user_paths $ANDROID_HOME/platform-tools
 end
 
-# gem install $name --user-install
+# Ruby
+#
+# Install gems via:
+#
+#   $ gem install $name --user-install
 if test -d ~/.gem/ruby/*/bin
   set fish_user_paths $fish_user_paths ~/.gem/ruby/*/bin
+end
+
+# golang
+#
+# Ubuntu (package is golang-*-go)
+if test -d /usr/lib/go-*/bin
+  set fish_user_paths $fish_user_paths /usr/lib/go-*/bin
+end
+# OS X
+if type go >/dev/null
+  set -x GOPATH ~/local/go
+  mkdir -p $GOPATH
+  if test -d $GOPATH/bin
+    set fish_user_paths $fish_user_paths $GOPATH/bin
+  end
+end
+
+if test -d /usr/local/sbin
+  set fish_user_paths $fish_user_paths /usr/local/sbin
+end
+
+if test -d /usr/local/bin
+  set fish_user_paths $fish_user_paths /usr/local/bin
 end
 
 # http://fishshell.com/docs/2.1/#variables-special
@@ -99,14 +134,6 @@ end
 
 if type atom >/dev/null
   set -x VISUAL "jed" # or "atom -w"
-end
-
-if type go >/dev/null
-  set -x GOPATH ~/local/go
-  mkdir -p $GOPATH
-  if test -d $GOPATH/bin
-    set fish_user_paths $fish_user_paths $GOPATH/bin
-  end
 end
 
 source $HOME/.config/fish/solarized.fish
