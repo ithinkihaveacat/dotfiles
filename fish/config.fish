@@ -20,31 +20,19 @@ if test -d ~/citc
   set -g CDPATH $CDPATH ~/citc
 end
 
-# http://fishshell.com/docs/2.1/#variables-special
-
-if test -d ~/.dotfiles/fish/../bin
-  set fish_user_paths $fish_user_paths ~/.dotfiles/fish/../bin
+function append_if_exists
+  if count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1]
+    # http://fishshell.com/docs/2.1/#variables-special
+    set -g fish_user_paths $fish_user_paths $argv[1]
+  end
 end
 
-if test -d ~/local/homebrew/bin
-  set fish_user_paths $fish_user_paths ~/local/homebrew/bin
-end
-
-if test -d ~/local/homebrew/sbin
-  set fish_user_paths $fish_user_paths ~/local/homebrew/sbin
-end
-
-if test -d ~/local/bin
-  set fish_user_paths $fish_user_paths ~/local/bin
-end
-
-if test -d ~/local/google-cloud-sdk/bin
-  set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/bin
-end
-
-if test -d ~/local/google-cloud-sdk/platform/google_appengine
-  set fish_user_paths $fish_user_paths ~/local/google-cloud-sdk/platform/google_appengine
-end
+append_if_exists ~/.dotfiles/fish/../bin
+append_if_exists ~/local/homebrew/bin
+append_if_exists ~/local/homebrew/sbin
+append_if_exists ~/local/bin
+append_if_exists ~/local/google-cloud-sdk/bin
+append_if_exists ~/local/google-cloud-sdk/platform/google_appengine
 
 # java
 #
@@ -52,9 +40,7 @@ end
 #    http://www.oracle.com/technetwork/java/javase/downloads/index.html
 # 2. Download the *.tar.gz.
 # 3. Extract to ~/local.
-if test -d ~/local/jre*/Contents/Home/bin
-  set fish_user_paths $fish_user_paths ~/local/jre*/Contents/Home/bin
-end
+append_if_exists "~/local/jre*/Contents/Home/bin"
 
 # ghc
 #
@@ -66,16 +52,12 @@ end
 #
 #   $ cabal update
 #   $ cabal install pandoc
-if test -d /opt/homebrew-cask/Caskroom/ghc/*/ghc-*.app/Contents/bin
-  set fish_user_paths $fish_user_paths /opt/homebrew-cask/Caskroom/ghc/*/ghc-*.app/Contents/bin
-end
-if test -d ~/.cabal/bin
-  set fish_user_paths $fish_user_paths ~/.cabal/bin
-end
+append_if_exists "/opt/homebrew-cask/Caskroom/ghc/*/ghc-*.app/Contents/bin"
+append_if_exists ~/.cabal/bin
 
 # Android
-if test -d ~/workspace/sdk
-  set -x ANDROID_HOME ~/workspace/sdk
+if test -d ~/Library/Android/sdk
+  set -x ANDROID_HOME ~/Library/Android/sdk
   set fish_user_paths $fish_user_paths $ANDROID_HOME/platform-tools
 end
 
@@ -84,32 +66,22 @@ end
 # Install gems via:
 #
 #   $ gem install $name --user-install
-if test -d ~/.gem/ruby/*/bin
-  set fish_user_paths $fish_user_paths ~/.gem/ruby/*/bin
-end
+append_if_exists "~/.gem/ruby/*/bin"
 
 # golang
 #
 # Ubuntu (package is golang-*-go)
-if test -d /usr/lib/go-*/bin
-  set fish_user_paths $fish_user_paths /usr/lib/go-*/bin
-end
+append_if_exists "/usr/lib/go-*/bin"
+
 # OS X
-if type go >/dev/null
+if type -q go
   set -x GOPATH ~/local/go
   mkdir -p $GOPATH
-  if test -d $GOPATH/bin
-    set fish_user_paths $fish_user_paths $GOPATH/bin
-  end
+  append_if_exists $GOPATH/bin
 end
 
-if test -d /usr/local/sbin
-  set fish_user_paths $fish_user_paths /usr/local/sbin
-end
-
-if test -d /usr/local/bin
-  set fish_user_paths $fish_user_paths /usr/local/bin
-end
+append_if_exists /usr/local/sbin
+append_if_exists /usr/local/bin
 
 # http://fishshell.com/docs/2.1/#variables-special
 set --erase fish_greeting
@@ -123,15 +95,15 @@ set -g __fish_git_prompt_showdirtystate "1"
 # . $HOME/.config/fish/rubies.fish
 
 # https://github.com/zimbatm/direnv
-if type direnv >/dev/null
+if type -q direnv
   eval (direnv hook fish)
 end
 
-if type jed >/dev/null
+if type -q jed
   set -x EDITOR "jed"
 end
 
-if type atom >/dev/null
+if type -q atom
   set -x VISUAL "jed" # or "atom -w"
 end
 
