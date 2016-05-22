@@ -27,12 +27,12 @@ function append_if_exists
   end
 end
 
-append_if_exists ~/.dotfiles/fish/../bin
-append_if_exists ~/local/homebrew/bin
-append_if_exists ~/local/homebrew/sbin
-append_if_exists ~/local/bin
-append_if_exists ~/local/google-cloud-sdk/bin
-append_if_exists ~/local/google-cloud-sdk/platform/google_appengine
+append_if_exists (realpath "$HOME/.dotfiles/fish/../bin")
+append_if_exists "$HOME/local/homebrew/bin"
+append_if_exists "$HOME/local/homebrew/sbin"
+append_if_exists "$HOME/local/bin"
+append_if_exists "$HOME/local/google-cloud-sdk/bin"
+append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine"
 
 # java
 #
