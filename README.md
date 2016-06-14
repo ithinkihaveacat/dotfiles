@@ -38,17 +38,27 @@ Ubuntu | OS X
 
 ### [fish](http://fishshell.com/)
 
-Ubuntu | OS X
--------|-----
-`sudo apt-get install fish ; sudo chsh mjs -s /usr/bin/fish`|`brew install fish`
+#### Ubuntu
 
-> **Need latest version?**
->
-> 1. Check version: `apt-cache show fish`
-> 1. Install `apt-add-repository`: `sudo apt-get install software-properties-common python-software-properties`
-> 1. Add fish PPA: <https://launchpad.net/~fish-shell/+archive/ubuntu/release-2>
->
-> **No [`brew`](http://brew.sh/)?**
+Via PPA:
+
+1. Install `apt-add-repository`: `sudo apt-get install software-properties-common python-software-properties`
+1. Add fish PPA: <https://launchpad.net/~fish-shell/+archive/ubuntu/release-2>
+
+Via DEB:
+
+1. Download appropriate package from <https://launchpad.net/~fish-shell/+archive/ubuntu/release-2/+packages>.
+1. Install via e.g. `sudo dpkg -i fish_2.3.0-1~trusty_amd64.deb`.
+
+#### OS X
+
+Via [`brew`](http://brew.sh/):
+
+````
+brew install fish
+````
+
+> **Don't already have [`brew`](http://brew.sh/)?**
 >
 > *If you want to install into `/usr/local` ...*
 >
@@ -63,10 +73,10 @@ installed into. (So if `brew` is symlinked into `/usr/local/bin`, then
 all executables installed by `brew` will be symlinked into there as well.)
 This can be useful if you want to install `brew` in your home
 directory, but symlink binaries into `/usr/local/bin`.
->
-> *Other Platforms*
->
-> See <http://fishshell.com/>.
+
+#### Other Platforms
+
+See <http://fishshell.com/>.
 
 ## Installation
 
