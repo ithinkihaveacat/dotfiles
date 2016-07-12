@@ -40,7 +40,8 @@ append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine"
 #    http://www.oracle.com/technetwork/java/javase/downloads/index.html
 # 2. Download the *.tar.gz.
 # 3. Extract to ~/local.
-append_if_exists "~/local/jre*/Contents/Home/bin"
+set d ~/local/jre*/Contents/Home/bin
+append_if_exists $d
 
 # ghc
 #
@@ -52,7 +53,8 @@ append_if_exists "~/local/jre*/Contents/Home/bin"
 #
 #   $ cabal update
 #   $ cabal install pandoc
-append_if_exists "/opt/homebrew-cask/Caskroom/ghc/*/ghc-*.app/Contents/bin"
+set d /Applications/ghc-*.app/Contents/bin
+append_if_exists $d
 append_if_exists ~/.cabal/bin
 
 # Android
@@ -66,12 +68,14 @@ end
 # Install gems via:
 #
 #   $ gem install $name --user-install
-append_if_exists "~/.gem/ruby/*/bin"
+set d ~/.gem/ruby/*/bin
+append_if_exists $d
 
 # golang
 #
 # Ubuntu (package is golang-*-go)
-append_if_exists "/usr/lib/go-*/bin"
+set d /usr/lib/go-*/bin
+append_if_exists $d
 
 # OS X
 if type -q go
@@ -107,4 +111,4 @@ if type -q atom
   set -x VISUAL "jed" # or "atom -w"
 end
 
-source $HOME/.config/fish/solarized.fish
+source ~/.config/fish/solarized.fish
