@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# http://stackoverflow.com/questions/16840184/how-can-i-automatically-be-warned-if-a-specific-file-changes
 # https://raw.githubusercontent.com/greg0ire/git_template/master/template/hooks/change_detector.sh
 
 # @param hook_type       post-checkout|post-merge|post-commit|pre-commit
