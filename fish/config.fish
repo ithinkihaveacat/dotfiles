@@ -2,7 +2,6 @@
 
 # tool config
 
-set -x GREP_OPTIONS "--exclude-dir=.svn --exclude-dir=.git --binary-files=without-match"
 set -x LESS "-XMcifR"
 set -x TZ "Europe/London"
 
