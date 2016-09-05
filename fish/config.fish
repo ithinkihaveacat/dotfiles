@@ -7,7 +7,7 @@ set -x TZ "Europe/London"
 
 # personal config
 
-set -x GITROOT "git@github.com:ithinkihaveacat"
+set -x GITROOT "https://github.com//ithinkihaveacat"
 
 # fish config
 
