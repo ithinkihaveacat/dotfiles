@@ -3,7 +3,7 @@
 Config files for various tools I use, or have used in the past, such as
 [fish](http://fishshell.com/), [git](http://git-scm.com/),
 [jed](http://www.jedsoft.org/jed/), [Sublime
-Text](http://www.sublimetext.com/) and [Atom](https://atom.io/).
+Text](http://www.sublimetext.com/), [Atom](https://atom.io/) and [Visual Studio Code](https://code.visualstudio.com/).
 
 It's very unlikely that anyone will want to use this directly; the more
 interesting directories are:
@@ -11,13 +11,14 @@ interesting directories are:
 * [fish](fish) - configuration and startup files for fish shell.
 * [bin](bin) - mostly git commands that are a bit too long or complicated to be
   embedded into [.gitconfig](home/.gitconfig).
-* [templates/hooks](templates/hooks) - git hooks
+* [etc/git/templates/hooks](templates/hooks) - git hooks
+* [docker](Docker) - Dockerfile
 
 ## Prerequisites
 
 > **Getting locale-related errors when going through these steps?**
 >
-> 1. Generate missing locales: `locale-gen fi_FI.UTF-8`
+> 1. Generate missing locales: `locale-gen en_GB.UTF-8`
 
 ### [git](http://git-scm.com/)
 
@@ -34,7 +35,7 @@ Ubuntu | OS X
 >
 > Don't want to install Xcode?
 >
-> Run `git` and install the command-line tools. (Also saves a lot of diskspace.)
+> Run `git` and install the command-line tools. (This also saves a lot of diskspace.)
 
 ### [fish](http://fishshell.com/)
 
@@ -42,7 +43,7 @@ Ubuntu | OS X
 
 Via PPA:
 
-1. Install `apt-add-repository`: `sudo apt-get install software-properties-common python-software-properties`
+1. Install `apt-add-repository`: `sudo apt-get install software-properties-common`
 1. Add fish PPA: <https://launchpad.net/~fish-shell/+archive/ubuntu/release-2>
 
 Via DEB:
@@ -100,23 +101,10 @@ wiped out!
 
 ### All Platforms
 
-#### [PHP](http://php.net)
-
-Probably best to [install from source](http://php.net/downloads.php).
-
-You'll probably want to enable a few extensions when you `./configure`:
-
-````sh
-$ ./configure --with-curl --with-zlib --with-openssl --enable-zip
-````
-
 #### [jed](http://www.jedsoft.org/jed/)
 
-`jed` has stopped building via `brew`, though maybe it's because I'm installing
-to somewhere other than `/usr/local`.
-
-If you have problems with the packages, you can do this manually via something
-like:
+If you have problems installing `jed` from packages, it can be installed
+manually via something like:
 
 ````sh
 # slang
