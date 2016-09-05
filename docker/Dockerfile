@@ -26,7 +26,8 @@ FROM ubuntu:16.04
 # Configure ssh (allow root to ssh)
 
 RUN apt-get update && \
-		DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server && \
+		DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		  openssh-server && \
     echo "AuthorizedKeysCommand /bin/cat /etc/ssh/keys/authorized_keys" >> /etc/ssh/sshd_config && \
     echo "AuthorizedKeysCommandUser root" >> /etc/ssh/sshd_config && \
     mkdir /var/run/sshd
@@ -54,8 +55,10 @@ RUN apt-get update && \
 RUN apt-get update && \
 		DEBIAN_FRONTEND=noninteractive apt-get install -y \
 			software-properties-common && \
-			apt-add-repository -y ppa:fish-shell/release-2 && \
-			apt-get install -y fish
+		apt-add-repository -y ppa:fish-shell/release-2 && \
+		apt-get update && \
+		DEBIAN_FRONTEND=noninteractive apt-get install -y \
+		  fish
 
 # Generate locale
 RUN locale-gen en_GB.UTF-8
