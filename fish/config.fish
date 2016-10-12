@@ -27,6 +27,7 @@ function append_if_exists
 end
 
 append_if_exists (realpath "$HOME/.dotfiles/fish/../bin")
+append_if_exists "$HOME/.yarn-cache/.global/node_modules/.bin"
 append_if_exists "$HOME/local/homebrew/bin"
 append_if_exists "$HOME/local/homebrew/sbin"
 append_if_exists "$HOME/local/bin"
