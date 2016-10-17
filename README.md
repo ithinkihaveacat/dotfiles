@@ -84,9 +84,9 @@ See <http://fishshell.com/>.
 ````sh
 $ cd $HOME
 $ git clone https://github.com/ithinkihaveacat/dotfiles.git .dotfiles
+$ cd $HOME/.dotfiles
 # Pull from ro repo, push to rw
 $ git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
-$ cd $HOME/.dotfiles
 $ ./update
 # On OS X, logout and login again
 ````
