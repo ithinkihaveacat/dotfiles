@@ -95,6 +95,12 @@ $ docker run --privileged -it --name barry -p 80:22 -h barry -d -v /root/.ssh:/e
     presumably placed there via `docker-machine create`.
 * `fred` – the name of the image
 
+On `localhost`:
+
+```sh
+$ docker run --privileged -it --name barry -p 127.0.0.1:8022:22 -h barry -d -v $HOME/.ssh:/etc/ssh/keys:ro fred
+```
+
 7.
 
 Get interactive shell (user `mjs`) on the container via `ssh`:
@@ -128,6 +134,12 @@ $ docker attach barry
 
 Exiting or killing this process stops the container. To detach from the
 container without killing the process, use `ctrl-p`, `ctrl-q`.
+
+On `localhost`:
+
+```sh
+$ ssh -i $HOME/.ssh/play_rsa -p 8022 mjs@127.0.0.1
+```
 
 ## Appendix A: Docker Concepts
 
