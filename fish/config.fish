@@ -111,4 +111,6 @@ if type -q atom
   set -x VISUAL "jed" # or "atom -w"
 end
 
+alias yarn="yarn --no-emoji"
+
 source ~/.config/fish/solarized.fish
