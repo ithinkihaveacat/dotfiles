@@ -26,6 +26,12 @@ function append_if_exists
   end
 end
 
+function sourceif
+  if test -r $argv[1]
+    source $argv[1]
+  end
+end
+
 append_if_exists (realpath "$HOME/.dotfiles/fish/../bin")
 append_if_exists "$HOME/.yarn-cache/.global/node_modules/.bin"
 append_if_exists "$HOME/local/homebrew/bin"
@@ -112,3 +118,5 @@ if type -q atom
 end
 
 source ~/.config/fish/solarized.fish
+
+sourceif ~/.ssh/etc/fish/envrc
