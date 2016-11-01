@@ -8,11 +8,15 @@ function fontdir
 
   switch (eval $UNAME)
 
-    case Linux
-      echo "$HOME/.fonts"
-
     case Darwin
+      # $DSTDIR/Library/Fonts is special, and can't be removed, so make sure fonts
+      # are copied into here (and not symlinked)
       echo "$HOME/Library/Fonts"
+
+    case Linux
+      # See /etc/fonts/fonts.conf for where Ubuntu looks for fonts
+      # (/usr/local/share/fonts will also work)
+      echo "$HOME/.fonts"
 
     case '*'
       exit 1
