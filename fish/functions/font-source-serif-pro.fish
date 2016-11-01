@@ -1,6 +1,6 @@
 # https://github.com/adobe-fonts/source-serif-pro/releases
 
-set DIR source-serif-pro
+set DIR (fontdir)/source-serif-pro
 set URL 'https://codeload.github.com/adobe-fonts/source-serif-pro/zip/1.017R'
 
 if test -d $DIR
@@ -8,4 +8,5 @@ if test -d $DIR
   exit 0
 end
 
+mkdir -p $DIR
 unzip -j (curl -s $URL | psub) '*.otf' -d $DIR
