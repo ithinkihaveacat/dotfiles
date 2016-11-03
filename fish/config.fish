@@ -63,9 +63,12 @@ set d /Applications/ghc-*.app/Contents/bin
 append_if_exists $d
 append_if_exists ~/.cabal/bin
 
-# Android
+# Android Tools
 if test -d ~/Library/Android/sdk
   set -x ANDROID_HOME ~/Library/Android/sdk
+end
+if test -d ~/Android/Sdk
+  set -x ANDROID_HOME ~/Android/Sdk
   set fish_user_paths $fish_user_paths $ANDROID_HOME/platform-tools
 end
 
