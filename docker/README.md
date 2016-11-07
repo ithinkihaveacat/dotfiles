@@ -61,8 +61,8 @@ correctly.
 ...
 ```
 
-Note: "locally" refers to where the machine is running, that is, in
-the datacenter.
+Note: "locally" refers to the location of the docker machine is running. (In
+this case, in the datacenter.)
 
 See Docker's [Getting Started
 documentation](https://docs.docker.com/machine/get-started/#/run-containers-and-experiment-with-machine-commands)
