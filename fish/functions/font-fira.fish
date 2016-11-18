@@ -2,7 +2,7 @@
 
 function font-fira
 
-  set DIR (fontdir)fira
+  set DIR (fontdir)/fira
 
   if test -d $DIR
     echo "error: $DIR already exists"
