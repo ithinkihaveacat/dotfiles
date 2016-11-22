@@ -85,13 +85,19 @@ append_if_exists $d
 # Ubuntu (package is golang-*-go)
 set d /usr/lib/go-*/bin
 append_if_exists $d
-
 # OS X
 if type -q go
   set -x GOPATH ~/local/go
   mkdir -p $GOPATH
   append_if_exists $GOPATH/bin
 end
+
+# Node
+#
+# NODE_VERSIONS is used by nodejs-install; see ~/.direnvrc
+
+set -x NODE_VERSIONS $HOME/.local/share/node/versions
+mkdir -p $NODE_VERSIONS
 
 append_if_exists /usr/local/sbin
 append_if_exists /usr/local/bin
