@@ -134,6 +134,7 @@ env DESTDIR=$HOME/local make install
 
 ```sh
 curl -s https://raw.githubusercontent.com/wilmoore/nodejs-install/master/bin/nodejs-install > $HOME/local/bin/nodejs-install
+chmod +x $HOME/local/bin/nodejs-install
 ```
 
 ### OS X
