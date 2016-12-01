@@ -122,6 +122,20 @@ make
 make install
 ````
 
+#### [direnv](https://github.com/direnv/direnv)
+
+```sh
+git clone https://github.com/direnv/direnv
+cd direnv
+env DESTDIR=$HOME/local make install
+```
+
+#### [nodejs-install](https://github.com/wilmoore/nodejs-install)
+
+```sh
+curl -s https://raw.githubusercontent.com/wilmoore/nodejs-install/master/bin/nodejs-install > $HOME/local/bin/nodejs-install
+```
+
 ### OS X
 
 (See [this

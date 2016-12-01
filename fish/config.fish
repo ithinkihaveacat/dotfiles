@@ -94,7 +94,8 @@ end
 
 # Node
 #
-# NODE_VERSIONS is used by nodejs-install; see ~/.direnvrc
+# NODE_VERSIONS is used by direnv and nodejs-install to make different
+# versions of node available; see ~/.direnvrc
 
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
