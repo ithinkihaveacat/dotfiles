@@ -1,4 +1,4 @@
-function ampurls -d "Lookup URL in AMP Cache"
+function ampurls-in-index-doc -d "Map URL to corresponding AMP URL (IN_INDEX_DOC strategy)"
   if test -z "$AMP_API_KEY"
     # https://developers.google.com/amp/cache/reference/authorizing
     echo "error: AMP_API_KEY must be set"
