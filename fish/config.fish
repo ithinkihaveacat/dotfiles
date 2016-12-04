@@ -128,5 +128,6 @@ if type -q atom
 end
 
 source ~/.config/fish/solarized.fish
+source ~/.config/fish/ua.fish
 
 sourceif ~/.ssh/etc/fish/envrc
