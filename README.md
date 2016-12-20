@@ -176,6 +176,11 @@ Get emacs keybindings across all gtk apps
 $ gsettings set org.gnome.desktop.interface gtk-key-theme "Emacs"
 ````
 
+#### Compose Key
+
+Set the [compose key](https://help.ubuntu.com/community/ComposeKey) to Caps Lock
+so that you can e.g. hold down Caps Lock and type `---` to get an mdash.
+
 #### Ubuntu Terminal
 
 ##### Change Colour Scheme
