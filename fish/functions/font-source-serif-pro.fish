@@ -3,7 +3,7 @@
 function font-source-serif-pro
 
   set DIR (fontdir)/source-serif-pro
-  set URL 'https://codeload.github.com/adobe-fonts/source-serif-pro/zip/1.017R'
+  set URL 'https://codeload.github.com/adobe-fonts/source-serif-pro/zip/2.000R'
 
   if test -d $DIR
     echo "error: $DIR already installed"
