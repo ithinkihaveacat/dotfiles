@@ -9,8 +9,8 @@ It's very unlikely that anyone will want to use this directly; the more
 interesting directories are:
 
 * [fish](fish) - configuration and startup files for fish shell.
-* [bin](bin) - mostly git commands that are a bit too long or complicated to be
-  embedded into [.gitconfig](home/.gitconfig).
+* [bin](bin) - hacky little bash scripts for various things.
+* [fish functions](fish/functions) - more scripts, generally those that are awkward/impossible to write in bash.
 * [etc/git/templates/hooks](templates/hooks) - git hooks
 * [docker](Docker) - Dockerfile
 
