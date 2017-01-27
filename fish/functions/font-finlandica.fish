@@ -3,7 +3,7 @@
 function font-finlandica
 
   set DIR (fontdir)/finlandica
-  set URL 'http://toolbox.finland.fi/wp-content/uploads/sites/16/Finlandica.zip'
+  set URL 'https://toolbox.finland.fi/wp-content/uploads/sites/16/Finlandica.zip'
 
   if test -d $DIR
     echo "error: $DIR already exists"
