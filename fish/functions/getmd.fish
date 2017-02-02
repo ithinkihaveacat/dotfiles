@@ -7,5 +7,5 @@ function getmd -d "Retrieve single URL, convert to markdown"
     echo "usage: $_ url"
     return 1
   end
-  curl -s -H "x-api-key: $MERCURY_API_KEY" 'https://mercury.postlight.com/parser?url='$argv[1] | jq -r .content | pandoc -f html -t markdown-raw_html-native_divs-native_spans
+  curl -s -G --data-urlencode (printf "url=%s" $argv[1]) -H "x-api-key: $MERCURY_API_KEY" https://mercury.postlight.com/parser | jq -r .content | pandoc -f html -t markdown
 end
