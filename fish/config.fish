@@ -70,6 +70,7 @@ end
 if test -d ~/Android/Sdk
   set -x ANDROID_HOME ~/Android/Sdk
   set fish_user_paths $fish_user_paths $ANDROID_HOME/platform-tools
+  set fish_user_paths $fish_user_paths $ANDROID_HOME/tools
 end
 
 # Ruby
