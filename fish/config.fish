@@ -118,6 +118,9 @@ set -g __fish_git_prompt_showdirtystate "1"
 # https://github.com/zimbatm/direnv
 if type -q direnv
   eval (direnv hook fish)
+  # Set MANPATH to something, so that if/when rewritten by direnv,
+  # man still search the default paths.
+  set -x MANPATH ":"
 end
 
 if type -q jed
