@@ -2,19 +2,17 @@
 
 ## Getting Started
 
-0.
+0A. Get Gandi API key and set the `GANDI_API_KEY` environment variable.
 
-Get Gandi API key and set the `GANDI_API_KEY` environment variable:
+See <https://www.gandi.net/admin/api_key>.
 
-https://www.gandi.net/admin/api_key
-
-1.
+1A. Download and install Gandi's Docker Machine driver.
 
 Download and install
 [`docker-machine-driver-gandi`](https://github.com/Gandi/docker-machine-gandi/releases)
 ([more info](https://github.com/Gandi/docker-machine-gandi)).
 
-2.
+2A. Create "Dockerized host" on Gandi infrastructure.
 
 Provision Gandi virtual machine and install Docker Engine on it, creating a
 "Dockerized host" that is able to run Docker containers:
@@ -31,20 +29,15 @@ $ docker-machine create \
 `default` is the machine name; if this exists, then many `docker-machine`
 commands will apply to this machine by default.
 
-3.
+3A. Configure `docker` command to interact with Gandi's Docker Engine.
 
-Get `docker` command to interact with newly-created Docker Engine in the cloud
-(instead of the Docker Engine provided by the local Docker.app):
+(Instead of the Docker Engine provided by the local Docker.app.)
 
 ```sh
 $ eval (docker-machine env default)
 ```
 
-4.
-
-(Optional.)
-
-Test Dockerized host:
+4. (Optional) Test Dockerized host.
 
 ```sh
 $ docker run hello-world
@@ -61,24 +54,20 @@ correctly.
 ...
 ```
 
-Note: "locally" refers to the location of the docker machine is running. (In
-this case, in the datacenter.)
+Note: "locally" refers to the location of the docker machine is running. (Either
+the datacenter, or locally.)
 
 See Docker's [Getting Started
 documentation](https://docs.docker.com/machine/get-started/#/run-containers-and-experiment-with-machine-commands)
 for some more examples.
 
-5.
-
-Create image (named `fred`) from `~/.dotfiles/docker/Dockerfile`:
+5. Create image (named `fred`) from `~/.dotfiles/docker/Dockerfile`.
 
 ```sh
 $ docker build -t fred ~/.dotfiles/docker
 ```
 
-6.
-
-Create and start a container (named `barry`):
+6A. Create and start a container (named `barry`) on Cloud Docker Engine:
 
 ```sh
 $ docker run --privileged -it --name barry -p 80:22 -h barry -d -v /root/.ssh:/etc/ssh/keys:ro fred
@@ -95,15 +84,13 @@ $ docker run --privileged -it --name barry -p 80:22 -h barry -d -v /root/.ssh:/e
     presumably placed there via `docker-machine create`.
 * `fred` – the name of the image
 
-On `localhost`:
+6B. Create and start a container (named `barry`) on local Docker Engine:
 
 ```sh
 $ docker run --privileged -it --name barry -p 127.0.0.1:8022:22 -h barry -d -v $HOME/.ssh:/etc/ssh/keys:ro fred
 ```
 
-7.
-
-Get interactive shell (user `mjs`) on the container via `ssh`:
+7A. `ssh` into the container as user `mjs` on the Cloud Docker Engine.
 
 ```sh
 $ ssh -i (docker-machine inspect -f "{{.HostOptions.AuthOptions.StorePath}}")/id_rsa -p 80 mjs@(docker-machine ip)
@@ -135,7 +122,7 @@ $ docker attach barry
 Exiting or killing this process stops the container. To detach from the
 container without killing the process, use `ctrl-p`, `ctrl-q`.
 
-On `localhost`:
+7B. `ssh` into the container as user `mjs` on local Docker Engine.
 
 ```sh
 $ ssh -i $HOME/.ssh/play_rsa -p 8022 mjs@127.0.0.1
@@ -181,8 +168,7 @@ Commands (applicable to created and started containers):
 
 * `docker exec mycontainer echo hello` - run `echo hello` in container
   * `docker exec --privileged mycontainer echo hello` - run command in
-    [privileged mode](https://docs.docker.com/engine/reference/run/#/runtime-pri
-    vilege-and-linux-capabilities)
+    [privileged mode](https://docs.docker.com/engine/reference/run/#/runtime-privilege-and-linux-capabilities)
 * `docker exec --privileged -it mycontainer bash` - start interactive shell in
   container
 * `docker attach mycontainer` - attach to an already running container; on exit,
