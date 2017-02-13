@@ -119,9 +119,10 @@ set -g __fish_git_prompt_showdirtystate "1"
 # https://github.com/zimbatm/direnv
 if type -q direnv
   eval (direnv hook fish)
-  # Set MANPATH to something, so that if/when rewritten by direnv,
-  # man still search the default paths.
-  set -x MANPATH ":"
+  # If MANPATH is set, man very helpfully ignores the default search path as defined in
+  # /etc/manpath.config (at least on Linux). Therefore, to ensure man searches through
+  # the default after direnv fiddles with MANPATH, we explicitly set it to its default value.
+  set -x MANPATH (man -w)
 end
 
 if type -q jed
