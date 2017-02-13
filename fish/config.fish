@@ -122,6 +122,7 @@ if type -q direnv
   # If MANPATH is set, man very helpfully ignores the default search path as defined in
   # /etc/manpath.config (at least on Linux). Therefore, to ensure man searches through
   # the default after direnv fiddles with MANPATH, we explicitly set it to its default value.
+  # See http://unix.stackexchange.com/q/344603/49703
   set -x MANPATH (man -w)
 end
 
