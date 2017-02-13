@@ -38,6 +38,7 @@ append_if_exists "$HOME/local/homebrew/bin"
 append_if_exists "$HOME/local/homebrew/sbin"
 append_if_exists "$HOME/local/bin"
 append_if_exists "$HOME/local/google-cloud-sdk/bin"
+append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine"
 append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
 
 # java
