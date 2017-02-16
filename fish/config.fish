@@ -40,6 +40,8 @@ append_if_exists "$HOME/local/bin"
 append_if_exists "$HOME/local/google-cloud-sdk/bin"
 append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine"
 append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
+# https://cloud.google.com/appengine/docs/go/download
+append_if_exists "$HOME/local/go_appengine"
 
 # java
 #
