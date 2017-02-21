@@ -136,6 +136,9 @@ if type -q atom
   set -x VISUAL "jed" # or "atom -w"
 end
 
+type -q pbcopy  ; or alias pbcopy  "xsel -bi"
+type -q pbpaste ; or alias pbpaste "xsel -bo"
+
 source ~/.config/fish/solarized.fish
 source ~/.config/fish/ua.fish
 
