@@ -165,6 +165,13 @@ Configure via the "Sound" system preference panel.
 
     $ sudo tmutil disablelocal
 
+#### Install "Network Link Conditioner"
+
+https://developer.apple.com/download/more/?q=Additional%20Tools
+
+This provides a way to simulate degraded network conditions ([more
+info](http://nshipster.com/network-link-conditioner/)).
+
 ### Ubuntu
 
 #### Emacs Keybindings
