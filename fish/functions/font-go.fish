@@ -11,6 +11,6 @@ function font-go
   end
 
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) '*.ttf' -d $DIR
+  unzip -j (curl -sL $URL | psub) '*/Go-*.ttf' -d $DIR
 
 end
