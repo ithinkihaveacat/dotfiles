@@ -192,7 +192,7 @@ so that you can e.g. hold down Caps Lock and type `---` to get an mdash.
 
 Open "System Settings", change the fonts as below:
 
-
+![Fonts](http://i.imgur.com/oBF07hH.png)
 
 #### Terminal
 
