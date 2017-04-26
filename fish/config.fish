@@ -20,7 +20,7 @@ if test -d ~/citc
 end
 
 function append_if_exists
-  if count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1]
+  if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
     # http://fishshell.com/docs/2.1/#variables-special
     set -g fish_user_paths $fish_user_paths $argv[1]
   end
@@ -139,7 +139,7 @@ end
 type -q pbcopy  ; or alias pbcopy  "xsel -bi"
 type -q pbpaste ; or alias pbpaste "xsel -bo"
 
-source ~/.config/fish/solarized.fish
-source ~/.config/fish/ua.fish
+. ~/.config/fish/solarized.fish
+. ~/.config/fish/ua.fish
 
 sourceif ~/.ssh/etc/fish/envrc
