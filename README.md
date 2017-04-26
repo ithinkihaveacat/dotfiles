@@ -188,7 +188,13 @@ $ gsettings set org.gnome.desktop.interface gtk-key-theme "Emacs"
 Set the [compose key](https://help.ubuntu.com/community/ComposeKey) to Caps Lock
 so that you can e.g. hold down Caps Lock and type `---` to get an mdash.
 
-#### Ubuntu Terminal
+#### Fonts
+
+Open "System Settings", change the fonts as below:
+
+
+
+#### Terminal
 
 ##### Change Colour Scheme
 
@@ -205,6 +211,11 @@ Use "Profile Preferences" to change the default font.
 
 Open "Keyboard Shortcuts" and unselect "Enable menu access keys".
 (Otherwise Alt is used for accessing the menu.)
+
+##### Change Size
+
+Edit "Default" profile, change custom default terminal size to 100
+columns, 60 rows.
 
 ## Manually Installing Binaries?
 
