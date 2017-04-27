@@ -20,7 +20,7 @@ function fish_prompt --description 'Write out the prompt'
     if not set -q __fish_prompt_hostname
         # once fish 2.5 is everywhere, use prompt_hostname here
         if test -d /etc/goobuntu
-          set -g __fish_prompt_hostname (hostname -s|cut -d \- -f 1)@goobuntu
+          set -g __fish_prompt_hostname goobuntu
         else if begin ; hostname | grep -q syd ; end
           set -g __fish_prompt_hostname syd@gandi
         else
