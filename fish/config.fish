@@ -49,6 +49,7 @@ append_if_exists "$HOME/local/go_appengine"
 #    http://www.oracle.com/technetwork/java/javase/downloads/index.html
 # 2. Download the *.tar.gz.
 # 3. Extract to ~/local.
+
 set d ~/local/jre*/Contents/Home/bin
 append_if_exists $d
 
@@ -62,30 +63,32 @@ append_if_exists $d
 #
 #   $ cabal update
 #   $ cabal install pandoc
+
 set d /Applications/ghc-*.app/Contents/bin
 append_if_exists $d
 append_if_exists ~/.cabal/bin
 
 # Android Tools
-if test -d ~/Library/Android/sdk
-  set -x ANDROID_HOME ~/Library/Android/sdk
-end
-if test -d ~/Android/Sdk
-  set -x ANDROID_HOME ~/Android/Sdk
-  append_if_exists $ANDROID_HOME/platform-tools
-  append_if_exists $ANDROID_HOME/tools
-end
+
+test -d ~/Library/Android/sdk ; and set -x ANDROID_HOME ~/Library/Android/sdk
+test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
+
+append_if_exists $ANDROID_HOME/platform-tools
+append_if_exists $ANDROID_HOME/tools
+append_if_exists $ANDROID_HOME/tools/bin
 
 # Ruby
 #
 # Install gems via:
 #
 #   $ gem install $name --user-install
+
 set d ~/.gem/ruby/*/bin
 append_if_exists $d
 
 # golang
 #
+
 # Ubuntu (package is golang-*-go)
 set d /usr/lib/go-*/bin
 append_if_exists $d
