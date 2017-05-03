@@ -3,7 +3,7 @@
 function font-vollkorn
 
   set DIR (fontdir)/vollkorn
-  set URL 'http://vollkorn-typeface.com/download/vollkorn-4-012.zip'
+  set URL 'http://vollkorn-typeface.com/download/vollkorn-4-015.zip'
 
   if test -d $DIR
     echo "error: $DIR already exists"
