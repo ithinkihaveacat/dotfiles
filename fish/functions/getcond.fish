@@ -13,7 +13,7 @@ function getcond -d "Conditionally retrieve URL"
 
   set -l httpcode (curl -s -o /dev/null -w "%{http_code}" $url)
   if test $httpcode -ne 200
-    curl -s -D - -o /dev/null $url
+    curl -sS -D - -o /dev/null $url
     return 1
   end
 
@@ -26,7 +26,7 @@ function getcond -d "Conditionally retrieve URL"
     echo "GET $url"
     echo $header
     echo
-    curl -s -D - -o /dev/null -H $header $url | head -1
+    curl -sS -D - -o /dev/null -H $header $url | head -1
     echo
   end
 
@@ -39,7 +39,7 @@ function getcond -d "Conditionally retrieve URL"
     echo "GET $url"
     echo $header
     echo
-    curl -s -D - -o /dev/null -H $header $url | head -1
+    curl -sS -D - -o /dev/null -H $header $url | head -1
   end
 
 end
