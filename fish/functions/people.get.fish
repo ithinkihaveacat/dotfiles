@@ -11,5 +11,5 @@ function people.get -d "Google+ People: get"
   end
   set url "https://www.googleapis.com/plus/v1/people/$userId$qs"
   echo "# $url"
-  curl -s $url
+  curl -sS $url
 end
