@@ -110,8 +110,8 @@ mkdir -p $NODE_VERSIONS
 append_if_exists /usr/local/sbin
 append_if_exists /usr/local/bin
 
-# http://fishshell.com/docs/2.1/#variables-special
-set --erase fish_greeting
+# http://fishshell.com/docs/current/faq.html#faq-greeting
+set fish_greeting
 
 # https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_git_prompt.fish
 set -g __fish_git_prompt_showupstream "auto"
