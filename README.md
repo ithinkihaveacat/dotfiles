@@ -67,7 +67,7 @@ brew install fish
 >
 > *If you want to install somewhere else ...*
 >
-> See [alternative installs](https://github.com/Homebrew/homebrew/blob/master/share/doc/homebrew/Installation.md#alternative-installs). (Installing into `~/local/homebrew`, and symlinking `brew` into `~/local/homebrew/bin` might be a good option.)
+> See [alternative installs](https://github.com/Homebrew/brew/blob/master/docs/Installation.md#alternative-installs). (Installing into `~/local/homebrew`, and symlinking `brew` into `~/local/homebrew/bin` might be a good option.)
 >
 > Note that the binaries are symlinked into whatever directory `brew` is
 installed into. (So if `brew` is symlinked into `/usr/local/bin`, then
