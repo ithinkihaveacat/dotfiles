@@ -11,7 +11,7 @@ interesting directories are:
 * [fish](fish) - configuration and startup files for fish shell.
 * [bin](bin) - hacky little bash scripts for various things.
 * [fish functions](fish/functions) - more scripts, generally those that are awkward/impossible to write in bash.
-* [etc/git/templates](git/templates) - git hooks
+* [etc/git/templates](etc/git/templates) - git hooks
 * [docker](docker) - Dockerfile
 
 ## Prerequisites
