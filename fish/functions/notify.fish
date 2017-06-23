@@ -14,7 +14,7 @@ function notify -a body -a title -d "Posts a notification using the native notif
   end
 
   if type -q notify-send
-    notify-send $title $body
+    notify-send --icon=terminal $title $body
     return
   end
 
