@@ -1,4 +1,5 @@
 # http://toolbox.finland.fi/identity-of-finland/graphic-elements/other-graphic-elements/finlandica-font/
+# https://github.com/ithinkihaveacat/misc/tree/master/fonts
 
 function font-finlandica
 
