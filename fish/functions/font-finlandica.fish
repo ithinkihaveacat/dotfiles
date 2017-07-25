@@ -12,6 +12,7 @@ function font-finlandica
   end
 
   mkdir -p $DIR
-  unzip -j (curl -s $URL | psub) '*.otf' -d $DIR # ttf, woff, woff2 also available
+  # -4 Because toolbox.finland.fi's IPv6 SSL is broken...
+  unzip -j (curl -4 -s $URL | psub) '*.otf' -d $DIR # ttf, woff, woff2 also available
 
 end
