@@ -26,7 +26,7 @@ function getcond -d "Conditionally retrieve URL"
     echo "GET $url"
     echo $header
     echo
-    curl -sS -D - -o /dev/null -H $header $url | head -1
+    curl -ksSo /dev/null -H $header -w "%{http_code} (dns:%{time_namelookup} tcp:%{time_connect} ssl:%{time_appconnect} ttfb:%{time_starttransfer} total:%{time_total})\n" $argv
     echo
   end
 
@@ -39,7 +39,7 @@ function getcond -d "Conditionally retrieve URL"
     echo "GET $url"
     echo $header
     echo
-    curl -sS -D - -o /dev/null -H $header $url | head -1
+    curl -ksSo /dev/null -H $header -w "%{http_code} (dns:%{time_namelookup} tcp:%{time_connect} ssl:%{time_appconnect} ttfb:%{time_starttransfer} total:%{time_total})\n" $argv
   end
 
 end
