@@ -137,7 +137,7 @@ curl -s https://raw.githubusercontent.com/wilmoore/nodejs-install/master/bin/nod
 chmod +x $HOME/local/bin/nodejs-install
 ```
 
-### OS X
+### macOS
 
 (See [this
 script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx)
@@ -171,6 +171,10 @@ https://developer.apple.com/download/more/?q=Additional%20Tools
 
 This provides a way to simulate degraded network conditions ([more
 info](http://nshipster.com/network-link-conditioner/)).
+
+#### Install GitHub theme for iA Writer
+
+See <https://ia.net/writer/templates/>.
 
 ### Ubuntu
 
