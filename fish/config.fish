@@ -107,6 +107,8 @@ end
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
+append_if_exists $NODE_VERSIONS/(ls $NODE_VERSIONS | sort -n | tail -1)/bin
+
 append_if_exists /usr/local/sbin
 append_if_exists /usr/local/bin
 
