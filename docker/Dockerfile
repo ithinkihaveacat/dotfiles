@@ -42,6 +42,7 @@ RUN apt-get update && \
       git \
       jed \
       less \
+      locales \
       man-db \
       mtr-tiny \
       net-tools \
