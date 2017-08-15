@@ -87,7 +87,8 @@ $ git clone https://github.com/ithinkihaveacat/dotfiles.git .dotfiles
 $ cd $HOME/.dotfiles
 # Pull from ro repo, push to rw
 $ git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
-$ ./update
+$ ./update                                 # if brew in PATH
+$ PATH=~/local/homebrew/bin:$PATH ./update # if brew not in PATH
 # On OS X, logout and login again
 ````
 
