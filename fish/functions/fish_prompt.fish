@@ -37,7 +37,7 @@ function fish_prompt --description 'Write out the prompt'
       set tmp (tty-frontmost)
       if test "$tmp" != (tty)
         set secs (math "$CMD_DURATION / 1000")
-        # It's not possible to raise the window via the notifcation; see
+        # It's not possible to raise the window via the notification; see
         # https://stackoverflow.com/a/33808356
         notify "$history[1]" "(status $status; $secs secs)"
       end
