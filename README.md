@@ -177,6 +177,10 @@ info](http://nshipster.com/network-link-conditioner/)).
 
 See <https://ia.net/writer/templates/>.
 
+#### Disable Hot Corners
+
+Via System Preferences.
+
 ### Ubuntu
 
 #### Emacs Keybindings
