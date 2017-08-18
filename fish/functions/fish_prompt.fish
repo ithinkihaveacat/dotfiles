@@ -32,8 +32,10 @@ function fish_prompt --description 'Write out the prompt'
     # https://github.com/jml/undistract-me/issues/32
     if test $CMD_DURATION
         if test $CMD_DURATION -gt (math "1000 * 10")
-            set secs (math "$CMD_DURATION / 1000")
-            notify "$history[1]" "(status $status; $secs secs)"
+            if test (frontmost-tty) != (tty)
+                set secs (math "$CMD_DURATION / 1000")
+                notify "$history[1]" "(status $status; $secs secs)"
+            end
         end
     end
 
