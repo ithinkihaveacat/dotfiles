@@ -28,7 +28,7 @@ function fish_prompt --description 'Write out the prompt'
         end
     end
 
-    # If commands runs >= 10 seconds, notify user on completion
+    # If commands takes longer than 10 seconds, notify user on completion
     # https://github.com/jml/undistract-me/issues/32
     if test $CMD_DURATION
         if test $CMD_DURATION -gt (math "1000 * 10")
