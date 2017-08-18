@@ -28,6 +28,15 @@ function fish_prompt --description 'Write out the prompt'
         end
     end
 
+    # If commands runs >= 10 seconds, notify user on completion
+    # https://github.com/jml/undistract-me/issues/32
+    if test $CMD_DURATION
+        if test $CMD_DURATION -gt (math "1000 * 10")
+            set secs (math "$CMD_DURATION / 1000")
+            notify "$history[1]" "(status $status; $secs secs)"
+        end
+    end
+
     echo -n -s "$__fish_prompt_color_hostname" "$__fish_prompt_hostname" "$__fish_prompt_color_normal" ':' "$__fish_prompt_color_cwd" (prompt_pwd) "$__fish_prompt_color_git" (__fish_git_prompt "#%s") "$__fish_prompt_color_normal" '$ '
 
 end
