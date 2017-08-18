@@ -32,7 +32,7 @@ function fish_prompt --description 'Write out the prompt'
   # https://github.com/jml/undistract-me/issues/32
   if test $CMD_DURATION
     if test $CMD_DURATION -gt (math "1000 * 10")
-      # tmp so that an empty frontmost-tty results in an empty string; see
+      # tmp so that an empty tty-frontmost results in an empty string; see
       # https://github.com/fish-shell/fish-shell/issues/159
       set tmp (tty-frontmost)
       if test "$tmp" != (tty)
