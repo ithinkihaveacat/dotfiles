@@ -34,7 +34,7 @@ function fish_prompt --description 'Write out the prompt'
     if test $CMD_DURATION -gt (math "1000 * 10")
       # tmp so that an empty frontmost-tty results in an empty string; see
       # https://github.com/fish-shell/fish-shell/issues/159
-      set tmp (frontmost-tty)
+      set tmp (tty-frontmost)
       if test "$tmp" != (tty)
         set secs (math "$CMD_DURATION / 1000")
         # It's not possible to raise the window via the notifcation; see
