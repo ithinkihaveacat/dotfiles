@@ -137,8 +137,8 @@ if type -q jed
   set -x EDITOR "jed"
 end
 
-if type -q atom
-  set -x VISUAL "jed" # or "atom -w"
+if type -q code
+  set -x VISUAL "code -w"
 end
 
 type -q pbcopy  ; or alias pbcopy  "xsel -bi"
