@@ -2,7 +2,7 @@ if test -n "$WINDOWID"
 
   # X Windows
   function terminal-frontmost
-    set -l tmp (printf "%d" (string -m 1 -r (xprop -root _NET_ACTIVE_WINDOW))[2])
+    set -l tmp (printf "%d" (string split -m 1 -r " " (xprop -root _NET_ACTIVE_WINDOW))[2])
     test "$WINDOWID" = "$tmp"
   end function
 
