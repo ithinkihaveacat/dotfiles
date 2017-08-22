@@ -1,10 +1,10 @@
 function notify -a title -a body -d "Posts a notification using the native notification system"
 
-  if [ -z "$title" ]
+  if test -z "$title"
     echo "usage: $_ title [body]"
     return
   end
-  if [ -z "$body" ]
+  if test -z "$body"
     set body ""
   end
 
