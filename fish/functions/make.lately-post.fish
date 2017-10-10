@@ -5,7 +5,7 @@ function make.lately-post -d "Generate lately post template"
   end
   set -l PREFIX $HOME/workspace/beebo-site/app/lately
   set -l yyyymmdd (date -u +'%Y-%m-%d')
-  set -l filename (printf "%s/%s_%s.markdown" $PREFIX $yyyymmdd $argv[1])
+  set -l filename (printf "%s/%s_%s.md" $PREFIX $yyyymmdd $argv[1])
   if test -e $filename
     echo "error: $filename already exists"
     return
