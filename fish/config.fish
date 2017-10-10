@@ -137,6 +137,8 @@ if type -q jed
   set -x EDITOR "jed"
 end
 
+set -x VISUAL $EDITOR
+
 #if type -q code
 #  set -x VISUAL "code -w"
 #end
