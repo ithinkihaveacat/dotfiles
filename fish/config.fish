@@ -36,6 +36,7 @@ append_if_exists (realpath "$HOME/.dotfiles/fish/../bin")
 append_if_exists "$HOME/.yarn-cache/.global/node_modules/.bin"
 append_if_exists "$HOME/local/homebrew/bin"
 append_if_exists "$HOME/local/homebrew/sbin"
+append_if_exists "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
 append_if_exists "$HOME/local/bin"
 append_if_exists "$HOME/local/google-cloud-sdk/bin"
 append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine"
