@@ -19,10 +19,23 @@ if test -d ~/citc
   set -g CDPATH $CDPATH ~/citc
 end
 
-function append_if_exists
+# Avoid fish_user_path and instead set PATH directly. fish_user_path can be used
+# to share a PATH across shells and invocations if set as a universal variable;
+# it isn't very useful otherwise. See
+# https://github.com/fish-shell/fish-shell/issues/527#issuecomment-253775156
+function append_path
   if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
-    # http://fishshell.com/docs/2.1/#variables-special
-    set -g fish_user_paths $fish_user_paths $argv[1]
+    if not contains $argv[1] $PATH
+      set PATH $PATH $argv[1]
+    end
+  end
+end
+
+function prepend_path
+  if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
+    if not contains $argv[1] $PATH
+      set PATH $argv[1] $PATH
+    end
   end
 end
 
@@ -32,17 +45,14 @@ function sourceif
   end
 end
 
-append_if_exists (realpath "$HOME/.dotfiles/fish/../bin")
-append_if_exists "$HOME/.yarn-cache/.global/node_modules/.bin"
-append_if_exists "$HOME/local/homebrew/bin"
-append_if_exists "$HOME/local/homebrew/sbin"
-append_if_exists "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
-append_if_exists "$HOME/local/bin"
-append_if_exists "$HOME/local/google-cloud-sdk/bin"
-append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine"
-append_if_exists "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
-# https://cloud.google.com/appengine/docs/go/download
-append_if_exists "$HOME/local/go_appengine"
+# Google Cloud SDK
+#
+# https://cloud.google.com/sdk/
+
+prepend_path "$HOME/local/go_appengine"
+prepend_path "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
+prepend_path "$HOME/local/google-cloud-sdk/platform/google_appengine"
+prepend_path "$HOME/local/google-cloud-sdk/bin"
 
 # java
 #
@@ -52,7 +62,7 @@ append_if_exists "$HOME/local/go_appengine"
 # 3. Extract to ~/local.
 
 set d ~/local/jre*/Contents/Home/bin
-append_if_exists $d
+prepend_path $d
 
 # ghc
 #
@@ -66,17 +76,17 @@ append_if_exists $d
 #   $ cabal install pandoc
 
 set d /Applications/ghc-*.app/Contents/bin
-append_if_exists $d
-append_if_exists ~/.cabal/bin
+prepend_path $d
+prepend_path ~/.cabal/bin
 
 # Android Tools
 
 test -d ~/Library/Android/sdk ; and set -x ANDROID_HOME ~/Library/Android/sdk
 test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 
-append_if_exists $ANDROID_HOME/platform-tools
-append_if_exists $ANDROID_HOME/tools
-append_if_exists $ANDROID_HOME/tools/bin
+prepend_path $ANDROID_HOME/platform-tools
+prepend_path $ANDROID_HOME/tools
+prepend_path $ANDROID_HOME/tools/bin
 
 # Ruby
 #
@@ -85,19 +95,19 @@ append_if_exists $ANDROID_HOME/tools/bin
 #   $ gem install $name --user-install
 
 set d ~/.gem/ruby/*/bin
-append_if_exists $d
+prepend_path $d
 
 # golang
 #
 
 # Ubuntu (package is golang-*-go)
 set d /usr/lib/go-*/bin
-append_if_exists $d
+prepend_path $d
 # OS X
 if type -q go
   set -x GOPATH ~/local/go
   mkdir -p $GOPATH
-  append_if_exists $GOPATH/bin
+  prepend_path $GOPATH/bin
 end
 
 # Node
@@ -108,10 +118,16 @@ end
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
-append_if_exists $NODE_VERSIONS/(ls $NODE_VERSIONS | sort -n | tail -1)/bin
+prepend_path $NODE_VERSIONS/(ls $NODE_VERSIONS | sort -n | tail -1)/bin
 
-append_if_exists /usr/local/sbin
-append_if_exists /usr/local/bin
+prepend_path /usr/local/sbin
+prepend_path /usr/local/bin
+
+prepend_path "$HOME/local/homebrew/bin"
+prepend_path "$HOME/local/homebrew/sbin"
+prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
+prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
+prepend_path "$HOME/local/bin"
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
