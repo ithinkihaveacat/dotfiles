@@ -6,5 +6,5 @@
 FISH=$(which fish)
 
 if [[ -x "$FISH" ]]; then
-  exec "$FISH" -i
+  exec env SHELL="$FISH" "$FISH" -i
 fi
