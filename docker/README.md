@@ -153,6 +153,7 @@ Images:
 * `docker build ...` - create image
 * `docker rmi ...` - remove image
   * `docker rmi (docker images -q -a)` - remove all images
+  * `docker system prune` - remove "unusaed" images and other resources
 
 Containers:
 

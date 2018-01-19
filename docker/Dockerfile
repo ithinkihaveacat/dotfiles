@@ -32,6 +32,7 @@ RUN apt-get update && \
     echo "AuthorizedKeysCommandUser root" >> /etc/ssh/sshd_config && \
     mkdir /var/run/sshd
 EXPOSE 22
+# TODO: Should https://github.com/Yelp/dumb-init be used here?
 CMD [ "/usr/sbin/sshd", "-D" ]
 
 # Install packages (with --no-install-recommends)
