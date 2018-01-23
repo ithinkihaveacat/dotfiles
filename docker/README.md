@@ -181,6 +181,12 @@ Commands (applicable to images):
   container, run default command and attach interactively
   * `docker run --privileged -it -h myhostname --rm myimage` - as above, but
     remove container on exit
+* `docker run --rm --mount source=data,target=/data
+myimage sh -c 'tar cOzf - -C /data . > data.tar.gz' - mount volume
+data as /data, then dump as *.tar.gz
+* `docker run --rm --mount type=bind,source=$(pwd)/data,target=/data
+myimage` - mount data (in current directory) via bind mount to /data
+(allows container to write to /data, and changes appear in data)
 
 ## Appendix C: `docker-machine` commands
 
