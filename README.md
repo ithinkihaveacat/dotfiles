@@ -24,7 +24,7 @@ interesting directories are:
 
 Ubuntu | OS X
 -------|-----
-`sudo apt-get install git-core`|Install [Xcode](https://developer.apple.com/xcode/downloads/)
+`sudo apt-get install git-core`|`xcode-select --install` (or install [Xcode](https://developer.apple.com/xcode/downloads/))
 
 > No `sudo`? (If, for example, you're on a Gandi VPS.)
 >
@@ -32,10 +32,6 @@ Ubuntu | OS X
 > 1. Install `sudo`: `apt-get install sudo`
 > 1. Edit `/etc/sudoers`: `visudo`
 > 1. Add the line: `mjs ALL=(ALL) NOPASSWD:ALL`
->
-> Don't want to install Xcode?
->
-> Run `git` and install the command-line tools. (This also saves a lot of diskspace.)
 
 ### [fish](http://fishshell.com/)
 
