@@ -97,19 +97,6 @@ prepend_path $ANDROID_HOME/tools/bin
 set d ~/.gem/ruby/*/bin
 prepend_path $d
 
-# golang
-#
-
-# Ubuntu (package is golang-*-go)
-set d /usr/lib/go-*/bin
-prepend_path $d
-# OS X
-if type -q go
-  set -x GOPATH ~/local/go
-  mkdir -p $GOPATH
-  prepend_path $GOPATH/bin
-end
-
 # Node
 #
 # NODE_VERSIONS is used by direnv and nodejs-install to make different
@@ -128,6 +115,20 @@ prepend_path "$HOME/local/homebrew/sbin"
 prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
 prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
 prepend_path "$HOME/local/bin"
+
+# golang
+#
+# (Needs to be configured after homebrew paths set.)
+
+# Special-case PATH for Ubuntu (package is golang-*-go)
+set d /usr/lib/go-*/bin
+prepend_path $d
+
+if type -q go
+  set -x GOPATH ~/local/go
+  mkdir -p $GOPATH
+  prepend_path $GOPATH/bin
+end
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
