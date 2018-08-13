@@ -7,7 +7,7 @@ function dig-any -d "DNS lookup (all records)"
   
   set -l QUERY
   # https://en.wikipedia.org/wiki/List_of_DNS_record_types
-  for type in A AAAA NS SOA MX TXT NAPTR CNAME DNSKEY RP SRV
+  for type in A AAAA NS SOA MX TXT NAPTR CNAME DNSKEY RP SRV CAA
     set QUERY $QUERY $argv[1] $type
   end
 
