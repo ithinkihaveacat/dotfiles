@@ -12,5 +12,7 @@ function getwellknown -d "Retrieve .well-known (and similar) URLs, output to std
   curl -sSi "{$argv}/apple-app-site-association" | head -1
   echo "# $argv/.well-known/apple-app-site-association"
   curl -sSi "{$argv}/.well-known/apple-app-site-association" | head -1
+  echo "# $argv/.well-known/change-password"
+  curl -sSi "{$argv}/.well-known/change-password" | head 1
 
 end
