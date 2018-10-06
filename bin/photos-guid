@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+# Calculates a GUID from the image data (not metadata) of the JPG, embeds it
+# into the JPG, and copies it into all other files that share the same name
+# (e.g. RAW) files. This is unfortunately not as useful as it could be because
+# Spotlight typically does not index RAW files (even if they have metadata), so
+# there's no easy way to find all files with a particular GUID. (Maybe one
+# day...)
+
+# Actual metadata:
+# xattr -p com.apple.metadata:kMDItemFinderComment *.ORF | xxd -r -p | plutil -convert xml1 - -o -
+
+# What Spotlight thinks the metadata is:
+# mdls -raw -name kMDItemFinderComment *.ORF
+
+# EXIF metadata (different to Spotlight metadata!):
+# exiftool -a *.ORF | grep "Image Unique ID"
+
+function isJpeg() {
+  if [[ -z $1 ]]; then
+    return 1
+  else
+    identify $1 2> /dev/null | cut -d ' ' -f 2 | grep -q JPEG
+  fi
+}
+
+function base() {
+  echo "${1%.*}"
+}
+
+if [[ -z $1 ]]; then
+  echo "usage: $(basename $0) dir"
+  exit 1
+fi
+
+for f in $(find $1 -type f) ; do
+
+  if isJpeg $f ; then
+
+    # Calculate GUID based on image data only (not metadata)
+    GUID=$(identify -format '%#' $f)
+    BASE=$(base $f)
+
+    # Ideally we'd write the GUID to the EXIF, and macOS would index that field.
+    # However, I can't find a suitable field. (kMDItemIdentifier looks pretty
+    # promising, but it doesn't seem to correspond to any EXIF field.) So,
+    # instead we write the GUID to both the ImageUniqueID EXIF field (in the
+    # file) *and* macOS's MDItemFinderComment field (in the file's metadata, on
+    # macOS only). This does expose the GUID to the Finder, but it is indexed by
+    # Spotlight.
+    #
+    # https://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/MacOS.html
+    # https://developer.apple.com/library/archive/documentation/CoreServices/Reference/MetadataAttributesRef/Reference/CommonAttrs.html
+
+    # These need to be separate commands for some reason
+    exiftool -q -overwrite_original -MDItemFinderComment=$GUID ${BASE}.*
+    exiftool -q -overwrite_original -ImageUniqueID=$GUID ${BASE}.*
+
+    # At this point, it's possible for the actual kMDItemFinderComment as
+    # received from Spotlight to be correct, but when it's queried again from
+    # the command-line, it's unchanged! I don't know why this happens. (Finder
+    # will show the expected value.) The fix seems to be to just run mdimport on
+    # the affected files, but it's difficult to do this from the script itself.
+
+    echo "$GUID $f"
+
+  fi
+
+done
+
+# Try to ensure the changes actually take...
+sleep 5
+mdimport $1
