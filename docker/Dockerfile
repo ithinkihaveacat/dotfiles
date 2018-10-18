@@ -21,7 +21,7 @@
 # It's a Docker-created file/volume that must be mapped via "docker run"
 # or "docker create", see https://docs.docker.com/engine/reference/run/#/volume-shared-filesystems
 
-FROM ubuntu:16.04
+FROM ubuntu:18.04
 
 # Configure ssh (allow root to ssh)
 
