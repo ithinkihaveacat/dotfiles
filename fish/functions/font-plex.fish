@@ -11,6 +11,6 @@ function font-plex
   end
 
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) 'type-master/fonts/*/*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) 'plex-master/*/fonts/complete/ttf/*.ttf' -d $DIR
 
 end
