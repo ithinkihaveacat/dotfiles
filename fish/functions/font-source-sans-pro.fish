@@ -3,7 +3,7 @@
 function font-source-sans-pro
 
   set DIR (fontdir)/source-sans-pro
-  set URL 'https://codeload.github.com/adobe-fonts/source-sans-pro/zip/2.020R-ro/1.075R-it'
+  set URL 'https://codeload.github.com/adobe-fonts/source-sans-pro/zip/2.040R-ro/1.090R-it'
 
   if test -d $DIR
     echo "error: $DIR already exists"
