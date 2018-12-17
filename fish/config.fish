@@ -105,7 +105,7 @@ prepend_path $d
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
-prepend_path $NODE_VERSIONS/node-v(ls $NODE_VERSIONS | cut -b 7- | sort -n | tail -1)/bin
+prepend_path $NODE_VERSIONS/(ls $NODE_VERSIONS | sort -V | tail -1)/bin
 
 prepend_path /usr/local/sbin
 prepend_path /usr/local/bin
