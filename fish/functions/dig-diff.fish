@@ -4,7 +4,7 @@ function dig-diff -d "Compares cached and uncached DNS records"
   # https://www.whatsmydns.net/
 
   if test ( count $argv ) -eq 0
-    echo "usage: $_ host"
+    printf "usage: %s host\n" (status current-command)
     return
   end
 

@@ -42,6 +42,7 @@ function fish_prompt --description 'Write out the prompt'
     end
   end
 
+  set_color -i black
   echo -n -s "$__fish_prompt_color_hostname" "$__fish_prompt_hostname" "$__fish_prompt_color_normal" ':' "$__fish_prompt_color_cwd" (prompt_pwd) "$__fish_prompt_color_git" (__fish_git_prompt "#%s") "$__fish_prompt_color_normal" '$ '
 
 end

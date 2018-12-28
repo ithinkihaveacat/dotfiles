@@ -1,6 +1,6 @@
 function amp-cloudflare-validator -d "Query Cloudflare for URL validity"
   if test ( count $argv ) -eq 0
-    echo "usage: $_ url"
+    printf "usage: %s url\n" (status current-command)
     return 1
   end
   if string match -q -r "^https://" $argv[1]

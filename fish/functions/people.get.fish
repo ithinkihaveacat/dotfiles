@@ -1,7 +1,7 @@
 # https://developers.google.com/+/api/latest/people/get
 function people.get -d "Google+ People: get"
   if test ( count $argv ) -eq 0
-    echo "usage: $_ user_id [access_token]"
+    printf "usage: %s user_id [access_token]\n" (status current-command)
     return
   end
   # example 112077979967606528699

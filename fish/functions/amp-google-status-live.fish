@@ -4,7 +4,7 @@ function amp-google-status-live -d "Query Google AMP CDN for URL validity (FETCH
     echo "error: AMP_API_KEY must be set"
   end
   if test ( count $argv ) -eq 0
-    echo "usage: $_ canonical_url"
+    printf "usage: %s canonical_url\n" (status current-command)
     return 1
   end
   # https://developers.google.com/amp/cache/reference/acceleratedmobilepageurl/rest/v1/ampUrls/batchGet#lookupstrategy

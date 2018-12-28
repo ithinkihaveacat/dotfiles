@@ -1,7 +1,7 @@
 function getcond -d "Conditionally retrieve URL"
 
   if test (count $argv) -ne 1
-    echo "error: $_ URL"
+    printf "error: %s URL\n" (status current-command)
     return 1
   end
   

@@ -14,7 +14,7 @@ function token.exchange -d "Exchanges an auth code for access, id and refresh to
   end
 
   if test ( count $argv ) -eq 0
-    echo "usage: $_ auth_code"
+    printf "usage: %s auth_code\n" (status current-command)
     return
   end
 

@@ -16,7 +16,7 @@ function token.refresh -d "Get access token from a refresh token"
   end
 
   if test ( count $argv ) -ne 1
-    echo "usage: $_ refresh_token"
+    printf "usage: %s refresh_token\n" (status current-command)
     return
   end
 

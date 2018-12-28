@@ -14,7 +14,7 @@ function token.get -d "Gets OpenID Connect tokens and assertions"
   end
 
   if test ( count $argv ) -eq 0
-    echo "usage: $_ scope # e.g. $_ email profile"
+    printf "usage: %s scope # e.g. %s email profile\n" (status current-command) (status current-command)
     return
   end
 

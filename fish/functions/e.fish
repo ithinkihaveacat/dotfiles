@@ -1,7 +1,7 @@
 function e -d 'Edit file, searching in a few different places' -w type
 
   if test ( count $argv ) -ne 1
-    echo "usage: $_ filename"
+    printf "usage: %s filename" (status current-command)
     return
   end
 
@@ -11,7 +11,7 @@ function e -d 'Edit file, searching in a few different places' -w type
   end
 
   if not type -qt $argv[1]
-    echo "$_: '$argv[1]' not found, or not a file"
+    printf "%s: '%s' not found, or not a file\n" (status current-command) $argv[1]
     return
   end
 

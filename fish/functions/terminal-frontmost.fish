@@ -7,7 +7,7 @@ if test -n "$WINDOWID"
   function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
     set -l tmp (printf "%d" (string split -m 1 -r " " (xprop -root _NET_ACTIVE_WINDOW))[2])
     test "$WINDOWID" = "$tmp"
-  end function
+  end
 
 else if test -n "$TERM_SESSION_ID"
 
@@ -26,13 +26,13 @@ else if test -n "$TERM_SESSION_ID"
       -e 'end tell' \
     )
     test (tty) = "$tmp"
-  end function
+  end
 
 else
 
   # Unknown/other
   function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
     return 0 # Always frontmost
-  end function
+  end
 
-end if
+end
