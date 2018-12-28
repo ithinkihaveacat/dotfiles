@@ -63,3 +63,4 @@ set -g fish_color_escape      $cyan
 set -g fish_color_hostname    $cyan
 set -g fish_color_cwd         $yellow
 set -g fish_color_git         $green
+set -g fish_color_sigil       $base2
