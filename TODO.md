@@ -1,1 +1,0 @@
-- http://osxnotes.net/keybindings.html
