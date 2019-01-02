@@ -24,7 +24,7 @@ function fish_prompt --description 'Write out the prompt'
     if test -d /etc/goobuntu
       set -g __fish_prompt_hostname goobuntu
     else
-      set -g __fish_prompt_hostname (string split --max 1 . (string lower $hostname))[1]
+      set -g __fish_prompt_hostname (string replace -r '[\.|\-].*' '' (string lower $hostname))
     end
   end
 
