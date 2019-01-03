@@ -1,4 +1,4 @@
-# Copied from /usr/share/fish/functions/ls.fish
+# Copied from share/fish/functions/ls.fish
 
 if command ls --version 1>/dev/null 2>/dev/null
   # This is GNU ls
