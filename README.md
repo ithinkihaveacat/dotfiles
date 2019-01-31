@@ -53,6 +53,8 @@ Via [`brew`](http://brew.sh/):
 
 ````
 brew install fish
+# add fish's full path to /etc/shells
+chsh -s /full/path/to/fish
 ````
 
 > **Don't already have [`brew`](http://brew.sh/)?**
@@ -119,21 +121,6 @@ make
 make install
 ````
 
-#### [direnv](https://github.com/direnv/direnv)
-
-```sh
-git clone https://github.com/direnv/direnv
-cd direnv
-env DESTDIR=$HOME/local make install
-```
-
-#### [nodejs-install](https://github.com/wilmoore/nodejs-install)
-
-```sh
-curl -s https://raw.githubusercontent.com/wilmoore/nodejs-install/master/bin/nodejs-install > $HOME/local/bin/nodejs-install
-chmod +x $HOME/local/bin/nodejs-install
-```
-
 ### macOS
 
 (See [this
@@ -142,7 +129,7 @@ for some tips on how to change some of these settings automatically.)
 
 #### Configure Terminal
 
-Import the [`etc/Solarized-Dark.terminal`](etc/Solarized-Dark.terminal) profile. (See [this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx) for some information on how to do this automatically.)
+Import the [`etc/Solarized-Dark.terminal`](etc/Solarized-Dark.terminal) profile, and set it to the "default". (See [this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx) for some information on how to do this automatically.)
 
 #### Configure keyboard
 
