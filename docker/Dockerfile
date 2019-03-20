@@ -57,7 +57,7 @@ RUN apt-get update && \
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       software-properties-common && \
-    apt-add-repository -y ppa:fish-shell/release-2 && \
+    apt-add-repository -y ppa:fish-shell/release-3 && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       fish
