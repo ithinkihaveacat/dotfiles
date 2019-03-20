@@ -40,7 +40,7 @@ Ubuntu | OS X
 Via PPA:
 
 1. Install `apt-add-repository`: `sudo apt-get install software-properties-common`
-1. Add fish PPA: <https://launchpad.net/~fish-shell/+archive/ubuntu/release-2>
+1. Add fish PPA: <https://launchpad.net/~fish-shell/+archive/ubuntu/release-3>
 
 Via DEB:
 
