@@ -1,10 +1,10 @@
-# http://toolbox.finland.fi/identity-of-finland/graphic-elements/other-graphic-elements/finlandica-font/
-# https://github.com/ithinkihaveacat/misc/tree/master/fonts
+# https://toolbox.finland.fi/brand-identity-and-guidelines/finlandica-font/
+# http://web.archive.org/web/20190323232539/https://toolbox.finland.fi/brand-identity-and-guidelines/finlandica-font/
 
 function font-finlandica
 
   set DIR (fontdir)/finlandica
-  set URL 'https://toolbox.finland.fi/wp-content/uploads/sites/16/Finlandica.zip'
+  set URL 'https://toolbox.finland.fi/wp-content/uploads/2015/09/finlandica-2018.zip'
 
   if test -d $DIR
     echo "error: $DIR already exists"
@@ -12,7 +12,6 @@ function font-finlandica
   end
 
   mkdir -p $DIR
-  # -4 Because toolbox.finland.fi's IPv6 SSL is broken...
-  unzip -j (curl -4 -s $URL | psub) '*.otf' -d $DIR # ttf, woff, woff2 also available
+  unzip -j (curl -s $URL | psub) '*/TTF/*.ttf' -x '__MACOSX/*' -d $DIR # web versions also available!
 
 end
