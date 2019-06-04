@@ -3,7 +3,7 @@
 function font-roboto
 
   set DIR (fontdir)/roboto
-  set URL 'https://codeload.github.com/google/roboto/zip/v2.134'
+  set URL (github-download-url google/roboto | grep unhinted)
 
   if test -d $DIR
     echo "error: $DIR already exists"
@@ -11,6 +11,6 @@ function font-roboto
   end
 
   mkdir -p $DIR
-  unzip -j (curl -s $URL | psub) '*.ttf' -d $DIR
+  unzip -j (curl -Ls $URL | psub) '*.ttf' -d $DIR
 
 end

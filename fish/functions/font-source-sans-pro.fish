@@ -3,7 +3,7 @@
 function font-source-sans-pro
 
   set DIR (fontdir)/source-sans-pro
-  set URL 'https://codeload.github.com/adobe-fonts/source-sans-pro/zip/2.040R-ro/1.090R-it'
+  set URL (github-download-url adobe-fonts/source-sans-pro)
 
   if test -d $DIR
     echo "error: $DIR already exists"
@@ -11,6 +11,6 @@ function font-source-sans-pro
   end
 
   mkdir -p $DIR
-  unzip -j (curl -s $URL | psub) '*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) '*/OTF/SourceSansPro*.otf' -d $DIR
 
 end

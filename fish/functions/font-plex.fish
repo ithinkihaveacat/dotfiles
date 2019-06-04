@@ -3,7 +3,7 @@
 function font-plex
 
   set DIR (fontdir)/plex
-  set URL 'https://github.com/IBM/type/archive/master.zip'
+  set URL (github-download-url IBM/plex | grep OpenType)
 
   if test -d $DIR
     echo "error: $DIR already exists"
@@ -11,6 +11,6 @@ function font-plex
   end
 
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) 'plex-master/*/fonts/complete/ttf/*.ttf' -d $DIR
+  unzip -j (curl -sL $URL | psub) '*.otf' -d $DIR
 
 end

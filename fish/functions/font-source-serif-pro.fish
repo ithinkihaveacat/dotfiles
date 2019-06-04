@@ -3,7 +3,7 @@
 function font-source-serif-pro
 
   set DIR (fontdir)/source-serif-pro
-  set URL 'https://codeload.github.com/adobe-fonts/source-serif-pro/zip/2.007R-ro/1.007R-it'
+  set URL (github-download-url adobe-fonts/source-serif-pro)
 
   if test -d $DIR
     echo "error: $DIR already installed"
@@ -11,6 +11,6 @@ function font-source-serif-pro
   end
 
   mkdir -p $DIR
-  unzip -j (curl -s $URL | psub) '*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) '*/OTF/*.otf' -d $DIR
 
 end
