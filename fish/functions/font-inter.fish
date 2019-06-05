@@ -2,8 +2,8 @@
 
 function font-inter
 
-  set DIR (fontdir)/plex
-  set URL (curl -sSL https://api.github.com/repos/rsms/inter/releases | jq -r '.[0].assets | .[].browser_download_url')
+  set DIR (fontdir)/inter
+  set URL (github-download-url rsms/inter)
   
   if test -d $DIR
     echo "error: $DIR already exists"
@@ -12,6 +12,6 @@ function font-inter
     mkdir -p $DIR
   end
 
-  unzip -j (curl -sL $URL | psub) 'Inter (TTF)/*.ttf' -d $DIR
+  unzip -j (curl -sL $URL | psub) 'Inter (OTF)/*.otf' -d $DIR
 
 end
