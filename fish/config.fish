@@ -107,15 +107,6 @@ mkdir -p $NODE_VERSIONS
 
 prepend_path $NODE_VERSIONS/(ls $NODE_VERSIONS | sort -V | tail -1)/bin
 
-prepend_path /usr/local/sbin
-prepend_path /usr/local/bin
-
-prepend_path "$HOME/local/homebrew/bin"
-prepend_path "$HOME/local/homebrew/sbin"
-prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
-prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
-prepend_path "$HOME/local/bin"
-
 # golang
 #
 # (Needs to be configured after homebrew paths set.)
@@ -129,6 +120,18 @@ if type -q go
   mkdir -p $GOPATH
   prepend_path $GOPATH/bin
 end
+
+# other binaries
+
+prepend_path /usr/local/sbin
+prepend_path /usr/local/bin
+
+prepend_path "$HOME/local/homebrew/bin"
+prepend_path "$HOME/local/homebrew/sbin"
+prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
+prepend_path "$HOME/.dotfiles/npm/node_modules/.bin"
+prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
+prepend_path "$HOME/local/bin"
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
