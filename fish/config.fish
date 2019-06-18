@@ -45,6 +45,17 @@ function sourceif
   end
 end
 
+# binaries
+
+prepend_path /usr/local/sbin
+prepend_path /usr/local/bin
+
+prepend_path "$HOME/local/homebrew/bin"
+prepend_path "$HOME/local/homebrew/sbin"
+
+prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
+prepend_path "$HOME/local/bin"
+
 # Google Cloud SDK
 #
 # https://cloud.google.com/sdk/
@@ -108,8 +119,6 @@ mkdir -p $NODE_VERSIONS
 prepend_path $NODE_VERSIONS/(ls $NODE_VERSIONS | sort -V | tail -1)/bin
 
 # golang
-#
-# (Needs to be configured after homebrew paths set.)
 
 # Special-case PATH for Ubuntu (package is golang-*-go)
 set d /usr/lib/go-*/bin
@@ -121,17 +130,10 @@ if type -q go
   prepend_path $GOPATH/bin
 end
 
-# other binaries
+# other scripts
 
-prepend_path /usr/local/sbin
-prepend_path /usr/local/bin
-
-prepend_path "$HOME/local/homebrew/bin"
-prepend_path "$HOME/local/homebrew/sbin"
 prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
 prepend_path "$HOME/.dotfiles/npm/node_modules/.bin"
-prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
-prepend_path "$HOME/local/bin"
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
