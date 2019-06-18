@@ -25,22 +25,22 @@ set -l green   "green"
 # been configured with a Solarized theme.i.e. if "blue" is the default blue, not
 # Solarized blue.
 #
-# set -l base03  002b36
-# set -l base02  073642
-# set -l base01  586e75
-# set -l base00  657b83
-# set -l base0   839496
-# set -l base1   93a1a1
-# set -l base2   eee8d5
-# set -l base3   fdf6e3
-# set -l yellow  b58900
-# set -l orange  cb4b16
-# set -l red     dc322f
-# set -l magenta d33682
-# set -l violet  6c71c4
-# set -l blue    268bd2
-# set -l cyan    2aa198
-# set -l green   859900
+set -l rgb_base03  002b36
+set -l rgb_base02  073642
+set -l rgb_base01  586e75
+set -l rgb_base00  657b83
+set -l rgb_base0   839496
+set -l rgb_base1   93a1a1
+set -l rgb_base2   eee8d5
+set -l rgb_base3   fdf6e3
+set -l rgb_yellow  b58900
+set -l rgb_orange  cb4b16
+set -l rgb_red     dc322f
+set -l rgb_magenta d33682
+set -l rgb_violet  6c71c4
+set -l rgb_blue    268bd2
+set -l rgb_cyan    2aa198
+set -l rgb_green   859900
 
 # Used by fish's completion; see
 # http://fishshell.com/docs/2.0/index.html#variables-color
@@ -60,7 +60,9 @@ set -g fish_color_escape      $cyan
 
 # Used by fish_prompt
 
-set -g fish_color_hostname    $cyan
-set -g fish_color_cwd         $yellow
-set -g fish_color_git         $green
-set -g fish_color_sigil       $base2
+set -g fish_color_ssh $rgb_base00
+
+set -g __fish_git_prompt_color_branch      $rgb_cyan
+set -g __fish_git_prompt_color_dirtystate  $rgb_base3
+set -g __fish_git_prompt_color_stagedstate $rgb_green
+set -g __fish_git_prompt_color_upstream    $rgb_cyan

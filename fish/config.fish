@@ -138,11 +138,6 @@ prepend_path "$HOME/.dotfiles/npm/node_modules/.bin"
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
 
-# https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_git_prompt.fish
-set -g __fish_git_prompt_showupstream "auto"
-set -g __fish_git_prompt_showstashstate "1"
-set -g __fish_git_prompt_showdirtystate "1"
-
 # mkdir -p ~/.rubies
 # . $HOME/.config/fish/rubies.fish
 

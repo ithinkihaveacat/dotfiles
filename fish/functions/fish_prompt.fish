@@ -1,31 +1,46 @@
+set fish_prompt_pwd_dir_length 0
+
+# https://github.com/fish-shell/fish-shell/blob/master/share/functions/fish_git_prompt.fish
+set __fish_git_prompt_showupstream "auto"
+set __fish_git_prompt_showstashstate "yes"
+set __fish_git_prompt_showdirtystate "yes"
+
+# Git Characters
+set __fish_git_prompt_char_dirtystate '*'
+set __fish_git_prompt_char_stagedstate '⇢'
+set __fish_git_prompt_char_upstream_prefix ' '
+set __fish_git_prompt_char_upstream_equal ''
+set __fish_git_prompt_char_upstream_ahead '⇡'
+set __fish_git_prompt_char_upstream_behind '⇣'
+set __fish_git_prompt_char_upstream_diverged '⇡⇣'
+
+function _print
+  set -l string $argv[1]
+  set -l color  $argv[2]
+
+  set_color $color
+  printf $string
+  set_color normal
+end
+
+function _prompt_color
+  if test $argv[1] -eq 0
+    echo white
+  else
+    echo red
+  end
+end
+
 function fish_prompt --description 'Write out the prompt'
 
-  if not set -q __fish_prompt_color_normal
-    set -g __fish_prompt_color_normal (set_color normal)
-  end
-
-  if not set -q __fish_prompt_color_hostname
-    set -g __fish_prompt_color_hostname (set_color normal ; set_color -i -o ; set_color -u $fish_color_hostname)
-  end
-
-  if not set -q __fish_prompt_color_cwd
-    set -g __fish_prompt_color_cwd (set_color normal ; set_color -i -o ; set_color $fish_color_cwd)
-  end
-
-  if not set -q __fish_prompt_color_git
-    set -g __fish_prompt_color_git (set_color normal ; set_color -i -o ; set_color $fish_color_git)
-  end
-
-  if not set -q __fish_prompt_color_sigil
-    set -g __fish_prompt_color_sigil (set_color normal ; set_color -i -o ; set_color $fish_color_sigil)
-  end
+  set -l last_status $status
 
   if not set -q __fish_prompt_hostname
-    if test -d /etc/goobuntu
-      set -g __fish_prompt_hostname goobuntu
-    else
-      set -g __fish_prompt_hostname (string replace -r '[\.|\-].*' '' (string lower $hostname))
-    end
+    set -g __fish_prompt_hostname (string replace -r '[\.|\-].*' '' (string lower $hostname))
+  end
+
+  if not set -q __fish_prompt_username
+    set -g __fish_prompt_username (whoami)
   end
 
   # If commands takes longer than 10 seconds, notify user on completion if Terminal
@@ -42,6 +57,15 @@ function fish_prompt --description 'Write out the prompt'
     end
   end
 
-  echo -n -s "$__fish_prompt_color_hostname" "$__fish_prompt_hostname" "$__fish_prompt_color_cwd" ' ' (prompt_pwd) "$__fish_prompt_color_git" (__fish_git_prompt "#%s") "$__fish_prompt_color_sigil" ' $ ' "$__fish_prompt_color_normal"
+  _print "\n"
+
+  if test -n "$SSH_CONNECTION"
+    _print "$__fish_prompt_username"@"$__fish_prompt_hostname" $fish_color_ssh
+    _print : white
+  end
+
+  _print (prompt_pwd) blue
+  __fish_git_prompt " %s"
+  _print "\n❯ " (_prompt_color $last_status)
 
 end
