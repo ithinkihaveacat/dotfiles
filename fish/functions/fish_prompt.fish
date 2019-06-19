@@ -14,6 +14,9 @@ set __fish_git_prompt_char_upstream_ahead '⇡'
 set __fish_git_prompt_char_upstream_behind '⇣'
 set __fish_git_prompt_char_upstream_diverged '⇡⇣'
 
+set __fish_prompt_hostname (string replace -r '[\.|\-].*' '' (string lower $hostname))
+set __fish_prompt_username $USER
+
 function _print
   set -l string $argv[1]
   set -l color  $argv[2]
@@ -35,19 +38,11 @@ function fish_prompt --description 'Write out the prompt'
 
   set -l last_status $status
 
-  if not set -q __fish_prompt_hostname
-    set -g __fish_prompt_hostname (string replace -r '[\.|\-].*' '' (string lower $hostname))
-  end
-
-  if not set -q __fish_prompt_username
-    set -g __fish_prompt_username (whoami)
-  end
-
   # If commands takes longer than 10 seconds, notify user on completion if Terminal
   # in background. (Otherwise e.g. reading man pages for longer than 10 seconds will
   # trigger the notification.) Inspired by https://github.com/jml/undistract-me/issues/32.
   if test $CMD_DURATION
-    if test $CMD_DURATION -gt (math "1000 * 10")
+    if test $CMD_DURATION -gt 10000
       if not terminal-frontmost
         set secs (math "$CMD_DURATION / 1000")
         # It's not possible to raise the window via the notification; see
@@ -57,7 +52,7 @@ function fish_prompt --description 'Write out the prompt'
     end
   end
 
-  _print "\n"
+  _print "\n" # TODO: not the first time
 
   if test -n "$SSH_CONNECTION"
     _print "$__fish_prompt_username"@"$__fish_prompt_hostname" $fish_color_ssh
