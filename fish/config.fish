@@ -116,7 +116,7 @@ prepend_path $d
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
-prepend_path $NODE_VERSIONS/(ls $NODE_VERSIONS | sort -V | tail -1)/bin
+prepend_path (ls -d $NODE_VERSIONS/node-v10*/bin | sort -V | tail -1)
 
 # golang
 
