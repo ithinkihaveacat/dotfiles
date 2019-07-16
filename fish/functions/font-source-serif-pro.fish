@@ -11,6 +11,6 @@ function font-source-serif-pro
   end
 
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) '*/OTF/*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) 'OTF/*.otf' -d $DIR
 
 end
