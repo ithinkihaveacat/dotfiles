@@ -2,7 +2,7 @@
 # available. (This is useful if it's not possible/advisable to change
 # the shell at system level to fish.)
 
-FISH=$(which fish)
+FISH=$(env PATH="$HOME/local/bin:$PATH" which fish)
 
 if echo $- | grep -q 'i' && [[ -x $FISH ]] && [[ $SHELL != $FISH ]]; then
   exec env SHELL=$FISH $FISH -i
