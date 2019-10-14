@@ -16,7 +16,7 @@ function dig-diff -d "Compares cached and uncached DNS records"
   # http://serverfault.com/q/754422/14573
   
   set -l QUERY
-  for type in A AAAA NS SOA MX TXT NAPTR CNAME DNSKEY RP SRV CAA
+  for type in A AAAA NS SOA MX TXT NAPTR CNAME DNSKEY RP SRV CAA PTR
     set QUERY $QUERY $argv[1] $type
   end
   
