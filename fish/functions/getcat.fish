@@ -1,10 +1,11 @@
 function getcat -w curl -d "Retrieve single URL, output to stdout"
   if test -n "$ACCESS_TOKEN"
-    curl -sSL --output - -H "Authorization: Bearer $ACCESS_TOKEN" $argv
-    if test "$status" -eq 23
-      printf "error: %s\n" (status current-command)
-    end
+    set -gx CURL_CMD "curl -sSL --output - -H \"Authorization: Bearer $ACCESS_TOKEN\" '$argv'"
   else
-    curl -sSL --output - $argv
+    set -gx CURL_CMD "curl -sSL --output - '$argv'"
+  end
+  eval $CURL_CMD
+  if test "$status" -eq 23
+    printf "error: %s\n" (status current-command)
   end
 end
