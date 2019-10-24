@@ -117,7 +117,7 @@ set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
 if count $NODE_VERSIONS/node-v10*/bin >/dev/null
-  prepend_path (ls -d $NODE_VERSIONS/node-v10*/bin | sort -V | tail -1)
+  prepend_path (ls -d $NODE_VERSIONS/node-v12*/bin | sort -V | tail -1)
 end
 
 # golang
