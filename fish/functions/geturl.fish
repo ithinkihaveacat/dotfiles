@@ -1,8 +1,8 @@
 function geturl -w curl -d "Save URL to file"
   if test -n "$ACCESS_TOKEN"
-    set -gx CURL_CMD "curl -sSL -H \"Authorization: Bearer $ACCESS_TOKEN\" --remote-name-all '$argv'"
+    set -gx CURL_CMD "curl -sSL -H \"Authorization: Bearer $ACCESS_TOKEN\" --remote-name-all"" (string escape -- $argv)
   else
-    set -gx CURL_CMD "curl -sSL --remote-name-all '$argv'"
+    set -gx CURL_CMD "curl -sSL --remote-name-all" (string escape -- $argv)
   end
   eval $CURL_CMD
   if test "$status" -eq 23
