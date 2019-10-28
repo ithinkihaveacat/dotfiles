@@ -170,3 +170,4 @@ type -q pbpaste ; or alias pbpaste "xsel -bo"
 . ~/.config/fish/ua.fish
 
 sourceif ~/.ssh/etc/fish/envrc
+sourceif ~/.ssh/etc/fish/functions.fish
