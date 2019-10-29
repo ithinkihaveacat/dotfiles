@@ -7,7 +7,7 @@ function getjpg -d "Save URLs to JPG files"
     printf "curl -sSL --output 'photo-%03d.jpg' '%s'" $i $line | sh
   end
   # overwrite dupes
-  for file in *
+  for file in *.jpg
     mv $file (printf "%s.jpg\n" (md5sum $file | cut -c 1-10))
   end
 end
