@@ -12,6 +12,6 @@ function font-inter
     mkdir -p $DIR
   end
 
-  unzip -j (curl -sL $URL | psub) 'Inter (OTF)/*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) 'Inter/*.otf' -d $DIR
 
 end
