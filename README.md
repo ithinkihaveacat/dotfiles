@@ -129,7 +129,7 @@ for some tips on how to change some of these settings automatically.)
 
 #### Configure Terminal
 
-Import the [`etc/Solarized-Dark.terminal`](etc/Solarized-Dark.terminal) profile, and set it to the "default". (See [this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx) for some information on how to do this automatically.)
+Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile, and set it to the "default". (See [this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx) for some information on how to do this automatically.)
 
 #### Configure keyboard
 
