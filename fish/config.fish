@@ -60,7 +60,6 @@ prepend_path "$HOME/local/bin"
 #
 # https://cloud.google.com/sdk/
 
-prepend_path "$HOME/local/go_appengine"
 prepend_path "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
 prepend_path "$HOME/local/google-cloud-sdk/platform/google_appengine"
 prepend_path "$HOME/local/google-cloud-sdk/bin"
@@ -131,6 +130,10 @@ if type -q go
   mkdir -p $GOPATH
   prepend_path $GOPATH/bin
 end
+
+# flutter
+
+prepend_path ~/local/flutter/bin
 
 # other scripts
 
