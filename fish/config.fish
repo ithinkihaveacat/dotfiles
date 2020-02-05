@@ -104,6 +104,8 @@ prepend_path $ANDROID_HOME/tools/bin
 #
 #   $ gem install $name --user-install
 
+set -x GEM_HOME ~/.gem
+
 set d ~/.gem/ruby/*/bin
 prepend_path $d
 
