@@ -4,6 +4,7 @@ set fish_prompt_pwd_dir_length 0
 set __fish_git_prompt_showupstream "auto"
 set __fish_git_prompt_showstashstate "yes"
 set __fish_git_prompt_showdirtystate "yes"
+set __fish_git_prompt_use_informative_chars "yes"
 
 # Git Characters
 set __fish_git_prompt_char_dirtystate '*'
