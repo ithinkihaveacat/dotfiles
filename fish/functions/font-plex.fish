@@ -5,11 +5,7 @@ function font-plex
   set DIR (fontdir)/plex
   set URL (github-download-url IBM/plex | grep OpenType)
 
-  if test -d $DIR
-    echo "error: $DIR already exists"
-    return 1
-  end
-
+  rm -rf $DIR
   mkdir -p $DIR
   unzip -j (curl -sL $URL | psub) '*.otf' -d $DIR
 
