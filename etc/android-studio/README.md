@@ -1,5 +1,9 @@
 # Import All Settings
 
+First, install the plugin [Solarized
+Themes](https://plugins.jetbrains.com/plugin/12784-solarized-themes).
+(This is not included as part of the settings, for some reason...)
+
 File | Import Settings... | [Choose settings.zip]
 
 (Requires IBM Plex Sans font.)
