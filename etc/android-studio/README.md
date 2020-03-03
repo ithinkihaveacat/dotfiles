@@ -4,9 +4,10 @@ File | Import Settings... | [Choose settings.zip]
 
 (Requires IBM Plex Sans font.)
 
-# Import Color Scheme Only
+# Import Color Scheme
 
-(Color Scheme should be included in "all" settings.)
+(Does not require a plugin, but only changes the colours of the
+"source code" area.)
 
 Preferences | Editor | Color Scheme | Cog | Import Scheme... | [Choose *.icls]
 
