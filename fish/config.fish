@@ -179,4 +179,20 @@ sourceif ~/.ssh/etc/fish/functions.fish
 
 if type -q starship
   starship init fish | source
+
+  function fish_prompt_notify --on-event fish_prompt
+    # If commands takes longer than 10 seconds, notify user on completion if Terminal
+    # in background. (Otherwise e.g. reading man pages for longer than 10 seconds will
+    # trigger the notification.) Inspired by https://github.com/jml/undistract-me/issues/32.
+    if test $CMD_DURATION
+      if test $CMD_DURATION -gt 10000
+        if not terminal-frontmost
+          set secs (math "$CMD_DURATION / 1000")
+          # It's not possible to raise the window via the notification; see
+          # https://stackoverflow.com/a/33808356
+          notify "$history[1]" "(status $status; $secs secs)"
+        end
+      end
+    end
+  end
 end
