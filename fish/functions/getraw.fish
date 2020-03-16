@@ -4,5 +4,5 @@ function getraw -w curl -d "Retrieve single URL (including headers), output to s
   else
     set -gx CURL_CMD "curl -sS -i --raw --max-redirs 0 --output -" (string escape -- $argv)
   end
-  eval $CURL_CMD
+  echo $CURL_CMD | source
 end

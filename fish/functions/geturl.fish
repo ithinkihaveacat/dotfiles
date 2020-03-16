@@ -4,7 +4,7 @@ function geturl -w curl -d "Save URL to file"
   else
     set -gx CURL_CMD "curl -sSL --remote-name-all" (string escape -- $argv)
   end
-  eval $CURL_CMD
+  echo $CURL_CMD | source
   if test "$status" -eq 23
     printf "error: %s\n" (status current-command)
   end
