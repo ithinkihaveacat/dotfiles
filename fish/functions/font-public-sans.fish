@@ -5,11 +5,7 @@ function font-public-sans
   set DIR (fontdir)/public-sans
   set URL (github-download-url uswds/public-sans)
 
-  if test -d $DIR
-    echo "error: $DIR already exists"
-    return 1
-  end
-
+  rm -rf $DIR
   mkdir -p $DIR
   unzip -j (curl -sL $URL | psub) 'binaries/otf/*.otf' -d $DIR
 
