@@ -1,18 +1,18 @@
 # Import All Settings
 
-First, install the plugin [Solarized
-Themes](https://plugins.jetbrains.com/plugin/12784-solarized-themes).
-(This is not included as part of the settings, for some reason...)
+1. Install the plugin [Solarized
+   Themes](https://plugins.jetbrains.com/plugin/12784-solarized-themes). (This
+   is not included as part of the settings, for some reason...)
 
-File | Import Settings... | [Choose settings.zip]
+2. Install the IBM Plex Sans via `font-plex`.
 
-(Requires IBM Plex Sans font.)
+3. File | Import Settings... | [Choose settings.zip]
 
-# Import Color Scheme
+# Import Color Scheme (only)
 
 (Does not require a plugin, but only changes the colours of the
 "source code" area.)
 
-Preferences | Editor | Color Scheme | Cog | Import Scheme... | [Choose *.icls]
+1. Preferences | Editor | Color Scheme | Cog | Import Scheme... | [Choose *.icls]
 
 [Source](https://github.com/jkaving/intellij-colors-solarized)
