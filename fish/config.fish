@@ -137,6 +137,10 @@ end
 
 prepend_path ~/local/flutter/bin
 
+# fzf
+
+set -x FZF_DEFAULT_OPTS "--height 40% --reverse"
+
 # other scripts
 
 prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
