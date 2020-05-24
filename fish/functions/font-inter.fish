@@ -7,6 +7,6 @@ function font-inter
   
   rm -rf $DIR
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) 'Inter/*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) 'Inter Desktop/*.otf' -d $DIR
 
 end
