@@ -4,6 +4,9 @@
    Themes](https://plugins.jetbrains.com/plugin/12784-solarized-themes). (This
    is not included as part of the settings, for some reason...)
 
+1. Install the plugin
+   [google-java-format](https://plugins.jetbrains.com/plugin/8527-google-java-format).
+
 2. Install the IBM Plex Sans via `font-plex`.
 
 3. File | Import Settings... | [Choose settings.zip]
