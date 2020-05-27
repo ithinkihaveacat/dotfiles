@@ -164,6 +164,10 @@ See <https://ia.net/writer/templates/>.
 
 Via System Preferences.
 
+#### Install optional fonts
+
+See <https://typography.guru/journal/awesome-catalina-fonts/>.
+
 ### Ubuntu
 
 #### Emacs Keybindings
