@@ -98,16 +98,20 @@ prepend_path $ANDROID_HOME/platform-tools
 prepend_path $ANDROID_HOME/tools
 prepend_path $ANDROID_HOME/tools/bin
 
+if count $ANDROID_HOME/build-tools/* >/dev/null
+  prepend_path (ls -d $ANDROID_HOME/build-tools/* | sort -rV | head -1)
+end
+
 # Ruby
 #
 # Install gems via:
 #
 #   $ gem install $name --user-install
 
-set -x GEM_HOME ~/.gem
+#set -x GEM_HOME ~/.gem
 
-set d ~/.gem/ruby/*/bin
-prepend_path $d
+#set d ~/.gem/ruby/*/bin
+#prepend_path $d
 
 # Node
 #
@@ -118,7 +122,7 @@ set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
 if count $NODE_VERSIONS/node-v12*/bin >/dev/null
-  prepend_path (ls -d $NODE_VERSIONS/node-v12*/bin | sort -V | tail -1)
+  prepend_path (ls -d $NODE_VERSIONS/node-v12*/bin | sort -rV | head -1)
 end
 
 # golang
