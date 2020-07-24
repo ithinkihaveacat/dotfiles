@@ -11,6 +11,7 @@ function dig-any -d "DNS lookup (all records)"
     set QUERY $QUERY $argv[1] $type
   end
 
-  dig +noall +nottl +answer $QUERY | sort | uniq
+  set -gx DIG_CMD "dig +noall +nottl +answer $QUERY | sort | uniq"
+  echo $DIG_CMD | source
 
 end
