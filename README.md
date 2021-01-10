@@ -37,15 +37,9 @@ Ubuntu | OS X
 
 #### Ubuntu
 
-Via PPA:
-
-1. Install `apt-add-repository`: `sudo apt-get install software-properties-common`
-1. Add fish PPA: <https://launchpad.net/~fish-shell/+archive/ubuntu/release-3>
-
-Via DEB:
-
-1. Download appropriate package from <https://launchpad.net/~fish-shell/+archive/ubuntu/release-2/+packages>.
-1. Install via e.g. `sudo dpkg -i fish_2.3.0-1~trusty_amd64.deb`.
+```
+sudo apt-get install fish
+```
 
 #### OS X
 
