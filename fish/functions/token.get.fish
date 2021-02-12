@@ -24,9 +24,10 @@ function token.get -d "Gets OpenID Connect tokens and assertions"
 
   set -l REDIRECT_URI "urn:ietf:wg:oauth:2.0:oob"
   set -l SCOPE (echo "openid $argv" | perl -MURI::Escape -ne 'chomp; print uri_escape($_);')
+  set -l NONCE "qqqqqqqq" # embedded into the returned id_token
 
   # https://developers.google.com/identity/protocols/OpenIDConnect?hl=en#authenticationuriparameters
-  echo "$AUTH_URI?client_id=$CLIENT_ID&response_type=code&scope=$SCOPE&redirect_uri=$REDIRECT_URI" | pbcopy
+  echo "$AUTH_URI?client_id=$CLIENT_ID&response_type=code&scope=$SCOPE&redirect_uri=$REDIRECT_URI&nonce=$NONCE" | pbcopy
 
   echo "OpenID Connect URL copied to your clipboard; load it, and paste the returned code below"
   read -l CODE
