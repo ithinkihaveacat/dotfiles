@@ -22,7 +22,8 @@ end
 # Avoid fish_user_path and instead set PATH directly. fish_user_path can be used
 # to share a PATH across shells and invocations if set as a universal variable;
 # it isn't very useful otherwise. See
-# https://github.com/fish-shell/fish-shell/issues/527#issuecomment-253775156
+# https://github.com/fish-shell/fish-shell/issues/527#issuecomment-253775156.
+# If fish >3.2, can replace with fish_add_path.
 function append_path
   if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
     if not contains $argv[1] $PATH
