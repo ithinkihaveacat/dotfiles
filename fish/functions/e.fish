@@ -10,7 +10,7 @@ function e -d 'Edit file, searching in a few different places' -w type
     return
   end
 
-  if not type -qt $argv[1]
+  if not type -q $argv[1]
     printf "%s: '%s' not found, or not a file\n" (status current-command) $argv[1]
     return
   end
