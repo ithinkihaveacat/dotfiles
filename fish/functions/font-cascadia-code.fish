@@ -1,5 +1,16 @@
+# https://github.com/microsoft/cascadia-code/releases
+
 function font-cascadia-code
 
-  echo "Download manually from https://github.com/microsoft/cascadia-code/releases"
+  set DIR (fontdir)/cascadia-code
+  set URL (github-download-url microsoft/cascadia-code)
+
+  if test -d $DIR
+    echo "error: $DIR already exists"
+    return 1
+  end
+
+  mkdir -p $DIR
+  unzip -j (curl -sL $URL | psub) 'otf/static/*.otf' -d $DIR
 
 end
