@@ -11,6 +11,8 @@ function font-cascadia-code
   end
 
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) 'otf/static/*.otf' -d $DIR
+  # Variable TTF version is recommended
+  # https://github.com/microsoft/cascadia-code/wiki/Installing-Cascadia-Code
+  unzip -j (curl -sL $URL | psub) 'ttf/C*.ttf' -d $DIR
 
 end
