@@ -7,7 +7,7 @@ function adb-android-serial -d "Sets ANDROID_SERIAL, the default device for adb"
     return
   end
 
-  set -g ANDROID_SERIAL (adb devices -l | tail +2 | grep -m 1 $argv[1] | awk '{ print $1 }')
+  set -xU ANDROID_SERIAL (adb devices -l | tail +2 | grep -m 1 $argv[1] | awk '{ print $1 }')
   printf "ANDROID_SERIAL=%s\n" $ANDROID_SERIAL
 
 end
