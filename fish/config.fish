@@ -185,6 +185,8 @@ set -x VISUAL $EDITOR
 #  set -x VISUAL "code -w"
 #end
 
+complete -c adb-hs-synthetic -f -a "on off start_walking start_running start_hiking start_swimming start_running_treadmill stop_exercise start_sleeping stop_sleeping"
+
 type -q pbcopy  ; or alias pbcopy  "xsel -bi"
 type -q pbpaste ; or alias pbpaste "xsel -bo"
 
