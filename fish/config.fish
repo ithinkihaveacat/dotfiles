@@ -75,6 +75,9 @@ prepend_path "$HOME/local/google-cloud-sdk/bin"
 set d ~/local/jre*/Contents/Home/bin
 prepend_path $d
 
+# JAVA_HOME is needed for apkanalyzer
+test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
+
 # ghc
 #
 # Install via:
