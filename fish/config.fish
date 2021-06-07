@@ -125,7 +125,7 @@ end
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
-set -l NODE_STABLE v14
+set -l NODE_STABLE v16
 if count {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin >/dev/null
   prepend_path (ls -d {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
 end
@@ -188,7 +188,9 @@ set -x VISUAL $EDITOR
 #  set -x VISUAL "code -w"
 #end
 
-complete -c adb-hs-synthetic -f -a "on off start_walking start_running start_hiking start_swimming start_running_treadmill stop_exercise start_sleeping stop_sleeping"
+# completions
+
+complete -c adb-hs-synthetic -f -a "on off start_walking start_running start_hiking start_swimming start_running_treadmill start_sleeping start_exercise stop_walking stop_running stop_hiking stop_swimming stop_running_treadmill stop_sleeping stop_exercise"
 
 type -q pbcopy  ; or alias pbcopy  "xsel -bi"
 type -q pbpaste ; or alias pbpaste "xsel -bo"
