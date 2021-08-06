@@ -101,6 +101,8 @@ test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 prepend_path $ANDROID_HOME/platform-tools
 prepend_path $ANDROID_HOME/tools
 prepend_path $ANDROID_HOME/tools/bin
+# the emulator in tools/emulator does not work: https://www.stkent.com/2017/08/10/update-your-path-for-the-new-android-emulator-location.html
+prepend_path $ANDROID_HOME/emulator
 
 if count $ANDROID_HOME/build-tools/* >/dev/null
   prepend_path (ls -d $ANDROID_HOME/build-tools/* | sort -rV | head -1)
@@ -156,6 +158,12 @@ set -l LOGCAT_IGNORED_TAGS eglCodecCommon EGL_emulation OpenGLRenderer GnssHAL_G
 
 set -x ANDROID_LOG_TAGS (string join " " (string replace -r '$' ':S' $LOGCAT_IGNORED_TAGS))
 set -x PIDCAT_IGNORED_TAGS (string join ";" $LOGCAT_IGNORED_TAGS)
+
+# acid
+
+if test -r ~/.ssh/etc/acid
+  set -x ACID_STARTUP_SCRIPT_PATH ~/.ssh/etc/acid
+end
 
 # other scripts
 
