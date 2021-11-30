@@ -7,6 +7,6 @@ function font-public-sans
 
   rm -rf $DIR
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) 'binaries/otf/*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) 'fonts/variable/*' -d $DIR
 
 end
