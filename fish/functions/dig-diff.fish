@@ -8,6 +8,7 @@ function dig-diff -d "Compares cached and uncached DNS records"
     return
   end
 
+  # not 100% correct, see https://jvns.ca/blog/2022/01/11/how-to-find-a-domain-s-authoritative-nameserver/
   set -l NS (dig +short $argv[1] NS | sort | head -1 | rev | cut -c 2- | rev)
 
   # DNS queries for the "ANY" type behave unpredictably, partly
