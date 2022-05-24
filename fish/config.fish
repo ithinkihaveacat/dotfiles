@@ -76,7 +76,8 @@ set d ~/local/jre*/Contents/Home/bin
 prepend_path $d
 
 # JAVA_HOME is needed for apkanalyzer
-test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
+# test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
+test -d "/Applications/Android Studio.app/Contents/jre/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jre/Contents/Home"
 
 # ghc
 #
