@@ -75,9 +75,10 @@ prepend_path "$HOME/local/google-cloud-sdk/bin"
 set d ~/local/jre*/Contents/Home/bin
 prepend_path $d
 
-# JAVA_HOME is needed for apkanalyzer
-# test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
-test -d "/Applications/Android Studio.app/Contents/jre/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jre/Contents/Home"
+# JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version (the Android Studio JRE does not work)
+test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
+#test -d "/Applications/Android Studio.app/Contents/jre/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jre/Contents/Home"
+#test -d ~/local/jdk*/Contents/Home ; and set -x JAVA_HOME (ls -d ~/local/jdk*/Contents/Home | sort -rV | head -1)
 
 # ghc
 #
