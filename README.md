@@ -2,17 +2,18 @@
 
 Config files for various tools I use, or have used in the past, such as
 [fish](http://fishshell.com/), [git](http://git-scm.com/),
-[jed](http://www.jedsoft.org/jed/), [Sublime
-Text](http://www.sublimetext.com/), [Atom](https://atom.io/) and [Visual Studio Code](https://code.visualstudio.com/).
+[jed](http://www.jedsoft.org/jed/), and [Visual Studio Code](https://code.visualstudio.com/).
 
 It's very unlikely that anyone will want to use this directly; the more
 interesting directories are:
 
 * [fish](fish) - configuration and startup files for fish shell.
-* [bin](bin) - hacky little bash scripts for various things.
+* [bin](bin) - bash scripts for various things.
 * [fish functions](fish/functions) - more scripts, generally those that are awkward/impossible to write in bash.
 * [etc/git/templates](etc/git/templates) - git hooks
 * [docker](docker) - Dockerfile
+
+The idempotent [install script](./update) handles a few different operating systems and package managers (past and present) has a some interesting constructions that may be useful.
 
 ## Prerequisites
 
