@@ -184,7 +184,8 @@ if type -q direnv
   # /etc/manpath.config (at least on Linux). Therefore, to ensure man searches through
   # the default after direnv fiddles with MANPATH, we explicitly set it to its default value.
   # See http://unix.stackexchange.com/q/344603/49703
-  set -x MANPATH (man -w)
+  # Broke around macOS Ventury 13.0
+  #set -x MANPATH (man -w)
 end
 
 if type -q jed
