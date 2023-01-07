@@ -67,10 +67,15 @@ prepend_path "$HOME/local/google-cloud-sdk/bin"
 
 # java
 #
-# 1. Choose a "JRE Download" from
-#    https://www.oracle.com/java/technologies/javase-downloads.html
-# 2. Download an appropriate *.tar.gz.
-# 3. Extract to ~/local.
+# Oracle keep messing around with their distributions and licenses... For the
+# scripts below to work, you need to end up with the JRE distribution in the
+# directory ~/local/jre1.8.0_341.jre/Contents/Home, and the java binary
+# available at ~/local/jre1.8.0_341.jre/Contents/Home/bin/java.
+#
+# To do this:
+#
+# 1. Download https://www.oracle.com/webapps/redirect/signon?nexturl=https://download.oracle.com/otn/java/jdk/8u341-b10/424b9da4b48848379167015dcc250d8d/jre-8u341-macosx-x64.tar.gz
+# 2. Extract to ~/local.
 
 set d ~/local/jre*/Contents/Home/bin
 prepend_path $d
