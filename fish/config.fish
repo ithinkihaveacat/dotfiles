@@ -74,8 +74,10 @@ prepend_path "$HOME/local/google-cloud-sdk/bin"
 #
 # To do this:
 #
-# 1. Download https://www.oracle.com/webapps/redirect/signon?nexturl=https://download.oracle.com/otn/java/jdk/8u341-b10/424b9da4b48848379167015dcc250d8d/jre-8u341-macosx-x64.tar.gz
-# 2. Extract to ~/local.
+# 1. Go to https://www.oracle.com/uk/java/technologies/javase/javase8u211-later-archive-downloads.html and accept cookies, etc.
+# 2. Download the Java SE Runtime Environment.
+#      Might be: https://www.oracle.com/webapps/redirect/signon?nexturl=https://download.oracle.com/otn/java/jdk/8u341-b10/424b9da4b48848379167015dcc250d8d/jre-8u341-macosx-x64.tar.gz
+# 3. Extract to ~/local.
 
 set d ~/local/jre*/Contents/Home/bin
 prepend_path $d
