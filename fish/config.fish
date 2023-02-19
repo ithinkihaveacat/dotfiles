@@ -136,7 +136,7 @@ end
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
-set -l NODE_STABLE v16
+set -l NODE_STABLE v18
 if count {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin >/dev/null
   prepend_path (ls -d {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
 end
