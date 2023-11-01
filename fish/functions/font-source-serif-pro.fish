@@ -3,7 +3,7 @@
 function font-source-serif-pro
 
   set DIR (fontdir)/source-serif-pro
-  set URL (github-download-url adobe-fonts/source-serif-pro)
+  set URL (github-download-url adobe-fonts/source-serif-pro | grep Desktop)
 
   rm -rf $DIR
   mkdir -p $DIR
