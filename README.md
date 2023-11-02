@@ -138,7 +138,7 @@ Configure via "Keychain Access" preferences.
 
 #### Add Volume Controls to Menu Bar
 
-Configure via the "Sound" system preference panel.
+Control Center | Sound | Always Show in Menu Bar.
 
 #### Disable local Time Machine backups
 
