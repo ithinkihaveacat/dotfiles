@@ -7,6 +7,6 @@ function font-plex
 
   rm -rf $DIR
   mkdir -p $DIR
-  unzip -j (curl -sL $URL | psub) '*.otf' -d $DIR
+  unzip -j (curl -sL $URL | psub) 'OpenType/IBM-Plex-Sans/*.otf' 'OpenType/IBM-Plex-Mono/*.otf' 'OpenType/IBM-Plex-Serif/*.otf' -d $DIR
 
 end
