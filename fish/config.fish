@@ -84,10 +84,10 @@ prepend_path "$HOME/local/google-cloud-sdk/bin"
 set d ~/local/jre*/Contents/Home/bin
 prepend_path $d
 
-# JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version (the Android Studio JRE does not work)
-test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
+# JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version. For now the Android Studio version works out
+test -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+#test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
 #test -d "/Applications/Android Studio.app/Contents/jre/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jre/Contents/Home"
-#test -d ~/local/jdk*/Contents/Home ; and set -x JAVA_HOME (ls -d ~/local/jdk*/Contents/Home | sort -rV | head -1)
 
 # ghc
 #
@@ -112,6 +112,7 @@ test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 prepend_path $ANDROID_HOME/platform-tools
 prepend_path $ANDROID_HOME/tools
 prepend_path $ANDROID_HOME/tools/bin
+prepend_path $ANDROID_HOME/cmdline-tools/latest/bin
 # the emulator in tools/emulator does not work: https://www.stkent.com/2017/08/10/update-your-path-for-the-new-android-emulator-location.html
 prepend_path $ANDROID_HOME/emulator
 
