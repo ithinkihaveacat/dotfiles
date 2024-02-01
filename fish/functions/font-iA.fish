@@ -1,4 +1,4 @@
-# https://monaspace.githubnext.com
+# https://ia.net/topics/a-typographic-christmas
 
 function font-iA
 
