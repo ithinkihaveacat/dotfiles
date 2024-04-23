@@ -120,6 +120,8 @@ if count $ANDROID_HOME/build-tools/* >/dev/null
   prepend_path (ls -d $ANDROID_HOME/build-tools/* | sort -rV | head -1)
 end
 
+test -d $ANDROID_HOME ; and set -x ANDROID_JAR (ls -d $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
+
 # Ruby
 #
 # Install gems via:
