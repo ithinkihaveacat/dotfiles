@@ -1,5 +1,5 @@
 function downloads-latest -d 'echos filename of newest file in ~/Downloads'
 
-  ls -trd $HOME/Downloads/* | tail -1
+  find "$HOME/Downloads" -type f -exec stat -f "%m %N" {} + | sort -n -r | head -n 1 | cut -d" " -f2-
 
 end
