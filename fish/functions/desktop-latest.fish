@@ -1,5 +1,5 @@
 function desktop-latest -d 'echos filename of newest file in ~/Desktop'
 
-  ls -tr (find $HOME/Desktop -type f -depth 1) | tail -1
+    find "$HOME/Desktop" -type f -exec stat -f "%m %N" {} + | sort -n -r | head -n 1 | cut -d" " -f2-
 
 end
