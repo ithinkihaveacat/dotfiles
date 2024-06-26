@@ -48,8 +48,7 @@ Via [`brew`](http://brew.sh/):
 
 ````
 brew install fish
-# add fish's full path to /etc/shells
-chsh -s /full/path/to/fish
+chsh -s /bin/bash # .bash_profile runs fish if available (zsh is default)
 ````
 
 > **Don't already have [`brew`](http://brew.sh/)?**
@@ -81,7 +80,7 @@ $ cd $HOME/.dotfiles
 # Pull from ro repo, push to rw
 $ git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
 $ ./update                                 # if macOS and brew in PATH
-$ PATH=~/local/homebrew/bin:$PATH ./update # if macOS and brew not in PATH
+$ PATH=~/local/homebrew/bin:/opt/homebrew/bin:$PATH ./update # if macOS and brew not in PATH
 # On OS X, logout and login again
 ````
 
