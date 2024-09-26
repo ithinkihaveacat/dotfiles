@@ -69,6 +69,12 @@ prepend_path "$HOME/local/google-cloud-sdk/bin"
 
 # java
 #
+# Via mule:
+#
+#   $ mule list | grep -o -E "jdk[0-9]+" | sort | tail -1 | xargs mule install
+#
+# Via manual install:
+#
 # Oracle keep messing around with their distributions and licenses... For the
 # scripts below to work, you need to end up with the JRE distribution in the
 # directory ~/local/jre1.8.0_341.jre/Contents/Home, and the java binary
