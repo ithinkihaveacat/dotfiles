@@ -59,7 +59,7 @@ prepend_path "/opt/homebrew/sbin"
 prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
 prepend_path "$HOME/local/bin"
 
-# Google Cloud SDK
+# Google Cloud SDK (gcloud)
 #
 # https://cloud.google.com/sdk/
 
