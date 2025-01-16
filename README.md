@@ -131,6 +131,15 @@ Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile,
   * Open Shortcuts > Services > File and Folders, enable "New Terminal at Folder".
   * Open Text, disable "Correct spelling automatically".
 
+#### Configure Text Replacements
+
+If signed into the same iCloud account, these should be shared
+automatically.
+
+Otherwise, see [Back up and share text replacements on
+Mac](https://support.apple.com/en-gb/guide/mac-help/mchl2a7bd795/mac).
+Text replacements themselves are stored in [`etc/Text Replacements.plist`](etc/Text Replacements.plist)
+
 #### Add Lock Screen option to Menu Bar
 
 Configure via "Keychain Access" preferences.
