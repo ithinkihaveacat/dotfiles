@@ -3,7 +3,7 @@
 function font-atkinson
 
   set DIR (fontdir)/atkinson
-  set URL https://www.brailleinstitute.org/atkinson-hyperlegible-font/Atkinson-Hyperlegible-Font-Print-and-Web-2020-0514.zip
+  set URL https://braileinstitute.box.com/shared/static/waaf5z9gfss6w6tf5118im5hhlwolacc.zip
   
   rm -rf $DIR
   mkdir -p $DIR
