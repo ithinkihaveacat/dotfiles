@@ -147,7 +147,7 @@ test -d $ANDROID_HOME ; and set -x ANDROID_JAR (ls -d $ANDROID_HOME/platforms/an
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
 
-set -l NODE_STABLE v20
+set -l NODE_STABLE v22
 if count {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin >/dev/null
   prepend_path (ls -d {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
 end
