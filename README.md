@@ -53,7 +53,7 @@ chsh -s /bin/bash # .bash_profile runs fish if available (zsh is default)
 
 > **Don't already have [`brew`](http://brew.sh/)?**
 >
-> *If you want to install into `/usr/local` ...*
+> *If you want to install into `/opt/homebrew` ...*
 >
 > See <http://brew.sh>.
 >
