@@ -226,6 +226,18 @@ is used for accessing the menu.)
 Edit "Default" profile, change custom default terminal size to 100 columns, 60
 rows.
 
+### Raspberry Pi OS
+
+1. Use the Raspberry Pi Imager <https://www.raspberrypi.com/software/> to
+   install the OS on an SD card.
+   1. Remember to enable SSH access (somewhere in the advanced options).
+   1. Enable WiFi in the advanced options if necessary.
+1. Install `fish`: `sudo apt-get install fish`.
+1. Install `tailscale`: `curl -fsSL https://tailscale.com/install.sh | sh`
+   <https://tailscale.com/download/linux>
+1. Install `node`: use `fnm`.
+   <https://github.com/Schniz/fnm?tab=readme-ov-file#installation>
+
 ## Manually Installing Binaries?
 
 Put them in `~/local/bin`, and man pages (if you have them) in
