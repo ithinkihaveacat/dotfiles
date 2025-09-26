@@ -1,12 +1,13 @@
 # -*- sh -*-
 
-# Don't run fish if Android Studio is attempting to retrieve environment variables
-# https://youtrack.jetbrains.com/articles/IDEA-A-19/Shell-Environment-Loading
+# Might also need to avoid fish if INTELLIJ_ENVIRONMENT_READER is present; see
+# https://youtrack.jetbrains.com/articles/SUPPORT-A-1727/Shell-Environment-Loading
 
-if [ -z "$INTELLIJ_ENVIRONMENT_READER" ]; then
+is_interactive() { [[ $- == *i* ]]; }
 
-    # Attempt to run fish as login shell, even if bash is technically the
-    # login shell.
+if is_interactive; then
+
+    # If we're running in interactive mode, look for fish, and exec if it exists.
 
     FISH=$(env PATH="$HOME/local/bin:$HOME/local/homebrew/bin:/opt/homebrew/bin:$PATH" which fish)
 
