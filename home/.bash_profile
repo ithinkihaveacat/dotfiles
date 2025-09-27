@@ -9,7 +9,7 @@ if is_interactive; then
 
     # If we're running in interactive mode, look for fish, and exec if it exists.
 
-    FISH=$(env PATH="$HOME/local/bin:$HOME/local/homebrew/bin:/opt/homebrew/bin:$PATH" which fish)
+    FISH=$(env PATH="$HOME/local/bin:/opt/homebrew/bin:$PATH" which fish)
 
     if [[ -x "$FISH" ]]; then
       exec env SHELL="$FISH" "$FISH" -i

@@ -235,8 +235,17 @@ rows.
 1. Install `fish`: `sudo apt-get install fish`.
 1. Install `tailscale`: `curl -fsSL https://tailscale.com/install.sh | sh`
    <https://tailscale.com/download/linux>
-1. Install `node`: use `fnm`.
-   <https://github.com/Schniz/fnm?tab=readme-ov-file#installation>
+1. Install `node`: since no recent versions are available via `apt`, use use
+   `fnm`. <https://github.com/Schniz/fnm?tab=readme-ov-file#installation>
+1. (Optional) Disable WiFi: add `dtoverlay=disable-wifi`, `dtoverlay=disable-bt`
+   to `/boot/firmware/config.txt` (see
+   <https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/overlays/README>)
+1. (Optional) Change the hostname: edit `/etc/hostname` and `/etc/hosts`, then
+   reboot.
+
+Recommendation: use VS Code's
+[Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh)
+extension to edit files.
 
 ## Manually Installing Binaries?
 
