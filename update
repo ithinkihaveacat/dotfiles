@@ -1,8 +1,58 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
+
 # Symlinks and copies files from the ~/.dotfiles directory into their
 # correct locations: $HOME, $HOME/.config/fish, $HOME/.config/templates,
 # etc.
+
+# Show usage information
+function show_help {
+  cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Symlinks and copies dotfiles from ~/.dotfiles to their correct locations.
+
+OPTIONS:
+  -h, --help    Show this help message and exit
+
+EXAMPLES:
+  $(basename "$0")    # Install dotfiles
+
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    -*)
+      echo "Error: Unknown option $1" >&2
+      show_help
+      exit 1
+      ;;
+    *)
+      echo "Error: No arguments expected" >&2
+      show_help
+      exit 1
+      ;;
+  esac
+done
+
+# Error handling wrapper
+function safe_execute {
+  local description="$1"
+  shift
+
+  if ! "$@"; then
+    echo "Error: Failed to $description" >&2
+    echo "Command: $*" >&2
+    exit 1
+  fi
+}
 
 # Echoes, then runs the command.
 #
@@ -36,12 +86,8 @@ function heading {
 # From http://stackoverflow.com/a/246128/11543
 SRCDIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# DSTDIR is probably $HOME
-if [ -d "$1" ]; then
-  DSTDIR="$1"
-else
-  DSTDIR="$( cd -P "$( dirname "${SRCDIR}" )" && pwd )"
-fi
+# DSTDIR is $HOME (parent of the git repo)
+DSTDIR="$( cd -P "$( dirname "${SRCDIR}" )" && pwd )"
 
 # "dotfiles" that will end up in $HOME
 
@@ -75,7 +121,17 @@ done
 
 # Set PLATFORM after $HOME/.platform has been symlinked
 
+if [[ ! -x "$HOME/.platform" ]]; then
+  echo "Error: $HOME/.platform script not found or not executable" >&2
+  echo "Make sure dotfiles are properly symlinked first" >&2
+  exit 1
+fi
+
 PLATFORM=$("$HOME"/.platform)
+if [[ -z "$PLATFORM" ]]; then
+  echo "Error: Failed to detect platform" >&2
+  exit 1
+fi
 
 # Ask for sudo upfront if we're likely to need it
 if [ "$PLATFORM" = "linux" ]; then
@@ -85,9 +141,14 @@ if [ "$PLATFORM" = "linux" ]; then
     # Passwordless sudo is configured, no need to prompt
     SUDO=0
   else
+    echo "This script requires sudo access for package management."
+    echo "You may be prompted for your password."
     # Good for 5 mins; for more see https://github.com/mathiasbynens/dotfiles/blob/master/.macos#L13
-    sudo -v > /dev/null
-    SUDO=$? # no boolean values in bash; use [ $SUDO -ne 1 ] in expressions
+    if ! sudo -v; then
+      echo "Error: Failed to obtain sudo access" >&2
+      exit 1
+    fi
+    SUDO=0
   fi
 fi
 
@@ -302,8 +363,12 @@ if [ ! -L "$HOME/.config/fish" ]; then
 fi
 
 # Update completions if completions more than 7 days old
-if ! find "$HOME"/.local/share/fish/generated_completions -maxdepth 0 -mtime 7 ; then
-  x echo fish -c fish_update_completions
+if exists fish; then
+  fish_completions_dir=$(fish -c 'echo $__fish_cache_dir/generated_completions' 2>/dev/null)
+  if [[ -n "$fish_completions_dir" ]] && ! find "$fish_completions_dir" -maxdepth 0 -mtime -7 2>/dev/null | grep -q . ; then
+    echo "Updating fish completions..."
+    safe_execute "update fish completions" fish -c fish_update_completions
+  fi
 fi
 
 # starship
@@ -325,9 +390,14 @@ if exists brew ; then
 
   heading "brew"
 
-  brew analytics off
+  safe_execute "disable brew analytics" brew analytics off
 
-  (brew update || exit) | grep -v "Already up-to-date." # need to agree to license when xcode updates
+  echo "Updating brew (this may prompt for Xcode license agreement)..."
+  if ! brew update; then
+    echo "Error: brew update failed. You may need to agree to Xcode license." >&2
+    echo "Try running 'sudo xcodebuild -license accept' if needed." >&2
+    exit 1
+  fi
 
   # The non-HEAD version is 7 years old...
   if ! brew leaves | grep -q jed ; then
