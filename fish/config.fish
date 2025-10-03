@@ -188,7 +188,6 @@ end
 # other scripts
 
 prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
-prepend_path "$HOME/.dotfiles/npm/node_modules/.bin"
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
