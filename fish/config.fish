@@ -56,6 +56,8 @@ prepend_path "$HOME/local/homebrew/sbin"
 prepend_path "/opt/homebrew/bin"
 prepend_path "/opt/homebrew/sbin"
 
+prepend_path "$HOME/.local/bin"
+
 prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
 prepend_path "$HOME/local/bin"
 
