@@ -16,3 +16,15 @@ if is_interactive; then
     fi
 
 fi
+
+# Last-resort PATH modifications. In most cases we either want a full interactive
+# shell (in which case we'll follow the is_interactive branch above, and fish's
+# config will run) *or* it's acceptable to have a very minimal PATH. However,
+# for some use cases we need . (Don't try to replicate the full fish PATH-setting
+# logic here!)
+
+path_prepend() { case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:$PATH";; esac; }
+
+path_prepend "$HOME/.local/bin"
+
+export PATH
