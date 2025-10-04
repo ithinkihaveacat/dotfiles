@@ -11,3 +11,13 @@ if [[ -z "${FNM_DIR-}" ]]; then
   fi
   unset _FNM_BIN
 fi
+
+# Set PATH for some non-interactive use cases, like "ssh server ...". Use
+# selectively; don't try to replicated fish's full PATH manipulation logic
+# here!
+
+path_prepend() { case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:$PATH";; esac; }
+
+path_prepend "$HOME/.local/bin"
+
+export PATH
