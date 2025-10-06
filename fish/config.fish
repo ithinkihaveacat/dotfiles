@@ -26,17 +26,23 @@ end
 # If fish >3.2, can replace with fish_add_path.
 function append_path
   if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
-    if not contains $argv[1] $PATH
-      set PATH $PATH $argv[1]
+    set -l path_to_add $argv[1]
+    set -l index (contains -i -- $path_to_add $PATH)
+    if set -q index[1]
+      set --erase PATH[$index]
     end
+    set PATH $PATH $path_to_add
   end
 end
 
 function prepend_path
   if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
-    if not contains $argv[1] $PATH
-      set PATH $argv[1] $PATH
+    set -l path_to_add $argv[1]
+    set -l index (contains -i -- $path_to_add $PATH)
+    if set -q index[1]
+      set --erase PATH[$index]
     end
+    set PATH $path_to_add $PATH
   end
 end
 
@@ -45,21 +51,6 @@ function sourceif
     source $argv[1]
   end
 end
-
-# binaries
-
-prepend_path /usr/local/sbin
-prepend_path /usr/local/bin
-
-prepend_path "$HOME/local/homebrew/bin"
-prepend_path "$HOME/local/homebrew/sbin"
-prepend_path "/opt/homebrew/bin"
-prepend_path "/opt/homebrew/sbin"
-
-prepend_path "$HOME/.local/bin"
-
-prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
-prepend_path "$HOME/local/bin"
 
 # Google Cloud SDK (gcloud)
 #
@@ -130,6 +121,22 @@ if count $ANDROID_HOME/build-tools/* >/dev/null
 end
 
 test -d $ANDROID_HOME ; and set -x ANDROID_JAR (ls -d $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
+
+# binaries
+
+prepend_path "/opt/homebrew/bin"
+prepend_path "/opt/homebrew/sbin"
+
+prepend_path /usr/local/sbin
+prepend_path /usr/local/bin
+
+prepend_path "$HOME/local/homebrew/bin"
+prepend_path "$HOME/local/homebrew/sbin"
+
+prepend_path "$HOME/.local/bin"
+
+prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
+prepend_path "$HOME/local/bin"
 
 # Ruby
 #
