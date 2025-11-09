@@ -110,6 +110,7 @@ Key points:
 
 Always include practical examples:
 - Show 2-3 common use cases
+- Where appropriate, include one or two less obvious or more advanced examples to inspire creative uses of the script.
 - Use realistic file names or package names
 - Demonstrate different argument patterns
 - Use `$(basename "$0")` for portability
@@ -142,7 +143,7 @@ Study these for formatting conventions, terminology, and structure.
 - [ ] Brief description of script purpose
 - [ ] Arguments section (for positional args)
 - [ ] Options section (for flags)
-- [ ] Examples section with 2-3 practical examples
+- [ ] Examples section with 2-3 practical examples (including novel cases where appropriate)
 - [ ] Error messages follow GNU coreutils pattern
 - [ ] Error messages write to stderr
 - [ ] Proper exit codes (0 for help, 1 for errors)
