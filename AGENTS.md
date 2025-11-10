@@ -2,6 +2,31 @@
 
 This document provides guidelines for all scripts in the `bin/` subdirectory.
 
+## General Script Requirements
+
+### Dependency Checking
+
+All scripts must declare their command-line dependencies using the `require()` function. This function checks for the existence of the specified commands and exits with an error if any are missing.
+
+```bash
+# Good
+require adb
+require apkanalyzer
+```
+
+### File Output
+
+If a script produces a new file as output, it must support an optional `--output` switch to allow callers to specify the output path. This is crucial for allowing scripts to work with temporary directories.
+
+```bash
+# Good
+my-script --output /tmp/my-output.txt
+```
+
+### Compatibility
+
+All scripts must be compatible with Bash version 3.2.57(1)-release (the default on recent macOS versions as of Nov 2025) and newer versions found on recent Linux distributions. This means avoiding features exclusive to newer Bash versions (e.g., associative arrays).
+
 ## Script Documentation Guidelines
 
 All scripts in `bin/` should provide comprehensive help documentation following GNU coreutils conventions.
