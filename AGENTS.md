@@ -1,8 +1,8 @@
-# Script Documentation Guidelines
+# Script Quality Guidelines
 
-This document provides guidelines for documenting scripts in the `bin/` subdirectory.
+This document provides guidelines for all scripts in the `bin/` subdirectory.
 
-## Help Function Requirements
+## Script Documentation Guidelines
 
 All scripts in `bin/` should provide comprehensive help documentation following GNU coreutils conventions.
 
@@ -122,6 +122,15 @@ Always include practical examples:
 - **Version information**: Not needed for personal utility scripts
 - **Excessive options**: Only document `-h, --help` unless the script has other flags
 
+### Top-of-File Comments
+
+Do not embed substantive help-like information in comments at the top of a script. This information can become outdated and is not easily accessible to users.
+
+- **DO:** Move any descriptive comments about the script's purpose, usage, or behavior into the `usage()` function's heredoc.
+- **DON'T:** Leave large comment blocks at the top of the file explaining what the script does.
+
+"Inline" comments that explain specific lines of code are acceptable. Commented-out code for debugging purposes is also fine.
+
 ### Reference Examples
 
 Good examples of comprehensive help output from GNU coreutils:
@@ -148,6 +157,27 @@ Study these for formatting conventions, terminology, and structure.
 - [ ] Error messages write to stderr
 - [ ] Proper exit codes (0 for help, 1 for errors)
 - [ ] No dependency lists in help text
+
+## Linting with ShellCheck
+
+All bash scripts in `bin/` must be linted with `shellcheck` to ensure they are free of common errors.
+
+### Requirements
+
+- Before committing any changes to a script, run `shellcheck` on it.
+- All reported lint errors must be fixed.
+- If an error cannot be fixed, it can be ignored using a `shellcheck disable` comment. See the [ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore) for more information.
+
+### Example
+
+```bash
+# Good
+shellcheck my-script.sh
+
+# Good (with ignored error)
+# shellcheck disable=SC2086
+echo $VAR
+```
 
 ## Examples from This Repository
 
