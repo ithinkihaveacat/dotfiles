@@ -1,80 +1,123 @@
 #!/usr/bin/env bash
 
-shopt -s nullglob
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] APK_FILE
 
-if [ -z "$1" ]; then
+Extracts the launcher icon and round launcher icon from an APK.
 
-  echo "usage: $(basename "$0") apk"
-  exit 1
+The script decodes the APK, finds the icon resources referenced in the
+AndroidManifest.xml, and saves them to the current directory or a specified
+output directory. It handles both vector drawables (XML) and raster images (PNG)
+and picks the highest density version available.
 
+Arguments:
+  APK_FILE    Path to an APK file or a ZIP archive containing a base split APK.
+
+Options:
+  -o, --output DIR  The directory to save the icons to. Defaults to the current directory.
+  -h, --help        Display this help message and exit
+
+Examples:
+  # Extract launcher icons to the current directory
+  $(basename "$0") /path/to/your/app.apk
+
+  # Extract launcher icons to a specific directory
+  $(basename "$0") --output /tmp/icons /path/to/your/app.zip
+EOF
+  exit 0
+}
+
+OUTPUT_DIR="."
+while getopts "o:h-" opt; do
+  case $opt in
+    o)
+      OUTPUT_DIR="$OPTARG"
+      ;;
+    h)
+      usage
+      ;;
+    -)
+      case "$OPTARG" in
+        output=*)
+          OUTPUT_DIR="${OPTARG#*=}"
+          ;;
+        help)
+          usage
+          ;;
+        *)
+          echo "Unknown option --$OPTARG" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    \?)
+      exit 1
+      ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
 fi
 
-function require() { hash "$@" || exit 127; }
+shopt -s nullglob
+
+require() { hash "$@" || exit 127; }
 
 require unzip
 require apktool
 require xmllint
+require xpath
+
+if [ -z "$1" ]; then
+  echo "$(basename "$0"): missing file operand" >&2
+  exit 1
+fi
 
 function match_vector() {
-
   GLOB="$1"
   GLOB="${GLOB/@/res\/}"
   GLOB="${GLOB/mipmap/mipmap*}"
   GLOB="${GLOB}*.xml"
-  
+  # shellcheck disable=SC2206
   MATCHES=($2/$GLOB)
-
   echo "${MATCHES[0]}"
-  return
-
 }
 
 function match_raster() {
-
   densities=(xxxhdpi xxhdpi xhdpi hdpi mdpi)
-  
   if [[ $1 =~ ^@drawable ]]; then
-  
     for d in "${densities[@]}"; do
-  
       GLOB="$1"
       GLOB="${GLOB/@/res\/}"
-      GLOB="${GLOB/drawable/drawable*}"
+      GLOB="${GLOB/drawable/drawable-*}" # More specific glob
       GLOB="${GLOB}.png"
-	  
+      # shellcheck disable=SC2206
       MATCHES=($2/$GLOB)
-	
       if [ ${#MATCHES[@]} -gt 0 ]; then
         echo "${MATCHES[0]}"
         return
       fi
-	
     done
-  
   elif [[ $1 =~ ^@mipmap ]]; then
-  
     for d in "${densities[@]}"; do
-  
       GLOB="$1"
       GLOB="${GLOB/@/res\/}"
       GLOB="${GLOB/mipmap/mipmap-${d}*}"
       GLOB="${GLOB}*.png"
-  
+      # shellcheck disable=SC2206
       MATCHES=($2/$GLOB)
-	
-	  if [ ${#MATCHES[@]} -gt 0 ]; then
+      if [ ${#MATCHES[@]} -gt 0 ]; then
         echo "${MATCHES[0]}"
-	    return
-	  fi
-	
+        return
+      fi
     done
-  
   fi
-  
 }
 
 function extract_resource() {
-
   DIR="$1"
   REFERENCE="$2"
   PREFIX="$3"
@@ -83,53 +126,44 @@ function extract_resource() {
   RASTER_ICON=$(match_raster "$REFERENCE" "$DIR")
 
   if [ -n "$VECTOR_ICON" ]; then
-
-    FILENAME="$PREFIX.xml"
+    FILENAME="$OUTPUT_DIR/$PREFIX.xml"
     xmllint --format "$VECTOR_ICON" > "$FILENAME"
     echo "Saved $FILENAME ($REFERENCE resolved to $VECTOR_ICON)"
-
   elif [ -n "$RASTER_ICON" ]; then
-
-    FILENAME="$PREFIX.png"
+    FILENAME="$OUTPUT_DIR/$PREFIX.png"
     cp "$RASTER_ICON" "$FILENAME"
     echo "Saved $FILENAME ($REFERENCE resolved to $RASTER_ICON)"
-
   fi
-
 }
 
 if [[ $1 == *.zip ]]; then
-
   TMPDIR=$(mktemp -d)
   trap 'rm -rf -- "$TMPDIR"' EXIT
-
-  unzip -q "$1" -d "$TMPDIR"
-  BASEAPK=$(directory-base-split "$TMPDIR")
-
-  if [ ! -f "${BASEAPK[0]}" ]; then
-    echo "error: *_base_split.apk not found in zip, aborting"
+  unzip -q -j "$1" '*-base-split.apk' -d "$TMPDIR"
+  BASEAPKS=("$TMPDIR"/*-base-split.apk)
+  BASEAPK="${BASEAPKS[0]}"
+  if [ ! -f "$BASEAPK" ]; then
+    echo "$(basename "$0"): *-base-split.apk not found in zip, aborting" >&2
     exit 1
   fi
-
 else
-
   BASEAPK="$1"
-
 fi
 
-TMPDIR=$(mktemp -d)
-apktool d "$BASEAPK" -f -s -o "$TMPDIR" > /dev/null 2>&1
+DECODED_TMPDIR=$(mktemp -d)
+trap 'rm -rf -- "$DECODED_TMPDIR"' EXIT
+apktool d "$BASEAPK" -f -s -o "$DECODED_TMPDIR" > /dev/null 2>&1
+
+MANIFEST_PATH="$DECODED_TMPDIR/AndroidManifest.xml"
 
 extract_resource \
-  "$TMPDIR" \
-  "$(xpath -n -q -e 'string(/manifest/application/@android:icon)' < "$TMPDIR"/AndroidManifest.xml)" \
+  "$DECODED_TMPDIR" \
+  "$(xpath -n -q -e 'string(/manifest/application/@android:icon)' < "$MANIFEST_PATH")" \
   "$(basename "$1" .zip)-launcher-icon"
 
-if [[ -n "$(xpath -n -q -e 'string(/manifest/application/@android:roundIcon)' < "$TMPDIR"/AndroidManifest.xml)" ]]; then
-
+if [[ -n "$(xpath -n -q -e 'string(/manifest/application/@android:roundIcon)' < "$MANIFEST_PATH")" ]]; then
   extract_resource \
-    "$TMPDIR" \
-    "$(xpath -n -q -e 'string(/manifest/application/@android:roundIcon)' < "$TMPDIR"/AndroidManifest.xml)" \
+    "$DECODED_TMPDIR" \
+    "$(xpath -n -q -e 'string(/manifest/application/@android:roundIcon)' < "$MANIFEST_PATH")" \
     "$(basename "$1" .zip)-launcher-icon-round"
-
 fi

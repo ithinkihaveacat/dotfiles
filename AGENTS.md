@@ -1,8 +1,59 @@
-# Script Documentation Guidelines
+# Script Quality Guidelines
 
-This document provides guidelines for documenting scripts in the `bin/` subdirectory.
+This document provides guidelines for all scripts in the `bin/` subdirectory.
 
-## Help Function Requirements
+## General Script Requirements
+
+### Dependency Checking
+
+All scripts must declare their command-line dependencies using the `require()` function. This function checks for the existence of the specified commands and exits with an error if any are missing.
+
+```bash
+# Good
+require adb
+require apkanalyzer
+```
+
+### File Output
+
+If a script produces a new file as output, it must support an optional `--output` switch to allow callers to specify the output path. This is crucial for allowing scripts to work with temporary directories.
+
+```bash
+# Good
+my-script --output /tmp/my-output.txt
+```
+
+### Compatibility
+
+All scripts must be compatible with Bash version 3.2.57(1)-release (the default on recent macOS versions as of Nov 2025) and newer versions found on recent Linux distributions. This means avoiding features exclusive to newer Bash versions (e.g., associative arrays).
+
+### Handling APK Archives
+
+Many scripts in this repository need to operate on a base APK. This base APK may be provided as a standalone `.apk` file or may be contained within a `.zip` archive as a `*-base-split.apk` file.
+
+To ensure consistency and robustness, all scripts that need to perform this extraction must use the following exact code block. This logic correctly handles both cases and ensures that temporary files are cleaned up properly.
+
+**Standard Code for Base APK Extraction:**
+
+```bash
+if [[ $1 == *.zip ]]; then
+  TMPDIR=$(mktemp -d)
+  trap 'rm -rf -- "$TMPDIR"' EXIT
+  unzip -q -j "$1" '*-base-split.apk' -d "$TMPDIR"
+  BASEAPKS=("$TMPDIR"/*-base-split.apk)
+  BASEAPK="${BASEAPKS[0]}"
+  if [ ! -f "$BASEAPK" ]; then
+    echo "$(basename "$0"): *-base-split.apk not found in zip, aborting" >&2
+    exit 1
+  fi
+else
+  BASEAPK="$1"
+fi
+```
+
+This block assumes that the input file path is in `$1`. If your script uses a different variable for the input path, you must adapt the code accordingly.
+
+## Script Documentation Guidelines
 
 All scripts in `bin/` should provide comprehensive help documentation following GNU coreutils conventions.
 
@@ -122,6 +173,15 @@ Always include practical examples:
 - **Version information**: Not needed for personal utility scripts
 - **Excessive options**: Only document `-h, --help` unless the script has other flags
 
+### Top-of-File Comments
+
+Do not embed substantive help-like information in comments at the top of a script. This information can become outdated and is not easily accessible to users.
+
+- **DO:** Move any descriptive comments about the script's purpose, usage, or behavior into the `usage()` function's heredoc.
+- **DON'T:** Leave large comment blocks at the top of the file explaining what the script does.
+
+"Inline" comments that explain specific lines of code are acceptable. Commented-out code for debugging purposes is also fine.
+
 ### Reference Examples
 
 Good examples of comprehensive help output from GNU coreutils:
@@ -148,6 +208,27 @@ Study these for formatting conventions, terminology, and structure.
 - [ ] Error messages write to stderr
 - [ ] Proper exit codes (0 for help, 1 for errors)
 - [ ] No dependency lists in help text
+
+## Linting with ShellCheck
+
+All bash scripts in `bin/` must be linted with `shellcheck` to ensure they are free of common errors.
+
+### Requirements
+
+- Before committing any changes to a script, run `shellcheck` on it.
+- All reported lint errors must be fixed.
+- If an error cannot be fixed, it can be ignored using a `shellcheck disable` comment. See the [ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore) for more information.
+
+### Example
+
+```bash
+# Good
+shellcheck my-script.sh
+
+# Good (with ignored error)
+# shellcheck disable=SC2086
+echo $VAR
+```
 
 ## Examples from This Repository
 
