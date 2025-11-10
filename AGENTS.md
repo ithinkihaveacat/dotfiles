@@ -27,6 +27,32 @@ my-script --output /tmp/my-output.txt
 
 All scripts must be compatible with Bash version 3.2.57(1)-release (the default on recent macOS versions as of Nov 2025) and newer versions found on recent Linux distributions. This means avoiding features exclusive to newer Bash versions (e.g., associative arrays).
 
+### Handling APK Archives
+
+Many scripts in this repository need to operate on a base APK. This base APK may be provided as a standalone `.apk` file or may be contained within a `.zip` archive as a `*-base-split.apk` file.
+
+To ensure consistency and robustness, all scripts that need to perform this extraction must use the following exact code block. This logic correctly handles both cases and ensures that temporary files are cleaned up properly.
+
+**Standard Code for Base APK Extraction:**
+
+```bash
+if [[ $1 == *.zip ]]; then
+  TMPDIR=$(mktemp -d)
+  trap 'rm -rf -- "$TMPDIR"' EXIT
+  unzip -q -j "$1" '*-base-split.apk' -d "$TMPDIR"
+  BASEAPKS=("$TMPDIR"/*-base-split.apk)
+  BASEAPK="${BASEAPKS[0]}"
+  if [ ! -f "$BASEAPK" ]; then
+    echo "$(basename "$0"): *-base-split.apk not found in zip, aborting" >&2
+    exit 1
+  fi
+else
+  BASEAPK="$1"
+fi
+```
+
+This block assumes that the input file path is in `$1`. If your script uses a different variable for the input path, you must adapt the code accordingly.
+
 ## Script Documentation Guidelines
 
 All scripts in `bin/` should provide comprehensive help documentation following GNU coreutils conventions.
