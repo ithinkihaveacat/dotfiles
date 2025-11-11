@@ -16,11 +16,19 @@ require apkanalyzer
 
 ### File Output
 
-If a script produces a new file as output, it must support an optional `--output` switch to allow callers to specify the output path. This is crucial for allowing scripts to work with temporary directories.
+If a script produces a new file or directory as output, it must support an optional `--output` switch to allow callers to specify the output path. This is crucial for allowing scripts to work with temporary directories.
+
+The `--output` path can be a file or a directory, depending on the tool's purpose.
+
+- If the specified path does not exist, the tool should create it.
+- If the output is a directory, the tool must not delete it on successful completion. The calling process is responsible for any cleanup. The tool should only delete a temporary directory if the tool itself fails.
 
 ```bash
-# Good
+# Good: Output to a file
 my-script --output /tmp/my-output.txt
+
+# Good: Output to a directory
+another-script --output /tmp/my-output-dir
 ```
 
 ### Compatibility
