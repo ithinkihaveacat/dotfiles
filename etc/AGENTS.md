@@ -1,6 +1,6 @@
-# GEMINI.md
+# AGENTS.md
 
-This document provides general rules and requirements for agents such as gemini-cli when making changes to codebases.
+This document provides general rules and requirements for agents when making changes to codebases.
 
 ## Markdown Formatting
 
