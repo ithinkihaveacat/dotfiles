@@ -35,10 +35,14 @@ libraries.
 
 ### Using `context-jetpack`
 
-You can use the tool to download the source for a specific library version:
+You can use the tool to download the source for a specific library. The version
+defaults to STABLE if not specified:
 
 ```bash
-context-jetpack androidx.wear.tiles:tiles STABLE
+context-jetpack androidx.wear.tiles:tiles
+context-jetpack androidx.wear.tiles:tiles ALPHA
+context-jetpack androidx.wear.tiles:tiles BETA
+context-jetpack androidx.wear.tiles:tiles RC
 ```
 
 This will download the source code to a temporary directory and print the path.
@@ -51,7 +55,7 @@ and use it locally:
 ```bash
 curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/context-jetpack -o context-jetpack
 chmod +x context-jetpack
-./context-jetpack androidx.wear.tiles:tiles STABLE
+./context-jetpack androidx.wear.tiles:tiles
 ```
 
 Alternatively, you can inspect the script's contents to understand how to
@@ -94,7 +98,6 @@ often adding convenience features or simplifying complex operations.
 - `adb-settings-theme`: Toggles the device's theme (light/dark).
 - **Wear OS Tile Management:** A common task is testing a new tile. This is a
   two-step process:
-
   1.  **Add the tile:** Use `adb-tile-add <COMPONENT_NAME>` to make the system
       aware of your tile. This command will output the index of the newly added
       tile.
