@@ -92,10 +92,17 @@ often adding convenience features or simplifying complex operations.
 - `adb-logcat-package <PACKAGE_NAME>`: Filters `logcat` output for a specific
   package.
 - `adb-settings-theme`: Toggles the device's theme (light/dark).
-- `adb-tile-add <COMPONENT_NAME>` / `adb-tile-remove <COMPONENT_NAME>` /
-  `adb-tile-show`: Manage Wear OS Tiles. These are particularly useful for
-  testing and debugging Wear OS complications and tiles without manual device
-  interaction.
+- **Wear OS Tile Management:** A common task is testing a new tile. This is a
+  two-step process:
+
+  1.  **Add the tile:** Use `adb-tile-add <COMPONENT_NAME>` to make the system
+      aware of your tile. This command will output the index of the newly added
+      tile.
+  2.  **Show the tile:** Use `adb-tile-show <TILE_INDEX>` with the index from
+      the previous step to make the tile visible on the device for debugging.
+
+  This workflow (`adb-tile-add` followed by `adb-tile-show`) is the standard
+  procedure for testing tiles from the command line.
 
 **2. APK Analysis and Manipulation (`apk-*`)** Scripts for inspecting and
 interacting with Android Package Kits.
