@@ -57,6 +57,82 @@ chmod +x context-jetpack
 Alternatively, you can inspect the script's contents to understand how to
 download the source code manually.
 
+## Android Device Interaction (ADB, APK, Package, Wear OS)
+
+A comprehensive suite of shell scripts designed to streamline interactions with
+Android devices, emulators, and APK files may be installed on the device (i.e.,
+somewhere in the PATH). These scripts leverage `adb` (Android Debug Bridge) and
+other Android-related tools to perform a wide range of tasks, from basic device
+information retrieval to advanced Wear OS service manipulation.
+
+Agents should investigate these scripts when tasked with:
+
+- Manipulating a physical Android device or emulator.
+- Analyzing APK files.
+- Interacting with specific Android packages.
+- Developing for or debugging Wear OS devices.
+
+Many of these scripts provide detailed usage information via the `--help`
+argument (e.g., `adb-screenshot --help`). You can also inspect their source code
+directly for implementation details.
+
+If these scripts are not available in the current environment's PATH, they can
+be downloaded individually from the
+[dotfiles repository's `bin` directory](https://github.com/ithinkihaveacat/dotfiles/tree/master/bin).
+
+### Key Script Categories and Examples:
+
+**1. General ADB Utilities (`adb-*`)** These scripts wrap common `adb` commands,
+often adding convenience features or simplifying complex operations.
+
+- `adb-screenshot`: Takes a screenshot of the connected device and saves it.
+  ```bash
+  adb-screenshot my_screenshot.png
+  ```
+- `adb-logcat-package <PACKAGE_NAME>`: Filters `logcat` output for a specific
+  package.
+- `adb-settings-theme`: Toggles the device's theme (light/dark).
+- `adb-tile-add <COMPONENT_NAME>` / `adb-tile-remove <COMPONENT_NAME>` /
+  `adb-tile-show`: Manage Wear OS Tiles. These are particularly useful for
+  testing and debugging Wear OS complications and tiles without manual device
+  interaction.
+
+**2. APK Analysis and Manipulation (`apk-*`)** Scripts for inspecting and
+interacting with Android Package Kits.
+
+- `apk-badging <APK_FILE>`: Extracts and displays the human-readable "badging"
+  information from an APK, including application name, launcher activities, and
+  permissions.
+- `apk-cat-manifest <APK_FILE>`: Dumps the `AndroidManifest.xml` in a readable
+  format.
+- `apk-decode <APK_FILE>`: Decodes an APK using `apktool`, extracting resources
+  and source code (smali).
+- `apk-tiles <APK_FILE>`: Lists Wear OS Tiles declared within an APK.
+
+**3. Package-Specific Operations (`packagename-*`)** These scripts perform
+actions on a specific installed Android package.
+
+- `packagename-force-stop <PACKAGE_NAME>`: Forces a package to stop.
+- `packagename-clear-cache <PACKAGE_NAME>`: Clears the cache for a given
+  package.
+- `packagename-permissions <PACKAGE_NAME>`: Lists permissions for a package.
+- `packagename-tiles <PACKAGE_NAME>`: Lists active Wear OS Tiles for an
+  installed package.
+
+**4. Wear OS Service Interaction (`wearableservice-*`)** A specialized set of
+tools for interacting with the Wear OS data layer and services. These are
+invaluable for debugging Wear OS applications.
+
+- `wearableservice-capabilities`: Lists all advertised capabilities on connected
+  Wear OS nodes.
+- `wearableservice-nodes`: Lists all connected Wear OS nodes (devices).
+- `wearableservice-items`: Lists data items on the Wear OS data layer.
+- `wearableservice-rpcs`: Provides utilities for interacting with RPCs (Remote
+  Procedure Calls) over the Wear OS data layer.
+
+This suite of scripts significantly simplifies common and complex Android
+development and debugging tasks, especially for Wear OS.
+
 ## Git Commit Messages
 
 When generating git commit messages, use the following structure (hard-wrap all
