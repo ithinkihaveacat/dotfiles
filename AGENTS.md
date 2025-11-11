@@ -6,7 +6,9 @@ This document provides guidelines for all scripts in the `bin/` subdirectory.
 
 ### Dependency Checking
 
-All scripts must declare their command-line dependencies using the `require()` function. This function checks for the existence of the specified commands and exits with an error if any are missing.
+All scripts must declare their command-line dependencies using the `require()`
+function. This function checks for the existence of the specified commands and
+exits with an error if any are missing.
 
 ```bash
 # Good
@@ -16,12 +18,17 @@ require apkanalyzer
 
 ### File Output
 
-If a script produces a new file or directory as output, it must support an optional `--output` switch to allow callers to specify the output path. This is crucial for allowing scripts to work with temporary directories.
+If a script produces a new file or directory as output, it must support an
+optional `--output` switch to allow callers to specify the output path. This is
+crucial for allowing scripts to work with temporary directories.
 
-The `--output` path can be a file or a directory, depending on the tool's purpose.
+The `--output` path can be a file or a directory, depending on the tool's
+purpose.
 
 - If the specified path does not exist, the tool should create it.
-- If the output is a directory, the tool must not delete it on successful completion. The calling process is responsible for any cleanup. The tool should only delete a temporary directory if the tool itself fails.
+- If the output is a directory, the tool must not delete it on successful
+  completion. The calling process is responsible for any cleanup. The tool
+  should only delete a temporary directory if the tool itself fails.
 
 ```bash
 # Good: Output to a file
@@ -33,13 +40,20 @@ another-script --output /tmp/my-output-dir
 
 ### Compatibility
 
-All scripts must be compatible with Bash version 3.2.57(1)-release (the default on recent macOS versions as of Nov 2025) and newer versions found on recent Linux distributions. This means avoiding features exclusive to newer Bash versions (e.g., associative arrays).
+All scripts must be compatible with Bash version 3.2.57(1)-release (the default
+on recent macOS versions as of Nov 2025) and newer versions found on recent
+Linux distributions. This means avoiding features exclusive to newer Bash
+versions (e.g., associative arrays).
 
 ### Handling APK Archives
 
-Many scripts in this repository need to operate on a base APK. This base APK may be provided as a standalone `.apk` file or may be contained within a `.zip` archive as a `*-base-split.apk` file.
+Many scripts in this repository need to operate on a base APK. This base APK may
+be provided as a standalone `.apk` file or may be contained within a `.zip`
+archive as a `*-base-split.apk` file.
 
-To ensure consistency and robustness, all scripts that need to perform this extraction must use the following exact code block. This logic correctly handles both cases and ensures that temporary files are cleaned up properly.
+To ensure consistency and robustness, all scripts that need to perform this
+extraction must use the following exact code block. This logic correctly handles
+both cases and ensures that temporary files are cleaned up properly.
 
 **Standard Code for Base APK Extraction:**
 
@@ -59,11 +73,13 @@ else
 fi
 ```
 
-This block assumes that the input file path is in `$1`. If your script uses a different variable for the input path, you must adapt the code accordingly.
+This block assumes that the input file path is in `$1`. If your script uses a
+different variable for the input path, you must adapt the code accordingly.
 
 ## Script Documentation Guidelines
 
-All scripts in `bin/` should provide comprehensive help documentation following GNU coreutils conventions.
+All scripts in `bin/` should provide comprehensive help documentation following
+GNU coreutils conventions.
 
 ### Basic Structure
 
@@ -114,17 +130,20 @@ fi
 #### 1. Function Naming
 
 Use `usage()` instead of `help()`:
+
 - `help` is a bash builtin command
 - Using `help()` would shadow the builtin
 - `usage()` is the established convention in shell scripting
 
 #### 2. Help Output Structure
 
-Follow GNU coreutils style (see `ls --help`, `cp --help`, `grep --help` for comprehensive examples):
+Follow GNU coreutils style (see `ls --help`, `cp --help`, `grep --help` for
+comprehensive examples):
 
 - **Usage line**: Show command syntax with argument placeholders in CAPS
 - **Description**: One-line summary of what the script does
-- **Arguments section**: Document positional arguments (not "Options" for positional args)
+- **Arguments section**: Document positional arguments (not "Options" for
+  positional args)
 - **Options section**: Document flags like `-h, --help`
 - **Examples section**: Provide 2-3 practical examples
 - **Additional notes**: Explain important behavior or caveats (optional)
@@ -142,6 +161,7 @@ echo "usage: $(basename "$0") args"
 ```
 
 Examples from coreutils:
+
 ```bash
 $ cp
 cp: missing file operand
@@ -154,6 +174,7 @@ mv: missing file operand
 ```
 
 Key points:
+
 - Format: `command: description of error`
 - Write to stderr (`>&2`)
 - Use "operand" terminology for missing arguments
@@ -168,27 +189,36 @@ Key points:
 #### 5. Examples Section
 
 Always include practical examples:
+
 - Show 2-3 common use cases
-- Where appropriate, include one or two less obvious or more advanced examples to inspire creative uses of the script.
+- Where appropriate, include one or two less obvious or more advanced examples
+  to inspire creative uses of the script.
 - Use realistic file names or package names
 - Demonstrate different argument patterns
 - Use `$(basename "$0")` for portability
 
 #### 6. What NOT to Include
 
-- **Dependencies**: Don't list required commands in the help text (they'll fail early anyway)
+- **Dependencies**: Don't list required commands in the help text (they'll fail
+  early anyway)
 - **Implementation details**: Focus on usage, not how it works internally
 - **Version information**: Not needed for personal utility scripts
-- **Excessive options**: Only document `-h, --help` unless the script has other flags
+- **Excessive options**: Only document `-h, --help` unless the script has other
+  flags
 
 ### Top-of-File Comments
 
-Do not embed substantive help-like information in comments at the top of a script. This information can become outdated and is not easily accessible to users.
+Do not embed substantive help-like information in comments at the top of a
+script. This information can become outdated and is not easily accessible to
+users.
 
-- **DO:** Move any descriptive comments about the script's purpose, usage, or behavior into the `usage()` function's heredoc.
-- **DON'T:** Leave large comment blocks at the top of the file explaining what the script does.
+- **DO:** Move any descriptive comments about the script's purpose, usage, or
+  behavior into the `usage()` function's heredoc.
+- **DON'T:** Leave large comment blocks at the top of the file explaining what
+  the script does.
 
-"Inline" comments that explain specific lines of code are acceptable. Commented-out code for debugging purposes is also fine.
+"Inline" comments that explain specific lines of code are acceptable.
+Commented-out code for debugging purposes is also fine.
 
 ### Reference Examples
 
@@ -211,7 +241,8 @@ Study these for formatting conventions, terminology, and structure.
 - [ ] Brief description of script purpose
 - [ ] Arguments section (for positional args)
 - [ ] Options section (for flags)
-- [ ] Examples section with 2-3 practical examples (including novel cases where appropriate)
+- [ ] Examples section with 2-3 practical examples (including novel cases where
+      appropriate)
 - [ ] Error messages follow GNU coreutils pattern
 - [ ] Error messages write to stderr
 - [ ] Proper exit codes (0 for help, 1 for errors)
@@ -219,13 +250,17 @@ Study these for formatting conventions, terminology, and structure.
 
 ## Linting with ShellCheck
 
-All bash scripts in `bin/` must be linted with `shellcheck` to ensure they are free of common errors.
+All bash scripts in `bin/` must be linted with `shellcheck` to ensure they are
+free of common errors.
 
 ### Requirements
 
 - Before committing any changes to a script, run `shellcheck` on it.
 - All reported lint errors must be fixed.
-- If an error cannot be fixed, it can be ignored using a `shellcheck disable` comment. See the [ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore) for more information.
+- If an error cannot be fixed, it can be ignored using a `shellcheck disable`
+  comment. See the
+  [ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore) for more
+  information.
 
 ### Example
 
@@ -238,9 +273,28 @@ shellcheck my-script.sh
 echo $VAR
 ```
 
+## Formatting Markdown with Prettier
+
+All Markdown files (`.md`) in this repository must be formatted using
+`prettier`.
+
+### Requirements
+
+- Before committing any changes to a Markdown file, run `prettier` on it.
+- The formatting configuration is defined in the `.prettierrc` file in the root
+  of the repository.
+
+### Example
+
+```bash
+# Good
+prettier --write README.md
+```
+
 ## Examples from This Repository
 
 See these scripts for reference implementations:
+
 - `bin/context-jetpack` - Multiple arguments, optional repo URL
 - `bin/apk-cat-file` - Two required arguments, simple and clean
 - `bin/packagename-services-dumpsys` - Single argument, Android-specific
