@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-export ANDROID_HOME="$HOME/.local/share/android-sdk"
+export ANDROID_HOME="${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
 # To find valid versions for build-tools, run:
 # sdkmanager --list | grep "build-tools;"
 export ANDROID_BUILD_TOOLS_VERSION="36.0.0"
@@ -38,6 +39,9 @@ Usage: $(basename "$0") [COMMAND]
 
 A script to set up and manage the Android SDK, emulator, and system images.
 
+Environment:
+  ANDROID_HOME: ${ANDROID_HOME}
+
 Commands:
   install-dependencies Install all necessary SDK components for creating and running an AVD.
   list                List all available AVDs.
@@ -46,7 +50,9 @@ Commands:
   start <name>        Start the specified AVD.
   stop <name>         Stop the specified AVD.
   delete <name>       Delete the specified AVD.
-  images              List all available system images with API level >30.
+  images              List all available system images with API level >=33.
+  check-updates       Check for updates to installed SDK packages.
+  upgrade             Upgrade all installed SDK packages to latest versions.
 
 Options:
   -h, --help          Display this help message and exit
@@ -60,6 +66,9 @@ Examples:
 
   # Start a specific AVD
   $(basename "$0") start my_default_avd
+
+  # Check for updates
+  $(basename "$0") check-updates
 EOF
   exit 0
 }
@@ -113,51 +122,92 @@ install_cli_tools() {
   esac
 
   local repository_xml
-  repository_xml=$(curl -s https://dl.google.com/android/repository/repository2-1.xml)
+  echo "Fetching repository metadata..."
+  if ! repository_xml=$(curl -fsSL --connect-timeout 30 --max-time 60 https://dl.google.com/android/repository/repository2-1.xml); then
+    echo "$(basename "$0"): Failed to fetch repository metadata" >&2
+    echo "For manual installation: https://developer.android.com/studio#command-line-tools-only" >&2
+    exit 1
+  fi
+
+  if [[ -z "${repository_xml}" ]]; then
+    echo "$(basename "$0"): Repository metadata is empty" >&2
+    echo "For manual installation: https://developer.android.com/studio#command-line-tools-only" >&2
+    exit 1
+  fi
 
   local latest_zip
-  latest_zip=$(echo "${repository_xml}" | grep "commandlinetools-${os}" | head -n 1 | sed -e 's/.*>\(.*\).zip<\/url>.*/\1.zip/')
+  latest_zip=$(echo "${repository_xml}" | grep "commandlinetools-${os}" | head -n 1 | sed -e 's/.*>\(.*\).zip<\/url>.*/\1.zip/' || true)
 
-  if [[ -z "${latest_zip}" ]]; then
-    echo "$(basename "$0"): Could not find latest commandlinetools for ${os}" >&2
+  if [[ -z "${latest_zip}" || "${latest_zip}" == ".zip" ]]; then
+    echo "$(basename "$0"): Could not parse command-line tools URL for ${os}" >&2
+    echo "For manual installation: https://developer.android.com/studio#command-line-tools-only" >&2
     exit 1
   fi
 
   local download_url
   download_url="https://dl.google.com/android/repository/${latest_zip}"
   echo "Downloading ${download_url}..."
-  curl -L "${download_url}" -o "${temp_dir}/commandlinetools.zip"
+  if ! curl -fL --connect-timeout 30 --max-time 300 "${download_url}" -o "${temp_dir}/commandlinetools.zip"; then
+    echo "$(basename "$0"): Failed to download command-line tools" >&2
+    echo "For manual installation: https://developer.android.com/studio#command-line-tools-only" >&2
+    exit 1
+  fi
+
+  # Verify download is not empty
+  if [[ ! -s "${temp_dir}/commandlinetools.zip" ]]; then
+    echo "$(basename "$0"): Downloaded file is empty" >&2
+    echo "For manual installation: https://developer.android.com/studio#command-line-tools-only" >&2
+    exit 1
+  fi
 
   echo "Unzipping to ${temp_dir}..."
-  unzip -q "${temp_dir}/commandlinetools.zip" -d "${temp_dir}"
+  if ! unzip -q "${temp_dir}/commandlinetools.zip" -d "${temp_dir}"; then
+    echo "$(basename "$0"): Failed to unzip command-line tools" >&2
+    echo "For manual installation: https://developer.android.com/studio#command-line-tools-only" >&2
+    exit 1
+  fi
 
   # Per https://developer.android.com/tools/sdkmanager
   local install_dir="$ANDROID_HOME/cmdline-tools/latest"
   echo "Creating installation directory ${install_dir}..."
   rm -rf "$ANDROID_HOME/cmdline-tools"
-  mkdir -p "${install_dir}"
+  if ! mkdir -p "${install_dir}"; then
+    echo "$(basename "$0"): Failed to create directory ${install_dir}" >&2
+    exit 1
+  fi
 
   echo "Moving cmdline-tools contents to ${install_dir}..."
-  mv "${temp_dir}/cmdline-tools/"* "${install_dir}/"
+  if ! mv "${temp_dir}/cmdline-tools/"* "${install_dir}/"; then
+    echo "$(basename "$0"): Failed to move cmdline-tools to ${install_dir}" >&2
+    exit 1
+  fi
 
   local sdkmanager_path="${install_dir}/bin/sdkmanager"
   # Conditionally patch sdkmanager to fix a quoting bug
   # shellcheck disable=SC2016
-  if grep -q 'JAVA_VER=$($JAVACMD' "${sdkmanager_path}"; then
+  if grep -q 'JAVA_VER=$($JAVACMD' "${sdkmanager_path}" 2>/dev/null; then
     echo "Patching sdkmanager to fix quoting bug..."
     cp "${sdkmanager_path}" "${sdkmanager_path}.backup"
     # shellcheck disable=SC2016
-    sed -i '' 's/JAVA_VER=$($JAVACMD/JAVA_VER=$("$JAVACMD"/g' "${sdkmanager_path}"
+    if [[ "$os" == "mac" ]]; then
+      sed -i '' 's/JAVA_VER=$($JAVACMD/JAVA_VER=$("$JAVACMD"/g' "${sdkmanager_path}"
+    else
+      sed -i 's/JAVA_VER=$($JAVACMD/JAVA_VER=$("$JAVACMD"/g' "${sdkmanager_path}"
+    fi
   fi
 
   local avdmanager_path="${install_dir}/bin/avdmanager"
   # Conditionally patch avdmanager to fix a quoting bug
   # shellcheck disable=SC2016
-  if grep -q 'JAVA_VER=$($JAVACMD' "${avdmanager_path}"; then
+  if grep -q 'JAVA_VER=$($JAVACMD' "${avdmanager_path}" 2>/dev/null; then
     echo "Patching avdmanager to fix quoting bug..."
     cp "${avdmanager_path}" "${avdmanager_path}.backup"
     # shellcheck disable=SC2016
-    sed -i '' 's/JAVA_VER=$($JAVACMD/JAVA_VER=$("$JAVACMD"/g' "${avdmanager_path}"
+    if [[ "$os" == "mac" ]]; then
+      sed -i '' 's/JAVA_VER=$($JAVACMD/JAVA_VER=$("$JAVACMD"/g' "${avdmanager_path}"
+    else
+      sed -i 's/JAVA_VER=$($JAVACMD/JAVA_VER=$("$JAVACMD"/g' "${avdmanager_path}"
+    fi
   fi
 }
 
@@ -323,8 +373,18 @@ start_avd() {
   echo "Starting AVD '$1'..."
   nohup "${emulator_path}" -avd "$1" -no-snapshot-load &> /dev/null &
 
-  echo "Waiting for device to connect..."
-  "${adb_path}" wait-for-device
+  echo ""
+  echo "To debug emulator issues, run this command:"
+  echo "  ${emulator_path} -avd '$1' -no-snapshot-load -verbose -show-kernel -no-audio"
+  echo ""
+
+  echo "Waiting for device to connect (timeout: 120s)..."
+  if ! timeout 120 "${adb_path}" wait-for-device; then
+    echo "$(basename "$0"): Timeout waiting for device to connect" >&2
+    echo "The emulator may still be starting. Check with: ${adb_path} devices" >&2
+    echo "Or debug with the command shown above" >&2
+    exit 1
+  fi
   echo "Device connected."
   "${adb_path}" devices -l
 }
@@ -456,6 +516,35 @@ list_images() {
   done) | sort | uniq
 }
 
+check_updates() {
+  ensure_dependencies
+  require sdkmanager
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+  echo "Checking for updates to installed packages..."
+  echo ""
+  "${sdkmanager}" --list | grep -A 1000 "Updates" || echo "All packages are up to date."
+}
+
+upgrade_packages() {
+  ensure_dependencies
+  require sdkmanager yes
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+  echo "Upgrading all installed packages..."
+  yes | "${sdkmanager}" --licenses > /dev/null
+
+  if ! "${sdkmanager}" --update; then
+    echo "$(basename "$0"): Failed to update packages" >&2
+    echo "Try running manually: ${sdkmanager} --update" >&2
+    exit 1
+  fi
+
+  echo "All packages upgraded successfully."
+}
+
 ensure_dependencies() {
   install_cli_tools
   install_platform_tools
@@ -474,20 +563,26 @@ case "$1" in
   images)
     list_images
     ;;
+  check-updates)
+    check_updates
+    ;;
+  upgrade)
+    upgrade_packages
+    ;;
   create)
-    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") create <name> [image]" >&2; exit 1; fi
-    create_avd "$2" "$3"
+    if [[ -z "${2:-}" ]]; then echo "$(basename "$0") create: AVD name required" >&2; exit 1; fi
+    create_avd "$2" "${3:-}"
     ;;
   start)
-    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") start <name>" >&2; exit 1; fi
+    if [[ -z "${2:-}" ]]; then echo "$(basename "$0") start: AVD name required" >&2; exit 1; fi
     start_avd "$2"
     ;;
   stop)
-    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") stop <name>" >&2; exit 1; fi
+    if [[ -z "${2:-}" ]]; then echo "$(basename "$0") stop: AVD name required" >&2; exit 1; fi
     stop_avd "$2"
     ;;
   delete)
-    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") delete <name>" >&2; exit 1; fi
+    if [[ -z "${2:-}" ]]; then echo "$(basename "$0") delete: AVD name required" >&2; exit 1; fi
     delete_avd "$2"
     ;;
   *)
