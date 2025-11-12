@@ -8,6 +8,29 @@ export ANDROID_BUILD_TOOLS_VERSION="36.0.0"
 # sdkmanager --list | grep "platforms;android-"
 export ANDROID_PLATFORM_VERSION="android-36"
 
+get_host_arch() {
+  require uname
+  case "$(uname -m)" in
+    arm64 | aarch64)
+      echo "arm64-v8a"
+      ;;
+    x86_64)
+      echo "x86_64"
+      ;;
+    *)
+      echo "$(basename "$0"): Unsupported architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+get_default_image_package() {
+  local arch
+  arch=$(get_host_arch)
+  echo "system-images;${ANDROID_PLATFORM_VERSION};android-wear-signed;${arch}"
+}
+
+
 
 usage() {
   cat <<EOF
@@ -16,25 +39,30 @@ Usage: $(basename "$0") [COMMAND]
 A script to set up and manage the Android SDK, emulator, and system images.
 
 Commands:
-  init                Install all necessary components and create a default Wear OS AVD.
+  init                Install all necessary SDK components for creating and running an AVD.
   list                List all available AVDs.
-  create <name>       Create a new Wear OS AVD with the specified name.
+  create <name> [image] Create a new Wear OS AVD.
+                      Defaults to image: $(get_default_image_package)
   start <name>        Start the specified AVD.
   stop <name>         Stop the specified AVD.
   delete <name>       Delete the specified AVD.
+  images              List all available system images with API level >30.
 
 Options:
   -h, --help          Display this help message and exit
 
 Examples:
-  # One-command setup for the emulator
+  # One-command setup for the emulator (without system image)
   $(basename "$0") init
 
-  # List available AVDs
-  $(basename "$0") list
+  # Create a new AVD with the default image
+  $(basename "$0") create my_default_avd
+
+  # Create a new AVD with a specific image
+  $(basename "$0") create my_specific_avd "system-images;android-33;android-wear;x86_64"
 
   # Start a specific AVD
-  $(basename "$0") start wearos_avd
+  $(basename "$0") start my_default_avd
 EOF
   exit 0
 }
@@ -135,53 +163,6 @@ install_emulator() {
   "${sdkmanager}" --install "emulator"
 }
 
-install_wearos_image() {
-  require uname awk grep tail yes
-
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-  if [[ ! -f "$sdkmanager" ]]; then
-    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
-    exit 1
-  fi
-
-  echo "Finding latest Wear OS image..."
-
-  local arch
-  case "$(uname -m)" in
-    arm64 | aarch64)
-      arch="arm64-v8a"
-      ;;
-    x86_64)
-      arch="x86_64"
-      ;;
-    *)
-      echo "$(basename "$0"): Unsupported architecture: $(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-
-  local wearos_image_package="system-images;${ANDROID_PLATFORM_VERSION};android-wear-signed;${arch}"
-  local installed_packages
-  installed_packages=$("${sdkmanager}" --list_installed)
-
-  if echo "${installed_packages}" | grep -q "${wearos_image_package}"; then
-    echo "Wear OS system image '${wearos_image_package}' already installed."
-    return 0
-  fi
-
-  local wearos_image
-  wearos_image=$("${sdkmanager}" --list --channel=3 | grep "${wearos_image_package}" | tail -n 1 | awk '{print $1}')
-
-  if [[ -z "${wearos_image}" ]]; then
-    echo "$(basename "$0"): Could not find latest Wear OS image" >&2
-    exit 1
-  fi
-
-  echo "Installing ${wearos_image}..."
-  yes | "${sdkmanager}" --licenses > /dev/null
-  "${sdkmanager}" --install "${wearos_image}"
-}
-
 install_platform_tools() {
   if [[ -d "$ANDROID_HOME/platform-tools" ]]; then
     echo "Android SDK platform-tools already installed."
@@ -242,49 +223,48 @@ install_platforms() {
 create_avd() {
   require uname awk grep tail yes avdmanager
 
+  local avd_name="$1"
+  local image_package="$2"
+
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
   if [[ ! -f "$sdkmanager" ]]; then
-    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    echo "$(basename "$0"): sdkmanager not found. Please run init first." >&2
     exit 1
   fi
 
   local avdmanager="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
   if [[ ! -f "$avdmanager" ]]; then
-    echo "$(basename "$0"): avdmanager not found. Please run --install-cli-tools first." >&2
+    echo "$(basename "$0"): avdmanager not found. Please run init first." >&2
     exit 1
   fi
 
-  if "${avdmanager}" list avd | grep -q "Name: $1"; then
-    echo "AVD '$1' already exists."
+  if "${avdmanager}" list avd | grep -q "Name: ${avd_name}"; then
+    echo "AVD '${avd_name}' already exists."
     return 0
   fi
 
-  echo "Finding latest Wear OS image..."
-
-  local arch
-  case "$(uname -m)" in
-    arm64 | aarch64)
-      arch="arm64-v8a"
-      ;;
-    x86_64)
-      arch="x86_64"
-      ;;
-    *)
-      echo "$(basename "$0"): Unsupported architecture: $(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-
-  local wearos_image
-  wearos_image=$("${sdkmanager}" --list --channel=3 | grep "system-images;.*android-wear.*${arch}" | tail -n 1 | awk '{print $1}')
-
-  if [[ -z "${wearos_image}" ]]; then
-    echo "$(basename "$0"): Could not find latest Wear OS image" >&2
-    exit 1
+  if [[ -z "$image_package" ]]; then
+    image_package=$(get_default_image_package)
+    echo "No image specified, using default: ${image_package}"
   fi
 
-  echo "Creating AVD '$1' with image '${wearos_image}'..."
-  echo "no" | "${avdmanager}" create avd -n "$1" -k "${wearos_image}" -d "wearos_large_round"
+  # Check if the image is installed, and install it if it's not
+  local installed_packages
+  installed_packages=$("${sdkmanager}" --list_installed)
+  if ! echo "${installed_packages}" | grep -q "${image_package}"; then
+    echo "System image '${image_package}' not found. Installing..."
+    yes | "${sdkmanager}" --licenses > /dev/null
+    "${sdkmanager}" --install "${image_package}"
+    if [[ $? -ne 0 ]]; then
+      echo "Failed to install system image '${image_package}'. Please check if the package name is valid." >&2
+      exit 1
+    fi
+  else
+    echo "System image '${image_package}' already installed."
+  fi
+
+  echo "Creating AVD '${avd_name}' with image '${image_package}'..."
+  echo "no" | "${avdmanager}" create avd -n "${avd_name}" -k "${image_package}" -d "wearos_large_round"
 }
 
 start_avd() {
@@ -362,9 +342,82 @@ delete_avd() {
 }
 
 list_avds() {
-  require emulator
+  require emulator adb grep awk tr
+
   local emulator_path="$ANDROID_HOME/emulator/emulator"
-  "${emulator_path}" -list-avds
+  local adb_path="$ANDROID_HOME/platform-tools/adb"
+
+  # Get all available AVDs
+  local all_avds
+  all_avds=$("${emulator_path}" -list-avds)
+
+  # Get the names of all running AVDs
+  local running_avd_names=()
+  local device_serials
+  device_serials=$("${adb_path}" devices | grep "emulator-" | awk '{print $1}')
+
+  if [[ -n "$device_serials" ]]; then
+    for serial in $device_serials; do
+      local avd_name
+      avd_name=$("${adb_path}" -s "$serial" shell getprop ro.boot.qemu.avd_name | tr -d '[:space:]')
+      if [[ -n "$avd_name" ]]; then
+        running_avd_names+=("$avd_name")
+      fi
+    done
+  fi
+
+  # Print the list, marking running AVDs
+  echo "$all_avds" | while IFS= read -r avd; do
+    local is_running=false
+    for running_avd in "${running_avd_names[@]}"; do
+      if [[ "$avd" == "$running_avd" ]]; then
+        is_running=true
+        break
+      fi
+    done
+
+    if [[ "$is_running" == true ]]; then
+      echo "* $avd"
+    else
+      echo "  $avd"
+    fi
+  done
+}
+
+list_images() {
+  require sdkmanager grep awk cut uname sed tr sort uniq
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+  # Determine host architecture for filtering
+  local arch_filter
+  arch_filter=$(get_host_arch)
+
+  # Get all available system images and installed packages
+  local all_packages_raw
+  all_packages_raw=$("$sdkmanager" --list)
+  local installed_packages
+  installed_packages=$("$sdkmanager" --list_installed | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  (echo "$all_packages_raw" | grep "system-images;android-" | grep "$arch_filter" | while IFS= read -r line; do
+    # Extract package path and trim whitespace
+    local package_path
+    package_path=$(echo "$line" | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    # Extract API level
+    local api_level
+    api_level=$(echo "$package_path" | awk -F';' '{print $2}' | cut -d'-' -f2)
+
+    # Check if API level is a number and greater than or equal to 33
+    if [[ "$api_level" =~ ^[0-9]+$ ]] && [[ "$api_level" -ge 33 ]]; then
+      # Check if the package is installed
+      if echo "$installed_packages" | grep -q -x "$package_path"; then
+        echo "* $package_path"
+      else
+        echo "  $package_path"
+      fi
+    fi
+  done) | sort | uniq
 }
 
 init_emulator() {
@@ -373,8 +426,6 @@ init_emulator() {
   install_build_tools
   install_platforms
   install_emulator
-  install_wearos_image
-  create_avd "wearos_avd"
 }
 
 case "$1" in
@@ -384,9 +435,12 @@ case "$1" in
   list)
     list_avds
     ;;
+  images)
+    list_images
+    ;;
   create)
-    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") create <name>" >&2; exit 1; fi
-    create_avd "$2"
+    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") create <name> [image]" >&2; exit 1; fi
+    create_avd "$2" "$3"
     ;;
   start)
     if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") start <name>" >&2; exit 1; fi
