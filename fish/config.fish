@@ -106,8 +106,9 @@ prepend_path ~/.cabal/bin
 
 # Android Tools
 
-test -d ~/Library/Android/sdk ; and set -x ANDROID_HOME ~/Library/Android/sdk
-test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
+test -d ~/.local/share/android-sdk ; and set -x ANDROID_HOME ~/.local/share/android-sdk
+#test -d ~/Library/Android/sdk ; and set -x ANDROID_HOME ~/Library/Android/sdk
+#test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 
 prepend_path $ANDROID_HOME/platform-tools
 prepend_path $ANDROID_HOME/tools
