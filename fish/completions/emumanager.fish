@@ -1,0 +1,46 @@
+# Fish completion script for emumanager
+
+# Helper function: check if we need a command
+function __fish_emumanager_needs_command
+  set -l cmd (commandline -opc)
+  if test (count $cmd) -eq 1
+    return 0
+  end
+  return 1
+end
+
+# Helper function: check if using specific command
+function __fish_emumanager_using_command
+  set -l cmd (commandline -opc)
+  if test (count $cmd) -gt 1
+    if test $argv[1] = $cmd[2]
+      return 0
+    end
+  end
+  return 1
+end
+
+# Helper function: get list of AVDs
+function __fish_emumanager_list_avds
+  emumanager list --names-only 2>/dev/null
+end
+
+# Complete subcommands (when no subcommand given)
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'bootstrap' -d 'Bootstrap SDK environment for emulator management'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'list' -d 'List all available AVDs'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'images' -d 'List all available system images with API level >=33'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'outdated' -d 'Show outdated SDK packages'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'update' -d 'Update all installed SDK packages to latest versions'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'create' -d 'Create a new Wear OS AVD'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'start' -d 'Start the specified AVD'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'stop' -d 'Stop the specified AVD'
+complete -c emumanager -n '__fish_emumanager_needs_command' -a 'delete' -d 'Delete the specified AVD'
+
+# Complete AVD names for commands that need them
+complete -c emumanager -n '__fish_emumanager_using_command start' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
+complete -c emumanager -n '__fish_emumanager_using_command stop' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
+complete -c emumanager -n '__fish_emumanager_using_command delete' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
+
+# Complete flags
+complete -c emumanager -s h -l help -d 'Display help message and exit'
+complete -c emumanager -n '__fish_emumanager_using_command list' -l names-only -d 'Output only AVD names without decoration'
