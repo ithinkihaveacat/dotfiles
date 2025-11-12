@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 
 export ANDROID_HOME="$HOME/.local/share/android-sdk"
+# To find valid versions for build-tools, run:
+# sdkmanager --list | grep "build-tools;"
+export ANDROID_BUILD_TOOLS_VERSION="36.0.0"
+# To find valid versions for platforms, run:
+# sdkmanager --list | grep "platforms;android-"
+export ANDROID_PLATFORM_VERSION="android-36"
+
 
 usage() {
   cat <<EOF
@@ -12,15 +19,25 @@ Commands:
   --install-cli-tools     Download and install the Android SDK command-line tools.
   --install-emulator      Install the latest Android emulator.
   --install-wearos-image  Install the latest Wear OS system image for the host architecture.
+  --install-platform-tools Install the Android SDK Platform-Tools.
+  --install-build-tools   Install the Android SDK Build-Tools.
+  --install-platforms     Install the latest Android SDK Platform.
+  --create-avd NAME       Create a new Wear OS AVD with the specified NAME.
+  --start-avd NAME        Start the specified AVD.
 
 Options:
   -h, --help              Display this help message and exit
 
 Examples:
-  # Install command-line tools, then the emulator, then a Wear OS image
+  # Install all components and create/start an AVD
   $(basename "$0") --install-cli-tools
   $(basename "$0") --install-emulator
   $(basename "$0") --install-wearos-image
+  $(basename "$0") --install-platform-tools
+  $(basename "$0") --install-build-tools # Installs build-tools;36.0.0
+  $(basename "$0") --install-platforms # Installs platforms;android-36
+  $(basename "$0") --create-avd wearos_large_round_api_36
+  $(basename "$0") --start-avd wearos_large_round_api_36
 EOF
   exit 0
 }
@@ -150,6 +167,121 @@ install_wearos_image() {
   "${sdkmanager}" --install "${wearos_image}"
 }
 
+install_platform_tools() {
+  require yes
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -f "$sdkmanager" ]]; then
+    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    exit 1
+  fi
+
+  echo "Installing platform-tools..."
+  yes | "${sdkmanager}" --licenses > /dev/null
+  "${sdkmanager}" --install "platform-tools"
+}
+
+install_build_tools() {
+  require yes
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -f "$sdkmanager" ]]; then
+    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    exit 1
+  fi
+
+  echo "Installing build-tools..."
+  yes | "${sdkmanager}" --licenses > /dev/null
+  "${sdkmanager}" --install "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+}
+
+install_platforms() {
+  require yes
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -f "$sdkmanager" ]]; then
+    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    exit 1
+  fi
+
+  echo "Installing platforms;${ANDROID_PLATFORM_VERSION}..."
+  yes | "${sdkmanager}" --licenses > /dev/null
+  "${sdkmanager}" --install "platforms;${ANDROID_PLATFORM_VERSION}"
+}
+
+create_avd() {
+  require uname awk grep tail yes
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -f "$sdkmanager" ]]; then
+    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    exit 1
+  fi
+
+  local avdmanager="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+  if [[ ! -f "$avdmanager" ]]; then
+    echo "$(basename "$0"): avdmanager not found. Please run --install-cli-tools first." >&2
+    exit 1
+  fi
+
+  echo "Finding latest Wear OS image..."
+
+  local arch
+  case "$(uname -m)" in
+    arm64 | aarch64)
+      arch="arm64-v8a"
+      ;;
+    x86_64)
+      arch="x86_64"
+      ;;
+    *)
+      echo "$(basename "$0"): Unsupported architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  local wearos_image
+  wearos_image=$("${sdkmanager}" --list --channel=3 | grep "system-images;.*android-wear.*${arch}" | tail -n 1 | awk '{print $1}')
+
+  if [[ -z "${wearos_image}" ]]; then
+    echo "$(basename "$0"): Could not find latest Wear OS image" >&2
+    exit 1
+  fi
+
+  echo "Creating AVD '$1' with image '${wearos_image}'..."
+  echo "no" | "${avdmanager}" create avd -n "$1" -k "${wearos_image}" -d "wearos_large_round" --force
+}
+
+start_avd() {
+  require emulator adb
+
+  local emulator_path="$ANDROID_HOME/emulator/emulator"
+  if [[ ! -f "${emulator_path}" ]]; then
+    echo "$(basename "$0"): emulator not found. Please run --install-emulator first." >&2
+    exit 1
+  fi
+
+  # Check for platform-tools
+  if [[ ! -d "$ANDROID_HOME/platform-tools" ]]; then
+    echo "$(basename "$0"): platform-tools not found. Please run --install-platform-tools first." >&2
+    exit 1
+  fi
+
+  local adb_path="$ANDROID_HOME/platform-tools/adb"
+  if [[ ! -f "${adb_path}" ]]; then
+    echo "$(basename "$0"): adb not found. Please run --install-platform-tools first." >&2
+    exit 1
+  fi
+
+  echo "Starting AVD '$1'..."
+  nohup "${emulator_path}" -avd "$1" -no-snapshot-load &> /dev/null &
+
+  echo "Waiting for device to connect..."
+  "${adb_path}" wait-for-device
+  echo "Device connected."
+  "${adb_path}" devices -l
+}
+
 case "$1" in
   --install-cli-tools)
     install_cli_tools
@@ -159,6 +291,21 @@ case "$1" in
     ;;
   --install-wearos-image)
     install_wearos_image
+    ;;
+  --install-platform-tools)
+    install_platform_tools
+    ;;
+  --install-build-tools)
+    install_build_tools
+    ;;
+  --install-platforms)
+    install_platforms
+    ;;
+  --create-avd)
+    create_avd "$2"
+    ;;
+  --start-avd)
+    start_avd "$2"
     ;;
   *)
     echo "$(basename "$0"): unknown command '$1'" >&2
