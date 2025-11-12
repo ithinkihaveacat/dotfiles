@@ -173,11 +173,37 @@ $ mv
 mv: missing file operand
 ```
 
+**For scripts with subcommands**, follow git-style error messages that include
+the subcommand name:
+
+```bash
+# Good (git-style for subcommands):
+echo "$(basename "$0") create: AVD name required" >&2
+
+# Avoid (too generic):
+echo "$(basename "$0"): missing operand" >&2
+```
+
+Examples from git:
+
+```bash
+$ git commit
+fatal: no changes added to commit
+
+$ git push origin
+fatal: The current branch has no upstream branch
+
+$ git checkout
+fatal: you must specify path(s) to restore
+```
+
 Key points:
 
-- Format: `command: description of error`
+- Format: `command: description of error` (simple tools)
+- Format: `command subcommand: description of error` (subcommand-based tools)
 - Write to stderr (`>&2`)
-- Use "operand" terminology for missing arguments
+- Use "operand" terminology for missing arguments (simple tools)
+- Use descriptive messages for subcommands (e.g., "AVD name required")
 - Do NOT include "Try 'command --help'" message (omit the second line)
 
 #### 4. Exit Codes
