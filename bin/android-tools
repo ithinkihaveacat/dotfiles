@@ -13,31 +13,28 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [COMMAND]
 
-A script to set up the Android SDK, emulator, and system images.
+A script to set up and manage the Android SDK, emulator, and system images.
 
 Commands:
-  --install-cli-tools     Download and install the Android SDK command-line tools.
-  --install-emulator      Install the latest Android emulator.
-  --install-wearos-image  Install the latest Wear OS system image for the host architecture.
-  --install-platform-tools Install the Android SDK Platform-Tools.
-  --install-build-tools   Install the Android SDK Build-Tools.
-  --install-platforms     Install the latest Android SDK Platform.
-  --create-avd NAME       Create a new Wear OS AVD with the specified NAME.
-  --start-avd NAME        Start the specified AVD.
+  init                Install all necessary components and create a default Wear OS AVD.
+  list                List all available AVDs.
+  create <name>       Create a new Wear OS AVD with the specified name.
+  start <name>        Start the specified AVD.
+  stop <name>         Stop the specified AVD.
+  delete <name>       Delete the specified AVD.
 
 Options:
-  -h, --help              Display this help message and exit
+  -h, --help          Display this help message and exit
 
 Examples:
-  # Install all components and create/start an AVD
-  $(basename "$0") --install-cli-tools
-  $(basename "$0") --install-emulator
-  $(basename "$0") --install-wearos-image
-  $(basename "$0") --install-platform-tools
-  $(basename "$0") --install-build-tools # Installs build-tools;36.0.0
-  $(basename "$0") --install-platforms # Installs platforms;android-36
-  $(basename "$0") --create-avd wearos_large_round_api_36
-  $(basename "$0") --start-avd wearos_large_round_api_36
+  # One-command setup for the emulator
+  $(basename "$0") init
+
+  # List available AVDs
+  $(basename "$0") list
+
+  # Start a specific AVD
+  $(basename "$0") start wearos_avd
 EOF
   exit 0
 }
@@ -45,6 +42,10 @@ EOF
 require() {
   for cmd in "$@"; do
     if ! command -v "$cmd" &>/dev/null; then
+      # If the command is in our SDK, let's try to find it there
+      if [[ -f "$ANDROID_HOME/cmdline-tools/latest/bin/$cmd" || -f "$ANDROID_HOME/emulator/$cmd" || -f "$ANDROID_HOME/platform-tools/$cmd" ]]; then
+        continue
+      fi
       echo "$(basename "$0"): '$cmd' command not found" >&2
       exit 127
     fi
@@ -64,8 +65,8 @@ install_cli_tools() {
 
   # Check if Android SDK cmdline-tools directory already exists
   if [[ -d "$ANDROID_HOME/cmdline-tools" ]]; then
-    echo "$(basename "$0"): $ANDROID_HOME/cmdline-tools already exists. Please remove it manually before running this script." >&2
-    exit 1
+    echo "Android SDK command-line tools already installed."
+    return 0
   fi
 
   local temp_dir
@@ -116,6 +117,11 @@ install_cli_tools() {
 }
 
 install_emulator() {
+  if [[ -f "$ANDROID_HOME/emulator/emulator" ]]; then
+    echo "Android emulator already installed."
+    return 0
+  fi
+
   require yes
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -154,8 +160,17 @@ install_wearos_image() {
       ;;
   esac
 
+  local wearos_image_package="system-images;${ANDROID_PLATFORM_VERSION};android-wear-signed;${arch}"
+  local installed_packages
+  installed_packages=$("${sdkmanager}" --list_installed)
+
+  if echo "${installed_packages}" | grep -q "${wearos_image_package}"; then
+    echo "Wear OS system image '${wearos_image_package}' already installed."
+    return 0
+  fi
+
   local wearos_image
-  wearos_image=$("${sdkmanager}" --list --channel=3 | grep "system-images;.*android-wear.*${arch}" | tail -n 1 | awk '{print $1}')
+  wearos_image=$("${sdkmanager}" --list --channel=3 | grep "${wearos_image_package}" | tail -n 1 | awk '{print $1}')
 
   if [[ -z "${wearos_image}" ]]; then
     echo "$(basename "$0"): Could not find latest Wear OS image" >&2
@@ -168,6 +183,11 @@ install_wearos_image() {
 }
 
 install_platform_tools() {
+  if [[ -d "$ANDROID_HOME/platform-tools" ]]; then
+    echo "Android SDK platform-tools already installed."
+    return 0
+  fi
+
   require yes
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -182,6 +202,11 @@ install_platform_tools() {
 }
 
 install_build_tools() {
+  if [[ -d "$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS_VERSION" ]]; then
+    echo "Android SDK build-tools version $ANDROID_BUILD_TOOLS_VERSION already installed."
+    return 0
+  fi
+
   require yes
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -196,6 +221,11 @@ install_build_tools() {
 }
 
 install_platforms() {
+  if [[ -d "$ANDROID_HOME/platforms/$ANDROID_PLATFORM_VERSION" ]]; then
+    echo "Android SDK platform $ANDROID_PLATFORM_VERSION already installed."
+    return 0
+  fi
+
   require yes
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -210,7 +240,7 @@ install_platforms() {
 }
 
 create_avd() {
-  require uname awk grep tail yes
+  require uname awk grep tail yes avdmanager
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
   if [[ ! -f "$sdkmanager" ]]; then
@@ -222,6 +252,11 @@ create_avd() {
   if [[ ! -f "$avdmanager" ]]; then
     echo "$(basename "$0"): avdmanager not found. Please run --install-cli-tools first." >&2
     exit 1
+  fi
+
+  if "${avdmanager}" list avd | grep -q "Name: $1"; then
+    echo "AVD '$1' already exists."
+    return 0
   fi
 
   echo "Finding latest Wear OS image..."
@@ -249,7 +284,7 @@ create_avd() {
   fi
 
   echo "Creating AVD '$1' with image '${wearos_image}'..."
-  echo "no" | "${avdmanager}" create avd -n "$1" -k "${wearos_image}" -d "wearos_large_round" --force
+  echo "no" | "${avdmanager}" create avd -n "$1" -k "${wearos_image}" -d "wearos_large_round"
 }
 
 start_avd() {
@@ -282,33 +317,92 @@ start_avd() {
   "${adb_path}" devices -l
 }
 
+stop_avd() {
+  require adb grep awk tr
+
+  local avd_name_to_stop="$1"
+  local adb_path="$ANDROID_HOME/platform-tools/adb"
+
+  echo "Attempting to stop AVD '$avd_name_to_stop'..."
+
+  # Get serial numbers of all online emulator devices
+  local device_serials
+  device_serials=$("${adb_path}" devices | grep "emulator-" | awk '{print $1}')
+
+  if [[ -z "$device_serials" ]]; then
+    echo "No running emulators found."
+    return 0
+  fi
+
+  local found_avd=false
+  for serial in $device_serials; do
+    # Get the AVD name for the current device and trim whitespace/carriage returns
+    local running_avd_name
+    running_avd_name=$("${adb_path}" -s "$serial" shell getprop ro.boot.qemu.avd_name | tr -d '[:space:]')
+
+    if [[ "$running_avd_name" == "$avd_name_to_stop" ]]; then
+      echo "Found running AVD '$avd_name_to_stop' on device '$serial'. Stopping it..."
+      "${adb_path}" -s "$serial" emu kill
+      echo "AVD '$avd_name_to_stop' stopped."
+      found_avd=true
+      break # Stop after finding and killing the first match
+    fi
+  done
+
+  if [[ "$found_avd" == false ]]; then
+    echo "AVD '$avd_name_to_stop' is not currently running."
+  fi
+}
+
+delete_avd() {
+  require avdmanager
+  local avdmanager_path="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+  echo "Deleting AVD '$1'..."
+  "${avdmanager_path}" delete avd -n "$1"
+}
+
+list_avds() {
+  require emulator
+  local emulator_path="$ANDROID_HOME/emulator/emulator"
+  "${emulator_path}" -list-avds
+}
+
+init_emulator() {
+  install_cli_tools
+  install_platform_tools
+  install_build_tools
+  install_platforms
+  install_emulator
+  install_wearos_image
+  create_avd "wearos_avd"
+}
+
 case "$1" in
-  --install-cli-tools)
-    install_cli_tools
+  init)
+    init_emulator
     ;;
-  --install-emulator)
-    install_emulator
+  list)
+    list_avds
     ;;
-  --install-wearos-image)
-    install_wearos_image
-    ;;
-  --install-platform-tools)
-    install_platform_tools
-    ;;
-  --install-build-tools)
-    install_build_tools
-    ;;
-  --install-platforms)
-    install_platforms
-    ;;
-  --create-avd)
+  create)
+    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") create <name>" >&2; exit 1; fi
     create_avd "$2"
     ;;
-  --start-avd)
+  start)
+    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") start <name>" >&2; exit 1; fi
     start_avd "$2"
+    ;;
+  stop)
+    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") stop <name>" >&2; exit 1; fi
+    stop_avd "$2"
+    ;;
+  delete)
+    if [[ -z "$2" ]]; then echo "Usage: $(basename "$0") delete <name>" >&2; exit 1; fi
+    delete_avd "$2"
     ;;
   *)
     echo "$(basename "$0"): unknown command '$1'" >&2
+    usage
     exit 1
     ;;
 esac
