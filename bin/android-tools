@@ -1,29 +1,56 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Check if Android SDK directory already exists
-if [[ -d "$HOME/.local/share/android-sdk" ]]; then
-  echo "Error: $HOME/.local/share/android-sdk already exists. Please remove it manually before running this script." >&2
-  exit 1
+export ANDROID_HOME="$HOME/.local/share/android-sdk"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [COMMAND]
+
+A script to set up the Android SDK, emulator, and system images.
+
+Commands:
+  --install-cli-tools     Download and install the Android SDK command-line tools.
+  --install-emulator      Install the latest Android emulator.
+  --install-wearos-image  Install the latest Wear OS system image for the host architecture.
+
+Options:
+  -h, --help              Display this help message and exit
+
+Examples:
+  # Install command-line tools, then the emulator, then a Wear OS image
+  $(basename "$0") --install-cli-tools
+  $(basename "$0") --install-emulator
+  $(basename "$0") --install-wearos-image
+EOF
+  exit 0
+}
+
+require() {
+  for cmd in "$@"; do
+    if ! command -v "$cmd" &>/dev/null; then
+      echo "$(basename "$0"): '$cmd' command not found" >&2
+      exit 127
+    fi
+  done
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
 fi
 
-# The initial version of this script will have an --install function that
-# downloads and installs the android emulator. It needs to support linux and
-# macos only.
+if [[ -z "$1" ]]; then
+  usage
+fi
 
-# Step 1: Download the correct package.
-# This function downloads the emulator image. It will need to first download the
-# URL https://dl.google.com/android/repository/repository2-1.xml contains
-# links to the latest versions of various tools, including the android sdk
-# command line tools. Download it, inspect it, and write an xpath query to
-# extract the version appropriate to the operating system (for linux, it's
-# currently commandlinetools-linux-13114758_latest.zip; macos is
-# commandlinetools-mac-13114758_latest.zip). Assume the general shape" of the
-# xml file will stay the same, and guess at the right query that continue to
-# return the appropriate file as the exact filename changes. Prepend
-# https://dl.google.com/android/repository/ to the filename to construct the
-# full download URL.
+install_cli_tools() {
+  require curl mktemp unzip uname grep head sed rm mkdir mv
 
-install_command_line_tools() {
+  # Check if Android SDK cmdline-tools directory already exists
+  if [[ -d "$ANDROID_HOME/cmdline-tools" ]]; then
+    echo "$(basename "$0"): $ANDROID_HOME/cmdline-tools already exists. Please remove it manually before running this script." >&2
+    exit 1
+  fi
+
   local temp_dir
   temp_dir=$(mktemp -d)
   trap 'rm -rf -- "$temp_dir"' EXIT
@@ -37,7 +64,7 @@ install_command_line_tools() {
       os="linux"
       ;;
     *)
-      echo "Unsupported OS: $(uname -s)" >&2
+      echo "$(basename "$0"): Unsupported OS: $(uname -s)" >&2
       exit 1
       ;;
   esac
@@ -49,12 +76,12 @@ install_command_line_tools() {
   latest_zip=$(echo "${repository_xml}" | grep "commandlinetools-${os}" | head -n 1 | sed -e 's/.*>\(.*\).zip<\/url>.*/\1.zip/')
 
   if [[ -z "${latest_zip}" ]]; then
-    echo "Could not find latest commandlinetools for ${os}" >&2
+    echo "$(basename "$0"): Could not find latest commandlinetools for ${os}" >&2
     exit 1
   fi
 
   local download_url
-  download_url=$(echo "https://dl.google.com/android/repository/${latest_zip}")
+  download_url="https://dl.google.com/android/repository/${latest_zip}"
   echo "Downloading ${download_url}..."
   curl -L "${download_url}" -o "${temp_dir}/commandlinetools.zip"
 
@@ -62,14 +89,79 @@ install_command_line_tools() {
   unzip -q "${temp_dir}/commandlinetools.zip" -d "${temp_dir}"
 
   # Per https://developer.android.com/tools/sdkmanager
-  local install_dir="$HOME/.local/share/android-sdk/cmdline-tools/latest"
+  local install_dir="$ANDROID_HOME/cmdline-tools/latest"
   echo "Creating installation directory ${install_dir}..."
-  rm -rf "$HOME/.local/share/android-sdk/cmdline-tools"
+  rm -rf "$ANDROID_HOME/cmdline-tools"
   mkdir -p "${install_dir}"
 
   echo "Moving cmdline-tools contents to ${install_dir}..."
   mv "${temp_dir}/cmdline-tools/"* "${install_dir}/"
 }
-if [[ "$1" == "--install" ]]; then
-  install_command_line_tools
-fi
+
+install_emulator() {
+  require yes
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -f "$sdkmanager" ]]; then
+    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    exit 1
+  fi
+
+  echo "Installing emulator..."
+  yes | "${sdkmanager}" --licenses > /dev/null
+  "${sdkmanager}" --install "emulator"
+}
+
+install_wearos_image() {
+  require uname awk grep tail yes
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -f "$sdkmanager" ]]; then
+    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    exit 1
+  fi
+
+  echo "Finding latest Wear OS image..."
+
+  local arch
+  case "$(uname -m)" in
+    arm64 | aarch64)
+      arch="arm64-v8a"
+      ;;
+    x86_64)
+      arch="x86_64"
+      ;;
+    *)
+      echo "$(basename "$0"): Unsupported architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  local wearos_image
+  wearos_image=$("${sdkmanager}" --list --channel=3 | grep "system-images;.*android-wear.*${arch}" | tail -n 1 | awk '{print $1}')
+
+  if [[ -z "${wearos_image}" ]]; then
+    echo "$(basename "$0"): Could not find latest Wear OS image" >&2
+    exit 1
+  fi
+
+  echo "Installing ${wearos_image}..."
+  yes | "${sdkmanager}" --licenses > /dev/null
+  "${sdkmanager}" --install "${wearos_image}"
+}
+
+case "$1" in
+  --install-cli-tools)
+    install_cli_tools
+    ;;
+  --install-emulator)
+    install_emulator
+    ;;
+  --install-wearos-image)
+    install_wearos_image
+    ;;
+  *)
+    echo "$(basename "$0"): unknown command '$1'" >&2
+    exit 1
+    ;;
+esac
