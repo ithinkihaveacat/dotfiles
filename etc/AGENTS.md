@@ -13,7 +13,7 @@ To format Markdown files, use the command `prettier --write <file(s)>`. This
 command will edit files in place.
 
 If `prettier` is not installed globally, you can run it via
-`npx -y prettier @latest --write <file(s)>`. If `npx` is not available, you can
+`npx -y prettier@latest --write <file(s)>`. If `npx` is not available, you can
 skip the prettier step.
 
 ## Shell Script Linting
