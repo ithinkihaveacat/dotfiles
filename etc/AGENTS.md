@@ -177,6 +177,21 @@ invaluable for debugging Wear OS applications.
 - `wearableservice-rpcs`: Provides utilities for interacting with RPCs (Remote
   Procedure Calls) over the Wear OS data layer.
 
+**5. Emulator Management (`emumanager`)** The `emumanager` script is a powerful
+tool for bootstrapping an Android SDK environment and managing Android Virtual
+Devices (AVDs). It can be particularly useful for spinning up an emulator to
+diagnose a problem, verify a bug, or test a fix in a clean environment.
+
+- `emumanager create <name>`: Creates a new Wear OS AVD.
+- `emumanager start <name>`: Starts the specified AVD.
+- `emumanager list`: Lists all available AVDs.
+
+  ```bash
+  # Create and start a new emulator for testing
+  emumanager create test-avd
+  emumanager start test-avd
+  ```
+
 This suite of scripts significantly simplifies common and complex Android
 development and debugging tasks, especially for Wear OS.
 
