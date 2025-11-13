@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") LIBRARY_COORDINATE
+
+Helper script to analyze a Jetpack library and suggest exceptions for jetpack-library.
+
+Arguments:
+  LIBRARY_COORDINATE  Maven coordinate (e.g., androidx.wear:wear)
+
+Examples:
+  $(basename "$0") androidx.wear:wear
+  $(basename "$0") androidx.core:core
+  $(basename "$0") androidx.lifecycle:lifecycle-viewmodel
+
+This script downloads the source JAR for a library, examines the package structure,
+and suggests exception entries for packages that don't follow the standard naming
+pattern. The output can be added to the EXCEPTIONS array in the jetpack-library script.
+
+How to build the full exceptions table:
+1. Get a list of all AndroidX libraries from https://androidx.tech
+2. For each library, run this script to analyze its package structure
+3. Add suggested exceptions to jetpack-library
+4. Test the exceptions with real package names from your code
+
+Alternatively, you can build exceptions on-demand:
+1. When jetpack-library produces incorrect output for a package
+2. Use jetpack-version to find what library provides that package
+3. Add the exception mapping to the EXCEPTIONS array
+EOF
+  exit 0
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
+set -e
+
+if [ "$#" -lt 1 ]; then
+  echo "$(basename "$0"): missing operand" >&2
+  exit 1
+fi
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$(basename "$0"): required command '$1' not found" >&2
+    exit 127
+  }
+}
+
+require curl
+require jar
+require context-jetpack
+
+LIBRARY=$1
+GROUP_ID=$(echo "$LIBRARY" | cut -d: -f1)
+ARTIFACT_ID=$(echo "$LIBRARY" | cut -d: -f2)
+
+echo "Analyzing library: $LIBRARY" >&2
+echo "" >&2
+
+# Download the source
+SOURCE_DIR=$(context-jetpack "$LIBRARY" 2>/dev/null)
+
+if [ ! -d "$SOURCE_DIR" ]; then
+  echo "$(basename "$0"): failed to download source for $LIBRARY" >&2
+  exit 1
+fi
+
+# Find all package prefixes (first 3-4 levels)
+PACKAGES=$(find "$SOURCE_DIR" -type f -name "*.java" -o -name "*.kt" | while read -r file; do
+  # Extract package declaration
+  grep -m1 "^package " "$file" 2>/dev/null | sed 's/package //;s/;.*//;s/ .*//'
+done | sort -u)
+
+echo "Found packages:" >&2
+echo "$PACKAGES" | sed 's/^/  /' >&2
+echo "" >&2
+
+# Analyze each package to see if it matches the heuristic
+echo "Suggested exceptions (add these to jetpack-library if needed):" >&2
+echo "" >&2
+
+LAST_GROUP_PART="${GROUP_ID##*.}"
+
+while IFS= read -r pkg; do
+  if [ -z "$pkg" ]; then
+    continue
+  fi
+
+  # Extract first 3 segments of package
+  PKG_SEGMENTS=(${pkg//./ })
+  if [ "${#PKG_SEGMENTS[@]}" -lt 3 ]; then
+    continue
+  fi
+
+  PKG_PREFIX="${PKG_SEGMENTS[0]}.${PKG_SEGMENTS[1]}.${PKG_SEGMENTS[2]}"
+
+  # Check what the heuristic would produce
+  EXPECTED_ARTIFACT="$LAST_GROUP_PART-${PKG_SEGMENTS[2]}"
+
+  # If it doesn't match the actual artifact, suggest an exception
+  if [ "$EXPECTED_ARTIFACT" != "$ARTIFACT_ID" ]; then
+    echo "  \"$PKG_PREFIX|$GROUP_ID:$ARTIFACT_ID\""
+  fi
+done <<< "$PACKAGES"
+
+# Clean up
+rm -rf "$SOURCE_DIR"
