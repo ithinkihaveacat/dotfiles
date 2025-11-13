@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") LIBRARY_COORDINATE
+
+Helper script to analyze a Jetpack library and suggest exceptions for jetpack-library.
+
+Arguments:
+  LIBRARY_COORDINATE  Maven coordinate (e.g., androidx.wear:wear)
+
+Examples:
+  $(basename "$0") androidx.wear:wear
+  $(basename "$0") androidx.core:core
+  $(basename "$0") androidx.lifecycle:lifecycle-viewmodel
+
+This script downloads the source JAR for a library, examines the package structure,
+and suggests exception entries for packages that don't follow the standard naming
+pattern. The output can be added to the EXCEPTIONS array in the jetpack-library script.
+
+How to build the full exceptions table:
+1. Get a list of all AndroidX libraries from https://androidx.tech
+2. For each library, run this script to analyze its package structure
+3. Add suggested exceptions to jetpack-library
+4. Test the exceptions with real package names from your code
+
+Alternatively, you can build exceptions on-demand:
+1. When jetpack-library produces incorrect output for a package
+2. Use jetpack-version to find what library provides that package
+3. Add the exception mapping to the EXCEPTIONS array
+EOF
+  exit 0
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
+set -e
+
+if [ "$#" -lt 1 ]; then
+  echo "$(basename "$0"): missing operand" >&2
+  exit 1
+fi
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$(basename "$0"): required command '$1' not found" >&2
+    exit 127
+  }
+}
+
+require curl
+require jar
+
+# Find jetpack-library script (should be in same directory as this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JETPACK_LIBRARY="$SCRIPT_DIR/jetpack-library"
+
+if [ ! -x "$JETPACK_LIBRARY" ]; then
+  # Try PATH as fallback
+  if command -v jetpack-library >/dev/null 2>&1; then
+    JETPACK_LIBRARY="jetpack-library"
+  else
+    echo "$(basename "$0"): jetpack-library script not found" >&2
+    exit 127
+  fi
+fi
+
+LIBRARY=$1
+GROUP_ID=$(echo "$LIBRARY" | cut -d: -f1)
+ARTIFACT_ID=$(echo "$LIBRARY" | cut -d: -f2)
+REPO_URL="${2:-https://dl.google.com/android/maven2}"
+
+echo "Analyzing library: $LIBRARY" >&2
+
+# Get the latest stable version
+GROUP_ID_PATH=$(echo "$GROUP_ID" | sed 's/\./\//g')
+METADATA_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/maven-metadata.xml"
+
+VERSION=$(curl -sSL "$METADATA_URL" 2>/dev/null |
+  grep -oP '<release>\K[^<]+' |
+  head -1)
+
+if [ -z "$VERSION" ]; then
+  # Try to get latest version if no release
+  VERSION=$(curl -sSL "$METADATA_URL" 2>/dev/null |
+    grep -oP '<latest>\K[^<]+' |
+    head -1)
+fi
+
+if [ -z "$VERSION" ]; then
+  echo "$(basename "$0"): could not determine version for $LIBRARY" >&2
+  exit 1
+fi
+
+echo "Using version: $VERSION" >&2
+
+# Download source JAR to temp directory
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+SOURCE_JAR_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/$VERSION/$ARTIFACT_ID-$VERSION-sources.jar"
+SOURCE_JAR="$TMPDIR/sources.jar"
+
+echo "Downloading: $SOURCE_JAR_URL" >&2
+if ! curl -sSL -o "$SOURCE_JAR" "$SOURCE_JAR_URL" 2>/dev/null; then
+  echo "$(basename "$0"): failed to download source JAR" >&2
+  exit 1
+fi
+
+# Extract and find all packages
+cd "$TMPDIR"
+jar xf sources.jar 2>/dev/null || true
+
+# Find all unique packages from source files
+PACKAGES=$(find . -type f \( -name "*.java" -o -name "*.kt" \) 2>/dev/null | while read -r file; do
+  grep -m1 "^package " "$file" 2>/dev/null | sed 's/package //;s/;.*//;s/ .*//'
+done | sort -u)
+
+if [ -z "$PACKAGES" ]; then
+  echo "$(basename "$0"): no packages found in source JAR" >&2
+  exit 1
+fi
+
+echo "" >&2
+echo "Found packages:" >&2
+echo "$PACKAGES" | sed 's/^/  /' >&2
+echo "" >&2
+
+# Test each package against jetpack-library to find needed exceptions
+echo "Checking which packages need exceptions:" >&2
+echo "" >&2
+
+NEEDS_EXCEPTION=false
+while IFS= read -r pkg; do
+  if [ -z "$pkg" ]; then
+    continue
+  fi
+
+  # Test with a fake class name
+  RESULT=$("$JETPACK_LIBRARY" "$pkg.TestClass" 2>/dev/null || echo "ERROR")
+
+  # Check if result matches expected library
+  if [ "$RESULT" != "$GROUP_ID:$ARTIFACT_ID" ]; then
+    echo "  \"$pkg|$GROUP_ID:$ARTIFACT_ID\""
+    NEEDS_EXCEPTION=true
+  fi
+done <<< "$PACKAGES"
+
+if [ "$NEEDS_EXCEPTION" = false ]; then
+  echo "  (no exceptions needed - all packages map correctly)" >&2
+fi

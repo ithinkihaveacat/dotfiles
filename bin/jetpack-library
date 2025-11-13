@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") PACKAGE_NAME
+
+Convert an Android package name to its corresponding Jetpack library coordinate.
+
+Arguments:
+  PACKAGE_NAME  Fully qualified package/class name (e.g., androidx.core.splashscreen.SplashScreen)
+
+Examples:
+  $(basename "$0") androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+  $(basename "$0") androidx.wear.ambient.AmbientLifecycleObserver
+  $(basename "$0") androidx.wear.protolayout.material3.textButton
+  $(basename "$0") androidx.lifecycle.ViewModel
+
+The script converts AndroidX package names to Maven library coordinates using
+heuristic rules and a lookup table for exceptions. Output format is GROUP_ID:ARTIFACT_ID
+(e.g., androidx.core:core-splashscreen).
+EOF
+  exit 0
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
+if [ "$#" -lt 1 ]; then
+  echo "$(basename "$0"): missing operand" >&2
+  exit 1
+fi
+
+PACKAGE_NAME=$1
+
+# Extract package prefix (remove class names and method names)
+# Split on dots and take segments until we find a likely package
+# Class names start with uppercase, so we stop at the first uppercase segment
+SEGMENTS=()
+IFS='.' read -ra ALL_SEGMENTS <<< "$PACKAGE_NAME"
+for segment in "${ALL_SEGMENTS[@]}"; do
+  # Check if segment starts with uppercase (likely a class name)
+  if [[ "$segment" =~ ^[A-Z] ]]; then
+    break
+  fi
+  SEGMENTS+=("$segment")
+done
+
+# If we filtered everything out, use the original segments
+if [ "${#SEGMENTS[@]}" -eq 0 ]; then
+  SEGMENTS=("${ALL_SEGMENTS[@]}")
+fi
+
+# Rebuild package name from segments (without class names)
+PACKAGE_PREFIX=$(IFS=.; echo "${SEGMENTS[*]}")
+
+# Known 3-segment AndroidX group IDs
+THREE_SEGMENT_GROUPS=(
+  "androidx.wear.protolayout"
+  "androidx.wear.compose"
+  "androidx.wear.tiles"
+  "androidx.wear.watchface"
+  "androidx.compose.animation"
+  "androidx.compose.foundation"
+  "androidx.compose.material"
+  "androidx.compose.material3"
+  "androidx.compose.runtime"
+  "androidx.compose.ui"
+)
+
+# Exceptions table: maps package prefix to library coordinate
+# Format: "package.prefix|group:artifact"
+EXCEPTIONS=(
+  "androidx.activity.contextaware|androidx.activity:activity"
+  "androidx.activity.result|androidx.activity:activity"
+  "androidx.core.app|androidx.core:core"
+  "androidx.core.content|androidx.core:core"
+  "androidx.core.graphics|androidx.core:core"
+  "androidx.core.os|androidx.core:core"
+  "androidx.core.util|androidx.core:core"
+  "androidx.core.view|androidx.core:core"
+  "androidx.core.widget|androidx.core:core"
+  "androidx.datastore.preferences.core|androidx.datastore:datastore-preferences-core"
+  "androidx.fragment.app|androidx.fragment:fragment"
+  "androidx.glance.wear.tiles|androidx.glance:glance-wear-tiles"
+  "androidx.lifecycle.livedata|androidx.lifecycle:lifecycle-livedata"
+  "androidx.lifecycle.viewmodel|androidx.lifecycle:lifecycle-viewmodel"
+  "androidx.lifecycle|androidx.lifecycle:lifecycle-runtime"
+  "androidx.wear.activity|androidx.wear:wear"
+  "androidx.wear.ambient|androidx.wear:wear"
+  "androidx.wear.input|androidx.wear:wear-input"
+  "androidx.wear.ongoing|androidx.wear:wear-ongoing"
+  "androidx.wear.phone|androidx.wear:wear-phone-interactions"
+  "androidx.wear.provider|androidx.wear:wear"
+  "androidx.wear.remote|androidx.wear:wear-remote-interactions"
+  "androidx.wear.tiles|androidx.wear.tiles:tiles"
+  "androidx.wear.utils|androidx.wear:wear"
+)
+
+# Check exceptions first (longest match wins)
+BEST_MATCH=""
+BEST_MATCH_LENGTH=0
+for exception in "${EXCEPTIONS[@]}"; do
+  PREFIX="${exception%%|*}"
+  COORDINATE="${exception##*|}"
+
+  # Check if package prefix starts with this exception prefix
+  if [[ "$PACKAGE_PREFIX" == "$PREFIX"* ]]; then
+    PREFIX_LENGTH=${#PREFIX}
+    if [ "$PREFIX_LENGTH" -gt "$BEST_MATCH_LENGTH" ]; then
+      BEST_MATCH="$COORDINATE"
+      BEST_MATCH_LENGTH=$PREFIX_LENGTH
+    fi
+  fi
+done
+
+if [ -n "$BEST_MATCH" ]; then
+  echo "$BEST_MATCH"
+  exit 0
+fi
+
+# Heuristic approach: determine group ID and artifact ID
+# Check if it's a 3-segment group
+GROUP_ID=""
+NEXT_SEGMENT=""
+
+for three_seg in "${THREE_SEGMENT_GROUPS[@]}"; do
+  if [[ "$PACKAGE_PREFIX" == "$three_seg."* ]]; then
+    GROUP_ID="$three_seg"
+    # Extract the next segment after the group ID
+    REMAINING="${PACKAGE_PREFIX#$three_seg.}"
+    NEXT_SEGMENT="${REMAINING%%.*}"
+    break
+  fi
+done
+
+# If not a 3-segment group, assume 2-segment group (androidx.X)
+if [ -z "$GROUP_ID" ]; then
+  if [ "${#SEGMENTS[@]}" -lt 3 ]; then
+    echo "$(basename "$0"): package name too short: $PACKAGE_PREFIX" >&2
+    exit 1
+  fi
+
+  GROUP_ID="${SEGMENTS[0]}.${SEGMENTS[1]}"
+  NEXT_SEGMENT="${SEGMENTS[2]}"
+fi
+
+# Build artifact ID using the pattern: {last_part_of_group}-{next_segment}
+LAST_GROUP_PART="${GROUP_ID##*.}"
+
+# Handle special cases where next segment is a generic name
+case "$NEXT_SEGMENT" in
+  app|content|graphics|os|util|view|widget|internal)
+    # These are typically part of the core library
+    ARTIFACT_ID="$LAST_GROUP_PART"
+    ;;
+  *)
+    # Standard pattern: last_group_part-next_segment
+    ARTIFACT_ID="$LAST_GROUP_PART-$NEXT_SEGMENT"
+    ;;
+esac
+
+echo "$GROUP_ID:$ARTIFACT_ID"
