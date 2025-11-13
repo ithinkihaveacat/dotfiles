@@ -1,7 +1,7 @@
 # fish/functions/__fish_android_packages.fish
 function __fish_android_packages
     # Check if a device is connected
-    if not adb devices | grep -q "device$"
+    if not adb get-state >/dev/null 2>&1
         return 1
     end
 
