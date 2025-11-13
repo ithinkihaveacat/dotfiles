@@ -57,6 +57,7 @@ Commands:
   start <name>        Start the specified AVD.
   stop <name>         Stop the specified AVD.
   delete <name>       Delete the specified AVD.
+  download <image>    Download a system image.
   images              List all available system images with API level >=33.
   outdated            Show outdated SDK packages.
   update              Update all installed SDK packages to latest versions.
@@ -301,6 +302,23 @@ install_platforms() {
 
 }
 
+download_image() {
+  local image_package="$1"
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+  # Check if the image is installed, and install it if it's not
+  local installed_packages
+  installed_packages=$(env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --list_installed)
+  if ! echo "${installed_packages}" | grep -q "${image_package}"; then
+    echo "System image '${image_package}' not found. Installing..."
+    yes | env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --licenses > /dev/null || true
+    if ! env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --install "${image_package}"; then
+      echo "Failed to install system image '${image_package}'. Please check if the package name is valid." >&2
+      exit 1
+    fi
+  fi
+}
+
 create_avd() {
   bootstrap
   require avdmanager
@@ -350,6 +368,19 @@ start_avd() {
   if ! echo "$all_avds" | grep -q "^${avd_name}$"; then
     echo "$(basename "$0"): AVD '${avd_name}' does not exist. Available AVDs:" >&2
     echo "$all_avds" >&2
+    exit 1
+  fi
+
+  local image_package
+  image_package=$(get_avd_image_package "$avd_name")
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  local installed_packages
+  installed_packages=$("$sdkmanager" --list_installed)
+  if ! echo "${installed_packages}" | grep -q "${image_package}"; then
+    echo "System image '${image_package}' for AVD '${avd_name}' not found." >&2
+    echo "Please download it using the following command:" >&2
+    echo "  $(basename "$0") download \"${image_package}\"" >&2
     exit 1
   fi
 
@@ -641,11 +672,8 @@ info_avd() {
   sdcard_size=$(grep "^sdcard.size=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
   playstore_enabled=$(grep "^PlayStore.enabled=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
 
-  # Convert sysdir path to package name (e.g., system-images/android-36/android-wear-signed/arm64-v8a/)
   local package_name
-  if [[ -n "$sysdir" ]]; then
-    package_name=$(echo "$sysdir" | sed 's|system-images/|system-images;|' | sed 's|/|;|g' | sed 's|;$||')
-  fi
+  package_name=$(get_avd_image_package "$avd_name")
 
   # Check if AVD is running
   local is_running=false
@@ -730,6 +758,32 @@ info_avd() {
   echo "Path: ${avd_path}"
 }
 
+get_avd_image_package() {
+    local avd_name="$1"
+    local avd_ini="$HOME/.android/avd/${avd_name}.ini"
+    local sysdir
+
+    if [[ ! -f "$avd_ini" ]]; then
+        echo "$(basename "$0"): AVD '${avd_name}' does not exist." >&2
+        exit 1
+    fi
+
+    local avd_path
+    avd_path=$(grep "^path=" "$avd_ini" | cut -d'=' -f2)
+    local config_ini="${avd_path}/config.ini"
+
+    if [[ ! -f "$config_ini" ]]; then
+        echo "$(basename "$0"): AVD configuration file not found at ${config_ini}" >&2
+        exit 1
+    fi
+
+    sysdir=$(grep "^image.sysdir.1=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+
+    if [[ -n "$sysdir" ]]; then
+        echo "$sysdir" | sed 's|system-images/|system-images;|' | sed 's|/|;|g' | sed 's|;$||'
+    fi
+}
+
 check_outdated() {
   bootstrap
   require sdkmanager
@@ -803,6 +857,10 @@ case "$1" in
   delete)
     if [[ -z "${2:-}" ]]; then echo "$(basename "$0") delete: AVD name required" >&2; exit 1; fi
     delete_avd "$2"
+    ;;
+  download)
+    if [[ -z "${2:-}" ]]; then echo "$(basename "$0") download: image name required" >&2; exit 1; fi
+    download_image "$2"
     ;;
   *)
     echo "$(basename "$0"): unknown command '$1'" >&2
