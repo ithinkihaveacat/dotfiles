@@ -224,10 +224,13 @@ install_cli_tools() {
 }
 
 install_emulator() {
+  if [[ -f "$ANDROID_HOME/emulator/emulator" ]]; then
+    return 0
+  fi
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
   if [[ ! -f "$sdkmanager" ]]; then
-    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    echo "$(basename "$0"): sdkmanager not found. Please run 'bootstrap' first." >&2
     exit 1
   fi
 
@@ -237,10 +240,13 @@ install_emulator() {
 }
 
 install_platform_tools() {
+  if [[ -d "$ANDROID_HOME/platform-tools" ]]; then
+    return 0
+  fi
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
   if [[ ! -f "$sdkmanager" ]]; then
-    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    echo "$(basename "$0"): sdkmanager not found. Please run 'bootstrap' first." >&2
     exit 1
   fi
 
@@ -250,10 +256,13 @@ install_platform_tools() {
 }
 
 install_build_tools() {
+  if [[ -d "$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS_VERSION}" ]]; then
+    return 0
+  fi
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
   if [[ ! -f "$sdkmanager" ]]; then
-    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
+    echo "$(basename "$0"): sdkmanager not found. Please run 'bootstrap' first." >&2
     exit 1
   fi
 
@@ -264,15 +273,32 @@ install_build_tools() {
 
 install_platforms() {
 
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-  if [[ ! -f "$sdkmanager" ]]; then
-    echo "$(basename "$0"): sdkmanager not found. Please run --install-cli-tools first." >&2
-    exit 1
+  if [[ -d "$ANDROID_HOME/platforms/${ANDROID_PLATFORM_VERSION}" ]]; then
+
+    return 0
+
   fi
 
-  echo "Installing platforms;${ANDROID_PLATFORM_VERSION}..."
+
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+  if [[ ! -f "$sdkmanager" ]]; then
+
+    echo "$(basename "$0"): sdkmanager not found. Please run 'bootstrap' first." >&2
+
+    exit 1
+
+  fi
+
+
+
+  echo "Installing platforms;${ANDROID_PLATFORM_VERSION}... "
+
   yes | "${sdkmanager}" --licenses > /dev/null || true
+
   "${sdkmanager}" --install "platforms;${ANDROID_PLATFORM_VERSION}"
+
 }
 
 create_avd() {
@@ -365,8 +391,32 @@ start_avd() {
     exit 1
   fi
 
+  # Check for KVM support on Linux for x86_64 emulators
+  if [[ "$(uname -s)" == "Linux" && "$(get_host_arch)" == "x86_64" ]]; then
+    if [[ ! -e /dev/kvm ]]; then
+      echo "$(basename "$0"): ERROR: /dev/kvm not found." >&2
+      echo "KVM acceleration is required for x86_64 emulators on Linux." >&2
+      echo "Please ensure KVM is enabled in BIOS and the module is loaded." >&2
+      echo "More info: https://developer.android.com/studio/run/emulator-acceleration#vm-linux" >&2
+      exit 1
+    fi
+    if ! grep -q -E 'vmx|svm' /proc/cpuinfo; then
+      echo "$(basename "$0"): ERROR: CPU does not support required virtualization extensions (VT-x or AMD-V)." >&2
+      echo "KVM acceleration is required for x86_64 emulators on Linux." >&2
+      echo "More info: https://developer.android.com/studio/run/emulator-acceleration#vm-linux" >&2
+      exit 1
+    fi
+    if ! groups | grep -q "\\bkvm\\b"; then
+      echo "$(basename "$0"): WARNING: User is not in the 'kvm' group. Emulator may fail to start." >&2
+      echo "Run: sudo usermod -aG kvm $USER" >&2
+      echo "You may need to log out and log back in for the group change to take effect." >&2
+    fi
+  fi
+
   echo "Starting AVD '$1'..."
-  nohup "${emulator_path}" -avd "$1" -no-snapshot-load &> /dev/null &
+  local emulator_log
+  emulator_log=$(mktemp)
+  nohup "${emulator_path}" -avd "$1" -no-snapshot-load > "${emulator_log}" 2>&1 &
 
   echo ""
   echo "To debug emulator issues, run this command:"
@@ -378,10 +428,14 @@ start_avd() {
     echo "$(basename "$0"): Timeout waiting for device to connect" >&2
     echo "The emulator may still be starting. Check with: ${adb_path} devices" >&2
     echo "Or debug with the command shown above" >&2
+    echo "--- Emulator Output --- $(date) --- " >&2
+    cat "${emulator_log}" >&2
+    echo "--- End Emulator Output --- $(date) --- " >&2
+    rm -f "${emulator_log}"
     exit 1
   fi
+  rm -f "${emulator_log}"
   echo "Device connected."
-  "${adb_path}" devices -l
 }
 
 stop_avd() {
@@ -452,16 +506,22 @@ delete_avd() {
 
   local avdmanager_path="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
   echo "Deleting AVD '${avd_name}'..."
-  # The 'delete avd' command may return a non-zero exit code on success.
-  "${avdmanager_path}" delete avd -n "${avd_name}" >/dev/null 2>&1 || true
+\
+  "${avdmanager_path}" delete avd -n "${avd_name}"
 
-  # Verify that the AVD has been deleted
-  if "$ANDROID_HOME/emulator/emulator" -list-avds | grep -q "^${avd_name}$"; then
-    echo "$(basename "$0"): Failed to delete AVD '${avd_name}'." >&2
-    exit 1
-  fi
+  # Verify that the AVD has been deleted (with retry)
+  local attempts=0
+  while [[ $attempts -lt 3 ]]; do
+    if ! "${avdmanager_path}" list avd | grep -q "Name: ${avd_name}"; then
+      echo "AVD '${avd_name}' deleted successfully."
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 1
+  done
 
-  echo "AVD '${avd_name}' deleted successfully."
+  echo "$(basename "$0"): Failed to delete AVD '${avd_name}'." >&2
+  exit 1
 }
 
 list_avds() {
