@@ -16,11 +16,48 @@ If `prettier` is not installed globally, you can run it via
 `npx -y prettier@latest --write <file(s)>`. If `npx` is not available, you can
 skip the prettier step.
 
-## Shell Script Linting
+## Shell Script Quality
 
 All shell scripts, whether new or updated, should be passed through `shellcheck`
-for linting. Any errors or warnings should be eliminated, or explicitly ignored
-if absolutely necessary.
+for linting and `shfmt` for formatting.
+
+### Linting
+
+Any errors or warnings from `shellcheck` should be eliminated, or explicitly
+ignored if absolutely necessary.
+
+Before committing any changes to a script, run `shellcheck` on it. All reported
+lint errors must be fixed.
+
+If an error cannot be fixed, it can be ignored using a `shellcheck disable`
+comment. See the
+[ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore) for more
+information.
+
+#### Example
+
+```bash
+# Good
+shellcheck my-script.sh
+
+# Good (with ignored error)
+# shellcheck disable=SC2086
+echo $VAR
+```
+
+### Formatting
+
+All shell scripts must be processed by `shfmt`.
+
+Example command:
+
+```bash
+shfmt -w -i 2 -ci bin/emumanager
+```
+
+- `-w` edits files in-place.
+- `-i 2` sets the indent to 2 spaces.
+- `-ci` vertically aligns case statements.
 
 ## Jetpack Library Source Code
 

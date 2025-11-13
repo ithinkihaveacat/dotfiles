@@ -1,5 +1,9 @@
 # Script Quality Guidelines
 
+In addition to the rules in this file, please follow the rules in
+@etc/AGENTS.md. In case of conflict, the rules in this file override those in
+@etc/AGENTS.md.
+
 This document provides guidelines for all scripts in the `bin/` subdirectory.
 
 ## General Script Requirements
@@ -274,31 +278,6 @@ Study these for formatting conventions, terminology, and structure.
 - [ ] Proper exit codes (0 for help, 1 for errors)
 - [ ] No dependency lists in help text
 
-## Linting with ShellCheck
-
-All bash scripts in `bin/` must be linted with `shellcheck` to ensure they are
-free of common errors.
-
-### Requirements
-
-- Before committing any changes to a script, run `shellcheck` on it.
-- All reported lint errors must be fixed.
-- If an error cannot be fixed, it can be ignored using a `shellcheck disable`
-  comment. See the
-  [ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore) for more
-  information.
-
-### Example
-
-```bash
-# Good
-shellcheck my-script.sh
-
-# Good (with ignored error)
-# shellcheck disable=SC2086
-echo $VAR
-```
-
 ## Fish Shell Completions
 
 Scripts in `bin/` may have corresponding Fish shell completion files in
@@ -329,24 +308,6 @@ ls fish/completions/my-script.fish
 If you modify `bin/emumanager` to add a new subcommand or option, you must also
 update `fish/completions/emumanager.fish` to include completions for the new
 functionality.
-
-## Formatting Markdown with Prettier
-
-All Markdown files (`.md`) in this repository must be formatted using
-`prettier`.
-
-### Requirements
-
-- Before committing any changes to a Markdown file, run `prettier` on it.
-- The formatting configuration is defined in the `.prettierrc` file in the root
-  of the repository.
-
-### Example
-
-```bash
-# Good
-prettier --write README.md
-```
 
 ## Examples from This Repository
 
