@@ -28,6 +28,7 @@ end
 # Complete subcommands (when no subcommand given)
 complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'bootstrap' -d 'Bootstrap SDK environment for emulator management'
 complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'list' -d 'List all available AVDs'
+complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'info' -d 'Show detailed information about an AVD'
 complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'images' -d 'List all available system images with API level >=33'
 complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'outdated' -d 'Show outdated SDK packages'
 complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'update' -d 'Update all installed SDK packages to latest versions'
@@ -37,6 +38,7 @@ complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'stop' -d 'Sto
 complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'delete' -d 'Delete the specified AVD'
 
 # Complete AVD names for commands that need them
+complete -c emumanager -f -n '__fish_emumanager_using_command info' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
 complete -c emumanager -f -n '__fish_emumanager_using_command start' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
 complete -c emumanager -f -n '__fish_emumanager_using_command stop' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
 complete -c emumanager -f -n '__fish_emumanager_using_command delete' -a '(__fish_emumanager_list_avds)' -d 'AVD name'

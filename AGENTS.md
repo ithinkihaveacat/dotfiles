@@ -299,6 +299,37 @@ shellcheck my-script.sh
 echo $VAR
 ```
 
+## Fish Shell Completions
+
+Scripts in `bin/` may have corresponding Fish shell completion files in
+`fish/completions/`. When updating a script, you must also update its completion
+file if one exists.
+
+### Requirements
+
+- Completion files are named `<script-name>.fish` in `fish/completions/`
+- When adding, removing, or modifying command-line options in a script, update
+  the corresponding completion file
+- When adding a new script that accepts command-line options, consider creating
+  a completion file
+- Completion files should provide completions for all documented options and
+  subcommands
+
+### Finding Completion Files
+
+Check if a completion file exists for a script:
+
+```bash
+# For a script named bin/my-script
+ls fish/completions/my-script.fish
+```
+
+### Example
+
+If you modify `bin/emumanager` to add a new subcommand or option, you must also
+update `fish/completions/emumanager.fish` to include completions for the new
+functionality.
+
 ## Formatting Markdown with Prettier
 
 All Markdown files (`.md`) in this repository must be formatted using

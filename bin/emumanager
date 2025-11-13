@@ -2,6 +2,12 @@
 set -euo pipefail
 
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
+
+# IMPORTANT: All Android SDK tools (adb, emulator, avdmanager, sdkmanager, etc.)
+# must be invoked using their full paths within $ANDROID_HOME, NOT from system PATH.
+# This ensures we use the correct versions and avoid conflicts with system-installed
+# Android tools. The require() function allows these commands to be satisfied from
+# $ANDROID_HOME paths.
 # To find valid versions for build-tools, run:
 # sdkmanager --list | grep "build-tools;"
 export ANDROID_BUILD_TOOLS_VERSION="36.0.0"
@@ -46,6 +52,7 @@ Environment:
 Commands:
   bootstrap           Bootstrap SDK environment for emulator management.
   list                List all available AVDs.
+  info <name>         Show detailed information about an AVD.
   create <name> [image] Create a new Wear OS AVD.
                       Defaults to image: $(get_default_image_package)
   start <name>        Start the specified AVD.
@@ -64,6 +71,9 @@ Examples:
 
   # Create a new AVD with a specific image
   $(basename "$0") create my_specific_avd "system-images;android-33;android-wear;x86_64"
+
+  # Show information about an AVD
+  $(basename "$0") info my_default_avd
 
   # Start a specific AVD
   $(basename "$0") start my_default_avd
@@ -537,6 +547,138 @@ list_images() {
   done) | sort | uniq
 }
 
+info_avd() {
+  bootstrap
+  require grep sed awk cut tr
+
+  local avd_name="$1"
+  local avd_ini="$HOME/.android/avd/${avd_name}.ini"
+  local adb_path="$ANDROID_HOME/platform-tools/adb"
+
+  if [[ ! -f "$avd_ini" ]]; then
+    echo "$(basename "$0"): AVD '${avd_name}' does not exist." >&2
+    exit 1
+  fi
+
+  # Get AVD directory path
+  local avd_path
+  avd_path=$(grep "^path=" "$avd_ini" | cut -d'=' -f2)
+  local config_ini="${avd_path}/config.ini"
+
+  if [[ ! -f "$config_ini" ]]; then
+    echo "$(basename "$0"): AVD configuration file not found at ${config_ini}" >&2
+    exit 1
+  fi
+
+  # Extract information from config.ini
+  local display_name api_level sysdir tag_display abi_type device_name
+  local lcd_width lcd_height lcd_density lcd_circular ram_size data_size
+  local sdcard_size playstore_enabled
+
+  display_name=$(grep "^avd.ini.displayname=" "$config_ini" | cut -d'=' -f2- | tr -d '\r' || true)
+  api_level=$(grep "^image.sysdir.1=" "$config_ini" | cut -d'=' -f2 | sed 's|system-images/android-\([0-9]*\)/.*|\1|' | tr -d '\r' || true)
+  sysdir=$(grep "^image.sysdir.1=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  tag_display=$(grep "^tag.display=" "$config_ini" | cut -d'=' -f2- | tr -d '\r' || true)
+  abi_type=$(grep "^abi.type=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  device_name=$(grep "^hw.device.name=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  lcd_width=$(grep "^hw.lcd.width=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  lcd_height=$(grep "^hw.lcd.height=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  lcd_density=$(grep "^hw.lcd.density=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  lcd_circular=$(grep "^hw.lcd.circular=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  ram_size=$(grep "^hw.ramSize=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  data_size=$(grep "^disk.dataPartition.size=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  sdcard_size=$(grep "^sdcard.size=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+  playstore_enabled=$(grep "^PlayStore.enabled=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true)
+
+  # Convert sysdir path to package name (e.g., system-images/android-36/android-wear-signed/arm64-v8a/)
+  local package_name
+  if [[ -n "$sysdir" ]]; then
+    package_name=$(echo "$sysdir" | sed 's|system-images/|system-images;|' | sed 's|/|;|g' | sed 's|;$||')
+  fi
+
+  # Check if AVD is running
+  local is_running=false
+  local serial_number=""
+  local device_serials
+  device_serials=$(timeout 5 "${adb_path}" devices | grep "emulator-" | awk '{print $1}' || true)
+
+  if [[ -n "$device_serials" ]]; then
+    for serial in $device_serials; do
+      local running_avd_name
+      running_avd_name=$(timeout 5 "${adb_path}" -s "$serial" emu avd name 2>/dev/null | tr -d '[:space:]' || true)
+      if [[ "$running_avd_name" == "$avd_name" ]]; then
+        is_running=true
+        serial_number="$serial"
+        break
+      fi
+    done
+  fi
+
+  # Display information
+  echo "AVD Information: ${avd_name}"
+  if [[ -n "$display_name" ]]; then
+    echo "  Display Name: ${display_name}"
+  fi
+
+  if [[ "$is_running" == true ]]; then
+    echo "  Status: Running (${serial_number})"
+  else
+    echo "  Status: Stopped"
+  fi
+
+  echo ""
+  echo "System Image:"
+  if [[ -n "$package_name" ]]; then
+    echo "  Package: ${package_name}"
+  fi
+  if [[ -n "$api_level" ]]; then
+    echo "  API Level: ${api_level}"
+  fi
+  if [[ -n "$tag_display" ]]; then
+    echo "  Tag: ${tag_display}"
+  fi
+  if [[ -n "$abi_type" ]]; then
+    echo "  Architecture: ${abi_type}"
+  fi
+
+  echo ""
+  echo "Device Configuration:"
+  if [[ -n "$device_name" ]]; then
+    echo "  Profile: ${device_name}"
+  fi
+  if [[ -n "$lcd_width" && -n "$lcd_height" ]]; then
+    local screen_info="${lcd_width}x${lcd_height}"
+    if [[ -n "$lcd_density" ]]; then
+      screen_info="${screen_info} (${lcd_density} dpi"
+      if [[ "$lcd_circular" == "true" ]]; then
+        screen_info="${screen_info}, circular)"
+      else
+        screen_info="${screen_info})"
+      fi
+    fi
+    echo "  Screen: ${screen_info}"
+  fi
+  if [[ -n "$ram_size" ]]; then
+    echo "  RAM: ${ram_size} MB"
+  fi
+  if [[ -n "$data_size" ]]; then
+    echo "  Storage: ${data_size}"
+  fi
+  if [[ -n "$sdcard_size" ]]; then
+    echo "  SD Card: ${sdcard_size}"
+  fi
+  if [[ -n "$playstore_enabled" ]]; then
+    if [[ "$playstore_enabled" == "true" ]]; then
+      echo "  Play Store: Yes"
+    else
+      echo "  Play Store: No"
+    fi
+  fi
+
+  echo ""
+  echo "Path: ${avd_path}"
+}
+
 check_outdated() {
   bootstrap
   require sdkmanager
@@ -580,6 +722,10 @@ case "$1" in
     ;;
   list)
     list_avds "${2:-}"
+    ;;
+  info)
+    if [[ -z "${2:-}" ]]; then echo "$(basename "$0") info: AVD name required" >&2; exit 1; fi
+    info_avd "$2"
     ;;
   images)
     list_images
