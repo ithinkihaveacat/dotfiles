@@ -238,6 +238,7 @@ type -q pbpaste ; or alias pbpaste "xsel -bo"
 
 sourceif ~/.ssh/etc/fish/envrc
 sourceif ~/.ssh/etc/fish/functions.fish
+sourceif ~/.ssh/etc/fish/config.fish
 
 if type -q starship
   starship init fish | source
