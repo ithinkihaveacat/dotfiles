@@ -427,18 +427,21 @@ start_avd() {
     exit 1
   fi
 
-  # Check for KVM support on Linux for x86_64 emulators
-  if [[ "$(uname -s)" == "Linux" && "$(get_host_arch)" == "x86_64" ]]; then
+  local avd_abi_type
+  avd_abi_type=$(get_avd_abi_type "$avd_name")
+
+  # Check for KVM support on Linux for x86 and x86_64 emulators
+  if [[ "$(uname -s)" == "Linux" && ("$avd_abi_type" == "x86" || "$avd_abi_type" == "x86_64") ]]; then
     if [[ ! -e /dev/kvm ]]; then
       echo "$(basename "$0"): ERROR: /dev/kvm not found." >&2
-      echo "KVM acceleration is required for x86_64 emulators on Linux." >&2
+      echo "KVM acceleration is required for x86/x86_64 emulators on Linux." >&2
       echo "Please ensure KVM is enabled in BIOS and the module is loaded." >&2
       echo "More info: https://developer.android.com/studio/run/emulator-acceleration#vm-linux" >&2
       exit 1
     fi
     if ! grep -q -E 'vmx|svm' /proc/cpuinfo; then
       echo "$(basename "$0"): ERROR: CPU does not support required virtualization extensions (VT-x or AMD-V)." >&2
-      echo "KVM acceleration is required for x86_64 emulators on Linux." >&2
+      echo "KVM acceleration is required for x86/x86_64 emulators on Linux." >&2
       echo "More info: https://developer.android.com/studio/run/emulator-acceleration#vm-linux" >&2
       exit 1
     fi
@@ -448,6 +451,10 @@ start_avd() {
       echo "You may need to log out and log back in for the group change to take effect." >&2
     fi
   fi
+
+  # Get a list of emulator serials before starting the new one.
+  local existing_emulators
+  existing_emulators=$("${adb_path}" devices | grep "emulator-" | awk '{print $1}' || true)
 
   echo "Starting AVD '${avd_name}'..."
   local emulator_log
@@ -459,8 +466,44 @@ start_avd() {
   echo "  ${emulator_path} -avd '${avd_name}' -no-snapshot-load -verbose -show-kernel -no-audio"
   echo ""
 
-  echo "Waiting for device to connect (timeout: 120s)..."
-  if ! timeout 120 "${adb_path}" wait-for-device; then
+  echo "Waiting for new emulator to be detected (timeout: 60s)..."
+  local new_serial=""
+  local attempts=0
+  local max_attempts=60 # 60 seconds timeout
+  while [[ -z "$new_serial" && $attempts -lt $max_attempts ]]; do
+    local current_emulators
+    current_emulators=$("${adb_path}" devices | grep "emulator-" | awk '{print $1}' || true)
+    for serial in $current_emulators; do
+      if ! echo "${existing_emulators}" | grep -q "$serial"; then
+        # Check if the AVD name matches
+        local detected_avd_name
+        detected_avd_name=$("${adb_path}" -s "$serial" shell getprop ro.boot.qemu.avd_name 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ "$detected_avd_name" == "$avd_name" ]]; then
+          new_serial="$serial"
+          break
+        fi
+      fi
+    done
+    if [[ -z "$new_serial" ]]; then
+      sleep 1
+      attempts=$((attempts + 1))
+    fi
+  done
+
+  if [[ -z "$new_serial" ]]; then
+    echo "$(basename "$0"): Failed to detect new emulator device" >&2
+    echo "The emulator may still be starting. Check with: ${adb_path} devices" >&2
+    echo "Or debug with the command shown above" >&2
+    echo "--- Emulator Output --- $(date) --- " >&2
+    cat "${emulator_log}" >&2
+    echo "--- End Emulator Output --- $(date) --- " >&2
+    rm -f "${emulator_log}"
+    exit 1
+  fi
+
+  echo "Waiting for device '${new_serial}' to connect (timeout: 120s)..."
+  # Unset ANDROID_SERIAL to ensure we wait for the correct device
+  if ! env ANDROID_SERIAL= timeout 120 "${adb_path}" -s "${new_serial}" wait-for-device; then
     echo "$(basename "$0"): Timeout waiting for device to connect" >&2
     echo "The emulator may still be starting. Check with: ${adb_path} devices" >&2
     echo "Or debug with the command shown above" >&2
@@ -816,6 +859,28 @@ get_avd_image_package() {
     if [[ -n "$sysdir" ]]; then
         echo "$sysdir" | sed 's|system-images/|system-images;|' | sed 's|/|;|g' | sed 's|;$||'
     fi
+}
+
+get_avd_abi_type() {
+    local avd_name="$1"
+    local avd_ini="$HOME/.android/avd/${avd_name}.ini"
+    local config_ini
+
+    if [[ ! -f "$avd_ini" ]]; then
+        echo "$(basename "$0"): AVD '${avd_name}' does not exist." >&2
+        exit 1
+    fi
+
+    local avd_path
+    avd_path=$(grep "^path=" "$avd_ini" | cut -d'=' -f2)
+    config_ini="${avd_path}/config.ini"
+
+    if [[ ! -f "$config_ini" ]]; then
+        echo "$(basename "$0"): AVD configuration file not found at ${config_ini}" >&2
+        exit 1
+    fi
+
+    grep "^abi.type=" "$config_ini" | cut -d'=' -f2 | tr -d '\r' || true
 }
 
 check_outdated() {
