@@ -68,33 +68,42 @@ if [ ! -x "$JETPACK_RESOLVE" ]; then
 fi
 
 LIBRARY=$1
+
+# Validate library format
+if [[ ! "$LIBRARY" =~ ^[^:]+:[^:]+$ ]]; then
+  echo "$(basename "$0"): invalid library format '$LIBRARY' (expected GROUP_ID:ARTIFACT_ID)" >&2
+  exit 1
+fi
+
 GROUP_ID=$(echo "$LIBRARY" | cut -d: -f1)
 ARTIFACT_ID=$(echo "$LIBRARY" | cut -d: -f2)
 REPO_URL="${2:-https://dl.google.com/android/maven2}"
-
-echo "Analyzing library: $LIBRARY" >&2
 
 # Get the latest stable version
 GROUP_ID_PATH=$(echo "$GROUP_ID" | sed 's/\./\//g')
 METADATA_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/maven-metadata.xml"
 
-VERSION=$(curl -sSL "$METADATA_URL" 2>/dev/null |
+# Check if the library exists
+if ! curl -sSLf "$METADATA_URL" >/dev/null 2>&1; then
+  echo "$(basename "$0"): failed to fetch $METADATA_URL" >&2
+  exit 1
+fi
+
+VERSION=$(curl -sSLf "$METADATA_URL" 2>/dev/null |
   grep -oP '<release>\K[^<]+' |
   head -1)
 
 if [ -z "$VERSION" ]; then
   # Try to get latest version if no release
-  VERSION=$(curl -sSL "$METADATA_URL" 2>/dev/null |
+  VERSION=$(curl -sSLf "$METADATA_URL" 2>/dev/null |
     grep -oP '<latest>\K[^<]+' |
     head -1)
 fi
 
 if [ -z "$VERSION" ]; then
-  echo "$(basename "$0"): could not determine version for $LIBRARY" >&2
+  echo "$(basename "$0"): no version found at $METADATA_URL" >&2
   exit 1
 fi
-
-echo "Using version: $VERSION" >&2
 
 # Download source JAR to temp directory
 TMPDIR=$(mktemp -d)
@@ -103,9 +112,8 @@ trap 'rm -rf "$TMPDIR"' EXIT
 SOURCE_JAR_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/$VERSION/$ARTIFACT_ID-$VERSION-sources.jar"
 SOURCE_JAR="$TMPDIR/sources.jar"
 
-echo "Downloading: $SOURCE_JAR_URL" >&2
-if ! curl -sSL -o "$SOURCE_JAR" "$SOURCE_JAR_URL" 2>/dev/null; then
-  echo "$(basename "$0"): failed to download source JAR" >&2
+if ! curl -sSLf -o "$SOURCE_JAR" "$SOURCE_JAR_URL" 2>/dev/null; then
+  echo "$(basename "$0"): failed to download $SOURCE_JAR_URL" >&2
   exit 1
 fi
 
@@ -119,20 +127,10 @@ PACKAGES=$(find . -type f \( -name "*.java" -o -name "*.kt" \) 2>/dev/null | whi
 done | sort -u)
 
 if [ -z "$PACKAGES" ]; then
-  echo "$(basename "$0"): no packages found in source JAR" >&2
+  echo "$(basename "$0"): no packages found in $SOURCE_JAR_URL" >&2
   exit 1
 fi
 
-echo "" >&2
-echo "Found packages:" >&2
-echo "$PACKAGES" | sed 's/^/  /' >&2
-echo "" >&2
-
-# Test each package against jetpack-resolve to find needed exceptions
-echo "Checking which packages need exceptions:" >&2
-echo "" >&2
-
-NEEDS_EXCEPTION=false
 while IFS= read -r pkg; do
   if [ -z "$pkg" ]; then
     continue
@@ -144,10 +142,5 @@ while IFS= read -r pkg; do
   # Check if result matches expected library
   if [ "$RESULT" != "$GROUP_ID:$ARTIFACT_ID" ]; then
     echo "  \"$pkg|$GROUP_ID:$ARTIFACT_ID\""
-    NEEDS_EXCEPTION=true
   fi
-done <<< "$PACKAGES"
-
-if [ "$NEEDS_EXCEPTION" = false ]; then
-  echo "  (no exceptions needed - all packages map correctly)" >&2
-fi
+done <<<"$PACKAGES"
