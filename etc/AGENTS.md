@@ -67,32 +67,32 @@ consult the library's source code. This is important because you will often be
 interacting with the latest version of the library, and understanding its
 implementation is key.
 
-The `context-jetpack` tool can be used to download the source code for Jetpack
+The `jetpack-source` tool can be used to download the source code for Jetpack
 libraries.
 
-### Using `context-jetpack`
+### Using `jetpack-source`
 
 You can use the tool to download the source for a specific library. The version
 defaults to STABLE if not specified:
 
 ```bash
-context-jetpack androidx.wear.tiles:tiles
-context-jetpack androidx.wear.tiles:tiles ALPHA
-context-jetpack androidx.wear.tiles:tiles BETA
-context-jetpack androidx.wear.tiles:tiles RC
+jetpack-source androidx.wear.tiles:tiles
+jetpack-source androidx.wear.tiles:tiles ALPHA
+jetpack-source androidx.wear.tiles:tiles BETA
+jetpack-source androidx.wear.tiles:tiles RC
 ```
 
 This will download the source code to a temporary directory and print the path.
 
-### If `context-jetpack` is not installed
+### If `jetpack-source` is not installed
 
-If the `context-jetpack` command is not available, you can download the script
+If the `jetpack-source` command is not available, you can download the script
 and use it locally:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/context-jetpack -o context-jetpack
-chmod +x context-jetpack
-./context-jetpack androidx.wear.tiles:tiles
+curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/jetpack-source -o jetpack-source
+chmod +x jetpack-source
+./jetpack-source androidx.wear.tiles:tiles
 ```
 
 Alternatively, you can inspect the script's contents to understand how to
