@@ -217,11 +217,14 @@ can use independently:
 
 #### Option 1: Add bin directory to PATH (Recommended)
 
-If you're working in this dotfiles repository or have cloned it:
+Clone the dotfiles repository and add the bin directory to your PATH:
 
 ```bash
+# Clone the repository
+git clone https://github.com/ithinkihaveacat/dotfiles.git
+
 # Add to your current shell session
-export PATH="/home/user/dotfiles/bin:$PATH"
+export PATH="/path/to/dotfiles/bin:$PATH"
 
 # Add to your shell profile for persistence (~/.bashrc, ~/.zshrc, etc.)
 echo 'export PATH="/path/to/dotfiles/bin:$PATH"' >> ~/.bashrc
@@ -271,31 +274,17 @@ sudo apt-get install curl libxml2-utils default-jdk-headless
 
 #### Option 3: Use without installation
 
-You can use the scripts directly without installation:
+Some scripts can be used directly without installation:
 
 ```bash
-# Download and use immediately
-bash <(curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/jetpack-inspect) \
-  androidx.wear.tiles.TileService
+# Example: Check the latest stable version of a package
+bash <(curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/jetpack-version) \
+  androidx.wear.tiles:tiles STABLE
 ```
 
 Note: This approach won't work for `jetpack-inspect` because it depends on other
-scripts that also need to be available. Use Option 2 to download all
-dependencies.
-
-#### Option 4: Package as a single script (Future Enhancement)
-
-Currently, the jetpack tools are distributed as separate scripts with
-dependencies. A potential improvement would be to package them as:
-
-1. **Single bundled script**: Combine all tools into one self-contained script
-2. **Pip/npm package**: Create a proper package with dependency management
-3. **Docker container**: Provide a container image with all dependencies
-4. **Static binary**: Use a tool like [shc](https://github.com/neurobin/shc) to
-   compile the scripts
-
-For now, Option 1 (adding to PATH) or Option 2 (downloading all scripts) are the
-recommended approaches.
+scripts (`jetpack-resolve` and `jetpack-source`) that also need to be available.
+Use Option 2 to download all dependencies.
 
 ### Troubleshooting
 
