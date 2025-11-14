@@ -134,36 +134,196 @@ consult the library's source code. This is important because you will often be
 interacting with the latest version of the library, and understanding its
 implementation is key.
 
-The `jetpack-source` tool can be used to download the source code for Jetpack
-libraries.
+### Using `jetpack-inspect`
 
-### Using `jetpack-source`
+The `jetpack-inspect` command is the most convenient way to quickly access
+Jetpack source code. It takes a fully qualified class or package name and
+automatically downloads the corresponding source code.
 
-You can use the tool to download the source for a specific library. The version
-defaults to STABLE if not specified:
-
-```bash
-jetpack-source androidx.wear.tiles:tiles
-jetpack-source androidx.wear.tiles:tiles ALPHA
-jetpack-source androidx.wear.tiles:tiles BETA
-jetpack-source androidx.wear.tiles:tiles RC
-```
-
-This will download the source code to a temporary directory and print the path.
-
-### If `jetpack-source` is not installed
-
-If the `jetpack-source` command is not available, you can download the script
-and use it locally:
+#### Basic Usage
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/jetpack-source -o jetpack-source
-chmod +x jetpack-source
-./jetpack-source androidx.wear.tiles:tiles
+# Inspect a specific class
+jetpack-inspect androidx.core.splashscreen.SplashScreen
+
+# Inspect with different version types
+jetpack-inspect androidx.wear.ambient.AmbientLifecycleObserver ALPHA
+jetpack-inspect androidx.lifecycle.ViewModel BETA
+jetpack-inspect androidx.wear.tiles.TileService STABLE
 ```
 
-Alternatively, you can inspect the script's contents to understand how to
-download the source code manually.
+The command prints the path to a directory containing the extracted source code.
+You can then navigate to that directory to explore the implementation:
+
+```bash
+# Navigate directly to the source
+cd "$(jetpack-inspect androidx.wear.tiles.TileService)"
+
+# Or use pushd to keep your current directory on the stack
+pushd "$(jetpack-inspect androidx.wear.tiles.TileService)"
+# ... explore source code ...
+popd
+```
+
+#### Practical Examples
+
+**Example 1: Understanding a class implementation**
+
+```bash
+# You're working with SplashScreen and want to understand how it works
+cd "$(jetpack-inspect androidx.core.splashscreen.SplashScreen)"
+ls  # See the source structure
+grep -r "installSplashScreen" .  # Find specific methods
+```
+
+**Example 2: Checking the latest alpha version**
+
+```bash
+# You want to see what's coming in the next release
+jetpack-inspect androidx.wear.tiles.TileService ALPHA
+```
+
+**Example 3: Comparing implementations**
+
+```bash
+# Download multiple versions to compare
+STABLE_DIR=$(jetpack-inspect androidx.lifecycle.ViewModel STABLE)
+ALPHA_DIR=$(jetpack-inspect androidx.lifecycle.ViewModel ALPHA)
+diff -r "$STABLE_DIR" "$ALPHA_DIR"
+```
+
+### Related Tools
+
+The `jetpack-inspect` command is built on top of several other tools that you
+can use independently:
+
+- **`jetpack-resolve`**: Converts a class name to a Maven coordinate
+  ```bash
+  jetpack-resolve androidx.core.splashscreen.SplashScreen
+  # Output: androidx.core:core-splashscreen
+  ```
+- **`jetpack-source`**: Downloads source code using Maven coordinates
+  ```bash
+  jetpack-source androidx.wear.tiles:tiles
+  jetpack-source androidx.wear.tiles:tiles ALPHA
+  ```
+- **`jetpack-version`**: Gets version information for a package
+  ```bash
+  jetpack-version androidx.wear.tiles:tiles STABLE
+  jetpack-version androidx.wear.tiles:tiles ALPHA
+  ```
+
+### Installation
+
+#### Option 1: Add bin directory to PATH (Recommended)
+
+If you're working in this dotfiles repository or have cloned it:
+
+```bash
+# Add to your current shell session
+export PATH="/home/user/dotfiles/bin:$PATH"
+
+# Add to your shell profile for persistence (~/.bashrc, ~/.zshrc, etc.)
+echo 'export PATH="/path/to/dotfiles/bin:$PATH"' >> ~/.bashrc
+```
+
+After adding to PATH, verify installation:
+
+```bash
+jetpack-inspect --help
+```
+
+#### Option 2: Download individual scripts
+
+If the tools are not in your PATH, you can download them individually. Note that
+`jetpack-inspect` requires several dependencies:
+
+**Download all required scripts:**
+
+```bash
+# Create a local bin directory
+mkdir -p ~/bin
+
+# Download all jetpack tools
+for script in jetpack-inspect jetpack-resolve jetpack-source jetpack-version; do
+  curl -sSL "https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/$script" \
+    -o ~/bin/"$script"
+  chmod +x ~/bin/"$script"
+done
+
+# Add to PATH for current session
+export PATH="$HOME/bin:$PATH"
+```
+
+**System dependencies:**
+
+These tools require the following system utilities:
+
+- `curl` - for downloading files
+- `xmllint` - for parsing Maven metadata (usually in `libxml2-utils` package)
+- `jar` - for extracting source JARs (part of JDK)
+
+Install on Debian/Ubuntu:
+
+```bash
+sudo apt-get install curl libxml2-utils default-jdk-headless
+```
+
+#### Option 3: Use without installation
+
+You can use the scripts directly without installation:
+
+```bash
+# Download and use immediately
+bash <(curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/jetpack-inspect) \
+  androidx.wear.tiles.TileService
+```
+
+Note: This approach won't work for `jetpack-inspect` because it depends on other
+scripts that also need to be available. Use Option 2 to download all
+dependencies.
+
+#### Option 4: Package as a single script (Future Enhancement)
+
+Currently, the jetpack tools are distributed as separate scripts with
+dependencies. A potential improvement would be to package them as:
+
+1. **Single bundled script**: Combine all tools into one self-contained script
+2. **Pip/npm package**: Create a proper package with dependency management
+3. **Docker container**: Provide a container image with all dependencies
+4. **Static binary**: Use a tool like [shc](https://github.com/neurobin/shc) to
+   compile the scripts
+
+For now, Option 1 (adding to PATH) or Option 2 (downloading all scripts) are the
+recommended approaches.
+
+### Troubleshooting
+
+**"Command not found" errors:**
+
+If you see errors like `jetpack-resolve: command not found` when running
+`jetpack-inspect`, ensure all scripts are in your PATH:
+
+```bash
+# Check if scripts are accessible
+which jetpack-inspect jetpack-resolve jetpack-source jetpack-version
+```
+
+**"xmllint: command not found":**
+
+Install the libxml2-utils package:
+
+```bash
+sudo apt-get install libxml2-utils
+```
+
+**"jar: command not found":**
+
+Install a JDK:
+
+```bash
+sudo apt-get install default-jdk-headless
+```
 
 ## Android Device Interaction (ADB, APK, Package, Wear OS)
 
