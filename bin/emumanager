@@ -101,10 +101,13 @@ get_latest_image_for_type() {
   esac
 
   # Find matching images and extract the one with the highest API level
+  # Version priority: CANARY > letter codenames (Baklava) > dotted numeric (36.1) > numeric (36)
   local best_image=""
-  local best_api=0
+  local best_version_type=0  # 0=none, 1=numeric, 2=dotted, 3=codename, 4=canary
+  local best_version_value=""
   local preferred_image=""
-  local preferred_api=0
+  local preferred_version_type=0
+  local preferred_version_value=""
 
   while IFS= read -r line; do
     # Extract package path
@@ -126,29 +129,114 @@ get_latest_image_for_type() {
       continue
     fi
 
-    # Extract API level (second field in package path)
+    # Extract API level/version (second field in package path)
     local api_part
     api_part=$(echo "$package" | awk -F';' '{print $2}')
-    local api_level
-    api_level=$(echo "$api_part" | sed 's/android-//' | sed 's/-.*//')
+    local version_string
+    version_string=$(echo "$api_part" | sed 's/android-//')
 
-    # Skip if not a numeric API level
-    if ! [[ "$api_level" =~ ^[0-9]+$ ]]; then
+    # Determine version type and comparable value
+    local version_type=0
+    local version_value=""
+
+    if [[ "$version_string" == "CANARY" ]]; then
+      # CANARY is always highest priority
+      version_type=4
+      version_value="CANARY"
+    elif [[ "$version_string" =~ ^[0-9]+\.[0-9]+-.*$ ]]; then
+      # Dotted version with suffix (e.g., "36.0-Baklava") - treat as codename
+      version_type=3
+      version_value="$version_string"
+    elif [[ "$version_string" =~ ^[A-Z][a-z]+ ]]; then
+      # Letter codename (e.g., "Baklava", "Baklava-ext19")
+      version_type=3
+      version_value="$version_string"
+    elif [[ "$version_string" =~ ^[0-9]+\.[0-9]+$ ]]; then
+      # Dotted numeric (e.g., "36.1")
+      version_type=2
+      version_value="$version_string"
+    elif [[ "$version_string" =~ ^[0-9]+$ ]]; then
+      # Pure numeric (e.g., "35", "36")
+      version_type=1
+      version_value="$version_string"
+    else
+      # Unknown format, skip
       continue
     fi
 
-    # Track preferred variant separately
-    if [[ -n "$prefer_pattern" ]] && echo "$package" | grep -qE "$prefer_pattern" 2>/dev/null; then
-      if [[ $api_level -gt $preferred_api ]]; then
-        preferred_api=$api_level
-        preferred_image="$package"
-      fi
+    # Helper function to compare versions within the same type
+    local is_better=false
+
+    if [[ $version_type -gt $best_version_type ]]; then
+      # Higher type always wins
+      is_better=true
+    elif [[ $version_type -eq $best_version_type ]]; then
+      # Same type, compare values
+      case $version_type in
+        1|2)
+          # Numeric or dotted numeric - compare as numbers
+          local current_major current_minor best_major best_minor
+          current_major=$(echo "$version_value" | cut -d'.' -f1)
+          current_minor=$(echo "$version_value" | cut -d'.' -f2 2>/dev/null || echo "0")
+          best_major=$(echo "$best_version_value" | cut -d'.' -f1)
+          best_minor=$(echo "$best_version_value" | cut -d'.' -f2 2>/dev/null || echo "0")
+
+          if [[ $current_major -gt $best_major ]] || \
+             [[ $current_major -eq $best_major && $current_minor -gt $best_minor ]]; then
+            is_better=true
+          fi
+          ;;
+        3|4)
+          # Codename or CANARY - use alphabetical (Baklava > 36.0-Baklava in practice)
+          # For codenames, just take the first one we find (they're typically equivalent)
+          # unless it's clearly newer (has -ext suffix with higher number)
+          if [[ "$version_value" > "$best_version_value" ]]; then
+            is_better=true
+          fi
+          ;;
+      esac
     fi
 
-    # Update best if this is higher
-    if [[ $api_level -gt $best_api ]]; then
-      best_api=$api_level
+    # Update best if this is better
+    if [[ "$is_better" == "true" ]]; then
+      best_version_type=$version_type
+      best_version_value="$version_value"
       best_image="$package"
+    fi
+
+    # Track preferred variant separately (same comparison logic)
+    if [[ -n "$prefer_pattern" ]] && echo "$package" | grep -qE "$prefer_pattern" 2>/dev/null; then
+      local is_preferred_better=false
+
+      if [[ $version_type -gt $preferred_version_type ]]; then
+        is_preferred_better=true
+      elif [[ $version_type -eq $preferred_version_type ]]; then
+        case $version_type in
+          1|2)
+            local current_major current_minor pref_major pref_minor
+            current_major=$(echo "$version_value" | cut -d'.' -f1)
+            current_minor=$(echo "$version_value" | cut -d'.' -f2 2>/dev/null || echo "0")
+            pref_major=$(echo "$preferred_version_value" | cut -d'.' -f1)
+            pref_minor=$(echo "$preferred_version_value" | cut -d'.' -f2 2>/dev/null || echo "0")
+
+            if [[ $current_major -gt $pref_major ]] || \
+               [[ $current_major -eq $pref_major && $current_minor -gt $pref_minor ]]; then
+              is_preferred_better=true
+            fi
+            ;;
+          3|4)
+            if [[ "$version_value" > "$preferred_version_value" ]]; then
+              is_preferred_better=true
+            fi
+            ;;
+        esac
+      fi
+
+      if [[ "$is_preferred_better" == "true" ]]; then
+        preferred_version_type=$version_type
+        preferred_version_value="$version_value"
+        preferred_image="$package"
+      fi
     fi
   done < <(echo "$all_packages" | grep "system-images;android-" || true)
 
