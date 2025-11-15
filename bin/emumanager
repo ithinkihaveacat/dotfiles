@@ -408,6 +408,7 @@ create_avd() {
   # Determine device definition based on image type
   # Extract the tag (3rd field) from the image package
   # Format: system-images;API_LEVEL;TAG;ARCHITECTURE
+  # To see all available device definitions, run: avdmanager list device
   local image_tag
   image_tag=$(echo "${image_package}" | awk -F';' '{print $3}')
 
@@ -418,8 +419,9 @@ create_avd() {
     device_arg="-d wearos_large_round"
     echo "Detected Wear OS image, using device definition: wearos_large_round"
   else
-    # Mobile/tablet image - omit -d flag to use avdmanager's default
-    echo "Detected mobile/tablet image, using default device definition"
+    # Mobile/tablet image - use medium_phone device definition
+    device_arg="-d medium_phone"
+    echo "Detected mobile/tablet image, using device definition: medium_phone"
   fi
 
   # Create AVD with appropriate device definition
@@ -614,7 +616,7 @@ stop_avd() {
 
   # Get serial numbers of all online emulator devices
   local device_serials
-  device_serials=$("${adb_path}" devices | grep "emulator-" | awk '{print $1}')
+  device_serials=$("${adb_path}" devices | grep "emulator-" | awk '{print $1}' || true)
 
   if [[ -z "$device_serials" ]]; then
     echo "No running emulators found."
@@ -646,16 +648,26 @@ delete_avd() {
   require avdmanager emulator
 
   local avd_name="$1"
+  local avd_dir="$HOME/.android/avd/${avd_name}.avd"
+  local avd_ini="$HOME/.android/avd/${avd_name}.ini"
 
   # Check if AVD exists
   if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -q "^${avd_name}$"; then
+    # AVD not registered, but check for orphaned files
+    if [[ -d "$avd_dir" ]] || [[ -f "$avd_ini" ]]; then
+      echo "AVD '${avd_name}' is not registered, but orphaned files exist. Cleaning up..."
+      [[ -d "$avd_dir" ]] && rm -rf "$avd_dir" && echo "  Removed directory: $avd_dir"
+      [[ -f "$avd_ini" ]] && rm -f "$avd_ini" && echo "  Removed file: $avd_ini"
+      echo "Orphaned files cleaned up successfully."
+      return 0
+    fi
     echo "$(basename "$0"): AVD '${avd_name}' does not exist." >&2
     exit 1
   fi
 
   # Check if AVD is running and stop it
   local running_avds
-  running_avds=$(list_avds | grep '(emulator-' | awk '{print $1}')
+  running_avds=$(list_avds | grep '(emulator-' | awk '{print $1}' || true)
   if echo "$running_avds" | grep -q "^${avd_name}$"; then
     echo "AVD '${avd_name}' is running. Stopping it first..."
     stop_avd "${avd_name}"
@@ -670,7 +682,28 @@ delete_avd() {
   local attempts=0
   while [[ $attempts -lt 3 ]]; do
     if ! "${avdmanager_path}" list avd | grep -q "Name: ${avd_name}"; then
-      echo "AVD '${avd_name}' deleted successfully."
+      # Give avdmanager a moment to finish cleaning up files.
+      # There appears to be a bug where avdmanager successfully removes the AVD
+      # from its registry but leaves the .avd directory behind, especially when
+      # the AVD was recently running. This delay gives it a chance to complete.
+      sleep 2
+
+      # Clean up any remaining files that avdmanager didn't remove
+      local cleaned=false
+      if [[ -d "$avd_dir" ]]; then
+        rm -rf "$avd_dir"
+        cleaned=true
+      fi
+      if [[ -f "$avd_ini" ]]; then
+        rm -f "$avd_ini"
+        cleaned=true
+      fi
+
+      if [[ "$cleaned" == true ]]; then
+        echo "AVD '${avd_name}' deleted and cleaned up successfully."
+      else
+        echo "AVD '${avd_name}' deleted successfully."
+      fi
       return 0
     fi
     attempts=$((attempts + 1))
@@ -780,7 +813,7 @@ list_images() {
     exit 1
   fi
 
-  (echo "$all_packages_raw" | grep "system-images;android-" | grep "$arch_filter" | while IFS= read -r line; do
+  (echo "$all_packages_raw" | { grep "system-images;android-" | grep "$arch_filter" || true; } | while IFS= read -r line; do
     # Extract package path and trim whitespace
     local package_path
     package_path=$(echo "$line" | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
