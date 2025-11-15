@@ -20,9 +20,14 @@ function __fish_emumanager_using_command
   return 1
 end
 
-# Helper function: get list of AVDs
+# Helper function: get list of all AVDs
 function __fish_emumanager_list_avds
   emumanager list --names-only 2>/dev/null
+end
+
+# Helper function: get list of running AVDs only
+function __fish_emumanager_list_running_avds
+  emumanager list --running-only 2>/dev/null
 end
 
 # Helper function: get list of system images
@@ -46,12 +51,13 @@ complete -c emumanager -f -n '__fish_emumanager_needs_command' -a 'download' -d 
 # Complete AVD names for commands that need them
 complete -c emumanager -f -n '__fish_emumanager_using_command info' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
 complete -c emumanager -f -n '__fish_emumanager_using_command start' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
-complete -c emumanager -f -n '__fish_emumanager_using_command stop' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
+complete -c emumanager -f -n '__fish_emumanager_using_command stop' -a '(__fish_emumanager_list_running_avds)' -d 'Running AVD'
 complete -c emumanager -f -n '__fish_emumanager_using_command delete' -a '(__fish_emumanager_list_avds)' -d 'AVD name'
 complete -c emumanager -f -n '__fish_emumanager_using_command download' -a '(__fish_emumanager_list_images)' -d 'System image'
 
 # Complete flags
 complete -c emumanager -f -s h -l help -d 'Display help message and exit'
 complete -c emumanager -f -n '__fish_emumanager_using_command list' -l names-only -d 'Output only AVD names without decoration'
+complete -c emumanager -f -n '__fish_emumanager_using_command list' -l running-only -d 'Output only running AVD names'
 complete -c emumanager -f -n '__fish_emumanager_using_command start' -l cold-boot -d 'Perform a cold boot (bypass Quick Boot snapshots)'
 complete -c emumanager -f -n '__fish_emumanager_using_command start' -l wipe-data -d 'Factory reset (wipe all data and perform cold boot)'
