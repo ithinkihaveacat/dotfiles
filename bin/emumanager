@@ -56,7 +56,10 @@ Commands:
   info <name>         Show detailed information about an AVD.
   create <name> [image] Create a new Wear OS AVD.
                       Defaults to image: $(get_default_image_package)
-  start <name>        Start the specified AVD.
+  start <name> [--cold-boot|--wipe-data]
+                      Start the specified AVD.
+                      --cold-boot: Perform a cold boot (bypass Quick Boot snapshots)
+                      --wipe-data: Factory reset (wipe all data and perform cold boot)
   stop <name>         Stop the specified AVD.
   delete <name>       Delete the specified AVD.
   download <image>    Download a system image.
@@ -77,8 +80,14 @@ Examples:
   # Show information about an AVD
   $(basename "$0") info my_default_avd
 
-  # Start a specific AVD
+  # Start an AVD (Quick Boot - fast)
   $(basename "$0") start my_default_avd
+
+  # Start an AVD with a cold boot
+  $(basename "$0") start my_default_avd --cold-boot
+
+  # Factory reset an AVD (wipe all data)
+  $(basename "$0") start my_default_avd --wipe-data
 
   # Check for outdated packages
   $(basename "$0") outdated
@@ -403,7 +412,48 @@ start_avd() {
   bootstrap
   require emulator adb
 
-  local avd_name="$1"
+  # Parse flags and AVD name (flags can appear in any position)
+  local cold_boot=false
+  local wipe_data=false
+  local avd_name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cold-boot)
+        cold_boot=true
+        shift
+        ;;
+      --wipe-data)
+        wipe_data=true
+        shift
+        ;;
+      -*)
+        echo "$(basename "$0") start: unknown flag '$1'" >&2
+        echo "Valid flags: --cold-boot, --wipe-data" >&2
+        exit 1
+        ;;
+      *)
+        # This is the AVD name
+        if [[ -n "$avd_name" ]]; then
+          echo "$(basename "$0") start: multiple AVD names specified: '$avd_name' and '$1'" >&2
+          exit 1
+        fi
+        avd_name="$1"
+        shift
+        ;;
+    esac
+  done
+
+  # Validate that AVD name was provided
+  if [[ -z "$avd_name" ]]; then
+    echo "$(basename "$0") start: AVD name required" >&2
+    exit 1
+  fi
+
+  # --wipe-data implies cold boot
+  if [[ "$wipe_data" == true ]]; then
+    cold_boot=true
+  fi
 
   # Check if AVD exists by listing them
   local all_avds
@@ -481,14 +531,30 @@ start_avd() {
   emulator_port=$(find_available_emulator_port)
   local emulator_serial="emulator-${emulator_port}"
 
-  echo "Starting AVD '${avd_name}' on port ${emulator_port} (serial: ${emulator_serial})..."
+  # Build emulator command with appropriate flags
+  local emulator_flags="-avd ${avd_name} -port ${emulator_port}"
+  local boot_mode="Quick Boot"
+
+  if [[ "$cold_boot" == true ]]; then
+    emulator_flags="${emulator_flags} -no-snapshot-load"
+    boot_mode="Cold Boot"
+  fi
+
+  if [[ "$wipe_data" == true ]]; then
+    emulator_flags="${emulator_flags} -wipe-data"
+    boot_mode="Factory Reset + Cold Boot"
+  fi
+
+  echo "Starting AVD '${avd_name}' on port ${emulator_port} (serial: ${emulator_serial}) [${boot_mode}]..."
   local emulator_log
   emulator_log=$(mktemp)
-  nohup "${emulator_path}" -avd "${avd_name}" -port "${emulator_port}" -no-snapshot-load >"${emulator_log}" 2>&1 &
+  # shellcheck disable=SC2086
+  nohup "${emulator_path}" ${emulator_flags} >"${emulator_log}" 2>&1 &
 
   echo ""
   echo "To debug emulator issues, run this command:"
-  echo "  ${emulator_path} -avd '${avd_name}' -port ${emulator_port} -no-snapshot-load -verbose -show-kernel -no-audio"
+  # shellcheck disable=SC2086
+  echo "  ${emulator_path} ${emulator_flags} -verbose -show-kernel -no-audio"
   echo ""
 
   echo "Waiting for device ${emulator_serial} to connect (timeout: 120s)..."
@@ -504,7 +570,7 @@ start_avd() {
   fi
 
   echo "Waiting for boot animation to stop..."
-  while [ "$("${adb_path}" -s "${emulator_serial}" shell getprop init.svc.bootanim | tr -d '\r')" != "stopped" ]; do
+  while [ "$("${adb_path}" -s "${emulator_serial}" shell getprop init.svc.bootanim 2>/dev/null | tr -d '\r')" != "stopped" ]; do
     sleep 1
   done
 
@@ -928,11 +994,7 @@ case "$1" in
     create_avd "$2" "${3:-}"
     ;;
   start)
-    if [[ -z "${2:-}" ]]; then
-      echo "$(basename "$0") start: AVD name required" >&2
-      exit 1
-    fi
-    start_avd "$2"
+    start_avd "${@:2}"
     ;;
   stop)
     if [[ -z "${2:-}" ]]; then
