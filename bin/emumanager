@@ -40,6 +40,137 @@ get_default_image_package() {
   echo "system-images;${ANDROID_PLATFORM_VERSION};android-wear-signed;${arch}"
 }
 
+# Get the latest available image for a specific device type
+# Usage: get_latest_image_for_type <device_type>
+# Device types: mobile, wear, tv, auto
+get_latest_image_for_type() {
+  local device_type="$1"
+  local arch
+  arch=$(get_host_arch)
+
+  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  if [[ ! -f "$sdkmanager" ]]; then
+    echo "$(basename "$0"): sdkmanager not found. Please run 'bootstrap' first." >&2
+    exit 1
+  fi
+
+  # Get all available packages
+  local all_packages
+  if ! all_packages=$(timeout 120 "$sdkmanager" --list 2>&1); then
+    echo "$(basename "$0"): Failed to list available packages" >&2
+    exit 1
+  fi
+
+  # Define patterns for each device type
+  # This design allows for easy addition of new device types in the future
+  local tag_patterns
+  local exclude_patterns
+  local prefer_pattern=""
+
+  case "$device_type" in
+    mobile)
+      # Prefer googleapisplaystore for Google Play support
+      # Also accept googleapis as fallback
+      # Exclude specialized variants (wear, tv, automotive, desktop, tablet, xr, atd, ps16k)
+      tag_patterns="googleapisplaystore|googleapis"
+      exclude_patterns="wear|tv|automotive|desktop|tablet|xr|atd|ps16k"
+      prefer_pattern="googleapisplaystore"
+      ;;
+    wear)
+      # Accept both signed and unsigned Wear OS images
+      tag_patterns="android-wear"
+      exclude_patterns="cn"  # Exclude China-specific variants
+      prefer_pattern="android-wear-signed"
+      ;;
+    tv)
+      # Future support for Android TV / Google TV
+      tag_patterns="android-tv|google-tv"
+      exclude_patterns=""
+      prefer_pattern="google-tv"
+      ;;
+    auto)
+      # Future support for Android Automotive
+      tag_patterns="android-automotive"
+      exclude_patterns="distant-display"  # Exclude distant display variants
+      prefer_pattern="android-automotive-playstore"
+      ;;
+    *)
+      echo "$(basename "$0"): Unknown device type: $device_type" >&2
+      echo "Supported types: mobile, wear" >&2
+      echo "Future support planned for: tv, auto" >&2
+      exit 1
+      ;;
+  esac
+
+  # Find matching images and extract the one with the highest API level
+  local best_image=""
+  local best_api=0
+  local preferred_image=""
+  local preferred_api=0
+
+  while IFS= read -r line; do
+    # Extract package path
+    local package
+    package=$(echo "$line" | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    # Skip if not a system-image for our architecture
+    if [[ ! "$package" =~ system-images.*${arch} ]]; then
+      continue
+    fi
+
+    # Check if it matches our tag patterns
+    if ! echo "$package" | grep -qE ";(${tag_patterns});" 2>/dev/null; then
+      continue
+    fi
+
+    # Check if it should be excluded
+    if [[ -n "$exclude_patterns" ]] && echo "$package" | grep -qE "$exclude_patterns" 2>/dev/null; then
+      continue
+    fi
+
+    # Extract API level (second field in package path)
+    local api_part
+    api_part=$(echo "$package" | awk -F';' '{print $2}')
+    local api_level
+    api_level=$(echo "$api_part" | sed 's/android-//' | sed 's/-.*//')
+
+    # Skip if not a numeric API level
+    if ! [[ "$api_level" =~ ^[0-9]+$ ]]; then
+      continue
+    fi
+
+    # Track preferred variant separately
+    if [[ -n "$prefer_pattern" ]] && echo "$package" | grep -qE "$prefer_pattern" 2>/dev/null; then
+      if [[ $api_level -gt $preferred_api ]]; then
+        preferred_api=$api_level
+        preferred_image="$package"
+      fi
+    fi
+
+    # Update best if this is higher
+    if [[ $api_level -gt $best_api ]]; then
+      best_api=$api_level
+      best_image="$package"
+    fi
+  done < <(echo "$all_packages" | grep "system-images;android-" || true)
+
+  # Prefer the preferred variant if available, otherwise use best
+  local selected_image=""
+  if [[ -n "$preferred_image" ]]; then
+    selected_image="$preferred_image"
+  elif [[ -n "$best_image" ]]; then
+    selected_image="$best_image"
+  fi
+
+  if [[ -z "$selected_image" ]]; then
+    echo "$(basename "$0"): No suitable $device_type image found for architecture $arch" >&2
+    echo "Try running: $(basename "$0") images" >&2
+    exit 1
+  fi
+
+  echo "$selected_image"
+}
+
 usage() {
   local exit_code="${1:-0}"
   cat <<EOF
@@ -54,8 +185,13 @@ Commands:
   bootstrap           Bootstrap SDK environment for emulator management.
   list                List all available AVDs.
   info <name>         Show detailed information about an AVD.
-  create <name> [image] Create a new Wear OS AVD.
-                      Defaults to image: $(get_default_image_package)
+  create <name> [options] [image]
+                      Create a new AVD with the specified device type or image.
+                      Device type options:
+                        --mobile, --phone    Create mobile/phone device (latest API)
+                        --wear, --watch      Create Wear OS device (latest API)
+                      If no device type or image is specified, defaults to Wear OS.
+                      If a specific image is provided, it overrides device type.
   start <name> [--cold-boot|--wipe-data]
                       Start the specified AVD.
                       --cold-boot: Perform a cold boot (bypass Quick Boot snapshots)
@@ -71,7 +207,13 @@ Options:
   -h, --help          Display this help message and exit
 
 Examples:
-  # Create a new AVD with the default image
+  # Create a mobile/phone AVD with the latest available image
+  $(basename "$0") create my_phone --mobile
+
+  # Create a Wear OS AVD with the latest available image
+  $(basename "$0") create my_watch --wear
+
+  # Create a new AVD with the default image (Wear OS)
   $(basename "$0") create my_default_avd
 
   # Create a new AVD with a specific image
@@ -376,7 +518,8 @@ create_avd() {
   require avdmanager
 
   local avd_name="$1"
-  local image_package="$2"
+  local device_type="$2"
+  local image_package="$3"
 
   local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
   local avdmanager="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
@@ -386,9 +529,16 @@ create_avd() {
     return 0
   fi
 
-  if [[ -z "$image_package" ]]; then
+  # Determine image package based on device type or use specified image
+  if [[ -n "$image_package" ]]; then
+    echo "Using specified image: ${image_package}"
+  elif [[ -n "$device_type" ]]; then
+    echo "Finding latest ${device_type} image..."
+    image_package=$(get_latest_image_for_type "$device_type")
+    echo "Selected image: ${image_package}"
+  else
     image_package=$(get_default_image_package)
-    echo "No image specified, using default: ${image_package}"
+    echo "No device type or image specified, using default: ${image_package}"
   fi
 
   # Check if the image is installed, and install it if it's not
@@ -1066,15 +1216,67 @@ case "$1" in
     update_packages
     ;;
   create)
-    if [[ -n "${4:-}" ]]; then
-      echo "$(basename "$0") create: too many arguments" >&2
-      exit 1
-    fi
-    if [[ -z "${2:-}" ]]; then
+    # Parse create command arguments
+    # Supports: create <name> [--mobile|--phone|--wear|--watch] [image]
+    avd_name=""
+    device_type=""
+    image_package=""
+    shift # skip "create"
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --mobile|--phone)
+          if [[ -n "$device_type" ]]; then
+            echo "$(basename "$0") create: multiple device types specified" >&2
+            exit 1
+          fi
+          device_type="mobile"
+          shift
+          ;;
+        --wear|--watch)
+          if [[ -n "$device_type" ]]; then
+            echo "$(basename "$0") create: multiple device types specified" >&2
+            exit 1
+          fi
+          device_type="wear"
+          shift
+          ;;
+        --tv)
+          echo "$(basename "$0") create: TV device type not yet supported" >&2
+          echo "This feature is planned for future implementation" >&2
+          exit 1
+          ;;
+        --auto)
+          echo "$(basename "$0") create: Automotive device type not yet supported" >&2
+          echo "This feature is planned for future implementation" >&2
+          exit 1
+          ;;
+        --*)
+          echo "$(basename "$0") create: unknown option '$1'" >&2
+          echo "Valid options: --mobile, --phone, --wear, --watch" >&2
+          exit 1
+          ;;
+        *)
+          # Non-flag argument
+          if [[ -z "$avd_name" ]]; then
+            avd_name="$1"
+          elif [[ -z "$image_package" ]]; then
+            image_package="$1"
+          else
+            echo "$(basename "$0") create: too many arguments" >&2
+            exit 1
+          fi
+          shift
+          ;;
+      esac
+    done
+
+    if [[ -z "$avd_name" ]]; then
       echo "$(basename "$0") create: AVD name required" >&2
       exit 1
     fi
-    create_avd "$2" "${3:-}"
+
+    create_avd "$avd_name" "$device_type" "$image_package"
     ;;
   start)
     start_avd "${@:2}"
