@@ -19,6 +19,13 @@ export ANDROID_BUILD_TOOLS_VERSION="36.0.0"
 # sdkmanager --list | grep "platforms;android-"
 export ANDROID_PLATFORM_VERSION="android-36"
 
+# Blocklist of known problematic system images that should be excluded
+# from automatic "latest" image selection. Add full package names here.
+# These images have known issues (e.g., HVF compatibility problems on macOS).
+BLOCKLISTED_IMAGES=(
+  "system-images;android-36.1;google_apis_playstore;arm64-v8a"
+)
+
 get_host_arch() {
   case "$(uname -m)" in
     arm64 | aarch64)
@@ -141,6 +148,18 @@ get_latest_image_for_type() {
       continue
     fi
 
+    # Check if package is in the blocklist
+    local is_blocklisted=false
+    for blocklisted in "${BLOCKLISTED_IMAGES[@]}"; do
+      if [[ "$package" == "$blocklisted" ]]; then
+        is_blocklisted=true
+        break
+      fi
+    done
+    if [[ "$is_blocklisted" == "true" ]]; then
+      continue
+    fi
+
     # Extract API level/version (second field in package path)
     local api_part
     api_part=$(echo "$package" | awk -F';' '{print $2}')
@@ -219,6 +238,7 @@ Environment:
 
 Commands:
   bootstrap           Bootstrap SDK environment for emulator management.
+  doctor              Run diagnostics to check for common issues.
   list                List all available AVDs.
   info <name>         Show detailed information about an AVD.
   create <name> [options] [image]
@@ -1240,6 +1260,147 @@ update_packages() {
   echo "All packages updated successfully."
 }
 
+run_doctor() {
+  echo "Running diagnostics..."
+  echo ""
+
+  local warnings=0
+  local errors=0
+
+  # Check for orphaned crashpad_handler processes
+  local crashpad_count
+  crashpad_count=$(pgrep -f 'android-sdk/emulator/crashpad_handler' | wc -l | tr -d ' ')
+  if [[ "$crashpad_count" -gt 0 ]]; then
+    echo "[WARN] Found $crashpad_count orphaned crashpad_handler processes"
+    echo "       These are leftover crash reporters from previous emulator sessions."
+    echo "       To clean up: pkill -f 'android-sdk/emulator/crashpad_handler'"
+    echo ""
+    warnings=$((warnings + 1))
+  else
+    echo "[OK]   No orphaned crashpad_handler processes"
+  fi
+
+  # Check for orphaned emulator processes
+  local emulator_count
+  emulator_count=$(pgrep -f 'emulator/emulator.*-avd' | wc -l | tr -d ' ')
+  if [[ "$emulator_count" -gt 0 ]]; then
+    echo "[INFO] Found $emulator_count running emulator process(es)"
+    # Get list of running AVDs
+    if [[ -f "$ANDROID_HOME/platform-tools/adb" ]]; then
+      local running_avds
+      running_avds=$("$ANDROID_HOME/platform-tools/adb" devices 2>/dev/null | grep -c "emulator-" || echo "0")
+      echo "       Connected devices: $running_avds"
+    fi
+    echo ""
+  else
+    echo "[OK]   No emulator processes running"
+  fi
+
+  # Check disk space for ANDROID_HOME
+  if [[ -d "$ANDROID_HOME" ]]; then
+    local avail_space
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      avail_space=$(df -h "$ANDROID_HOME" | tail -1 | awk '{print $4}')
+    else
+      avail_space=$(df -h "$ANDROID_HOME" | tail -1 | awk '{print $4}')
+    fi
+    local avail_gb
+    avail_gb=$(df -g "$ANDROID_HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "0")
+
+    if [[ "$avail_gb" -lt 5 ]]; then
+      echo "[WARN] Low disk space: ${avail_space} available at ANDROID_HOME"
+      echo "       AVD images can be several GB each. Consider freeing up space."
+      echo ""
+      warnings=$((warnings + 1))
+    else
+      echo "[OK]   Disk space: ${avail_space} available at ANDROID_HOME"
+    fi
+  fi
+
+  # Check for orphaned/mismatched AVD files
+  if [[ -d "$HOME/.android/avd" ]]; then
+    local orphaned_avds=0
+    local orphaned_inis=0
+
+    # Check for .avd directories without corresponding .ini files
+    while IFS= read -r avd_dir; do
+      local avd_name
+      avd_name=$(basename "$avd_dir" .avd)
+      if [[ ! -f "$HOME/.android/avd/${avd_name}.ini" ]]; then
+        if [[ "$orphaned_avds" -eq 0 ]]; then
+          echo "[WARN] Found orphaned AVD directories (no .ini file):"
+        fi
+        echo "       - ${avd_name}"
+        orphaned_avds=$((orphaned_avds + 1))
+      fi
+    done < <(find "$HOME/.android/avd" -maxdepth 1 -name "*.avd" -type d)
+
+    # Check for .ini files without corresponding .avd directories
+    while IFS= read -r ini_file; do
+      local avd_name
+      avd_name=$(basename "$ini_file" .ini)
+      if [[ ! -d "$HOME/.android/avd/${avd_name}.avd" ]]; then
+        if [[ "$orphaned_inis" -eq 0 ]]; then
+          echo "[WARN] Found orphaned AVD .ini files (no .avd directory):"
+        fi
+        echo "       - ${avd_name}"
+        orphaned_inis=$((orphaned_inis + 1))
+      fi
+    done < <(find "$HOME/.android/avd" -maxdepth 1 -name "*.ini" -type f)
+
+    if [[ "$orphaned_avds" -gt 0 || "$orphaned_inis" -gt 0 ]]; then
+      echo "       To clean up orphaned files, manually remove them or use: $(basename "$0") delete <name>"
+      echo ""
+      warnings=$((warnings + 1))
+    else
+      echo "[OK]   No orphaned AVD files found"
+    fi
+  fi
+
+  # Check for SDK tools
+  if [[ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]]; then
+    echo "[ERROR] Android SDK command-line tools not found"
+    echo "        Run: $(basename "$0") bootstrap"
+    echo ""
+    errors=$((errors + 1))
+  else
+    echo "[OK]   Android SDK command-line tools installed"
+  fi
+
+  if [[ ! -d "$ANDROID_HOME/platform-tools" ]]; then
+    echo "[ERROR] Android platform-tools not found"
+    echo "        Run: $(basename "$0") bootstrap"
+    echo ""
+    errors=$((errors + 1))
+  else
+    echo "[OK]   Android platform-tools installed"
+  fi
+
+  if [[ ! -d "$ANDROID_HOME/emulator" ]]; then
+    echo "[ERROR] Android emulator not found"
+    echo "        Run: $(basename "$0") bootstrap"
+    echo ""
+    errors=$((errors + 1))
+  else
+    echo "[OK]   Android emulator installed"
+  fi
+
+  # Summary
+  echo ""
+  echo "========================================"
+  if [[ "$errors" -eq 0 && "$warnings" -eq 0 ]]; then
+    echo "Diagnostics complete: No issues found"
+    return 0
+  else
+    echo "Diagnostics complete: $errors error(s), $warnings warning(s)"
+    if [[ "$errors" -gt 0 ]]; then
+      return 1
+    else
+      return 0
+    fi
+  fi
+}
+
 bootstrap() {
   install_cli_tools
   install_platform_tools
@@ -1251,6 +1412,9 @@ bootstrap() {
 case "$1" in
   bootstrap)
     bootstrap
+    ;;
+  doctor)
+    run_doctor
     ;;
   list)
     list_avds "${2:-}"
