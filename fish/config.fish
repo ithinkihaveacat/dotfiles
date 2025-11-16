@@ -175,14 +175,6 @@ if type -q go
   prepend_path $GOPATH/bin
 end
 
-# flutter
-
-prepend_path ~/local/flutter/bin
-
-# fzf
-
-set -x FZF_DEFAULT_OPTS "--height 40% --reverse"
-
 # adb
 
 set -l LOGCAT_IGNORED_TAGS eglCodecCommon EGL_emulation OpenGLRenderer GnssHAL_GnssInterface
@@ -228,13 +220,10 @@ set -x VISUAL $EDITOR
 
 # completions
 
-complete -c adb-hs-synthetic -f -a "on off start_walking start_running start_hiking start_swimming start_running_treadmill start_sleeping start_exercise stop_walking stop_running stop_hiking stop_swimming stop_running_treadmill stop_sleeping stop_exercise"
-
 type -q pbcopy  ; or alias pbcopy  "xsel -bi"
 type -q pbpaste ; or alias pbpaste "xsel -bo"
 
 . ~/.config/fish/solarized.fish
-. ~/.config/fish/ua.fish
 
 sourceif ~/.ssh/etc/fish/envrc
 sourceif ~/.ssh/etc/fish/functions.fish
