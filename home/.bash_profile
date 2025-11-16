@@ -1,8 +1,5 @@
 # -*- sh -*-
 
-# Might also need to avoid fish if INTELLIJ_ENVIRONMENT_READER is present; see
-# https://youtrack.jetbrains.com/articles/SUPPORT-A-1727/Shell-Environment-Loading
-
 is_interactive() { [[ $- == *i* ]]; }
 
 if is_interactive; then
@@ -12,7 +9,17 @@ if is_interactive; then
     FISH=$(env PATH="$HOME/local/bin:/opt/homebrew/bin:$PATH" which fish)
 
     if [[ -x "$FISH" ]]; then
-      exec env SHELL="$FISH" "$FISH" -i
+      # If bash was invoked with -c 'command' (e.g., Android Studio's printenv),
+      # pass the command to fish so it runs in fish's environment after fish config.
+      # See https://youtrack.jetbrains.com/articles/SUPPORT-A-1727/Shell-Environment-Loading
+      if [[ -n "${BASH_EXECUTION_STRING-}" ]]; then
+        exec env SHELL="$FISH" "$FISH" -i -c "$BASH_EXECUTION_STRING"
+      else
+        exec env SHELL="$FISH" "$FISH" -i
+      fi
     fi
 
 fi
+
+# If we reach here, fish wasn't found. Source bashrc for PATH and environment setup.
+[[ -r "$HOME/.bashrc" ]] && . "$HOME/.bashrc"
