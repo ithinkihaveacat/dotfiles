@@ -1332,33 +1332,36 @@ run_doctor() {
       all_avd_dirs+=("$dir")
     done < <(find "$avd_base_path" -maxdepth 1 -name "*.avd" -type d)
 
-    # Track which AVD directories are referenced by .ini files
-    local referenced_avd_dirs=""
+    # Track which AVD directories are referenced by .ini files using associative array
+    declare -A referenced_avd_dirs
 
     declare -a orphaned_inis=()
+    declare -a orphaned_ini_reasons=()
     # Check for orphaned .ini files
     for ini_file in "${all_ini_files[@]}"; do
       local avd_path
       avd_path=$(get_ini_value "$ini_file" "path")
 
       if [[ -z "$avd_path" ]]; then
-        orphaned_inis+=("$ini_file (malformed: missing 'path' entry)")
+        orphaned_inis+=("$ini_file")
+        orphaned_ini_reasons+=("malformed: missing 'path' entry")
         has_orphans=true
         continue
       fi
 
       if [[ ! -d "$avd_path" ]]; then
-        orphaned_inis+=("$ini_file (points to missing directory: $avd_path)")
+        orphaned_inis+=("$ini_file")
+        orphaned_ini_reasons+=("points to missing directory: $avd_path")
         has_orphans=true
       else
-        referenced_avd_dirs+="${avd_path}"$'\n'
+        referenced_avd_dirs["$avd_path"]=1
       fi
     done
 
     declare -a orphaned_avds=()
     # Check for orphaned .avd directories
     for avd_dir in "${all_avd_dirs[@]}"; do
-      if ! echo -e "$referenced_avd_dirs" | grep -q -x -F "$avd_dir"; then
+      if [[ -z "${referenced_avd_dirs[$avd_dir]:-}" ]]; then
         orphaned_avds+=("$avd_dir")
         has_orphans=true
       fi
@@ -1366,8 +1369,10 @@ run_doctor() {
 
     if [[ ${#orphaned_inis[@]} -gt 0 ]]; then
       echo "[WARN] Found orphaned AVD .ini files:"
+      local i=0
       for orphan in "${orphaned_inis[@]}"; do
-        echo "       - $orphan"
+        echo "       - $orphan (${orphaned_ini_reasons[$i]})"
+        i=$((i + 1))
       done
     fi
 
@@ -1380,21 +1385,23 @@ run_doctor() {
 
     if [[ "$has_orphans" == "true" ]]; then
       warnings=$((warnings + 1))
-      local unique_names_to_delete=""
+      declare -A unique_names_to_delete
       for orphan in "${orphaned_inis[@]}"; do
-        unique_names_to_delete+="$(basename "${orphan%% *}" .ini)"$'\n'
+        local name
+        name=$(basename "$orphan" .ini)
+        unique_names_to_delete["$name"]=1
       done
       for orphan in "${orphaned_avds[@]}"; do
-        unique_names_to_delete+="$(basename "$orphan" .avd)"$'\n'
+        local name
+        name=$(basename "$orphan" .avd)
+        unique_names_to_delete["$name"]=1
       done
 
-      if [[ -n "$unique_names_to_delete" ]]; then
+      if [[ ${#unique_names_to_delete[@]} -gt 0 ]]; then
         echo "       To clean up, run:"
-        echo -e "$unique_names_to_delete" | sort -u | while IFS= read -r name; do
-          if [[ -n "$name" ]]; then
-            echo "         $(basename "$0") delete \"$name\""
-          fi
-        done
+        for name in "${!unique_names_to_delete[@]}"; do
+          echo "         $(basename "$0") delete \"$name\""
+        done | sort
       fi
       echo ""
     else
