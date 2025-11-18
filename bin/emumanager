@@ -1316,36 +1316,64 @@ run_doctor() {
 
   # Check for orphaned/mismatched AVD files
   if [[ -d "$HOME/.android/avd" ]]; then
-    local orphaned_avds=0
-    local orphaned_inis=0
+    local avd_dirs=()
+    while IFS= read -r d; do avd_dirs+=("$d"); done < <(find "$HOME/.android/avd" -maxdepth 1 -name "*.avd" -type d)
 
-    # Check for .avd directories without corresponding .ini files
-    while IFS= read -r avd_dir; do
-      local avd_name
-      avd_name=$(basename "$avd_dir" .avd)
-      if [[ ! -f "$HOME/.android/avd/${avd_name}.ini" ]]; then
-        if [[ "$orphaned_avds" -eq 0 ]]; then
-          echo "[WARN] Found orphaned AVD directories (no .ini file):"
+    local ini_files=()
+    while IFS= read -r f; do ini_files+=("$f"); done < <(find "$HOME/.android/avd" -maxdepth 1 -name "*.ini" -type f)
+
+    local referenced_avd_paths=()
+    local orphaned_inis=()
+
+    # Check for .ini files pointing to non-existent .avd directories
+    for ini_file in "${ini_files[@]}"; do
+      local avd_path
+      avd_path=$(get_ini_value "$ini_file" "path")
+      if [[ -z "$avd_path" || ! -d "$avd_path" ]]; then
+        orphaned_inis+=("$ini_file")
+      else
+        # Store the fully resolved, real path for comparison
+        # This handles relative paths (e.g. `path.rel`) or symlinks
+        if ! real_path=$(cd "$(dirname "$ini_file")" && cd "$avd_path" && pwd -P); then
+          orphaned_inis+=("$ini_file")
+          continue
         fi
-        echo "       - ${avd_dir}"
-        orphaned_avds=$((orphaned_avds + 1))
+        referenced_avd_paths+=("$real_path")
       fi
-    done < <(find "$HOME/.android/avd" -maxdepth 1 -name "*.avd" -type d)
+    done
 
-    # Check for .ini files without corresponding .avd directories
-    while IFS= read -r ini_file; do
-      local avd_name
-      avd_name=$(basename "$ini_file" .ini)
-      if [[ ! -d "$HOME/.android/avd/${avd_name}.avd" ]]; then
-        if [[ "$orphaned_inis" -eq 0 ]]; then
-          echo "[WARN] Found orphaned AVD .ini files (no .avd directory):"
+    local orphaned_avds=()
+    # Check for .avd directories that are not referenced by any .ini file
+    for avd_dir in "${avd_dirs[@]}"; do
+      local is_referenced=false
+      # Get the real path of the directory to handle symlinks
+      local avd_real_path
+      avd_real_path=$(cd "$avd_dir" && pwd -P)
+      for referenced_path in "${referenced_avd_paths[@]}"; do
+        if [[ "$avd_real_path" == "$referenced_path" ]]; then
+          is_referenced=true
+          break
         fi
-        echo "       - ${ini_file}"
-        orphaned_inis=$((orphaned_inis + 1))
+      done
+      if [[ "$is_referenced" == false ]]; then
+        orphaned_avds+=("$avd_dir")
       fi
-    done < <(find "$HOME/.android/avd" -maxdepth 1 -name "*.ini" -type f)
+    done
 
-    if [[ "$orphaned_avds" -gt 0 || "$orphaned_inis" -gt 0 ]]; then
+    local has_orphans=false
+    if [[ "${#orphaned_avds[@]}" -gt 0 ]]; then
+      has_orphans=true
+      echo "[WARN] Found orphaned AVD directories (not referenced by any .ini file):"
+      printf "       - %s\n" "${orphaned_avds[@]}"
+    fi
+
+    if [[ "${#orphaned_inis[@]}" -gt 0 ]]; then
+      has_orphans=true
+      echo "[WARN] Found orphaned AVD .ini files (path points to a non-existent directory):"
+      printf "       - %s\n" "${orphaned_inis[@]}"
+    fi
+
+    if [[ "$has_orphans" == true ]]; then
       echo "       To clean up orphaned files, manually remove them or use: $(basename "$0") delete <name>"
       echo ""
       warnings=$((warnings + 1))
