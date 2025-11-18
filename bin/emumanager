@@ -738,26 +738,23 @@ start_avd() {
     exit 1
   fi
 
-  # Check for KVM support on Linux for x86_64 emulators
+  # Check for hardware acceleration and provide a streamlined error message
+  local acceleration_ok=true
   if [[ "$(uname -s)" == "Linux" && "$(get_host_arch)" == "x86_64" ]]; then
-    if [[ ! -e /dev/kvm ]]; then
-      echo "$(basename "$0"): ERROR: /dev/kvm not found." >&2
-      echo "KVM acceleration is required for x86_64 emulators on Linux." >&2
-      echo "Please ensure KVM is enabled in BIOS and the module is loaded." >&2
-      echo "More info: https://developer.android.com/studio/run/emulator-acceleration#vm-linux" >&2
-      exit 1
+    if [[ ! -e /dev/kvm ]] || ! grep -q -E 'vmx|svm' /proc/cpuinfo; then
+      acceleration_ok=false
     fi
-    if ! grep -q -E 'vmx|svm' /proc/cpuinfo; then
-      echo "$(basename "$0"): ERROR: CPU does not support required virtualization extensions (VT-x or AMD-V)." >&2
-      echo "KVM acceleration is required for x86_64 emulators on Linux." >&2
-      echo "More info: https://developer.android.com/studio/run/emulator-acceleration#vm-linux" >&2
-      exit 1
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    if ! sysctl -a | grep -q "kern.hv_support: 1"; then
+      acceleration_ok=false
     fi
-    if ! groups | grep -q "\\bkvm\\b"; then
-      echo "$(basename "$0"): WARNING: User is not in the 'kvm' group. Emulator may fail to start." >&2
-      echo "Run: sudo usermod -aG kvm $USER" >&2
-      echo "You may need to log out and log back in for the group change to take effect." >&2
-    fi
+  fi
+
+  if [[ "$acceleration_ok" == false ]]; then
+    echo "$(basename "$0"): ERROR: Hardware acceleration is not available." >&2
+    echo "This is required to run the emulator." >&2
+    echo "For a detailed diagnosis, run: $(basename "$0") doctor" >&2
+    exit 1
   fi
 
   # Find an available port to avoid conflicts with ANDROID_SERIAL
@@ -1269,7 +1266,7 @@ run_doctor() {
 
   # Check for orphaned crashpad_handler processes
   local crashpad_count
-  crashpad_count=$(pgrep -f 'android-sdk/emulator/crashpad_handler' | wc -l | tr -d ' ')
+  crashpad_count=$(pgrep -c -f 'android-sdk/emulator/crashpad_handler' || true)
   if [[ "$crashpad_count" -gt 0 ]]; then
     echo "[WARN] Found $crashpad_count orphaned crashpad_handler processes"
     echo "       These are leftover crash reporters from previous emulator sessions."
@@ -1282,7 +1279,7 @@ run_doctor() {
 
   # Check for orphaned emulator processes
   local emulator_count
-  emulator_count=$(pgrep -f 'emulator/emulator.*-avd' | wc -l | tr -d ' ')
+  emulator_count=$(pgrep -c -f 'emulator/emulator.*-avd' || true)
   if [[ "$emulator_count" -gt 0 ]]; then
     echo "[INFO] Found $emulator_count running emulator process(es)"
     # Get list of running AVDs
@@ -1357,6 +1354,84 @@ run_doctor() {
     fi
   fi
 
+  # Check for Java environment
+  local javacmd=""
+  local resolution_method=""
+  if [[ -n "${JAVA_HOME:-}" ]] && [[ -x "$JAVA_HOME/bin/java" ]]; then
+    javacmd="$JAVA_HOME/bin/java"
+    resolution_method="\$JAVA_HOME"
+  elif command -v java &>/dev/null; then
+    javacmd=$(command -v java)
+    resolution_method="PATH"
+  fi
+
+  if [[ -z "$javacmd" ]]; then
+    echo "[ERROR] Java executable not found"
+    echo "        Android SDK requires Java 17 or higher."
+    echo "        Please set JAVA_HOME or add 'java' to your PATH."
+    echo ""
+    errors=$((errors + 1))
+  else
+    local java_version_string
+    java_version_string=$("$javacmd" -version 2>&1 | head -n 1)
+    local java_major_version
+    # Regex to extract major version for formats like "1.8.0_292" (version 8) and "11.0.12" (version 11) or "17.0.1" (version 17)
+    java_major_version=$(echo "$java_version_string" | sed -E -n 's/.*version "((1\.)?([0-9]+))\..*".*/\3/p')
+
+    if [[ -z "$java_major_version" ]]; then
+      echo "[WARN] Could not determine Java version."
+      echo "       Java executable: $javacmd (found via $resolution_method)"
+      echo "       'java -version' output:"
+      echo "       $java_version_string"
+      echo ""
+      warnings=$((warnings + 1))
+    elif [[ "$java_major_version" -lt 17 ]]; then
+      echo "[ERROR] Java version is too old: $java_major_version"
+      echo "        Java executable: $javacmd (found via $resolution_method)"
+      echo "        Android SDK requires Java 17 or higher."
+      echo ""
+      errors=$((errors + 1))
+    else
+      echo "[OK]   Java version: $java_major_version ($javacmd, found via $resolution_method)"
+    fi
+  fi
+
+  # Check for hardware acceleration
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ ! -e /dev/kvm ]]; then
+      echo "[ERROR] KVM not found at /dev/kvm"
+      echo "        Hardware acceleration is required for running x86_64 emulators on Linux."
+      echo "        Please ensure KVM is enabled in your BIOS and the module is loaded."
+      echo ""
+      errors=$((errors + 1))
+    elif ! grep -q -E 'vmx|svm' /proc/cpuinfo; then
+      echo "[ERROR] CPU does not support virtualization extensions (VT-x or AMD-V)"
+      echo "        KVM acceleration is required for x86_64 emulators on Linux."
+      echo "        Please ensure virtualization is enabled in your BIOS."
+      echo ""
+      errors=$((errors + 1))
+    elif ! groups | grep -q "\\bkvm\\b"; then
+      echo "[WARN] User is not in the 'kvm' group."
+      echo "       Emulator may fail to start or run slowly."
+      echo "       To fix, run: sudo usermod -aG kvm \$USER"
+      echo "       You may need to log out and log back in for the changes to take effect."
+      echo ""
+      warnings=$((warnings + 1))
+    else
+      echo "[OK]   KVM is enabled and user is in the 'kvm' group"
+    fi
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    if ! sysctl -a | grep -q "kern.hv_support: 1"; then
+      echo "[ERROR] Hypervisor Framework (HVF) is not enabled"
+      echo "        Hardware acceleration is required for running emulators on macOS."
+      echo "        Please ensure your macOS version and hardware support HVF."
+      echo ""
+      errors=$((errors + 1))
+    else
+      echo "[OK]   Hypervisor Framework (HVF) is enabled"
+    fi
+  fi
+
   # Check for SDK tools
   if [[ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]]; then
     echo "[ERROR] Android SDK command-line tools not found"
@@ -1389,16 +1464,14 @@ run_doctor() {
   echo ""
   echo "========================================"
   if [[ "$errors" -eq 0 && "$warnings" -eq 0 ]]; then
-    echo "Diagnostics complete: No issues found"
-    return 0
+    echo "No issues found"
   else
     echo "Diagnostics complete: $errors error(s), $warnings warning(s)"
     if [[ "$errors" -gt 0 ]]; then
       return 1
-    else
-      return 0
     fi
   fi
+  return 0
 }
 
 bootstrap() {
