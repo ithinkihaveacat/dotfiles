@@ -1318,39 +1318,85 @@ run_doctor() {
 
   # Check for orphaned/mismatched AVD files
   if [[ -d "$ANDROID_USER_HOME/avd" ]]; then
-    local orphaned_avds=0
-    local orphaned_inis=0
+    local avd_base_path="$ANDROID_USER_HOME/avd"
+    local has_orphans=false
 
-    # Check for .avd directories without corresponding .ini files
-    while IFS= read -r avd_dir; do
-      local avd_name
-      avd_name=$(basename "$avd_dir" .avd)
-      if [[ ! -f "$ANDROID_USER_HOME/avd/${avd_name}.ini" ]]; then
-        if [[ "$orphaned_avds" -eq 0 ]]; then
-          echo "[WARN] Found orphaned AVD directories (no .ini file):"
-        fi
-        echo "       - ${avd_dir}"
-        orphaned_avds=$((orphaned_avds + 1))
+    # Arrays to store all .ini files and .avd directories
+    declare -a all_ini_files
+    while IFS= read -r file; do
+      all_ini_files+=("$file")
+    done < <(find "$avd_base_path" -maxdepth 1 -name "*.ini" -type f)
+
+    declare -a all_avd_dirs
+    while IFS= read -r dir; do
+      all_avd_dirs+=("$dir")
+    done < <(find "$avd_base_path" -maxdepth 1 -name "*.avd" -type d)
+
+    # Track which AVD directories are referenced by .ini files
+    local referenced_avd_dirs=""
+
+    declare -a orphaned_inis
+    # Check for orphaned .ini files
+    for ini_file in "${all_ini_files[@]}"; do
+      local avd_path
+      avd_path=$(get_ini_value "$ini_file" "path")
+
+      if [[ -z "$avd_path" ]]; then
+        orphaned_inis+=("$ini_file (malformed: missing 'path' entry)")
+        has_orphans=true
+        continue
       fi
-    done < <(find "$ANDROID_USER_HOME/avd" -maxdepth 1 -name "*.avd" -type d)
 
-    # Check for .ini files without corresponding .avd directories
-    while IFS= read -r ini_file; do
-      local avd_name
-      avd_name=$(basename "$ini_file" .ini)
-      if [[ ! -d "$ANDROID_USER_HOME/avd/${avd_name}.avd" ]]; then
-        if [[ "$orphaned_inis" -eq 0 ]]; then
-          echo "[WARN] Found orphaned AVD .ini files (no .avd directory):"
-        fi
-        echo "       - ${ini_file}"
-        orphaned_inis=$((orphaned_inis + 1))
+      if [[ ! -d "$avd_path" ]]; then
+        orphaned_inis+=("$ini_file (points to missing directory: $avd_path)")
+        has_orphans=true
+      else
+        referenced_avd_dirs+="${avd_path}"$'\n'
       fi
-    done < <(find "$ANDROID_USER_HOME/avd" -maxdepth 1 -name "*.ini" -type f)
+    done
 
-    if [[ "$orphaned_avds" -gt 0 || "$orphaned_inis" -gt 0 ]]; then
-      echo "       To clean up orphaned files, manually remove them or use: $(basename "$0") delete <name>"
-      echo ""
+    declare -a orphaned_avds
+    # Check for orphaned .avd directories
+    for avd_dir in "${all_avd_dirs[@]}"; do
+      if ! echo -e "$referenced_avd_dirs" | grep -q -x -F "$avd_dir"; then
+        orphaned_avds+=("$avd_dir")
+        has_orphans=true
+      fi
+    done
+
+    if [[ ${#orphaned_inis[@]} -gt 0 ]]; then
+      echo "[WARN] Found orphaned AVD .ini files:"
+      for orphan in "${orphaned_inis[@]}"; do
+        echo "       - $orphan"
+      done
+    fi
+
+    if [[ ${#orphaned_avds[@]} -gt 0 ]]; then
+      echo "[WARN] Found orphaned AVD directories (not referenced by any .ini file):"
+      for orphan in "${orphaned_avds[@]}"; do
+        echo "       - $orphan"
+      done
+    fi
+
+    if [[ "$has_orphans" == "true" ]]; then
       warnings=$((warnings + 1))
+      local unique_names_to_delete=""
+      for orphan in "${orphaned_inis[@]}"; do
+        unique_names_to_delete+="$(basename "${orphan%% *}" .ini)"$'\n'
+      done
+      for orphan in "${orphaned_avds[@]}"; do
+        unique_names_to_delete+="$(basename "$orphan" .avd)"$'\n'
+      done
+
+      if [[ -n "$unique_names_to_delete" ]]; then
+        echo "       To clean up, run:"
+        echo -e "$unique_names_to_delete" | sort -u | while IFS= read -r name; do
+          if [[ -n "$name" ]]; then
+            echo "         $(basename "$0") delete \"$name\""
+          fi
+        done
+      fi
+      echo ""
     else
       echo "[OK]   No orphaned AVD files found"
     fi
