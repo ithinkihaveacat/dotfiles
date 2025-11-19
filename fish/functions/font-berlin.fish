@@ -3,15 +3,15 @@
 
 function font-berlin
 
-  set DIR (fontdir)/berlin
-  set URL 'https://wir.berlin/fileadmin/downloads/Wir.Berlin_Schrift.zip'
-  
-  if test -d $DIR
-    echo "error: $DIR already exists"
-    return 1
-  end
+    set DIR (fontdir)/berlin
+    set URL 'https://wir.berlin/fileadmin/downloads/Wir.Berlin_Schrift.zip'
 
-  mkdir -p $DIR
-  unzip -j (curl -sL --output - $URL | psub) '*/BerlinType*.otf' -d $DIR
+    if test -d $DIR
+        echo "error: $DIR already exists"
+        return 1
+    end
+
+    mkdir -p $DIR
+    unzip -j (curl -sL --output - $URL | psub) '*/BerlinType*.otf' -d $DIR
 
 end

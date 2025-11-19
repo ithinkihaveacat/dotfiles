@@ -2,8 +2,8 @@
 
 # tool config
 
-set -x LESS "-XMcifR"
-set -x TZ "Europe/London"
+set -x LESS -XMcifR
+set -x TZ Europe/London
 
 # personal config
 
@@ -13,10 +13,10 @@ set -x GITROOT "git@github.com:ithinkihaveacat"
 
 set -g CDPATH . ~
 if test -d ~/workspace
-  set -g CDPATH $CDPATH ~/workspace
+    set -g CDPATH $CDPATH ~/workspace
 end
 if test -d ~/citc
-  set -g CDPATH $CDPATH ~/citc
+    set -g CDPATH $CDPATH ~/citc
 end
 
 # Avoid fish_user_path and instead set PATH directly. fish_user_path can be used
@@ -25,31 +25,35 @@ end
 # https://github.com/fish-shell/fish-shell/issues/527#issuecomment-253775156.
 # If fish >3.2, can replace with fish_add_path.
 function append_path
-  if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
-    set -l path_to_add $argv[1]
-    set -l index (contains -i -- $path_to_add $PATH)
-    if set -q index[1]
-      set --erase PATH[$index]
+    if begin
+            count $argv >/dev/null; and count $argv[1] >/dev/null; and test -d $argv[1]
+        end
+        set -l path_to_add $argv[1]
+        set -l index (contains -i -- $path_to_add $PATH)
+        if set -q index[1]
+            set --erase PATH[$index]
+        end
+        set PATH $PATH $path_to_add
     end
-    set PATH $PATH $path_to_add
-  end
 end
 
 function prepend_path
-  if begin ; count $argv > /dev/null ; and count $argv[1] > /dev/null ; and test -d $argv[1] ; end
-    set -l path_to_add $argv[1]
-    set -l index (contains -i -- $path_to_add $PATH)
-    if set -q index[1]
-      set --erase PATH[$index]
+    if begin
+            count $argv >/dev/null; and count $argv[1] >/dev/null; and test -d $argv[1]
+        end
+        set -l path_to_add $argv[1]
+        set -l index (contains -i -- $path_to_add $PATH)
+        if set -q index[1]
+            set --erase PATH[$index]
+        end
+        set PATH $path_to_add $PATH
     end
-    set PATH $path_to_add $PATH
-  end
 end
 
 function sourceif
-  if test -r $argv[1]
-    source $argv[1]
-  end
+    if test -r $argv[1]
+        source $argv[1]
+    end
 end
 
 # Google Cloud SDK (gcloud)
@@ -84,8 +88,8 @@ set d ~/local/jre*/Contents/Home/bin
 prepend_path $d
 
 # JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version. For now the Android Studio version works out
-test -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
-test -d "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"
+test -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home"; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+test -d "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"; and set -x JAVA_HOME "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"
 #test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
 #test -d "/Applications/Android Studio.app/Contents/jre/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jre/Contents/Home"
 
@@ -106,7 +110,7 @@ prepend_path ~/.cabal/bin
 
 # Android Tools
 
-test -d ~/.local/share/android-sdk ; and set -x ANDROID_HOME ~/.local/share/android-sdk
+test -d ~/.local/share/android-sdk; and set -x ANDROID_HOME ~/.local/share/android-sdk
 #test -d ~/Library/Android/sdk ; and set -x ANDROID_HOME ~/Library/Android/sdk
 #test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 
@@ -118,15 +122,15 @@ prepend_path $ANDROID_HOME/cmdline-tools/latest/bin
 prepend_path $ANDROID_HOME/emulator
 
 if count $ANDROID_HOME/build-tools/* >/dev/null
-  prepend_path (ls -d $ANDROID_HOME/build-tools/* | sort -rV | head -1)
+    prepend_path (ls -d $ANDROID_HOME/build-tools/* | sort -rV | head -1)
 end
 
-test -d $ANDROID_HOME ; and set -x ANDROID_JAR (ls -d $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
+test -d $ANDROID_HOME; and set -x ANDROID_JAR (ls -d $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
 
 # binaries
 
-prepend_path "/opt/homebrew/bin"
-prepend_path "/opt/homebrew/sbin"
+prepend_path /opt/homebrew/bin
+prepend_path /opt/homebrew/sbin
 
 prepend_path /usr/local/sbin
 prepend_path /usr/local/bin
@@ -160,7 +164,7 @@ mkdir -p $NODE_VERSIONS
 
 set -l NODE_STABLE v22
 if count {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin >/dev/null
-  prepend_path (ls -d {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
+    prepend_path (ls -d {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
 end
 
 # golang
@@ -170,9 +174,9 @@ set d /usr/lib/go-*/bin
 prepend_path $d
 
 if type -q go
-  set -x GOPATH ~/local/go
-  mkdir -p $GOPATH
-  prepend_path $GOPATH/bin
+    set -x GOPATH ~/local/go
+    mkdir -p $GOPATH
+    prepend_path $GOPATH/bin
 end
 
 # adb
@@ -184,7 +188,7 @@ set -x PIDCAT_IGNORED_TAGS (string join ";" $LOGCAT_IGNORED_TAGS)
 # acid
 
 if test -r ~/.ssh/etc/acid
-  set -x ACID_STARTUP_SCRIPT_PATH ~/.ssh/etc/acid
+    set -x ACID_STARTUP_SCRIPT_PATH ~/.ssh/etc/acid
 end
 
 # other scripts
@@ -199,17 +203,17 @@ set fish_greeting
 
 # https://github.com/zimbatm/direnv
 if type -q direnv
-  direnv hook fish | source
-  # If MANPATH is set, man very helpfully ignores the default search path as defined in
-  # /etc/manpath.config (at least on Linux). Therefore, to ensure man searches through
-  # the default after direnv fiddles with MANPATH, we explicitly set it to its default value.
-  # See http://unix.stackexchange.com/q/344603/49703
-  # Broke around macOS Ventury 13.0
-  #set -x MANPATH (man -w)
+    direnv hook fish | source
+    # If MANPATH is set, man very helpfully ignores the default search path as defined in
+    # /etc/manpath.config (at least on Linux). Therefore, to ensure man searches through
+    # the default after direnv fiddles with MANPATH, we explicitly set it to its default value.
+    # See http://unix.stackexchange.com/q/344603/49703
+    # Broke around macOS Ventury 13.0
+    #set -x MANPATH (man -w)
 end
 
 if type -q jed
-  set -x EDITOR "jed"
+    set -x EDITOR jed
 end
 
 set -x VISUAL $EDITOR
@@ -220,8 +224,8 @@ set -x VISUAL $EDITOR
 
 # completions
 
-type -q pbcopy  ; or alias pbcopy  "xsel -bi"
-type -q pbpaste ; or alias pbpaste "xsel -bo"
+type -q pbcopy; or alias pbcopy "xsel -bi"
+type -q pbpaste; or alias pbpaste "xsel -bo"
 
 . ~/.config/fish/solarized.fish
 
@@ -230,21 +234,21 @@ sourceif ~/.ssh/etc/fish/functions.fish
 sourceif ~/.ssh/etc/fish/config.fish
 
 if type -q starship
-  starship init fish | source
+    starship init fish | source
 
-  function fish_prompt_notify --on-event fish_prompt
-    # If commands takes longer than 10 seconds, notify user on completion if Terminal
-    # in background. (Otherwise e.g. reading man pages for longer than 10 seconds will
-    # trigger the notification.) Inspired by https://github.com/jml/undistract-me/issues/32.
-    if test $CMD_DURATION
-      if test $CMD_DURATION -gt 10000
-        if not terminal-frontmost
-          set secs (math "$CMD_DURATION / 1000")
-          # It's not possible to raise the window via the notification; see
-          # https://stackoverflow.com/a/33808356
-          notify "$history[1]" "(status $status; $secs secs)"
+    function fish_prompt_notify --on-event fish_prompt
+        # If commands takes longer than 10 seconds, notify user on completion if Terminal
+        # in background. (Otherwise e.g. reading man pages for longer than 10 seconds will
+        # trigger the notification.) Inspired by https://github.com/jml/undistract-me/issues/32.
+        if test $CMD_DURATION
+            if test $CMD_DURATION -gt 10000
+                if not terminal-frontmost
+                    set secs (math "$CMD_DURATION / 1000")
+                    # It's not possible to raise the window via the notification; see
+                    # https://stackoverflow.com/a/33808356
+                    notify "$history[1]" "(status $status; $secs secs)"
+                end
+            end
         end
-      end
     end
-  end
 end

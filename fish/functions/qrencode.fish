@@ -1,3 +1,3 @@
 function qrencode
-  printf $argv | curl '-F-=<-' http://qrenco.de
-end  
+    printf $argv | curl '-F-=<-' http://qrenco.de
+end

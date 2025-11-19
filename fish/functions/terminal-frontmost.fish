@@ -3,17 +3,17 @@
 # https://pleasantprogrammer.com/posts/is-my-terminal-window-active.html
 if test -n "$WINDOWID"
 
-  # X Windows (supports Ubuntu Terminal excluding tabs)
-  function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
-    set -l tmp (printf "%d" (string split -m 1 -r " " (xprop -root _NET_ACTIVE_WINDOW))[2])
-    test "$WINDOWID" = "$tmp"
-  end
+    # X Windows (supports Ubuntu Terminal excluding tabs)
+    function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
+        set -l tmp (printf "%d" (string split -m 1 -r " " (xprop -root _NET_ACTIVE_WINDOW))[2])
+        test "$WINDOWID" = "$tmp"
+    end
 
 else if test -n "$TERM_SESSION_ID"
 
-  # macOS (supports Terminal.app and tabs)
-  function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
-    set -l tmp (osascript \
+    # macOS (supports Terminal.app and tabs)
+    function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
+        set -l tmp (osascript \
       -e 'tell application "Terminal"' \
       -e '  if frontmost is true' \
       -e '    repeat with w in windows' \
@@ -25,14 +25,14 @@ else if test -n "$TERM_SESSION_ID"
       -e '  end if' \
       -e 'end tell' \
     )
-    test (tty) = "$tmp"
-  end
+        test (tty) = "$tmp"
+    end
 
 else
 
-  # Unknown/other
-  function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
-    return 0 # Always frontmost
-  end
+    # Unknown/other
+    function terminal-frontmost -d "Returns 0 if terminal is frontmost, otherwise 1"
+        return 0 # Always frontmost
+    end
 
 end

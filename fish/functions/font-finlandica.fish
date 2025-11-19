@@ -4,15 +4,15 @@
 
 function font-finlandica
 
-  set DIR (fontdir)/finlandica
-  set URL 'https://api.github.com/repos/HelsinkiTypeStudio/Finlandica/zipball'
-  
-  if test -d $DIR
-    echo "error: $DIR already exists"
-    return 1
-  end
+    set DIR (fontdir)/finlandica
+    set URL 'https://api.github.com/repos/HelsinkiTypeStudio/Finlandica/zipball'
 
-  mkdir -p $DIR
-  unzip -j (curl -sL --output - $URL | psub) '*/fonts/variable/*.ttf' -d $DIR
+    if test -d $DIR
+        echo "error: $DIR already exists"
+        return 1
+    end
+
+    mkdir -p $DIR
+    unzip -j (curl -sL --output - $URL | psub) '*/fonts/variable/*.ttf' -d $DIR
 
 end

@@ -6,5 +6,5 @@ function __fish_android_services
     end
 
     # List services and extract service names, filtering out the header
-    adb shell service list | sed '1d' | awk '{print $2}' | tr -d ':' | command sort -u
+    adb shell service list | sed 1d | awk '{print $2}' | tr -d ':' | command sort -u
 end
