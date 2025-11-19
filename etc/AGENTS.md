@@ -47,7 +47,7 @@ echo $VAR
 
 ### Formatting
 
-All shell scripts must be processed by `shfmt`.
+All non-Fish shell scripts must be processed by `shfmt`.
 
 Example command:
 
@@ -58,6 +58,19 @@ shfmt -w -i 2 -ci bin/emumanager
 - `-w` edits files in-place.
 - `-i 2` sets the indent to 2 spaces.
 - `-ci` vertically aligns case statements.
+
+### Fish Script Formatting
+
+All Fish shell scripts, whether new or updated, _must_ be formatted by
+`fish_indent -w`.
+
+Example command:
+
+```bash
+fish_indent -w fish/completions/emumanager.fish
+```
+
+- `-w` edits files in-place.
 
 ## Error Handling in Shell Scripts
 
