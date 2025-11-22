@@ -1,14 +1,17 @@
 # MCP Shell Server
 
-An MCP (Model Context Protocol) server for executing shell commands safely with timeouts, environment variables, and stdin support.
+An MCP (Model Context Protocol) server for executing shell commands safely with
+timeouts, environment variables, and stdin support.
 
 ## Features
 
 - **Execute shell commands** using bash
 - **Environment variables** - Set custom environment variables for commands
-- **Timeout support** - Commands timeout after 300 seconds by default (configurable)
+- **Timeout support** - Commands timeout after 300 seconds by default
+  (configurable)
 - **Stdin support** - Provide input to commands via stdin
-- **Comprehensive output** - Captures stdout, stderr, exit codes, and timeout status
+- **Comprehensive output** - Captures stdout, stderr, exit codes, and timeout
+  status
 
 ## Installation
 
@@ -26,6 +29,7 @@ The server runs over stdio and provides a single tool: `execute_shell`.
 Execute a shell command using bash.
 
 **Parameters:**
+
 - `command` (string, required): The shell command to execute
   - Simple: `"ls -la"`
   - Complex: `"echo hello | grep h"`
@@ -36,14 +40,23 @@ Execute a shell command using bash.
 - `stdin` (string, optional): Input to provide via stdin
 
 **Returns:**
+
 - `stdout` (string): Standard output from the command
 - `stderr` (string): Standard error from the command
-- `exitCode` (number | null): Exit code, or null if timeout expired
-- `timedOut` (boolean): True if command was terminated due to timeout
+- `exitCode` (number): Exit code from the timeout command
+  - 0: Success
+  - 1-123: Command's actual exit code
+  - 124: Timeout expired
+  - 125: timeout command itself failed
+  - 126: Command found but not executable
+  - 127: Command not found
+  - 128+N: Terminated by signal N (e.g., 137 = SIGKILL)
+- `timedOut` (boolean): Convenience flag, true when exitCode is 124-137
 
 ### Examples
 
 **Simple command:**
+
 ```json
 {
   "command": "ls -la"
@@ -51,14 +64,16 @@ Execute a shell command using bash.
 ```
 
 **Command with environment variables:**
+
 ```json
 {
   "command": "echo $MY_VAR",
-  "env": {"MY_VAR": "Hello World"}
+  "env": { "MY_VAR": "Hello World" }
 }
 ```
 
 **Command with stdin:**
+
 ```json
 {
   "command": "grep hello",
@@ -67,13 +82,16 @@ Execute a shell command using bash.
 ```
 
 **Command with custom timeout:**
+
 ```json
 {
   "command": "sleep 10",
   "timeout": 5
 }
 ```
-This will timeout after 5 seconds, returning `exitCode: null` and `timedOut: true`.
+
+This will timeout after 5 seconds, returning `exitCode: 124` and
+`timedOut: true`.
 
 ## Testing
 
@@ -86,10 +104,14 @@ npx @modelcontextprotocol/inspector node dist/index.js
 ## How It Works
 
 Commands are executed using:
+
 ```bash
 timeout <seconds> bash -c "<command>"
 ```
 
 - The `timeout` utility enforces the time limit
-- When timeout expires, the command returns exit code 124, which is detected and reported as `timedOut: true` with `exitCode: null`
-- All other exit codes are passed through normally
+- Exit codes are passed through transparently:
+  - 0-123: Normal command exit codes
+  - 124-137: timeout-related codes (triggers `timedOut: true`)
+- The `timedOut` flag provides a convenient way to check for timeout without
+  needing to know the specific exit codes

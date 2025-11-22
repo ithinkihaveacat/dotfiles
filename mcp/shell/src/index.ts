@@ -15,9 +15,16 @@ const server = new McpServer({
  *
  * The command is executed as: timeout <timeout_seconds> bash -c "<command>"
  *
- * Exit codes:
- * - null: The timeout expired (timeout command returns 124)
- * - number: The actual exit code from the command
+ * Exit codes from the timeout command:
+ * - 0: Command completed successfully
+ * - 1-123: Command's actual exit code
+ * - 124: Timeout expired
+ * - 125: timeout command itself failed
+ * - 126: Command found but not executable
+ * - 127: Command not found
+ * - 128+N: Command terminated by signal N (e.g., 137 = 128+9 for SIGKILL)
+ *
+ * The timedOut flag is true when exitCode is in the range 124-137 (timeout-related codes).
  */
 server.registerTool(
     'execute_shell',
@@ -33,7 +40,7 @@ server.registerTool(
         outputSchema: {
             stdout: z.string(),
             stderr: z.string(),
-            exitCode: z.number().nullable(),
+            exitCode: z.number(),
             timedOut: z.boolean()
         }
     },
@@ -82,11 +89,12 @@ server.registerTool(
 
             // Handle process completion
             child.on('close', (code) => {
-                // The timeout command returns 124 when it times out
-                const timedOut = code === 124;
+                // Pass through the actual exit code from timeout
+                const exitCode = code ?? 0;
 
-                // If timed out, set exitCode to null, otherwise use the actual exit code
-                const exitCode = timedOut ? null : (code ?? 0);
+                // timeout command uses exit codes 124-137 for timeout-related statuses
+                // 124: timeout expired, 125-137: various timeout/signal issues
+                const timedOut = exitCode >= 124 && exitCode <= 137;
 
                 const output = {
                     stdout,
@@ -109,7 +117,7 @@ server.registerTool(
                 const output = {
                     stdout: '',
                     stderr: `Failed to execute command: ${error.message}`,
-                    exitCode: null,
+                    exitCode: 1,
                     timedOut: false
                 };
 
