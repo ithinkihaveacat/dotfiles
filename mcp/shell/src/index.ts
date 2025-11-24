@@ -1,12 +1,16 @@
+#!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn } from "child_process";
 import { constants } from "os";
+import { stat } from "fs/promises";
+
+const MAX_OUTPUT_SIZE = 1024 * 1024; // 1MB cap
 
 const server = new McpServer({
   name: "mcp-shell",
-  version: "0.1.0"
+  version: "1.0.0"
 });
 
 server.registerTool(
@@ -34,7 +38,11 @@ server.registerTool(
       stdin: z
         .string()
         .optional()
-        .describe("Content to pass to standard input.")
+        .describe("Content to pass to standard input."),
+      cwd: z
+        .string()
+        .optional()
+        .describe("The working directory for execution.")
     },
     outputSchema: {
       stdout: z.string(),
@@ -49,40 +57,94 @@ server.registerTool(
         .describe("Whether the process was terminated due to a timeout.")
     }
   },
-  async ({ command, args = [], env = {}, timeout = 300, stdin }) => {
+  async ({ command, args = [], env = {}, timeout = 300, stdin, cwd }) => {
+    // Validate cwd if provided
+    if (cwd) {
+      try {
+        const stats = await stat(cwd);
+        if (!stats.isDirectory()) {
+          return {
+            content: [
+              { type: "text", text: `Error: cwd '${cwd}' is not a directory` }
+            ],
+            isError: true
+          };
+        }
+      } catch (error: any) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error resolving cwd '${cwd}': ${error.message}`
+            }
+          ],
+          isError: true
+        };
+      }
+    }
+
     return new Promise((resolve) => {
-      const controller = new AbortController();
-      const { signal } = controller;
+      let timedOut = false;
+      let killedByTimeout = false;
+
+      // Use detached: true to create a new process group, allowing us to kill the whole tree
+      const child = spawn("bash", ["-c", command, "bash", ...args], {
+        env: { ...process.env, ...env },
+        cwd,
+        detached: true
+      });
+
+      const killProcess = () => {
+        if (child.pid) {
+          try {
+            // Kill the process group
+            process.kill(-child.pid, "SIGTERM");
+          } catch (e) {
+            // Process might be already gone, try simple kill as fallback
+            try {
+              child.kill("SIGTERM");
+            } catch (e2) {}
+          }
+        }
+      };
 
       const timer = setTimeout(() => {
-        controller.abort();
+        timedOut = true;
+        killedByTimeout = true;
+        killProcess();
       }, timeout * 1000);
-
-      const childEnv = { ...process.env, ...env };
-
-      const child = spawn("bash", ["-c", command, "bash", ...args], {
-        env: childEnv,
-        signal
-      });
 
       let stdout = "";
       let stderr = "";
 
+      const appendOutput = (target: string, data: string): string => {
+        if (target.length >= MAX_OUTPUT_SIZE) return target;
+        const newLength = target.length + data.length;
+        if (newLength > MAX_OUTPUT_SIZE) {
+          return (
+            target +
+            data.slice(0, MAX_OUTPUT_SIZE - target.length) +
+            "\n... [Truncated]"
+          );
+        }
+        return target + data;
+      };
+
       if (child.stdout) {
         child.stdout.on("data", (data) => {
-          stdout += data.toString();
+          stdout = appendOutput(stdout, data.toString());
         });
       }
 
       if (child.stderr) {
         child.stderr.on("data", (data) => {
-          stderr += data.toString();
+          stderr = appendOutput(stderr, data.toString());
         });
       }
 
       if (child.stdin) {
         child.stdin.on("error", () => {
-          // Ignore stdin errors (e.g. EPIPE if the process exits early)
+          // Ignore EPIPE
         });
         if (stdin) {
           child.stdin.write(stdin);
@@ -90,29 +152,26 @@ server.registerTool(
         child.stdin.end();
       }
 
-      let timedOut = false;
       let errorOccurred = false;
 
       child.on("error", (err: any) => {
-        if (err.name === "AbortError") {
-          timedOut = true;
-        } else {
-          errorOccurred = true;
-          clearTimeout(timer);
-          const result = {
-            stdout,
-            stderr:
-              stderr +
-              (stderr ? "\n" : "") +
-              `Error spawning process: ${err.message}`,
-            exitCode: 1, // Generic error
-            timedOut: false
-          };
-          resolve({
-            content: [{ type: "text", text: JSON.stringify(result) }],
-            structuredContent: result
-          });
-        }
+        errorOccurred = true;
+        clearTimeout(timer);
+        const output = {
+          stdout,
+          stderr:
+            stderr +
+            (stderr ? "\n" : "") +
+            `Error spawning process: ${err.message}`,
+          exitCode: 1,
+          timedOut: false
+        };
+
+        resolve({
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output,
+          isError: true
+        });
       });
 
       child.on("close", (code, signal) => {
@@ -121,7 +180,7 @@ server.registerTool(
 
         let finalCode = 0;
 
-        if (timedOut) {
+        if (killedByTimeout) {
           finalCode = 124;
         } else if (code !== null) {
           finalCode = code;
@@ -130,16 +189,16 @@ server.registerTool(
           finalCode = 128 + signalNumber;
         }
 
-        const result = {
+        const output = {
           stdout,
           stderr,
           exitCode: finalCode,
-          timedOut
+          timedOut: killedByTimeout
         };
 
         resolve({
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          structuredContent: result
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output
         });
       });
     });
