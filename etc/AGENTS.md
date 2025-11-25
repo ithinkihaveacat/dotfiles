@@ -5,6 +5,15 @@ changes to codebases.
 
 ## Markdown Formatting
 
+### Heading Style
+
+When creating Markdown, do not add additional formatting to headings or use ALL
+CAPS. For example, do not write "## **INTRODUCTION**"; instead, use the heading
+format: "## Introduction". When modifying existing Markdown, copy existing
+approaches.
+
+### Automatic Formatting
+
 All Markdown files, whether new or updated, _must_ be formatted by `prettier`.
 There is a `.prettierrc` file in the root directory that applies the formatting
 rules.
