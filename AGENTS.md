@@ -44,10 +44,45 @@ another-script --output /tmp/my-output-dir
 
 ### Compatibility
 
-All scripts must be compatible with Bash version 3.2.57(1)-release (the default
-on recent macOS versions as of Nov 2025) and newer versions found on recent
-Linux distributions. This means avoiding features exclusive to newer Bash
-versions (e.g., associative arrays).
+Scripts should target Bash version 3.2.57(1)-release (the default on recent
+macOS versions as of Nov 2025) for maximum compatibility. This is especially
+important for short scripts and general-purpose utilities.
+
+For longer, more complex scripts where modern Bash features significantly
+improve reliability and robustness, Bash 4.x features are acceptable. However,
+scripts using Bash 4.x features must include a version guard at the top to fail
+gracefully on older systems:
+
+```bash
+#!/usr/bin/env bash
+
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+```
+
+Guidelines for using Bash 4.x features:
+
+- Use only when it provides clear benefits to reliability, robustness, or
+  maintainability
+- Prefer simple, well-established features (e.g., associative arrays,
+  `readarray`) over exotic ones
+- Avoid features that are conceptually or syntactically "odd", even if
+  technically superior
+- Never use Bash 5.x-specific features
+
+Examples of acceptable Bash 4.x features for complex scripts:
+
+- Associative arrays (`declare -A`) for lookups and mappings
+- `readarray`/`mapfile` for safer array population
+- `${var,,}` and `${var^^}` for case conversion (sparingly)
+
+Examples of features to avoid:
+
+- Bash 5.x features (e.g., `${var@U}`, `${var@u}`)
+- Obscure parameter expansions that harm readability
+- Any feature that would confuse maintainers familiar with basic Bash
 
 ### Handling APK Archives
 

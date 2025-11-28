@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 # See https://developer.android.com/tools/variables#envar
@@ -151,14 +157,14 @@ get_latest_image_for_type() {
     fi
 
     # Check if package is in the blocklist
-    local is_blocklisted=false
+    local is_blocklisted=0
     for blocklisted in "${BLOCKLISTED_IMAGES[@]}"; do
       if [[ "$package" == "$blocklisted" ]]; then
-        is_blocklisted=true
+        is_blocklisted=1
         break
       fi
     done
-    if [[ "$is_blocklisted" == "true" ]]; then
+    if ((is_blocklisted)); then
       continue
     fi
 
@@ -182,14 +188,14 @@ get_latest_image_for_type() {
     minor=${minor:-0}
 
     # Compare versions: prefer higher major, then higher minor
-    local is_better=false
+    local is_better=0
     if [[ $major -gt $best_major ]] ||
       [[ $major -eq $best_major && $minor -gt $best_minor ]]; then
-      is_better=true
+      is_better=1
     fi
 
     # Update best if this is better
-    if [[ "$is_better" == "true" ]]; then
+    if ((is_better)); then
       best_major=$major
       best_minor=$minor
       best_image="$package"
@@ -197,13 +203,13 @@ get_latest_image_for_type() {
 
     # Track preferred variant separately (same comparison logic)
     if [[ -n "$prefer_pattern" ]] && echo "$package" | grep -qE "$prefer_pattern" 2>/dev/null; then
-      local is_preferred_better=false
+      local is_preferred_better=0
       if [[ $major -gt $preferred_major ]] ||
         [[ $major -eq $preferred_major && $minor -gt $preferred_minor ]]; then
-        is_preferred_better=true
+        is_preferred_better=1
       fi
 
-      if [[ "$is_preferred_better" == "true" ]]; then
+      if ((is_preferred_better)); then
         preferred_major=$major
         preferred_minor=$minor
         preferred_image="$package"
@@ -553,22 +559,25 @@ find_available_emulator_port() {
   local adb_path="$ANDROID_HOME/platform-tools/adb"
 
   # Get list of currently used emulator ports from adb devices
-  local used_ports
-  used_ports=$("${adb_path}" devices 2>/dev/null | grep "emulator-" | awk '{print $1}' | sed 's/emulator-//' || true)
+  local -a used_ports
+  readarray -t used_ports < <(
+    "${adb_path}" devices 2>/dev/null |
+    awk '/emulator-/ {sub(/emulator-/, "", $1); print $1}'
+  )
 
   # Try ports from 5554 to 5584 (even numbers only)
   for port in $(seq 5554 2 5584); do
-    local port_in_use=false
+    local port_in_use=0
 
-    # Check if this port is in the list of used ports
-    for used_port in $used_ports; do
+    # Check if this port is in the array
+    for used_port in "${used_ports[@]}"; do
       if [[ "$port" == "$used_port" ]]; then
-        port_in_use=true
+        port_in_use=1
         break
       fi
     done
 
-    if [[ "$port_in_use" == false ]]; then
+    if ! ((port_in_use)); then
       echo "$port"
       return 0
     fi
@@ -650,18 +659,18 @@ start_avd() {
   require emulator adb
 
   # Parse flags and AVD name (flags can appear in any position)
-  local cold_boot=false
-  local wipe_data=false
+  local cold_boot=0
+  local wipe_data=0
   local avd_name=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --cold-boot)
-        cold_boot=true
+        cold_boot=1
         shift
         ;;
       --wipe-data)
-        wipe_data=true
+        wipe_data=1
         shift
         ;;
       -*)
@@ -688,8 +697,8 @@ start_avd() {
   fi
 
   # --wipe-data implies cold boot
-  if [[ "$wipe_data" == true ]]; then
-    cold_boot=true
+  if ((wipe_data)); then
+    cold_boot=1
   fi
 
   # Check if AVD exists by listing them
@@ -741,18 +750,18 @@ start_avd() {
   fi
 
   # Check for hardware acceleration and provide a streamlined error message
-  local acceleration_ok=true
+  local acceleration_ok=1
   if [[ "$(uname -s)" == "Linux" && "$(get_host_arch)" == "x86_64" ]]; then
     if [[ ! -e /dev/kvm ]] || ! grep -q -E 'vmx|svm' /proc/cpuinfo; then
-      acceleration_ok=false
+      acceleration_ok=0
     fi
   elif [[ "$(uname -s)" == "Darwin" ]]; then
     if [[ "$(sysctl -n kern.hv.supported 2>/dev/null)" -ne 1 ]]; then
-      acceleration_ok=false
+      acceleration_ok=0
     fi
   fi
 
-  if [[ "$acceleration_ok" == false ]]; then
+  if ! ((acceleration_ok)); then
     echo "$(basename "$0"): ERROR: Hardware acceleration is not available." >&2
     echo "This is required to run the emulator." >&2
     echo "For a detailed diagnosis, run: $(basename "$0") doctor" >&2
@@ -768,12 +777,12 @@ start_avd() {
   local emulator_flags="-avd ${avd_name} -port ${emulator_port}"
   local boot_mode="Quick Boot"
 
-  if [[ "$cold_boot" == true ]]; then
+  if ((cold_boot)); then
     emulator_flags="${emulator_flags} -no-snapshot-load"
     boot_mode="Cold Boot"
   fi
 
-  if [[ "$wipe_data" == true ]]; then
+  if ((wipe_data)); then
     emulator_flags="${emulator_flags} -wipe-data"
     boot_mode="Factory Reset + Cold Boot"
   fi
@@ -836,7 +845,7 @@ stop_avd() {
     return 0
   fi
 
-  local found_avd=false
+  local found_avd=0
   for serial in $device_serials; do
     # Get the AVD name for the current device and trim whitespace/carriage returns
     local running_avd_name
@@ -846,12 +855,12 @@ stop_avd() {
       echo "Found running AVD '$avd_name_to_stop' on device '$serial'. Stopping it..."
       "${adb_path}" -s "$serial" emu kill
       echo "AVD '$avd_name_to_stop' stopped."
-      found_avd=true
+      found_avd=1
       break # Stop after finding and killing the first match
     fi
   done
 
-  if [[ "$found_avd" == false ]]; then
+  if ! ((found_avd)); then
     echo "AVD '$avd_name_to_stop' is not currently running."
   fi
 }
@@ -902,17 +911,17 @@ delete_avd() {
       sleep 2
 
       # Clean up any remaining files that avdmanager didn't remove
-      local cleaned=false
+      local cleaned=0
       if [[ -d "$avd_dir" ]]; then
         rm -rf "$avd_dir"
-        cleaned=true
+        cleaned=1
       fi
       if [[ -f "$avd_ini" ]]; then
         rm -f "$avd_ini"
-        cleaned=true
+        cleaned=1
       fi
 
-      if [[ "$cleaned" == true ]]; then
+      if ((cleaned)); then
         echo "AVD '${avd_name}' deleted and cleaned up successfully."
       else
         echo "AVD '${avd_name}' deleted successfully."
@@ -1122,7 +1131,7 @@ info_avd() {
   package_name=$(get_avd_image_package "$avd_name")
 
   # Check if AVD is running
-  local is_running=false
+  local is_running=0
   local serial_number=""
   local device_serials
   device_serials=$(timeout 5 "${adb_path}" devices | grep "emulator-" | awk '{print $1}' || true)
@@ -1132,7 +1141,7 @@ info_avd() {
       local running_avd_name
       running_avd_name=$(timeout 5 "${adb_path}" -s "$serial" shell getprop ro.boot.qemu.avd_name 2>/dev/null | tr -d '[:space:]' || true)
       if [[ "$running_avd_name" == "$avd_name" ]]; then
-        is_running=true
+        is_running=1
         serial_number="$serial"
         break
       fi
@@ -1145,7 +1154,7 @@ info_avd() {
     echo "  Display Name: ${display_name}"
   fi
 
-  if [[ "$is_running" == true ]]; then
+  if ((is_running)); then
     echo "  Status: Running (${serial_number})"
   else
     echo "  Status: Stopped"
@@ -1321,18 +1330,18 @@ run_doctor() {
   # Check for orphaned/mismatched AVD files
   if [[ -d "$ANDROID_USER_HOME/avd" ]]; then
     local avd_base_path="$ANDROID_USER_HOME/avd"
-    local has_orphans=false
+    local has_orphans=0
 
     # Arrays to store all .ini files and .avd directories
     declare -a all_ini_files
-    while IFS= read -r file; do
-      all_ini_files+=("$file")
-    done < <(find "$avd_base_path" -maxdepth 1 -name "*.ini" -type f)
+    readarray -t all_ini_files < <(
+      find "$avd_base_path" -maxdepth 1 -name "*.ini" -type f
+    )
 
     declare -a all_avd_dirs
-    while IFS= read -r dir; do
-      all_avd_dirs+=("$dir")
-    done < <(find "$avd_base_path" -maxdepth 1 -name "*.avd" -type d)
+    readarray -t all_avd_dirs < <(
+      find "$avd_base_path" -maxdepth 1 -name "*.avd" -type d
+    )
 
     # Track which AVD directories are referenced by .ini files using associative array
     declare -A referenced_avd_dirs
@@ -1347,14 +1356,14 @@ run_doctor() {
       if [[ -z "$avd_path" ]]; then
         orphaned_inis+=("$ini_file")
         orphaned_ini_reasons+=("malformed: missing 'path' entry")
-        has_orphans=true
+        has_orphans=1
         continue
       fi
 
       if [[ ! -d "$avd_path" ]]; then
         orphaned_inis+=("$ini_file")
         orphaned_ini_reasons+=("points to missing directory: $avd_path")
-        has_orphans=true
+        has_orphans=1
       else
         referenced_avd_dirs["$avd_path"]=1
       fi
@@ -1365,7 +1374,7 @@ run_doctor() {
     for avd_dir in "${all_avd_dirs[@]}"; do
       if [[ -z "${referenced_avd_dirs[$avd_dir]:-}" ]]; then
         orphaned_avds+=("$avd_dir")
-        has_orphans=true
+        has_orphans=1
       fi
     done
 
@@ -1385,7 +1394,7 @@ run_doctor() {
       done
     fi
 
-    if [[ "$has_orphans" == "true" ]]; then
+    if ((has_orphans)); then
       warnings=$((warnings + 1))
       declare -A unique_names_to_delete
       for orphan in "${orphaned_inis[@]}"; do
