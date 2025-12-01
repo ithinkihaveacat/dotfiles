@@ -1,0 +1,49 @@
+# AGENTS.md
+
+This document provides general rules and requirements for agents when making
+changes to codebases.
+
+## Markdown Formatting
+
+### Heading Style
+
+When creating Markdown, do not add additional formatting to headings or use ALL
+CAPS. For example, do not write "## **INTRODUCTION**"; instead, use the heading
+format: "## Introduction". When modifying existing Markdown, copy existing
+approaches.
+
+### Automatic Formatting
+
+All Markdown files, whether new or updated, _must_ be formatted by `prettier`.
+There is a `.prettierrc` file in the root directory that applies the formatting
+rules.
+
+To format Markdown files, use the command `prettier --write <file(s)>`. This
+command will edit files in place.
+
+If `prettier` is not installed globally, you can run it via
+`npx -y prettier@latest --write <file(s)>`. If `npx` is not available, you can
+skip the prettier step.
+
+## Git Commit Messages
+
+When generating git commit messages, use the following structure (hard-wrap all
+body text at 80 characters):
+
+- Subject line (imperative mood) of <=50 characters. Do add "feat" or "bug" to
+  the subject line.
+- Blank line.
+- One of more paragraphs explaining what changed and why. Point form is
+  acceptable.
+
+## Language-Specific Guidelines
+
+For language-specific or domain-specific guidelines, refer to the following
+documents:
+
+- **Shell/Bash Development**: See [agents-shell.md](./agents-shell.md) for shell
+  script quality standards, formatting requirements, and error handling best
+  practices.
+- **Android Development**: See [agents-android.md](./agents-android.md) for
+  Jetpack library usage, Android device interaction tools (ADB, APK, Wear OS),
+  and related development workflows.
