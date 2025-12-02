@@ -41,9 +41,8 @@ body text at 80 characters):
 For language-specific or domain-specific guidelines, refer to the following
 documents:
 
-- **Shell/Bash Development**: See [agents-shell.md](./agents-shell.md) for shell
-  script quality standards, formatting requirements, and error handling best
-  practices.
-- **Android Development**: See [agents-android.md](./agents-android.md) for
-  Jetpack library usage, Android device interaction tools (ADB, APK, Wear OS),
-  and related development workflows.
+- **Shell/Bash Development**: See [shell.md](./shell.md) for shell script
+  quality standards, formatting requirements, and error handling best practices.
+- **Android Development**: See [android.md](./android.md) for Jetpack library
+  usage, Android device interaction tools (ADB, APK, Wear OS), and related
+  development workflows.
