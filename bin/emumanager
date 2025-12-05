@@ -311,15 +311,37 @@ EOF
   exit "$exit_code"
 }
 
+# Require an Android SDK tool and return its path.
+# Only checks ANDROID_HOME paths, never system PATH.
+# Usage: local sdkmanager; sdkmanager=$(require_sdk sdkmanager)
+require_sdk() {
+  local cmd="$1"
+
+  local sdk_paths=(
+    "$ANDROID_HOME/cmdline-tools/latest/bin/$cmd"
+    "$ANDROID_HOME/emulator/$cmd"
+    "$ANDROID_HOME/platform-tools/$cmd"
+  )
+
+  for path in "${sdk_paths[@]}"; do
+    if [[ -f "$path" ]]; then
+      echo "$path"
+      return 0
+    fi
+  done
+
+  echo "$(basename "$0"): '$cmd' not found in ANDROID_HOME" >&2
+  echo "Please run '$(basename "$0") bootstrap' first." >&2
+  return 127
+}
+
+# Require a general system command (checks PATH only).
+# Usage: require curl unzip
 require() {
   for cmd in "$@"; do
     if ! command -v "$cmd" &>/dev/null; then
-      # If the command is in our SDK, let's try to find it there
-      if [[ -f "$ANDROID_HOME/cmdline-tools/latest/bin/$cmd" || -f "$ANDROID_HOME/emulator/$cmd" || -f "$ANDROID_HOME/platform-tools/$cmd" ]]; then
-        continue
-      fi
       echo "$(basename "$0"): '$cmd' command not found" >&2
-      exit 127
+      return 127
     fi
   done
 }
@@ -592,14 +614,14 @@ find_available_emulator_port() {
 
 create_avd() {
   bootstrap
-  require avdmanager
 
   local avd_name="$1"
   local device_type="$2"
   local image_package="$3"
 
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-  local avdmanager="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+  local sdkmanager avdmanager
+  sdkmanager=$(require_sdk sdkmanager)
+  avdmanager=$(require_sdk avdmanager)
 
   if "${avdmanager}" list avd | grep -q "Name: ${avd_name}"; then
     echo "AVD '${avd_name}' already exists."
@@ -658,7 +680,6 @@ create_avd() {
 
 start_avd() {
   bootstrap
-  require emulator adb
 
   # Parse flags and AVD name (flags can appear in any position)
   local cold_boot=0
@@ -703,9 +724,14 @@ start_avd() {
     cold_boot=1
   fi
 
+  local sdkmanager emulator_path adb_path
+  sdkmanager=$(require_sdk sdkmanager)
+  emulator_path=$(require_sdk emulator)
+  adb_path=$(require_sdk adb)
+
   # Check if AVD exists by listing them
   local all_avds
-  all_avds=$("$ANDROID_HOME/emulator/emulator" -list-avds)
+  all_avds=$("$emulator_path" -list-avds)
   if ! echo "$all_avds" | grep -q "^${avd_name}$"; then
     echo "$(basename "$0"): AVD '${avd_name}' does not exist. Available AVDs:" >&2
     echo "$all_avds" >&2
@@ -715,7 +741,6 @@ start_avd() {
   local image_package
   image_package=$(get_avd_image_package "$avd_name")
 
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
   local installed_packages
   installed_packages=$("$sdkmanager" --list_installed)
   if ! echo "${installed_packages}" | grep -q "${image_package}"; then
@@ -731,24 +756,6 @@ start_avd() {
   if echo "$running_avds" | grep -q "^${avd_name}$"; then
     echo "AVD '${avd_name}' is already running."
     return 0
-  fi
-
-  local emulator_path="$ANDROID_HOME/emulator/emulator"
-  if [[ ! -f "${emulator_path}" ]]; then
-    echo "$(basename "$0"): emulator not found. Please run 'bootstrap' first." >&2
-    exit 1
-  fi
-
-  # Check for platform-tools
-  if [[ ! -d "$ANDROID_HOME/platform-tools" ]]; then
-    echo "$(basename "$0"): platform-tools not found. Please run 'bootstrap' first." >&2
-    exit 1
-  fi
-
-  local adb_path="$ANDROID_HOME/platform-tools/adb"
-  if [[ ! -f "${adb_path}" ]]; then
-    echo "$(basename "$0"): adb not found. Please run 'bootstrap' first." >&2
-    exit 1
   fi
 
   # Check for hardware acceleration and provide a streamlined error message
@@ -824,17 +831,18 @@ start_avd() {
 
 stop_avd() {
   bootstrap
-  require adb emulator
 
   local avd_name_to_stop="$1"
 
+  local emulator_path adb_path
+  emulator_path=$(require_sdk emulator)
+  adb_path=$(require_sdk adb)
+
   # Check if AVD exists
-  if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -q "^${avd_name_to_stop}$"; then
+  if ! "$emulator_path" -list-avds | grep -q "^${avd_name_to_stop}$"; then
     echo "$(basename "$0"): AVD '${avd_name_to_stop}' does not exist." >&2
     exit 1
   fi
-
-  local adb_path="$ANDROID_HOME/platform-tools/adb"
 
   echo "Attempting to stop AVD '$avd_name_to_stop'..."
 
@@ -869,14 +877,17 @@ stop_avd() {
 
 delete_avd() {
   bootstrap
-  require avdmanager emulator
 
   local avd_name="$1"
   local avd_dir="$ANDROID_USER_HOME/avd/${avd_name}.avd"
   local avd_ini="$ANDROID_USER_HOME/avd/${avd_name}.ini"
 
+  local emulator_path avdmanager_path
+  emulator_path=$(require_sdk emulator)
+  avdmanager_path=$(require_sdk avdmanager)
+
   # Check if AVD exists
-  if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -q "^${avd_name}$"; then
+  if ! "$emulator_path" -list-avds | grep -q "^${avd_name}$"; then
     # AVD not registered, but check for orphaned files
     if [[ -d "$avd_dir" ]] || [[ -f "$avd_ini" ]]; then
       echo "AVD '${avd_name}' is not registered, but orphaned files exist. Cleaning up..."
@@ -897,7 +908,6 @@ delete_avd() {
     stop_avd "${avd_name}"
   fi
 
-  local avdmanager_path="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
   echo "Deleting AVD '${avd_name}'..."
 
   "${avdmanager_path}" delete avd -n "${avd_name}"
@@ -940,10 +950,10 @@ delete_avd() {
 
 list_avds() {
   bootstrap
-  require emulator adb
 
-  local emulator_path="$ANDROID_HOME/emulator/emulator"
-  local adb_path="$ANDROID_HOME/platform-tools/adb"
+  local emulator_path adb_path
+  emulator_path=$(require_sdk emulator)
+  adb_path=$(require_sdk adb)
 
   # Get all available AVDs
   local all_avds
@@ -1016,9 +1026,9 @@ list_avds() {
 
 list_images() {
   bootstrap --no-emulator
-  require sdkmanager
 
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  local sdkmanager
+  sdkmanager=$(require_sdk sdkmanager)
 
   # Determine host architecture for filtering
   local arch_filter
@@ -1243,9 +1253,9 @@ get_avd_image_package() {
 
 check_outdated() {
   bootstrap --no-emulator
-  require sdkmanager
 
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  local sdkmanager
+  sdkmanager=$(require_sdk sdkmanager)
 
   echo "Checking for outdated packages..."
   echo ""
@@ -1254,9 +1264,9 @@ check_outdated() {
 
 update_packages() {
   bootstrap --no-emulator
-  require sdkmanager
 
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  local sdkmanager
+  sdkmanager=$(require_sdk sdkmanager)
 
   echo "Updating all installed packages..."
   yes | "${sdkmanager}" --licenses >/dev/null || true
@@ -1504,8 +1514,8 @@ run_doctor() {
   fi
 
   # Check for SDK tools
-  if [[ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]]; then
-    echo "[ERROR] Android SDK command-line tools not found"
+  if ! require_sdk sdkmanager >/dev/null 2>&1; then
+    echo "[ERROR] Android SDK command-line tools not found (sdkmanager missing)"
     echo "        Run: $(basename "$0") bootstrap"
     echo ""
     errors=$((errors + 1))
@@ -1513,8 +1523,8 @@ run_doctor() {
     echo "[OK]   Android SDK command-line tools installed"
   fi
 
-  if [[ ! -d "$ANDROID_HOME/platform-tools" ]]; then
-    echo "[ERROR] Android platform-tools not found"
+  if ! require_sdk adb >/dev/null 2>&1; then
+    echo "[ERROR] Android platform-tools not found (adb missing)"
     echo "        Run: $(basename "$0") bootstrap"
     echo ""
     errors=$((errors + 1))
@@ -1522,7 +1532,7 @@ run_doctor() {
     echo "[OK]   Android platform-tools installed"
   fi
 
-  if [[ ! -d "$ANDROID_HOME/emulator" ]]; then
+  if ! require_sdk emulator >/dev/null 2>&1; then
     echo "[ERROR] Android emulator not found"
     echo "        Run: $(basename "$0") bootstrap"
     echo ""
