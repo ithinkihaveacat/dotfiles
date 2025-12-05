@@ -69,6 +69,7 @@ complete -c emumanager -f -n '__fish_emumanager_using_command download' -a '(__f
 
 # Complete flags
 complete -c emumanager -f -s h -l help -d 'Display help message and exit'
+complete -c emumanager -f -n '__fish_emumanager_using_command bootstrap' -l no-emulator -d 'Skip installing the emulator'
 complete -c emumanager -f -n '__fish_emumanager_using_command list' -l names-only -d 'Output only AVD names without decoration'
 complete -c emumanager -f -n '__fish_emumanager_using_command list' -l running-only -d 'Output only running AVD names'
 complete -c emumanager -f -n '__fish_emumanager_using_command list' -l stopped-only -d 'Output only stopped AVD names'
