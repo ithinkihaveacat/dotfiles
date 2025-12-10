@@ -12,9 +12,10 @@ Download and extract source code for one or more Jetpack packages.
 Arguments:
   PACKAGE     One or more package names in the format GROUP_ID:ARTIFACT_ID
               (supports brace expansion, e.g., androidx.pkg:{foo,bar})
-  VERSION     Version string: ALPHA, BETA, RC, STABLE, LATEST, or a specific version number
+  VERSION     Version string: ALPHA, BETA, RC, STABLE, LATEST, SNAPSHOT, or a specific version number
               (optional, defaults to STABLE)
   REPO_URL    Maven repository URL (optional, default: https://dl.google.com/android/maven2)
+              For SNAPSHOT, this is ignored and the androidx.dev snapshot repo is used.
 
 Options:
   -h, --help  Display this help message and exit
@@ -25,6 +26,8 @@ Examples:
   $(basename "$0") androidx.wear.tiles:tiles STABLE
   $(basename "$0") androidx.wear.tiles:tiles ALPHA
   $(basename "$0") androidx.wear.tiles:tiles RC
+  $(basename "$0") androidx.wear.tiles:tiles SNAPSHOT
+  $(basename "$0") androidx.glance:glance-wear-tiles SNAPSHOT
   $(basename "$0") androidx.wear.protolayout:protolayout-{expression,material,material3}
   $(basename "$0") com.google.android.horologist:horologist-datalayer STABLE https://repo1.maven.org/maven2
   $(basename "$0") --output /tmp/wear-tiles androidx.wear.tiles:tiles BETA
@@ -114,6 +117,15 @@ if [ "${#PACKAGES[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# For SNAPSHOT versions, set up the snapshot repository
+if [ "$VERSION_STRING_UPPER" = "SNAPSHOT" ]; then
+  # Use the "latest" redirect URL which automatically resolves to the current snapshot build
+  # e.g., https://androidx.dev/snapshots/latest/artifacts/repository redirects to
+  #       https://androidx.dev/snapshots/builds/14566697/artifacts/repository
+  REPO_URL="https://androidx.dev/snapshots/latest/artifacts/repository"
+  echo "info: Using AndroidX snapshot repository" >&2
+fi
+
 # Validate all packages before creating directories or downloading
 for PACKAGE_NAME in "${PACKAGES[@]}"; do
   # Validate package name format
@@ -148,17 +160,35 @@ for PACKAGE_NAME in "${PACKAGES[@]}"; do
   ARTIFACT_ID=$(echo "$PACKAGE_NAME" | cut -d: -f2)
   GROUP_ID_PATH=$(echo "$GROUP_ID" | sed 's/\./\//g')
 
-  # Resolve version (use the first package to resolve ALPHA/BETA/RC/STABLE/LATEST)
+  # Resolve version (use the first package to resolve ALPHA/BETA/RC/STABLE/LATEST/SNAPSHOT)
   if [ -z "$VERSION" ]; then
-    if [ "$VERSION_STRING_UPPER" == "ALPHA" ] || [ "$VERSION_STRING_UPPER" == "BETA" ] || [ "$VERSION_STRING_UPPER" == "RC" ] || [ "$VERSION_STRING_UPPER" == "STABLE" ] || [ "$VERSION_STRING_UPPER" == "LATEST" ]; then
+    if [ "$VERSION_STRING_UPPER" == "ALPHA" ] || [ "$VERSION_STRING_UPPER" == "BETA" ] || [ "$VERSION_STRING_UPPER" == "RC" ] || [ "$VERSION_STRING_UPPER" == "STABLE" ] || [ "$VERSION_STRING_UPPER" == "LATEST" ] || [ "$VERSION_STRING_UPPER" == "SNAPSHOT" ]; then
       VERSION=$(jetpack-version "${PACKAGE_NAME}" "$VERSION_STRING_UPPER" "$REPO_URL")
       echo "info: Resolved $VERSION_STRING_UPPER version for ${PACKAGE_NAME} to ${VERSION}" >&2
     else
       VERSION=$VERSION_STRING
     fi
   fi
-  SOURCE_JAR_URL="${REPO_URL}/${GROUP_ID_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${VERSION}-sources.jar"
-  SOURCE_JAR_FILENAME="${ARTIFACT_ID}-${VERSION}-sources.jar"
+
+  # For SNAPSHOT versions, we need to resolve the timestamped version for the JAR filename
+  # The directory structure uses X.Y.Z-SNAPSHOT but the JAR uses X.Y.Z-TIMESTAMP-N
+  JAR_VERSION="$VERSION"
+  if [[ "$VERSION" =~ -SNAPSHOT$ ]]; then
+    # Fetch the version-specific maven-metadata.xml to get the timestamped version
+    VERSION_METADATA_URL="${REPO_URL}/${GROUP_ID_PATH}/${ARTIFACT_ID}/${VERSION}/maven-metadata.xml"
+    SNAPSHOT_JAR_VERSION=$(curl -sSLf "$VERSION_METADATA_URL" 2>/dev/null |
+      xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
+
+    if [ -n "$SNAPSHOT_JAR_VERSION" ]; then
+      JAR_VERSION="$SNAPSHOT_JAR_VERSION"
+      echo "info: Resolved snapshot JAR version to ${JAR_VERSION}" >&2
+    else
+      echo "$(basename "$0"): warning: could not resolve timestamped version, trying ${VERSION}" >&2
+    fi
+  fi
+
+  SOURCE_JAR_URL="${REPO_URL}/${GROUP_ID_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${JAR_VERSION}-sources.jar"
+  SOURCE_JAR_FILENAME="${ARTIFACT_ID}-${JAR_VERSION}-sources.jar"
 
   echo "info: Downloading ${PACKAGE_NAME} version ${VERSION}" >&2
   if ! curl -sSLf -o "${BUILD_DIR}/${SOURCE_JAR_FILENAME}" "${SOURCE_JAR_URL}"; then
@@ -174,7 +204,7 @@ for PACKAGE_NAME in "${PACKAGES[@]}"; do
 
   # Check for Kotlin Multiplatform platform-specific sources
   # Download the POM to check for platform dependencies (-jvm, -android, etc.)
-  POM_URL="${REPO_URL}/${GROUP_ID_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${VERSION}.pom"
+  POM_URL="${REPO_URL}/${GROUP_ID_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${JAR_VERSION}.pom"
   POM_CONTENT=$(curl -sSLf "${POM_URL}" 2>/dev/null || true)
 
   if [ -n "$POM_CONTENT" ]; then
@@ -186,8 +216,19 @@ for PACKAGE_NAME in "${PACKAGES[@]}"; do
     if [ -n "$PLATFORM_ARTIFACTS" ]; then
       echo "info: Detected Kotlin Multiplatform library, downloading platform-specific sources..." >&2
       for PLATFORM_ARTIFACT in $PLATFORM_ARTIFACTS; do
-        PLATFORM_SOURCE_JAR_URL="${REPO_URL}/${GROUP_ID_PATH}/${PLATFORM_ARTIFACT}/${VERSION}/${PLATFORM_ARTIFACT}-${VERSION}-sources.jar"
-        PLATFORM_SOURCE_JAR_FILENAME="${PLATFORM_ARTIFACT}-${VERSION}-sources.jar"
+        # For SNAPSHOT versions, resolve the timestamped version for each platform artifact
+        PLATFORM_JAR_VERSION="$VERSION"
+        if [[ "$VERSION" =~ -SNAPSHOT$ ]]; then
+          PLATFORM_VERSION_METADATA_URL="${REPO_URL}/${GROUP_ID_PATH}/${PLATFORM_ARTIFACT}/${VERSION}/maven-metadata.xml"
+          PLATFORM_SNAPSHOT_JAR_VERSION=$(curl -sSLf "$PLATFORM_VERSION_METADATA_URL" 2>/dev/null |
+            xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
+          if [ -n "$PLATFORM_SNAPSHOT_JAR_VERSION" ]; then
+            PLATFORM_JAR_VERSION="$PLATFORM_SNAPSHOT_JAR_VERSION"
+          fi
+        fi
+
+        PLATFORM_SOURCE_JAR_URL="${REPO_URL}/${GROUP_ID_PATH}/${PLATFORM_ARTIFACT}/${VERSION}/${PLATFORM_ARTIFACT}-${PLATFORM_JAR_VERSION}-sources.jar"
+        PLATFORM_SOURCE_JAR_FILENAME="${PLATFORM_ARTIFACT}-${PLATFORM_JAR_VERSION}-sources.jar"
 
         # Try to download platform sources (may not exist for all platforms)
         if curl -sSLf -o "${BUILD_DIR}/${PLATFORM_SOURCE_JAR_FILENAME}" "${PLATFORM_SOURCE_JAR_URL}" 2>/dev/null; then
