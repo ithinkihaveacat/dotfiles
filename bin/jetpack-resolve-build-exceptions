@@ -11,27 +11,15 @@ Arguments:
 
 Examples:
   $(basename "$0") androidx.wear:wear
-  $(basename "$0") androidx.core:core
-  $(basename "$0") androidx.lifecycle:lifecycle-viewmodel
+  $(basename "$0") androidx.glance.wear:wear-core
 
-This script downloads the source JAR for a library, examines the package structure,
-and suggests exception entries for packages that don't follow the standard naming
-pattern. The output can be added to the EXCEPTIONS array in the jetpack-resolve script.
+This script downloads the source JAR for a library from the AndroidX SNAPSHOT repository,
+examines the package structure, and suggests exception entries for packages that don't
+follow the standard naming pattern. The output can be added to the EXCEPTIONS array in
+the jetpack-resolve script.
 
-How to build the full exceptions table:
-
-1. Get a list of all AndroidX libraries from either:
-     - https://developer.android.com/jetpack/androidx/explorer?case=all
-     - https://maven.google.com/web/index.html
-2. For each library, run this script to analyze its package structure
-3. Add suggested exceptions to jetpack-resolve
-4. Test the exceptions with real package names from your code
-
-Alternatively, you can build exceptions on-demand:
-
-1. When jetpack-resolve produces incorrect output for a package
-2. Use jetpack-version to find what library provides that package
-3. Add the exception mapping to the EXCEPTIONS array
+NOTE: This script ONLY supports SNAPSHOT versions from https://androidx.dev/snapshots/latest/artifacts/repository
+This is because we typically need to find exceptions for new APIs that are not yet stable.
 EOF
   exit 0
 }
@@ -80,9 +68,11 @@ fi
 
 GROUP_ID=$(echo "$LIBRARY" | cut -d: -f1)
 ARTIFACT_ID=$(echo "$LIBRARY" | cut -d: -f2)
-REPO_URL="${2:-https://dl.google.com/android/maven2}"
 
-# Get the latest stable version
+# Always use snapshot repo
+REPO_URL="https://androidx.dev/snapshots/latest/artifacts/repository"
+
+# Get the latest snapshot version
 GROUP_ID_PATH=$(echo "$GROUP_ID" | sed 's/\./\//g')
 METADATA_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/maven-metadata.xml"
 
@@ -93,26 +83,39 @@ if ! curl -sSLf "$METADATA_URL" >/dev/null 2>&1; then
 fi
 
 VERSION=$(curl -sSLf "$METADATA_URL" 2>/dev/null |
-  grep -oP '<release>\K[^<]+' |
+  sed -n 's/.*<latest>\(.*\)<\/latest>.*/\1/p' |
   head -1)
-
-if [ -z "$VERSION" ]; then
-  # Try to get latest version if no release
-  VERSION=$(curl -sSLf "$METADATA_URL" 2>/dev/null |
-    grep -oP '<latest>\K[^<]+' |
-    head -1)
-fi
 
 if [ -z "$VERSION" ]; then
   echo "$(basename "$0"): no version found at $METADATA_URL" >&2
   exit 1
 fi
 
+# Resolve timestamped JAR version for SNAPSHOTs
+JAR_VERSION="$VERSION"
+VERSION_METADATA_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/$VERSION/maven-metadata.xml"
+
+# Try to use xmllint if available, otherwise fallback to grep/sed hacks
+if command -v xmllint >/dev/null 2>&1; then
+  SNAPSHOT_JAR_VERSION=$(curl -sSLf "$VERSION_METADATA_URL" 2>/dev/null |
+    xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
+else
+  # Fallback for systems without xmllint (approximate)
+  SNAPSHOT_JAR_VERSION=$(curl -sSLf "$VERSION_METADATA_URL" 2>/dev/null |
+    grep -A 5 "<classifier>sources</classifier>" | grep "<value>" | head -1 | sed 's/.*<value>\(.*\)<\/value>.*/\1/')
+fi
+
+if [ -n "$SNAPSHOT_JAR_VERSION" ]; then
+  JAR_VERSION="$SNAPSHOT_JAR_VERSION"
+else
+  echo "$(basename "$0"): warning: could not resolve timestamped version for snapshot, using $VERSION" >&2
+fi
+
 # Download source JAR to temp directory
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-SOURCE_JAR_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/$VERSION/$ARTIFACT_ID-$VERSION-sources.jar"
+SOURCE_JAR_URL="$REPO_URL/$GROUP_ID_PATH/$ARTIFACT_ID/$VERSION/$ARTIFACT_ID-$JAR_VERSION-sources.jar"
 SOURCE_JAR="$TMPDIR/sources.jar"
 
 if ! curl -sSLf -o "$SOURCE_JAR" "$SOURCE_JAR_URL" 2>/dev/null; then
