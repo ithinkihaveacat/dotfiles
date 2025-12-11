@@ -44,6 +44,10 @@ another-script --output /tmp/my-output-dir
 
 ### Compatibility
 
+Scripts must be compatible with standard utilities (e.g., `grep`, `awk`, `tr`)
+found in any macOS or Debian stable release that was current within the last
+two years.
+
 Scripts should target Bash version 3.2.57(1)-release (the default on recent
 macOS versions as of Nov 2025) for maximum compatibility. This is especially
 important for short scripts and general-purpose utilities.

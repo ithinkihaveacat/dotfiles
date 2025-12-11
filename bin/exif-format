@@ -17,35 +17,75 @@
 set -eo pipefail
 shopt -s nullglob
 
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") FILENAME
+
+Organizes photos by outputting a new path based on EXIF date and file hash.
+Format: YYYY/MM/YYYYMMDDHHMMSS-HASH.jpg
+
+Arguments:
+  FILENAME    The image file to process
+
+Options:
+  -h, --help  Display this help message and exit
+
+Examples:
+  $(basename "$0") photo.jpg
+  # Output: 2023/12/20231211123045-a1b2c3d4e5f6.jpg
+
+  # Use with mv to rename/move files:
+  dst=\$($(basename "$0") photo.jpg) && mv -v photo.jpg "\$dst"
+EOF
+  exit 0
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
 require() { hash "$@" || exit 127; }
 
 require exiftool
-require identify
-require md5
 
-if [ $# == 0 ]; then
-  >&2 echo "usage: $(basename "$0") filename"
-  exit 1
+if command -v md5 >/dev/null; then
+  # macOS / BSD
+  md5_cmd() { md5 -q "$1"; }
+elif command -v md5sum >/dev/null; then
+  # Linux / GNU
+  md5_cmd() { md5sum "$1" | awk '{print $1}'; }
+else
+  echo "$(basename "$0"): md5 or md5sum not found" >&2
+  exit 127
 fi
 
-if ! EXIFDATE=$(identify -format '%[EXIF:DateTimeOriginal]' "$1" 2>/dev/null); then
+if [ $# == 0 ]; then
+  usage
+fi
+
+# Use exiftool for date extraction and formatting (Portable)
+# -s3: Short output (values only)
+# -d: Date format helper
+if ! DIR=$(exiftool -d '%Y/%m' -DateTimeOriginal -s3 "$1"); then
+  >&2 echo "error: failed to run exiftool on $1"
+  exit 2
+fi
+
+if [ -z "$DIR" ]; then
   >&2 echo "error: can't read EXIF data from $1"
   exit 2
 fi
 
-if ! DIR=$(date -jf '%Y:%m:%d %H:%M:%S' "$EXIFDATE" +'%Y/%m' 2>/dev/null); then
-  >&2 echo "error: couldn't parse EXIF date $EXIFDATE"
+if ! DATE=$(exiftool -d '%Y%m%d%H%M%S' -DateTimeOriginal -s3 "$1"); then
+  >&2 echo "error: couldn't parse EXIF date from $1"
   exit 2
 fi
 
-if ! HASH=$(md5 -q "$1" | cut -b -12); then
+if ! HASH_FULL=$(md5_cmd "$1"); then
   >&2 echo "error: couldn't generate MD5 hash of $1"
   exit 2
 fi
 
-if ! DATE=$(date -jf '%Y:%m:%d %H:%M:%S' "$EXIFDATE" +"%Y%m%d%H%M%S" 2>/dev/null); then
-  >&2 echo "error: couldn't parse EXIF date $EXIFDATE"
-  exit 2
-fi
+HASH=$(echo "$HASH_FULL" | cut -b -12)
 
 printf "%s/%s-%s.jpg\n" "$DIR" "$DATE" "$HASH"
