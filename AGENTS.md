@@ -355,6 +355,6 @@ See these scripts for reference implementations:
 - `bin/jetpack-source` - Multiple arguments, optional version and repo URL
 - `bin/apk-cat-file` - Two required arguments, simple and clean
 - `bin/packagename-services-dumpsys` - Single argument, Android-specific
-- `bin/select` - Multiple files, macOS-specific
+- `bin/macos-finder-reveal` - Multiple files, macOS-specific
 
 Each demonstrates proper GNU coreutils style documentation.
