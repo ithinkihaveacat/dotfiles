@@ -30,8 +30,7 @@ function fish_prompt --description 'Write out the prompt'
     set -l last_status $status
 
     set_color blue
-    echo -n (prompt_pwd)
-    echo -n " "
+    printf "%s\n" (prompt_pwd)
 
     if test $last_status -eq 0
         set_color white
