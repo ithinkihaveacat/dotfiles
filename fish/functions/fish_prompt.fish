@@ -1,4 +1,6 @@
-set fish_prompt_pwd_dir_length 0
+set fish_prompt_pwd_dir_length 1
+set fish_prompt_pwd_full_dirs 3
+set fish_transient_prompt 1
 
 # https://github.com/fish-shell/fish-shell/blob/master/share/functions/fish_git_prompt.fish
 set __fish_git_prompt_showupstream auto
@@ -15,53 +17,41 @@ set __fish_git_prompt_char_upstream_ahead '⇡'
 set __fish_git_prompt_char_upstream_behind '⇣'
 set __fish_git_prompt_char_upstream_diverged '⇡⇣'
 
-set __fish_prompt_hostname (string replace -r '[\.|\-].*' '' (string lower $hostname))
-set __fish_prompt_username $USER
-
-function _print
-    set -l string $argv[1]
-    set -l color $argv[2]
-
-    set_color $color
-    printf $string
-    set_color normal
-end
-
-function _prompt_color
-    if test $argv[1] -eq 0
-        echo white
-    else
-        echo red
-    end
-end
-
 function fish_prompt --description 'Write out the prompt'
 
-    set -l last_status $status
+    set_color blue
+    echo -n (prompt_pwd)
+    echo -n " "
 
-    # If commands takes longer than 10 seconds, notify user on completion if Terminal
-    # in background. (Otherwise e.g. reading man pages for longer than 10 seconds will
-    # trigger the notification.) Inspired by https://github.com/jml/undistract-me/issues/32.
-    if test $CMD_DURATION
-        if test $CMD_DURATION -gt 10000
-            if not terminal-frontmost
-                set secs (math "$CMD_DURATION / 1000")
-                # It's not possible to raise the window via the notification; see
-                # https://stackoverflow.com/a/33808356
-                notify "$history[1]" "(status $status; $secs secs)"
-            end
+    if test $status -eq 0
+        set_color white
+    else
+        set_color red
+    end
+    echo -n "\$ "
+
+    set_color normal
+
+end
+
+function fish_right_prompt --description 'Write out the right prompt'
+
+    if not contains -- --final-rendering $argv
+
+        if test -n "$SSH_CONNECTION"
+            set_color $fish_color_ssh
+            printf "@%s " (string replace -r '[\.|\-].*' '' (string lower $hostname))
+            set_color normal
         end
+
+        if __fish_is_git_repository
+            set_color yellow
+            basename (git rev-parse --show-toplevel)
+            set_color normal
+            echo -n " "
+            __fish_git_prompt "%s"
+        end
+
     end
-
-    _print "\n" # TODO: not the first time
-
-    if test -n "$SSH_CONNECTION"
-        _print "$__fish_prompt_username"@"$__fish_prompt_hostname" $fish_color_ssh
-        _print : white
-    end
-
-    _print (prompt_pwd) blue
-    __fish_git_prompt " %s"
-    _print "\n❯ " (_prompt_color $last_status)
 
 end
