@@ -1,21 +1,30 @@
+# https://github.com/fish-shell/fish-shell/blob/master/share/functions/fish_git_prompt.fish
+
+# PWD Settings
 set fish_prompt_pwd_dir_length 1
 set fish_prompt_pwd_full_dirs 3
-set fish_transient_prompt 1
+set fish_transient_prompt yes
 
-# https://github.com/fish-shell/fish-shell/blob/master/share/functions/fish_git_prompt.fish
+# Git Logic
 set __fish_git_prompt_showupstream auto
 set __fish_git_prompt_showstashstate yes
-set __fish_git_prompt_showdirtystate yes
-set __fish_git_prompt_use_informative_chars yes
+set __fish_git_prompt_show_informative_status yes
+
+# Git Characters (Customizing the look)
+set __fish_git_prompt_char_stateseparator ' '
+set __fish_git_prompt_char_cleanstate "✔"
+set __fish_git_prompt_color_cleanstate --bold white
+#set __fish_git_prompt_char_dirtystate '*'     # Overrides default ✚
+#set __fish_git_prompt_char_stagedstate '⇢'    # Overrides default ●
 
 # Git Characters
-set __fish_git_prompt_char_dirtystate '*'
-set __fish_git_prompt_char_stagedstate '⇢'
-set __fish_git_prompt_char_upstream_prefix ' '
-set __fish_git_prompt_char_upstream_equal ''
-set __fish_git_prompt_char_upstream_ahead '⇡'
-set __fish_git_prompt_char_upstream_behind '⇣'
-set __fish_git_prompt_char_upstream_diverged '⇡⇣'
+#set __fish_git_prompt_char_dirtystate '*'
+#set __fish_git_prompt_char_stagedstate '⇢'
+#set __fish_git_prompt_char_upstream_prefix ' '
+#set __fish_git_prompt_char_upstream_equal ''
+#set __fish_git_prompt_char_upstream_ahead '⇡'
+#set __fish_git_prompt_char_upstream_behind '⇣'
+#set __fish_git_prompt_char_upstream_diverged '⇡⇣'
 
 function fish_prompt --description 'Write out the prompt'
 
