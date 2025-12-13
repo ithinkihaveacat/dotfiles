@@ -172,6 +172,7 @@ jetpack-inspect androidx.core.splashscreen.SplashScreen
 jetpack-inspect androidx.wear.ambient.AmbientLifecycleObserver ALPHA
 jetpack-inspect androidx.lifecycle.ViewModel BETA
 jetpack-inspect androidx.wear.tiles.TileService STABLE
+jetpack-inspect androidx.glance.wear.tiles.GlanceTileService SNAPSHOT
 ```
 
 The command prints the path to a directory containing the extracted source code.
@@ -185,6 +186,36 @@ cd "$(jetpack-inspect androidx.wear.tiles.TileService)"
 pushd "$(jetpack-inspect androidx.wear.tiles.TileService)"
 # ... explore source code ...
 popd
+```
+
+#### Using SNAPSHOT Versions
+
+**About SNAPSHOT builds:** These are bleeding-edge versions of Jetpack
+libraries. In these scripts, 'SNAPSHOT' always refers to the **latest**
+available build from [androidx.dev](https://androidx.dev/). Selecting a specific
+build ID is not supported. Use this when you need the absolute latest,
+unreleased code.
+
+**When to use SNAPSHOT:**
+
+- You're working with a library that is in active development and only available
+  as a snapshot
+- You need the absolute latest changes that haven't been released yet (even
+  alpha/beta)
+- You're testing against cutting-edge features or bug fixes
+
+**Important:** By default, `jetpack-inspect` resolves against stable/release
+repositories. If you need a snapshot version, you **must** explicitly specify
+the `SNAPSHOT` version type, or the command may fail or find an older version.
+
+**Example:**
+
+```bash
+# This may fail if the library is only available as a snapshot
+jetpack-inspect androidx.compose.remote:remote-creation-compose
+
+# Correct: explicitly request SNAPSHOT version
+jetpack-inspect androidx.compose.remote:remote-creation-compose SNAPSHOT
 ```
 
 #### Practical Examples
@@ -205,7 +236,16 @@ grep -r "installSplashScreen" .  # Find specific methods
 jetpack-inspect androidx.wear.tiles.TileService ALPHA
 ```
 
-**Example 3: Comparing implementations**
+**Example 3: Working with snapshot versions**
+
+```bash
+# You need the absolute latest unreleased code
+jetpack-inspect androidx.glance:glance-wear-tiles SNAPSHOT
+cd "$(jetpack-inspect androidx.glance:glance-wear-tiles SNAPSHOT)"
+# Explore the bleeding-edge implementation
+```
+
+**Example 4: Comparing implementations**
 
 ```bash
 # Download multiple versions to compare
@@ -228,12 +268,17 @@ can use independently:
   ```bash
   jetpack-source androidx.wear.tiles:tiles
   jetpack-source androidx.wear.tiles:tiles ALPHA
+  jetpack-source androidx.wear.tiles:tiles SNAPSHOT
   ```
 - **`jetpack-version`**: Gets version information for a package
   ```bash
   jetpack-version androidx.wear.tiles:tiles STABLE
   jetpack-version androidx.wear.tiles:tiles ALPHA
+  jetpack-version androidx.wear.tiles:tiles SNAPSHOT
   ```
+
+All of these tools support the `SNAPSHOT` version type for accessing
+bleeding-edge builds from androidx.dev.
 
 ### Installation
 
