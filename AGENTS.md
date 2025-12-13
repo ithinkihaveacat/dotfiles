@@ -4,7 +4,8 @@ In addition to the rules in this file, please follow the rules in
 @etc/AGENTS.md. In case of conflict, the rules in this file override those in
 @etc/AGENTS.md.
 
-This document provides guidelines for all scripts in the `bin/` subdirectory.
+This document provides guidelines for all scripts in the `bin/`
+subdirectory, as well as the `./update` script.
 
 ## General Script Requirements
 
