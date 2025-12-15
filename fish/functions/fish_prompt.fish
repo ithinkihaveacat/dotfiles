@@ -49,7 +49,7 @@ function fish_right_prompt --description 'Write out the right prompt'
 
         if test -n "$SSH_CONNECTION"
             set_color $fish_color_ssh
-            printf "@%s " (string replace -r '[\.|\-].*' '' (string lower $hostname))
+            printf "@%s " (prompt_hostname)
             set_color normal
         end
 
