@@ -19,34 +19,16 @@ if test -d ~/citc
     set -g CDPATH $CDPATH ~/citc
 end
 
-# Avoid fish_user_path and instead set PATH directly. fish_user_path can be used
-# to share a PATH across shells and invocations if set as a universal variable;
-# it isn't very useful otherwise. See
-# https://github.com/fish-shell/fish-shell/issues/527#issuecomment-253775156.
-# If fish >3.2, can replace with fish_add_path.
-function append_path
-    if begin
-            count $argv >/dev/null; and count $argv[1] >/dev/null; and test -d $argv[1]
-        end
-        set -l path_to_add $argv[1]
-        set -l index (contains -i -- $path_to_add $PATH)
-        if set -q index[1]
-            set --erase PATH[$index]
-        end
-        set PATH $PATH $path_to_add
-    end
-end
+# Modify PATH directly via fish_add_path -gP rather than using fish_user_paths.
+# fish_user_paths is useful for sharing paths across shells when set as a
+# universal variable, but can accumulate stale entries over time. Using -gP
+# keeps PATH management explicit and predictable. The -m flag moves existing
+# entries to avoid duplicates. See
+# https://github.com/fish-shell/fish-shell/issues/527#issuecomment-253775156
 
-function prepend_path
-    if begin
-            count $argv >/dev/null; and count $argv[1] >/dev/null; and test -d $argv[1]
-        end
-        set -l path_to_add $argv[1]
-        set -l index (contains -i -- $path_to_add $PATH)
-        if set -q index[1]
-            set --erase PATH[$index]
-        end
-        set PATH $path_to_add $PATH
+function add_path
+    for p in $argv
+        test -d $p; and fish_add_path -gPm $p
     end
 end
 
@@ -60,9 +42,9 @@ end
 #
 # https://cloud.google.com/sdk/
 
-prepend_path "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
-prepend_path "$HOME/local/google-cloud-sdk/platform/google_appengine"
-prepend_path "$HOME/local/google-cloud-sdk/bin"
+add_path "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
+add_path "$HOME/local/google-cloud-sdk/platform/google_appengine"
+add_path "$HOME/local/google-cloud-sdk/bin"
 
 # java
 #
@@ -84,8 +66,9 @@ prepend_path "$HOME/local/google-cloud-sdk/bin"
 #      Might be: https://www.oracle.com/webapps/redirect/signon?nexturl=https://download.oracle.com/otn/java/jdk/8u341-b10/424b9da4b48848379167015dcc250d8d/jre-8u341-macosx-x64.tar.gz
 # 3. Extract to ~/local.
 
-set d ~/local/jre*/Contents/Home/bin
-prepend_path $d
+for d in ~/local/jre*/Contents/Home/bin
+    add_path $d
+end
 
 # JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version. For now the Android Studio version works out
 test -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home"; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
@@ -104,9 +87,10 @@ test -d "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"; a
 #   $ cabal update
 #   $ cabal install pandoc
 
-set d /Applications/ghc-*.app/Contents/bin
-prepend_path $d
-prepend_path ~/.cabal/bin
+for d in /Applications/ghc-*.app/Contents/bin
+    add_path $d
+end
+add_path ~/.cabal/bin
 
 # Android Tools
 
@@ -114,34 +98,34 @@ test -d ~/.local/share/android-sdk; and set -x ANDROID_HOME ~/.local/share/andro
 #test -d ~/Library/Android/sdk ; and set -x ANDROID_HOME ~/Library/Android/sdk
 #test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 
-prepend_path $ANDROID_HOME/platform-tools
-prepend_path $ANDROID_HOME/tools
-prepend_path $ANDROID_HOME/tools/bin
-prepend_path $ANDROID_HOME/cmdline-tools/latest/bin
+add_path $ANDROID_HOME/platform-tools
+add_path $ANDROID_HOME/tools
+add_path $ANDROID_HOME/tools/bin
+add_path $ANDROID_HOME/cmdline-tools/latest/bin
 # the emulator in tools/emulator does not work: https://www.stkent.com/2017/08/10/update-your-path-for-the-new-android-emulator-location.html
-prepend_path $ANDROID_HOME/emulator
+add_path $ANDROID_HOME/emulator
 
 if count $ANDROID_HOME/build-tools/* >/dev/null
-    prepend_path (ls -d $ANDROID_HOME/build-tools/* | sort -rV | head -1)
+    add_path (printf '%s\n' $ANDROID_HOME/build-tools/* | sort -rV | head -1)
 end
 
-test -d $ANDROID_HOME; and set -x ANDROID_JAR (ls -d $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
+test -d $ANDROID_HOME; and set -x ANDROID_JAR (printf '%s\n' $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
 
 # binaries
 
-prepend_path /opt/homebrew/bin
-prepend_path /opt/homebrew/sbin
+add_path /opt/homebrew/bin
+add_path /opt/homebrew/sbin
 
-prepend_path /usr/local/sbin
-prepend_path /usr/local/bin
+add_path /usr/local/sbin
+add_path /usr/local/bin
 
-prepend_path "$HOME/local/homebrew/bin"
-prepend_path "$HOME/local/homebrew/sbin"
+add_path "$HOME/local/homebrew/bin"
+add_path "$HOME/local/homebrew/sbin"
 
-prepend_path "$HOME/.local/bin"
+add_path "$HOME/.local/bin"
 
-prepend_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
-prepend_path "$HOME/local/bin"
+add_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
+add_path "$HOME/local/bin"
 
 # Ruby
 #
@@ -151,8 +135,7 @@ prepend_path "$HOME/local/bin"
 
 #set -x GEM_HOME ~/.gem
 
-#set d ~/.gem/ruby/*/bin
-#prepend_path $d
+#for d in ~/.gem/ruby/*/bin; add_path $d; end
 
 # Node
 #
@@ -164,19 +147,20 @@ mkdir -p $NODE_VERSIONS
 
 set -l NODE_STABLE v22
 if count {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin >/dev/null
-    prepend_path (ls -d {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
+    add_path (printf '%s\n' {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
 end
 
 # golang
 
 # Special-case PATH for Ubuntu (package is golang-*-go)
-set d /usr/lib/go-*/bin
-prepend_path $d
+for d in /usr/lib/go-*/bin
+    add_path $d
+end
 
 if type -q go
     set -x GOPATH ~/local/go
     mkdir -p $GOPATH
-    prepend_path $GOPATH/bin
+    add_path $GOPATH/bin
 end
 
 # adb
@@ -193,7 +177,7 @@ end
 
 # other scripts
 
-prepend_path (realpath "$HOME/.dotfiles/fish/../bin")
+add_path (realpath "$HOME/.dotfiles/fish/../bin")
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
