@@ -42,16 +42,16 @@ end
 #
 # https://cloud.google.com/sdk/
 
-add_path "$HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin"
-add_path "$HOME/local/google-cloud-sdk/platform/google_appengine"
-add_path "$HOME/local/google-cloud-sdk/bin"
+add_path $HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin
+add_path $HOME/local/google-cloud-sdk/platform/google_appengine
+add_path $HOME/local/google-cloud-sdk/bin
 
 # java
-#
+
 # Via mule:
 #
 #   $ mule list | grep -o -E "jdk[0-9]+" | sort | tail -1 | xargs mule install
-#
+
 # Via manual install:
 #
 # Oracle keep messing around with their distributions and licenses... For the
@@ -65,12 +65,16 @@ add_path "$HOME/local/google-cloud-sdk/bin"
 # 2. Download the Java SE Runtime Environment.
 #      Might be: https://www.oracle.com/webapps/redirect/signon?nexturl=https://download.oracle.com/otn/java/jdk/8u341-b10/424b9da4b48848379167015dcc250d8d/jre-8u341-macosx-x64.tar.gz
 # 3. Extract to ~/local.
+#
+#for d in ~/local/jre*/Contents/Home/bin
+#    add_path $d
+#end
 
-for d in ~/local/jre*/Contents/Home/bin
-    add_path $d
-end
+# Via Android Studio:
+#
+# https://developer.android.com/studio
 
-# JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version. For now the Android Studio version works out
+# JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version. It's compatible with the Android Studio version at least
 test -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home"; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 test -d "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"; and set -x JAVA_HOME "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"
 #test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
@@ -86,11 +90,11 @@ test -d "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"; a
 #
 #   $ cabal update
 #   $ cabal install pandoc
-
-for d in /Applications/ghc-*.app/Contents/bin
-    add_path $d
-end
-add_path ~/.cabal/bin
+#
+#for d in /Applications/ghc-*.app/Contents/bin
+#    add_path $d
+#end
+#add_path ~/.cabal/bin
 
 # Android Tools
 
@@ -99,8 +103,6 @@ test -d ~/.local/share/android-sdk; and set -x ANDROID_HOME ~/.local/share/andro
 #test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 
 add_path $ANDROID_HOME/platform-tools
-add_path $ANDROID_HOME/tools
-add_path $ANDROID_HOME/tools/bin
 add_path $ANDROID_HOME/cmdline-tools/latest/bin
 # the emulator in tools/emulator does not work: https://www.stkent.com/2017/08/10/update-your-path-for-the-new-android-emulator-location.html
 add_path $ANDROID_HOME/emulator
@@ -119,13 +121,10 @@ add_path /opt/homebrew/sbin
 add_path /usr/local/sbin
 add_path /usr/local/bin
 
-add_path "$HOME/local/homebrew/bin"
-add_path "$HOME/local/homebrew/sbin"
+add_path $HOME/local/homebrew/bin
+add_path $HOME/local/homebrew/sbin
 
-add_path "$HOME/.local/bin"
-
-add_path "$HOME/local-linux/bin" # $PLATFORM is not readily available, so hardcode
-add_path "$HOME/local/bin"
+add_path $HOME/.local/bin
 
 # Ruby
 #
@@ -153,8 +152,8 @@ end
 # golang
 
 # Special-case PATH for Ubuntu (package is golang-*-go)
-for d in /usr/lib/go-*/bin
-    add_path $d
+if count /usr/lib/go-*/bin >/dev/null
+    add_path (printf '%s\n' /usr/lib/go-*/bin | sort -rV | head -1)
 end
 
 if type -q go
@@ -177,7 +176,7 @@ end
 
 # other scripts
 
-add_path (realpath "$HOME/.dotfiles/fish/../bin")
+add_path (realpath $HOME/.dotfiles/fish/../bin)
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
@@ -211,11 +210,11 @@ set -x VISUAL $EDITOR
 type -q pbcopy; or alias pbcopy "xsel -bi"
 type -q pbpaste; or alias pbpaste "xsel -bo"
 
-. ~/.config/fish/solarized.fish
+sourceif $HOME/.config/fish/solarized.fish
 
-sourceif ~/.ssh/etc/fish/envrc
-sourceif ~/.ssh/etc/fish/functions.fish
-sourceif ~/.ssh/etc/fish/config.fish
+sourceif $HOME/.ssh/etc/fish/envrc
+sourceif $HOME/.ssh/etc/fish/functions.fish
+sourceif $HOME/.ssh/etc/fish/config.fish
 
 function fish_prompt_notify --on-event fish_prompt
     # If commands takes longer than 10 seconds, notify user on completion if Terminal
@@ -238,5 +237,5 @@ end
 # end
 
 if set -q GHOSTTY_RESOURCES_DIR
-    source "$GHOSTTY_RESOURCES_DIR"/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish
+    source $GHOSTTY_RESOURCES_DIR/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish
 end
