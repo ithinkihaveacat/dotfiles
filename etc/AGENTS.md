@@ -483,8 +483,8 @@ development and debugging tasks, especially for Wear OS.
 When generating git commit messages, use the following structure (hard-wrap all
 body text at 80 characters):
 
-- Subject line (imperative mood) of <=50 characters. Do add "feat" or "bug" to
-  the subject line.
+- Subject line (imperative mood) of <=50 characters. Do not add "feat" or "bug"
+  to the subject line.
 - Blank line.
 - One of more paragraphs explaining what changed and why. Point form is
   acceptable.
