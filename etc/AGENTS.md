@@ -478,6 +478,13 @@ diagnose a problem, verify a bug, or test a fix in a clean environment.
 This suite of scripts significantly simplifies common and complex Android
 development and debugging tasks, especially for Wear OS.
 
+## Git Operations
+
+Agents must not commit changes automatically unless explicitly requested. When
+tasked with modifying code (e.g., fixing a bug, adding a feature), apply the
+changes to the working directory but refrain from committing them. Only proceed
+with `git commit` when explicitly commanded to do so.
+
 ## Git Commit Messages
 
 When generating git commit messages, use the following structure (hard-wrap all
