@@ -1,35 +1,13 @@
-if type -q osascript
+function notify -a title -a body -d "Posts a notification using the native notification system"
+    # If two arguments are provided, use OSC 777 (Title + Body)
+    if count $argv >1
+        printf "\033]777;notify;%s;%s\033\\" $argv[1] $argv[2]
 
-    function notify -a title -a body -d "Posts a notification using the native notification system"
-        test -n "$title"; or begin
-            printf "usage: %s title [body]\n" (status current-command)
-            return
-        end
-        test -n "$body"; or set -l body ""
-        # https://developer.apple.com/library/mac/documentation/applescript/conceptual/applescriptlangguide/reference/aslr_cmds.html#//apple_ref/doc/uid/TP40000983-CH216-SW224
-        osascript -e "on run argv" -e "display notification (item 2 of argv) with title (item 1 of argv)" -e "end run" $title $body
+        # If only one argument is provided, use OSC 9 (Message only)
+    else if count $argv >0
+        printf "\033]9;%s\033\\" $argv[1]
+
+    else
+        printf "Usage: %s [title] <message>" (status current-command)
     end
-
-else if type -q notify-send
-
-    function notify -a title -a body -d "Posts a notification using the native notification system"
-        test -n "$title"; or begin
-            printf "usage: %s title [body]\n" (status current-command)
-            return
-        end
-        test -n "$body"; or set -l body ""
-        notify-send --icon=terminal $title $body
-    end
-
-else
-
-    function notify -a title -a body -d "Posts a notification using the native notification system"
-        test -n "$title"; or begin
-            printf "usage: %s title [body]\n" (status current-command)
-            return
-        end
-        test -n "$body"; or set -l body ""
-        echo "$title: $body"
-    end
-
 end
