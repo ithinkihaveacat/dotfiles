@@ -207,8 +207,8 @@ set -x VISUAL $EDITOR
 
 # completions
 
-type -q pbcopy; or alias pbcopy "xsel -bi"
-type -q pbpaste; or alias pbpaste "xsel -bo"
+type -q pbcopy; or alias pbcopy fish_clipboard_copy
+type -q pbpaste; or alias pbpaste fish_clipboard_paste
 
 sourceif $HOME/.config/fish/solarized.fish
 
