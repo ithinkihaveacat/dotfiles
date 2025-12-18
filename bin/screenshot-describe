@@ -6,10 +6,12 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") IMAGE [PROMPT]
 
-Generate a text description of a screenshot using the Gemini API.
+Generate a text description of a screenshot using the Gemini API. Optimized for
+screenshots and UI captures; the default prompt focuses on UI elements, text,
+colors, and layout.
 
 Arguments:
-  IMAGE       Path to an image file (JPEG, PNG, GIF, or WebP)
+  IMAGE       Path to a screenshot (any format supported by ImageMagick)
   PROMPT      Custom prompt for the AI model (optional)
 
 Options:
@@ -20,11 +22,8 @@ Environment Variables:
 
 Examples:
   $(basename "$0") screenshot.png
-  $(basename "$0") photo.jpg "What objects are in this image?"
-  $(basename "$0") ui-mockup.png "List all UI elements visible in this screenshot"
-
-The default prompt generates concise alt text (around 200 characters) describing
-the content of the screenshot, focusing on UI elements, text, colors, and layout.
+  $(basename "$0") screen-capture.png "What objects are in this image?"
+  $(basename "$0") ui-mockup.png "List all UI elements visible"
 EOF
   exit 0
 }
@@ -37,12 +36,11 @@ require() { hash "$@" || exit 127; }
 
 require curl
 require jq
-require file
 require base64
+require magick
 
 if [[ $# -lt 1 ]]; then
-  echo "$(basename "$0"): missing image operand" >&2
-  exit 1
+  usage
 fi
 
 IMAGE_PATH="$1"
@@ -54,28 +52,21 @@ if [[ -z "${GEMINI_API_KEY:-}" ]]; then
   exit 1
 fi
 
-API_KEY="${GEMINI_API_KEY}"
 MODEL="gemini-3-flash-preview"
 #MODEL="gemini-2.5-flash"
-URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
 
 if [[ ! -f "$IMAGE_PATH" ]]; then
   echo "$(basename "$0"): $IMAGE_PATH: No such file or directory" >&2
   exit 1
 fi
 
-MIME_TYPE=$(file -b --mime-type "$IMAGE_PATH")
-if [[ "$MIME_TYPE" != "image/jpeg" && "$MIME_TYPE" != "image/png" && "$MIME_TYPE" != "image/gif" && "$MIME_TYPE" != "image/webp" ]]; then
-  echo "$(basename "$0"): unsupported image type: $MIME_TYPE" >&2
-  echo "Supported types: image/jpeg, image/png, image/gif, image/webp" >&2
-  exit 1
-fi
-
-# base64 encoding: macOS uses -b 0, Linux uses -w 0
+# Convert to lossless webp and base64 encode
+# base64: macOS uses -b 0, Linux uses -w 0
 if base64 --help 2>&1 | grep -q -- '-w'; then
-  IMAGE_BASE64=$(base64 -w 0 < "$IMAGE_PATH")
+  IMAGE_BASE64=$(magick "$IMAGE_PATH" -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 else
-  IMAGE_BASE64=$(base64 -b 0 < "$IMAGE_PATH")
+  IMAGE_BASE64=$(magick "$IMAGE_PATH" -alpha off -define webp:lossless=true webp:- | base64 -b 0)
 fi
 
 REQUEST_BODY=$(
@@ -87,7 +78,7 @@ REQUEST_BODY=$(
         {"text": "${PROMPT}"},
         {
           "inlineData": {
-            "mimeType": "${MIME_TYPE}",
+            "mimeType": "image/webp",
             "data": "${IMAGE_BASE64}"
           }
         }
@@ -98,9 +89,10 @@ REQUEST_BODY=$(
 EOF
 )
 
-RESPONSE=$(curl -s -X POST \
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "${REQUEST_BODY}" \
+  -d @- \
   "${URL}")
 
 # Check for API errors
