@@ -3,7 +3,12 @@
 # PWD Settings
 set fish_prompt_pwd_dir_length 1
 set fish_prompt_pwd_full_dirs 3
-set fish_transient_prompt yes
+
+# Transient prompts (hide right prompt on non-active lines) requires fish 4.1+
+# fish 4.0.x does not support --final-rendering flag
+if test "$FISH_VERSION" \> "4.0.999"
+    set fish_transient_prompt 1
+end
 
 # Git Logic
 set __fish_git_prompt_showupstream auto
