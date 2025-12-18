@@ -6,7 +6,11 @@ set fish_prompt_pwd_full_dirs 3
 
 # Transient prompts (hide right prompt on non-active lines) requires fish 4.1+
 # fish 4.0.x does not support --final-rendering flag
-if test "$FISH_VERSION" \> "4.0.999"
+set -l version_parts (string split . $FISH_VERSION) 0 0
+set -l major $version_parts[1]
+set -l minor $version_parts[2]
+
+if test $major -gt 4; or test $major -eq 4 -a $minor -ge 1
     set fish_transient_prompt 1
 end
 
