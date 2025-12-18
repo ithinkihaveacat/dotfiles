@@ -26,7 +26,7 @@ function pbpaste
     end
 
     # Set terminal to raw mode with timeout (10 deciseconds = 1 second)
-    command stty raw -echo min 0 time 10 2>/dev/null
+    command stty raw -echo min 0 time 50 2>/dev/null
 
     # Send OSC 52 query to terminal
     printf '\e]52;c;?\a' >/dev/tty
