@@ -47,7 +47,7 @@ function fish_right_prompt --description 'Write out the right prompt'
 
     if not contains -- --final-rendering $argv
 
-        if test -n "$SSH_CONNECTION"
+        if is_remote
             set_color $fish_color_ssh
             printf "@%s " (prompt_hostname)
             set_color normal
