@@ -10,7 +10,7 @@ function pbcopy
         test -n "$cmdline"; or set cmdline (commandline | fish_indent --only-indent | string collect)
     end
 
-    if not __fish_is_remote; and type -q pbcopy
+    if not is_remote; and type -q pbcopy
         if test $is_tty_stdin -eq 1
             printf '%s' $cmdline | command pbcopy
         else
@@ -25,13 +25,13 @@ function pbcopy
         end
     end
 
-    if type -q base64; and test "$TERM" != dumb
-        if not isatty stdout
-            echo "pbcopy: stdout is not a terminal" >&2
-            return 1
-        end
-
-        set -l encoded (printf %s $cmdline | base64 | string join '')
-        printf '\e]52;c;%s\a' "$encoded"
+    if not type -q base64; or test "$TERM" = dumb
+        echo "pbcopy: cannot copy (no base64 or dumb terminal)" >&2
+        return 1
     end
+
+    # OSC 52 needs to be sent to the terminal
+    # Write to /dev/tty to work even if stdout is redirected
+    set -l encoded (printf '%s' $cmdline | base64 | string join '')
+    printf '\e]52;c;%s\a' "$encoded" >/dev/tty
 end
