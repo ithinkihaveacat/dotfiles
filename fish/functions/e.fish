@@ -10,32 +10,35 @@ function e -d 'Edit file, searching in a few different places' -w type
         return
     end
 
-    if not type -q $argv[1]
+    # Strip .fish extension if present (e.g., "foo.fish" -> "foo")
+    set -l name (string replace -r '\.fish$' '' $argv[1])
+
+    if not type -q $name
         printf "%s: '%s' not found, or not a file\n" (status current-command) $argv[1]
         return
     end
 
-    switch ( type -t $argv[1] )
+    switch ( type -t $name )
 
         case file
 
-            if file ( type -p $argv[1] ) | grep text >/dev/null
-                eval $EDITOR ( type -p $argv[1] )
+            if file ( type -p $name ) | grep text >/dev/null
+                eval $EDITOR ( type -p $name )
             else
-                echo "error: '$argv[1]' is not a text file"
+                echo "error: '$name' is not a text file"
             end
 
         case function
 
-            if test -f $HOME/.config/fish/functions/$argv[1].fish
-                eval $EDITOR $HOME/.config/fish/functions/$argv[1].fish
+            if test -f $HOME/.config/fish/functions/$name.fish
+                eval $EDITOR $HOME/.config/fish/functions/$name.fish
             else
-                echo "error: '$argv[1]' not defined in $HOME/.config/fish/functions"
+                echo "error: '$name' not defined in $HOME/.config/fish/functions"
             end
 
         case '*'
 
-            echo "error: '$argv[1]' not found"
+            echo "error: '$name' not found"
 
     end
 
