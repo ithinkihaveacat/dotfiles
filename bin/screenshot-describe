@@ -1,27 +1,81 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") IMAGE [PROMPT]
+
+Generate a text description of a screenshot using the Gemini API.
+
+Arguments:
+  IMAGE       Path to an image file (JPEG, PNG, GIF, or WebP)
+  PROMPT      Custom prompt for the AI model (optional)
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment Variables:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  $(basename "$0") screenshot.png
+  $(basename "$0") photo.jpg "What objects are in this image?"
+  $(basename "$0") ui-mockup.png "List all UI elements visible in this screenshot"
+
+The default prompt generates concise alt text (around 200 characters) describing
+the content of the screenshot, focusing on UI elements, text, colors, and layout.
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+require file
+require base64
+
+if [[ $# -lt 1 ]]; then
+  echo "$(basename "$0"): missing image operand" >&2
+  exit 1
+fi
 
 IMAGE_PATH="$1"
 DEFAULT_PROMPT="Generate concise alt text (around 200 chars) describing the *content* of this screenshot. Do not describe the physical device, its shape (e.g., circular), or type (e.g., smartwatch). Focus on key UI elements, text, colors, and layout differences to distinguish it from similar screen captures."
 PROMPT="${2:-${DEFAULT_PROMPT}}"
-API_KEY="${GEMINI_API_KEY:?API key not set. Please set the GEMINI_API_KEY environment variable}"
-MODEL="gemini-3-flash-preview"
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+API_KEY="${GEMINI_API_KEY}"
+MODEL="gemini-2.5-flash"
 URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}"
 
-if [ ! -f "$IMAGE_PATH" ]; then
-  echo "Error: Image file not found: $IMAGE_PATH" >&2
+if [[ ! -f "$IMAGE_PATH" ]]; then
+  echo "$(basename "$0"): $IMAGE_PATH: No such file or directory" >&2
   exit 1
 fi
 
 MIME_TYPE=$(file -b --mime-type "$IMAGE_PATH")
 if [[ "$MIME_TYPE" != "image/jpeg" && "$MIME_TYPE" != "image/png" && "$MIME_TYPE" != "image/gif" && "$MIME_TYPE" != "image/webp" ]]; then
-  echo "Error: Unsupported image type: $MIME_TYPE" >&2
-  echo "Supported types are: image/jpeg, image/png, image/gif, image/webp" >&2
+  echo "$(basename "$0"): unsupported image type: $MIME_TYPE" >&2
+  echo "Supported types: image/jpeg, image/png, image/gif, image/webp" >&2
   exit 1
 fi
 
-IMAGE_BASE64=$(base64 -w 0 "$IMAGE_PATH")
+# base64 encoding: macOS uses -b 0, Linux uses -w 0
+if base64 --help 2>&1 | grep -q -- '-w'; then
+  IMAGE_BASE64=$(base64 -w 0 "$IMAGE_PATH")
+else
+  IMAGE_BASE64=$(base64 -b 0 "$IMAGE_PATH")
+fi
 
 REQUEST_BODY=$(cat <<EOF
 {
@@ -42,7 +96,23 @@ REQUEST_BODY=$(cat <<EOF
 EOF
 )
 
-curl -s -X POST \
+RESPONSE=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   -d "${REQUEST_BODY}" \
-  "${URL}" | jq -r '.candidates[0].content.parts[0].text'
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+if [[ -z "$TEXT" ]]; then
+  echo "$(basename "$0"): no response text received from API" >&2
+  exit 1
+fi
+
+echo "$TEXT"
