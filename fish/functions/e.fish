@@ -1,4 +1,4 @@
-function e -d 'Edit file, searching in a few different places' -w type
+function e -d 'Edit file, searching in a few different places'
 
     if test ( count $argv ) -ne 1
         printf "usage: %s filename" (status current-command)
