@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [COMMAND...]
+
+Manage the Gemini allowed tools whitelist.
+These commands can be executed by the 'run_shell_command' tool.
+
+Arguments:
+  COMMAND         The shell command to allow or remove.
+                  (e.g., 'git', './gradlew installDebug')
+
+Options:
+  -h, --help      Display this help message and exit
+  --output FILE   Specify the settings file to update
+                  (default: $HOME/.gemini/settings.json)
+  --list          List currently allowed tools
+  --add           Add the specified tools (default action)
+  --remove        Remove the specified tools
+
+Examples:
+  $(basename "$0") git
+  $(basename "$0") --add "ls -la"
+  $(basename "$0") --remove git
+  $(basename "$0") --list
+EOF
+  exit 0
+}
+
+require() {
+  hash "$@" || {
+    echo "$(basename "$0"): $1: command not found" >&2
+    exit 127
+  }
+}
+
+SETTINGS_FILE="$HOME/.gemini/settings.json"
+MODE="add" # Default mode
+
+# Parse arguments
+REMAINING_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      ;;
+    --output)
+      if [[ -z "${2:-}" ]]; then
+        echo "$(basename "$0"): option '--output' requires an argument" >&2
+        exit 1
+      fi
+      SETTINGS_FILE="$2"
+      shift 2
+      ;;
+    --list)
+      MODE="list"
+      shift
+      ;;
+    --add)
+      MODE="add"
+      shift
+      ;;
+    --remove)
+      MODE="remove"
+      shift
+      ;;
+    *)
+      REMAINING_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${REMAINING_ARGS[@]}"
+
+require jq
+
+# Cleanup function to remove temporary files
+cleanup() {
+  if [[ -n "${TMP_FILE:-}" && -f "$TMP_FILE" ]]; then
+    rm -f "$TMP_FILE"
+  fi
+}
+trap cleanup EXIT
+
+# Ensure the settings directory exists
+mkdir -p "$(dirname "$SETTINGS_FILE")"
+
+# Ensure the settings file exists and is valid JSON
+if [[ ! -f "$SETTINGS_FILE" ]]; then
+  echo "{}" >"$SETTINGS_FILE"
+fi
+
+case "$MODE" in
+  list)
+    if [[ ! -s "$SETTINGS_FILE" ]]; then
+      exit 0
+    fi
+    jq -r '.tools.allowed[]? // empty | if startswith("run_shell_command(") and endswith(")") then .[18:-1] else . end' "$SETTINGS_FILE"
+    ;;
+
+  add)
+    if [[ $# -eq 0 ]]; then
+      # If no arguments were provided to 'add', but we are in default add mode, check if we should show usage.
+      # However, if the user explicitly typed --add without args, we should complain.
+      # If the user just typed script name without args, we show usage.
+      if [[ "${1:-}" == "" ]]; then
+         usage
+      fi
+      echo "$(basename "$0"): no commands specified to add" >&2
+      exit 1
+    fi
+
+    # Construct the JSON array of new commands
+    # We iterate over arguments and wrap them in run_shell_command()
+    NEW_CMDS_JSON=$(jq -n '$ARGS.positional | map("run_shell_command(" + . + ")")' --args "$@")
+
+    TMP_FILE=$(mktemp)
+
+    # Update the settings
+    # 1. Read existing settings
+    # 2. Ensure .tools object exists
+    # 3. Append new commands to .tools.allowed (initializing if null)
+    # 4. Remove duplicates with unique
+    jq --argjson new "$NEW_CMDS_JSON" \
+      '.tools |= (. // {}) | .tools.allowed |= ((. // []) + $new | unique)' \
+      "$SETTINGS_FILE" >"$TMP_FILE"
+
+    mv "$TMP_FILE" "$SETTINGS_FILE"
+
+    echo "Added tools:"
+    echo "$NEW_CMDS_JSON" | jq -r '.[] | if startswith("run_shell_command(") and endswith(")") then .[18:-1] else . end | "  - " + .'
+    ;;
+  remove)
+    if [[ $# -eq 0 ]]; then
+      echo "$(basename "$0"): no commands specified to remove" >&2
+      exit 1
+    fi
+
+    # Construct the JSON array of commands to remove (wrapped)
+    REMOVE_CMDS_JSON=$(jq -n '$ARGS.positional | map("run_shell_command(" + . + ")")' --args "$@")
+
+    TMP_FILE=$(mktemp)
+
+    # Update the settings
+    # Subtract the removal list from the allowed list
+    jq --argjson remove "$REMOVE_CMDS_JSON" \
+      '.tools |= (. // {}) | .tools.allowed |= ((. // []) - $remove)' \
+      "$SETTINGS_FILE" >"$TMP_FILE"
+
+    mv "$TMP_FILE" "$SETTINGS_FILE"
+
+    echo "Removed tools:"
+    echo "$REMOVE_CMDS_JSON" | jq -r '.[] | if startswith("run_shell_command(") and endswith(")") then .[18:-1] else . end | "  - " + .'
+    ;;esac

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [FILENAME...]
+
+Manage the Gemini context file whitelist.
+These files are automatically added to the Gemini context.
+
+Arguments:
+  FILENAME        The filename to allow or remove.
+                  (e.g., 'AGENTS.md', 'CONTEXT.md')
+
+Options:
+  -h, --help      Display this help message and exit
+  --output FILE   Specify the settings file to update
+                  (default: $HOME/.gemini/settings.json)
+  --list          List currently allowed context files
+  --add           Add the specified files (default action)
+  --remove        Remove the specified files
+
+Examples:
+  $(basename "$0") AGENTS.md
+  $(basename "$0") --add CONTEXT.md
+  $(basename "$0") --remove AGENTS.md
+  $(basename "$0") --list
+EOF
+  exit 0
+}
+
+require() {
+  hash "$@" || {
+    echo "$(basename "$0"): $1: command not found" >&2
+    exit 127
+  }
+}
+
+SETTINGS_FILE="$HOME/.gemini/settings.json"
+MODE="add" # Default mode
+
+# Parse arguments
+REMAINING_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help) 
+      usage
+      ;; 
+    --output) 
+      if [[ -z "${2:-}" ]]; then
+        echo "$(basename "$0"): option '--output' requires an argument" >&2
+        exit 1
+      fi
+      SETTINGS_FILE="$2"
+      shift 2
+      ;; 
+    --list) 
+      MODE="list"
+      shift
+      ;; 
+    --add) 
+      MODE="add"
+      shift
+      ;; 
+    --remove) 
+      MODE="remove"
+      shift
+      ;; 
+    *) 
+      REMAINING_ARGS+=("$1")
+      shift
+      ;; 
+  esac
+done
+set -- "${REMAINING_ARGS[@]}"
+
+require jq
+
+# Cleanup function to remove temporary files
+cleanup() {
+  if [[ -n "${TMP_FILE:-}" && -f "$TMP_FILE" ]]; then
+    rm -f "$TMP_FILE"
+  fi
+}
+trap cleanup EXIT
+
+# Ensure the settings directory exists
+mkdir -p "$(dirname "$SETTINGS_FILE")"
+
+# Ensure the settings file exists and is valid JSON
+if [[ ! -f "$SETTINGS_FILE" ]]; then
+  echo "{}" >"$SETTINGS_FILE"
+fi
+
+case "$MODE" in
+  list)
+    if [[ ! -s "$SETTINGS_FILE" ]]; then
+      exit 0
+    fi
+    jq -r '.context.fileName[]? // empty' "$SETTINGS_FILE"
+    ;;
+
+  add)
+    if [[ $# -eq 0 ]]; then
+      if [[ "${1:-}" == "" ]]; then
+         usage
+      fi
+      echo "$(basename "$0"): no files specified to add" >&2
+      exit 1
+    fi
+
+    # Construct the JSON array of new files
+    NEW_FILES_JSON=$(jq -n '$ARGS.positional' --args "$@")
+
+    TMP_FILE=$(mktemp)
+
+    # Update the settings
+    # 1. Read existing settings
+    # 2. Ensure .context object exists
+    # 3. Append new files to .context.fileName (initializing if null)
+    # 4. Remove duplicates with unique
+    jq --argjson new "$NEW_FILES_JSON" \
+      '.context |= (. // {}) | .context.fileName |= ((. // []) + $new | unique)' \
+      "$SETTINGS_FILE" >"$TMP_FILE"
+
+    mv "$TMP_FILE" "$SETTINGS_FILE"
+
+    echo "Added context files:"
+    echo "$NEW_FILES_JSON" | jq -r '.[] | "  - " + .'
+    ;;
+
+  remove)
+    if [[ $# -eq 0 ]]; then
+      echo "$(basename "$0"): no files specified to remove" >&2
+      exit 1
+    fi
+
+    # Construct the JSON array of files to remove
+    REMOVE_FILES_JSON=$(jq -n '$ARGS.positional' --args "$@")
+
+    TMP_FILE=$(mktemp)
+
+    # Update the settings
+    # Subtract the removal list from the allowed list
+    jq --argjson remove "$REMOVE_FILES_JSON" \
+      '.context |= (. // {}) | .context.fileName |= ((. // []) - $remove)' \
+      "$SETTINGS_FILE" >"$TMP_FILE"
+
+    mv "$TMP_FILE" "$SETTINGS_FILE"
+
+    echo "Removed context files:"
+    echo "$REMOVE_FILES_JSON" | jq -r '.[] | "  - " + .'
+    ;;
+esac
