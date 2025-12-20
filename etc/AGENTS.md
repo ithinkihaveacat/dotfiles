@@ -3,10 +3,11 @@
 This document provides general rules and requirements for agents when making
 changes to codebases.
 
-## Markdown Formatting
+## Markdown Quality
 
-Format Markdown files with `prettier`. Use standard heading styles without
-additional formatting or ALL CAPS.
+All Markdown files must be linted with `markdownlint-cli2` and formatted with
+`prettier`. Use standard heading styles without additional formatting or ALL
+CAPS.
 
 @./context/markdown.md
 

@@ -1,5 +1,26 @@
 # Markdown Formatting
 
+## Linting
+
+All Markdown files, whether new or updated, _must_ be linted with
+`markdownlint-cli2`. Any errors must be fixed before committing.
+
+To lint Markdown files:
+
+```bash
+markdownlint-cli2 "**/*.md"
+```
+
+To automatically fix some errors:
+
+```bash
+markdownlint-cli2 --fix "**/*.md"
+```
+
+If `markdownlint-cli2` is not installed globally, you can run it via
+`npx -y markdownlint-cli2 "**/*.md"`. If `npx` is not available, you can skip
+the linting step.
+
 ## Heading Style
 
 When creating Markdown, do not add additional formatting to headings or use ALL
