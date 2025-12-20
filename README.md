@@ -16,7 +16,7 @@ interesting directories are:
 - [docker](docker) - Dockerfile
 
 The idempotent [install script](./update) handles a few different operating
-systems and package managers (past and present) has a some interesting
+systems and package managers (past and present) and has some interesting
 constructions that may be useful.
 
 ## Prerequisites
@@ -27,9 +27,9 @@ constructions that may be useful.
 
 ### [git](http://git-scm.com/)
 
-| Ubuntu                          | OS X                                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `sudo apt-get install git-core` | `xcode-select --install` (or install [Xcode](https://developer.apple.com/xcode/downloads/)) |
+| Ubuntu                      | macOS                                                                                        |
+| --------------------------- | -------------------------------------------------------------------------------------------- |
+| `sudo apt-get install git`  | `xcode-select --install` (or install [Xcode](https://developer.apple.com/xcode/downloads/)) |
 
 > No `sudo`? (If, for example, you're on a Gandi VPS.)
 >
@@ -42,15 +42,15 @@ constructions that may be useful.
 
 #### Ubuntu
 
-```
+```sh
 sudo apt-get install fish
 ```
 
-#### OS X
+#### macOS
 
 Via [`brew`](http://brew.sh/):
 
-```
+```sh
 brew install fish
 chsh -s /bin/bash # .bash_profile runs fish if available (zsh is default)
 ```
@@ -88,10 +88,10 @@ $ cd $HOME/.dotfiles
 $ git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
 $ ./update                                 # if macOS and brew in PATH
 $ PATH=~/local/homebrew/bin:/opt/homebrew/bin:$PATH ./update # if macOS and brew not in PATH
-# On OS X, logout and login again
+# On macOS, logout and login again
 ```
 
-Note that `update` may be destructive&#8212;if you have "unmanaged" files in
+Note that `update` may be destructive—if you have "unmanaged" files in
 locations such as `~/Library/KeyBindings` or `~/Library/Fonts`, they will be
 wiped out!
 
@@ -129,7 +129,7 @@ for some tips on how to change some of these settings automatically.)
 
 #### Configure Terminal
 
-Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile,
+Import the [`etc/Solarized Dark.terminal`](etc/Solarized%20Dark.terminal) profile,
 and set it to the "default". (See
 [this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx) for
 some information on how to do this automatically.)
@@ -147,8 +147,8 @@ If signed into the same iCloud account, these should be shared automatically.
 
 Otherwise, see
 [Back up and share text replacements on Mac](https://support.apple.com/en-gb/guide/mac-help/mchl2a7bd795/mac).
-Text replacements themselves are stored in [`etc/Text
-Replacements.plist`](etc/Text Replacements.plist)
+Text replacements themselves are stored in
+[`etc/Text Replacements.plist`](etc/Text%20Replacements.plist).
 
 #### Add Lock Screen option to Menu Bar
 
@@ -160,7 +160,8 @@ Control Center | Sound | Always Show in Menu Bar.
 
 #### Disable local Time Machine backups
 
-    $ sudo tmutil disablelocal
+> **Note:** This option was removed in macOS High Sierra. Local snapshots are
+> now managed automatically by the system.
 
 #### Install "Network Link Conditioner"
 
