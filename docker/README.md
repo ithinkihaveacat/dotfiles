@@ -34,10 +34,10 @@ commands will apply to this machine by default.
 (Instead of the Docker Engine provided by the local Docker.app.)
 
 ```sh
-$ eval (docker-machine env default)
+eval (docker-machine env default)
 ```
 
-4. (Optional) Test Dockerized host.
+1. (Optional) Test Dockerized host.
 
 ```sh
 $ docker run hello-world
@@ -61,16 +61,17 @@ See Docker's
 [Getting Started documentation](https://docs.docker.com/machine/get-started/#/run-containers-and-experiment-with-machine-commands)
 for some more examples.
 
-5. Create image (named `fred`) from `~/.dotfiles/docker/Dockerfile`.
+1. Create image (named `fred`) from `~/.dotfiles/docker/Dockerfile`.
 
 ```sh
-$ docker build -t fred ~/.dotfiles/docker
+docker build -t fred ~/.dotfiles/docker
 ```
 
 6A. Create and start a container (named `barry`) on Cloud Docker Engine:
 
 ```sh
-$ docker run --privileged -it --name barry -p 80:22 -h barry -d -v /root/.ssh:/etc/ssh/keys:ro fred
+docker run --privileged -it --name barry -p 80:22 -h barry -d \
+  -v /root/.ssh:/etc/ssh/keys:ro fred
 ```
 
 - `--name barry` – the name of the container
@@ -87,13 +88,15 @@ $ docker run --privileged -it --name barry -p 80:22 -h barry -d -v /root/.ssh:/e
 6B. Create and start a container (named `barry`) on local Docker Engine:
 
 ```sh
-$ docker run --privileged -it --name barry -p 127.0.0.1:8022:22 -h barry -d -v $HOME/.ssh:/etc/ssh/keys:ro fred
+docker run --privileged -it --name barry -p 127.0.0.1:8022:22 -h barry -d \
+  -v $HOME/.ssh:/etc/ssh/keys:ro fred
 ```
 
 7A. `ssh` into the container as user `mjs` on the Cloud Docker Engine.
 
 ```sh
-$ ssh -i (docker-machine inspect -f "{{.HostOptions.AuthOptions.StorePath}}")/id_rsa -p 80 mjs@(docker-machine ip)
+KEYPATH=$(docker-machine inspect -f "{{.HostOptions.AuthOptions.StorePath}}")
+ssh -i "$KEYPATH/id_rsa" -p 80 mjs@(docker-machine ip)
 ```
 
 - `(docker-machine inspect -f "{{.HostOptions.AuthOptions.StorePath}}")` – the
@@ -110,13 +113,13 @@ $ ssh -i (docker-machine inspect -f "{{.HostOptions.AuthOptions.StorePath}}")/id
 Or, get interactive shell (user `root`) on the container via Docker:
 
 ```sh
-$ docker exec --privileged -it barry bash -l
+docker exec --privileged -it barry bash -l
 ```
 
 Or, attach to the `sshd` (or whatever is run by `CMD` in `Dockerfile`) via:
 
 ```sh
-$ docker attach barry
+docker attach barry
 ```
 
 Exiting or killing this process stops the container. To detach from the
@@ -125,7 +128,7 @@ container without killing the process, use `ctrl-p`, `ctrl-q`.
 7B. `ssh` into the container as user `mjs` on local Docker Engine.
 
 ```sh
-$ ssh -i $HOME/.ssh/play_rsa -p 8022 mjs@127.0.0.1
+ssh -i $HOME/.ssh/play_rsa -p 8022 mjs@127.0.0.1
 ```
 
 ## Appendix A: Docker Concepts

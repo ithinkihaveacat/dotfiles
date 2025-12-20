@@ -1,3 +1,5 @@
+# Fontconfig
+
 Fixes rendering of Helvetica.
 
 For some reason some Linux systems come with a horrible bitmapped version of

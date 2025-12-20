@@ -72,7 +72,7 @@ jetpack-inspect androidx.compose.remote:remote-creation-compose SNAPSHOT
 
 #### Practical Examples
 
-**Example 1: Understanding a class implementation**
+##### Example 1: Understanding a class implementation
 
 ```bash
 # You're working with SplashScreen and want to understand how it works
@@ -81,14 +81,14 @@ ls  # See the source structure
 grep -r "installSplashScreen" .  # Find specific methods
 ```
 
-**Example 2: Checking the latest alpha version**
+##### Example 2: Checking the latest alpha version
 
 ```bash
 # You want to see what's coming in the next release
 jetpack-inspect androidx.wear.tiles.TileService ALPHA
 ```
 
-**Example 3: Working with snapshot versions**
+##### Example 3: Working with snapshot versions
 
 ```bash
 # You need the absolute latest unreleased code
@@ -97,7 +97,7 @@ cd "$(jetpack-inspect androidx.glance:glance-wear-tiles SNAPSHOT)"
 # Explore the bleeding-edge implementation
 ```
 
-**Example 4: Comparing implementations**
+##### Example 4: Comparing implementations
 
 ```bash
 # Download multiple versions to compare
@@ -112,17 +112,22 @@ The `jetpack-inspect` command is built on top of several other tools that you
 can use independently:
 
 - **`jetpack-resolve`**: Converts a class name to a Maven coordinate
+
   ```bash
   jetpack-resolve androidx.core.splashscreen.SplashScreen
   # Output: androidx.core:core-splashscreen
   ```
+
 - **`jetpack-source`**: Downloads source code using Maven coordinates
+
   ```bash
   jetpack-source androidx.wear.tiles:tiles
   jetpack-source androidx.wear.tiles:tiles ALPHA
   jetpack-source androidx.wear.tiles:tiles SNAPSHOT
   ```
+
 - **`jetpack-version`**: Gets version information for a package
+
   ```bash
   jetpack-version androidx.wear.tiles:tiles STABLE
   jetpack-version androidx.wear.tiles:tiles ALPHA
@@ -167,9 +172,10 @@ If the tools are not in your PATH, you can download them individually. Note that
 mkdir -p ~/bin
 
 # Download all jetpack tools
+BASE_URL="https://raw.githubusercontent.com/ithinkihaveacat/dotfiles"
+BASE_URL="$BASE_URL/refs/heads/master/bin"
 for script in jetpack-inspect jetpack-resolve jetpack-source jetpack-version; do
-  curl -sSL "https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/$script" \
-    -o ~/bin/"$script"
+  curl -sSL "$BASE_URL/$script" -o ~/bin/"$script"
   chmod +x ~/bin/"$script"
 done
 
@@ -197,8 +203,9 @@ Some scripts can be used directly without installation:
 
 ```bash
 # Example: Check the latest stable version of a package
-bash <(curl -sSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/refs/heads/master/bin/jetpack-version) \
-  androidx.wear.tiles:tiles STABLE
+URL="https://raw.githubusercontent.com/ithinkihaveacat/dotfiles"
+URL="$URL/refs/heads/master/bin/jetpack-version"
+bash <(curl -sSL "$URL") androidx.wear.tiles:tiles STABLE
 ```
 
 Note: This approach won't work for `jetpack-inspect` because it depends on other
@@ -256,25 +263,27 @@ If these scripts are not available in the current environment's PATH, they can
 be downloaded individually from the
 [dotfiles repository's `bin` directory](https://github.com/ithinkihaveacat/dotfiles/tree/master/bin).
 
-### Key Script Categories and Examples:
+### Key Script Categories and Examples
 
 **1. General ADB Utilities (`adb-*`)** These scripts wrap common `adb` commands,
 often adding convenience features or simplifying complex operations.
 
 - `adb-screenshot`: Takes a screenshot of the connected device and saves it.
+
   ```bash
   adb-screenshot my_screenshot.png
   ```
+
 - `adb-logcat-package <PACKAGE_NAME>`: Filters `logcat` output for a specific
   package.
 - `adb-settings-theme`: Toggles the device's theme (light/dark).
 - **Wear OS Tile Management:** A common task is testing a new tile. This is a
   two-step process:
-  1.  **Add the tile:** Use `adb-tile-add <COMPONENT_NAME>` to make the system
-      aware of your tile. This command will output the index of the newly added
-      tile.
-  2.  **Show the tile:** Use `adb-tile-show <TILE_INDEX>` with the index from
-      the previous step to make the tile visible on the device for debugging.
+  1. **Add the tile:** Use `adb-tile-add <COMPONENT_NAME>` to make the system
+     aware of your tile. This command will output the index of the newly added
+     tile.
+  2. **Show the tile:** Use `adb-tile-show <TILE_INDEX>` with the index from the
+     previous step to make the tile visible on the device for debugging.
 
   This workflow (`adb-tile-add` followed by `adb-tile-show`) is the standard
   procedure for testing tiles from the command line.

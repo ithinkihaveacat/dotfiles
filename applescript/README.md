@@ -1,3 +1,5 @@
+# AppleScript
+
 ## About
 
 Some random AppleScript scripts. (Note that there are others in the `bin`
@@ -7,19 +9,19 @@ directory.)
 
 Need the current working directory?
 
-```
+```applescript
 set pwd to do shell script "pwd"
 ```
 
 Create file object from Unix-style path (with "/"):
 
-```
+```applescript
 (POSIX file unixpath)
 ```
 
 Get Unix-style path from a file object:
 
-```
+```applescript
 (POSIX path file)
 ```
 

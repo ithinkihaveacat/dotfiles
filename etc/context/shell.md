@@ -263,7 +263,7 @@ work around issues.
 ```bash
 # Good - Specific and actionable
 if ! command -v jq >/dev/null 2>&1; then
-  echo "$(basename "$0"): jq command not found. Install via: apt-get install jq" >&2
+  echo "$(basename "$0"): jq not found, install via: apt-get install jq" >&2
   exit 1
 fi
 

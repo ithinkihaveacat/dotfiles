@@ -13,16 +13,12 @@
    [Settings Repository](https://www.jetbrains.com/help/idea/sharing-your-ide-settings.html#settings-repository)
    to share settings from <https://github.com/ithinkihaveacat/as-settings/>.
 
-# Previously #1…
-
-## Use settings.zip
+## Previously #1: Use settings.zip
 
 Previously, the settings sync step above involving importing settings via File |
 Import Settings... | [Choose settings.zip]
 
-# Previously #2…
-
-## Import Color Scheme (only)
+## Previously #2: Import Color Scheme Only
 
 (Does not require a plugin, but only changes the colours of the "source code"
 area.)
