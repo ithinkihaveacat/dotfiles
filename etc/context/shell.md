@@ -54,6 +54,136 @@ fish_indent -w fish/completions/emumanager.fish
 
 - `-w` edits files in-place.
 
+## Script Documentation Guidelines
+
+Scripts should provide comprehensive help documentation following GNU coreutils
+conventions.
+
+### Basic Structure
+
+Each script should include:
+
+1. A `usage()` function that displays help text
+2. Support for `-h` and `--help` flags
+3. Clear error messages following GNU coreutils patterns
+4. Practical examples demonstrating common use cases
+
+### Function Naming
+
+Use `usage()` for the help display function, not `help()`:
+
+- `help` is a bash builtin command
+- Using `help()` would shadow the builtin
+- `usage()` is the established convention in shell scripting
+
+### Implementation Pattern
+
+```bash
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") ARGUMENTS [OPTIONS]
+
+Brief description of what the script does.
+
+Arguments:
+  ARG1        Description of first argument
+  ARG2        Description of second argument (optional if optional)
+
+Options:
+  -h, --help  Display this help message and exit
+
+Examples:
+  $(basename "$0") example1
+  $(basename "$0") example2 --option
+  $(basename "$0") example3 with multiple arguments
+
+Additional explanation of behavior, edge cases, or important details.
+EOF
+  exit 0
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
+# Rest of script...
+```
+
+### Key Requirements
+
+#### 1. Help Output Structure
+
+Follow GNU coreutils style (see `ls --help`, `cp --help`, `grep --help` for
+comprehensive examples):
+
+- **Usage line**: Show command syntax with argument placeholders in CAPS
+- **Description**: One-line summary of what the script does
+- **Arguments section**: Document positional arguments (not "Options" for
+  positional args)
+- **Options section**: Document flags like `-h, --help`
+- **Examples section**: Provide 2-3 practical examples
+- **Additional notes**: Explain important behavior or caveats (optional)
+
+#### 2. Examples Section
+
+Always include practical examples:
+
+- Show 2-3 common use cases
+- Where appropriate, include one or two less obvious or more advanced examples
+  to inspire creative uses of the script.
+- Use realistic file names or package names
+- Demonstrate different argument patterns
+- Use `$(basename "$0")` for portability
+
+#### 3. What NOT to Include
+
+- **Dependencies**: Don't list required commands in the help text (they'll fail
+  early anyway)
+- **Implementation details**: Focus on usage, not how it works internally
+- **Version information**: Not needed for personal utility scripts
+- **Excessive options**: Only document `-h, --help` unless the script has other
+  flags
+
+### Top-of-File Comments
+
+Do not embed substantive help-like information in comments at the top of a
+script. This information can become outdated and is not easily accessible to
+users.
+
+- **DO:** Move any descriptive comments about the script's purpose, usage, or
+  behavior into the `usage()` function's heredoc.
+- **DON'T:** Leave large comment blocks at the top of the file explaining what
+  the script does.
+
+"Inline" comments that explain specific lines of code are acceptable.
+Commented-out code for debugging purposes is also fine.
+
+### Reference Examples
+
+Good examples of comprehensive help output from GNU coreutils:
+
+```bash
+ls --help      # Comprehensive, well-organized options
+cp --help      # Clear argument documentation
+grep --help    # Good examples section
+tar --help     # Detailed but readable
+```
+
+Study these for formatting conventions, terminology, and structure.
+
+### Checklist for New Scripts
+
+- [ ] `usage()` function defined (not `help()`)
+- [ ] Checks for `-h` and `--help` before other validation
+- [ ] Usage line with argument syntax
+- [ ] Brief description of script purpose
+- [ ] Arguments section (for positional args)
+- [ ] Options section (for flags)
+- [ ] Examples section with 2-3 practical examples
+- [ ] No dependency lists in help text
+
 ## Error Handling in Shell Scripts
 
 All shell scripts must have reliable and robust error detection and reporting.
@@ -91,10 +221,36 @@ error handling:
 - Prioritize readability and small size over clever constructions
 - Maintain consistency in error message format and behavior
 
-### Error Message Quality
+### Error Messages
 
-Error messages should be clear and actionable. It is acceptable (and often
-helpful) to expose internal implementation details such as:
+Error messages should follow GNU coreutils conventions:
+
+- Format: `program: description of error`
+- Write to stderr (`>&2`)
+- Be specific and actionable
+- Do NOT include "Try 'command --help'" suggestions
+
+```bash
+# Good (GNU coreutils style)
+echo "$(basename "$0"): missing file operand" >&2
+
+# Avoid
+echo "Error: something went wrong"
+```
+
+For scripts with subcommands, follow git-style error messages that include the
+subcommand name:
+
+```bash
+# Good (git-style for subcommands):
+echo "$(basename "$0") create: AVD name required" >&2
+
+# Avoid (too generic):
+echo "$(basename "$0"): missing operand" >&2
+```
+
+It is acceptable (and often helpful) to expose internal implementation details
+such as:
 
 - Exact commands that failed
 - URLs that were not found
@@ -104,19 +260,24 @@ helpful) to expose internal implementation details such as:
 This transparency improves clarity and enables users to diagnose and manually
 work around issues.
 
-### Example
-
 ```bash
 # Good - Specific and actionable
 if ! command -v jq >/dev/null 2>&1; then
-  echo "Error: jq command not found. Install via: apt-get install jq" >&2
+  echo "$(basename "$0"): jq command not found. Install via: apt-get install jq" >&2
   exit 1
 fi
 
 # Good - Exposes implementation details
 if ! curl -sf "$API_URL" >/dev/null; then
-  echo "Error: Failed to fetch $API_URL" >&2
-  echo "Check network connectivity or verify the URL is accessible" >&2
+  echo "$(basename "$0"): failed to fetch $API_URL" >&2
   exit 1
 fi
 ```
+
+### Exit Codes
+
+Follow these conventions:
+
+- `exit 0` for successful operations and help display (`--help`)
+- `exit 1` for general errors (missing arguments, invalid input)
+- `exit 127` for missing required commands (convention for "command not found")
