@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") IMAGE
+
+Detect if people feature prominently in a photo using the Gemini API. Returns
+true if people (or parts of people like hands, backs of heads, silhouettes)
+are a significant part of the image.
+
+Arguments:
+  IMAGE       Path to a photo (any format supported by ImageMagick)
+
+Options:
+  -q, --quiet  Suppress output; exit code only
+  -h, --help   Display this help message and exit
+
+Environment Variables:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Exit Codes:
+  0  People feature prominently in the photo (true)
+  1  People do not feature prominently in the photo (false)
+
+Examples:
+  $(basename "$0") portrait.jpg
+  $(basename "$0") landscape.heic && echo "Has people"
+  $(basename "$0") photo.png || echo "No people"
+EOF
+  exit 0
+}
+
+QUIET=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      ;;
+    -q | --quiet)
+      QUIET=true
+      shift
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+require base64
+require magick
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+IMAGE_PATH="$1"
+PROMPT="Do people feature prominently in this photo? This includes partial views of people such as hands, backs of heads, silhouettes, or any visible human body parts. Answer true if people are a significant part of the image, false otherwise."
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-3-flash-preview"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+if [[ ! -f "$IMAGE_PATH" ]]; then
+  echo "$(basename "$0"): $IMAGE_PATH: No such file or directory" >&2
+  exit 1
+fi
+
+# Convert to HEIF and base64 encode
+# Max 384x384px per https://ai.google.dev/gemini-api/docs/image-understanding
+# base64: macOS uses -b 0, Linux uses -w 0
+if base64 --help 2>&1 | grep -q -- '-w'; then
+  IMAGE_BASE64=$(magick "$IMAGE_PATH" -alpha off -resize 384x384\> heif:- | base64 -w 0)
+else
+  IMAGE_BASE64=$(magick "$IMAGE_PATH" -alpha off -resize 384x384\> heif:- | base64 -b 0)
+fi
+
+# Image before text for single-image prompts per:
+# https://ai.google.dev/gemini-api/docs/image-understanding
+REQUEST_BODY=$(
+  cat <<EOF
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "inlineData": {
+            "mimeType": "image/heif",
+            "data": "${IMAGE_BASE64}"
+          }
+        },
+        {"text": "${PROMPT}"}
+      ]
+    }
+  ],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseJsonSchema": {
+      "type": "object",
+      "properties": {
+        "has_people": {
+          "type": "boolean",
+          "description": "True if people feature prominently in the photo"
+        }
+      },
+      "required": ["has_people"]
+    }
+  }
+}
+EOF
+)
+
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract the JSON response text
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+if [[ -z "$TEXT" ]]; then
+  echo "$(basename "$0"): no response text received from API" >&2
+  exit 1
+fi
+
+# Parse the boolean result
+HAS_PEOPLE=$(echo "$TEXT" | jq -r '.has_people')
+if [[ "$HAS_PEOPLE" != "true" && "$HAS_PEOPLE" != "false" ]]; then
+  echo "$(basename "$0"): failed to parse response: $TEXT" >&2
+  exit 1
+fi
+
+if [[ "$QUIET" == "false" ]]; then
+  echo "$HAS_PEOPLE"
+fi
+
+if [[ "$HAS_PEOPLE" == "true" ]]; then
+  exit 0
+else
+  exit 1
+fi
