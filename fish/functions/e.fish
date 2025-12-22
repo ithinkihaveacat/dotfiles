@@ -30,10 +30,20 @@ function e -d 'Edit file, searching in a few different places'
 
         case function
 
-            if test -f $HOME/.config/fish/functions/$name.fish
-                eval $EDITOR $HOME/.config/fish/functions/$name.fish
+            set -l type_output (type $name)
+            set -l def_line (string match -r '# Defined in .*' $type_output)
+
+            if test -n "$def_line"
+                set -l func_file (string replace '# Defined in ' '' $def_line | string trim)
+                # Further clean the path to remove potential line number and column info
+                set func_file (echo $func_file | string match -r '^[^ @]+')
+                if test -f "$func_file"
+                    eval $EDITOR "$func_file"
+                else
+                    echo "error: file '$func_file' for function '$name' not found"
+                end
             else
-                echo "error: '$name' not defined in $HOME/.config/fish/functions"
+                echo "error: could not determine file for function '$name'"
             end
 
         case '*'
