@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0")
+
+Generate a combined repomix output of Gemini API documentation and examples.
+
+This script downloads and combines:
+  - Google Gemini Cookbook examples (Book_illustration.ipynb, Image_out.ipynb)
+  - Image generation, image understanding, and structured output documentation from ai.google.dev
+
+Binary image data is filtered from notebooks while preserving all text content
+and maintaining valid ipynb structure. Output is written to stdout.
+
+Options:
+  -h, --help  Display this help message and exit
+
+Examples:
+  $(basename "$0")
+    Generate combined documentation to stdout
+
+  $(basename "$0") > gemini-api-context.txt
+    Save combined documentation to a file
+EOF
+  exit 0
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
+set -e
+
+BUILD_DIR=$(mktemp -d)
+trap 'rm -rf "$BUILD_DIR"' EXIT
+
+require() {
+  hash "$@" || {
+    echo "Error: Command '$1' not found." >&2
+    exit 127
+  }
+}
+
+require curl
+require unzip
+require repomix
+require jq
+
+# Download google-gemini/cookbook repo
+COOKBOOK_URL="https://github.com/google-gemini/cookbook/archive/refs/heads/main.zip"
+COOKBOOK_ZIP="$BUILD_DIR/cookbook.zip"
+COOKBOOK_DIR="$BUILD_DIR/cookbook-main"
+
+curl -sSL -o "$COOKBOOK_ZIP" "$COOKBOOK_URL"
+unzip -o -q "$COOKBOOK_ZIP" -d "$BUILD_DIR"
+
+# Create a filtered notebooks directory
+FILTERED_DIR="$BUILD_DIR/filtered"
+mkdir -p "$FILTERED_DIR"
+
+# Filter Book_illustration.ipynb - remove binary image data
+jq 'walk(if type == "object" and has("data") and (.data | type == "object") then
+  .data |= with_entries(select(.key | test("^image/") | not))
+  else . end) |
+  walk(if type == "object" and has("outputs") then
+  .outputs |= map(if .data then .data |= with_entries(select(.key | test("^image/") | not)) else . end)
+  else . end)' \
+  "$COOKBOOK_DIR/examples/Book_illustration.ipynb" >"$FILTERED_DIR/Book_illustration.ipynb"
+
+# Filter Image_out.ipynb - remove binary image data
+jq 'walk(if type == "object" and has("data") and (.data | type == "object") then
+  .data |= with_entries(select(.key | test("^image/") | not))
+  else . end) |
+  walk(if type == "object" and has("outputs") then
+  .outputs |= map(if .data then .data |= with_entries(select(.key | test("^image/") | not)) else . end)
+  else . end)' \
+  "$COOKBOOK_DIR/quickstarts/Image_out.ipynb" >"$FILTERED_DIR/Image_out.ipynb"
+
+# Create a combined directory structure for repomix
+COMBINED_DIR="$BUILD_DIR/combined"
+mkdir -p "$COMBINED_DIR/notebooks"
+
+# Copy filtered notebooks
+cp "$FILTERED_DIR/Book_illustration.ipynb" "$COMBINED_DIR/notebooks/"
+cp "$FILTERED_DIR/Image_out.ipynb" "$COMBINED_DIR/notebooks/"
+
+# Download API documentation
+curl -sSL -o "$COMBINED_DIR/image-generation.md" "https://ai.google.dev/gemini-api/docs/image-generation.md.txt"
+curl -sSL -o "$COMBINED_DIR/image-understanding.md" "https://ai.google.dev/gemini-api/docs/image-understanding.md.txt"
+curl -sSL -o "$COMBINED_DIR/structured-output.md" "https://ai.google.dev/gemini-api/docs/structured-output.md.txt"
+
+# Use repomix to combine everything
+repomix "$COMBINED_DIR" --no-security-check --quiet -o -
