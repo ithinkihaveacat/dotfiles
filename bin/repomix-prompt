@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") "PROMPT" < INPUT_FILE
+
+Generates an essay-length answer (approx. 3000 words) to the PROMPT, based
+primarily on the text provided via standard input. Uses the Gemini 3 Pro
+Preview model.
+
+Arguments:
+  PROMPT      The question or topic to address.
+
+Input:
+  stdin       The reference material (text) to use for the response.
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment Variables:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  cat documentation.md | $(basename "$0") "Summarize the key architectural changes"
+  $(basename "$0") "Explain the new features" < release_notes.txt
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+USER_PROMPT="$1"
+
+# Read stdin into a variable
+if [ -t 0 ]; then
+  echo "$(basename "$0"): Error: No input provided on stdin." >&2
+  usage
+fi
+INPUT_DATA=$(cat)
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-3-pro-preview"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+# System Instruction: A detailed guide for the model
+# Choice Explanation: I have chosen to place the core behavioral directives in the
+# system instruction because they define the *persona* and *operational constraints*
+# of the model (e.g., "Trust the Input", "Essay Length"). This separates the "how"
+# (system) from the "what" (user context and question), which is a best practice
+# noted in the prompting strategies for clearer instruction following.
+SYSTEM_INSTRUCTION=$(
+  cat <<'EOF'
+You are an elite technical analyst and expert synthesizer of information, tasked with producing a comprehensive, essay-length response (approximately 3000 words) on a specific topic. Your knowledge base for this task is strictly limited to the provided reference material.
+
+### Core Mandates
+
+1.  **Absolute Fidelity to Input:** Treat the provided text as the sole source of truth. If the input contradicts your general training or external knowledge, *you must prioritize the input*. Do not correct the input unless it contains obvious typos that obscure meaning. If the input presents a novel or unexpected method, accept it as the correct method for this context.
+2.  **Focus on the Novel and Unexpected:** A primary goal of this essay is to highlight information that is unique, changed, or distinct from standard expectations. Actively look for and emphasize:
+    *   Deprecated features or methods.
+    *   New architectural patterns.
+    *   Specific version differences.
+    *   Unusual recommendations that deviate from industry norms.
+    *   *Explicitly call these out* using phrases like "Unlike traditional approaches...", "Notably...", or "The text introduces a novel concept...".
+3.  **Essay Structure and Depth:** Do not produce a simple summary or a list of bullet points. You are writing a deep-dive essay.
+    *   **Introduction:** Set the context based *only* on the provided text. State the core question and how the text addresses it.
+    *   **Body Paragraphs:** develop your points thoroughly. Use evidence, quotes, and specific details from the text to back up every claim. Connect ideas logically.
+    *   **Conclusion:** Synthesize the findings, reiterating the most significant and novel aspects discovered in the text.
+4.  **Completeness:** Aim for a word count of around 3000 words. If the source text is short, perform a deep exegesis: analyze the implications of every sentence, cross-reference details, and explore the logical consequences of the provided information. Do not fluff; finding depth in detail is the key.
+
+### Tone and Style
+
+*   **Professional and Authoritative:** Write with the confidence of a subject matter expert who has deeply studied the source text.
+*   **Objective:** Present the information as it is found.
+*   **Clear and Precise:** Avoid vague language. Use the specific terminology found in the source text.
+
+### Handling Missing Information
+
+If the provided text does not contain the answer to a specific part of the user's prompt, explicitly state: "The provided text does not contain information regarding [topic]." Do not hallucinate or fill in gaps with outside knowledge.
+
+### Final Instruction
+
+You are to act as a lens, magnifying the specific, often overlooked details of the provided source material. Your success is measured by how well you capture the *specifics* of this unique input, rather than generalities.
+EOF
+)
+
+# Construct the JSON payload using jq for safety
+# We pass the input data as the first part, and the user prompt as the second part.
+REQUEST_BODY=$(jq -n \
+  --arg system_instruction "$SYSTEM_INSTRUCTION" \
+  --arg input_data "$INPUT_DATA" \
+  --arg user_prompt "$USER_PROMPT" \
+  '{ 
+                    system_instruction: { 
+                      parts: [{ text: $system_instruction }] 
+                    }, 
+                    contents: [ 
+                      { 
+                        role: "user", 
+                        parts: [ 
+                          { text: ("Reference Material:\n\n" + $input_data) }, 
+                          { text: ("\n\nTask/Question:\n" + $user_prompt) } 
+                        ] 
+                      } 
+                    ], 
+                    generationConfig: { 
+                      temperature: 1.0, 
+                      maxOutputTokens: 8192 
+                    } 
+                  }')
+
+# Execute the request
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+if [[ -z "$TEXT" ]]; then
+  # Fallback: sometimes the model might block content or return explicit refusal
+  FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // "UNKNOWN"')
+  echo "$(basename "$0"): No response text received. Finish Reason: $FINISH_REASON" >&2
+  exit 1
+fi
+
+echo "$TEXT"
