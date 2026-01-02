@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") IMAGE1 IMAGE2 [PROMPT]
+
+Compare two screenshots using the Gemini API. Identifies visual differences like
+layout shifts, color changes, padding, or text updates.
+
+Arguments:
+  IMAGE1      Path to the first screenshot (baseline/before)
+  IMAGE2      Path to the second screenshot (comparison/after)
+  PROMPT      Custom prompt for the AI model (optional)
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment Variables:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  $(basename "$0") before.png after.png
+  $(basename "$0") v1.png v2.png "Check for font size changes in the header"
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+require base64
+require magick
+
+if [[ $# -lt 2 ]]; then
+  usage
+fi
+
+IMAGE1_PATH="$1"
+IMAGE2_PATH="$2"
+DEFAULT_PROMPT="Compare these two screenshots. They are expected to be the same size and show the same UI, differing only in minor details (e.g., margins, padding, colors, font sizes).
+
+If the images are completely different (e.g., they show different apps or entirely different screens), provide a single, concise explanation of why they are not comparable as your entire response.
+
+Otherwise, provide a detailed description of the visual differences in paragraph form. Do not use bullet points or lists. Be specific about changes to colors, font sizes, margins, padding, and layout shifts, noting direction and approximate pixel values where possible. Describe which specific text or UI elements have changed and how.
+
+Conclude with a brief summary paragraph of the overall changes (e.g., 'the theme has been changed' or 'vertical padding has been increased throughout').
+
+Your entire response must be in paragraph form and must not utilize bullet points."
+PROMPT="${3:-${DEFAULT_PROMPT}}"
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-2.0-flash-exp"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+if [[ ! -f "$IMAGE1_PATH" ]]; then
+  echo "$(basename "$0"): $IMAGE1_PATH: No such file or directory" >&2
+  exit 1
+fi
+if [[ ! -f "$IMAGE2_PATH" ]]; then
+  echo "$(basename "$0"): $IMAGE2_PATH: No such file or directory" >&2
+  exit 1
+fi
+
+# Convert to lossless webp and base64 encode
+# base64: macOS uses -b 0, Linux uses -w 0
+encode_image() {
+  local file="$1"
+  if base64 --help 2>&1 | grep -q -- '-w'; then
+    magick "$file" -alpha off -define webp:lossless=true webp:- | base64 -w 0
+  else
+    magick "$file" -alpha off -define webp:lossless=true webp:- | base64 -b 0
+  fi
+}
+
+IMG1_B64=$(encode_image "$IMAGE1_PATH")
+IMG2_B64=$(encode_image "$IMAGE2_PATH")
+
+# Text before images for comparison tasks, see https://ai.google.dev/gemini-api/docs/image-understanding#multiple-images
+REQUEST_BODY=$(jq -n \
+  --arg prompt "$PROMPT" \
+  --arg img1 "$IMG1_B64" \
+  --arg img2 "$IMG2_B64" \
+  '{
+    contents: [{
+      parts: [
+        {text: $prompt},
+        {inlineData: {mimeType: "image/webp", data: $img1}},
+        {inlineData: {mimeType: "image/webp", data: $img2}}
+      ]
+    }]
+  }')
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+if [[ -z "$TEXT" ]]; then
+  echo "$(basename "$0"): no response text received from API" >&2
+  exit 1
+fi
+
+echo "$TEXT"
