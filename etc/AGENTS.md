@@ -5,9 +5,9 @@ changes to codebases.
 
 ## Markdown Quality
 
-All Markdown files must be linted with `markdownlint-cli2` and formatted with
-`prettier`. Use standard heading styles without additional formatting or ALL
-CAPS.
+All Markdown files must be formatted and linted with `markdown-format`. Use
+standard heading styles without additional formatting or ALL CAPS. Do not add
+numbers to headings.
 
 @./context/markdown.md
 
