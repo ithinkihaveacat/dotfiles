@@ -35,7 +35,7 @@ the specified commit message format.
 
 @./context/git.md
 
-## Agent Function Notation
+## Agent Function Notation (AFN)
 
 ### Overview
 
