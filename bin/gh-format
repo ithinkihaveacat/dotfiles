@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") URL [OPTIONS]
+
+Fetch and format GitHub issues or pull requests as markdown.
+
+Arguments:
+  URL         GitHub issue or pull request URL
+
+Options:
+  --comments       Include all discussion comments
+  --output FILE    Write output to file instead of stdout
+  -h, --help       Display this help message and exit
+
+Examples:
+  $(basename "$0") https://github.com/owner/repo/issues/123
+  $(basename "$0") https://github.com/owner/repo/pull/456
+  $(basename "$0") https://github.com/owner/repo/issues/123 --comments
+  $(basename "$0") https://github.com/owner/repo/pull/456 --comments --output pr-456.md
+
+The script automatically detects whether the URL is an issue or pull request
+and uses the appropriate GitHub API endpoint.
+EOF
+  exit 0
+}
+
+# Dependency checking
+require() {
+  for cmd in "$@"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "$(basename "$0"): $cmd not found" >&2
+      exit 127
+    fi
+  done
+}
+
+require curl jq markdown-format
+
+if [[ $# -eq 0 && -t 0 ]]; then
+  usage
+fi
+
+# Parse arguments
+INCLUDE_COMMENTS=false
+OUTPUT_FILE=""
+URL=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h | --help) usage ;;
+    --comments)
+      INCLUDE_COMMENTS=true
+      shift
+      ;;
+    --output)
+      OUTPUT_FILE="$2"
+      shift 2
+      ;;
+    *)
+      URL="$1"
+      shift
+      ;;
+  esac
+done
+
+# Check if URL was provided
+if [ -z "$URL" ]; then
+  echo "$(basename "$0"): missing URL operand" >&2
+  exit 1
+fi
+
+# Validate URL format (issues or pull)
+if ! echo "$URL" | grep -Eq '^https://github\.com/[[:alnum:]_.-]+/[[:alnum:]_.-]+/(issues|pull)/[[:digit:]]+$'; then
+  echo "$(basename "$0"): invalid GitHub URL" >&2
+  exit 1
+fi
+
+# Extract URL components
+OWNER=$(echo -n "$URL" | sed -E 's|^https://github\.com/([[:alnum:]_.-]+)/.*|\1|')
+REPO=$(echo -n "$URL" | sed -E 's|^https://github\.com/[^/]+/([[:alnum:]_.-]+)/.*|\1|')
+NUMBER=$(echo -n "$URL" | sed -E 's|.*/([[:digit:]]+)$|\1|')
+
+# Fetch issue/PR body from GitHub API
+API_URL="https://api.github.com/repos/$OWNER/$REPO/issues/$NUMBER"
+RESPONSE=$(curl -sH "Accept: application/vnd.github.v3+json" "$API_URL")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.message' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message')
+  echo "$(basename "$0"): GitHub API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Create temporary file for output
+TMPFILE=$(mktemp)
+trap 'rm -f "$TMPFILE"' EXIT
+
+# Extract and format title and body
+{
+  echo "$RESPONSE" | jq -r '"# " + .title'
+  echo ""
+  echo "$RESPONSE" | jq -r '"Created by " + .user.login + " (" + .created_at + ")"'
+  echo ""
+  echo "$RESPONSE" | jq -r '.body // ""' | markdown-format
+} >>"$TMPFILE"
+
+# If --comments flag is set, fetch and format comments
+if [ "$INCLUDE_COMMENTS" = true ]; then
+  COMMENTS_URL="https://api.github.com/repos/$OWNER/$REPO/issues/$NUMBER/comments"
+  COMMENTS=$(curl -sH "Accept: application/vnd.github.v3+json" "$COMMENTS_URL")
+
+  # Check if there are any comments
+  COMMENT_COUNT=$(echo "$COMMENTS" | jq 'length')
+  if [ "$COMMENT_COUNT" -gt 0 ]; then
+    # Add separator before comments
+    echo -e "\n---\n" >>"$TMPFILE"
+
+    # Format each comment
+    echo "$COMMENTS" | jq -r '.[] | "## Comment by \(.user.login) (\(.created_at))\n\n\(.body)\n\n---\n"' | markdown-format >>"$TMPFILE"
+  fi
+fi
+
+# Output to file or stdout
+if [ -n "$OUTPUT_FILE" ]; then
+  cp "$TMPFILE" "$OUTPUT_FILE"
+else
+  cat "$TMPFILE"
+fi
