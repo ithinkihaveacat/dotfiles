@@ -147,6 +147,41 @@ If you modify `bin/emumanager` to add a new subcommand or option, you must also
 update `fish/completions/emumanager.fish` to include completions for the new
 functionality.
 
+## Tests
+
+Some scripts have associated tests in the `tests/` directory. Tests use the TAP
+(Test Anything Protocol) format and can be run with `prove` or executed directly.
+
+### Directory Structure
+
+```
+tests/
+└── <script-name>/
+    ├── test-basic           # TAP test file (executable)
+    └── fixtures/            # Test data (images, sample files, etc.)
+```
+
+### Requirements
+
+- Test files should be executable and output TAP format
+- Scripts with tests include a `# Tests:` comment pointing to their test
+  directory
+- When modifying a script with tests, review whether the tests need updating
+- Tests that call external APIs (e.g., Gemini) are expensive and slow; run them
+  manually when making substantive changes to the tested script
+
+### Finding Tests
+
+Check if a script has associated tests:
+
+```bash
+# Look for a Tests comment in the script
+grep '# Tests:' bin/my-script
+
+# Or check the tests directory
+ls tests/my-script/
+```
+
 ## Examples from This Repository
 
 See these scripts for reference implementations:
