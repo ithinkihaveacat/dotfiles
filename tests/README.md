@@ -17,34 +17,36 @@ tests/
 
 ## Running Tests
 
+The following examples assume you are running from the `tests/` directory.
+
 ### Run All Tests
 
 ```bash
-prove tests/*/test-*
+prove */test-*
 ```
 
 Or with verbose output:
 
 ```bash
-prove -v tests/*/test-*
+prove -v */test-*
 ```
 
 ### Run a Single Test Suite
 
 ```bash
-prove tests/jetpack-resolve/test-*
+prove jetpack-resolve/test-*
 ```
 
 ### Run a Single Test File
 
 ```bash
-prove tests/jetpack-resolve/test-basic
+prove jetpack-resolve/test-basic
 ```
 
 Or execute directly:
 
 ```bash
-./tests/jetpack-resolve/test-basic
+./jetpack-resolve/test-basic
 ```
 
 ## File Naming Convention
@@ -53,7 +55,7 @@ Test files are named `test-*` (e.g., `test-basic`, `test-edge-cases`) rather
 than using the `.t` extension. While `.t` is prove's default extension, the
 `test-*` pattern:
 
-- Works identically with prove via `prove tests/*/test-*`
+- Works identically with prove via `prove */test-*`
 - Can be executed directly without prove
 - Is more self-documenting for shell scripts
 
@@ -69,11 +71,11 @@ if not set:
 
 ```bash
 # Without key - tests are skipped
-prove tests/screenshot-compare/test-*
+prove screenshot-compare/test-*
 # Output: skipped: GEMINI_API_KEY not set
 
 # With key - tests run (slow, incurs API costs)
-GEMINI_API_KEY=your-key prove tests/screenshot-compare/test-*
+GEMINI_API_KEY=your-key prove screenshot-compare/test-*
 ```
 
 ## Writing Tests
