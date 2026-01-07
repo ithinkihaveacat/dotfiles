@@ -2,14 +2,20 @@
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0")
+Usage: $(basename "$0") [OPTIONS]
 
-Lists all available tile services on the connected device.
+Lists all available tile and widget services on the connected device.
 
-This script queries the package manager for services that require the
-'com.google.android.wearable.permission.BIND_TILE_PROVIDER' permission.
+This script queries the package manager for services that:
+  - Require the 'BIND_TILE_PROVIDER' permission (Tiles)
+  - Handle the 'androidx.wear.tiles.action.BIND_TILE_PROVIDER' action (Tiles)
+  - Handle the 'androidx.glance.wear.action.BIND_WIDGET_PROVIDER' action (Widgets)
+
+By default, it lists both with indicators (T for Tile, W for Widget).
 
 Options:
+  --tiles-only    List only tile services (no indicators)
+  --widgets-only  List only widget services (no indicators)
   -h, --help      Display this help message and exit
 
 Environment:
@@ -19,27 +25,130 @@ Environment:
 
 Examples:
   $(basename "$0")
+  $(basename "$0") --tiles-only
 EOF
   exit 0
 }
 
-if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-  usage
+# Parse args
+tiles_only=0
+widgets_only=0
+
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+    --tiles-only) tiles_only=1 ;;
+    --widgets-only) widgets_only=1 ;;
+    -h | --help) usage ;;
+    *)
+      echo "$(basename "$0"): unknown option '$1'" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if ((tiles_only && widgets_only)); then
+  echo "$(basename "$0"): cannot specify both --tiles-only and --widgets-only" >&2
+  exit 1
 fi
 
 require() { hash "$@" || exit 127; }
 
 require adb
 
-# Dump services and extract component names from lines containing BIND_TILE_PROVIDER
-# Format of dumpsys package services:
-#     package.name/class.name: com.google.android.wearable.permission.BIND_TILE_PROVIDER
-# We extract the component name (before the colon) from matching lines.
+# Define constants
+TILE_PERM="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
+TILE_ACTION="androidx.wear.tiles.action.BIND_TILE_PROVIDER"
+WIDGET_ACTION="androidx.glance.wear.action.BIND_WIDGET_PROVIDER"
 
-adb shell dumpsys package services |
-  grep "com.google.android.wearable.permission.BIND_TILE_PROVIDER" |
+# Awk script to parse 'cmd package query-services' output
+# Extract package/class from ServiceInfo blocks, ignoring ApplicationInfo
+# shellcheck disable=SC2016
+PARSE_CMD_OUTPUT_AWK='
+  /ServiceInfo:/ { in_service = 1; next }
+  /ApplicationInfo:/ { in_service = 0; next }
+  in_service && /name=/ { sub("name=", "", $1); svc_name = $1 }
+  in_service && /packageName=/ { sub("packageName=", "", $1); pkg_name = $1; print pkg_name "/" svc_name }
+'
+
+# 1. Get Tiles via Permission (Legacy/Standard method)
+# dumpsys package services lists "Component: Permission"
+# We extract components that require BIND_TILE_PROVIDER
+dump_tiles=$(adb shell dumpsys package services |
+  grep "${TILE_PERM}" |
   grep -v "Permission \[" |
   grep -v "perm=PermissionInfo" |
-  grep -v "^[[:space:]]*com.google.android.wearable.permission.BIND_TILE_PROVIDER" |
-  sed -E 's/^[[:space:]]*([^:]+):.*/\1/' |
-  sort
+  grep -v "^[[:space:]]*${TILE_PERM}" |
+  sed -E 's/^[[:space:]]*([^:]+):.*/\1/')
+
+# 2. Get Tiles via Action (Modern method)
+action_tiles=$(adb shell cmd package query-services -a "${TILE_ACTION}" 2>/dev/null |
+  awk "$PARSE_CMD_OUTPUT_AWK" |
+  tr -d '\r')
+
+# 3. Get Widgets via Action
+action_widgets=$(adb shell cmd package query-services -a "${WIDGET_ACTION}" 2>/dev/null |
+  awk "$PARSE_CMD_OUTPUT_AWK" |
+  tr -d '\r')
+
+# Process and Merge using awk
+# We pass the three lists as separate input streams (process substitution)
+awk -v t_only="$tiles_only" -v w_only="$widgets_only" '
+  # Helper to clean component names
+  function clean(c) {
+    # Remove whitespace
+    gsub(/^[ \t]+|[ \t]+$/, "", c)
+    return c
+  }
+
+  # Read from specific files based on ARGIND or similar isn"t portable.
+  # Instead, we will cat them with prefixes and parse the single stream.
+  
+  # Logic handled in the main loop below:
+  # The input will be formatted as "TYPE:COMPONENT"
+  
+  {
+    type = $1
+    # Component is the rest of the line (fields 2+)
+    $1 = ""
+    comp = clean($0)
+    
+    if (comp == "") next
+
+    if (type == "TILE:") {
+      tiles[comp] = 1
+    } else if (type == "WIDGET:") {
+      widgets[comp] = 1
+    }
+  }
+
+  END {
+    # Combine all unique keys
+    for (c in tiles) all[c] = 1
+    for (c in widgets) all[c] = 1
+
+    for (c in all) {
+      is_t = (c in tiles)
+      is_w = (c in widgets)
+      
+      if (t_only) {
+        if (is_t) print c
+      } else if (w_only) {
+        if (is_w) print c
+      } else {
+        t_mark = is_t ? "T" : " "
+        w_mark = is_w ? "W" : " "
+        # Print with TW indicators
+        printf "%s%s %s\n", t_mark, w_mark, c
+      }
+    }
+  }
+' <(
+  # Feed the streams with prefixes
+  # shellcheck disable=SC2001
+  echo "$dump_tiles" | sed 's/^/TILE: /'
+  # shellcheck disable=SC2001
+  echo "$action_tiles" | sed 's/^/TILE: /'
+  # shellcheck disable=SC2001
+  echo "$action_widgets" | sed 's/^/WIDGET: /'
+) | sort | uniq
