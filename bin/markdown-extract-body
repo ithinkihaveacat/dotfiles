@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") < INPUT_FILE
+
+Extracts the core "body" of the text from a Markdown document, removing repetitive
+headers, footers, sidebars, and other boilerplate.
+
+Input:
+  stdin       The Markdown content to process.
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  cat article.md | $(basename "$0") > article-body.md
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+
+# Read stdin into a variable
+if [ -t 0 ]; then
+  echo "$(basename "$0"): Error: No input provided on stdin." >&2
+  usage
+fi
+INPUT_DATA=$(cat)
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-2.5-flash-lite"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+SYSTEM_INSTRUCTION=$(
+  cat <<'EOF'
+You are an expert content extractor. Your task is to take a raw Markdown document (which may contain website boilerplate like navigation menus, "Related Stories" sidebars, footers, share buttons, and advertisements) and extract ONLY the core article or body content.
+
+### Guidelines:
+
+1.  **Remove Boilerplate:** Delete all headers, footers, navigation links, "Read also" lists, "Share this" sections, and advertisements.
+2.  **Preserve Core Content:** Keep the main title and the entire narrative body text of the article.
+3.  **Exclude Metadata Blocks:** Remove publication dates, bylines, and categories if they appear as separate blocks before the main content starts.
+4.  **Maintain Formatting:** Preserve the Markdown formatting (bolding, headers, lists, links) of the core content.
+5.  **No Commentary:** Return ONLY the cleaned Markdown. Do not add introductory or concluding remarks.
+6.  **Output:** The output should be ready to publish as a standalone Markdown file.
+
+### Example:
+
+Input:
+    Menu | Home | News
+    Related: 5 tips for success
+    # The Real Story
+    By Jane Doe
+    Published on Jan 1
+    Share on Twitter
+    This is the first paragraph.
+    Subscribe now!
+    Footer stuff
+
+Output:
+    # The Real Story
+    
+    This is the first paragraph.
+EOF
+)
+
+# Construct the JSON payload using jq for safety
+REQUEST_BODY=$(jq -n \
+  --arg system_instruction "$SYSTEM_INSTRUCTION" \
+  --arg input_data "$INPUT_DATA" \
+  '{ 
+    system_instruction: { 
+      parts: [{ text: $system_instruction }] 
+    }, 
+    contents: [ 
+      { 
+        role: "user", 
+        parts: [ 
+          { text: $input_data }
+        ] 
+      } 
+    ], 
+    generationConfig: { 
+      temperature: 0.1
+    }
+  }')
+
+# Execute the request
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+if [[ -z "$TEXT" ]]; then
+  # Fallback: sometimes the model might block content or return explicit refusal
+  FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // "UNKNOWN"')
+  echo "$(basename "$0"): No response text received. Finish Reason: $FINISH_REASON" >&2
+  exit 1
+fi
+
+echo "$TEXT"
