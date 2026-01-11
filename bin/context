@@ -33,7 +33,6 @@ print(d.replace("]]>", "]]]]><![CDATA[>"), end="")
 '
 }
 
-# is_binary - returns 0 if input contains null bytes (binary), 1 if text
 is_binary() {
   grep -q $'\x00'
 }
@@ -42,19 +41,7 @@ is_binary() {
 #
 # Captures a command and its output as XML. The first argument is displayed
 # in the <command> element. The second argument, if provided, is the command
-# actually executed to produce the output; if omitted, it defaults to DISPLAY_CMD.
-#
-# This allows showing a canonical or remote command while executing a local
-# equivalent. For example, if foo.txt exists locally but the intended source
-# is a remote URL:
-#
-#   run "curl -s https://example.com/foo.txt" "cat foo.txt"
-#
-# This displays "curl -s https://example.com/foo.txt" but outputs the contents
-# of the local file.
-#
-# Errors (non-zero exit, binary content) emit an <error> entry instead of
-# <entry> and processing continues.
+# actually executed; if omitted, it defaults to DISPLAY_CMD.
 run() {
   local display_cmd="$1"
   local source_cmd="${2:-$1}"
@@ -88,11 +75,9 @@ run() {
 # fetch - Download a source and return its local path
 #
 # Usage:
-#   fetch github://owner/repo              Download default branch, return dir path
-#   fetch github://owner/repo@branch       Download specific branch, return dir path
-#   fetch https://example.com/file.txt     Download URL, return file path
-#
-# All downloads are cached in $BUILD_DIR for the duration of the script.
+#   fetch github://owner/repo              Download default branch
+#   fetch github://owner/repo@branch       Download specific branch
+#   fetch https://example.com/file.txt     Download URL
 fetch() {
   local url="$1"
 
@@ -100,7 +85,6 @@ fetch() {
     local repo_spec="${BASH_REMATCH[1]}"
     local repo branch="main"
 
-    # Parse owner/repo@branch
     if [[ "$repo_spec" =~ ^(.+)@(.+)$ ]]; then
       repo="${BASH_REMATCH[1]}"
       branch="${BASH_REMATCH[2]}"
@@ -143,93 +127,6 @@ fetch() {
   fi
 }
 
-# run_url - Fetch a URL and output its content
-#
-# Usage: run_url URL
-#
-# Convenience wrapper that fetches a URL and runs it with proper display.
-run_url() {
-  local url="$1"
-  local file
-  file=$(fetch "$url")
-  run "curl -s '$url'" "cat '$file'"
-}
-
-# run_repo_file - Output a file from a fetched repo with proper URL display
-#
-# Usage: run_repo_file OWNER/REPO BRANCH LOCAL_REPO_PATH FILE_PATH
-#
-# Displays as: curl -s https://raw.githubusercontent.com/owner/repo/branch/path
-# Executes: cat local_repo_path/path
-run_repo_file() {
-  local repo="$1"
-  local branch="$2"
-  local repo_path="$3"
-  local file_path="$4"
-  local url="https://raw.githubusercontent.com/${repo}/${branch}/${file_path}"
-  run "curl -s '$url'" "cat '$repo_path/$file_path'"
-}
-
-# run_repo_tree - Output all matching files from a repo directory
-#
-# Usage: run_repo_tree OWNER/REPO BRANCH LOCAL_REPO_PATH DIR_PATH [GLOB_PATTERN]
-#
-# Iterates through files matching the pattern and outputs each one.
-run_repo_tree() {
-  local repo="$1"
-  local branch="$2"
-  local repo_path="$3"
-  local dir_path="$4"
-  local glob_pattern="${5:-*}"
-
-  find "$repo_path/$dir_path" -name "$glob_pattern" -type f 2>/dev/null | sort | while read -r file; do
-    local rel_path="${file#$repo_path/}"
-    run_repo_file "$repo" "$branch" "$repo_path" "$rel_path"
-  done
-}
-
-# filter_ipynb - Filter binary image data from Jupyter notebooks
-#
-# Usage: filter_ipynb INPUT
-# Outputs filtered JSON to stdout
-filter_ipynb() {
-  local input="$1"
-  jq 'walk(if type == "object" and has("data") and (.data | type == "object") then
-    .data |= with_entries(select(.key | test("^image/") | not))
-    else . end) |
-    walk(if type == "object" and has("outputs") then
-    .outputs |= map(if .data then .data |= with_entries(select(.key | test("^image/") | not)) else . end)
-    else . end)' "$input"
-}
-
-# run_notebook - Output a filtered Jupyter notebook
-#
-# Usage: run_notebook OWNER/REPO BRANCH LOCAL_REPO_PATH NOTEBOOK_PATH
-run_notebook() {
-  local repo="$1"
-  local branch="$2"
-  local repo_path="$3"
-  local notebook_path="$4"
-  local url="https://raw.githubusercontent.com/${repo}/${branch}/${notebook_path}"
-
-  local output status
-  output=$(filter_ipynb "$repo_path/$notebook_path" 2>/dev/null)
-  status=$?
-
-  if [[ $status -ne 0 ]]; then
-    printf "<error>\n"
-    printf "<command>%s</command>\n" "$(printf '%s' "curl -s '$url'" | xml_escape)"
-    printf "<message>Failed to process notebook</message>\n"
-    printf "</error>\n"
-    return
-  fi
-
-  printf "<entry>\n"
-  printf "<command>%s</command>\n" "$(printf '%s' "curl -s '$url'" | xml_escape)"
-  printf "<output><![CDATA[%s]]></output>\n" "$(printf '%s' "$output" | cdata_escape)"
-  printf "</entry>\n"
-}
-
 # =============================================================================
 # TOPIC DEFINITIONS
 # =============================================================================
@@ -238,61 +135,91 @@ topic_gemini_api() {
   local repo
   repo=$(fetch "github://google-gemini/cookbook")
 
-  # Notebooks (filtered to remove binary image data)
-  run_notebook "google-gemini/cookbook" "main" "$repo" "examples/Book_illustration.ipynb"
-  run_notebook "google-gemini/cookbook" "main" "$repo" "quickstarts/Image_out.ipynb"
+  # Notebooks - filter out binary image data with jq
+  local nb
+  for nb in "examples/Book_illustration.ipynb" "quickstarts/Image_out.ipynb"; do
+    run "curl -s 'https://raw.githubusercontent.com/google-gemini/cookbook/main/$nb'" \
+      "jq 'walk(if type == \"object\" and has(\"data\") and (.data | type == \"object\") then .data |= with_entries(select(.key | test(\"^image/\") | not)) else . end)' '$repo/$nb'"
+  done
 
   # Documentation URLs
-  run_url "https://ai.google.dev/gemini-api/docs/image-generation.md.txt"
-  run_url "https://ai.google.dev/gemini-api/docs/image-understanding.md.txt"
-  run_url "https://ai.google.dev/gemini-api/docs/models.md.txt"
-  run_url "https://ai.google.dev/gemini-api/docs/prompting-strategies.md.txt"
-  run_url "https://ai.google.dev/gemini-api/docs/structured-output.md.txt"
-  run_url "https://ai.google.dev/gemini-api/docs/text-generation.md.txt"
+  local url
+  for url in \
+    "https://ai.google.dev/gemini-api/docs/image-generation.md.txt" \
+    "https://ai.google.dev/gemini-api/docs/image-understanding.md.txt" \
+    "https://ai.google.dev/gemini-api/docs/models.md.txt" \
+    "https://ai.google.dev/gemini-api/docs/prompting-strategies.md.txt" \
+    "https://ai.google.dev/gemini-api/docs/structured-output.md.txt" \
+    "https://ai.google.dev/gemini-api/docs/text-generation.md.txt"
+  do
+    local file
+    file=$(fetch "$url")
+    run "curl -s '$url'" "cat '$file'"
+  done
 }
 
 topic_gemini_sdk() {
   local repo
   repo=$(fetch "github://googleapis/js-genai")
 
-  run_repo_tree "googleapis/js-genai" "main" "$repo" "src"
+  find "$repo/src" -type f | sort | while read -r file; do
+    local rel="${file#$repo/}"
+    run "curl -s 'https://raw.githubusercontent.com/googleapis/js-genai/main/$rel'" "cat '$file'"
+  done
 }
 
 topic_mcp_server() {
   local repo
   repo=$(fetch "github://modelcontextprotocol/modelcontextprotocol")
 
-  run_repo_file "modelcontextprotocol/modelcontextprotocol" "main" "$repo" "docs/docs/learn/server-concepts.mdx"
-  run_repo_file "modelcontextprotocol/modelcontextprotocol" "main" "$repo" "docs/docs/learn/architecture.mdx"
-  run_repo_tree "modelcontextprotocol/modelcontextprotocol" "main" "$repo" "docs/specification/2025-11-25"
+  # Specific doc files
+  local file
+  for file in "docs/docs/learn/server-concepts.mdx" "docs/docs/learn/architecture.mdx"; do
+    run "curl -s 'https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$file'" "cat '$repo/$file'"
+  done
+
+  # Specification directory
+  find "$repo/docs/specification/2025-11-25" -type f | sort | while read -r file; do
+    local rel="${file#$repo/}"
+    run "curl -s 'https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$rel'" "cat '$file'"
+  done
 }
 
 topic_mcp_typescript_sdk() {
   local repo
   repo=$(fetch "github://modelcontextprotocol/typescript-sdk")
 
-  run_repo_file "modelcontextprotocol/typescript-sdk" "main" "$repo" "README.md"
+  run "curl -s 'https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/main/README.md'" "cat '$repo/README.md'"
 }
 
 topic_gemini_cli() {
   local repo
   repo=$(fetch "github://google-gemini/gemini-cli")
 
-  run_repo_tree "google-gemini/gemini-cli" "main" "$repo" "docs"
+  find "$repo/docs" -type f | sort | while read -r file; do
+    local rel="${file#$repo/}"
+    run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel'" "cat '$file'"
+  done
 }
 
 topic_gemini_cli_extensions() {
   local repo
   repo=$(fetch "github://google-gemini/gemini-cli")
 
-  run_repo_tree "google-gemini/gemini-cli" "main" "$repo" "docs/extensions" "*.md"
+  find "$repo/docs/extensions" -name "*.md" -type f | sort | while read -r file; do
+    local rel="${file#$repo/}"
+    run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel'" "cat '$file'"
+  done
 }
 
 topic_gemini_cli_hooks() {
   local repo
   repo=$(fetch "github://google-gemini/gemini-cli")
 
-  run_repo_tree "google-gemini/gemini-cli" "main" "$repo" "docs/hooks" "*.md"
+  find "$repo/docs/hooks" -name "*.md" -type f | sort | while read -r file; do
+    local rel="${file#$repo/}"
+    run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel'" "cat '$file'"
+  done
 }
 
 topic_inkyframe() {
@@ -300,15 +227,27 @@ topic_inkyframe() {
   inky=$(fetch "github://pimoroni/inky-frame")
   pico=$(fetch "github://pimoroni/pimoroni-pico")
 
-  run_repo_tree "pimoroni/inky-frame" "main" "$inky" "docs"
-  run_repo_tree "pimoroni/inky-frame" "main" "$inky" "examples"
-  run_repo_tree "pimoroni/inky-frame" "main" "$inky" "modules"
-  run_repo_tree "pimoroni/pimoroni-pico" "main" "$pico" "micropython/modules/picographics"
+  # inky-frame docs, examples, modules
+  local dir
+  for dir in docs examples modules; do
+    find "$inky/$dir" -type f 2>/dev/null | sort | while read -r file; do
+      local rel="${file#$inky/}"
+      run "curl -s 'https://raw.githubusercontent.com/pimoroni/inky-frame/main/$rel'" "cat '$file'"
+    done
+  done
+
+  # pimoroni-pico picographics
+  find "$pico/micropython/modules/picographics" -type f | sort | while read -r file; do
+    local rel="${file#$pico/}"
+    run "curl -s 'https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel'" "cat '$file'"
+  done
 
   # External URLs
-  run_url "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt"
+  local mpremote
+  mpremote=$(fetch "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt")
+  run "curl -s 'https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt'" "cat '$mpremote'"
 
-  # Jina reader for learn.pimoroni.com (rendered HTML)
+  # Jina reader for learn.pimoroni.com
   local pimoroni_learn
   pimoroni_learn=$(fetch "https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame")
   run "curl -s 'https://learn.pimoroni.com/article/getting-started-with-inky-frame'" "cat '$pimoroni_learn'"
@@ -320,43 +259,59 @@ topic_rpi() {
 
   local src="$repo/documentation/asciidoc/computers"
 
+  local dir
   for dir in config_txt configuration getting-started os raspberry-pi remote-access; do
     # Index file
     if [[ -f "$src/$dir.adoc" ]]; then
-      run_repo_file "raspberrypi/documentation" "master" "$repo" "documentation/asciidoc/computers/$dir.adoc"
+      run "curl -s 'https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/$dir.adoc'" "cat '$src/$dir.adoc'"
     fi
     # Directory contents
     if [[ -d "$src/$dir" ]]; then
-      run_repo_tree "raspberrypi/documentation" "master" "$repo" "documentation/asciidoc/computers/$dir"
+      find "$src/$dir" -type f | sort | while read -r file; do
+        local rel="${file#$repo/}"
+        run "curl -s 'https://raw.githubusercontent.com/raspberrypi/documentation/master/$rel'" "cat '$file'"
+      done
     fi
   done
 
-  # Additional standalone files
+  # Standalone file
   if [[ -f "$src/software-sources.adoc" ]]; then
-    run_repo_file "raspberrypi/documentation" "master" "$repo" "documentation/asciidoc/computers/software-sources.adoc"
+    run "curl -s 'https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/software-sources.adoc'" "cat '$src/software-sources.adoc'"
   fi
 }
 
 topic_skills() {
-  # 1. agentskills/agentskills repository - all .mdx files
-  local agentskills_repo
-  agentskills_repo=$(fetch "github://agentskills/agentskills")
-  run_repo_tree "agentskills/agentskills" "main" "$agentskills_repo" "" "*.mdx"
+  # agentskills/agentskills repository - all .mdx files
+  local agentskills
+  agentskills=$(fetch "github://agentskills/agentskills")
+  find "$agentskills" -name "*.mdx" -type f | sort | while read -r file; do
+    local rel="${file#$agentskills/}"
+    run "curl -s 'https://raw.githubusercontent.com/agentskills/agentskills/main/$rel'" "cat '$file'"
+  done
 
-  # 2. Claude platform best practices
-  run_url "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md"
+  # Claude platform best practices
+  local best_practices
+  best_practices=$(fetch "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md")
+  run "curl -s 'https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md'" "cat '$best_practices'"
 
-  # 3. Anthropic skills repository - skill-creator SKILL.md
-  run_url "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md"
+  # Anthropic skills repository
+  local anthropic_skills
+  anthropic_skills=$(fetch "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md")
+  run "curl -s 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md'" "cat '$anthropic_skills'"
 
-  # 4. Gemini CLI skills documentation
-  run_url "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md"
+  # Gemini CLI skills
+  local gemini_skills
+  gemini_skills=$(fetch "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md")
+  run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md'" "cat '$gemini_skills'"
 
-  # 5. OpenAI Codex skills documentation
-  run_url "https://developers.openai.com/codex/skills.md"
+  # OpenAI Codex skills
+  local openai_skills
+  openai_skills=$(fetch "https://developers.openai.com/codex/skills.md")
+  run "curl -s 'https://developers.openai.com/codex/skills.md'" "cat '$openai_skills'"
 
-  # 6. OpenAI Codex create-skill documentation
-  run_url "https://developers.openai.com/codex/skills/create-skill.md"
+  local openai_create
+  openai_create=$(fetch "https://developers.openai.com/codex/skills/create-skill.md")
+  run "curl -s 'https://developers.openai.com/codex/skills/create-skill.md'" "cat '$openai_create'"
 }
 
 # =============================================================================
