@@ -27,6 +27,7 @@ complete -c context -f -n __fish_context_needs_topic -a gemini-cli-extensions -d
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli-hooks -d 'Gemini CLI hooks documentation'
 complete -c context -f -n __fish_context_needs_topic -a inkyframe -d 'Pimoroni Inky Frame documentation'
 complete -c context -f -n __fish_context_needs_topic -a rpi -d 'Raspberry Pi documentation'
+complete -c context -f -n __fish_context_needs_topic -a skills -d 'Agent skills documentation (Claude, Gemini CLI, OpenAI Codex)'
 
 # Complete flags
 complete -c context -f -s h -l help -d 'Display help message and exit'
