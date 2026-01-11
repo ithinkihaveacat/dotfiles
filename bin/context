@@ -2,7 +2,7 @@
 
 # context - Generate aggregated context for various topics
 #
-# Each topic is a bash function that uses fetch() to download sources
+# Each topic is a bash function that uses fetch() to download GitHub repos
 # and run() to output content in a shell_session XML format.
 
 set -e
@@ -21,7 +21,7 @@ require() {
 }
 
 xml_escape() {
-  python3 -c 'import sys, html; print(html.escape(sys.stdin.read()), end="")'
+  python3 -c 'import sys, html; print(html.escape(sys.stdin.read(), quote=False), end="")'
 }
 
 cdata_escape() {
@@ -33,37 +33,20 @@ print(d.replace("]]>", "]]]]><![CDATA[>"), end="")
 '
 }
 
-is_binary() {
-  grep -q $'\x00'
-}
-
 # run DISPLAY_CMD [SOURCE_CMD]
 #
 # Captures a command and its output as XML. The first argument is displayed
 # in the <command> element. The second argument, if provided, is the command
 # actually executed; if omitted, it defaults to DISPLAY_CMD.
+# Exits on failure.
 run() {
   local display_cmd="$1"
   local source_cmd="${2:-$1}"
-  local output status
+  local output
 
-  output=$(eval "$source_cmd" 2>/dev/null)
-  status=$?
-
-  if [[ $status -ne 0 ]]; then
-    printf "<error>\n"
-    printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
-    printf "<message>Command failed with exit status %d</message>\n" "$status"
-    printf "</error>\n"
-    return
-  fi
-
-  if printf '%s' "$output" | is_binary; then
-    printf "<error>\n"
-    printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
-    printf "<message>Binary content detected</message>\n"
-    printf "</error>\n"
-    return
+  if ! output=$(eval "$source_cmd"); then
+    echo "$SCRIPT_NAME: command failed: $display_cmd" >&2
+    exit 1
   fi
 
   printf "<entry>\n"
@@ -72,59 +55,54 @@ run() {
   printf "</entry>\n"
 }
 
-# fetch - Download a source and return its local path
+# fetch - Download a GitHub repository and return its local path
 #
 # Usage:
 #   fetch github://owner/repo              Download default branch
 #   fetch github://owner/repo@branch       Download specific branch
-#   fetch https://example.com/file.txt     Download URL
+#
+# Exits on failure.
 fetch() {
   local url="$1"
 
-  if [[ "$url" =~ ^github://(.+) ]]; then
-    local repo_spec="${BASH_REMATCH[1]}"
-    local repo branch="main"
-
-    if [[ "$repo_spec" =~ ^(.+)@(.+)$ ]]; then
-      repo="${BASH_REMATCH[1]}"
-      branch="${BASH_REMATCH[2]}"
-    else
-      repo="$repo_spec"
-    fi
-
-    local repo_slug="${repo//\//-}"
-    local extract_dir="$BUILD_DIR/repos/$repo_slug"
-
-    if [[ ! -d "$extract_dir" ]]; then
-      local archive_url="https://github.com/${repo}/archive/refs/heads/${branch}.zip"
-      local zip_file="$BUILD_DIR/${repo_slug}.zip"
-      local archive_name="${repo##*/}-${branch}"
-
-      curl -fsSL -o "$zip_file" "$archive_url"
-      mkdir -p "$extract_dir"
-      unzip -o -q "$zip_file" -d "$BUILD_DIR/temp_extract"
-      mv "$BUILD_DIR/temp_extract/$archive_name"/* "$extract_dir/"
-      rm -rf "$BUILD_DIR/temp_extract" "$zip_file"
-    fi
-
-    echo "$extract_dir"
-
-  elif [[ "$url" =~ ^https?:// ]]; then
-    local filename
-    filename=$(basename "$url")
-    local dest="$BUILD_DIR/urls/$filename"
-
-    if [[ ! -f "$dest" ]]; then
-      mkdir -p "$BUILD_DIR/urls"
-      curl -fsSL -o "$dest" "$url"
-    fi
-
-    echo "$dest"
-
-  else
+  if [[ ! "$url" =~ ^github://(.+) ]]; then
     echo "$SCRIPT_NAME: fetch: unsupported URL scheme: $url" >&2
-    return 1
+    exit 1
   fi
+
+  local repo_spec="${BASH_REMATCH[1]}"
+  local repo branch="main"
+
+  if [[ "$repo_spec" =~ ^(.+)@(.+)$ ]]; then
+    repo="${BASH_REMATCH[1]}"
+    branch="${BASH_REMATCH[2]}"
+  else
+    repo="$repo_spec"
+  fi
+
+  local repo_slug="${repo//\//-}"
+  local extract_dir="$BUILD_DIR/repos/$repo_slug"
+
+  if [[ ! -d "$extract_dir" ]]; then
+    local archive_url="https://github.com/${repo}/archive/refs/heads/${branch}.zip"
+    local zip_file="$BUILD_DIR/${repo_slug}.zip"
+    local archive_name="${repo##*/}-${branch}"
+
+    if ! curl -fsSL -o "$zip_file" "$archive_url"; then
+      echo "$SCRIPT_NAME: fetch: failed to download $archive_url" >&2
+      exit 1
+    fi
+    mkdir -p "$extract_dir"
+    if ! unzip -o -q "$zip_file" -d "$BUILD_DIR/temp_extract"; then
+      echo "$SCRIPT_NAME: fetch: failed to extract $zip_file" >&2
+      rm -f "$zip_file"
+      exit 1
+    fi
+    mv "$BUILD_DIR/temp_extract/$archive_name"/* "$extract_dir/"
+    rm -rf "$BUILD_DIR/temp_extract" "$zip_file"
+  fi
+
+  echo "$extract_dir"
 }
 
 # =============================================================================
@@ -150,21 +128,8 @@ topic_gemini_api() {
     "https://ai.google.dev/gemini-api/docs/models.md.txt" \
     "https://ai.google.dev/gemini-api/docs/prompting-strategies.md.txt" \
     "https://ai.google.dev/gemini-api/docs/structured-output.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/text-generation.md.txt"
-  do
-    local file
-    file=$(fetch "$url")
-    run "curl -s '$url'" "cat '$file'"
-  done
-}
-
-topic_gemini_sdk() {
-  local repo
-  repo=$(fetch "github://googleapis/js-genai")
-
-  find "$repo/src" -type f | sort | while read -r file; do
-    local rel="${file#$repo/}"
-    run "curl -s 'https://raw.githubusercontent.com/googleapis/js-genai/main/$rel'" "cat '$file'"
+    "https://ai.google.dev/gemini-api/docs/text-generation.md.txt"; do
+    run "curl -sfS '$url'"
   done
 }
 
@@ -179,8 +144,8 @@ topic_mcp_server() {
   done
 
   # Specification directory
-  find "$repo/docs/specification/2025-11-25" -type f | sort | while read -r file; do
-    local rel="${file#$repo/}"
+  find "$repo/docs/specification/2025-11-25" -name "*.mdx" -type f | sort | while read -r file; do
+    local rel="${file#"$repo"/}"
     run "curl -s 'https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$rel'" "cat '$file'"
   done
 }
@@ -196,8 +161,8 @@ topic_gemini_cli() {
   local repo
   repo=$(fetch "github://google-gemini/gemini-cli")
 
-  find "$repo/docs" -type f | sort | while read -r file; do
-    local rel="${file#$repo/}"
+  find "$repo/docs" -name "*.md" -type f | sort | while read -r file; do
+    local rel="${file#"$repo"/}"
     local published="https://geminicli.com/${rel%.md}/"
     run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel'  # published to $published" "cat '$file'"
   done
@@ -208,7 +173,7 @@ topic_gemini_cli_extensions() {
   repo=$(fetch "github://google-gemini/gemini-cli")
 
   find "$repo/docs/extensions" -name "*.md" -type f | sort | while read -r file; do
-    local rel="${file#$repo/}"
+    local rel="${file#"$repo"/}"
     local published="https://geminicli.com/${rel%.md}/"
     run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel'  # published to $published" "cat '$file'"
   done
@@ -219,7 +184,7 @@ topic_gemini_cli_hooks() {
   repo=$(fetch "github://google-gemini/gemini-cli")
 
   find "$repo/docs/hooks" -name "*.md" -type f | sort | while read -r file; do
-    local rel="${file#$repo/}"
+    local rel="${file#"$repo"/}"
     local published="https://geminicli.com/${rel%.md}/"
     run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel'  # published to $published" "cat '$file'"
   done
@@ -233,27 +198,24 @@ topic_inkyframe() {
   # inky-frame docs, examples, modules
   local dir
   for dir in docs examples modules; do
-    find "$inky/$dir" -type f 2>/dev/null | sort | while read -r file; do
-      local rel="${file#$inky/}"
+    find "$inky/$dir" -name "*.md" -type f 2>/dev/null | sort | while read -r file; do
+      local rel="${file#"$inky"/}"
       run "curl -s 'https://raw.githubusercontent.com/pimoroni/inky-frame/main/$rel'" "cat '$file'"
     done
   done
 
   # pimoroni-pico picographics
-  find "$pico/micropython/modules/picographics" -type f | sort | while read -r file; do
-    local rel="${file#$pico/}"
+  find "$pico/micropython/modules/picographics" -name "*.md" -type f | sort | while read -r file; do
+    local rel="${file#"$pico"/}"
     run "curl -s 'https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel'" "cat '$file'"
   done
 
   # External URLs
-  local mpremote
-  mpremote=$(fetch "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt")
-  run "curl -s 'https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt'" "cat '$mpremote'"
+  run "curl -sfS 'https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt'"
 
-  # Jina reader for learn.pimoroni.com
-  local pimoroni_learn
-  pimoroni_learn=$(fetch "https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame")
-  run "curl -s 'https://learn.pimoroni.com/article/getting-started-with-inky-frame'" "cat '$pimoroni_learn'"
+  # Jina reader for learn.pimoroni.com (display URL differs from fetch URL)
+  run "curl -s 'https://learn.pimoroni.com/article/getting-started-with-inky-frame'" \
+    "curl -sfS 'https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame'"
 }
 
 topic_rpi() {
@@ -270,8 +232,8 @@ topic_rpi() {
     fi
     # Directory contents
     if [[ -d "$src/$dir" ]]; then
-      find "$src/$dir" -type f | sort | while read -r file; do
-        local rel="${file#$repo/}"
+      find "$src/$dir" -name "*.adoc" -type f | sort | while read -r file; do
+        local rel="${file#"$repo"/}"
         run "curl -s 'https://raw.githubusercontent.com/raspberrypi/documentation/master/$rel'" "cat '$file'"
       done
     fi
@@ -288,33 +250,22 @@ topic_skills() {
   local agentskills
   agentskills=$(fetch "github://agentskills/agentskills")
   find "$agentskills" -name "*.mdx" -type f | sort | while read -r file; do
-    local rel="${file#$agentskills/}"
+    local rel="${file#"$agentskills"/}"
     run "curl -s 'https://raw.githubusercontent.com/agentskills/agentskills/main/$rel'" "cat '$file'"
   done
 
   # Claude platform best practices
-  local best_practices
-  best_practices=$(fetch "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md")
-  run "curl -s 'https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md'" "cat '$best_practices'"
+  run "curl -sfS 'https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md'"
 
   # Anthropic skills repository
-  local anthropic_skills
-  anthropic_skills=$(fetch "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md")
-  run "curl -s 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md'" "cat '$anthropic_skills'"
+  run "curl -sfS 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md'"
 
   # Gemini CLI skills
-  local gemini_skills
-  gemini_skills=$(fetch "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md")
-  run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md'" "cat '$gemini_skills'"
+  run "curl -sfS 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md'"
 
   # OpenAI Codex skills
-  local openai_skills
-  openai_skills=$(fetch "https://developers.openai.com/codex/skills.md")
-  run "curl -s 'https://developers.openai.com/codex/skills.md'" "cat '$openai_skills'"
-
-  local openai_create
-  openai_create=$(fetch "https://developers.openai.com/codex/skills/create-skill.md")
-  run "curl -s 'https://developers.openai.com/codex/skills/create-skill.md'" "cat '$openai_create'"
+  run "curl -sfS 'https://developers.openai.com/codex/skills.md'"
+  run "curl -sfS 'https://developers.openai.com/codex/skills/create-skill.md'"
 }
 
 # =============================================================================
@@ -323,7 +274,6 @@ topic_skills() {
 
 TOPICS=(
   "gemini-api:Gemini API documentation and examples"
-  "gemini-sdk:Gemini TypeScript/JavaScript SDK"
   "mcp-server:MCP server documentation and specification"
   "mcp-typescript-sdk:MCP TypeScript SDK documentation"
   "gemini-cli:Gemini CLI documentation (all)"
@@ -392,7 +342,6 @@ emit_header() {
     1. &lt;command&gt;: The command string acting as the data source. (e.g., "cat file.txt" or "curl url")
        Treat this as the source of truth for where the data originated.
     2. &lt;output&gt;: The raw content returned by that command.
-    Errors appear as &lt;error&gt; elements with a &lt;message&gt; instead of &lt;output&gt;.
   </structure>
   <guidelines>
     - PROVENANCE: The origin of the data is defined by the command itself. If the command is
@@ -416,7 +365,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 case "$1" in
-  -h|--help)
+  -h | --help)
     usage
     ;;
   --list)
@@ -433,7 +382,7 @@ esac
 
 # Validate topic
 TOPIC_FUNC="topic_${TOPIC//-/_}"
-if ! declare -f "$TOPIC_FUNC" > /dev/null 2>&1; then
+if ! declare -f "$TOPIC_FUNC" >/dev/null 2>&1; then
   echo "$SCRIPT_NAME: unknown topic: $TOPIC" >&2
   echo "Run '$SCRIPT_NAME --list' to see available topics" >&2
   exit 1
