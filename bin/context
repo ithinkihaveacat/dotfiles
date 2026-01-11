@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# context - Generate combined repomix context for various topics
+# context - Generate aggregated context for various topics
 #
 # Each topic is a bash function that uses fetch() to download sources
-# and standard cp to assemble files into $MIX_DIR for repomix.
+# and run() to output content in a shell_session XML format.
 
 set -e
 
@@ -18,6 +18,71 @@ require() {
     echo "$SCRIPT_NAME: command '$1' not found" >&2
     exit 127
   }
+}
+
+xml_escape() {
+  python3 -c 'import sys, html; print(html.escape(sys.stdin.read()), end="")'
+}
+
+cdata_escape() {
+  python3 -c '
+import sys
+d = sys.stdin.read()
+d = d.translate({i: None for i in range(32) if i not in (9, 10, 13)})
+print(d.replace("]]>", "]]]]><![CDATA[>"), end="")
+'
+}
+
+# is_binary - returns 0 if input contains null bytes (binary), 1 if text
+is_binary() {
+  grep -q $'\x00'
+}
+
+# run DISPLAY_CMD [SOURCE_CMD]
+#
+# Captures a command and its output as XML. The first argument is displayed
+# in the <command> element. The second argument, if provided, is the command
+# actually executed to produce the output; if omitted, it defaults to DISPLAY_CMD.
+#
+# This allows showing a canonical or remote command while executing a local
+# equivalent. For example, if foo.txt exists locally but the intended source
+# is a remote URL:
+#
+#   run "curl -s https://example.com/foo.txt" "cat foo.txt"
+#
+# This displays "curl -s https://example.com/foo.txt" but outputs the contents
+# of the local file.
+#
+# Errors (non-zero exit, binary content) emit an <error> entry instead of
+# <entry> and processing continues.
+run() {
+  local display_cmd="$1"
+  local source_cmd="${2:-$1}"
+  local output status
+
+  output=$(eval "$source_cmd" 2>/dev/null)
+  status=$?
+
+  if [[ $status -ne 0 ]]; then
+    printf "<error>\n"
+    printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
+    printf "<message>Command failed with exit status %d</message>\n" "$status"
+    printf "</error>\n"
+    return
+  fi
+
+  if printf '%s' "$output" | is_binary; then
+    printf "<error>\n"
+    printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
+    printf "<message>Binary content detected</message>\n"
+    printf "</error>\n"
+    return
+  fi
+
+  printf "<entry>\n"
+  printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
+  printf "<output><![CDATA[%s]]></output>\n" "$(printf '%s' "$output" | cdata_escape)"
+  printf "</entry>\n"
 }
 
 # fetch - Download a source and return its local path
@@ -78,222 +143,156 @@ fetch() {
   fi
 }
 
-# add_source_comment - Prepend source attribution to a file
+# run_url - Fetch a URL and output its content
 #
-# Usage: add_source_comment FILE SOURCE_URL
+# Usage: run_url URL
 #
-# Detects file type and uses appropriate comment syntax.
-add_source_comment() {
-  local file="$1"
-  local source="$2"
-  local ext="${file##*.}"
-  local tmpfile
-
-  tmpfile=$(mktemp)
-
-  case "$ext" in
-    md|mdx|html)
-      echo "<!-- Source: $source -->" > "$tmpfile"
-      echo "" >> "$tmpfile"
-      ;;
-    adoc)
-      echo "// Source: $source" > "$tmpfile"
-      echo "" >> "$tmpfile"
-      ;;
-    py|sh|bash|fish|yaml|yml|toml)
-      echo "# Source: $source" > "$tmpfile"
-      echo "" >> "$tmpfile"
-      ;;
-    js|ts|tsx|jsx|json|jsonc)
-      echo "// Source: $source" > "$tmpfile"
-      echo "" >> "$tmpfile"
-      ;;
-    rst)
-      echo ".. Source: $source" > "$tmpfile"
-      echo "" >> "$tmpfile"
-      ;;
-    *)
-      # Unknown type - no comment added
-      cat "$file" > "$tmpfile"
-      mv "$tmpfile" "$file"
-      return
-      ;;
-  esac
-
-  cat "$file" >> "$tmpfile"
-  mv "$tmpfile" "$file"
+# Convenience wrapper that fetches a URL and runs it with proper display.
+run_url() {
+  local url="$1"
+  local file
+  file=$(fetch "$url")
+  run "curl -s '$url'" "cat '$file'"
 }
 
-# copy_with_source - Copy file(s) to MIX_DIR with source attribution
+# run_repo_file - Output a file from a fetched repo with proper URL display
 #
-# Usage: copy_with_source SOURCE_URL FILE... DEST
+# Usage: run_repo_file OWNER/REPO BRANCH LOCAL_REPO_PATH FILE_PATH
 #
-# Like cp, but adds source attribution header to each file.
-copy_with_source() {
-  local source_url="$1"
-  shift
-
-  # Last arg is destination
-  local dest="${*: -1}"
-  local files=("${@:1:$#-1}")
-
-  for file in "${files[@]}"; do
-    if [[ -d "$file" ]]; then
-      # For directories, copy recursively and add source to each file
-      local base
-      base=$(basename "$file")
-      cp -r "$file" "$dest/"
-      find "$dest/$base" -type f | while read -r f; do
-        add_source_comment "$f" "$source_url"
-      done
-    elif [[ -f "$file" ]]; then
-      cp "$file" "$dest/"
-      local basename
-      basename=$(basename "$file")
-      add_source_comment "$dest/$basename" "$source_url"
-    fi
-  done
+# Displays as: curl -s https://raw.githubusercontent.com/owner/repo/branch/path
+# Executes: cat local_repo_path/path
+run_repo_file() {
+  local repo="$1"
+  local branch="$2"
+  local repo_path="$3"
+  local file_path="$4"
+  local url="https://raw.githubusercontent.com/${repo}/${branch}/${file_path}"
+  run "curl -s '$url'" "cat '$repo_path/$file_path'"
 }
 
-# copy_repo_tree - Copy files from a repo with per-file source URLs
+# run_repo_tree - Output all matching files from a repo directory
 #
-# Usage: copy_repo_tree REPO_BASE_URL REPO_PATH SRC_DIR DEST_DIR [GLOB_PATTERN]
+# Usage: run_repo_tree OWNER/REPO BRANCH LOCAL_REPO_PATH DIR_PATH [GLOB_PATTERN]
 #
-# Copies files from SRC_DIR to DEST_DIR, adding source attribution headers
-# that include the full path within the repo for each file.
-#
-# Example:
-#   copy_repo_tree "github://owner/repo" "$repo" "$repo/docs" "$MIX_DIR/docs" "*.md"
-#
-# This will copy all .md files from $repo/docs to $MIX_DIR/docs, adding source
-# headers like "github://owner/repo/docs/file.md" to each file.
-copy_repo_tree() {
-  local repo_base_url="$1"
-  local repo_path="$2"
-  local src_dir="$3"
-  local dest_dir="$4"
+# Iterates through files matching the pattern and outputs each one.
+run_repo_tree() {
+  local repo="$1"
+  local branch="$2"
+  local repo_path="$3"
+  local dir_path="$4"
   local glob_pattern="${5:-*}"
 
-  mkdir -p "$dest_dir"
-
-  # Find files matching the pattern and copy with source attribution
-  find "$src_dir" -name "$glob_pattern" -type f | while read -r file; do
-    # Calculate relative path from repo root
-    local rel_from_repo="${file#$repo_path/}"
-    local source_url="$repo_base_url/$rel_from_repo"
-
-    # Calculate relative path from src_dir to preserve directory structure
-    local rel_from_src="${file#$src_dir/}"
-    local dest_file="$dest_dir/$rel_from_src"
-
-    # Create destination directory structure
-    mkdir -p "$(dirname "$dest_file")"
-
-    # Copy and add source comment
-    cp "$file" "$dest_file"
-    add_source_comment "$dest_file" "$source_url"
+  find "$repo_path/$dir_path" -name "$glob_pattern" -type f 2>/dev/null | sort | while read -r file; do
+    local rel_path="${file#$repo_path/}"
+    run_repo_file "$repo" "$branch" "$repo_path" "$rel_path"
   done
 }
 
 # filter_ipynb - Filter binary image data from Jupyter notebooks
 #
-# Usage: filter_ipynb INPUT OUTPUT
+# Usage: filter_ipynb INPUT
+# Outputs filtered JSON to stdout
 filter_ipynb() {
   local input="$1"
-  local output="$2"
   jq 'walk(if type == "object" and has("data") and (.data | type == "object") then
     .data |= with_entries(select(.key | test("^image/") | not))
     else . end) |
     walk(if type == "object" and has("outputs") then
     .outputs |= map(if .data then .data |= with_entries(select(.key | test("^image/") | not)) else . end)
-    else . end)' "$input" > "$output"
+    else . end)' "$input"
+}
+
+# run_notebook - Output a filtered Jupyter notebook
+#
+# Usage: run_notebook OWNER/REPO BRANCH LOCAL_REPO_PATH NOTEBOOK_PATH
+run_notebook() {
+  local repo="$1"
+  local branch="$2"
+  local repo_path="$3"
+  local notebook_path="$4"
+  local url="https://raw.githubusercontent.com/${repo}/${branch}/${notebook_path}"
+
+  local output status
+  output=$(filter_ipynb "$repo_path/$notebook_path" 2>/dev/null)
+  status=$?
+
+  if [[ $status -ne 0 ]]; then
+    printf "<error>\n"
+    printf "<command>%s</command>\n" "$(printf '%s' "curl -s '$url'" | xml_escape)"
+    printf "<message>Failed to process notebook</message>\n"
+    printf "</error>\n"
+    return
+  fi
+
+  printf "<entry>\n"
+  printf "<command>%s</command>\n" "$(printf '%s' "curl -s '$url'" | xml_escape)"
+  printf "<output><![CDATA[%s]]></output>\n" "$(printf '%s' "$output" | cdata_escape)"
+  printf "</entry>\n"
 }
 
 # =============================================================================
 # TOPIC DEFINITIONS
 # =============================================================================
-# Each topic is a bash function that:
-#   1. Uses fetch() to download sources
-#   2. Uses cp (or copy_with_source) to assemble files into $MIX_DIR
-#   3. Can use any standard shell commands for filtering/transformation
 
 topic_gemini_api() {
   local repo
   repo=$(fetch "github://google-gemini/cookbook")
 
-  # Copy and filter notebooks (remove binary image data)
-  mkdir -p "$MIX_DIR/notebooks"
-  filter_ipynb "$repo/examples/Book_illustration.ipynb" "$MIX_DIR/notebooks/Book_illustration.ipynb"
-  add_source_comment "$MIX_DIR/notebooks/Book_illustration.ipynb" "github://google-gemini/cookbook/examples/Book_illustration.ipynb"
-  filter_ipynb "$repo/quickstarts/Image_out.ipynb" "$MIX_DIR/notebooks/Image_out.ipynb"
-  add_source_comment "$MIX_DIR/notebooks/Image_out.ipynb" "github://google-gemini/cookbook/quickstarts/Image_out.ipynb"
+  # Notebooks (filtered to remove binary image data)
+  run_notebook "google-gemini/cookbook" "main" "$repo" "examples/Book_illustration.ipynb"
+  run_notebook "google-gemini/cookbook" "main" "$repo" "quickstarts/Image_out.ipynb"
 
-  # Fetch documentation URLs
-  local urls=(
-    "https://ai.google.dev/gemini-api/docs/image-generation.md.txt"
-    "https://ai.google.dev/gemini-api/docs/image-understanding.md.txt"
-    "https://ai.google.dev/gemini-api/docs/models.md.txt"
-    "https://ai.google.dev/gemini-api/docs/prompting-strategies.md.txt"
-    "https://ai.google.dev/gemini-api/docs/structured-output.md.txt"
-    "https://ai.google.dev/gemini-api/docs/text-generation.md.txt"
-  )
-  for url in "${urls[@]}"; do
-    local file dest_name
-    file=$(fetch "$url")
-    dest_name=$(basename "$url" .txt)  # Remove .txt suffix
-    cp "$file" "$MIX_DIR/$dest_name"
-    add_source_comment "$MIX_DIR/$dest_name" "$url"
-  done
+  # Documentation URLs
+  run_url "https://ai.google.dev/gemini-api/docs/image-generation.md.txt"
+  run_url "https://ai.google.dev/gemini-api/docs/image-understanding.md.txt"
+  run_url "https://ai.google.dev/gemini-api/docs/models.md.txt"
+  run_url "https://ai.google.dev/gemini-api/docs/prompting-strategies.md.txt"
+  run_url "https://ai.google.dev/gemini-api/docs/structured-output.md.txt"
+  run_url "https://ai.google.dev/gemini-api/docs/text-generation.md.txt"
 }
 
 topic_gemini_sdk() {
   local repo
   repo=$(fetch "github://googleapis/js-genai")
 
-  copy_with_source "github://googleapis/js-genai/src" "$repo/src" "$MIX_DIR/"
+  run_repo_tree "googleapis/js-genai" "main" "$repo" "src"
 }
 
 topic_mcp_server() {
   local repo
   repo=$(fetch "github://modelcontextprotocol/modelcontextprotocol")
 
-  mkdir -p "$MIX_DIR/docs" "$MIX_DIR/specification"
-  copy_with_source "github://modelcontextprotocol/modelcontextprotocol/docs/docs/learn" \
-    "$repo/docs/docs/learn/server-concepts.mdx" \
-    "$repo/docs/docs/learn/architecture.mdx" \
-    "$MIX_DIR/docs/"
-  copy_with_source "github://modelcontextprotocol/modelcontextprotocol/docs/specification/2025-11-25" \
-    "$repo/docs/specification/2025-11-25" "$MIX_DIR/"
+  run_repo_file "modelcontextprotocol/modelcontextprotocol" "main" "$repo" "docs/docs/learn/server-concepts.mdx"
+  run_repo_file "modelcontextprotocol/modelcontextprotocol" "main" "$repo" "docs/docs/learn/architecture.mdx"
+  run_repo_tree "modelcontextprotocol/modelcontextprotocol" "main" "$repo" "docs/specification/2025-11-25"
 }
 
 topic_mcp_typescript_sdk() {
   local repo
   repo=$(fetch "github://modelcontextprotocol/typescript-sdk")
 
-  copy_with_source "github://modelcontextprotocol/typescript-sdk" "$repo/README.md" "$MIX_DIR/"
+  run_repo_file "modelcontextprotocol/typescript-sdk" "main" "$repo" "README.md"
 }
 
 topic_gemini_cli() {
   local repo
   repo=$(fetch "github://google-gemini/gemini-cli")
 
-  copy_with_source "github://google-gemini/gemini-cli/docs" "$repo/docs" "$MIX_DIR/"
+  run_repo_tree "google-gemini/gemini-cli" "main" "$repo" "docs"
 }
 
 topic_gemini_cli_extensions() {
   local repo
   repo=$(fetch "github://google-gemini/gemini-cli")
 
-  mkdir -p "$MIX_DIR/extensions"
-  copy_with_source "github://google-gemini/gemini-cli/docs/extensions" "$repo/docs/extensions"/*.md "$MIX_DIR/extensions/"
+  run_repo_tree "google-gemini/gemini-cli" "main" "$repo" "docs/extensions" "*.md"
 }
 
 topic_gemini_cli_hooks() {
   local repo
   repo=$(fetch "github://google-gemini/gemini-cli")
 
-  mkdir -p "$MIX_DIR/hooks"
-  copy_with_source "github://google-gemini/gemini-cli/docs/hooks" "$repo/docs/hooks"/*.md "$MIX_DIR/hooks/"
+  run_repo_tree "google-gemini/gemini-cli" "main" "$repo" "docs/hooks" "*.md"
 }
 
 topic_inkyframe() {
@@ -301,25 +300,18 @@ topic_inkyframe() {
   inky=$(fetch "github://pimoroni/inky-frame")
   pico=$(fetch "github://pimoroni/pimoroni-pico")
 
-  mkdir -p "$MIX_DIR/inky-frame" "$MIX_DIR/pico"
-  copy_with_source "github://pimoroni/inky-frame/docs" "$inky/docs" "$MIX_DIR/inky-frame/"
-  copy_with_source "github://pimoroni/inky-frame/examples" "$inky/examples" "$MIX_DIR/inky-frame/"
-  copy_with_source "github://pimoroni/inky-frame/modules" "$inky/modules" "$MIX_DIR/inky-frame/"
-  copy_with_source "github://pimoroni/pimoroni-pico/micropython/modules/picographics" \
-    "$pico/micropython/modules/picographics" "$MIX_DIR/pico/"
+  run_repo_tree "pimoroni/inky-frame" "main" "$inky" "docs"
+  run_repo_tree "pimoroni/inky-frame" "main" "$inky" "examples"
+  run_repo_tree "pimoroni/inky-frame" "main" "$inky" "modules"
+  run_repo_tree "pimoroni/pimoroni-pico" "main" "$pico" "micropython/modules/picographics"
 
-  # Fetch URLs
-  local mpremote pimoroni_learn
-  mpremote=$(fetch "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt")
-  mkdir -p "$MIX_DIR/mpremote"
-  cp "$mpremote" "$MIX_DIR/mpremote/mpremote.rst"
-  add_source_comment "$MIX_DIR/mpremote/mpremote.rst" "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt"
+  # External URLs
+  run_url "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt"
 
+  # Jina reader for learn.pimoroni.com (rendered HTML)
+  local pimoroni_learn
   pimoroni_learn=$(fetch "https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame")
-  mkdir -p "$MIX_DIR/pimoroni-learn"
-  cp "$pimoroni_learn" "$MIX_DIR/pimoroni-learn/getting-started-with-inky-frame.md"
-  add_source_comment "$MIX_DIR/pimoroni-learn/getting-started-with-inky-frame.md" \
-    "https://learn.pimoroni.com/article/getting-started-with-inky-frame"
+  run "curl -s 'https://learn.pimoroni.com/article/getting-started-with-inky-frame'" "cat '$pimoroni_learn'"
 }
 
 topic_rpi() {
@@ -328,65 +320,43 @@ topic_rpi() {
 
   local src="$repo/documentation/asciidoc/computers"
 
-  # Positive patterns only - explicitly list included directories
-  # (One-time snapshot; new upstream directories won't auto-include)
   for dir in config_txt configuration getting-started os raspberry-pi remote-access; do
-    # Copy index file if it exists
+    # Index file
     if [[ -f "$src/$dir.adoc" ]]; then
-      copy_with_source "github://raspberrypi/documentation/documentation/asciidoc/computers/$dir.adoc" \
-        "$src/$dir.adoc" "$MIX_DIR/"
+      run_repo_file "raspberrypi/documentation" "master" "$repo" "documentation/asciidoc/computers/$dir.adoc"
     fi
-    # Copy directory contents
+    # Directory contents
     if [[ -d "$src/$dir" ]]; then
-      copy_with_source "github://raspberrypi/documentation/documentation/asciidoc/computers/$dir" \
-        "$src/$dir" "$MIX_DIR/"
+      run_repo_tree "raspberrypi/documentation" "master" "$repo" "documentation/asciidoc/computers/$dir"
     fi
   done
 
   # Additional standalone files
   if [[ -f "$src/software-sources.adoc" ]]; then
-    copy_with_source "github://raspberrypi/documentation/documentation/asciidoc/computers/software-sources.adoc" \
-      "$src/software-sources.adoc" "$MIX_DIR/"
+    run_repo_file "raspberrypi/documentation" "master" "$repo" "documentation/asciidoc/computers/software-sources.adoc"
   fi
 }
 
 topic_skills() {
-  # Agent skills documentation from multiple sources
-
   # 1. agentskills/agentskills repository - all .mdx files
   local agentskills_repo
   agentskills_repo=$(fetch "github://agentskills/agentskills")
-  copy_repo_tree "github://agentskills/agentskills" "$agentskills_repo" "$agentskills_repo" "$MIX_DIR/agentskills" "*.mdx"
+  run_repo_tree "agentskills/agentskills" "main" "$agentskills_repo" "" "*.mdx"
 
   # 2. Claude platform best practices
-  local best_practices
-  best_practices=$(fetch "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md")
-  cp "$best_practices" "$MIX_DIR/best-practices.md"
-  add_source_comment "$MIX_DIR/best-practices.md" "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md"
+  run_url "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md"
 
   # 3. Anthropic skills repository - skill-creator SKILL.md
-  local anthropic_skills
-  anthropic_skills=$(fetch "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md")
-  cp "$anthropic_skills" "$MIX_DIR/skill-creator-SKILL.md"
-  add_source_comment "$MIX_DIR/skill-creator-SKILL.md" "https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md"
+  run_url "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md"
 
   # 4. Gemini CLI skills documentation
-  local gemini_cli_skills
-  gemini_cli_skills=$(fetch "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md")
-  cp "$gemini_cli_skills" "$MIX_DIR/gemini-cli-skills.md"
-  add_source_comment "$MIX_DIR/gemini-cli-skills.md" "https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/skills.md"
+  run_url "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/docs/cli/skills.md"
 
   # 5. OpenAI Codex skills documentation
-  local openai_skills
-  openai_skills=$(fetch "https://developers.openai.com/codex/skills.md")
-  cp "$openai_skills" "$MIX_DIR/openai-codex-skills.md"
-  add_source_comment "$MIX_DIR/openai-codex-skills.md" "https://developers.openai.com/codex/skills.md"
+  run_url "https://developers.openai.com/codex/skills.md"
 
   # 6. OpenAI Codex create-skill documentation
-  local openai_create_skill
-  openai_create_skill=$(fetch "https://developers.openai.com/codex/skills/create-skill.md")
-  cp "$openai_create_skill" "$MIX_DIR/openai-codex-create-skill.md"
-  add_source_comment "$MIX_DIR/openai-codex-create-skill.md" "https://developers.openai.com/codex/skills/create-skill.md"
+  run_url "https://developers.openai.com/codex/skills/create-skill.md"
 }
 
 # =============================================================================
@@ -414,8 +384,8 @@ usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME <topic>
 
-Generate combined repomix context for a specific topic. Output is written to
-stdout and can be redirected to a file or piped to other commands.
+Generate aggregated context for a specific topic. Output is written to stdout
+as a shell_session XML format suitable for AI agent consumption.
 
 Topics:
 EOF
@@ -434,7 +404,7 @@ Examples:
   $SCRIPT_NAME gemini-api
     Generate Gemini API context to stdout
 
-  $SCRIPT_NAME gemini-api > gemini-api-context.txt
+  $SCRIPT_NAME gemini-api > gemini-api-context.xml
     Save context to a file
 
   $SCRIPT_NAME gemini-api | pbcopy
@@ -448,6 +418,35 @@ list_topics() {
     echo "${entry%%:*}"
   done
   exit 0
+}
+
+emit_header() {
+  echo "<shell_session>"
+  cat <<EOF
+<context_summary>
+  <purpose>
+    This content represents a recorded shell session designed to provide context for an AI agent.
+    It aggregates resources (local files, remote URLs, system info) by capturing shell commands
+    and their output.
+  </purpose>
+  <structure>
+    The session is organized as a sequence of &lt;entry&gt; elements:
+    1. &lt;command&gt;: The command string acting as the data source. (e.g., "cat file.txt" or "curl url")
+       Treat this as the source of truth for where the data originated.
+    2. &lt;output&gt;: The raw content returned by that command.
+    Errors appear as &lt;error&gt; elements with a &lt;message&gt; instead of &lt;output&gt;.
+  </structure>
+  <guidelines>
+    - PROVENANCE: The origin of the data is defined by the command itself. If the command is
+      \`curl -s https://example.com\`, the content is from that external URL.
+    - SNAPSHOT: The outputs below capture the exact state of the resources at the time this script was run.
+  </guidelines>
+</context_summary>
+EOF
+}
+
+emit_footer() {
+  echo "</shell_session>"
 }
 
 # =============================================================================
@@ -485,17 +484,18 @@ fi
 # Check dependencies
 require curl
 require unzip
-require repomix
 require jq
+require python3
 
 # Create build directory
 BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/$SCRIPT_NAME.XXXXXXXXXX")
-MIX_DIR="$BUILD_DIR/mix"
-mkdir -p "$MIX_DIR"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-# Run the topic function to assemble files
+# Output header
+emit_header
+
+# Run the topic function
 "$TOPIC_FUNC"
 
-# Run repomix on the assembled directory
-repomix "$MIX_DIR" --no-security-check --quiet -o -
+# Output footer
+emit_footer
