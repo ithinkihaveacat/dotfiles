@@ -15,13 +15,11 @@ function __fish_context_list_topics
 end
 
 # Complete topics (when no topic given)
-complete -c context -f -n __fish_context_needs_topic -a '(__fish_context_list_topics)' -d 'Topic'
+complete -c context -f -n __fish_context_needs_topic -a '(__fish_context_list_topics)' -d Topic
 
 # Complete individual topics with descriptions
 complete -c context -f -n __fish_context_needs_topic -a gemini-api -d 'Gemini API documentation and examples'
-complete -c context -f -n __fish_context_needs_topic -a gemini-sdk -d 'Gemini TypeScript/JavaScript SDK'
 complete -c context -f -n __fish_context_needs_topic -a mcp-server -d 'MCP server documentation and specification'
-complete -c context -f -n __fish_context_needs_topic -a mcp-typescript-sdk -d 'MCP TypeScript SDK documentation'
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli -d 'Gemini CLI documentation (all)'
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli-extensions -d 'Gemini CLI extensions documentation'
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli-hooks -d 'Gemini CLI hooks documentation'
