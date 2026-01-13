@@ -18,10 +18,11 @@ can use to:
 Before creating files, research the following:
 
 1. **Review the Agent Skills specification** at
-   <https://agentskills.io/specification> to understand frontmatter
+   <https://agentskills.io/specification.md> to understand frontmatter
    requirements, directory structure, and naming conventions.
 
 2. **Examine the `bin/jetpack` script thoroughly**:
+
    - All subcommands: `version`, `resolve`, `source`, `inspect`,
      `resolve-exceptions`
    - The underlying `curl`, `xmllint`, and `jar` commands
@@ -31,6 +32,7 @@ Before creating files, research the following:
    - The exceptions table in the `resolve` subcommand
 
    For each subcommand, understand:
+
    - Purpose and when to use it
    - The underlying raw commands
    - Input/output format

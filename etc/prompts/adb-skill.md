@@ -6,8 +6,8 @@ document both script-first and raw-ADB-fallback approaches.
 
 ## Goal
 
-Produce a self-contained skill directory at `skills/android-adb-wear/` that an
-agent can use to:
+Produce a self-contained skill directory at `etc/skills/adb/` that an agent can
+use to:
 
 1. Run bundled scripts directly (fast, deterministic)
 2. When scripts fail (missing dependencies, environment issues), extract raw ADB
@@ -18,7 +18,7 @@ agent can use to:
 Before creating files, research the following:
 
 1. **Review the Agent Skills specification** at
-   <https://agentskills.io/specification> to understand frontmatter
+   <https://agentskills.io/specification.md> to understand frontmatter
    requirements, directory structure, and naming conventions.
 
 2. **Examine relevant scripts in `bin/`**:
