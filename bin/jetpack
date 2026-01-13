@@ -21,6 +21,7 @@ SCRIPT_NAME=$(basename "$0")
 
 GOOGLE_MAVEN_URL="https://dl.google.com/android/maven2"
 SNAPSHOT_REPO_URL="https://androidx.dev/snapshots/latest/artifacts/repository"
+SNAPSHOT_BUILD_URL_PREFIX="https://androidx.dev/snapshots/builds"
 
 # =============================================================================
 # SHARED HELPERS
@@ -41,6 +42,29 @@ validate_package_format() {
     echo "$SCRIPT_NAME: invalid package format '$pkg' (expected GROUP_ID:ARTIFACT_ID)" >&2
     exit 1
   fi
+}
+
+# Classify a version string into one of three categories:
+#   "symbolic" - ALPHA, BETA, RC, STABLE, LATEST, SNAPSHOT (floating versions)
+#   "build_id" - All digits, e.g., 14710011 (pinned snapshot build)
+#   "pinned"   - Specific version string, e.g., 1.6.0-alpha01 (pinned release)
+classify_version() {
+  local version="$1"
+  local version_upper
+  version_upper=$(echo "$version" | tr '[:lower:]' '[:upper:]')
+
+  case "$version_upper" in
+    ALPHA | BETA | RC | STABLE | LATEST | SNAPSHOT)
+      echo "symbolic"
+      ;;
+    *)
+      if [[ "$version" =~ ^[0-9]+$ ]]; then
+        echo "build_id"
+      else
+        echo "pinned"
+      fi
+      ;;
+  esac
 }
 
 # =============================================================================
@@ -472,25 +496,49 @@ Download and extract source code for one or more Jetpack packages.
 Arguments:
   PACKAGE     One or more package names in the format GROUP_ID:ARTIFACT_ID
               (supports brace expansion, e.g., androidx.pkg:{foo,bar})
-  VERSION     Version string: ALPHA, BETA, RC, STABLE, LATEST, SNAPSHOT,
-              or a specific version number (optional, defaults to STABLE)
+  VERSION     Version specifier (optional, defaults to STABLE). See below.
   REPO_URL    Maven repository URL
               (optional, default: https://dl.google.com/android/maven2)
-              For SNAPSHOT, this is ignored and the androidx.dev snapshot
-              repo is used.
+              Ignored for SNAPSHOT, build IDs, and pinned snapshot versions.
 
-**About SNAPSHOT builds:** These are bleeding-edge versions of Jetpack
-libraries. 'SNAPSHOT' refers to the **latest** available build from
-androidx.dev. More info: https://androidx.dev/
+Version Specifiers:
+
+  There are two categories of version specifiers:
+
+  **Symbolic (floating):** Resolve to the latest matching version at runtime.
+  The actual code returned may change over time as new versions are released.
+
+    ALPHA      Latest alpha version (e.g., 1.2.3-alpha04)
+    BETA       Latest beta version (e.g., 1.2.3-beta02)
+    RC         Latest release candidate (e.g., 1.2.3-rc01)
+    STABLE     Latest stable release (e.g., 1.2.3)
+    LATEST     Latest version of any kind
+    SNAPSHOT   Latest snapshot from androidx.dev
+
+  **Pinned (immutable):** Always resolve to the exact same code, regardless of
+  when the command is run. Use these for reproducible builds or to reference
+  a specific known-good version.
+
+    <version>  Specific version string (e.g., 1.6.0-alpha01, 2.0.0)
+    <build_id> Snapshot build ID from androidx.dev (e.g., 14710011)
+               Find build IDs at: https://androidx.dev/snapshots/builds
 
 Options:
   -h, --help    Display this help message
   --output DIR  Specify output directory (default: create temporary directory)
 
 Examples:
+  # Symbolic (floating) versions
   $SCRIPT_NAME source androidx.wear.tiles:tiles
   $SCRIPT_NAME source androidx.wear.tiles:tiles ALPHA
   $SCRIPT_NAME source androidx.wear.tiles:tiles SNAPSHOT
+
+  # Pinned (immutable) versions
+  $SCRIPT_NAME source androidx.wear.tiles:tiles 1.4.0
+  $SCRIPT_NAME source androidx.wear.tiles:tiles 1.5.0-alpha01
+  $SCRIPT_NAME source androidx.wear.tiles:tiles 14710011
+
+  # Other options
   $SCRIPT_NAME source androidx.wear.protolayout:protolayout-{expression,material,material3}
   $SCRIPT_NAME source --output /tmp/tiles androidx.wear.tiles:tiles
   pushd "\$($SCRIPT_NAME source androidx.wear.tiles:tiles)"
@@ -565,10 +613,18 @@ cmd_source() {
     exit 1
   fi
 
-  # For SNAPSHOT versions, use snapshot repository
-  if [[ "$version_string_upper" == "SNAPSHOT" ]]; then
+  # Classify the version and set up repository URL accordingly
+  local version_class
+  version_class=$(classify_version "$version_string")
+
+  if [[ "$version_class" == "build_id" ]]; then
+    # Build ID: use specific snapshot build from androidx.dev
+    repo_url="$SNAPSHOT_BUILD_URL_PREFIX/$version_string/artifacts/repository"
+    echo "info: Using AndroidX snapshot build $version_string" >&2
+  elif [[ "$version_string_upper" == "SNAPSHOT" ]]; then
+    # SNAPSHOT: use latest snapshot repository
     repo_url="$SNAPSHOT_REPO_URL"
-    echo "info: Using AndroidX snapshot repository" >&2
+    echo "info: Using AndroidX snapshot repository (latest)" >&2
   fi
 
   # Validate all packages before creating directories
@@ -608,12 +664,16 @@ cmd_source() {
 
     # Resolve version
     if [[ -z "$version" ]]; then
-      if [[ "$version_string_upper" == "ALPHA" || "$version_string_upper" == "BETA" || \
-            "$version_string_upper" == "RC" || "$version_string_upper" == "STABLE" || \
-            "$version_string_upper" == "LATEST" || "$version_string_upper" == "SNAPSHOT" ]]; then
+      if [[ "$version_class" == "symbolic" ]]; then
+        # Symbolic version: resolve to actual version number
         version=$(cmd_version "$package_name" "$version_string_upper" "$repo_url")
         echo "info: Resolved $version_string_upper version for ${package_name} to ${version}" >&2
+      elif [[ "$version_class" == "build_id" ]]; then
+        # Build ID: resolve SNAPSHOT version from that specific build
+        version=$(cmd_version "$package_name" "SNAPSHOT" "$repo_url")
+        echo "info: Resolved SNAPSHOT version for build $version_string to ${version}" >&2
       else
+        # Pinned version: use as-is
         version=$version_string
       fi
     fi
@@ -699,7 +759,7 @@ cmd_source() {
 
 usage_inspect() {
   cat <<EOF
-Usage: $SCRIPT_NAME inspect [OPTIONS] CLASS_NAME [VERSION_TYPE] [REPO_URL]
+Usage: $SCRIPT_NAME inspect [OPTIONS] CLASS_NAME [VERSION] [REPO_URL]
 
 Download and inspect source code for a Jetpack class or package.
 
@@ -707,26 +767,51 @@ This is a convenience wrapper that combines resolve and source to map from
 a package/class name directly to source code.
 
 Arguments:
-  CLASS_NAME    Fully qualified package/class name
-                (e.g., androidx.core.splashscreen.SplashScreen)
-                OR Maven coordinate (e.g., androidx.wear.tiles:tiles)
-  VERSION_TYPE  Version type: ALPHA, BETA, RC, STABLE, LATEST, or SNAPSHOT
-                (optional, defaults to STABLE)
-  REPO_URL      Maven repository URL (optional, defaults to Google Maven)
+  CLASS_NAME  Fully qualified package/class name
+              (e.g., androidx.core.splashscreen.SplashScreen)
+              OR Maven coordinate (e.g., androidx.wear.tiles:tiles)
+  VERSION     Version specifier (optional, defaults to STABLE). See below.
+  REPO_URL    Maven repository URL (optional, defaults to Google Maven)
+              Ignored for SNAPSHOT, build IDs, and pinned snapshot versions.
 
-**About SNAPSHOT builds:** These are bleeding-edge versions of Jetpack
-libraries. 'SNAPSHOT' refers to the **latest** available build from
-androidx.dev. More info: https://androidx.dev/
+Version Specifiers:
+
+  There are two categories of version specifiers:
+
+  **Symbolic (floating):** Resolve to the latest matching version at runtime.
+  The actual code returned may change over time as new versions are released.
+
+    ALPHA      Latest alpha version (e.g., 1.2.3-alpha04)
+    BETA       Latest beta version (e.g., 1.2.3-beta02)
+    RC         Latest release candidate (e.g., 1.2.3-rc01)
+    STABLE     Latest stable release (e.g., 1.2.3)
+    LATEST     Latest version of any kind
+    SNAPSHOT   Latest snapshot from androidx.dev
+
+  **Pinned (immutable):** Always resolve to the exact same code, regardless of
+  when the command is run. Use these for reproducible builds or to reference
+  a specific known-good version.
+
+    <version>  Specific version string (e.g., 1.6.0-alpha01, 2.0.0)
+    <build_id> Snapshot build ID from androidx.dev (e.g., 14710011)
+               Find build IDs at: https://androidx.dev/snapshots/builds
 
 Options:
   -h, --help    Display this help message
   --output DIR  Specify output directory (default: create temporary directory)
 
 Examples:
+  # Symbolic (floating) versions
   $SCRIPT_NAME inspect androidx.core.splashscreen.SplashScreen
   $SCRIPT_NAME inspect androidx.wear.tiles:tiles
   $SCRIPT_NAME inspect androidx.wear.ambient.AmbientLifecycleObserver ALPHA
   $SCRIPT_NAME inspect androidx.glance.wear.tiles.GlanceTileService SNAPSHOT
+
+  # Pinned (immutable) versions
+  $SCRIPT_NAME inspect androidx.lifecycle.ViewModel 2.8.7
+  $SCRIPT_NAME inspect androidx.wear.tiles.TileService 1.4.0
+  $SCRIPT_NAME inspect androidx.wear.tiles.TileService 14710011
+
   pushd "\$($SCRIPT_NAME inspect androidx.wear.tiles.TileService)"
 
 For Kotlin Multiplatform libraries, both common and platform-specific sources
