@@ -1,0 +1,1044 @@
+#!/usr/bin/env bash
+#
+# jetpack - Jetpack library utilities
+#
+# Subcommands:
+#   version           Get version for a package (ALPHA/BETA/RC/STABLE/SNAPSHOT)
+#   resolve           Convert package name to Maven coordinate
+#   source            Download and extract source JARs
+#   inspect           Convenience wrapper: resolve + source
+#   resolve-exceptions  Find missing exceptions for resolve
+#
+# Tests: tests/jetpack-resolve/
+
+set -euo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+
+# =============================================================================
+# SHARED CONSTANTS
+# =============================================================================
+
+GOOGLE_MAVEN_URL="https://dl.google.com/android/maven2"
+SNAPSHOT_REPO_URL="https://androidx.dev/snapshots/latest/artifacts/repository"
+SNAPSHOT_BUILD_URL_PREFIX="https://androidx.dev/snapshots/builds"
+
+# =============================================================================
+# SHARED HELPERS
+# =============================================================================
+
+require() {
+  for cmd in "$@"; do
+    if ! command -v "$cmd" &>/dev/null; then
+      echo "$SCRIPT_NAME: required command '$cmd' not found" >&2
+      exit 127
+    fi
+  done
+}
+
+validate_package_format() {
+  local pkg="$1"
+  if [[ ! "$pkg" =~ ^[^:]+:[^:]+$ ]]; then
+    echo "$SCRIPT_NAME: invalid package format '$pkg' (expected GROUP_ID:ARTIFACT_ID)" >&2
+    exit 1
+  fi
+}
+
+# Classify a version string into one of three categories:
+#   "symbolic" - ALPHA, BETA, RC, STABLE, LATEST, SNAPSHOT (floating versions)
+#   "build_id" - All digits, e.g., 14710011 (pinned snapshot build)
+#   "pinned"   - Specific version string, e.g., 1.6.0-alpha01 (pinned release)
+classify_version() {
+  local version="$1"
+  local version_upper
+  version_upper=$(echo "$version" | tr '[:lower:]' '[:upper:]')
+
+  case "$version_upper" in
+    ALPHA | BETA | RC | STABLE | LATEST | SNAPSHOT)
+      echo "symbolic"
+      ;;
+    *)
+      if [[ "$version" =~ ^[0-9]+$ ]]; then
+        echo "build_id"
+      else
+        echo "pinned"
+      fi
+      ;;
+  esac
+}
+
+# =============================================================================
+# MAIN USAGE
+# =============================================================================
+
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME <command> [options]
+
+Jetpack library utilities for working with AndroidX packages.
+
+Commands:
+  version             Get version for a package (ALPHA/BETA/RC/STABLE/SNAPSHOT)
+  resolve             Convert package/class name to Maven coordinate
+  source              Download and extract source JARs
+  inspect             Resolve a class name and download its source
+  resolve-exceptions  Find missing exceptions for the resolve command
+
+Options:
+  -h, --help          Display this help message
+
+Run '$SCRIPT_NAME <command> --help' for more information on a command.
+
+Examples:
+  $SCRIPT_NAME version androidx.wear.tiles:tiles STABLE
+  $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen
+  $SCRIPT_NAME source androidx.wear.tiles:tiles ALPHA
+  $SCRIPT_NAME inspect androidx.lifecycle.ViewModel
+EOF
+  exit 0
+}
+
+# =============================================================================
+# VERSION SUBCOMMAND
+# =============================================================================
+
+usage_version() {
+  cat <<EOF
+Usage: $SCRIPT_NAME version PACKAGE_NAME [VERSION_TYPE] [REPO_URL]
+
+Get a specific version type for a given Jetpack package.
+
+Arguments:
+  PACKAGE_NAME  The package name (e.g., androidx.wear.tiles:tiles)
+  VERSION_TYPE  The version type to retrieve: ALPHA, BETA, RC, STABLE,
+                LATEST, or SNAPSHOT (optional, defaults to STABLE)
+  REPO_URL      The Maven repository URL (optional, defaults to Google Maven)
+                For SNAPSHOT, this is ignored and the androidx.dev snapshot
+                repo is used.
+
+**About SNAPSHOT builds:** These are bleeding-edge versions of Jetpack
+libraries. 'SNAPSHOT' refers to the **latest** available build from
+androidx.dev. More info: https://androidx.dev/
+
+Version Types:
+  ALPHA    - Latest alpha version (e.g., 1.2.3-alpha04)
+  BETA     - Latest beta version (e.g., 1.2.3-beta02)
+  RC       - Latest release candidate version (e.g., 1.2.3-rc01)
+  STABLE   - Latest stable release (e.g., 1.2.3)
+  LATEST   - Latest version of any kind (from maven-metadata.xml)
+  SNAPSHOT - Latest snapshot version from androidx.dev
+
+Examples:
+  $SCRIPT_NAME version androidx.wear.tiles:tiles
+  $SCRIPT_NAME version androidx.wear.tiles:tiles ALPHA
+  $SCRIPT_NAME version androidx.wear.tiles:tiles SNAPSHOT
+  $SCRIPT_NAME version com.google.android.horologist:horologist-datalayer \\
+    STABLE https://repo1.maven.org/maven2
+EOF
+  exit 0
+}
+
+cmd_version() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage_version
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    usage_version
+  fi
+
+  require curl xmllint
+
+  local package_name="$1"
+  validate_package_format "$package_name"
+
+  # Parse optional arguments
+  local version_type repo_url
+  if [[ -n "${2:-}" ]]; then
+    if [[ "$2" =~ ^https?:// ]]; then
+      version_type="STABLE"
+      repo_url="$2"
+    else
+      version_type=$(echo "$2" | tr '[:lower:]' '[:upper:]')
+      repo_url="${3:-$GOOGLE_MAVEN_URL}"
+    fi
+  else
+    version_type="STABLE"
+    repo_url="$GOOGLE_MAVEN_URL"
+  fi
+
+  # Validate version type
+  case "$version_type" in
+    ALPHA | BETA | RC | STABLE | LATEST | SNAPSHOT) ;;
+    *)
+      echo "$SCRIPT_NAME version: invalid version type '$version_type'" >&2
+      echo "Valid types: ALPHA, BETA, RC, STABLE, LATEST, SNAPSHOT" >&2
+      exit 1
+      ;;
+  esac
+
+  local group_id artifact_id group_id_path
+  group_id=$(echo "$package_name" | cut -d: -f1)
+  artifact_id=$(echo "$package_name" | cut -d: -f2)
+  group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+
+  local version metadata_url
+
+  # Handle SNAPSHOT separately
+  if [[ "$version_type" == "SNAPSHOT" ]]; then
+    metadata_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/maven-metadata.xml"
+
+    if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
+      echo "$SCRIPT_NAME version: failed to fetch $metadata_url" >&2
+      echo "$SCRIPT_NAME version: package may not exist in snapshot builds" >&2
+      exit 1
+    fi
+
+    version=$(curl -sSLf "$metadata_url" |
+      xmllint --xpath "//version/text()" - |
+      tr ' ' '\n' |
+      grep -E '\-SNAPSHOT$' |
+      sort -V |
+      tail -n 1)
+
+    if [[ -z "$version" ]]; then
+      echo "$SCRIPT_NAME version: no snapshot version found at $metadata_url" >&2
+      exit 1
+    fi
+
+    echo "$version"
+    return 0
+  fi
+
+  metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
+
+  if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
+    echo "$SCRIPT_NAME version: failed to fetch $metadata_url" >&2
+    exit 1
+  fi
+
+  case "$version_type" in
+    ALPHA)
+      version=$(curl -sSLf "$metadata_url" |
+        xmllint --xpath "//version/text()" - |
+        tr ' ' '\n' |
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+-alpha[0-9]+$' |
+        sort -V |
+        tail -n 1)
+
+      if [[ -z "$version" ]]; then
+        echo "$SCRIPT_NAME version: no alpha version found at $metadata_url" >&2
+        exit 1
+      fi
+      ;;
+
+    BETA)
+      version=$(curl -sSLf "$metadata_url" |
+        xmllint --xpath "//version/text()" - |
+        tr ' ' '\n' |
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$' |
+        sort -V |
+        tail -n 1)
+
+      if [[ -z "$version" ]]; then
+        echo "$SCRIPT_NAME version: no beta version found at $metadata_url" >&2
+        exit 1
+      fi
+      ;;
+
+    RC)
+      version=$(curl -sSLf "$metadata_url" |
+        xmllint --xpath "//version/text()" - |
+        tr ' ' '\n' |
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' |
+        sort -V |
+        tail -n 1)
+
+      if [[ -z "$version" ]]; then
+        echo "$SCRIPT_NAME version: no rc version found at $metadata_url" >&2
+        exit 1
+      fi
+      ;;
+
+    STABLE)
+      version=$(curl -sSLf "$metadata_url" |
+        xmllint --xpath "//version/text()" - |
+        tr ' ' '\n' |
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' |
+        sort -V |
+        tail -n 1)
+
+      if [[ -z "$version" ]]; then
+        version=$(curl -sSLf "$metadata_url" |
+          xmllint --xpath "//version/text()" - |
+          tr ' ' '\n' |
+          sort -V |
+          tail -n 1)
+        if [[ -z "$version" ]]; then
+          echo "$SCRIPT_NAME version: no stable version found at $metadata_url" >&2
+          exit 1
+        fi
+        echo "$SCRIPT_NAME version: using prerelease version: $version" >&2
+      fi
+      ;;
+
+    LATEST)
+      version=$(curl -sSLf "$metadata_url" |
+        xmllint --xpath "//versioning/latest/text()" -)
+
+      if [[ -z "$version" ]]; then
+        echo "$SCRIPT_NAME version: no latest version found at $metadata_url" >&2
+        exit 1
+      fi
+      ;;
+  esac
+
+  echo "$version"
+}
+
+# =============================================================================
+# RESOLVE SUBCOMMAND
+# =============================================================================
+
+usage_resolve() {
+  cat <<EOF
+Usage: $SCRIPT_NAME resolve PACKAGE_NAME
+
+Convert an Android package name to its corresponding Jetpack library coordinate.
+
+Arguments:
+  PACKAGE_NAME  Fully qualified package/class name
+                (e.g., androidx.core.splashscreen.SplashScreen)
+
+Examples:
+  $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+  $SCRIPT_NAME resolve androidx.wear.ambient.AmbientLifecycleObserver
+  $SCRIPT_NAME resolve androidx.wear.protolayout.material3.textButton
+  $SCRIPT_NAME resolve androidx.lifecycle.ViewModel
+
+The command converts AndroidX package names to Maven library coordinates using
+heuristic rules and a lookup table for exceptions. Output format is
+GROUP_ID:ARTIFACT_ID (e.g., androidx.core:core-splashscreen).
+EOF
+  exit 0
+}
+
+cmd_resolve() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage_resolve
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    usage_resolve
+  fi
+
+  local package_name="$1"
+
+  # Extract package prefix (remove class names and method names)
+  local -a segments all_segments
+  IFS='.' read -ra all_segments <<<"$package_name"
+  for segment in "${all_segments[@]}"; do
+    # Check if segment starts with uppercase (likely a class name)
+    if [[ "$segment" =~ ^[A-Z] ]]; then
+      break
+    fi
+    segments+=("$segment")
+  done
+
+  # If we filtered everything out, use the original segments
+  if [[ ${#segments[@]} -eq 0 ]]; then
+    segments=("${all_segments[@]}")
+  fi
+
+  # Rebuild package name from segments (without class names)
+  local package_prefix
+  package_prefix=$(IFS='.'; echo "${segments[*]}")
+
+  # Known 3-segment AndroidX group IDs
+  local -a three_segment_groups=(
+    "androidx.wear.protolayout"
+    "androidx.wear.compose"
+    "androidx.wear.tiles"
+    "androidx.wear.watchface"
+    "androidx.compose.animation"
+    "androidx.compose.foundation"
+    "androidx.compose.material"
+    "androidx.compose.material3"
+    "androidx.compose.remote"
+    "androidx.compose.runtime"
+    "androidx.compose.ui"
+  )
+
+  # Exceptions table: maps package prefix to library coordinate
+  local -a exceptions=(
+    "androidx.activity.contextaware|androidx.activity:activity"
+    "androidx.activity.result|androidx.activity:activity"
+    "androidx.activity|androidx.activity:activity"
+    "androidx.annotation|androidx.annotation:annotation"
+    "androidx.compose.runtime|androidx.compose.runtime:runtime"
+    "androidx.compose.remote.creation.actions|androidx.compose.remote:remote-creation-core"
+    "androidx.compose.remote.creation.compose|androidx.compose.remote:remote-creation-compose"
+    "androidx.compose.remote.creation.modifiers|androidx.compose.remote:remote-creation-core"
+    "androidx.compose.remote.creation.platform|androidx.compose.remote:remote-creation-android"
+    "androidx.compose.remote.creation.profile|androidx.compose.remote:remote-creation-core"
+    "androidx.compose.remote.player.compose|androidx.compose.remote:remote-player-compose"
+    "androidx.compose.remote.player.core|androidx.compose.remote:remote-player-core"
+    "androidx.compose.remote.player.view|androidx.compose.remote:remote-player-view"
+    "androidx.compose.remote.tooling.preview|androidx.compose.remote:remote-tooling-preview"
+    "androidx.compose.ui.platform|androidx.compose.ui:ui"
+    "androidx.compose.ui|androidx.compose.ui:ui"
+    "androidx.core.app|androidx.core:core"
+    "androidx.core.content|androidx.core:core"
+    "androidx.core.graphics|androidx.core:core"
+    "androidx.core.os|androidx.core:core"
+    "androidx.core.util|androidx.core:core"
+    "androidx.core.view|androidx.core:core"
+    "androidx.core.widget|androidx.core:core"
+    "androidx.datastore.preferences.core|androidx.datastore:datastore-preferences-core"
+    "androidx.fragment.app|androidx.fragment:fragment"
+    "androidx.glance.wear.composable|androidx.glance.wear:wear"
+    "androidx.glance.wear.parcel.legacy|androidx.glance.wear:wear"
+    "androidx.glance.wear.parcel|androidx.glance.wear:wear"
+    "androidx.glance.wear.proto|androidx.glance.wear:wear-core"
+    "androidx.glance.wear.tiles|androidx.glance:glance-wear-tiles"
+    "androidx.glance.wear|androidx.glance.wear:wear"
+    "androidx.lifecycle.livedata|androidx.lifecycle:lifecycle-livedata"
+    "androidx.lifecycle.viewmodel|androidx.lifecycle:lifecycle-viewmodel"
+    "androidx.lifecycle|androidx.lifecycle:lifecycle-runtime"
+    "androidx.wear.activity|androidx.wear:wear"
+    "androidx.wear.ambient|androidx.wear:wear"
+    "androidx.wear.compose.remote.material3|androidx.wear.compose.remote:remote-material3"
+    "androidx.wear.compose.ui.tooling.preview|androidx.wear.compose:compose-ui-tooling"
+    "androidx.wear.input|androidx.wear:wear-input"
+    "androidx.wear.ongoing|androidx.wear:wear-ongoing"
+    "androidx.wear.phone|androidx.wear:wear-phone-interactions"
+    "androidx.wear.protolayout.layout|androidx.wear.protolayout:protolayout"
+    "androidx.wear.protolayout.modifiers|androidx.wear.protolayout:protolayout"
+    "androidx.wear.protolayout.types|androidx.wear.protolayout:protolayout"
+    "androidx.wear.protolayout|androidx.wear.protolayout:protolayout"
+    "androidx.wear.provider|androidx.wear:wear"
+    "androidx.wear.remote|androidx.wear:wear-remote-interactions"
+    "androidx.wear.tiles|androidx.wear.tiles:tiles"
+    "androidx.wear.tooling.preview.devices|androidx.wear:wear-tooling-preview"
+    "androidx.wear.utils|androidx.wear:wear"
+  )
+
+  # Check exceptions first (longest match wins)
+  local best_match="" best_match_length=0
+  local prefix coordinate prefix_length
+  for exception in "${exceptions[@]}"; do
+    prefix="${exception%%|*}"
+    coordinate="${exception##*|}"
+
+    if [[ "$package_prefix" == "$prefix"* ]]; then
+      prefix_length=${#prefix}
+      if [[ $prefix_length -gt $best_match_length ]]; then
+        best_match="$coordinate"
+        best_match_length=$prefix_length
+      fi
+    fi
+  done
+
+  if [[ -n "$best_match" ]]; then
+    echo "$best_match"
+    return 0
+  fi
+
+  # Heuristic approach: determine group ID and artifact ID
+  local group_id="" next_segment="" remaining
+
+  for three_seg in "${three_segment_groups[@]}"; do
+    if [[ "$package_prefix" == "$three_seg."* ]]; then
+      group_id="$three_seg"
+      remaining="${package_prefix#"$three_seg".}"
+      next_segment="${remaining%%.*}"
+      break
+    fi
+  done
+
+  # If not a 3-segment group, assume 2-segment group (androidx.X)
+  if [[ -z "$group_id" ]]; then
+    if [[ ${#segments[@]} -lt 3 ]]; then
+      echo "$SCRIPT_NAME resolve: package name too short: $package_prefix" >&2
+      exit 1
+    fi
+
+    group_id="${segments[0]}.${segments[1]}"
+    next_segment="${segments[2]}"
+  fi
+
+  # Build artifact ID using the pattern: {last_part_of_group}-{next_segment}
+  local last_group_part="${group_id##*.}"
+  local artifact_id
+
+  case "$next_segment" in
+    app | content | graphics | os | util | view | widget | internal)
+      artifact_id="$last_group_part"
+      ;;
+    *)
+      artifact_id="$last_group_part-$next_segment"
+      ;;
+  esac
+
+  echo "$group_id:$artifact_id"
+}
+
+# =============================================================================
+# SOURCE SUBCOMMAND
+# =============================================================================
+
+usage_source() {
+  cat <<EOF
+Usage: $SCRIPT_NAME source [OPTIONS] PACKAGE... [VERSION] [REPO_URL]
+
+Download and extract source code for one or more Jetpack packages.
+
+Arguments:
+  PACKAGE     One or more package names in the format GROUP_ID:ARTIFACT_ID
+              (supports brace expansion, e.g., androidx.pkg:{foo,bar})
+  VERSION     Version specifier (optional, defaults to STABLE). See below.
+  REPO_URL    Maven repository URL
+              (optional, default: https://dl.google.com/android/maven2)
+              Ignored for SNAPSHOT, build IDs, and pinned snapshot versions.
+
+Version Specifiers:
+
+  There are two categories of version specifiers:
+
+  **Symbolic (floating):** Resolve to the latest matching version at runtime.
+  The actual code returned may change over time as new versions are released.
+
+    ALPHA      Latest alpha version (e.g., 1.2.3-alpha04)
+    BETA       Latest beta version (e.g., 1.2.3-beta02)
+    RC         Latest release candidate (e.g., 1.2.3-rc01)
+    STABLE     Latest stable release (e.g., 1.2.3)
+    LATEST     Latest version of any kind
+    SNAPSHOT   Latest snapshot from androidx.dev
+
+  **Pinned (immutable):** Always resolve to the exact same code, regardless of
+  when the command is run. Use these for reproducible builds or to reference
+  a specific known-good version.
+
+    <version>  Specific version string (e.g., 1.6.0-alpha01, 2.0.0)
+    <build_id> Snapshot build ID from androidx.dev (e.g., 14710011)
+               Find build IDs at: https://androidx.dev/snapshots/builds
+
+Options:
+  -h, --help    Display this help message
+  --output DIR  Specify output directory (default: create temporary directory)
+
+Examples:
+  # Symbolic (floating) versions
+  $SCRIPT_NAME source androidx.wear.tiles:tiles
+  $SCRIPT_NAME source androidx.wear.tiles:tiles ALPHA
+  $SCRIPT_NAME source androidx.wear.tiles:tiles SNAPSHOT
+
+  # Pinned (immutable) versions
+  $SCRIPT_NAME source androidx.wear.tiles:tiles 1.4.0
+  $SCRIPT_NAME source androidx.wear.tiles:tiles 1.5.0-alpha01
+  $SCRIPT_NAME source androidx.wear.tiles:tiles 14710011
+
+  # Other options
+  $SCRIPT_NAME source androidx.wear.protolayout:protolayout-{expression,material,material3}
+  $SCRIPT_NAME source --output /tmp/tiles androidx.wear.tiles:tiles
+  pushd "\$($SCRIPT_NAME source androidx.wear.tiles:tiles)"
+
+The command downloads the source JARs, extracts them, and prints the path.
+For Kotlin Multiplatform libraries, platform-specific sources are also downloaded.
+EOF
+  exit 0
+}
+
+cmd_source() {
+  local output_dir=""
+  local -a remaining_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h | --help)
+        usage_source
+        ;;
+      --output)
+        if [[ -z "${2:-}" ]]; then
+          echo "$SCRIPT_NAME source: option '--output' requires an argument" >&2
+          exit 1
+        fi
+        output_dir="$2"
+        shift 2
+        ;;
+      *)
+        remaining_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- "${remaining_args[@]}"
+
+  if [[ $# -lt 1 ]]; then
+    usage_source
+  fi
+
+  require curl jar xmllint
+
+  # Parse arguments: PACKAGE... [VERSION] [REPO_URL]
+  local repo_url version_string version_string_upper
+  local -a packages
+
+  if [[ "${!#}" =~ ^https?:// ]]; then
+    repo_url="${!#}"
+    local last_non_url_arg="${*: -2:1}"
+    if [[ ! "$last_non_url_arg" =~ : ]]; then
+      version_string="$last_non_url_arg"
+      packages=("${@:1:$#-2}")
+    else
+      version_string="STABLE"
+      packages=("${@:1:$#-1}")
+    fi
+  else
+    repo_url="$GOOGLE_MAVEN_URL"
+    local last_arg="${!#}"
+    if [[ ! "$last_arg" =~ : ]]; then
+      version_string="$last_arg"
+      packages=("${@:1:$#-1}")
+    else
+      version_string="STABLE"
+      packages=("$@")
+    fi
+  fi
+
+  version_string_upper=$(echo "$version_string" | tr '[:lower:]' '[:upper:]')
+
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    echo "$SCRIPT_NAME source: no packages specified" >&2
+    exit 1
+  fi
+
+  # Classify the version and set up repository URL accordingly
+  local version_class
+  version_class=$(classify_version "$version_string")
+
+  if [[ "$version_class" == "build_id" ]]; then
+    # Build ID: use specific snapshot build from androidx.dev
+    repo_url="$SNAPSHOT_BUILD_URL_PREFIX/$version_string/artifacts/repository"
+    echo "info: Using AndroidX snapshot build $version_string" >&2
+  elif [[ "$version_string_upper" == "SNAPSHOT" ]]; then
+    # SNAPSHOT: use latest snapshot repository
+    repo_url="$SNAPSHOT_REPO_URL"
+    echo "info: Using AndroidX snapshot repository (latest)" >&2
+  fi
+
+  # Validate all packages before creating directories
+  local group_id artifact_id group_id_path metadata_url
+  for package_name in "${packages[@]}"; do
+    validate_package_format "$package_name"
+
+    group_id=$(echo "$package_name" | cut -d: -f1)
+    artifact_id=$(echo "$package_name" | cut -d: -f2)
+    group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+    metadata_url="${repo_url}/${group_id_path}/${artifact_id}/maven-metadata.xml"
+
+    if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
+      echo "$SCRIPT_NAME source: failed to fetch $metadata_url" >&2
+      exit 1
+    fi
+  done
+
+  # Create output directory
+  local build_dir
+  if [[ -n "$output_dir" ]]; then
+    build_dir="$output_dir"
+    mkdir -p "$build_dir"
+  else
+    build_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
+  fi
+
+  # Download and extract each package
+  local version="" jar_version snapshot_jar_version
+  local source_jar_url source_jar_filename
+  local pom_url pom_content platform_artifacts
+
+  for package_name in "${packages[@]}"; do
+    group_id=$(echo "$package_name" | cut -d: -f1)
+    artifact_id=$(echo "$package_name" | cut -d: -f2)
+    group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+
+    # Resolve version
+    if [[ -z "$version" ]]; then
+      if [[ "$version_class" == "symbolic" ]]; then
+        # Symbolic version: resolve to actual version number
+        version=$(cmd_version "$package_name" "$version_string_upper" "$repo_url")
+        echo "info: Resolved $version_string_upper version for ${package_name} to ${version}" >&2
+      elif [[ "$version_class" == "build_id" ]]; then
+        # Build ID: resolve SNAPSHOT version from that specific build
+        version=$(cmd_version "$package_name" "SNAPSHOT" "$repo_url")
+        echo "info: Resolved SNAPSHOT version for build $version_string to ${version}" >&2
+      else
+        # Pinned version: use as-is
+        version=$version_string
+      fi
+    fi
+
+    # For SNAPSHOT versions, resolve the timestamped version
+    jar_version="$version"
+    if [[ "$version" =~ -SNAPSHOT$ ]]; then
+      local version_metadata_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
+      snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
+        xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
+
+      if [[ -n "$snapshot_jar_version" ]]; then
+        jar_version="$snapshot_jar_version"
+        echo "info: Resolved snapshot JAR version to ${jar_version}" >&2
+      else
+        echo "$SCRIPT_NAME source: warning: could not resolve timestamped version, trying ${version}" >&2
+      fi
+    fi
+
+    source_jar_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}-sources.jar"
+    source_jar_filename="${artifact_id}-${jar_version}-sources.jar"
+
+    echo "info: Downloading ${package_name} version ${version}" >&2
+    if ! curl -sSLf -o "${build_dir}/${source_jar_filename}" "${source_jar_url}"; then
+      echo "$SCRIPT_NAME source: failed to download $source_jar_url" >&2
+      exit 1
+    fi
+
+    (
+      cd "${build_dir}"
+      jar xf "${source_jar_filename}"
+      rm "${source_jar_filename}"
+    )
+
+    # Check for Kotlin Multiplatform platform-specific sources
+    pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
+    pom_content=$(curl -sSLf "${pom_url}" 2>/dev/null || true)
+
+    if [[ -n "$pom_content" ]]; then
+      platform_artifacts=$(echo "$pom_content" | xmllint --xpath "//*[local-name()='dependency']/*[local-name()='groupId' and text()='${group_id}']/../*[local-name()='artifactId']/text()" - 2>/dev/null | grep "^${artifact_id}-" || true)
+
+      if [[ -n "$platform_artifacts" ]]; then
+        echo "info: Detected Kotlin Multiplatform library, downloading platform-specific sources..." >&2
+        local platform_artifact platform_jar_version platform_snapshot_jar_version
+        local platform_source_jar_url platform_source_jar_filename
+
+        for platform_artifact in $platform_artifacts; do
+          platform_jar_version="$version"
+          if [[ "$version" =~ -SNAPSHOT$ ]]; then
+            local platform_version_metadata_url="${repo_url}/${group_id_path}/${platform_artifact}/${version}/maven-metadata.xml"
+            platform_snapshot_jar_version=$(curl -sSLf "$platform_version_metadata_url" 2>/dev/null |
+              xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
+            if [[ -n "$platform_snapshot_jar_version" ]]; then
+              platform_jar_version="$platform_snapshot_jar_version"
+            fi
+          fi
+
+          platform_source_jar_url="${repo_url}/${group_id_path}/${platform_artifact}/${version}/${platform_artifact}-${platform_jar_version}-sources.jar"
+          platform_source_jar_filename="${platform_artifact}-${platform_jar_version}-sources.jar"
+
+          if curl -sSLf -o "${build_dir}/${platform_source_jar_filename}" "${platform_source_jar_url}" 2>/dev/null; then
+            echo "info: Downloaded ${platform_artifact} platform sources" >&2
+            (
+              cd "${build_dir}"
+              jar xf "${platform_source_jar_filename}"
+              rm "${platform_source_jar_filename}"
+            )
+          fi
+        done
+      fi
+    fi
+  done
+
+  # Clean up META-INF
+  rm -rf "${build_dir}/META-INF"
+
+  echo "${build_dir}"
+}
+
+# =============================================================================
+# INSPECT SUBCOMMAND
+# =============================================================================
+
+usage_inspect() {
+  cat <<EOF
+Usage: $SCRIPT_NAME inspect [OPTIONS] CLASS_NAME [VERSION] [REPO_URL]
+
+Download and inspect source code for a Jetpack class or package.
+
+This is a convenience wrapper that combines resolve and source to map from
+a package/class name directly to source code.
+
+Arguments:
+  CLASS_NAME  Fully qualified package/class name
+              (e.g., androidx.core.splashscreen.SplashScreen)
+              OR Maven coordinate (e.g., androidx.wear.tiles:tiles)
+  VERSION     Version specifier (optional, defaults to STABLE). See below.
+  REPO_URL    Maven repository URL (optional, defaults to Google Maven)
+              Ignored for SNAPSHOT, build IDs, and pinned snapshot versions.
+
+Version Specifiers:
+
+  There are two categories of version specifiers:
+
+  **Symbolic (floating):** Resolve to the latest matching version at runtime.
+  The actual code returned may change over time as new versions are released.
+
+    ALPHA      Latest alpha version (e.g., 1.2.3-alpha04)
+    BETA       Latest beta version (e.g., 1.2.3-beta02)
+    RC         Latest release candidate (e.g., 1.2.3-rc01)
+    STABLE     Latest stable release (e.g., 1.2.3)
+    LATEST     Latest version of any kind
+    SNAPSHOT   Latest snapshot from androidx.dev
+
+  **Pinned (immutable):** Always resolve to the exact same code, regardless of
+  when the command is run. Use these for reproducible builds or to reference
+  a specific known-good version.
+
+    <version>  Specific version string (e.g., 1.6.0-alpha01, 2.0.0)
+    <build_id> Snapshot build ID from androidx.dev (e.g., 14710011)
+               Find build IDs at: https://androidx.dev/snapshots/builds
+
+Options:
+  -h, --help    Display this help message
+  --output DIR  Specify output directory (default: create temporary directory)
+
+Examples:
+  # Symbolic (floating) versions
+  $SCRIPT_NAME inspect androidx.core.splashscreen.SplashScreen
+  $SCRIPT_NAME inspect androidx.wear.tiles:tiles
+  $SCRIPT_NAME inspect androidx.wear.ambient.AmbientLifecycleObserver ALPHA
+  $SCRIPT_NAME inspect androidx.glance.wear.tiles.GlanceTileService SNAPSHOT
+
+  # Pinned (immutable) versions
+  $SCRIPT_NAME inspect androidx.lifecycle.ViewModel 2.8.7
+  $SCRIPT_NAME inspect androidx.wear.tiles.TileService 1.4.0
+  $SCRIPT_NAME inspect androidx.wear.tiles.TileService 14710011
+
+  pushd "\$($SCRIPT_NAME inspect androidx.wear.tiles.TileService)"
+
+For Kotlin Multiplatform libraries, both common and platform-specific sources
+are automatically downloaded.
+EOF
+  exit 0
+}
+
+cmd_inspect() {
+  local output_dir=""
+  local -a remaining_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h | --help)
+        usage_inspect
+        ;;
+      --output)
+        if [[ -z "${2:-}" ]]; then
+          echo "$SCRIPT_NAME inspect: option '--output' requires an argument" >&2
+          exit 1
+        fi
+        output_dir="$2"
+        shift 2
+        ;;
+      *)
+        remaining_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- "${remaining_args[@]}"
+
+  if [[ $# -lt 1 ]]; then
+    usage_inspect
+  fi
+
+  local class_name="$1"
+  local version_type="${2:-STABLE}"
+  local repo_url="${3:-}"
+
+  # Resolve class name to Maven coordinate
+  local coordinate
+  if [[ "$class_name" == *:* ]]; then
+    coordinate="$class_name"
+  else
+    coordinate=$(cmd_resolve "$class_name")
+  fi
+
+  # Build source arguments
+  local -a source_args=()
+  if [[ -n "$output_dir" ]]; then
+    source_args+=(--output "$output_dir")
+  fi
+  source_args+=("$coordinate" "$version_type")
+  if [[ -n "$repo_url" ]]; then
+    source_args+=("$repo_url")
+  fi
+
+  cmd_source "${source_args[@]}"
+}
+
+# =============================================================================
+# RESOLVE-EXCEPTIONS SUBCOMMAND
+# =============================================================================
+
+usage_resolve_exceptions() {
+  cat <<EOF
+Usage: $SCRIPT_NAME resolve-exceptions LIBRARY_COORDINATE
+
+Helper to analyze a Jetpack library and suggest exceptions for resolve.
+
+Arguments:
+  LIBRARY_COORDINATE  Maven coordinate (e.g., androidx.wear:wear)
+
+Examples:
+  $SCRIPT_NAME resolve-exceptions androidx.wear:wear
+  $SCRIPT_NAME resolve-exceptions androidx.glance.wear:wear-core
+
+This command downloads the source JAR from the AndroidX SNAPSHOT repository,
+examines the package structure, and suggests exception entries for packages
+that don't follow the standard naming pattern. The output can be added to the
+exceptions array in the resolve command.
+
+NOTE: Only supports SNAPSHOT versions from androidx.dev since we typically
+need to find exceptions for new APIs that are not yet stable.
+EOF
+  exit 0
+}
+
+cmd_resolve_exceptions() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage_resolve_exceptions
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    usage_resolve_exceptions
+  fi
+
+  require curl jar
+
+  local library="$1"
+  validate_package_format "$library"
+
+  local group_id artifact_id group_id_path
+  group_id=$(echo "$library" | cut -d: -f1)
+  artifact_id=$(echo "$library" | cut -d: -f2)
+  group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+
+  local metadata_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/maven-metadata.xml"
+
+  if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
+    echo "$SCRIPT_NAME resolve-exceptions: failed to fetch $metadata_url" >&2
+    exit 1
+  fi
+
+  local version
+  version=$(curl -sSLf "$metadata_url" 2>/dev/null |
+    sed -n 's/.*<latest>\(.*\)<\/latest>.*/\1/p' |
+    head -1)
+
+  if [[ -z "$version" ]]; then
+    echo "$SCRIPT_NAME resolve-exceptions: no version found at $metadata_url" >&2
+    exit 1
+  fi
+
+  # Resolve timestamped JAR version
+  local jar_version="$version"
+  local version_metadata_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/$version/maven-metadata.xml"
+
+  if command -v xmllint >/dev/null 2>&1; then
+    local snapshot_jar_version
+    snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
+      xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
+    if [[ -n "$snapshot_jar_version" ]]; then
+      jar_version="$snapshot_jar_version"
+    fi
+  else
+    local snapshot_jar_version
+    snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
+      grep -A 5 "<classifier>sources</classifier>" | grep "<value>" | head -1 | sed 's/.*<value>\(.*\)<\/value>.*/\1/')
+    if [[ -n "$snapshot_jar_version" ]]; then
+      jar_version="$snapshot_jar_version"
+    fi
+  fi
+
+  # Download and extract
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  local source_jar_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/$version/$artifact_id-$jar_version-sources.jar"
+  local source_jar="$tmpdir/sources.jar"
+
+  if ! curl -sSLf -o "$source_jar" "$source_jar_url" 2>/dev/null; then
+    echo "$SCRIPT_NAME resolve-exceptions: failed to download $source_jar_url" >&2
+    exit 1
+  fi
+
+  cd "$tmpdir"
+  jar xf sources.jar 2>/dev/null || true
+
+  # Find all unique packages
+  local packages
+  packages=$(find . -type f \( -name "*.java" -o -name "*.kt" \) 2>/dev/null | while read -r file; do
+    grep -m1 "^package " "$file" 2>/dev/null | sed 's/package //;s/;.*//;s/ .*//'
+  done | sort -u)
+
+  if [[ -z "$packages" ]]; then
+    echo "$SCRIPT_NAME resolve-exceptions: no packages found in $source_jar_url" >&2
+    exit 1
+  fi
+
+  local pkg result
+  while IFS= read -r pkg; do
+    if [[ -z "$pkg" ]]; then
+      continue
+    fi
+
+    result=$(cmd_resolve "$pkg.TestClass" 2>/dev/null || echo "ERROR")
+
+    if [[ "$result" != "$group_id:$artifact_id" ]]; then
+      echo "  \"$pkg|$group_id:$artifact_id\""
+    fi
+  done <<<"$packages"
+}
+
+# =============================================================================
+# MAIN DISPATCH
+# =============================================================================
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+case "$1" in
+  -h | --help)
+    usage
+    ;;
+  version)
+    shift
+    cmd_version "$@"
+    ;;
+  resolve)
+    shift
+    cmd_resolve "$@"
+    ;;
+  source)
+    shift
+    cmd_source "$@"
+    ;;
+  inspect)
+    shift
+    cmd_inspect "$@"
+    ;;
+  resolve-exceptions)
+    shift
+    cmd_resolve_exceptions "$@"
+    ;;
+  -*)
+    echo "$SCRIPT_NAME: unknown option: $1" >&2
+    echo "Run '$SCRIPT_NAME --help' for usage" >&2
+    exit 1
+    ;;
+  *)
+    echo "$SCRIPT_NAME: unknown command: $1" >&2
+    echo "Run '$SCRIPT_NAME --help' for usage" >&2
+    exit 1
+    ;;
+esac
