@@ -22,7 +22,6 @@ Before creating files, research the following:
    requirements, directory structure, and naming conventions.
 
 2. **Examine the `bin/jetpack` script thoroughly**:
-
    - All subcommands: `version`, `resolve`, `source`, `inspect`,
      `resolve-exceptions`
    - The underlying `curl`, `xmllint`, and `jar` commands
@@ -32,7 +31,6 @@ Before creating files, research the following:
    - The exceptions table in the `resolve` subcommand
 
    For each subcommand, understand:
-
    - Purpose and when to use it
    - The underlying raw commands
    - Input/output format
@@ -57,13 +55,13 @@ Do not create extra files like README.md, CHANGELOG.md, or INSTALLATION.md.
 
 Copy `bin/jetpack` into `scripts/`.
 
-Preserve the filename and executable permissions. Use a real copy, not a
-symlink.
+Preserve the filename and executable permissions. Symlink it from `bin/` (using
+relative path).
 
 ### Transitive Script Dependencies
 
 The `jetpack` script is self-contained and does not call other scripts from
-`bin/`. No additional scripts need to be copied.
+`bin/`. No additional scripts need to be symlinked.
 
 ## SKILL.md Requirements
 
@@ -308,7 +306,7 @@ Before finalizing, verify:
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
 - [ ] `SKILL.md` body is under 500 lines
-- [ ] `scripts/` contains a copy of `bin/jetpack`
+- [ ] `scripts/` contains a symlink to `bin/jetpack`
 - [ ] Script is executable (`chmod +x`)
 - [ ] Both script-first AND raw-command-fallback approaches are documented
 - [ ] `references/command-index.md` documents each subcommand with raw commands
@@ -321,10 +319,12 @@ Before finalizing, verify:
 
 ## Implementation Notes
 
-- Use `mkdir -p` and `cp -p` to create directories and copy files
+- Use `mkdir -p` to create directories
+- Use `ln -s` to create relative symlinks (e.g.,
+  `ln -s ../../../bin/jetpack scripts/jetpack`)
 - Verify executable bits with `chmod +x scripts/*` if needed
-- Do not modify the original `bin/jetpack` script—only copy into the skill
-- Test that the copied script works from the skill directory
+- Do not modify the original `bin/jetpack` script—only symlink into the skill
+- Test that the symlinked script works from the skill directory
 - The script's `require` function will check for dependencies at runtime
 
 ## Package Name Examples

@@ -22,7 +22,6 @@ Before creating files, research the following:
    requirements, directory structure, and naming conventions.
 
 2. **Examine relevant scripts in `bin/`**:
-
    - All `bin/adb-*` scripts (~40 scripts for device manipulation, screenshots,
      tiles, demo mode, key events, dumpsys, etc.)
    - All `bin/wearableservice-*` scripts (4 scripts for Wear OS data layer
@@ -31,7 +30,6 @@ Before creating files, research the following:
    - All `bin/apk-*` scripts (~16 scripts for APK analysis)
 
    For each script, understand:
-
    - Purpose and when to use it
    - The underlying `adb` commands
    - Dependencies (look for `require` lines)
@@ -66,13 +64,14 @@ Copy these scripts into `scripts/`:
 - `bin/apk-*` scripts that analyze installed packages (e.g., `apk-tiles`,
   `apk-badging`)
 
-Preserve filenames and executable permissions. Use real copies, not symlinks.
+Preserve filenames and executable permissions. Symlink them from `bin/` (using
+relative paths), do not copy.
 
 ### Transitive Script Dependencies (Required)
 
-If any script you copy invokes other scripts by name (for example, `apk-tiles`
-calling `apk-cat-manifest`), you must also copy those invoked scripts into
-`scripts/` so the skill remains self-contained.
+If any script you symlink invokes other scripts by name (for example,
+`apk-tiles` calling `apk-cat-manifest`), you must also symlink those invoked
+scripts into `scripts/` so the skill remains self-contained.
 
 How to detect this:
 
@@ -256,7 +255,7 @@ Before finalizing, verify:
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
 - [ ] `SKILL.md` body is under 500 lines
-- [ ] `scripts/` contains copies of all `bin/adb-*`, `bin/wearableservice-*`,
+- [ ] `scripts/` contains symlinks to all `bin/adb-*`, `bin/wearableservice-*`,
       and `bin/packagename` scripts
 - [ ] Scripts are executable (`chmod +x`)
 - [ ] Both script-first AND raw-ADB-fallback approaches are documented
@@ -269,7 +268,9 @@ Before finalizing, verify:
 
 ## Implementation Notes
 
-- Use `mkdir -p` and `cp -p` to create directories and copy files
+- Use `mkdir -p` to create directories
+- Use `ln -s` to create relative symlinks (e.g.,
+  `ln -s ../../../bin/script scripts/script`)
 - Verify executable bits with `chmod +x scripts/*` if needed
-- Do not modify original `bin/` scripts—only copy into the skill
-- Test that copied scripts work from the skill directory
+- Do not modify original `bin/` scripts—only symlink into the skill
+- Test that symlinked scripts work from the skill directory
