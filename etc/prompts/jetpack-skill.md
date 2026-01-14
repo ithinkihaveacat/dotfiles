@@ -321,7 +321,7 @@ Before finalizing, verify:
 
 - Use `mkdir -p` to create directories
 - Use `ln -s` to create relative symlinks (e.g.,
-  `ln -s ../../../bin/jetpack scripts/jetpack`)
+  `ln -s ../../../../bin/jetpack scripts/jetpack`)
 - Verify executable bits with `chmod +x scripts/*` if needed
 - Do not modify the original `bin/jetpack` script—only symlink into the skill
 - Test that the symlinked script works from the skill directory
