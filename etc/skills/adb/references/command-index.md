@@ -7,6 +7,7 @@
 - [Device Basics](#device-basics)
 - [Media Capture](#media-capture)
 - [Tile Management (Wear OS)](#tile-management-wear-os)
+- [Activity Discovery](#activity-discovery)
 - [Package Operations](#package-operations)
 - [Wear OS Data Layer](#wear-os-data-layer)
 - [Display & Demo Mode](#display--demo-mode)
@@ -138,6 +139,69 @@ adb shell am broadcast \
 ```bash
 adb shell dumpsys activity service com.google.android.wearable.app.tiles.TileService
 # (Requires parsing output)
+```
+
+## Activity Discovery
+
+### `scripts/adb-activities`
+
+**Purpose**: List activities on the device, tagged by category. By default shows
+only user-installed apps. **Dependencies**: `adb` **Usage**:
+
+```bash
+scripts/adb-activities [OPTIONS]
+```
+
+**Options**:
+
+- `--launcher-only`: Show only launcher activities
+- `--home-only`: Show only home/launcher app activities
+- `--tv-only`: Show only TV/Leanback activities
+- `--settings-only`: Show only settings/preference activities
+- `--all`: Include system apps (default: user apps only)
+
+**Category Tags** (in default output):
+
+- `L` - Launcher (`android.intent.category.LAUNCHER`)
+- `H` - Home (`android.intent.category.HOME`)
+- `T` - TV/Leanback (`android.intent.category.LEANBACK_LAUNCHER`)
+- `S` - Settings (`android.intent.category.PREFERENCE`)
+
+**Examples**:
+
+```bash
+# List all activities from user apps with category tags
+scripts/adb-activities
+
+# Find launcher activities only
+scripts/adb-activities --launcher-only
+
+# Find TV/Leanback activities (useful for Android TV)
+scripts/adb-activities --tv-only
+
+# Include system apps
+scripts/adb-activities --all
+```
+
+**Raw Command**:
+
+```bash
+# Query launcher activities
+adb shell cmd package query-activities \
+  -a android.intent.action.MAIN \
+  -c android.intent.category.LAUNCHER
+
+# Query TV/Leanback activities
+adb shell cmd package query-activities \
+  -a android.intent.action.MAIN \
+  -c android.intent.category.LEANBACK_LAUNCHER
+
+# Query settings activities
+adb shell cmd package query-activities \
+  -c android.intent.category.PREFERENCE
+
+# List user-installed packages only
+adb shell pm list packages -3
 ```
 
 ## Package Operations

@@ -51,7 +51,7 @@ Do not create extra files like README.md, CHANGELOG.md, or INSTALLATION.md.
 
 ## Script Selection
 
-Copy these scripts into `scripts/`:
+Symlink these scripts into `scripts/` using relative paths:
 
 **Required (core functionality):**
 
@@ -64,8 +64,7 @@ Copy these scripts into `scripts/`:
 - `bin/apk-*` scripts that analyze installed packages (e.g., `apk-tiles`,
   `apk-badging`)
 
-Preserve filenames and executable permissions. Symlink them from `bin/` (using
-relative paths), do not copy.
+Preserve filenames and executable permissions.
 
 ### Transitive Script Dependencies (Required)
 
@@ -132,9 +131,10 @@ load this only when the skill activates, so be concise.
 #### Quick Start
 
 - How to target a device (`ANDROID_SERIAL` for multiple devices)
-- 5-6 highest-value commands to run first:
+- 6-7 highest-value commands to run first:
   - `adb-screenshot` (with circular mask for Wear OS)
   - `adb-tile-add` + `adb-tile-show` workflow
+  - `adb-activities` (discover launcher, TV, settings activities)
   - `wearableservice-capabilities` / `wearableservice-nodes`
   - `packagename tiles PACKAGE`
   - `adb-device-properties`
@@ -148,6 +148,7 @@ with one-line descriptions:
 - **Device basics**: connection, wake/sleep, properties, API level
 - **Media capture**: screenshots, screen recording
 - **Tile management**: add, show, remove, list tiles
+- **Activity discovery**: list activities by category (launcher, TV, settings)
 - **Package operations**: launch, stop, uninstall, permissions, services
 - **Wear OS data layer**: capabilities, nodes, data items, RPCs
 - **Display/demo mode**: demo on/off, font scale, touches, theme
@@ -199,6 +200,24 @@ adb exec-out "screencap -p" | magick - \
   \( +clone -channel A -evaluate set 0 +channel \
      -draw "circle %[fx:(w-1)/2],%[fx:(h-1)/2] %[fx:(w-1)/2],0.5" \) \
   -compose dstin -composite output.png
+```
+
+##### Activity Discovery
+
+```bash
+# From adb-activities: Query launcher activities
+adb shell cmd package query-activities \
+  -a android.intent.action.MAIN \
+  -c android.intent.category.LAUNCHER
+
+# Query TV/Leanback activities
+adb shell cmd package query-activities \
+  -a android.intent.action.MAIN \
+  -c android.intent.category.LEANBACK_LAUNCHER
+
+# Query settings activities
+adb shell cmd package query-activities \
+  -c android.intent.category.PREFERENCE
 ```
 
 #### Safety Notes
