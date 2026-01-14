@@ -56,10 +56,8 @@ Do not create extra files like README.md, CHANGELOG.md, or INSTALLATION.md.
 
 ## Script Selection
 
-Copy `bin/emumanager` into `scripts/`.
-
-Preserve the filename and executable permissions. Symlink it from `bin/` (using
-relative path).
+Symlink `bin/emumanager` into `scripts/` using a relative path. Preserve the
+filename and executable permissions.
 
 ### Transitive Script Dependencies
 

@@ -51,7 +51,7 @@ Do not create extra files like README.md, CHANGELOG.md, or INSTALLATION.md.
 
 ## Script Selection
 
-Copy these scripts into `scripts/`:
+Symlink these scripts into `scripts/` using relative paths:
 
 **Required (core functionality):**
 
@@ -64,8 +64,7 @@ Copy these scripts into `scripts/`:
 - `bin/apk-*` scripts that analyze installed packages (e.g., `apk-tiles`,
   `apk-badging`)
 
-Preserve filenames and executable permissions. Symlink them from `bin/` (using
-relative paths), do not copy.
+Preserve filenames and executable permissions.
 
 ### Transitive Script Dependencies (Required)
 
