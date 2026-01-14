@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS] 
+Usage: $(basename "$0") [OPTIONS]
 
 Lists available activities on the connected device, tagged by category.
+By default, lists only activities from user-installed (third-party) apps.
 
 Supported categories:
   L - Launcher (android.intent.category.LAUNCHER)
@@ -17,6 +23,7 @@ Options:
   --home-only      List only home/launcher app activities
   --tv-only        List only TV/Leanback activities
   --settings-only  List only settings activities
+  --all            List activities from all packages (including system apps)
   -h, --help       Display this help message and exit
 
 Environment:
@@ -30,6 +37,7 @@ launcher_only=0
 home_only=0
 tv_only=0
 settings_only=0
+all_apps=0
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -37,6 +45,7 @@ while [[ "$#" -gt 0 ]]; do
     --home-only) home_only=1 ;;
     --tv-only) tv_only=1 ;;
     --settings-only) settings_only=1 ;;
+    --all) all_apps=1 ;;
     -h | --help) usage ;;
     *)
       echo "$(basename "$0"): unknown option '$1'" >&2
@@ -46,9 +55,6 @@ while [[ "$#" -gt 0 ]]; do
   shift
 done
 
-# Validate mutual exclusivity (optional, but good for clarity if user expects combined list)
-# Actually, allowing multiple flags to filter 'OR' logic or just failing?
-# adb-tiles fails if both are set. Let's fail if more than one is set.
 count=$((launcher_only + home_only + tv_only + settings_only))
 if ((count > 1)); then
   echo "$(basename "$0"): cannot specify multiple *-only options" >&2
@@ -59,7 +65,6 @@ require() { hash "$@" || exit 127; }
 
 require adb
 
-# Check device availability
 if ! adb get-state >/dev/null 2>&1; then
   if [[ -n "$ANDROID_SERIAL" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
@@ -76,8 +81,18 @@ CAT_HOME="android.intent.category.HOME"
 CAT_LEANBACK="android.intent.category.LEANBACK_LAUNCHER"
 CAT_PREFERENCE="android.intent.category.PREFERENCE"
 
+# Fetch user packages if filtering is enabled
+declare -A user_pkgs
+if ((!all_apps)); then
+  # Read user packages into associative array
+  # 'pm list packages -3' returns "package:com.example"
+  while read -r line; do
+    pkg=${line#package:}
+    user_pkgs["$pkg"]=1
+  done < <(adb shell pm list packages -3 | tr -d '\r')
+fi
+
 # Awk script to parse 'cmd package query-activities' output
-# ActivityInfo block structure is similar to ServiceInfo
 # shellcheck disable=SC2016
 PARSE_CMD_OUTPUT_AWK=' 
   /ActivityInfo:/ { in_block = 1; next }
@@ -85,12 +100,6 @@ PARSE_CMD_OUTPUT_AWK='
   in_block && /name=/ { sub("name=", "", $1); name = $1 }
   in_block && /packageName=/ { sub("packageName=", "", $1); pkg = $1; print pkg "/" name }
 '
-
-# Queries
-# We always query all 4 to build the complete list if no specific flag is set,
-# or just the needed ones?
-# Optimization: if a flag is set, only run that query.
-# But for the "list all with tags" mode, we need all.
 
 run_query() {
   local action=$1
@@ -105,33 +114,44 @@ run_query() {
     tr -d '\r'
 }
 
-# Fetch data
-# We'll use associative arrays in the main awk to merge.
+# Helper to filter output based on user_pkgs
+filter_and_print() {
+  while read -r comp; do
+    [[ -z "$comp" ]] && continue
+    if ((all_apps)); then
+      echo "$comp"
+    else
+      # Extract package name: com.example/Activity -> com.example
+      local pkg="${comp%%/*}"
+      if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+        echo "$comp"
+      fi
+    fi
+  done
+}
 
-# If specific flag, just run one and exit
+# If specific flag, run query and filter
 if ((launcher_only)); then
-  run_query "$ACTION_MAIN" "$CAT_LAUNCHER" | sort | uniq
+  run_query "$ACTION_MAIN" "$CAT_LAUNCHER" | filter_and_print | sort | uniq
   exit 0
 fi
 
 if ((home_only)); then
-  run_query "$ACTION_MAIN" "$CAT_HOME" | sort | uniq
+  run_query "$ACTION_MAIN" "$CAT_HOME" | filter_and_print | sort | uniq
   exit 0
 fi
 
 if ((tv_only)); then
-  run_query "$ACTION_MAIN" "$CAT_LEANBACK" | sort | uniq
+  run_query "$ACTION_MAIN" "$CAT_LEANBACK" | filter_and_print | sort | uniq
   exit 0
 fi
 
 if ((settings_only)); then
-  run_query "" "$CAT_PREFERENCE" | sort | uniq
+  run_query "" "$CAT_PREFERENCE" | filter_and_print | sort | uniq
   exit 0
 fi
 
 # Default: List all with tags
-# We fetch all concurrently (in background) or just sequentially?
-# adb-tiles does it sequentially but feeds to awk via process substitution.
 
 # Gather lists
 list_l=$(run_query "$ACTION_MAIN" "$CAT_LAUNCHER")
@@ -166,7 +186,7 @@ awk '
       tag_h = (c in h) ? "H" : " "
       tag_t = (c in t) ? "T" : " "
       tag_s = (c in s) ? "S" : " "
-
+      
       # Format: LH T S com.package/Activity
       printf "%s%s%s%s %s\n", tag_l, tag_h, tag_t, tag_s, c
     }
@@ -176,4 +196,16 @@ awk '
   echo "$list_h" | awk '{print "H: " $0}'
   echo "$list_t" | awk '{print "T: " $0}'
   echo "$list_s" | awk '{print "S: " $0}'
-) | sort | uniq
+) | sort | uniq | while read -r line; do
+  if ((all_apps)); then
+    echo "$line"
+  else
+    # line is "LHTS com.pkg/Act"
+    # Extract comp (last field)
+    comp=${line##* }
+    pkg=${comp%%/*}
+    if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+      echo "$line"
+    fi
+  fi
+done

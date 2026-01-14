@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
 Lists all available tile and widget services on the connected device.
+By default, lists only services from user-installed (third-party) apps.
 
 This script queries the package manager for services that:
   - Require the 'BIND_TILE_PROVIDER' permission (Tiles)
@@ -16,6 +22,7 @@ By default, it lists both with indicators (T for Tile, W for Widget).
 Options:
   --tiles-only    List only tile services (no indicators)
   --widgets-only  List only widget services (no indicators)
+  --all           List services from all packages (including system apps)
   -h, --help      Display this help message and exit
 
 Environment:
@@ -33,11 +40,13 @@ EOF
 # Parse args
 tiles_only=0
 widgets_only=0
+all_apps=0
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --tiles-only) tiles_only=1 ;;
     --widgets-only) widgets_only=1 ;;
+    --all) all_apps=1 ;;
     -h | --help) usage ;;
     *)
       echo "$(basename "$0"): unknown option '$1'" >&2
@@ -66,6 +75,31 @@ if ! adb get-state >/dev/null 2>&1; then
   exit 1
 fi
 
+# Fetch user packages if filtering is enabled
+declare -A user_pkgs
+if ((!all_apps)); then
+  while read -r line; do
+    pkg=${line#package:}
+    user_pkgs["$pkg"]=1
+  done < <(adb shell pm list packages -3 | tr -d '\r')
+fi
+
+# Helper to filter output based on user_pkgs
+filter_and_print() {
+  while read -r comp; do
+    [[ -z "$comp" ]] && continue
+    if ((all_apps)); then
+      echo "$comp"
+    else
+      # Extract package name: com.example/Service -> com.example
+      local pkg="${comp%%/*}"
+      if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+        echo "$comp"
+      fi
+    fi
+  done
+}
+
 # Define constants
 TILE_PERM="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
 TILE_ACTION="androidx.wear.tiles.action.BIND_TILE_PROVIDER"
@@ -74,7 +108,7 @@ WIDGET_ACTION="androidx.glance.wear.action.BIND_WIDGET_PROVIDER"
 # Awk script to parse 'cmd package query-services' output
 # Extract package/class from ServiceInfo blocks, ignoring ApplicationInfo
 # shellcheck disable=SC2016
-PARSE_CMD_OUTPUT_AWK='
+PARSE_CMD_OUTPUT_AWK=' 
   /ServiceInfo:/ { in_service = 1; next }
   /ApplicationInfo:/ { in_service = 0; next }
   in_service && /name=/ { sub("name=", "", $1); svc_name = $1 }
@@ -104,7 +138,7 @@ action_widgets=$(adb shell cmd package query-services -a "${WIDGET_ACTION}" 2>/d
 
 # Process and Merge using awk
 # We pass the three lists as separate input streams (process substitution)
-awk -v t_only="$tiles_only" -v w_only="$widgets_only" '
+awk -v t_only="$tiles_only" -v w_only="$widgets_only" ' 
   # Helper to clean component names
   function clean(c) {
     # Remove whitespace
@@ -112,12 +146,6 @@ awk -v t_only="$tiles_only" -v w_only="$widgets_only" '
     return c
   }
 
-  # Read from specific files based on ARGIND or similar isn'\''t portable.
-  # Instead, we will cat them with prefixes and parse the single stream.
-  
-  # Logic handled in the main loop below:
-  # The input will be formatted as "TYPE:COMPONENT"
-  
   {
     type = $1
     # Component is the rest of the line (fields 2+)
@@ -159,4 +187,25 @@ awk -v t_only="$tiles_only" -v w_only="$widgets_only" '
   echo "$dump_tiles" | awk '{print "TILE: " $0}'
   echo "$action_tiles" | awk '{print "TILE: " $0}'
   echo "$action_widgets" | awk '{print "WIDGET: " $0}'
-) | sort | uniq
+) | sort | uniq | while read -r line; do
+  if ((all_apps)); then
+    echo "$line"
+  else
+    # line might be "TW com.pkg/Svc" or just "com.pkg/Svc" if flag set
+    # We need to extract the component cleanly
+
+    # If using flags, line is just "com.pkg/Svc"
+    if ((tiles_only || widgets_only)); then
+      comp="$line"
+    else
+      # line is "X Y com.pkg/Svc"
+      # Extract last field
+      comp=${line##* }
+    fi
+
+    pkg=${comp%%/*}
+    if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+      echo "$line"
+    fi
+  fi
+done
