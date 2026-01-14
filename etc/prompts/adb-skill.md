@@ -39,7 +39,7 @@ Before creating files, research the following:
 Create this exact structure:
 
 ```text
-skills/android-adb-wear/
+etc/skills/adb/
 ├── SKILL.md              # Required: frontmatter + instructions
 ├── scripts/              # Copies of all relevant scripts
 └── references/           # Reference documentation
@@ -88,7 +88,7 @@ Follow the Agent Skills specification exactly:
 
 ```yaml
 ---
-name: android-adb-wear
+name: adb
 description: [See below]
 ---
 ```
@@ -251,7 +251,7 @@ Cover:
 
 Before finalizing, verify:
 
-- [ ] Skill directory exists at `skills/android-adb-wear/`
+- [ ] Skill directory exists at `etc/skills/adb/`
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
 - [ ] `SKILL.md` body is under 500 lines
@@ -270,7 +270,7 @@ Before finalizing, verify:
 
 - Use `mkdir -p` to create directories
 - Use `ln -s` to create relative symlinks (e.g.,
-  `ln -s ../../../bin/script scripts/script`)
+  `ln -s ../../../../bin/script scripts/script`)
 - Verify executable bits with `chmod +x scripts/*` if needed
 - Do not modify original `bin/` scripts—only symlink into the skill
 - Test that symlinked scripts work from the skill directory
