@@ -1,12 +1,12 @@
 ---
 name: emumanager
 description: >
-  Manages Android SDK, emulators, and AVDs (Android Virtual Devices). Provides
-  commands for bootstrapping the SDK environment, creating/starting/stopping
-  AVDs, and managing system images. Supports mobile, Wear OS, TV, and Automotive
-  device types. Use when setting up Android development environments, managing
-  emulators, creating AVDs, downloading system images, or troubleshooting SDK
-  issues. Covers sdkmanager, avdmanager, emulator CLI tools.
+  Manages Android SDK, emulators, and AVDs. Use when bootstrapping Android SDK,
+  creating/starting/stopping AVDs, downloading system images, or troubleshooting
+  emulator issues. Supports mobile, Wear OS, TV, and Automotive devices. Covers
+  sdkmanager, avdmanager, emulator CLI. Triggers: android emulator, android
+  virtual device, avd, system image, wear os emulator, tv emulator, automotive
+  emulator, bootstrap android sdk.
 ---
 
 # Android Emulator Manager
