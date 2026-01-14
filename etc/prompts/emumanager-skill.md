@@ -19,9 +19,9 @@ agent can use to:
 
 Before creating files, research the following:
 
-1. **Review the Agent Skills specification** at
-   <https://agentskills.io/specification.md> to understand frontmatter
-   requirements, directory structure, and naming conventions.
+1. **Review the Agent Skills specification and best practices**:
+   - Specification: <https://agentskills.io/specification.md>
+   - Best practices: <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
 
 2. **Examine the `bin/emumanager` script thoroughly**:
    - All subcommands: `bootstrap`, `doctor`, `list`, `info`, `create`, `start`,
@@ -87,20 +87,25 @@ description: [See below]
 
 - Max 1024 characters
 - Write in **third person** (the description is injected into system prompts)
+  - Good: "Manages Android SDK..." / "Extracts text from PDFs..."
+  - Bad: "I can help you..." / "You can use this to..."
 - Include what the skill does AND when to use it
-- Include trigger phrases: emulator, android emulator, avd, android virtual
-  device, sdk, sdkmanager, avdmanager, wear os emulator, tv emulator, automotive
-  emulator, system image, bootstrap android
+- End with explicit trigger phrases using "Triggers:" prefix for reliable
+  discovery across different agent implementations
+
+Include these trigger phrases: android emulator, android virtual device, avd,
+system image, wear os emulator, tv emulator, automotive emulator, bootstrap
+android sdk, sdkmanager, avdmanager
 
 Example pattern:
 
 ```yaml
 description: >
-  Manages Android SDK, emulators, and AVDs. Provides commands for bootstrapping
-  the SDK environment, creating/starting/stopping AVDs, and managing system
-  images. Supports mobile, Wear OS, TV, and Automotive device types. Use when
-  setting up Android development environments, managing emulators, creating AVDs,
-  or troubleshooting SDK issues.
+  Manages Android SDK, emulators, and AVDs. Use when bootstrapping Android SDK,
+  creating/starting/stopping AVDs, downloading system images, or troubleshooting
+  emulator issues. Supports mobile, Wear OS, TV, and Automotive devices. Covers
+  sdkmanager, avdmanager, emulator CLI. Triggers: android emulator, android
+  virtual device, avd, system image, wear os emulator, bootstrap android sdk.
 ```
 
 For maximum compatibility across skill loaders, prefer a single-line
@@ -113,6 +118,16 @@ wrapping, prefer a folded scalar (`description: >`) rather than a literal block
 
 Keep the body under 500 lines. Structure it for progressive disclosure—agents
 load this only when the skill activates, so be concise.
+
+**Degrees of Freedom:** Match specificity to task fragility:
+
+- **Low freedom** (exact commands): Use for fragile operations like SDK
+  bootstrap, database migrations, or sequences that must run exactly right
+- **High freedom** (guidance): Use for flexible tasks where context determines
+  the best approach
+
+For emumanager, most operations are deterministic (run this exact command), so
+prefer low-freedom documentation with specific commands.
 
 #### Quick Start
 
@@ -254,43 +269,11 @@ done
 "$ADB" -s emulator-5554 emu kill
 ```
 
-#### Common Workflows
+#### Common Workflows (Optional)
 
-Document typical usage patterns:
-
-1. **First-time setup**
-
-   ```bash
-   scripts/emumanager bootstrap
-   scripts/emumanager doctor
-   ```
-
-2. **Creating and running a phone emulator**
-
-   ```bash
-   scripts/emumanager create my_phone --mobile
-   scripts/emumanager start my_phone
-   ```
-
-3. **Creating a Wear OS emulator**
-
-   ```bash
-   scripts/emumanager create my_watch --wear
-   scripts/emumanager start my_watch
-   ```
-
-4. **Factory resetting an AVD**
-
-   ```bash
-   scripts/emumanager start my_phone --wipe-data
-   ```
-
-5. **Checking for SDK updates**
-
-   ```bash
-   scripts/emumanager outdated
-   scripts/emumanager update
-   ```
+**Note:** Consider omitting this section if it largely duplicates Quick Start.
+Only include workflows that combine commands in non-obvious ways or demonstrate
+patterns not shown elsewhere. Every line costs context tokens.
 
 #### Safety Notes
 
@@ -347,31 +330,80 @@ Cover:
 
 ## Writing Guidelines
 
-- Be concise. Agents are intelligent; provide what they don't already know.
-- Use imperative form ("Run this command" not "You can run this command").
-- Include concrete examples with realistic AVD names and image paths.
-- Document raw commands prominently—they're essential fallbacks.
-- Keep file references one level deep from SKILL.md.
+### Core Principle: Conciseness
+
+The context window is shared with conversation history, other skills, and system
+prompts. **Assume agents are already intelligent**—only provide information they
+don't already know. Challenge each paragraph: "Does this justify its token
+cost?"
+
+Bad (verbose):
+```markdown
+PDF (Portable Document Format) files are a common file format. To extract
+text from a PDF, you'll need to use a library...
+```
+
+Good (concise):
+```markdown
+Use pdfplumber for text extraction:
+```python
+with pdfplumber.open("file.pdf") as pdf:
+    text = pdf.pages[0].extract_text()
+```
+
+### Cross-Model Compatibility
+
+Skills run on Claude (Haiku/Sonnet/Opus), Gemini CLI, and OpenAI Codex. Write
+instructions that work across capability levels:
+
+- Provide enough detail for simpler models (Haiku) to follow
+- Don't over-explain for powerful models (Opus)
+- Include explicit trigger phrases for reliable discovery
+- Raw command fallbacks help when model-specific tool access varies
+
+### Style
+
+- Use imperative form ("Run this command" not "You can run this command")
+- Include concrete examples with realistic AVD names and image paths
+- Document raw commands prominently—they're essential fallbacks
+- Keep file references one level deep from SKILL.md
+- Avoid redundant sections (don't repeat Quick Start examples in Common
+  Workflows)
 
 ## Quality Checklist
 
 Before finalizing, verify:
 
+### Structure
 - [ ] Skill directory exists at `etc/skills/emumanager/`
-- [ ] `SKILL.md` has valid frontmatter matching the spec
-- [ ] Description is in third person and includes trigger phrases
-- [ ] `SKILL.md` body is under 500 lines
 - [ ] `scripts/` contains a symlink to `bin/emumanager`
 - [ ] Script is executable (`chmod +x`)
-- [ ] Both script-first AND raw-command-fallback approaches are documented
+- [ ] No extraneous files (README.md, etc.)
+
+### SKILL.md
+- [ ] Valid frontmatter matching the spec
+- [ ] Description is in third person
+- [ ] Description ends with "Triggers:" and explicit keywords
+- [ ] Body is under 500 lines
+- [ ] No redundant sections (Quick Start vs Common Workflows)
+
+### Content Coverage
+- [ ] Both script-first AND raw-command-fallback approaches documented
+- [ ] All twelve subcommands documented
+- [ ] Device types (mobile, wear, tv, auto) explained
+- [ ] Start modes (quick boot, cold boot, wipe data) explained
+- [ ] Environment variables documented
+- [ ] Examples use realistic AVD names and system image paths
+
+### References
 - [ ] `references/command-index.md` documents each subcommand with raw commands
 - [ ] `references/troubleshooting.md` covers common issues
-- [ ] All twelve subcommands are documented
-- [ ] Device types (mobile, wear, tv, auto) are explained
-- [ ] Start modes (quick boot, cold boot, wipe data) are explained
-- [ ] Environment variables are documented
-- [ ] No extraneous files (README.md, etc.)
-- [ ] Examples use realistic AVD names and system image paths
+- [ ] Files over 100 lines have a Contents section
+
+### Cross-Model Compatibility
+- [ ] Instructions are clear enough for simpler models (Haiku)
+- [ ] Instructions don't over-explain for powerful models (Opus)
+- [ ] Raw commands provide fallback when tool access varies
 
 ## Implementation Notes
 
