@@ -32,6 +32,9 @@ multiple devices are connected.
 
 - **Device Info:** `scripts/adb-device-properties`
 
+- **Discover Activities:** `scripts/adb-activities` (find launcher, TV, settings
+  activities)
+
 ## Script Index
 
 See `references/command-index.md` for detailed usage and raw ADB equivalents.
@@ -55,6 +58,12 @@ See `references/command-index.md` for detailed usage and raw ADB equivalents.
 - `scripts/adb-tile-show`: Show an added tile.
 - `scripts/adb-tile-remove`: Remove a tile.
 - `scripts/adb-tiles`: List currently added tiles.
+
+### Activity Discovery
+
+- `scripts/adb-activities`: List activities tagged by category (Launcher, Home,
+  TV/Leanback, Settings). Use `--launcher-only`, `--tv-only`, `--settings-only`
+  to filter. Add `--all` to include system apps.
 
 ### Package Operations
 
@@ -122,6 +131,24 @@ adb exec-out "screencap -p" | magick - \
   \( +clone -channel A -evaluate set 0 +channel \
      -draw "circle %[fx:(w-1)/2],%[fx:(h-1)/2] %[fx:(w-1)/2],0.5" \) \
   -compose dstin -composite output.png
+```
+
+#### Activity Discovery
+
+```bash
+# From adb-activities: Query launcher activities
+adb shell cmd package query-activities \
+  -a android.intent.action.MAIN \
+  -c android.intent.category.LAUNCHER
+
+# Query TV/Leanback activities
+adb shell cmd package query-activities \
+  -a android.intent.action.MAIN \
+  -c android.intent.category.LEANBACK_LAUNCHER
+
+# Query settings activities
+adb shell cmd package query-activities \
+  -c android.intent.category.PREFERENCE
 ```
 
 ## Safety Notes
