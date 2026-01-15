@@ -39,7 +39,6 @@ Before creating files, research the following:
    - Image encoding (base64 webp)
    - Request body structure for vision vs text tasks
    - Single-image vs multi-image prompts
-   - Model selection (flash vs pro)
 
 ## Deliverable Structure
 
@@ -166,28 +165,19 @@ A compact reference for each script. For each, provide:
 Scripts to document:
 
 1. **screenshot-describe** - Generate concise alt-text for a screenshot
-   - Optimized for UI captures; default prompt focuses on elements, text, colors
+   - Fast, optimized for UI captures
+   - Default prompt focuses on elements, text, colors, layout
    - Supports custom prompts for specific analysis needs
-   - Uses gemini-2.5-flash model
 
 2. **screenshot-compare** - Compare two screenshots for visual differences
    - Identifies layout shifts, color changes, padding, text updates
    - Detailed paragraph-form output for UI QA
-   - Uses gemini-3-flash-preview model
    - Exit code 2 when images are identical
 
 3. **emerson** - Generate essay-length (~3000 words) analysis from text input
    - Reads reference material from stdin
    - Produces authoritative, footnoted Markdown output
-   - Uses gemini-3-pro-preview model
-
-#### Model Selection
-
-Document which models each script uses and why:
-
-- `gemini-2.5-flash` - Fast, efficient for single-image description
-- `gemini-3-flash-preview` - Balanced speed/quality for image comparison
-- `gemini-3-pro-preview` - High quality for long-form text generation
+   - High-quality output suitable for documentation and reports
 
 #### Raw API Fallback
 
@@ -197,6 +187,10 @@ don't work:
 1. Show the Gemini API endpoint pattern
 2. Explain image encoding requirements
 3. Provide curl commands for each operation
+
+Note: The raw examples should use the same models as the scripts. Extract the
+current model names from the scripts when writing the skill documentation, as
+these may change over time.
 
 Include worked examples:
 
@@ -310,7 +304,6 @@ For each script, document:
 
 Include a section on:
 
-- **Gemini API models** used by each script
 - **Image encoding** requirements and platform differences (macOS vs Linux)
 - **Request structure** differences (image-first vs text-first)
 
@@ -393,7 +386,6 @@ Before finalizing, verify:
 ### Content Coverage
 - [ ] Both script-first AND raw-API-fallback approaches documented
 - [ ] All three scripts documented (screenshot-describe, screenshot-compare, emerson)
-- [ ] Gemini models explained (flash vs pro)
 - [ ] Image encoding conventions documented
 - [ ] Platform differences (macOS vs Linux) noted
 - [ ] Examples use realistic filenames
