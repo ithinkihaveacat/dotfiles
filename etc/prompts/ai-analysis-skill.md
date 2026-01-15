@@ -1,13 +1,12 @@
-# Prompt: Create Screenshot Analysis Skill
+# Prompt: Create AI Analysis Skill
 
-Create an Agent Skill that helps agents analyze screenshots and generate text
-content using AI vision and language models. This skill should document the
-screenshot analysis and text generation scripts and provide both script-first
-and raw-API-fallback approaches.
+Create an Agent Skill that helps agents perform AI-powered analysis tasks using
+the Gemini API. This skill should document CLI tools that delegate to AI models
+for image description, image comparison, text generation, and boolean evaluation.
 
 ## Goal
 
-Produce a self-contained skill directory at `etc/skills/screenshot/` that an
+Produce a self-contained skill directory at `etc/skills/ai-analysis/` that an
 agent can use to:
 
 1. Run the bundled scripts directly (fast, deterministic)
@@ -23,9 +22,10 @@ Before creating files, research the following:
    - Best practices: <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
 
 2. **Examine the AI-powered scripts thoroughly**:
-   - `bin/screenshot-describe` - Generate alt-text/descriptions from screenshots
-   - `bin/screenshot-compare` - Compare two screenshots for UI differences
+   - `bin/screenshot-describe` - Generate alt-text/descriptions from images
+   - `bin/screenshot-compare` - Compare two images for visual differences
    - `bin/emerson` - Generate essay-length analysis from text input
+   - `bin/satisfies` - Evaluate boolean conditions against text input
 
    For each script, understand:
    - Purpose and when to use it
@@ -39,15 +39,16 @@ Before creating files, research the following:
    - Image encoding (base64 webp)
    - Request body structure for vision vs text tasks
    - Single-image vs multi-image prompts
+   - Structured output for boolean responses
 
 ## Deliverable Structure
 
 Create this exact structure:
 
 ```text
-etc/skills/screenshot/
+etc/skills/ai-analysis/
 ├── SKILL.md              # Required: frontmatter + instructions
-├── scripts/              # Copies of the AI-powered scripts
+├── scripts/              # Symlinks to the AI-powered scripts
 └── references/           # Reference documentation
     ├── command-index.md
     └── troubleshooting.md
@@ -62,6 +63,7 @@ Symlink these scripts into `scripts/` using relative paths:
 - `bin/screenshot-describe`
 - `bin/screenshot-compare`
 - `bin/emerson`
+- `bin/satisfies`
 
 Preserve filenames and executable permissions.
 
@@ -78,7 +80,7 @@ Follow the Agent Skills specification exactly:
 
 ```yaml
 ---
-name: screenshot
+name: ai-analysis
 description: [See below]
 ---
 ```
@@ -93,27 +95,27 @@ description: [See below]
 
 - Max 1024 characters
 - Write in **third person** (the description is injected into system prompts)
-  - Good: "Analyzes screenshots..." / "Generates descriptions..."
+  - Good: "Analyzes images..." / "Evaluates conditions..."
   - Bad: "I can help you..." / "You can use this to..."
 - Include what the skill does AND when to use it
 - End with explicit trigger phrases using "Triggers:" prefix for reliable
   discovery across different agent implementations
 
-Include these trigger phrases: screenshot, screenshot analysis, compare
-screenshots, describe screenshot, alt text, image description, UI comparison,
-visual diff, gemini vision, screenshot diff
+Include these trigger phrases: ai analysis, describe image, compare screenshots,
+generate essay, evaluate condition, alt text, image description, UI comparison,
+visual diff, satisfies condition, boolean evaluation, gemini
 
 Example pattern:
 
 ```yaml
 description: >
-  Analyzes screenshots using AI vision models. Generates alt-text descriptions
-  for accessibility, compares screenshots to identify UI differences, and
-  produces essay-length analysis from text input. Use when describing images,
-  comparing UI states, generating accessibility text, or analyzing visual
-  changes between screenshots. Triggers: screenshot, screenshot analysis,
-  compare screenshots, describe screenshot, alt text, image description, UI
-  comparison, visual diff.
+  Command-line tools that delegate analysis tasks to AI models. Includes image
+  description, screenshot comparison, essay generation from text, and boolean
+  condition evaluation. Use for describing images, comparing UI states,
+  generating reports, evaluating conditions, or any task requiring AI inference.
+  Triggers: ai analysis, describe image, compare screenshots, generate essay,
+  evaluate condition, alt text, image description, UI comparison, visual diff,
+  satisfies condition, boolean evaluation, gemini.
 ```
 
 **Compatibility requirements (recommended):**
@@ -121,7 +123,7 @@ description: >
 - Max 500 characters
 - Include if the skill has external dependencies or environment requirements
 - Mention required command-line tools, network access needs, or target platforms
-- Example: `compatibility: Requires curl, jq, base64, magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to generativelanguage.googleapis.com.`
+- Example: `compatibility: Requires curl and jq. Image tools also need base64 and magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to generativelanguage.googleapis.com.`
 
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
@@ -140,17 +142,18 @@ load this only when the skill activates, so be concise.
   with specific request formats
 - **High freedom** (guidance): Use for flexible tasks like choosing prompts
 
-For screenshot analysis, most operations are deterministic (run this exact
-command), so prefer low-freedom documentation with specific commands.
+For AI analysis, most operations are deterministic (run this exact command), so
+prefer low-freedom documentation with specific commands.
 
 #### Quick Start
 
 - Environment: `GEMINI_API_KEY` required
-- Dependencies: `curl`, `jq`, `base64`, `magick` (ImageMagick)
-- 3-4 highest-value commands to run first:
+- Dependencies: `curl`, `jq` (all tools); `base64`, `magick` (image tools only)
+- 4 highest-value commands to run first:
   - `scripts/screenshot-describe image.png` (generate alt-text)
-  - `scripts/screenshot-compare before.png after.png` (find UI differences)
+  - `scripts/screenshot-compare before.png after.png` (find visual differences)
   - `scripts/emerson "Question" < document.txt` (essay-length analysis)
+  - `echo "text" | scripts/satisfies "condition"` (boolean evaluation)
 - Use paths relative to the skill: `scripts/screenshot-describe`
 
 #### Script Overview
@@ -164,12 +167,12 @@ A compact reference for each script. For each, provide:
 
 Scripts to document:
 
-1. **screenshot-describe** - Generate concise alt-text for a screenshot
+1. **screenshot-describe** - Generate concise alt-text for an image
    - Fast, optimized for UI captures
    - Default prompt focuses on elements, text, colors, layout
    - Supports custom prompts for specific analysis needs
 
-2. **screenshot-compare** - Compare two screenshots for visual differences
+2. **screenshot-compare** - Compare two images for visual differences
    - Identifies layout shifts, color changes, padding, text updates
    - Detailed paragraph-form output for UI QA
    - Exit code 2 when images are identical
@@ -178,6 +181,11 @@ Scripts to document:
    - Reads reference material from stdin
    - Produces authoritative, footnoted Markdown output
    - High-quality output suitable for documentation and reports
+
+4. **satisfies** - Evaluate whether text satisfies a condition
+   - Reads input from stdin, returns boolean via exit code
+   - Useful for shell conditionals and validation
+   - Exit code 0 = true, 1 = false
 
 #### Raw API Fallback
 
@@ -194,7 +202,7 @@ these may change over time.
 
 Include worked examples:
 
-##### Describing a Screenshot
+##### Describing an Image
 
 ```bash
 # Encode image to base64 webp
@@ -215,7 +223,7 @@ curl -s -X POST \
   }' | jq -r '.candidates[0].content.parts[0].text'
 ```
 
-##### Comparing Two Screenshots
+##### Comparing Two Images
 
 ```bash
 # Encode both images
@@ -238,7 +246,7 @@ curl -s -X POST \
   }' | jq -r '.candidates[0].content.parts[0].text'
 ```
 
-##### Text Analysis with Emerson
+##### Text Analysis (Emerson-style)
 
 ```bash
 # Read input and construct request
@@ -264,6 +272,39 @@ curl -s -X POST \
     }')" | jq -r '.candidates[0].content.parts[0].text'
 ```
 
+##### Boolean Condition Evaluation
+
+```bash
+INPUT_TEXT=$(cat file.txt)
+CONDITION="mentions Elvis"
+
+RESPONSE=$(curl -s -X POST \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n \
+    --arg input "$INPUT_TEXT" \
+    --arg cond "$CONDITION" \
+    '{
+      contents: [{
+        parts: [
+          {text: $input},
+          {text: ("Does the above text satisfy the condition: " + $cond)}
+        ]
+      }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "object",
+          properties: {satisfies: {type: "boolean"}},
+          required: ["satisfies"]
+        }
+      }
+    }')")
+
+echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' | jq -e '.satisfies'
+```
+
 #### Image Encoding Notes
 
 Document the image encoding conventions:
@@ -281,7 +322,7 @@ Document the image encoding conventions:
 - `GEMINI_API_KEY` must be set in the environment
 - API calls may incur usage costs
 - Large images increase request size and latency
-- The scripts do not store or log images
+- The scripts do not store or log input data
 
 ## Reference Files
 
@@ -302,10 +343,10 @@ For each script, document:
 - **Raw API commands** (the underlying curl commands)
 - **Exit codes** (success/failure conditions)
 
-Include a section on:
+Include sections on:
 
 - **Image encoding** requirements and platform differences (macOS vs Linux)
-- **Request structure** differences (image-first vs text-first)
+- **Request structure** differences (image-first vs text-first vs boolean)
 
 ### references/troubleshooting.md
 
@@ -325,6 +366,8 @@ Cover:
 - Network connectivity issues
 - Large image handling and timeouts
 - Platform differences (macOS vs Linux base64 flags)
+- Missing stdin input (satisfies)
+- Unexpected boolean results (satisfies)
 
 ## Writing Guidelines
 
@@ -343,7 +386,7 @@ analyze a screenshot, you'll need to use an AI vision model...
 
 Good (concise):
 ```markdown
-Describe a screenshot:
+Describe an image:
 ```bash
 scripts/screenshot-describe image.png
 ```
@@ -371,8 +414,8 @@ instructions that work across capability levels:
 Before finalizing, verify:
 
 ### Structure
-- [ ] Skill directory exists at `etc/skills/screenshot/`
-- [ ] `scripts/` contains symlinks to all three scripts
+- [ ] Skill directory exists at `etc/skills/ai-analysis/`
+- [ ] `scripts/` contains symlinks to all four scripts
 - [ ] Scripts are executable (`chmod +x`)
 - [ ] No extraneous files (README.md, etc.)
 
@@ -385,7 +428,7 @@ Before finalizing, verify:
 
 ### Content Coverage
 - [ ] Both script-first AND raw-API-fallback approaches documented
-- [ ] All three scripts documented (screenshot-describe, screenshot-compare, emerson)
+- [ ] All four scripts documented (screenshot-describe, screenshot-compare, emerson, satisfies)
 - [ ] Image encoding conventions documented
 - [ ] Platform differences (macOS vs Linux) noted
 - [ ] Examples use realistic filenames
@@ -414,13 +457,14 @@ Before finalizing, verify:
 
 Use these realistic examples throughout the documentation:
 
-**Screenshots:**
+**Images:**
 - `screenshot.png`, `before.png`, `after.png`
 - `login-screen.png`, `dashboard.png`
 - `v1-header.png`, `v2-header.png`
 - `ui-mockup.png`, `production-capture.png`
 
-**Text files (for emerson):**
+**Text files:**
 - `documentation.md`, `release_notes.txt`
 - `api-spec.md`, `design-doc.txt`
 - `meeting-notes.txt`, `research-paper.md`
+- `log.txt`, `response.json`
