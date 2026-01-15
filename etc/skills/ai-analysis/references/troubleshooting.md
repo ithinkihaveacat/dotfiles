@@ -238,6 +238,46 @@ The script uses `maxOutputTokens: 8192`. For longer content:
 2. Process incrementally
 3. Combine results
 
+### Missing Input (satisfies)
+
+**Error:**
+```
+satisfies: missing input from stdin
+```
+
+**Cause:** No input was piped to the script.
+
+**Solution:**
+```bash
+# Correct usage - pipe input
+cat file.txt | scripts/satisfies "condition"
+echo "text" | scripts/satisfies "condition"
+
+# Incorrect - no input
+scripts/satisfies "condition"  # Will fail
+```
+
+### Unexpected Boolean Result (satisfies)
+
+**Issue:** `satisfies` returns true/false unexpectedly
+
+**Possible causes:**
+1. Condition is ambiguous
+2. Input text doesn't clearly match/contradict the condition
+3. AI model interpretation differs from expectation
+
+**Solutions:**
+1. Make conditions more specific:
+   ```bash
+   # Vague
+   cat file.txt | scripts/satisfies "is good"
+
+   # Specific
+   cat file.txt | scripts/satisfies "contains the word 'approved'"
+   ```
+2. Test with known inputs first
+3. Use explicit phrasing like "contains", "mentions", "starts with"
+
 ---
 
 ## Platform Differences

@@ -1,62 +1,60 @@
 ---
-name: screenshot
+name: ai-analysis
 description: >
-  Analyzes screenshots using AI vision models. Generates alt-text descriptions
-  for accessibility, compares screenshots to identify UI differences, and
-  produces essay-length analysis from text input. Use when describing images,
-  comparing UI states, generating accessibility text, or analyzing visual
-  changes between screenshots. Triggers: screenshot, screenshot analysis,
-  compare screenshots, describe screenshot, alt text, image description, UI
-  comparison, visual diff, gemini vision, screenshot diff.
+  Command-line tools that delegate analysis tasks to AI models. Includes image
+  description, screenshot comparison, essay generation from text, and boolean
+  condition evaluation. Use for describing images, comparing UI states,
+  generating reports, evaluating conditions, or any task requiring AI inference.
+  Triggers: ai analysis, describe image, compare screenshots, generate essay,
+  evaluate condition, alt text, image description, UI comparison, visual diff,
+  satisfies condition, boolean evaluation, gemini.
 compatibility: >
-  Requires curl, jq, base64, magick (ImageMagick). Needs GEMINI_API_KEY
-  environment variable and network access to generativelanguage.googleapis.com.
+  Requires curl and jq. Image tools also need base64 and magick (ImageMagick).
+  Needs GEMINI_API_KEY environment variable and network access to
+  generativelanguage.googleapis.com.
 ---
 
-# Screenshot Analysis
+# AI Analysis Tools
 
 ## Quick Start
 
 **Environment:** Set `GEMINI_API_KEY` before running any commands.
 
-**Dependencies:** `curl`, `jq`, `base64`, `magick` (ImageMagick)
+**Dependencies:** `curl`, `jq` (all tools); `base64`, `magick` (image tools only)
 
 ```bash
-# Describe a screenshot (generate alt-text)
+# Describe an image (generate alt-text)
 scripts/screenshot-describe screenshot.png
 
-# Compare two screenshots for UI differences
+# Compare two images for visual differences
 scripts/screenshot-compare before.png after.png
 
 # Generate essay-length analysis from text
 scripts/emerson "Summarize the key changes" < documentation.md
+
+# Evaluate a boolean condition against text
+echo "Hello world" | scripts/satisfies "is a greeting"
 ```
 
 ## Script Overview
 
 ### screenshot-describe
 
-Generate concise alt-text for a screenshot. Optimized for UI captures.
+Generate concise alt-text for an image. Optimized for UI captures.
 
 ```bash
 scripts/screenshot-describe IMAGE [PROMPT]
 ```
 
-**Options:**
-- `-h, --help` - Display help
-
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
 ### screenshot-compare
 
-Compare two screenshots for visual differences. Identifies layout shifts, color changes, padding, and text updates.
+Compare two images for visual differences. Identifies layout shifts, color changes, padding, and text updates.
 
 ```bash
 scripts/screenshot-compare IMAGE1 IMAGE2 [PROMPT]
 ```
-
-**Options:**
-- `-h, --help` - Display help
 
 **Exit codes:** 0 differences found, 1 error, 2 images identical, 127 missing dependency
 
@@ -68,24 +66,43 @@ Generate essay-length (~3000 words) analysis from text input. Produces authorita
 scripts/emerson "PROMPT" < input.txt
 ```
 
-**Options:**
-- `-h, --help` - Display help
-
 **Exit codes:** 0 success, 1 error, 127 missing dependency
+
+### satisfies
+
+Evaluate whether input text satisfies a condition. Returns boolean via exit code.
+
+```bash
+echo "text" | scripts/satisfies "CONDITION"
+```
+
+**Exit codes:** 0 true (satisfies), 1 false (does not satisfy), 127 missing dependency
+
+**Examples:**
+```bash
+# Check if file mentions a topic
+cat file.txt | scripts/satisfies "mentions Elvis" && echo "Found it"
+
+# Validate content type
+cat response.json | scripts/satisfies "is valid JSON with an 'id' field"
+
+# Use in conditionals
+if cat log.txt | scripts/satisfies "contains error messages"; then
+  echo "Errors detected"
+fi
+```
 
 ## Raw API Fallback
 
 When scripts fail due to missing dependencies or environment issues, use these curl commands directly.
 
-### Describing a Screenshot
+### Describing an Image
 
 Model: `gemini-2.5-flash`
 
 ```bash
-# Encode image to base64 webp
 IMAGE_BASE64=$(magick image.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 
-# API request
 curl -s -X POST \
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
@@ -100,16 +117,14 @@ curl -s -X POST \
   }' | jq -r '.candidates[0].content.parts[0].text'
 ```
 
-### Comparing Two Screenshots
+### Comparing Two Images
 
 Model: `gemini-3-flash-preview`
 
 ```bash
-# Encode both images
 IMG1_B64=$(magick before.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 IMG2_B64=$(magick after.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 
-# API request (text before images for comparison tasks)
 curl -s -X POST \
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
@@ -152,6 +167,41 @@ curl -s -X POST \
     }')" | jq -r '.candidates[0].content.parts[0].text'
 ```
 
+### Boolean Condition Evaluation
+
+Model: `gemini-2.5-flash-lite`
+
+```bash
+INPUT_TEXT=$(cat file.txt)
+CONDITION="mentions Elvis"
+
+RESPONSE=$(curl -s -X POST \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n \
+    --arg input "$INPUT_TEXT" \
+    --arg cond "$CONDITION" \
+    '{
+      contents: [{
+        parts: [
+          {text: $input},
+          {text: ("Does the above text satisfy the condition: " + $cond)}
+        ]
+      }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "object",
+          properties: {satisfies: {type: "boolean"}},
+          required: ["satisfies"]
+        }
+      }
+    }')")
+
+echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' | jq -e '.satisfies'
+```
+
 ## Image Encoding Notes
 
 - Images converted to lossless WebP for consistent encoding
@@ -166,7 +216,7 @@ curl -s -X POST \
 - `GEMINI_API_KEY` must be set in the environment
 - API calls may incur usage costs
 - Large images increase request size and latency
-- Scripts do not store or log images
+- Scripts do not store or log input data
 
 ## References
 

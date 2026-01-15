@@ -2,9 +2,10 @@
 
 ## Contents
 
-- [screenshot-describe](#screenshot-describe) - Generate alt-text from screenshots
-- [screenshot-compare](#screenshot-compare) - Compare two screenshots for differences
+- [screenshot-describe](#screenshot-describe) - Generate alt-text from images
+- [screenshot-compare](#screenshot-compare) - Compare two images for differences
 - [emerson](#emerson) - Generate essay-length analysis from text
+- [satisfies](#satisfies) - Evaluate boolean conditions against text
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
 - [Request Structure](#request-structure) - API request patterns
 
@@ -244,6 +245,109 @@ curl -s -X POST \
 
 ---
 
+## satisfies
+
+Evaluate whether input text satisfies a condition using the Gemini API. Returns a boolean result via exit code.
+
+### Synopsis
+
+```bash
+echo "text" | scripts/satisfies "CONDITION"
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `CONDITION` | The condition or question to evaluate against the input |
+
+### Input
+
+| Source | Description |
+|--------|-------------|
+| `stdin` | Text content to evaluate |
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `-h, --help` | Display help message and exit |
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | Yes | Your Gemini API key |
+
+### Examples
+
+```bash
+# Check if text mentions a topic
+cat file.txt | scripts/satisfies "mentions Elvis"
+
+# Use in shell conditionals
+if cat log.txt | scripts/satisfies "contains error messages"; then
+  echo "Errors detected"
+fi
+
+# Validate content
+cat response.json | scripts/satisfies "is valid JSON with an 'id' field"
+
+# Chain with other commands
+cat README.md | scripts/satisfies "has installation instructions" && echo "Ready to use"
+```
+
+### Raw API Command
+
+Model: `gemini-2.5-flash-lite`
+
+```bash
+INPUT_TEXT=$(cat file.txt)
+CONDITION="mentions Elvis"
+
+RESPONSE=$(curl -s -X POST \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n \
+    --arg input "$INPUT_TEXT" \
+    --arg cond "$CONDITION" \
+    '{
+      contents: [{
+        parts: [
+          {text: $input},
+          {text: ("Does the above text satisfy the condition: " + $cond)}
+        ]
+      }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "object",
+          properties: {satisfies: {type: "boolean"}},
+          required: ["satisfies"]
+        }
+      }
+    }')")
+
+# Extract and check result
+RESULT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' | jq -r '.satisfies')
+if [ "$RESULT" = "true" ]; then
+  exit 0
+else
+  exit 1
+fi
+```
+
+### Exit Codes
+
+| Code | Description |
+|------|-------------|
+| 0 | True (input satisfies the condition) |
+| 1 | False (input does not satisfy the condition) |
+| 127 | Missing required dependency |
+
+---
+
 ## Image Encoding
 
 ### Platform Differences
@@ -332,6 +436,29 @@ Structure with reference material first, then task:
   "generationConfig": {
     "temperature": 1.0,
     "maxOutputTokens": 8192
+  }
+}
+```
+
+### Boolean Evaluation
+
+Use structured output to get JSON boolean response:
+
+```json
+{
+  "contents": [{
+    "parts": [
+      {"text": "<input text>"},
+      {"text": "Does the above text satisfy the condition: <condition>"}
+    ]
+  }],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseSchema": {
+      "type": "object",
+      "properties": {"satisfies": {"type": "boolean"}},
+      "required": ["satisfies"]
+    }
   }
 }
 ```
