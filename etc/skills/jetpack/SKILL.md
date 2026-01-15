@@ -7,6 +7,9 @@ description: >
   androidx libraries, resolving Maven coordinates, downloading Jetpack source
   code, checking library versions (alpha/beta/stable/snapshot), or inspecting
   AndroidX class implementations.
+compatibility: >
+  Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to
+  dl.google.com and androidx.dev.
 ---
 
 # Jetpack Library Utilities
