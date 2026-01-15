@@ -6,6 +6,9 @@ description: >
   inspection, package operations, and device configuration. Use when working
   with adb, Android devices, Wear OS watches, tiles, wearable data layer,
   dumpsys, or device debugging.
+compatibility: >
+  Requires adb. Some scripts require magick (ImageMagick), aapt, or scrcpy.
+  Designed for filesystem-based agents with bash access.
 ---
 
 # Android ADB

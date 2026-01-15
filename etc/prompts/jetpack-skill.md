@@ -101,6 +101,13 @@ description: >
   AndroidX class implementations.
 ```
 
+**Compatibility requirements (recommended):**
+
+- Max 500 characters
+- Include if the skill has external dependencies or environment requirements
+- Mention required command-line tools, network access needs, or target platforms
+- Example: `compatibility: Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to dl.google.com and androidx.dev.`
+
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
 implementations treat multi-line descriptions inconsistently). If you need line
@@ -303,6 +310,7 @@ Before finalizing, verify:
 - [ ] Skill directory exists at `etc/skills/jetpack/`
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
+- [ ] Compatibility field lists required tools (curl, xmllint, jar) and network access
 - [ ] `SKILL.md` body is under 500 lines
 - [ ] `scripts/` contains a symlink to `bin/jetpack`
 - [ ] Script is executable (`chmod +x`)

@@ -117,6 +117,13 @@ description: >
   dumpsys, or device debugging.
 ```
 
+**Compatibility requirements (recommended):**
+
+- Max 500 characters
+- Include if the skill has external dependencies or environment requirements
+- Mention required command-line tools, network access needs, or target platforms
+- Example: `compatibility: Requires adb. Some scripts require magick (ImageMagick), aapt, or scrcpy. Designed for filesystem-based agents with bash access.`
+
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
 implementations treat multi-line descriptions inconsistently). If you need line
@@ -273,6 +280,7 @@ Before finalizing, verify:
 - [ ] Skill directory exists at `etc/skills/adb/`
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
+- [ ] Compatibility field lists required tools and environment (adb, magick, etc.)
 - [ ] `SKILL.md` body is under 500 lines
 - [ ] `scripts/` contains symlinks to all `bin/adb-*`, `bin/wearableservice-*`,
       and `bin/packagename` scripts
