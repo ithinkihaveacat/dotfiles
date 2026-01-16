@@ -61,8 +61,7 @@ Symlink these scripts into `scripts/` using relative paths:
 
 **Optional (if directly useful for ADB workflows):**
 
-- `bin/apk-*` scripts that analyze installed packages (e.g., `apk-tiles`,
-  `apk-badging`)
+- `bin/apk-*` scripts that analyze installed packages (e.g., `apk-tiles`)
 
 Preserve filenames and executable permissions.
 

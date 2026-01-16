@@ -74,7 +74,6 @@ See `references/command-index.md` for detailed usage and raw ADB equivalents.
   clear-cache).
 - `scripts/adb-logcat-package`: Show logcat filtered for a specific package.
 - `scripts/apk-tiles`: List tiles declared in an APK file.
-- `scripts/apk-badging`: Display detailed APK info (badging) using `aapt`.
 
 ### Wear OS Data Layer
 

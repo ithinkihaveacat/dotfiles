@@ -251,16 +251,6 @@ apk-cat-manifest APK_FILE | xpath -n -q -e \
   "//service[intent-filter/action[@android:name='androidx.wear.tiles.action.BIND_TILE_PROVIDER']]"
 ```
 
-### `scripts/apk-badging`
-
-**Purpose**: Display 'aapt d badging' info (version, permissions, etc.) for an
-APK. **Dependencies**: `aapt`, `unzip` **Usage**: `scripts/apk-badging APK_FILE`
-**Raw Command**:
-
-```bash
-aapt d badging APK_FILE
-```
-
 ## Wear OS Data Layer
 
 ### `scripts/wearableservice-capabilities`
