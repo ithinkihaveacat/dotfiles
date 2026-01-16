@@ -13,7 +13,7 @@ function pbcopy
         # If the string contains no internal newlines (m/\n./s would mean a newline followed by something),
         # strip the trailing newline.
         # We use -pe to auto-print.
-        set cmdline (string collect --no-trim-newline | perl -0777 -pe 's/\n$// if !/\n./')
+        perl -0777 -pe 's/\n$// if !/\n./' | read -z cmdline
     end
 
     if not is_remote; and type -q pbcopy
