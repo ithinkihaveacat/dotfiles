@@ -14,20 +14,20 @@ function pbclean
         return
     end
 
-    # Process content using perl
-    # We pipe the variable to perl and collect the result
+    # Process content using perl for robust UTF-8 and cross-platform handling
     set -l content_out (printf '%s' "$content_in" | perl -CSD -pe '
-        next if /^\x5Bimage\d+\]: <data:image\//;
+        next if /^\[image\d+\]: <data:image\//;
         s/"data:[^"]*"/""/g;
         s/\x{00A0}/ /g;
-        s/\x5Bcite[^]]*\]//g;
+        s/\[cite[^\]]*\]//g;
         s/---//g;
     ' | string collect --no-trim-newline)
 
     set -l size_out (string length --bytes -- "$content_out")
 
-    # Copy the cleaned content back to clipboard
-    printf '%s' "$content_out" | pbcopy
+    # Copy the cleaned content back to clipboard (use 'command' to call the
+    # system pbcopy directly, avoiding the fish function wrapper)
+    printf '%s' "$content_out" | command pbcopy
 
     # Calculate and report statistics
     set -l diff (math $size_in - $size_out)
