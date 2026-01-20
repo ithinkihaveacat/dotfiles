@@ -7,7 +7,7 @@ function pbclean
 
     # Capture clipboard content into a variable (binary safe-ish)
     set -l content_in (pbpaste | string collect --no-trim-newline)
-    set -l size_in (string length --bytes -- "$content_in")
+    set -l size_in (printf '%s' "$content_in" | wc -c | string trim)
 
     if test $size_in -eq 0
         echo "pbclean: Clipboard empty" >&2
@@ -20,10 +20,11 @@ function pbclean
         s/"data:[^"]*"/""/g;
         s/\x{00A0}/ /g;
         s/\[cite[^\]]*\]//g;
+        s/ ?\(\[source\]\(http[^)]+\)\)//g;
         s/---//g;
     ' | string collect --no-trim-newline)
 
-    set -l size_out (string length --bytes -- "$content_out")
+    set -l size_out (printf '%s' "$content_out" | wc -c | string trim)
 
     # Copy the cleaned content back to clipboard (use 'command' to call the
     # system pbcopy directly, avoiding the fish function wrapper)
