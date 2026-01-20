@@ -16,7 +16,7 @@ function pbclean
 
     # Process content using perl for robust UTF-8 and cross-platform handling
     set -l content_out (printf '%s' "$content_in" | perl -CSD -pe '
-        next if /^\[image\d+\]: <data:image\//;
+        if (/^\[image\d+\]: <data:image\//) { $_ = ""; next; }
         s/"data:[^"]*"/""/g;
         s/\x{00A0}/ /g;
         s/\[cite[^\]]*\]//g;
