@@ -2,16 +2,21 @@
 
 Create an Agent Skill that helps agents manipulate Android devices via ADB, with
 emphasis on Wear OS devices. This skill should bundle existing scripts and
-document both script-first and raw-ADB-fallback approaches.
+strongly encourage agents to use them over raw ADB commands.
 
 ## Goal
 
 Produce a self-contained skill directory at `etc/skills/adb/` that an agent can
 use to:
 
-1. Run bundled scripts directly (fast, deterministic)
-2. When scripts fail (missing dependencies, environment issues), extract raw ADB
-   commands from those scripts as an authoritative fallback
+1. Run bundled scripts directly (fast, deterministic, with extra features)
+2. Only fall back to raw ADB commands when scripts fail due to missing
+   dependencies
+
+**Important:** Scripts provide significant value beyond raw commands (e.g.,
+`adb-screenshot` auto-detects Wear OS displays and applies circular masks, wakes
+the device, copies to clipboard). The skill must make agents prefer scripts by
+default and only consult raw commands as a last resort.
 
 ## Research Phase
 
@@ -121,7 +126,8 @@ description: >
 - Max 500 characters
 - Include if the skill has external dependencies or environment requirements
 - Mention required command-line tools, network access needs, or target platforms
-- Example: `compatibility: Requires adb. Some scripts require magick (ImageMagick), aapt, or scrcpy. Designed for filesystem-based agents with bash access.`
+- Example:
+  `compatibility: Requires adb. Some scripts require magick (ImageMagick), aapt, or scrcpy. Designed for filesystem-based agents with bash access.`
 
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
@@ -134,11 +140,30 @@ wrapping, prefer a folded scalar (`description: >`) rather than a literal block
 Keep the body under 500 lines. Structure it for progressive disclosure—agents
 load this only when the skill activates, so be concise.
 
+#### Scripts First (Critical)
+
+Add a prominent section at the top of SKILL.md body titled "Important: Use
+Scripts First" that:
+
+1. Tells agents to **ALWAYS prefer scripts** over raw `adb` commands
+2. Lists specific features scripts provide that raw commands don't:
+   - Automatic circular masking for Wear OS screenshots
+   - Device wake-up before capture
+   - Clipboard integration on macOS
+   - Sensible default filenames and error handling
+3. If a script fails due to missing dependencies, tells agents to read the
+   script source to find the underlying `adb` command
+
+This section ensures agents see the scripts-first guidance immediately when the
+skill activates.
+
 #### Quick Start
 
 - How to target a device (`ANDROID_SERIAL` for multiple devices)
 - 6-7 highest-value commands to run first:
-  - `adb-screenshot` (with circular mask for Wear OS)
+  - `adb-screenshot` — **always use instead of raw `adb shell screencap`**
+    (auto-detects Wear OS, applies circular mask, wakes device, copies to
+    clipboard)
   - `adb-tile-add` + `adb-tile-show` workflow
   - `adb-activities` (discover launcher, TV, settings activities)
   - `wearableservice-capabilities` / `wearableservice-nodes`
@@ -160,71 +185,6 @@ with one-line descriptions:
 - **Display/demo mode**: demo on/off, font scale, touches, theme
 
 Point to `references/command-index.md` for detailed usage.
-
-#### Raw ADB Fallback
-
-This is critical. Teach agents how to extract raw ADB commands when scripts
-don't work:
-
-1. Open the script in `scripts/`
-2. Find the `require` lines to identify dependencies
-3. Locate the core `adb` command(s)
-4. Run them manually, adapting as needed
-
-Include worked examples:
-
-##### Tile Workflow
-
-```bash
-# From adb-tile-add:
-adb shell am broadcast \
-  -a com.google.android.wearable.app.DEBUG_SURFACE \
-  --es operation add-tile \
-  --ecn component "com.example/.MyTileService"
-
-# From adb-tile-show:
-adb shell am broadcast \
-  -a com.google.android.wearable.app.DEBUG_SYSUI \
-  --es operation show-tile \
-  --ei index 0
-```
-
-##### WearableService Dump
-
-```bash
-# From wearableservice-capabilities:
-adb exec-out dumpsys activity service WearableService | \
-  sed -n '/CapabilityService/,/######/p'
-```
-
-##### Screenshot With Circular Mask
-
-```bash
-# From adb-screenshot (for square Wear OS displays):
-adb exec-out "screencap -p" | magick - \
-  -alpha set -background none -fill white \
-  \( +clone -channel A -evaluate set 0 +channel \
-     -draw "circle %[fx:(w-1)/2],%[fx:(h-1)/2] %[fx:(w-1)/2],0.5" \) \
-  -compose dstin -composite output.png
-```
-
-##### Activity Discovery
-
-```bash
-# From adb-activities: Query launcher activities
-adb shell cmd package query-activities \
-  -a android.intent.action.MAIN \
-  -c android.intent.category.LAUNCHER
-
-# Query TV/Leanback activities
-adb shell cmd package query-activities \
-  -a android.intent.action.MAIN \
-  -c android.intent.category.LEANBACK_LAUNCHER
-
-# Query settings activities
-adb shell cmd package query-activities \
-  -c android.intent.category.PREFERENCE
-```
 
 #### Safety Notes
 
@@ -269,7 +229,10 @@ Cover:
 - Be concise. Agents are intelligent; provide what they don't already know.
 - Use imperative form ("Run this command" not "You can run this command").
 - Include concrete examples with realistic package/component names.
-- Document raw ADB commands prominently—they're essential fallbacks.
+- Emphasize scripts over raw commands. Scripts provide features (circular masks,
+  device wake-up, clipboard integration) that raw commands don't.
+- Do not duplicate raw commands from scripts into SKILL.md. Tell agents to read
+  the script source if they need the underlying command.
 - Keep file references one level deep from SKILL.md.
 
 ## Quality Checklist
@@ -279,14 +242,17 @@ Before finalizing, verify:
 - [ ] Skill directory exists at `etc/skills/adb/`
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
-- [ ] Compatibility field lists required tools and environment (adb, magick, etc.)
+- [ ] Compatibility field lists required tools and environment (adb, magick,
+      etc.)
 - [ ] `SKILL.md` body is under 500 lines
+- [ ] `SKILL.md` has "Important: Use Scripts First" section at top of body
+- [ ] `adb-screenshot` entry explicitly says to use it instead of raw screencap
 - [ ] `scripts/` contains symlinks to all `bin/adb-*`, `bin/wearableservice-*`,
       and `bin/packagename` scripts
 - [ ] Scripts are executable (`chmod +x`)
-- [ ] Both script-first AND raw-ADB-fallback approaches are documented
 - [ ] `references/command-index.md` documents each script with raw commands
 - [ ] `references/troubleshooting.md` covers common issues
+- [ ] Raw ADB commands are NOT in SKILL.md body (agents read script source)
 - [ ] Every file in `scripts/` is documented in `references/command-index.md`
       and referenced from the `SKILL.md` Script Index (no undocumented scripts)
 - [ ] No extraneous files (README.md, etc.)

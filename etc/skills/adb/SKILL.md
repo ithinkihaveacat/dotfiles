@@ -13,6 +13,20 @@ compatibility: >
 
 # Android ADB
 
+## Important: Use Scripts First
+
+**ALWAYS prefer the scripts in `scripts/` over raw `adb` commands.** The scripts
+provide features that raw commands do not, such as:
+
+- Automatic circular masking for Wear OS screenshots
+- Device wake-up before capture
+- Clipboard integration on macOS
+- Sensible default filenames and error handling
+
+Only fall back to raw `adb` commands if a script fails due to missing
+dependencies (e.g., `magick`). In that case, read the script source in
+`scripts/` to find the underlying `adb` command.
+
 ## Quick Start
 
 Target specific devices using the `ANDROID_SERIAL` environment variable if
@@ -40,7 +54,7 @@ multiple devices are connected.
 
 ## Script Index
 
-See `references/command-index.md` for detailed usage and raw ADB equivalents.
+See `references/command-index.md` for detailed usage.
 
 ### Device Basics
 
@@ -52,7 +66,10 @@ See `references/command-index.md` for detailed usage and raw ADB equivalents.
 
 ### Media Capture
 
-- `scripts/adb-screenshot`: Take a screenshot (handles Wear OS round screens).
+- `scripts/adb-screenshot`: Take a screenshot. **Always use this instead of raw
+  `adb shell screencap`.** Features: auto-detects square Wear OS displays and
+  applies circular mask, wakes device before capture, copies to macOS clipboard,
+  generates timestamped filenames by default.
 - `scripts/adb-screenrecord`: Record the screen to a file.
 
 ### Tile Management (Wear OS)
@@ -87,71 +104,6 @@ See `references/command-index.md` for detailed usage and raw ADB equivalents.
 - `scripts/adb-fontscale-default` / `large`: Change font size.
 - `scripts/adb-settings-theme`: Toggle dark/light theme.
 - `scripts/adb-touches-on` / `off`: Show/hide taps on screen.
-
-## Raw ADB Fallback
-
-If scripts fail (e.g., missing dependencies like `magick`), inspect the script
-to find the core `adb` command.
-
-1. Open the script in `scripts/`.
-2. Find the `require` lines to identify dependencies.
-3. Locate the core `adb` command(s).
-4. Run them manually.
-
-### Examples
-
-#### Tile Workflow (Wear OS)
-
-```bash
-# From adb-tile-add:
-adb shell am broadcast \
-  -a com.google.android.wearable.app.DEBUG_SURFACE \
-  --es operation add-tile \
-  --ecn component "com.example/.MyTileService"
-
-# From adb-tile-show:
-adb shell am broadcast \
-  -a com.google.android.wearable.app.DEBUG_SYSUI \
-  --es operation show-tile \
-  --ei index 0
-```
-
-#### WearableService Dump
-
-```bash
-# From wearableservice-capabilities:
-adb exec-out dumpsys activity service WearableService | \
-  sed -n '/CapabilityService/,/######/p'
-```
-
-#### Screenshot With Circular Mask
-
-```bash
-# From adb-screenshot (for square Wear OS displays):
-adb exec-out "screencap -p" | magick - \
-  -alpha set -background none -fill white \
-  \( +clone -channel A -evaluate set 0 +channel \
-     -draw "circle %[fx:(w-1)/2],%[fx:(h-1)/2] %[fx:(w-1)/2],0.5" \) \
-  -compose dstin -composite output.png
-```
-
-#### Activity Discovery
-
-```bash
-# From adb-activities: Query launcher activities
-adb shell cmd package query-activities \
-  -a android.intent.action.MAIN \
-  -c android.intent.category.LAUNCHER
-
-# Query TV/Leanback activities
-adb shell cmd package query-activities \
-  -a android.intent.action.MAIN \
-  -c android.intent.category.LEANBACK_LAUNCHER
-
-# Query settings activities
-adb shell cmd package query-activities \
-  -c android.intent.category.PREFERENCE
-```
 
 ## Safety Notes
 
