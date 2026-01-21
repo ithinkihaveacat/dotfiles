@@ -23,6 +23,7 @@ complete -c context -f -n __fish_context_needs_topic -a mcp-server -d 'MCP serve
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli -d 'Gemini CLI documentation (all)'
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli-extensions -d 'Gemini CLI extensions documentation'
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli-hooks -d 'Gemini CLI hooks documentation'
+complete -c context -f -n __fish_context_needs_topic -a gemini-cli-changelog -d 'Gemini CLI changelog (index, latest, preview, releases)'
 complete -c context -f -n __fish_context_needs_topic -a inkyframe -d 'Pimoroni Inky Frame documentation'
 complete -c context -f -n __fish_context_needs_topic -a rpi -d 'Raspberry Pi documentation'
 complete -c context -f -n __fish_context_needs_topic -a skills -d 'Agent skills documentation (Claude, Gemini CLI, OpenAI Codex)'
