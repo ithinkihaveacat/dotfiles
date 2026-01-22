@@ -11,6 +11,21 @@ description: >
 
 # Android Emulator Manager
 
+## Important: Use Script First
+
+**ALWAYS use `scripts/emumanager` over raw `sdkmanager`, `avdmanager`, or
+`emulator` commands.** The script provides features that raw commands do not:
+
+- Automatic system image selection for device types (--mobile, --wear, --tv)
+- Boot completion detection with timeout
+- Sensible defaults and helpful error messages
+- Diagnostics via `doctor` subcommand
+
+**When to read the script source:** If the script doesn't do exactly what you
+need, or fails due to missing dependencies, read the script source. It encodes
+solutions to SDK quirks and boot detection edge cases—use it as reference when
+building similar functionality.
+
 ## Quick Start
 
 ### Environment Variables
@@ -62,8 +77,8 @@ scripts/emumanager bootstrap --no-emulator  # Skip emulator installation
 
 ### doctor
 
-Run diagnostics to check for common issues: Java version, hardware
-acceleration, SDK tools, disk space, orphaned AVD files.
+Run diagnostics to check for common issues: Java version, hardware acceleration,
+SDK tools, disk space, orphaned AVD files.
 
 ```bash
 scripts/emumanager doctor
@@ -167,100 +182,22 @@ scripts/emumanager update
 The `create` command supports device type flags that automatically select the
 latest appropriate system image for the host architecture:
 
-| Flag               | Device Type        | System Image Pattern            |
-| ------------------ | ------------------ | ------------------------------- |
-| `--mobile`/`--phone` | Mobile/Phone     | `google_apis_playstore`         |
-| `--wear`/`--watch`   | Wear OS          | `android-wear` / `android-wear-signed` |
-| `--tv`             | Android/Google TV | `android-tv` / `google-tv`      |
-| `--auto`           | Automotive        | `android-automotive-playstore`  |
+| Flag                 | Device Type       | System Image Pattern                   |
+| -------------------- | ----------------- | -------------------------------------- |
+| `--mobile`/`--phone` | Mobile/Phone      | `google_apis_playstore`                |
+| `--wear`/`--watch`   | Wear OS           | `android-wear` / `android-wear-signed` |
+| `--tv`               | Android/Google TV | `android-tv` / `google-tv`             |
+| `--auto`             | Automotive        | `android-automotive-playstore`         |
 
 If no device type or image is specified, defaults to mobile/phone.
 
 ## Start Mode Options
 
-| Mode | Flag | Description |
-| ---- | ---- | ----------- |
-| Quick Boot | (default) | Fast startup using snapshots |
-| Cold Boot | `--cold-boot` | Bypass Quick Boot, perform full boot |
-| Factory Reset | `--wipe-data` | Wipe all data and cold boot |
-
-## Raw Command Fallback
-
-When the script fails (missing dependencies, environment issues), use the
-underlying SDK tools directly.
-
-### Environment Setup
-
-```bash
-export ANDROID_HOME="${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
-export ANDROID_USER_HOME="${ANDROID_USER_HOME:-$HOME/.android}"
-
-SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
-EMULATOR="$ANDROID_HOME/emulator/emulator"
-ADB="$ANDROID_HOME/platform-tools/adb"
-```
-
-### Installing SDK Components
-
-```bash
-# Accept licenses
-yes | "$SDKMANAGER" --licenses
-
-# Install platform-tools (includes adb)
-"$SDKMANAGER" --install "platform-tools"
-
-# Install emulator
-"$SDKMANAGER" --install "emulator"
-
-# Install build-tools
-"$SDKMANAGER" --install "build-tools;36.0.0"
-
-# Install a platform
-"$SDKMANAGER" --install "platforms;android-36"
-```
-
-### Listing and Installing System Images
-
-```bash
-# List available images
-"$SDKMANAGER" --list | grep "system-images;android-"
-
-# Install a system image
-"$SDKMANAGER" --install "system-images;android-36;google_apis_playstore;arm64-v8a"
-```
-
-### Creating an AVD
-
-```bash
-# Create AVD with specific image
-echo "no" | "$AVDMANAGER" create avd \
-  -n my_phone \
-  -k "system-images;android-36;google_apis_playstore;arm64-v8a" \
-  -d medium_phone
-```
-
-### Starting an AVD
-
-```bash
-# Start emulator in background
-"$EMULATOR" -avd my_phone &
-
-# Wait for device to connect
-"$ADB" wait-for-device
-
-# Wait for boot to complete
-while [ "$("$ADB" shell getprop init.svc.bootanim | tr -d '\r')" != "stopped" ]; do
-  sleep 1
-done
-```
-
-### Stopping an AVD
-
-```bash
-# Find emulator serial and stop it
-"$ADB" -s emulator-5554 emu kill
-```
+| Mode          | Flag          | Description                          |
+| ------------- | ------------- | ------------------------------------ |
+| Quick Boot    | (default)     | Fast startup using snapshots         |
+| Cold Boot     | `--cold-boot` | Bypass Quick Boot, perform full boot |
+| Factory Reset | `--wipe-data` | Wipe all data and cold boot          |
 
 ## Common Workflows
 
@@ -309,5 +246,5 @@ scripts/emumanager update
 
 ## Reference Documentation
 
-- `references/command-index.md` - Detailed subcommand reference with raw commands
+- `references/command-index.md` - Detailed subcommand reference
 - `references/troubleshooting.md` - Common issues and solutions

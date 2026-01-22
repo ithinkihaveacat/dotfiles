@@ -2,16 +2,23 @@
 
 Create an Agent Skill that helps agents perform AI-powered analysis tasks using
 the Gemini API. This skill should document CLI tools that delegate to AI models
-for image description, image comparison, text generation, and boolean evaluation.
+for image description, image comparison, text generation, and boolean
+evaluation, and strongly encourage agents to use these scripts over raw API
+calls.
 
 ## Goal
 
 Produce a self-contained skill directory at `etc/skills/ai-analysis/` that an
 agent can use to:
 
-1. Run the bundled scripts directly (fast, deterministic)
-2. When scripts fail (missing dependencies, environment issues), use raw `curl`
-   commands to call the Gemini API as an authoritative fallback
+1. Run the bundled scripts directly (fast, deterministic, with proper error
+   handling and model selection)
+2. Only fall back to raw API calls when scripts fail due to missing dependencies
+
+**Important:** The scripts provide significant value beyond raw curl commands
+(e.g., proper image encoding, model selection, structured output handling,
+meaningful exit codes). The skill must make agents prefer scripts by default and
+only consult raw commands as a last resort by reading the script source.
 
 ## Research Phase
 
@@ -19,7 +26,8 @@ Before creating files, research the following:
 
 1. **Review the Agent Skills specification and best practices**:
    - Specification: <https://agentskills.io/specification.md>
-   - Best practices: <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
+   - Best practices:
+     <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
 
 2. **Examine the AI-powered scripts thoroughly**:
    - `bin/screenshot-describe` - Generate alt-text/descriptions from images
@@ -123,7 +131,8 @@ description: >
 - Max 500 characters
 - Include if the skill has external dependencies or environment requirements
 - Mention required command-line tools, network access needs, or target platforms
-- Example: `compatibility: Requires curl and jq. Image tools also need base64 and magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to generativelanguage.googleapis.com.`
+- Example:
+  `compatibility: Requires curl and jq. Image tools also need base64 and magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to generativelanguage.googleapis.com.`
 
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
@@ -144,6 +153,26 @@ load this only when the skill activates, so be concise.
 
 For AI analysis, most operations are deterministic (run this exact command), so
 prefer low-freedom documentation with specific commands.
+
+#### Scripts First (Critical)
+
+Add a prominent section at the top of SKILL.md body titled "Important: Use
+Scripts First" that:
+
+1. Tells agents to **ALWAYS prefer the scripts** over raw `curl` API calls
+2. Lists specific features scripts provide that raw commands don't:
+   - Proper image encoding (WebP, alpha removal)
+   - Appropriate model selection for each task
+   - Structured output handling (boolean responses)
+   - Meaningful exit codes for shell integration
+3. Explains when to read script source: if a script doesn't do exactly what's
+   needed, or fails due to missing dependencies. The scripts encode Gemini API
+   best practices (image ordering, structured output schemas, model selection)
+   that may not be obvious—they serve as valuable reference when building
+   similar functionality.
+
+This section ensures agents see the scripts-first guidance immediately when the
+skill activates.
 
 #### Quick Start
 
@@ -186,124 +215,6 @@ Scripts to document:
    - Reads input from stdin, returns boolean via exit code
    - Useful for shell conditionals and validation
    - Exit code 0 = true, 1 = false
-
-#### Raw API Fallback
-
-This is critical. Teach agents how to perform operations manually when scripts
-don't work:
-
-1. Show the Gemini API endpoint pattern
-2. Explain image encoding requirements
-3. Provide curl commands for each operation
-
-Note: The raw examples should use the same models as the scripts. Extract the
-current model names from the scripts when writing the skill documentation, as
-these may change over time.
-
-Include worked examples:
-
-##### Describing an Image
-
-```bash
-# Encode image to base64 webp
-IMAGE_BASE64=$(magick image.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
-
-# API request
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{
-      "parts": [
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMAGE_BASE64"'"}},
-        {"text": "Generate concise alt text describing this screenshot."}
-      ]
-    }]
-  }' | jq -r '.candidates[0].content.parts[0].text'
-```
-
-##### Comparing Two Images
-
-```bash
-# Encode both images
-IMG1_B64=$(magick before.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
-IMG2_B64=$(magick after.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
-
-# API request (text before images for comparison tasks)
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{
-      "parts": [
-        {"text": "Compare these two screenshots. Describe the visual differences."},
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMG1_B64"'"}},
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMG2_B64"'"}}
-      ]
-    }]
-  }' | jq -r '.candidates[0].content.parts[0].text'
-```
-
-##### Text Analysis (Emerson-style)
-
-```bash
-# Read input and construct request
-INPUT_TEXT=$(cat document.txt)
-PROMPT="Summarize the key points"
-
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg text "$INPUT_TEXT" \
-    --arg prompt "$PROMPT" \
-    '{
-      contents: [{
-        role: "user",
-        parts: [
-          {text: ("Reference Material:\n\n" + $text)},
-          {text: ("\n\nTask/Question:\n" + $prompt)}
-        ]
-      }],
-      generationConfig: {temperature: 1.0, maxOutputTokens: 8192}
-    }')" | jq -r '.candidates[0].content.parts[0].text'
-```
-
-##### Boolean Condition Evaluation
-
-```bash
-INPUT_TEXT=$(cat file.txt)
-CONDITION="mentions Elvis"
-
-RESPONSE=$(curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg input "$INPUT_TEXT" \
-    --arg cond "$CONDITION" \
-    '{
-      contents: [{
-        parts: [
-          {text: $input},
-          {text: ("Does the above text satisfy the condition: " + $cond)}
-        ]
-      }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "object",
-          properties: {satisfies: {type: "boolean"}},
-          required: ["satisfies"]
-        }
-      }
-    }')")
-
-echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' | jq -e '.satisfies'
-```
 
 #### Image Encoding Notes
 
@@ -379,17 +290,21 @@ don't already know. Challenge each paragraph: "Does this justify its token
 cost?"
 
 Bad (verbose):
+
 ```markdown
 Screenshots are image files that capture what is displayed on a screen. To
 analyze a screenshot, you'll need to use an AI vision model...
 ```
 
 Good (concise):
-```markdown
+
+````markdown
 Describe an image:
+
 ```bash
 scripts/screenshot-describe image.png
 ```
+````
 
 ### Cross-Model Compatibility
 
@@ -405,7 +320,10 @@ instructions that work across capability levels:
 
 - Use imperative form ("Run this command" not "You can run this command")
 - Include concrete examples with realistic filenames
-- Document raw API commands prominently—they're essential fallbacks
+- Emphasize scripts over raw API calls. Scripts provide features (image
+  encoding, model selection, exit codes) that raw commands don't.
+- Do not duplicate raw API commands from scripts into SKILL.md. Tell agents to
+  read the script source if they need the underlying command.
 - Keep file references one level deep from SKILL.md
 - Avoid redundant sections
 
@@ -414,12 +332,14 @@ instructions that work across capability levels:
 Before finalizing, verify:
 
 ### Structure
+
 - [ ] Skill directory exists at `etc/skills/ai-analysis/`
 - [ ] `scripts/` contains symlinks to all four scripts
 - [ ] Scripts are executable (`chmod +x`)
 - [ ] No extraneous files (README.md, etc.)
 
 ### SKILL.md
+
 - [ ] Valid frontmatter matching the spec
 - [ ] Description is in third person
 - [ ] Description ends with "Triggers:" and explicit keywords
@@ -427,21 +347,25 @@ Before finalizing, verify:
 - [ ] Body is under 500 lines
 
 ### Content Coverage
-- [ ] Both script-first AND raw-API-fallback approaches documented
-- [ ] All four scripts documented (screenshot-describe, screenshot-compare, emerson, satisfies)
-- [ ] Image encoding conventions documented
+
+- [ ] `SKILL.md` has "Important: Use Scripts First" section at top of body
+- [ ] All four scripts documented (screenshot-describe, screenshot-compare,
+      emerson, satisfies)
+- [ ] Image encoding conventions documented (briefly, for troubleshooting)
 - [ ] Platform differences (macOS vs Linux) noted
+- [ ] Raw API commands are NOT in SKILL.md body (agents read script source)
 - [ ] Examples use realistic filenames
 
 ### References
+
 - [ ] `references/command-index.md` documents each script with raw API commands
 - [ ] `references/troubleshooting.md` covers common issues
 - [ ] Files over 100 lines have a Contents section
 
 ### Cross-Model Compatibility
+
 - [ ] Instructions are clear enough for simpler models (Haiku)
 - [ ] Instructions don't over-explain for powerful models (Opus)
-- [ ] Raw commands provide fallback when tool access varies
 
 ## Implementation Notes
 
@@ -458,12 +382,14 @@ Before finalizing, verify:
 Use these realistic examples throughout the documentation:
 
 **Images:**
+
 - `screenshot.png`, `before.png`, `after.png`
 - `login-screen.png`, `dashboard.png`
 - `v1-header.png`, `v2-header.png`
 - `ui-mockup.png`, `production-capture.png`
 
 **Text files:**
+
 - `documentation.md`, `release_notes.txt`
 - `api-spec.md`, `design-doc.txt`
 - `meeting-notes.txt`, `research-paper.md`

@@ -16,11 +16,28 @@ compatibility: >
 
 # AI Analysis Tools
 
+## Important: Use Scripts First
+
+**ALWAYS prefer the scripts in `scripts/` over raw `curl` API calls.** The
+scripts provide features that raw commands do not:
+
+- Proper image encoding (WebP conversion, alpha removal)
+- Appropriate model selection for each task
+- Structured output handling (boolean responses via exit codes)
+- Meaningful exit codes for shell integration
+
+**When to read the script source:** If a script doesn't do exactly what you
+need, or fails due to missing dependencies, read the script source. The scripts
+encode Gemini API best practices (image ordering, structured output schemas,
+model selection) that may not be obvious—use them as reference when building
+similar functionality.
+
 ## Quick Start
 
 **Environment:** Set `GEMINI_API_KEY` before running any commands.
 
-**Dependencies:** `curl`, `jq` (all tools); `base64`, `magick` (image tools only)
+**Dependencies:** `curl`, `jq` (all tools); `base64`, `magick` (image tools
+only)
 
 ```bash
 # Describe an image (generate alt-text)
@@ -50,17 +67,20 @@ scripts/screenshot-describe IMAGE [PROMPT]
 
 ### screenshot-compare
 
-Compare two images for visual differences. Identifies layout shifts, color changes, padding, and text updates.
+Compare two images for visual differences. Identifies layout shifts, color
+changes, padding, and text updates.
 
 ```bash
 scripts/screenshot-compare IMAGE1 IMAGE2 [PROMPT]
 ```
 
-**Exit codes:** 0 differences found, 1 error, 2 images identical, 127 missing dependency
+**Exit codes:** 0 differences found, 1 error, 2 images identical, 127 missing
+dependency
 
 ### emerson
 
-Generate essay-length (~3000 words) analysis from text input. Produces authoritative, footnoted Markdown.
+Generate essay-length (~3000 words) analysis from text input. Produces
+authoritative, footnoted Markdown.
 
 ```bash
 scripts/emerson "PROMPT" < input.txt
@@ -70,15 +90,18 @@ scripts/emerson "PROMPT" < input.txt
 
 ### satisfies
 
-Evaluate whether input text satisfies a condition. Returns boolean via exit code.
+Evaluate whether input text satisfies a condition. Returns boolean via exit
+code.
 
 ```bash
 echo "text" | scripts/satisfies "CONDITION"
 ```
 
-**Exit codes:** 0 true (satisfies), 1 false (does not satisfy), 127 missing dependency
+**Exit codes:** 0 true (satisfies), 1 false (does not satisfy), 127 missing
+dependency
 
 **Examples:**
+
 ```bash
 # Check if file mentions a topic
 cat file.txt | scripts/satisfies "mentions Elvis" && echo "Found it"
@@ -92,120 +115,11 @@ if cat log.txt | scripts/satisfies "contains error messages"; then
 fi
 ```
 
-## Raw API Fallback
-
-When scripts fail due to missing dependencies or environment issues, use these curl commands directly.
-
-### Describing an Image
-
-Model: `gemini-2.5-flash`
-
-```bash
-IMAGE_BASE64=$(magick image.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
-
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{
-      "parts": [
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMAGE_BASE64"'"}},
-        {"text": "Generate concise alt text describing this screenshot."}
-      ]
-    }]
-  }' | jq -r '.candidates[0].content.parts[0].text'
-```
-
-### Comparing Two Images
-
-Model: `gemini-3-flash-preview`
-
-```bash
-IMG1_B64=$(magick before.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
-IMG2_B64=$(magick after.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
-
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{
-      "parts": [
-        {"text": "Compare these two screenshots. Describe the visual differences."},
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMG1_B64"'"}},
-        {"inlineData": {"mimeType": "image/webp", "data": "'"$IMG2_B64"'"}}
-      ]
-    }]
-  }' | jq -r '.candidates[0].content.parts[0].text'
-```
-
-### Text Analysis (Emerson-style)
-
-Model: `gemini-3-pro-preview`
-
-```bash
-INPUT_TEXT=$(cat document.txt)
-PROMPT="Summarize the key points"
-
-curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg text "$INPUT_TEXT" \
-    --arg prompt "$PROMPT" \
-    '{
-      contents: [{
-        role: "user",
-        parts: [
-          {text: ("Reference Material:\n\n" + $text)},
-          {text: ("\n\nTask/Question:\n" + $prompt)}
-        ]
-      }],
-      generationConfig: {temperature: 1.0, maxOutputTokens: 8192}
-    }')" | jq -r '.candidates[0].content.parts[0].text'
-```
-
-### Boolean Condition Evaluation
-
-Model: `gemini-2.5-flash-lite`
-
-```bash
-INPUT_TEXT=$(cat file.txt)
-CONDITION="mentions Elvis"
-
-RESPONSE=$(curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg input "$INPUT_TEXT" \
-    --arg cond "$CONDITION" \
-    '{
-      contents: [{
-        parts: [
-          {text: $input},
-          {text: ("Does the above text satisfy the condition: " + $cond)}
-        ]
-      }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "object",
-          properties: {satisfies: {type: "boolean"}},
-          required: ["satisfies"]
-        }
-      }
-    }')")
-
-echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' | jq -e '.satisfies'
-```
-
 ## Image Encoding Notes
 
 - Images converted to lossless WebP for consistent encoding
-- Alpha channel removed (`-alpha off`) so transparency-only differences are ignored
+- Alpha channel removed (`-alpha off`) so transparency-only differences are
+  ignored
 - Base64: use `-w 0` (Linux) or `-b 0` (macOS) for single-line output
 - Single-image prompts: image before text (Gemini best practice)
 - Multi-image comparison: text before images (Gemini best practice)
@@ -220,5 +134,6 @@ echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' | jq -e '.satisf
 
 ## References
 
-- [Command Index](references/command-index.md) - Detailed documentation for each script
+- [Command Index](references/command-index.md) - Detailed documentation for each
+  script
 - [Troubleshooting](references/troubleshooting.md) - Common issues and solutions

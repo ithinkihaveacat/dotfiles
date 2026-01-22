@@ -14,6 +14,21 @@ compatibility: >
 
 # Jetpack Library Utilities
 
+## Important: Use Script First
+
+**ALWAYS use `scripts/jetpack` over raw `curl` and `xmllint` commands.** The
+script provides features that raw commands do not:
+
+- Package-to-coordinate resolution with exceptions table
+- Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
+- Kotlin Multiplatform platform-specific source detection
+- Build ID resolution for pinned snapshots
+
+**When to read the script source:** If the script doesn't do exactly what you
+need, or fails due to missing dependencies, read the script source. It encodes
+Maven repository URL patterns, version filtering logic, and package naming
+heuristics—use it as reference when building similar functionality.
+
 ## Quick Start
 
 **Requirements:** `curl`, `xmllint` (libxml2-utils), `jar` (JDK).
@@ -81,46 +96,6 @@ Always resolve to the exact same code.
 - **Version String**: Specific version (e.g., `1.6.0-alpha01`).
 - **Build ID**: Specific snapshot build (e.g., `14710011` from
   `androidx.dev/snapshots/builds`).
-
-## Raw Command Fallback
-
-If the script fails, use raw `curl` and `xmllint`.
-
-### Fetching Version Information
-
-```bash
-# Example: Get latest stable version for androidx.wear.tiles:tiles
-REPO="https://dl.google.com/android/maven2"
-GROUP_PATH="androidx/wear/tiles"
-ARTIFACT="tiles"
-curl -sSLf "$REPO/$GROUP_PATH/$ARTIFACT/maven-metadata.xml" | \
-  xmllint --xpath "//version/text()" - | tr ' ' '\n' | \
-  grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
-```
-
-### Downloading Source Code
-
-```bash
-# Example: Download source for androidx.wear.tiles:tiles version 1.4.0
-REPO="https://dl.google.com/android/maven2"
-GROUP_PATH="androidx/wear/tiles"
-ARTIFACT="tiles"
-VERSION="1.4.0"
-JAR="$ARTIFACT-$VERSION-sources.jar"
-curl -sSLf "$REPO/$GROUP_PATH/$ARTIFACT/$VERSION/$JAR" -o sources.jar
-jar xf sources.jar
-```
-
-### Resolving Package Names
-
-The script uses a combination of:
-
-1. **Exceptions Table**: Hardcoded mapping (e.g., `androidx.lifecycle` ->
-   `androidx.lifecycle:lifecycle-runtime`).
-2. **Heuristics**:
-   - 3-segment groups (e.g., `androidx.compose.ui`).
-   - 2-segment groups (e.g., `androidx.core`).
-   - Artifact ID derived from the next segment or last part of group.
 
 ## Common Workflows
 

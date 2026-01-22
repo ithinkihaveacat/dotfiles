@@ -2,18 +2,23 @@
 
 Create an Agent Skill that helps agents manage the Android SDK, emulators, and
 AVDs (Android Virtual Devices). This skill should document the `emumanager`
-script's capabilities and provide both script-first and raw-command fallback
-approaches.
+script's capabilities and strongly encourage agents to use the script over raw
+SDK commands.
 
 ## Goal
 
 Produce a self-contained skill directory at `etc/skills/emumanager/` that an
 agent can use to:
 
-1. Run the bundled `emumanager` script directly (fast, deterministic)
-2. When the script fails (missing dependencies, environment issues), use raw
-   `sdkmanager`, `avdmanager`, and `emulator` commands as an authoritative
-   fallback
+1. Run the bundled `emumanager` script directly (fast, deterministic, with
+   helpful error messages and sensible defaults)
+2. Only fall back to raw SDK commands when the script fails due to missing
+   dependencies
+
+**Important:** The `emumanager` script provides significant value beyond raw
+commands (e.g., automatic system image selection, boot completion detection,
+device type presets). The skill must make agents prefer the script by default
+and only consult raw commands as a last resort by reading the script source.
 
 ## Research Phase
 
@@ -21,7 +26,8 @@ Before creating files, research the following:
 
 1. **Review the Agent Skills specification and best practices**:
    - Specification: <https://agentskills.io/specification.md>
-   - Best practices: <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
+   - Best practices:
+     <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
 
 2. **Examine the `bin/emumanager` script thoroughly**:
    - All subcommands: `bootstrap`, `doctor`, `list`, `info`, `create`, `start`,
@@ -129,6 +135,25 @@ load this only when the skill activates, so be concise.
 For emumanager, most operations are deterministic (run this exact command), so
 prefer low-freedom documentation with specific commands.
 
+#### Scripts First (Critical)
+
+Add a prominent section at the top of SKILL.md body titled "Important: Use
+Script First" that:
+
+1. Tells agents to **ALWAYS use `scripts/emumanager`** over raw SDK commands
+2. Lists specific features the script provides that raw commands don't:
+   - Automatic system image selection for device types (--mobile, --wear, --tv)
+   - Boot completion detection with timeout
+   - Sensible defaults and helpful error messages
+   - Diagnostics via `doctor` subcommand
+3. Explains when to read script source: if the script doesn't do exactly what's
+   needed, or fails due to missing dependencies. The script encodes solutions to
+   SDK quirks and boot detection edge cases—it serves as valuable reference when
+   building similar functionality.
+
+This section ensures agents see the scripts-first guidance immediately when the
+skill activates.
+
 #### Quick Start
 
 - Environment variables: `ANDROID_HOME`, `ANDROID_USER_HOME`
@@ -184,90 +209,6 @@ Document the start mode flags:
 - Default (Quick Boot) - Fast startup using snapshots
 - `--cold-boot` - Bypass Quick Boot, perform cold boot
 - `--wipe-data` - Factory reset (wipe all data) and cold boot
-
-#### Raw Command Fallback
-
-This is critical. Teach agents how to perform operations manually when the
-script doesn't work:
-
-1. Show the Android SDK tool paths used
-2. Explain the environment setup
-3. Provide raw commands for each operation
-
-Include worked examples:
-
-##### Environment Setup
-
-```bash
-export ANDROID_HOME="${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
-export ANDROID_USER_HOME="${ANDROID_USER_HOME:-$HOME/.android}"
-
-SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
-EMULATOR="$ANDROID_HOME/emulator/emulator"
-ADB="$ANDROID_HOME/platform-tools/adb"
-```
-
-##### Installing SDK Components
-
-```bash
-# Accept licenses
-yes | "$SDKMANAGER" --licenses
-
-# Install platform-tools (includes adb)
-"$SDKMANAGER" --install "platform-tools"
-
-# Install emulator
-"$SDKMANAGER" --install "emulator"
-
-# Install build-tools
-"$SDKMANAGER" --install "build-tools;36.0.0"
-
-# Install a platform
-"$SDKMANAGER" --install "platforms;android-36"
-```
-
-##### Listing and Installing System Images
-
-```bash
-# List available images
-"$SDKMANAGER" --list | grep "system-images;android-"
-
-# Install a system image
-"$SDKMANAGER" --install "system-images;android-36;google_apis_playstore;arm64-v8a"
-```
-
-##### Creating an AVD
-
-```bash
-# Create AVD with specific image
-echo "no" | "$AVDMANAGER" create avd \
-  -n my_phone \
-  -k "system-images;android-36;google_apis_playstore;arm64-v8a" \
-  -d medium_phone
-```
-
-##### Starting an AVD
-
-```bash
-# Start emulator in background
-"$EMULATOR" -avd my_phone &
-
-# Wait for device to connect
-"$ADB" wait-for-device
-
-# Wait for boot to complete
-while [ "$("$ADB" shell getprop init.svc.bootanim | tr -d '\r')" != "stopped" ]; do
-  sleep 1
-done
-```
-
-##### Stopping an AVD
-
-```bash
-# Find emulator serial and stop it
-"$ADB" -s emulator-5554 emu kill
-```
 
 #### Common Workflows (Optional)
 
@@ -338,18 +279,22 @@ don't already know. Challenge each paragraph: "Does this justify its token
 cost?"
 
 Bad (verbose):
+
 ```markdown
-PDF (Portable Document Format) files are a common file format. To extract
-text from a PDF, you'll need to use a library...
+PDF (Portable Document Format) files are a common file format. To extract text
+from a PDF, you'll need to use a library...
 ```
 
 Good (concise):
-```markdown
+
+````markdown
 Use pdfplumber for text extraction:
+
 ```python
 with pdfplumber.open("file.pdf") as pdf:
     text = pdf.pages[0].extract_text()
 ```
+````
 
 ### Cross-Model Compatibility
 
@@ -365,7 +310,10 @@ instructions that work across capability levels:
 
 - Use imperative form ("Run this command" not "You can run this command")
 - Include concrete examples with realistic AVD names and image paths
-- Document raw commands prominently—they're essential fallbacks
+- Emphasize the script over raw commands. The script provides features (device
+  type presets, boot detection, diagnostics) that raw commands don't.
+- Do not duplicate raw commands from the script into SKILL.md. Tell agents to
+  read the script source if they need the underlying command.
 - Keep file references one level deep from SKILL.md
 - Avoid redundant sections (don't repeat Quick Start examples in Common
   Workflows)
@@ -375,12 +323,14 @@ instructions that work across capability levels:
 Before finalizing, verify:
 
 ### Structure
+
 - [ ] Skill directory exists at `etc/skills/emumanager/`
 - [ ] `scripts/` contains a symlink to `bin/emumanager`
 - [ ] Script is executable (`chmod +x`)
 - [ ] No extraneous files (README.md, etc.)
 
 ### SKILL.md
+
 - [ ] Valid frontmatter matching the spec
 - [ ] Description is in third person
 - [ ] Description ends with "Triggers:" and explicit keywords
@@ -388,22 +338,25 @@ Before finalizing, verify:
 - [ ] No redundant sections (Quick Start vs Common Workflows)
 
 ### Content Coverage
-- [ ] Both script-first AND raw-command-fallback approaches documented
+
+- [ ] `SKILL.md` has "Important: Use Script First" section at top of body
 - [ ] All twelve subcommands documented
 - [ ] Device types (mobile, wear, tv, auto) explained
 - [ ] Start modes (quick boot, cold boot, wipe data) explained
 - [ ] Environment variables documented
+- [ ] Raw SDK commands are NOT in SKILL.md body (agents read script source)
 - [ ] Examples use realistic AVD names and system image paths
 
 ### References
+
 - [ ] `references/command-index.md` documents each subcommand with raw commands
 - [ ] `references/troubleshooting.md` covers common issues
 - [ ] Files over 100 lines have a Contents section
 
 ### Cross-Model Compatibility
+
 - [ ] Instructions are clear enough for simpler models (Haiku)
 - [ ] Instructions don't over-explain for powerful models (Opus)
-- [ ] Raw commands provide fallback when tool access varies
 
 ## Implementation Notes
 

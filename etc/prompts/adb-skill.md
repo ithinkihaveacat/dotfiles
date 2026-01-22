@@ -151,8 +151,10 @@ Scripts First" that:
    - Device wake-up before capture
    - Clipboard integration on macOS
    - Sensible default filenames and error handling
-3. If a script fails due to missing dependencies, tells agents to read the
-   script source to find the underlying `adb` command
+3. Explains when to read script source: if a script doesn't do exactly what's
+   needed, or fails due to missing dependencies. The scripts encode solutions to
+   edge cases and platform quirks—they serve as valuable reference when building
+   similar functionality.
 
 This section ensures agents see the scripts-first guidance immediately when the
 skill activates.

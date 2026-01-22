@@ -23,9 +23,10 @@ provide features that raw commands do not, such as:
 - Clipboard integration on macOS
 - Sensible default filenames and error handling
 
-Only fall back to raw `adb` commands if a script fails due to missing
-dependencies (e.g., `magick`). In that case, read the script source in
-`scripts/` to find the underlying `adb` command.
+**When to read the script source:** If a script doesn't do exactly what you
+need, or fails due to missing dependencies, read the script source. The scripts
+encode solutions to edge cases and platform quirks that may not be obvious—use
+them as reference when building similar functionality.
 
 ## Quick Start
 

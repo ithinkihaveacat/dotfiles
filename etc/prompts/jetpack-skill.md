@@ -1,17 +1,24 @@
 # Prompt: Create Jetpack Library Utilities Skill
 
 Create an Agent Skill that helps agents work with Android Jetpack libraries.
-This skill should document the `jetpack` script's capabilities and provide both
-script-first and raw-command fallback approaches.
+This skill should document the `jetpack` script's capabilities and strongly
+encourage agents to use the script over raw commands.
 
 ## Goal
 
 Produce a self-contained skill directory at `etc/skills/jetpack/` that an agent
 can use to:
 
-1. Run the bundled `jetpack` script directly (fast, deterministic)
-2. When the script fails (missing dependencies, environment issues), use raw
-   `curl` and `xmllint` commands as an authoritative fallback
+1. Run the bundled `jetpack` script directly (fast, deterministic, with
+   intelligent package resolution and version handling)
+2. Only fall back to raw commands when the script fails due to missing
+   dependencies
+
+**Important:** The `jetpack` script provides significant value beyond raw
+commands (e.g., package-to-coordinate resolution with exceptions table, version
+type handling, Kotlin Multiplatform support). The skill must make agents prefer
+the script by default and only consult raw commands as a last resort by reading
+the script source.
 
 ## Research Phase
 
@@ -106,7 +113,8 @@ description: >
 - Max 500 characters
 - Include if the skill has external dependencies or environment requirements
 - Mention required command-line tools, network access needs, or target platforms
-- Example: `compatibility: Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to dl.google.com and androidx.dev.`
+- Example:
+  `compatibility: Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to dl.google.com and androidx.dev.`
 
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
@@ -128,6 +136,26 @@ load this only when the skill activates, so be concise.
   - `scripts/jetpack resolve <CLASS_NAME>`
   - `scripts/jetpack source <PACKAGE> SNAPSHOT`
 - Use paths relative to the skill: `scripts/jetpack`
+
+#### Scripts First (Critical)
+
+Add a prominent section near the top of SKILL.md body titled "Important: Use
+Script First" that:
+
+1. Tells agents to **ALWAYS use `scripts/jetpack`** over raw curl/xmllint
+2. Lists specific features the script provides that raw commands don't:
+   - Package-to-coordinate resolution with exceptions table
+   - Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
+   - Kotlin Multiplatform platform-specific source detection
+   - Build ID resolution for pinned snapshots
+3. Explains when to read script source: if the script doesn't do exactly what's
+   needed, or fails due to missing dependencies. The script encodes Maven
+   repository URL patterns, version filtering logic, and package naming
+   heuristics—it serves as valuable reference when building similar
+   functionality.
+
+This section ensures agents see the scripts-first guidance immediately when the
+skill activates.
 
 #### Subcommand Overview
 
@@ -157,65 +185,6 @@ Document the version specifier system clearly:
 
 - Specific version strings (e.g., `1.6.0-alpha01`)
 - Snapshot build IDs (e.g., `14710011` from androidx.dev)
-
-#### Raw Command Fallback
-
-This is critical. Teach agents how to perform operations manually when the
-script doesn't work:
-
-1. Show the Maven repository URLs used
-2. Explain the maven-metadata.xml structure
-3. Provide curl + xmllint commands for each operation
-
-Include worked examples:
-
-##### Fetching Version Information
-
-```bash
-# Maven metadata URL pattern
-# Released versions:
-https://dl.google.com/android/maven2/{group/path}/{artifact}/maven-metadata.xml
-
-# Snapshot versions:
-https://androidx.dev/snapshots/latest/artifacts/repository/{group/path}/{artifact}/maven-metadata.xml
-
-# Example: Get latest stable version for androidx.wear.tiles:tiles
-REPO="https://dl.google.com/android/maven2"
-GROUP_PATH="androidx/wear/tiles"
-ARTIFACT="tiles"
-curl -sSLf "$REPO/$GROUP_PATH/$ARTIFACT/maven-metadata.xml" | \
-  xmllint --xpath "//version/text()" - | tr ' ' '\n' | \
-  grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
-```
-
-##### Downloading Source Code
-
-```bash
-# Source JAR URL pattern
-# Released versions:
-https://dl.google.com/android/maven2/{group/path}/{artifact}/{version}/{artifact}-{version}-sources.jar
-
-# Snapshot versions:
-https://androidx.dev/snapshots/latest/artifacts/repository/{group/path}/{artifact}/{version}/{artifact}-{jar_version}-sources.jar
-
-# Example: Download source for androidx.wear.tiles:tiles version 1.4.0
-REPO="https://dl.google.com/android/maven2"
-GROUP_PATH="androidx/wear/tiles"
-ARTIFACT="tiles"
-VERSION="1.4.0"
-JAR="$ARTIFACT-$VERSION-sources.jar"
-curl -sSLf "$REPO/$GROUP_PATH/$ARTIFACT/$VERSION/$JAR" -o sources.jar
-jar xf sources.jar
-```
-
-##### Resolving Package Names
-
-Document the heuristic rules and exceptions table from the script. Include:
-
-- The pattern for 2-segment vs 3-segment group IDs
-- Key exceptions (e.g., `androidx.lifecycle` →
-  `androidx.lifecycle:lifecycle-runtime`)
-- How to handle class names vs package names
 
 #### Common Workflows
 
@@ -300,7 +269,10 @@ Cover:
 - Be concise. Agents are intelligent; provide what they don't already know.
 - Use imperative form ("Run this command" not "You can run this command").
 - Include concrete examples with realistic package/class names.
-- Document raw commands prominently—they're essential fallbacks.
+- Emphasize the script over raw commands. The script provides features (package
+  resolution, version handling, KMP support) that raw commands don't.
+- Do not duplicate raw commands from the script into SKILL.md. Tell agents to
+  read the script source if they need the underlying command.
 - Keep file references one level deep from SKILL.md.
 
 ## Quality Checklist
@@ -310,11 +282,13 @@ Before finalizing, verify:
 - [ ] Skill directory exists at `etc/skills/jetpack/`
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
-- [ ] Compatibility field lists required tools (curl, xmllint, jar) and network access
+- [ ] Compatibility field lists required tools (curl, xmllint, jar) and network
+      access
 - [ ] `SKILL.md` body is under 500 lines
+- [ ] `SKILL.md` has "Important: Use Script First" section near top of body
 - [ ] `scripts/` contains a symlink to `bin/jetpack`
 - [ ] Script is executable (`chmod +x`)
-- [ ] Both script-first AND raw-command-fallback approaches are documented
+- [ ] Raw commands are NOT in SKILL.md body (agents read script source)
 - [ ] `references/command-index.md` documents each subcommand with raw commands
 - [ ] `references/troubleshooting.md` covers common issues
 - [ ] All five subcommands are documented
