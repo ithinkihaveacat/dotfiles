@@ -46,7 +46,7 @@ outputs.
 ### Basic Form
 
 ```
-G<type>(args…, prompt) = output
+G<type>(prompt, context…) = output
 ```
 
 Where:
@@ -54,10 +54,10 @@ Where:
 - **G** represents the agent performing the operation
 - **<type>** optionally specifies the expected output type (e.g., `<text>`,
   `<number>`, `<filename>`)
-- **args…** is a variable number of input arguments, which may include text,
-  numbers, images, files, or other data
 - **prompt** is a text instruction that describes what the agent should do,
-  typically referring to the arguments
+  typically referring to the context
+- **context…** is an optional, variable number of inputs, which may include
+  text, numbers, images, files, or other data
 - **output** is the result produced by the agent
 
 ### Conventions
@@ -95,29 +95,29 @@ and substitution places a reference to that file into the larger expression.
 
 This notation is intentionally loose in two respects:
 
-1. **Types are approximate.** The `<type>` annotation suggests the *kind* of
+1. **Types are approximate.** The `<type>` annotation suggests the _kind_ of
    output expected, but boundaries between types are not rigid. Text containing
    a number, a number expressed in words, and a numeral are all reasonable
    interpretations depending on context.
 
-2. **Argument references are informal.** The prompt refers to arguments using
-   natural language (e.g., "the first argument," "the two arguments," "the
-   input") rather than formal parameter names. The agent interprets these
-   references as a human reader would.
+2. **Context references are informal.** The prompt refers to context using
+   natural language (e.g., "the first argument," "the two inputs," "the image")
+   rather than formal parameter names. The agent interprets these references as
+   a human reader would.
 
 ### Worked Examples
 
 #### Example 1: Simple Arithmetic
 
 ```
-G<text>(2, X, "add the two arguments and return the result in words") = "four"
+G<text>("add the two arguments and return the result in words", 2, X) = "four"
 ```
 
 **Problem:** Find X.
 
-**Solution:** The prompt instructs the agent to add the two arguments. The
-output is "four," which represents the number 4. Since the first argument is 2,
-and 2 + X = 4, we have:
+**Solution:** The prompt instructs the agent to add the two context values. The
+output is "four," which represents the number 4. Since the first value is 2, and
+2 + X = 4, we have:
 
 **Answer:** X = 2
 
@@ -127,8 +127,8 @@ and 2 + X = 4, we have:
 
 ```
 G<text>(
-    G′<text>(X, "extract the core complaint, ignoring emotional language"),
-    "suggest a one-sentence empathetic customer service response"
+    "suggest a one-sentence empathetic customer service response",
+    G′<text>("extract the core complaint, ignoring emotional language", X)
 ) = "I understand the delay has been frustrating, and I'll personally ensure your order ships today."
 ```
 
@@ -146,7 +146,7 @@ anger.
 
 **Answer:** A plausible value for X is:
 
-*"This is absolutely ridiculous! I ordered this THREE WEEKS ago and it still
-hasn't shipped?! What kind of operation are you running?!"*
+_"This is absolutely ridiculous! I ordered this THREE WEEKS ago and it still
+hasn't shipped?! What kind of operation are you running?!"_
 
 Other phrasings that convey a shipping delay complaint would also be valid.
