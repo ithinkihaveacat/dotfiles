@@ -191,11 +191,21 @@ If a topic fetches `docs/overview.md`, check if related files exist:
 
 Documentation sites often add new pages that follow existing patterns.
 
-## Phase 4: Make Updates
+## Phase 4: Propose Additions
+
+If you identify new content in Phase 3 that should be added:
+
+1. **List the files/URLs**: Provide the specific filenames or URLs you intend to add.
+2. **Inspect the content**: Briefly describe what these files contain and why they are relevant.
+3. **Request Confirmation**: Ask the user if they want these files added to the topic.
+
+*Note: You do not need to ask for confirmation to fix broken URLs or apply minor corrections to existing sources. Proceed with those fixes in Phase 5.*
+
+## Phase 5: Make Updates
 
 Apply necessary changes to the topic function in `bin/context`.
 
-### 4.1 Add New Sources
+### 5.1 Add New Sources
 
 When adding new URLs:
 
@@ -203,7 +213,7 @@ When adding new URLs:
 2. Include `# published to` comments for markdown files with HTML equivalents
 3. Add appropriate comments explaining the source
 
-### 4.2 Update Existing Sources
+### 5.2 Update Existing Sources
 
 When URLs have moved:
 
@@ -211,19 +221,19 @@ When URLs have moved:
 2. Verify the content is equivalent
 3. Update any published URL comments
 
-### 4.3 Remove Obsolete Sources
+### 5.3 Remove Obsolete Sources
 
 When content is no longer available or relevant:
 
 1. Remove the URL from the topic
 2. Consider whether replacement content exists
 
-### 4.4 Update Topic Description
+### 5.4 Update Topic Description
 
 If the scope of the topic has changed, update its description in the TOPICS
 array.
 
-### 4.5 Validate Changes
+### 5.5 Validate Changes
 
 After making changes, run the topic and verify:
 
@@ -254,7 +264,6 @@ After completing the audit, provide a summary:
 
 - URL returns 404, replacement found at new location
 - Published URL comment missing or incorrect
-- New documentation page added to existing repository
 - Branch name changed from `master` to `main`
 
 **Requires discussion (report but don't change):**
@@ -263,6 +272,7 @@ After completing the audit, provide a summary:
 - Content deprecated with no clear replacement
 - Significant scope change (should topic be split or merged?)
 - New authoritative source with overlapping content
+- New documentation page added to existing repository
 
 ## Checklist
 
@@ -274,6 +284,7 @@ Before completing the audit:
 - [ ] Web search performed for new documentation
 - [ ] Repository structures checked for changes
 - [ ] Related/sibling content checked
+- [ ] Proposed additions confirmed by user
 - [ ] Changes applied (if any)
 - [ ] Topic runs without errors after changes
 - [ ] Summary provided
