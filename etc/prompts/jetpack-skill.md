@@ -92,9 +92,11 @@ description: [See below]
 - Max 1024 characters
 - Write in **third person** (the description is injected into system prompts)
 - Include what the skill does AND when to use it
-- Include trigger phrases: jetpack, androidx, maven coordinate, source code,
-  library version, snapshot, alpha, beta, stable, artifact, dependency, inspect
-  source
+- End with explicit trigger phrases using "Triggers:" prefix for reliable
+  discovery across different agent implementations
+
+Include these trigger phrases: androidx, jetpack, maven coordinate, jetpack
+source, library version, snapshot, alpha, beta
 
 Example pattern:
 
@@ -105,7 +107,8 @@ description: >
   tools for inspecting Jetpack library implementations. Use when working with
   androidx libraries, resolving Maven coordinates, downloading Jetpack source
   code, checking library versions (alpha/beta/stable/snapshot), or inspecting
-  AndroidX class implementations.
+  AndroidX class implementations. Triggers: androidx, jetpack, maven coordinate,
+  jetpack source, library version, snapshot, alpha, beta.
 ```
 
 **Compatibility requirements (recommended):**
@@ -143,12 +146,14 @@ Add a prominent section near the top of SKILL.md body titled "Important: Use
 Script First" that:
 
 1. Tells agents to **ALWAYS use `scripts/jetpack`** over raw curl/xmllint
-2. Lists specific features the script provides that raw commands don't:
+2. Notes that the script is located in the `scripts/` subdirectory of the
+   skill's folder
+3. Lists specific features the script provides that raw commands don't:
    - Package-to-coordinate resolution with exceptions table
    - Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
    - Kotlin Multiplatform platform-specific source detection
    - Build ID resolution for pinned snapshots
-3. Explains when to read script source: if the script doesn't do exactly what's
+4. Explains when to read script source: if the script doesn't do exactly what's
    needed, or fails due to missing dependencies. The script encodes Maven
    repository URL patterns, version filtering logic, and package naming
    heuristics—it serves as valuable reference when building similar

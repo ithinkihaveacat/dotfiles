@@ -6,7 +6,8 @@ description: >
   tools for inspecting Jetpack library implementations. Use when working with
   androidx libraries, resolving Maven coordinates, downloading Jetpack source
   code, checking library versions (alpha/beta/stable/snapshot), or inspecting
-  AndroidX class implementations.
+  AndroidX class implementations. Triggers: androidx, jetpack, maven coordinate,
+  jetpack source, library version, snapshot, alpha, beta.
 compatibility: >
   Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to
   dl.google.com and androidx.dev.
@@ -17,7 +18,8 @@ compatibility: >
 ## Important: Use Script First
 
 **ALWAYS use `scripts/jetpack` over raw `curl` and `xmllint` commands.** The
-script provides features that raw commands do not:
+script is located in the `scripts/` subdirectory of this skill's folder. It
+provides features that raw commands do not:
 
 - Package-to-coordinate resolution with exceptions table
 - Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)

@@ -114,6 +114,14 @@ description: >
   virtual device, avd, system image, wear os emulator, bootstrap android sdk.
 ```
 
+**Compatibility requirements (recommended):**
+
+- Max 500 characters
+- Include if the skill has external dependencies or environment requirements
+- Mention required command-line tools, network access needs, or target platforms
+- Example:
+  `compatibility: Requires Java 17+, curl, and unzip. Hardware acceleration (KVM on Linux, HVF on macOS) required for emulators. Needs network access for downloading SDK components. Designed for filesystem-based agents with bash access.`
+
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
 implementations treat multi-line descriptions inconsistently). If you need line
@@ -141,12 +149,14 @@ Add a prominent section at the top of SKILL.md body titled "Important: Use
 Script First" that:
 
 1. Tells agents to **ALWAYS use `scripts/emumanager`** over raw SDK commands
-2. Lists specific features the script provides that raw commands don't:
+2. Notes that the script is located in the `scripts/` subdirectory of the
+   skill's folder
+3. Lists specific features the script provides that raw commands don't:
    - Automatic system image selection for device types (--mobile, --wear, --tv)
    - Boot completion detection with timeout
    - Sensible defaults and helpful error messages
    - Diagnostics via `doctor` subcommand
-3. Explains when to read script source: if the script doesn't do exactly what's
+4. Explains when to read script source: if the script doesn't do exactly what's
    needed, or fails due to missing dependencies. The script encodes solutions to
    SDK quirks and boot detection edge cases—it serves as valuable reference when
    building similar functionality.

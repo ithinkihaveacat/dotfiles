@@ -160,12 +160,14 @@ Add a prominent section at the top of SKILL.md body titled "Important: Use
 Scripts First" that:
 
 1. Tells agents to **ALWAYS prefer the scripts** over raw `curl` API calls
-2. Lists specific features scripts provide that raw commands don't:
+2. Notes that scripts are located in the `scripts/` subdirectory of the skill's
+   folder
+3. Lists specific features scripts provide that raw commands don't:
    - Proper image encoding (WebP, alpha removal)
    - Appropriate model selection for each task
    - Structured output handling (boolean responses)
    - Meaningful exit codes for shell integration
-3. Explains when to read script source: if a script doesn't do exactly what's
+4. Explains when to read script source: if a script doesn't do exactly what's
    needed, or fails due to missing dependencies. The scripts encode Gemini API
    best practices (image ordering, structured output schemas, model selection)
    that may not be obvious—they serve as valuable reference when building

@@ -5,7 +5,8 @@ description: >
   for screenshots, screen recording, tile management, WearableService
   inspection, package operations, and device configuration. Use when working
   with adb, Android devices, Wear OS watches, tiles, wearable data layer,
-  dumpsys, or device debugging.
+  dumpsys, or device debugging. Triggers: adb, android device, wear os,
+  wearable, tile, screenshot, screen recording, dumpsys, logcat.
 compatibility: >
   Requires adb. Some scripts require magick (ImageMagick), aapt, or scrcpy.
   Designed for filesystem-based agents with bash access.
@@ -15,8 +16,9 @@ compatibility: >
 
 ## Important: Use Scripts First
 
-**ALWAYS prefer the scripts in `scripts/` over raw `adb` commands.** The scripts
-provide features that raw commands do not, such as:
+**ALWAYS prefer the scripts in `scripts/` over raw `adb` commands.** Scripts are
+located in the `scripts/` subdirectory of this skill's folder. They provide
+features that raw commands do not, such as:
 
 - Automatic circular masking for Wear OS screenshots
 - Device wake-up before capture

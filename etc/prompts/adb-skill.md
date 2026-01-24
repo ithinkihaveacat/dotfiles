@@ -107,8 +107,11 @@ description: [See below]
 - Max 1024 characters
 - Write in **third person** (the description is injected into system prompts)
 - Include what the skill does AND when to use it
-- Include trigger phrases: adb, android device, wear os, watch, tiles,
-  WearableService, dumpsys, screenshot, screenrecord, wearable data layer
+- End with explicit trigger phrases using "Triggers:" prefix for reliable
+  discovery across different agent implementations
+
+Include these trigger phrases: adb, android device, wear os, wearable, tile,
+screenshot, screen recording, dumpsys, logcat
 
 Example pattern:
 
@@ -118,7 +121,8 @@ description: >
   for screenshots, screen recording, tile management, WearableService
   inspection, package operations, and device configuration. Use when working
   with adb, Android devices, Wear OS watches, tiles, wearable data layer,
-  dumpsys, or device debugging.
+  dumpsys, or device debugging. Triggers: adb, android device, wear os,
+  wearable, tile, screenshot, screen recording, dumpsys, logcat.
 ```
 
 **Compatibility requirements (recommended):**
@@ -146,12 +150,14 @@ Add a prominent section at the top of SKILL.md body titled "Important: Use
 Scripts First" that:
 
 1. Tells agents to **ALWAYS prefer scripts** over raw `adb` commands
-2. Lists specific features scripts provide that raw commands don't:
+2. Notes that scripts are located in the `scripts/` subdirectory of the skill's
+   folder
+3. Lists specific features scripts provide that raw commands don't:
    - Automatic circular masking for Wear OS screenshots
    - Device wake-up before capture
    - Clipboard integration on macOS
    - Sensible default filenames and error handling
-3. Explains when to read script source: if a script doesn't do exactly what's
+4. Explains when to read script source: if a script doesn't do exactly what's
    needed, or fails due to missing dependencies. The scripts encode solutions to
    edge cases and platform quirks—they serve as valuable reference when building
    similar functionality.

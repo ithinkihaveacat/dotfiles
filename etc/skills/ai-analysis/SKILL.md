@@ -18,8 +18,9 @@ compatibility: >
 
 ## Important: Use Scripts First
 
-**ALWAYS prefer the scripts in `scripts/` over raw `curl` API calls.** The
-scripts provide features that raw commands do not:
+**ALWAYS prefer the scripts in `scripts/` over raw `curl` API calls.** Scripts
+are located in the `scripts/` subdirectory of this skill's folder. They provide
+features that raw commands do not:
 
 - Proper image encoding (WebP conversion, alpha removal)
 - Appropriate model selection for each task
