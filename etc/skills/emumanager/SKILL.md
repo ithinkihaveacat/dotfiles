@@ -7,6 +7,10 @@ description: >
   sdkmanager, avdmanager, emulator CLI. Triggers: android emulator, android
   virtual device, avd, system image, wear os emulator, tv emulator, automotive
   emulator, bootstrap android sdk.
+compatibility: >
+  Requires Java 17+, curl, and unzip. Hardware acceleration (KVM on Linux, HVF
+  on macOS) required for emulators. Needs network access for downloading SDK
+  components. Designed for filesystem-based agents with bash access.
 ---
 
 # Android Emulator Manager
