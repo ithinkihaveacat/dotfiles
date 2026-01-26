@@ -6,5 +6,5 @@ function gemini-mule --description 'Run gemini (mule version)'
     end
 
     set -lx TMPDIR (mktemp -d)
-    $executable -m gemini-3-pro-preview --include-directories $TMPDIR $argv
+    $executable --include-directories $TMPDIR $argv
 end
