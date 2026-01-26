@@ -186,7 +186,7 @@ set fish_greeting
 
 # https://github.com/zimbatm/direnv
 if type -q direnv
-    direnv hook fish | source
+#    direnv hook fish | source
     # If MANPATH is set, man very helpfully ignores the default search path as defined in
     # /etc/manpath.config (at least on Linux). Therefore, to ensure man searches through
     # the default after direnv fiddles with MANPATH, we explicitly set it to its default value.
