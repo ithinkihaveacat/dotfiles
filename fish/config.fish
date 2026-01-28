@@ -138,16 +138,11 @@ add_path $HOME/.local/bin
 
 # Node
 #
-# NODE_VERSIONS is used by direnv and nodejs-install to make different
-# versions of node available; see ~/.direnvrc
+# direnv looks in NODE_VERSIONS for different versions of node; nodejs-install has been configured
+# install them there. See ~/.direnv for usage instructions.
 
 set -x NODE_VERSIONS $HOME/.local/share/node/versions
 mkdir -p $NODE_VERSIONS
-
-set -l NODE_STABLE v22
-if count {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin >/dev/null
-    add_path (printf '%s\n' {$NODE_VERSIONS}/node-{$NODE_STABLE}*/bin | sort -rV | head -1)
-end
 
 # golang
 
@@ -186,7 +181,7 @@ set fish_greeting
 
 # https://github.com/zimbatm/direnv
 if type -q direnv
-#    direnv hook fish | source
+    direnv hook fish | source
     # If MANPATH is set, man very helpfully ignores the default search path as defined in
     # /etc/manpath.config (at least on Linux). Therefore, to ensure man searches through
     # the default after direnv fiddles with MANPATH, we explicitly set it to its default value.
