@@ -138,7 +138,7 @@ add_path $HOME/.local/bin
 
 # Node
 #
-# direnv looks in NODE_VERSIONS for different versions of node; nodejs-install has been configured
+# direnv looks in NODE_VERSIONS for different versions of node; node-install has been configured
 # install them there. See ~/.direnv for usage instructions.
 
 set -x NODE_VERSIONS $HOME/.local/share/node/versions

@@ -99,6 +99,70 @@ wiped out!
 
 (Though it is safe to run `update` multiple times.)
 
+## Environment Management
+
+This repository uses [direnv](https://direnv.net/) to automatically switch
+development environments when entering directories. This is configured via
+`~/.direnvrc` (linked from `home/.direnvrc`) and hooks in `fish/config.fish`.
+
+To configure a project, create an `.envrc` file in the project root.
+
+### Node.js
+
+Node.js versions are managed by the custom `node-install` script (found in
+`bin/`) and `direnv`.
+
+1.  **Install a Node.js version:**
+
+    ```sh
+    node-install 22  # Installs the latest 22.x release
+    ```
+
+    This installs the version into `$HOME/.local/share/node/versions`.
+
+2.  **Use it in a project:**
+
+    Add the following to your `.envrc`:
+
+    ```sh
+    use node 22
+    layout node
+    ```
+
+    `use node 22` selects the version, and `layout node` adds `node_modules/.bin`
+    to the PATH.
+
+### Python (via uv)
+
+Python environments are managed using [uv](https://github.com/astral-sh/uv).
+
+1.  **Use it in a project:**
+
+    Add the following to your `.envrc`:
+
+    ```sh
+    layout uv
+    ```
+
+    This will automatically create a virtual environment (`.venv`) if one
+    doesn't exist (using `uv venv`) and activate it.
+
+### Environment Variables
+
+You can also use `.envrc` to set environment variables on a per-project basis.
+This is useful for API keys, configuration flags, or other project-specific
+settings.
+
+**Example:**
+
+```sh
+export GEMINI_API_KEY="your-api-key"
+export PORT=8080
+```
+
+When you enter the directory, these variables will be exported. When you leave,
+they will be unset.
+
 ## Manual Changes
 
 ### All Platforms
