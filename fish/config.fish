@@ -162,6 +162,7 @@ end
 set -l LOGCAT_IGNORED_TAGS eglCodecCommon EGL_emulation OpenGLRenderer GnssHAL_GnssInterface
 set -x ANDROID_LOG_TAGS (string join " " (string replace -r '$' ':s' $LOGCAT_IGNORED_TAGS))
 set -x PIDCAT_IGNORED_TAGS (string join ";" $LOGCAT_IGNORED_TAGS)
+set -x ADB_VENDOR_KEYS $HOME/.local/share/adb-security/adb # go/wear-productivity-adb#adb-vendor-keys
 
 # acid
 
