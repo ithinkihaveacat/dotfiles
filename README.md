@@ -112,40 +112,40 @@ To configure a project, create an `.envrc` file in the project root.
 Node.js versions are managed by the custom `node-install` script (found in
 `bin/`) and `direnv`.
 
-1.  **Install a Node.js version:**
+1. **Install a Node.js version:**
 
-    ```sh
-    node-install 22  # Installs the latest 22.x release
-    ```
+   ```sh
+   node-install 22  # Installs the latest 22.x release
+   ```
 
-    This installs the version into `$HOME/.local/share/node/versions`.
+   This installs the version into `$HOME/.local/share/node/versions`.
 
-2.  **Use it in a project:**
+2. **Use it in a project:**
 
-    Add the following to your `.envrc`:
+   Add the following to your `.envrc`:
 
-    ```sh
-    use node 22
-    layout node
-    ```
+   ```sh
+   use node 22
+   layout node
+   ```
 
-    `use node 22` selects the version, and `layout node` adds `node_modules/.bin`
-    to the PATH.
+   `use node 22` selects the version, and `layout node` adds `node_modules/.bin`
+   to the PATH.
 
 ### Python (via uv)
 
 Python environments are managed using [uv](https://github.com/astral-sh/uv).
 
-1.  **Use it in a project:**
+1. **Use it in a project:**
 
-    Add the following to your `.envrc`:
+   Add the following to your `.envrc`:
 
-    ```sh
-    layout uv
-    ```
+   ```sh
+   layout uv
+   ```
 
-    This will automatically create a virtual environment (`.venv`) if one
-    doesn't exist (using `uv venv`) and activate it.
+   This will automatically create a virtual environment (`.venv`) if one doesn't
+   exist (using `uv venv`) and activate it.
 
 ### Environment Variables
 
@@ -303,19 +303,42 @@ rows.
 ### Raspberry Pi OS
 
 1. Use the Raspberry Pi Imager <https://www.raspberrypi.com/software/> to
-   install the OS on an SD card.
-   1. Remember to enable SSH access (somewhere in the advanced options).
-   1. Enable WiFi in the advanced options if necessary.
+   install the OS on an SD card or external SSD.
+   1. For a "headless" version (i.e. without desktop apps), go to "Raspberry Pi
+      OS (other)" and select "Raspberry Pi OS Lite".
+   1. In the OS customization settings, enable SSH access in the "Remote access"
+      section.
+   1. (Optional) Configure Wi-Fi in the "Wi-Fi" section.
+1. SSH into the machine: `ssh mjs@lil.local` (where `mjs` is the username and
+   `lil` is the hostname provided in the "User" section of the imager).
+   1. (Optional) If using Ghostty, copy the terminfo (run from your local
+      machine): `infocmp -x xterm-ghostty | ssh mjs@lil.local -- tic -x -`
+1. Update the OS: `sudo apt-get update && sudo apt-get upgrade -y`
+   1. If `/var/run/reboot-required` exists (created if a package update requires
+      a reboot), reboot: `sudo reboot`.
 1. Install `fish`: `sudo apt-get install fish`.
+1. Install `git`: `sudo apt-get install git`.
 1. Install `tailscale`: `curl -fsSL https://tailscale.com/install.sh | sh`
    <https://tailscale.com/download/linux>
-1. Install `node`: since no recent versions are available via `apt`, use use
-   `fnm`. <https://github.com/Schniz/fnm?tab=readme-ov-file#installation>
-1. (Optional) Disable WiFi: add `dtoverlay=disable-wifi`, `dtoverlay=disable-bt`
-   to `/boot/firmware/config.txt` (see
-   <https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/overlays/README>)
-1. (Optional) Change the hostname: edit `/etc/hostname` and `/etc/hosts`, then
-   reboot.
+   1. Log in to Tailscale: `sudo tailscale up`
+1. (Optional) Install `nodejs`: `sudo apt-get install nodejs`. Note that this
+   may install an older version; for newer versions, see the [Node.js](#nodejs)
+   section.
+1. (Optional) Disable WiFi and Bluetooth: add `dtoverlay=disable-wifi` and
+   `dtoverlay=disable-bt` on separate lines under the `[all]` section in
+   `/boot/firmware/config.txt`. (See the
+   [overlays README](https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/overlays/README)
+   for more info.)
+1. (Optional) Change the hostname: edit `/etc/hostname` and `/etc/hosts`,
+   replacing the old hostname with the new one in both files.
+
+A reboot is recommended after performing any of the optional configuration steps
+above (such as disabling WiFi/Bluetooth or changing the hostname) to ensure that
+the changes are consistently applied across the system: `sudo reboot`.
+
+Once complete, the Raspberry Pi is ready for user configuration. Proceed to the
+[Installation](#installation) section to clone these dotfiles and set up your
+environment.
 
 Recommendation: use VS Code's
 [Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh)
