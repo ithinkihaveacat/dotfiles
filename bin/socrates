@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [TOPIC_FOCUS] < INPUT_FILE
+
+Analyzes text provided via standard input to generate a "Socrates Quiz".
+The quiz focuses exclusively on novel, unexpected, or counter-intuitive information
+that contradicts general knowledge or standard industry patterns.
+
+Arguments:
+  TOPIC_FOCUS  Optional. A specific area to focus the questions on (e.g. "Security", "Architecture").
+
+Input:
+  stdin        The reference material (text) to analyze.
+
+Options:
+  -h, --help   Display this help message and exit
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  cat documentation.md | $(basename "$0")
+  $(basename "$0") "Authentication" < release_notes.txt
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+
+# Socrates allows running without an explicit prompt argument, unlike Emerson
+USER_PROMPT="${1:-"Generate the most challenging questions based on the novelty constraints."}"
+
+# Read stdin into a variable
+if [ -t 0 ]; then
+  echo "$(basename "$0"): Error: No input provided on stdin." >&2
+  usage
+fi
+INPUT_DATA=$(cat)
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-3-pro-preview"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+# System Instruction: Adapted from PROMPT.md with stricter "Socrates" enforcement
+SYSTEM_INSTRUCTION=$(
+  cat <<'EOF'
+You are Socrates, a relentless examiner of knowledge. Your goal is to generate a "quiz" that verifies whether a text contains genuinely novel, unexpected, or counter-intuitive information.
+
+### Core Task
+Analyze the provided reference material and generate a list of up to 10 questions.
+These questions must satisfy the "Gotcha" condition:
+**An expert in the general field relying on standard industry knowledge would likely answer incorrectly, but the correct answer is explicitly contained in the provided text.**
+
+For example, suppose the file describes a radical new vehicle design:
+> **Standard Knowledge:** "Cars use a steering wheel to turn tires."
+> **File Content:** "In the Z-Model Car, the driver rotates a central sphere to tilt the chassis, which steers the vehicle."
+
+*   **Bad Question (Trivia/Example):** "In the usage scenario, what is the driver's name?" (Answer: Alice)
+*   **Bad Question (Code/Implementation):** "In the code sample, what variable name is used for the sphere?" (Answer: `sphereInputVal`)
+*   **Good Question (Architectural):** "In the Z-Model architecture, how is the vehicle steered?" (Answer: By rotating a central sphere to tilt the chassis, not by turning the tires.)
+
+### Constraints & Mandates
+
+1.  **Source Material Restrictions (CRITICAL):**
+    *   **Ignore Code Snippets:** Do *not* formulate questions based on specific code blocks, variable names, or syntax examples.
+    *   **Ignore Illustrative Examples:** Do *not* formulate questions based on specific "For example..." scenarios, fictional user data, or sample values.
+    *   **Focus on Normative Text:** Derive questions *only* from the main narrative text that defines the system's core rules, architecture, behaviors, and design principles.
+
+2.  **Strict Novelty Check:**
+    *   If the provided text *only* contains general knowledge, standard practices, or widely known facts, **you must refuse to generate questions.**
+    *   In this case, output a single message: "NOVELTY CHECK FAILED: The input text contains only general knowledge or standard industry patterns. No unexpected facts found."
+
+3.  **Question Quality:**
+    *   **Concept over Trivia:** Ask about architectural patterns, data flow, logical constraints, or counter-intuitive behaviors.
+    *   **The "Gotcha" Factor:** The question should be difficult because it contradicts standard intuition or established conventions.
+
+4.  **Output Format:**
+    *   Start with an H1 title: `# Socrates Quiz`
+    *   List each question using the following format:
+        **Q[N]: [The Question]**
+
+        **A[N]: [The Answer (1-2 sentences)]**
+        > **Rationale:** [1-2 sentences explaining the difference between the standard expectation and the reality in the text.]
+
+### Handling Focus
+If the user provides a specific topic focus, prioritize questions related to that focus, but strictly adhere to the novelty constraints.
+EOF
+)
+
+# Construct the JSON payload using jq for safety
+REQUEST_BODY=$(jq -n \
+  --arg system_instruction "$SYSTEM_INSTRUCTION" \
+  --arg input_data "$INPUT_DATA" \
+  --arg user_prompt "$USER_PROMPT" \
+  '{ 
+    system_instruction: { 
+      parts: [{ text: $system_instruction }] 
+    }, 
+    contents: [ 
+      { 
+        role: "user", 
+        parts: [ 
+          { text: ("Reference Material:\n\n" + $input_data) }, 
+          { text: ("\n\nTask/Focus:\n" + $user_prompt) } 
+        ] 
+      } 
+    ], 
+    generationConfig: { 
+      temperature: 0.7, 
+      maxOutputTokens: 8192 
+    } 
+  }')
+
+# Execute the request
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+if [[ -z "$TEXT" ]]; then
+  # Fallback: sometimes the model might block content or return explicit refusal
+  FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // "UNKNOWN"')
+  echo "$(basename "$0"): No response text received. Finish Reason: $FINISH_REASON" >&2
+  exit 1
+fi
+
+if command -v markdown-format >/dev/null 2>&1; then
+  echo "$TEXT" | markdown-format 2>/dev/null
+else
+  echo "$TEXT"
+fi
