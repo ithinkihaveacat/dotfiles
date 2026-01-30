@@ -28,6 +28,12 @@ const DEFAULT_QUESTION_COUNT = 7;
 
 const SCRIPT_NAME = "socrates";
 
+// Helper to truncate text to fit terminal width
+function truncate(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen - 3) + "...";
+}
+
 // CLI helpers
 function usage(): void {
   console.log(`Usage: ${SCRIPT_NAME} [OPTIONS] [TOPIC_FOCUS]
@@ -112,7 +118,7 @@ async function generateQuestions(
   topicFocus: string,
   questionCount: number
 ): Promise<Question[]> {
-  console.error("Thinking... (Generating candidate questions)");
+  console.error("Generating questions...");
 
   const systemInstruction = `Analyze the provided reference material and generate exactly ${questionCount} questions that verify whether the text contains genuinely novel, unexpected, or counter-intuitive information.
 
@@ -268,10 +274,10 @@ Output strictly in JSON.`;
 // Validate a single question (test + evaluate)
 async function validateQuestion(
   ai: GoogleGenAI,
-  q: Question
+  q: Question,
+  index: number,
+  total: number
 ): Promise<ValidationResult> {
-  console.error(`Validating: ${q.question}`);
-
   // Test: Ask target model without context
   const candidateAnswer = await testQuestion(ai, q.question);
 
@@ -283,7 +289,13 @@ async function validateQuestion(
     candidateAnswer
   );
 
-  console.error(`  Judge Verdict: Is Correct? ${evalResult.is_correct}`);
+  // Display result with truncated question
+  const cols = process.stdout.columns || 80;
+  const prefix = `  [${index}/${total}] `;
+  const result = evalResult.is_correct ? "correct" : "incorrect";
+  // Account for space before result
+  const maxQuestion = cols - prefix.length - result.length - 1;
+  console.error(`${prefix}${truncate(q.question, maxQuestion)} ${result}`);
 
   return { question: q, candidateAnswer, evalResult };
 }
@@ -300,6 +312,10 @@ function formatResult(result: ValidationResult, isFailure: boolean): string {
   } else {
     output += `\n**Analysis (Success):** ${evalResult.summary} ${evalResult.critique}\n`;
   }
+
+  output += `\n<details><summary>Why This Is Tricky</summary>\n\n`;
+  output += `${question.rationale}\n\n`;
+  output += `</details>\n\n`;
 
   output += `<details><summary>Raw Target Response</summary>\n\n`;
   output += `${candidateAnswer}\n\n`;
@@ -371,10 +387,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Step 2 & 3: Validate questions in parallel
-  const results = await Promise.all(
-    questions.map((q) => validateQuestion(ai, q))
-  );
+  // Step 2 & 3: Validate questions sequentially for clean output
+  console.error(`Validating ${questions.length} questions...`);
+  const results: ValidationResult[] = [];
+  for (let i = 0; i < questions.length; i++) {
+    results.push(
+      await validateQuestion(ai, questions[i], i + 1, questions.length)
+    );
+  }
 
   // Step 4: Generate and output report
   const report = generateReport(results);
