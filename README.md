@@ -321,9 +321,9 @@ rows.
 1. Install `tailscale`: `curl -fsSL https://tailscale.com/install.sh | sh`
    <https://tailscale.com/download/linux>
    1. Log in to Tailscale: `sudo tailscale up`
-1. (Optional) Install `nodejs`: `sudo apt-get install nodejs`. Note that this
-   may install an older version; for newer versions, see the [Node.js](#nodejs)
-   section.
+1. (Optional) Install `nodejs` and `npm`: `sudo apt-get install nodejs npm`.
+   Note that these may be older versions; for newer versions, see the
+   [Node.js](#nodejs) section.
 1. (Optional) Disable WiFi and Bluetooth: add `dtoverlay=disable-wifi` and
    `dtoverlay=disable-bt` on separate lines under the `[all]` section in
    `/boot/firmware/config.txt`. (See the
