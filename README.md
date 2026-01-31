@@ -316,7 +316,19 @@ rows.
 1. Update the OS: `sudo apt-get update && sudo apt-get upgrade -y`
    1. If `/var/run/reboot-required` exists (created if a package update requires
       a reboot), reboot: `sudo reboot`.
-1. Install `fish`: `sudo apt-get install fish`.
+1. Install `fish` from the OpenSUSE Build Service (for the latest version):
+
+   ```bash
+   curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_Unstable/Release.key | \
+     gpg --dearmor | sudo tee /usr/share/keyrings/fish-shell.gpg > /dev/null
+   echo 'deb [signed-by=/usr/share/keyrings/fish-shell.gpg] https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_Unstable/ /' | \
+     sudo tee /etc/apt/sources.list.d/fish-shell.list
+   sudo apt update && sudo apt install -y fish
+   ```
+
+   Alternatively, install the (older) version from the Debian repos:
+   `sudo apt-get install fish`.
+
 1. Install `git`: `sudo apt-get install git`.
 1. Install `tailscale`: `curl -fsSL https://tailscale.com/install.sh | sh`
    <https://tailscale.com/download/linux>
