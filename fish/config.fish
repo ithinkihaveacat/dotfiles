@@ -170,6 +170,10 @@ if test -r ~/.ssh/etc/acid
     set -x ACID_STARTUP_SCRIPT_PATH ~/.ssh/etc/acid
 end
 
+# mosh
+
+set -x MOSH_TITLE_NOPREFIX 1
+
 # other scripts
 
 add_path (realpath $HOME/.dotfiles/fish/../bin)
