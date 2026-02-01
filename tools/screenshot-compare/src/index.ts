@@ -4,6 +4,7 @@ import { GoogleGenAI } from "@google/genai/node";
 import { execFileSync, execSync } from "child_process";
 import { access } from "fs/promises";
 import { constants } from "fs";
+import pkg from "../package.json" with { type: "json" };
 
 // Version check - Node.js 24+ required
 const REQUIRED_NODE_MAJOR = 24;
@@ -51,7 +52,8 @@ Arguments:
   PROMPT      Custom prompt for the AI model (optional)
 
 Options:
-  -h, --help  Display this help message and exit
+  -h, --help     Display this help message and exit
+  -v, --version  Display version number and exit
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
@@ -70,6 +72,11 @@ Exit Codes:
 function error(message: string, code: number = 1): never {
   console.error(`${SCRIPT_NAME}: ${message}`);
   process.exit(code);
+}
+
+function version(): void {
+  console.log(`${SCRIPT_NAME} ${pkg.version}`);
+  process.exit(0);
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -115,9 +122,12 @@ function processImage(path: string): string {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  // Handle help
+  // Handle help and version
   if (args.includes("-h") || args.includes("--help")) {
     usage();
+  }
+  if (args.includes("-v") || args.includes("--version")) {
+    version();
   }
 
   // Validate arguments

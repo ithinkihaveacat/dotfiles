@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { GoogleGenAI, Type } from "@google/genai/node";
+import pkg from "../package.json" with { type: "json" };
 
 // Version check - Node.js 24+ required
 const REQUIRED_NODE_MAJOR = 24;
@@ -61,6 +62,7 @@ Input:
 
 Options:
   -h, --help        Display this help message and exit
+  -v, --version     Display version number and exit
   --questions N     Number of questions to generate (default: ${DEFAULT_QUESTION_COUNT})
 
 Environment:
@@ -77,6 +79,11 @@ function error(message: string): never {
   process.exit(1);
 }
 
+function version(): void {
+  console.log(`${SCRIPT_NAME} ${pkg.version}`);
+  process.exit(0);
+}
+
 // Parse CLI arguments
 function parseArgs(): { topicFocus: string; questionCount: number } {
   const args = process.argv.slice(2);
@@ -88,6 +95,8 @@ function parseArgs(): { topicFocus: string; questionCount: number } {
 
     if (arg === "-h" || arg === "--help") {
       usage();
+    } else if (arg === "-v" || arg === "--version") {
+      version();
     } else if (arg === "--questions") {
       const next = args[++i];
       if (!next || isNaN(parseInt(next, 10))) {
