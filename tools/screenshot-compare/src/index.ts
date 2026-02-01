@@ -1,9 +1,21 @@
 #!/usr/bin/env node
 
 import { GoogleGenAI } from "@google/genai/node";
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import { access } from "fs/promises";
 import { constants } from "fs";
+
+// Version check - Node.js 24+ required
+const REQUIRED_NODE_MAJOR = 24;
+{
+  const major = Number(process.versions.node.split(".")[0]);
+  if (major < REQUIRED_NODE_MAJOR) {
+    console.error(
+      `screenshot-compare: requires Node.js ${REQUIRED_NODE_MAJOR}+ (found ${process.version})`
+    );
+    process.exit(1);
+  }
+}
 
 const SCRIPT_NAME = "screenshot-compare";
 const MODEL = "gemini-3-flash-preview";
@@ -91,8 +103,10 @@ function commandExists(cmd: string): boolean {
  */
 function processImage(path: string): string {
   // ImageMagick outputs binary webp to stdout, which we capture as a Buffer
-  const webpBuffer = execSync(
-    `magick ${JSON.stringify(path)} -background magenta -flatten -define webp:lossless=true webp:-`,
+  // Using execFileSync avoids shell parsing and handles special characters in paths
+  const webpBuffer = execFileSync(
+    "magick",
+    [path, "-background", "magenta", "-flatten", "-define", "webp:lossless=true", "webp:-"],
     { maxBuffer: 50 * 1024 * 1024 }, // 50MB buffer for large images
   );
   return webpBuffer.toString("base64");

@@ -2,6 +2,18 @@
 
 import { GoogleGenAI, Type } from "@google/genai/node";
 
+// Version check - Node.js 24+ required
+const REQUIRED_NODE_MAJOR = 24;
+{
+  const major = Number(process.versions.node.split(".")[0]);
+  if (major < REQUIRED_NODE_MAJOR) {
+    console.error(
+      `socrates: requires Node.js ${REQUIRED_NODE_MAJOR}+ (found ${process.version})`
+    );
+    process.exit(1);
+  }
+}
+
 // Type definitions
 interface Question {
   question: string;
