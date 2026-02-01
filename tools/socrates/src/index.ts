@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai/node";
 
 // Type definitions
 interface Question {
