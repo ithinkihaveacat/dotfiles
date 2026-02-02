@@ -113,8 +113,16 @@ function processImage(path: string): string {
   // Using execFileSync avoids shell parsing and handles special characters in paths
   const webpBuffer = execFileSync(
     "magick",
-    [path, "-background", "magenta", "-flatten", "-define", "webp:lossless=true", "webp:-"],
-    { maxBuffer: 50 * 1024 * 1024 }, // 50MB buffer for large images
+    [
+      path,
+      "-background",
+      "magenta",
+      "-flatten",
+      "-define",
+      "webp:lossless=true",
+      "webp:-"
+    ],
+    { maxBuffer: 50 * 1024 * 1024 } // 50MB buffer for large images
   );
   return webpBuffer.toString("base64");
 }
@@ -180,10 +188,10 @@ async function main(): Promise<void> {
         parts: [
           { text: prompt },
           { inlineData: { mimeType: "image/webp", data: img1Base64 } },
-          { inlineData: { mimeType: "image/webp", data: img2Base64 } },
-        ],
-      },
-    ],
+          { inlineData: { mimeType: "image/webp", data: img2Base64 } }
+        ]
+      }
+    ]
   });
 
   // Extract text response

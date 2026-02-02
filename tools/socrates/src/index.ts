@@ -173,9 +173,9 @@ If the text contains only general knowledge, return an empty list.`;
         role: "user",
         parts: [
           { text: `Reference Material:\n\n${inputData}` },
-          { text: `\n\nTask:\n${topicFocus}` },
-        ],
-      },
+          { text: `\n\nTask:\n${topicFocus}` }
+        ]
+      }
     ],
     config: {
       systemInstruction,
@@ -188,18 +188,18 @@ If the text contains only general knowledge, return an empty list.`;
             question: { type: Type.STRING },
             answer: {
               type: Type.STRING,
-              description: "The correct answer based strictly on the text.",
+              description: "The correct answer based strictly on the text."
             },
             rationale: {
               type: Type.STRING,
-              description: "Why this is counter-intuitive.",
-            },
+              description: "Why this is counter-intuitive."
+            }
           },
-          required: ["question", "answer", "rationale"],
-        },
+          required: ["question", "answer", "rationale"]
+        }
       },
-      temperature: 0.5,
-    },
+      temperature: 0.5
+    }
   });
 
   const text = response.text;
@@ -221,7 +221,7 @@ async function testQuestion(
 ): Promise<string> {
   const response = await ai.models.generateContent({
     model: TARGET_MODEL,
-    contents: question,
+    contents: question
   });
 
   return response.text || "I do not know.";
@@ -263,21 +263,21 @@ Output strictly in JSON.`;
           is_correct: {
             type: Type.BOOLEAN,
             description:
-              "False if the answer is wrong, misleading, or buries the lead.",
+              "False if the answer is wrong, misleading, or buries the lead."
           },
           summary: {
             type: Type.STRING,
-            description: "Brief summary of what the candidate actually said.",
+            description: "Brief summary of what the candidate actually said."
           },
           critique: {
             type: Type.STRING,
             description:
-              "Why it is correct or incorrect, referencing the Ground Truth.",
-          },
+              "Why it is correct or incorrect, referencing the Ground Truth."
+          }
         },
-        required: ["is_correct", "summary", "critique"],
-      },
-    },
+        required: ["is_correct", "summary", "critique"]
+      }
+    }
   });
 
   const text = response.text;
