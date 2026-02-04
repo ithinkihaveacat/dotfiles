@@ -4,6 +4,7 @@
 
 - [screenshot-describe](#screenshot-describe) - Generate alt-text from images
 - [screenshot-compare](#screenshot-compare) - Compare two images for differences
+- [photo-smart-crop](#photo-smart-crop) - Smart crop around detected people
 - [emerson](#emerson) - Generate essay-length analysis from text
 - [satisfies](#satisfies) - Evaluate boolean conditions against text
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
@@ -23,22 +24,22 @@ scripts/screenshot-describe IMAGE [PROMPT]
 
 ### Arguments
 
-| Argument | Description |
-|----------|-------------|
-| `IMAGE` | Path to a screenshot (any format supported by ImageMagick) |
-| `PROMPT` | Custom prompt for the AI model (optional) |
+| Argument | Description                                                |
+| -------- | ---------------------------------------------------------- |
+| `IMAGE`  | Path to a screenshot (any format supported by ImageMagick) |
+| `PROMPT` | Custom prompt for the AI model (optional)                  |
 
 ### Options
 
-| Option | Description |
-|--------|-------------|
+| Option       | Description                   |
+| ------------ | ----------------------------- |
 | `-h, --help` | Display help message and exit |
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Your Gemini API key |
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
 
 ### Examples
 
@@ -76,11 +77,11 @@ curl -s -X POST \
 
 ### Exit Codes
 
-| Code | Description |
-|------|-------------|
-| 0 | Success |
-| 1 | General error (API error, missing file, etc.) |
-| 127 | Missing required dependency |
+| Code | Description                                   |
+| ---- | --------------------------------------------- |
+| 0    | Success                                       |
+| 1    | General error (API error, missing file, etc.) |
+| 127  | Missing required dependency                   |
 
 ---
 
@@ -96,23 +97,23 @@ scripts/screenshot-compare IMAGE1 IMAGE2 [PROMPT]
 
 ### Arguments
 
-| Argument | Description |
-|----------|-------------|
-| `IMAGE1` | Path to the first screenshot (baseline/before) |
+| Argument | Description                                      |
+| -------- | ------------------------------------------------ |
+| `IMAGE1` | Path to the first screenshot (baseline/before)   |
 | `IMAGE2` | Path to the second screenshot (comparison/after) |
-| `PROMPT` | Custom prompt for the AI model (optional) |
+| `PROMPT` | Custom prompt for the AI model (optional)        |
 
 ### Options
 
-| Option | Description |
-|--------|-------------|
+| Option       | Description                   |
+| ------------ | ----------------------------- |
 | `-h, --help` | Display help message and exit |
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Your Gemini API key |
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
 
 ### Examples
 
@@ -152,12 +153,79 @@ curl -s -X POST \
 
 ### Exit Codes
 
-| Code | Description |
-|------|-------------|
-| 0 | Success (differences found and described) |
-| 1 | General error (API error, usage, missing file, etc.) |
-| 2 | Images are identical (no differences to describe) |
-| 127 | Missing required dependency |
+| Code | Description                                          |
+| ---- | ---------------------------------------------------- |
+| 0    | Success (differences found and described)            |
+| 1    | General error (API error, usage, missing file, etc.) |
+| 2    | Images are identical (no differences to describe)    |
+| 127  | Missing required dependency                          |
+
+---
+
+## photo-smart-crop
+
+Smart crop images around detected people using Gemini API for face detection.
+
+### Synopsis
+
+```bash
+scripts/photo-smart-crop [OPTIONS] INPUT OUTPUT
+```
+
+### Arguments
+
+| Argument | Description                                               |
+| -------- | --------------------------------------------------------- |
+| `INPUT`  | Path to input image (any format supported by ImageMagick) |
+| `OUTPUT` | Path for cropped output image                             |
+
+### Options
+
+| Option        | Description                          |
+| ------------- | ------------------------------------ |
+| `--ratio W:H` | Aspect ratio for crop (default: 5:3) |
+| `-h, --help`  | Display help message and exit        |
+
+### Environment Variables
+
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+
+### Examples
+
+```bash
+# Default 5:3 aspect ratio
+scripts/photo-smart-crop family.jpg family-cropped.jpg
+
+# 16:9 for video thumbnails
+scripts/photo-smart-crop --ratio 16:9 portrait.jpg landscape-16x9.jpg
+
+# Square crop for profile pictures
+scripts/photo-smart-crop --ratio 1:1 headshot.png avatar.png
+
+# 4:3 standard photo ratio
+scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3.jpg
+```
+
+### Processing Details
+
+1. Detects all people in the image using Gemini vision API
+2. Calculates bounding box around all detected faces (prioritizes heads over
+   bodies)
+3. Expands box by 20% for headroom
+4. Adjusts to match the requested aspect ratio
+5. If full body cannot fit, crops from bottom (preserving heads)
+6. Applies crop using ImageMagick with auto-orient for EXIF handling
+
+### Exit Codes
+
+| Code | Description                                                         |
+| ---- | ------------------------------------------------------------------- |
+| 0    | Success (cropped output written)                                    |
+| 1    | Error (no people found, API error, invalid arguments, missing file) |
+| 2    | Rate limited (API returned 429)                                     |
+| 127  | Missing required dependency                                         |
 
 ---
 
@@ -173,27 +241,27 @@ scripts/emerson "PROMPT" < INPUT_FILE
 
 ### Arguments
 
-| Argument | Description |
-|----------|-------------|
+| Argument | Description                      |
+| -------- | -------------------------------- |
 | `PROMPT` | The question or topic to address |
 
 ### Input
 
-| Source | Description |
-|--------|-------------|
+| Source  | Description                                       |
+| ------- | ------------------------------------------------- |
 | `stdin` | Reference material (text) to use for the response |
 
 ### Options
 
-| Option | Description |
-|--------|-------------|
+| Option       | Description                   |
+| ------------ | ----------------------------- |
 | `-h, --help` | Display help message and exit |
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Your Gemini API key |
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
 
 ### Examples
 
@@ -237,17 +305,18 @@ curl -s -X POST \
 
 ### Exit Codes
 
-| Code | Description |
-|------|-------------|
-| 0 | Success |
-| 1 | General error (API error, no input, etc.) |
-| 127 | Missing required dependency |
+| Code | Description                               |
+| ---- | ----------------------------------------- |
+| 0    | Success                                   |
+| 1    | General error (API error, no input, etc.) |
+| 127  | Missing required dependency               |
 
 ---
 
 ## satisfies
 
-Evaluate whether input text satisfies a condition using the Gemini API. Returns a boolean result via exit code.
+Evaluate whether input text satisfies a condition using the Gemini API. Returns
+a boolean result via exit code.
 
 ### Synopsis
 
@@ -257,27 +326,27 @@ echo "text" | scripts/satisfies "CONDITION"
 
 ### Arguments
 
-| Argument | Description |
-|----------|-------------|
+| Argument    | Description                                             |
+| ----------- | ------------------------------------------------------- |
 | `CONDITION` | The condition or question to evaluate against the input |
 
 ### Input
 
-| Source | Description |
-|--------|-------------|
+| Source  | Description              |
+| ------- | ------------------------ |
 | `stdin` | Text content to evaluate |
 
 ### Options
 
-| Option | Description |
-|--------|-------------|
+| Option       | Description                   |
+| ------------ | ----------------------------- |
 | `-h, --help` | Display help message and exit |
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Your Gemini API key |
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
 
 ### Examples
 
@@ -340,11 +409,11 @@ fi
 
 ### Exit Codes
 
-| Code | Description |
-|------|-------------|
-| 0 | True (input satisfies the condition) |
-| 1 | False (input does not satisfy the condition) |
-| 127 | Missing required dependency |
+| Code | Description                                  |
+| ---- | -------------------------------------------- |
+| 0    | True (input satisfies the condition)         |
+| 1    | False (input does not satisfy the condition) |
+| 127  | Missing required dependency                  |
 
 ---
 
@@ -355,11 +424,13 @@ fi
 The scripts handle platform differences automatically, but for raw API commands:
 
 **Linux:**
+
 ```bash
 base64 -w 0  # Single-line output
 ```
 
 **macOS:**
+
 ```bash
 base64 -b 0  # Single-line output
 ```
@@ -383,7 +454,9 @@ magick input.png -alpha off -define webp:lossless=true webp:- | base64 -w 0
 
 ### Alpha Channel Removal
 
-The `-alpha off` flag removes transparency. Images differing only in alpha channel are treated as identical. This is intentional for comparing visual appearance on an opaque background.
+The `-alpha off` flag removes transparency. Images differing only in alpha
+channel are treated as identical. This is intentional for comparing visual
+appearance on an opaque background.
 
 ---
 
@@ -395,12 +468,14 @@ Place image **before** text (Gemini best practice):
 
 ```json
 {
-  "contents": [{
-    "parts": [
-      {"inlineData": {"mimeType": "image/webp", "data": "<base64>"}},
-      {"text": "Describe this image"}
-    ]
-  }]
+  "contents": [
+    {
+      "parts": [
+        { "inlineData": { "mimeType": "image/webp", "data": "<base64>" } },
+        { "text": "Describe this image" }
+      ]
+    }
+  ]
 }
 ```
 
@@ -410,13 +485,15 @@ Place text **before** images (Gemini best practice):
 
 ```json
 {
-  "contents": [{
-    "parts": [
-      {"text": "Compare these images"},
-      {"inlineData": {"mimeType": "image/webp", "data": "<base64-1>"}},
-      {"inlineData": {"mimeType": "image/webp", "data": "<base64-2>"}}
-    ]
-  }]
+  "contents": [
+    {
+      "parts": [
+        { "text": "Compare these images" },
+        { "inlineData": { "mimeType": "image/webp", "data": "<base64-1>" } },
+        { "inlineData": { "mimeType": "image/webp", "data": "<base64-2>" } }
+      ]
+    }
+  ]
 }
 ```
 
@@ -426,13 +503,15 @@ Structure with reference material first, then task:
 
 ```json
 {
-  "contents": [{
-    "role": "user",
-    "parts": [
-      {"text": "Reference Material:\n\n<content>"},
-      {"text": "\n\nTask/Question:\n<prompt>"}
-    ]
-  }],
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        { "text": "Reference Material:\n\n<content>" },
+        { "text": "\n\nTask/Question:\n<prompt>" }
+      ]
+    }
+  ],
   "generationConfig": {
     "temperature": 1.0,
     "maxOutputTokens": 8192
@@ -446,17 +525,19 @@ Use structured output to get JSON boolean response:
 
 ```json
 {
-  "contents": [{
-    "parts": [
-      {"text": "<input text>"},
-      {"text": "Does the above text satisfy the condition: <condition>"}
-    ]
-  }],
+  "contents": [
+    {
+      "parts": [
+        { "text": "<input text>" },
+        { "text": "Does the above text satisfy the condition: <condition>" }
+      ]
+    }
+  ],
   "generationConfig": {
     "responseMimeType": "application/json",
     "responseSchema": {
       "type": "object",
-      "properties": {"satisfies": {"type": "boolean"}},
+      "properties": { "satisfies": { "type": "boolean" } },
       "required": ["satisfies"]
     }
   }
