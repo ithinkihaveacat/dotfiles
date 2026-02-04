@@ -2,12 +2,13 @@
 name: ai-analysis
 description: >
   Command-line tools that delegate analysis tasks to AI models. Includes image
-  description, screenshot comparison, smart cropping around people, essay
-  generation from text, and boolean condition evaluation. Use for describing
-  images, comparing UI states, cropping photos around faces, generating reports,
-  evaluating conditions, or any task requiring AI inference. Triggers: ai
-  analysis, describe image, compare screenshots, smart crop, crop around people,
-  face crop, generate essay, evaluate condition, alt text, image description, UI
+  description, screenshot comparison, smart cropping around people, token
+  counting, essay generation from text, and boolean condition evaluation. Use
+  for describing images, comparing UI states, cropping photos around faces,
+  counting tokens, generating reports, evaluating conditions, or any task
+  requiring AI inference. Triggers: ai analysis, describe image, compare
+  screenshots, smart crop, crop around people, face crop, count tokens, token
+  count, generate essay, evaluate condition, alt text, image description, UI
   comparison, visual diff, satisfies condition, boolean evaluation, gemini.
 compatibility: >
   Requires curl and jq. Image tools also need base64 and magick (ImageMagick).
@@ -56,6 +57,9 @@ scripts/emerson "Summarize the key changes" < documentation.md
 
 # Evaluate a boolean condition against text
 echo "Hello world" | scripts/satisfies "is a greeting"
+
+# Count tokens in text
+cat document.md | scripts/token-count
 ```
 
 ## Script Overview
@@ -146,6 +150,16 @@ if cat log.txt | scripts/satisfies "contains error messages"; then
   echo "Errors detected"
 fi
 ```
+
+### token-count
+
+Count tokens in text using the Gemini API.
+
+```bash
+cat file.txt | scripts/token-count
+```
+
+**Exit codes:** 0 success, 1 error, 127 missing dependency
 
 ## Image Encoding Notes
 

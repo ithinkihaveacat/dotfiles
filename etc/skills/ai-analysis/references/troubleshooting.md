@@ -317,20 +317,22 @@ content:
 2. Process incrementally
 3. Combine results
 
-### Missing Input (satisfies)
+### Missing or Empty Input (token-count, satisfies)
 
 **Error:**
 
 ```
+token-count: empty input
 satisfies: missing input from stdin
 ```
 
-**Cause:** No input was piped to the script.
+**Cause:** No input was piped to the script, or the input was empty.
 
 **Solution:**
 
 ```bash
 # Correct usage - pipe input
+cat file.txt | scripts/token-count
 cat file.txt | scripts/satisfies "condition"
 echo "text" | scripts/satisfies "condition"
 

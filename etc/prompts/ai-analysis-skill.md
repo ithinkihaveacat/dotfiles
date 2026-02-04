@@ -33,6 +33,7 @@ Before creating files, research the following:
    - `bin/screenshot-describe` - Generate alt-text/descriptions from images
    - `bin/screenshot-compare` - Compare two images for visual differences
    - `bin/photo-smart-crop` - Smart crop images around detected people
+   - `bin/token-count` - Count tokens in text
    - `bin/emerson` - Generate essay-length analysis from text input
    - `bin/satisfies` - Evaluate boolean conditions against text input
 
@@ -72,6 +73,7 @@ Symlink these scripts into `scripts/` using relative paths:
 - `bin/screenshot-describe`
 - `bin/screenshot-compare`
 - `bin/photo-smart-crop`
+- `bin/token-count`
 - `bin/emerson`
 - `bin/satisfies`
 
@@ -112,21 +114,22 @@ description: [See below]
   discovery across different agent implementations
 
 Include these trigger phrases: ai analysis, describe image, compare screenshots,
-smart crop, crop around people, face crop, generate essay, evaluate condition,
-alt text, image description, UI comparison, visual diff, satisfies condition,
-boolean evaluation, gemini
+smart crop, crop around people, face crop, count tokens, token count, generate
+essay, evaluate condition, alt text, image description, UI comparison, visual
+diff, satisfies condition, boolean evaluation, gemini
 
 Example pattern:
 
 ```yaml
 description: >
   Command-line tools that delegate analysis tasks to AI models. Includes image
-  description, screenshot comparison, smart cropping around people, essay
-  generation from text, and boolean condition evaluation. Use for describing
-  images, comparing UI states, cropping photos around faces, generating reports,
-  evaluating conditions, or any task requiring AI inference. Triggers: ai
-  analysis, describe image, compare screenshots, smart crop, crop around people,
-  face crop, generate essay, evaluate condition, alt text, image description, UI
+  description, screenshot comparison, smart cropping around people, token
+  counting, essay generation from text, and boolean condition evaluation. Use
+  for describing images, comparing UI states, cropping photos around faces,
+  counting tokens, generating reports, evaluating conditions, or any task
+  requiring AI inference. Triggers: ai analysis, describe image, compare
+  screenshots, smart crop, crop around people, face crop, count tokens, token
+  count, generate essay, evaluate condition, alt text, image description, UI
   comparison, visual diff, satisfies condition, boolean evaluation, gemini.
 ```
 
@@ -184,10 +187,11 @@ skill activates.
 
 - Environment: `GEMINI_API_KEY` required
 - Dependencies: `curl`, `jq` (all tools); `base64`, `magick` (image tools only)
-- 5 highest-value commands to run first:
+- 6 highest-value commands to run first:
   - `scripts/screenshot-describe image.png` (generate alt-text)
   - `scripts/screenshot-compare before.png after.png` (find visual differences)
   - `scripts/photo-smart-crop photo.jpg cropped.jpg` (crop around people)
+  - `cat file.txt | scripts/token-count` (count tokens)
   - `scripts/emerson "Question" < document.txt` (essay-length analysis)
   - `echo "text" | scripts/satisfies "condition"` (boolean evaluation)
 - Use paths relative to the skill: `scripts/screenshot-describe`
@@ -219,12 +223,17 @@ Scripts to document:
    - Prioritizes faces, expands for headroom, enforces aspect ratio
    - Exit code 2 when rate limited (allows retry logic)
 
-4. **emerson** - Generate essay-length (~3000 words) analysis from text input
+4. **token-count** - Count tokens in text
+   - Uses Gemini countTokens API endpoint
+   - Reads from stdin, outputs token count
+   - Simple utility for estimating API costs
+
+5. **emerson** - Generate essay-length (~3000 words) analysis from text input
    - Reads reference material from stdin
    - Produces authoritative, footnoted Markdown output
    - High-quality output suitable for documentation and reports
 
-5. **satisfies** - Evaluate whether text satisfies a condition
+6. **satisfies** - Evaluate whether text satisfies a condition
    - Reads input from stdin, returns boolean via exit code
    - Useful for shell conditionals and validation
    - Exit code 0 = true, 1 = false
@@ -362,8 +371,8 @@ Before finalizing, verify:
 ### Content Coverage
 
 - [ ] `SKILL.md` has "Important: Use Scripts First" section at top of body
-- [ ] All five scripts documented (screenshot-describe, screenshot-compare,
-      photo-smart-crop, emerson, satisfies)
+- [ ] All six scripts documented (screenshot-describe, screenshot-compare,
+      photo-smart-crop, token-count, emerson, satisfies)
 - [ ] Image encoding conventions documented (briefly, for troubleshooting)
 - [ ] Platform differences (macOS vs Linux) noted
 - [ ] Raw API commands are NOT in SKILL.md body (agents read script source)

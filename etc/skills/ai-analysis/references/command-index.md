@@ -7,6 +7,7 @@
 - [photo-smart-crop](#photo-smart-crop) - Smart crop around detected people
 - [emerson](#emerson) - Generate essay-length analysis from text
 - [satisfies](#satisfies) - Evaluate boolean conditions against text
+- [token-count](#token-count) - Count tokens in text
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
 - [Request Structure](#request-structure) - API request patterns
 
@@ -414,6 +415,46 @@ fi
 | 0    | True (input satisfies the condition)         |
 | 1    | False (input does not satisfy the condition) |
 | 127  | Missing required dependency                  |
+
+---
+
+## token-count
+
+Count tokens in text using the Gemini API's countTokens endpoint.
+
+### Synopsis
+
+```bash
+cat file.txt | scripts/token-count
+echo "text" | scripts/token-count
+```
+
+### Environment Variables
+
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+
+### Examples
+
+```bash
+# Count tokens in a file
+cat document.md | scripts/token-count
+
+# Count tokens in a string
+echo "The quick brown fox" | scripts/token-count
+
+# Count tokens across multiple files
+cat *.md | scripts/token-count
+```
+
+### Exit Codes
+
+| Code | Description                    |
+| ---- | ------------------------------ |
+| 0    | Success (outputs token count)  |
+| 1    | Error (empty input, API error) |
+| 127  | Missing required dependency    |
 
 ---
 
