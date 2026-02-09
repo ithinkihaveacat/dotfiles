@@ -117,7 +117,12 @@ description: >
 - Include if the skill has external dependencies or environment requirements
 - Mention required command-line tools, network access needs, or target platforms
 - Example:
-  `compatibility: Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to dl.google.com and androidx.dev.`
+
+  ```yaml
+  compatibility: >
+    Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to
+    dl.google.com and androidx.dev.
+  ```
 
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
@@ -172,7 +177,8 @@ A compact reference for each subcommand. For each, provide:
 
 Subcommands to document:
 
-1. **version** - Get specific version type for a Jetpack package
+1. **version** - Get specific version type or snapshot build ID for a Jetpack
+   package
 2. **resolve** - Convert Android package/class name to Maven coordinate
 3. **source** - Download and extract source JARs
 4. **inspect** - Convenience wrapper combining resolve + source
@@ -206,6 +212,7 @@ Document typical usage patterns:
    ```bash
    scripts/jetpack version androidx.wear.tiles:tiles ALPHA
    scripts/jetpack version androidx.wear.tiles:tiles SNAPSHOT
+   scripts/jetpack version androidx.wear.tiles:tiles 14765146
    ```
 
 3. **Working with bleeding-edge code**

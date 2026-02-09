@@ -14,14 +14,18 @@
 ## version
 
 **Purpose**: Get specific version type for a Jetpack package. **Synopsis**:
-`scripts/jetpack version PACKAGE_NAME [VERSION_TYPE] [REPO_URL]` **Arguments**:
+`scripts/jetpack version PACKAGE_NAME [VERSION_TYPE_OR_BUILD_ID] [REPO_URL]`
+**Arguments**:
 
 - `PACKAGE_NAME`: Maven coordinate (e.g., `androidx.wear.tiles:tiles`).
-- `VERSION_TYPE`: `ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`, or `SNAPSHOT`
-  (default: `STABLE`).
-- `REPO_URL`: Custom Maven repo URL (ignored for SNAPSHOT). **Examples**:
+- `VERSION_TYPE_OR_BUILD_ID`: `ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`,
+  `SNAPSHOT`, or a specific build ID integer (e.g., `14765146`) for a pinned
+  snapshot (default: `STABLE`).
+- `REPO_URL`: Custom Maven repo URL (ignored for SNAPSHOT or build ID).
+  **Examples**:
 - `scripts/jetpack version androidx.wear.tiles:tiles`
 - `scripts/jetpack version androidx.wear.tiles:tiles ALPHA`
+- `scripts/jetpack version androidx.wear.tiles:tiles 14765146`
 
 **Raw Commands**:
 

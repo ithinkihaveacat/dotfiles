@@ -113,6 +113,7 @@ cd "$(scripts/jetpack inspect androidx.wear.tiles.TileService)"
 ```bash
 scripts/jetpack version androidx.wear.tiles:tiles ALPHA
 scripts/jetpack version androidx.wear.tiles:tiles SNAPSHOT
+scripts/jetpack version androidx.wear.tiles:tiles 14765146
 ```
 
 ### Working with Bleeding-Edge Code

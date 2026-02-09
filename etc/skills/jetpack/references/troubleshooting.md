@@ -26,10 +26,12 @@ script relies on system tools. **Solution**:
 
 - No internet connection.
 - Firewall blocking `dl.google.com` or `androidx.dev`.
-- Package does not exist in the specified repository. **Solution**:
+- Package does not exist in the specified repository.
+- Invalid or expired Build ID (artifacts are not kept forever). **Solution**:
 - Check internet.
 - Verify package name is correct (e.g., `androidx.wear.tiles:tiles` vs
   `androidx.wear.tiles:wear-tiles`).
+- Verify Build ID exists at `https://androidx.dev/snapshots/builds`.
 
 ## Resolution Failures
 
