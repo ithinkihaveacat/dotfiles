@@ -322,14 +322,28 @@ adb exec-out settings put system font_scale 1.0
 adb exec-out settings put system font_scale 1.15
 ```
 
-### `scripts/adb-settings-theme`
+### `scripts/adb-theme`
 
-**Purpose**: Toggle dark/light theme. **Dependencies**: `adb` **Usage**:
-`scripts/adb-settings-theme` **Raw Command**:
+**Purpose**: Get or set system theme customization (e.g., 'lemongrass', 'none').
+**Requirements**: Wear OS device, API Level 36+ (Android 16) recommended.
+**Dependencies**: `adb`, `jq` **Usage**: `scripts/adb-theme [get|set THEME]`
+**Raw Command**:
 
 ```bash
-# Toggle ui_night_mode (0=auto, 1=no, 2=yes)
-adb shell settings put secure ui_night_mode 2
+# Get current theme
+adb exec-out settings get secure theme_customization_overlay_packages | jq .
+
+# Set theme (example)
+adb exec-out settings put secure theme_customization_overlay_packages '{"android.theme.customization.theme_style":"EXPRESSIVE",...}'
+```
+
+### `scripts/adb-settings-theme`
+
+**Purpose**: Open system theme settings (requires root/debuggable build).
+**Dependencies**: `adb` **Usage**: `scripts/adb-settings-theme` **Raw Command**:
+
+```bash
+adb exec-out am start -a com.google.android.clockwork.sysui.ACTION_SYSTEM_THEME_SETTINGS
 ```
 
 ### `scripts/adb-touches-on`

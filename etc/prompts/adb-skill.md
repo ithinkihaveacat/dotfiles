@@ -190,7 +190,7 @@ with one-line descriptions:
 - **Activity discovery**: list activities by category (launcher, TV, settings)
 - **Package operations**: launch, stop, uninstall, permissions, services
 - **Wear OS data layer**: capabilities, nodes, data items, RPCs
-- **Display/demo mode**: demo on/off, font scale, touches, theme
+- **Display/demo mode**: demo on/off, font scale, touches, theme customization (Wear OS 5+/API 36+), theme settings
 
 Point to `references/command-index.md` for detailed usage.
 
