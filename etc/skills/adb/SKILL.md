@@ -105,7 +105,7 @@ See `references/command-index.md` for detailed usage.
 
 - `scripts/adb-demo-on` / `off`: Toggle Android demo mode (clean status bar).
 - `scripts/adb-fontscale-default` / `large`: Change font size.
-- `scripts/adb-theme`: Get or set system theme customization (e.g., set to 'lemongrass'). Requires Wear OS 5+ (API 36+).
+- `scripts/adb-theme`: Get or set system theme customization (e.g., set to 'lemongrass'). Requires Wear OS 6+ (API 36+).
 - `scripts/adb-settings-theme`: Open system theme settings (requires root/debuggable build).
 - `scripts/adb-touches-on` / `off`: Show/hide taps on screen.
 
