@@ -189,7 +189,7 @@ skill activates.
 
 - Environment: `GEMINI_API_KEY` required
 - Dependencies: `curl`, `jq`, `python3` (all tools); `base64`, `magick` (image tools only)
-- 6 highest-value commands to run first:
+- 7 highest-value commands to run first:
   - `scripts/screenshot-describe image.png` (generate alt-text)
   - `scripts/screenshot-compare before.png after.png` (find visual differences)
   - `scripts/photo-smart-crop photo.jpg cropped.jpg` (crop around people)
@@ -235,7 +235,7 @@ Scripts to document:
    - Reads reference material from stdin
    - Produces authoritative, footnoted Markdown output
    - High-quality output suitable for documentation and reports
-   - Best used with `context` script to provide rich background material
+   - Can be combined with `context` to provide rich background material
 
 6. **context** - Generate aggregated context for analysis
    - Fetches documentation/repos for specific topics (e.g., gemini-api)

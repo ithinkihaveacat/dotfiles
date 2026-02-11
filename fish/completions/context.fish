@@ -21,12 +21,10 @@ complete -c context -f -n __fish_context_needs_topic -a '(__fish_context_list_to
 complete -c context -f -n __fish_context_needs_topic -a gemini-api -d 'Gemini API documentation and examples'
 complete -c context -f -n __fish_context_needs_topic -a mcp-server -d 'MCP server documentation and specification'
 complete -c context -f -n __fish_context_needs_topic -a gemini-cli -d 'Gemini CLI documentation (all)'
-complete -c context -f -n __fish_context_needs_topic -a gemini-cli-extensions -d 'Gemini CLI extensions documentation'
-complete -c context -f -n __fish_context_needs_topic -a gemini-cli-hooks -d 'Gemini CLI hooks documentation'
-complete -c context -f -n __fish_context_needs_topic -a gemini-cli-changelog -d 'Gemini CLI changelog (index, latest, preview, releases)'
 complete -c context -f -n __fish_context_needs_topic -a inkyframe -d 'Pimoroni Inky Frame documentation'
 complete -c context -f -n __fish_context_needs_topic -a rpi -d 'Raspberry Pi documentation'
 complete -c context -f -n __fish_context_needs_topic -a skills -d 'Agent skills documentation (Claude, Gemini CLI, OpenAI Codex)'
+complete -c context -f -n __fish_context_needs_topic -a gemini-sdk-js -d 'Google Gemini JavaScript SDK codegen instructions'
 complete -c context -f -n __fish_context_needs_topic -a compose-architecture -d 'Android Compose Architecture documentation'
 
 # Complete flags
