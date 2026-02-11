@@ -133,7 +133,8 @@ scripts/emerson "PROMPT" < input.txt
 ### context
 
 Generate aggregated context for various topics (e.g., `gemini-api`,
-`gemini-cli`). Outputs XML format suitable for `emerson`.
+`gemini-cli`). Run with `--list` to see all available topics. Outputs XML format
+suitable for `emerson`.
 
 **Warning:** Output can be very large. **Do not** read output directly into
 your conversation history. Pipe to `emerson` for analysis, or redirect to a

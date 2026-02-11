@@ -321,8 +321,8 @@ curl -s -X POST \
 ## context
 
 Generate aggregated context for various topics (e.g., `gemini-api`, `gemini-cli`)
-by fetching data from GitHub or local execution. Outputs XML format suitable for
-`emerson`.
+by fetching data from GitHub or local execution. Run `scripts/context --list`
+to see all available topics. Outputs XML format suitable for `emerson`.
 
 **Note:** The output is often extremely large. Agents should **not** consume
 this output directly. Instead, pipe it to `emerson` for analysis, or redirect it

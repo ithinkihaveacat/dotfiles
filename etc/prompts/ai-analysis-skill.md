@@ -239,6 +239,7 @@ Scripts to document:
 
 6. **context** - Generate aggregated context for analysis
    - Fetches documentation/repos for specific topics (e.g., gemini-api)
+   - Run with `--list` to see available topics
    - Outputs XML format optimized for AI consumption
    - **Warning:** Output is very large; do not read directly. Pipe to `emerson`
      or redirect to a file.
