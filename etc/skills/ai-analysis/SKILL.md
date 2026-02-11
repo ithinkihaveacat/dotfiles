@@ -121,8 +121,8 @@ scripts/photo-smart-crop --ratio 1:1 headshot.png avatar.png
 ### emerson
 
 Generate essay-length (~3000 words) analysis from text input. Produces
-authoritative, footnoted Markdown. Best used with `context` to provide rich
-background material.
+authoritative, footnoted Markdown. Can be combined with `context` to provide
+rich background material.
 
 ```bash
 scripts/emerson "PROMPT" < input.txt
