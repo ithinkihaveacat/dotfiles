@@ -35,6 +35,7 @@ Before creating files, research the following:
    - `bin/photo-smart-crop` - Smart crop images around detected people
    - `bin/token-count` - Count tokens in text
    - `bin/emerson` - Generate essay-length analysis from text input
+   - `bin/context` - Generate aggregated context for analysis
    - `bin/satisfies` - Evaluate boolean conditions against text input
 
    For each script, understand:
@@ -75,6 +76,7 @@ Symlink these scripts into `scripts/` using relative paths:
 - `bin/photo-smart-crop`
 - `bin/token-count`
 - `bin/emerson`
+- `bin/context`
 - `bin/satisfies`
 
 Preserve filenames and executable permissions.
@@ -139,7 +141,7 @@ description: >
 - Include if the skill has external dependencies or environment requirements
 - Mention required command-line tools, network access needs, or target platforms
 - Example:
-  `compatibility: Requires curl and jq. Image tools also need base64 and magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to generativelanguage.googleapis.com.`
+  `compatibility: Requires curl, jq, and python3. Image tools also need base64 and magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to generativelanguage.googleapis.com.`
 
 For maximum compatibility across skill loaders, prefer a single-line
 `description:` value and avoid YAML block scalars like `description: |` (some
@@ -186,13 +188,14 @@ skill activates.
 #### Quick Start
 
 - Environment: `GEMINI_API_KEY` required
-- Dependencies: `curl`, `jq` (all tools); `base64`, `magick` (image tools only)
+- Dependencies: `curl`, `jq`, `python3` (all tools); `base64`, `magick` (image tools only)
 - 6 highest-value commands to run first:
   - `scripts/screenshot-describe image.png` (generate alt-text)
   - `scripts/screenshot-compare before.png after.png` (find visual differences)
   - `scripts/photo-smart-crop photo.jpg cropped.jpg` (crop around people)
   - `cat file.txt | scripts/token-count` (count tokens)
   - `scripts/emerson "Question" < document.txt` (essay-length analysis)
+  - `scripts/context gemini-api | scripts/emerson "Question"` (context + analysis)
   - `echo "text" | scripts/satisfies "condition"` (boolean evaluation)
 - Use paths relative to the skill: `scripts/screenshot-describe`
 
@@ -232,8 +235,15 @@ Scripts to document:
    - Reads reference material from stdin
    - Produces authoritative, footnoted Markdown output
    - High-quality output suitable for documentation and reports
+   - Best used with `context` script to provide rich background material
 
-6. **satisfies** - Evaluate whether text satisfies a condition
+6. **context** - Generate aggregated context for analysis
+   - Fetches documentation/repos for specific topics (e.g., gemini-api)
+   - Outputs XML format optimized for AI consumption
+   - **Warning:** Output is very large; do not read directly. Pipe to `emerson`
+     or redirect to a file.
+
+7. **satisfies** - Evaluate whether text satisfies a condition
    - Reads input from stdin, returns boolean via exit code
    - Useful for shell conditionals and validation
    - Exit code 0 = true, 1 = false

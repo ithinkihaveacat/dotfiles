@@ -6,6 +6,7 @@
 - [screenshot-compare](#screenshot-compare) - Compare two images for differences
 - [photo-smart-crop](#photo-smart-crop) - Smart crop around detected people
 - [emerson](#emerson) - Generate essay-length analysis from text
+- [context](#context) - Generate aggregated context for analysis
 - [satisfies](#satisfies) - Evaluate boolean conditions against text
 - [token-count](#token-count) - Count tokens in text
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
@@ -270,6 +271,9 @@ scripts/emerson "PROMPT" < INPUT_FILE
 # Summarize documentation
 cat documentation.md | scripts/emerson "Summarize the key architectural changes"
 
+# Context-aware analysis
+scripts/context gemini-api | scripts/emerson "Explain the key features"
+
 # Analyze release notes
 scripts/emerson "Explain the new features" < release_notes.txt
 
@@ -310,6 +314,66 @@ curl -s -X POST \
 | ---- | ----------------------------------------- |
 | 0    | Success                                   |
 | 1    | General error (API error, no input, etc.) |
+| 127  | Missing required dependency               |
+
+---
+
+## context
+
+Generate aggregated context for various topics (e.g., `gemini-api`, `gemini-cli`)
+by fetching data from GitHub or local execution. Outputs XML format suitable for
+`emerson`.
+
+**Note:** The output is often extremely large. Agents should **not** consume
+this output directly. Instead, pipe it to `emerson` for analysis, or redirect it
+to a file to search locally.
+
+### Synopsis
+
+```bash
+scripts/context TOPIC
+scripts/context --list
+```
+
+### Arguments
+
+| Argument | Description                                |
+| -------- | ------------------------------------------ |
+| `TOPIC`  | The topic to generate context for (required) |
+
+### Options
+
+| Option          | Description                     |
+| --------------- | ------------------------------- |
+| `--list`        | List available topics           |
+| `-h, --help`    | Display help message and exit   |
+
+### Environment Variables
+
+None required. (Uses `curl`, `jq`, `python3`)
+
+### Examples
+
+```bash
+# List available topics
+scripts/context --list
+
+# Gather context for Gemini API
+scripts/context gemini-api > gemini-context.xml
+
+# Pipe context directly to analysis
+scripts/context gemini-cli | scripts/emerson "How do commands work?"
+
+# Combine with other tools
+scripts/context mcp-server | grep "protocol"
+```
+
+### Exit Codes
+
+| Code | Description                               |
+| ---- | ----------------------------------------- |
+| 0    | Success                                   |
+| 1    | General error (unknown topic, etc.)       |
 | 127  | Missing required dependency               |
 
 ---

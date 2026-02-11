@@ -3,17 +3,19 @@ name: ai-analysis
 description: >
   Command-line tools that delegate analysis tasks to AI models. Includes image
   description, screenshot comparison, smart cropping around people, token
-  counting, essay generation from text, and boolean condition evaluation. Use
-  for describing images, comparing UI states, cropping photos around faces,
-  counting tokens, generating reports, evaluating conditions, or any task
-  requiring AI inference. Triggers: ai analysis, describe image, compare
-  screenshots, smart crop, crop around people, face crop, count tokens, token
-  count, generate essay, evaluate condition, alt text, image description, UI
-  comparison, visual diff, satisfies condition, boolean evaluation, gemini.
+  counting, essay generation from text, boolean condition evaluation, and
+  context gathering. Use for describing images, comparing UI states, cropping
+  photos around faces, counting tokens, generating reports, evaluating
+  conditions, gathering context for analysis, or any task requiring AI
+  inference. Triggers: ai analysis, describe image, compare screenshots, smart
+  crop, crop around people, face crop, count tokens, token count, generate
+  essay, evaluate condition, alt text, image description, UI comparison, visual
+  diff, satisfies condition, boolean evaluation, gemini, context, gather
+  context, research topic.
 compatibility: >
-  Requires curl and jq. Image tools also need base64 and magick (ImageMagick).
-  Needs GEMINI_API_KEY environment variable and network access to
-  generativelanguage.googleapis.com.
+  Requires curl, jq, and python3. Image tools also need base64 and magick
+  (ImageMagick). Needs GEMINI_API_KEY environment variable and network access
+  to generativelanguage.googleapis.com.
 ---
 
 # AI Analysis Tools
@@ -54,6 +56,9 @@ scripts/photo-smart-crop photo.jpg cropped.jpg
 
 # Generate essay-length analysis from text
 scripts/emerson "Summarize the key changes" < documentation.md
+
+# Gather context and analyze
+scripts/context gemini-api | scripts/emerson "Explain the key features"
 
 # Evaluate a boolean condition against text
 echo "Hello world" | scripts/satisfies "is a greeting"
@@ -116,13 +121,44 @@ scripts/photo-smart-crop --ratio 1:1 headshot.png avatar.png
 ### emerson
 
 Generate essay-length (~3000 words) analysis from text input. Produces
-authoritative, footnoted Markdown.
+authoritative, footnoted Markdown. Best used with `context` to provide rich
+background material.
 
 ```bash
 scripts/emerson "PROMPT" < input.txt
 ```
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
+
+### context
+
+Generate aggregated context for various topics (e.g., `gemini-api`,
+`gemini-cli`). Outputs XML format suitable for `emerson`.
+
+**Warning:** Output can be very large. **Do not** read output directly into
+your conversation history. Pipe to `emerson` for analysis, or redirect to a
+file to search/read locally.
+
+```bash
+scripts/context TOPIC
+```
+
+**Options:** `--list` (list available topics)
+
+**Exit codes:** 0 success, 1 error, 127 missing dependency
+
+**Examples:**
+
+```bash
+# List available topics
+scripts/context --list
+
+# Gather context for Gemini API
+scripts/context gemini-api > gemini-context.xml
+
+# Pipe context directly to analysis
+scripts/context gemini-cli | scripts/emerson "How do commands work?"
+```
 
 ### satisfies
 
