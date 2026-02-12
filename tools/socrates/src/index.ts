@@ -3,6 +3,25 @@
 import { GoogleGenAI, Type } from "@google/genai/node";
 import pkg from "../package.json" with { type: "json" };
 
+/**
+ * Socrates Architecture
+ *
+ * This tool uses a three-stage "Socratic" pipeline to identify knowledge gaps:
+ *
+ * 1. Hypothesis Generation (The Miner): An advanced model (Gemini 3 Pro) analyzes
+ *    the source text to extract facts that are likely novel, counter-intuitive,
+ *    or "gotchas." It generates questions targeting these specific facts.
+ *    It does *not* verify the gaps; it only hypothesizes that they exist.
+ *
+ * 2. Blind Testing (The Subject): The target model (Gemini 2.5 Flash) attempts
+ *    to answer these questions *without* access to the source text. This tests
+ *    the model's intrinsic knowledge.
+ *
+ * 3. Adjudication (The Judge): The advanced model compares the Subject's answer
+ *    against the Ground Truth (from step 1). If the Subject fails to answer
+ *    correctly, the fact is confirmed as a "Validated Unknown."
+ */
+
 // Version check - Node.js 24+ required
 const REQUIRED_NODE_MAJOR = 24;
 {
@@ -141,7 +160,7 @@ async function generateQuestions(
 ): Promise<Question[]> {
   console.error("Generating questions...");
 
-  const systemInstruction = `Analyze the provided reference material and generate exactly ${questionCount} questions that verify whether the text contains genuinely novel, unexpected, or counter-intuitive information.
+  const systemInstruction = `Analyze the provided reference material to identify specific details that are likely novel, unexpected, or counter-intuitive. Generate exactly ${questionCount} questions designed to challenge an expert model's knowledge of these facts.
 
 ### Core Task
 Generate questions that satisfy the "Gotcha" condition:
@@ -155,6 +174,7 @@ Generate questions that satisfy the "Gotcha" condition:
 
 ### Constraints & Mandates
 1.  **Source Material Restrictions:**
+    *   **Strict Grounding:** You are strictly limited to the provided Reference Material for the facts used in the questions and answers. Do not incorporate outside facts.
     *   **Ignore Code Snippets:** Do not formulate questions based on code blocks, variable names, or syntax.
     *   **Ignore Illustrative Examples:** Do not use "For example..." scenarios or sample values.
     *   **Focus on Normative Text:** Derive questions only from the main narrative defining core rules, architecture, and behaviors.
@@ -232,22 +252,39 @@ async function evaluateAnswer(
   ai: GoogleGenAI,
   question: string,
   groundTruth: string,
+  rationale: string,
   candidateAnswer: string
 ): Promise<EvalResult> {
-  const systemInstruction =
-    "You are an impartial judge. Evaluate the Candidate Answer against the Ground Truth.";
+  const systemInstruction = `You are a strictly grounded impartial judge. Evaluate the Candidate Answer SOLELY against the provided Ground Truth.
 
-  const prompt = `Question: ${question}
-Ground Truth: ${groundTruth}
-Candidate Answer: ${candidateAnswer}
+### Constraints
+1.  **Strict Grounding:** You must **not** access or utilize your own knowledge or common sense to evaluate the answer. Treat the provided Ground Truth (Answer + Rationale) as the absolute limit of truth.
+2.  **XML Structure:** The input is provided in XML tags. Analyze the <candidate_answer> against the <ground_truth>.`;
+
+  const prompt = `<question>
+${question}
+</question>
+
+<ground_truth>
+<answer>
+${groundTruth}
+</answer>
+<rationale>
+${rationale}
+</rationale>
+</ground_truth>
+
+<candidate_answer>
+${candidateAnswer}
+</candidate_answer>
 
 Your Task:
 1. Summarize the key points of the Candidate Answer.
-2. Compare it to the Ground Truth.
+2. Compare it to the Ground Truth (Answer and Rationale).
 3. specific failures:
     - Direct contradiction.
-    - Missing the core 'gotcha' fact.
-    - Technically correct but misleading emphasis (e.g., burying the real answer in a footnote or side comment).
+    - Missing the core 'gotcha' fact defined in the rationale.
+    - Technically correct but misleading emphasis.
 
 Output strictly in JSON.`;
 
@@ -307,6 +344,7 @@ async function validateQuestion(
     ai,
     q.question,
     q.answer,
+    q.rationale,
     candidateAnswer
   );
 

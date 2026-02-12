@@ -9,31 +9,55 @@ the response was correct.
 
 ## How It Works
 
-1. **Question Generation**: An evaluator model (Gemini 3 Pro) analyzes your
-   input text and generates "gotcha" questions—questions where an expert relying
-   on standard knowledge would likely answer incorrectly, but the correct answer
-   is in your text.
+Socrates uses a three-stage "Socratic" pipeline to identify genuine knowledge
+gaps:
 
-2. **Testing**: Each question is asked to a target model (Gemini 2.5 Flash)
-   without any context from your input.
+1. **Hypothesis Generation (The Miner):** An advanced model (Gemini 3 Pro)
+   analyzes the source text to extract facts that are likely novel,
+   counter-intuitive, or "gotchas." It generates questions targeting these
+   specific facts. It does _not_ verify the gaps; it only hypothesizes that they
+   exist.
 
-3. **Validation**: A judge evaluates each response against the ground truth from
-   your text, identifying genuine knowledge gaps vs false alarms.
+2. **Blind Testing (The Subject):** The target model (Gemini 2.5 Flash) attempts
+   to answer these questions _without_ access to the source text. This tests the
+   model's intrinsic knowledge.
+
+3. **Adjudication (The Judge):** The advanced model compares the Subject's
+   answer against the Ground Truth (from step 1). If the Subject fails to answer
+   correctly, the fact is confirmed as a "Validated Unknown."
 
 4. **Report**: Outputs a markdown report categorizing questions into "Confirmed
    Unknowns" (the model failed) and "False Alarms" (the model knew the answer).
 
-## Installation
+## Installation & Usage
+
+There are three ways to use Socrates:
+
+### 1. System Integration (Recommended)
+
+If you are using the dotfiles environment, simply run the update script. This
+will build the tool and install it to `~/.local/bin/socrates`.
+
+```bash
+./update
+```
+
+### 2. Standalone Installation
+
+If you only want to install this specific tool globally on your system:
+
+```bash
+npm install -g .
+```
+
+### 3. Local Execution
+
+To run the tool directly from the source directory without installing it:
 
 ```bash
 npm install
 npm run build
-```
-
-For global installation:
-
-```bash
-npm install -g .
+node dist/index.js --help
 ```
 
 ## Usage
@@ -85,20 +109,3 @@ The tool outputs a markdown report to stdout with two sections:
   information is already known.
 
 Progress messages are written to stderr.
-
-## Development
-
-Build the project:
-
-```bash
-npm run build
-```
-
-Run directly after building:
-
-```bash
-node dist/index.js --help
-```
-
-The TypeScript compiler is configured with `strict: true`, so the build will
-fail on type errors.
