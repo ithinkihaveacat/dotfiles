@@ -365,16 +365,16 @@ function formatResult(result: ValidationResult, isFailure: boolean): string {
 
   let output = `### Q: ${question.question}\n`;
 
+  output += `\n<details><summary>Why This Is Tricky</summary>\n\n`;
+  output += `${question.rationale}\n\n`;
+  output += `</details>\n\n`;
+
   if (isFailure) {
     output += `**A (Ground Truth):** ${question.answer}\n\n`;
     output += `**Analysis (Fail):** ${evalResult.summary} ${evalResult.critique}\n`;
   } else {
     output += `\n**Analysis (Success):** ${evalResult.summary} ${evalResult.critique}\n`;
   }
-
-  output += `\n<details><summary>Why This Is Tricky</summary>\n\n`;
-  output += `${question.rationale}\n\n`;
-  output += `</details>\n\n`;
 
   output += `<details><summary>Raw Target Response</summary>\n\n`;
   output += `${candidateAnswer}\n\n`;
