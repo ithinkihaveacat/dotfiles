@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") FILE [PROMPT]
+
+Generate a text description of a UI hierarchy XML using the Gemini API.
+
+Arguments:
+  FILE        Path to a UI hierarchy XML file
+  PROMPT      Custom prompt for the AI model (optional)
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  $(basename "$0") hierarchy.xml
+  $(basename "$0") hierarchy.xml "List all button texts"
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+FILE_PATH="$1"
+DEFAULT_PROMPT="Analyze this UI hierarchy XML and describe the screen layout and content. Focus on the structure, visible text, and interactive elements."
+PROMPT="${2:-${DEFAULT_PROMPT}}"
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-2.5-flash"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}"
+
+if [[ ! -f "$FILE_PATH" ]]; then
+  echo "$(basename "$0"): $FILE_PATH: No such file or directory" >&2
+  exit 1
+fi
+
+# Construct JSON payload using jq to handle escaping
+REQUEST_BODY=$(jq -n \
+  --arg prompt "$PROMPT" \
+  --rawfile xml "$FILE_PATH" \
+  '{
+    contents: [{
+      parts: [
+        {text: ($prompt + "\n\nXML Content:\n" + $xml)}
+      ]
+    }]
+  }')
+
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+if [[ -z "$TEXT" ]]; then
+  echo "$(basename "$0"): no response text received from API" >&2
+  exit 1
+fi
+
+echo "$TEXT"

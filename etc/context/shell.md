@@ -281,3 +281,70 @@ Follow these conventions:
 - `exit 0` for successful operations and help display (`--help`)
 - `exit 1` for general errors (missing arguments, invalid input)
 - `exit 127` for missing required commands (convention for "command not found")
+
+## Handling Large Inputs with jq
+
+When using `jq` to process data, you must account for the system's `ARG_MAX`
+limit (often around 256KB). Passing large strings (e.g., file contents, long
+prompts) as command-line arguments (like `--arg val "$LARGE_VAR"`) will cause
+scripts to crash with "Argument list too long."
+
+### Guidelines
+
+1.  **Avoid reading large inputs into shell variables.** Reading a whole file
+    into a variable (e.g., `DATA=$(cat file.txt)`) and then passing it to a
+    command is brittle.
+2.  **Use `jq` features for input.** Use `--rawfile` for files and `-R` (raw
+    input) for stdin.
+3.  **Pipe stdin directly.** If processing stdin, pipe it directly into `jq`.
+
+### Examples
+
+**Scenario 1: Input is a file**
+
+Do NOT read the file into a variable. Use `--rawfile`.
+
+```bash
+# BAD - Will crash on large files
+XML_CONTENT=$(cat "$FILE_PATH")
+jq -n --arg xml "$XML_CONTENT" '{ content: $xml }'
+
+# GOOD - Reads file directly, no size limit
+jq -n --rawfile xml "$FILE_PATH" '{ content: $xml }'
+```
+
+**Scenario 2: Input is from stdin**
+
+Use `jq -Rs` (Raw input + Slurp) to read the entire stdin as a single string.
+Inside the `jq` filter, refer to the input as `.`.
+
+```bash
+# BAD - Will crash on large inputs
+INPUT=$(cat)
+jq -n --arg input "$INPUT" '{ content: $input }'
+
+# GOOD - Reads stdin directly
+# The '.' represents the input string
+jq -Rs '{ content: . }'
+```
+
+**Scenario 3: Input is a variable (that might be large)**
+
+If you already have data in a variable, pipe it to `jq` instead of using `--arg`.
+
+```bash
+# BAD
+jq -n --arg val "$LARGE_VAR" '{ content: $val }'
+
+# GOOD
+printf "%s" "$LARGE_VAR" | jq -Rs '{ content: . }'
+```
+
+**Why this works:** The `ARG_MAX` limit applies to the arguments passed to a new
+process via the `exec()` system call.
+1. `jq --arg ...` fails because the shell must pass the huge string to the `jq`
+   process.
+2. `printf ... | jq` works because `printf` is a shell builtin in Bash. The
+   shell handles the data internally and writes it to the pipe without creating a
+   new process for `printf`, bypassing the `exec()` limit. `jq` then reads the
+   data from stdin, which has no size limit.

@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") FILE1 FILE2 [PROMPT]
+
+Compare two UI hierarchy XML files using the Gemini API.
+
+Arguments:
+  FILE1       Path to the first UI hierarchy XML file
+  FILE2       Path to the second UI hierarchy XML file
+  PROMPT      Custom prompt for the AI model (optional)
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  $(basename "$0") hierarchy1.xml hierarchy2.xml
+  $(basename "$0") hierarchy1.xml hierarchy2.xml "Check for missing buttons"
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+
+if [[ $# -lt 2 ]]; then
+  usage
+fi
+
+FILE1_PATH="$1"
+FILE2_PATH="$2"
+DEFAULT_PROMPT="Compare these two UI hierarchy XML files. Identify any differences in structure, content, text, or attributes. Focus on changes that would be visible to the user."
+PROMPT="${3:-${DEFAULT_PROMPT}}"
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-2.5-flash"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}"
+
+if [[ ! -f "$FILE1_PATH" ]]; then
+  echo "$(basename "$0"): $FILE1_PATH: No such file or directory" >&2
+  exit 1
+fi
+
+if [[ ! -f "$FILE2_PATH" ]]; then
+  echo "$(basename "$0"): $FILE2_PATH: No such file or directory" >&2
+  exit 1
+fi
+
+# Construct JSON payload using jq to handle escaping
+REQUEST_BODY=$(jq -n \
+  --arg prompt "$PROMPT" \
+  --rawfile xml1 "$FILE1_PATH" \
+  --rawfile xml2 "$FILE2_PATH" \
+  '{
+    contents: [{
+      parts: [
+        {text: ($prompt + "\n\n--- File 1 ---\n" + $xml1 + "\n\n--- File 2 ---\n" + $xml2)}
+      ]
+    }]
+  }')
+
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+if [[ -z "$TEXT" ]]; then
+  echo "$(basename "$0"): no response text received from API" >&2
+  exit 1
+fi
+
+echo "$TEXT"
