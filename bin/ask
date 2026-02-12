@@ -4,13 +4,16 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [PROMPT]
+Usage: $(basename "$0") PROMPT
 
 Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
 response (wrapped to 80 columns).
 
 Arguments:
-  PROMPT      The question to ask. If not provided, reads from stdin.
+  PROMPT      The question to ask.
+
+Input:
+  stdin       Optional context to include with the question.
 
 Options:
   -h, --help  Display this help message and exit
@@ -20,7 +23,8 @@ Environment:
 
 Examples:
   $(basename "$0") "What is the capital of Peru?"
-  echo "Explain quantum computing" | $(basename "$0")
+  cat article.md | $(basename "$0") "Summarize this article"
+  $(basename "$0") "Explain this code" < script.sh
 EOF
   exit 0
 }
@@ -40,25 +44,11 @@ if [[ -z "${GEMINI_API_KEY:-}" ]]; then
   exit 1
 fi
 
-# Determine input
-if [[ $# -gt 0 ]]; then
-  USER_PROMPT="$*"
-  # Check if there is also stdin input to use as context
-  if ! [ -t 0 ]; then
-     CONTEXT=$(cat)
-     USER_PROMPT="Context:\n${CONTEXT}\n\nQuestion:\n${USER_PROMPT}"
-  fi
-else
-  # No arguments, read from stdin
-  if [ -t 0 ]; then
-    usage
-  fi
-  USER_PROMPT=$(cat)
-fi
-
-if [[ -z "${USER_PROMPT:-}" ]]; then
+if [[ $# -lt 1 ]]; then
   usage
 fi
+
+USER_PROMPT="$*"
 
 MODEL="gemini-3-flash-preview"
 URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
@@ -67,27 +57,52 @@ URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateCo
 SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer (less than 300 characters) in a single full paragraph. Do not use point form, lists, or markdown formatting (like bold or headers). Just plain text."
 
 # Construct the JSON payload
-# We use jq to safely escape strings and construct the JSON
-REQUEST_BODY=$(printf "%s" "$USER_PROMPT" | jq -Rs \
-  --arg system_instruction "$SYSTEM_INSTRUCTION" \
-  '{
-    system_instruction: {
-      parts: [{ text: $system_instruction }]
-    },
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: . }]
+if ! [ -t 0 ]; then
+  # Stdin available — pipe context directly to jq, avoiding shell variable
+  REQUEST_BODY=$(jq -Rs \
+    --arg system_instruction "$SYSTEM_INSTRUCTION" \
+    --arg user_prompt "$USER_PROMPT" \
+    '{
+      system_instruction: {
+        parts: [{ text: $system_instruction }]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: ("Context:\n" + . + "\n\nQuestion:\n" + $user_prompt) }]
+        }
+      ],
+      generationConfig: {
+        temperature: 1.0,
+        maxOutputTokens: 2048,
+        thinkingConfig: {
+          thinkingLevel: "low"
+        }
       }
-    ],
-    generationConfig: {
-      temperature: 1.0,
-      maxOutputTokens: 2048,
-      thinkingConfig: {
-        thinkingLevel: "low"
+    }')
+else
+  REQUEST_BODY=$(jq -n \
+    --arg system_instruction "$SYSTEM_INSTRUCTION" \
+    --arg user_prompt "$USER_PROMPT" \
+    '{
+      system_instruction: {
+        parts: [{ text: $system_instruction }]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: $user_prompt }]
+        }
+      ],
+      generationConfig: {
+        temperature: 1.0,
+        maxOutputTokens: 2048,
+        thinkingConfig: {
+          thinkingLevel: "low"
+        }
       }
-    }
-  }')
+    }')
+fi
 
 # Execute the request
 RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
