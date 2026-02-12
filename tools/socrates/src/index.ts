@@ -34,6 +34,9 @@ const REQUIRED_NODE_MAJOR = 24;
   }
 }
 
+// Derive parameter types from the SDK's generateContent method
+type GenerateParams = Parameters<GoogleGenAI["models"]["generateContent"]>[0];
+
 // Type definitions
 interface Question {
   question: string;
@@ -56,18 +59,29 @@ interface ValidationResult {
   error?: boolean;
 }
 
+interface RetryOptions {
+  maxRetries?: number;
+  /**
+   * Callback invoked before a retry.
+   * @param attempt The current attempt number (starting at 1).
+   * @param error The error that caused the failure.
+   * @returns true to proceed with retry, false to abort.
+   */
+  onRetry?: (attempt: number, error: unknown) => boolean;
+}
+
 // Constants
 const DEFAULT_MODELS = ["gemini-2.5-flash"];
 const EVALUATOR_MODEL = "gemini-3-pro-preview";
 const DEFAULT_QUESTION_COUNT = 7;
-// Error handling constants
 const MAX_RETRIES = 3;
 const MAX_GLOBAL_ERRORS = 10;
-let globalErrorCount = 0;
 
 const SCRIPT_NAME = "socrates";
 
-// Helper to truncate text to fit terminal width
+// Helper to truncate text to fit terminal width.
+// Note: does not account for wide (e.g. CJK) characters, which occupy two
+// terminal columns each and may cause slight misalignment.
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - 3) + "...";
@@ -77,9 +91,11 @@ function truncate(text: string, maxLen: number): string {
 async function generateContentWithRetry(
   ai: GoogleGenAI,
   model: string,
-  contents: any,
-  config?: any
-): Promise<string> {
+  contents: GenerateParams["contents"],
+  config?: GenerateParams["config"],
+  retryOptions?: RetryOptions
+): Promise<string | null> {
+  const maxRetries = retryOptions?.maxRetries ?? MAX_RETRIES;
   let attempt = 0;
   while (true) {
     try {
@@ -88,7 +104,7 @@ async function generateContentWithRetry(
         contents,
         config
       });
-      return response.text || "";
+      return response.text ?? null;
     } catch (e: any) {
       const msg = e.message || String(e);
 
@@ -105,8 +121,16 @@ async function generateContentWithRetry(
       }
 
       attempt++;
-      if (attempt > MAX_RETRIES) {
-        throw e;
+      if (attempt > maxRetries) {
+        console.error(`\nFailed after ${attempt} attempts: ${msg}`);
+        return null;
+      }
+
+      // Allow caller to control retry policy (e.g., global limits)
+      if (retryOptions?.onRetry) {
+        if (!retryOptions.onRetry(attempt, e)) {
+          return null;
+        }
       }
 
       // Exponential backoff with jitter
@@ -189,12 +213,25 @@ function parseArgs(): {
   const args = process.argv.slice(2);
   let questionCount = DEFAULT_QUESTION_COUNT;
   let topicFocus = "Generate challenging questions based on novel information.";
+  let topicFocusSet = false;
   let targetModels = [...DEFAULT_MODELS];
+  let endOfOptions = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
-    if (arg === "-h" || arg === "--help") {
+    if (endOfOptions) {
+      if (topicFocusSet) {
+        error("unexpected argument: only one TOPIC_FOCUS is allowed");
+      }
+      topicFocus = arg;
+      topicFocusSet = true;
+      continue;
+    }
+
+    if (arg === "--") {
+      endOfOptions = true;
+    } else if (arg === "-h" || arg === "--help") {
       usage();
     } else if (arg === "-v" || arg === "--version") {
       version();
@@ -219,7 +256,11 @@ function parseArgs(): {
     } else if (arg.startsWith("-")) {
       error(`unknown option: ${arg}`);
     } else {
+      if (topicFocusSet) {
+        error("unexpected argument: only one TOPIC_FOCUS is allowed");
+      }
       topicFocus = arg;
+      topicFocusSet = true;
     }
   }
 
@@ -247,7 +288,8 @@ async function generateQuestions(
   ai: GoogleGenAI,
   inputData: string,
   topicFocus: string,
-  questionCount: number
+  questionCount: number,
+  retryOptions?: RetryOptions
 ): Promise<Question[]> {
   console.error("Generating questions...");
 
@@ -311,7 +353,8 @@ If the text contains only general knowledge, return an empty list.`;
         }
       },
       temperature: 0.5
-    }
+    },
+    retryOptions
   );
 
   if (!responseText) {
@@ -329,18 +372,10 @@ If the text contains only general knowledge, return an empty list.`;
 async function testQuestion(
   ai: GoogleGenAI,
   model: string,
-  question: string
+  question: string,
+  retryOptions?: RetryOptions
 ): Promise<string | null> {
-  try {
-    return await generateContentWithRetry(ai, model, question);
-  } catch (err: any) {
-    globalErrorCount++;
-    if (globalErrorCount >= MAX_GLOBAL_ERRORS) {
-      console.error("\nAborting: Too many errors encountered.");
-      process.exit(1);
-    }
-    return null;
-  }
+  return generateContentWithRetry(ai, model, question, undefined, retryOptions);
 }
 
 // Evaluate the candidate answer against ground truth
@@ -349,8 +384,9 @@ async function evaluateAnswer(
   question: string,
   groundTruth: string,
   rationale: string,
-  candidateAnswer: string
-): Promise<EvalResult> {
+  candidateAnswer: string,
+  retryOptions?: RetryOptions
+): Promise<EvalResult | null> {
   const systemInstruction = `You are a strictly grounded impartial judge. Evaluate the Candidate Answer SOLELY against the provided Ground Truth.
 
 ### Constraints
@@ -377,7 +413,7 @@ ${candidateAnswer}
 Your Task:
 1. Summarize the key points of the Candidate Answer.
 2. Compare it to the Ground Truth (Answer and Rationale).
-3. specific failures:
+3. Identify specific failures:
     - Direct contradiction.
     - Missing the core 'gotcha' fact defined in the rationale.
     - Technically correct but misleading emphasis.
@@ -411,19 +447,21 @@ Your Task:
         },
         required: ["is_correct", "summary", "critique"]
       }
-    }
+    },
+    retryOptions
   );
 
   if (!responseText) {
-    error("failed to evaluate answer: empty response");
+    return null;
   }
 
   try {
     return JSON.parse(responseText) as EvalResult;
   } catch {
-    error(`failed to parse evaluation JSON: ${responseText}`);
+    return null;
   }
 }
+
 // Validate a single question (test + evaluate)
 async function validateQuestion(
   ai: GoogleGenAI,
@@ -431,17 +469,20 @@ async function validateQuestion(
   index: number,
   total: number,
   model: string,
-  modelDisplayName: string
+  modelDisplayName: string,
+  retryOptions?: RetryOptions,
+  onError?: () => void
 ): Promise<ValidationResult> {
   const cols = process.stdout.columns || 80;
   const prefix = `  [${index}/${total}] ${modelDisplayName}: `;
   const maxQuestionLen = Math.max(10, cols - prefix.length - 12); // Space for result
 
   // Test: Ask target model without context
-  const candidateAnswer = await testQuestion(ai, model, q.question);
+  const candidateAnswer = await testQuestion(ai, model, q.question, retryOptions);
 
   if (candidateAnswer === null) {
     console.error(`${prefix}${truncate(q.question, maxQuestionLen)} error`);
+    onError?.();
     return {
       question: q,
       candidateAnswer: null,
@@ -453,28 +494,18 @@ async function validateQuestion(
   }
 
   // Evaluate: Judge the answer
-  try {
-    const evalResult = await evaluateAnswer(
-      ai,
-      q.question,
-      q.answer,
-      q.rationale,
-      candidateAnswer
-    );
+  const evalResult = await evaluateAnswer(
+    ai,
+    q.question,
+    q.answer,
+    q.rationale,
+    candidateAnswer,
+    retryOptions
+  );
 
-    const result = evalResult.is_correct ? "correct" : "incorrect";
-    console.error(`${prefix}${truncate(q.question, maxQuestionLen)} ${result}`);
-
-    return {
-      question: q,
-      candidateAnswer,
-      evalResult,
-      model,
-      modelDisplayName
-    };
-  } catch (err: any) {
+  if (evalResult === null) {
     console.error(`${prefix}${truncate(q.question, maxQuestionLen)} eval_err`);
-    globalErrorCount++;
+    onError?.();
     return {
       question: q,
       candidateAnswer,
@@ -484,6 +515,17 @@ async function validateQuestion(
       error: true
     };
   }
+
+  const result = evalResult.is_correct ? "correct" : "incorrect";
+  console.error(`${prefix}${truncate(q.question, maxQuestionLen)} ${result}`);
+
+  return {
+    question: q,
+    candidateAnswer,
+    evalResult,
+    model,
+    modelDisplayName
+  };
 }
 
 // Generate final report
@@ -596,12 +638,26 @@ async function main(): Promise<void> {
   // Initialize AI client
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+  // Error tracking (local to main, not a global)
+  let errorCount = 0;
+  const retryOptions: RetryOptions = {
+    onRetry: () => errorCount < MAX_GLOBAL_ERRORS
+  };
+  const onError = () => {
+    errorCount++;
+    if (errorCount >= MAX_GLOBAL_ERRORS) {
+      console.error("\nAborting: Too many errors encountered.");
+      process.exit(1);
+    }
+  };
+
   // Step 1: Generate questions
   const questions = await generateQuestions(
     ai,
     inputData,
     topicFocus,
-    questionCount
+    questionCount,
+    retryOptions
   );
 
   if (questions.length === 0) {
@@ -614,7 +670,12 @@ async function main(): Promise<void> {
   const modelConfigs = getModelDisplayNames(targetModels);
 
   // Prepare tasks: Cross product of questions and models
-  const tasks = [];
+  const tasks: Array<{
+    question: Question;
+    qIndex: number;
+    model: string;
+    modelDisplayName: string;
+  }> = [];
   for (let i = 0; i < questions.length; i++) {
     for (const config of modelConfigs) {
       tasks.push({
@@ -638,7 +699,9 @@ async function main(): Promise<void> {
       task.qIndex,
       questions.length,
       task.model,
-      task.modelDisplayName
+      task.modelDisplayName,
+      retryOptions,
+      onError
     )
   );
 
