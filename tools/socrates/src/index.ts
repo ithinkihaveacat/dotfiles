@@ -49,14 +49,21 @@ interface EvalResult {
 
 interface ValidationResult {
   question: Question;
-  candidateAnswer: string;
-  evalResult: EvalResult;
+  candidateAnswer: string | null;
+  evalResult: EvalResult | null;
+  model: string;
+  modelDisplayName: string;
+  error?: boolean;
 }
 
 // Constants
-const TARGET_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODELS = ["gemini-2.5-flash"];
 const EVALUATOR_MODEL = "gemini-3-pro-preview";
 const DEFAULT_QUESTION_COUNT = 7;
+// Error handling constants
+const MAX_RETRIES = 3;
+const MAX_GLOBAL_ERRORS = 10;
+let globalErrorCount = 0;
 
 const SCRIPT_NAME = "socrates";
 
@@ -64,6 +71,73 @@ const SCRIPT_NAME = "socrates";
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - 3) + "...";
+}
+
+// Helper to generate content with robust retry logic
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  model: string,
+  contents: any,
+  config?: any
+): Promise<string> {
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents,
+        config
+      });
+      return response.text || "";
+    } catch (e: any) {
+      const msg = e.message || String(e);
+
+      // Critical Error: Model not found (404)
+      if (
+        msg.includes("404") ||
+        e.status === 404 ||
+        msg.includes("NOT_FOUND")
+      ) {
+        console.error(
+          `\nFATAL: Model '${model}' not found or inaccessible.\n${msg}`
+        );
+        process.exit(1);
+      }
+
+      attempt++;
+      if (attempt > MAX_RETRIES) {
+        throw e;
+      }
+
+      // Exponential backoff with jitter
+      const delay = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
+// Helper to process items in parallel with a concurrency limit
+async function mapConcurrent<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let currentIndex = 0;
+
+  const worker = async () => {
+    while (currentIndex < items.length) {
+      const index = currentIndex++;
+      results[index] = await fn(items[index], index);
+    }
+  };
+
+  const workers = Array(Math.min(limit, items.length))
+    .fill(null)
+    .map(() => worker());
+
+  await Promise.all(workers);
+  return results;
 }
 
 // CLI helpers
@@ -83,6 +157,9 @@ Options:
   -h, --help        Display this help message and exit
   -v, --version     Display version number and exit
   --questions N     Number of questions to generate (default: ${DEFAULT_QUESTION_COUNT})
+  --models LIST     Comma-separated list of models to test (default: ${DEFAULT_MODELS.join(",")})
+                    For a list of available models, see:
+                    https://ai.google.dev/gemini-api/docs/models
 
 Environment:
   GEMINI_API_KEY    Required. Your Gemini API key.
@@ -104,10 +181,15 @@ function version(): void {
 }
 
 // Parse CLI arguments
-function parseArgs(): { topicFocus: string; questionCount: number } {
+function parseArgs(): {
+  topicFocus: string;
+  questionCount: number;
+  targetModels: string[];
+} {
   const args = process.argv.slice(2);
   let questionCount = DEFAULT_QUESTION_COUNT;
   let topicFocus = "Generate challenging questions based on novel information.";
+  let targetModels = [...DEFAULT_MODELS];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -125,6 +207,15 @@ function parseArgs(): { topicFocus: string; questionCount: number } {
       if (questionCount < 1) {
         error("--questions must be at least 1");
       }
+    } else if (arg === "--models") {
+      const next = args[++i];
+      if (!next) {
+        error("--models requires a comma-separated list");
+      }
+      targetModels = next.split(",").map((m) => m.trim()).filter((m) => m);
+      if (targetModels.length === 0) {
+        error("--models list cannot be empty");
+      }
     } else if (arg.startsWith("-")) {
       error(`unknown option: ${arg}`);
     } else {
@@ -132,7 +223,7 @@ function parseArgs(): { topicFocus: string; questionCount: number } {
     }
   }
 
-  return { topicFocus, questionCount };
+  return { topicFocus, questionCount, targetModels };
 }
 
 // Read all stdin
@@ -186,9 +277,10 @@ Generate questions that satisfy the "Gotcha" condition:
 
 If the text contains only general knowledge, return an empty list.`;
 
-  const response = await ai.models.generateContent({
-    model: EVALUATOR_MODEL,
-    contents: [
+  const responseText = await generateContentWithRetry(
+    ai,
+    EVALUATOR_MODEL,
+    [
       {
         role: "user",
         parts: [
@@ -197,7 +289,7 @@ If the text contains only general knowledge, return an empty list.`;
         ]
       }
     ],
-    config: {
+    {
       systemInstruction,
       responseMimeType: "application/json",
       responseSchema: {
@@ -220,31 +312,35 @@ If the text contains only general knowledge, return an empty list.`;
       },
       temperature: 0.5
     }
-  });
+  );
 
-  const text = response.text;
-  if (!text) {
+  if (!responseText) {
     error("failed to generate questions: empty response");
   }
 
   try {
-    return JSON.parse(text) as Question[];
+    return JSON.parse(responseText) as Question[];
   } catch {
-    error(`failed to parse questions JSON: ${text}`);
+    error(`failed to parse questions JSON: ${responseText}`);
   }
 }
 
 // Test a question against the target model (no context)
 async function testQuestion(
   ai: GoogleGenAI,
+  model: string,
   question: string
-): Promise<string> {
-  const response = await ai.models.generateContent({
-    model: TARGET_MODEL,
-    contents: question
-  });
-
-  return response.text || "I do not know.";
+): Promise<string | null> {
+  try {
+    return await generateContentWithRetry(ai, model, question);
+  } catch (err: any) {
+    globalErrorCount++;
+    if (globalErrorCount >= MAX_GLOBAL_ERRORS) {
+      console.error("\nAborting: Too many errors encountered.");
+      process.exit(1);
+    }
+    return null;
+  }
 }
 
 // Evaluate the candidate answer against ground truth
@@ -286,12 +382,13 @@ Your Task:
     - Missing the core 'gotcha' fact defined in the rationale.
     - Technically correct but misleading emphasis.
 
-Output strictly in JSON.`;
+  Output strictly in JSON.`;
 
-  const response = await ai.models.generateContent({
-    model: EVALUATOR_MODEL,
-    contents: prompt,
-    config: {
+  const responseText = await generateContentWithRetry(
+    ai,
+    EVALUATOR_MODEL,
+    prompt,
+    {
       systemInstruction,
       responseMimeType: "application/json",
       responseSchema: {
@@ -315,107 +412,175 @@ Output strictly in JSON.`;
         required: ["is_correct", "summary", "critique"]
       }
     }
-  });
+  );
 
-  const text = response.text;
-  if (!text) {
+  if (!responseText) {
     error("failed to evaluate answer: empty response");
   }
 
   try {
-    return JSON.parse(text) as EvalResult;
+    return JSON.parse(responseText) as EvalResult;
   } catch {
-    error(`failed to parse evaluation JSON: ${text}`);
+    error(`failed to parse evaluation JSON: ${responseText}`);
   }
 }
-
 // Validate a single question (test + evaluate)
 async function validateQuestion(
   ai: GoogleGenAI,
   q: Question,
   index: number,
-  total: number
+  total: number,
+  model: string,
+  modelDisplayName: string
 ): Promise<ValidationResult> {
-  // Test: Ask target model without context
-  const candidateAnswer = await testQuestion(ai, q.question);
-
-  // Evaluate: Judge the answer
-  const evalResult = await evaluateAnswer(
-    ai,
-    q.question,
-    q.answer,
-    q.rationale,
-    candidateAnswer
-  );
-
-  // Display result with truncated question
   const cols = process.stdout.columns || 80;
-  const prefix = `  [${index}/${total}] `;
-  const result = evalResult.is_correct ? "correct" : "incorrect";
-  // Account for space before result
-  const maxQuestion = cols - prefix.length - result.length - 1;
-  console.error(`${prefix}${truncate(q.question, maxQuestion)} ${result}`);
+  const prefix = `  [${index}/${total}] ${modelDisplayName}: `;
+  const maxQuestionLen = Math.max(10, cols - prefix.length - 12); // Space for result
 
-  return { question: q, candidateAnswer, evalResult };
-}
+  // Test: Ask target model without context
+  const candidateAnswer = await testQuestion(ai, model, q.question);
 
-// Format validation result as markdown
-function formatResult(result: ValidationResult, isFailure: boolean): string {
-  const { question, candidateAnswer, evalResult } = result;
-
-  let output = `### Q: ${question.question}\n`;
-
-  output += `\n<details><summary>Why This Is Tricky</summary>\n\n`;
-  output += `${question.rationale}\n\n`;
-  output += `</details>\n\n`;
-
-  if (isFailure) {
-    output += `**A (Ground Truth):** ${question.answer}\n\n`;
-    output += `**Analysis (Fail):** ${evalResult.summary} ${evalResult.critique}\n`;
-  } else {
-    output += `\n**Analysis (Success):** ${evalResult.summary} ${evalResult.critique}\n`;
+  if (candidateAnswer === null) {
+    console.error(`${prefix}${truncate(q.question, maxQuestionLen)} error`);
+    return {
+      question: q,
+      candidateAnswer: null,
+      evalResult: null,
+      model,
+      modelDisplayName,
+      error: true
+    };
   }
 
-  output += `<details><summary>Raw Target Response</summary>\n\n`;
-  output += `${candidateAnswer}\n\n`;
-  output += `</details>\n\n`;
+  // Evaluate: Judge the answer
+  try {
+    const evalResult = await evaluateAnswer(
+      ai,
+      q.question,
+      q.answer,
+      q.rationale,
+      candidateAnswer
+    );
 
-  return output;
+    const result = evalResult.is_correct ? "correct" : "incorrect";
+    console.error(`${prefix}${truncate(q.question, maxQuestionLen)} ${result}`);
+
+    return {
+      question: q,
+      candidateAnswer,
+      evalResult,
+      model,
+      modelDisplayName
+    };
+  } catch (err: any) {
+    console.error(`${prefix}${truncate(q.question, maxQuestionLen)} eval_err`);
+    globalErrorCount++;
+    return {
+      question: q,
+      candidateAnswer,
+      evalResult: null,
+      model,
+      modelDisplayName,
+      error: true
+    };
+  }
 }
 
 // Generate final report
-function generateReport(results: ValidationResult[]): string {
-  const failures = results.filter((r) => !r.evalResult.is_correct);
-  const successes = results.filter((r) => r.evalResult.is_correct);
-
-  let report = `# Validated Knowledge Gaps\nTarget Model: \`${TARGET_MODEL}\`\n\n`;
-
-  report += "## \u2705 Confirmed Unknowns\n";
-  if (failures.length > 0) {
-    report += `The model FAILED to answer these correctly, proving the information is novel.\n\n`;
-    for (const result of failures) {
-      report += formatResult(result, true);
-    }
+function generateReport(
+  results: ValidationResult[],
+  questions: Question[],
+  models: { model: string; displayName: string }[]
+): string {
+  let report = `# Validated Knowledge Gaps\n`;
+  if (models.length === 1) {
+    report += `Target Model: \`${models[0].displayName}\`\n\n`;
   } else {
-    report += `_None found. The model appears to know all generated facts._\n`;
+    report += `Target Models: ${models.map((m) => `\`${m.displayName}\``).join(", ")}\n\n`;
   }
 
-  report += `\n---\n\n`;
+  // Summary Table
+  report += "## Summary\n\n";
+  report += "| Question | " + models.map((m) => m.displayName).join(" | ") + " |\n";
+  report += "| :--- | " + models.map(() => ":---:").join(" | ") + " |\n";
 
-  if (successes.length > 0) {
-    report += "## \u274C False Alarms (Model Answered Correctly)\n";
-    report += `The model SUCCESSFULLY answered these, so they are not novel gaps.\n\n`;
-    for (const result of successes) {
-      report += formatResult(result, false);
+  for (const q of questions) {
+    const qResults = results.filter((r) => r.question === q);
+    const row = [truncate(q.question, 60)];
+    for (const m of models) {
+      const res = qResults.find((r) => r.modelDisplayName === m.displayName);
+      if (res?.error) {
+        row.push("-");
+      } else {
+        row.push(res?.evalResult?.is_correct ? "✅" : "❌");
+      }
     }
+    report += "| " + row.join(" | ") + " |\n";
+  }
+  report += "\n---\n\n";
+
+  // Detailed Breakdown
+  report += "## Detailed Analysis\n\n";
+
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    report += `### Q${i + 1}: ${q.question}\n\n`;
+    report += `**Rationale:** ${q.rationale}\n\n`;
+    report += `**Ground Truth:** ${q.answer}\n\n`;
+
+    const qResults = results.filter((r) => r.question === q);
+
+    for (const m of models) {
+      const res = qResults.find((r) => r.modelDisplayName === m.displayName);
+      if (!res) continue;
+
+      if (res.error) {
+        report += `#### ⚠️ ${m.displayName}\n\n`;
+        report += `**Analysis:** Failed to obtain a valid response or evaluation after retries.\n\n`;
+        continue;
+      }
+
+      // Safe access because error is false
+      const evalRes = res.evalResult!;
+      const icon = evalRes.is_correct ? "✅" : "❌";
+      report += `#### ${icon} ${m.displayName}\n\n`;
+      report += `**Analysis:** ${evalRes.summary} ${evalRes.critique}\n\n`;
+      report += `<details><summary>Raw Response</summary>\n\n${res.candidateAnswer}\n\n</details>\n\n`;
+    }
+    report += "---\n\n";
   }
 
   return report;
 }
 
+// Helper to get display names for models (handling duplicates)
+function getModelDisplayNames(models: string[]): {
+  model: string;
+  displayName: string;
+}[] {
+  const counts: Record<string, number> = {};
+  const result = [];
+
+  // First pass to count
+  for (const m of models) {
+    counts[m] = (counts[m] || 0) + 1;
+  }
+
+  const current: Record<string, number> = {};
+  for (const m of models) {
+    let name = m;
+    if (counts[m] > 1) {
+      current[m] = (current[m] || 0) + 1;
+      name = `${m}[#${current[m]}]`;
+    }
+    result.push({ model: m, displayName: name });
+  }
+  return result;
+}
+
 // Main
 async function main(): Promise<void> {
-  const { topicFocus, questionCount } = parseArgs();
+  const { topicFocus, questionCount, targetModels } = parseArgs();
 
   // Check for API key
   if (!process.env.GEMINI_API_KEY) {
@@ -446,17 +611,39 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Step 2 & 3: Validate questions sequentially for clean output
-  console.error(`Validating ${questions.length} questions...`);
-  const results: ValidationResult[] = [];
+  const modelConfigs = getModelDisplayNames(targetModels);
+
+  // Prepare tasks: Cross product of questions and models
+  const tasks = [];
   for (let i = 0; i < questions.length; i++) {
-    results.push(
-      await validateQuestion(ai, questions[i], i + 1, questions.length)
-    );
+    for (const config of modelConfigs) {
+      tasks.push({
+        question: questions[i],
+        qIndex: i + 1,
+        model: config.model,
+        modelDisplayName: config.displayName
+      });
+    }
   }
 
+  // Step 2 & 3: Validate questions in parallel
+  console.error(
+    `Validating ${questions.length} questions on ${modelConfigs.length} models (${tasks.length} total tasks)...`
+  );
+
+  const results = await mapConcurrent(tasks, 10, (task, _) =>
+    validateQuestion(
+      ai,
+      task.question,
+      task.qIndex,
+      questions.length,
+      task.model,
+      task.modelDisplayName
+    )
+  );
+
   // Step 4: Generate and output report
-  const report = generateReport(results);
+  const report = generateReport(results, questions, modelConfigs);
   console.log(report);
 }
 
