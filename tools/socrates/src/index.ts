@@ -304,11 +304,16 @@ async function generateQuestions(
 Generate questions that satisfy the "Gotcha" condition:
 **An expert in the general field relying on standard industry knowledge would likely answer incorrectly, but the correct answer is explicitly contained in the provided text.**
 
-### CRITICAL: Context & Fairness
-*   **Self-Contained Questions:** The questions will be asked to a model *without* the provided text. You MUST include all necessary context in the question itself.
+### CRITICAL: Context & Disambiguation
+*   **Self-Contained & Unambiguous:** The questions will be asked to a model *without* the provided text. You MUST include all necessary context in the question itself.
+*   **Disambiguate Overloaded Terms:** Many technical terms mean different things in different contexts. You MUST qualify these terms to avoid ambiguity.
+    *   *Ambiguous:* "How do I add a tile?" (Could be Wear OS, Quick Settings, Google Maps, Windows OS...)
+    *   *Fixed:* "How do I add a **Wear OS** tile to the carousel?"
+    *   *Ambiguous:* "What is the limit for navigation?" (UX navigation? Jetpack Navigation component? GPS?)
+    *   *Fixed:* "What is the back stack limit in **Jetpack Navigation Compose**?"
 *   **Specify Versions/Platforms:** If the information is specific to "Wear OS 5" or "Jetpack Tiles 1.4", you **must** explicitly state this in the question.
     *   *Bad:* "What is the limit for animated elements?" (Which system? Which version?)
-    *   *Good:* "In Wear OS Tiles API v1.4, what is the hard limit on simultaneously animated elements?"
+    *   *Good:* "In **Wear OS Tiles API v1.4**, what is the hard limit on simultaneously animated elements?"
 
 ### Question Types & Variety
 Generate a diverse set of questions. While most should focus on positive knowledge (how things work), ensure that **a small portion (approx. 15-20%)** of the questions target **negative constraints** or **impossible actions** to test for hallucinations.
