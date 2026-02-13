@@ -305,6 +305,15 @@ Generate questions that satisfy the "Gotcha" condition:
     *   *Bad:* "What is the limit for animated elements?" (Which system? Which version?)
     *   *Good:* "In Wear OS Tiles API v1.4, what is the hard limit on simultaneously animated elements?"
 
+### Question Types & Variety
+Generate a diverse set of questions. While most should focus on positive knowledge (how things work), ensure that **a small portion (approx. 15-20%)** of the questions target **negative constraints** or **impossible actions** to test for hallucinations.
+
+1.  **Positive Knowledge (Majority):** Counter-intuitive facts about how the system works, architectural patterns, or specific limitations of valid features.
+2.  **Negative Constraints (Minority):** Ask how to perform a task that the text implies or states is impossible or inadvisable.
+    *   *Example:* If the text says "Images must be PNG," ask "How do I load a JPEG image?"
+    *   *Desired Answer:* "This is not possible; only PNGs are supported."
+    *   *Goal:* Verify the model doesn't hallucinate a solution for something that cannot be done.
+
 ### Constraints & Mandates
 1.  **Source Material Restrictions:**
     *   **Strict Grounding:** You are strictly limited to the provided Reference Material for the facts used in the questions and answers. Do not incorporate outside facts.
