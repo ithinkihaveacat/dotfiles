@@ -108,14 +108,18 @@ async function generateContentWithRetry(
     } catch (e: any) {
       const msg = e.message || String(e);
 
-      // Critical Error: Model not found (404)
+      // Critical Error: Model not found (404) or Quota Exceeded (429)
       if (
         msg.includes("404") ||
         e.status === 404 ||
-        msg.includes("NOT_FOUND")
+        msg.includes("NOT_FOUND") ||
+        msg.includes("429") ||
+        e.status === 429 ||
+        msg.includes("RESOURCE_EXHAUSTED") ||
+        msg.toLowerCase().includes("quota")
       ) {
         console.error(
-          `\nFATAL: Model '${model}' not found or inaccessible.\n${msg}`
+          `\nFATAL: Critical error encountered (Model not found or Quota exceeded).\n${msg}`
         );
         process.exit(1);
       }
