@@ -186,6 +186,7 @@ Options:
   -v, --version     Display version number and exit
   --questions N     Number of questions to generate (default: ${DEFAULT_QUESTION_COUNT})
   --models LIST     Comma-separated list of models to test (default: ${DEFAULT_MODELS.join(",")})
+                    Append "+grounded" to a model name to enable Google Search (e.g. gemini-1.5-pro+grounded).
                     For a list of available models, see:
                     https://ai.google.dev/gemini-api/docs/models
 
@@ -386,9 +387,11 @@ async function testQuestion(
   ai: GoogleGenAI,
   model: string,
   question: string,
+  useGrounding: boolean,
   retryOptions?: RetryOptions
 ): Promise<string | null> {
-  return generateContentWithRetry(ai, model, question, undefined, retryOptions);
+  const config = useGrounding ? { tools: [{ googleSearch: {} }] } : undefined;
+  return generateContentWithRetry(ai, model, question, config, retryOptions);
 }
 
 // Evaluate the candidate answer against ground truth
@@ -481,7 +484,7 @@ async function validateQuestion(
   q: Question,
   index: number,
   total: number,
-  model: string,
+  modelRaw: string,
   modelDisplayName: string,
   retryOptions?: RetryOptions,
   onError?: () => void
@@ -490,8 +493,19 @@ async function validateQuestion(
   const prefix = `  [${index}/${total}] ${modelDisplayName}: `;
   const maxQuestionLen = Math.max(10, cols - prefix.length - 12); // Space for result
 
+  const isGrounded = modelRaw.endsWith("+grounded");
+  const model = isGrounded
+    ? modelRaw.slice(0, -"+grounded".length)
+    : modelRaw;
+
   // Test: Ask target model without context
-  const candidateAnswer = await testQuestion(ai, model, q.question, retryOptions);
+  const candidateAnswer = await testQuestion(
+    ai,
+    model,
+    q.question,
+    isGrounded,
+    retryOptions
+  );
 
   if (candidateAnswer === null) {
     console.error(`${prefix}${truncate(q.question, maxQuestionLen)} error`);
@@ -547,8 +561,8 @@ function generateReport(
   questions: Question[],
   models: { model: string; displayName: string }[]
 ): string {
-  let report = `# Model Knowledge Gap Analysis\n`;
-  report += `Date: ${new Date().toISOString().slice(0, 16).replace("T", " ")}\n`;
+  let report = `# Model Knowledge Gap Analysis\n\n`;
+  report += `Date: ${new Date().toISOString().slice(0, 16).replace("T", " ")} \\\n`;
 
   if (models.length === 1) {
     report += `Target Model: \`${models[0].displayName}\`\n\n`;
