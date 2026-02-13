@@ -543,7 +543,9 @@ function generateReport(
   questions: Question[],
   models: { model: string; displayName: string }[]
 ): string {
-  let report = `# Validated Knowledge Gaps\n`;
+  let report = `# Model Knowledge Gap Analysis\n`;
+  report += `Date: ${new Date().toISOString().slice(0, 16).replace("T", " ")}\n`;
+
   if (models.length === 1) {
     report += `Target Model: \`${models[0].displayName}\`\n\n`;
   } else {
