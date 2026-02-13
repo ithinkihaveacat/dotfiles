@@ -336,6 +336,12 @@ Generate a diverse set of questions. While most should focus on positive knowled
     *   **The "Gotcha" Factor:** The question should be difficult because it contradicts standard intuition.
     *   **Prioritization:** Select the ${questionCount} questions MOST likely to result in an incorrect response from an expert.
 
+3.  **Self-Contained Rationale:**
+    *   The rationale must explain *why* the fact is true based on the system's logic, NOT based on the document's existence.
+    *   **Forbidden Phrases:** "The text says...", "According to the document...", "The reference material indicates..."
+    *   *Bad:* "The text states that X is true."
+    *   *Good:* "X is true because the system architecture requires Y."
+
 If the text contains only general knowledge, return an empty list.`;
 
   const responseText = await generateContentWithRetry(
