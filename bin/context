@@ -359,6 +359,7 @@ EOF
 
 Options:
   -h, --help    Display this help message and exit
+  -f, --force   Force cache rebuild (ignore 24h cache)
   --list        List available topics (names only)
 
 Examples:
@@ -419,25 +420,39 @@ emit_footer() {
 # MAIN
 # =============================================================================
 
-if [[ $# -lt 1 ]]; then
+FORCE_REFRESH=false
+TOPIC=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      ;;
+    --list)
+      list_topics
+      ;;
+    -f | --force)
+      FORCE_REFRESH=true
+      shift
+      ;;
+    -*)
+      echo "$SCRIPT_NAME: unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$TOPIC" ]]; then
+        echo "$SCRIPT_NAME: only one topic allowed" >&2
+        exit 1
+      fi
+      TOPIC="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$TOPIC" ]]; then
   usage
 fi
-
-case "$1" in
-  -h | --help)
-    usage
-    ;;
-  --list)
-    list_topics
-    ;;
-  -*)
-    echo "$SCRIPT_NAME: unknown option: $1" >&2
-    exit 1
-    ;;
-  *)
-    TOPIC="$1"
-    ;;
-esac
 
 # Validate topic
 TOPIC_FUNC="topic_${TOPIC//-/_}"
@@ -451,6 +466,31 @@ fi
 require curl
 require jq
 require python3
+
+# Cache setup
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/context"
+mkdir -p "$CACHE_DIR"
+CACHE_FILE="$CACHE_DIR/$TOPIC.xml"
+
+# Check cache
+if [[ "$FORCE_REFRESH" == "false" && -f "$CACHE_FILE" ]]; then
+  # Resolve script path for modification check
+  SCRIPT_PATH="$0"
+  if [[ ! -f "$SCRIPT_PATH" ]]; then
+    # Fallback if $0 is just the basename (e.g. found in PATH)
+    SCRIPT_PATH=$(command -v "$0" || echo "")
+  fi
+
+  # Check if cache is fresh:
+  # 1. Less than 24 hours old (find -mtime -1)
+  # 2. Newer than the script itself (if script found)
+  if [[ -n "$(find "$CACHE_FILE" -mtime -1 2>/dev/null)" ]]; then
+    if [[ -z "$SCRIPT_PATH" || "$CACHE_FILE" -nt "$SCRIPT_PATH" ]]; then
+      cat "$CACHE_FILE"
+      exit 0
+    fi
+  fi
+fi
 
 # Create build directory
 BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/$SCRIPT_NAME.XXXXXXXXXX")
@@ -479,5 +519,8 @@ SIZE=$(wc -c <"$OUTPUT_FILE" | tr -d ' \t')
 if ((SIZE > 1000000)); then
   echo "$SCRIPT_NAME: warning: output size ($SIZE bytes) exceeds 1MB" >&2
 fi
+
+# Update cache
+cp "$OUTPUT_FILE" "$CACHE_FILE"
 
 cat "$OUTPUT_FILE"
