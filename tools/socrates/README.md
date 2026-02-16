@@ -3,35 +3,24 @@
 Identify **validated knowledge gaps** in large language models.
 
 Socrates analyzes reference material and generates questions designed to expose
-information that an LLM genuinely doesn't know. It validates each question by
-testing it against a target model, then uses a judge model to evaluate whether
-the response was correct.
+information that an LLM genuinely doesn't know. It uses a SQLite-backed
+workflow to decouple generation, answering, and evaluation, allowing for
+flexible testing scenarios including offline and human-in-the-loop workflows.
 
-## How It Works
+## Workflow
 
-Socrates uses a three-stage "Socratic" pipeline to identify genuine knowledge
-gaps:
+Socrates uses a multi-stage pipeline:
 
-1. **Hypothesis Generation (The Miner):** An advanced model (Gemini 3 Pro)
-   analyzes the source text to extract facts that are likely novel,
-   counter-intuitive, or "gotchas." It generates questions targeting these
-   specific facts. It does _not_ verify the gaps; it only hypothesizes that they
-   exist.
-
-2. **Blind Testing (The Subject):** The target model (Gemini 2.5 Flash) attempts
-   to answer these questions _without_ access to the source text. This tests the
-   model's intrinsic knowledge.
-
-3. **Adjudication (The Judge):** The advanced model compares the Subject's
-   answer against the Ground Truth (from step 1). If the Subject fails to answer
-   correctly, the fact is confirmed as a "Validated Unknown."
-
-4. **Report**: Outputs a markdown report categorizing questions into "Confirmed
-   Unknowns" (the model failed) and "False Alarms" (the model knew the answer).
+1.  **Generate**: An advanced model (Gemini 3 Pro) analyzes source text to extract
+    likely novel facts and generates questions. These are stored in a local
+    SQLite database.
+2.  **Answer**: Questions are answered by a target. This can be an LLM (e.g.,
+    Gemini 2.5 Flash), a shell script, or a human (interactive mode).
+3.  **Score**: An advanced judge model evaluates the answers against the ground
+    truth.
+4.  **Report**: A markdown report is generated from the database.
 
 ## Installation & Usage
-
-There are three ways to use Socrates:
 
 ### 1. System Integration (Recommended)
 
@@ -63,49 +52,75 @@ node dist/index.js --help
 ## Usage
 
 ```text
-socrates [OPTIONS] [TOPIC_FOCUS] < INPUT_FILE
+socrates <command> [OPTIONS]
 ```
 
-### Options
+### Commands
 
-| Option          | Description                                  |
-| --------------- | -------------------------------------------- |
-| `-h, --help`    | Display help message and exit                |
-| `--questions N` | Number of questions to generate (default: 7) |
+| Command    | Description                                      |
+| ---------- | ------------------------------------------------ |
+| `generate` | Generate questions from stdin into a new DB.     |
+| `answer`   | Answer questions in the DB (model, shell, user). |
+| `score`    | Evaluate answers in the DB.                      |
+| `status`   | Show progress (questions, answers, evaluations). |
+| `report`   | Generate a Markdown report from the DB.          |
 
-### Arguments
+### Examples
 
-| Argument      | Description                                      |
-| ------------- | ------------------------------------------------ |
-| `TOPIC_FOCUS` | Optional. A specific area to focus questions on. |
+#### 1. Generate Questions
+Read documentation and generate questions about "Security".
+This creates a new SQLite database file (path printed to stdout).
+
+```bash
+cat documentation.md | socrates generate "Security"
+# Output: /path/to/db/5fb15139-Security.db
+```
+
+#### 2. Answer Questions
+Use an LLM to answer the questions:
+
+```bash
+socrates answer /path/to/db.db --mode model:gemini-2.5-flash
+```
+
+Use a shell script (e.g., to test a CLI tool):
+
+```bash
+socrates answer /path/to/db.db --mode shell:./my-tool-wrapper.sh
+```
+
+Manually answer questions:
+
+```bash
+socrates answer /path/to/db.db --mode interactive:manual
+```
+
+#### 3. Score Answers
+Evaluate the accuracy of the answers using the judge model:
+
+```bash
+socrates score /path/to/db.db
+```
+
+#### 4. Generate Report
+Output the final analysis to Markdown:
+
+```bash
+socrates report /path/to/db.db > analysis.md
+```
 
 ### Environment Variables
 
 | Variable         | Description                    |
 | ---------------- | ------------------------------ |
 | `GEMINI_API_KEY` | Required. Your Gemini API key. |
-
-## Examples
-
-Analyze documentation for knowledge gaps:
-
-```bash
-cat documentation.md | socrates "Security"
-```
-
-Quick test with fewer questions:
-
-```bash
-cat api-spec.md | socrates --questions 2 "Error Handling"
-```
+| `XDG_DATA_HOME`  | Optional. Base directory for DB storage (default: `~/.local/share`). |
 
 ## Output
 
-The tool outputs a markdown report to stdout with two sections:
+The `report` command outputs a markdown report to stdout with:
 
-- **Confirmed Unknowns**: Questions the model answered incorrectly, proving the
-  information is novel to the model.
-- **False Alarms**: Questions the model answered correctly, meaning this
-  information is already known.
+- **Summary Table**: Overview of pass/fail rates.
+- **Detailed Analysis**: Per-question breakdown with ground truth, rationale, and the model's response and critique.
 
 Progress messages are written to stderr.
