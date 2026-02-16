@@ -138,6 +138,20 @@ Output the final analysis to Markdown:
 socrates report 5fb15139 > analysis.md
 ```
 
+#### 6. Complete Workflow Example
+Run the full pipeline:
+
+```bash
+# Answer
+socrates answer 5fb15139 --mode model:gemini-3-flash-preview
+
+# Score
+socrates score 5fb15139
+
+# Report
+socrates report 5fb15139 > report.md
+```
+
 ## Advanced Usage
 
 ### Multiple Iterations
@@ -157,6 +171,15 @@ You can also target a specific run index explicitly:
 ```bash
 # Resume or overwrite run #2
 socrates answer 5fb15139 --mode model:gemini-flash[2]
+```
+
+### Model Grounding
+
+To enable Google Search grounding for a model, append `+grounded` to the model name.
+
+```bash
+# Use Google Search grounding
+socrates answer 5fb15139 --mode model:gemini-3-flash-preview+grounded
 ```
 
 ### Shell Mode
@@ -192,3 +215,17 @@ The `report` command outputs a markdown report to stdout with:
 - **Detailed Analysis**: Per-question breakdown with ground truth, rationale, and the model's response and critique.
 
 Progress messages are written to stderr.
+
+## Supported Models
+
+Socrates supports the full range of Gemini models. Common general-purpose choices include:
+
+*   **`gemini-3-pro-preview`**: Frontier reasoning and coding capabilities.
+*   **`gemini-3-flash-preview`**: High speed and scale with frontier intelligence.
+*   **`gemini-2.5-pro`**: Stable, high-performance general purpose model.
+*   **`gemini-2.5-flash`**: Low-latency workhorse for high-volume tasks.
+*   **`gemini-2.5-flash-lite`**: Extremely cost-efficient and fast.
+
+> **Note:** To enable Google Search grounding for any model, append `+grounded` to the model name (e.g., `gemini-3-flash-preview+grounded`).
+
+For the latest model list and capabilities, visit the [Gemini API Models Documentation](https://ai.google.dev/gemini-api/docs/models).

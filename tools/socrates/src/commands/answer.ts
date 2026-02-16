@@ -1,7 +1,7 @@
 import { GoogleGenAI } from "@google/genai/node";
 import * as path from "path";
 import * as fs from "fs";
-import { exec, spawn } from "child_process";
+import { exec, spawn, execFile } from "child_process";
 import { promisify } from "util";
 import { initDB, getUnansweredQuestions, addAnswer, getAllResponders } from "../db.js";
 import { testQuestion } from "../genai.js";
@@ -11,10 +11,10 @@ import { resolveDBPath } from "../resolve.js";
 import { Question } from "../types.js";
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export async function run(dbPathOrId: string, mode: string) {
   const dbPath = resolveDBPath(dbPathOrId);
-
   const db = initDB(dbPath);
   
   let responder = mode;
@@ -32,8 +32,6 @@ export async function run(dbPathOrId: string, mode: string) {
   }
 
   const [type, ...rest] = responder.split(":");
-  // subConfig is the model name or script path.
-  // We must strip any existing [N] suffix (e.g. from "gemini[7]") so the API call uses the clean name.
   let subConfig = rest.join(":");
   subConfig = subConfig.replace(/\[\d+\]$/, "").replace(/\[\]$/, "");
 
@@ -75,17 +73,21 @@ export async function run(dbPathOrId: string, mode: string) {
     });
 
   } else if (type === "shell") {
-    const scriptCmd = subConfig;
+    // Simplify: Assume subConfig is a simple command path without spaces or arguments.
+    const cmd = subConfig.trim();
+    if (!cmd) {
+      throw new Error("Shell command is empty.");
+    }
+
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
       const prefix = `[${i + 1}/${questions.length}]`;
       try {
-        // Simple shell execution: script "question text"
-        // We need to escape the question text to be safe in shell
-        const safeQuestion = q.text.replace(/"/g, '"');
-        const command = `${scriptCmd} "${safeQuestion}"`;
+        // Execute directly without shell interpretation.
+        // We pass the question as the ONLY argument.
+        const args = [q.text];
         
-        const { stdout, stderr } = await execAsync(command);
+        const { stdout, stderr } = await execFileAsync(cmd, args);
         if (stderr) {
           console.warn(`${prefix} stderr: ${stderr.trim()}`);
         }
