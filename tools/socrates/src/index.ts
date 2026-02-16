@@ -14,7 +14,7 @@ function usage(): void {
   console.log(`Usage: ${SCRIPT_NAME} <command> [options]
 
 Commands:
-  generate <topic>      Generate questions from stdin.
+  generate [topic]      Generate questions from stdin.
   answer <db> --mode <mode>
                         Answer questions in the database.
                         Modes:
@@ -74,9 +74,7 @@ async function main() {
         });
         
         const topic = options.positionals[0];
-        if (!topic) {
-          error("generate requires a topic argument");
-        }
+        // Topic is optional. If undefined, generate.ts will use a default.
         
         const count = options.values.questions ? parseInt(options.values.questions, 10) : 7;
         await runGenerate(topic, count);

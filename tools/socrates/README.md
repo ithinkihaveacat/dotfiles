@@ -49,6 +49,10 @@ npm run build
 node dist/index.js --help
 ```
 
+> **Note:** The `socrates` tool relies on the `better-sqlite3` native module,
+> which cannot be bundled. Therefore, the `node_modules` directory must be
+> present and populated (via `npm install`) for `dist/index.js` to work.
+
 ## Usage
 
 ```text

@@ -36,7 +36,7 @@ function readStdin(): Promise<string> {
   });
 }
 
-export async function run(topic: string, questionCount: number) {
+export async function run(topic: string | undefined, questionCount: number) {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable not set");
   }
@@ -48,19 +48,22 @@ export async function run(topic: string, questionCount: number) {
     throw new Error("Empty input provided via stdin");
   }
 
+  const promptTopic = topic || "Generate challenging questions based on novel information.";
+  const fileTopic = topic || "general";
+
   console.error("Generating questions...");
-  const questions = await generateQuestions(ai, inputData, topic, questionCount);
+  const questions = await generateQuestions(ai, inputData, promptTopic, questionCount);
 
   if (questions.length === 0) {
     console.error("No questions generated.");
     return;
   }
 
-  const dbPath = getDBPath(topic);
+  const dbPath = getDBPath(fileTopic);
   const db = initDB(dbPath);
 
   // Add topic to questions before inserting
-  const questionsWithTopic = questions.map((q) => ({ ...q, topic }));
+  const questionsWithTopic = questions.map((q) => ({ ...q, topic: promptTopic }));
 
   addQuestions(db, questionsWithTopic);
 
