@@ -1,13 +1,31 @@
 import * as fs from "fs";
-import { initDB, getStats } from "../db.js";
-import { Stats } from "../types.js";
+import { initDB, getStats, getAllQuestions } from "../db.js";
+import { Stats, Question } from "../types.js";
 import { resolveDBPath } from "../resolve.js";
+
+function wrapText(text: string, width: number): string {
+  const words = text.split(" ");
+  let lines = [];
+  let currentLine = words[0];
+
+  for (let i = 1; i < words.length; i++) {
+    if (currentLine.length + 1 + words[i].length <= width) {
+      currentLine += " " + words[i];
+    } else {
+      lines.push(currentLine);
+      currentLine = words[i];
+    }
+  }
+  lines.push(currentLine);
+  return lines.join("\n");
+}
 
 export async function run(dbPathOrId: string) {
   const dbPath = resolveDBPath(dbPathOrId);
 
   const db = initDB(dbPath);
   const stats: Stats = getStats(db);
+  const questions: Question[] = getAllQuestions(db);
 
   console.log(`Database: ${dbPath}`);
   console.log(`Total Questions: ${stats.totalQuestions}`);
@@ -23,4 +41,16 @@ export async function run(dbPathOrId: string) {
     );
   }
   console.log("--------------------------------------------------");
+
+  if (questions.length > 0) {
+    console.log("\nQuestions:");
+    console.log("--------------------------------------------------");
+    for (const q of questions) {
+      // Indent subsequent lines of wrapped text for better readability
+      const wrapped = wrapText(q.text, 80);
+      const indented = wrapped.replace(/\n/g, "\n    ");
+      console.log(`[${q.id}] ${indented}`);
+    }
+    console.log("--------------------------------------------------");
+  }
 }
