@@ -123,6 +123,45 @@ Output the final analysis to Markdown:
 socrates report 5fb15139 > analysis.md
 ```
 
+## Advanced Usage
+
+### Multiple Iterations
+
+To run multiple evaluations with the same model (e.g., to test for consistency or stochasticity), append `[]` to the model name. Socrates will automatically assign a new run index (e.g., `[1]`, `[2]`).
+
+```bash
+# First run -> model:gemini-flash[1]
+socrates answer 5fb15139 --mode model:gemini-flash[]
+
+# Second run -> model:gemini-flash[2]
+socrates answer 5fb15139 --mode model:gemini-flash[]
+```
+
+You can also target a specific run index explicitly:
+
+```bash
+# Resume or overwrite run #2
+socrates answer 5fb15139 --mode model:gemini-flash[2]
+```
+
+### Shell Mode
+
+The `shell` mode executes a specific binary or script for each question.
+*   **Safety:** The command is executed directly (not via a shell), so no escaping is needed.
+*   **Format:** The argument must be the path to an executable file (no spaces or arguments).
+*   **Input:** The question text is passed as the **only argument** to the executable.
+
+```bash
+# Valid: Executable script
+socrates answer 5fb15139 --mode shell:./my-script.sh
+
+# Invalid: Cannot include arguments
+socrates answer 5fb15139 --mode 'shell:python my-script.py' 
+# Instead, create a wrapper script:
+# #!/bin/sh
+# python my-script.py "$1"
+```
+
 ### Environment Variables
 
 | Variable         | Description                    |
