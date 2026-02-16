@@ -102,14 +102,24 @@ export async function run(dbPathOrId: string, mode: string) {
 [${i + 1}/${questions.length}] Question:`);
       console.log(q.text);
       console.log("-".repeat(40));
-      
+      console.log("Enter answer (type 'EOF' on a new line to save):");
+
       const answerText = await new Promise<string>((resolve) => {
-        rl.question("Answer > ", (answer) => {
-          resolve(answer.trim());
-        });
+        const lines: string[] = [];
+        const loop = () => {
+          rl.question("", (line) => {
+            if (line.trim() === "EOF") {
+              resolve(lines.join("\n"));
+            } else {
+              lines.push(line);
+              loop();
+            }
+          });
+        };
+        loop();
       });
 
-      if (answerText) {
+      if (answerText.trim()) {
         addAnswer(db, {
           question_id: q.id,
           responder,
