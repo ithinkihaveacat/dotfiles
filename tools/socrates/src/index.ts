@@ -16,7 +16,7 @@ function usage(): void {
   console.log(`Usage: ${SCRIPT_NAME} <command> [options]
 
 Commands:
-  generate [topic]      Generate questions from stdin.
+  generate              Generate questions from stdin.
   answer <db> --mode <mode>
                         Answer questions in the database.
                         Modes:
@@ -36,7 +36,7 @@ Options:
   -v, --version         Display version number.
 
 Examples:
-  cat context.md | ${SCRIPT_NAME} generate "Topic Name" > my-session.db
+  cat context.md | ${SCRIPT_NAME} generate > my-session.db
   ${SCRIPT_NAME} answer my-session.db --mode model:gemini-2.5-flash
   ${SCRIPT_NAME} score my-session.db
   ${SCRIPT_NAME} report my-session.db > report.md
@@ -79,9 +79,8 @@ async function main() {
           allowPositionals: true,
         });
         
-        const topic = positionals[0];
         const count = values.questions ? parseInt(values.questions, 10) : 7;
-        await runGenerate(topic, count);
+        await runGenerate(count);
         break;
       }
 

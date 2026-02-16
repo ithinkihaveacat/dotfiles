@@ -77,15 +77,8 @@ Read documentation and generate questions.
 This creates a new SQLite database and prints the Session ID.
 
 ```bash
-cat documentation.md | socrates generate "Security"
-# Output: /path/to/db/5fb15139-Security.db
-# Session ID: 5fb15139-Security
-```
-
-If no topic is provided, an AI-generated slug is used:
-
-```bash
 cat documentation.md | socrates generate
+# Output: /path/to/db/5fb15139-wear-os-security.db
 # Session ID: 5fb15139-wear-os-security
 ```
 

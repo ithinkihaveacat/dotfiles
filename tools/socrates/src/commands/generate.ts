@@ -25,7 +25,7 @@ function readStdin(): Promise<string> {
   });
 }
 
-export async function run(topic: string | undefined, questionCount: number) {
+export async function run(questionCount: number) {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable not set");
   }
@@ -38,16 +38,10 @@ export async function run(topic: string | undefined, questionCount: number) {
   }
 
   // Determine prompt topic (instruction to AI)
-  const promptTopic = topic || "Generate challenging questions based on novel information.";
+  const promptTopic = "Generate challenging questions based on novel information.";
 
-  // Determine file slug (human readable ID part)
-  let slug: string;
-  if (topic) {
-    slug = sanitizeSlug(topic);
-  } else {
-    console.error("Generating topic slug...");
-    slug = await generateTopicSlug(ai, inputData);
-  }
+  console.error("Generating topic slug...");
+  const slug = await generateTopicSlug(ai, inputData);
 
   console.error(`Generating questions for topic: "${slug}"...`);
   const questions = await generateQuestions(ai, inputData, promptTopic, questionCount);
