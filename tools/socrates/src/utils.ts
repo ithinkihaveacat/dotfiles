@@ -40,3 +40,21 @@ export async function mapConcurrent<T, R>(
   await Promise.all(workers);
   return results;
 }
+
+export function wrapText(text: string, width: number): string {
+  const words = text.split(" ");
+  let lines = [];
+  let currentLine = words[0];
+
+  for (let i = 1; i < words.length; i++) {
+    if (currentLine.length + 1 + words[i].length <= width) {
+      currentLine += " " + words[i];
+    } else {
+      lines.push(currentLine);
+      currentLine = words[i];
+    }
+  }
+  lines.push(currentLine);
+  return lines.join("\n");
+}
+

@@ -6,6 +6,7 @@ import { run as runAnswer } from "./commands/answer.js";
 import { run as runScore } from "./commands/score.js";
 import { run as runStatus } from "./commands/status.js";
 import { run as runReport } from "./commands/report.js";
+import { run as runQuestion } from "./commands/question.js";
 import pkg from "../package.json" with { type: "json" };
 
 const SCRIPT_NAME = "socrates";
@@ -23,6 +24,7 @@ Commands:
                           interactive:<label> (e.g. interactive:manual)
   score <db>            Evaluate answers in the database.
   status <db>           Show progress status.
+  question <db>         List questions in the database.
   report <db>           Generate Markdown report.
 
 Options:
@@ -113,6 +115,13 @@ async function main() {
          const dbPath = args[1];
          if (!dbPath) error("status requires a database path argument");
          await runStatus(dbPath);
+         break;
+      }
+
+      case "question": {
+         const dbPath = args[1];
+         if (!dbPath) error("question requires a database path argument");
+         await runQuestion(dbPath);
          break;
       }
 
