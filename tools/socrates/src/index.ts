@@ -24,7 +24,7 @@ Commands:
                           interactive:<label> (e.g. interactive:manual)
   score <db>            Evaluate answers in the database.
   status <db>           Show progress status.
-  question <db>         List questions in the database.
+  questions <db>        List questions in the database.
   report <db>           Generate Markdown report.
 
 Options:
@@ -118,9 +118,9 @@ async function main() {
          break;
       }
 
-      case "question": {
+      case "questions": {
          const dbPath = args[1];
-         if (!dbPath) error("question requires a database path argument");
+         if (!dbPath) error("questions requires a database path argument");
          await runQuestion(dbPath);
          break;
       }
