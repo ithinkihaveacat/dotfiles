@@ -210,3 +210,13 @@ export function getAllResponders(db: Database.Database): string[] {
   const rows = db.prepare("SELECT DISTINCT responder FROM answers").all() as { responder: string }[];
   return rows.map((r) => r.responder);
 }
+
+export function deleteResponder(db: Database.Database, responder: string): void {
+  const deleteAnswers = db.prepare("DELETE FROM answers WHERE responder = ?");
+  const deleteEvaluations = db.prepare("DELETE FROM evaluations WHERE responder = ?");
+  
+  db.transaction(() => {
+    deleteAnswers.run(responder);
+    deleteEvaluations.run(responder);
+  })();
+}

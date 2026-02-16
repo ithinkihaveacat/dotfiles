@@ -6,6 +6,7 @@ import { run as runAnswer } from "./commands/answer.js";
 import { run as runScore } from "./commands/score.js";
 import { run as runStatus } from "./commands/status.js";
 import { run as runReport } from "./commands/report.js";
+import { run as runDelete } from "./commands/delete.js";
 import { run as runQuestion } from "./commands/question.js";
 import pkg from "../package.json" with { type: "json" };
 
@@ -24,6 +25,7 @@ Commands:
                           interactive:<label> (e.g. interactive:manual)
   score <db>            Evaluate answers in the database.
   status <db>           Show progress status.
+  delete <db> <resp>    Delete a responder and its answers from the database.
   questions <db>        List questions in the database.
   report <db>           Generate Markdown report.
 
@@ -67,6 +69,7 @@ async function main() {
   try {
     switch (command) {
       case "generate": {
+        // ... (existing code)
         const options = parseArgs({
           args: args.slice(1),
           options: {
@@ -76,8 +79,6 @@ async function main() {
         });
         
         const topic = options.positionals[0];
-        // Topic is optional. If undefined, generate.ts will use a default.
-        
         const count = options.values.questions ? parseInt(options.values.questions, 10) : 7;
         await runGenerate(topic, count);
         break;
@@ -115,6 +116,15 @@ async function main() {
          const dbPath = args[1];
          if (!dbPath) error("status requires a database path argument");
          await runStatus(dbPath);
+         break;
+      }
+      
+      case "delete": {
+         const dbPath = args[1];
+         const responder = args[2];
+         if (!dbPath) error("delete requires a database path argument");
+         if (!responder) error("delete requires a responder argument (e.g. 'model:gemini-flash')");
+         await runDelete(dbPath, responder);
          break;
       }
 

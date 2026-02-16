@@ -67,6 +67,7 @@ socrates <command> [OPTIONS]
 | `answer`   | Answer questions (accepts DB path or Session ID).|
 | `score`    | Evaluate answers (accepts DB path or Session ID).|
 | `status`   | Show progress (accepts DB path or Session ID).   |
+| `delete`   | Delete a responder (accepts DB path or Session ID).|
 | `report`   | Generate Report (accepts DB path or Session ID). |
 
 ### Examples
@@ -116,7 +117,21 @@ Evaluate the accuracy of the answers using the judge model:
 socrates score 5fb15139
 ```
 
-#### 4. Generate Report
+#### 4. Manage Database (Delete Runs)
+If you want to remove a specific run (e.g. to re-run it from scratch or remove a test):
+
+```bash
+# Delete a specific model run
+socrates delete 5fb15139 model:gemini-2.5-flash
+
+# Delete a specific iteration
+socrates delete 5fb15139 model:gemini-2.5-flash[1]
+
+# Delete a shell run
+socrates delete 5fb15139 shell:./my-tool-wrapper.sh
+```
+
+#### 5. Generate Report
 Output the final analysis to Markdown:
 
 ```bash
