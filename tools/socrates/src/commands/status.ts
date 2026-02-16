@@ -46,11 +46,24 @@ export async function run(dbPathOrId: string) {
     console.log("\nQuestions:");
     console.log("--------------------------------------------------");
     for (const q of questions) {
-      // Indent subsequent lines of wrapped text for better readability
-      const wrapped = wrapText(q.text, 80);
-      const indented = wrapped.replace(/\n/g, "\n    ");
-      console.log(`[${q.id}] ${indented}`);
+      console.log(`Q${q.id}:`);
+      console.log("");
+      
+      console.log("QUESTION");
+      console.log("");
+      console.log(wrapText(q.text, 80));
+      console.log("");
+
+      console.log("ANSWER");
+      console.log("");
+      console.log(wrapText(q.ground_truth, 80));
+      console.log("");
+
+      console.log("RATIONALE");
+      console.log("");
+      console.log(wrapText(q.rationale, 80));
+      console.log("");
+      console.log("-".repeat(50));
     }
-    console.log("--------------------------------------------------");
   }
 }
