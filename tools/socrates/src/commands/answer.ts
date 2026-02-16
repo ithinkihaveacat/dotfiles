@@ -1,8 +1,7 @@
 import { GoogleGenAI } from "@google/genai/node";
 import * as path from "path";
 import * as fs from "fs";
-import * as readline from "readline";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { initDB, getUnansweredQuestions, addAnswer } from "../db.js";
 import { testQuestion } from "../genai.js";
@@ -91,35 +90,38 @@ export async function run(dbPathOrId: string, mode: string) {
     }
 
   } else if (type === "interactive") {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
+    // We don't use readline here because we want to support multi-line input
+    // terminated by Ctrl+D, which is best handled by spawning a child process
+    // (like 'cat') that inherits stdin. This avoids Node.js stream complexity
+    // with reopening stdin.
 
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
-      console.log(`
-[${i + 1}/${questions.length}] Question:`);
+      console.log(`\n[${i + 1}/${questions.length}] Question:`);
       console.log(q.text);
       console.log("-".repeat(40));
-      console.log("Enter answer (type 'EOF' on a new line to save):");
+      console.log("Enter answer (Press Ctrl+D to save):");
 
-      const answerText = await new Promise<string>((resolve) => {
-        const lines: string[] = [];
-        const loop = () => {
-          rl.question("", (line) => {
-            if (line.trim() === "EOF") {
-              resolve(lines.join("\n"));
-            } else {
-              lines.push(line);
-              loop();
-            }
-          });
-        };
-        loop();
+      const answerText = await new Promise<string>((resolve, reject) => {
+        const child = spawn("cat", [], {
+          stdio: ["inherit", "pipe", "inherit"],
+        });
+        let data = "";
+
+        child.stdout.on("data", (chunk) => {
+          data += chunk.toString();
+        });
+
+        child.on("close", () => {
+          resolve(data.trim());
+        });
+
+        child.on("error", (err) => {
+          reject(err);
+        });
       });
 
-      if (answerText.trim()) {
+      if (answerText) {
         addAnswer(db, {
           question_id: q.id,
           responder,
@@ -130,7 +132,6 @@ export async function run(dbPathOrId: string, mode: string) {
         console.log("Skipped (empty answer).");
       }
     }
-    rl.close();
 
   } else {
     throw new Error(`Unknown mode type: ${type}. Supported: model, shell, interactive.`);
