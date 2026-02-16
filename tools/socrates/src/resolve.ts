@@ -28,5 +28,9 @@ export function resolveDBPath(arg: string): string {
     throw new Error(`Ambiguous database reference '${arg}': matches multiple files: ${matches.join(", ")}`);
   }
 
-  throw new Error(`Database not found: ${arg} (checked path and ID in ${dataDir})`);
+  const allFiles = files.join(", ");
+  throw new Error(`Database not found: '${arg}'.
+Checked path: ${directPath}
+Checked ID in: ${dataDir}
+Available files: ${allFiles || "(none)"}`);
 }
