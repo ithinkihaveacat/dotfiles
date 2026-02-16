@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { initDB, getAllQuestions, getAllAnswers, getEvaluation } from "../db.js";
 import { Question, Answer, Evaluation } from "../types.js";
 import { truncate } from "../utils.js";
+import { resolveDBPath } from "../resolve.js";
 
 interface ReportData {
   questions: Question[];
@@ -75,10 +76,8 @@ function generateReport(data: ReportData): string {
   return report;
 }
 
-export async function run(dbPath: string) {
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`Database not found: ${dbPath}`);
-  }
+export async function run(dbPathOrId: string) {
+  const dbPath = resolveDBPath(dbPathOrId);
 
   const db = initDB(dbPath);
   const questions = getAllQuestions(db);

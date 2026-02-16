@@ -3,24 +3,13 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { initDB, addQuestions } from "../db.js";
-import { generateQuestions } from "../genai.js";
+import { generateQuestions, generateTopicSlug } from "../genai.js";
 import { CONFIG } from "../config.js";
+import { getDataDir } from "../utils.js";
 import { Question } from "../types.js";
 
-function getDBPath(topic: string): string {
-  // 8 chars of hex + topic
-  const hash = crypto.randomBytes(4).toString("hex");
-  const safeTopic = topic.replace(/[^a-zA-Z0-9]/g, "-").slice(0, 30);
-  const filename = `${hash}-${safeTopic}.db`;
-
-  const xdgDataHome = process.env.XDG_DATA_HOME || path.join(process.env.HOME || "", ".local", "share");
-  const dataDir = path.join(xdgDataHome, "socrates");
-
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-
-  return path.join(dataDir, filename);
+function sanitizeSlug(s: string): string {
+  return s.replace(/[^a-zA-Z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
 }
 
 // Read all stdin
@@ -48,10 +37,19 @@ export async function run(topic: string | undefined, questionCount: number) {
     throw new Error("Empty input provided via stdin");
   }
 
+  // Determine prompt topic (instruction to AI)
   const promptTopic = topic || "Generate challenging questions based on novel information.";
-  const fileTopic = topic || "general";
 
-  console.error("Generating questions...");
+  // Determine file slug (human readable ID part)
+  let slug: string;
+  if (topic) {
+    slug = sanitizeSlug(topic);
+  } else {
+    console.error("Generating topic slug...");
+    slug = await generateTopicSlug(ai, inputData);
+  }
+
+  console.error(`Generating questions for topic: "${slug}"...`);
   const questions = await generateQuestions(ai, inputData, promptTopic, questionCount);
 
   if (questions.length === 0) {
@@ -59,7 +57,13 @@ export async function run(topic: string | undefined, questionCount: number) {
     return;
   }
 
-  const dbPath = getDBPath(fileTopic);
+  // Create unique ID: hash-slug
+  const hash = crypto.randomBytes(4).toString("hex");
+  const dbId = `${hash}-${slug}`;
+  const filename = `${dbId}.db`;
+  
+  const dataDir = getDataDir();
+  const dbPath = path.join(dataDir, filename);
   const db = initDB(dbPath);
 
   // Add topic to questions before inserting
@@ -68,5 +72,6 @@ export async function run(topic: string | undefined, questionCount: number) {
   addQuestions(db, questionsWithTopic);
 
   console.error(`Generated ${questions.length} questions.`);
-  console.log(dbPath); // Print ONLY the DB path to stdout for pipeability
+  console.log(dbPath); // Print full path for pipeability/logging
+  console.error(`Session ID: ${dbId}`); // Print ID to stderr for user reference
 }

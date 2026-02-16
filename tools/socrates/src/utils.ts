@@ -1,7 +1,20 @@
+import * as path from "path";
+import * as fs from "fs";
+
 // Helper to truncate text to fit terminal width.
 export function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - 3) + "...";
+}
+
+export function getDataDir(): string {
+  const xdgDataHome = process.env.XDG_DATA_HOME || path.join(process.env.HOME || "", ".local", "share");
+  const dataDir = path.join(xdgDataHome, "socrates");
+
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+  return dataDir;
 }
 
 // Helper to process items in parallel with a concurrency limit

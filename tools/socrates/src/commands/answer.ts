@@ -8,14 +8,13 @@ import { initDB, getUnansweredQuestions, addAnswer } from "../db.js";
 import { testQuestion } from "../genai.js";
 import { CONFIG } from "../config.js";
 import { mapConcurrent, truncate } from "../utils.js";
+import { resolveDBPath } from "../resolve.js";
 import { Question } from "../types.js";
 
 const execAsync = promisify(exec);
 
-export async function run(dbPath: string, mode: string) {
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`Database not found: ${dbPath}`);
-  }
+export async function run(dbPathOrId: string, mode: string) {
+  const dbPath = resolveDBPath(dbPathOrId);
 
   const db = initDB(dbPath);
   const [type, ...rest] = mode.split(":");

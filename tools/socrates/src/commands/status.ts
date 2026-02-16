@@ -1,11 +1,10 @@
 import * as fs from "fs";
 import { initDB, getStats } from "../db.js";
 import { Stats } from "../types.js";
+import { resolveDBPath } from "../resolve.js";
 
-export async function run(dbPath: string) {
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`Database not found: ${dbPath}`);
-  }
+export async function run(dbPathOrId: string) {
+  const dbPath = resolveDBPath(dbPathOrId);
 
   const db = initDB(dbPath);
   const stats: Stats = getStats(db);

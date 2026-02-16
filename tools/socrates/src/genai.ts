@@ -269,3 +269,51 @@ Your Task:
     return null;
   }
 }
+
+export async function generateTopicSlug(
+  ai: GoogleGenAI,
+  inputData: string,
+  retryOptions?: RetryOptions
+): Promise<string> {
+  const prompt = `Analyze the following text and generate a concise, human-readable topic slug.
+  
+  Constraints:
+  1. Use only lowercase letters, numbers, and hyphens.
+  2. No other punctuation or spaces.
+  3. Maximum length: 30 characters.
+  4. Format: word1-word2-word3
+  5. The slug should be descriptive of the main topic.
+  
+  Text Sample (first 2000 chars):
+  ${inputData.slice(0, 2000)}
+  `;
+
+  const responseText = await generateContentWithRetry(
+    ai,
+    CONFIG.EVALUATOR_MODEL,
+    prompt,
+    {
+      responseMimeType: "text/plain",
+      temperature: 0.5,
+    },
+    retryOptions
+  );
+
+  if (!responseText) {
+    return "general";
+  }
+
+  // Clean up just in case the model is chatty
+  let slug = responseText.trim().toLowerCase();
+  // Remove any surrounding quotes or markdown
+  slug = slug.replace(/['"`]/g, "").replace(/\n/g, "");
+  // Keep only safe chars
+  slug = slug.replace(/[^a-z0-9-]/g, "-");
+  // Remove duplicate dashes
+  slug = slug.replace(/-+/g, "-");
+  // Trim dashes
+  slug = slug.replace(/^-|-$/g, "");
+  
+  return slug.slice(0, 30) || "general";
+}
+

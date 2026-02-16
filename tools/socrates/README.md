@@ -64,53 +64,63 @@ socrates <command> [OPTIONS]
 | Command    | Description                                      |
 | ---------- | ------------------------------------------------ |
 | `generate` | Generate questions from stdin into a new DB.     |
-| `answer`   | Answer questions in the DB (model, shell, user). |
-| `score`    | Evaluate answers in the DB.                      |
-| `status`   | Show progress (questions, answers, evaluations). |
-| `report`   | Generate a Markdown report from the DB.          |
+| `answer`   | Answer questions (accepts DB path or Session ID).|
+| `score`    | Evaluate answers (accepts DB path or Session ID).|
+| `status`   | Show progress (accepts DB path or Session ID).   |
+| `report`   | Generate Report (accepts DB path or Session ID). |
 
 ### Examples
 
 #### 1. Generate Questions
-Read documentation and generate questions about "Security".
-This creates a new SQLite database file (path printed to stdout).
+Read documentation and generate questions.
+This creates a new SQLite database and prints the Session ID.
 
 ```bash
 cat documentation.md | socrates generate "Security"
 # Output: /path/to/db/5fb15139-Security.db
+# Session ID: 5fb15139-Security
+```
+
+If no topic is provided, an AI-generated slug is used:
+
+```bash
+cat documentation.md | socrates generate
+# Session ID: 5fb15139-wear-os-security
 ```
 
 #### 2. Answer Questions
+You can refer to the database by its full path or its Session ID (e.g. `5fb15139-Security` or even just `5fb15139`).
+
 Use an LLM to answer the questions:
 
 ```bash
-socrates answer /path/to/db.db --mode model:gemini-2.5-flash
+socrates answer 5fb15139 --mode model:gemini-2.5-flash
 ```
 
 Use a shell script (e.g., to test a CLI tool):
 
 ```bash
-socrates answer /path/to/db.db --mode shell:./my-tool-wrapper.sh
+socrates answer 5fb15139 --mode shell:./my-tool-wrapper.sh
 ```
 
 Manually answer questions:
 
 ```bash
-socrates answer /path/to/db.db --mode interactive:manual
+socrates answer 5fb15139 --mode interactive:manual
 ```
 
 #### 3. Score Answers
 Evaluate the accuracy of the answers using the judge model:
 
 ```bash
-socrates score /path/to/db.db
+socrates score 5fb15139
 ```
 
 #### 4. Generate Report
 Output the final analysis to Markdown:
 
 ```bash
-socrates report /path/to/db.db > analysis.md
+socrates report 5fb15139 > analysis.md
 ```
 
 ### Environment Variables

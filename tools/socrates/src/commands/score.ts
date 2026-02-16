@@ -5,11 +5,10 @@ import { initDB, getUnevaluatedAnswers, addEvaluation, getAllQuestions } from ".
 import { evaluateAnswer } from "../genai.js";
 import { CONFIG } from "../config.js";
 import { mapConcurrent, truncate } from "../utils.js";
+import { resolveDBPath } from "../resolve.js";
 
-export async function run(dbPath: string) {
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`Database not found: ${dbPath}`);
-  }
+export async function run(dbPathOrId: string) {
+  const dbPath = resolveDBPath(dbPathOrId);
 
   if (!process.env.GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable not set");
