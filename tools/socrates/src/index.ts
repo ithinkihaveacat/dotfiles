@@ -8,9 +8,9 @@ import { run as runStatus } from "./commands/status.js";
 import { run as runReport } from "./commands/report.js";
 import { run as runDelete } from "./commands/delete.js";
 import { run as runQuestion } from "./commands/question.js";
-import pkg from "../package.json" with { type: "json" };
 
 const SCRIPT_NAME = "socrates";
+const VERSION = "1.0.0";
 
 function usage(): void {
   console.log(`Usage: ${SCRIPT_NAME} <command> [options]
@@ -28,6 +28,7 @@ Commands:
   delete <db> <resp>    Delete a responder and its answers from the database.
   questions <db>        List questions in the database.
   report <db>           Generate Markdown report.
+                        Options: --force (ignore incomplete data)
 
 Options:
   --questions <n>       Number of questions to generate (default: 7).
@@ -42,13 +43,14 @@ Examples:
 `);
 }
 
-function error(message: string): never {
+function error(message: string): void {
   console.error(`${SCRIPT_NAME}: ${message}`);
   process.exit(1);
 }
 
 async function main() {
   const args = process.argv.slice(2);
+  
   if (args.length === 0) {
     usage();
     process.exit(0);
@@ -62,15 +64,14 @@ async function main() {
   }
 
   if (["-v", "--version"].includes(command)) {
-    console.log(`${SCRIPT_NAME} ${pkg.version}`);
+    console.log(`${SCRIPT_NAME} ${VERSION}`);
     process.exit(0);
   }
 
   try {
     switch (command) {
       case "generate": {
-        // ... (existing code)
-        const options = parseArgs({
+        const { values, positionals } = parseArgs({
           args: args.slice(1),
           options: {
             questions: { type: "string" },
@@ -78,14 +79,14 @@ async function main() {
           allowPositionals: true,
         });
         
-        const topic = options.positionals[0];
-        const count = options.values.questions ? parseInt(options.values.questions, 10) : 7;
+        const topic = positionals[0];
+        const count = values.questions ? parseInt(values.questions, 10) : 7;
         await runGenerate(topic, count);
         break;
       }
 
       case "answer": {
-        const options = parseArgs({
+        const { values, positionals } = parseArgs({
           args: args.slice(1),
           options: {
             mode: { type: "string" },
@@ -93,15 +94,15 @@ async function main() {
           allowPositionals: true,
         });
 
-        const dbPath = options.positionals[0];
+        const dbPath = positionals[0];
         if (!dbPath) {
           error("answer requires a database path argument");
         }
-        if (!options.values.mode) {
+        if (!values.mode) {
           error("answer requires --mode <mode>");
         }
 
-        await runAnswer(dbPath, options.values.mode);
+        await runAnswer(dbPath, values.mode as string);
         break;
       }
 
@@ -136,9 +137,18 @@ async function main() {
       }
 
       case "report": {
-         const dbPath = args[1];
+         const { values, positionals } = parseArgs({
+            args: args.slice(1),
+            options: {
+              force: { type: "boolean" },
+            },
+            allowPositionals: true,
+         });
+
+         const dbPath = positionals[0];
          if (!dbPath) error("report requires a database path argument");
-         await runReport(dbPath);
+         
+         await runReport(dbPath, { force: values.force });
          break;
       }
 

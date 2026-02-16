@@ -76,13 +76,21 @@ function generateReport(data: ReportData): string {
   return report;
 }
 
-export async function run(dbPathOrId: string) {
+export async function run(dbPathOrId: string, options: { force?: boolean } = {}) {
   const dbPath = resolveDBPath(dbPathOrId);
-
   const db = initDB(dbPath);
+  
   const questions = getAllQuestions(db);
   const answers = getAllAnswers(db);
   
+  // Get unique responders
+  const responders = Array.from(new Set(answers.map(a => a.responder))).sort();
+
+  if (responders.length === 0) {
+    console.error("No answers found in database.");
+    return;
+  }
+
   // Get evaluations for all answers
   const evaluations: Evaluation[] = [];
   for (const ans of answers) {
@@ -92,8 +100,32 @@ export async function run(dbPathOrId: string) {
     }
   }
 
-  // Get unique responders
-  const responders = Array.from(new Set(answers.map(a => a.responder))).sort();
+  // Completeness Check
+  if (!options.force) {
+    const questionCount = questions.length;
+    const errors: string[] = [];
+    
+    for (const r of responders) {
+      // Check 1: Did this responder answer all questions?
+      const responderAnswers = answers.filter(a => a.responder === r);
+      if (responderAnswers.length < questionCount) {
+        errors.push(`Responder '${r}' has answered only ${responderAnswers.length}/${questionCount} questions.`);
+      }
+
+      // Check 2: Are all answers scored?
+      const responderEvaluations = evaluations.filter(e => e.responder === r);
+      if (responderEvaluations.length < responderAnswers.length) {
+         errors.push(`Responder '${r}' has only ${responderEvaluations.length}/${responderAnswers.length} answers evaluated.`);
+      }
+    }
+
+    if (errors.length > 0) {
+      console.error("Report generation aborted due to incomplete data:");
+      errors.forEach(e => console.error(`- ${e}`));
+      console.error("\nUse --force to generate the report anyway.");
+      process.exit(1);
+    }
+  }
 
   const report = generateReport({ questions, answers, evaluations, responders });
   console.log(report);
