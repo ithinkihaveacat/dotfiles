@@ -205,3 +205,8 @@ export function getStats(db: Database.Database): Stats {
 
   return { totalQuestions, responders };
 }
+
+export function getAllResponders(db: Database.Database): string[] {
+  const rows = db.prepare("SELECT DISTINCT responder FROM answers").all() as { responder: string }[];
+  return rows.map((r) => r.responder);
+}

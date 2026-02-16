@@ -3,7 +3,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { exec, spawn } from "child_process";
 import { promisify } from "util";
-import { initDB, getUnansweredQuestions, addAnswer } from "../db.js";
+import { initDB, getUnansweredQuestions, addAnswer, getAllResponders } from "../db.js";
 import { testQuestion } from "../genai.js";
 import { CONFIG } from "../config.js";
 import { mapConcurrent, truncate } from "../utils.js";
@@ -16,9 +16,26 @@ export async function run(dbPathOrId: string, mode: string) {
   const dbPath = resolveDBPath(dbPathOrId);
 
   const db = initDB(dbPath);
-  const [type, ...rest] = mode.split(":");
-  const responder = mode; // Full string is the responder ID
-  const subConfig = rest.join(":"); // e.g., "gemini-2.5-flash" or "script.sh"
+  
+  let responder = mode;
+
+  // Handle auto-increment syntax "name[]"
+  if (responder.endsWith("[]")) {
+    const base = responder.slice(0, -2);
+    const existing = new Set(getAllResponders(db));
+    let i = 1;
+    while (existing.has(`${base}[${i}]`)) {
+      i++;
+    }
+    responder = `${base}[${i}]`;
+    console.log(`Starting new run: ${responder}`);
+  }
+
+  const [type, ...rest] = responder.split(":");
+  // subConfig is the model name or script path.
+  // We must strip any existing [N] suffix (e.g. from "gemini[7]") so the API call uses the clean name.
+  let subConfig = rest.join(":");
+  subConfig = subConfig.replace(/\[\d+\]$/, "").replace(/\[\]$/, "");
 
   const questions = getUnansweredQuestions(db, responder);
 
