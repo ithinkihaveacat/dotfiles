@@ -3,6 +3,7 @@ export const CONFIG = {
   MAX_GLOBAL_ERRORS: 10,
   DEFAULT_QUESTION_COUNT: 7,
   EVALUATOR_MODEL: "gemini-3-pro-preview",
+  SLUG_MODEL: "gemini-3-flash-preview",
   DEFAULT_TARGET_MODEL: "gemini-2.5-flash",
   MAX_CONCURRENCY: 10,
 };

@@ -275,26 +275,39 @@ export async function generateTopicSlug(
   inputData: string,
   retryOptions?: RetryOptions
 ): Promise<string> {
-  const prompt = `Analyze the following text and generate a concise, human-readable topic slug.
-  
-  Constraints:
-  1. Use only lowercase letters, numbers, and hyphens.
-  2. No other punctuation or spaces.
-  3. Maximum length: 30 characters.
-  4. Format: word1-word2-word3
-  5. The slug should be descriptive of the main topic.
-  
-  Text Sample (first 2000 chars):
-  ${inputData.slice(0, 2000)}
-  `;
+  const prompt = `Analyze the provided text and generate a concise, representative topic slug.
+
+### Goal
+Create a slug that allows a human to instantly identify the source or subject matter of this text.
+Focus on the **title**, **main system**, or **primary component** described.
+
+### Anti-Patterns (Avoid These)
+*   Do NOT pick a random variable name (e.g., "debounced-goals").
+*   Do NOT pick a specific low-level method (e.g., "prepare-exercise").
+*   Do NOT use generic terms (e.g., "documentation", "guide").
+
+### Constraints
+1.  **Format:** kebab-case (lowercase words joined by hyphens).
+2.  **Characters:** a-z, 0-9, - (hyphen) only.
+3.  **Length:** Max 40 characters.
+4.  **No Hallucinations:** The slug must be derived from the text's primary subject.
+
+### Examples
+*   Text about "Wear OS Tiles API" -> \`wear-os-tiles\`
+*   Text about "Jetpack Navigation" -> \`jetpack-navigation\`
+*   Text about "Health Services ExerciseClient" -> \`health-services-exercise\`
+
+Text Sample:
+${inputData}
+`;
 
   const responseText = await generateContentWithRetry(
     ai,
-    CONFIG.EVALUATOR_MODEL,
+    CONFIG.SLUG_MODEL,
     prompt,
     {
       responseMimeType: "text/plain",
-      temperature: 0.5,
+      // Use default temperature
     },
     retryOptions
   );
@@ -314,6 +327,6 @@ export async function generateTopicSlug(
   // Trim dashes
   slug = slug.replace(/^-|-$/g, "");
   
-  return slug.slice(0, 30) || "general";
+  return slug.slice(0, 40) || "general";
 }
 
