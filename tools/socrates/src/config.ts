@@ -6,6 +6,7 @@ export const CONFIG = {
   SLUG_MODEL: "gemini-3-flash-preview",
   DEFAULT_TARGET_MODEL: "gemini-2.5-flash",
   MAX_CONCURRENCY: 10,
+  PLACEHOLDER_TEXT: "[allocating...]",
 };
 
 export interface RetryOptions {

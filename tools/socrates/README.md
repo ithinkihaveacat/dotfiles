@@ -67,7 +67,7 @@ socrates <command> [OPTIONS]
 | `answer`   | Answer questions (accepts DB path or Session ID).|
 | `score`    | Evaluate answers (accepts DB path or Session ID).|
 | `status`   | Show progress (accepts DB path or Session ID).   |
-| `delete`   | Delete a responder (accepts DB path or Session ID).|
+| `delete`   | Delete a responder or cleanup zombies (`--cleanup`).|
 | `report`   | Generate Report (accepts DB path or Session ID). |
 
 ### Examples
@@ -122,6 +122,9 @@ socrates delete 5fb15139 model:gemini-2.5-flash[1]
 
 # Delete a shell run
 socrates delete 5fb15139 shell:./my-tool-wrapper.sh
+
+# Cleanup incomplete/zombie runs (e.g. from crashed processes)
+socrates delete 5fb15139 --cleanup
 ```
 
 #### 5. Generate Report

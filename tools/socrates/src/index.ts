@@ -25,7 +25,8 @@ Commands:
                           interactive:<label> (e.g. interactive:manual)
   score <db>            Evaluate answers in the database.
   status <db>           Show progress status.
-  delete <db> <resp>    Delete a responder and its answers from the database.
+  delete <db> [resp]    Delete a responder and its answers from the database.
+                        Options: --cleanup (remove incomplete/zombie runs)
   questions <db>        List questions in the database.
   report <db>           Generate Markdown report.
                         Options: --force (ignore incomplete data)
@@ -120,11 +121,24 @@ async function main() {
       }
       
       case "delete": {
-         const dbPath = args[1];
-         const responder = args[2];
+         const { values, positionals } = parseArgs({
+            args: args.slice(1),
+            options: {
+              cleanup: { type: "boolean" },
+            },
+            allowPositionals: true,
+         });
+
+         const dbPath = positionals[0];
+         const responder = positionals[1];
+         
          if (!dbPath) error("delete requires a database path argument");
-         if (!responder) error("delete requires a responder argument (e.g. 'model:gemini-flash')");
-         await runDelete(dbPath, responder);
+         
+         if (!values.cleanup && !responder) {
+            error("delete requires a responder argument (e.g. 'model:gemini-flash') or --cleanup");
+         }
+
+         await runDelete(dbPath, responder, { cleanup: values.cleanup });
          break;
       }
 

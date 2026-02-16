@@ -31,16 +31,31 @@ export async function run(dbPathOrId: string, mode: string) {
     console.log(`Starting new run: ${responder}`);
   }
 
-  const [type, ...rest] = responder.split(":");
-  let subConfig = rest.join(":");
-  subConfig = subConfig.replace(/\[\d+\]$/, "").replace(/\[\]$/, "");
-
   const questions = getUnansweredQuestions(db, responder);
 
   if (questions.length === 0) {
     console.log(`No unanswered questions for responder '${responder}'.`);
     return;
   }
+
+  // Reserve the run immediately to prevent race conditions with other processes
+  // trying to start the same run index (e.g., [1]).
+  // We insert a placeholder answer for the first question.
+  // This makes the responder "exist" in the DB.
+  try {
+    addAnswer(db, {
+      question_id: questions[0].id,
+      responder,
+      text: CONFIG.PLACEHOLDER_TEXT,
+    });
+  } catch (e) {
+    // Ignore error if we can't reserve (unlikely unless DB is locked or really weird race)
+    console.warn("Warning: Failed to reserve run index.", e);
+  }
+
+  const [type, ...rest] = responder.split(":");
+  let subConfig = rest.join(":");
+  subConfig = subConfig.replace(/\[\d+\]$/, "").replace(/\[\]$/, "");
 
   console.log(`Found ${questions.length} unanswered questions for '${responder}'.`);
 
