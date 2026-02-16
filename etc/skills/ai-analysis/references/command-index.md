@@ -6,6 +6,7 @@
 - [screenshot-compare](#screenshot-compare) - Compare two images for differences
 - [photo-smart-crop](#photo-smart-crop) - Smart crop around detected people
 - [emerson](#emerson) - Generate essay-length analysis from text
+- [pascal](#pascal) - Ask a question and get a short response
 - [context](#context) - Generate aggregated context for analysis
 - [satisfies](#satisfies) - Evaluate boolean conditions against text
 - [token-count](#token-count) - Count tokens in text
@@ -318,11 +319,91 @@ curl -s -X POST \
 
 ---
 
+## pascal
+
+Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
+response (wrapped to 80 columns).
+
+### Synopsis
+
+```bash
+scripts/pascal PROMPT
+```
+
+### Arguments
+
+| Argument | Description          |
+| -------- | -------------------- |
+| `PROMPT` | The question to ask. |
+
+### Input
+
+| Source  | Description                                    |
+| ------- | ---------------------------------------------- |
+| `stdin` | Optional context to include with the question. |
+
+### Options
+
+| Option       | Description                   |
+| ------------ | ----------------------------- |
+| `-h, --help` | Display help message and exit |
+
+### Environment Variables
+
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+
+### Examples
+
+```bash
+# Ask a question
+scripts/pascal "What is the capital of Peru?"
+
+# Summarize an article
+cat article.md | scripts/pascal "Summarize this article"
+```
+
+### Raw API Command
+
+Model: `gemini-3-flash-preview`
+
+```bash
+PROMPT="What is the capital of Peru?"
+SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer \
+(less than 300 characters) in a single full paragraph. Do not use point form, \
+lists, or markdown formatting (like bold or headers). Just plain text."
+
+curl -s -X POST \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent" \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n \
+    --arg system_instruction "$SYSTEM_INSTRUCTION" \
+    --arg user_prompt "$PROMPT" \
+    '{
+      system_instruction: { parts: [{ text: $system_instruction }] },
+      contents: [{ role: "user", parts: [{ text: $user_prompt }] }],
+      generationConfig: { temperature: 1.0, maxOutputTokens: 2048 }
+    }')" | jq -r '.candidates[0].content.parts[0].text' | fmt -w 80
+```
+
+### Exit Codes
+
+| Code | Description                 |
+| ---- | --------------------------- |
+| 0    | Success                     |
+| 1    | General error               |
+| 127  | Missing required dependency |
+
+---
+
 ## context
 
-Generate aggregated context for various topics (e.g., `gemini-api`, `gemini-cli`)
-by fetching data from GitHub or local execution. Run `scripts/context --list`
-to see all available topics. Outputs XML format suitable for `emerson`.
+Generate aggregated context for various topics (e.g., `gemini-api`,
+`gemini-cli`) by fetching data from GitHub or local execution. Run
+`scripts/context --list` to see all available topics. Outputs XML format
+suitable for `emerson`.
 
 **Note:** The output is often extremely large. Agents should **not** consume
 this output directly. Instead, pipe it to `emerson` for analysis, or redirect it
@@ -337,16 +418,16 @@ scripts/context --list
 
 ### Arguments
 
-| Argument | Description                                |
-| -------- | ------------------------------------------ |
+| Argument | Description                                  |
+| -------- | -------------------------------------------- |
 | `TOPIC`  | The topic to generate context for (required) |
 
 ### Options
 
-| Option          | Description                     |
-| --------------- | ------------------------------- |
-| `--list`        | List available topics           |
-| `-h, --help`    | Display help message and exit   |
+| Option       | Description                   |
+| ------------ | ----------------------------- |
+| `--list`     | List available topics         |
+| `-h, --help` | Display help message and exit |
 
 ### Environment Variables
 
@@ -370,11 +451,11 @@ scripts/context mcp-server | grep "protocol"
 
 ### Exit Codes
 
-| Code | Description                               |
-| ---- | ----------------------------------------- |
-| 0    | Success                                   |
-| 1    | General error (unknown topic, etc.)       |
-| 127  | Missing required dependency               |
+| Code | Description                         |
+| ---- | ----------------------------------- |
+| 0    | Success                             |
+| 1    | General error (unknown topic, etc.) |
+| 127  | Missing required dependency         |
 
 ---
 
@@ -386,7 +467,7 @@ a boolean result via exit code.
 ### Synopsis
 
 ```bash
-echo "text" | scripts/satisfies "CONDITION"
+echo "text" | scripts/satisfies [OPTIONS] "CONDITION"
 ```
 
 ### Arguments
@@ -403,9 +484,10 @@ echo "text" | scripts/satisfies "CONDITION"
 
 ### Options
 
-| Option       | Description                   |
-| ------------ | ----------------------------- |
-| `-h, --help` | Display help message and exit |
+| Option          | Description                        |
+| --------------- | ---------------------------------- |
+| `-v, --verbose` | Output "true" or "false" to stderr |
+| `-h, --help`    | Display help message and exit      |
 
 ### Environment Variables
 

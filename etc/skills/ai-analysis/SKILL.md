@@ -14,8 +14,8 @@ description: >
   context, research topic.
 compatibility: >
   Requires curl, jq, and python3. Image tools also need base64 and magick
-  (ImageMagick). Needs GEMINI_API_KEY environment variable and network access
-  to generativelanguage.googleapis.com.
+  (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
+  generativelanguage.googleapis.com.
 ---
 
 # AI Analysis Tools
@@ -130,15 +130,41 @@ scripts/emerson "PROMPT" < input.txt
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
+### pascal
+
+Ask a question and get a short, paragraph-style response (wrapped to 80
+columns). Optimized for quick answers.
+
+```bash
+scripts/pascal "QUESTION"
+```
+
+**Input:** Optional context via stdin
+
+**Exit codes:** 0 success, 1 error, 127 missing dependency
+
+**Examples:**
+
+```bash
+# Ask a quick question
+scripts/pascal "What is the capital of Peru?"
+
+# Summarize a file
+cat article.md | scripts/pascal "Summarize this article"
+
+# Explain code
+scripts/pascal "Explain this code" < script.sh
+```
+
 ### context
 
 Generate aggregated context for various topics (e.g., `gemini-api`,
 `gemini-cli`). Run with `--list` to see all available topics. Outputs XML format
 suitable for `emerson`.
 
-**Warning:** Output can be very large. **Do not** read output directly into
-your conversation history. Pipe to `emerson` for analysis, or redirect to a
-file to search/read locally.
+**Warning:** Output can be very large. **Do not** read output directly into your
+conversation history. Pipe to `emerson` for analysis, or redirect to a file to
+search/read locally.
 
 ```bash
 scripts/context TOPIC
@@ -167,8 +193,10 @@ Evaluate whether input text satisfies a condition. Returns boolean via exit
 code.
 
 ```bash
-echo "text" | scripts/satisfies "CONDITION"
+echo "text" | scripts/satisfies [-v|--verbose] "CONDITION"
 ```
+
+**Options:** `-v, --verbose` (output "true" or "false" to stderr)
 
 **Exit codes:** 0 true (satisfies), 1 false (does not satisfy), 127 missing
 dependency

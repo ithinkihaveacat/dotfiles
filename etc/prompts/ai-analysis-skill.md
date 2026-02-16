@@ -35,6 +35,7 @@ Before creating files, research the following:
    - `bin/photo-smart-crop` - Smart crop images around detected people
    - `bin/token-count` - Count tokens in text
    - `bin/emerson` - Generate essay-length analysis from text input
+   - `bin/pascal` - Ask a question and get a short response
    - `bin/context` - Generate aggregated context for analysis
    - `bin/satisfies` - Evaluate boolean conditions against text input
 
@@ -76,6 +77,7 @@ Symlink these scripts into `scripts/` using relative paths:
 - `bin/photo-smart-crop`
 - `bin/token-count`
 - `bin/emerson`
+- `bin/pascal`
 - `bin/context`
 - `bin/satisfies`
 
@@ -188,14 +190,17 @@ skill activates.
 #### Quick Start
 
 - Environment: `GEMINI_API_KEY` required
-- Dependencies: `curl`, `jq`, `python3` (all tools); `base64`, `magick` (image tools only)
+- Dependencies: `curl`, `jq`, `python3` (all tools); `base64`, `magick` (image
+  tools only)
 - 7 highest-value commands to run first:
   - `scripts/screenshot-describe image.png` (generate alt-text)
   - `scripts/screenshot-compare before.png after.png` (find visual differences)
   - `scripts/photo-smart-crop photo.jpg cropped.jpg` (crop around people)
   - `cat file.txt | scripts/token-count` (count tokens)
   - `scripts/emerson "Question" < document.txt` (essay-length analysis)
-  - `scripts/context gemini-api | scripts/emerson "Question"` (context + analysis)
+  - `scripts/pascal "Question"` (quick answer)
+  - `scripts/context gemini-api | scripts/emerson "Question"` (context +
+    analysis)
   - `echo "text" | scripts/satisfies "condition"` (boolean evaluation)
 - Use paths relative to the skill: `scripts/screenshot-describe`
 
@@ -237,17 +242,24 @@ Scripts to document:
    - High-quality output suitable for documentation and reports
    - Can be combined with `context` to provide rich background material
 
-6. **context** - Generate aggregated context for analysis
+6. **pascal** - Ask a question and get a short response
+   - Uses Gemini 3 Flash for fast, concise answers
+   - Optimized for quick lookups and summaries
+   - Supports stdin for context
+   - Wraps output to 80 columns
+
+7. **context** - Generate aggregated context for analysis
    - Fetches documentation/repos for specific topics (e.g., gemini-api)
    - Run with `--list` to see available topics
    - Outputs XML format optimized for AI consumption
    - **Warning:** Output is very large; do not read directly. Pipe to `emerson`
      or redirect to a file.
 
-7. **satisfies** - Evaluate whether text satisfies a condition
+8. **satisfies** - Evaluate whether text satisfies a condition
    - Reads input from stdin, returns boolean via exit code
    - Useful for shell conditionals and validation
    - Exit code 0 = true, 1 = false
+   - Use `-v` or `--verbose` to print "true" or "false" to stderr
 
 #### Image Encoding Notes
 
@@ -382,8 +394,8 @@ Before finalizing, verify:
 ### Content Coverage
 
 - [ ] `SKILL.md` has "Important: Use Scripts First" section at top of body
-- [ ] All six scripts documented (screenshot-describe, screenshot-compare,
-      photo-smart-crop, token-count, emerson, satisfies)
+- [ ] All seven scripts documented (screenshot-describe, screenshot-compare,
+      photo-smart-crop, token-count, emerson, pascal, satisfies)
 - [ ] Image encoding conventions documented (briefly, for troubleshooting)
 - [ ] Platform differences (macOS vs Linux) noted
 - [ ] Raw API commands are NOT in SKILL.md body (agents read script source)
