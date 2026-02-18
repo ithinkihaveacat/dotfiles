@@ -10,15 +10,15 @@ Produce a self-contained skill directory at `etc/skills/jetpack/` that an agent
 can use to:
 
 1. Run the bundled `jetpack` script directly (fast, deterministic, with
-   intelligent package resolution and version handling)
+   intelligent package resolution, search, and version handling)
 2. Only fall back to raw commands when the script fails due to missing
    dependencies
 
 **Important:** The `jetpack` script provides significant value beyond raw
-commands (e.g., package-to-coordinate resolution with exceptions table, version
-type handling, Kotlin Multiplatform support). The skill must make agents prefer
-the script by default and only consult raw commands as a last resort by reading
-the script source.
+commands (e.g., package-to-coordinate resolution with exceptions table, code
+search, version type handling, Kotlin Multiplatform support). The skill must
+make agents prefer the script by default and only consult raw commands as a last
+resort by reading the script source.
 
 ## Research Phase
 
@@ -29,13 +29,14 @@ Before creating files, research the following:
    requirements, directory structure, and naming conventions.
 
 2. **Examine the `bin/jetpack` script thoroughly**:
-   - All subcommands: `version`, `resolve`, `source`, `inspect`,
-     `resolve-exceptions`
-   - The underlying `curl`, `xmllint`, and `jar` commands
+   - All subcommands: `version`, `versions`, `resolve`, `search`, `source`,
+     `inspect`, `resolve-exceptions`
+   - The underlying `curl`, `xmllint`, `jar`, `jq`, and `perl` commands
    - Dependencies (look for `require` calls)
    - Maven repository URLs used (Google Maven, androidx.dev snapshots)
    - Version type handling (ALPHA, BETA, RC, STABLE, LATEST, SNAPSHOT)
    - The exceptions table in the `resolve` subcommand
+   - The search logic (index vs code search)
 
    For each subcommand, understand:
    - Purpose and when to use it
@@ -120,8 +121,8 @@ description: >
 
   ```yaml
   compatibility: >
-    Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to
-    dl.google.com and androidx.dev.
+    Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
+    access to dl.google.com, androidx.dev, and cs.android.com.
   ```
 
 For maximum compatibility across skill loaders, prefer a single-line
@@ -137,9 +138,11 @@ load this only when the skill activates, so be concise.
 
 #### Quick Start
 
-- System requirements: `curl`, `xmllint` (libxml2-utils), `jar` (JDK)
+- System requirements: `curl`, `xmllint` (libxml2-utils), `jar` (JDK), `jq`,
+  `perl`
 - 4-5 highest-value commands to run first:
   - `scripts/jetpack inspect <CLASS_NAME>` (most common use case)
+  - `scripts/jetpack search <QUERY>`
   - `scripts/jetpack version <PACKAGE> STABLE`
   - `scripts/jetpack resolve <CLASS_NAME>`
   - `scripts/jetpack source <PACKAGE> SNAPSHOT`
@@ -155,6 +158,7 @@ Script First" that:
    skill's folder
 3. Lists specific features the script provides that raw commands don't:
    - Package-to-coordinate resolution with exceptions table
+   - Code search integration for finding artifacts by class name
    - Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
    - Kotlin Multiplatform platform-specific source detection
    - Build ID resolution for pinned snapshots
@@ -179,10 +183,12 @@ Subcommands to document:
 
 1. **version** - Get specific version type or snapshot build ID for a Jetpack
    package
-2. **resolve** - Convert Android package/class name to Maven coordinate
-3. **source** - Download and extract source JARs
-4. **inspect** - Convenience wrapper combining resolve + source
-5. **resolve-exceptions** - Find missing exceptions for resolve command
+2. **versions** - List all available versions for a package
+3. **resolve** - Convert Android package/class name to Maven coordinate
+4. **search** - Search for artifacts by package or class name
+5. **source** - Download and extract source JARs (mention `--find`)
+6. **inspect** - Convenience wrapper combining resolve/search + source
+7. **resolve-exceptions** - Find missing exceptions for resolve command
 
 #### Version Types
 
@@ -207,21 +213,28 @@ Document typical usage patterns:
    cd "$(scripts/jetpack inspect androidx.wear.tiles.TileService)"
    ```
 
-2. **Checking what version is available**
+2. **Finding a library**
 
    ```bash
-   scripts/jetpack version androidx.wear.tiles:tiles ALPHA
-   scripts/jetpack version androidx.wear.tiles:tiles SNAPSHOT
-   scripts/jetpack version androidx.wear.tiles:tiles 14765146
+   scripts/jetpack search androidx.wear.compose
+   scripts/jetpack search RemoteImage
    ```
 
-3. **Working with bleeding-edge code**
+3. **Checking available versions**
+
+   ```bash
+   scripts/jetpack versions androidx.wear.tiles:tiles
+   scripts/jetpack version androidx.wear.tiles:tiles ALPHA
+   scripts/jetpack version androidx.wear.tiles:tiles SNAPSHOT
+   ```
+
+4. **Working with bleeding-edge code**
 
    ```bash
    scripts/jetpack source androidx.compose.remote:remote-creation-compose SNAPSHOT
    ```
 
-4. **Finding the Maven coordinate for a class**
+5. **Finding the Maven coordinate for a class**
 
    ```bash
    scripts/jetpack resolve androidx.core.splashscreen.SplashScreen
@@ -229,10 +242,20 @@ Document typical usage patterns:
 
 #### Safety Notes
 
-- Script requires network access to Maven repositories
+- Script requires network access to Maven repositories and Code Search
 - SNAPSHOT versions change frequently; pinned versions are reproducible
 - Some libraries may not have all version types available
 - Kotlin Multiplatform libraries have platform-specific sources
+
+#### Reference Material
+
+Include a section at the end of `SKILL.md` linking to the files in `references/`:
+
+- Link to `references/command-index.md` for detailed command usage
+- Link to `references/troubleshooting.md` for common errors
+
+This follows the Agent Skills spec for progressive disclosure, ensuring agents
+can discover these detailed resources when needed.
 
 ## Reference Files
 
@@ -249,7 +272,7 @@ For each subcommand, document:
 - **Arguments** (with descriptions)
 - **Options** (flags and their effects)
 - **Examples** (2-3 practical examples)
-- **Raw commands** (the underlying curl/xmllint/jar commands)
+- **Raw commands** (the underlying curl/xmllint/jar/jq/perl commands)
 - **Exit codes** (success/failure conditions)
 
 Include a section on the **exceptions table** from the `resolve` subcommand,
@@ -267,8 +290,9 @@ previewing the file.
 
 Cover:
 
-- Missing dependencies (`curl`, `xmllint`, `jar`)
+- Missing dependencies (`curl`, `xmllint`, `jar`, `jq`, `perl`)
 - Network errors (failed to fetch maven-metadata.xml)
+- Search failures (rate limits, stale index)
 - Package not found in repository
 - No version of requested type available
 - Snapshot-only packages (must explicitly request SNAPSHOT)
@@ -281,8 +305,8 @@ Cover:
 - Be concise. Agents are intelligent; provide what they don't already know.
 - Use imperative form ("Run this command" not "You can run this command").
 - Include concrete examples with realistic package/class names.
-- Emphasize the script over raw commands. The script provides features (package
-  resolution, version handling, KMP support) that raw commands don't.
+- Emphasize the script over raw commands. The script provides features (search,
+  package resolution, version handling, KMP support) that raw commands don't.
 - Do not duplicate raw commands from the script into SKILL.md. Tell agents to
   read the script source if they need the underlying command.
 - Keep file references one level deep from SKILL.md.
@@ -294,8 +318,8 @@ Before finalizing, verify:
 - [ ] Skill directory exists at `etc/skills/jetpack/`
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
-- [ ] Compatibility field lists required tools (curl, xmllint, jar) and network
-      access
+- [ ] Compatibility field lists required tools (curl, xmllint, jar, jq, perl)
+      and network access
 - [ ] `SKILL.md` body is under 500 lines
 - [ ] `SKILL.md` has "Important: Use Script First" section near top of body
 - [ ] `scripts/` contains a symlink to `bin/jetpack`
@@ -303,7 +327,7 @@ Before finalizing, verify:
 - [ ] Raw commands are NOT in SKILL.md body (agents read script source)
 - [ ] `references/command-index.md` documents each subcommand with raw commands
 - [ ] `references/troubleshooting.md` covers common issues
-- [ ] All five subcommands are documented
+- [ ] All seven subcommands are documented
 - [ ] Version types (ALPHA/BETA/RC/STABLE/LATEST/SNAPSHOT) are explained
 - [ ] Pinned versions (specific strings, build IDs) are explained
 - [ ] No extraneous files (README.md, etc.)
@@ -330,12 +354,13 @@ Use these realistic examples throughout the documentation:
 - `androidx.compose.ui:ui`
 - `androidx.core:core-splashscreen`
 
-**Class names for resolve:**
+**Class names for resolve/search:**
 
 - `androidx.wear.tiles.TileService`
 - `androidx.lifecycle.ViewModel`
 - `androidx.core.splashscreen.SplashScreen`
 - `androidx.compose.ui.Modifier`
+- `RemoteImage`
 
 **Snapshot-only packages (use SNAPSHOT explicitly):**
 

@@ -103,6 +103,11 @@ If a script exists but isn't documented:
 - Add it to the appropriate section in `SKILL.md`
 - Add detailed documentation to `references/command-index.md`
 
+**For monolithic scripts (like `jetpack` or `emumanager`):**
+Check that all available subcommands are documented. Run the script with `--help`
+to see the full list, and verify each one is covered in `SKILL.md` and
+`references/command-index.md`.
+
 ### 2.3 Check for New Scripts
 
 Look for new scripts in `bin/` that should be added to existing skills:
@@ -145,6 +150,11 @@ Pay particular attention to:
 - Description conventions (person, content, discovery keywords)
 - Body structure recommendations (length, sections, progressive disclosure)
 - Reference file expectations
+
+**Specific check for progressive disclosure:**
+Verify that `SKILL.md` explicitly links to every file in the `references/`
+directory (e.g., in a "Reference Material" section). This ensures agents can
+discover these files without needing to list the directory.
 
 **Before making changes based on the specification**, check whether the skill's
 generating prompt addresses the same topic. If the prompt specifies something

@@ -5,7 +5,9 @@
 ## Contents
 
 - [version](#version)
+- [versions](#versions)
 - [resolve](#resolve)
+- [search](#search)
 - [source](#source)
 - [inspect](#inspect)
 - [resolve-exceptions](#resolve-exceptions)
@@ -37,6 +39,15 @@ curl -sSLf "https://dl.google.com/android/maven2/GROUP/PATH/ARTIFACT/maven-metad
 xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
 ```
 
+## versions
+
+**Purpose**: List all available versions for a package. **Synopsis**:
+`scripts/jetpack versions PACKAGE_NAME [REPO_URL]` **Arguments**:
+
+- `PACKAGE_NAME`: Maven coordinate.
+- `REPO_URL`: Custom Maven repo URL. **Examples**:
+- `scripts/jetpack versions androidx.wear.tiles:tiles`
+
 ## resolve
 
 **Purpose**: Convert Android package/class name to Maven coordinate.
@@ -49,6 +60,24 @@ xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[
 **Raw Commands**: N/A (Logic is internal script heuristics + table lookup). See
 [Exceptions Table](#exceptions-table).
 
+## search
+
+**Purpose**: Search for artifacts by package or class name. **Synopsis**:
+`scripts/jetpack search [OPTIONS] QUERY` **Arguments**:
+
+- `QUERY`: Substring to search for (e.g., `androidx.wear` or `RemoteImage`).
+  **Options**:
+- `--index`: Force searching the package index (offline cache).
+- `--code`: Force searching code (Android Code Search). **Examples**:
+- `scripts/jetpack search androidx.wear.compose`
+- `scripts/jetpack search RemoteImage`
+
+**Raw Commands**:
+
+- Uses `https://dl.google.com/android/maven2/master-index.xml` for package
+  index.
+- Uses `cs.android.com` (Android Code Search) API for class search.
+
 ## source
 
 **Purpose**: Download and extract source JARs. **Synopsis**:
@@ -58,9 +87,12 @@ xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[
 - `PACKAGE`: Maven coordinate(s).
 - `VERSION`: Version specifier (symbolic or pinned).
 - `REPO_URL`: Custom Maven repo URL. **Options**:
-- `--output DIR`: Directory to extract to (default: temp dir). **Examples**:
+- `--output DIR`: Directory to extract to (default: temp dir).
+- `--find PATTERN`: Locate files matching PATTERN in the source and print their
+  path. **Examples**:
 - `scripts/jetpack source androidx.wear.tiles:tiles`
 - `scripts/jetpack source --output src_dir androidx.core:core 1.6.0`
+- `scripts/jetpack source --find "TileService.java" androidx.wear.tiles:tiles`
 
 **Raw Commands**:
 
@@ -74,17 +106,17 @@ jar xf sources.jar
 
 ## inspect
 
-**Purpose**: Convenience wrapper combining `resolve` + `source`. **Synopsis**:
-`scripts/jetpack inspect [OPTIONS] CLASS_NAME [VERSION] [REPO_URL]`
-**Arguments**:
+**Purpose**: Convenience wrapper combining `search`/`resolve` + `source`.
+**Synopsis**: `scripts/jetpack inspect [OPTIONS] CLASS_NAME [VERSION]
+[REPO_URL]` **Arguments**:
 
 - `CLASS_NAME`: Class name (resolved to coordinate) OR coordinate.
 - `VERSION`: Version specifier. **Options**:
 - `--output DIR`: Directory to extract to. **Examples**:
 - `scripts/jetpack inspect androidx.core.splashscreen.SplashScreen`
-- `scripts/jetpack inspect androidx.wear.tiles.TileService SNAPSHOT`
+- `scripts/jetpack inspect RemoteImage SNAPSHOT`
 
-**Raw Commands**: Combines logic from `resolve` and `source`.
+**Raw Commands**: Combines logic from `resolve`, `search`, and `source`.
 
 ## resolve-exceptions
 

@@ -9,8 +9,8 @@ description: >
   AndroidX class implementations. Triggers: androidx, jetpack, maven coordinate,
   jetpack source, library version, snapshot, alpha, beta.
 compatibility: >
-  Requires curl, xmllint (libxml2-utils), jar (JDK). Needs network access to
-  dl.google.com and androidx.dev.
+  Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
+  access to dl.google.com, androidx.dev, and cs.android.com.
 ---
 
 # Jetpack Library Utilities
@@ -22,6 +22,7 @@ script is located in the `scripts/` subdirectory of this skill's folder. It
 provides features that raw commands do not:
 
 - Package-to-coordinate resolution with exceptions table
+- Code search integration for finding artifacts by class name
 - Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
 - Build ID resolution for pinned snapshots
@@ -33,12 +34,14 @@ heuristics—use it as reference when building similar functionality.
 
 ## Quick Start
 
-**Requirements:** `curl`, `xmllint` (libxml2-utils), `jar` (JDK).
+**Requirements:** `curl`, `xmllint` (libxml2-utils), `jar` (JDK), `jq`, `perl`.
 
 ### Highest-Value Commands
 
 - **Inspect a class (most common):**
   `scripts/jetpack inspect androidx.wear.tiles.TileService`
+- **Search for a library:**
+  `scripts/jetpack search androidx.wear.compose`
 - **Check stable version:**
   `scripts/jetpack version androidx.wear.tiles:tiles STABLE`
 - **Resolve package to Maven coordinate:**
@@ -54,23 +57,35 @@ heuristics—use it as reference when building similar functionality.
 package. **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]` **Options**:
 `ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`, `SNAPSHOT`.
 
+### `versions`
+
+**Purpose**: List all available versions for a package. **Usage**:
+`scripts/jetpack versions PACKAGE [REPO]`
+
 ### `resolve`
 
 **Purpose**: Convert Android package/class name to Maven coordinate. **Usage**:
 `scripts/jetpack resolve PACKAGE_OR_CLASS` **Note**: Uses heuristic rules and an
 exceptions table.
 
+### `search`
+
+**Purpose**: Search for artifacts by package or class name. **Usage**:
+`scripts/jetpack search [OPTIONS] QUERY` **Options**: `--index` (package names),
+`--code` (class names).
+
 ### `source`
 
 **Purpose**: Download and extract source JARs. **Usage**:
 `scripts/jetpack source PACKAGE... [VERSION]` **Options**: `--output DIR` to
-specify destination.
+specify destination, `--find PATTERN` to locate specific files.
 
 ### `inspect`
 
-**Purpose**: Convenience wrapper combining `resolve` + `source`. **Usage**:
-`scripts/jetpack inspect CLASS_NAME [VERSION]` **Note**: Best for quickly
-checking implementation details.
+**Purpose**: Convenience wrapper combining `search`/`resolve` + `source`.
+**Usage**: `scripts/jetpack inspect CLASS_NAME [VERSION]` **Note**: Best for
+quickly checking implementation details; uses code search if direct resolution
+fails.
 
 ### `resolve-exceptions`
 
@@ -108,12 +123,25 @@ cd "$(scripts/jetpack inspect androidx.wear.tiles.TileService)"
 # Browse source files...
 ```
 
+### Finding a Library
+
+```bash
+# Find libraries related to 'wear.compose'
+scripts/jetpack search androidx.wear.compose
+
+# Find which artifact contains 'RemoteImage'
+scripts/jetpack search RemoteImage
+```
+
 ### Checking Available Versions
 
 ```bash
+# List all versions
+scripts/jetpack versions androidx.wear.tiles:tiles
+
+# Check specific version types
 scripts/jetpack version androidx.wear.tiles:tiles ALPHA
 scripts/jetpack version androidx.wear.tiles:tiles SNAPSHOT
-scripts/jetpack version androidx.wear.tiles:tiles 14765146
 ```
 
 ### Working with Bleeding-Edge Code
@@ -131,9 +159,18 @@ scripts/jetpack resolve androidx.core.splashscreen.SplashScreen
 
 ## Safety Notes
 
-- **Network Access**: Requires access to `dl.google.com` and `androidx.dev`.
+- **Network Access**: Requires access to `dl.google.com`, `androidx.dev`, and
+  `cs.android.com`.
 - **SNAPSHOTs**: Change frequently; use pinned versions or Build IDs for
   reproducibility.
 - **Kotlin Multiplatform**: `source` and `inspect` automatically download
   platform-specific sources (e.g., `-android`, `-desktop`) if detected in the
   POM.
+
+## Reference Material
+
+- **Command Reference**: Detailed usage, arguments, and raw commands for all
+  subcommands. See [references/command-index.md](references/command-index.md).
+- **Troubleshooting**: Solutions for network errors, missing dependencies, and
+  search failures. See
+  [references/troubleshooting.md](references/troubleshooting.md).

@@ -6,6 +6,7 @@
 
 - [Missing Dependencies](#missing-dependencies)
 - [Network Errors](#network-errors)
+- [Search Failures](#search-failures)
 - [Resolution Failures](#resolution-failures)
 - [Version Not Found](#version-not-found)
 - [Kotlin Multiplatform](#kotlin-multiplatform)
@@ -19,6 +20,8 @@ script relies on system tools. **Solution**:
 - `xmllint`: `sudo apt-get install libxml2-utils` or macOS
   `brew install libxml2`.
 - `jar`: Install a JDK (e.g., `default-jdk-headless` or via Android Studio).
+- `jq`: `brew install jq` or `apt-get install jq`.
+- `perl`: Standard on most systems.
 
 ## Network Errors
 
@@ -32,6 +35,17 @@ script relies on system tools. **Solution**:
 - Verify package name is correct (e.g., `androidx.wear.tiles:tiles` vs
   `androidx.wear.tiles:wear-tiles`).
 - Verify Build ID exists at `https://androidx.dev/snapshots/builds`.
+
+## Search Failures
+
+**Symptom**: `Code search request failed` or stale index. **Cause**:
+
+- `search` uses `cs.android.com` which may rate limit or change APIs.
+- Local package index (`~/.cache/jetpack/androidx-index.json`) is outdated and
+  network is down. **Solution**:
+- Wait and try again (for API rate limits).
+- Delete `~/.cache/jetpack/androidx-index.json` to force a rebuild.
+- Use explicit `--index` (packages) or `--code` (classes) flags.
 
 ## Resolution Failures
 
