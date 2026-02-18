@@ -13,6 +13,11 @@
 
 set -euo pipefail
 
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+
 SCRIPT_NAME=$(basename "$0")
 
 # =============================================================================
@@ -42,6 +47,25 @@ validate_package_format() {
     echo "$SCRIPT_NAME: invalid package format '$pkg' (expected GROUP_ID:ARTIFACT_ID)" >&2
     exit 1
   fi
+}
+
+fetch_maven_metadata() {
+  local repo_url="$1"
+  local group_id="$2"
+  local artifact_id="$3"
+  local group_id_path
+  group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+
+  local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
+
+  if ! curl -sSLf "$metadata_url"; then
+    echo "$SCRIPT_NAME: failed to fetch $metadata_url" >&2
+    return 1
+  fi
+}
+
+extract_versions_from_xml() {
+  xmllint --xpath "//version/text()" - | tr ' ' '\n' | sort -V
 }
 
 # Classify a version string into one of three categories:
@@ -79,7 +103,9 @@ Jetpack library utilities for working with AndroidX packages.
 
 Commands:
   version             Get version for a package (ALPHA/BETA/RC/STABLE/SNAPSHOT)
+  versions            List all available versions for a package
   resolve             Convert package/class name to Maven coordinate
+  search              Search for artifacts by package or class name
   source              Download and extract source JARs
   inspect             Resolve a class name and download its source
   resolve-exceptions  Find missing exceptions for the resolve command
@@ -92,10 +118,298 @@ Run '$SCRIPT_NAME <command> --help' for more information on a command.
 Examples:
   $SCRIPT_NAME version androidx.wear.tiles:tiles STABLE
   $SCRIPT_NAME resolve androidx.core.splashscreen.SplashScreen
+  $SCRIPT_NAME search androidx.wear.compose
   $SCRIPT_NAME source androidx.wear.tiles:tiles ALPHA
   $SCRIPT_NAME inspect androidx.lifecycle.ViewModel
 EOF
   exit "${1:-0}"
+}
+
+# =============================================================================
+# SEARCH SUBCOMMAND
+# =============================================================================
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jetpack"
+INDEX_FILE="$CACHE_DIR/androidx-index.json"
+PACKAGES_URL="https://developer.android.com/reference/androidx/packages"
+MAX_AGE_SECONDS=$((4 * 3600)) # 4 hours
+
+usage_search() {
+  cat <<EOF
+Usage: $SCRIPT_NAME search [OPTIONS] QUERY
+
+Search for AndroidX artifacts by package name or class name.
+
+Arguments:
+  QUERY       Search term (substring match on package, or class name)
+
+Options:
+  --index     Force use of Static Index (package names only)
+  --code      Force use of Code Search (class names/files)
+  -h, --help  Display this help message
+
+Examples:
+  $SCRIPT_NAME search androidx.wear.compose
+  $SCRIPT_NAME search RemoteImage
+EOF
+  exit 0
+}
+
+is_index_fresh() {
+  if [[ ! -f "$INDEX_FILE" ]]; then
+    return 1
+  fi
+
+  local file_age
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    file_age=$(stat -f "%m" "$INDEX_FILE")
+  else
+    file_age=$(stat -c "%Y" "$INDEX_FILE")
+  fi
+
+  local current_time
+  current_time=$(date +%s)
+
+  local age=$((current_time - file_age))
+  if [[ $age -lt $MAX_AGE_SECONDS ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+update_index() {
+  echo "info: Updating AndroidX index from Google Maven..." >&2
+  mkdir -p "$CACHE_DIR"
+  local master_url="https://dl.google.com/android/maven2/master-index.xml"
+
+  (
+    local xml_file
+    xml_file=$(mktemp)
+    trap 'rm -f "$xml_file"' EXIT
+
+    if ! curl -sL -o "$xml_file" "$master_url"; then
+      echo "warning: Failed to download master index." >&2
+      if [[ -f "$INDEX_FILE" ]]; then
+        echo "warning: Using stale cache." >&2
+        exit 0
+      fi
+      exit 1
+    fi
+
+    local json_output
+    # Extract tags like <androidx.activity/>, remove brackets/slash
+    json_output=$(grep -oE '<androidx\.[^/]+' "$xml_file" | sed 's/<//' | sort -u | \
+      jq -R -s 'split("\n") | map(select(length > 0)) | map({group: .})')
+
+    if [[ -z "$json_output" ]] || [[ "$json_output" == "[]" ]]; then
+       echo "warning: No groups extracted." >&2
+       if [[ -f "$INDEX_FILE" ]]; then
+         echo "warning: Using stale cache." >&2
+         exit 0
+       fi
+       exit 1
+    fi
+
+    if echo "$json_output" | jq '.' > "$INDEX_FILE"; then
+      echo "info: Index updated." >&2
+    else
+      echo "warning: Failed to save JSON index." >&2
+      exit 1
+    fi
+  )
+}
+
+search_index() {
+  local query="$1"
+  require jq perl xmllint
+
+  if ! is_index_fresh; then
+    update_index
+  fi
+
+  if [[ ! -f "$INDEX_FILE" ]]; then
+    echo "error: Index file not found and update failed." >&2
+    return 1
+  fi
+
+  jq -r --arg q "$query" \
+    '.[] | select(.group | contains($q)) | "\(.group)"' \
+    "$INDEX_FILE" | sort -u
+}
+
+fetch_cs_api_key() {
+  # We extract the API key by looking for the fixed prefix "AIza".
+  local key
+  key=$(curl -s "https://cs.android.com/" | perl -nle 'print $1 if /(AIza[0-9A-Za-z_-]{35})/' | head -n 1)
+  
+  if [[ -z "$key" ]]; then
+    echo "error: Could not fetch CS API key." >&2
+    return 1
+  fi
+  echo "$key"
+}
+
+search_code() {
+  local query="$1"
+  require jq perl curl
+
+  # Heuristic: If query doesn't have "class:" or "file:" prefix, assume class search
+  if [[ ! "$query" =~ : ]]; then
+    query="class:$query"
+  fi
+
+  local api_key
+  if ! api_key=$(fetch_cs_api_key); then
+    return 1
+  fi
+
+  local url="https://grimoireoss-pa.clients6.google.com/v1/contents/search?alt=json&key=${api_key}"
+
+  local json_body
+  json_body=$(jq -n \
+    --arg query "$query" \
+    '{
+      "queryString": $query,
+      "searchOptions": {
+          "enableDiagnostics": false,
+          "exhaustive": false,
+          "isDedupResultsEnabled": false,
+          "numberOfContextLines": 1,
+          "pageSize": 20,
+          "repositoryScope": {
+              "root": {
+                  "ossProject": "androidx",
+                  "repositoryName": "platform/frameworks/support"
+              }
+          },
+          "retrieveMultibranchResults": true
+      }
+    }')
+
+  local response
+  if ! response=$(curl -s -X POST "$url" \
+    -H "Content-Type: application/json" \
+    -H "Referer: https://cs.android.com/" \
+    -H "Origin: https://cs.android.com" \
+    -H "X-Requested-With: XMLHttpRequest" \
+    -d "$json_body"); then
+      echo "warning: Code search request failed." >&2
+      return 1
+  fi
+
+  # Extract paths
+  local paths
+  paths=$(echo "$response" | jq -r '.searchResults[]?.fileSearchResult.fileSpec.path // empty')
+
+  if [[ -z "$paths" ]]; then
+    return 0
+  fi
+
+  # Map paths to artifacts
+  local path artifact_path group_id artifact_id
+  while IFS= read -r path; do
+    # Strip src/...
+    # Example: wear/compose/compose-material/src/main/java/...
+    if [[ "$path" =~ ^(.*)/src/(main|commonMain|androidMain)/.*$ ]]; then
+      artifact_path="${BASH_REMATCH[1]}"
+      
+      # Split into segments
+      local IFS='/'
+      read -ra segments <<< "$artifact_path"
+      
+      if [[ ${#segments[@]} -ge 2 ]]; then
+        artifact_id="${segments[-1]}"
+        unset "segments[-1]"
+        group_id="androidx.$(IFS='.'; echo "${segments[*]}")"
+        echo "$group_id:$artifact_id"
+      fi
+    fi
+  done <<< "$paths" | sort -u
+}
+
+cmd_search() {
+  local force_index=false
+  local force_code=false
+  local query=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h | --help)
+        usage_search
+        ;;
+      --index)
+        force_index=true
+        shift
+        ;;
+      --code)
+        force_code=true
+        shift
+        ;;
+      -*)
+        echo "$SCRIPT_NAME search: unknown option: $1" >&2
+        exit 1
+        ;;
+      *)
+        if [[ -z "$query" ]]; then
+          query="$1"
+        else
+          echo "$SCRIPT_NAME search: too many arguments" >&2
+          exit 1
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$query" ]]; then
+    usage_search
+  fi
+
+  # Dispatch based on strategy
+  if [[ "$force_index" == "true" ]]; then
+    search_index "$query"
+    return
+  fi
+  
+  if [[ "$force_code" == "true" ]]; then
+    search_code "$query"
+    return
+  fi
+
+  # Default Strategy:
+  # 1. Try index first (especially if it looks like a package)
+  local results=""
+  
+  # Optimization: If query looks like a package, prioritize index
+  if [[ "$query" =~ \. ]]; then
+    results=$(search_index "$query")
+    if [[ -n "$results" ]]; then
+      echo "$results"
+      return
+    fi
+  fi
+  
+  # 2. Try code search (finding class definition)
+  # Only if it looks like a class (Capitalized) or we haven't tried index yet
+  if [[ "$query" =~ ^[A-Z] ]]; then
+     results=$(search_code "$query")
+     if [[ -n "$results" ]]; then
+       echo "$results"
+       return
+     fi
+  fi
+
+  # 3. Fallback to index if we skipped it (e.g. simple name but not class-like)
+  if [[ ! "$query" =~ \. && ! "$query" =~ ^[A-Z] ]]; then
+     results=$(search_index "$query")
+     if [[ -n "$results" ]]; then
+       echo "$results"
+       return
+     fi
+     # Last resort: code search
+     search_code "$query"
+  fi
 }
 
 # =============================================================================
@@ -190,30 +504,23 @@ cmd_version() {
   artifact_id=$(echo "$package_name" | cut -d: -f2)
   group_id_path=$(echo "$group_id" | sed 's/\./\//g')
 
-  local version metadata_url
+  local version xml_content all_versions
 
   # Handle SNAPSHOT separately
   if [[ "$version_type" == "SNAPSHOT" ]]; then
     if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
       repo_url="$SNAPSHOT_REPO_URL"
     fi
-    metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
-
-    if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
-      echo "$SCRIPT_NAME version: failed to fetch $metadata_url" >&2
+    
+    if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id"); then
       echo "$SCRIPT_NAME version: package may not exist in snapshot builds" >&2
       exit 1
     fi
 
-    version=$(curl -sSLf "$metadata_url" |
-      xmllint --xpath "//version/text()" - |
-      tr ' ' '\n' |
-      grep -E '\-SNAPSHOT$' |
-      sort -V |
-      tail -n 1)
+    version=$(echo "$xml_content" | extract_versions_from_xml | grep -E '\-SNAPSHOT$' | tail -n 1)
 
     if [[ -z "$version" ]]; then
-      echo "$SCRIPT_NAME version: no snapshot version found at $metadata_url" >&2
+      echo "$SCRIPT_NAME version: no snapshot version found" >&2
       exit 1
     fi
 
@@ -221,72 +528,45 @@ cmd_version() {
     return 0
   fi
 
-  metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
-
-  if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
-    echo "$SCRIPT_NAME version: failed to fetch $metadata_url" >&2
+  if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id"); then
     exit 1
   fi
+  
+  all_versions=$(echo "$xml_content" | extract_versions_from_xml)
 
   case "$version_type" in
     ALPHA)
-      version=$(curl -sSLf "$metadata_url" |
-        xmllint --xpath "//version/text()" - |
-        tr ' ' '\n' |
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+-alpha[0-9]+$' |
-        sort -V |
-        tail -n 1)
-
+      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-alpha[0-9]+$' | tail -n 1)
       if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no alpha version found at $metadata_url" >&2
+        echo "$SCRIPT_NAME version: no alpha version found" >&2
         exit 1
       fi
       ;;
 
     BETA)
-      version=$(curl -sSLf "$metadata_url" |
-        xmllint --xpath "//version/text()" - |
-        tr ' ' '\n' |
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$' |
-        sort -V |
-        tail -n 1)
-
+      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$' | tail -n 1)
       if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no beta version found at $metadata_url" >&2
+        echo "$SCRIPT_NAME version: no beta version found" >&2
         exit 1
       fi
       ;;
 
     RC)
-      version=$(curl -sSLf "$metadata_url" |
-        xmllint --xpath "//version/text()" - |
-        tr ' ' '\n' |
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' |
-        sort -V |
-        tail -n 1)
-
+      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' | tail -n 1)
       if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no rc version found at $metadata_url" >&2
+        echo "$SCRIPT_NAME version: no rc version found" >&2
         exit 1
       fi
       ;;
 
     STABLE)
-      version=$(curl -sSLf "$metadata_url" |
-        xmllint --xpath "//version/text()" - |
-        tr ' ' '\n' |
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' |
-        sort -V |
-        tail -n 1)
+      version=$(echo "$all_versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | tail -n 1)
 
       if [[ -z "$version" ]]; then
-        version=$(curl -sSLf "$metadata_url" |
-          xmllint --xpath "//version/text()" - |
-          tr ' ' '\n' |
-          sort -V |
-          tail -n 1)
+        # Fallback to latest available version if no stable found
+        version=$(echo "$all_versions" | tail -n 1)
         if [[ -z "$version" ]]; then
-          echo "$SCRIPT_NAME version: no stable version found at $metadata_url" >&2
+          echo "$SCRIPT_NAME version: no stable version found" >&2
           exit 1
         fi
         echo "$SCRIPT_NAME version: using prerelease version: $version" >&2
@@ -294,17 +574,64 @@ cmd_version() {
       ;;
 
     LATEST)
-      version=$(curl -sSLf "$metadata_url" |
-        xmllint --xpath "//versioning/latest/text()" -)
+      version=$(echo "$xml_content" | xmllint --xpath "//versioning/latest/text()" -)
 
       if [[ -z "$version" ]]; then
-        echo "$SCRIPT_NAME version: no latest version found at $metadata_url" >&2
+        echo "$SCRIPT_NAME version: no latest version found" >&2
         exit 1
       fi
       ;;
   esac
 
   echo "$version"
+}
+
+# =============================================================================
+# VERSIONS SUBCOMMAND
+# =============================================================================
+
+usage_versions() {
+  cat <<EOF
+Usage: $SCRIPT_NAME versions PACKAGE_NAME [REPO_URL]
+
+List all available versions for a given Jetpack package.
+
+Arguments:
+  PACKAGE_NAME  The package name (e.g., androidx.wear.tiles:tiles)
+  REPO_URL      The Maven repository URL (optional, defaults to Google Maven)
+
+Examples:
+  $SCRIPT_NAME versions androidx.wear.tiles:tiles
+  $SCRIPT_NAME versions androidx.wear.tiles:tiles https://androidx.dev/snapshots/latest/artifacts/repository
+EOF
+  exit 0
+}
+
+cmd_versions() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage_versions
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    usage_versions
+  fi
+
+  require curl xmllint
+
+  local package_name="$1"
+  validate_package_format "$package_name"
+
+  local repo_url="${2:-$GOOGLE_MAVEN_URL}"
+  local group_id artifact_id
+  group_id=$(echo "$package_name" | cut -d: -f1)
+  artifact_id=$(echo "$package_name" | cut -d: -f2)
+
+  local xml_content
+  if ! xml_content=$(fetch_maven_metadata "$repo_url" "$group_id" "$artifact_id"); then
+    exit 1
+  fi
+
+  echo "$xml_content" | extract_versions_from_xml
 }
 
 # =============================================================================
@@ -562,6 +889,7 @@ EOF
 
 cmd_source() {
   local output_dir=""
+  local find_pattern=""
   local -a remaining_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -575,6 +903,14 @@ cmd_source() {
           exit 1
         fi
         output_dir="$2"
+        shift 2
+        ;;
+      --find)
+        if [[ -z "${2:-}" ]]; then
+          echo "$SCRIPT_NAME source: option '--find' requires an argument" >&2
+          exit 1
+        fi
+        find_pattern="$2"
         shift 2
         ;;
       *)
@@ -761,7 +1097,23 @@ cmd_source() {
   # Clean up META-INF
   rm -rf "${build_dir}/META-INF"
 
-  echo "${build_dir}"
+  if [[ -n "$find_pattern" ]]; then
+    local -a matches
+    # Use array to capture filenames safely (handling spaces, though source files rarely have them)
+    mapfile -t matches < <(find "$build_dir" -name "*$find_pattern*" -type f)
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+      echo "error: No files matching '$find_pattern' found in $build_dir" >&2
+      exit 1
+    elif [[ ${#matches[@]} -eq 1 ]]; then
+      cat "${matches[0]}"
+    else
+      echo "info: Multiple matches found:" >&2
+      printf '%s\n' "${matches[@]}"
+    fi
+  else
+    echo "${build_dir}"
+  fi
 }
 
 # =============================================================================
@@ -860,16 +1212,45 @@ cmd_inspect() {
     usage_inspect
   fi
 
-  local class_name="$1"
+  local input="$1"
   local version_type="${2:-STABLE}"
   local repo_url="${3:-}"
 
-  # Resolve class name to Maven coordinate
-  local coordinate
-  if [[ "$class_name" == *:* ]]; then
-    coordinate="$class_name"
+  local coordinate=""
+  local find_target=""
+
+  if [[ "$input" == *:* ]]; then
+    # Input is already a coordinate
+    coordinate="$input"
   else
-    coordinate=$(cmd_resolve "$class_name")
+    # Extract potential class name if input looks like FQCN
+    if [[ "$input" =~ \.([A-Z][a-zA-Z0-9]*)$ ]]; then
+      find_target="${BASH_REMATCH[1]}"
+    elif [[ ! "$input" =~ \. ]]; then
+      # Simple class name
+      find_target="$input"
+    fi
+
+    # Try to resolve or search
+    if [[ "$input" =~ \. ]]; then
+      # It looks like a FQCN or package
+      if resolved=$(cmd_resolve "$input" 2>/dev/null); then
+        coordinate="$resolved"
+      fi
+    fi
+
+    # If resolve failed or didn't apply, try search
+    if [[ -z "$coordinate" ]]; then
+       local search_results
+       if search_results=$(cmd_search "$input"); then
+          coordinate=$(echo "$search_results" | head -n 1)
+       fi
+    fi
+  fi
+
+  if [[ -z "$coordinate" ]]; then
+    echo "$SCRIPT_NAME inspect: could not resolve or find artifact for '$input'" >&2
+    exit 1
   fi
 
   # Build source arguments
@@ -877,6 +1258,13 @@ cmd_inspect() {
   if [[ -n "$output_dir" ]]; then
     source_args+=(--output "$output_dir")
   fi
+  
+  if [[ -n "$find_target" ]]; then
+    # Only append --find if we have a target (simple class name or extracted class name)
+    # AND the filename looks like a source file (or we assume .kt/.java will be matched by *target*)
+    source_args+=(--find "$find_target")
+  fi
+
   source_args+=("$coordinate" "$version_type")
   if [[ -n "$repo_url" ]]; then
     source_args+=("$repo_url")
@@ -1037,9 +1425,17 @@ case "$1" in
     shift
     cmd_version "$@"
     ;;
+  versions)
+    shift
+    cmd_versions "$@"
+    ;;
   resolve)
     shift
     cmd_resolve "$@"
+    ;;
+  search)
+    shift
+    cmd_search "$@"
     ;;
   source)
     shift
