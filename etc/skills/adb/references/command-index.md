@@ -204,6 +204,17 @@ adb shell cmd package query-activities \
 adb shell pm list packages -3
 ```
 
+### `scripts/adb-uihierarchy`
+
+**Purpose**: Dump the UI hierarchy to an XML file. **Dependencies**: `adb`,
+`xmllint` (optional but recommended for formatting) **Usage**:
+`scripts/adb-uihierarchy [OUTPUT_FILE]` **Raw Command**:
+
+```bash
+adb exec-out uiautomator dump /dev/stdout
+# (Piped to xml format)
+```
+
 ## Package Operations
 
 ### `scripts/packagename`

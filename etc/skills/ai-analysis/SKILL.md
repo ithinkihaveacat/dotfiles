@@ -54,6 +54,9 @@ scripts/screenshot-compare before.png after.png
 # Smart crop image around detected people
 scripts/photo-smart-crop photo.jpg cropped.jpg
 
+# Check if a photo prominently features people
+scripts/photo-has-people photo.jpg
+
 # Generate essay-length analysis from text
 scripts/emerson "Summarize the key changes" < documentation.md
 
@@ -116,6 +119,27 @@ scripts/photo-smart-crop --ratio 16:9 portrait.jpg thumbnail.jpg
 
 # Square crop for profile pictures
 scripts/photo-smart-crop --ratio 1:1 headshot.png avatar.png
+```
+
+### photo-has-people
+
+Detect if people feature prominently in a photo. Returns boolean via exit code.
+
+```bash
+scripts/photo-has-people IMAGE
+```
+
+**Options:** `-q, --quiet` (suppress output)
+
+**Exit codes:** 0 true (has people), 1 false (no people), 127 missing dependency
+
+**Examples:**
+
+```bash
+# Check if photo has people
+if scripts/photo-has-people photo.jpg; then
+  echo "Found people"
+fi
 ```
 
 ### emerson
@@ -243,8 +267,9 @@ cat file.txt | scripts/token-count
 - Large images increase request size and latency
 - Scripts do not store or log input data
 
-## References
+## Reference Material
 
-- [Command Index](references/command-index.md) - Detailed documentation for each
-  script
-- [Troubleshooting](references/troubleshooting.md) - Common issues and solutions
+- **Command Reference**: Detailed documentation for each script. See
+  [references/command-index.md](references/command-index.md).
+- **Troubleshooting**: Common issues and solutions. See
+  [references/troubleshooting.md](references/troubleshooting.md).

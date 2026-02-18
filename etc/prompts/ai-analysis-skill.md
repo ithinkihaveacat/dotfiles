@@ -75,6 +75,7 @@ Symlink these scripts into `scripts/` using relative paths:
 - `bin/screenshot-describe`
 - `bin/screenshot-compare`
 - `bin/photo-smart-crop`
+- `bin/photo-has-people`
 - `bin/token-count`
 - `bin/emerson`
 - `bin/pascal`
@@ -120,7 +121,8 @@ description: [See below]
 Include these trigger phrases: ai analysis, describe image, compare screenshots,
 smart crop, crop around people, face crop, count tokens, token count, generate
 essay, evaluate condition, alt text, image description, UI comparison, visual
-diff, satisfies condition, boolean evaluation, gemini
+diff, satisfies condition, boolean evaluation, gemini, context, gather context,
+research topic.
 
 Example pattern:
 
@@ -128,13 +130,15 @@ Example pattern:
 description: >
   Command-line tools that delegate analysis tasks to AI models. Includes image
   description, screenshot comparison, smart cropping around people, token
-  counting, essay generation from text, and boolean condition evaluation. Use
-  for describing images, comparing UI states, cropping photos around faces,
-  counting tokens, generating reports, evaluating conditions, or any task
-  requiring AI inference. Triggers: ai analysis, describe image, compare
-  screenshots, smart crop, crop around people, face crop, count tokens, token
-  count, generate essay, evaluate condition, alt text, image description, UI
-  comparison, visual diff, satisfies condition, boolean evaluation, gemini.
+  counting, essay generation from text, boolean condition evaluation, and
+  context gathering. Use for describing images, comparing UI states, cropping
+  photos around faces, counting tokens, generating reports, evaluating
+  conditions, gathering context for analysis, or any task requiring AI
+  inference. Triggers: ai analysis, describe image, compare screenshots, smart
+  crop, crop around people, face crop, count tokens, token count, generate
+  essay, evaluate condition, alt text, image description, UI comparison, visual
+  diff, satisfies condition, boolean evaluation, gemini, context, gather
+  context, research topic.
 ```
 
 **Compatibility requirements (recommended):**
@@ -196,9 +200,9 @@ skill activates.
   - `scripts/screenshot-describe image.png` (generate alt-text)
   - `scripts/screenshot-compare before.png after.png` (find visual differences)
   - `scripts/photo-smart-crop photo.jpg cropped.jpg` (crop around people)
+  - `scripts/photo-has-people photo.jpg` (check for people)
   - `cat file.txt | scripts/token-count` (count tokens)
   - `scripts/emerson "Question" < document.txt` (essay-length analysis)
-  - `scripts/pascal "Question"` (quick answer)
   - `scripts/context gemini-api | scripts/emerson "Question"` (context +
     analysis)
   - `echo "text" | scripts/satisfies "condition"` (boolean evaluation)
@@ -231,31 +235,35 @@ Scripts to document:
    - Prioritizes faces, expands for headroom, enforces aspect ratio
    - Exit code 2 when rate limited (allows retry logic)
 
-4. **token-count** - Count tokens in text
+4. **photo-has-people** - Detect if people feature prominently in a photo
+   - Returns boolean via exit code (0=true, 1=false)
+   - Useful for conditional logic in workflows
+
+5. **token-count** - Count tokens in text
    - Uses Gemini countTokens API endpoint
    - Reads from stdin, outputs token count
    - Simple utility for estimating API costs
 
-5. **emerson** - Generate essay-length (~3000 words) analysis from text input
+6. **emerson** - Generate essay-length (~3000 words) analysis from text input
    - Reads reference material from stdin
    - Produces authoritative, footnoted Markdown output
    - High-quality output suitable for documentation and reports
    - Can be combined with `context` to provide rich background material
 
-6. **pascal** - Ask a question and get a short response
+7. **pascal** - Ask a question and get a short response
    - Uses Gemini 3 Flash for fast, concise answers
    - Optimized for quick lookups and summaries
    - Supports stdin for context
    - Wraps output to 80 columns
 
-7. **context** - Generate aggregated context for analysis
+8. **context** - Generate aggregated context for analysis
    - Fetches documentation/repos for specific topics (e.g., gemini-api)
    - Run with `--list` to see available topics
    - Outputs XML format optimized for AI consumption
    - **Warning:** Output is very large; do not read directly. Pipe to `emerson`
      or redirect to a file.
 
-8. **satisfies** - Evaluate whether text satisfies a condition
+9. **satisfies** - Evaluate whether text satisfies a condition
    - Reads input from stdin, returns boolean via exit code
    - Useful for shell conditionals and validation
    - Exit code 0 = true, 1 = false
@@ -279,6 +287,16 @@ Document the image encoding conventions:
 - API calls may incur usage costs
 - Large images increase request size and latency
 - The scripts do not store or log input data
+
+#### Reference Material
+
+Include a section at the end of `SKILL.md` linking to the files in `references/`:
+
+- Link to `references/command-index.md` for detailed command usage
+- Link to `references/troubleshooting.md` for common errors
+
+This follows the Agent Skills spec for progressive disclosure, ensuring agents
+can discover these detailed resources when needed.
 
 ## Reference Files
 

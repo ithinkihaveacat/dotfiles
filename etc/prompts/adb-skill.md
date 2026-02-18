@@ -174,6 +174,7 @@ skill activates.
     clipboard)
   - `adb-tile-add` + `adb-tile-show` workflow
   - `adb-activities` (discover launcher, TV, settings activities)
+  - `adb-uihierarchy` (dump UI XML)
   - `wearableservice-capabilities` / `wearableservice-nodes`
   - `packagename tiles PACKAGE`
   - `adb-device-properties`
@@ -187,7 +188,7 @@ with one-line descriptions:
 - **Device basics**: connection, wake/sleep, properties, API level
 - **Media capture**: screenshots, screen recording
 - **Tile management**: add, show, remove, list tiles
-- **Activity discovery**: list activities by category (launcher, TV, settings)
+- **Activity discovery**: list activities by category (launcher, TV, settings), UI hierarchy
 - **Package operations**: launch, stop, uninstall, permissions, services
 - **Wear OS data layer**: capabilities, nodes, data items, RPCs
 - **Display/demo mode**: demo on/off, font scale, touches, theme customization (Wear OS 5+/API 36+), theme settings
@@ -199,6 +200,16 @@ Point to `references/command-index.md` for detailed usage.
 - Debug broadcasts are Wear OS-specific and may not work on all devices
 - Some operations require USB debugging enabled
 - The skill avoids destructive actions unless explicitly requested
+
+#### Reference Material
+
+Include a section at the end of `SKILL.md` linking to the files in `references/`:
+
+- Link to `references/command-index.md` for detailed command usage
+- Link to `references/troubleshooting.md` for common errors
+
+This follows the Agent Skills spec for progressive disclosure, ensuring agents
+can discover these detailed resources when needed.
 
 ## Reference Files
 

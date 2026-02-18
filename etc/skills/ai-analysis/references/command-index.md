@@ -232,6 +232,68 @@ scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3
 
 ---
 
+## photo-has-people
+
+Detect if people feature prominently in a photo using the Gemini API.
+
+### Synopsis
+
+```bash
+scripts/photo-has-people [OPTIONS] IMAGE
+```
+
+### Arguments
+
+| Argument | Description                                               |
+| -------- | --------------------------------------------------------- |
+| `IMAGE`  | Path to input image (any format supported by ImageMagick) |
+
+### Options
+
+| Option         | Description                        |
+| -------------- | ---------------------------------- |
+| `-q, --quiet`  | Suppress output; exit code only    |
+| `-h, --help`   | Display help message and exit      |
+
+### Environment Variables
+
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+
+### Examples
+
+```bash
+# Basic usage
+scripts/photo-has-people photo.jpg
+
+# Use in conditional (quiet mode)
+if scripts/photo-has-people -q image.png; then
+  echo "People detected"
+fi
+```
+
+### Raw API Command
+
+Model: `gemini-2.5-flash`
+
+```bash
+# (Encoding is same as other image tools)
+PROMPT="Do people feature prominently in this photo? This includes partial views..."
+
+# ... (Standard curl request with schema for boolean response) ...
+```
+
+### Exit Codes
+
+| Code | Description                                      |
+| ---- | ------------------------------------------------ |
+| 0    | True (people feature prominently)                |
+| 1    | False (people do not feature prominently)        |
+| 127  | Missing required dependency                      |
+
+---
+
 ## emerson
 
 Generate essay-length (~3000 words) analysis from text input using Gemini 3 Pro.

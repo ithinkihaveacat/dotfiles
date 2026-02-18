@@ -87,6 +87,7 @@ See `references/command-index.md` for detailed usage.
 - `scripts/adb-activities`: List activities tagged by category (Launcher, Home,
   TV/Leanback, Settings). Use `--launcher-only`, `--tv-only`, `--settings-only`
   to filter. Add `--all` to include system apps.
+- `scripts/adb-uihierarchy`: Dump the UI hierarchy to an XML file.
 
 ### Package Operations
 
@@ -117,3 +118,11 @@ See `references/command-index.md` for detailed usage.
 - **USB Debugging**: Requires `adb` authorization.
 - **Destructive Actions**: Scripts like `adb-tile-remove` or
   `packagename uninstall` modify device state.
+
+## Reference Material
+
+- **Command Reference**: Detailed usage and arguments for all scripts. See
+  [references/command-index.md](references/command-index.md).
+- **Troubleshooting**: Solutions for connection issues, missing dependencies,
+  and Wear OS quirks. See
+  [references/troubleshooting.md](references/troubleshooting.md).
