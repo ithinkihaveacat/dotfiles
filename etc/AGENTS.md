@@ -14,6 +14,13 @@ numbers to headings.
 
 @./context/markdown.md
 
+### CLI Tool Design
+
+Standards for designing predictable and discoverable command-line interfaces,
+including command structure, help systems, and exit codes.
+
+@./context/cli-tools.md
+
 ### Shell Script Quality
 
 All shell scripts must be linted with `shellcheck` and formatted with `shfmt`.

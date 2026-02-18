@@ -92,7 +92,7 @@ Arguments:
   ARG2        Description of second argument (optional if optional)
 
 Options:
-  -h, --help  Display this help message and exit
+  --help      Display this help message and exit
 
 Examples:
   $(basename "$0") example1
@@ -104,7 +104,7 @@ EOF
   exit 0
 }
 
-if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+if [[ "$1" == "--help" ]]; then
   usage
 fi
 
@@ -122,7 +122,7 @@ comprehensive examples):
 - **Description**: One-line summary of what the script does
 - **Arguments section**: Document positional arguments (not "Options" for
   positional args)
-- **Options section**: Document flags like `-h, --help`
+- **Options section**: Document flags like `--help`
 - **Examples section**: Provide 2-3 practical examples
 - **Additional notes**: Explain important behavior or caveats (optional)
 
@@ -143,7 +143,7 @@ Always include practical examples:
   early anyway)
 - **Implementation details**: Focus on usage, not how it works internally
 - **Version information**: Not needed for personal utility scripts
-- **Excessive options**: Only document `-h, --help` unless the script has other
+- **Excessive options**: Only document `--help` unless the script has other
   flags
 
 ### Top-of-File Comments
@@ -176,7 +176,7 @@ Study these for formatting conventions, terminology, and structure.
 ### Checklist for New Scripts
 
 - [ ] `usage()` function defined (not `help()`)
-- [ ] Checks for `-h` and `--help` before other validation
+- [ ] Checks for `--help` before other validation
 - [ ] Usage line with argument syntax
 - [ ] Brief description of script purpose
 - [ ] Arguments section (for positional args)
@@ -228,11 +228,11 @@ Error messages should follow GNU coreutils conventions:
 - Format: `program: description of error`
 - Write to stderr (`>&2`)
 - Be specific and actionable
-- Do NOT include "Try 'command --help'" suggestions
 
 ```bash
 # Good (GNU coreutils style)
 echo "$(basename "$0"): missing file operand" >&2
+echo "Try '$(basename "$0") --help' for more information." >&2
 
 # Avoid
 echo "Error: something went wrong"
