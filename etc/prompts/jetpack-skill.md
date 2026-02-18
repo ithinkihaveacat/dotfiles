@@ -185,7 +185,7 @@ Subcommands to document:
    package
 2. **versions** - List all available versions for a package
 3. **resolve** - Convert Android package/class name to Maven coordinate
-4. **search** - Search for artifacts by package or class name
+4. **search** - Search for artifacts by package or class name (mention `--force`)
 5. **source** - Download and extract source JARs (mention `--find`)
 6. **inspect** - Convenience wrapper combining resolve/search + source
 7. **resolve-exceptions** - Find missing exceptions for resolve command

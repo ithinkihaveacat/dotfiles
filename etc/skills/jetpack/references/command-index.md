@@ -68,9 +68,11 @@ xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[
 - `QUERY`: Substring to search for (e.g., `androidx.wear` or `RemoteImage`).
   **Options**:
 - `--index`: Force searching the package index (offline cache).
-- `--code`: Force searching code (Android Code Search). **Examples**:
+- `--code`: Force searching code (Android Code Search).
+- `--force`: Force cache rebuild (ignore existing index). **Examples**:
 - `scripts/jetpack search androidx.wear.compose`
 - `scripts/jetpack search RemoteImage`
+- `scripts/jetpack search --force androidx.wear`
 
 **Raw Commands**:
 

@@ -72,7 +72,7 @@ exceptions table.
 
 **Purpose**: Search for artifacts by package or class name. **Usage**:
 `scripts/jetpack search [OPTIONS] QUERY` **Options**: `--index` (package names),
-`--code` (class names).
+`--code` (class names), `--force` (rebuild cache).
 
 ### `source`
 
