@@ -52,14 +52,14 @@ outputs.
 
 ### Basic Form
 
-```
+```text
 G<type>(prompt, context…) = output
 ```
 
 Where:
 
 - **G** represents the agent performing the operation
-- **<type>** optionally specifies the expected output type (e.g., `<text>`,
+- **`<type>`** optionally specifies the expected output type (e.g., `<text>`,
   `<number>`, `<filename>`)
 - **prompt** is a text instruction that describes what the agent should do,
   typically referring to the context
@@ -116,7 +116,7 @@ This notation is intentionally loose in two respects:
 
 #### Example 1: Simple Arithmetic
 
-```
+```text
 G<text>("add the two arguments and return the result in words", 2, X) = "four"
 ```
 
@@ -132,11 +132,12 @@ output is "four," which represents the number 4. Since the first value is 2, and
 
 #### Example 2: Nested Judgement
 
-```
+```text
 G<text>(
     "suggest a one-sentence empathetic customer service response",
     G′<text>("extract the core complaint, ignoring emotional language", X)
-) = "I understand the delay has been frustrating, and I'll personally ensure your order ships today."
+) = "I understand the delay has been frustrating, and I'll personally ensure \
+your order ships today."
 ```
 
 **Problem:** What might X be?

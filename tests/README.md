@@ -34,19 +34,19 @@ prove -v */test-*
 ### Run a Single Test Suite
 
 ```bash
-prove jetpack-resolve/test-*
+prove jetpack/test-*
 ```
 
 ### Run a Single Test File
 
 ```bash
-prove jetpack-resolve/test-basic
+prove jetpack/test-basic
 ```
 
 Or execute directly:
 
 ```bash
-./jetpack-resolve/test-basic
+./jetpack/test-basic
 ```
 
 ## File Naming Convention

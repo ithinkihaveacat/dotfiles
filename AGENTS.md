@@ -116,13 +116,21 @@ fi
 This block assumes that the input file path is in `$1`. If your script uses a
 different variable for the input path, you must adapt the code accordingly.
 
+## CLI Design and Documentation
+
+Scripts must follow the predictable standard for command-line interfaces and
+comprehensive documentation guidelines.
+
+@etc/context/cli-tools.md
+@etc/context/shell.md
+
 ## Fish Shell Completions
 
 Scripts in `bin/` may have corresponding Fish shell completion files in
 `fish/completions/`. When updating a script, you must also update its completion
 file if one exists.
 
-### Requirements
+### Completion Requirements
 
 - Completion files are named `<script-name>.fish` in `fish/completions/`
 - When adding, removing, or modifying command-line options in a script, update
@@ -150,18 +158,19 @@ functionality.
 ## Tests
 
 Some scripts have associated tests in the `tests/` directory. Tests use the TAP
-(Test Anything Protocol) format and can be run with `prove` or executed directly.
+(Test Anything Protocol) format and can be run with `prove` or executed
+directly.
 
 ### Directory Structure
 
-```
+```text
 tests/
 └── <script-name>/
     ├── test-basic           # TAP test file (executable)
     └── fixtures/            # Test data (images, sample files, etc.)
 ```
 
-### Requirements
+### Test Requirements
 
 - Test files should be executable and output TAP format
 - Scripts with tests include a `# Tests:` comment pointing to their test
@@ -186,9 +195,9 @@ ls tests/my-script/
 
 See these scripts for reference implementations:
 
-- `bin/jetpack-source` - Multiple arguments, optional version and repo URL
+- `bin/jetpack` - Multiple arguments, optional version and repo URL
 - `bin/apk-cat-file` - Two required arguments, simple and clean
-- `bin/packagename-services-dumpsys` - Single argument, Android-specific
+- `bin/packagename` - Single argument, Android-specific
 - `bin/macos-finder-reveal` - Multiple files, macOS-specific
 
 Each demonstrates proper GNU coreutils style documentation.
