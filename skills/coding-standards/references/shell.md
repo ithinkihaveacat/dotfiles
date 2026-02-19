@@ -263,7 +263,7 @@ work around issues.
 ```bash
 # Good - Specific and actionable
 if ! command -v jq >/dev/null 2>&1; then
-  echo "$(basename "$0"): jq not found, install via: apt-get install jq" >&2
+  echo "$(basename "$0"): jq not found" >&2
   exit 1
 fi
 
@@ -281,6 +281,24 @@ Follow these conventions:
 - `exit 0` for successful operations and help display (`--help`)
 - `exit 1` for general errors (missing arguments, invalid input)
 - `exit 127` for missing required commands (convention for "command not found")
+
+### Dependency Checking
+
+Scripts should check for non-trivial dependencies using a helper function.
+This ensures consistent error reporting and exit codes. Do not include
+instructions on how to install the dependency, as this varies by OS.
+
+```bash
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require jq
+require curl
+```
 
 ## Handling Large Inputs with jq
 
