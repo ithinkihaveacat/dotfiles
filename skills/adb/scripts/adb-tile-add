@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] COMPONENT_NAME
+
+Adds a tile provided by COMPONENT_NAME to the carousel. The script automatically
+shows the tile after it has been added (no separate call to adb-tile-show is
+needed).
+
+Arguments:
+  COMPONENT_NAME  A string composed of the package name and a class in that
+                  package, for example:
+                  com.example.wear.tiles/com.example.wear.tiles.PreviewTileService
+
+Options:
+  --type TYPE     Tile type: FULLSCREEN, LARGE (default), or SMALL. Only applies
+                  to tiles supporting the BIND_WIDGET_PROVIDER intent (e.g.,
+                  Glance-based tiles).
+  --no-show       Do not show the tile after adding it
+  -h, --help      Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  To target a specific device, use:
+                    env ANDROID_SERIAL=<serial> $(basename "$0")
+
+Examples:
+  $(basename "$0") com.google.android.wearable.shell/.weather.WeatherTileService
+  $(basename "$0") --type LARGE com.google.example.wear_widget/.HelloWidgetService
+  $(basename "$0") --no-show com.google.example.wear_widget/.HelloWidgetService
+EOF
+  exit 0
+}
+
+if [[ $# -eq 0 ]]; then
+  usage
+fi
+
+SHOW=true
+TYPE_INT=1 # Default to LARGE
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --no-show)
+      SHOW=false
+      shift
+      ;;
+    --type)
+      shift
+      if [[ -z "$1" ]]; then
+        echo "Error: --type requires an argument (FULLSCREEN, LARGE, SMALL)" >&2
+        exit 1
+      fi
+      case "$1" in
+        FULLSCREEN) TYPE_INT=0 ;;
+        LARGE) TYPE_INT=1 ;;
+        SMALL) TYPE_INT=2 ;;
+        *)
+          echo "Error: Invalid type '$1'. Must be FULLSCREEN, LARGE, or SMALL." >&2
+          exit 1
+          ;;
+      esac
+      shift
+      ;;
+    -h | --help)
+      usage
+      ;;
+    -*)
+      echo "Error: Unknown option $1" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$COMPONENT_NAME" ]]; then
+        COMPONENT_NAME="$1"
+      else
+        echo "Error: Unexpected argument '$1'" >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$COMPONENT_NAME" ]; then
+  echo "Error: COMPONENT_NAME is required" >&2
+  exit 1
+fi
+
+require() { hash "$@" || exit 127; }
+
+require adb
+
+# Check device availability
+if ! adb get-state >/dev/null 2>&1; then
+  if [[ -n "$ANDROID_SERIAL" ]]; then
+    echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
+  else
+    echo "$(basename "$0"): no device connected" >&2
+  fi
+  exit 1
+fi
+
+PACKAGE_NAME="${COMPONENT_NAME%%/*}"
+
+# Check if the package is installed
+if ! adb shell pm list packages | grep -q "^package:${PACKAGE_NAME}$"; then
+  echo "Error: Package '$PACKAGE_NAME' not found. Is the app installed?" >&2
+  exit 1
+fi
+
+# Workaround for a bug: force-stop the package to ensure a fresh bind
+adb shell am force-stop "$PACKAGE_NAME"
+
+# Add the tile and capture output
+OUTPUT=$(adb shell am broadcast \
+  -a com.google.android.wearable.app.DEBUG_SURFACE \
+  --es operation add-tile \
+  --ecn component "$COMPONENT_NAME" \
+  --ei type "$TYPE_INT")
+
+# Check for "Requested tile provider does not exist" error (result=2)
+# Note: This error frequently occurs with system-provided tiles (e.g., HandWashTileProviderService)
+# which may require specific system permissions or configurations not accessible via this method.
+# This script is primarily intended for user-installed apps.
+if echo "$OUTPUT" | grep -q "Requested tile provider does not exist"; then
+  echo "Error: The requested tile provider does not exist or is disabled."
+  echo "This commonly happens with system tiles that cannot be added via this method."
+  exit 1
+fi
+
+# Extract Index (e.g., from Index=[0])
+INDEX=$(echo "$OUTPUT" | grep -o 'Index=\[[0-9]*\]' | sed 's/Index=\[\([0-9]*\)\]/\1/')
+
+if [ -n "$INDEX" ]; then
+  echo "Added tile ID: $INDEX"
+  if [ "$SHOW" = true ]; then
+    adb shell am broadcast \
+      -a com.google.android.wearable.app.DEBUG_SYSUI \
+      --es operation show-tile \
+      --ei index "$INDEX" >/dev/null
+  fi
+else
+  echo "Failed to parse tile ID from output:"
+  echo "$OUTPUT"
+  exit 1
+fi

@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] <input> <output>
+
+Smart crop images around detected people with a specified aspect ratio.
+
+Arguments:
+  input        Input image file
+  output       Output image file (explicit path)
+
+Options:
+  --ratio W:H  Aspect ratio for crop (default: 5:3)
+  --help       Display this help message and exit
+
+Processing:
+  Uses Gemini API to detect people and calculate a crop box with the specified
+  aspect ratio. Expands by 20% for headroom, then crops centered on detected
+  people. Works with any input orientation (portrait or landscape).
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Exit Codes:
+  0    Success (cropped output written)
+  1    Error (API error, missing file, no people found, invalid arguments)
+  2    Rate limited (API returned 429)
+  127  Missing required command
+
+Examples:
+  $(basename "$0") photo.jpg cropped.jpg
+  $(basename "$0") --ratio 16:9 portrait.jpg landscape-16x9.jpg
+  $(basename "$0") --ratio 4:3 ~/Photos/family.jpg ./output/family-4x3.jpg
+EOF
+  exit "${1:-0}"
+}
+
+# Parse arguments
+ratio="5:3"
+
+if [[ "${1:-}" == "help" ]]; then
+  usage 0
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help)
+      usage 0
+      ;;
+    --ratio)
+      if [[ $# -lt 2 ]]; then
+        echo "$(basename "$0"): --ratio requires an argument" >&2
+        usage 1 >&2
+      fi
+      ratio="$2"
+      shift 2
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      usage 1 >&2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -ne 2 ]]; then
+  usage 1 >&2
+fi
+
+INPUT="$1"
+OUTPUT="$2"
+
+# Validate ratio format (W:H where both are positive integers)
+if ! [[ "$ratio" =~ ^([0-9]+):([0-9]+)$ ]]; then
+  echo "$(basename "$0"): invalid ratio format: $ratio (expected W:H, e.g., 5:3)" >&2
+  exit 1
+fi
+
+ratio_w="${BASH_REMATCH[1]}"
+ratio_h="${BASH_REMATCH[2]}"
+
+if [[ "$ratio_w" -eq 0 || "$ratio_h" -eq 0 ]]; then
+  echo "$(basename "$0"): ratio components must be positive: $ratio" >&2
+  exit 1
+fi
+
+if [[ ! -f "$INPUT" ]]; then
+  echo "$(basename "$0"): $INPUT: No such file or directory" >&2
+  exit 1
+fi
+
+require() {
+  for cmd in "$@"; do
+    if ! hash "$cmd" 2>/dev/null; then
+      echo "$(basename "$0"): '$cmd' command not found" >&2
+      exit 127
+    fi
+  done
+}
+
+require curl
+require jq
+require base64
+require magick
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+# Get image dimensions AFTER auto-orient to detect true orientation
+dimensions=$(magick "$INPUT" -auto-orient -format "%w %h" info:)
+img_width=$(echo "$dimensions" | cut -d' ' -f1)
+img_height=$(echo "$dimensions" | cut -d' ' -f2)
+
+MODEL="gemini-3-flash-preview"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+# Convert to HEIF and base64 encode for API
+# Using 1024x1024 for better detail retention while staying within reasonable token limits
+# base64: macOS uses -b 0, Linux uses -w 0
+if base64 --help 2>&1 | grep -q -- '-w'; then
+  IMAGE_BASE64=$(magick "$INPUT" -auto-orient -alpha off -resize 1024x1024\> heif:- | base64 -w 0)
+else
+  IMAGE_BASE64=$(magick "$INPUT" -auto-orient -alpha off -resize 1024x1024\> heif:- | base64 -b 0)
+fi
+
+# System Instruction: Defines the core task and constraints
+SYSTEM_INSTRUCTION="Analyze this image to identify all human subjects and calculate a smart crop that prioritizes faces.
+
+1. DETECT: Find all people in the image, focusing especially on FACES. Locate the bounding box around all visible faces first.
+
+2. CALCULATE CROP BOX: Create a crop bounding box with these constraints:
+   - PRIORITY: The crop box MUST include all detected faces/heads. Faces are more important than bodies.
+   - Aspect ratio: MUST be exactly ${ratio_w}:${ratio_h} (width:height), so height = width * ${ratio_h}/${ratio_w}
+   - Start with a tight box around all faces, then expand to include as much of the bodies as possible while maintaining the aspect ratio
+   - If the full body cannot fit while keeping the required aspect ratio, crop from the BOTTOM (legs/feet), never from the top (heads)
+   - Maximum width: 800 units (on 0-1000 scale where 1000 = full image width)
+   - Keep the box within image bounds (0-1000 for both dimensions)
+
+3. RETURN: Coordinates in normalized 0-1000 scale as ymin, xmin, ymax, xmax.
+
+If no people are detected, set people_found to false and omit crop_box."
+
+USER_PROMPT="Perform the smart crop analysis on this image."
+
+# Build JSON request body
+REQUEST_BODY=$(jq -n \
+  --arg system_instruction "$SYSTEM_INSTRUCTION" \
+  --arg user_prompt "$USER_PROMPT" \
+  --arg image "$IMAGE_BASE64" \
+  '{
+    "system_instruction": {
+      "parts": [{ "text": $system_instruction }]
+    },
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "inlineData": {
+              "mimeType": "image/heif",
+              "data": $image
+            }
+          },
+          {"text": $user_prompt}
+        ]
+      }
+    ],
+    "generationConfig": {
+      "temperature": 1.0,
+      "responseMimeType": "application/json",
+      "thinkingConfig": {
+        "thinkingLevel": "low"
+      },
+      "responseJsonSchema": {
+        "type": "object",
+        "properties": {
+          "people_found": {
+            "type": "boolean",
+            "description": "True if any people were detected"
+          },
+          "people_count": {
+            "type": "integer",
+            "description": "Number of people detected (0 if none)"
+          },
+          "crop_box": {
+            "type": "object",
+            "properties": {
+              "ymin": {"type": "integer", "description": "Top coordinate (0-1000)"},
+              "xmin": {"type": "integer", "description": "Left coordinate (0-1000)"},
+              "ymax": {"type": "integer", "description": "Bottom coordinate (0-1000)"},
+              "xmax": {"type": "integer", "description": "Right coordinate (0-1000)"}
+            },
+            "required": ["ymin", "xmin", "ymax", "xmax"]
+          }
+        },
+        "required": ["people_found", "people_count"]
+      }
+    }
+  }')
+
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_CODE=$(echo "$RESPONSE" | jq -r '.error.code // 0')
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  if [[ "$ERROR_CODE" == "429" ]]; then
+    exit 2
+  fi
+  exit 1
+fi
+
+# Extract the JSON response text
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+if [[ -z "$TEXT" ]]; then
+  echo "$(basename "$0"): no response text received from API" >&2
+  exit 1
+fi
+
+# Parse the response
+PEOPLE_FOUND=$(echo "$TEXT" | jq -r '.people_found')
+if [[ "$PEOPLE_FOUND" != "true" ]]; then
+  echo "$(basename "$0"): no people found in image: $INPUT" >&2
+  exit 1
+fi
+
+# Extract crop box coordinates (normalized 0-1000)
+xmin=$(echo "$TEXT" | jq -r '.crop_box.xmin')
+ymin=$(echo "$TEXT" | jq -r '.crop_box.ymin')
+xmax=$(echo "$TEXT" | jq -r '.crop_box.xmax')
+ymax=$(echo "$TEXT" | jq -r '.crop_box.ymax')
+
+# Validate we got numeric values
+for val in "$xmin" "$ymin" "$xmax" "$ymax"; do
+  if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+    echo "$(basename "$0"): invalid crop box coordinates from API" >&2
+    exit 1
+  fi
+done
+
+# Convert normalized coords to pixels FIRST (aspect ratio math must be in pixels)
+px_xmin=$((xmin * img_width / 1000))
+px_ymin=$((ymin * img_height / 1000))
+px_xmax=$((xmax * img_width / 1000))
+px_ymax=$((ymax * img_height / 1000))
+
+# Calculate pixel dimensions and center point
+px_width=$((px_xmax - px_xmin))
+px_height=$((px_ymax - px_ymin))
+center_x=$(((px_xmin + px_xmax) / 2))
+center_y=$(((px_ymin + px_ymax) / 2))
+
+# Expand by 20% (10% each side)
+expand_x=$((px_width / 10))
+expand_y=$((px_height / 10))
+new_width=$((px_width + 2 * expand_x))
+new_height=$((px_height + 2 * expand_y))
+
+# Force aspect ratio (width:height = ratio_w:ratio_h, so height = width * ratio_h/ratio_w)
+# Expand the smaller dimension to achieve the ratio
+target_height=$((new_width * ratio_h / ratio_w))
+target_width=$((new_height * ratio_w / ratio_h))
+
+if [[ $new_height -lt $target_height ]]; then
+  # Height is too small, expand it
+  new_height=$target_height
+elif [[ $new_width -lt $target_width ]]; then
+  # Width is too small, expand it
+  new_width=$target_width
+fi
+
+# Calculate box from center and dimensions
+new_xmin=$((center_x - new_width / 2))
+new_ymin=$((center_y - new_height / 2))
+new_xmax=$((center_x + new_width / 2))
+new_ymax=$((center_y + new_height / 2))
+
+# Shift box if it goes out of bounds (prefer shifting over shrinking)
+if [[ $new_xmin -lt 0 ]]; then
+  new_xmax=$((new_xmax - new_xmin))
+  new_xmin=0
+fi
+if [[ $new_ymin -lt 0 ]]; then
+  new_ymax=$((new_ymax - new_ymin))
+  new_ymin=0
+fi
+if [[ $new_xmax -gt $img_width ]]; then
+  new_xmin=$((new_xmin - (new_xmax - img_width)))
+  new_xmax=$img_width
+fi
+if [[ $new_ymax -gt $img_height ]]; then
+  new_ymin=$((new_ymin - (new_ymax - img_height)))
+  new_ymax=$img_height
+fi
+
+# Final clamp (in case shifting pushed us negative)
+[[ $new_xmin -lt 0 ]] && new_xmin=0
+[[ $new_ymin -lt 0 ]] && new_ymin=0
+
+# Recalculate dimensions after clamping and enforce aspect ratio by shrinking if needed
+final_width=$((new_xmax - new_xmin))
+final_height=$((new_ymax - new_ymin))
+target_height=$((final_width * ratio_h / ratio_w))
+target_width=$((final_height * ratio_w / ratio_h))
+
+if [[ $final_height -gt $target_height ]]; then
+  # Shrink height to match width - remove from BOTTOM to preserve heads at top
+  diff=$((final_height - target_height))
+  new_ymax=$((new_ymax - diff))
+elif [[ $final_width -gt $target_width ]]; then
+  # Shrink width to match height
+  diff=$((final_width - target_width))
+  new_xmin=$((new_xmin + diff / 2))
+  new_xmax=$((new_xmax - (diff - diff / 2)))
+fi
+
+# Final crop dimensions in pixels
+crop_w=$((new_xmax - new_xmin))
+crop_h=$((new_ymax - new_ymin))
+px_x1=$new_xmin
+px_y1=$new_ymin
+
+# Crop with ImageMagick
+if magick "$INPUT" \
+  -auto-orient \
+  -crop "${crop_w}x${crop_h}+${px_x1}+${px_y1}" \
+  +repage \
+  "$OUTPUT"; then
+  exit 0
+else
+  echo "$(basename "$0"): failed to crop image" >&2
+  exit 1
+fi

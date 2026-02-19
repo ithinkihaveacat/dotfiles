@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") PROMPT
+
+Evaluates if the input from stdin satisfies the PROMPT.
+Returns true (exit 0) or false (exit 1).
+
+Arguments:
+  PROMPT      The condition or question to evaluate (e.g., "mentions Elvis")
+
+Options:
+  -h, --help     Display this help message and exit
+  -v, --verbose  Output "true" or "false" to stderr
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Exit Codes:
+  0  True (satisfies prompt)
+  1  False (does not satisfy prompt)
+
+Examples:
+  cat file.txt | $(basename "$0") "mentions Elvis"
+  echo "hello world" | $(basename "$0") "is a greeting" && echo "It is!"
+EOF
+  exit 0
+}
+
+PROMPT=""
+VERBOSE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      ;;
+    -v | --verbose)
+      VERBOSE=true
+      shift
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$PROMPT" ]]; then
+        PROMPT="$1"
+        shift
+      else
+        echo "$(basename "$0"): too many arguments" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+if [[ -z "$PROMPT" ]]; then
+  echo "$(basename "$0"): missing PROMPT argument" >&2
+  exit 1
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+# Read stdin
+if [ -t 0 ]; then
+  echo "$(basename "$0"): missing input from stdin" >&2
+  exit 1
+fi
+
+MODEL="gemini-2.5-flash-lite"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+# Construct JSON payload using jq to ensure safe escaping
+REQUEST_BODY=$(jq -Rs \
+  --arg prompt "$PROMPT" \
+  '{ 
+    contents: [{
+      parts: [
+        {text: .},
+        {text: ("Does the above text satisfy the condition: " + $prompt)}
+      ]
+    }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseJsonSchema: {
+        type: "object",
+        properties: {
+          satisfies: {
+            type: "boolean",
+            description: ("True if the text satisfies the condition: " + $prompt)
+          }
+        },
+        required: ["satisfies"]
+      }
+    }
+  }')
+
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract the JSON response text
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+if [[ -z "$TEXT" ]]; then
+  echo "$(basename "$0"): no response text received from API" >&2
+  echo "Full response: $RESPONSE" >&2
+  exit 1
+fi
+
+# Parse the boolean result
+RESULT=$(echo "$TEXT" | jq -r '.satisfies')
+if [[ "$RESULT" != "true" && "$RESULT" != "false" ]]; then
+  echo "$(basename "$0"): failed to parse response: $TEXT" >&2
+  exit 1
+fi
+
+if [[ "$VERBOSE" == "true" ]]; then
+  echo "$RESULT" >&2
+fi
+
+if [[ "$RESULT" == "true" ]]; then
+  exit 0
+else
+  exit 1
+fi

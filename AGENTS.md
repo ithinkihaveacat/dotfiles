@@ -1,7 +1,7 @@
 # Script Quality Guidelines
 
-This document provides guidelines for all scripts in the `bin/` subdirectory, as
-well as the `./update` script.
+This document provides guidelines for script entrypoints in `bin/`, canonical
+script sources in `skills/*/scripts/`, as well as the `./update` script.
 
 ## General Script Requirements
 
@@ -121,8 +121,7 @@ different variable for the input path, you must adapt the code accordingly.
 Scripts must follow the predictable standard for command-line interfaces and
 comprehensive documentation guidelines.
 
-@etc/context/cli-tools.md
-@etc/context/shell.md
+@context/cli-tools.md @context/shell.md
 
 ## Fish Shell Completions
 

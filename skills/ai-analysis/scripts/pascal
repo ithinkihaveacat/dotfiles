@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") PROMPT
+
+Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
+response (wrapped to 80 columns).
+
+Arguments:
+  PROMPT      The question to ask.
+
+Input:
+  stdin       Optional context to include with the question.
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  $(basename "$0") "What is the capital of Peru?"
+  cat article.md | $(basename "$0") "Summarize this article"
+  $(basename "$0") "Explain this code" < script.sh
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+require fmt
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+USER_PROMPT="$*"
+
+MODEL="gemini-3-flash-preview"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+# System Instruction
+SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer (less than 300 characters) in a single full paragraph. Do not use point form, lists, or markdown formatting (like bold or headers). Just plain text."
+
+# Construct the JSON payload
+if ! [ -t 0 ]; then
+  # Stdin available — pipe context directly to jq, avoiding shell variable
+  REQUEST_BODY=$(jq -Rs \
+    --arg system_instruction "$SYSTEM_INSTRUCTION" \
+    --arg user_prompt "$USER_PROMPT" \
+    '{
+      system_instruction: {
+        parts: [{ text: $system_instruction }]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: ("Context:\n" + . + "\n\nQuestion:\n" + $user_prompt) }]
+        }
+      ],
+      generationConfig: {
+        temperature: 1.0,
+        maxOutputTokens: 2048,
+        thinkingConfig: {
+          thinkingLevel: "low"
+        }
+      }
+    }')
+else
+  REQUEST_BODY=$(jq -n \
+    --arg system_instruction "$SYSTEM_INSTRUCTION" \
+    --arg user_prompt "$USER_PROMPT" \
+    '{
+      system_instruction: {
+        parts: [{ text: $system_instruction }]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: $user_prompt }]
+        }
+      ],
+      generationConfig: {
+        temperature: 1.0,
+        maxOutputTokens: 2048,
+        thinkingConfig: {
+          thinkingLevel: "low"
+        }
+      }
+    }')
+fi
+
+# Execute the request
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+if [[ -z "$TEXT" ]]; then
+  # Fallback: sometimes the model might block content or return explicit refusal
+  FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // "UNKNOWN"')
+  echo "$(basename "$0"): No response text received. Finish Reason: $FINISH_REASON" >&2
+  exit 1
+fi
+
+# Wrap to 80 chars
+echo "$TEXT" | fmt -w 80

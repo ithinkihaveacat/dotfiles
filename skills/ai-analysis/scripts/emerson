@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") "PROMPT" < INPUT_FILE
+
+Generates an essay-length answer (approx. 3000 words) to the PROMPT, based
+primarily on the text provided via standard input. Uses the Gemini 3 Pro
+Preview model.
+
+Arguments:
+  PROMPT      The question or topic to address.
+
+Input:
+  stdin       The reference material (text) to use for the response.
+
+Options:
+  -h, --help  Display this help message and exit
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+
+Examples:
+  cat documentation.md | $(basename "$0") "Summarize the key architectural changes"
+  $(basename "$0") "Explain the new features" < release_notes.txt
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+require() { hash "$@" || exit 127; }
+
+require curl
+require jq
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+USER_PROMPT="$1"
+
+# Read stdin into a variable
+if [ -t 0 ]; then
+  echo "$(basename "$0"): Error: No input provided on stdin." >&2
+  usage
+fi
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
+  exit 1
+fi
+
+MODEL="gemini-3-pro-preview"
+URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
+
+# System Instruction: A detailed guide for the model
+# Choice Explanation: I have chosen to place the core behavioral directives in the
+# system instruction because they define the *persona* and *operational constraints*
+# of the model (e.g., "Trust the Input", "Essay Length"). This separates the "how"
+# (system) from the "what" (user context and question), which is a best practice
+# noted in the prompting strategies for clearer instruction following.
+SYSTEM_INSTRUCTION=$(
+  cat <<'EOF'
+You are an elite technical analyst tasked with producing a comprehensive, authoritative answer (approx. 3000 words) to a specific prompt, based *strictly* on the provided reference material.
+
+### Core Mandates
+
+1.  **Format & Structure:**
+    *   **Markdown:** The output must be valid Markdown.
+    *   **Heading:** Start with a descriptive H1 title (e.g., `# Title`).
+    *   **Rich Content:** While maintaining an essay-like depth, actively use lists, tables, and especially **code blocks/fragments** to improve readability and utility.
+    *   **Code Preference:** If code samples are included, prioritize **NodeJS**, followed by **Kotlin**, then **curl**, then **Python**. Provide only one language variant per sample.
+    *   **Length:** Aim for approximately 3000 words of deep analysis.
+
+2.  **Authoritative Voice:**
+    *   **No Meta-References:** Do not refer to "the documentation," "the text," or "the input." Present the information directly as authoritative fact.
+    *   *Bad:* "The documentation mentions that the API is deprecated."
+    *   *Good:* "The API is deprecated."
+
+3.  **Fidelity & Citations:**
+    *   **Trust the Input:** Treat the provided text as the sole source of truth.
+    *   **Direct Quotes:** You are encouraged to include direct quotes from the source material.
+    *   **Footnotes:** When quoting or referencing specific information, use Markdown footnotes to cite the source. Look for provenance hints in the input structure (e.g., URLs, commands, file paths) and cite the most specific source available.
+        *   Example body: "Configuration is mandatory."[^1]
+        *   Example footer: [^1]: `https://example.com/docs/config.md`
+        *   If no specific source is identifiable, cite "emerson input".
+
+4.  **Focus on the Novel and Unexpected:**
+    *   Prioritize information that is unique, very new, or deviates from standard industry expectations.
+    *   Explicitly call out version differences, architectural oddities, or specific constraints.
+
+### Handling Missing Information
+
+If the provided text does not contain the answer to a specific part of the user's prompt, explicitly state: "The provided material does not contain information regarding [topic]." Do not hallucinate.
+EOF
+)
+
+# Construct the JSON payload using jq for safety
+# We pass the input data as the first part (read from stdin), and the user prompt as the second part.
+REQUEST_BODY=$(jq -Rs \
+  --arg system_instruction "$SYSTEM_INSTRUCTION" \
+  --arg user_prompt "$USER_PROMPT" \
+  '{ 
+                    system_instruction: { 
+                      parts: [{ text: $system_instruction }] 
+                    }, 
+                    contents: [ 
+                      { 
+                        role: "user", 
+                        parts: [ 
+                          { text: ("Reference Material:\n\n" + .) }, 
+                          { text: ("\n\nTask/Question:\n" + $user_prompt) } 
+                        ] 
+                      } 
+                    ], 
+                    generationConfig: { 
+                      temperature: 1.0, 
+                      maxOutputTokens: 8192 
+                    } 
+                  }')
+
+# Execute the request
+RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+  -H "x-goog-api-key: $GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  "${URL}")
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+  exit 1
+fi
+
+# Extract and output the text response
+TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+if [[ -z "$TEXT" ]]; then
+  # Fallback: sometimes the model might block content or return explicit refusal
+  FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // "UNKNOWN"')
+  echo "$(basename "$0"): No response text received. Finish Reason: $FINISH_REASON" >&2
+  exit 1
+fi
+
+if command -v markdown-format >/dev/null 2>&1; then
+  echo "$TEXT" | markdown-format 2>/dev/null
+else
+  echo "$TEXT"
+fi
