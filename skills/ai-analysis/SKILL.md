@@ -1,17 +1,17 @@
 ---
 name: ai-analysis
 description: >
-  Command-line tools that delegate analysis tasks to AI models. Includes image
-  description, screenshot comparison, smart cropping around people, token
-  counting, essay generation from text, boolean condition evaluation, and
-  context gathering. Use for describing images, comparing UI states, cropping
-  photos around faces, counting tokens, generating reports, evaluating
-  conditions, gathering context for analysis, or any task requiring AI
-  inference. Triggers: ai analysis, describe image, compare screenshots, smart
-  crop, crop around people, face crop, count tokens, token count, generate
-  essay, evaluate condition, alt text, image description, UI comparison, visual
-  diff, satisfies condition, boolean evaluation, gemini, context, gather
-  context, research topic.
+  Provides AI-powered analysis of images and text, and gathers authoritative,
+  up-to-date context for deep research on various technical domains (Gemini API,
+  MCP, Home Assistant, etc.). Use for image description, UI state comparison,
+  smart-cropping, evaluating boolean conditions, counting tokens, or
+  generating reports. Particularly essential when an agent requires the latest
+  documentation or comprehensive background knowledge for a specific topic. The
+  context script should be the first tool considered when exploring unfamiliar
+  technical areas or requiring detailed specifications for analysis. Triggers:
+  ai analysis, context, research, documentation, gemini api, mcp, home
+  assistant, image description, screenshot compare, smart crop, token count,
+  satisfies, emerson, pascal.
 compatibility: >
   Requires curl, jq, and python3. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
@@ -45,6 +45,9 @@ similar functionality.
 only)
 
 ```bash
+# Gather context and analyze
+scripts/context gemini-api | scripts/emerson "Explain the key features"
+
 # Describe an image (generate alt-text)
 scripts/screenshot-describe screenshot.png
 
@@ -60,9 +63,6 @@ scripts/photo-has-people photo.jpg
 # Generate essay-length analysis from text
 scripts/emerson "Summarize the key changes" < documentation.md
 
-# Gather context and analyze
-scripts/context gemini-api | scripts/emerson "Explain the key features"
-
 # Evaluate a boolean condition against text
 echo "Hello world" | scripts/satisfies "is a greeting"
 
@@ -71,6 +71,38 @@ cat document.md | scripts/token-count
 ```
 
 ## Script Overview
+
+### context
+
+Gathers authoritative, up-to-date context for deep research on various technical
+topics (e.g., `gemini-api`, `mcp`, `home-assistant`). Run with `--list` to see
+all available topics. This script should be your first tool for gathering
+background knowledge or the latest documentation for an unfamiliar domain.
+
+**Warning:** Output can be very large. **Do not** read output directly into your
+conversation history. Pipe to `emerson` for analysis, or redirect to a file to
+search/read locally.
+
+```bash
+scripts/context TOPIC
+```
+
+**Options:** `--list` (list available topics)
+
+**Exit codes:** 0 success, 1 error, 127 missing dependency
+
+**Examples:**
+
+```bash
+# List available topics
+scripts/context --list
+
+# Gather context for Gemini API
+scripts/context gemini-api > gemini-context.xml
+
+# Pipe context directly to analysis
+scripts/context gemini-cli | scripts/emerson "How do commands work?"
+```
 
 ### screenshot-describe
 
@@ -178,37 +210,6 @@ cat article.md | scripts/pascal "Summarize this article"
 
 # Explain code
 scripts/pascal "Explain this code" < script.sh
-```
-
-### context
-
-Generate aggregated context for various topics (e.g., `gemini-api`,
-`gemini-cli`). Run with `--list` to see all available topics. Outputs XML format
-suitable for `emerson`.
-
-**Warning:** Output can be very large. **Do not** read output directly into your
-conversation history. Pipe to `emerson` for analysis, or redirect to a file to
-search/read locally.
-
-```bash
-scripts/context TOPIC
-```
-
-**Options:** `--list` (list available topics)
-
-**Exit codes:** 0 success, 1 error, 127 missing dependency
-
-**Examples:**
-
-```bash
-# List available topics
-scripts/context --list
-
-# Gather context for Gemini API
-scripts/context gemini-api > gemini-context.xml
-
-# Pipe context directly to analysis
-scripts/context gemini-cli | scripts/emerson "How do commands work?"
 ```
 
 ### satisfies
