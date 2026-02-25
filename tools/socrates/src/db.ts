@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { Question, Answer, Evaluation, Stats } from "./types.js";
+import { CONFIG } from "./config.js";
 
 export function initDB(path: string): Database.Database {
   const db = new Database(path);
@@ -54,25 +55,29 @@ export function addQuestions(db: Database.Database, questions: Omit<Question, "i
 }
 
 export function getNextQuestion(db: Database.Database, responder: string): Question | null {
+  // We exclude answers that match PLACEHOLDER_TEXT. This text is inserted to
+  // reserve a run ID (e.g. model[1]) before the first real answer is generated.
+  // By treating it as unanswered, we allow interrupted runs to be resumed.
   const row = db.prepare(`
     SELECT * FROM questions
     WHERE id NOT IN (
-      SELECT question_id FROM answers WHERE responder = ?
+      SELECT question_id FROM answers WHERE responder = ? AND text != ?
     )
     ORDER BY id ASC
     LIMIT 1
-  `).get(responder) as Question | undefined;
+  `).get(responder, CONFIG.PLACEHOLDER_TEXT) as Question | undefined;
   return row || null;
 }
 
 export function getUnansweredQuestions(db: Database.Database, responder: string): Question[] {
+  // See comment in getNextQuestion regarding PLACEHOLDER_TEXT.
   return db.prepare(`
     SELECT * FROM questions
     WHERE id NOT IN (
-      SELECT question_id FROM answers WHERE responder = ?
+      SELECT question_id FROM answers WHERE responder = ? AND text != ?
     )
     ORDER BY id ASC
-  `).all(responder) as Question[];
+  `).all(responder, CONFIG.PLACEHOLDER_TEXT) as Question[];
 }
 
 export function getAllQuestions(db: Database.Database): Question[] {

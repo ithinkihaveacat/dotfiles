@@ -10,7 +10,7 @@ import { run as runDelete } from "./commands/delete.js";
 import { run as runQuestion } from "./commands/question.js";
 
 const SCRIPT_NAME = "socrates";
-const VERSION = "1.0.2";
+const VERSION = "1.0.3";
 
 function usage(): void {
   console.log(`Usage: ${SCRIPT_NAME} <command> [options]
@@ -24,6 +24,7 @@ Commands:
                           model:<model_name> (e.g. model:gemini-2.5-flash)
                             - Append '+grounded' for Google Search grounding.
                             - Append '[]' to auto-increment run ID (e.g. model:foo[]).
+                            - Use explicit ID (e.g. model:foo[1]) to resume/overwrite.
                           shell:<script_path> (e.g. shell:./myscript.sh)
                           interactive:<label> (e.g. interactive:manual)
   score <db>            Evaluate answers in the database.

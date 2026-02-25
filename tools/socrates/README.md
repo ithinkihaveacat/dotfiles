@@ -175,7 +175,7 @@ socrates answer 5fb15139 --mode model:gemini-flash[]
 You can also target a specific run index explicitly:
 
 ```bash
-# Resume or overwrite run #2
+# Resume (e.g. after interruption) or overwrite run #2
 socrates answer 5fb15139 --mode model:gemini-flash[2]
 ```
 
