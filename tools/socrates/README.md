@@ -74,12 +74,12 @@ socrates <command> [OPTIONS]
 
 #### 1. Generate Questions
 Read documentation and generate questions.
-This creates a new SQLite database and prints the Session ID.
+This creates a new SQLite database and prints the absolute path to stdout.
 
 ```bash
-cat documentation.md | socrates generate
-# Output: /path/to/db/5fb15139-wear-os-security.db
-# Session ID: 5fb15139-wear-os-security
+DB_PATH=$(cat documentation.md | socrates generate)
+# Output (stderr): Session ID: 5fb15139-wear-os-security
+# DB_PATH now contains: /path/to/db/5fb15139-wear-os-security.db
 ```
 
 #### 2. Answer Questions
@@ -88,7 +88,7 @@ You can refer to the database by its full path or its Session ID (e.g. `5fb15139
 Use an LLM to answer the questions:
 
 ```bash
-socrates answer 5fb15139 --mode model:gemini-2.5-flash
+socrates answer "$DB_PATH" --mode model:gemini-2.5-flash
 ```
 
 Use a shell script (e.g., to test a CLI tool):
@@ -107,7 +107,7 @@ socrates answer 5fb15139 --mode interactive:manual
 Evaluate the accuracy of the answers using the judge model:
 
 ```bash
-socrates score 5fb15139
+socrates score "$DB_PATH"
 ```
 
 #### 4. Manage Database (Delete Runs)
@@ -115,23 +115,23 @@ If you want to remove a specific run (e.g. to re-run it from scratch or remove a
 
 ```bash
 # Delete a specific model run
-socrates delete 5fb15139 model:gemini-2.5-flash
+socrates delete "$DB_PATH" model:gemini-2.5-flash
 
 # Delete a specific iteration
-socrates delete 5fb15139 model:gemini-2.5-flash[1]
+socrates delete "$DB_PATH" model:gemini-2.5-flash[1]
 
 # Delete a shell run
-socrates delete 5fb15139 shell:./my-tool-wrapper.sh
+socrates delete "$DB_PATH" shell:./my-tool-wrapper.sh
 
 # Cleanup incomplete/zombie runs (e.g. from crashed processes)
-socrates delete 5fb15139 --cleanup
+socrates delete "$DB_PATH" --cleanup
 ```
 
 #### 5. Generate Report
 Output the final analysis to Markdown:
 
 ```bash
-socrates report 5fb15139 > analysis.md
+socrates report "$DB_PATH" > analysis.md
 ```
 
 #### 6. Complete Workflow Example
@@ -139,13 +139,13 @@ Run the full pipeline:
 
 ```bash
 # Answer
-socrates answer 5fb15139 --mode model:gemini-3-flash-preview
+socrates answer "$DB_PATH" --mode model:gemini-3-flash-preview
 
 # Score
-socrates score 5fb15139
+socrates score "$DB_PATH"
 
 # Report
-socrates report 5fb15139 > report.md
+socrates report "$DB_PATH" > report.md
 ```
 
 ## Advanced Usage

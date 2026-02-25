@@ -10,13 +10,14 @@ import { run as runDelete } from "./commands/delete.js";
 import { run as runQuestion } from "./commands/question.js";
 
 const SCRIPT_NAME = "socrates";
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 
 function usage(): void {
   console.log(`Usage: ${SCRIPT_NAME} <command> [options]
 
 Commands:
   generate              Generate questions from stdin.
+                        Outputs the absolute path to the created database.
   answer <db> --mode <mode>
                         Answer questions in the database.
                         Modes:
@@ -37,10 +38,17 @@ Options:
   -v, --version         Display version number.
 
 Examples:
-  cat context.md | ${SCRIPT_NAME} generate > my-session.db
-  ${SCRIPT_NAME} answer my-session.db --mode model:gemini-2.5-flash
-  ${SCRIPT_NAME} score my-session.db
-  ${SCRIPT_NAME} report my-session.db > report.md
+  # Generate questions and capture the database path
+  DB_PATH=$(cat context.md | ${SCRIPT_NAME} generate)
+
+  # Answer questions using the generated database
+  ${SCRIPT_NAME} answer "$DB_PATH" --mode model:gemini-2.5-flash
+
+  # Score the answers
+  ${SCRIPT_NAME} score "$DB_PATH"
+
+  # Generate a report
+  ${SCRIPT_NAME} report "$DB_PATH" > report.md
 `);
 }
 
