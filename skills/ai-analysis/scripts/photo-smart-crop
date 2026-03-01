@@ -5,7 +5,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] <input> <output>
 
-Smart crop images around detected people with a specified aspect ratio.
+Smart crop images to focus on the primary subject with a specified aspect ratio.
 
 Arguments:
   input        Input image file
@@ -16,16 +16,16 @@ Options:
   --help       Display this help message and exit
 
 Processing:
-  Uses Gemini API to detect people and calculate a crop box with the specified
-  aspect ratio. Expands by 20% for headroom, then crops centered on detected
-  people. Works with any input orientation (portrait or landscape).
+  Uses Gemini API to detect the primary subject (people, food, landscapes, etc.)
+  and calculates the maximum possible crop box with the specified aspect ratio,
+  centered on the subject. Works with any input orientation (portrait or landscape).
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
 
 Exit Codes:
   0    Success (cropped output written)
-  1    Error (API error, missing file, no people found, invalid arguments)
+  1    Error (API error, missing file, invalid arguments)
   2    Rate limited (API returned 429)
   127  Missing required command
 
@@ -128,21 +128,16 @@ else
 fi
 
 # System Instruction: Defines the core task and constraints
-SYSTEM_INSTRUCTION="Analyze this image to identify all human subjects and calculate a smart crop that prioritizes faces.
+SYSTEM_INSTRUCTION="Analyze this image to identify the primary subject or key compositional elements.
 
-1. DETECT: Find all people in the image, focusing especially on FACES. Locate the bounding box around all visible faces first.
+1. DETECT: Identify the primary subject (e.g., people, faces, food, focal points in a landscape).
+   - If the subject is a person, the bounding box MUST focus on their face/head area so it does not get cut off during cropping.
+   - If the subject is food, an object, or a landscape, identify the most important or aesthetically pleasing region.
 
-2. CALCULATE CROP BOX: Create a crop bounding box with these constraints:
-   - PRIORITY: The crop box MUST include all detected faces/heads. Faces are more important than bodies.
-   - Aspect ratio: MUST be exactly ${ratio_w}:${ratio_h} (width:height), so height = width * ${ratio_h}/${ratio_w}
-   - Start with a tight box around all faces, then expand to include as much of the bodies as possible while maintaining the aspect ratio
-   - If the full body cannot fit while keeping the required aspect ratio, crop from the BOTTOM (legs/feet), never from the top (heads)
-   - Maximum width: 800 units (on 0-1000 scale where 1000 = full image width)
-   - Keep the box within image bounds (0-1000 for both dimensions)
+2. CALCULATE BOX: Create a bounding box around this focal region.
+   - Keep the box within image bounds (0-1000 for both dimensions).
 
-3. RETURN: Coordinates in normalized 0-1000 scale as ymin, xmin, ymax, xmax.
-
-If no people are detected, set people_found to false and omit crop_box."
+3. RETURN: Coordinates in normalized 0-1000 scale as ymin, xmin, ymax, xmax. If there is no specific focal point, return a box covering the central compositional area."
 
 USER_PROMPT="Perform the smart crop analysis on this image."
 
@@ -178,15 +173,7 @@ REQUEST_BODY=$(jq -n \
       "responseJsonSchema": {
         "type": "object",
         "properties": {
-          "people_found": {
-            "type": "boolean",
-            "description": "True if any people were detected"
-          },
-          "people_count": {
-            "type": "integer",
-            "description": "Number of people detected (0 if none)"
-          },
-          "crop_box": {
+          "subject_box": {
             "type": "object",
             "properties": {
               "ymin": {"type": "integer", "description": "Top coordinate (0-1000)"},
@@ -197,7 +184,7 @@ REQUEST_BODY=$(jq -n \
             "required": ["ymin", "xmin", "ymax", "xmax"]
           }
         },
-        "required": ["people_found", "people_count"]
+        "required": ["subject_box"]
       }
     }
   }')
@@ -226,106 +213,63 @@ if [[ -z "$TEXT" ]]; then
   exit 1
 fi
 
-# Parse the response
-PEOPLE_FOUND=$(echo "$TEXT" | jq -r '.people_found')
-if [[ "$PEOPLE_FOUND" != "true" ]]; then
-  echo "$(basename "$0"): no people found in image: $INPUT" >&2
-  exit 1
-fi
-
-# Extract crop box coordinates (normalized 0-1000)
-xmin=$(echo "$TEXT" | jq -r '.crop_box.xmin')
-ymin=$(echo "$TEXT" | jq -r '.crop_box.ymin')
-xmax=$(echo "$TEXT" | jq -r '.crop_box.xmax')
-ymax=$(echo "$TEXT" | jq -r '.crop_box.ymax')
+# Extract subject box coordinates (normalized 0-1000)
+xmin=$(echo "$TEXT" | jq -r '.subject_box.xmin')
+ymin=$(echo "$TEXT" | jq -r '.subject_box.ymin')
+xmax=$(echo "$TEXT" | jq -r '.subject_box.xmax')
+ymax=$(echo "$TEXT" | jq -r '.subject_box.ymax')
 
 # Validate we got numeric values
 for val in "$xmin" "$ymin" "$xmax" "$ymax"; do
   if ! [[ "$val" =~ ^[0-9]+$ ]]; then
-    echo "$(basename "$0"): invalid crop box coordinates from API" >&2
+    echo "$(basename "$0"): invalid subject box coordinates from API" >&2
     exit 1
   fi
 done
 
-# Convert normalized coords to pixels FIRST (aspect ratio math must be in pixels)
-px_xmin=$((xmin * img_width / 1000))
-px_ymin=$((ymin * img_height / 1000))
-px_xmax=$((xmax * img_width / 1000))
-px_ymax=$((ymax * img_height / 1000))
+# Convert normalized coords to pixels FIRST
+sub_px_xmin=$((xmin * img_width / 1000))
+sub_px_ymin=$((ymin * img_height / 1000))
+sub_px_xmax=$((xmax * img_width / 1000))
+sub_px_ymax=$((ymax * img_height / 1000))
 
-# Calculate pixel dimensions and center point
-px_width=$((px_xmax - px_xmin))
-px_height=$((px_ymax - px_ymin))
-center_x=$(((px_xmin + px_xmax) / 2))
-center_y=$(((px_ymin + px_ymax) / 2))
+# Calculate center of the subject
+sub_center_x=$(((sub_px_xmin + sub_px_xmax) / 2))
+sub_center_y=$(((sub_px_ymin + sub_px_ymax) / 2))
 
-# Expand by 20% (10% each side)
-expand_x=$((px_width / 10))
-expand_y=$((px_height / 10))
-new_width=$((px_width + 2 * expand_x))
-new_height=$((px_height + 2 * expand_y))
+# Calculate maximum possible crop box dimensions for the target aspect ratio
+# First, assume the width is the limiting factor (full width)
+max_crop_w=$img_width
+max_crop_h=$((img_width * ratio_h / ratio_w))
 
-# Force aspect ratio (width:height = ratio_w:ratio_h, so height = width * ratio_h/ratio_w)
-# Expand the smaller dimension to achieve the ratio
-target_height=$((new_width * ratio_h / ratio_w))
-target_width=$((new_height * ratio_w / ratio_h))
-
-if [[ $new_height -lt $target_height ]]; then
-  # Height is too small, expand it
-  new_height=$target_height
-elif [[ $new_width -lt $target_width ]]; then
-  # Width is too small, expand it
-  new_width=$target_width
+# If the calculated height exceeds the image height, then height is the limiting factor
+if [[ $max_crop_h -gt $img_height ]]; then
+  max_crop_h=$img_height
+  max_crop_w=$((img_height * ratio_w / ratio_h))
 fi
 
-# Calculate box from center and dimensions
-new_xmin=$((center_x - new_width / 2))
-new_ymin=$((center_y - new_height / 2))
-new_xmax=$((center_x + new_width / 2))
-new_ymax=$((center_y + new_height / 2))
+# Calculate top-left corner by centering the maximal crop box on the subject
+new_xmin=$((sub_center_x - max_crop_w / 2))
+new_ymin=$((sub_center_y - max_crop_h / 2))
 
-# Shift box if it goes out of bounds (prefer shifting over shrinking)
+# Clamp to image boundaries
 if [[ $new_xmin -lt 0 ]]; then
-  new_xmax=$((new_xmax - new_xmin))
   new_xmin=0
 fi
 if [[ $new_ymin -lt 0 ]]; then
-  new_ymax=$((new_ymax - new_ymin))
   new_ymin=0
 fi
-if [[ $new_xmax -gt $img_width ]]; then
-  new_xmin=$((new_xmin - (new_xmax - img_width)))
-  new_xmax=$img_width
+
+if [[ $((new_xmin + max_crop_w)) -gt $img_width ]]; then
+  new_xmin=$((img_width - max_crop_w))
 fi
-if [[ $new_ymax -gt $img_height ]]; then
-  new_ymin=$((new_ymin - (new_ymax - img_height)))
-  new_ymax=$img_height
-fi
-
-# Final clamp (in case shifting pushed us negative)
-[[ $new_xmin -lt 0 ]] && new_xmin=0
-[[ $new_ymin -lt 0 ]] && new_ymin=0
-
-# Recalculate dimensions after clamping and enforce aspect ratio by shrinking if needed
-final_width=$((new_xmax - new_xmin))
-final_height=$((new_ymax - new_ymin))
-target_height=$((final_width * ratio_h / ratio_w))
-target_width=$((final_height * ratio_w / ratio_h))
-
-if [[ $final_height -gt $target_height ]]; then
-  # Shrink height to match width - remove from BOTTOM to preserve heads at top
-  diff=$((final_height - target_height))
-  new_ymax=$((new_ymax - diff))
-elif [[ $final_width -gt $target_width ]]; then
-  # Shrink width to match height
-  diff=$((final_width - target_width))
-  new_xmin=$((new_xmin + diff / 2))
-  new_xmax=$((new_xmax - (diff - diff / 2)))
+if [[ $((new_ymin + max_crop_h)) -gt $img_height ]]; then
+  new_ymin=$((img_height - max_crop_h))
 fi
 
-# Final crop dimensions in pixels
-crop_w=$((new_xmax - new_xmin))
-crop_h=$((new_ymax - new_ymin))
+# Final crop dimensions and position
+crop_w=$max_crop_w
+crop_h=$max_crop_h
 px_x1=$new_xmin
 px_y1=$new_ymin
 
