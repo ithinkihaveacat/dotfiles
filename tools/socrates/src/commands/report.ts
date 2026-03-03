@@ -11,6 +11,18 @@ interface ReportData {
   responders: string[];
 }
 
+function parseResponder(r: string) {
+  if (r.startsWith("model:")) {
+    const config = r.slice("model:".length);
+    const modelName = config.replace(/\[\d+\]$/, "").replace(/\+grounded$/, "");
+    const isGrounded = config.includes("+grounded");
+    return { name: modelName, grounded: isGrounded, isModel: true };
+  } else {
+    const name = r.replace(/\[\d+\]$/, "");
+    return { name: name, grounded: false, isModel: false };
+  }
+}
+
 function generateReport(data: ReportData): string {
   const { questions, answers, evaluations, responders } = data;
   
@@ -25,19 +37,55 @@ function generateReport(data: ReportData): string {
 
   // Summary Table
   report += "## Summary\n\n";
-  report += "| Question | " + responders.map((m) => m).join(" | ") + " |\n";
-  report += "| :--- | " + responders.map(() => ":---:").join(" | ") + " |\n";
 
-  for (const q of questions) {
-    const row = [truncate(q.text, 60)];
-    for (const r of responders) {
-      const evalRes = evaluations.find(e => e.question_id === q.id && e.responder === r);
-      if (evalRes) {
-        row.push(evalRes.is_correct ? "✅" : "❌");
-      } else {
-        const ans = answers.find(a => a.question_id === q.id && a.responder === r);
-        row.push(ans ? "⏳" : "-");
+  // Organize responders into columns
+  const groups: Map<string, { ungrounded: string[], grounded: string[], isModel: boolean }> = new Map();
+  for (const r of responders) {
+    const parsed = parseResponder(r);
+    if (!groups.has(parsed.name)) {
+      groups.set(parsed.name, { ungrounded: [], grounded: [], isModel: parsed.isModel });
+    }
+    const group = groups.get(parsed.name)!;
+    if (parsed.grounded) {
+      group.grounded.push(r);
+    } else {
+      group.ungrounded.push(r);
+    }
+  }
+
+  const columns: { label: string, subLabel: string, responders: string[] }[] = [];
+  for (const [name, group] of groups) {
+    if (group.isModel) {
+      columns.push({ label: `**${name}**`, subLabel: "No Grounding", responders: group.ungrounded });
+      columns.push({ label: " ", subLabel: "Grounded", responders: group.grounded });
+    } else {
+      columns.push({ label: `**${name}**`, subLabel: " ", responders: group.ungrounded });
+    }
+  }
+
+  report += "| Question | " + columns.map(c => c.label).join(" | ") + " |\n";
+  report += "| :--- | " + columns.map(() => ":---:").join(" | ") + " |\n";
+  report += "| | " + columns.map(c => c.subLabel).join(" | ") + " |\n";
+
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    const row = [`Q${i + 1}: ${truncate(q.text, 50)}`];
+    
+    for (const col of columns) {
+      if (col.responders.length === 0) {
+        row.push("-");
+        continue;
       }
+
+      const icons = col.responders.map(r => {
+        const evalRes = evaluations.find(e => e.question_id === q.id && e.responder === r);
+        if (evalRes) {
+          return evalRes.is_correct ? "✅" : "❌";
+        }
+        const ans = answers.find(a => a.question_id === q.id && a.responder === r);
+        return ans ? "⏳" : "-";
+      });
+      row.push(icons.join(" "));
     }
     report += "| " + row.join(" | ") + " |\n";
   }
