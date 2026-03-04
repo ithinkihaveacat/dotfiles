@@ -25,6 +25,14 @@ The following examples assume you are running from the `tests/` directory.
 prove */test-*
 ```
 
+### Run Tests in Parallel
+
+Tests can be run in parallel to speed up execution:
+
+```bash
+prove -j 9 */test-*
+```
+
 Or with verbose output:
 
 ```bash
@@ -86,6 +94,7 @@ Tests should:
 2. Be executable (`chmod +x`)
 3. Use `#!/usr/bin/env bash` shebang
 4. Skip gracefully when dependencies are missing using `1..0 # SKIP reason`
+5. Be safe to run in parallel (avoid shared temporary files or global state)
 
 Example test structure:
 

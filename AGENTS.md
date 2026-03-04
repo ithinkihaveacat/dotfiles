@@ -173,6 +173,8 @@ tests/
 ### Test Requirements
 
 - Test files should be executable and output TAP format
+- Tests must be safe to run in parallel (avoid shared temporary files or state)
+- Tests can be run in parallel for speed (e.g., `prove -j 9 tests/*/test-*`)
 - Scripts with tests include a `# Tests:` comment pointing to their test
   directory
 - When modifying a script with tests, review whether the tests need updating
