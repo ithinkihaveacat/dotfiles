@@ -63,7 +63,23 @@ fetch_maven_metadata() {
 	local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
 
 	if ! curl -sSLf "$metadata_url"; then
-		echo "$SCRIPT_NAME: failed to fetch $metadata_url" >&2
+		echo "$SCRIPT_NAME: artifact '$group_id:$artifact_id' not found at $metadata_url (404)" >&2
+
+		# Suggest alternatives from the local index
+		if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
+			local suggestions
+			# Try searching for artifacts with the same name in other groups
+			suggestions=$(cmd_search --index "$artifact_id" 2>/dev/null | grep ":$artifact_id$" | head -n 5 || true)
+			if [[ -z "$suggestions" ]]; then
+				# Try a broader search if no exact artifact name matches
+				suggestions=$(cmd_search --index "$artifact_id" 2>/dev/null | head -n 3 || true)
+			fi
+
+			if [[ -n "$suggestions" ]]; then
+				echo "$SCRIPT_NAME: did you mean one of these?" >&2
+				echo "$suggestions" | sed 's/^/  /' >&2
+			fi
+		fi
 		return 1
 	fi
 }
@@ -281,7 +297,7 @@ search_index() {
 	fi
 
 	jq -r --arg q "$query" \
-		'.[] | select(.group | contains($q)) | "\(.group)"' \
+		'.[] | .group as $g | select(($g | contains($q)) or ($q | startswith($g))) | $g' \
 		"$INDEX_FILE" | sort -u
 }
 
@@ -794,6 +810,9 @@ cmd_resolve() {
 		"androidx.glance.wear.proto|androidx.glance.wear:wear-core"
 		"androidx.glance.wear.tiles|androidx.glance:glance-wear-tiles"
 		"androidx.glance.wear|androidx.glance.wear:wear"
+		"androidx.health.connect.client|androidx.health:health-connect-client"
+		"androidx.health.services.client|androidx.health:health-services-client"
+		"androidx.health.services.client.data|androidx.health:health-services-client"
 		"androidx.lifecycle.livedata|androidx.lifecycle:lifecycle-livedata"
 		"androidx.lifecycle.viewmodel|androidx.lifecycle:lifecycle-viewmodel"
 		"androidx.lifecycle|androidx.lifecycle:lifecycle-runtime"
@@ -1288,11 +1307,16 @@ cmd_inspect() {
 		if [[ "$input" =~ \. ]]; then
 			# It looks like a FQCN or package
 			if resolved=$(cmd_resolve "$input" 2>/dev/null); then
-				artifact="$resolved"
+				# Check if this resolved artifact actually exists
+				local gid="${resolved%%:*}"
+				local aid="${resolved##*:}"
+				if fetch_maven_metadata "$GOOGLE_MAVEN_URL" "$gid" "$aid" >/dev/null 2>&1; then
+					artifact="$resolved"
+				fi
 			fi
 		fi
 
-		# If resolve failed or didn't apply, try search
+		# If resolve failed, didn't apply, or 404'd, try search
 		if [[ -z "$artifact" ]]; then
 			local search_results
 			if search_results=$(cmd_search "$input"); then
@@ -1409,19 +1433,18 @@ cmd_resolve_exceptions() {
 	fi
 
 	# Download and extract
-	local tmpdir
-	tmpdir=$(mktemp -d)
-	trap 'rm -rf "$tmpdir"' EXIT
+	TMPDIR=$(mktemp -d)
+	trap 'rm -rf -- "$TMPDIR"' EXIT
 
 	local source_jar_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/$version/$artifact_id-$jar_version-sources.jar"
-	local source_jar="$tmpdir/sources.jar"
+	local source_jar="$TMPDIR/sources.jar"
 
 	if ! curl -sSLf -o "$source_jar" "$source_jar_url" 2>/dev/null; then
 		echo "$SCRIPT_NAME resolve-exceptions: failed to download $source_jar_url" >&2
 		exit 1
 	fi
 
-	cd "$tmpdir"
+	cd "$TMPDIR"
 	jar xf sources.jar 2>/dev/null || true
 
 	# Find all unique packages
