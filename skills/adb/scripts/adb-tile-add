@@ -18,6 +18,8 @@ Options:
                   to tiles supporting the BIND_WIDGET_PROVIDER intent (e.g.,
                   Glance-based tiles).
   --no-show       Do not show the tile after adding it
+  --wait          Wait for the tile to be visible (default)
+  --no-wait       Do not wait for visibility (return immediately)
   --help          Display this help message and exit
 
 Environment:
@@ -38,12 +40,21 @@ if [[ $# -eq 0 ]]; then
 fi
 
 SHOW=true
+WAIT=true
 TYPE_INT=1 # Default to LARGE
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --no-show)
       SHOW=false
+      shift
+      ;;
+    --wait)
+      WAIT=true
+      shift
+      ;;
+    --no-wait)
+      WAIT=false
       shift
       ;;
     --type)
@@ -114,6 +125,20 @@ if ! adb shell pm list packages | grep -q "^package:${PACKAGE_NAME}$"; then
   exit 1
 fi
 
+# Setup Logcat monitoring if waiting
+LOG_FILE=""
+LOG_PID=""
+if [ "$WAIT" = true ] && [ "$SHOW" = true ]; then
+  LOG_FILE=$(mktemp)
+  # Clear buffer to avoid reading old logs
+  adb logcat -c
+  # Monitor relevant tags
+  adb logcat -v time SysUI:I ProtoTilesTileRendererImpl:E AndroidRuntime:E *:S > "$LOG_FILE" &
+  LOG_PID=$!
+  # Ensure cleanup on exit
+  trap 'kill "$LOG_PID" 2>/dev/null; rm -f "$LOG_FILE"' EXIT
+fi
+
 # Workaround for a bug: force-stop the package to ensure a fresh bind
 adb shell am force-stop "$PACKAGE_NAME"
 
@@ -125,9 +150,6 @@ OUTPUT=$(adb shell am broadcast \
   --ei type "$TYPE_INT")
 
 # Check for "Requested tile provider does not exist" error (result=2)
-# Note: This error frequently occurs with system-provided tiles (e.g., HandWashTileProviderService)
-# which may require specific system permissions or configurations not accessible via this method.
-# This script is primarily intended for user-installed apps.
 if echo "$OUTPUT" | grep -q "Requested tile provider does not exist"; then
   echo "Error: The requested tile provider does not exist or is disabled."
   echo "This commonly happens with system tiles that cannot be added via this method."
@@ -144,6 +166,64 @@ if [ -n "$INDEX" ]; then
       -a com.google.android.wearable.app.DEBUG_SYSUI \
       --es operation show-tile \
       --ei index "$INDEX" >/dev/null
+
+    # Wait logic
+    if [ "$WAIT" = true ]; then
+      echo "Waiting for tile visibility..."
+      START_TIME=$(date +%s)
+      TIMEOUT=10
+      VISIBLE=false
+
+      while true; do
+        CURRENT_TIME=$(date +%s)
+        ELAPSED=$((CURRENT_TIME - START_TIME))
+        
+        if [ $ELAPSED -ge $TIMEOUT ]; then
+          echo "Warning: Timeout waiting for tile visibility ($TIMEOUT s)."
+          break
+        fi
+
+        # Check for Success
+        if grep -q "Visible tile added" "$LOG_FILE"; then
+          VISIBLE=true
+          break
+        fi
+
+        # Check for Failures
+        if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
+          echo "Error: App crash detected!"
+          grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
+          exit 1
+        fi
+        if grep -q "Error getting tile response" "$LOG_FILE"; then
+          echo "Error: Renderer failed to get tile response."
+          grep "Error getting tile response" "$LOG_FILE"
+          exit 1
+        fi
+        if grep -q "Provider is not allowlisted" "$LOG_FILE"; then
+          echo "Error: Provider is not allowlisted."
+          exit 1
+        fi
+
+        sleep 0.2
+      done
+
+      if [ "$VISIBLE" = true ]; then
+        # Continue monitoring for a short buffer to catch immediate crashes
+        sleep 1.5
+         if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
+          echo "Error: App crash detected after visibility!"
+          grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
+          exit 1
+        fi
+        if grep -q "Error getting tile response" "$LOG_FILE"; then
+          echo "Error: Renderer failed to get tile response."
+          grep "Error getting tile response" "$LOG_FILE"
+          exit 1
+        fi
+        echo "Success: Tile is visible."
+      fi
+    fi
   fi
 else
   echo "Failed to parse tile ID from output:"
