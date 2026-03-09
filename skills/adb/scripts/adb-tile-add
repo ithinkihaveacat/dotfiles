@@ -125,18 +125,63 @@ if ! adb shell pm list packages | grep -q "^package:${PACKAGE_NAME}$"; then
   exit 1
 fi
 
-# Setup Logcat monitoring if waiting
+# -----------------------------------------------------------------------------
+# REMOTE COMPOSE VISIBILITY & FAILURE DETECTION
+# -----------------------------------------------------------------------------
+# Wear Widgets use a remote rendering architecture (Remote Compose).
+# The app generates a document and serializes it over a Binder IPC connection.
+# SysUI (via ProtoTilesTileRendererImpl) receives, deserializes, and renders it.
+#
+# Because of this IPC boundary, we cannot rely on app-level logs or just "sleep".
+# Failures happen asynchronously AFTER the initial 'add-tile' broadcast.
+# We explicitly detect known failure modes to fail fast and prevent false positives:
+#
+#   1. Binder Overload: Sending large unscaled images exceeds
+#      the ~1MB Binder IPC limit. (b/488353353)
+#      Result: 'FATAL EXCEPTION' in AndroidRuntime (TransactionTooLargeException)
+#
+#   2. Unsupported Modifiers: e.g., using alpha or blur effects. (b/473745800)
+#      Result: 'Failed to render and attach the tile' in the renderer.
+#
+#   3. Allowlist Rejection: Package isn't registered for Remote Compose in prod.
+#      Result: 'Provider is not allowlisted' in the renderer.
+#
+#   4. Renderer Timeouts: The provider hung or crashed silently before responding.
+#      Result: 'Error getting tile response' in the renderer.
+#
+# Note: SysUI emits "Visible tile added" when it allocates the container, but
+# the renderer might still fail to parse the document milliseconds *after* this.
+# Therefore, we monitor for specific failure signatures both
+# BEFORE and AFTER the visibility signal using a short grace period.
+# -----------------------------------------------------------------------------
+
 LOG_FILE=""
 LOG_PID=""
 if [ "$WAIT" = true ] && [ "$SHOW" = true ]; then
   LOG_FILE=$(mktemp)
-  # Clear buffer to avoid reading old logs
+  if [ ! -w "$LOG_FILE" ]; then
+    echo "Error: Could not create writable temporary file for logcat monitoring." >&2
+    exit 1
+  fi
+
+  # Clear buffer to avoid reading old logs from previous runs
   adb logcat -c
-  # Monitor relevant tags
-  adb logcat -v time SysUI:I ProtoTilesTileRendererImpl:E AndroidRuntime:E *:S > "$LOG_FILE" &
+
+  # Monitor relevant tags in the background. We filter specifically for errors
+  # from the renderer and runtime to catch async crashes.
+  adb logcat -v time SysUI:I ProtoTilesTileRendererImpl:E AndroidRuntime:E "*:S" >"$LOG_FILE" &
   LOG_PID=$!
-  # Ensure cleanup on exit
-  trap 'kill "$LOG_PID" 2>/dev/null; rm -f "$LOG_FILE"' EXIT
+
+  # Robust cleanup trap: Handles normal exits, INT (Ctrl+C), and TERM signals.
+  trap '
+    EXIT_CODE=$?
+    [ -n "$LOG_PID" ] && kill "$LOG_PID" 2>/dev/null
+    [ -n "$LOG_FILE" ] && rm -f "$LOG_FILE"
+    if [ $EXIT_CODE -eq 130 ]; then
+       echo -e "\nWarning: Script interrupted by user. Background logcat killed."
+    fi
+    exit $EXIT_CODE
+  ' EXIT INT TERM
 fi
 
 # Workaround for a bug: force-stop the package to ensure a fresh bind
@@ -177,36 +222,55 @@ if [ -n "$INDEX" ]; then
       while true; do
         CURRENT_TIME=$(date +%s)
         ELAPSED=$((CURRENT_TIME - START_TIME))
-        
+
+        # Check if logcat background process died unexpectedly
+        if ! kill -0 "$LOG_PID" 2>/dev/null; then
+          echo "Error: Background logcat process died unexpectedly. Cannot verify visibility."
+          exit 1
+        fi
+
+        # Check if device disconnected
+        if ! adb get-state >/dev/null 2>&1; then
+          echo "Error: Device disconnected during visibility check."
+          exit 1
+        fi
+
         if [ $ELAPSED -ge $TIMEOUT ]; then
           echo "Warning: Timeout waiting for tile visibility ($TIMEOUT s)."
+          echo "The tile may be visible, but the success log was missed, or it's stuck loading."
           break
         fi
 
-        # Check for Success
+        # Check for Success Signal
         if grep -q "Visible tile added" "$LOG_FILE"; then
           VISIBLE=true
           break
         fi
 
-        # Check for Failures
+        # --- Failure Detection (Pre-Visibility) ---
         if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
-          echo "Error: App crash detected!"
+          # b/488353353
+          echo "Error: Remote Compose App Crash detected!"
+          echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException) or a local runtime crash."
           grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
           exit 1
         fi
         if grep -q "Error getting tile response" "$LOG_FILE"; then
-          echo "Error: Renderer failed to get tile response."
+          echo "Error: Renderer timed out getting the tile response."
+          echo "The provider may have hung or crashed silently before responding."
           grep "Error getting tile response" "$LOG_FILE"
           exit 1
         fi
         if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
-          echo "Error: Renderer failed to read or attach the document (e.g. unsupported modifier)."
+          # b/473745800
+          echo "Error: Renderer failed to parse or attach the document."
+          echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)."
           grep -A 2 "Failed to render and attach the tile" "$LOG_FILE"
           exit 1
         fi
         if grep -q "Provider is not allowlisted" "$LOG_FILE"; then
-          echo "Error: Provider is not allowlisted."
+          echo "Error: Provider is not allowlisted for Remote Compose."
+          echo "Your applicationId must be registered to run on production builds."
           exit 1
         fi
 
@@ -214,20 +278,28 @@ if [ -n "$INDEX" ]; then
       done
 
       if [ "$VISIBLE" = true ]; then
-        # Continue monitoring for a short buffer to catch immediate crashes
+        # Continue monitoring for a short buffer. SysUI says the container is
+        # visible, but the renderer might still throw an async parsing exception
+        # a few hundred milliseconds later.
         sleep 1.5
-         if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
-          echo "Error: App crash detected after visibility!"
+
+        # --- Failure Detection (Post-Visibility Buffer) ---
+        if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
+          # b/488353353
+          echo "Error: Remote Compose App Crash detected immediately after visibility!"
+          echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException)."
           grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
           exit 1
         fi
         if grep -q "Error getting tile response" "$LOG_FILE"; then
-          echo "Error: Renderer failed to get tile response."
+          echo "Error: Renderer timed out getting the tile response after visibility."
           grep "Error getting tile response" "$LOG_FILE"
           exit 1
         fi
         if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
-          echo "Error: Renderer failed to read or attach the document (e.g. unsupported modifier) after visibility signal."
+          # b/473745800
+          echo "Error: Renderer rejected the document after visibility."
+          echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)."
           grep -A 2 "Failed to render and attach the tile" "$LOG_FILE"
           exit 1
         fi
