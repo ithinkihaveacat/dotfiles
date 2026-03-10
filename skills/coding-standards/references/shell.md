@@ -284,9 +284,9 @@ Follow these conventions:
 
 ### Dependency Checking
 
-Scripts should check for non-trivial dependencies using a helper function.
-This ensures consistent error reporting and exit codes. Do not include
-instructions on how to install the dependency, as this varies by OS.
+Scripts should check for non-trivial dependencies using a helper function. This
+ensures consistent error reporting and exit codes. Do not include instructions
+on how to install the dependency, as this varies by OS.
 
 ```bash
 require() {
@@ -309,12 +309,12 @@ scripts to crash with "Argument list too long."
 
 ### Guidelines
 
-1.  **Avoid reading large inputs into shell variables.** Reading a whole file
-    into a variable (e.g., `DATA=$(cat file.txt)`) and then passing it to a
-    command is brittle.
-2.  **Use `jq` features for input.** Use `--rawfile` for files and `-R` (raw
-    input) for stdin.
-3.  **Pipe stdin directly.** If processing stdin, pipe it directly into `jq`.
+1. **Avoid reading large inputs into shell variables.** Reading a whole file
+   into a variable (e.g., `DATA=$(cat file.txt)`) and then passing it to a
+   command is brittle.
+2. **Use `jq` features for input.** Use `--rawfile` for files and `-R` (raw
+   input) for stdin.
+3. **Pipe stdin directly.** If processing stdin, pipe it directly into `jq`.
 
 ### Examples
 
@@ -348,7 +348,8 @@ jq -Rs '{ content: . }'
 
 **Scenario 3: Input is a variable (that might be large)**
 
-If you already have data in a variable, pipe it to `jq` instead of using `--arg`.
+If you already have data in a variable, pipe it to `jq` instead of using
+`--arg`.
 
 ```bash
 # BAD
@@ -360,9 +361,10 @@ printf "%s" "$LARGE_VAR" | jq -Rs '{ content: . }'
 
 **Why this works:** The `ARG_MAX` limit applies to the arguments passed to a new
 process via the `exec()` system call.
+
 1. `jq --arg ...` fails because the shell must pass the huge string to the `jq`
    process.
 2. `printf ... | jq` works because `printf` is a shell builtin in Bash. The
-   shell handles the data internally and writes it to the pipe without creating a
-   new process for `printf`, bypassing the `exec()` limit. `jq` then reads the
+   shell handles the data internally and writes it to the pipe without creating
+   a new process for `printf`, bypassing the `exec()` limit. `jq` then reads the
    data from stdin, which has no size limit.
