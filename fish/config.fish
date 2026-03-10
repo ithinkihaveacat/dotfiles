@@ -38,12 +38,6 @@ function sourceif
     end
 end
 
-# Google Cloud SDK (gcloud)
-#
-# https://cloud.google.com/sdk/
-
-add_path $HOME/.local/share/google-cloud-sdk/bin
-
 # java
 
 # Via mule:
@@ -123,6 +117,21 @@ add_path $HOME/local/homebrew/bin
 add_path $HOME/local/homebrew/sbin
 
 add_path $HOME/.local/bin
+
+# Google Cloud SDK (gcloud)
+#
+# https://cloud.google.com/sdk/
+
+add_path $HOME/.local/share/google-cloud-sdk/bin
+
+if type -q gcloud
+    if type -q python3
+        set -l python_path (which python3)
+        if $python_path -c 'import sys; exit(0 if sys.version_info >= (3, 10) else 1)'
+            set -gx CLOUDSDK_PYTHON $python_path
+        end
+    end
+end
 
 # Ruby
 #
