@@ -40,8 +40,7 @@ heuristics—use it as reference when building similar functionality.
 
 - **Inspect a class (most common):**
   `scripts/jetpack inspect androidx.wear.tiles.TileService`
-- **Search for a library:**
-  `scripts/jetpack search androidx.wear.compose`
+- **Search for a library:** `scripts/jetpack search androidx.wear.compose`
 - **Check stable version:**
   `scripts/jetpack version androidx.wear.tiles:tiles STABLE`
 - **Resolve package to Maven coordinate:**

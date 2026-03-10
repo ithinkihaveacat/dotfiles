@@ -51,6 +51,7 @@ java -version
 **Solution**: Install Java 17+ and ensure it's in your PATH or set `JAVA_HOME`.
 
 The SDK tools require Java 17 or higher. Common sources of older Java:
+
 - System default Java on older Linux distributions
 - JAVA_HOME pointing to an old installation
 
@@ -124,7 +125,7 @@ scripts/emumanager bootstrap
 ```
 
 Or manually download cmdline-tools from:
-https://developer.android.com/studio#command-line-tools-only
+<https://developer.android.com/studio#command-line-tools-only>
 
 ### adb Not Found
 
@@ -179,6 +180,7 @@ scripts/emumanager images
 **Symptom**: "No suitable mobile/wear/tv/auto image found for architecture X"
 
 **Causes**:
+
 - No images available for your host architecture
 - Network issues preventing image list retrieval
 - All available images are blocklisted
@@ -211,11 +213,13 @@ pgrep -f 'qemu-system.*-avd'
 ```
 
 **Common causes**:
+
 - Hardware acceleration not working
 - Insufficient RAM or CPU resources
 - Corrupted AVD state
 
 **Solutions**:
+
 1. Try cold boot: `scripts/emumanager start my_phone --cold-boot`
 2. Try factory reset: `scripts/emumanager start my_phone --wipe-data`
 3. Delete and recreate AVD: `scripts/emumanager delete my_phone`
@@ -264,7 +268,8 @@ scripts/emumanager create my_phone --mobile
 
 ### Orphaned AVD Files
 
-**Symptom**: `emumanager doctor` reports orphaned .ini files or .avd directories.
+**Symptom**: `emumanager doctor` reports orphaned .ini files or .avd
+directories.
 
 **Cause**: AVD was partially deleted or corrupted.
 
@@ -308,6 +313,7 @@ scripts/emumanager delete my_phone
 **Cause**: Less than 5GB available. AVD images can be several GB each.
 
 **Solutions**:
+
 1. Remove unused AVDs: `scripts/emumanager delete <name>`
 2. Remove unused system images via sdkmanager
 3. Move ANDROID_HOME to a larger disk
@@ -340,10 +346,11 @@ Large system images (2-4GB) may fail to download on slow connections.
 **Cause**: Network connectivity issues or firewall blocking Google servers.
 
 **Solution**:
+
 1. Check internet connectivity
 2. Check proxy settings
 3. Try manual download from:
-   https://developer.android.com/studio#command-line-tools-only
+   <https://developer.android.com/studio#command-line-tools-only>
 
 ### Package Installation Timeout
 

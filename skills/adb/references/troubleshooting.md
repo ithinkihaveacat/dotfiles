@@ -1,6 +1,6 @@
-<!-- markdownlint-disable MD013 -->
-
 # Troubleshooting
+
+<!-- markdownlint-disable MD013 -->
 
 ## Contents
 
@@ -132,3 +132,4 @@ adb exec-out "screencap -p" > raw_screenshot.png
 **Cause**: Missing executable permission. **Solution**:
 
 - `chmod +x scripts/script-name`.
+<!-- markdownlint-restore MD013 -->

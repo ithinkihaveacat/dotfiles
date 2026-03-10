@@ -1,4 +1,4 @@
-# dotfiles
+# .dotfiles
 
 ## About
 
@@ -318,6 +318,8 @@ rows.
       a reboot), reboot: `sudo reboot`.
 1. Install `fish` from the OpenSUSE Build Service (for the latest version):
 
+   <!-- markdownlint-disable MD013 -->
+
    ```bash
    curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_Unstable/Release.key | \
      gpg --dearmor | sudo tee /usr/share/keyrings/fish-shell.gpg > /dev/null
@@ -325,6 +327,8 @@ rows.
      sudo tee /etc/apt/sources.list.d/fish-shell.list
    sudo apt update && sudo apt install -y fish
    ```
+
+   <!-- markdownlint-restore MD013 -->
 
    Alternatively, install the (older) version from the Debian repos:
    `sudo apt-get install fish`.

@@ -187,6 +187,8 @@ scripts/emumanager update
 The `create` command supports device type flags that automatically select the
 latest appropriate system image for the host architecture:
 
+<!-- markdownlint-disable MD013 -->
+
 | Flag                 | Device Type       | System Image Pattern                   |
 | -------------------- | ----------------- | -------------------------------------- |
 | `--mobile`/`--phone` | Mobile/Phone      | `google_apis_playstore`                |
@@ -194,15 +196,21 @@ latest appropriate system image for the host architecture:
 | `--tv`               | Android/Google TV | `android-tv` / `google-tv`             |
 | `--auto`             | Automotive        | `android-automotive-playstore`         |
 
+<!-- markdownlint-restore MD013 -->
+
 If no device type or image is specified, defaults to mobile/phone.
 
 ## Start Mode Options
+
+<!-- markdownlint-disable MD013 -->
 
 | Mode          | Flag          | Description                          |
 | ------------- | ------------- | ------------------------------------ |
 | Quick Boot    | (default)     | Fast startup using snapshots         |
 | Cold Boot     | `--cold-boot` | Bypass Quick Boot, perform full boot |
 | Factory Reset | `--wipe-data` | Wipe all data and cold boot          |
+
+<!-- markdownlint-restore MD013 -->
 
 ## Common Workflows
 

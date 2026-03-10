@@ -213,10 +213,14 @@ socrates answer 5fb15139 --mode 'shell:python my-script.py'
 
 ### Environment Variables
 
+<!-- markdownlint-disable MD013 -->
+
 | Variable         | Description                                                          |
 | ---------------- | -------------------------------------------------------------------- |
 | `GEMINI_API_KEY` | Required. Your Gemini API key.                                       |
 | `XDG_DATA_HOME`  | Optional. Base directory for DB storage (default: `~/.local/share`). |
+
+<!-- markdownlint-restore MD013 -->
 
 ## Output
 

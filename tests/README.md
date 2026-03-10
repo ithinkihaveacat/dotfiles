@@ -5,7 +5,7 @@ Anything Protocol) format.
 
 ## Directory Structure
 
-```
+```text
 tests/
 ├── README.md
 ├── script-name/

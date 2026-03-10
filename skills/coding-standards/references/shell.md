@@ -318,7 +318,7 @@ scripts to crash with "Argument list too long."
 
 ### Examples
 
-**Scenario 1: Input is a file**
+#### Scenario 1: Input is a file
 
 Do NOT read the file into a variable. Use `--rawfile`.
 
@@ -331,7 +331,7 @@ jq -n --arg xml "$XML_CONTENT" '{ content: $xml }'
 jq -n --rawfile xml "$FILE_PATH" '{ content: $xml }'
 ```
 
-**Scenario 2: Input is from stdin**
+#### Scenario 2: Input is from stdin
 
 Use `jq -Rs` (Raw input + Slurp) to read the entire stdin as a single string.
 Inside the `jq` filter, refer to the input as `.`.
@@ -346,7 +346,7 @@ jq -n --arg input "$INPUT" '{ content: $input }'
 jq -Rs '{ content: . }'
 ```
 
-**Scenario 3: Input is a variable (that might be large)**
+#### Scenario 3: Input is a variable (that might be large)
 
 If you already have data in a variable, pipe it to `jq` instead of using
 `--arg`.

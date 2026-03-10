@@ -1,6 +1,6 @@
-<!-- markdownlint-disable MD013 -->
-
 # Troubleshooting
+
+<!-- markdownlint-disable MD013 -->
 
 ## Contents
 
@@ -74,3 +74,5 @@ libraries have separate artifacts for `-android`, `-desktop`, etc. **Solution**:
 The `source` and `inspect` commands automatically detect KMP libraries (via POM
 analysis) and attempt to download platform-specific source JARs. Check the
 output logs for "Detected Kotlin Multiplatform library".
+
+<!-- markdownlint-restore MD013 -->

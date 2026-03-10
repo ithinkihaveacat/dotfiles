@@ -1,5 +1,7 @@
 # Command Index
 
+<!-- markdownlint-disable MD013 MD024 -->
+
 ## Contents
 
 - [screenshot-describe](#screenshot-describe) - Generate alt-text from images
@@ -250,10 +252,10 @@ scripts/photo-has-people [OPTIONS] IMAGE
 
 ### Options
 
-| Option         | Description                        |
-| -------------- | ---------------------------------- |
-| `-q, --quiet`  | Suppress output; exit code only    |
-| `-h, --help`   | Display help message and exit      |
+| Option        | Description                     |
+| ------------- | ------------------------------- |
+| `-q, --quiet` | Suppress output; exit code only |
+| `-h, --help`  | Display help message and exit   |
 
 ### Environment Variables
 
@@ -286,11 +288,11 @@ PROMPT="Do people feature prominently in this photo? This includes partial views
 
 ### Exit Codes
 
-| Code | Description                                      |
-| ---- | ------------------------------------------------ |
-| 0    | True (people feature prominently)                |
-| 1    | False (people do not feature prominently)        |
-| 127  | Missing required dependency                      |
+| Code | Description                               |
+| ---- | ----------------------------------------- |
+| 0    | True (people feature prominently)         |
+| 1    | False (people do not feature prominently) |
+| 127  | Missing required dependency               |
 
 ---
 
@@ -792,3 +794,5 @@ Use structured output to get JSON boolean response:
   }
 }
 ```
+
+<!-- markdownlint-restore MD013 MD024 -->

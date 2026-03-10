@@ -1,6 +1,6 @@
-<!-- markdownlint-disable MD013 -->
-
 # Command Index
+
+<!-- markdownlint-disable MD013 -->
 
 ## Contents
 
@@ -365,3 +365,5 @@ adb exec-out am start -a com.google.android.clockwork.sysui.ACTION_SYSTEM_THEME_
 ```bash
 adb exec-out settings put system show_touches 1
 ```
+
+<!-- markdownlint-restore MD013 -->

@@ -21,11 +21,15 @@ resource.
 
 ### 1.3 Examples
 
+<!-- markdownlint-disable MD013 -->
+
 | ✅ **Do This (Kubectl Style)**    | ❌ **Avoid This (Legacy Style)**                           |
 | --------------------------------- | ---------------------------------------------------------- |
 | `tool create user --name="alice"` | `tool create-user --name="alice"` (Hyphenated commands)    |
 | `tool list databases`             | `tool show-dbs` (Inconsistent verb/abbreviation)           |
 | `tool delete config --id=5`       | `tool remove config -i 5` (Synonyms like remove vs delete) |
+
+<!-- markdownlint-restore MD013 -->
 
 ### 1.4 Contextual Consistency
 
@@ -212,6 +216,8 @@ Options:
 
 ## Summary Checklist for Developers
 
+<!-- markdownlint-disable MD013 -->
+
 | Feature        | Implementation Requirement                    | Reference     |
 | -------------- | --------------------------------------------- | ------------- |
 | **Structure**  | `tool [verb] [noun]` (Unless specialized).    | `kubectl`     |
@@ -222,3 +228,5 @@ Options:
 | **Exit Code**  | `0` for requested help, `1` for syntax error. | POSIX         |
 | **Progress**   | Single updating line (CR), no scrolling logs. | `rsync`       |
 | **Streams**    | Data to `stdout`, Logs/Progress to `stderr`.  | Standard Unix |
+
+<!-- markdownlint-restore MD013 -->

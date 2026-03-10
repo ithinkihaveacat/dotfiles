@@ -17,7 +17,7 @@
 
 **Error:**
 
-```
+```text
 script-name: GEMINI_API_KEY environment variable not set
 ```
 
@@ -113,7 +113,7 @@ magick --version
 
 **Error:**
 
-```
+```text
 API error: API key not valid. Please pass a valid API key.
 ```
 
@@ -127,7 +127,7 @@ API error: API key not valid. Please pass a valid API key.
 
 **Error:**
 
-```
+```text
 API error: Resource has been exhausted (e.g. check quota).
 ```
 
@@ -141,7 +141,7 @@ API error: Resource has been exhausted (e.g. check quota).
 
 **Error:**
 
-```
+```text
 API error: Quota exceeded for quota metric
 ```
 
@@ -155,7 +155,7 @@ API error: Quota exceeded for quota metric
 
 **Error:**
 
-```
+```text
 API error: models/model-name is not found
 ```
 
@@ -173,7 +173,7 @@ API error: models/model-name is not found
 
 **Error:**
 
-```
+```text
 script-name: path/to/image.png: No such file or directory
 ```
 
@@ -224,7 +224,7 @@ chmod 644 image.png
 
 **Error:**
 
-```
+```text
 script-name: no response text received from API
 ```
 
@@ -244,7 +244,7 @@ script-name: no response text received from API
 
 **Error:**
 
-```
+```text
 The images are identical.
 script-name: error: input images are identical
 ```
@@ -264,7 +264,7 @@ are byte-identical after encoding.
 
 **Error:**
 
-```
+```text
 photo-smart-crop: no people found in image: photo.jpg
 ```
 
@@ -295,7 +295,7 @@ photo-smart-crop: no people found in image: photo.jpg
 
 **Error:**
 
-```
+```text
 photo-smart-crop: invalid ratio format: abc (expected W:H, e.g., 5:3)
 ```
 
@@ -321,7 +321,7 @@ content:
 
 **Error:**
 
-```
+```text
 token-count: empty input
 satisfies: missing input from stdin
 ```

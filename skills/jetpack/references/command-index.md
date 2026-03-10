@@ -1,6 +1,6 @@
-<!-- markdownlint-disable MD013 -->
-
 # Command Index
+
+<!-- markdownlint-disable MD013 -->
 
 ## Contents
 
@@ -144,3 +144,5 @@ Exceptions: `androidx.lifecycle` -> `androidx.lifecycle:lifecycle-runtime`
 **Adding exceptions**: Use `resolve-exceptions` to find missing mappings, then
 edit the `exceptions` array in `scripts/jetpack` (canonical source;
 `bin/jetpack` is the symlink entrypoint).
+
+<!-- markdownlint-restore MD013 -->

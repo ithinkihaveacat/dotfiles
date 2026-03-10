@@ -1,5 +1,7 @@
 # Command Index
 
+<!-- markdownlint-disable MD013 -->
+
 ## Contents
 
 - [Environment Variables](#environment-variables)
@@ -21,12 +23,12 @@
 
 ## Environment Variables
 
-| Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `ANDROID_HOME` | `$HOME/.local/share/android-sdk` | Android SDK installation directory |
-| `ANDROID_USER_HOME` | `$HOME/.android` | User-specific Android files (AVDs, preferences) |
-| `ANDROID_BUILD_TOOLS_VERSION` | `36.0.0` | Build-tools version to install |
-| `ANDROID_PLATFORM_VERSION` | `android-36` | Platform version to install |
+| Variable                      | Default                          | Description                                     |
+| ----------------------------- | -------------------------------- | ----------------------------------------------- |
+| `ANDROID_HOME`                | `$HOME/.local/share/android-sdk` | Android SDK installation directory              |
+| `ANDROID_USER_HOME`           | `$HOME/.android`                 | User-specific Android files (AVDs, preferences) |
+| `ANDROID_BUILD_TOOLS_VERSION` | `36.0.0`                         | Build-tools version to install                  |
+| `ANDROID_PLATFORM_VERSION`    | `android-36`                     | Platform version to install                     |
 
 ## Subcommands
 
@@ -37,9 +39,11 @@
 **Synopsis**: `scripts/emumanager bootstrap [--no-emulator]`
 
 **Options**:
+
 - `--no-emulator`: Skip installing the emulator component
 
 **What it installs**:
+
 1. cmdline-tools (sdkmanager, avdmanager)
 2. platform-tools (adb)
 3. build-tools (specified version)
@@ -76,6 +80,7 @@ yes | "$SDKMANAGER" --licenses
 **Synopsis**: `scripts/emumanager doctor`
 
 **Checks performed**:
+
 - Running emulator processes
 - Orphaned crashpad_handler processes
 - Disk space at ANDROID_HOME
@@ -92,9 +97,11 @@ yes | "$SDKMANAGER" --licenses
 
 **Purpose**: List all available AVDs with running status.
 
-**Synopsis**: `scripts/emumanager list [--names-only|--running-only|--stopped-only]`
+**Synopsis**:
+`scripts/emumanager list [--names-only|--running-only|--stopped-only]`
 
 **Options**:
+
 - `--names-only`: Output only AVD names (no status)
 - `--running-only`: Show only running AVDs
 - `--stopped-only`: Show only stopped AVDs
@@ -130,9 +137,11 @@ scripts/emumanager list --names-only
 **Synopsis**: `scripts/emumanager info <name>`
 
 **Arguments**:
+
 - `<name>`: AVD name (required)
 
 **Output includes**:
+
 - Display name and status (running/stopped)
 - System image package, API level, tag, architecture
 - Device profile, screen dimensions, density
@@ -157,10 +166,12 @@ cat "$ANDROID_USER_HOME/avd/my_phone.avd/config.ini"
 **Synopsis**: `scripts/emumanager create <name> [options] [image]`
 
 **Arguments**:
+
 - `<name>`: AVD name (required)
 - `[image]`: Specific system image package (optional)
 
 **Options**:
+
 - `--mobile`, `--phone`: Create mobile/phone device (default)
 - `--wear`, `--watch`: Create Wear OS device
 - `--tv`: Create Android/Google TV device
@@ -207,9 +218,11 @@ echo "no" | "$AVDMANAGER" create avd \
 **Synopsis**: `scripts/emumanager start <name> [--cold-boot|--wipe-data]`
 
 **Arguments**:
+
 - `<name>`: AVD name (required)
 
 **Options**:
+
 - `--cold-boot`: Bypass Quick Boot snapshots, perform cold boot
 - `--wipe-data`: Factory reset (wipe all data) and cold boot
 
@@ -253,6 +266,7 @@ done
 **Synopsis**: `scripts/emumanager stop <name>`
 
 **Arguments**:
+
 - `<name>`: AVD name (required)
 
 **Raw Commands**:
@@ -277,9 +291,11 @@ done
 **Synopsis**: `scripts/emumanager delete <name>`
 
 **Arguments**:
+
 - `<name>`: AVD name (required)
 
 **Behavior**:
+
 - Stops the AVD if running
 - Deletes AVD registration
 - Cleans up orphaned .avd directory and .ini file
@@ -306,6 +322,7 @@ rm -f "$ANDROID_USER_HOME/avd/my_phone.ini"
 **Synopsis**: `scripts/emumanager download <image>`
 
 **Arguments**:
+
 - `<image>`: System image package name (required)
 
 **Example**:
@@ -372,12 +389,12 @@ yes | "$SDKMANAGER" --licenses
 
 ## Device Types
 
-| Type | Flags | System Image Tags | Device Definition |
-| ---- | ----- | ----------------- | ----------------- |
-| Mobile/Phone | `--mobile`, `--phone` | `google_apis_playstore`, `google_apis` | `medium_phone` |
-| Wear OS | `--wear`, `--watch` | `android-wear-signed`, `android-wear` | `wearos_large_round` |
-| TV | `--tv` | `google-tv`, `android-tv` | (default) |
-| Automotive | `--auto` | `android-automotive-playstore`, `android-automotive` | (default) |
+| Type         | Flags                 | System Image Tags                                    | Device Definition    |
+| ------------ | --------------------- | ---------------------------------------------------- | -------------------- |
+| Mobile/Phone | `--mobile`, `--phone` | `google_apis_playstore`, `google_apis`               | `medium_phone`       |
+| Wear OS      | `--wear`, `--watch`   | `android-wear-signed`, `android-wear`                | `wearos_large_round` |
+| TV           | `--tv`                | `google-tv`, `android-tv`                            | (default)            |
+| Automotive   | `--auto`              | `android-automotive-playstore`, `android-automotive` | (default)            |
 
 The script automatically selects the latest available image for the device type
 and host architecture. Preferred variants (e.g., `google_apis_playstore` over
@@ -387,9 +404,11 @@ and host architecture. Preferred variants (e.g., `google_apis_playstore` over
 
 The script maps host architecture to Android architecture:
 
-| Host | Android Architecture |
-| ---- | -------------------- |
-| `arm64`, `aarch64` | `arm64-v8a` |
-| `x86_64` | `x8664` |
+| Host               | Android Architecture |
+| ------------------ | -------------------- |
+| `arm64`, `aarch64` | `arm64-v8a`          |
+| `x86_64`           | `x8664`              |
 
 System images are filtered to match the host architecture.
+
+<!-- markdownlint-restore MD013 -->

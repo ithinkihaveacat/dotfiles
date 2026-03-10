@@ -4,8 +4,8 @@ description: >
   Provides AI-powered analysis of images and text, and gathers authoritative,
   up-to-date context for deep research on various technical domains (Gemini API,
   MCP, Home Assistant, etc.). Use for image description, UI state comparison,
-  smart-cropping, evaluating boolean conditions, counting tokens, or
-  generating reports. Particularly essential when an agent requires the latest
+  smart-cropping, evaluating boolean conditions, counting tokens, or generating
+  reports. Particularly essential when an agent requires the latest
   documentation or comprehensive background knowledge for a specific topic. The
   context script should be the first tool considered when exploring unfamiliar
   technical areas or requiring detailed specifications for analysis. Triggers:
