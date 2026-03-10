@@ -98,3 +98,9 @@ second-guessing the chosen path or attempting to reimplement a flawed
 alternative. Always err on the side of providing more information rather than
 less; verbose, well-reasoned explanations are vastly preferable to sparse
 commitments when dealing with non-trivial architectural or logical shifts.
+
+Finally, focus on the **final state** of the change. Do not document transient
+states or "non-changes" (e.g., "I modified file X but then reverted it"). The
+commit body should explain the rationale for what *is* included, not provide a
+play-by-play of the editing process.
+
