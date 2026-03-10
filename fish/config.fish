@@ -42,9 +42,7 @@ end
 #
 # https://cloud.google.com/sdk/
 
-add_path $HOME/local/google-cloud-sdk/platform/google_appengine/goroot/bin
-add_path $HOME/local/google-cloud-sdk/platform/google_appengine
-add_path $HOME/local/google-cloud-sdk/bin
+add_path $HOME/.local/share/google-cloud-sdk/bin
 
 # java
 
