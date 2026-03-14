@@ -104,7 +104,21 @@ current watchface.
     --ecn component "com.example.app/.MyComplicationProvider"
   ```
 
-## Watch-specific Debugging Settings
+## Ongoing Activities
+
+Ongoing Activities prevent the watch from returning to the watch face during
+extended tasks (like workouts or media playback) and display a persistent
+indicator on the watch face.
+
+- **Testing Ongoing Activities**: When your app creates an Ongoing Activity
+  using the `OngoingActivity` API (linked to a persistent notification), ensure
+  you test the following:
+  1. Trigger the activity (e.g., start a workout).
+  2. Put the device to sleep (`adb shell input keyevent KEYCODE_SLEEP`).
+  3. Wake the device.
+  4. **Validation**: The screen should wake directly to your app (or its ambient
+     mode), _not_ the watch face. If the user manually navigates away, the
+     ongoing activity indicator must be visible on the system watch face.
 
 - **Set a Debug App**: Setting a debug app extends the timeout for Tile
   providers (up to 20 minutes) when the system binds to them, preventing silent

@@ -67,9 +67,10 @@ permissions. Apps should handle this disabled state gracefully.
   adb shell settings put secure location_mode 3
   ```
 
-## App Standby Buckets
+## App Standby Buckets & Hibernation
 
-Test how an app behaves when the system heavily restricts its background work.
+Test how an app behaves when the system heavily restricts its background work or
+when the user hasn't interacted with it for months (hibernation).
 
 - **Put app in 'Rare' bucket** (highly restricted):
 
@@ -81,6 +82,13 @@ Test how an app behaves when the system heavily restricts its background work.
 
   ```bash
   adb shell am get-standby-bucket <your.package.name>
+  ```
+
+- **Force App into Hibernation (Android 12+)**: Revokes permissions and clears
+  cache to simulate months of inactivity.
+
+  ```bash
+  adb shell cmd app_hibernation set-state <your.package.name> true
   ```
 
 ## UI, Accessibility & Display
@@ -130,6 +138,32 @@ system colors.
 
   ```bash
   adb shell settings put global theater_mode_on 1
+  ```
+
+## Physical Inputs & Gestures
+
+Wear OS offers unique navigation methods. Simulate them using `keyevent`.
+
+- **Rotary Crown / Bezel Scroll**: Simulate scrolling up or down.
+
+  ```bash
+  adb shell input keyevent 260 # Scroll Up
+  adb shell input keyevent 261 # Scroll Down
+  ```
+
+- **Wrist Gestures**: Simulate flicking the wrist out or in (useful for
+  accessibility testing or system navigation).
+
+  ```bash
+  adb shell input keyevent 264 # Flick Out
+  adb shell input keyevent 265 # Flick In
+  ```
+
+- **Hardware Buttons**:
+
+  ```bash
+  adb shell input keyevent KEYCODE_HOME # (3) Home Button
+  adb shell input keyevent KEYCODE_BACK # (4) Back Swipe / Button
   ```
 
 ## Language & Localization
