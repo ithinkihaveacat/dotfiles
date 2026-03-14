@@ -9,47 +9,79 @@ Wear OS apps must handle phone disconnection gracefully. When the phone
 disconnects, data layer messages are queued.
 
 - **Isolate Device (Disable all radios)**: Use the bundled script to disable
-  Wi-Fi and Bluetooth. `bash scripts/wear-network-isolate`
+  Wi-Fi and Bluetooth.
+
+  ```bash
+  scripts/wear-network-isolate
+  ```
+
 - **Restore Connectivity (Enable radios)**:
-  `bash scripts/wear-network-isolate --restore`
+
+  ```bash
+  scripts/wear-network-isolate --restore
+  ```
 
 ## Power & Doze Mode
 
 Wear apps must respect battery constraints and handle Doze mode cleanly.
 
 - **Force device into Doze (Idle) mode**:
-  `adb shell dumpsys deviceidle force-idle`
-- **Exit Doze mode**: `adb shell dumpsys deviceidle unforce`
-- **Simulate low battery (e.g., 5%)**: `adb shell dumpsys battery unplug`
-  `adb shell dumpsys battery set level 5`
-- **Reset battery state to default**: `adb shell dumpsys battery reset`
 
-## Global Location Toggle (Wear 4+)
+  ```bash
+  adb shell dumpsys deviceidle force-idle
+  ```
+
+- **Exit Doze mode**:
+
+  ```bash
+  adb shell dumpsys deviceidle unforce
+  ```
+
+- **Simulate low battery (e.g., 5%)**:
+
+  ```bash
+  adb shell dumpsys battery unplug
+  adb shell dumpsys battery set level 5
+  ```
+
+- **Reset battery state to default**:
+
+  ```bash
+  adb shell dumpsys battery reset
+  ```
+
+## Global Location Permission (Wear 4+)
 
 Wear OS 4 introduced a global toggle for location, separate from individual app
 permissions. Apps should handle this disabled state gracefully.
 
-- **Disable Global Location**: `adb shell settings put secure location_mode 0`
+- **Disable Global Location**:
+
+  ```bash
+  adb shell settings put secure location_mode 0
+  ```
+
 - **Enable Global Location (High Accuracy)**:
-  `adb shell settings put secure location_mode 3`
 
-## OOBE & Account Setup
-
-Test the "First Run" experience by skipping the mandatory setup wizard.
-
-- **Skip OOBE (Out-of-Box Experience)**:
-  `adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE`
-- **Force Google Account Sync**:
-  `adb shell am broadcast -a com.google.android.gms.auth.login.ACCOUNT_CHANGED`
+  ```bash
+  adb shell settings put secure location_mode 3
+  ```
 
 ## App Standby Buckets
 
 Test how an app behaves when the system heavily restricts its background work.
 
 - **Put app in 'Rare' bucket** (highly restricted):
-  `adb shell am set-standby-bucket <your.package.name> rare`
+
+  ```bash
+  adb shell am set-standby-bucket <your.package.name> rare
+  ```
+
 - **Check current bucket**:
-  `adb shell am get-standby-bucket <your.package.name>`
+
+  ```bash
+  adb shell am get-standby-bucket <your.package.name>
+  ```
 
 ## UI, Accessibility & Display
 
@@ -58,21 +90,90 @@ system colors.
 
 - **Change System Theme / Dynamic Color (API 36+)**: Use the bundled script to
   test how your app's UI adapts to different Material 3 system palettes (e.g.,
-  indigo, lemongrass, porcelain). `bash scripts/adb-theme set lemongrass`
+  indigo, lemongrass, porcelain).
+
+  ```bash
+  scripts/adb-theme set lemongrass
+  ```
+
 - **Increase font scale (e.g., 1.3x)**:
-  `adb shell settings put system font_scale 1.3`
-- **Reset font scale**: `adb shell settings put system font_scale 1.0`
-- **Change display density (DPI)**: `adb shell wm density 250`
-- **Reset display density**: `adb shell wm density reset`
+
+  ```bash
+  adb shell settings put system font_scale 1.3
+  ```
+
+- **Reset font scale**:
+
+  ```bash
+  adb shell settings put system font_scale 1.0
+  ```
+
+- **Change display density (DPI)**:
+
+  ```bash
+  adb shell wm density 250
+  ```
+
+- **Reset display density**:
+
+  ```bash
+  adb shell wm density reset
+  ```
+
 - **Enable Always-on Display (AOD)**:
-  `adb shell settings put secure doze_enabled 1`
+
+  ```bash
+  adb shell settings put secure doze_enabled 1
+  ```
+
 - **Toggle Theater Mode on (Screen Off, No Waking)**:
-  `adb shell settings put global theater_mode_on 1`
+
+  ```bash
+  adb shell settings put global theater_mode_on 1
+  ```
 
 ## Language & Localization
 
 Test localized strings without diving into the UI settings.
 
-- **Change Language (e.g., French)**:
-  `adb shell setprop persist.sys.locale fr-FR; adb shell setprop ctl.restart zygote`
-  _(Note: The device UI will briefly restart to apply the locale change)_
+- **Change Language (e.g., French)**: _(Note: The device UI will briefly restart
+  to apply the locale change)_
+
+  ```bash
+  adb shell setprop persist.sys.locale fr-FR
+  adb shell setprop ctl.restart zygote
+  ```
+
+## Cloud Backup & Restore (Wear 4+)
+
+Wear OS 4+ supports cloud backup and restore (up to 25 MB per app). If the
+backup exceeds 25 MB, **no data** is backed up. Tiles, Complications, and
+Watchfaces are also backed up automatically.
+
+- **Simulate Backup**: Force a backup using the local transport to test what
+  gets saved.
+
+  ```bash
+  adb shell bmgr backupnow <your.package.name>
+  ```
+
+- **Simulate Restore**:
+
+  ```bash
+  adb shell bmgr restore <your.package.name>
+  ```
+
+- **Wipe Data to Test Restore Flow**: Clear the app's data before restoring to
+  verify the fresh install + restore experience.
+
+  ```bash
+  adb shell pm clear <your.package.name>
+  ```
+
+**Important Notes for Wear OS**:
+
+- Do **not** call Wearable Data Layer APIs inside a custom `BackupAgent`, as
+  they may fail during the backup/restore process.
+- Automatic backups only happen when the device is: charging, on Wi-Fi, signed
+  into a Google Account, and 24 hours have passed since the last backup (devices
+  do not need to be idle).
