@@ -33,8 +33,11 @@ implementations.
 - **System States & Edge Cases**: `references/system-states.md` (Network
   isolation, Doze mode, location permissions, battery states, language, and
   display density).
-- **App Testability Patterns**: `references/testability.md` (Patterns for
-  making Wear apps more debuggable via auth bypass, data seeding, and triggers).
+- **Health Services & Synthetic Data**: `references/health-services.md`
+  (Triggering simulated exercises, sensor data, sleep states, and fall
+  detection).
+- **App Testability Patterns**: `references/testability.md` (Patterns for making
+  Wear apps more debuggable via auth bypass, data seeding, and triggers).
 - **Wear Surfaces**: `references/surfaces.md` (Interacting with Tiles,
   Watchfaces, and Complications using `DEBUG_SURFACE` and `DEBUG_SYSUI`).
 
