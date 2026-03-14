@@ -24,7 +24,7 @@ Wear apps must respect battery constraints and handle Doze mode cleanly.
   `adb shell dumpsys battery set level 5`
 - **Reset battery state to default**: `adb shell dumpsys battery reset`
 
-## Global Location Permission (Wear 4+)
+## Global Location Toggle (Wear 4+)
 
 Wear OS 4 introduced a global toggle for location, separate from individual app
 permissions. Apps should handle this disabled state gracefully.
@@ -32,6 +32,15 @@ permissions. Apps should handle this disabled state gracefully.
 - **Disable Global Location**: `adb shell settings put secure location_mode 0`
 - **Enable Global Location (High Accuracy)**:
   `adb shell settings put secure location_mode 3`
+
+## OOBE & Account Setup
+
+Test the "First Run" experience by skipping the mandatory setup wizard.
+
+- **Skip OOBE (Out-of-Box Experience)**:
+  `adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE`
+- **Force Google Account Sync**:
+  `adb shell am broadcast -a com.google.android.gms.auth.login.ACCOUNT_CHANGED`
 
 ## App Standby Buckets
 
