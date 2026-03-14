@@ -33,6 +33,9 @@ implementations.
 - **System States & Edge Cases**: `references/system-states.md` (Network
   isolation, Doze mode, location permissions, battery states, language, and
   display density).
+- **Permissions & OS Behavior**: `references/permissions.md` (Managing API 30-36
+  changes, granular health permissions, FGS crashes, and cross-device
+  requesting).
 - **Health Services & Synthetic Data**: `references/health-services.md`
   (Triggering simulated exercises, sensor data, sleep states, and fall
   detection).
