@@ -6,7 +6,7 @@ authoritative information about the subject.
 
 ## How the Context Command Works
 
-The `context` command (canonical source: `skills/ai-analysis/scripts/context`,
+The `context` command (canonical source: `skills/ai-tools/scripts/context`,
 with `bin/context` as the PATH symlink) generates aggregated documentation for
 specific topics. Each topic is a bash function that gathers content from
 multiple sources and outputs it in XML format suitable for AI agent consumption.
@@ -63,7 +63,7 @@ run "curl -sfS 'https://x.io/page.md'  # published to https://x.io/page" \
 ### Available Topics
 
 Run `context --list` to see available topics. Each topic has a description in
-the TOPICS array in `skills/ai-analysis/scripts/context`.
+the TOPICS array in `skills/ai-tools/scripts/context`.
 
 ## Goal
 
@@ -96,11 +96,11 @@ This shows all the attributed sources. Review the list to understand:
 
 ### 1.2 Read the Topic Function
 
-Read the topic function in `skills/ai-analysis/scripts/context` to understand
+Read the topic function in `skills/ai-tools/scripts/context` to understand
 how it gathers content:
 
 ```bash
-grep -A 50 'topic_<name>()' skills/ai-analysis/scripts/context
+grep -A 50 'topic_<name>()' skills/ai-tools/scripts/context
 ```
 
 Note the fetch patterns, URL lists, and any filtering or processing applied.
@@ -210,7 +210,7 @@ corrections to existing sources. Proceed with those fixes in Phase 5._
 ## Phase 5: Make Updates
 
 Apply necessary changes to the topic function in
-`skills/ai-analysis/scripts/context`.
+`skills/ai-tools/scripts/context`.
 
 ### 5.1 Add New Sources
 
@@ -252,7 +252,7 @@ context <topic-name> 2>&1 | head -20
 context <topic-name> 2>/dev/null | grep '<command>'
 ```
 
-Run `shellcheck` on `skills/ai-analysis/scripts/context` to catch any syntax
+Run `shellcheck` on `skills/ai-tools/scripts/context` to catch any syntax
 errors.
 
 ## Output

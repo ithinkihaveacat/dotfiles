@@ -116,7 +116,7 @@ are reflected consistently in both skills and `bin/` entrypoints:
 - `skills/adb/scripts/adb-*` and `skills/adb/scripts/wearableservice-*` → adb
   skill
 - `skills/jetpack/scripts/jetpack` subcommands → jetpack skill
-- AI analysis scripts → ai-analysis skill
+- AI analysis scripts → ai-tools skill
 - `skills/emumanager/scripts/emumanager` subcommands → emumanager skill
 
 For each new script found:

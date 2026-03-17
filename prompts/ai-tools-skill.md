@@ -8,7 +8,7 @@ calls.
 
 ## Goal
 
-Produce a self-contained skill directory at `skills/ai-analysis/` that an agent
+Produce a self-contained skill directory at `skills/ai-tools/` that an agent
 can use to:
 
 1. Run the bundled scripts directly (fast, deterministic, with proper error
@@ -30,20 +30,20 @@ Before creating files, research the following:
      <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
 
 2. **Examine the AI-powered scripts thoroughly**:
-   - `skills/ai-analysis/scripts/screenshot-describe` - Generate
+   - `skills/ai-tools/scripts/screenshot-describe` - Generate
      alt-text/descriptions from images
-   - `skills/ai-analysis/scripts/screenshot-compare` - Compare two images for
+   - `skills/ai-tools/scripts/screenshot-compare` - Compare two images for
      visual differences
-   - `skills/ai-analysis/scripts/photo-smart-crop` - Smart crop images around
+   - `skills/ai-tools/scripts/photo-smart-crop` - Smart crop images around
      detected people
-   - `skills/ai-analysis/scripts/token-count` - Count tokens in text
-   - `skills/ai-analysis/scripts/emerson` - Generate essay-length analysis from
+   - `skills/ai-tools/scripts/token-count` - Count tokens in text
+   - `skills/ai-tools/scripts/emerson` - Generate essay-length analysis from
      text input
-   - `skills/ai-analysis/scripts/pascal` - Ask a question and get a short
+   - `skills/ai-tools/scripts/pascal` - Ask a question and get a short
      response
-   - `skills/ai-analysis/scripts/context` - Generate aggregated context for
+   - `skills/ai-tools/scripts/context` - Generate aggregated context for
      analysis
-   - `skills/ai-analysis/scripts/satisfies` - Evaluate boolean conditions
+   - `skills/ai-tools/scripts/satisfies` - Evaluate boolean conditions
      against text input
 
    Also check the corresponding `bin/*` symlinks, which are the CLI entrypoints
@@ -68,7 +68,7 @@ Before creating files, research the following:
 Create this exact structure:
 
 ```text
-skills/ai-analysis/
+skills/ai-tools/
 ├── SKILL.md              # Required: frontmatter + instructions
 ├── scripts/              # Canonical AI-powered script implementations
 └── references/           # Reference documentation
@@ -95,7 +95,7 @@ implementations:
 
 In this repository, each script should also have a `bin/` symlink entrypoint,
 for example:
-`bin/screenshot-describe -> ../skills/ai-analysis/scripts/screenshot-describe`.
+`bin/screenshot-describe -> ../skills/ai-tools/scripts/screenshot-describe`.
 Preserve filenames and executable permissions.
 
 ### Transitive Script Dependencies
@@ -111,7 +111,7 @@ Follow the Agent Skills specification exactly:
 
 ```yaml
 ---
-name: ai-analysis
+name: ai-tools
 description: [See below]
 ---
 ```
@@ -413,7 +413,7 @@ Before finalizing, verify:
 
 ### Structure
 
-- [ ] Skill directory exists at `skills/ai-analysis/`
+- [ ] Skill directory exists at `skills/ai-tools/`
 - [ ] `scripts/` contains executable files for all required scripts
 - [ ] Matching `bin/` symlinks exist for each script
 - [ ] Scripts are executable (`chmod +x`)
@@ -454,9 +454,9 @@ Before finalizing, verify:
 - Use `mkdir -p` to create directories
 - Implement scripts directly in `scripts/` as regular files (not symlinks)
 - Create/maintain `bin/` symlinks to those scripts (e.g.,
-  `ln -s ../skills/ai-analysis/scripts/screenshot-describe bin/screenshot-describe`)
+  `ln -s ../skills/ai-tools/scripts/screenshot-describe bin/screenshot-describe`)
 - Verify executable bits with `chmod +x scripts/*` if needed
-- Treat `skills/ai-analysis/scripts/*` as source of truth
+- Treat `skills/ai-tools/scripts/*` as source of truth
 - Test both `scripts/<name>` and `bin/<name>` invocation paths
 - The scripts' `require` function checks for dependencies at runtime
 

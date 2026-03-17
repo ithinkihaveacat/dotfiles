@@ -1,19 +1,20 @@
 ---
-name: ai-analysis
+name: ai-tools
 description: >
   Provides AI-powered analysis of images and text, and gathers authoritative,
   up-to-date context for deep research on various technical domains (Gemini API,
   MCP, Home Assistant, etc.). Use for image description, UI state comparison,
-  smart-cropping, evaluating boolean conditions, counting tokens, or generating
-  reports. Particularly essential when an agent requires the latest
-  documentation or comprehensive background knowledge for a specific topic. The
-  context script should be the first tool considered when exploring unfamiliar
-  technical areas or requiring detailed specifications for analysis. Triggers:
-  ai analysis, context, research, documentation, gemini api, mcp, home
-  assistant, image description, screenshot compare, smart crop, token count,
-  satisfies, emerson, pascal.
+  smart-cropping, evaluating boolean conditions, counting tokens, generating
+  reports, or interacting with Android UIs via popper. Particularly essential when
+  an agent requires the latest documentation or comprehensive background
+  knowledge for a specific topic. The context script should be the first tool
+  considered when exploring unfamiliar technical areas or requiring detailed
+  specifications for analysis. Triggers: ai analysis, context, research,
+  documentation, gemini api, mcp, home assistant, image description,
+  screenshot compare, smart crop, token count, satisfies, emerson, pascal,
+  popper, android ui, uiautomator2.
 compatibility: >
-  Requires curl, jq, and python3. Image tools also need base64 and magick
+  Requires curl, jq, uv, and python3. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
   generativelanguage.googleapis.com.
 ---
@@ -68,6 +69,9 @@ echo "Hello world" | scripts/satisfies "is a greeting"
 
 # Count tokens in text
 cat document.md | scripts/token-count
+
+# Interact with an Android UI via AI
+scripts/popper "start an exercise"
 ```
 
 ## Script Overview
@@ -250,6 +254,33 @@ cat file.txt | scripts/token-count
 ```
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
+
+### popper
+
+Interact with Android UIs using an AI agent powered by `uiautomator2` and Gemini. This allows semantic control of the device by providing a goal in natural language.
+
+```bash
+scripts/popper "GOAL"
+```
+
+**Options:** `--app-only` (restrict the agent to the current application)
+
+**Environment:** `ANDROID_SERIAL` (optional, target specific device)
+
+**Exit codes:** 0 success (task completed), 1 error (task failed)
+
+**Examples:**
+
+```bash
+# General UI task
+scripts/popper "accept all permissions"
+
+# Restrict to current app
+scripts/popper --app-only "start a running exercise"
+
+# Target specific device
+env ANDROID_SERIAL=12345 scripts/popper "open settings"
+```
 
 ## Image Encoding Notes
 
