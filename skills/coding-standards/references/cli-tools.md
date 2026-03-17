@@ -58,6 +58,12 @@ manual.
    - `tool help` and `tool --help` must produce **identical output**.
    - `tool help [command]` and `tool [command] --help` must produce **identical
      output**.
+   - **Complex Command Exception (The `git` exception):** For larger,
+     sophisticated tools that use subcommands (like `git` or `docker`), running
+     the bare command (`tool`) with no arguments should be treated as an
+     explicit request for help. It should be synonymous with `tool --help` and
+     `tool help`. (Simple utility tools should still fail when required
+     arguments are missing).
 
 2. **No Pagers:**
    - **Negative Example:** Unlike `git`, the tool generally **must not** launch
@@ -95,8 +101,10 @@ scripting and CI/CD pipelines.
 ### 3.1 Scenario A: Explicit Request (Success)
 
 If the user _asks_ for help, the tool has successfully fulfilled the request.
+For complex tools with subcommands, running the command with no arguments is
+also considered an explicit request for help.
 
-- **Input:** `tool --help` OR `tool help`
+- **Input:** `tool --help`, `tool help`, OR `tool` (for tools with subcommands)
 - **Output:** Help text to `stdout`.
 - **Exit Code:** `0` (Success)
 - **Why:** This allows users to pipe help text (e.g.,
@@ -107,7 +115,8 @@ If the user _asks_ for help, the tool has successfully fulfilled the request.
 If the tool displays help because the user typed a command incorrectly, the tool
 has failed.
 
-- **Input:** `tool --invalid-flag`
+- **Input:** `tool --invalid-flag` OR `tool` (for simple tools missing required
+  arguments)
 - **Output:**
   1. Short error message to `stderr` ("Unknown flag: --invalid-flag").
   2. Brief usage summary (or "Try 'tool --help' for details").
@@ -224,6 +233,7 @@ Options:
 | **Short Help** | `-h` is **FORBIDDEN** for help.               | GNU Coreutils |
 | **Long Help**  | `--help` prints to `stdout`.                  | `docker`      |
 | **Help Cmd**   | `help` is an alias for `--help`.              | `cargo`       |
+| **Bare Cmd**   | `tool` (no args) is help for complex tools.   | `git`         |
 | **Pager**      | Never launch `less` or `man`.                 | Anti-`git`    |
 | **Exit Code**  | `0` for requested help, `1` for syntax error. | POSIX         |
 | **Progress**   | Single updating line (CR), no scrolling logs. | `rsync`       |
