@@ -1,0 +1,247 @@
+#!/usr/bin/env -S uv run --script
+# Requires uv (https://docs.astral.sh/uv/).
+# /// script
+# dependencies = ["uiautomator2", "google-genai", "pydantic"]
+# [tool.uv.sources]
+# uiautomator2 = { index = "pypi" }
+# google-genai = { index = "pypi" }
+# pydantic = { index = "pypi" }
+# [[tool.uv.index]]
+# name = "pypi"
+# url = "https://pypi.org/simple"
+# ///
+"""AI-driven semantic UI interaction for Android via ADB."""
+
+import argparse
+import os
+import sys
+import time
+from typing import Literal
+
+import uiautomator2 as u2
+from google import genai
+from google.genai import types
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Interact with Android UIs using an AI agent.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  To target a specific device, use:
+                    env ANDROID_SERIAL=<serial> popper "accept all permissions"
+  GEMINI_API_KEY  Required. Your Gemini API key.
+"""
+    )
+    parser.add_argument("goal", type=str, help="The goal for the AI to achieve (e.g. 'start an exercise')")
+    parser.add_argument("--cross-app", action="store_true", help="Allow the agent to cross app boundaries (e.g. open system settings)")
+    
+    args = parser.parse_args()
+    
+    if not os.environ.get("GEMINI_API_KEY"):
+        print("popper: GEMINI_API_KEY environment variable not set", file=sys.stderr)
+        sys.exit(1)
+
+    serial = os.environ.get("ANDROID_SERIAL")
+    try:
+        # Connect to the device
+        d = u2.connect(serial)
+    except Exception as e:
+        print(f"popper: Failed to connect to device: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Connected to device {serial if serial else 'default'}. Initializing AI...", file=sys.stderr)
+
+    # Get device metadata to help the agent
+    try:
+        device_info = d.app_current()
+        initial_package = device_info.get("package", "")
+        
+        # Determine if it's a watch, tv, etc.
+        characteristics = d.shell("getprop ro.build.characteristics").output.strip()
+        device_info["characteristics"] = characteristics
+        if "watch" in characteristics:
+            device_info["device_type"] = "Wear OS Watch"
+        
+        print(f"Device Info: {device_info}", file=sys.stderr)
+    except Exception as e:
+        device_info = {}
+        initial_package = ""
+        print(f"Warning: Failed to get device info: {e}", file=sys.stderr)
+    print(f"Starting package: {initial_package}", file=sys.stderr)
+
+    client = genai.Client()
+
+    # Define UI tools
+    def tap_element(text: str = None, resource_id: str = None, description: str = None) -> dict:
+        """Taps a UI element matching the provided criteria. Only provide ONE criteria.
+        
+        Args:
+            text: The exact text of the element to tap.
+            resource_id: The exact resource-id of the element to tap.
+            description: The exact content-desc of the element to tap.
+        """
+        criteria = []
+        if text: criteria.append(f"text='{text}'")
+        if resource_id: criteria.append(f"resource_id='{resource_id}'")
+        if description: criteria.append(f"description='{description}'")
+        criteria_str = ", ".join(criteria) if criteria else "none provided"
+        print(f"UI ACTION: Tapping element ({criteria_str})", file=sys.stderr)
+        
+        try:
+            if text:
+                el = d(text=text)
+            elif resource_id:
+                el = d(resourceId=resource_id)
+            elif description:
+                el = d(description=description)
+            else:
+                return {"status": "error", "message": "Must provide text, resource_id, or description"}
+            
+            if el.exists:
+                el.click()
+                time.sleep(1.5)
+                return {"status": "success", "new_ui_hierarchy": d.dump_hierarchy()}
+            else:
+                return {"status": "error", "message": "Element not found. Try scrolling or checking criteria.", "current_ui_hierarchy": d.dump_hierarchy()}
+        except Exception as e:
+             return {"status": "error", "message": str(e), "current_ui_hierarchy": d.dump_hierarchy()}
+
+    def scroll(direction: str) -> dict:
+        """Scrolls the screen in the specified direction.
+        
+        Args:
+            direction: The direction to scroll. MUST be one of: 'forward' (scrolls down to see more content), 'backward' (scrolls up), 'left' (scrolls left to see content on the right), 'right' (scrolls right to see content on the left).
+        """
+        print(f"UI ACTION: Scrolling {direction}", file=sys.stderr)
+        try:
+            if direction == "forward":
+                d.swipe_ext("up")
+            elif direction == "backward":
+                d.swipe_ext("down")
+            elif direction == "left":
+                d.swipe_ext("right")
+            elif direction == "right":
+                d.swipe_ext("left")
+            else:
+                 return {"status": "error", "message": f"Invalid direction '{direction}'. Must be one of: 'forward', 'backward', 'left', 'right'"}
+                 
+            time.sleep(1.5)
+            return {"status": "success", "new_ui_hierarchy": d.dump_hierarchy()}
+        except Exception as e:
+             return {"status": "error", "message": str(e), "current_ui_hierarchy": d.dump_hierarchy()}
+
+    def press_button(button: str) -> dict:
+        """Presses a physical device button.
+        
+        Args:
+            button: The button to press. MUST be one of: 'home', 'back', or 'enter'.
+        """
+        print(f"UI ACTION: Pressing {button} button", file=sys.stderr)
+        try:
+            if button not in ["home", "back", "enter"]:
+                return {"status": "error", "message": f"Invalid button '{button}'. Must be one of: 'home', 'back', 'enter'"}
+            d.press(button)
+            time.sleep(1.5)
+            return {"status": "success", "new_ui_hierarchy": d.dump_hierarchy()}
+        except Exception as e:
+            return {"status": "error", "message": str(e), "current_ui_hierarchy": d.dump_hierarchy()}
+        
+    def complete_task(success: bool, reason: str) -> dict:
+        """Call this when the goal has been definitively achieved or cannot be achieved.
+        
+        Args:
+            success: True if the goal was achieved, False if it failed.
+            reason: Explanation of the outcome.
+        """
+        print(f"UI ACTION: Task marked complete (success={success}, reason={reason})", file=sys.stderr)
+        if success:
+            sys.exit(0)
+        else:
+            sys.exit(1)
+
+    ui_tools = [tap_element, scroll, press_button, complete_task]
+
+    # Set up AI context
+    cross_app_instruction = "You are ALLOWED to cross app boundaries (e.g. into system settings) to achieve the goal." if args.cross_app else f"DO NOT leave the current application ({initial_package}). If the task requires leaving, fail the task."
+
+    system_instruction = f"""You are a very strong reasoner and planner operating a complex user interface. Use these critical instructions to structure your plans, thoughts, and responses.
+
+Before taking any action (either tool calls or responses to the user), you must proactively, methodically, and independently plan and reason about:
+
+1) Logical dependencies and constraints: Analyze the intended UI action against the following factors. Resolve conflicts in order of importance:
+    1.1) Policy-based rules, mandatory prerequisites, and constraints of the interface.
+    1.2) Order of operations: Ensure taking a UI action does not prevent a subsequent necessary action.
+        1.2.1) The user may request actions in a random order, but you may need to reorder operations to maximize successful completion of the task.
+    1.3) Other prerequisites (information and/or actions needed).
+    1.4) Explicit user constraints or preferences.
+
+2) Risk assessment: What are the consequences of taking the action? Will the new UI state cause any future issues?
+
+3) Abductive reasoning and hypothesis exploration: At each step, identify the most logical and likely reason for any UI problem or error encountered.
+    3.1) Wear OS specific: If you are operating a Wear OS watch and cannot find an expected action button (like Pause, Stop, or Settings), it is highly likely located on an adjacent horizontal page. Use the scroll tool to swipe 'left' or 'right' to discover hidden pages. Paging indicators often do not appear in the XML hierarchy.
+
+4) Outcome evaluation and adaptability: Does the previous observation require any changes to your plan?
+
+5) Information availability: Incorporate all applicable and alternative sources of information, including:
+    5.1) Using available tools and their capabilities.
+    5.2) All policies, rules, checklists, and constraints.
+    5.3) Previous observations and conversation history.
+
+6) Precision and Grounding: Ensure your reasoning is extremely precise and relevant to each exact ongoing situation.
+
+7) Completeness: Ensure that all requirements, constraints, options, and preferences are exhaustively incorporated into your plan.
+
+8) Persistence and patience: Do not give up unless all the reasoning above is exhausted.
+    8.1) Don't be dissuaded by time taken or user frustration.
+    8.2) This persistence must be intelligent: On transient errors (e.g. timeout, UI loading), you must retry unless an explicit retry limit (e.g., max 3 tries) has been reached. If such a limit is hit, you must stop. On other errors, you must change your strategy or arguments, not repeat the same failed tool call.
+
+9) Inhibit your response: only take an action after all the above reasoning is completed. Once you've executed a state-changing UI action, you cannot take it back.
+
+When thinking silently: ALWAYS start the thought with a brief (one sentence) recap of the current progress on the task. In particular, consider whether the task is already done.
+
+In quoted strings, the only allowed escape sequences are \\\\, \\n, and \\". Instead of \\\\u escapes, use UTF-8.
+
+---
+Device Information:
+{device_info}
+
+Constraints:
+{cross_app_instruction}
+"""
+
+    config = types.GenerateContentConfig(
+        tools=ui_tools,
+        system_instruction=system_instruction,
+        temperature=1.0,
+        tool_config=types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(mode='ANY')
+        ),
+    )
+
+    chat = client.chats.create(model="gemini-3-flash-preview", config=config)
+    
+    print(f"Starting goal: {args.goal}", file=sys.stderr)
+    
+    # Send the initial UI state and goal to the model
+    initial_xml = d.dump_hierarchy()
+    prompt = f"""Goal: {args.goal}
+
+Current UI State:
+{initial_xml}
+
+What is your first action?"""
+    
+    try:
+        # The SDK seamlessly handles the execution cycle: it detects the model's call, 
+        # executes the mapped Python function, and feeds the resulting UI state back to the model.
+        # This will block and loop internally until `complete_task` is called (which calls sys.exit()).
+        response = chat.send_message(prompt)
+        print(f"\\nFinal Model Response: {response.text}")
+    except Exception as e:
+        print(f"\\nError communicating with AI or executing UI actions: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
