@@ -1,25 +1,24 @@
 ---
 name: ai-tools
 description: >
-  Provides AI-powered analysis of images and text, and gathers authoritative,
-  up-to-date context for deep research on various technical domains (Gemini API,
-  MCP, Home Assistant, etc.). Use for image description, UI state comparison,
-  smart-cropping, evaluating boolean conditions, counting tokens, generating
-  reports, or interacting with Android UIs via popper. Particularly essential when
-  an agent requires the latest documentation or comprehensive background
-  knowledge for a specific topic. The context script should be the first tool
-  considered when exploring unfamiliar technical areas or requiring detailed
-  specifications for analysis. Triggers: ai analysis, context, research,
-  documentation, gemini api, mcp, home assistant, image description,
-  screenshot compare, smart crop, token count, satisfies, emerson, pascal,
-  popper, android ui, uiautomator2.
+  Use this skill to interact with and automate Android UIs via ADB, analyze
+  visual UI states, and gather authoritative context for deep technical research.
+  It provides a suite of AI-powered utilities for driving Android devices (via
+  the popper agent), describing screenshots, comparing before/after UI states,
+  smart-cropping photos, and evaluating text. Use when you need to control an
+  Android app, test a Wear OS UI, understand visual differences in screenshots,
+  or when you lack sufficient background knowledge on topics like the Gemini API
+  or MCP and need to generate comprehensive reports or short answers based on
+  the latest documentation. Triggers: android ui, adb, uiautomator2, popper,
+  automate app, test wear os, screenshot compare, image description, smart crop,
+  context, research, gemini api, mcp, home assistant, token count.
 compatibility: >
   Requires curl, jq, uv, and python3. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
   generativelanguage.googleapis.com.
 ---
 
-# AI Analysis Tools
+# AI Tools
 
 ## Important: Use Scripts First
 
