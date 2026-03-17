@@ -62,25 +62,25 @@ Environment:
         print(f"popper: Failed to connect to device: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Connected to device {serial if serial else 'default'}. Initializing AI...", file=sys.stderr)
+    print(f"[local] Connected to device {serial if serial else 'default'}. Initializing AI...", file=sys.stderr)
 
     # Get device metadata to help the agent
     try:
         device_info = d.app_current()
         initial_package = device_info.get("package", "")
-        
+
         # Determine if it's a watch, tv, etc.
         characteristics = d.shell("getprop ro.build.characteristics").output.strip()
         device_info["characteristics"] = characteristics
         if "watch" in characteristics:
             device_info["device_type"] = "Wear OS Watch"
-        
-        print(f"Device Info: {device_info}", file=sys.stderr)
+
+        print(f"[local] Device Info: {device_info}", file=sys.stderr)
     except Exception as e:
         device_info = {}
         initial_package = ""
-        print(f"Warning: Failed to get device info: {e}", file=sys.stderr)
-    print(f"Starting package: {initial_package}", file=sys.stderr)
+        print(f"[local] Warning: Failed to get device info: {e}", file=sys.stderr)
+    print(f"[local] Starting package: {initial_package}", file=sys.stderr)
 
     client = genai.Client()
 
@@ -98,7 +98,7 @@ Environment:
         if resource_id: criteria.append(f"resource_id='{resource_id}'")
         if description: criteria.append(f"description='{description}'")
         criteria_str = ", ".join(criteria) if criteria else "none provided"
-        print(f"UI ACTION: Tapping element ({criteria_str})", file=sys.stderr)
+        print(f"[agent] Tapping element ({criteria_str})", file=sys.stderr)
         
         try:
             if text:
@@ -125,7 +125,7 @@ Environment:
         Args:
             direction: The direction to scroll. MUST be one of: 'forward' (scrolls down to see more content), 'backward' (scrolls up), 'left' (scrolls left to see content on the right), 'right' (scrolls right to see content on the left).
         """
-        print(f"UI ACTION: Scrolling {direction}", file=sys.stderr)
+        print(f"[agent] Scrolling {direction}", file=sys.stderr)
         try:
             if direction == "forward":
                 d.swipe_ext("up")
@@ -149,7 +149,7 @@ Environment:
         Args:
             button: The button to press. MUST be one of: 'home', 'back', or 'enter'.
         """
-        print(f"UI ACTION: Pressing {button} button", file=sys.stderr)
+        print(f"[agent] Pressing {button} button", file=sys.stderr)
         try:
             if button not in ["home", "back", "enter"]:
                 return {"status": "error", "message": f"Invalid button '{button}'. Must be one of: 'home', 'back', 'enter'"}
@@ -166,7 +166,7 @@ Environment:
             success: True if the goal was achieved, False if it failed.
             reason: Explanation of the outcome.
         """
-        print(f"UI ACTION: Task marked complete (success={success}, reason={reason})", file=sys.stderr)
+        print(f"[agent] Task marked complete (success={success}, reason={reason})", file=sys.stderr)
         if success:
             sys.exit(0)
         else:
@@ -229,11 +229,14 @@ Constraints:
         tool_config=types.ToolConfig(
             function_calling_config=types.FunctionCallingConfig(mode='ANY')
         ),
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=50
+        )
     )
 
     chat = client.chats.create(model="gemini-3-flash-preview", config=config)
     
-    print(f"Starting goal: {args.goal}", file=sys.stderr)
+    print(f"[goal] {args.goal}", file=sys.stderr)
     
     # Send the initial UI state and goal to the model
     initial_xml = d.dump_hierarchy()
@@ -249,9 +252,20 @@ What is your first action?"""
         # executes the mapped Python function, and feeds the resulting UI state back to the model.
         # This will block and loop internally until `complete_task` is called (which calls sys.exit()).
         response = chat.send_message(prompt)
-        print(f"\\nFinal Model Response: {response.text}")
+        # If the model breaks the ANY constraints and returns a pure text response instead of
+        # calling complete_task, print it cleanly. If it contains function calls, don't crash.
+        text_output = ""
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if part.text:
+                    text_output += part.text
+        if text_output:
+            print(f"[agent] Model responded without calling complete_task: {text_output.strip()}", file=sys.stderr)
+        else:
+            print(f"[agent] Agent execution loop terminated without a final text response.", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        print(f"\\nError communicating with AI or executing UI actions: {e}", file=sys.stderr)
+        print(f"[local] Error communicating with AI or executing UI actions: {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
