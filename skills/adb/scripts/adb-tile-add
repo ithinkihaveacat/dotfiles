@@ -149,10 +149,19 @@ fi
 #   4. Renderer Timeouts: The provider hung or crashed silently before responding.
 #      Result: 'Error getting tile response' in the renderer.
 #
-# Note: SysUI emits "Visible tile added" when it allocates the container, but
-# the renderer might still fail to parse the document milliseconds *after* this.
-# Therefore, we monitor for specific failure signatures both
-# BEFORE and AFTER the visibility signal using a short grace period.
+# Visibility Heuristics:
+# SysUI provides two distinct signals for a successful addition:
+#   - Signal 1 (Container): SysUI allocates the carousel slot and shifts focus.
+#     (e.g., "Visible tile added", "Jumped to the tile")
+#   - Signal 2 (Content): The renderer has received and parsed the app's data.
+#     (e.g., "Received tile content", "Rendering tile")
+#
+# We wait for Signal 2 to ensure that automated tools (like screenshots) don't
+# capture the tile in its transient "loading" state (generic app icon).
+#
+# Robustness: Signal 2 logs can be inconsistent across OS versions. If Signal 1
+# is confirmed, we only wait a short grace period (~3s) for Signal 2 before
+# assuming success, preventing a full timeout if the rendering log was missed.
 # -----------------------------------------------------------------------------
 
 LOG_FILE=""
@@ -169,7 +178,7 @@ if [ "$WAIT" = true ] && [ "$SHOW" = true ]; then
 
   # Monitor relevant tags in the background. We filter specifically for errors
   # from the renderer and runtime to catch async crashes.
-  adb logcat -v time SysUI:I ProtoTilesTileRendererImpl:E AndroidRuntime:E "*:S" >"$LOG_FILE" &
+  adb logcat -v time SysUI:D ProtoTilesTileRendererImpl:D AndroidRuntime:E "*:S" >"$LOG_FILE" &
   LOG_PID=$!
 
   # Robust cleanup trap: Handles normal exits, INT (Ctrl+C), and TERM signals.
@@ -216,8 +225,9 @@ if [ -n "$INDEX" ]; then
     if [ "$WAIT" = true ]; then
       echo "Waiting for tile visibility..."
       START_TIME=$(date +%s)
-      TIMEOUT=10
+      TIMEOUT=15
       VISIBLE=false
+      VISIBLE_TIME=0
 
       while true; do
         CURRENT_TIME=$(date +%s)
@@ -235,15 +245,32 @@ if [ -n "$INDEX" ]; then
           exit 1
         fi
 
-        if [ $ELAPSED -ge $TIMEOUT ]; then
-          echo "Warning: Timeout waiting for tile visibility ($TIMEOUT s)."
-          echo "The tile may be visible, but the success log was missed, or it's stuck loading."
-          break
+        # Check for Container Visibility (Success Signal 1)
+        if [ "$VISIBLE" = false ] && grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile." "$LOG_FILE"; then
+          VISIBLE=true
+          VISIBLE_TIME=$CURRENT_TIME
         fi
 
-        # Check for Success Signal
-        if grep -q "Visible tile added" "$LOG_FILE"; then
-          VISIBLE=true
+        # Check for Content Rendering (Success Signal 2)
+        if [ "$VISIBLE" = true ]; then
+          # If we find evidence of rendering, we are done.
+          if grep -Eq "(Received tile content|Rendering tile).*$PACKAGE_NAME" "$LOG_FILE"; then
+            break
+          fi
+
+          # Robustness: If the container is visible, don't wait more than 3 seconds for
+          # the specific rendering log. Some devices or tile types might not emit it.
+          if [ $((CURRENT_TIME - VISIBLE_TIME)) -ge 3 ]; then
+            break
+          fi
+        fi
+
+        # Global timeout
+        if [ $ELAPSED -ge $TIMEOUT ]; then
+          if [ "$VISIBLE" = false ]; then
+            echo "Warning: Timeout waiting for tile visibility ($TIMEOUT s)."
+            echo "The tile may be visible, but the success log was missed, or it's stuck loading."
+          fi
           break
         fi
 
