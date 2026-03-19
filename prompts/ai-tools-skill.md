@@ -8,8 +8,8 @@ calls.
 
 ## Goal
 
-Produce a self-contained skill directory at `skills/ai-tools/` that an agent
-can use to:
+Produce a self-contained skill directory at `skills/ai-tools/` that an agent can
+use to:
 
 1. Run the bundled scripts directly (fast, deterministic, with proper error
    handling and model selection)
@@ -37,14 +37,15 @@ Before creating files, research the following:
    - `skills/ai-tools/scripts/photo-smart-crop` - Smart crop images around
      detected people
    - `skills/ai-tools/scripts/token-count` - Count tokens in text
+   - `skills/ai-tools/scripts/popper` - Interact with Android UIs using an AI
+     agent
    - `skills/ai-tools/scripts/emerson` - Generate essay-length analysis from
      text input
-   - `skills/ai-tools/scripts/pascal` - Ask a question and get a short
-     response
+   - `skills/ai-tools/scripts/pascal` - Ask a question and get a short response
    - `skills/ai-tools/scripts/context` - Generate aggregated context for
      analysis
-   - `skills/ai-tools/scripts/satisfies` - Evaluate boolean conditions
-     against text input
+   - `skills/ai-tools/scripts/satisfies` - Evaluate boolean conditions against
+     text input
 
    Also check the corresponding `bin/*` symlinks, which are the CLI entrypoints
    in PATH.
@@ -88,6 +89,7 @@ implementations:
 - `scripts/photo-smart-crop`
 - `scripts/photo-has-people`
 - `scripts/token-count`
+- `scripts/popper`
 - `scripts/emerson`
 - `scripts/pascal`
 - `scripts/context`
@@ -136,7 +138,8 @@ Include these trigger phrases: ai analysis, describe image, compare screenshots,
 smart crop, crop around people, face crop, count tokens, token count, generate
 essay, evaluate condition, alt text, image description, UI comparison, visual
 diff, satisfies condition, boolean evaluation, gemini, context, gather context,
-research topic.
+research topic, android ui, adb, uiautomator2, popper, automate app, test wear
+os.
 
 Example pattern:
 
@@ -144,15 +147,16 @@ Example pattern:
 description: >
   Command-line tools that delegate analysis tasks to AI models. Includes image
   description, screenshot comparison, smart cropping around people, token
-  counting, essay generation from text, boolean condition evaluation, and
-  context gathering. Use for describing images, comparing UI states, cropping
-  photos around faces, counting tokens, generating reports, evaluating
-  conditions, gathering context for analysis, or any task requiring AI
-  inference. Triggers: ai analysis, describe image, compare screenshots, smart
-  crop, crop around people, face crop, count tokens, token count, generate
-  essay, evaluate condition, alt text, image description, UI comparison, visual
-  diff, satisfies condition, boolean evaluation, gemini, context, gather
-  context, research topic.
+  counting, essay generation from text, boolean condition evaluation, context
+  gathering, and Android UI interaction via popper. Use for describing images,
+  comparing UI states, cropping photos around faces, counting tokens, generating
+  reports, evaluating conditions, gathering context for analysis, automating
+  Android apps, testing Wear OS, or any task requiring AI inference. Triggers:
+  ai analysis, describe image, compare screenshots, smart crop, crop around
+  people, face crop, count tokens, token count, generate essay, evaluate
+  condition, alt text, image description, UI comparison, visual diff, satisfies
+  condition, boolean evaluation, gemini, context, gather context, research
+  topic, android ui, adb, uiautomator2, popper, automate app, test wear os.
 ```
 
 **Compatibility requirements (recommended):**
@@ -161,8 +165,8 @@ description: >
 - Include if the skill has external dependencies or environment requirements
 - Mention required command-line tools, network access needs, or target platforms
 - Example:
-  `compatibility: Requires curl, jq, and python3. Image tools also need base64`
-  `and magick (ImageMagick). Needs GEMINI_API_KEY and network access to`
+  `compatibility: Requires curl, jq, and uv. Image tools also need base64`
+  `and magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to`
   `generativelanguage.googleapis.com.`
 
 For maximum compatibility across skill loaders, prefer a single-line
@@ -210,9 +214,9 @@ skill activates.
 #### Quick Start
 
 - Environment: `GEMINI_API_KEY` required
-- Dependencies: `curl`, `jq`, `python3` (all tools); `base64`, `magick` (image
-  tools only)
-- 7 highest-value commands to run first:
+- Dependencies: `curl`, `jq`, `uv` (all tools); `base64`, `magick` (image tools
+  only)
+- 8 highest-value commands to run first:
   - `scripts/screenshot-describe image.png` (generate alt-text)
   - `scripts/screenshot-compare before.png after.png` (find visual differences)
   - `scripts/photo-smart-crop photo.jpg cropped.jpg` (crop around people)
@@ -222,6 +226,7 @@ skill activates.
   - `scripts/context gemini-api | scripts/emerson "Question"` (context +
     analysis)
   - `echo "text" | scripts/satisfies "condition"` (boolean evaluation)
+  - `scripts/popper "start an exercise"` (interact with Android UI)
 - Use paths relative to the skill: `scripts/screenshot-describe`
 
 #### Script Overview
@@ -284,6 +289,12 @@ Scripts to document:
    - Useful for shell conditionals and validation
    - Exit code 0 = true, 1 = false
    - Use `-v` or `--verbose` to print "true" or "false" to stderr
+
+10. **popper** - Interact with Android UIs using an AI agent
+    - Uses uiautomator2 and Gemini to semantically control Android devices
+    - Provide a natural language goal (e.g., "accept all permissions")
+    - Supports `--app-only` to restrict actions to the current application
+    - Exit code 0 on success, 1 on failure
 
 #### Image Encoding Notes
 
@@ -432,7 +443,7 @@ Before finalizing, verify:
 - [ ] `SKILL.md` has "Important: Use Scripts First" section at top of body
 - [ ] All scripts documented (screenshot-describe, screenshot-compare,
       photo-smart-crop, photo-has-people, token-count, emerson, pascal, context,
-      satisfies)
+      satisfies, popper)
 - [ ] Image encoding conventions documented (briefly, for troubleshooting)
 - [ ] Platform differences (macOS vs Linux) noted
 - [ ] Raw API commands are NOT in SKILL.md body (agents read script source)

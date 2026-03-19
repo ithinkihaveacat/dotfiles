@@ -12,6 +12,7 @@
 - [context](#context) - Generate aggregated context for analysis
 - [satisfies](#satisfies) - Evaluate boolean conditions against text
 - [token-count](#token-count) - Count tokens in text
+- [popper](#popper) - Interact with Android UIs using an AI agent
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
 - [Request Structure](#request-structure) - API request patterns
 
@@ -665,6 +666,66 @@ cat *.md | scripts/token-count
 | 0    | Success (outputs token count)  |
 | 1    | Error (empty input, API error) |
 | 127  | Missing required dependency    |
+
+---
+
+## popper
+
+Interact with Android UIs using an AI agent powered by `uiautomator2` and
+Gemini. This allows semantic control of the device by providing a goal in
+natural language.
+
+### Synopsis
+
+```bash
+scripts/popper [OPTIONS] "GOAL"
+```
+
+### Arguments
+
+| Argument | Required | Description                                        |
+| -------- | -------- | -------------------------------------------------- |
+| `GOAL`   | Yes      | The natural language goal for the agent to achieve |
+
+### Options
+
+| Option       | Description                                                                       |
+| ------------ | --------------------------------------------------------------------------------- |
+| `--app-only` | Restrict the agent to the current application. It will fail if it leaves the app. |
+
+### Environment Variables
+
+| Variable         | Required | Description                               |
+| ---------------- | -------- | ----------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                       |
+| `ANDROID_SERIAL` | No       | Target a specific Android device/emulator |
+
+### Examples
+
+```bash
+# General UI task
+scripts/popper "accept all permissions"
+
+# Restrict to current app
+scripts/popper --app-only "start a running exercise"
+
+# Target specific device
+env ANDROID_SERIAL=12345 scripts/popper "open settings"
+```
+
+### Raw API Command
+
+_This script delegates complex control flow, image capture, XML parsing, and
+planning to a python script (`uv run --script`). It cannot be reasonably reduced
+to a single curl command. Please see `scripts/popper` for the implementation
+details._
+
+### Exit Codes
+
+| Code | Description              |
+| ---- | ------------------------ |
+| 0    | Success (task completed) |
+| 1    | Error (task failed)      |
 
 ---
 

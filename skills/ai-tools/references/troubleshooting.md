@@ -7,6 +7,7 @@
 - [API Errors](#api-errors)
 - [File Issues](#file-issues)
 - [Output Issues](#output-issues)
+- [Popper (Android UI) Issues](#popper-android-ui-issues)
 - [Platform Differences](#platform-differences)
 
 ---
@@ -99,10 +100,24 @@ sudo apt-get install imagemagick
 brew install imagemagick
 ```
 
+### Missing uv
+
+**Error:** `exit code 127` or `uv: command not found`
+
+**Solution:**
+
+Install `uv` according to the official instructions
+(<https://docs.astral.sh/uv/>):
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 **Verify installation:**
 
 ```bash
-magick --version
+uv --version
 ```
 
 ---
@@ -364,6 +379,53 @@ scripts/satisfies "condition"  # Will fail
 
 2. Test with known inputs first
 3. Use explicit phrasing like "contains", "mentions", "starts with"
+
+---
+
+## Popper (Android UI) Issues
+
+### Device Not Found
+
+**Error:** `uiautomator2.exceptions.DeviceNotFoundError` or ADB device missing
+
+**Solution:**
+
+Ensure a device or emulator is running and accessible via ADB:
+
+```bash
+# Check connected devices
+adb devices
+```
+
+If multiple devices are connected, set `ANDROID_SERIAL`:
+
+```bash
+export ANDROID_SERIAL="your-device-id"
+scripts/popper "goal"
+```
+
+### uiautomator2 Server Error
+
+**Error:** `uiautomator2` fails to start or connect
+
+**Solution:**
+
+`uiautomator2` installs a background server on the device. Sometimes this needs
+to be reinitialized:
+
+```bash
+uv run python -m uiautomator2 init
+```
+
+### Leaving Application Boundaries
+
+**Error:** Task fails immediately when using `--app-only`
+
+**Solution:**
+
+The agent attempted an action that would switch to a different app. If the goal
+requires interacting with system dialogs or other apps, run `popper` without the
+`--app-only` flag.
 
 ---
 

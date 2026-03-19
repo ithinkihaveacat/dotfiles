@@ -2,18 +2,19 @@
 name: ai-tools
 description: >
   Use this skill to interact with and automate Android UIs via ADB, analyze
-  visual UI states, and gather authoritative context for deep technical research.
-  It provides a suite of AI-powered utilities for driving Android devices (via
-  the popper agent), describing screenshots, comparing before/after UI states,
-  smart-cropping photos, and evaluating text. Use when you need to control an
-  Android app, test a Wear OS UI, understand visual differences in screenshots,
-  or when you lack sufficient background knowledge on topics like the Gemini API
-  or MCP and need to generate comprehensive reports or short answers based on
-  the latest documentation. Triggers: android ui, adb, uiautomator2, popper,
-  automate app, test wear os, screenshot compare, image description, smart crop,
-  context, research, gemini api, mcp, home assistant, token count.
+  visual UI states, and gather authoritative context for deep technical
+  research. It provides a suite of AI-powered utilities for driving Android
+  devices (via the popper agent), describing screenshots, comparing before/after
+  UI states, smart-cropping photos, and evaluating text. Use when you need to
+  control an Android app, test a Wear OS UI, understand visual differences in
+  screenshots, or when you lack sufficient background knowledge on topics like
+  the Gemini API or MCP and need to generate comprehensive reports or short
+  answers based on the latest documentation. Triggers: android ui, adb,
+  uiautomator2, popper, automate app, test wear os, screenshot compare, image
+  description, smart crop, context, research, gemini api, mcp, home assistant,
+  token count.
 compatibility: >
-  Requires curl, jq, uv, and python3. Image tools also need base64 and magick
+  Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
   generativelanguage.googleapis.com.
 ---
@@ -41,8 +42,8 @@ similar functionality.
 
 **Environment:** Set `GEMINI_API_KEY` before running any commands.
 
-**Dependencies:** `curl`, `jq` (all tools); `base64`, `magick` (image tools
-only)
+**Dependencies:** `curl`, `jq`, `uv` (all tools); `base64`, `magick` (image
+tools only)
 
 ```bash
 # Gather context and analyze
@@ -256,7 +257,9 @@ cat file.txt | scripts/token-count
 
 ### popper
 
-Interact with Android UIs using an AI agent powered by `uiautomator2` and Gemini. This allows semantic control of the device by providing a goal in natural language.
+Interact with Android UIs using an AI agent powered by `uiautomator2` and
+Gemini. This allows semantic control of the device by providing a goal in
+natural language.
 
 ```bash
 scripts/popper "GOAL"
