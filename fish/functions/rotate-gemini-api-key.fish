@@ -21,5 +21,6 @@ function rotate-gemini-api-key -d "Cycles GEMINI_API_KEY through the GEMINI_API_
     end
 
     set -xU GEMINI_API_KEY $GEMINI_API_KEYS[$next_index]
-    echo "Switched GEMINI_API_KEY to key $next_index of "(count $GEMINI_API_KEYS)
+    set -xU GEMINI_CLI_GEMINI_API_KEY $GEMINI_API_KEYS[$next_index]
+    echo "Switched GEMINI_API_KEY and GEMINI_CLI_GEMINI_API_KEY to key $next_index of "(count $GEMINI_API_KEYS)
 end
