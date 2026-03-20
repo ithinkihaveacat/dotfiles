@@ -9,7 +9,7 @@
 - [Tile Management (Wear OS)](#tile-management-wear-os)
 - [Activity Discovery](#activity-discovery)
 - [Package Operations](#package-operations)
-- [Wear OS Data Layer](#wear-os-data-layer)
+- [Raw Dumpsys & Service Commands](#raw-dumpsys--service-commands)
 - [System & Dumpsys](#system--dumpsys)
 - [Display & Demo Mode](#display--demo-mode)
 
@@ -64,33 +64,6 @@ adb exec-out input keyevent KEYCODE_WAKEUP
 adb exec-out input keyevent KEYCODE_SLEEP
 ```
 
-### `scripts/adb-account`
-
-**Purpose**: Display account information. **Dependencies**: `adb` **Usage**:
-`scripts/adb-account` **Raw Command**:
-
-```bash
-adb exec-out dumpsys account
-```
-
-### `scripts/adb-charging-off`
-
-**Purpose**: Simulate unplugging the charger. **Dependencies**: `adb` **Usage**:
-`scripts/adb-charging-off` **Raw Command**:
-
-```bash
-adb exec-out dumpsys battery unplug
-```
-
-### `scripts/adb-charging-on`
-
-**Purpose**: Reset the battery status to charging. **Dependencies**: `adb`
-**Usage**: `scripts/adb-charging-on` **Raw Command**:
-
-```bash
-adb exec-out dumpsys battery reset
-```
-
 ### `scripts/adb-log`
 
 **Purpose**: Write a message to the Android system log. **Dependencies**: `adb`
@@ -107,16 +80,6 @@ adb exec-out log -p f -t TAG MESSAGE
 
 ```bash
 adb logcat -v time "*:S TAG"
-```
-
-### `scripts/adb-setting-location-accuracy`
-
-**Purpose**: Check the status of the "Google Location Accuracy" setting.
-**Dependencies**: `adb` **Usage**: `scripts/adb-setting-location-accuracy` **Raw
-Command**:
-
-```bash
-adb exec-out dumpsys settings | awk '$2 == "name:assisted_gps_enabled"'
 ```
 
 ### `scripts/adb-version-sft`
@@ -384,16 +347,6 @@ apk-cat-manifest APK_FILE | xpath -n -q -e \
 adb exec-out pm list packages -3 | cut -b 9- | sort
 ```
 
-### `scripts/apk-badging`
-
-**Purpose**: Display 'aapt d badging' information for a given APK.
-**Dependencies**: `aapt` **Usage**: `scripts/apk-badging APK_FILE` **Raw
-Command**:
-
-```bash
-aapt d badging APK_FILE
-```
-
 ### `scripts/apk-cat-manifest`
 
 **Purpose**: Display the AndroidManifest.xml from an APK. **Dependencies**:
@@ -404,44 +357,32 @@ Command**:
 apkanalyzer manifest print APK_FILE | xmllint --format -
 ```
 
-## Wear OS Data Layer
+## Raw Dumpsys & Service Commands
 
-### `scripts/wearableservice-capabilities`
+Instead of using wrapper scripts, you should use raw ADB commands for simple
+dumpsys operations. Here are the most useful service names and raw commands:
 
-**Purpose**: Dump advertised capabilities. **Dependencies**: `adb` **Usage**:
-`scripts/wearableservice-capabilities` **Raw Command**:
+### Common System Dumpsys
 
-```bash
-adb exec-out dumpsys activity service WearableService | sed -n '/CapabilityService/,/######/p'
-```
+- **Account information:** `adb exec-out dumpsys account`
+- **Battery stats:** `adb exec-out dumpsys batterystats`
+- **Power information:** `adb exec-out dumpsys power`
+- **Process exit info:** `adb exec-out dumpsys activity exit-info`
+- **Battery state simulation:**
+  - Unplug charger: `adb exec-out dumpsys battery unplug`
+  - Reset charging state: `adb exec-out dumpsys battery reset`
 
-### `scripts/wearableservice-nodes`
+### Useful Package and Service Names
 
-**Purpose**: List connected nodes. **Dependencies**: `adb` **Usage**:
-`scripts/wearableservice-nodes` **Raw Command**:
+When dumping specific services (`adb exec-out dumpsys activity service <NAME>`),
+these specific packages/components are very useful to know:
 
-```bash
-adb exec-out dumpsys activity service WearableService | sed -n '/NodeService/,/######/p'
-```
-
-### `scripts/wearableservice-items`
-
-**Purpose**: List data items. **Dependencies**: `adb` **Usage**:
-`scripts/wearableservice-items` **Raw Command**:
-
-```bash
-adb exec-out dumpsys activity service WearableService | sed -n '/DataService/,/######/p'
-```
-
-### `scripts/wearableservice-rpcs`
-
-**Purpose**: Dump the state of the RpcTracker from the Wearable Service.
-**Dependencies**: `adb` **Usage**: `scripts/wearableservice-rpcs` **Raw
-Command**:
-
-```bash
-adb exec-out dumpsys activity service WearableService | sed -n '/RpcTracker/,/######/p'
-```
+- **Wear Health Services (WHS) Main Service:**
+  `com.google.android.wearable.healthservices`
+- **WHS RecordingService (for tracking exercises/logs):**
+  `com.google.android.wearable.healthservices/.background.service.RecordingService`
+- **WearableService (Data Layer):** `WearableService` (e.g.
+  `adb exec-out dumpsys activity service WearableService`)
 
 ## System & Dumpsys
 
@@ -455,61 +396,6 @@ adb exec-out dumpsys battery
 adb exec-out dumpsys settings | awk -v _match="match" '$2 ~ "name:(" _match ")"'
 ```
 
-### `scripts/adb-dumpsys-batterystats`
-
-**Purpose**: Display battery stats dumpsys. **Dependencies**: `adb` **Usage**:
-`scripts/adb-dumpsys-batterystats` **Raw Command**:
-
-```bash
-adb exec-out dumpsys batterystats
-```
-
-### `scripts/adb-dumpsys-power`
-
-**Purpose**: Display power information dumpsys. **Dependencies**: `adb`
-**Usage**: `scripts/adb-dumpsys-power` **Raw Command**:
-
-```bash
-adb exec-out dumpsys power
-```
-
-### `scripts/adb-dumpsys-service`
-
-**Purpose**: Display dumpsys information for a specific Android service.
-**Dependencies**: `adb` **Usage**: `scripts/adb-dumpsys-service SERVICE_NAME`
-**Raw Command**:
-
-```bash
-adb exec-out dumpsys activity service SERVICE_NAME
-```
-
-### `scripts/adb-dumpsys-whs`
-
-**Purpose**: Display Wear Health Services (WHS) dumpsys. **Dependencies**: `adb`
-**Usage**: `scripts/adb-dumpsys-whs` **Raw Command**:
-
-```bash
-adb exec-out dumpsys activity services WHS_SERVICE
-```
-
-### `scripts/adb-dumpsys-whs-logs`
-
-**Purpose**: Display WHS RecordingService logs. **Dependencies**: `adb`
-**Usage**: `scripts/adb-dumpsys-whs-logs` **Raw Command**:
-
-```bash
-adb exec-out dumpsys activity service com.google.android.wearable.healthservices/.background.service.RecordingService
-```
-
-### `scripts/adb-exit-info`
-
-**Purpose**: Display process exit information. **Dependencies**: `adb`
-**Usage**: `scripts/adb-exit-info` **Raw Command**:
-
-```bash
-adb exec-out dumpsys activity exit-info
-```
-
 ### `scripts/adb-jobscheduler`
 
 **Purpose**: Display dumpsys information for the Android JobScheduler.
@@ -518,16 +404,6 @@ Command**:
 
 ```bash
 adb exec-out dumpsys jobscheduler
-```
-
-### `scripts/adb-not-optimized`
-
-**Purpose**: List user applications whitelisted for battery optimization (doze
-mode). **Dependencies**: `adb`, `perl` **Usage**: `scripts/adb-not-optimized`
-**Raw Command**:
-
-```bash
-adb exec-out dumpsys deviceidle | perl -ne 'print if /^\s+Whitelist user apps/ ... /^\s+Whitelist/'
 ```
 
 ## Display & Demo Mode
