@@ -4,15 +4,15 @@ description: >
   Provides coding standards and conventions for this repository: shell script
   quality (shellcheck, shfmt, error handling, Bash compatibility), CLI tool
   design (verb-noun command patterns, help systems, exit codes, output
-  conventions), Markdown formatting (markdown-format, heading styles), git
-  commit policies (message format, agent commit restrictions), and Android
-  development context. Use when writing, reviewing, or validating scripts, CLI
-  tools, Markdown files, or git commits against project conventions. Also use
-  when asked to check whether a change follows coding standards, review code for
-  style compliance, or validate work against project rules. Triggers: coding
-  standards, style guide, validate change, review conventions, shellcheck,
-  shfmt, markdown format, commit message, CLI design, code review, lint,
-  formatting.
+  conventions), Markdown formatting (markdown-format, heading styles), python
+  linting and formatting (ruff, uvx), git commit policies (message format, agent
+  commit restrictions), and Android development context. Use when writing,
+  reviewing, or validating scripts, CLI tools, Markdown files, or git commits
+  against project conventions. Also use when asked to check whether a change
+  follows coding standards, review code for style compliance, or validate work
+  against project rules. Triggers: coding standards, style guide, validate
+  change, review conventions, shellcheck, shfmt, markdown format, python, ruff,
+  uvx, lint, commit message, CLI design, code review, formatting.
 ---
 
 # Coding Standards
@@ -29,6 +29,13 @@ standard heading styles without additional formatting or ALL CAPS. Do not add
 numbers to headings.
 
 @references/markdown.md
+
+### Python Development
+
+All Python files must be linted and formatted with `ruff`. Use `uvx` to run
+tools. Target Python 3.11+.
+
+@references/python.md
 
 ### CLI Tool Design
 
