@@ -1,47 +1,164 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "google-genai",
+# ]
+# [tool.uv.sources]
+# google-genai = { index = "pypi" }
+# [[tool.uv.index]]
+# name = "pypi"
+# url = "https://pypi.org/simple"
+# ///
 
-set -euo pipefail
+import sys
+import os
+import subprocess
 
-usage() {
-  cat <<EOF
-Usage: $(basename "$0") IMAGE1 IMAGE2
+from google import genai
+from google.genai import types
 
-Compares two screenshots.
+SCRIPT_NAME = os.path.basename(sys.argv[0])
+MODEL = "gemini-3-flash-preview"
+
+DEFAULT_PROMPT = """You are a meticulous UI QA engineer. Compare these two screenshots with extreme precision. They are expected to show the same UI, but one contains subtle layout, size, or styling variations that may be bugs.
+
+Perform a pixel-by-pixel mental comparison. Carefully examine:
+1. The exact width and height of all containers and shapes.
+2. The internal padding between text/icons and their containers.
+3. The external margins between elements and the screen edges.
+4. The precise alignment and centering of all components.
+5. Font properties including size, weight, style (italic/bold), and color.
+
+Specifically, look for any stretching, shrinking, or shifting of UI elements, or changes in text rendering. Even a few pixels of difference or a slight font weight change is critical to report.
+
+If the images are completely different (e.g., they show different apps or entirely different screens), provide a single, concise explanation of why they are not comparable as your entire response.
+
+Otherwise, provide a detailed description of the visual differences in paragraph form. Do not use bullet points or lists. Be specific about changes to container dimensions, colors, font sizes, margins, padding, and layout shifts, noting direction and approximate pixel values where possible.
+
+Conclude with a brief summary paragraph of the overall changes (e.g., 'the height of the primary container has been reduced' or 'vertical padding has been increased throughout').
+
+Your entire response must be in paragraph form and must not utilize bullet points."""
+
+def usage(code=0):
+    print(f"""Usage: {SCRIPT_NAME} IMAGE1 IMAGE2 [PROMPT]
+
+Compare two screenshots using the Gemini API. Identifies visual differences like
+layout shifts, color changes, padding, or text updates.
 
 Arguments:
-  IMAGE1      The first image file.
-  IMAGE2      The second image file.
+  IMAGE1      Path to the first screenshot (baseline/before)
+  IMAGE2      Path to the second screenshot (comparison/after)
+  PROMPT      Custom prompt for the AI model (optional)
 
 Options:
-  --help      Display this help message and exit
+  -h, --help     Display this help message and exit
+  -v, --version  Display version number and exit
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
 
 Examples:
-  $(basename "$0") screenshot1.png screenshot2.png
-EOF
-  exit 0
-}
+  {SCRIPT_NAME} before.png after.png
+  {SCRIPT_NAME} v1.png v2.png "Check for font size changes in the header"
 
-if [[ "${1:-}" == "--help" ]]; then
-  usage
-fi
+Exit Codes:
+  0    Success (differences found and described)
+  1    General error (API error, usage, missing file, etc.)
+  2    Images are identical (no differences to describe)""", file=sys.stdout if code == 0 else sys.stderr)
+    sys.exit(code)
 
-if [[ $# -ne 2 ]]; then
-  usage 1 >&2
-fi
+def error(message, code=1):
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+    sys.exit(code)
 
-require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo >&2 "$(basename "$0"): $1 not found"
-    exit 127
-  }
-}
+def command_exists(cmd):
+    try:
+        subprocess.run(["command", "-v", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+    except FileNotFoundError:
+        return False
 
-TARGET="${HOME}/.local/bin/screenshot-compare"
+def process_image(path):
+    try:
+        result = subprocess.run(
+            [
+                "magick",
+                path,
+                "-background",
+                "magenta",
+                "-flatten",
+                "-define",
+                "webp:lossless=true",
+                "webp:-"
+            ],
+            capture_output=True,
+            check=True
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        error(f"ImageMagick processing failed: {e.stderr.decode('utf-8', errors='replace')}")
+    except Exception as e:
+        error(f"Failed to process image: {e}")
 
-if [ ! -x "$TARGET" ]; then
-  echo "$(basename "$0"): required executable not found at $TARGET" >&2
-  echo "Install/update via ./update (tools/screenshot-compare)" >&2
-  exit 127
-fi
+def main():
+    args = sys.argv[1:]
 
-exec "$TARGET" "$@"
+    if "-h" in args or "--help" in args:
+        usage(0)
+    if "-v" in args or "--version" in args:
+        print(f"{SCRIPT_NAME} 1.0.0")
+        sys.exit(0)
+
+    if len(args) < 2:
+        usage(1)
+
+    if not command_exists("magick"):
+        error("magick not found (install ImageMagick)")
+
+    image1_path = args[0]
+    image2_path = args[1]
+    prompt = args[2] if len(args) > 2 else DEFAULT_PROMPT
+
+    if not os.path.isfile(image1_path):
+        error(f"{image1_path}: No such file or directory")
+    if not os.path.isfile(image2_path):
+        error(f"{image2_path}: No such file or directory")
+
+    img1_bytes = process_image(image1_path)
+    img2_bytes = process_image(image2_path)
+
+    if img1_bytes == img2_bytes:
+        print("The images are identical.")
+        print(f"{SCRIPT_NAME}: error: input images are identical", file=sys.stderr)
+        sys.exit(2)
+
+    if not os.environ.get("GEMINI_API_KEY"):
+        error("GEMINI_API_KEY environment variable not set")
+
+    try:
+        client = genai.Client()
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=img1_bytes, mime_type="image/webp"),
+                        types.Part.from_bytes(data=img2_bytes, mime_type="image/webp"),
+                    ]
+                )
+            ]
+        )
+        text = response.text
+        if not text:
+            error("no response text received from API")
+        print(text)
+    except Exception as e:
+        error(f"API error: {e}")
+
+if __name__ == "__main__":
+    main()
