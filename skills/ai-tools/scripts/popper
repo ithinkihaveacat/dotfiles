@@ -1,11 +1,12 @@
 #!/usr/bin/env -S uv run --script
 # Requires uv (https://docs.astral.sh/uv/).
 # /// script
-# dependencies = ["uiautomator2", "google-genai", "apkutils"]
+# dependencies = ["uiautomator2", "google-genai", "apkutils", "google-api-core"]
 # [tool.uv.sources]
 # uiautomator2 = { index = "pypi" }
 # google-genai = { index = "pypi" }
 # apkutils = { index = "pypi" }
+# google-api-core = { index = "pypi" }
 # [[tool.uv.index]]
 # name = "pypi"
 # url = "https://pypi.org/simple"
@@ -20,6 +21,8 @@ import time
 import uiautomator2 as u2
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
+from google.api_core import retry
 
 
 def main():
@@ -435,11 +438,29 @@ Current UI State:
 
 What is your first action?"""
 
+    def should_retry(exception: Exception) -> bool:
+        """Retry on rate limits (429) and server errors (500, 503)."""
+        if isinstance(exception, genai_errors.APIError):
+            if exception.code in (429, 500, 503):
+                print(f"[local] Warning: API error {exception.code} ({exception.status}). Retrying with backoff...", file=sys.stderr)
+                return True
+        return False
+
+    @retry.Retry(
+        predicate=should_retry,
+        initial=2.0,
+        maximum=60.0,
+        multiplier=2.0,
+        timeout=300.0,
+    )
+    def send_with_retry(prompt_text: str):
+        return chat.send_message(prompt_text)
+
     try:
         # The SDK seamlessly handles the execution cycle: it detects the model's call,
         # executes the mapped Python function, and feeds the resulting UI state back to the model.
         # This will block and loop internally until `complete_task` is called (which calls sys.exit()).
-        response = chat.send_message(prompt)
+        response = send_with_retry(prompt)
         # If the model breaks the ANY constraints and returns a pure text response instead of
         # calling complete_task, print it cleanly. If it contains function calls, don't crash.
         text_output = ""
