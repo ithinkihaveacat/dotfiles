@@ -1,18 +1,18 @@
 ---
 name: ai-tools
 description: >
-  Use this skill to interact with and automate Android UIs via ADB, analyze
-  visual UI states, and gather authoritative context for deep technical
-  research. It provides a suite of AI-powered utilities for driving Android
-  devices (via the popper agent), describing screenshots, comparing before/after
-  UI states, smart-cropping photos, and evaluating text. Use when you need to
-  control an Android app, test a Wear OS UI, understand visual differences in
-  screenshots, or when you lack sufficient background knowledge on topics like
-  the Gemini API or MCP and need to generate comprehensive reports or short
-  answers based on the latest documentation. Triggers: android ui, adb,
-  uiautomator2, popper, automate app, test wear os, screenshot compare, image
-  description, smart crop, context, research, gemini api, mcp, home assistant,
-  token count.
+  Command-line tools that delegate analysis tasks to AI models. Includes image
+  description, screenshot comparison, smart cropping around people, token
+  counting, essay generation from text, boolean condition evaluation, context
+  gathering, and Android UI interaction via popper. Use for describing images,
+  comparing UI states, cropping photos around faces, counting tokens, generating
+  reports, evaluating conditions, gathering context for analysis, automating
+  Android apps, testing Wear OS, or any task requiring AI inference. Triggers:
+  ai analysis, describe image, compare screenshots, smart crop, crop around
+  people, face crop, count tokens, token count, generate essay, evaluate
+  condition, alt text, image description, UI comparison, visual diff, satisfies
+  condition, boolean evaluation, gemini, context, gather context, research
+  topic, android ui, adb, uiautomator2, popper, automate app, test wear os.
 compatibility: >
   Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to

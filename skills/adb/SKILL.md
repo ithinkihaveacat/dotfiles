@@ -66,6 +66,14 @@ See `references/command-index.md` for detailed usage.
   manufacturer, etc.).
 - `scripts/adb-api-level`: Get the device API level (SDK version).
 - `scripts/adb-keyevent-wakeup` / `sleep`: Wake up or put device to sleep.
+- `scripts/adb-account`: Display account information.
+- `scripts/adb-charging-off`: Simulate unplugging the charger.
+- `scripts/adb-charging-on`: Reset the battery status to charging.
+- `scripts/adb-log`: Write a message to the system log.
+- `scripts/adb-logcat-tag`: Stream logcat output filtered by a specific tag.
+- `scripts/adb-setting-location-accuracy`: Check the status of "Google Location
+  Accuracy".
+- `scripts/adb-version-sft`: Extract the Health Tracking GmsModule version.
 
 ### Media Capture
 
@@ -74,6 +82,8 @@ See `references/command-index.md` for detailed usage.
   applies circular mask, wakes device before capture, copies to macOS clipboard,
   generates timestamped filenames by default.
 - `scripts/adb-screenrecord`: Record the screen to a file.
+- `scripts/adb-screenmirror`: Mirror the device screen using scrcpy.
+- `scripts/adb-screenrecord-raw`: Record the screen using raw frames and ffmpeg.
 
 ### Tile Management (Wear OS)
 
@@ -81,6 +91,7 @@ See `references/command-index.md` for detailed usage.
 - `scripts/adb-tile-show`: Show an added tile.
 - `scripts/adb-tile-remove`: Remove a tile.
 - `scripts/adb-tiles`: List currently added tiles.
+- `scripts/adb-watchface-add`: Set the current watch face.
 
 ### Activity Discovery
 
@@ -88,6 +99,8 @@ See `references/command-index.md` for detailed usage.
   TV/Leanback, Settings). Use `--launcher-only`, `--tv-only`, `--settings-only`
   to filter. Add `--all` to include system apps.
 - `scripts/adb-uihierarchy`: Dump the UI hierarchy to an XML file.
+- `scripts/adb-currentfocus`: Display the package name that currently has focus.
+- `scripts/adb-intent-view`: Start an activity with a VIEW intent.
 
 ### Package Operations
 
@@ -95,12 +108,31 @@ See `references/command-index.md` for detailed usage.
   clear-cache).
 - `scripts/adb-logcat-package`: Show logcat filtered for a specific package.
 - `scripts/apk-tiles`: List tiles declared in an APK file.
+- `scripts/adb-packages`: List installed packages.
+- `scripts/apk-badging`: Display 'aapt d badging' information for a given APK.
+- `scripts/apk-cat-manifest`: Display the AndroidManifest.xml from an APK.
 
 ### Wear OS Data Layer
 
 - `scripts/wearableservice-capabilities`: Dump advertised capabilities.
 - `scripts/wearableservice-nodes`: List connected nodes.
 - `scripts/wearableservice-items`: List data items.
+- `scripts/wearableservice-rpcs`: Dump the state of the RpcTracker.
+
+### System & Dumpsys
+
+- `scripts/adb-battery-stats`: Display battery-related information and settings.
+- `scripts/adb-dumpsys-batterystats`: Display raw battery stats via dumpsys.
+- `scripts/adb-dumpsys-power`: Display power information via dumpsys.
+- `scripts/adb-dumpsys-service`: Display dumpsys information for a specific
+  service.
+- `scripts/adb-dumpsys-whs`: Display Wear Health Services (WHS) dumpsys.
+- `scripts/adb-dumpsys-whs-logs`: Display WHS RecordingService logs.
+- `scripts/adb-exit-info`: Display process exit information.
+- `scripts/adb-jobscheduler`: Display dumpsys information for the Android
+  JobScheduler.
+- `scripts/adb-not-optimized`: List applications whitelisted for battery
+  optimization (doze mode).
 
 ### Display & Demo Mode
 

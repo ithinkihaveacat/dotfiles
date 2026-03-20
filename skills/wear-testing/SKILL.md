@@ -1,9 +1,10 @@
 ---
 name: wear-testing
-description:
-  Guide and ADB commands for testing Wear OS applications. Focuses on triggering
-  system state changes, simulating edge cases, and interacting with
-  Wear-specific surfaces (tiles, complications, watchfaces).
+description: >
+  Provides a guide and ADB commands for testing Wear OS applications. Focuses on
+  triggering system state changes, simulating edge cases, and interacting with
+  Wear-specific surfaces (tiles, complications, watchfaces). Triggers: wear os,
+  testing, wear os testing, test wear os app, adb, pixel watch, galaxy watch.
 compatibility:
   Requires adb and a connected Wear OS device (e.g., Pixel Watch, Galaxy Watch)
   or emulator.

@@ -1,17 +1,18 @@
 ---
 name: coding-standards
 description: >
-  Coding standards and conventions for this repository: shell script quality
-  (shellcheck, shfmt, error handling, Bash compatibility), CLI tool design
-  (verb-noun command patterns, help systems, exit codes, output conventions),
-  Markdown formatting (markdown-format, heading styles), git commit policies
-  (message format, agent commit restrictions), and Android development context.
-  Use when writing, reviewing, or validating scripts, CLI tools, Markdown files,
-  or git commits against project conventions. Also use when asked to check
-  whether a change follows coding standards, review code for style compliance,
-  or validate work against project rules. Triggers: coding standards, style
-  guide, validate change, review conventions, shellcheck, shfmt, markdown
-  format, commit message, CLI design, code review, lint, formatting.
+  Provides coding standards and conventions for this repository: shell script
+  quality (shellcheck, shfmt, error handling, Bash compatibility), CLI tool
+  design (verb-noun command patterns, help systems, exit codes, output
+  conventions), Markdown formatting (markdown-format, heading styles), git
+  commit policies (message format, agent commit restrictions), and Android
+  development context. Use when writing, reviewing, or validating scripts, CLI
+  tools, Markdown files, or git commits against project conventions. Also use
+  when asked to check whether a change follows coding standards, review code for
+  style compliance, or validate work against project rules. Triggers: coding
+  standards, style guide, validate change, review conventions, shellcheck,
+  shfmt, markdown format, commit message, CLI design, code review, lint,
+  formatting.
 ---
 
 # Coding Standards

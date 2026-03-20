@@ -10,6 +10,7 @@
 - [Activity Discovery](#activity-discovery)
 - [Package Operations](#package-operations)
 - [Wear OS Data Layer](#wear-os-data-layer)
+- [System & Dumpsys](#system--dumpsys)
 - [Display & Demo Mode](#display--demo-mode)
 
 ## Device Basics
@@ -63,6 +64,70 @@ adb exec-out input keyevent KEYCODE_WAKEUP
 adb exec-out input keyevent KEYCODE_SLEEP
 ```
 
+### `scripts/adb-account`
+
+**Purpose**: Display account information. **Dependencies**: `adb` **Usage**:
+`scripts/adb-account` **Raw Command**:
+
+```bash
+adb exec-out dumpsys account
+```
+
+### `scripts/adb-charging-off`
+
+**Purpose**: Simulate unplugging the charger. **Dependencies**: `adb` **Usage**:
+`scripts/adb-charging-off` **Raw Command**:
+
+```bash
+adb exec-out dumpsys battery unplug
+```
+
+### `scripts/adb-charging-on`
+
+**Purpose**: Reset the battery status to charging. **Dependencies**: `adb`
+**Usage**: `scripts/adb-charging-on` **Raw Command**:
+
+```bash
+adb exec-out dumpsys battery reset
+```
+
+### `scripts/adb-log`
+
+**Purpose**: Write a message to the Android system log. **Dependencies**: `adb`
+**Usage**: `scripts/adb-log MESSAGE` **Raw Command**:
+
+```bash
+adb exec-out log -p f -t TAG MESSAGE
+```
+
+### `scripts/adb-logcat-tag`
+
+**Purpose**: Stream logcat output filtered by a specific tag. **Dependencies**:
+`adb` **Usage**: `scripts/adb-logcat-tag TAG` **Raw Command**:
+
+```bash
+adb logcat -v time "*:S TAG"
+```
+
+### `scripts/adb-setting-location-accuracy`
+
+**Purpose**: Check the status of the "Google Location Accuracy" setting.
+**Dependencies**: `adb` **Usage**: `scripts/adb-setting-location-accuracy` **Raw
+Command**:
+
+```bash
+adb exec-out dumpsys settings | awk '$2 == "name:assisted_gps_enabled"'
+```
+
+### `scripts/adb-version-sft`
+
+**Purpose**: Extract the Health Tracking GmsModule version. **Dependencies**:
+`adb` **Usage**: `scripts/adb-version-sft` **Raw Command**:
+
+```bash
+adb exec-out dumpsys activity provider com.google.android.gms.chimera.container.GmsModuleProvider | grep com.google.android.gms.health_tracking__wearable
+```
+
 ## Media Capture
 
 ### `scripts/adb-screenshot`
@@ -91,6 +156,25 @@ adb exec-out "screencap -p" | magick - \
 ```bash
 adb shell screenrecord /sdcard/screen.mp4
 # (Then pull the file)
+```
+
+### `scripts/adb-screenmirror`
+
+**Purpose**: Mirror the screen using scrcpy. **Dependencies**: `scrcpy`
+**Usage**: `scripts/adb-screenmirror` **Raw Command**:
+
+```bash
+scrcpy --always-on-top
+```
+
+### `scripts/adb-screenrecord-raw`
+
+**Purpose**: Record the screen using raw frames and ffmpeg. **Dependencies**:
+`adb`, `ffmpeg` **Usage**: `scripts/adb-screenrecord-raw [FILE]` **Raw
+Command**:
+
+```bash
+adb exec-out screenrecord --output-format=raw-frames --size SIZE --bit-rate BITRATE - | ffmpeg -f rawvideo -vcodec rawvideo -s SIZE -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -vsync 0 -i - -an -c:v libx264 -pix_fmt yuv420p -y OUTPUT
 ```
 
 ## Tile Management (Wear OS)
@@ -139,6 +223,15 @@ adb shell am broadcast \
 ```bash
 adb shell dumpsys activity service com.google.android.wearable.app.tiles.TileService
 # (Requires parsing output)
+```
+
+### `scripts/adb-watchface-add`
+
+**Purpose**: Set the current watch face on a Wear OS device. **Dependencies**:
+`adb` **Usage**: `scripts/adb-watchface-add COMPONENT_NAME` **Raw Command**:
+
+```bash
+adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation set-watchface --es watchFaceId COMPONENT_NAME
 ```
 
 ## Activity Discovery
@@ -215,6 +308,26 @@ adb exec-out uiautomator dump /dev/stdout
 # (Piped to xml format)
 ```
 
+### `scripts/adb-currentfocus`
+
+**Purpose**: Display the package name of the application that currently has
+focus. **Dependencies**: `adb` **Usage**: `scripts/adb-currentfocus` **Raw
+Command**:
+
+```bash
+adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }' | awk -F '/' '{ print $1 }'
+```
+
+### `scripts/adb-intent-view`
+
+**Purpose**: Start an activity with an android.intent.action.VIEW intent for a
+deeplink. **Dependencies**: `adb` **Usage**: `scripts/adb-intent-view DEEPLINK`
+**Raw Command**:
+
+```bash
+adb exec-out am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d DEEPLINK
+```
+
 ## Package Operations
 
 ### `scripts/packagename`
@@ -262,6 +375,35 @@ apk-cat-manifest APK_FILE | xpath -n -q -e \
   "//service[intent-filter/action[@android:name='androidx.wear.tiles.action.BIND_TILE_PROVIDER']]"
 ```
 
+### `scripts/adb-packages`
+
+**Purpose**: List installed packages on the connected device. **Dependencies**:
+`adb` **Usage**: `scripts/adb-packages [OPTIONS]` **Raw Command**:
+
+```bash
+adb exec-out pm list packages -3 | cut -b 9- | sort
+```
+
+### `scripts/apk-badging`
+
+**Purpose**: Display 'aapt d badging' information for a given APK.
+**Dependencies**: `aapt` **Usage**: `scripts/apk-badging APK_FILE` **Raw
+Command**:
+
+```bash
+aapt d badging APK_FILE
+```
+
+### `scripts/apk-cat-manifest`
+
+**Purpose**: Display the AndroidManifest.xml from an APK. **Dependencies**:
+`apkanalyzer`, `xmllint` **Usage**: `scripts/apk-cat-manifest APK_FILE` **Raw
+Command**:
+
+```bash
+apkanalyzer manifest print APK_FILE | xmllint --format -
+```
+
 ## Wear OS Data Layer
 
 ### `scripts/wearableservice-capabilities`
@@ -289,6 +431,103 @@ adb exec-out dumpsys activity service WearableService | sed -n '/NodeService/,/#
 
 ```bash
 adb exec-out dumpsys activity service WearableService | sed -n '/DataService/,/######/p'
+```
+
+### `scripts/wearableservice-rpcs`
+
+**Purpose**: Dump the state of the RpcTracker from the Wearable Service.
+**Dependencies**: `adb` **Usage**: `scripts/wearableservice-rpcs` **Raw
+Command**:
+
+```bash
+adb exec-out dumpsys activity service WearableService | sed -n '/RpcTracker/,/######/p'
+```
+
+## System & Dumpsys
+
+### `scripts/adb-battery-stats`
+
+**Purpose**: Display battery-related information and settings. **Dependencies**:
+`adb` **Usage**: `scripts/adb-battery-stats` **Raw Command**:
+
+```bash
+adb exec-out dumpsys battery
+adb exec-out dumpsys settings | awk -v _match="match" '$2 ~ "name:(" _match ")"'
+```
+
+### `scripts/adb-dumpsys-batterystats`
+
+**Purpose**: Display battery stats dumpsys. **Dependencies**: `adb` **Usage**:
+`scripts/adb-dumpsys-batterystats` **Raw Command**:
+
+```bash
+adb exec-out dumpsys batterystats
+```
+
+### `scripts/adb-dumpsys-power`
+
+**Purpose**: Display power information dumpsys. **Dependencies**: `adb`
+**Usage**: `scripts/adb-dumpsys-power` **Raw Command**:
+
+```bash
+adb exec-out dumpsys power
+```
+
+### `scripts/adb-dumpsys-service`
+
+**Purpose**: Display dumpsys information for a specific Android service.
+**Dependencies**: `adb` **Usage**: `scripts/adb-dumpsys-service SERVICE_NAME`
+**Raw Command**:
+
+```bash
+adb exec-out dumpsys activity service SERVICE_NAME
+```
+
+### `scripts/adb-dumpsys-whs`
+
+**Purpose**: Display Wear Health Services (WHS) dumpsys. **Dependencies**: `adb`
+**Usage**: `scripts/adb-dumpsys-whs` **Raw Command**:
+
+```bash
+adb exec-out dumpsys activity services WHS_SERVICE
+```
+
+### `scripts/adb-dumpsys-whs-logs`
+
+**Purpose**: Display WHS RecordingService logs. **Dependencies**: `adb`
+**Usage**: `scripts/adb-dumpsys-whs-logs` **Raw Command**:
+
+```bash
+adb exec-out dumpsys activity service com.google.android.wearable.healthservices/.background.service.RecordingService
+```
+
+### `scripts/adb-exit-info`
+
+**Purpose**: Display process exit information. **Dependencies**: `adb`
+**Usage**: `scripts/adb-exit-info` **Raw Command**:
+
+```bash
+adb exec-out dumpsys activity exit-info
+```
+
+### `scripts/adb-jobscheduler`
+
+**Purpose**: Display dumpsys information for the Android JobScheduler.
+**Dependencies**: `adb` **Usage**: `scripts/adb-jobscheduler [PACKAGE]` **Raw
+Command**:
+
+```bash
+adb exec-out dumpsys jobscheduler
+```
+
+### `scripts/adb-not-optimized`
+
+**Purpose**: List user applications whitelisted for battery optimization (doze
+mode). **Dependencies**: `adb`, `perl` **Usage**: `scripts/adb-not-optimized`
+**Raw Command**:
+
+```bash
+adb exec-out dumpsys deviceidle | perl -ne 'print if /^\s+Whitelist user apps/ ... /^\s+Whitelist/'
 ```
 
 ## Display & Demo Mode
@@ -364,6 +603,15 @@ adb exec-out am start -a com.google.android.clockwork.sysui.ACTION_SYSTEM_THEME_
 
 ```bash
 adb exec-out settings put system show_touches 1
+```
+
+### `scripts/adb-touches-off`
+
+**Purpose**: Disable the "Show touches" setting. **Dependencies**: `adb`
+**Usage**: `scripts/adb-touches-off` **Raw Command**:
+
+```bash
+adb exec-out settings put system show_touches 0
 ```
 
 <!-- markdownlint-restore MD013 -->
