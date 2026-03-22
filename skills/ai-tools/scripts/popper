@@ -1,7 +1,15 @@
 #!/usr/bin/env -S uv run --script
 # Requires uv (https://docs.astral.sh/uv/).
 # /// script
-# dependencies = ["uiautomator2", "google-genai", "apkutils", "google-api-core"]
+# dependencies = [
+#   "uiautomator2",
+#   "google-genai",
+#   "google-api-core",
+#   # apkutils is an optional dependency of uiautomator2, needed for installing
+#   # its agent APKs onto the device. Must be declared explicitly for uv to
+#   # include it.
+#   "apkutils",
+# ]
 # [tool.uv.sources]
 # uiautomator2 = { index = "pypi" }
 # google-genai = { index = "pypi" }
@@ -17,6 +25,9 @@ import argparse
 import os
 import sys
 import time
+import signal
+import json
+import datetime
 
 import uiautomator2 as u2
 from google import genai
@@ -47,9 +58,23 @@ Environment:
         help="The goal for the AI to achieve (e.g. 'start an exercise')",
     )
     parser.add_argument(
-        "--app-only",
-        action="store_true",
-        help="Restrict the agent to the current application (do not allow it to open system settings or other apps)",
+        "--app",
+        type=str,
+        metavar="PACKAGE",
+        help="Launch the specified app before starting (e.g. com.example.fitness)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=180,
+        metavar="SECONDS",
+        help="Maximum execution time in seconds (default: 180; exit code 2 on timeout)",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["text", "stream-json"],
+        default="text",
+        help="Output format: 'text' (default, human-readable) or 'stream-json' (NDJSON to stdout)",
     )
     parser.add_argument(
         "--help",
@@ -60,7 +85,44 @@ Environment:
 
     args = parser.parse_args()
 
-    api_key = os.environ.get("GEMINI_CLI_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    step = 0
+
+    def emit(event: dict):
+        """Emit a stream-json event to stdout."""
+        if args.output_format != "stream-json":
+            return
+        event["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        print(json.dumps(event, separators=(",", ":")), flush=True)
+
+    def timeout_handler(signum, frame):
+        emit(
+            {
+                "type": "result",
+                "success": False,
+                "reason": "timeout",
+                "steps": step,
+                "elapsed_ms": args.timeout * 1000,
+            }
+        )
+        print(
+            f"popper: timed out after {args.timeout} seconds",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if args.timeout:
+        if hasattr(signal, "SIGALRM"):
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(args.timeout)
+        else:
+            print(
+                "popper: --timeout is not supported on this platform (requires SIGALRM)",
+                file=sys.stderr,
+            )
+
+    api_key = os.environ.get("GEMINI_CLI_GEMINI_API_KEY") or os.environ.get(
+        "GEMINI_API_KEY"
+    )
     if not api_key:
         print("popper: GEMINI_API_KEY environment variable not set", file=sys.stderr)
         sys.exit(1)
@@ -87,7 +149,16 @@ Environment:
     except Exception as e:
         print(f"[local] Warning: Failed to wake up screen: {e}", file=sys.stderr)
 
-    # Note: `app_start(pkg)` and `app_auto_grant_permissions(pkg)` are intentionally omitted.
+    if args.app:
+        print(f"[local] Launching {args.app}", file=sys.stderr)
+        try:
+            d.app_start(args.app)
+            time.sleep(2)  # allow app launch animation to settle
+        except Exception as e:
+            print(f"popper: failed to launch {args.app}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Note: `app_auto_grant_permissions(pkg)` is intentionally omitted.
     # We want this script to replicate manual UI actions (taps, swipes) as much as possible.
 
     # Get device metadata to help the agent
@@ -140,6 +211,13 @@ Environment:
 
     client = genai.Client()
 
+    def safe_dump_hierarchy():
+        """Attempts to dump the hierarchy, returning None if the device is unreachable."""
+        try:
+            return d.dump_hierarchy()
+        except Exception:
+            return None
+
     # Define UI tools
     def tap_element(
         text: str = None, resource_id: str = None, description: str = None
@@ -182,20 +260,20 @@ Environment:
                 return {
                     "status": "error",
                     "message": "Element not found. Try scrolling or checking criteria.",
-                    "current_ui_hierarchy": d.dump_hierarchy(),
+                    "current_ui_hierarchy": safe_dump_hierarchy(),
                 }
         except Exception as e:
             return {
                 "status": "error",
                 "message": str(e),
-                "current_ui_hierarchy": d.dump_hierarchy(),
+                "current_ui_hierarchy": safe_dump_hierarchy(),
             }
 
     def scroll(direction: str) -> dict:
         """Scrolls the screen in the specified direction.
 
         Args:
-            direction: The direction to scroll. MUST be one of: 'forward' (scrolls down to see more content), 'backward' (scrolls up), 'left' (scrolls left to see content on the right), 'right' (scrolls right to see content on the left).
+            direction: The direction to scroll. MUST be one of: 'forward' (scrolls down to reveal content below), 'backward' (scrolls up to reveal content above), 'left' (scrolls left to reveal the next page), 'right' (scrolls right to reveal the previous page).
         """
         print(f"[agent] Scrolling {direction}", file=sys.stderr)
         try:
@@ -219,7 +297,7 @@ Environment:
             return {
                 "status": "error",
                 "message": str(e),
-                "current_ui_hierarchy": d.dump_hierarchy(),
+                "current_ui_hierarchy": safe_dump_hierarchy(),
             }
 
     def press_button(button: str) -> dict:
@@ -242,7 +320,7 @@ Environment:
             return {
                 "status": "error",
                 "message": str(e),
-                "current_ui_hierarchy": d.dump_hierarchy(),
+                "current_ui_hierarchy": safe_dump_hierarchy(),
             }
 
     def input_text(
@@ -278,10 +356,8 @@ Environment:
                     el = d(text=text)
                 elif resource_id:
                     el = d(resourceId=resource_id)
-                elif description:
-                    el = d(description=description)
                 else:
-                    return {"status": "error", "message": "Invalid criteria"}
+                    el = d(description=description)
 
                 if el.exists:
                     el.set_text(text_to_type)
@@ -291,7 +367,7 @@ Environment:
                     return {
                         "status": "error",
                         "message": "Element not found. Try scrolling or checking criteria.",
-                        "current_ui_hierarchy": d.dump_hierarchy(),
+                        "current_ui_hierarchy": safe_dump_hierarchy(),
                     }
             else:
                 d.send_keys(text_to_type, clear=True)
@@ -301,7 +377,7 @@ Environment:
             return {
                 "status": "error",
                 "message": str(e),
-                "current_ui_hierarchy": d.dump_hierarchy(),
+                "current_ui_hierarchy": safe_dump_hierarchy(),
             }
 
     def open_notification() -> dict:
@@ -315,7 +391,7 @@ Environment:
             return {
                 "status": "error",
                 "message": str(e),
-                "current_ui_hierarchy": d.dump_hierarchy(),
+                "current_ui_hierarchy": safe_dump_hierarchy(),
             }
 
     def open_quick_settings() -> dict:
@@ -329,8 +405,24 @@ Environment:
             return {
                 "status": "error",
                 "message": str(e),
-                "current_ui_hierarchy": d.dump_hierarchy(),
+                "current_ui_hierarchy": safe_dump_hierarchy(),
             }
+
+    def observe(delay_ms: int = 0) -> dict:
+        """Retrieve the current UI hierarchy without performing any action. Use this
+        to wait for the screen to update after a previous action, or to re-examine
+        the current state.
+
+        Args:
+            delay_ms: Minimum milliseconds to wait before reading the screen.
+        """
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+        print(f"[agent] Observing screen (delay={delay_ms}ms)", file=sys.stderr)
+        try:
+            return {"status": "success", "ui_hierarchy": d.dump_hierarchy()}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     def complete_task(success: bool, reason: str) -> dict:
         """Call this when the goal has been definitively achieved or cannot be achieved.
@@ -343,10 +435,7 @@ Environment:
             f"[agent] Task marked complete (success={success}, reason={reason})",
             file=sys.stderr,
         )
-        if success:
-            sys.exit(0)
-        else:
-            sys.exit(1)
+        return {"success": success, "reason": reason}
 
     ui_tools = [
         tap_element,
@@ -355,15 +444,23 @@ Environment:
         input_text,
         open_notification,
         open_quick_settings,
+        observe,
         complete_task,
     ]
 
+    tool_map = {fn.__name__: fn for fn in ui_tools}
+
     # Set up AI context
-    cross_app_instruction = (
-        f"DO NOT leave the current application ({initial_package}). If the task requires leaving, fail the task."
-        if args.app_only
-        else "You are ALLOWED to cross app boundaries (e.g. into system settings or other apps) to achieve the goal."
-    )
+    if args.app:
+        cross_app_instruction = (
+            f"The target application is {args.app}. "
+            "Prefer to accomplish the goal within this app."
+        )
+    else:
+        cross_app_instruction = (
+            "You are ALLOWED to cross app boundaries "
+            "(e.g. into system settings or other apps) to achieve the goal."
+        )
 
     # The core system instruction template is adapted from the official Google Gemini documentation
     # for agentic workflows: https://ai.google.dev/gemini-api/docs/prompting-strategies#agentic-si-template
@@ -415,12 +512,11 @@ Constraints:
     config = types.GenerateContentConfig(
         tools=ui_tools,
         system_instruction=system_instruction,
+        # temperature=1.0 is required by gemini-3-flash-preview. The model was
+        # trained at this temperature; lower values degrade output quality.
         temperature=1.0,
         tool_config=types.ToolConfig(
             function_calling_config=types.FunctionCallingConfig(mode="ANY")
-        ),
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-            maximum_remote_calls=50
         ),
         thinking_config=types.ThinkingConfig(thinking_level="low"),
     )
@@ -442,7 +538,10 @@ What is your first action?"""
         """Retry on rate limits (429) and server errors (500, 503)."""
         if isinstance(exception, genai_errors.APIError):
             if exception.code in (429, 500, 503):
-                print(f"[local] Warning: API error {exception.code} ({exception.status}). Retrying with backoff...", file=sys.stderr)
+                print(
+                    f"[local] Warning: API error {exception.code} ({exception.status}). Retrying with backoff...",
+                    file=sys.stderr,
+                )
                 return True
         return False
 
@@ -453,32 +552,109 @@ What is your first action?"""
         multiplier=2.0,
         timeout=300.0,
     )
-    def send_with_retry(prompt_text: str):
-        return chat.send_message(prompt_text)
+    def send_with_retry(message):
+        return chat.send_message(message)
 
-    try:
-        # The SDK seamlessly handles the execution cycle: it detects the model's call,
-        # executes the mapped Python function, and feeds the resulting UI state back to the model.
-        # This will block and loop internally until `complete_task` is called (which calls sys.exit()).
-        response = send_with_retry(prompt)
-        # If the model breaks the ANY constraints and returns a pure text response instead of
-        # calling complete_task, print it cleanly. If it contains function calls, don't crash.
+    def extract_text(response):
         text_output = ""
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.text:
                     text_output += part.text
-        if text_output:
-            print(
-                f"[agent] Model responded without calling complete_task: {text_output.strip()}",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "[agent] Agent execution loop terminated without a final text response.",
-                file=sys.stderr,
-            )
-        sys.exit(1)
+        return text_output.strip()
+
+    try:
+        session_start = time.perf_counter()
+
+        emit({"type": "start", "goal": args.goal, "device": device_info})
+        emit({"type": "hierarchy", "step": 0, "xml": initial_xml})
+
+        response = send_with_retry(prompt)
+        task_result = None
+
+        while task_result is None:
+            function_calls = []
+            if response.candidates and response.candidates[0].content.parts:
+                function_calls = [
+                    part
+                    for part in response.candidates[0].content.parts
+                    if part.function_call
+                ]
+
+            if not function_calls:
+                text = extract_text(response)
+                print(
+                    f"[agent] Model responded without tool call: {text}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            tool_results = []
+            for fc in function_calls:
+                step += 1
+                fn = tool_map[fc.name]
+
+                step_start = time.perf_counter()
+
+                args_dict = dict(fc.args) if fc.args else {}
+                result = fn(**args_dict)
+
+                elapsed_ms = int((time.perf_counter() - step_start) * 1000)
+                session_elapsed_ms = int((time.perf_counter() - session_start) * 1000)
+
+                emit(
+                    {
+                        "type": "step",
+                        "step": step,
+                        "action": fc.name,
+                        "args": args_dict,
+                        "status": result.get("status", "success")
+                        if isinstance(result, dict)
+                        else "success",
+                        "elapsed_ms": elapsed_ms,
+                    }
+                )
+
+                if isinstance(result, dict):
+                    if "new_ui_hierarchy" in result or "ui_hierarchy" in result:
+                        xml = result.get("new_ui_hierarchy") or result.get(
+                            "ui_hierarchy"
+                        )
+                        if xml:
+                            emit({"type": "hierarchy", "step": step, "xml": xml})
+
+                    if fc.name == "complete_task":
+                        task_result = result
+                        break
+
+                    # Inject timing so the agent sees it in the function response
+                    result["step_elapsed_ms"] = elapsed_ms
+                    result["session_elapsed_ms"] = session_elapsed_ms
+
+                tool_results.append(
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response=result,
+                    )
+                )
+
+            if task_result is not None:
+                break
+
+            response = send_with_retry(tool_results)
+
+        total_elapsed = time.perf_counter() - session_start
+        emit(
+            {
+                "type": "result",
+                "success": task_result.get("success", False),
+                "reason": task_result.get("reason", ""),
+                "steps": step,
+                "elapsed_ms": int(total_elapsed * 1000),
+            }
+        )
+
+        sys.exit(0 if task_result.get("success") else 1)
     except Exception as e:
         print(
             f"[local] Error communicating with AI or executing UI actions: {e}",
