@@ -80,6 +80,12 @@ Environment:
         help="Output format: 'text' (default, human-readable) or 'stream-json' (NDJSON to stdout)",
     )
     parser.add_argument(
+        "--screenshots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable screenshot capture and transmission to the model (default: enabled)",
+    )
+    parser.add_argument(
         "--help",
         action="help",
         default=argparse.SUPPRESS,
@@ -89,6 +95,11 @@ Environment:
     args = parser.parse_args()
 
     step = 0
+    context_usage = {
+        "input_limit": 1048576,  # Default fallback
+        "prompt_tokens": 0,
+        "candidate_tokens": 0,
+    }
 
     def emit(event: dict):
         """Emit a stream-json event to stdout."""
@@ -214,6 +225,12 @@ Environment:
 
     client = genai.Client()
 
+    try:
+        model_info = client.models.get(model="gemini-3-flash-preview")
+        context_usage["input_limit"] = model_info.input_token_limit
+    except Exception as e:
+        print(f"[local] Warning: Failed to fetch model limits: {e}", file=sys.stderr)
+
     def capture_state_as_parts():
         """Attempts to dump the hierarchy and screenshot. Returns the XML string
         and the screenshot formatted as a FunctionResponsePart.
@@ -223,18 +240,20 @@ Environment:
         except Exception:
             xml = '<hierarchy error="device unreachable"/>'
 
-        try:
-            img = d.screenshot()
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format="JPEG", quality=85)
-            img_bytes = img_byte_arr.getvalue()
+        img_part = None
+        if args.screenshots:
+            try:
+                img = d.screenshot()
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format="JPEG", quality=85)
+                img_bytes = img_byte_arr.getvalue()
 
-            img_part = types.FunctionResponsePart.from_bytes(
-                data=img_bytes, mime_type="image/jpeg"
-            )
-            img_part.inline_data.display_name = "screenshot.jpg"
-        except Exception:
-            img_part = None
+                img_part = types.FunctionResponsePart.from_bytes(
+                    data=img_bytes, mime_type="image/jpeg"
+                )
+                img_part.inline_data.display_name = "screenshot.jpg"
+            except Exception:
+                pass
 
         return xml, img_part
 
@@ -579,7 +598,22 @@ What is your first action?"""
         timeout=300.0,
     )
     def send_with_retry(message):
-        return chat.send_message(message)
+        resp = chat.send_message(message)
+        if resp.usage_metadata:
+            context_usage["prompt_tokens"] = resp.usage_metadata.prompt_token_count
+            context_usage["candidate_tokens"] += (
+                resp.usage_metadata.candidates_token_count
+            )
+
+            # Print reactive usage to stderr for human readability
+            rem_pct = 100 * (
+                1.0 - (context_usage["prompt_tokens"] / context_usage["input_limit"])
+            )
+            print(
+                f"[context] Input: {context_usage['prompt_tokens']}/{context_usage['input_limit']} ({rem_pct:.1f}% remaining)",
+                file=sys.stderr,
+            )
+        return resp
 
     def extract_text(response):
         text_output = ""
@@ -684,6 +718,7 @@ What is your first action?"""
                 "reason": task_result.get("reason", ""),
                 "steps": step,
                 "elapsed_ms": int(total_elapsed * 1000),
+                "context": context_usage,
             }
         )
 
