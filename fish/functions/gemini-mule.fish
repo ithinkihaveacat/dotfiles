@@ -7,5 +7,6 @@ function gemini-mule --description 'Run gemini (mule version)'
 
     # Set TMPDIR to a directory gemini can access without permission
     set -lx TMPDIR $HOME/.gemini/tmp
-    $executable -m gemini-3-flash-preview $argv
+    set -e GEMINI_API_KEY
+    $executable -m gemini-3.1-pro-preview $argv
 end
