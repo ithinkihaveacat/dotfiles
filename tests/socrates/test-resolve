@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# Tests for socrates database path resolution
+#
+# Does NOT require GEMINI_API_KEY. Tests the resolve logic that converts
+# user-friendly identifiers to actual database file paths.
+
+set -u
+
+SCRIPT_DIR=$(dirname "$0")
+ROOT_DIR="$SCRIPT_DIR/../.."
+SOCRATES="node $ROOT_DIR/tools/socrates/dist/index.js"
+
+TOTAL_TESTS=10
+TEST_NUM=0
+
+echo "1..$TOTAL_TESTS"
+
+TMPDIR_BASE=$(mktemp -d)
+trap 'rm -rf -- "$TMPDIR_BASE"' EXIT
+
+# Use Python's sqlite3 module to create DBs
+sql() {
+  local db_path="$1"
+  local query="$2"
+  python3 -c "
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+cur = conn.cursor()
+cur.executescript(sys.argv[2])
+conn.commit()
+conn.close()
+" "$db_path" "$query"
+}
+
+SCHEMA="
+PRAGMA journal_mode = WAL;
+CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, ground_truth TEXT NOT NULL, rationale TEXT NOT NULL, topic TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS answers (question_id INTEGER, responder TEXT, text TEXT NOT NULL, meta TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (question_id, responder), FOREIGN KEY(question_id) REFERENCES questions(id));
+CREATE TABLE IF NOT EXISTS evaluations (question_id INTEGER, responder TEXT, is_correct BOOLEAN NOT NULL, summary TEXT, critique TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (question_id, responder), FOREIGN KEY(question_id) REFERENCES questions(id));
+INSERT INTO questions (text, ground_truth, rationale) VALUES ('Q1', 'A1', 'R1');
+"
+
+pass() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+fail() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  if [ -n "${2:-}" ]; then
+    echo "# $2"
+  fi
+}
+
+assert_exit_code() {
+  local description="$1"
+  local expected="$2"
+  local actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    pass "$description"
+  else
+    fail "$description" "Expected exit code $expected, got $actual"
+  fi
+}
+
+assert_contains() {
+  local description="$1"
+  local needle="$2"
+  local haystack="$3"
+  if echo "$haystack" | grep -qF "$needle"; then
+    pass "$description"
+  else
+    fail "$description" "Expected output to contain: '$needle'"
+  fi
+}
+
+# --- Test: direct absolute path resolves ---
+
+DB1="$TMPDIR_BASE/direct-path.db"
+sql "$DB1" "$SCHEMA"
+
+OUTPUT=$($SOCRATES status "$DB1" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "direct path: resolves correctly" "0" "$EXIT_CODE"
+assert_contains "direct path: shows database" "direct-path.db" "$OUTPUT"
+
+# --- Test: nonexistent path fails with helpful error ---
+
+OUTPUT=$($SOCRATES status "/tmp/definitely-does-not-exist-12345.db" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "nonexistent path: exits non-zero" "1" "$EXIT_CODE"
+assert_contains "nonexistent path: error mentions path" "not found" "$OUTPUT"
+
+# --- Test: resolve by prefix in XDG data dir ---
+# Set XDG_DATA_HOME to our temp dir so resolve checks there
+
+FAKE_DATA="$TMPDIR_BASE/xdg-data/socrates"
+mkdir -p "$FAKE_DATA"
+
+DB2="$FAKE_DATA/abc12345-test-topic.db"
+sql "$DB2" "$SCHEMA"
+
+OUTPUT=$(XDG_DATA_HOME="$TMPDIR_BASE/xdg-data" $SOCRATES status "abc12345" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "prefix resolve: resolves by ID prefix" "0" "$EXIT_CODE"
+assert_contains "prefix resolve: shows database" "abc12345-test-topic.db" "$OUTPUT"
+
+# --- Test: ambiguous prefix fails ---
+
+DB3="$FAKE_DATA/abc12345-second-topic.db"
+sql "$DB3" "$SCHEMA"
+
+OUTPUT=$(XDG_DATA_HOME="$TMPDIR_BASE/xdg-data" $SOCRATES status "abc12345" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "ambiguous prefix: exits non-zero" "1" "$EXIT_CODE"
+assert_contains "ambiguous prefix: error mentions ambiguous" "Ambiguous" "$OUTPUT"
+
+# --- Test: full filename without .db extension ---
+
+OUTPUT=$(XDG_DATA_HOME="$TMPDIR_BASE/xdg-data" $SOCRATES status "abc12345-test-topic" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "name without .db: resolves correctly" "0" "$EXIT_CODE"
+assert_contains "name without .db: shows database" "abc12345-test-topic.db" "$OUTPUT"

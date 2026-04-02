@@ -102,7 +102,7 @@ export function addAnswer(db: Database.Database, answer: Omit<Answer, "timestamp
 }
 
 export function getAnswers(db: Database.Database, questionId: number): Answer[] {
-  const rows = db.prepare("SELECT * FROM answers WHERE question_id = ?").all() as any[];
+  const rows = db.prepare("SELECT * FROM answers WHERE question_id = ?").all(questionId) as any[];
   return rows.map((r) => ({
     question_id: r.question_id,
     responder: r.responder,

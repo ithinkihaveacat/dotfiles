@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+// Tests: tests/socrates/
+
 import { parseArgs } from "node:util";
 import { run as runGenerate } from "./commands/generate.js";
 import { run as runAnswer } from "./commands/answer.js";

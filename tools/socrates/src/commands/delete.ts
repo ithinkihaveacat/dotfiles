@@ -1,4 +1,4 @@
-import { initDB, deleteResponder, getAllResponders, getAnswers } from "../db.js";
+import { initDB, deleteResponder, getAllResponders } from "../db.js";
 import { resolveDBPath } from "../resolve.js";
 import { CONFIG } from "../config.js";
 
@@ -12,11 +12,6 @@ export async function run(dbPathOrId: string, responder?: string, options: { cle
     let deletedCount = 0;
 
     for (const r of responders) {
-      const answers = getAnswers(db, -1); // Check all answers for this responder?
-      // Wait, getAnswers(db, questionId) gets answers for a question.
-      // I need getAnswersForResponder or just filter.
-      // Let's use a custom query here for efficiency.
-      
       const rows = db.prepare("SELECT text FROM answers WHERE responder = ?").all(r) as { text: string }[];
       
       if (rows.length === 0) continue; // Should not happen based on getAllResponders

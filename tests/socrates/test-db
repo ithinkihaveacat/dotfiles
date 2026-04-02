@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+#
+# Tests for socrates SQLite database layer
+#
+# Does NOT require GEMINI_API_KEY. Tests the DB operations that underpin
+# all commands: insert, query, upsert, stats, and deletion.
+
+set -u
+
+SCRIPT_DIR=$(dirname "$0")
+ROOT_DIR="$SCRIPT_DIR/../.."
+SOCRATES="node $ROOT_DIR/tools/socrates/dist/index.js"
+
+TOTAL_TESTS=20
+TEST_NUM=0
+FAILURES=0
+
+echo "1..$TOTAL_TESTS"
+
+TMPDIR_BASE=$(mktemp -d)
+trap 'rm -rf -- "$TMPDIR_BASE"' EXIT
+
+# Use Python's sqlite3 module as the CLI may not be installed
+sql() {
+  local db_path="$1"
+  local query="$2"
+  python3 -c "
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+cur = conn.cursor()
+cur.executescript(sys.argv[2])
+conn.commit()
+for row in cur.fetchall():
+    print('|'.join(str(c) for c in row))
+conn.close()
+" "$db_path" "$query"
+}
+
+sql_query() {
+  local db_path="$1"
+  local query="$2"
+  python3 -c "
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+cur = conn.cursor()
+cur.execute(sys.argv[2])
+for row in cur.fetchall():
+    print('|'.join(str(c) for c in row))
+conn.close()
+" "$db_path" "$query"
+}
+
+# Create a test database with the socrates schema and seed data
+create_test_db() {
+  local db_path="$1"
+  sql "$db_path" "
+PRAGMA journal_mode = WAL;
+
+CREATE TABLE IF NOT EXISTS metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS questions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  text TEXT NOT NULL,
+  ground_truth TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  topic TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS answers (
+  question_id INTEGER,
+  responder TEXT,
+  text TEXT NOT NULL,
+  meta TEXT,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (question_id, responder),
+  FOREIGN KEY(question_id) REFERENCES questions(id)
+);
+
+CREATE TABLE IF NOT EXISTS evaluations (
+  question_id INTEGER,
+  responder TEXT,
+  is_correct BOOLEAN NOT NULL,
+  summary TEXT,
+  critique TEXT,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (question_id, responder),
+  FOREIGN KEY(question_id) REFERENCES questions(id)
+);
+
+INSERT INTO questions (text, ground_truth, rationale, topic) VALUES
+  ('What color is the sky on Mars during sunset?', 'Blue', 'Martian atmosphere scatters light differently', 'mars');
+INSERT INTO questions (text, ground_truth, rationale, topic) VALUES
+  ('How many moons does Mars have?', 'Two: Phobos and Deimos', 'Both are small irregular satellites', 'mars');
+INSERT INTO questions (text, ground_truth, rationale, topic) VALUES
+  ('What is the tallest mountain on Mars?', 'Olympus Mons', 'It is a shield volcano about 21.9 km high', 'mars');
+"
+}
+
+pass() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+fail() {
+  TEST_NUM=$((TEST_NUM + 1))
+  FAILURES=$((FAILURES + 1))
+  echo "not ok $TEST_NUM - $1"
+  if [ -n "${2:-}" ]; then
+    echo "# $2"
+  fi
+}
+
+assert_eq() {
+  local description="$1"
+  local expected="$2"
+  local actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    pass "$description"
+  else
+    fail "$description" "Expected: '$expected', Got: '$actual'"
+  fi
+}
+
+assert_contains() {
+  local description="$1"
+  local needle="$2"
+  local haystack="$3"
+  if echo "$haystack" | grep -qF "$needle"; then
+    pass "$description"
+  else
+    fail "$description" "Expected output to contain: '$needle'"
+  fi
+}
+
+assert_exit_code() {
+  local description="$1"
+  local expected="$2"
+  local actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    pass "$description"
+  else
+    fail "$description" "Expected exit code $expected, got $actual"
+  fi
+}
+
+# --- Test: status command with fresh DB (no answers) ---
+
+DB1="$TMPDIR_BASE/test-status-empty.db"
+create_test_db "$DB1"
+
+OUTPUT=$($SOCRATES status "$DB1" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "status: exits 0 on valid DB" "0" "$EXIT_CODE"
+assert_contains "status: shows total question count" "Total Questions: 3" "$OUTPUT"
+assert_contains "status: shows no answers message" "No answers recorded yet" "$OUTPUT"
+
+# --- Test: questions command lists all questions ---
+
+OUTPUT=$($SOCRATES questions "$DB1" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "questions: exits 0" "0" "$EXIT_CODE"
+assert_contains "questions: shows Q1 text" "What color is the sky on Mars" "$OUTPUT"
+assert_contains "questions: shows Q2 text" "How many moons does Mars have" "$OUTPUT"
+assert_contains "questions: shows Q3 ground truth" "Olympus Mons" "$OUTPUT"
+
+# --- Test: status with answers and evaluations ---
+
+DB2="$TMPDIR_BASE/test-status-full.db"
+create_test_db "$DB2"
+
+sql "$DB2" "
+INSERT INTO answers (question_id, responder, text) VALUES
+  (1, 'model:test-model', 'Red');
+INSERT INTO answers (question_id, responder, text) VALUES
+  (2, 'model:test-model', 'Two');
+INSERT INTO answers (question_id, responder, text) VALUES
+  (3, 'model:test-model', 'Olympus Mons');
+
+INSERT INTO evaluations (question_id, responder, is_correct, summary, critique) VALUES
+  (1, 'model:test-model', 0, 'Said red', 'Incorrect, the answer is blue');
+INSERT INTO evaluations (question_id, responder, is_correct, summary, critique) VALUES
+  (2, 'model:test-model', 1, 'Said two', 'Correct');
+INSERT INTO evaluations (question_id, responder, is_correct, summary, critique) VALUES
+  (3, 'model:test-model', 1, 'Said Olympus Mons', 'Correct');
+"
+
+OUTPUT=$($SOCRATES status "$DB2" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "status: exits 0 with populated DB" "0" "$EXIT_CODE"
+assert_contains "status: shows responder name" "model:test-model" "$OUTPUT"
+
+# --- Test: report command ---
+
+OUTPUT=$($SOCRATES report "$DB2" 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "report: exits 0 on complete DB" "0" "$EXIT_CODE"
+assert_contains "report: includes header" "Knowledge Gap Analysis" "$OUTPUT"
+assert_contains "report: includes responder" "model:test-model" "$OUTPUT"
+assert_contains "report: includes question text" "What color is the sky on Mars" "$OUTPUT"
+
+# --- Test: delete command ---
+
+DB3="$TMPDIR_BASE/test-delete.db"
+create_test_db "$DB3"
+
+sql "$DB3" "
+INSERT INTO answers (question_id, responder, text) VALUES
+  (1, 'model:alpha', 'answer-a');
+INSERT INTO answers (question_id, responder, text) VALUES
+  (1, 'model:beta', 'answer-b');
+INSERT INTO answers (question_id, responder, text) VALUES
+  (2, 'model:alpha', 'answer-a2');
+
+INSERT INTO evaluations (question_id, responder, is_correct, summary, critique) VALUES
+  (1, 'model:alpha', 1, 'ok', 'ok');
+"
+
+$SOCRATES delete "$DB3" 'model:alpha' >/dev/null 2>&1
+EXIT_CODE=$?
+
+assert_exit_code "delete: exits 0" "0" "$EXIT_CODE"
+
+ALPHA_COUNT=$(sql_query "$DB3" "SELECT COUNT(*) FROM answers WHERE responder = 'model:alpha';")
+BETA_COUNT=$(sql_query "$DB3" "SELECT COUNT(*) FROM answers WHERE responder = 'model:beta';")
+EVAL_COUNT=$(sql_query "$DB3" "SELECT COUNT(*) FROM evaluations WHERE responder = 'model:alpha';")
+
+assert_eq "delete: removes target answers" "0" "$ALPHA_COUNT"
+assert_eq "delete: preserves other responder" "1" "$BETA_COUNT"
+assert_eq "delete: removes target evaluations" "0" "$EVAL_COUNT"
+
+# --- Test: delete --cleanup removes zombie runs ---
+
+DB4="$TMPDIR_BASE/test-cleanup.db"
+create_test_db "$DB4"
+
+sql "$DB4" "
+INSERT INTO answers (question_id, responder, text) VALUES
+  (1, 'model:zombie[1]', '[allocating...]');
+
+INSERT INTO answers (question_id, responder, text) VALUES
+  (1, 'model:healthy[1]', 'A real answer');
+"
+
+OUTPUT=$($SOCRATES delete "$DB4" --cleanup 2>&1)
+EXIT_CODE=$?
+
+assert_exit_code "cleanup: exits 0" "0" "$EXIT_CODE"
+
+ZOMBIE_COUNT=$(sql_query "$DB4" "SELECT COUNT(*) FROM answers WHERE responder = 'model:zombie[1]';")
+HEALTHY_COUNT=$(sql_query "$DB4" "SELECT COUNT(*) FROM answers WHERE responder = 'model:healthy[1]';")
+
+assert_eq "cleanup: removes zombie run" "0" "$ZOMBIE_COUNT"
+assert_eq "cleanup: preserves healthy run" "1" "$HEALTHY_COUNT"
