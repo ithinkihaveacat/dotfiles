@@ -1,0 +1,1326 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "google-genai",
+# ]
+# [tool.uv.sources]
+# google-genai = { index = "pypi" }
+# [[tool.uv.index]]
+# name = "pypi"
+# url = "https://pypi.org/simple"
+# ///
+
+# Tests: tests/socrates/
+
+import json
+import os
+import random
+import re
+import secrets
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+from google import genai
+from google.genai import types
+
+SCRIPT_NAME = "socrates"
+VERSION = "1.0.3"
+
+MAX_RETRIES = 3
+MAX_CONCURRENCY = 10
+DEFAULT_QUESTION_COUNT = 7
+EVALUATOR_MODEL = "gemini-3-pro-preview"
+SLUG_MODEL = "gemini-3-flash-preview"
+PLACEHOLDER_TEXT = "[allocating...]"
+
+
+# ---- CLI ----
+
+
+def usage():
+    print(
+        f"""\
+Usage: {SCRIPT_NAME} <command> [options]
+
+Commands:
+  generate              Generate questions from stdin.
+                        Outputs the absolute path to the created database.
+  answer <db> --mode <mode>
+                        Answer questions in the database.
+                        Modes:
+                          model:<model_name> (e.g. model:gemini-2.5-flash)
+                            - Append '+grounded' for Google Search grounding.
+                            - Append '[]' to auto-increment run ID (e.g. model:foo[]).
+                            - Use explicit ID (e.g. model:foo[1]) to resume/overwrite.
+                          shell:<script_path> (e.g. shell:./myscript.sh)
+                          interactive:<label> (e.g. interactive:manual)
+  score <db>            Evaluate answers in the database.
+  status <db>           Show progress status.
+  delete <db> [resp]    Delete a responder and its answers from the database.
+                        Options: --cleanup (remove incomplete/zombie runs)
+  questions <db>        List questions in the database.
+  report <db>           Generate Markdown report.
+                        Options: --force (ignore incomplete data)
+
+Options:
+  --questions <n>       Number of questions to generate (default: 7).
+  -h, --help            Display this help message.
+  -v, --version         Display version number.
+
+Examples:
+  # Generate questions and capture the database path
+  DB_PATH=$(cat context.md | {SCRIPT_NAME} generate)
+
+  # Answer questions using the generated database
+  {SCRIPT_NAME} answer "$DB_PATH" --mode model:gemini-2.5-flash
+
+  # Score the answers
+  {SCRIPT_NAME} score "$DB_PATH"
+
+  # Generate a report
+  {SCRIPT_NAME} report "$DB_PATH" > report.md
+"""
+    )
+
+
+def error(message):
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---- Database ----
+
+
+def init_db(path):
+    db = sqlite3.connect(path, check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode = WAL")
+    db.executescript(
+        """\
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    ground_truth TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    topic TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS answers (
+    question_id INTEGER,
+    responder TEXT,
+    text TEXT NOT NULL,
+    meta TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (question_id, responder),
+    FOREIGN KEY(question_id) REFERENCES questions(id)
+);
+CREATE TABLE IF NOT EXISTS evaluations (
+    question_id INTEGER,
+    responder TEXT,
+    is_correct BOOLEAN NOT NULL,
+    summary TEXT,
+    critique TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (question_id, responder),
+    FOREIGN KEY(question_id) REFERENCES questions(id)
+);"""
+    )
+    return db
+
+
+def add_questions(db, questions, lock=None):
+    def _do():
+        for q in questions:
+            db.execute(
+                "INSERT INTO questions (text, ground_truth, rationale, topic)"
+                " VALUES (?, ?, ?, ?)",
+                (q["text"], q["ground_truth"], q["rationale"], q.get("topic")),
+            )
+        db.commit()
+
+    if lock:
+        with lock:
+            _do()
+    else:
+        _do()
+
+
+def get_unanswered_questions(db, responder):
+    rows = db.execute(
+        "SELECT * FROM questions"
+        " WHERE id NOT IN ("
+        "   SELECT question_id FROM answers WHERE responder = ? AND text != ?"
+        " ) ORDER BY id ASC",
+        (responder, PLACEHOLDER_TEXT),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_questions(db):
+    return [
+        dict(r)
+        for r in db.execute("SELECT * FROM questions ORDER BY id ASC").fetchall()
+    ]
+
+
+def add_answer(db, question_id, responder, text, meta=None, lock=None):
+    def _do():
+        db.execute(
+            "INSERT INTO answers (question_id, responder, text, meta)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(question_id, responder) DO UPDATE SET"
+            "   text=excluded.text,"
+            "   meta=excluded.meta,"
+            "   timestamp=CURRENT_TIMESTAMP",
+            (question_id, responder, text, json.dumps(meta) if meta else None),
+        )
+        db.commit()
+
+    if lock:
+        with lock:
+            _do()
+    else:
+        _do()
+
+
+def get_all_answers(db):
+    results = []
+    for r in db.execute("SELECT * FROM answers").fetchall():
+        d = dict(r)
+        if d.get("meta"):
+            d["meta"] = json.loads(d["meta"])
+        results.append(d)
+    return results
+
+
+def add_evaluation(
+    db, question_id, responder, is_correct, summary, critique, lock=None
+):
+    def _do():
+        db.execute(
+            "INSERT INTO evaluations (question_id, responder, is_correct, summary, critique)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(question_id, responder) DO UPDATE SET"
+            "   is_correct=excluded.is_correct,"
+            "   summary=excluded.summary,"
+            "   critique=excluded.critique,"
+            "   timestamp=CURRENT_TIMESTAMP",
+            (question_id, responder, 1 if is_correct else 0, summary, critique),
+        )
+        db.commit()
+
+    if lock:
+        with lock:
+            _do()
+    else:
+        _do()
+
+
+def get_evaluation(db, question_id, responder):
+    row = db.execute(
+        "SELECT * FROM evaluations WHERE question_id = ? AND responder = ?",
+        (question_id, responder),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["is_correct"] = bool(d["is_correct"])
+    return d
+
+
+def get_unevaluated_answers(db):
+    rows = db.execute(
+        "SELECT a.* FROM answers a"
+        " LEFT JOIN evaluations e"
+        "   ON a.question_id = e.question_id AND a.responder = e.responder"
+        " WHERE e.question_id IS NULL"
+    ).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        if d.get("meta"):
+            d["meta"] = json.loads(d["meta"])
+        results.append(d)
+    return results
+
+
+def get_stats(db):
+    total = db.execute("SELECT COUNT(*) as count FROM questions").fetchone()["count"]
+    responders = {}
+    for row in db.execute(
+        "SELECT responder, COUNT(*) as count FROM answers GROUP BY responder"
+    ).fetchall():
+        responders[row["responder"]] = {
+            "answers": row["count"],
+            "evaluations": 0,
+            "correct": 0,
+        }
+    for row in db.execute(
+        "SELECT responder, COUNT(*) as count,"
+        " SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct"
+        " FROM evaluations GROUP BY responder"
+    ).fetchall():
+        if row["responder"] not in responders:
+            responders[row["responder"]] = {
+                "answers": 0,
+                "evaluations": 0,
+                "correct": 0,
+            }
+        responders[row["responder"]]["evaluations"] = row["count"]
+        responders[row["responder"]]["correct"] = row["correct"]
+    return {"total_questions": total, "responders": responders}
+
+
+def get_all_responders(db):
+    return [
+        r["responder"]
+        for r in db.execute("SELECT DISTINCT responder FROM answers").fetchall()
+    ]
+
+
+def delete_responder(db, responder):
+    db.execute("DELETE FROM answers WHERE responder = ?", (responder,))
+    db.execute("DELETE FROM evaluations WHERE responder = ?", (responder,))
+    db.commit()
+
+
+# ---- Utilities ----
+
+
+def truncate(text, max_len):
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def wrap_text(text, width):
+    words = text.split(" ")
+    if not words:
+        return ""
+    lines = [words[0]]
+    for word in words[1:]:
+        if len(lines[-1]) + 1 + len(word) <= width:
+            lines[-1] += " " + word
+        else:
+            lines.append(word)
+    return "\n".join(lines)
+
+
+def get_data_dir():
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share"
+    )
+    data_dir = os.path.join(xdg, "socrates")
+    os.makedirs(data_dir, exist_ok=True)
+    return data_dir
+
+
+def resolve_db_path(arg):
+    if os.path.exists(arg):
+        return arg
+
+    data_dir = get_data_dir()
+
+    name = arg if arg.endswith(".db") else f"{arg}.db"
+    direct = os.path.join(data_dir, name)
+    if os.path.exists(direct):
+        return direct
+
+    try:
+        files = [f for f in os.listdir(data_dir) if f.endswith(".db")]
+    except FileNotFoundError:
+        files = []
+    matches = [f for f in files if f.startswith(arg)]
+
+    if len(matches) == 1:
+        return os.path.join(data_dir, matches[0])
+    if len(matches) > 1:
+        error(
+            f"Ambiguous database reference '{arg}':"
+            f" matches multiple files: {', '.join(matches)}"
+        )
+
+    all_files = ", ".join(files) if files else "(none)"
+    error(
+        f"Database not found: '{arg}'.\n"
+        f"Checked path: {direct}\n"
+        f"Checked ID in: {data_dir}\n"
+        f"Available files: {all_files}"
+    )
+
+
+def map_concurrent(items, limit, fn):
+    if not items:
+        return []
+    results = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=min(limit, len(items))) as pool:
+        futures = {pool.submit(fn, item, i): i for i, item in enumerate(items)}
+        for future in futures:
+            i = futures[future]
+            try:
+                results[i] = future.result()
+            except Exception as e:
+                print(f"Worker error: {e}", file=sys.stderr)
+    return results
+
+
+# ---- GenAI ----
+
+
+def get_client():
+    key = os.environ.get("GEMINI_CLI_GEMINI_API_KEY") or os.environ.get(
+        "GEMINI_API_KEY"
+    )
+    if not key:
+        error("GEMINI_API_KEY environment variable not set")
+    os.environ["GEMINI_API_KEY"] = key
+    return genai.Client()
+
+
+def generate_with_retry(client, model, contents, config=None, max_retries=MAX_RETRIES):
+    attempt = 0
+    while True:
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            return response.text
+        except Exception as e:
+            msg = str(e)
+
+            if (
+                any(x in msg for x in ["404", "NOT_FOUND", "429", "RESOURCE_EXHAUSTED"])
+                or "quota" in msg.lower()
+            ):
+                print(
+                    f"\nFATAL: Critical error encountered"
+                    f" (Model not found or Quota exceeded).\n{msg}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            attempt += 1
+            if attempt > max_retries:
+                print(
+                    f"\nFailed after {attempt} attempts: {msg}",
+                    file=sys.stderr,
+                )
+                return None
+
+            delay = (2**attempt) + random.random() * 0.5
+            time.sleep(delay)
+
+
+def generate_questions_ai(client, input_data, topic_focus, question_count):
+    system_instruction = (
+        "Analyze the provided reference material to identify specific details"
+        " that are likely novel, unexpected, or counter-intuitive. Generate"
+        f" exactly {question_count} questions designed to challenge an expert"
+        " model's knowledge of these facts.\n"
+        "\n"
+        "### Core Task\n"
+        'Generate questions that satisfy the "Gotcha" condition:\n'
+        "**An expert in the general field relying on standard industry"
+        " knowledge would likely answer incorrectly, but the correct answer"
+        " is explicitly contained in the provided text.**\n"
+        "\n"
+        "### CRITICAL: Context & Disambiguation\n"
+        "*   **Self-Contained & Unambiguous:** The questions will be asked to"
+        " a model *without* the provided text. You MUST include all necessary"
+        " context in the question itself.\n"
+        "*   **Disambiguate Overloaded Terms:** Many technical terms mean"
+        " different things in different contexts. You MUST qualify these terms"
+        " to avoid ambiguity.\n"
+        '    *   *Ambiguous:* "How do I add a tile?" (Could be Wear OS,'
+        " Quick Settings, Google Maps, Windows OS...)\n"
+        '    *   *Fixed:* "How do I add a **Wear OS** tile to the carousel?"\n'
+        '    *   *Ambiguous:* "What is the limit for navigation?" (UX'
+        " navigation? Jetpack Navigation component? GPS?)\n"
+        '    *   *Fixed:* "What is the back stack limit in **Jetpack'
+        ' Navigation Compose**?"\n'
+        "*   **Specify Versions/Platforms:** If the information is specific to"
+        ' "Wear OS 5" or "Jetpack Tiles 1.4", you **must** explicitly state'
+        " this in the question.\n"
+        '    *   *Bad:* "What is the limit for animated elements?" (Which'
+        " system? Which version?)\n"
+        '    *   *Good:* "In **Wear OS Tiles API v1.4**, what is the hard'
+        ' limit on simultaneously animated elements?"\n'
+        "\n"
+        "### Question Types & Variety\n"
+        "Generate a diverse set of questions. While most should focus on"
+        " positive knowledge (how things work), ensure that **a small portion"
+        " (approx. 15-20%)** of the questions target **negative constraints**"
+        " or **impossible actions** to test for hallucinations.\n"
+        "\n"
+        "1.  **Positive Knowledge (Majority):** Counter-intuitive facts about"
+        " how the system works, architectural patterns, or specific"
+        " limitations of valid features.\n"
+        "2.  **Negative Constraints (Minority):** Ask how to perform a task"
+        " that the text implies or states is impossible or inadvisable.\n"
+        '    *   *Example:* If the text says "Images must be PNG," ask "How'
+        ' do I load a JPEG image?"\n'
+        '    *   *Desired Answer:* "This is not possible; only PNGs are'
+        ' supported."\n'
+        "    *   *Goal:* Verify the model doesn't hallucinate a solution for"
+        " something that cannot be done.\n"
+        "\n"
+        "### Constraints & Mandates\n"
+        "1.  **Source Material Restrictions:**\n"
+        "    *   **Strict Grounding:** You are strictly limited to the"
+        " provided Reference Material for the facts used in the questions and"
+        " answers. Do not incorporate outside facts.\n"
+        "    *   **Ignore Code Snippets:** Do not formulate questions based on"
+        " code blocks, variable names, or syntax.\n"
+        "    *   **Ignore Illustrative Examples:** Do not use"
+        ' "For example..." scenarios or sample values.\n'
+        "    *   **Focus on Normative Text:** Derive questions only from the"
+        " main narrative defining core rules, architecture, and behaviors.\n"
+        "\n"
+        "2.  **Question Quality:**\n"
+        "    *   **Concept over Trivia:** Ask about architectural patterns,"
+        " data flow, logical constraints, or counter-intuitive behaviors.\n"
+        '    *   **The "Gotcha" Factor:** The question should be difficult'
+        " because it contradicts standard intuition.\n"
+        f"    *   **Prioritization:** Select the {question_count} questions"
+        " MOST likely to result in an incorrect response from an expert.\n"
+        "\n"
+        "3.  **Self-Contained Rationale:**\n"
+        "    *   The rationale must explain *why* the fact is true based on"
+        " the system's logic, NOT based on the document's existence.\n"
+        '    *   **Forbidden Phrases:** "The text says...",'
+        ' "According to the document...",'
+        ' "The reference material indicates..."\n'
+        '    *   *Bad:* "The text states that X is true."\n'
+        '    *   *Good:* "X is true because the system architecture'
+        ' requires Y."\n'
+        "\n"
+        "If the text contains only general knowledge, return an empty list."
+    )
+
+    response_text = generate_with_retry(
+        client,
+        EVALUATOR_MODEL,
+        [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=f"Reference Material:\n\n{input_data}"),
+                    types.Part.from_text(text=f"\n\nTask:\n{topic_focus}"),
+                ],
+            ),
+        ],
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema={
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "question": {"type": "STRING"},
+                        "answer": {
+                            "type": "STRING",
+                            "description": "The correct answer based strictly on the text.",
+                        },
+                        "rationale": {
+                            "type": "STRING",
+                            "description": "Why this is counter-intuitive.",
+                        },
+                    },
+                    "required": ["question", "answer", "rationale"],
+                },
+            },
+            temperature=0.5,
+        ),
+    )
+
+    if not response_text:
+        raise RuntimeError("Failed to generate questions: empty response")
+
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Failed to parse questions JSON: {response_text}")
+
+    return [
+        {
+            "text": p["question"],
+            "ground_truth": p["answer"],
+            "rationale": p["rationale"],
+        }
+        for p in parsed
+    ]
+
+
+def test_question_ai(client, model, question, use_grounding):
+    config = None
+    if use_grounding:
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+    return generate_with_retry(client, model, question, config=config)
+
+
+def evaluate_answer_ai(client, question, ground_truth, rationale, candidate_answer):
+    system_instruction = (
+        "You are a strictly grounded impartial judge. Evaluate the Candidate"
+        " Answer SOLELY against the provided Ground Truth.\n"
+        "\n"
+        "### Constraints\n"
+        "1.  **Strict Grounding:** You must **not** access or utilize your own"
+        " knowledge or common sense to evaluate the answer. Treat the provided"
+        " Ground Truth (Answer + Rationale) as the absolute limit of truth.\n"
+        "2.  **XML Structure:** The input is provided in XML tags. Analyze the"
+        " <candidate_answer> against the <ground_truth>."
+    )
+
+    prompt = (
+        f"<question>\n{question}\n</question>\n\n"
+        f"<ground_truth>\n<answer>\n{ground_truth}\n</answer>\n"
+        f"<rationale>\n{rationale}\n</rationale>\n</ground_truth>\n\n"
+        f"<candidate_answer>\n{candidate_answer}\n</candidate_answer>\n\n"
+        "Your Task:\n"
+        "1. Summarize the key points of the Candidate Answer.\n"
+        "2. Compare it to the Ground Truth (Answer and Rationale).\n"
+        "3. Identify specific failures:\n"
+        "    - Direct contradiction.\n"
+        "    - Missing the core 'gotcha' fact defined in the rationale.\n"
+        "    - Technically correct but misleading emphasis.\n"
+        "\n"
+        "  Output strictly in JSON."
+    )
+
+    response_text = generate_with_retry(
+        client,
+        EVALUATOR_MODEL,
+        prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema={
+                "type": "OBJECT",
+                "properties": {
+                    "is_correct": {
+                        "type": "BOOLEAN",
+                        "description": "False if the answer is wrong, misleading, or buries the lead.",
+                    },
+                    "summary": {
+                        "type": "STRING",
+                        "description": "Brief summary of what the candidate actually said.",
+                    },
+                    "critique": {
+                        "type": "STRING",
+                        "description": "Why it is correct or incorrect, referencing the Ground Truth.",
+                    },
+                },
+                "required": ["is_correct", "summary", "critique"],
+            },
+        ),
+    )
+
+    if not response_text:
+        return None
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        return None
+
+
+def generate_topic_slug(client, input_data):
+    prompt = (
+        "Analyze the provided text and generate a concise, representative"
+        " topic slug.\n\n"
+        "### Goal\n"
+        "Create a slug that allows a human to instantly identify the source"
+        " or subject matter of this text.\n"
+        "Focus on the **title**, **main system**, or **primary component**"
+        " described.\n\n"
+        "### Anti-Patterns (Avoid These)\n"
+        '*   Do NOT pick a random variable name (e.g., "debounced-goals").\n'
+        "*   Do NOT pick a specific low-level method"
+        ' (e.g., "prepare-exercise").\n'
+        '*   Do NOT use generic terms (e.g., "documentation", "guide").\n\n'
+        "### Constraints\n"
+        "1.  **Format:** kebab-case (lowercase words joined by hyphens).\n"
+        "2.  **Characters:** a-z, 0-9, - (hyphen) only.\n"
+        "3.  **Length:** Max 40 characters.\n"
+        "4.  **No Hallucinations:** The slug must be derived from the text's"
+        " primary subject.\n\n"
+        "### Examples\n"
+        '*   Text about "Wear OS Tiles API" -> `wear-os-tiles`\n'
+        '*   Text about "Jetpack Navigation" -> `jetpack-navigation`\n'
+        '*   Text about "Health Services ExerciseClient"'
+        " -> `health-services-exercise`\n\n"
+        f"Text Sample:\n{input_data}\n"
+    )
+
+    response_text = generate_with_retry(
+        client,
+        SLUG_MODEL,
+        prompt,
+        config=types.GenerateContentConfig(response_mime_type="text/plain"),
+    )
+
+    if not response_text:
+        return "general"
+
+    slug = response_text.strip().lower()
+    slug = re.sub(r"['\"`]", "", slug)
+    slug = slug.replace("\n", "")
+    slug = re.sub(r"[^a-z0-9-]", "-", slug)
+    slug = re.sub(r"-+", "-", slug)
+    slug = slug.strip("-")
+    return slug[:40] or "general"
+
+
+# ---- Commands ----
+
+
+def cmd_generate(args):
+    question_count = DEFAULT_QUESTION_COUNT
+    i = 0
+    while i < len(args):
+        if args[i] == "--questions" and i + 1 < len(args):
+            question_count = int(args[i + 1])
+            i += 2
+        else:
+            i += 1
+
+    client = get_client()
+    input_data = sys.stdin.read()
+    if not input_data or not input_data.strip():
+        error("Empty input provided via stdin")
+
+    topic_focus = "Generate challenging questions based on novel information."
+
+    print("Generating topic slug...", file=sys.stderr)
+    slug = generate_topic_slug(client, input_data)
+
+    print(f'Generating questions for topic: "{slug}"...', file=sys.stderr)
+    questions = generate_questions_ai(client, input_data, topic_focus, question_count)
+
+    if not questions:
+        print("No questions generated.", file=sys.stderr)
+        return
+
+    hash_id = secrets.token_hex(4)
+    db_id = f"{hash_id}-{slug}"
+    filename = f"{db_id}.db"
+
+    data_dir = get_data_dir()
+    db_path = os.path.join(data_dir, filename)
+    db = init_db(db_path)
+
+    questions_with_topic = [{**q, "topic": topic_focus} for q in questions]
+    add_questions(db, questions_with_topic)
+
+    print(f"Generated {len(questions)} questions.", file=sys.stderr)
+    print(db_path)
+    print(f"Session ID: {db_id}", file=sys.stderr)
+
+
+def cmd_answer(args):
+    db_path_arg = None
+    mode = None
+    positionals = []
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--mode" and i + 1 < len(args):
+            mode = args[i + 1]
+            i += 2
+        else:
+            positionals.append(args[i])
+            i += 1
+
+    db_path_arg = positionals[0] if positionals else None
+    if not db_path_arg:
+        error("answer requires a database path argument")
+    if not mode:
+        error("answer requires --mode <mode>")
+
+    db_path = resolve_db_path(db_path_arg)
+    db = init_db(db_path)
+    db_lock = threading.Lock()
+
+    responder = mode
+
+    # Handle auto-increment syntax "name[]"
+    if responder.endswith("[]"):
+        base = responder[:-2]
+        existing = set(get_all_responders(db))
+        idx = 1
+        while f"{base}[{idx}]" in existing:
+            idx += 1
+        responder = f"{base}[{idx}]"
+        print(f"Starting new run: {responder}")
+
+    questions = get_unanswered_questions(db, responder)
+    if not questions:
+        print(f"No unanswered questions for responder '{responder}'.")
+        return
+
+    # Reserve run ID
+    try:
+        add_answer(db, questions[0]["id"], responder, PLACEHOLDER_TEXT)
+    except Exception as e:
+        print(f"Warning: Failed to reserve run index. {e}", file=sys.stderr)
+
+    parts = responder.split(":", 1)
+    resp_type = parts[0]
+    sub_config = parts[1] if len(parts) > 1 else ""
+    sub_config = re.sub(r"\[\d+\]$", "", sub_config)
+    sub_config = sub_config.replace("[]", "")
+
+    print(f"Found {len(questions)} unanswered questions for '{responder}'.")
+
+    if resp_type == "model":
+        client = get_client()
+        model = sub_config
+        is_grounded = model.endswith("+grounded")
+        model_name = model[: -len("+grounded")] if is_grounded else model
+
+        def answer_worker(q, i):
+            prefix = f"[{i + 1}/{len(questions)}]"
+            try:
+                answer_text = test_question_ai(
+                    client, model_name, q["text"], is_grounded
+                )
+                if answer_text:
+                    add_answer(db, q["id"], responder, answer_text, lock=db_lock)
+                    print(f"{prefix} Answered: {truncate(q['text'], 50)}")
+                else:
+                    print(
+                        f"{prefix} Failed to get answer for: {truncate(q['text'], 50)}",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(
+                    f"{prefix} Error answering question {q['id']}: {e}",
+                    file=sys.stderr,
+                )
+
+        map_concurrent(questions, MAX_CONCURRENCY, answer_worker)
+
+    elif resp_type == "shell":
+        cmd = sub_config.strip()
+        if not cmd:
+            error("Shell command is empty.")
+
+        for i, q in enumerate(questions):
+            prefix = f"[{i + 1}/{len(questions)}]"
+            try:
+                result = subprocess.run(
+                    [cmd, q["text"]],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.stderr:
+                    print(f"{prefix} stderr: {result.stderr.strip()}", file=sys.stderr)
+                answer_text = result.stdout.strip()
+                if answer_text:
+                    add_answer(db, q["id"], responder, answer_text)
+                    print(f"{prefix} Answered: {truncate(q['text'], 50)}")
+                else:
+                    print(
+                        f"{prefix} Empty stdout from script for:"
+                        f" {truncate(q['text'], 50)}",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(
+                    f"{prefix} Error executing script for question {q['id']}: {e}",
+                    file=sys.stderr,
+                )
+
+    elif resp_type == "interactive":
+        for i, q in enumerate(questions):
+            print(f"\n[{i + 1}/{len(questions)}] Question:")
+            print(q["text"])
+            print("-" * 40)
+            print("Enter answer (Press Ctrl+D to save):")
+
+            try:
+                result = subprocess.run(
+                    ["cat"],
+                    stdin=None,
+                    capture_output=True,
+                )
+                answer_text = result.stdout.decode().strip()
+            except Exception as e:
+                print(f"Error reading input: {e}", file=sys.stderr)
+                answer_text = ""
+
+            if answer_text:
+                add_answer(db, q["id"], responder, answer_text)
+                print("Answer saved.")
+            else:
+                print("Skipped (empty answer).")
+
+    else:
+        error(f"Unknown mode type: {resp_type}. Supported: model, shell, interactive.")
+
+
+def cmd_score(args):
+    if not args:
+        error("score requires a database path argument")
+
+    db_path = resolve_db_path(args[0])
+    db = init_db(db_path)
+    db_lock = threading.Lock()
+    client = get_client()
+
+    all_questions = get_all_questions(db)
+    questions_map = {q["id"]: q for q in all_questions}
+
+    answers = get_unevaluated_answers(db)
+    if not answers:
+        print("No unevaluated answers found.")
+        return
+
+    print(f"Found {len(answers)} unevaluated answers.")
+
+    def score_worker(ans, i):
+        q = questions_map.get(ans["question_id"])
+        if not q:
+            print(
+                f"Question ID {ans['question_id']} not found for answer.",
+                file=sys.stderr,
+            )
+            return
+
+        prefix = f"[{i + 1}/{len(answers)}]"
+        try:
+            evaluation = evaluate_answer_ai(
+                client, q["text"], q["ground_truth"], q["rationale"], ans["text"]
+            )
+            if evaluation:
+                add_evaluation(
+                    db,
+                    ans["question_id"],
+                    ans["responder"],
+                    evaluation["is_correct"],
+                    evaluation["summary"],
+                    evaluation["critique"],
+                    lock=db_lock,
+                )
+                verdict = "\u2705" if evaluation["is_correct"] else "\u274c"
+                print(
+                    f"{prefix} Scored {verdict}:"
+                    f" {truncate(q['text'], 50)} ({ans['responder']})"
+                )
+            else:
+                print(
+                    f"{prefix} Failed to evaluate answer for:"
+                    f" {truncate(q['text'], 50)}",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(
+                f"{prefix} Error evaluating answer for question {q['id']}: {e}",
+                file=sys.stderr,
+            )
+
+    map_concurrent(answers, MAX_CONCURRENCY, score_worker)
+
+
+def cmd_status(args):
+    if not args:
+        error("status requires a database path argument")
+
+    db_path = resolve_db_path(args[0])
+    db = init_db(db_path)
+    stats = get_stats(db)
+
+    print(f"Database: {db_path}")
+    print(f"Total Questions: {stats['total_questions']}")
+
+    if stats["responders"]:
+        print()
+
+        h_model = "Model".ljust(50)
+        h_ans = "\U0001f4dd".rjust(6)
+        h_cor = "\u2705".rjust(5)
+        h_inc = "\u274c".rjust(5)
+        h_pen = "\u231b".rjust(5)
+
+        print(f"{h_model} | {h_ans} | {h_cor} | {h_inc} | {h_pen}")
+        print("-" * (50 + 3 + 6 + 3 + 6 + 3 + 6 + 3 + 6))
+
+        for responder, data in stats["responders"].items():
+            name = truncate(responder, 50).ljust(50)
+            incorrect = data["evaluations"] - data["correct"]
+            pending = data["answers"] - data["evaluations"]
+
+            ans = str(data["answers"]).rjust(6)
+            cor = str(data["correct"]).rjust(6)
+            inc = str(incorrect).rjust(6)
+            pen = str(pending).rjust(6)
+
+            print(f"{name} | {ans} | {cor} | {inc} | {pen}")
+        print()
+    else:
+        print("\nNo answers recorded yet.")
+
+
+def cmd_questions(args):
+    if not args:
+        error("questions requires a database path argument")
+
+    db_path = resolve_db_path(args[0])
+    db = init_db(db_path)
+    questions = get_all_questions(db)
+
+    if questions:
+        print("Questions:")
+        print("-" * 50)
+        for q in questions:
+            print(f"Q{q['id']}:")
+            print()
+            print("QUESTION")
+            print()
+            print(wrap_text(q["text"], 80))
+            print()
+            print("ANSWER")
+            print()
+            print(wrap_text(q["ground_truth"], 80))
+            print()
+            print("RATIONALE")
+            print()
+            print(wrap_text(q["rationale"], 80))
+            print()
+            print("-" * 50)
+    else:
+        print("No questions found.")
+
+
+def cmd_delete(args):
+    positionals = []
+    cleanup = False
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--cleanup":
+            cleanup = True
+            i += 1
+        else:
+            positionals.append(args[i])
+            i += 1
+
+    db_path_arg = positionals[0] if positionals else None
+    responder = positionals[1] if len(positionals) > 1 else None
+
+    if not db_path_arg:
+        error("delete requires a database path argument")
+    if not cleanup and not responder:
+        error(
+            "delete requires a responder argument"
+            " (e.g. 'model:gemini-flash') or --cleanup"
+        )
+
+    db_path = resolve_db_path(db_path_arg)
+    db = init_db(db_path)
+
+    if cleanup:
+        print("Cleaning up incomplete runs...")
+        responders = get_all_responders(db)
+        deleted_count = 0
+
+        for r in responders:
+            rows = db.execute(
+                "SELECT text FROM answers WHERE responder = ?", (r,)
+            ).fetchall()
+            if not rows:
+                continue
+            if all(row["text"] == PLACEHOLDER_TEXT for row in rows):
+                print(f"Deleting zombie run '{r}' (only placeholders found)...")
+                delete_responder(db, r)
+                deleted_count += 1
+
+        if deleted_count == 0:
+            print("No zombie runs found.")
+        else:
+            print(f"Cleaned up {deleted_count} runs.")
+        return
+
+    exists = db.execute(
+        "SELECT 1 FROM answers WHERE responder = ? LIMIT 1", (responder,)
+    ).fetchone()
+    if not exists:
+        print(f"Responder '{responder}' not found in database.", file=sys.stderr)
+        return
+
+    delete_responder(db, responder)
+    print(f"Deleted all records for responder '{responder}'.")
+
+
+def cmd_report(args):
+    positionals = []
+    force = False
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--force":
+            force = True
+            i += 1
+        else:
+            positionals.append(args[i])
+            i += 1
+
+    db_path_arg = positionals[0] if positionals else None
+    if not db_path_arg:
+        error("report requires a database path argument")
+
+    db_path = resolve_db_path(db_path_arg)
+    db = init_db(db_path)
+
+    questions = get_all_questions(db)
+    answers = get_all_answers(db)
+
+    responders = sorted(set(a["responder"] for a in answers))
+    if not responders:
+        print("No answers found in database.", file=sys.stderr)
+        return
+
+    evaluations = []
+    for ans in answers:
+        ev = get_evaluation(db, ans["question_id"], ans["responder"])
+        if ev:
+            evaluations.append(ev)
+
+    # Completeness check
+    if not force:
+        errors = []
+        for r in responders:
+            r_answers = [a for a in answers if a["responder"] == r]
+            if len(r_answers) < len(questions):
+                errors.append(
+                    f"Responder '{r}' has answered only"
+                    f" {len(r_answers)}/{len(questions)} questions."
+                )
+            r_evals = [e for e in evaluations if e["responder"] == r]
+            if len(r_evals) < len(r_answers):
+                errors.append(
+                    f"Responder '{r}' has only"
+                    f" {len(r_evals)}/{len(r_answers)} answers evaluated."
+                )
+        if errors:
+            print(
+                "Report generation aborted due to incomplete data:",
+                file=sys.stderr,
+            )
+            for e in errors:
+                print(f"- {e}", file=sys.stderr)
+            print("\nUse --force to generate the report anyway.", file=sys.stderr)
+            sys.exit(1)
+
+    report = generate_report(questions, answers, evaluations, responders)
+    print(report)
+
+
+def parse_responder(r):
+    if r.startswith("model:"):
+        config = r[len("model:") :]
+        model_name = re.sub(r"\[\d+\]$", "", config).removesuffix("+grounded")
+        is_grounded = "+grounded" in config
+        return {"name": model_name, "grounded": is_grounded, "is_model": True}
+    name = re.sub(r"\[\d+\]$", "", r)
+    return {"name": name, "grounded": False, "is_model": False}
+
+
+def generate_report(questions, answers, evaluations, responders):
+    report = "# Model Knowledge Gap Analysis\n\n"
+    date_str = time.strftime("%Y-%m-%d %H:%M", time.gmtime())
+    report += f"Date: {date_str} \\\n"
+
+    if len(responders) == 1:
+        report += f"Responder: `{responders[0]}`\n\n"
+    else:
+        report += "Responders: " + ", ".join(f"`{m}`" for m in responders) + "\n\n"
+
+    # Summary Table
+    report += "## Summary\n\n"
+
+    groups = {}
+    for r in responders:
+        parsed = parse_responder(r)
+        if parsed["name"] not in groups:
+            groups[parsed["name"]] = {
+                "ungrounded": [],
+                "grounded": [],
+                "is_model": parsed["is_model"],
+            }
+        group = groups[parsed["name"]]
+        if parsed["grounded"]:
+            group["grounded"].append(r)
+        else:
+            group["ungrounded"].append(r)
+
+    columns = []
+    for name, group in groups.items():
+        if group["is_model"]:
+            columns.append(
+                {
+                    "label": f"**{name}**",
+                    "sub_label": "No Grounding",
+                    "responders": group["ungrounded"],
+                }
+            )
+            columns.append(
+                {"label": " ", "sub_label": "Grounded", "responders": group["grounded"]}
+            )
+        else:
+            columns.append(
+                {
+                    "label": f"**{name}**",
+                    "sub_label": " ",
+                    "responders": group["ungrounded"],
+                }
+            )
+
+    report += "| Question | " + " | ".join(c["label"] for c in columns) + " |\n"
+    report += "| :--- | " + " | ".join(":---:" for _ in columns) + " |\n"
+    report += "| | " + " | ".join(c["sub_label"] for c in columns) + " |\n"
+
+    for i, q in enumerate(questions):
+        row = [f"Q{i + 1}: {truncate(q['text'], 50)}"]
+        for col in columns:
+            if not col["responders"]:
+                row.append("-")
+                continue
+            icons = []
+            for r in col["responders"]:
+                ev = next(
+                    (
+                        e
+                        for e in evaluations
+                        if e["question_id"] == q["id"] and e["responder"] == r
+                    ),
+                    None,
+                )
+                if ev:
+                    icons.append("\u2705" if ev["is_correct"] else "\u274c")
+                else:
+                    ans = next(
+                        (
+                            a
+                            for a in answers
+                            if a["question_id"] == q["id"] and a["responder"] == r
+                        ),
+                        None,
+                    )
+                    icons.append("\u23f3" if ans else "-")
+            row.append(" ".join(icons))
+        report += "| " + " | ".join(row) + " |\n"
+
+    report += "\n---\n\n"
+
+    # Detailed Analysis
+    report += "## Detailed Analysis\n\n"
+
+    for i, q in enumerate(questions):
+        report += f"### Q{i + 1}: {q['text']}\n\n"
+        report += f"**Rationale:** {q['rationale']}\n\n"
+        report += f"**Ground Truth:** {q['ground_truth']}\n\n"
+
+        for r in responders:
+            ans = next(
+                (
+                    a
+                    for a in answers
+                    if a["question_id"] == q["id"] and a["responder"] == r
+                ),
+                None,
+            )
+            if not ans:
+                continue
+
+            ev = next(
+                (
+                    e
+                    for e in evaluations
+                    if e["question_id"] == q["id"] and e["responder"] == r
+                ),
+                None,
+            )
+
+            if not ev:
+                report += f"#### \u23f3 {r}\n\n"
+                report += "**Status:** Answered but not yet evaluated.\n\n"
+                report += (
+                    f"<details><summary>Raw Response</summary>\n\n"
+                    f"{ans['text']}\n\n</details>\n\n"
+                )
+                continue
+
+            icon = "\u2705" if ev["is_correct"] else "\u274c"
+            report += f"#### {icon} {r}\n\n"
+            report += f"**Analysis:** {ev['summary']} {ev['critique']}\n\n"
+            report += (
+                f"<details><summary>Raw Response</summary>\n\n"
+                f"{ans['text']}\n\n</details>\n\n"
+            )
+
+        report += "---\n\n"
+
+    return report
+
+
+# ---- Main ----
+
+
+def main():
+    args = sys.argv[1:]
+
+    if not args:
+        usage()
+        sys.exit(0)
+
+    command = args[0]
+
+    if command in ("-h", "--help"):
+        usage()
+        sys.exit(0)
+
+    if command in ("-v", "--version"):
+        print(f"{SCRIPT_NAME} {VERSION}")
+        sys.exit(0)
+
+    sub_args = args[1:]
+
+    try:
+        if command == "generate":
+            cmd_generate(sub_args)
+        elif command == "answer":
+            cmd_answer(sub_args)
+        elif command == "score":
+            cmd_score(sub_args)
+        elif command == "status":
+            cmd_status(sub_args)
+        elif command == "delete":
+            cmd_delete(sub_args)
+        elif command == "questions":
+            cmd_questions(sub_args)
+        elif command == "report":
+            cmd_report(sub_args)
+        else:
+            error(f"unknown command: {command}")
+    except SystemExit:
+        raise
+    except Exception as e:
+        error(str(e))
+
+
+if __name__ == "__main__":
+    main()
