@@ -24,6 +24,7 @@ complete -c context -f -n __fish_context_needs_topic -a gemini-cli -d 'Gemini CL
 complete -c context -f -n __fish_context_needs_topic -a inkyframe -d 'Pimoroni Inky Frame documentation'
 complete -c context -f -n __fish_context_needs_topic -a rpi -d 'Raspberry Pi documentation'
 complete -c context -f -n __fish_context_needs_topic -a skills -d 'Agent skills documentation (Claude, Gemini CLI, OpenAI Codex)'
+complete -c context -f -n __fish_context_needs_topic -a prompting -d 'Prompt engineering guides for Claude, Gemini, and OpenAI'
 complete -c context -f -n __fish_context_needs_topic -a gemini-sdk-js -d 'Google Gemini JavaScript SDK codegen instructions'
 
 # Complete flags
