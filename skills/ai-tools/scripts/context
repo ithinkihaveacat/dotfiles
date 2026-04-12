@@ -3,7 +3,7 @@
 # context - Generate aggregated context for various topics
 #
 # Each topic is a bash function that uses fetch() to download GitHub repos
-# and run() to output content in a shell_session XML format.
+# and entry_url/entry_file/entry_stdin to emit content as XML entries.
 
 # Bash 4.0 or higher required for robust string manipulation
 if ((BASH_VERSINFO[0] < 4)); then
@@ -37,11 +37,89 @@ cdata_escape() {
   tr -d '\000-\010\013\014\016-\037' | sed 's/]]>/]]]]><![CDATA[>/g'
 }
 
+# _emit_entry DISPLAY_CMD CONTENT
+#
+# Emits a single XML entry with the given display command and content.
+_emit_entry() {
+  local display_cmd="$1"
+  local content="$2"
+  printf "<entry>\n"
+  printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
+  printf "<output><![CDATA[%s]]></output>\n" "$(printf '%s' "$content" | cdata_escape)"
+  printf "</entry>\n"
+}
+
+# _make_display_cmd URL [WEB_URL]
+#
+# Builds a display command string for an entry.
+_make_display_cmd() {
+  local url="$1"
+  local web_url="${2:-}"
+  local cmd="curl -sfSL '$url'"
+  if [[ -n "$web_url" ]]; then
+    cmd+="  # web page: $web_url"
+  fi
+  printf '%s' "$cmd"
+}
+
+# entry_url FETCH_URL [WEB_URL]
+#
+# Fetches a URL (following redirects) and emits an entry. If WEB_URL is
+# provided, it is included as a "# web page:" citation.
+entry_url() {
+  local fetch_url="$1"
+  local web_url="${2:-}"
+  local display_cmd
+  display_cmd=$(_make_display_cmd "$fetch_url" "$web_url")
+  local output
+  if ! output=$(curl -sfSL "$fetch_url"); then
+    echo "$SCRIPT_NAME: command failed: $display_cmd" >&2
+    exit 1
+  fi
+  _emit_entry "$display_cmd" "$output"
+}
+
+# entry_file LOCAL_PATH DISPLAY_URL [WEB_URL]
+#
+# Reads a local file and emits an entry. DISPLAY_URL is shown as the source
+# (typically a raw GitHub URL). If WEB_URL is provided, it is included as a
+# "# web page:" citation.
+entry_file() {
+  local local_path="$1"
+  local display_url="$2"
+  local web_url="${3:-}"
+  local display_cmd
+  display_cmd=$(_make_display_cmd "$display_url" "$web_url")
+  local output
+  if ! output=$(cat "$local_path"); then
+    echo "$SCRIPT_NAME: failed to read: $local_path" >&2
+    exit 1
+  fi
+  _emit_entry "$display_cmd" "$output"
+}
+
+# entry_stdin DISPLAY_URL [WEB_URL]
+#
+# Reads content from stdin and emits an entry. DISPLAY_URL is shown as the
+# source. If WEB_URL is provided, it is included as a "# web page:" citation.
+entry_stdin() {
+  local display_url="$1"
+  local web_url="${2:-}"
+  local display_cmd
+  display_cmd=$(_make_display_cmd "$display_url" "$web_url")
+  local output
+  if ! output=$(cat); then
+    echo "$SCRIPT_NAME: failed to read stdin for: $display_url" >&2
+    exit 1
+  fi
+  _emit_entry "$display_cmd" "$output"
+}
+
 # run DISPLAY_CMD COMMAND [ARGS...]
 #
-# Captures a command and its output as XML. The first argument is displayed
-# in the <command> element. The remaining arguments are the command to execute.
-# Exits on failure.
+# Legacy helper used by run_dynamic_topic. Captures a command and its output
+# as XML. The first argument is the display command; remaining arguments are
+# the command to execute. Exits on failure.
 run() {
   local display_cmd="$1"
   shift
@@ -52,10 +130,7 @@ run() {
     exit 1
   fi
 
-  printf "<entry>\n"
-  printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
-  printf "<output><![CDATA[%s]]></output>\n" "$(printf '%s' "$output" | cdata_escape)"
-  printf "</entry>\n"
+  _emit_entry "$display_cmd" "$output"
 }
 
 # fetch - Download a GitHub repository and return its local path
@@ -224,8 +299,8 @@ topic_gemini_api() {
     "quickstarts/Safety.ipynb" \
     "quickstarts/System_instructions.ipynb"; do
     colab="https://colab.research.google.com/github/google-gemini/cookbook/blob/main/$nb"
-    run "curl -s 'https://raw.githubusercontent.com/google-gemini/cookbook/main/$nb'  # web page: $colab" \
-      jq '.cells[] |= (if .cell_type == "code" then .outputs = [] | .execution_count = null else . end)' "$repo/$nb"
+    jq '.cells[] |= (if .cell_type == "code" then .outputs = [] | .execution_count = null else . end)' "$repo/$nb" |
+      entry_stdin "https://raw.githubusercontent.com/google-gemini/cookbook/main/$nb" "$colab"
   done
 
   # Documentation URLs
@@ -249,7 +324,7 @@ topic_gemini_api() {
     "https://ai.google.dev/gemini-api/docs/text-generation.md.txt" \
     "https://ai.google.dev/gemini-api/docs/tokens.md.txt" \
     "https://ai.google.dev/gemini-api/docs/troubleshooting.md.txt"; do
-    run "curl -sfS '$url'" curl -sfS "$url"
+    entry_url "$url"
   done
 }
 
@@ -266,7 +341,9 @@ topic_mcp_server() {
     slug="${file#docs/docs/}"
     slug="${slug%.mdx}"
     published="https://modelcontextprotocol.io/docs/$slug"
-    run "curl -s 'https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$file'  # web page: $published" cat "$repo/$file"
+    entry_file "$repo/$file" \
+      "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$file" \
+      "$published"
   done
 
   # Specification directory
@@ -277,7 +354,9 @@ topic_mcp_server() {
     local slug="${rel#docs/}"
     slug="${slug%.mdx}"
     local published="https://modelcontextprotocol.io/$slug"
-    run "curl -s 'https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$rel'  # web page: $published" cat "$file"
+    entry_file "$file" \
+      "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$rel" \
+      "$published"
   done
 }
 
@@ -298,7 +377,9 @@ topic_gemini_cli() {
     # The previous topic_gemini_cli_changelog used explicit URLs for index/latest/preview.
     # We'll rely on the repo content here which is generally better.
 
-    run "curl -s 'https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel'  # web page: $published" cat "$file"
+    entry_file "$file" \
+      "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel" \
+      "$published"
   done
 }
 
@@ -309,7 +390,8 @@ topic_inkyframe() {
 
   # inky-frame README
   if [[ -f "$inky/README.md" ]]; then
-    run "curl -s 'https://raw.githubusercontent.com/pimoroni/inky-frame/main/README.md'" cat "$inky/README.md"
+    entry_file "$inky/README.md" \
+      "https://raw.githubusercontent.com/pimoroni/inky-frame/main/README.md"
   fi
 
   # inky-frame docs, examples, modules
@@ -317,29 +399,31 @@ topic_inkyframe() {
   for dir in docs examples modules; do
     find "$inky/$dir" \( -name "*.md" -o -name "*.py" \) -type f 2>/dev/null | sort | while read -r file; do
       local rel="${file#"$inky"/}"
-      run "curl -s 'https://raw.githubusercontent.com/pimoroni/inky-frame/main/$rel'" cat "$file"
+      entry_file "$file" \
+        "https://raw.githubusercontent.com/pimoroni/inky-frame/main/$rel"
     done
   done
 
   # pimoroni-pico picographics
   find "$pico/micropython/modules/picographics" -name "*.md" -type f | sort | while read -r file; do
     local rel="${file#"$pico"/}"
-    run "curl -s 'https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel'" cat "$file"
+    entry_file "$file" \
+      "https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel"
   done
 
   # pimoroni-pico inky_frame examples
   find "$pico/micropython/examples/inky_frame" \( -name "*.md" -o -name "*.py" \) -type f 2>/dev/null | sort | while read -r file; do
     local rel="${file#"$pico"/}"
-    run "curl -s 'https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel'" cat "$file"
+    entry_file "$file" \
+      "https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel"
   done
 
   # External URLs
-  run "curl -sfS 'https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt'" \
-    curl -sfS 'https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt'
+  entry_url "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt"
 
-  # Jina reader for learn.pimoroni.com (display URL differs from fetch URL)
-  run "curl -s 'https://learn.pimoroni.com/article/getting-started-with-inky-frame'" \
-    curl -sfS 'https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame'
+  # Jina reader for learn.pimoroni.com
+  entry_url "https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame" \
+    "https://learn.pimoroni.com/article/getting-started-with-inky-frame"
 }
 
 topic_rpi() {
@@ -353,20 +437,26 @@ topic_rpi() {
     published="https://www.raspberrypi.com/documentation/computers/${dir}.html"
     # Index file
     if [[ -f "$src/$dir.adoc" ]]; then
-      run "curl -s 'https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/$dir.adoc'  # web page: $published" cat "$src/$dir.adoc"
+      entry_file "$src/$dir.adoc" \
+        "https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/$dir.adoc" \
+        "$published"
     fi
     # Directory contents
     if [[ -d "$src/$dir" ]]; then
       find "$src/$dir" -name "*.adoc" -type f | grep -v "device-tree.adoc" | sort | while read -r file; do
         local rel="${file#"$repo"/}"
-        run "curl -s 'https://raw.githubusercontent.com/raspberrypi/documentation/master/$rel'  # web page: $published" cat "$file"
+        entry_file "$file" \
+          "https://raw.githubusercontent.com/raspberrypi/documentation/master/$rel" \
+          "$published"
       done
     fi
   done
 
   # Standalone file
   if [[ -f "$src/software-sources.adoc" ]]; then
-    run "curl -s 'https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/software-sources.adoc'  # web page: https://www.raspberrypi.com/documentation/computers/software-sources.html" cat "$src/software-sources.adoc"
+    entry_file "$src/software-sources.adoc" \
+      "https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/software-sources.adoc" \
+      "https://www.raspberrypi.com/documentation/computers/software-sources.html"
   fi
 }
 
@@ -383,20 +473,21 @@ topic_skills() {
     local slug="${rel#docs/}"
     slug="${slug%.mdx}"
     local published="https://agentskills.io/$slug"
-    run "curl -s 'https://raw.githubusercontent.com/agentskills/agentskills/main/$rel'  # web page: $published" cat "$file"
+    entry_file "$file" \
+      "https://raw.githubusercontent.com/agentskills/agentskills/main/$rel" \
+      "$published"
   done
 
   # Claude platform best practices
-  run "curl -sfS 'https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md'  # web page: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices" \
-    curl -sfS 'https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md'
+  entry_url "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md" \
+    "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices"
 
   # Claude Code documentation (contains general tips and examples for writing effective skills)
-  run "curl -sfS 'https://code.claude.com/docs/en/skills.md'  # web page: https://code.claude.com/docs/en/skills" \
-    curl -sfS 'https://code.claude.com/docs/en/skills.md'
+  entry_url "https://code.claude.com/docs/en/skills.md" \
+    "https://code.claude.com/docs/en/skills"
 
   # Anthropic skills repository
-  run "curl -sfS 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md'" \
-    curl -sfS 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md'
+  entry_url "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md"
 }
 
 topic_homeassistant() {
@@ -436,31 +527,35 @@ topic_homeassistant() {
     vicare \
     water_heater; do
     published="https://www.home-assistant.io/integrations/$integration/"
-    run "curl -s 'https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_integrations/$integration.markdown'  # web page: $published" \
-      cat "$ha_io/source/_integrations/$integration.markdown"
+    entry_file "$ha_io/source/_integrations/$integration.markdown" \
+      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_integrations/$integration.markdown" \
+      "$published"
   done
 
   # Automation docs
   local doc slug
   for doc in trigger condition action templating; do
     published="https://www.home-assistant.io/docs/automation/$doc/"
-    run "curl -s 'https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/automation/$doc.markdown'  # web page: $published" \
-      cat "$ha_io/source/_docs/automation/$doc.markdown"
+    entry_file "$ha_io/source/_docs/automation/$doc.markdown" \
+      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/automation/$doc.markdown" \
+      "$published"
   done
 
   # Script docs
   for doc in scripts scripts/conditions scripts/perform-actions; do
     slug="${doc%.markdown}"
     published="https://www.home-assistant.io/docs/$slug/"
-    run "curl -s 'https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/$doc.markdown'  # web page: $published" \
-      cat "$ha_io/source/_docs/$doc.markdown"
+    entry_file "$ha_io/source/_docs/$doc.markdown" \
+      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/$doc.markdown" \
+      "$published"
   done
 
   # Configuration and templating docs
   for doc in configuration/yaml configuration/templating; do
     published="https://www.home-assistant.io/docs/$doc/"
-    run "curl -s 'https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/$doc.markdown'  # web page: $published" \
-      cat "$ha_io/source/_docs/$doc.markdown"
+    entry_file "$ha_io/source/_docs/$doc.markdown" \
+      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/$doc.markdown" \
+      "$published"
   done
 
   # Dashboard docs
@@ -474,8 +569,9 @@ topic_homeassistant() {
       published_slug="dashboards/$dashboard/"
     fi
     published="https://www.home-assistant.io/$published_slug"
-    run "curl -s 'https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/$dashboard_rel'  # web page: $published" \
-      cat "$dashboard_file"
+    entry_file "$dashboard_file" \
+      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/$dashboard_rel" \
+      "$published"
   done
 
   # REST API and WebSocket API (from developers.home-assistant)
@@ -483,8 +579,9 @@ topic_homeassistant() {
   for api_file in rest.md websocket.md supervisor/endpoints.md supervisor/models.md; do
     api_slug="${api_file%.md}"
     published="https://developers.home-assistant.io/docs/api/$api_slug"
-    run "curl -s 'https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/api/$api_file'  # web page: $published" \
-      cat "$dev_docs/docs/api/$api_file"
+    entry_file "$dev_docs/docs/api/$api_file" \
+      "https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/api/$api_file" \
+      "$published"
   done
 
   # Apps documentation (from developers.home-assistant)
@@ -492,8 +589,9 @@ topic_homeassistant() {
   for apps_file in communication.md configuration.md presentation.md publishing.md repository.md security.md testing.md tutorial.md; do
     apps_slug="${apps_file%.md}"
     published="https://developers.home-assistant.io/docs/apps/$apps_slug"
-    run "curl -s 'https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/apps/$apps_file'  # web page: $published" \
-      cat "$dev_docs/docs/apps/$apps_file"
+    entry_file "$dev_docs/docs/apps/$apps_file" \
+      "https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/apps/$apps_file" \
+      "$published"
   done
 }
 
@@ -501,34 +599,28 @@ topic_prompting() {
   # Anthropic / Claude docs (native .md support)
   local claude_url
   for claude_url in \
-    "https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview" \
-    "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices" \
-    "https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/system-prompts"; do
-    run "curl -sfS '${claude_url}.md'  # web page: ${claude_url}" \
-      curl -sfS "${claude_url}.md"
+    "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview" \
+    "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"; do
+    entry_url "${claude_url}.md" "$claude_url"
   done
 
   # Google AI / Gemini API docs (native .md.txt support)
   local gemini_url
   for gemini_url in \
     "https://ai.google.dev/gemini-api/docs/prompting-strategies"; do
-    run "curl -sfS '${gemini_url}.md.txt'  # web page: ${gemini_url}" \
-      curl -sfS "${gemini_url}.md.txt"
+    entry_url "${gemini_url}.md.txt" "$gemini_url"
   done
 
   # OpenAI Docs (native .md support via developers subdomain)
   local openai_slug
   for openai_slug in "guides/prompt-engineering" "guides/text"; do
-    local md_url="https://developers.openai.com/api/docs/${openai_slug}.md"
-    local web_url="https://platform.openai.com/docs/${openai_slug}"
-    run "curl -sfS '${md_url}'  # web page: ${web_url}" \
-      curl -sfS "${md_url}"
+    entry_url "https://developers.openai.com/api/docs/${openai_slug}.md" \
+      "https://platform.openai.com/docs/${openai_slug}"
   done
 }
 
 topic_gemini_sdk_js() {
-  run "curl -sfS 'https://raw.githubusercontent.com/googleapis/js-genai/main/codegen_instructions.md'" \
-    curl -sfS 'https://raw.githubusercontent.com/googleapis/js-genai/main/codegen_instructions.md'
+  entry_url "https://raw.githubusercontent.com/googleapis/js-genai/main/codegen_instructions.md"
 }
 
 # =============================================================================
