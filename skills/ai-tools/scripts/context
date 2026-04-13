@@ -88,12 +88,13 @@ entry_file() {
   local local_path="$1"
   local display_url="$2"
   local web_url="${3:-}"
+
   local display_cmd
   display_cmd=$(_make_display_cmd "$display_url" "$web_url")
   local output
-  if ! output=$(cat "$local_path"); then
-    echo "$SCRIPT_NAME: failed to read: $local_path" >&2
-    exit 1
+  if ! output=$(cat "$local_path" 2>/dev/null); then
+    echo "$SCRIPT_NAME: warning: skipping unreadable file: $local_path" >&2
+    return 0
   fi
   _emit_entry "$display_cmd" "$output"
 }
@@ -163,8 +164,9 @@ clean_url() {
   local u="$1"
   # Replace all // with /
   u="${u//\/\//\/}"
-  # Fix protocol (restore https://)
+  # Fix protocol (restore https:// or http://)
   u="${u/https:\//https:\/\/}"
+  u="${u/http:\//http:\/\/}"
   echo "$u"
 }
 
@@ -175,11 +177,18 @@ topic_dynamic() {
   # Check if directory exists (handles broken symlinks)
   if [[ ! -e "$topic_dir" ]]; then
     echo "$SCRIPT_NAME: topic '$topic' not found (or broken symlink at $topic_dir)" >&2
+    echo "Hint: This may be due to expired credentials or an unmounted network filesystem." >&2
     exit 1
   fi
 
   if [[ ! -d "$topic_dir" ]]; then
     echo "$SCRIPT_NAME: topic '$topic' is not a directory" >&2
+    exit 1
+  fi
+
+  if [[ ! -r "$topic_dir" ]]; then
+    echo "$SCRIPT_NAME: topic '$topic' is unreadable: $topic_dir" >&2
+    echo "Hint: This may be due to expired credentials or an unmounted network filesystem." >&2
     exit 1
   fi
 
@@ -189,6 +198,43 @@ topic_dynamic() {
     local display_cmd
 
     case "$topic" in
+      # Special-case dynamic topics that start with "g3doc-"
+      # These files are mapped to internal http://g3doc/ URLs.
+      g3doc-*)
+        local path
+        path=$(realpath "$file")
+
+        if [[ "$path" =~ /google3/(.+)/g3doc/(.+)$ ]]; then
+          local prefix="${BASH_REMATCH[1]}"
+          local suffix="${BASH_REMATCH[2]}"
+          local published="http://g3doc/$prefix/$suffix"
+
+          # Extension stripping
+          if [[ "$published" == *.md.txt ]]; then
+            published="${published%.md.txt}"
+          elif [[ "$published" == *.txt ]]; then
+            published="${published%.txt}"
+          elif [[ "$published" == *.md ]]; then
+            published="${published%.md}"
+          fi
+
+          # Index handling
+          local base
+          base=$(basename "$published")
+          if [[ "$base" == "index" || "$base" == "home" ]]; then
+            published="$(dirname "$published")"
+            if [[ "$published" == "." ]]; then published="http://g3doc/$prefix"; fi
+          fi
+
+          published=$(clean_url "$published")
+          published="${published%/}"
+
+          display_cmd="cat //depot/google3/$prefix/g3doc/$suffix # web page: $published"
+        else
+          display_cmd="cat $topic_dir/$rel"
+        fi
+        ;;
+
       # Special-case dynamic topics that start with "dac-"
       # These files are mapped to public developer.android.com URLs by stripping
       # internal path segments (like /knowledge_base/latest/android) and file extensions.
@@ -253,9 +299,9 @@ topic_dynamic() {
     esac
 
     local output
-    if ! output=$(cat "$file"); then
-      echo "$SCRIPT_NAME: failed to read: $file" >&2
-      exit 1
+    if ! output=$(cat "$file" 2>/dev/null); then
+      echo "$SCRIPT_NAME: warning: skipping unreadable file: $file" >&2
+      continue
     fi
 
     _emit_entry "$display_cmd" "$output"
@@ -796,6 +842,7 @@ fi
 # Check dependencies
 require curl
 require jq
+require realpath
 
 # Cache setup
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/context"
