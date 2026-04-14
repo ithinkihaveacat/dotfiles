@@ -12,6 +12,7 @@ complete -c jetpack -n __fish_use_subcommand -a resolve -d 'Convert package name
 complete -c jetpack -n __fish_use_subcommand -a source -d 'Download and extract source JARs'
 complete -c jetpack -n __fish_use_subcommand -a inspect -d 'Resolve class name and download source'
 complete -c jetpack -n __fish_use_subcommand -a resolve-exceptions -d 'Find missing exceptions for resolve'
+complete -c jetpack -n __fish_use_subcommand -a dependencies -d 'List direct Maven dependencies for an artifact'
 
 # version subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from version' -s h -l help -d 'Display help'
@@ -32,3 +33,8 @@ complete -c jetpack -n '__fish_seen_subcommand_from inspect' -a 'ALPHA BETA RC S
 
 # resolve-exceptions subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from resolve-exceptions' -s h -l help -d 'Display help'
+complete -c jetpack -n '__fish_seen_subcommand_from resolve-exceptions' -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Symbolic version'
+
+# dependencies subcommand
+complete -c jetpack -n '__fish_seen_subcommand_from dependencies' -s h -l help -d 'Display help'
+complete -c jetpack -n '__fish_seen_subcommand_from dependencies' -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Symbolic version'
