@@ -86,11 +86,15 @@ specify destination, `--find PATTERN` to locate specific files.
 quickly checking implementation details; uses code search if direct resolution
 fails.
 
+### `dependencies`
+
+**Purpose**: List direct Maven dependencies for an artifact. **Usage**:
+`scripts/jetpack dependencies ARTIFACT [VERSION]`
+
 ### `resolve-exceptions`
 
 **Purpose**: Find missing exceptions for the `resolve` command. **Usage**:
-`scripts/jetpack resolve-exceptions COORDINATE` **Note**: Analyzes SNAPSHOT JARs
-to find packages violating naming conventions.
+`scripts/jetpack resolve-exceptions COORDINATE [VERSION]`
 
 ## Version Types
 

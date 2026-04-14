@@ -192,6 +192,7 @@ Subcommands to document:
 5. **source** - Download and extract source JARs (mention `--find`)
 6. **inspect** - Convenience wrapper combining resolve/search + source
 7. **resolve-exceptions** - Find missing exceptions for resolve command
+8. **dependencies** - List direct Maven dependencies for an artifact
 
 #### Version Types
 
