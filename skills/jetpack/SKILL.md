@@ -47,6 +47,8 @@ heuristics—use it as reference when building similar functionality.
   `scripts/jetpack resolve androidx.lifecycle.ViewModel`
 - **Download bleeding-edge source:**
   `scripts/jetpack source androidx.compose.ui:ui SNAPSHOT`
+- **Download reference sample code:**
+  `scripts/jetpack-samples androidx.compose.remote:remote-creation-compose`
 
 ## Subcommand Overview
 
@@ -95,6 +97,14 @@ fails.
 
 **Purpose**: Find missing exceptions for the `resolve` command. **Usage**:
 `scripts/jetpack resolve-exceptions COORDINATE [VERSION]`
+
+## Standalone Scripts
+
+### `scripts/jetpack-samples`
+
+**Purpose**: Download non-published reference samples and integration tests.
+**Usage**: `scripts/jetpack-samples ARTIFACT [--output DIR]`
+**Details**: Locates files from the AOSP source structure and aggregates into readable components locally.
 
 ## Version Types
 

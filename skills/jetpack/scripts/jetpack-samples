@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+
+# jetpack-samples - Extract reference files for inspection
+#
+# Usage: jetpack-samples ARTIFACT [--output DIR]
+
+set -euo pipefail
+
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require curl
+require jq
+require perl
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") ARTIFACT [OPTIONS]
+
+Extract reference files (samples and integration tests) from the AndroidX 
+source repository for inspection.
+
+Arguments:
+  ARTIFACT       The Maven coordinate of the Jetpack library (e.g., androidx.compose.remote:remote-creation-compose).
+
+Options:
+  --output DIR   Directory where extracted files will be downloaded.
+                 If omitted, a temporary directory is used.
+  --help         Display this help message and exit
+
+Examples:
+  $(basename "$0") androidx.compose.remote:remote-creation-compose
+  $(basename "$0") androidx.compose.remote:remote-creation-compose --output ./my-samples
+EOF
+  exit 0
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
+  usage
+fi
+
+ARTIFACT=""
+OUTPUT_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      if [[ -z "${2:-}" ]]; then
+        echo "$(basename "$0"): option '--output' requires an argument" >&2
+        echo "Try '$(basename "$0") --help' for more information." >&2
+        exit 1
+      fi
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$ARTIFACT" ]]; then
+        ARTIFACT="$1"
+      else
+        echo "$(basename "$0"): too many arguments" >&2
+        echo "Try '$(basename "$0") --help' for more information." >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$ARTIFACT" ]]; then
+  echo "$(basename "$0"): missing artifact operand" >&2
+  echo "Try '$(basename "$0") --help' for more information." >&2
+  exit 1
+fi
+
+if [[ ! "$ARTIFACT" =~ ^[^:]+:[^:]+$ ]]; then
+  echo "$(basename "$0"): invalid artifact format '$ARTIFACT' (expected GROUP_ID:ARTIFACT_ID)" >&2
+  echo "Try '$(basename "$0") --help' for more information." >&2
+  exit 1
+fi
+
+GROUP_ID=$(echo "$ARTIFACT" | cut -d: -f1)
+DERIVED_PATH=$(echo "$GROUP_ID" | sed 's/^androidx\.//' | sed 's/\./\//g')
+
+CLEANUP_ON_FAILURE=false
+if [[ -z "$OUTPUT_DIR" ]]; then
+  OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/jetpack-samples.XXXXXXXXXX")
+  CLEANUP_ON_FAILURE=true
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+trap_failure() {
+  if [[ "$CLEANUP_ON_FAILURE" == "true" ]]; then
+    rm -rf "$OUTPUT_DIR"
+  fi
+}
+trap trap_failure ERR
+
+fetch_cs_api_key() {
+  curl -s "https://cs.android.com/" | perl -nle 'print $1 if /(AIza[0-9A-Za-z_-]{35})/' | head -n 1
+}
+
+API_KEY=$(fetch_cs_api_key)
+if [[ -z "$API_KEY" ]]; then
+  echo "$(basename "$0"): failed to fetch Code Search API key" >&2
+  exit 1
+fi
+
+CS_QUERY="file:$DERIVED_PATH/.*(integration-tests|samples)/.* package"
+URL="https://grimoireoss-pa.clients6.google.com/v1/contents/search?alt=json&key=${API_KEY}"
+
+JSON_BODY=$(jq -n \
+  --arg query "$CS_QUERY" \
+  '{
+    "queryString": $query,
+    "searchOptions": {
+        "enableDiagnostics": false,
+        "exhaustive": false,
+        "isDedupResultsEnabled": false,
+        "numberOfContextLines": 0,
+        "pageSize": 100,
+        "repositoryScope": {
+            "root": {
+                "ossProject": "androidx",
+                "repositoryName": "platform/frameworks/support"
+            }
+        },
+        "retrieveMultibranchResults": true
+    }
+  }')
+
+RESPONSE=$(curl -s -X POST "$URL" \
+  -H "Content-Type: application/json" \
+  -H "Referer: https://cs.android.com/" \
+  -H "Origin: https://cs.android.com" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d "$JSON_BODY")
+
+PATHS=$(echo "$RESPONSE" | jq -r '.searchResults[]?.fileSearchResult.fileSpec.path // empty' | sort -u)
+
+if [[ -z "$PATHS" ]]; then
+  echo "$(basename "$0"): no files found for path $DERIVED_PATH" >&2
+  exit 1
+fi
+
+FOUND_SAMPLES=0
+while IFS= read -r path; do
+  if [[ "$path" =~ /samples/ || "$path" =~ /integration-tests/ ]]; then
+    TARGET_PATH="$OUTPUT_DIR/$path"
+    mkdir -p "$(dirname "$TARGET_PATH")"
+
+    RAW_URL="https://raw.githubusercontent.com/androidx/androidx/androidx-main/$path"
+
+    if curl -sSLf -o "$TARGET_PATH" "$RAW_URL"; then
+      FOUND_SAMPLES=$((FOUND_SAMPLES + 1))
+    fi
+  fi
+done <<<"$PATHS"
+
+if [[ $FOUND_SAMPLES -eq 0 ]]; then
+  echo "$(basename "$0"): found files but none matched samples or integration-tests" >&2
+  exit 1
+fi
+
+echo "info: Downloaded $FOUND_SAMPLES files to $OUTPUT_DIR" >&2
+echo "$OUTPUT_DIR"
