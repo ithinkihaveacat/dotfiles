@@ -146,6 +146,8 @@ Commands:
                       Convenience wrapper that resolves a class name to an artifact
                       and then downloads its source.
                       Equivalent to: resolve -> source.
+  dependencies <artifact> [version]
+                      List direct Maven dependencies for a given Maven artifact.
   resolve-exceptions <artifact>
                       Analyze a Maven artifact to find packages that don't follow standard
                       naming conventions (for updating the resolve command).
@@ -1351,29 +1353,105 @@ cmd_inspect() {
 }
 
 # =============================================================================
+# DEPENDENCIES SUBCOMMAND
+# =============================================================================
+
+usage_dependencies() {
+	cat <<EOF
+Usage: $SCRIPT_NAME dependencies ARTIFACT [VERSION] [REPO_URL]
+
+List direct Maven dependencies for a given artifact.
+
+Arguments:
+  ARTIFACT      Maven artifact (e.g., androidx.wear.tiles:tiles)
+  VERSION       Version specifier (optional, defaults to STABLE)
+  REPO_URL      Repository URL (optional)
+
+Examples:
+  $SCRIPT_NAME dependencies androidx.wear.tiles:tiles
+EOF
+	exit "${1:-0}"
+}
+
+cmd_dependencies() {
+	if [[ "${1:-}" == "--help" ]]; then
+		usage_dependencies
+	fi
+
+	if [[ $# -lt 1 ]]; then
+		usage_dependencies
+	fi
+
+	local artifact="$1"
+	validate_artifact_format "$artifact"
+
+	local version_string="${2:-STABLE}"
+	local repo_url="${3:-$GOOGLE_MAVEN_URL}"
+
+	local group_id artifact_id group_id_path
+	group_id=$(echo "$artifact" | cut -d: -f1)
+	artifact_id=$(echo "$artifact" | cut -d: -f2)
+	group_id_path=$(echo "$group_id" | sed 's/\./\//g')
+
+	local version
+	version=$(cmd_version "$artifact" "$version_string" "$repo_url")
+
+	local jar_version="$version"
+	if [[ "$version" =~ -SNAPSHOT$ ]]; then
+		if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
+			repo_url="$SNAPSHOT_REPO_URL"
+		fi
+		local version_metadata_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
+		local snapshot_jar_version
+		snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
+			xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
+		if [[ -n "$snapshot_jar_version" ]]; then
+			jar_version="$snapshot_jar_version"
+		fi
+	fi
+
+	local pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
+	local pom_content
+	if ! pom_content=$(curl -sSLf "${pom_url}"); then
+		echo "$SCRIPT_NAME dependencies: failed to download $pom_url" >&2
+		exit 1
+	fi
+
+	local deps
+	deps=$(echo "$pom_content" | perl -0777 -ne '
+	while (/<dependency>(.*?)<\/dependency>/gs) {
+		my $dep = $1;
+		my ($g) = $dep =~ /<groupId>([^<]+)<\/groupId>/;
+		my ($a) = $dep =~ /<artifactId>([^<]+)<\/artifactId>/;
+		my ($v) = $dep =~ /<version>([^<]+)<\/version>/;
+		my ($s) = $dep =~ /<scope>([^<]+)<\/scope>/;
+		$s ||= "compile";
+		if ($g && $a) {
+			print "$g:$a:$v ($s)\n";
+		}
+	}
+	' || true)
+
+	if [[ -n "$deps" ]]; then
+		echo "$deps"
+	fi
+}
+
+# =============================================================================
 # RESOLVE-EXCEPTIONS SUBCOMMAND
 # =============================================================================
 
 usage_resolve_exceptions() {
 	cat <<EOF
-Usage: $SCRIPT_NAME resolve-exceptions ARTIFACT
+Usage: $SCRIPT_NAME resolve-exceptions ARTIFACT [VERSION]
 
-Helper to analyze a Maven artifact and suggest exceptions for resolve.
+Helper heuristic to examine package pathways and spot exceptions.
 
 Arguments:
-  ARTIFACT            Maven artifact (e.g., androidx.wear:wear)
+  ARTIFACT            Maven target identifier.
+  VERSION             Baseline releases (STABLE, ALPHA, etc.). Defaults to STABLE.
 
-Examples:
-  $SCRIPT_NAME resolve-exceptions androidx.wear:wear
-  $SCRIPT_NAME resolve-exceptions androidx.glance.wear:wear-core
-
-This command downloads the source JAR from the AndroidX SNAPSHOT repository,
-examines the package structure, and suggests exception entries for packages
-that don't follow the standard naming pattern. The output can be added to the
-exceptions array in the resolve command.
-
-NOTE: Only supports SNAPSHOT versions from androidx.dev since we typically
-need to find exceptions for new APIs that are not yet stable.
+Evaluates directory mappings against code structure formats effectively.
 EOF
 	exit "${1:-0}"
 }
@@ -1390,71 +1468,29 @@ cmd_resolve_exceptions() {
 	local artifact="$1"
 	validate_artifact_format "$artifact"
 
-	local group_id artifact_id group_id_path
+	local version="${2:-STABLE}"
+	local group_id artifact_id
 	group_id=$(echo "$artifact" | cut -d: -f1)
 	artifact_id=$(echo "$artifact" | cut -d: -f2)
-	group_id_path=$(echo "$group_id" | sed 's/\./\//g')
 
-	local metadata_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/maven-metadata.xml"
+	local tmp_dir
+	tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/jetpack-resolve-exceptions.XXXXXXXXXX")
 
-	if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
-		echo "$SCRIPT_NAME resolve-exceptions: failed to fetch $metadata_url" >&2
+	local src_dir
+	if ! src_dir=$(cmd_source --output "$tmp_dir" "$artifact" "$version" 2>/dev/null); then
+		echo "$SCRIPT_NAME resolve-exceptions: failed to fetch sources for $artifact ($version)" >&2
+		rm -rf -- "$tmp_dir"
 		exit 1
 	fi
 
-	local version
-	version=$(curl -sSLf "$metadata_url" 2>/dev/null |
-		sed -n 's/.*<latest>\(.*\)<\/latest>.*/\1/p' |
-		head -1)
-
-	if [[ -z "$version" ]]; then
-		echo "$SCRIPT_NAME resolve-exceptions: no version found at $metadata_url" >&2
-		exit 1
-	fi
-
-	# Resolve timestamped JAR version
-	local jar_version="$version"
-	local version_metadata_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/$version/maven-metadata.xml"
-
-	if command -v xmllint >/dev/null 2>&1; then
-		local snapshot_jar_version
-		snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
-			xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
-		if [[ -n "$snapshot_jar_version" ]]; then
-			jar_version="$snapshot_jar_version"
-		fi
-	else
-		local snapshot_jar_version
-		snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
-			grep -A 5 "<classifier>sources</classifier>" | grep "<value>" | head -1 | sed 's/.*<value>\(.*\)<\/value>.*/\1/')
-		if [[ -n "$snapshot_jar_version" ]]; then
-			jar_version="$snapshot_jar_version"
-		fi
-	fi
-
-	# Download and extract
-	TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/jetpack.XXXXXXXXXX")
-	trap 'rm -rf -- "$TMPDIR"' EXIT
-
-	local source_jar_url="$SNAPSHOT_REPO_URL/$group_id_path/$artifact_id/$version/$artifact_id-$jar_version-sources.jar"
-	local source_jar="$TMPDIR/sources.jar"
-
-	if ! curl -sSLf -o "$source_jar" "$source_jar_url" 2>/dev/null; then
-		echo "$SCRIPT_NAME resolve-exceptions: failed to download $source_jar_url" >&2
-		exit 1
-	fi
-
-	cd "$TMPDIR"
-	jar xf sources.jar 2>/dev/null || true
-
-	# Find all unique packages
 	local packages
-	packages=$(find . -type f \( -name "*.java" -o -name "*.kt" \) 2>/dev/null | while read -r file; do
+	packages=$(find "$src_dir" -type f \( -name "*.java" -o -name "*.kt" \) 2>/dev/null | while read -r file; do
 		grep -m1 "^package " "$file" 2>/dev/null | sed 's/package //;s/;.*//;s/ .*//'
 	done | sort -u)
 
 	if [[ -z "$packages" ]]; then
-		echo "$SCRIPT_NAME resolve-exceptions: no packages found in $source_jar_url" >&2
+		echo "$SCRIPT_NAME resolve-exceptions: no packages found in $artifact sources" >&2
+		rm -rf -- "$tmp_dir"
 		exit 1
 	fi
 
@@ -1470,6 +1506,8 @@ cmd_resolve_exceptions() {
 			echo "  \"$pkg|$group_id:$artifact_id\""
 		fi
 	done <<<"$packages"
+
+	rm -rf -- "$tmp_dir"
 }
 
 # =============================================================================
@@ -1488,6 +1526,7 @@ help | --help)
 		resolve) usage_resolve ;;
 		source) usage_source ;;
 		inspect) usage_inspect ;;
+		dependencies) usage_dependencies ;;
 		resolve-exceptions) usage_resolve_exceptions ;;
 		*)
 			echo "$SCRIPT_NAME: unknown command '$2'" >&2
@@ -1521,6 +1560,10 @@ source)
 inspect)
 	shift
 	cmd_inspect "$@"
+	;;
+dependencies)
+	shift
+	cmd_dependencies "$@"
 	;;
 resolve-exceptions)
 	shift
