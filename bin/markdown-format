@@ -2,7 +2,7 @@
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [FILE...]
+Usage: $(basename "$0") [FILE...] [OPTIONS]
 
 Format Markdown files using markdownlint-cli2 and prettier.
 
@@ -10,28 +10,29 @@ When FILEs are provided, each file is formatted in place. When no FILE is
 provided, reads from standard input and writes to standard output.
 
 Arguments:
-  FILE...     Paths to Markdown files to format (optional)
+  FILE...           Paths to Markdown files to format (optional)
 
 Options:
-  -h, --help  Display this help message and exit
+  -h, --help        Display this help message and exit
+  --mdx             Use MDX parser to format text inside HTML-like tags
+
+Note on Tags:
+  To ensure text inside custom tags (e.g., <rules>) is formatted correctly,
+  you should surround the content with blank lines:
+
+  <rules>
+
+  1. Your list item...
+
+  </rules>
 
 Examples:
 
 # Format a file in place
-
   $(basename "$0") README.md
 
-# Format multiple files
-
-  $(basename "$0") docs/*.md
-
-# Format from stdin to stdout
-
-  cat README.md | $(basename "$0") > formatted.md
-
-# Format a file and see the result
-
-  $(basename "$0") < notes.md
+# Format using MDX parser for HTML-like tags
+  $(basename "$0") --mdx < notes.md
 EOF
   exit 0
 }
@@ -44,14 +45,34 @@ if [[ $# -eq 0 && -t 0 ]]; then
   usage
 fi
 
-# Determine which commands to use
+# Parse options
+FILES=()
+PRETTIER_PARSER=""
 
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mdx)
+      PRETTIER_PARSER="--parser mdx"
+      shift
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      FILES+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# Determine which commands to use
 if command -v markdownlint-cli2 >/dev/null 2>&1; then
   MARKDOWNLINT="markdownlint-cli2"
 elif command -v npx >/dev/null 2>&1; then
   MARKDOWNLINT="npx -y markdownlint-cli2"
 else
-  echo "$(basename "$0"): markdownlint-cli2 not found and npx not available" >&2
+  echo "$(basename "$0"): markdownlint-cli2 not found" >&2
   exit 127
 fi
 
@@ -60,46 +81,47 @@ if command -v prettier >/dev/null 2>&1; then
 elif command -v npx >/dev/null 2>&1; then
   PRETTIER="npx -y prettier"
 else
-  echo "$(basename "$0"): prettier not found and npx not available" >&2
+  echo "$(basename "$0"): prettier not found" >&2
   exit 127
 fi
 
-if [[ $# -eq 0 ]]; then
+format_content() {
+  local input_file="$1"
+  local output_file="$2"
 
+  # Fix what can be auto-fixed by the linter
+  $MARKDOWNLINT --fix "$input_file" >/dev/null 2>&1
+
+  # Format with prettier
+  # shellcheck disable=SC2086
+  $PRETTIER --prose-wrap always $PRETTIER_PARSER --write "$input_file" >/dev/null 2>&1
+
+  # Report any remaining lint errors to stderr
+  $MARKDOWNLINT "$input_file" >&2 || true
+
+  if [[ -n "$output_file" ]]; then
+    cat "$input_file" >"$output_file"
+  fi
+}
+
+if [[ ${#FILES[@]} -eq 0 ]]; then
   # Read from stdin, write to stdout
-
   TMPDIR=$(mktemp -d)
   TMPFILE="$TMPDIR/content.md"
   trap 'rm -rf -- "$TMPDIR"' EXIT
   cat >"$TMPFILE"
-
-  # Fix what can be auto-fixed
-  $MARKDOWNLINT --fix "$TMPFILE" >/dev/null 2>&1
-  $PRETTIER --prose-wrap always --write "$TMPFILE" >/dev/null 2>&1
-
-  # Report any remaining lint errors to stderr (keeps stdout clean for piping)
-  $MARKDOWNLINT "$TMPFILE" >&2 || true
-
+  format_content "$TMPFILE"
   cat "$TMPFILE"
 else
-
   # Format files in place
-
   FAILED=0
-  for FILE in "$@"; do
+  for FILE in "${FILES[@]}"; do
     if [[ ! -f "$FILE" ]]; then
       echo "$(basename "$0"): $FILE: No such file or directory" >&2
       FAILED=1
       continue
     fi
-
-    # Fix what can be auto-fixed
-    $MARKDOWNLINT --fix "$FILE" >/dev/null 2>&1
-    $PRETTIER --prose-wrap always --write "$FILE" >/dev/null 2>&1
-
-    # Report any remaining lint errors that couldn't be auto-fixed
-    $MARKDOWNLINT "$FILE" 2>&1 || true
-
+    format_content "$FILE"
     echo "$(basename "$0"): $FILE: formatted"
   done
   exit $FAILED
