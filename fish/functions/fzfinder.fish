@@ -25,7 +25,7 @@ Examples:
         return 0
     end
 
-    if not string match -r ghostty "$TERM"
+    if not string match -q -r ghostty "$TERM"
         echo "fzfinder: requires Ghostty terminal" >&2
         return 1
     end
@@ -47,8 +47,8 @@ Examples:
 
         set type (file --brief --dereference --mime -- "$file")
 
-        if not string match -r image/ "$type"
-            if string match -r '=binary' "$type"
+        if not string match -q -r image/ "$type"
+            if string match -q -r '=binary' "$type"
                 file "$argv[1]"
                 return
             end
