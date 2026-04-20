@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+
+# Tests: tests/video-index/
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../../bin/video-index"
+
+if ! command -v uv >/dev/null 2>&1 || ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+  echo "1..0 # SKIP uv, ffmpeg, or ffprobe not available"
+  exit 0
+fi
+
+TMPDIR=$(mktemp -d)
+OUTPUT=$(mktemp)
+PROGRESS=$(mktemp)
+trap 'rm -rf "$TMPDIR"; rm -f "$OUTPUT" "$PROGRESS"' EXIT
+
+INPUT_DIR="$TMPDIR/input"
+OUTPUT_DIR="$TMPDIR/output"
+TARGET_DIR="$TMPDIR/targets"
+mkdir -p "$INPUT_DIR/nested"
+mkdir -p "$TARGET_DIR"
+
+SHORT_VIDEO="$INPUT_DIR/nested/short clip.mp4"
+AAA_VIDEO="$INPUT_DIR/nested/aaa.mp4"
+LONG_TARGET="$TARGET_DIR/long-target.mp4"
+LONG_VIDEO_LINK="$INPUT_DIR/long.mp4"
+
+make_video() {
+  local duration="$1"
+  local output="$2"
+
+  ffmpeg \
+    -v error \
+    -f lavfi \
+    -i 'testsrc2=size=160x90:rate=1' \
+    -t "$duration" \
+    -c:v libx264 \
+    -preset ultrafast \
+    -pix_fmt yuv420p \
+    "$output"
+}
+
+make_video 25 "$SHORT_VIDEO"
+make_video 15 "$AAA_VIDEO"
+make_video 305 "$LONG_TARGET"
+ln -s "$LONG_TARGET" "$LONG_VIDEO_LINK"
+
+first_mtime() {
+  local file="$1"
+
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    stat -f "%m" "$file"
+  else
+    stat -c "%Y" "$file"
+  fi
+}
+
+echo "1..10"
+
+if "$BIN" --help >"$OUTPUT" 2>&1 && grep -q "Usage: video-index" "$OUTPUT"; then
+  echo "ok 1 - help output includes usage"
+else
+  echo "not ok 1 - help output failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+if "$BIN" >"$OUTPUT" 2>&1; then
+  echo "not ok 2 - missing operand should fail"
+  sed 's/^/# /' "$OUTPUT"
+elif grep -q "missing directory operand" "$OUTPUT"; then
+  echo "ok 2 - missing operand is reported"
+else
+  echo "not ok 2 - missing operand message not found"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+"$BIN" --output "$OUTPUT_DIR" "$INPUT_DIR" >"$OUTPUT" 2>"$PROGRESS"
+
+if [[ -f "$OUTPUT_DIR/INDEX.md" ]]; then
+  echo "ok 3 - writes INDEX.md"
+else
+  echo "not ok 3 - INDEX.md was not created"
+fi
+
+if [[ -f "$OUTPUT_DIR/index.html" ]]; then
+  echo "ok 4 - writes index.html"
+else
+  echo "not ok 4 - index.html was not created"
+fi
+
+if [[ $(find "$OUTPUT_DIR/screenshots" -type f -name '*.png' | wc -l | tr -d ' ') == "9" ]]; then
+  echo "ok 5 - writes three screenshots per video including symlinked targets"
+else
+  echo "not ok 5 - unexpected screenshot count"
+  find "$OUTPUT_DIR/screenshots" -type f -name '*.png' | sed 's/^/# /'
+fi
+
+if grep -Fq "\`nested/short clip.mp4\`" "$OUTPUT_DIR/INDEX.md" &&
+  grep -Fq "\`nested/aaa.mp4\`" "$OUTPUT_DIR/INDEX.md" &&
+  grep -Fq "\`long.mp4\`" "$OUTPUT_DIR/INDEX.md" &&
+  grep -q 'Screenshots: 00:10, 00:00, 00:00' "$OUTPUT_DIR/INDEX.md" &&
+  grep -q 'Screenshots: 00:10, 00:05, 00:05' "$OUTPUT_DIR/INDEX.md" &&
+  grep -q 'Screenshots: 00:10, 01:00, 05:00' "$OUTPUT_DIR/INDEX.md"; then
+  md_long_line=$(grep -n "## \`long.mp4\`" "$OUTPUT_DIR/INDEX.md" | cut -d: -f1)
+  md_aaa_line=$(grep -n "## \`nested/aaa.mp4\`" "$OUTPUT_DIR/INDEX.md" | cut -d: -f1)
+  md_short_line=$(grep -n "## \`nested/short clip.mp4\`" "$OUTPUT_DIR/INDEX.md" | cut -d: -f1)
+  if ((md_long_line < md_aaa_line && md_aaa_line < md_short_line)); then
+    echo "ok 6 - markdown index is alphabetical and includes expected timestamps"
+  else
+    echo "not ok 6 - markdown entries were not alphabetical"
+    sed 's/^/# /' "$OUTPUT_DIR/INDEX.md"
+  fi
+else
+  echo "not ok 6 - INDEX.md content did not match expectations"
+  sed 's/^/# /' "$OUTPUT_DIR/INDEX.md"
+fi
+
+if grep -q '<title>Video Index</title>' "$OUTPUT_DIR/index.html" &&
+  grep -q '<code>nested/aaa.mp4</code>' "$OUTPUT_DIR/index.html" &&
+  grep -q '<code>nested/short clip.mp4</code>' "$OUTPUT_DIR/index.html" &&
+  grep -q '<code>long.mp4</code>' "$OUTPUT_DIR/index.html" &&
+  grep -q '<figcaption>00:00</figcaption>' "$OUTPUT_DIR/index.html" &&
+  grep -q '<figcaption>00:05</figcaption>' "$OUTPUT_DIR/index.html" &&
+  grep -q 'src="screenshots/' "$OUTPUT_DIR/index.html"; then
+  html_long_line=$(grep -n '<code>long.mp4</code>' "$OUTPUT_DIR/index.html" | cut -d: -f1)
+  html_aaa_line=$(grep -n '<code>nested/aaa.mp4</code>' "$OUTPUT_DIR/index.html" | cut -d: -f1)
+  html_short_line=$(grep -n '<code>nested/short clip.mp4</code>' "$OUTPUT_DIR/index.html" | cut -d: -f1)
+  if ((html_long_line < html_aaa_line && html_aaa_line < html_short_line)); then
+    echo "ok 7 - html index is alphabetical and includes timestamps and screenshots"
+  else
+    echo "not ok 7 - html entries were not alphabetical"
+    sed 's/^/# /' "$OUTPUT_DIR/index.html"
+  fi
+else
+  echo "not ok 7 - index.html content did not match expectations"
+  sed 's/^/# /' "$OUTPUT_DIR/index.html"
+fi
+
+if grep -q 'found 3 candidate video files' "$PROGRESS" &&
+  grep -q ' 33% (1/3) | indexing long.mp4' "$PROGRESS" &&
+  grep -q ' 66% (2/3) | indexing nested/aaa.mp4' "$PROGRESS" &&
+  grep -q '100% (3/3) | indexing nested/short clip.mp4' "$PROGRESS" &&
+  grep -q 'wrote .*INDEX.md and .*index.html with 3 indexed videos' "$PROGRESS"; then
+  echo "ok 8 - non-tty progress is reported on stderr in thresholded lines"
+else
+  echo "not ok 8 - expected progress output was not found"
+  sed 's/^/# /' "$PROGRESS"
+fi
+
+FIRST_SHOT=$(find "$OUTPUT_DIR/screenshots" -type f -name '*.png' | sort | head -n 1)
+if [[ -z "$FIRST_SHOT" ]]; then
+  echo "not ok 9 - could not find a screenshot to test cache behavior"
+  exit 1
+fi
+
+MTIME_BEFORE=$(first_mtime "$FIRST_SHOT")
+sleep 1
+"$BIN" --output "$OUTPUT_DIR" "$INPUT_DIR" >"$OUTPUT" 2>"$PROGRESS"
+MTIME_AFTER=$(first_mtime "$FIRST_SHOT")
+
+if [[ "$MTIME_AFTER" == "$MTIME_BEFORE" ]]; then
+  echo "ok 9 - existing screenshots are reused without --force"
+else
+  echo "not ok 9 - screenshot was regenerated without --force"
+fi
+
+sleep 1
+"$BIN" --force --output "$OUTPUT_DIR" "$INPUT_DIR" >"$OUTPUT" 2>"$PROGRESS"
+MTIME_FORCE=$(first_mtime "$FIRST_SHOT")
+
+if ((MTIME_FORCE > MTIME_AFTER)); then
+  echo "ok 10 - --force regenerates existing screenshots"
+else
+  echo "not ok 10 - --force did not regenerate screenshot"
+fi

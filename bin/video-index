@@ -1,0 +1,576 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+
+# Tests: tests/video-index/
+
+from __future__ import annotations
+
+import html
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+SCRIPT_NAME = os.path.basename(sys.argv[0])
+VIDEO_EXTENSIONS = (
+    ".3gp",
+    ".asf",
+    ".avi",
+    ".flv",
+    ".m2ts",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".mts",
+    ".mxf",
+    ".ogv",
+    ".qt",
+    ".ts",
+    ".webm",
+    ".wmv",
+)
+
+
+@dataclass
+class VideoEntry:
+    relative_name: str
+    dimensions: str
+    size_text: str
+    duration_text: str
+    time_a: str
+    time_b: str
+    time_c: str
+    shot_a: str
+    shot_b: str
+    shot_c: str
+
+
+class ProgressReporter:
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.is_tty = sys.stderr.isatty()
+        self.width = 0
+        self.next_percent = 10
+
+    def log_info(self, message: str) -> None:
+        print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+
+    def update(self, current: int, relative_name: str) -> None:
+        if self.total <= 0:
+            return
+
+        percent = (current * 100) // self.total
+        message = (
+            f"{SCRIPT_NAME}: {percent:3d}% ({current}/{self.total}) | "
+            f"indexing {relative_name}"
+        )
+
+        if self.is_tty:
+            self.width = max(self.width, len(message))
+            print(
+                f"\r{message:<{self.width}}",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+
+        if percent < self.next_percent and current < self.total:
+            return
+
+        self.log_info(message.removeprefix(f"{SCRIPT_NAME}: "))
+        while self.next_percent <= percent:
+            self.next_percent += 10
+
+    def finish(self) -> None:
+        if self.is_tty and self.total > 0:
+            print(file=sys.stderr, flush=True)
+
+
+def usage(code: int = 0) -> None:
+    out = sys.stdout if code == 0 else sys.stderr
+    print(
+        f"""Usage: {SCRIPT_NAME} [OPTIONS] DIRECTORY
+
+Recursively index video files in a directory, capture three screenshots per
+video, and write a simple Markdown index.
+
+By default, the script writes INDEX.md and a screenshots/ directory into the
+input directory. Use --output to write those generated files elsewhere.
+
+For each video, the script captures frames at 10 seconds, 60 seconds, and 300
+seconds. If a requested timestamp would fall past the end of the video, it uses
+20 seconds before the end instead. Very short videos are clamped to 0 seconds.
+
+Arguments:
+  DIRECTORY                    Directory to scan recursively for video files
+
+Options:
+  --force                      Regenerate screenshots even if they already
+                               exist
+  --output DIRECTORY           Directory where INDEX.md and screenshots/ are
+                               written (default: input directory)
+  --help                       Display this help message and exit
+
+Examples:
+  {SCRIPT_NAME} ~/Movies
+  {SCRIPT_NAME} --force ~/Movies
+  {SCRIPT_NAME} --output /tmp/video-index ~/Videos""",
+        file=out,
+    )
+    raise SystemExit(code)
+
+
+def die_usage(message: str) -> None:
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+    print(f"Try '{SCRIPT_NAME} --help' for more information.", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def error(message: str, code: int = 1) -> None:
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def require(command: str) -> None:
+    if shutil.which(command) is None:
+        error(f"{command} not found", 127)
+
+
+def parse_args() -> tuple[Path, Path, bool]:
+    args = sys.argv[1:]
+
+    if len(args) == 1 and args[0] == "help":
+        usage(0)
+
+    search_root: str | None = None
+    output_dir: str | None = None
+    force = False
+    i = 0
+
+    while i < len(args):
+        arg = args[i]
+        if arg == "--help":
+            usage(0)
+        if arg == "--force":
+            force = True
+            i += 1
+            continue
+        if arg == "--output":
+            if i + 1 >= len(args):
+                die_usage("option '--output' requires an argument")
+            output_dir = args[i + 1]
+            i += 2
+            continue
+        if arg == "--":
+            i += 1
+            break
+        if arg.startswith("-"):
+            die_usage(f"unrecognized option '{arg}'")
+        if search_root is not None:
+            die_usage(f"extra operand '{arg}'")
+        search_root = arg
+        i += 1
+
+    if i < len(args):
+        if search_root is not None:
+            die_usage(f"extra operand '{args[i]}'")
+        search_root = args[i]
+        i += 1
+
+    if i < len(args):
+        die_usage(f"extra operand '{args[i]}'")
+
+    if not search_root:
+        die_usage("missing directory operand")
+
+    if search_root.startswith("-"):
+        search_root = f"./{search_root}"
+
+    if output_dir and output_dir.startswith("-"):
+        output_dir = f"./{output_dir}"
+
+    search_path = Path(search_root)
+    if not search_path.exists():
+        error(f"{search_path}: No such file or directory")
+    if not search_path.is_dir():
+        error(f"{search_path}: Not a directory")
+
+    output_path = Path(output_dir) if output_dir else search_path
+    return search_path, output_path, force
+
+
+def is_video_candidate(path: Path) -> bool:
+    return path.name.lower().endswith(VIDEO_EXTENSIONS)
+
+
+def relative_name(search_root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(search_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def list_sorted_candidates(search_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for root, dirs, files in os.walk(search_root, followlinks=False):
+        dirs.sort()
+        for name in sorted(files):
+            path = Path(root, name)
+            if is_video_candidate(path):
+                candidates.append(path)
+    return sorted(candidates, key=lambda p: relative_name(search_root, p))
+
+
+def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def probe_dimensions(path: Path) -> str | None:
+    result = run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(path),
+        ]
+    )
+    if result.returncode != 0:
+        return None
+    text = result.stdout.strip().splitlines()
+    return text[0].strip() if text and text[0].strip() else None
+
+
+def probe_duration_seconds(path: Path) -> float | None:
+    result = run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+    )
+    if result.returncode != 0:
+        return None
+    text = result.stdout.strip().splitlines()
+    if not text:
+        return None
+    value = text[0].strip()
+    if not value or value == "N/A":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def format_bytes(size_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(size_bytes)
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(size)} {units[unit_index]}"
+    return f"{size:.1f} {units[unit_index]}"
+
+
+def format_duration(seconds: float) -> str:
+    total = int(seconds + 0.5)
+    if total < 0:
+        total = 0
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def capture_second(requested: int, duration_seconds: float) -> int:
+    total = int(duration_seconds + 0.5)
+    if total < 0:
+        total = 0
+    target = requested
+    if total <= requested:
+        target = total - 20
+    return max(target, 0)
+
+
+def safe_stem(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._@-]+", "_", name)
+
+
+def capture_screenshot(video_path: Path, second: int, output_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-ss",
+            str(second),
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = result.stderr.strip() or result.stdout.strip() or "ffmpeg failed"
+        error(details)
+
+
+def ensure_screenshot(
+    video_path: Path,
+    second: int,
+    output_path: Path,
+    *,
+    force: bool,
+) -> None:
+    if output_path.is_file() and not force:
+        return
+    capture_screenshot(video_path, second, output_path)
+
+
+def write_markdown_header(search_root: Path) -> str:
+    return f"# Video Index\n\nGenerated from `{search_root}`.\n\n"
+
+
+def append_markdown_entry(entry: VideoEntry) -> str:
+    return (
+        f"## `{entry.relative_name}`\n\n"
+        f"- Metadata: {entry.dimensions}, {entry.size_text}, {entry.duration_text}\n"
+        f"- Screenshots: {entry.time_a}, {entry.time_b}, {entry.time_c}\n\n"
+        f"![]({entry.shot_a})\n\n"
+        f"![]({entry.shot_b})\n\n"
+        f"![]({entry.shot_c})\n\n"
+    )
+
+
+def write_html_header(search_root: Path) -> str:
+    source = html.escape(str(search_root))
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Index</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 2rem auto;
+      max-width: 960px;
+      padding: 0 1rem 3rem;
+      line-height: 1.5;
+      color: #222;
+    }}
+    h1, h2 {{
+      line-height: 1.2;
+    }}
+    .video-entry {{
+      border-top: 1px solid #ddd;
+      padding-top: 1.5rem;
+      margin-top: 1.5rem;
+    }}
+    .meta {{
+      color: #555;
+      margin-bottom: 0.75rem;
+    }}
+    .shots {{
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }}
+    figure {{
+      margin: 0;
+    }}
+    img {{
+      width: 100%;
+      height: auto;
+      display: block;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+    }}
+    figcaption {{
+      margin-top: 0.35rem;
+      font-size: 0.9rem;
+      color: #555;
+    }}
+    code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }}
+  </style>
+</head>
+<body>
+  <h1>Video Index</h1>
+  <p>Generated from <code>{source}</code>.</p>
+"""
+
+
+def append_html_entry(entry: VideoEntry) -> str:
+    name = html.escape(entry.relative_name)
+    dimensions = html.escape(entry.dimensions)
+    size_text = html.escape(entry.size_text)
+    duration_text = html.escape(entry.duration_text)
+    time_a = html.escape(entry.time_a)
+    time_b = html.escape(entry.time_b)
+    time_c = html.escape(entry.time_c)
+    shot_a = html.escape(entry.shot_a, quote=True)
+    shot_b = html.escape(entry.shot_b, quote=True)
+    shot_c = html.escape(entry.shot_c, quote=True)
+    return f"""  <section class="video-entry">
+    <h2><code>{name}</code></h2>
+    <p class="meta"><strong>Metadata:</strong> {dimensions}, {size_text}, {duration_text}</p>
+    <div class="shots">
+      <figure>
+        <img src="{shot_a}" alt="Screenshot from {name} at {time_a}">
+        <figcaption>{time_a}</figcaption>
+      </figure>
+      <figure>
+        <img src="{shot_b}" alt="Screenshot from {name} at {time_b}">
+        <figcaption>{time_b}</figcaption>
+      </figure>
+      <figure>
+        <img src="{shot_c}" alt="Screenshot from {name} at {time_c}">
+        <figcaption>{time_c}</figcaption>
+      </figure>
+    </div>
+  </section>
+"""
+
+
+def write_html_footer() -> str:
+    return "</body>\n</html>\n"
+
+
+def build_entry(
+    search_root: Path,
+    video_path: Path,
+    screenshots_dir: Path,
+    *,
+    count: int,
+    force: bool,
+) -> VideoEntry | None:
+    dimensions = probe_dimensions(video_path)
+    duration_seconds = probe_duration_seconds(video_path)
+    if not dimensions or duration_seconds is None:
+        return None
+
+    relative = relative_name(search_root, video_path)
+    size_text = format_bytes(video_path.stat().st_size)
+    duration_text = format_duration(duration_seconds)
+
+    second_a = capture_second(10, duration_seconds)
+    second_b = capture_second(60, duration_seconds)
+    second_c = capture_second(300, duration_seconds)
+
+    stem = safe_stem(video_path.stem)
+    shot_a_name = f"{count:04d}-{stem}-10s.png"
+    shot_b_name = f"{count:04d}-{stem}-60s.png"
+    shot_c_name = f"{count:04d}-{stem}-300s.png"
+
+    shot_a_path = screenshots_dir / shot_a_name
+    shot_b_path = screenshots_dir / shot_b_name
+    shot_c_path = screenshots_dir / shot_c_name
+
+    ensure_screenshot(video_path, second_a, shot_a_path, force=force)
+    ensure_screenshot(video_path, second_b, shot_b_path, force=force)
+    ensure_screenshot(video_path, second_c, shot_c_path, force=force)
+
+    return VideoEntry(
+        relative_name=relative,
+        dimensions=dimensions,
+        size_text=size_text,
+        duration_text=duration_text,
+        time_a=format_duration(second_a),
+        time_b=format_duration(second_b),
+        time_c=format_duration(second_c),
+        shot_a=(Path("screenshots") / shot_a_name).as_posix(),
+        shot_b=(Path("screenshots") / shot_b_name).as_posix(),
+        shot_c=(Path("screenshots") / shot_c_name).as_posix(),
+    )
+
+
+def main() -> None:
+    search_root, output_dir, force = parse_args()
+
+    require("ffprobe")
+    require("ffmpeg")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    screenshots_dir = output_dir / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+    index_file = output_dir / "INDEX.md"
+    html_file = output_dir / "index.html"
+
+    candidates = list_sorted_candidates(search_root)
+    progress = ProgressReporter(len(candidates))
+    progress.log_info(f"found {len(candidates)} candidate video files")
+
+    markdown_parts = [write_markdown_header(search_root)]
+    html_parts = [write_html_header(search_root)]
+
+    indexed_count = 0
+    skipped_count = 0
+
+    for count, video_path in enumerate(candidates, start=1):
+        progress.update(count, relative_name(search_root, video_path))
+        entry = build_entry(
+            search_root,
+            video_path,
+            screenshots_dir,
+            count=count,
+            force=force,
+        )
+        if entry is None:
+            skipped_count += 1
+            continue
+        indexed_count += 1
+        markdown_parts.append(append_markdown_entry(entry))
+        html_parts.append(append_html_entry(entry))
+
+    html_parts.append(write_html_footer())
+
+    index_file.write_text("".join(markdown_parts), encoding="utf-8")
+    html_file.write_text("".join(html_parts), encoding="utf-8")
+
+    progress.finish()
+    if skipped_count > 0:
+        progress.log_info(
+            f"wrote {index_file} and {html_file} with {indexed_count} indexed "
+            f"videos and {skipped_count} skipped files"
+        )
+    else:
+        progress.log_info(
+            f"wrote {index_file} and {html_file} with {indexed_count} indexed videos"
+        )
+
+
+if __name__ == "__main__":
+    main()

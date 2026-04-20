@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+
+# Tests: tests/video-find-hd/
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../../bin/video-find-hd"
+
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+  echo "1..0 # SKIP ffmpeg and ffprobe not available"
+  exit 0
+fi
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+GOOD_DIR="$TMPDIR/nested"
+mkdir -p "$GOOD_DIR"
+
+GOOD_VIDEO="$GOOD_DIR/hd-good.mp4"
+LOW_BITRATE_VIDEO="$TMPDIR/hd-low.mp4"
+LOW_RES_VIDEO="$TMPDIR/sd-high.mp4"
+
+make_video() {
+  local size="$1"
+  local bitrate="$2"
+  local output="$3"
+
+  ffmpeg \
+    -v error \
+    -f lavfi \
+    -i "testsrc2=size=$size:rate=24" \
+    -t 2 \
+    -c:v libx264 \
+    -preset ultrafast \
+    -pix_fmt yuv420p \
+    -b:v "$bitrate" \
+    -minrate "$bitrate" \
+    -maxrate "$bitrate" \
+    -bufsize "$bitrate" \
+    "$output"
+}
+
+make_video 1280x720 4M "$GOOD_VIDEO"
+make_video 1280x720 800k "$LOW_BITRATE_VIDEO"
+make_video 640x360 4M "$LOW_RES_VIDEO"
+
+echo "1..4"
+
+OUTPUT=$(mktemp)
+trap 'rm -rf "$TMPDIR"; rm -f "$OUTPUT"' EXIT
+
+if "$BIN" --help >"$OUTPUT" 2>&1 && grep -q "Usage: video-find-hd" "$OUTPUT"; then
+  echo "ok 1 - help output includes usage"
+else
+  echo "not ok 1 - help output failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+if "$BIN" >"$OUTPUT" 2>&1; then
+  echo "not ok 2 - missing operand should fail"
+  sed 's/^/# /' "$OUTPUT"
+elif grep -q "missing directory operand" "$OUTPUT"; then
+  echo "ok 2 - missing operand is reported"
+else
+  echo "not ok 2 - missing operand message not found"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+RESULT=$("$BIN" "$TMPDIR")
+if [[ "$RESULT" == "$GOOD_VIDEO" ]]; then
+  echo "ok 3 - only qualifying HD video is listed"
+else
+  echo "not ok 3 - unexpected qualifying files"
+  printf '%s\n' "$RESULT" | sed 's/^/# /'
+fi
+
+RESULT=$("$BIN" --min-width 1920 "$TMPDIR")
+if [[ -z "$RESULT" ]]; then
+  echo "ok 4 - stricter size filter excludes 720p result"
+else
+  echo "not ok 4 - stricter size filter should have excluded all files"
+  printf '%s\n' "$RESULT" | sed 's/^/# /'
+fi

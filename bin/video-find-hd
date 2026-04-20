@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+# Tests: tests/video-find-hd/
+
+set -euo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+MIN_WIDTH=1280
+MIN_HEIGHT=720
+MIN_KBPS_PER_MEGAPIXEL=2800
+SEARCH_ROOT=""
+
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME [OPTIONS] DIRECTORY
+
+Recursively list video files that are at least the requested size and have a
+reasonable bitrate for their frame size.
+
+The default bitrate floor is 2800 kilobits per second per megapixel. That means
+a 1280x720 file needs roughly 2581 kbps, and larger frames scale upward.
+The script prefers the first video stream bitrate and falls back to the
+container bitrate when the stream bitrate is unavailable.
+
+Arguments:
+  DIRECTORY                    Directory to scan recursively for video files
+
+Options:
+  --min-width PIXELS           Minimum video width in pixels (default: 1280)
+  --min-height PIXELS          Minimum video height in pixels (default: 720)
+  --min-kbps-per-megapixel KBPS
+                               Minimum bitrate density in kilobits per second
+                               per megapixel (default: 2800)
+  --help                       Display this help message and exit
+
+Examples:
+  $SCRIPT_NAME ~/Movies
+  $SCRIPT_NAME --min-width 1920 --min-height 1080 ~/Videos
+  $SCRIPT_NAME --min-kbps-per-megapixel 3500 /Volumes/Archive
+EOF
+  exit "${1:-0}"
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$SCRIPT_NAME: $1 not found" >&2
+    exit 127
+  }
+}
+
+die_usage() {
+  echo "$SCRIPT_NAME: $1" >&2
+  echo "Try '$SCRIPT_NAME --help' for more information." >&2
+  exit 1
+}
+
+require_positive_integer() {
+  local option_name="$1"
+  local value="$2"
+
+  case "$value" in
+    '' | *[!0-9]*)
+      die_usage "invalid value for $option_name: '$value'"
+      ;;
+  esac
+
+  if ((value <= 0)); then
+    die_usage "invalid value for $option_name: '$value'"
+  fi
+}
+
+required_bitrate_bps() {
+  local width="$1"
+  local height="$2"
+  local pixels
+
+  pixels=$((width * height))
+  echo $(((pixels * MIN_KBPS_PER_MEGAPIXEL * 1000 + 999999) / 1000000))
+}
+
+probe_video() {
+  local file="$1"
+  local stream_info
+  local width
+  local height
+  local bitrate
+
+  stream_info=$(
+    ffprobe \
+      -v error \
+      -select_streams v:0 \
+      -show_entries stream=width,height,bit_rate \
+      -of csv=p=0:s='|' \
+      "$file" 2>/dev/null || true
+  )
+
+  IFS='|' read -r width height bitrate _ <<EOF
+$stream_info
+EOF
+
+  if [[ -z "$width" || -z "$height" ]]; then
+    return 1
+  fi
+
+  if [[ -z "$bitrate" || "$bitrate" == "N/A" ]]; then
+    bitrate=$(
+      ffprobe \
+        -v error \
+        -show_entries format=bit_rate \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$file" 2>/dev/null | head -n 1 || true
+    )
+  fi
+
+  if [[ -z "$bitrate" || "$bitrate" == "N/A" ]]; then
+    return 1
+  fi
+
+  printf '%s|%s|%s\n' "$width" "$height" "$bitrate"
+}
+
+list_candidates() {
+  find "$SEARCH_ROOT" -type f \
+    \( \
+    -iname '*.3gp' -o \
+    -iname '*.asf' -o \
+    -iname '*.avi' -o \
+    -iname '*.flv' -o \
+    -iname '*.m2ts' -o \
+    -iname '*.m4v' -o \
+    -iname '*.mkv' -o \
+    -iname '*.mov' -o \
+    -iname '*.mp4' -o \
+    -iname '*.mpeg' -o \
+    -iname '*.mpg' -o \
+    -iname '*.mts' -o \
+    -iname '*.mxf' -o \
+    -iname '*.ogv' -o \
+    -iname '*.qt' -o \
+    -iname '*.ts' -o \
+    -iname '*.webm' -o \
+    -iname '*.wmv' \
+    \) \
+    -print0
+}
+
+if [[ $# -eq 1 && "$1" == "help" ]]; then
+  usage
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help)
+      usage
+      ;;
+    --min-width)
+      if [[ $# -lt 2 ]]; then
+        die_usage "option '--min-width' requires an argument"
+      fi
+      require_positive_integer "--min-width" "$2"
+      MIN_WIDTH="$2"
+      shift 2
+      ;;
+    --min-height)
+      if [[ $# -lt 2 ]]; then
+        die_usage "option '--min-height' requires an argument"
+      fi
+      require_positive_integer "--min-height" "$2"
+      MIN_HEIGHT="$2"
+      shift 2
+      ;;
+    --min-kbps-per-megapixel)
+      if [[ $# -lt 2 ]]; then
+        die_usage "option '--min-kbps-per-megapixel' requires an argument"
+      fi
+      require_positive_integer "--min-kbps-per-megapixel" "$2"
+      MIN_KBPS_PER_MEGAPIXEL="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die_usage "unrecognized option '$1'"
+      ;;
+    *)
+      if [[ -n "$SEARCH_ROOT" ]]; then
+        die_usage "extra operand '$1'"
+      fi
+      SEARCH_ROOT="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ $# -gt 0 ]]; then
+  if [[ -n "$SEARCH_ROOT" ]]; then
+    die_usage "extra operand '$1'"
+  fi
+  SEARCH_ROOT="$1"
+  shift
+fi
+
+if [[ $# -gt 0 ]]; then
+  die_usage "extra operand '$1'"
+fi
+
+if [[ -z "$SEARCH_ROOT" ]]; then
+  die_usage "missing directory operand"
+fi
+
+if [[ "$SEARCH_ROOT" == -* ]]; then
+  SEARCH_ROOT="./$SEARCH_ROOT"
+fi
+
+if [[ ! -e "$SEARCH_ROOT" ]]; then
+  echo "$SCRIPT_NAME: $SEARCH_ROOT: No such file or directory" >&2
+  exit 1
+fi
+
+if [[ ! -d "$SEARCH_ROOT" ]]; then
+  echo "$SCRIPT_NAME: $SEARCH_ROOT: Not a directory" >&2
+  exit 1
+fi
+
+require ffprobe
+require find
+
+while IFS= read -r -d '' file; do
+  probe=$(probe_video "$file") || continue
+  IFS='|' read -r width height bitrate <<EOF
+$probe
+EOF
+
+  if ((width < MIN_WIDTH || height < MIN_HEIGHT)); then
+    continue
+  fi
+
+  if ((bitrate < $(required_bitrate_bps "$width" "$height"))); then
+    continue
+  fi
+
+  printf '%s\n' "$file"
+done < <(list_candidates)
