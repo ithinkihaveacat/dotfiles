@@ -26,6 +26,7 @@ complete -c context -f -n __fish_context_needs_topic -a rpi -d 'Raspberry Pi doc
 complete -c context -f -n __fish_context_needs_topic -a skills -d 'Agent skills documentation (Claude, Gemini CLI, OpenAI Codex)'
 complete -c context -f -n __fish_context_needs_topic -a prompting -d 'Prompt engineering guides for Claude, Gemini, and OpenAI'
 complete -c context -f -n __fish_context_needs_topic -a gemini-sdk-js -d 'Google Gemini JavaScript SDK codegen instructions'
+complete -c context -f -n __fish_context_needs_topic -a meshtastic -d 'Meshtastic documentation'
 
 # Complete flags
 complete -c context -f -s h -l help -d 'Display help message and exit'
