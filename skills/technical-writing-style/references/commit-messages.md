@@ -8,11 +8,20 @@ A commit message is a permanent, historical record attached to the code itself.
 
 - **Goal:** Provide a factual, concise record of _what_ was changed and the
   immediate technical _why_.
-- **Detail:** Focused. Omit extensive background narratives, broad
-  justifications, or sweeping user stories. Focus strictly on the technical
-  problem, the technical cause, and the applied solution.
+- **Detail:** Proportional to complexity. The length and depth of the
+  explanation should scale with the complexity or unexpected nature of the
+  change. Omit sweeping user stories or broad PR-style justifications, but
+  provide well-reasoned, detailed explanations when documenting non-trivial
+  architectural shifts, non-obvious constraints, or rejected alternatives.
 - **Tone:** Objective and matter-of-fact. State the problem and the resolution
   plainly.
+
+## Mechanical Formatting
+
+This document focuses on the structural content and tone of commit messages. For
+rules regarding mechanical formatting (e.g., Conventional Commits syntax,
+subject line length limits, or line wrapping), please search for and consult any
+available coding standards or git guidelines within the workspace.
 
 ## Structural Archetypes
 

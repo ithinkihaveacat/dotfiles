@@ -77,30 +77,11 @@ adhere to the following formatting rules:
    cleanly in standard `git log` output and other terminal-based tools that
    indent the commit body.
 
-### The Commit Body
+### Content and Tone
 
-While the conventional commit prefix and description provide a concise summary
-of _what_ changed, the commit body is a crucial tool for explaining the _why_.
-Both human reviewers and future AI agents rely heavily on the commit body to
-understand the context and rationale behind a modification. Therefore, you are
-strongly encouraged to utilize the commit body to its fullest extent.
-
-Use the commit body to clearly convey the overarching goals and motivations of
-the change. If the problem being solved is complex, or if the constraints that
-shaped the final implementation are not immediately obvious from reading the
-code itself, explain them in detail here.
-
-Furthermore, the commit body is an excellent place to document alternative
-approaches that were considered and ultimately rejected. By discussing these
-alternatives and the reasons for discarding them, you provide additional
-information that prevents future contributors (both human and machine) from
-second-guessing the chosen path or attempting to reimplement a flawed
-alternative. Always err on the side of providing more information rather than
-less; verbose, well-reasoned explanations are vastly preferable to sparse
-commitments when dealing with non-trivial architectural or logical shifts.
-
-Finally, focus on the **final state** of the change. Do not document transient
-states or "non-changes" (e.g., "I modified file X but then reverted it"). The
-commit body should explain the rationale for what *is* included, not provide a
-play-by-play of the editing process.
-
+This document specifies the mechanical formatting and syntax of a commit
+message. For guidance on the actual content, structure, and tone of the commit
+body, you should search for and consult any available technical writing style
+guides or documentation within the workspace. Such guides typically provide
+instructions on how to effectively explain the rationale behind a change and
+detail what sections to include.
