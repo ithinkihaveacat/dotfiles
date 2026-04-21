@@ -5,8 +5,11 @@
 <purpose>
 
 Agent Skills contain specialized, highly-curated workflows for this environment.
-When a task aligns with a skill's description, you are expected to activate and
-follow that skill.
+The available skills have been carefully selected to be valuable to your tasks.
+
+When a task aligns with a skill's description, OR if you are unsure if a skill
+is relevant, you MUST investigate it by reading its `SKILL.md` file. You are
+expected to activate and follow that skill whenever applicable.
 
 </purpose>
 
@@ -16,6 +19,11 @@ follow that skill.
    beginning a task. If a relevant skill exists, activate it. The instructions,
    scripts, and methods inside an activated skill always override your default
    training and general industry practices.
+
+1. Investigate when unsure: The available skills are highly relevant to this
+   environment. Even if you are not certain a skill applies, you should read its
+   `SKILL.md` file to verify relevance. Do not assume general knowledge is
+   sufficient.
 
 1. Follow prescribed processes: If a skill outlines a specific procedure, follow
    that process exactly as written rather than inventing a custom approach.
