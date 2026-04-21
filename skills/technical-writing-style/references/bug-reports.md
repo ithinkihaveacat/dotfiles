@@ -26,19 +26,6 @@ provided. It should describe:
 - **Log Correlation:** Explicitly link the triggering code line to the
   corresponding timestamped entry in the error log.
 
-**Strict Prohibition on Speculation:**
-
-- **Do not** use "because" clauses that explain the _why_ (e.g., "Crashes
-  because the variable is null").
-- **Do not** interpret the intent or attach qualitative judgment to the behavior
-  (e.g., instead of "This undermines the caching strategy," write "This causes
-  the cache to be bypassed.").
-- **Do not** reference internal code logic, specific functions, or race
-  conditions.
-- **Do not** propose fixes here.
-
-Save all technical reasoning and root cause analysis for the "Analysis" section.
-
 ### Environment
 
 Precise versioning allows for accurate reproduction and source code validation.

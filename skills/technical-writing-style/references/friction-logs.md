@@ -9,20 +9,6 @@ The goal is to provide product and engineering teams with actionable,
 constructive feedback from a user's perspective, without sounding like a
 detached software review or an overly subjective critique.
 
-## Tone & Perspective
-
-- **Collegial & Constructive:** You are a peer engineer offering observations.
-  You want the tool to succeed. Frame friction as opportunities for clarity, not
-  as failures.
-- **Plain English:** Be direct and factual. Avoid excessive jargon and corporate
-  speak.
-- **Avoid Exaggeration:** Do not use colloquial "cheerleading" or exaggerations
-  (e.g., instead of "massive quality-of-life update" or "absolute powerhouse,"
-  use "significantly simplifies parsing" or "provides powerful capabilities").
-- **Establish the "Why":** Set the stage in the opening paragraph. Acknowledge
-  the value of the tool, validate its approach based on your own experience (if
-  applicable), and express optimism for its future.
-
 ## Required Structure
 
 A complete friction log consists of the following sections:
