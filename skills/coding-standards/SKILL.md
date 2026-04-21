@@ -1,18 +1,13 @@
 ---
 name: coding-standards
 description: >
-  Provides coding standards and conventions for this repository: shell script
-  quality (shellcheck, shfmt, error handling, Bash compatibility), CLI tool
-  design (verb-noun command patterns, help systems, exit codes, output
-  conventions), Markdown formatting (markdown-format, heading styles), python
-  linting and formatting (ruff, uvx), git commit policies (message format, agent
-  commit restrictions), and Android development context. Use when writing,
-  reviewing, or validating scripts, CLI tools, Markdown files, or git commits
-  against project conventions. Also use when asked to check whether a change
-  follows coding standards, review code for style compliance, or validate work
-  against project rules. Triggers: coding standards, style guide, validate
-  change, review conventions, shellcheck, shfmt, markdown format, python, ruff,
-  uvx, lint, commit message, CLI design, code review, formatting.
+  Use this skill when writing, reviewing, or validating code (shell scripts,
+  Python, Markdown) or CLI tools to ensure they follow repository coding
+  standards and conventions. Also use when formatting git commit messages
+  (Conventional Commits syntax, line wrapping) or checking code for style
+  compliance. Triggers: coding standards, style guide, validate change,
+  review conventions, shellcheck, shfmt, markdown format, python, ruff,
+  uvx, lint, commit message format, CLI design, code review, formatting.
 ---
 
 # Coding Standards

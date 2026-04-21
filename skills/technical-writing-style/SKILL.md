@@ -1,10 +1,12 @@
 ---
 name: technical-writing-style
-description:
-  Guidelines for authoring and editing technical documents, including bug
-  reports, known issues, and friction logs. Use when asked to write, review, or
-  format long-form engineering content to ensure a clear, factual, and
-  constructive tone.
+description: >
+  Use this skill when authoring, reviewing, or editing technical documents,
+  including bug reports, known issues, friction logs, PR descriptions, and the
+  structural content and tone of commit messages. Use to ensure engineering
+  content maintains a clear, factual, and constructive tone. Triggers: technical
+  writing, bug report, known issue, friction log, PR description, pull request,
+  commit message tone, review document.
 ---
 
 # Technical Writing Style Guidelines
