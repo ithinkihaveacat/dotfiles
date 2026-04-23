@@ -65,10 +65,15 @@ Environment:
         help="The goal for the AI to achieve (e.g. 'start an exercise')",
     )
     parser.add_argument(
-        "--app",
+        "--launch",
         type=str,
         metavar="PACKAGE",
         help="Launch the specified app before starting (e.g. com.example.fitness)",
+    )
+    parser.add_argument(
+        "--stay-in-app",
+        action="store_true",
+        help="Restrict the agent to a single application package for the entire run",
     )
     parser.add_argument(
         "--timeout",
@@ -210,13 +215,13 @@ Environment:
     except Exception as e:
         print(f"[local] Warning: Failed to wake up screen: {e}", file=sys.stderr)
 
-    if args.app:
-        print(f"[local] Launching {args.app}", file=sys.stderr)
+    if args.launch:
+        print(f"[local] Launching {args.launch}", file=sys.stderr)
         try:
-            d.app_start(args.app)
+            d.app_start(args.launch)
             time.sleep(2)  # allow app launch animation to settle
         except Exception as e:
-            print(f"popper: failed to launch {args.app}: {e}", file=sys.stderr)
+            print(f"popper: failed to launch {args.launch}: {e}", file=sys.stderr)
             sys.exit(1)
 
     # Note: `app_auto_grant_permissions(pkg)` is intentionally omitted.
@@ -269,6 +274,14 @@ Environment:
         initial_package = ""
         print(f"[local] Warning: Failed to get device info: {e}", file=sys.stderr)
     print(f"[local] Starting package: {initial_package}", file=sys.stderr)
+
+    restricted_package = initial_package if args.stay_in_app else ""
+    if args.stay_in_app and not restricted_package:
+        print(
+            "popper: --stay-in-app requires a current app package; launch an app first or use --launch",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     client = genai.Client()
 
@@ -362,7 +375,8 @@ Environment:
         """Taps the screen at the coordinates of the UI element with the specified ID.
 
         Args:
-            element_id: The ID of the element to tap (e.g. '1.5').
+            element_id: The ID of the element to tap in 'step:index' format
+                (e.g. '1:5').
         """
         print(f"[agent] Tapping by ID: {element_id}", file=sys.stderr)
         if element_id not in current_layout_map:
@@ -582,9 +596,15 @@ Environment:
     tool_map = {fn.__name__: fn for fn in ui_tools}
 
     # Set up AI context
-    if args.app:
+    if args.stay_in_app and restricted_package:
         cross_app_instruction = (
-            f"The target application is {args.app}. "
+            f"You MUST stay within the application package '{restricted_package}' "
+            "for the entire task. If an action would leave this package, do not "
+            "take it. Use complete_task(success=False, ...) instead."
+        )
+    elif args.launch:
+        cross_app_instruction = (
+            f"The target application is {args.launch}. "
             "Prefer to accomplish the goal within this app."
         )
     else:
@@ -672,6 +692,9 @@ Constraints:
 
 Current UI State:
 {initial_xml}
+
+Element IDs use 'step:index' format such as '0:12'. When calling tap_by_id,
+use IDs from the latest UI state.
 
 What is your first action?"""
     ]
@@ -790,6 +813,24 @@ What is your first action?"""
                         result["new_ui_hierarchy"] = xml_str
                         emit({"type": "hierarchy", "step": step, "xml": xml_str})
 
+                        if restricted_package:
+                            try:
+                                current_package = d.app_current().get("package", "")
+                            except Exception:
+                                current_package = ""
+
+                            if current_package != restricted_package:
+                                task_result = {
+                                    "success": False,
+                                    "reason": (
+                                        "Left restricted application package "
+                                        f"'{restricted_package}' and entered "
+                                        f"'{current_package or 'unknown'}'"
+                                    ),
+                                }
+                                result["status"] = "error"
+                                result["message"] = task_result["reason"]
+
                         if img_part:
                             result["screenshot"] = {"$ref": "screenshot.jpg"}
                             parts_list.append(img_part)
@@ -803,6 +844,9 @@ What is your first action?"""
                         else None,
                     )
                 )
+
+                if task_result is not None:
+                    break
 
             if task_result is not None:
                 break

@@ -419,13 +419,14 @@ uv run python -m uiautomator2 init
 
 ### Leaving Application Boundaries
 
-**Error:** Task fails immediately when using `--app-only`
+**Error:** Task fails after using `--stay-in-app`
 
 **Solution:**
 
-The agent attempted an action that would switch to a different app. If the goal
-requires interacting with system dialogs or other apps, run `popper` without the
-`--app-only` flag.
+The agent left the restricted application package. If the goal requires
+interacting with system dialogs or other apps, run `popper` without the
+`--stay-in-app` flag. If you want to start in a specific app and keep the run
+inside it, combine `--launch PACKAGE --stay-in-app`.
 
 ---
 

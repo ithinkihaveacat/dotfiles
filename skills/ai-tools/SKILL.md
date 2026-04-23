@@ -265,11 +265,13 @@ natural language.
 scripts/popper "GOAL"
 ```
 
-**Options:** `--app-only` (restrict the agent to the current application)
+**Options:** `--launch PACKAGE` (launch a package before starting),
+`--stay-in-app` (restrict the run to a single application package),
+`--dump-layout` (print the current simplified UI layout as JSON and exit)
 
 **Environment:** `ANDROID_SERIAL` (optional, target specific device)
 
-**Exit codes:** 0 success (task completed), 1 error (task failed)
+**Exit codes:** 0 success (task completed), 1 error (task failed), 2 timeout
 
 **Examples:**
 
@@ -277,8 +279,8 @@ scripts/popper "GOAL"
 # General UI task
 scripts/popper "accept all permissions"
 
-# Restrict to current app
-scripts/popper --app-only "start a running exercise"
+# Launch an app and keep the run inside it
+scripts/popper --launch com.example.fitness --stay-in-app "start a running exercise"
 
 # Target specific device
 env ANDROID_SERIAL=12345 scripts/popper "open settings"

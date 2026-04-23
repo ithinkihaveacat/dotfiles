@@ -689,9 +689,15 @@ scripts/popper [OPTIONS] "GOAL"
 
 ### Options
 
-| Option       | Description                                                                       |
-| ------------ | --------------------------------------------------------------------------------- |
-| `--app-only` | Restrict the agent to the current application. It will fail if it leaves the app. |
+| Option             | Description                                                                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--launch PACKAGE` | Launch the specified package before starting.                                                                                               |
+| `--stay-in-app`    | Restrict the agent to a single application package for the entire run. If used with `--launch`, that launched package becomes the boundary. |
+| `--timeout SEC`    | Maximum execution time in seconds. Exits with code `2` on timeout.                                                                          |
+| `--output-format`  | Output format: `text` or `stream-json` (NDJSON telemetry to stdout).                                                                        |
+| `--screenshots`    | Enable screenshot capture and transmission to the model. Enabled by default.                                                                |
+| `--no-screenshots` | Disable screenshot capture and transmission to the model.                                                                                   |
+| `--dump-layout`    | Print the current simplified UI layout as JSON and exit.                                                                                    |
 
 ### Environment Variables
 
@@ -706,8 +712,11 @@ scripts/popper [OPTIONS] "GOAL"
 # General UI task
 scripts/popper "accept all permissions"
 
-# Restrict to current app
-scripts/popper --app-only "start a running exercise"
+# Launch an app and keep the run inside it
+scripts/popper --launch com.example.fitness --stay-in-app "start a running exercise"
+
+# Dump the current simplified layout without running the agent
+scripts/popper --dump-layout
 
 # Target specific device
 env ANDROID_SERIAL=12345 scripts/popper "open settings"
@@ -726,6 +735,7 @@ details._
 | ---- | ------------------------ |
 | 0    | Success (task completed) |
 | 1    | Error (task failed)      |
+| 2    | Timed out                |
 
 ---
 

@@ -166,7 +166,8 @@ description: >
 - Mention required command-line tools, network access needs, or target platforms
 - Example:
   `compatibility: Requires curl, jq, and uv. Image tools also need base64`
-  `and magick (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to`
+  `and magick (ImageMagick).`
+  `Needs GEMINI_API_KEY environment variable and network access to`
   `generativelanguage.googleapis.com.`
 
 For maximum compatibility across skill loaders, prefer a single-line
@@ -293,7 +294,8 @@ Scripts to document:
 10. **popper** - Interact with Android UIs using an AI agent
     - Uses uiautomator2 and Gemini to semantically control Android devices
     - Provide a natural language goal (e.g., "accept all permissions")
-    - Supports `--app-only` to restrict actions to the current application
+    - Supports `--launch PACKAGE` to launch a target app and `--stay-in-app` to
+      keep the run inside a single app package
     - Exit code 0 on success, 1 on failure
 
 #### Image Encoding Notes
