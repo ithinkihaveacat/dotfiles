@@ -32,6 +32,8 @@ import io
 import signal
 import json
 import datetime
+import xml.etree.ElementTree as ET
+import re
 
 import uiautomator2 as u2
 from google import genai
@@ -59,6 +61,7 @@ Environment:
     parser.add_argument(
         "goal",
         type=str,
+        nargs="?",
         help="The goal for the AI to achieve (e.g. 'start an exercise')",
     )
     parser.add_argument(
@@ -87,6 +90,11 @@ Environment:
         help="Enable/disable screenshot capture and transmission to the model (default: enabled)",
     )
     parser.add_argument(
+        "--dump-layout",
+        action="store_true",
+        help="Dump the UI layout as JSON and exit",
+    )
+    parser.add_argument(
         "--help",
         action="help",
         default=argparse.SUPPRESS,
@@ -94,6 +102,8 @@ Environment:
     )
 
     args = parser.parse_args()
+    if not args.dump_layout and not args.goal:
+        parser.error("the following arguments are required: goal")
 
     step = 0
     context_usage = {
@@ -146,14 +156,50 @@ Environment:
     serial = os.environ.get("ANDROID_SERIAL")
     try:
         # Connect to the device
-        print(
-            f"[local] Connecting to device {serial if serial else 'default'}",
-            file=sys.stderr,
-        )
+        if not args.dump_layout:
+            print(
+                f"[local] Connecting to device {serial if serial else 'default'}",
+                file=sys.stderr,
+            )
         d = u2.connect(serial)
     except Exception as e:
         print(f"popper: Failed to connect to device: {e}", file=sys.stderr)
         sys.exit(1)
+
+    current_layout_map = {}
+
+    def get_ui_state():
+        current_layout_map.clear()
+        try:
+            res = []
+            nodes = [
+                n
+                for n in ET.fromstring(d.dump_hierarchy()).iter("node")
+                if n.get("text") or n.get("content-desc")
+            ]
+            for idx, n in enumerate(nodes):
+                b = [int(x) for x in re.findall(r"\d+", n.get("bounds") or "")]
+                if len(b) >= 4:
+                    cx, cy = (b[0] + b[2]) // 2, (b[1] + b[3]) // 2
+                    element_id = f"{step}:{idx}"
+                    current_layout_map[element_id] = (cx, cy)
+                    item = {
+                        "id": element_id,
+                        "text": n.get("text"),
+                        "content-desc": n.get("content-desc"),
+                        "resource-id": n.get("resource-id").split("/")[-1]
+                        if n.get("resource-id")
+                        else "",
+                        "center": f"[{cx},{cy}]",
+                    }
+                    res.append({k: v for k, v in item.items() if v})
+            return json.dumps(res, ensure_ascii=False)
+        except Exception:
+            return "[]"
+
+    if args.dump_layout:
+        print(get_ui_state())
+        sys.exit(0)
 
     print("[local] Initializing AI", file=sys.stderr)
 
@@ -236,10 +282,7 @@ Environment:
         """Attempts to dump the hierarchy and screenshot. Returns the XML string
         and the screenshot formatted as a FunctionResponsePart.
         """
-        try:
-            xml = d.dump_hierarchy()
-        except Exception:
-            xml = '<hierarchy error="device unreachable"/>'
+        xml = get_ui_state()
 
         img_part = None
         if args.screenshots:
@@ -312,6 +355,36 @@ Environment:
                     "status": "error",
                     "message": "Element not found. Try scrolling or checking criteria.",
                 }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def tap_by_id(element_id: str) -> dict:
+        """Taps the screen at the coordinates of the UI element with the specified ID.
+
+        Args:
+            element_id: The ID of the element to tap (e.g. '1.5').
+        """
+        print(f"[agent] Tapping by ID: {element_id}", file=sys.stderr)
+        if element_id not in current_layout_map:
+            try:
+                s, _ = map(int, element_id.split(":"))
+                if s != step:
+                    return {
+                        "status": "error",
+                        "message": f"ID '{element_id}' belongs to step {s}, but current step is {step}. Use IDs from the current UI state.",
+                    }
+            except ValueError:
+                pass
+            return {
+                "status": "error",
+                "message": f"Element ID '{element_id}' not found in current layout.",
+            }
+
+        x, y = current_layout_map[element_id]
+        try:
+            d.click(x, y)
+            time.sleep(1.5)
+            return {"status": "success"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -495,6 +568,7 @@ Environment:
 
     ui_tools = [
         tap_element,
+        tap_by_id,
         scroll,
         press_button,
         input_text,
@@ -586,10 +660,7 @@ Constraints:
 
     # Send the initial UI state and goal to the model
     # For the initial prompt, we must send the raw PIL Image if available.
-    try:
-        initial_xml = d.dump_hierarchy()
-    except Exception:
-        initial_xml = '<hierarchy error="device unreachable"/>'
+    initial_xml = get_ui_state()
 
     try:
         initial_img = d.screenshot()
