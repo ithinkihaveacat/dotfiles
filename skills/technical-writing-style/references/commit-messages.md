@@ -47,10 +47,15 @@ Best for targeted fixes where the cause and effect are clear.
 Best for larger changes introducing new capabilities or restructuring code.
 
 - **Summary / Goal:** A high-level overview of what the change achieves.
-- **Proposed Changes:** A concise breakdown of the major components modified,
-  grouped logically (e.g., by module or architectural layer).
-- **Rationale & Safety:** Explain why the chosen approach is safe and discuss
-  any specific trade-offs (e.g., adding stub classes).
+- **Changes / Implementation Details:** A concise breakdown of the major
+  components modified, grouped logically (e.g., by module or architectural
+  layer). Using a rigid heading is not required; simply listing the changes is
+  often sufficient.
+- **Rationale & Safety (Situational):** Explain why the chosen approach is safe
+  and discuss any specific trade-offs (e.g., adding stub classes). This section
+  is highly situational and should be reserved for complex, risky, or
+  non-obvious architectural shifts, rather than being treated as a mandatory
+  template for every feature or refactor commit.
 
 ### The Architectural Shift
 
