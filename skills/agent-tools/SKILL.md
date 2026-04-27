@@ -1,25 +1,24 @@
 ---
-name: ai-tools
+name: agent-tools
 description: >
-  Command-line tools that delegate analysis tasks to AI models. Includes image
-  description, screenshot comparison, smart cropping around people, token
-  counting, essay generation from text, boolean condition evaluation, context
-  gathering, and Android UI interaction via popper. Use for describing images,
-  comparing UI states, cropping photos around faces, counting tokens, generating
-  reports, evaluating conditions, gathering context for analysis, automating
-  Android apps, testing Wear OS, or any task requiring AI inference. Triggers:
-  ai analysis, describe image, compare screenshots, smart crop, crop around
-  people, face crop, count tokens, token count, generate essay, evaluate
-  condition, alt text, image description, UI comparison, visual diff, satisfies
-  condition, boolean evaluation, gemini, context, gather context, research
-  topic, android ui, adb, uiautomator2, popper, automate app, test wear os.
+  Command-line tools that delegate analysis tasks to AI models and format
+  up-to-date context for agents. Includes image description, screenshot
+  comparison, smart cropping, token counting, technical essay generation,
+  boolean condition evaluation, live context gathering, Android UI interaction
+  via popper, and GitHub PR/Issue formatting via gh-markdown. Use this skill
+  when the user needs to analyze images, count tokens, evaluate conditions,
+  gather the latest authoritative documentation for a topic, format GitHub data,
+  automate Android apps, or generate technical essays. Triggers: ai analysis,
+  describe image, visual diff, token count, generate essay, boolean evaluation,
+  gather context, latest docs, research topic, github, pull request,
+  gh-markdown, automate app.
 compatibility: >
   Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
   generativelanguage.googleapis.com.
 ---
 
-# AI Tools
+# Agent Tools
 
 ## Important: Use Scripts First
 
@@ -31,16 +30,18 @@ features that raw commands do not:
 - Appropriate model selection for each task
 - Structured output handling (boolean responses via exit codes)
 - Meaningful exit codes for shell integration
+- Formatting structured data (like GitHub PRs) into LLM-friendly Markdown
 
 **When to read the script source:** If a script doesn't do exactly what you
 need, or fails due to missing dependencies, read the script source. The scripts
-encode Gemini API best practices (image ordering, structured output schemas,
-model selection) that may not be obvious—use them as reference when building
-similar functionality.
+encode API best practices (image ordering, structured output schemas, model
+selection) that may not be obvious—use them as reference when building similar
+functionality.
 
 ## Quick Start
 
-**Environment:** Set `GEMINI_API_KEY` before running any commands.
+**Environment:** Set `GEMINI_API_KEY` before running AI commands. `gh-markdown`
+optionally accepts a `--token` for GitHub API access.
 
 **Dependencies:** `curl`, `jq`, `uv` (all tools); `base64`, `magick` (image
 tools only)
@@ -48,6 +49,9 @@ tools only)
 ```bash
 # Gather context and analyze
 scripts/context gemini-api | scripts/emerson "Explain the key features"
+
+# Fetch a GitHub PR or Issue as Markdown
+scripts/gh-markdown https://github.com/owner/repo/pull/123
 
 # Describe an image (generate alt-text)
 scripts/screenshot-describe screenshot.png
@@ -76,12 +80,38 @@ scripts/popper "start an exercise"
 
 ## Script Overview
 
+### gh-markdown
+
+Fetch GitHub Pull Requests or Issues and format them as Markdown for LLM Agents.
+Includes the main description, standard comments, reviews, and inline review
+comments.
+
+```bash
+scripts/gh-markdown URL [--token TOKEN]
+```
+
+**Options:** `--token` (GitHub Personal Access Token for private repos or rate
+limits)
+
+**Exit codes:** 0 success, 1 error
+
+**Examples:**
+
+```bash
+# Fetch a PR
+scripts/gh-markdown https://github.com/owner/repo/pull/123
+
+# Fetch an issue with an auth token
+scripts/gh-markdown https://github.com/owner/repo/issues/456 --token "$GITHUB_TOKEN"
+```
+
 ### context
 
-Gathers authoritative, up-to-date context for deep research on various technical
-topics (e.g., `gemini-api`, `mcp`, `home-assistant`). Run with `--list` to see
-all available topics. This script should be your first tool for gathering
-background knowledge or the latest documentation for an unfamiliar domain.
+Gathers the very latest, authoritative, up-to-date context for deep research on
+various technical topics (e.g., `gemini-api`, `mcp`, `home-assistant`). Run with
+`--list` to see all available topics. This script should be your first tool for
+gathering background knowledge or the latest documentation for an unfamiliar
+domain.
 
 **Warning:** Output can be very large. **Do not** read output directly into your
 conversation history. Pipe to `emerson` for analysis, or redirect to a file to
@@ -308,4 +338,6 @@ env ANDROID_SERIAL=12345 scripts/popper "open settings"
 - **Command Reference**: Detailed documentation for each script. See
   [references/command-index.md](references/command-index.md).
 - **Troubleshooting**: Common issues and solutions. See
+  [references/troubleshooting.md](references/troubleshooting.md).
+  \*Troubleshooting\*\*: Common issues and solutions. See
   [references/troubleshooting.md](references/troubleshooting.md).

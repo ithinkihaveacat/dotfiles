@@ -1,0 +1,236 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "requests",
+# ]
+# ///
+
+import sys
+import requests
+import re
+from urllib.parse import urlparse
+import os
+
+
+def usage():
+    print(
+        f"""Usage: {os.path.basename(sys.argv[0])} <url> [options]
+
+Fetch GitHub PR as Markdown for LLM Agents.
+
+Arguments:
+  url         The GitHub PR URL
+
+Options:
+  --token     GitHub Personal Access Token (PAT)
+  --help      Display this help message and exit
+
+Examples:
+  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/pull/123
+  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/pull/123 --token YOUR_TOKEN
+""",
+        file=sys.stdout,
+    )
+    sys.exit(0)
+
+
+def parse_github_url(url):
+    """Extracts owner, repo, and PR/Issue number from a GitHub URL."""
+    path_parts = urlparse(url).path.strip("/").split("/")
+    if len(path_parts) >= 4:
+        if path_parts[2] == "pull":
+            return path_parts[0], path_parts[1], path_parts[3], "pr"
+        elif path_parts[2] == "issues":
+            return path_parts[0], path_parts[1], path_parts[3], "issue"
+    raise ValueError("invalid GitHub URL format. Must be a PR or Issue URL.")
+
+
+def fetch_data(url, token):
+    """Fetches paginated data from the GitHub API."""
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    results = []
+    while url:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            print(
+                f"{os.path.basename(sys.argv[0])}: API error {response.status_code}: {response.text}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # If it's a list (comments/reviews), extend. If it's a dict (PR details), return directly.
+        data = response.json()
+        if isinstance(data, dict):
+            return data
+
+        results.extend(data)
+
+        # Handle pagination
+        url = None
+        if "Link" in response.headers:
+            links = response.headers["Link"].split(", ")
+            for link in links:
+                if 'rel="next"' in link:
+                    url = re.search(r"<(.*)>", link).group(1)
+                    break
+    return results
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"{os.path.basename(sys.argv[0])}: missing url operand", file=sys.stderr)
+        print(
+            f"Try '{os.path.basename(sys.argv[0])} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if sys.argv[1] in ("--help", "help"):
+        usage()
+
+    if "-h" in sys.argv:
+        print(f"{os.path.basename(sys.argv[0])}: invalid option '-h'", file=sys.stderr)
+        print(
+            f"Try '{os.path.basename(sys.argv[0])} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    url = sys.argv[1]
+    token = None
+
+    i = 2
+    while i < len(sys.argv):
+        if sys.argv[i] == "--token":
+            if i + 1 < len(sys.argv):
+                token = sys.argv[i + 1]
+                i += 2
+            else:
+                print(
+                    f"{os.path.basename(sys.argv[0])}: missing argument for '--token'",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        else:
+            print(
+                f"{os.path.basename(sys.argv[0])}: unknown argument '{sys.argv[i]}'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    try:
+        owner, repo, number, item_type = parse_github_url(url)
+    except ValueError as e:
+        print(f"{os.path.basename(sys.argv[0])}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    base_api = f"https://api.github.com/repos/{owner}/{repo}"
+
+    # Fetch all necessary data
+    if item_type == "pr":
+        item_data = fetch_data(f"{base_api}/pulls/{number}", token)
+        reviews = fetch_data(f"{base_api}/pulls/{number}/reviews", token)
+        inline_comments = fetch_data(f"{base_api}/pulls/{number}/comments", token)
+    else:
+        item_data = fetch_data(f"{base_api}/issues/{number}", token)
+        reviews = []
+        inline_comments = []
+
+    if not isinstance(item_data, dict):
+        print(
+            f"{os.path.basename(sys.argv[0])}: expected dictionary response for main item, got {type(item_data).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Standard discussion comments are accessed via the issues endpoint
+    comments = fetch_data(f"{base_api}/issues/{number}/comments", token)
+
+    if isinstance(inline_comments, list):
+        inline_comments.sort(key=lambda x: x.get("created_at", ""))
+    else:
+        inline_comments = []
+
+    def quote_body(body):
+        if not body:
+            return ""
+        return "\n".join(f"> {line}" for line in body.splitlines())
+
+    state = item_data.get("state", "Unknown").capitalize()
+    if state == "Closed" and item_data.get("merged_at"):
+        state = "Merged"
+
+    labels = ", ".join(label["name"] for label in item_data.get("labels", []))
+    if not labels:
+        labels = "None"
+
+    # Format the Markdown output
+    md = []
+    title_prefix = "PR" if item_type == "pr" else "Issue"
+    md.append(f"# {title_prefix}: {item_data.get('title', 'Untitled')}")
+    md.append(f"**Author:** {item_data.get('user', {}).get('login', 'Unknown')}")
+    md.append(f"**URL:** {item_data.get('html_url', url)}")
+    md.append(f"**State:** {state}")
+    if item_type == "pr":
+        md.append(f"**Base Branch:** {item_data.get('base', {}).get('ref', 'Unknown')}")
+        md.append(f"**Head Branch:** {item_data.get('head', {}).get('ref', 'Unknown')}")
+    md.append(f"**Labels:** {labels}")
+    md.append(f"**Created:** {item_data.get('created_at', 'Unknown')}")
+    md.append("\n## Description\n")
+    md.append(quote_body(item_data.get("body")) or "*No description provided.*")
+    md.append("\n---\n")
+
+    if comments:
+        md.append("## Standard Comments\n")
+        for comment in comments:
+            author = comment.get("user", {}).get("login", "Unknown")
+            created_at = comment.get("created_at", "Unknown")
+            md.append(f"### Comment by {author} on {created_at}")
+            md.append(f"{quote_body(comment.get('body'))}\n")
+            md.append("---\n")
+
+    if reviews:
+        md.append("## Top-Level Reviews\n")
+        for review in reviews:
+            if not review.get("body"):  # Skip empty review submissions
+                continue
+            author = review.get("user", {}).get("login", "Unknown")
+            state_review = review.get("state", "COMMENTED")
+            submitted_at = review.get("submitted_at", "Unknown")
+            md.append(f"### Review ({state_review}) by {author} on {submitted_at}")
+            md.append(f"{quote_body(review.get('body'))}\n")
+            md.append("---\n")
+
+    if inline_comments:
+        md.append("## Inline Review Comments\n")
+        for ic in inline_comments:
+            author = ic.get("user", {}).get("login", "Unknown")
+            path = ic.get("path", "Unknown file")
+            line = ic.get("line") or ic.get("original_line", "Unknown line")
+            created_at = ic.get("created_at", "Unknown")
+
+            md.append(
+                f"### Inline comment by {author} on `{path}` (Line {line}) at {created_at}"
+            )
+
+            # Optionally include the code diff snippet if useful for the agent
+            if diff_hunk := ic.get("diff_hunk"):
+                md.append("```diff")
+                md.append(diff_hunk)
+                md.append("```")
+
+            md.append(f"{quote_body(ic.get('body'))}\n")
+            md.append("---\n")
+
+    print("\n".join(md))
+
+
+if __name__ == "__main__":
+    main()
