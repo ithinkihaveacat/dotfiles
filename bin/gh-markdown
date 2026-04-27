@@ -36,11 +36,14 @@ Examples:
 
 
 def parse_github_url(url):
-    """Extracts owner, repo, and PR number from a GitHub URL."""
+    """Extracts owner, repo, and PR/Issue number from a GitHub URL."""
     path_parts = urlparse(url).path.strip("/").split("/")
-    if len(path_parts) >= 4 and path_parts[2] == "pull":
-        return path_parts[0], path_parts[1], path_parts[3]
-    raise ValueError("Invalid GitHub PR URL format.")
+    if len(path_parts) >= 4:
+        if path_parts[2] == "pull":
+            return path_parts[0], path_parts[1], path_parts[3], "pr"
+        elif path_parts[2] == "issues":
+            return path_parts[0], path_parts[1], path_parts[3], "issue"
+    raise ValueError("Invalid GitHub URL format. Must be a PR or Issue URL.")
 
 
 def fetch_data(url, token):
@@ -120,7 +123,7 @@ def main():
             sys.exit(1)
 
     try:
-        owner, repo, pr_number = parse_github_url(url)
+        owner, repo, number, item_type = parse_github_url(url)
     except ValueError as e:
         print(f"{os.path.basename(sys.argv[0])}: {e}", file=sys.stderr)
         sys.exit(1)
@@ -128,16 +131,21 @@ def main():
     base_api = f"https://api.github.com/repos/{owner}/{repo}"
 
     # Fetch all necessary data
-    pr_data = fetch_data(f"{base_api}/pulls/{pr_number}", token)
+    if item_type == "pr":
+        item_data = fetch_data(f"{base_api}/pulls/{number}", token)
+        reviews = fetch_data(f"{base_api}/pulls/{number}/reviews", token)
+        inline_comments = fetch_data(f"{base_api}/pulls/{number}/comments", token)
+    else:
+        item_data = fetch_data(f"{base_api}/issues/{number}", token)
+        reviews = []
+        inline_comments = []
+
+    if not isinstance(item_data, dict):
+        print(f"Error: Expected dictionary response for main item, got {type(item_data)}", file=sys.stderr)
+        sys.exit(1)
 
     # Standard discussion comments are accessed via the issues endpoint
-    comments = fetch_data(f"{base_api}/issues/{pr_number}/comments", token)
-
-    # Top-level review summaries (e.g., "Approved")
-    reviews = fetch_data(f"{base_api}/pulls/{pr_number}/reviews", token)
-
-    # Inline code review comments
-    inline_comments = fetch_data(f"{base_api}/pulls/{pr_number}/comments", token)
+    comments = fetch_data(f"{base_api}/issues/{number}/comments", token)
 
     if inline_comments:
         inline_comments.sort(key=lambda x: x.get("created_at", ""))
@@ -147,26 +155,28 @@ def main():
             return ""
         return "\n".join(f"> {line}" for line in body.splitlines())
 
-    state = pr_data.get("state", "Unknown").capitalize()
-    if state == "Closed" and pr_data.get("merged_at"):
+    state = item_data.get("state", "Unknown").capitalize()
+    if state == "Closed" and item_data.get("merged_at"):
         state = "Merged"
 
-    labels = ", ".join(label["name"] for label in pr_data.get("labels", []))
+    labels = ", ".join(label["name"] for label in item_data.get("labels", []))
     if not labels:
         labels = "None"
 
     # Format the Markdown output
     md = []
-    md.append(f"# PR: {pr_data.get('title', 'Untitled')}")
-    md.append(f"**Author:** {pr_data.get('user', {}).get('login', 'Unknown')}")
-    md.append(f"**URL:** {pr_data.get('html_url', url)}")
+    title_prefix = "PR" if item_type == "pr" else "Issue"
+    md.append(f"# {title_prefix}: {item_data.get('title', 'Untitled')}")
+    md.append(f"**Author:** {item_data.get('user', {}).get('login', 'Unknown')}")
+    md.append(f"**URL:** {item_data.get('html_url', url)}")
     md.append(f"**State:** {state}")
-    md.append(f"**Base Branch:** {pr_data.get('base', {}).get('ref', 'Unknown')}")
-    md.append(f"**Head Branch:** {pr_data.get('head', {}).get('ref', 'Unknown')}")
+    if item_type == "pr":
+        md.append(f"**Base Branch:** {item_data.get('base', {}).get('ref', 'Unknown')}")
+        md.append(f"**Head Branch:** {item_data.get('head', {}).get('ref', 'Unknown')}")
     md.append(f"**Labels:** {labels}")
-    md.append(f"**Created:** {pr_data.get('created_at', 'Unknown')}")
+    md.append(f"**Created:** {item_data.get('created_at', 'Unknown')}")
     md.append("\n## Description\n")
-    md.append(quote_body(pr_data.get("body")) or "*No description provided.*")
+    md.append(quote_body(item_data.get("body")) or "*No description provided.*")
     md.append("\n---\n")
 
     if comments:
