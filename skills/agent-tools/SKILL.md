@@ -339,5 +339,3 @@ env ANDROID_SERIAL=12345 scripts/popper "open settings"
   [references/command-index.md](references/command-index.md).
 - **Troubleshooting**: Common issues and solutions. See
   [references/troubleshooting.md](references/troubleshooting.md).
-  \*Troubleshooting\*\*: Common issues and solutions. See
-  [references/troubleshooting.md](references/troubleshooting.md).
