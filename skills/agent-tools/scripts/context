@@ -20,6 +20,11 @@ from datetime import datetime
 ENTRY_COUNTER = 0
 ENTRIES = []
 
+CONTEXT_BASE_DIR = os.path.join(
+    os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+    "context",
+)
+
 
 def _emit_entry(display_cmd, content):
     global ENTRY_COUNTER
@@ -32,8 +37,103 @@ def _emit_entry(display_cmd, content):
 def _make_display_cmd(url, web_url=None):
     cmd = f"curl -sfSL '{url}'"
     if web_url:
-        cmd += f"  # web page: {web_url}"
+        cmd += f"  # published to {web_url}"
     return cmd
+
+
+def get_dynamic_topics():
+    if os.path.isdir(CONTEXT_BASE_DIR):
+        return sorted(
+            [
+                d
+                for d in os.listdir(CONTEXT_BASE_DIR)
+                if os.path.isdir(os.path.join(CONTEXT_BASE_DIR, d))
+                or os.path.islink(os.path.join(CONTEXT_BASE_DIR, d))
+            ]
+        )
+    return []
+
+
+def clean_url(url):
+    import re
+
+    # Replace all // with / except after protocol
+    url = re.sub(r"(?<!:)/+", "/", url)
+    return url
+
+
+def run_dynamic_topic(topic):
+    topic_dir = os.path.join(CONTEXT_BASE_DIR, topic)
+
+    if not os.path.exists(topic_dir):
+        print(
+            f"context: topic '{topic}' not found (or broken symlink at {topic_dir})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not os.path.isdir(topic_dir):
+        print(f"context: topic '{topic}' is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    # Find files
+    files = []
+    for root, dirs, filenames in os.walk(topic_dir, followlinks=True):
+        for filename in filenames:
+            if filename.endswith(".txt") or filename.endswith(".md"):
+                files.append(os.path.join(root, filename))
+    files.sort()
+
+    for file in files:
+        rel = os.path.relpath(file, topic_dir)
+        display_cmd = ""
+
+        if topic.startswith("dac-"):
+            path = os.path.realpath(file)
+            marker = "/knowledge_base/latest/android"
+            base_url = "https://developer.android.com"
+            suffix = ""
+
+            if marker in path:
+                suffix = path[path.find(marker) + len(marker) :]
+            else:
+                suffix = f"/{rel}"
+
+            suffix = suffix.lstrip("/")
+            published = f"{base_url}/{suffix}"
+            raw_url = published  # Raw matches published structure initially
+
+            # Extension stripping
+            if published.endswith(".md.txt"):
+                published = published[: -len(".md.txt")]
+            elif published.endswith(".txt"):
+                published = published[: -len(".txt")]
+            elif published.endswith(".md"):
+                published = published[: -len(".md")]
+
+            # Index handling
+            if os.path.basename(published) == "index":
+                published = os.path.dirname(published)
+                if published == ".":
+                    published = ""
+
+            raw_url = clean_url(raw_url)
+            published = clean_url(published)
+            published = published.rstrip("/")
+
+            display_cmd = f"curl -s {raw_url}  # published to {published}"
+        else:
+            display_cmd = f"cat {topic_dir}/{rel}"
+
+        try:
+            with open(file, "r", encoding="utf-8") as f:
+                content = f.read()
+            _emit_entry(display_cmd, content)
+        except Exception as e:
+            print(
+                f"context: warning: skipping unreadable file: {file} ({e})",
+                file=sys.stderr,
+            )
 
 
 def entry_url(fetch_url, web_url=None):
@@ -196,7 +296,7 @@ def generate_xml(topic_desc, use_toc=True):
     - PROVENANCE: The &lt;command&gt; element indicates an approximate source for the data. In some cases
       the actual retrieval method may differ (e.g., fetched from a local cache or extracted archive).
     - SNAPSHOT: Outputs represent a best-effort snapshot at the time this script was run.
-    - CITATION: If a &lt;command&gt; contains a "# web page: URL" comment, that URL represents the
+    - CITATION: If a &lt;command&gt; contains a "# published to URL" comment, that URL represents the
       canonical, human-readable source for the content. Agents are encouraged to prioritize this
       URL when citing sources or providing links to the user.
   </guidelines>
@@ -666,6 +766,26 @@ def topic_prompting():
         )
 
 
+def topic_compose_architecture():
+    urls = [
+        "https://developer.android.com/develop/ui/compose/why-adopt",
+        "https://developer.android.com/develop/ui/compose/mental-model",
+        "https://developer.android.com/develop/ui/compose/lifecycle",
+        "https://developer.android.com/develop/ui/compose/side-effects",
+        "https://developer.android.com/develop/ui/compose/phases",
+        "https://developer.android.com/develop/ui/compose/state",
+        "https://developer.android.com/develop/ui/compose/state-hoisting",
+        "https://developer.android.com/develop/ui/compose/state-saving",
+        "https://developer.android.com/develop/ui/compose/state-lifespans",
+        "https://developer.android.com/develop/ui/compose/state-callbacks",
+        "https://developer.android.com/develop/ui/compose/architecture",
+        "https://developer.android.com/develop/ui/compose/layering",
+        "https://developer.android.com/develop/ui/compose/compositionlocal",
+    ]
+    for url in urls:
+        entry_url(f"{url}.md.txt", url)
+
+
 def topic_gemini_sdk_js():
     entry_url(
         "https://raw.githubusercontent.com/googleapis/js-genai/main/codegen_instructions.md"
@@ -717,30 +837,6 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "help":
         sys.argv[1] = "--help"
 
-    parser = argparse.ArgumentParser(
-        description="Generate aggregated context for a specific topic. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.",
-        add_help=False,  # Disable default -h/--help
-    )
-    parser.add_argument(
-        "--help",
-        action="help",
-        default=argparse.SUPPRESS,
-        help="show this help message and exit",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List available topics (names only)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force cache rebuild",
-    )
-    parser.add_argument("topic", nargs="?", help="Topic to generate context for")
-
-    args = parser.parse_args()
-
     topics = {
         "skills": (
             topic_skills,
@@ -764,10 +860,52 @@ def main():
         ),
         "meshtastic": (topic_meshtastic, "Meshtastic documentation"),
         "gemini-cli": (topic_gemini_cli, "Gemini CLI documentation"),
+        "compose-architecture": (
+            topic_compose_architecture,
+            "Android Compose Architecture documentation",
+        ),
     }
 
+    # Construct help description
+    description = "Generate aggregated context for a specific topic. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.\n\nTopics:\n"
+    for t in sorted(topics.keys()):
+        func, desc = topics[t]
+        description += f"  {t:<22} {desc}\n"
+
+    dynamic_topics = get_dynamic_topics()
+    if dynamic_topics:
+        description += "\nDynamic Topics:\n"
+        for t in sorted(dynamic_topics):
+            description += f"  {t}\n"
+
+    parser = argparse.ArgumentParser(
+        description=description,
+        add_help=False,  # Disable default -h/--help
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--help",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="show this help message and exit",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List available topics (names only)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force cache rebuild",
+    )
+    parser.add_argument("topic", nargs="?", help="Topic to generate context for")
+
+    args = parser.parse_args()
+
     if args.list:
-        for t in topics:
+        all_topics = list(topics.keys()) + get_dynamic_topics()
+        for t in sorted(all_topics):
             print(t)
         sys.exit(0)
 
@@ -775,9 +913,13 @@ def main():
         parser.print_help()
         sys.exit(1)
 
+    is_dynamic = False
     if args.topic not in topics:
-        print(f"context: unknown topic: {args.topic}", file=sys.stderr)
-        sys.exit(1)
+        if args.topic in get_dynamic_topics():
+            is_dynamic = True
+        else:
+            print(f"context: unknown topic: {args.topic}", file=sys.stderr)
+            sys.exit(1)
 
     cache_dir = os.path.join(
         os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "context"
@@ -790,7 +932,9 @@ def main():
         import time
 
         mtime = os.path.getmtime(cache_file)
-        if (time.time() - mtime) < 24 * 3600:
+        script_mtime = os.path.getmtime(os.path.realpath(__file__))
+
+        if (time.time() - mtime) < 24 * 3600 and mtime > script_mtime:
             use_cache = True
 
     if use_cache:
@@ -798,8 +942,13 @@ def main():
             print(f.read(), end="")
         sys.exit(0)
 
-    func, desc = topics[args.topic]
-    func()
+    if is_dynamic:
+        desc = f"Dynamic topic: {args.topic}"
+        run_dynamic_topic(args.topic)
+    else:
+        func, desc = topics[args.topic]
+        func()
+
     xml_output = generate_xml(desc)
 
     # Save to cache
