@@ -27,7 +27,9 @@ complete -c context -f -n __fish_context_needs_topic -a skills -d 'Agent skills 
 complete -c context -f -n __fish_context_needs_topic -a prompting -d 'Prompt engineering guides for Claude, Gemini, and OpenAI'
 complete -c context -f -n __fish_context_needs_topic -a gemini-sdk-js -d 'Google Gemini JavaScript SDK codegen instructions'
 complete -c context -f -n __fish_context_needs_topic -a meshtastic -d 'Meshtastic documentation'
+complete -c context -f -n __fish_context_needs_topic -a homeassistant -d 'Home Assistant integration, automation, API and CLI documentation'
 
 # Complete flags
-complete -c context -f -s h -l help -d 'Display help message and exit'
+complete -c context -f -l help -d 'Display help message and exit'
 complete -c context -f -l list -d 'List available topics (names only)'
+complete -c context -f -l force -d 'Force cache rebuild'

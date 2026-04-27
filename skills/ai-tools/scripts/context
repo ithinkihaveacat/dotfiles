@@ -1,786 +1,186 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "requests",
+# ]
+# ///
 
-# context - Generate aggregated context for various topics
-#
-# Each topic is a bash function that uses fetch() to download GitHub repos
-# and entry_url/entry_file/entry_stdin to emit content as XML entries.
+import argparse
+import json
+import os
+import sys
+import requests
+import tempfile
+import tarfile
+import glob
+from datetime import datetime
 
-# Bash 4.0 or higher required for robust string manipulation
-if ((BASH_VERSINFO[0] < 4)); then
-  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
-  exit 1
-fi
+# Global state
+ENTRY_COUNTER = 0
+ENTRIES = []
 
-set -euo pipefail
 
-# Enable lastpipe so that the last command in a pipeline (like the while loops
-# in topic functions) runs in the current shell. This allows ENTRY_COUNTER
-# to persist across loops instead of resetting in a subshell.
-shopt -s lastpipe
+def _emit_entry(display_cmd, content):
+    global ENTRY_COUNTER
+    ENTRY_COUNTER += 1
+    ENTRIES.append(
+        {"id": str(ENTRY_COUNTER), "command": display_cmd, "output": content}
+    )
 
-SCRIPT_NAME=$(basename "$0")
 
-# Dynamic Topics Directory
-CONTEXT_BASE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/context"
+def _make_display_cmd(url, web_url=None):
+    cmd = f"curl -sfSL '{url}'"
+    if web_url:
+        cmd += f"  # web page: {web_url}"
+    return cmd
 
-# =============================================================================
-# HELPER FUNCTIONS
-# =============================================================================
 
-require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo >&2 "$(basename "$0"): $1 not found"
-    exit 127
-  }
-}
+def entry_url(fetch_url, web_url=None):
+    display_cmd = _make_display_cmd(fetch_url, web_url)
+    try:
+        response = requests.get(fetch_url)
+        response.raise_for_status()
+        _emit_entry(display_cmd, response.text)
+    except Exception as e:
+        print(f"context: failed to fetch {fetch_url}: {e}", file=sys.stderr)
+        sys.exit(1)
 
-xml_escape() {
-  sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
-}
 
-cdata_escape() {
-  tr -d '\000-\010\013\014\016-\037' | sed 's/]]>/]]]]><![CDATA[>/g'
-}
-
-# _emit_entry DISPLAY_CMD CONTENT
-#
-# Emits a single XML entry with the given display command and content.
-ENTRY_COUNTER=0
-
-_emit_entry() {
-  ENTRY_COUNTER=$((ENTRY_COUNTER + 1))
-  local display_cmd="$1"
-  local content="$2"
-  printf "<entry id=\"$ENTRY_COUNTER\">\n"
-  printf "<command>%s</command>\n" "$(printf '%s' "$display_cmd" | xml_escape)"
-  printf "<output><![CDATA[%s]]></output>\n" "$(printf '%s' "$content" | cdata_escape)"
-  printf "</entry>\n"
-}
-
-# _make_display_cmd URL [WEB_URL]
-#
-# Builds a display command string for an entry.
-_make_display_cmd() {
-  local url="$1"
-  local web_url="${2:-}"
-  local cmd="curl -sfSL '$url'"
-  if [[ -n "$web_url" ]]; then
-    cmd+="  # web page: $web_url"
-  fi
-  printf '%s' "$cmd"
-}
-
-# entry_url FETCH_URL [WEB_URL]
-#
-# Fetches a URL (following redirects) and emits an entry. If WEB_URL is
-# provided, it is included as a "# web page:" citation.
-entry_url() {
-  local fetch_url="$1"
-  local web_url="${2:-}"
-  local display_cmd
-  display_cmd=$(_make_display_cmd "$fetch_url" "$web_url")
-  local output
-  if ! output=$(curl -sfSL "$fetch_url"); then
-    echo "$SCRIPT_NAME: command failed: $display_cmd" >&2
-    exit 1
-  fi
-  _emit_entry "$display_cmd" "$output"
-}
-
-# entry_file LOCAL_PATH DISPLAY_URL [WEB_URL]
-#
-# Reads a local file and emits an entry. DISPLAY_URL is shown as the source
-# (typically a raw GitHub URL). If WEB_URL is provided, it is included as a
-# "# web page:" citation.
-entry_file() {
-  local local_path="$1"
-  local display_url="$2"
-  local web_url="${3:-}"
-
-  local display_cmd
-  display_cmd=$(_make_display_cmd "$display_url" "$web_url")
-  local output
-  if ! output=$(cat "$local_path" 2>/dev/null); then
-    echo "$SCRIPT_NAME: warning: skipping unreadable file: $local_path" >&2
-    return 0
-  fi
-  _emit_entry "$display_cmd" "$output"
-}
-
-# entry_stdin DISPLAY_URL [WEB_URL]
-#
-# Reads content from stdin and emits an entry. DISPLAY_URL is shown as the
-# source. If WEB_URL is provided, it is included as a "# web page:" citation.
-entry_stdin() {
-  local display_url="$1"
-  local web_url="${2:-}"
-  local display_cmd
-  display_cmd=$(_make_display_cmd "$display_url" "$web_url")
-  local output
-  if ! output=$(cat); then
-    echo "$SCRIPT_NAME: failed to read stdin for: $display_url" >&2
-    exit 1
-  fi
-  _emit_entry "$display_cmd" "$output"
-}
-
-# fetch - Download a GitHub repository and return its local path
-#
-# Usage:
-#   fetch github://owner/repo              Download default branch
-#   fetch github://owner/repo@branch       Download specific branch
-#
-# Exits on failure.
-fetch() {
-  local url="$1"
-
-  if [[ ! "$url" =~ ^github://(.+) ]]; then
-    echo "$SCRIPT_NAME: fetch: unsupported URL scheme: $url" >&2
-    exit 1
-  fi
-
-  local repo_spec="${BASH_REMATCH[1]}"
-  local repo branch="main"
-
-  if [[ "$repo_spec" =~ ^(.+)@(.+)$ ]]; then
-    repo="${BASH_REMATCH[1]}"
-    branch="${BASH_REMATCH[2]}"
-  else
-    repo="$repo_spec"
-  fi
-
-  local archive_url="https://github.com/${repo}/archive/refs/heads/${branch}.tar.gz"
-  local extract_dir
-  extract_dir=$(mktemp -d "$BUILD_DIR/fetch.XXXXXXXXXX")
-
-  if ! curl -fsSL "$archive_url" | tar -xzf - -C "$extract_dir" --strip-components=1; then
-    echo "$SCRIPT_NAME: fetch: failed to download $archive_url" >&2
-    exit 1
-  fi
-
-  echo "$extract_dir"
-}
-
-# Get list of dynamic topics
-get_dynamic_topics() {
-  if [[ -d "$CONTEXT_BASE_DIR" ]]; then
-    find "$CONTEXT_BASE_DIR" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -exec basename {} \; | sort
-  fi
-}
-
-clean_url() {
-  local u="$1"
-  # Replace all // with /
-  u="${u//\/\//\/}"
-  # Fix protocol (restore https:// or http://)
-  u="${u/https:\//https:\/\/}"
-  u="${u/http:\//http:\/\/}"
-  echo "$u"
-}
-
-topic_dynamic() {
-  local topic="$1"
-  local topic_dir="$CONTEXT_BASE_DIR/$topic"
-
-  # Check if directory exists (handles broken symlinks)
-  if [[ ! -e "$topic_dir" ]]; then
-    echo "$SCRIPT_NAME: topic '$topic' not found (or broken symlink at $topic_dir)" >&2
-    echo "Hint: This may be due to expired credentials or an unmounted network filesystem." >&2
-    exit 1
-  fi
-
-  if [[ ! -d "$topic_dir" ]]; then
-    echo "$SCRIPT_NAME: topic '$topic' is not a directory" >&2
-    exit 1
-  fi
-
-  if [[ ! -r "$topic_dir" ]]; then
-    echo "$SCRIPT_NAME: topic '$topic' is unreadable: $topic_dir" >&2
-    echo "Hint: This may be due to expired credentials or an unmounted network filesystem." >&2
-    exit 1
-  fi
-
-  # Find files
-  find -L "$topic_dir" -type f \( -name "*.txt" -o -name "*.md" \) | sort | while read -r file; do
-    local rel="${file#"$topic_dir"/}"
-    local display_cmd
-
-    case "$topic" in
-      # Special-case dynamic topics that start with "g3doc-"
-      # These files are mapped to internal http://g3doc/ URLs.
-      g3doc-*)
-        local path
-        path=$(realpath "$file")
-
-        if [[ "$path" =~ /depot/(.+)$ ]]; then
-          local full_piper="${BASH_REMATCH[1]}"
-          local published=""
-          local depot_path="//depot/$full_piper"
-
-          if [[ "$full_piper" == google3/* ]]; then
-            # Strip google3/
-            published="http://g3doc/${full_piper#google3/}"
-          else
-            # Keep path as is
-            published="http://g3doc/$full_piper"
-          fi
-
-          published=$(clean_url "$published")
-          published="${published%/}"
-
-          display_cmd="cat $depot_path # web page: $published"
-        else
-          display_cmd="cat $topic_dir/$rel"
-        fi
-        ;;
-
-      # Special-case dynamic topics that start with "dac-"
-      # These files are mapped to public developer.android.com URLs by stripping
-      # internal path segments (like /knowledge_base/latest/android) and file extensions.
-      dac-*)
-        local path
-        path=$(realpath "$file")
-
-        # Define markers to check against path
-        local markers=(
-          "/knowledge_base/latest/android"
+def entry_file(local_path, display_url, web_url=None):
+    display_cmd = _make_display_cmd(display_url, web_url)
+    try:
+        with open(local_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        _emit_entry(display_cmd, content)
+    except Exception as e:
+        print(
+            f"context: warning: skipping unreadable file: {local_path} ({e})",
+            file=sys.stderr,
         )
-        local marker=""
-        local suffix=""
 
-        # Check markers in order
-        for m in "${markers[@]}"; do
-          if [[ "$path" == *"$m"* ]]; then
-            marker="$m"
-            break
-          fi
-        done
 
-        if [[ -n "$marker" ]]; then
-          suffix="${path#*"$marker"}"
-        else
-          suffix="/$rel"
-        fi
-
-        local base_url="https://developer.android.com"
-
-        # Strip leading slash
-        suffix="${suffix#/}"
-
-        local published="$base_url/$suffix"
-        local raw_url="$base_url/$suffix" # Raw matches published structure initially
-
-        # Extension stripping
-        if [[ "$published" == *.md.txt ]]; then
-          published="${published%.md.txt}"
-        elif [[ "$published" == *.txt ]]; then
-          published="${published%.txt}"
-        elif [[ "$published" == *.md ]]; then
-          published="${published%.md}"
-        fi
-
-        # Index handling
-        if [[ "$(basename "$published")" == "index" ]]; then
-          published="$(dirname "$published")"
-          if [[ "$published" == "." ]]; then published=""; fi
-        fi
-
-        raw_url=$(clean_url "$raw_url")
-        published=$(clean_url "$published")
-        # Remove trailing slash
-        published="${published%/}"
-
-        display_cmd="curl -s $raw_url # web page: $published"
-        ;;
-      *)
-        display_cmd="cat $topic_dir/$rel"
-        ;;
-    esac
-
-    local output
-    if ! output=$(cat "$file" 2>/dev/null); then
-      echo "$SCRIPT_NAME: warning: skipping unreadable file: $file" >&2
-      continue
-    fi
-
-    _emit_entry "$display_cmd" "$output"
-  done
-}
-
-# =============================================================================
-# TOPIC DEFINITIONS
-# =============================================================================
-
-topic_gemini_api() {
-  local repo
-  repo=$(fetch "github://google-gemini/cookbook")
-
-  # Notebooks - clear outputs and execution counts
-  local nb colab
-  for nb in \
-    "examples/Book_illustration.ipynb" \
-    "examples/json_capabilities/Entity_Extraction_JSON.ipynb" \
-    "examples/prompting/Basic_Evaluation.ipynb" \
-    "examples/prompting/Basic_Information_Extraction.ipynb" \
-    "quickstarts/Caching.ipynb" \
-    "quickstarts/Counting_Tokens.ipynb" \
-    "quickstarts/Error_handling.ipynb" \
-    "quickstarts/Function_calling.ipynb" \
-    "quickstarts/Get_Started_Nano_Banana.ipynb" \
-    "quickstarts/Image_out.ipynb" \
-    "quickstarts/JSON_mode.ipynb" \
-    "quickstarts/Safety.ipynb" \
-    "quickstarts/System_instructions.ipynb"; do
-    colab="https://colab.research.google.com/github/google-gemini/cookbook/blob/main/$nb"
-    jq '.cells[] |= (if .cell_type == "code" then .outputs = [] | .execution_count = null else . end)' "$repo/$nb" |
-      entry_stdin "https://raw.githubusercontent.com/google-gemini/cookbook/main/$nb" "$colab"
-  done
-
-  # Documentation URLs
-  local url
-  for url in \
-    "https://ai.google.dev/gemini-api/docs/caching.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/files.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/function-calling.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/google-search.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/imagen.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/image-generation.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/image-understanding.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/interactions.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/long-context.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/models.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/pricing.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/prompting-strategies.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/rate-limits.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/safety-settings.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/structured-output.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/text-generation.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/tokens.md.txt" \
-    "https://ai.google.dev/gemini-api/docs/troubleshooting.md.txt"; do
-    entry_url "$url"
-  done
-}
-
-topic_mcp_server() {
-  local repo
-  repo=$(fetch "github://modelcontextprotocol/modelcontextprotocol")
-
-  # Specific doc files
-  local file slug published
-  for file in \
-    "docs/docs/learn/server-concepts.mdx" \
-    "docs/docs/learn/architecture.mdx" \
-    "docs/docs/develop/build-server.mdx"; do
-    slug="${file#docs/docs/}"
-    slug="${slug%.mdx}"
-    published="https://modelcontextprotocol.io/docs/$slug"
-    entry_file "$repo/$file" \
-      "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$file" \
-      "$published"
-  done
-
-  # Specification directory
-  # Note: Excluding schema.mdx (~450KB) to save context.
-  # It is available at: https://modelcontextprotocol.io/docs/specification/2025-11-25/schema
-  find "$repo/docs/specification/2025-11-25" -name "*.mdx" -type f | grep -v "schema.mdx" | sort | while read -r file; do
-    local rel="${file#"$repo"/}"
-    local slug="${rel#docs/}"
-    slug="${slug%.mdx}"
-    local published="https://modelcontextprotocol.io/$slug"
-    entry_file "$file" \
-      "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/$rel" \
-      "$published"
-  done
-}
-
-topic_gemini_cli() {
-  local repo
-  repo=$(fetch "github://google-gemini/gemini-cli")
-
-  # Process all files in docs/, excluding legacy configuration
-  find "$repo/docs" -name "*.md" -type f |
-    grep -v "configuration-v1.md" |
-    sort | while read -r file; do
-    local rel="${file#"$repo"/}"
-    local published="https://geminicli.com/${rel%.md}/"
-
-    # Special handling for changelogs if needed, or just standard URL mapping
-    # The original implementation for changelogs fetched from raw URLs directly in some cases,
-    # but the find command here will cover them if they are in the repo.
-    # The previous topic_gemini_cli_changelog used explicit URLs for index/latest/preview.
-    # We'll rely on the repo content here which is generally better.
-
-    entry_file "$file" \
-      "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/$rel" \
-      "$published"
-  done
-}
-
-topic_inkyframe() {
-  local inky pico
-  inky=$(fetch "github://pimoroni/inky-frame")
-  pico=$(fetch "github://pimoroni/pimoroni-pico")
-
-  # inky-frame README
-  if [[ -f "$inky/README.md" ]]; then
-    entry_file "$inky/README.md" \
-      "https://raw.githubusercontent.com/pimoroni/inky-frame/main/README.md"
-  fi
-
-  # inky-frame docs, examples, modules
-  local dir
-  for dir in docs examples modules; do
-    find "$inky/$dir" \( -name "*.md" -o -name "*.py" \) -type f 2>/dev/null | sort | while read -r file; do
-      local rel="${file#"$inky"/}"
-      entry_file "$file" \
-        "https://raw.githubusercontent.com/pimoroni/inky-frame/main/$rel"
-    done
-  done
-
-  # pimoroni-pico picographics
-  find "$pico/micropython/modules/picographics" -name "*.md" -type f | sort | while read -r file; do
-    local rel="${file#"$pico"/}"
-    entry_file "$file" \
-      "https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel"
-  done
-
-  # pimoroni-pico inky_frame examples
-  find "$pico/micropython/examples/inky_frame" \( -name "*.md" -o -name "*.py" \) -type f 2>/dev/null | sort | while read -r file; do
-    local rel="${file#"$pico"/}"
-    entry_file "$file" \
-      "https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/$rel"
-  done
-
-  # External URLs
-  entry_url "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt"
-
-  # Jina reader for learn.pimoroni.com
-  entry_url "https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame" \
-    "https://learn.pimoroni.com/article/getting-started-with-inky-frame"
-}
-
-topic_rpi() {
-  local repo
-  repo=$(fetch "github://raspberrypi/documentation@master")
-
-  local src="$repo/documentation/asciidoc/computers"
-
-  local dir published
-  for dir in config_txt configuration getting-started os raspberry-pi remote-access; do
-    published="https://www.raspberrypi.com/documentation/computers/${dir}.html"
-    # Index file
-    if [[ -f "$src/$dir.adoc" ]]; then
-      entry_file "$src/$dir.adoc" \
-        "https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/$dir.adoc" \
-        "$published"
-    fi
-    # Directory contents
-    if [[ -d "$src/$dir" ]]; then
-      find "$src/$dir" -name "*.adoc" -type f | grep -v "device-tree.adoc" | sort | while read -r file; do
-        local rel="${file#"$repo"/}"
-        entry_file "$file" \
-          "https://raw.githubusercontent.com/raspberrypi/documentation/master/$rel" \
-          "$published"
-      done
-    fi
-  done
-
-  # Standalone file
-  if [[ -f "$src/software-sources.adoc" ]]; then
-    entry_file "$src/software-sources.adoc" \
-      "https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/software-sources.adoc" \
-      "https://www.raspberrypi.com/documentation/computers/software-sources.html"
-  fi
-}
-
-topic_skills() {
-  # Focus: The Agent Skills specification, directory structure, and SKILL.md authoring.
-  # Explicitly excludes documentation on how specific agents (Claude, Gemini, Codex)
-  # implement, discover, or load skills, as well as concepts like plugins or subagents.
-
-  # agentskills/agentskills repository - all .mdx files excluding client-implementation
-  local agentskills
-  agentskills=$(fetch "github://agentskills/agentskills")
-  find "$agentskills" -name "*.mdx" -type f | grep -v "client-implementation" | sort | while read -r file; do
-    local rel="${file#"$agentskills"/}"
-    local slug="${rel#docs/}"
-    slug="${slug%.mdx}"
-    local published="https://agentskills.io/$slug"
-    entry_file "$file" \
-      "https://raw.githubusercontent.com/agentskills/agentskills/main/$rel" \
-      "$published"
-  done
-
-  # Claude platform best practices
-  entry_url "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md" \
-    "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices"
-
-  # Claude Code documentation (contains general tips and examples for writing effective skills)
-  entry_url "https://code.claude.com/docs/en/skills.md" \
-    "https://code.claude.com/docs/en/skills"
-
-  # Anthropic skills repository
-  entry_url "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md"
-}
-
-topic_homeassistant() {
-  local ha_io dev_docs ha_skills
-  ha_io=$(fetch "github://home-assistant/home-assistant.io@current")
-  dev_docs=$(fetch "github://home-assistant/developers.home-assistant@master")
-  ha_skills=$(fetch "github://homeassistant-ai/skills@main")
-
-  # Integration docs
-  local integration published
-  for integration in \
-    binary_sensor \
-    climate \
-    derivative \
-    esphome \
-    hassio \
-    home_connect \
-    homeassistant \
-    input_boolean \
-    input_datetime \
-    input_number \
-    matter \
-    metoffice \
-    min_max \
-    mqtt \
-    nest \
-    openweathermap \
-    recorder \
-    ruuvitag_ble \
-    sensor \
-    shelly \
-    sql \
-    statistics \
-    switch_as_x \
-    template \
-    threshold \
-    utility_meter \
-    vicare \
-    water_heater; do
-    published="https://www.home-assistant.io/integrations/$integration/"
-    entry_file "$ha_io/source/_integrations/$integration.markdown" \
-      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_integrations/$integration.markdown" \
-      "$published"
-  done
-
-  # Automation docs
-  local doc slug
-  for doc in trigger condition action templating; do
-    published="https://www.home-assistant.io/docs/automation/$doc/"
-    entry_file "$ha_io/source/_docs/automation/$doc.markdown" \
-      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/automation/$doc.markdown" \
-      "$published"
-  done
-
-  # Script docs
-  for doc in scripts scripts/conditions scripts/perform-actions; do
-    slug="${doc%.markdown}"
-    published="https://www.home-assistant.io/docs/$slug/"
-    entry_file "$ha_io/source/_docs/$doc.markdown" \
-      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/$doc.markdown" \
-      "$published"
-  done
-
-  # Configuration and templating docs
-  for doc in configuration/yaml configuration/templating; do
-    published="https://www.home-assistant.io/docs/$doc/"
-    entry_file "$ha_io/source/_docs/$doc.markdown" \
-      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/$doc.markdown" \
-      "$published"
-  done
-
-  # Dashboard docs
-  local dashboard dashboard_file dashboard_rel published_slug
-  find "$ha_io/source/_dashboards" "$ha_io/source/dashboards" -maxdepth 1 -type f -name "*.markdown" 2>/dev/null | sort | while read -r dashboard_file; do
-    dashboard_rel=${dashboard_file#"$ha_io/"}
-    dashboard=$(basename "$dashboard_file" .markdown)
-    if [ "$dashboard" = "index" ]; then
-      published_slug="dashboards/"
-    else
-      published_slug="dashboards/$dashboard/"
-    fi
-    published="https://www.home-assistant.io/$published_slug"
-    entry_file "$dashboard_file" \
-      "https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/$dashboard_rel" \
-      "$published"
-  done
-
-  # REST API and WebSocket API (from developers.home-assistant)
-  local api_file api_slug
-  for api_file in rest.md websocket.md supervisor/endpoints.md supervisor/models.md; do
-    api_slug="${api_file%.md}"
-    published="https://developers.home-assistant.io/docs/api/$api_slug"
-    entry_file "$dev_docs/docs/api/$api_file" \
-      "https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/api/$api_file" \
-      "$published"
-  done
-
-  # Apps documentation (from developers.home-assistant)
-  local apps_file apps_slug
-  for apps_file in communication.md configuration.md presentation.md publishing.md repository.md security.md testing.md tutorial.md; do
-    apps_slug="${apps_file%.md}"
-    published="https://developers.home-assistant.io/docs/apps/$apps_slug"
-    entry_file "$dev_docs/docs/apps/$apps_file" \
-      "https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/apps/$apps_file" \
-      "$published"
-  done
-
-  # Home Assistant AI Skills
-  local skill_file
-  while IFS= read -r skill_file; do
-    local rel_path="${skill_file#"$ha_skills"/}"
-    entry_file "$skill_file" \
-      "https://raw.githubusercontent.com/homeassistant-ai/skills/main/$rel_path" \
-      "https://github.com/homeassistant-ai/skills/blob/main/$rel_path"
-  done < <(find "$ha_skills/skills" -type f \( -name "*.md" -o -name "*.markdown" \) 2>/dev/null | sort)
-}
-
-topic_prompting() {
-  # Anthropic / Claude docs (native .md support)
-  local claude_url
-  for claude_url in \
-    "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview" \
-    "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"; do
-    entry_url "${claude_url}.md" "$claude_url"
-  done
-
-  # Google AI / Gemini API docs (native .md.txt support)
-  local gemini_url
-  # shellcheck disable=SC2043
-  for gemini_url in \
-    "https://ai.google.dev/gemini-api/docs/prompting-strategies"; do
-    entry_url "${gemini_url}.md.txt" "$gemini_url"
-  done
-
-  # OpenAI Docs (native .md support via developers subdomain)
-  local openai_slug
-  for openai_slug in "guides/prompt-engineering" "guides/text"; do
-    entry_url "https://developers.openai.com/api/docs/${openai_slug}.md" \
-      "https://platform.openai.com/docs/${openai_slug}"
-  done
-}
-
-topic_gemini_sdk_js() {
-  entry_url "https://raw.githubusercontent.com/googleapis/js-genai/main/codegen_instructions.md"
-}
-
-topic_meshtastic() {
-  local repo
-  repo=$(fetch "github://meshtastic/meshtastic@master")
-
-  local dir
-  for dir in "docs/getting-started" "docs/software/python-cli" "docs/hardware/devices" "docs/configuration"; do
-    if [[ -d "$repo/$dir" ]]; then
-      find "$repo/$dir" -type f \( -name "*.md" -o -name "*.mdx" \) | sort | while read -r file; do
-        local rel="${file#"$repo"/}"
-        local published="https://meshtastic.org/$rel"
-        published="${published%.mdx}"
-        published="${published%.md}"
-
-        if [[ "$(basename "$published")" == "index" ]]; then
-          published="$(dirname "$published")"
-        fi
-
-        entry_file "$file" \
-          "https://raw.githubusercontent.com/meshtastic/meshtastic/master/$rel" \
-          "$published"
-      done
-    fi
-  done
-}
-
-# =============================================================================
-# TOPIC REGISTRY
-# =============================================================================
-
-TOPICS=(
-  "gemini-api:Gemini API documentation and examples"
-  "mcp-server:MCP server documentation and specification"
-  "gemini-cli:Gemini CLI documentation"
-  "inkyframe:Pimoroni Inky Frame documentation"
-  "rpi:Raspberry Pi documentation"
-  "skills:Agent skills format specification and authoring guide"
-  "homeassistant:Home Assistant integration, automation, API and CLI documentation"
-  "prompting:Prompt engineering guides for Claude, Gemini, and OpenAI"
-  "gemini-sdk-js:Google Gemini JavaScript SDK codegen instructions"
-  "meshtastic:Meshtastic documentation"
-)
-
-# =============================================================================
-# USAGE AND ARGUMENT PARSING
-# =============================================================================
-
-usage() {
-  cat <<EOF
-Usage: $SCRIPT_NAME <topic>
-
-Generate aggregated context for a specific topic. Output is written to stdout
-as a shell_session XML format suitable for AI agent consumption.
-
-Topics:
-EOF
-  for entry in "${TOPICS[@]}"; do
-    local name="${entry%%:*}"
-    local desc="${entry#*:}"
-    printf "  %-22s %s\n" "$name" "$desc"
-  done
-
-  echo ""
-  echo "Dynamic Topics ($CONTEXT_BASE_DIR):"
-  local dynamics
-  # Read into array to handle empty case safely
-  read -r -a dynamics <<<"$(get_dynamic_topics | tr '\n' ' ')"
-  if [[ ${#dynamics[@]} -eq 0 || -z "${dynamics[0]}" ]]; then
-    echo "  (none)"
-  else
-    for topic in "${dynamics[@]}"; do
-      if [[ -n "$topic" ]]; then
-        echo "  $topic"
-      fi
-    done
-  fi
-
-  cat <<EOF
-
-Options:
-  --help        Display this help message and exit
-  -f, --force   Force cache rebuild (ignore 24h cache)
-  --list        List available topics (names only)
-
-Examples:
-  $SCRIPT_NAME gemini-api
-    Generate Gemini API context to stdout
-
-  $SCRIPT_NAME gemini-api > gemini-api-context.xml
-    Save context to a file
-
-  $SCRIPT_NAME gemini-api | pbcopy
-    Copy context to clipboard (macOS)
-EOF
-  exit "${1:-0}"
-}
-
-list_topics() {
-  for entry in "${TOPICS[@]}"; do
-    echo "${entry%%:*}"
-  done
-  get_dynamic_topics
-  exit 0
-}
-
-emit_header() {
-  local topic_desc="$1"
-  local timestamp
-  timestamp=$(date +%Y-%m-%dT%H:%M:%S%z)
-  echo "<shell_session>"
-  cat <<EOF
+def fetch(url):
+    if not url.startswith("github://"):
+        print(f"context: fetch: unsupported URL scheme: {url}", file=sys.stderr)
+        sys.exit(1)
+
+    repo_spec = url[len("github://") :]
+    branch = "main"
+    if "@" in repo_spec:
+        repo, branch = repo_spec.split("@")
+    else:
+        repo = repo_spec
+
+    archive_url = f"https://github.com/{repo}/archive/refs/heads/{branch}.tar.gz"
+
+    print(f"[local] Fetching {archive_url}", file=sys.stderr)
+    try:
+        response = requests.get(archive_url, stream=True)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"context: fetch: failed to download {archive_url}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    extract_dir = tempfile.mkdtemp(prefix="fetch.")
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        for chunk in response.iter_content(chunk_size=8192):
+            tmp_file.write(chunk)
+        tmp_file_path = tmp_file.name
+
+    try:
+        with tarfile.open(tmp_file_path, "r:gz") as tar:
+            members = tar.getmembers()
+            if not members:
+                print("context: fetch: empty archive", file=sys.stderr)
+                sys.exit(1)
+
+            root_dir = members[0].name.split("/")[0]
+
+            for member in members:
+                if member.name.startswith(root_dir + "/"):
+                    member.name = member.name[len(root_dir) + 1 :]
+                    if (
+                        member.name
+                    ):  # avoid extracting the root dir itself as empty string
+                        tar.extract(member, path=extract_dir, filter="data")
+    except Exception as e:
+        print(f"context: fetch: failed to extract archive: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        os.unlink(tmp_file_path)
+
+    return extract_dir
+
+
+def topic_skills():
+    agentskills = fetch("github://agentskills/agentskills")
+
+    # Find files
+    search_pattern = os.path.join(agentskills, "**", "*.mdx")
+    files = glob.glob(search_pattern, recursive=True)
+    files = [f for f in files if "client-implementation" not in f]
+    files.sort()
+
+    for file in files:
+        rel = os.path.relpath(file, agentskills)
+        slug = rel
+        if slug.startswith("docs/"):
+            slug = slug[len("docs/") :]
+        if slug.endswith(".mdx"):
+            slug = slug[:-4]
+        published = f"https://agentskills.io/{slug}"
+
+        entry_file(
+            file,
+            f"https://raw.githubusercontent.com/agentskills/agentskills/main/{rel}",
+            published,
+        )
+
+    entry_url(
+        "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md",
+        "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices",
+    )
+
+    entry_url(
+        "https://code.claude.com/docs/en/skills.md",
+        "https://code.claude.com/docs/en/skills",
+    )
+
+    entry_url(
+        "https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/skill-creator/SKILL.md"
+    )
+
+
+def generate_xml(topic_desc, use_toc=True):
+    # We build the XML manually or via ET.
+    # Since we need to calculate line numbers for TOC, and CDATA blocks are hard to do with ET
+    # without third party libraries or hacks (ET escapes < and > inside text even if we want CDATA),
+    # it might be easier to generate strings or use a hybrid approach.
+
+    # Let's build the entries strings first to count lines.
+
+    entry_strings = []
+    for entry in ENTRIES:
+        s = f'<entry id="{entry["id"]}">\n'
+        s += f"<command>{entry['command']}</command>\n"
+        s += f"<output><![CDATA[{entry['output']}]]></output>\n"
+        s += "</entry>\n"
+        entry_strings.append(s)
+
+    # Now calculate TOC if needed
+    toc_items = []
+    if use_toc:
+        # We need to know the starting line of entries.
+        # Header lines + TOC lines.
+
+        timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S%z")
+        header = f"""<shell_session>
 <context_summary>
-  <generated_at>$timestamp</generated_at>
+  <generated_at>{timestamp}</generated_at>
   <purpose>
-    Topic: $topic_desc
+    Topic: {topic_desc}
 
     This content represents a recorded shell session designed to provide context for an AI agent.
     It aggregates resources (local files, remote URLs, system info) by capturing shell commands
@@ -801,194 +201,617 @@ emit_header() {
       URL when citing sources or providing links to the user.
   </guidelines>
 </context_summary>
-EOF
-}
+"""
+        header_lines = header.count("\n")
 
-emit_footer() {
-  echo "</shell_session>"
-}
+        toc_lines = (
+            len(ENTRIES) + 2
+        )  # <table_of_contents> + items + </table_of_contents>
 
-generate_toc() {
-  local entries_file="$1"
-  local topic_desc="$2"
-  
-  local num_entries
-  num_entries=$(grep -c "^<entry" "$entries_file")
-  
-  local header_lines
-  header_lines=$(emit_header "$topic_desc" | wc -l)
-  
-  local toc_lines=$((num_entries + 2))
-  local offset=$((header_lines + toc_lines))
-  
-  echo "<table_of_contents>"
-  awk -v offset="$offset" '
-    /^<entry id=/ {
-      match($0, /id="[0-9]+"/);
-      id = substr($0, RSTART + 4, RLENGTH - 5);
-      start_line = NR + offset;
+        current_line = header_lines + toc_lines + 1
+
+        for i, entry in enumerate(ENTRIES):
+            est = entry_strings[i]
+            lines = est.count("\n")
+            start = current_line
+            end = current_line + lines - 1
+            toc_items.append(
+                f'  <item id="{entry["id"]}" startLine="{start}" endLine="{end}">{entry["command"]}</item>'
+            )
+            current_line += lines
+
+    output = []
+    output.append(header)
+    if use_toc:
+        output.append("<table_of_contents>\n")
+        for item in toc_items:
+            output.append(item + "\n")
+        output.append("</table_of_contents>\n")
+
+    for s in entry_strings:
+        output.append(s)
+
+    output.append("</shell_session>\n")
+    return "".join(output)
+
+
+def topic_gemini_api():
+    repo = fetch("github://google-gemini/cookbook")
+
+    notebooks = [
+        "examples/Book_illustration.ipynb",
+        "examples/json_capabilities/Entity_Extraction_JSON.ipynb",
+        "examples/prompting/Basic_Evaluation.ipynb",
+        "examples/prompting/Basic_Information_Extraction.ipynb",
+        "quickstarts/Caching.ipynb",
+        "quickstarts/Counting_Tokens.ipynb",
+        "quickstarts/Error_handling.ipynb",
+        "quickstarts/Function_calling.ipynb",
+        "quickstarts/Get_Started_Nano_Banana.ipynb",
+        "quickstarts/Image_out.ipynb",
+        "quickstarts/JSON_mode.ipynb",
+        "quickstarts/Safety.ipynb",
+        "quickstarts/System_instructions.ipynb",
+    ]
+
+    for nb in notebooks:
+        nb_path = os.path.join(repo, nb)
+        colab = f"https://colab.research.google.com/github/google-gemini/cookbook/blob/main/{nb}"
+
+        try:
+            with open(nb_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            for cell in data.get("cells", []):
+                if cell.get("cell_type") == "code":
+                    cell["outputs"] = []
+                    cell["execution_count"] = None
+
+            content = json.dumps(data, indent=2)
+
+            display_url = (
+                f"https://raw.githubusercontent.com/google-gemini/cookbook/main/{nb}"
+            )
+            display_cmd = _make_display_cmd(display_url, colab)
+            _emit_entry(display_cmd, content)
+        except Exception as e:
+            print(f"context: failed to process notebook {nb}: {e}", file=sys.stderr)
+
+    urls = [
+        "https://ai.google.dev/gemini-api/docs/caching.md.txt",
+        "https://ai.google.dev/gemini-api/docs/files.md.txt",
+        "https://ai.google.dev/gemini-api/docs/function-calling.md.txt",
+        "https://ai.google.dev/gemini-api/docs/google-search.md.txt",
+        "https://ai.google.dev/gemini-api/docs/imagen.md.txt",
+        "https://ai.google.dev/gemini-api/docs/image-generation.md.txt",
+        "https://ai.google.dev/gemini-api/docs/image-understanding.md.txt",
+        "https://ai.google.dev/gemini-api/docs/interactions.md.txt",
+        "https://ai.google.dev/gemini-api/docs/long-context.md.txt",
+        "https://ai.google.dev/gemini-api/docs/models.md.txt",
+        "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+        "https://ai.google.dev/gemini-api/docs/prompting-strategies.md.txt",
+        "https://ai.google.dev/gemini-api/docs/rate-limits.md.txt",
+        "https://ai.google.dev/gemini-api/docs/safety-settings.md.txt",
+        "https://ai.google.dev/gemini-api/docs/structured-output.md.txt",
+        "https://ai.google.dev/gemini-api/docs/text-generation.md.txt",
+        "https://ai.google.dev/gemini-api/docs/tokens.md.txt",
+        "https://ai.google.dev/gemini-api/docs/troubleshooting.md.txt",
+    ]
+
+    for url in urls:
+        entry_url(url)
+
+
+def topic_mcp_server():
+    repo = fetch("github://modelcontextprotocol/modelcontextprotocol")
+
+    # Specific doc files
+    files = [
+        "docs/docs/learn/server-concepts.mdx",
+        "docs/docs/learn/architecture.mdx",
+        "docs/docs/develop/build-server.mdx",
+    ]
+
+    for file in files:
+        path = os.path.join(repo, file)
+        slug = file[len("docs/docs/") :]
+        slug = slug[:-4] if slug.endswith(".mdx") else slug
+        published = f"https://modelcontextprotocol.io/docs/{slug}"
+
+        entry_file(
+            path,
+            f"https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/{file}",
+            published,
+        )
+
+    # Specification directory
+    spec_dir = os.path.join(repo, "docs/specification/2025-11-25")
+    search_pattern = os.path.join(spec_dir, "**", "*.mdx")
+    spec_files = glob.glob(search_pattern, recursive=True)
+    spec_files = [f for f in spec_files if "schema.mdx" not in f]
+    spec_files.sort()
+
+    for file in spec_files:
+        rel = os.path.relpath(file, repo)
+        slug = rel[len("docs/") :]
+        slug = slug[:-4] if slug.endswith(".mdx") else slug
+        published = f"https://modelcontextprotocol.io/{slug}"
+
+        entry_file(
+            file,
+            f"https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/{rel}",
+            published,
+        )
+
+
+def topic_gemini_cli():
+    repo = fetch("github://google-gemini/gemini-cli")
+
+    docs_dir = os.path.join(repo, "docs")
+    search_pattern = os.path.join(docs_dir, "**", "*.md")
+    files = glob.glob(search_pattern, recursive=True)
+    files = [f for f in files if "configuration-v1.md" not in f]
+    files.sort()
+
+    for file in files:
+        rel = os.path.relpath(file, repo)
+        slug = rel
+        if slug.endswith(".md"):
+            slug = slug[:-3]
+        published = f"https://geminicli.com/{slug}/"
+
+        entry_file(
+            file,
+            f"https://raw.githubusercontent.com/google-gemini/gemini-cli/main/{rel}",
+            published,
+        )
+
+
+def topic_inkyframe():
+    inky = fetch("github://pimoroni/inky-frame")
+    pico = fetch("github://pimoroni/pimoroni-pico")
+
+    # inky-frame README
+    readme = os.path.join(inky, "README.md")
+    if os.path.exists(readme):
+        entry_file(
+            readme,
+            "https://raw.githubusercontent.com/pimoroni/inky-frame/main/README.md",
+        )
+
+    # inky-frame docs, examples, modules
+    for dir_name in ["docs", "examples", "modules"]:
+        dir_path = os.path.join(inky, dir_name)
+        if os.path.exists(dir_path):
+            files = []
+            for ext in ["*.md", "*.py"]:
+                files.extend(
+                    glob.glob(os.path.join(dir_path, "**", ext), recursive=True)
+                )
+            files.sort()
+
+            for file in files:
+                rel = os.path.relpath(file, inky)
+                entry_file(
+                    file,
+                    f"https://raw.githubusercontent.com/pimoroni/inky-frame/main/{rel}",
+                )
+
+    # pimoroni-pico picographics
+    pico_docs = os.path.join(pico, "micropython/modules/picographics")
+    if os.path.exists(pico_docs):
+        files = glob.glob(os.path.join(pico_docs, "**", "*.md"), recursive=True)
+        files.sort()
+        for file in files:
+            rel = os.path.relpath(file, pico)
+            entry_file(
+                file,
+                f"https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/{rel}",
+            )
+
+    # pimoroni-pico inky_frame examples
+    pico_examples = os.path.join(pico, "micropython/examples/inky_frame")
+    if os.path.exists(pico_examples):
+        files = []
+        for ext in ["*.md", "*.py"]:
+            files.extend(
+                glob.glob(os.path.join(pico_examples, "**", ext), recursive=True)
+            )
+        files.sort()
+        for file in files:
+            rel = os.path.relpath(file, pico)
+            entry_file(
+                file,
+                f"https://raw.githubusercontent.com/pimoroni/pimoroni-pico/main/{rel}",
+            )
+
+    # External URLs
+    entry_url(
+        "https://docs.micropython.org/en/latest/_sources/reference/mpremote.rst.txt"
+    )
+    entry_url(
+        "https://r.jina.ai/https://learn.pimoroni.com/article/getting-started-with-inky-frame",
+        "https://learn.pimoroni.com/article/getting-started-with-inky-frame",
+    )
+
+
+def topic_rpi():
+    repo = fetch("github://raspberrypi/documentation@master")
+    src = os.path.join(repo, "documentation/asciidoc/computers")
+
+    dirs = [
+        "config_txt",
+        "configuration",
+        "getting-started",
+        "os",
+        "raspberry-pi",
+        "remote-access",
+    ]
+
+    for dir_name in dirs:
+        published = (
+            f"https://www.raspberrypi.com/documentation/computers/{dir_name}.html"
+        )
+
+        # Index file
+        index_file = os.path.join(src, f"{dir_name}.adoc")
+        if os.path.exists(index_file):
+            entry_file(
+                index_file,
+                f"https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/{dir_name}.adoc",
+                published,
+            )
+
+        # Directory contents
+        dir_path = os.path.join(src, dir_name)
+        if os.path.exists(dir_path):
+            search_pattern = os.path.join(dir_path, "**", "*.adoc")
+            files = glob.glob(search_pattern, recursive=True)
+            files = [f for f in files if "device-tree.adoc" not in f]
+            files.sort()
+
+            for file in files:
+                rel = os.path.relpath(file, repo)
+                entry_file(
+                    file,
+                    f"https://raw.githubusercontent.com/raspberrypi/documentation/master/{rel}",
+                    published,
+                )
+
+    # Standalone file
+    software_sources = os.path.join(src, "software-sources.adoc")
+    if os.path.exists(software_sources):
+        entry_file(
+            software_sources,
+            "https://raw.githubusercontent.com/raspberrypi/documentation/master/documentation/asciidoc/computers/software-sources.adoc",
+            "https://www.raspberrypi.com/documentation/computers/software-sources.html",
+        )
+
+
+def topic_homeassistant():
+    ha_io = fetch("github://home-assistant/home-assistant.io@current")
+    dev_docs = fetch("github://home-assistant/developers.home-assistant@master")
+    ha_skills = fetch("github://homeassistant-ai/skills@main")
+
+    # Integration docs
+    integrations = [
+        "binary_sensor",
+        "climate",
+        "derivative",
+        "esphome",
+        "hassio",
+        "home_connect",
+        "homeassistant",
+        "input_boolean",
+        "input_datetime",
+        "input_number",
+        "matter",
+        "metoffice",
+        "min_max",
+        "mqtt",
+        "nest",
+        "openweathermap",
+        "recorder",
+        "ruuvitag_ble",
+        "sensor",
+        "shelly",
+        "sql",
+        "statistics",
+        "switch_as_x",
+        "template",
+        "threshold",
+        "utility_meter",
+        "vicare",
+        "water_heater",
+    ]
+    for integration in integrations:
+        path = os.path.join(ha_io, f"source/_integrations/{integration}.markdown")
+        published = f"https://www.home-assistant.io/integrations/{integration}/"
+        entry_file(
+            path,
+            f"https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_integrations/{integration}.markdown",
+            published,
+        )
+
+    # Automation docs
+    for doc in ["trigger", "condition", "action", "templating"]:
+        path = os.path.join(ha_io, f"source/_docs/automation/{doc}.markdown")
+        published = f"https://www.home-assistant.io/docs/automation/{doc}/"
+        entry_file(
+            path,
+            f"https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/automation/{doc}.markdown",
+            published,
+        )
+
+    # Script docs
+    for doc in ["scripts", "scripts/conditions", "scripts/perform-actions"]:
+        path = os.path.join(ha_io, f"source/_docs/{doc}.markdown")
+        slug = doc
+        published = f"https://www.home-assistant.io/docs/{slug}/"
+        entry_file(
+            path,
+            f"https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/{doc}.markdown",
+            published,
+        )
+
+    # Configuration and templating docs
+    for doc in ["configuration/yaml", "configuration/templating"]:
+        path = os.path.join(ha_io, f"source/_docs/{doc}.markdown")
+        published = f"https://www.home-assistant.io/docs/{doc}/"
+        entry_file(
+            path,
+            f"https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/source/_docs/{doc}.markdown",
+            published,
+        )
+
+    # Dashboard docs
+    files = []
+    for d in ["source/_dashboards", "source/dashboards"]:
+        dir_path = os.path.join(ha_io, d)
+        if os.path.exists(dir_path):
+            for f in os.listdir(dir_path):
+                if f.endswith(".markdown"):
+                    files.append(os.path.join(dir_path, f))
+    files.sort()
+
+    for file in files:
+        rel = os.path.relpath(file, ha_io)
+        dashboard = os.path.splitext(os.path.basename(file))[0]
+        if dashboard == "index":
+            published_slug = "dashboards/"
+        else:
+            published_slug = f"dashboards/{dashboard}/"
+        published = f"https://www.home-assistant.io/{published_slug}"
+        entry_file(
+            file,
+            f"https://raw.githubusercontent.com/home-assistant/home-assistant.io/current/{rel}",
+            published,
+        )
+
+    # REST API and WebSocket API
+    apis = [
+        "rest.md",
+        "websocket.md",
+        "supervisor/endpoints.md",
+        "supervisor/models.md",
+    ]
+    for api_file in apis:
+        path = os.path.join(dev_docs, "docs/api", api_file)
+        slug = os.path.splitext(api_file)[0]
+        published = f"https://developers.home-assistant.io/docs/api/{slug}"
+        entry_file(
+            path,
+            f"https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/api/{api_file}",
+            published,
+        )
+
+    # Apps documentation
+    apps = [
+        "communication.md",
+        "configuration.md",
+        "presentation.md",
+        "publishing.md",
+        "repository.md",
+        "security.md",
+        "testing.md",
+        "tutorial.md",
+    ]
+    for apps_file in apps:
+        path = os.path.join(dev_docs, "docs/apps", apps_file)
+        slug = os.path.splitext(apps_file)[0]
+        published = f"https://developers.home-assistant.io/docs/apps/{slug}"
+        entry_file(
+            path,
+            f"https://raw.githubusercontent.com/home-assistant/developers.home-assistant/master/docs/apps/{apps_file}",
+            published,
+        )
+
+    # Home Assistant AI Skills
+    search_pattern = os.path.join(ha_skills, "skills", "**", "*.md")
+    files = glob.glob(search_pattern, recursive=True)
+    files.extend(
+        glob.glob(os.path.join(ha_skills, "skills", "**", "*.markdown"), recursive=True)
+    )
+    files.sort()
+
+    for file in files:
+        rel = os.path.relpath(file, ha_skills)
+        entry_file(
+            file,
+            f"https://raw.githubusercontent.com/homeassistant-ai/skills/main/{rel}",
+            f"https://github.com/homeassistant-ai/skills/blob/main/{rel}",
+        )
+
+
+def topic_prompting():
+    # Claude platform best practices
+    claude_urls = [
+        "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview",
+        "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices",
+    ]
+    for url in claude_urls:
+        entry_url(f"{url}.md", url)
+
+    # Google AI / Gemini API docs
+    gemini_urls = ["https://ai.google.dev/gemini-api/docs/prompting-strategies"]
+    for url in gemini_urls:
+        entry_url(f"{url}.md.txt", url)
+
+    # OpenAI Docs
+    openai_slugs = ["guides/prompt-engineering", "guides/text"]
+    for slug in openai_slugs:
+        entry_url(
+            f"https://developers.openai.com/api/docs/{slug}.md",
+            f"https://platform.openai.com/docs/{slug}",
+        )
+
+
+def topic_gemini_sdk_js():
+    entry_url(
+        "https://raw.githubusercontent.com/googleapis/js-genai/main/codegen_instructions.md"
+    )
+
+
+def topic_meshtastic():
+    repo = fetch("github://meshtastic/meshtastic@master")
+
+    dirs = [
+        "docs/getting-started",
+        "docs/software/python-cli",
+        "docs/hardware/devices",
+        "docs/configuration",
+    ]
+
+    for dir_name in dirs:
+        dir_path = os.path.join(repo, dir_name)
+        if os.path.exists(dir_path):
+            files = []
+            for ext in ["*.md", "*.mdx"]:
+                files.extend(
+                    glob.glob(os.path.join(dir_path, "**", ext), recursive=True)
+                )
+            files.sort()
+
+            for file in files:
+                rel = os.path.relpath(file, repo)
+                slug = rel
+                if slug.endswith(".mdx"):
+                    slug = slug[:-4]
+                elif slug.endswith(".md"):
+                    slug = slug[:-3]
+
+                if os.path.basename(slug) == "index":
+                    slug = os.path.dirname(slug)
+
+                published = f"https://meshtastic.org/{slug}"
+
+                entry_file(
+                    file,
+                    f"https://raw.githubusercontent.com/meshtastic/meshtastic/master/{rel}",
+                    published,
+                )
+
+
+def main():
+    # Support 'help' as alias for '--help'
+    if len(sys.argv) > 1 and sys.argv[1] == "help":
+        sys.argv[1] = "--help"
+
+    parser = argparse.ArgumentParser(
+        description="Generate aggregated context for a specific topic. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.",
+        add_help=False,  # Disable default -h/--help
+    )
+    parser.add_argument(
+        "--help",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="show this help message and exit",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List available topics (names only)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force cache rebuild",
+    )
+    parser.add_argument("topic", nargs="?", help="Topic to generate context for")
+
+    args = parser.parse_args()
+
+    topics = {
+        "skills": (
+            topic_skills,
+            "Agent skills format specification and authoring guide",
+        ),
+        "gemini-api": (topic_gemini_api, "Gemini API documentation and examples"),
+        "mcp-server": (topic_mcp_server, "MCP server documentation and specification"),
+        "inkyframe": (topic_inkyframe, "Pimoroni Inky Frame documentation"),
+        "rpi": (topic_rpi, "Raspberry Pi documentation"),
+        "homeassistant": (
+            topic_homeassistant,
+            "Home Assistant integration, automation, API and CLI documentation",
+        ),
+        "prompting": (
+            topic_prompting,
+            "Prompt engineering guides for Claude, Gemini, and OpenAI",
+        ),
+        "gemini-sdk-js": (
+            topic_gemini_sdk_js,
+            "Google Gemini JavaScript SDK codegen instructions",
+        ),
+        "meshtastic": (topic_meshtastic, "Meshtastic documentation"),
+        "gemini-cli": (topic_gemini_cli, "Gemini CLI documentation"),
     }
-    /^<\/entry>/ {
-      end_line = NR + offset;
-      print "  <item id=\"" id "\" startLine=\"" start_line "\" endLine=\"" end_line "\">" cmd "</item>";
-    }
-    /^<command>/ {
-      cmd = $0;
-      sub(/<command>/, "", cmd);
-      sub(/<\/command>/, "", cmd);
-    }
-  ' "$entries_file"
-  echo "</table_of_contents>"
-}
 
-# =============================================================================
-# MAIN
-# =============================================================================
+    if args.list:
+        for t in topics:
+            print(t)
+        sys.exit(0)
 
-USE_TOC=true
-FORCE_REFRESH=false
-TOPIC=""
+    if not args.topic:
+        parser.print_help()
+        sys.exit(1)
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --help)
-      usage 0
-      ;;
-    --list)
-      list_topics
-      ;;
-    --no-toc)
-      USE_TOC=false
-      shift
-      ;;
-    -f | --force)
-      FORCE_REFRESH=true
-      shift
-      ;;
-    -*)
-      echo "$SCRIPT_NAME: unknown option: $1" >&2
-      exit 1
-      ;;
-    *)
-      if [[ -n "$TOPIC" ]]; then
-        echo "$SCRIPT_NAME: only one topic allowed" >&2
-        exit 1
-      fi
-      TOPIC="$1"
-      shift
-      ;;
-  esac
-done
+    if args.topic not in topics:
+        print(f"context: unknown topic: {args.topic}", file=sys.stderr)
+        sys.exit(1)
 
-if [[ -z "$TOPIC" ]]; then
-  usage 1 >&2
-fi
+    cache_dir = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "context"
+    )
+    cache_file = os.path.join(cache_dir, f"{args.topic}.xml")
 
-if [[ "$TOPIC" == "help" ]]; then
-  usage 0
-fi
+    # Check cache
+    use_cache = False
+    if not args.force and os.path.exists(cache_file):
+        import time
 
-# Validate topic
-TOPIC_FUNC="topic_${TOPIC//-/_}"
-IS_DYNAMIC=false
+        mtime = os.path.getmtime(cache_file)
+        if (time.time() - mtime) < 24 * 3600:
+            use_cache = True
 
-if declare -f "$TOPIC_FUNC" >/dev/null 2>&1; then
-  IS_DYNAMIC=false
-else
-  # Check if it's a dynamic topic
-  DYNAMIC_DIR="$CONTEXT_BASE_DIR/$TOPIC"
-  if [[ -d "$DYNAMIC_DIR" ]]; then # check for directory existence (following symlinks for -d)
-    IS_DYNAMIC=true
-  elif [[ -L "$DYNAMIC_DIR" ]]; then
-    # It is a symlink but -d failed, likely broken
-    # We let topic_dynamic fail with a good message later, OR fail here.
-    # The prompt says "error when context topic is called".
-    # Since topic_dynamic handles it, we can mark it as dynamic here.
-    IS_DYNAMIC=true
-  else
-    echo "$SCRIPT_NAME: unknown topic: $TOPIC" >&2
-    echo "Run '$SCRIPT_NAME --list' to see available topics" >&2
-    exit 1
-  fi
-fi
+    if use_cache:
+        with open(cache_file, "r") as f:
+            print(f.read(), end="")
+        sys.exit(0)
 
-# Check dependencies
-require curl
-require jq
-require realpath
+    func, desc = topics[args.topic]
+    func()
+    xml_output = generate_xml(desc)
 
-# Cache setup
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/context"
-mkdir -p "$CACHE_DIR"
-CACHE_FILE="$CACHE_DIR/$TOPIC.xml"
+    # Save to cache
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cache_file, "w") as f:
+            f.write(xml_output)
+    except Exception as e:
+        print(f"context: warning: failed to update cache: {e}", file=sys.stderr)
 
-# Check cache
-if [[ "$FORCE_REFRESH" == "false" && -f "$CACHE_FILE" ]]; then
-  # Resolve script path for modification check
-  SCRIPT_PATH="$0"
-  if [[ ! -f "$SCRIPT_PATH" ]]; then
-    # Fallback if $0 is just the basename (e.g. found in PATH)
-    SCRIPT_PATH=$(command -v "$0" || echo "")
-  fi
+    print(xml_output, end="")
 
-  # Check if cache is fresh:
-  # 1. Less than 24 hours old (find -mtime -1)
-  # 2. Newer than the script itself (if script found)
-  if [[ -n "$(find "$CACHE_FILE" -mtime -1 2>/dev/null)" ]]; then
-    if [[ -z "$SCRIPT_PATH" || "$CACHE_FILE" -nt "$SCRIPT_PATH" ]]; then
-      cat "$CACHE_FILE"
-      exit 0
-    fi
-  fi
-fi
 
-# Create build directory
-BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/$SCRIPT_NAME.XXXXXXXXXX")
-trap 'rm -rf "$BUILD_DIR"' EXIT
-
-# Look up topic description
-TOPIC_DESC=""
-if [[ "$IS_DYNAMIC" == "true" ]]; then
-  TOPIC_DESC="Dynamic topic: $TOPIC"
-else
-  for entry in "${TOPICS[@]}"; do
-    if [[ "${entry%%:*}" == "$TOPIC" ]]; then
-      TOPIC_DESC="${entry#*:}"
-      break
-    fi
-  done
-fi
-
-# Output generation
-OUTPUT_FILE="$BUILD_DIR/output.xml"
-ENTRIES_FILE="$BUILD_DIR/entries.xml"
-
-# Generate entries
-{
-  if [[ "$IS_DYNAMIC" == "true" ]]; then
-    topic_dynamic "$TOPIC"
-  else
-    "$TOPIC_FUNC"
-  fi
-} >"$ENTRIES_FILE"
-
-# Combine into final output
-{
-  emit_header "$TOPIC_DESC"
-  if [[ "$USE_TOC" == "true" ]]; then
-    generate_toc "$ENTRIES_FILE" "$TOPIC_DESC"
-  fi
-  cat "$ENTRIES_FILE"
-  emit_footer
-} >"$OUTPUT_FILE"
-
-# Check output size (3MB limit)
-SIZE=$(wc -c <"$OUTPUT_FILE" | tr -d ' \t')
-if ((SIZE > 3000000)); then
-  echo "$SCRIPT_NAME: warning: output size ($SIZE bytes) exceeds 3MB" >&2
-fi
-
-# Update cache
-cp "$OUTPUT_FILE" "$CACHE_FILE"
-
-cat "$OUTPUT_FILE"
+if __name__ == "__main__":
+    main()
