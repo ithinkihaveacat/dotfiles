@@ -74,3 +74,9 @@ history. **See:** [references/commit-messages.md](references/commit-messages.md)
 Use when authoring or reviewing pull request descriptions. Ensures the change is
 persuasively justified and broad context is provided for reviewers. **See:**
 [references/pr-descriptions.md](references/pr-descriptions.md)
+
+### 6. Writing Comments
+
+Use when authoring or reviewing comments across different contexts (e.g., code
+reviews, bug reports). Ensures the content is direct, concise, and factual.
+**See:** [references/comments.md](references/comments.md)
