@@ -8,229 +8,221 @@
 
 import sys
 import requests
-import re
-from urllib.parse import urlparse
 import os
-
+from urllib.parse import urlparse
 
 def usage():
-    print(
-        f"""Usage: {os.path.basename(sys.argv[0])} <url> [options]
-
-Fetch GitHub PR as Markdown for LLM Agents.
-
-Arguments:
-  url         The GitHub PR URL
-
-Options:
-  --token     GitHub Personal Access Token (PAT)
-  --help      Display this help message and exit
-
-Examples:
-  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/pull/123
-  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/pull/123 --token YOUR_TOKEN
-""",
-        file=sys.stdout,
-    )
+    print(f"Usage: {os.path.basename(sys.argv[0])} <url>")
+    print("Fetches GitHub PR details and timeline using GraphQL.")
+    print("Requires GITHUB_API_KEY environment variable.")
     sys.exit(0)
 
-
 def parse_github_url(url):
-    """Extracts owner, repo, and PR/Issue number from a GitHub URL."""
     path_parts = urlparse(url).path.strip("/").split("/")
-    if len(path_parts) >= 4:
-        if path_parts[2] == "pull":
-            return path_parts[0], path_parts[1], path_parts[3], "pr"
-        elif path_parts[2] == "issues":
-            return path_parts[0], path_parts[1], path_parts[3], "issue"
-    raise ValueError("invalid GitHub URL format. Must be a PR or Issue URL.")
-
-
-def fetch_data(url, token):
-    """Fetches paginated data from the GitHub API."""
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    results = []
-    while url:
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            print(
-                f"{os.path.basename(sys.argv[0])}: API error {response.status_code}: {response.text}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        # If it's a list (comments/reviews), extend. If it's a dict (PR details), return directly.
-        data = response.json()
-        if isinstance(data, dict):
-            return data
-
-        results.extend(data)
-
-        # Handle pagination
-        url = None
-        if "Link" in response.headers:
-            links = response.headers["Link"].split(", ")
-            for link in links:
-                if 'rel="next"' in link:
-                    url = re.search(r"<(.*)>", link).group(1)
-                    break
-    return results
-
+    if len(path_parts) >= 4 and path_parts[2] == "pull":
+        return path_parts[0], path_parts[1], int(path_parts[3])
+    raise ValueError("Invalid GitHub PR URL format.")
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"{os.path.basename(sys.argv[0])}: missing url operand", file=sys.stderr)
-        print(
-            f"Try '{os.path.basename(sys.argv[0])} --help' for more information.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if sys.argv[1] in ("--help", "help"):
+    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "help"):
         usage()
 
-    if "-h" in sys.argv:
-        print(f"{os.path.basename(sys.argv[0])}: invalid option '-h'", file=sys.stderr)
-        print(
-            f"Try '{os.path.basename(sys.argv[0])} --help' for more information.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
     url = sys.argv[1]
-    token = None
-
-    i = 2
-    while i < len(sys.argv):
-        if sys.argv[i] == "--token":
-            if i + 1 < len(sys.argv):
-                token = sys.argv[i + 1]
-                i += 2
-            else:
-                print(
-                    f"{os.path.basename(sys.argv[0])}: missing argument for '--token'",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        else:
-            print(
-                f"{os.path.basename(sys.argv[0])}: unknown argument '{sys.argv[i]}'",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    
+    api_key = os.environ.get("GITHUB_API_KEY")
+    if not api_key:
+        print("Error: GITHUB_API_KEY environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
 
     try:
-        owner, repo, number, item_type = parse_github_url(url)
+        owner, repo, number = parse_github_url(url)
     except ValueError as e:
-        print(f"{os.path.basename(sys.argv[0])}: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    base_api = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = {
+        "Authorization": f"bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
-    # Fetch all necessary data
-    if item_type == "pr":
-        item_data = fetch_data(f"{base_api}/pulls/{number}", token)
-        reviews = fetch_data(f"{base_api}/pulls/{number}/reviews", token)
-        inline_comments = fetch_data(f"{base_api}/pulls/{number}/comments", token)
-    else:
-        item_data = fetch_data(f"{base_api}/issues/{number}", token)
-        reviews = []
-        inline_comments = []
+    # We use the GraphQL API because the GitHub REST API for listing review comments
+    # (/pulls/{number}/comments) does not expose the "resolved" status of review threads.
+    query = """
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          title
+          url
+          state
+          author { login }
+          createdAt
+          body
+          baseRefName
+          headRefName
+          labels(first: 100) { nodes { name } }
+          
+          comments(first: 100) {
+            nodes {
+              author { login }
+              createdAt
+              body
+            }
+          }
+          
+          reviews(first: 100) {
+            nodes {
+              author { login }
+              state
+              submittedAt
+              body
+            }
+          }
+          
+          reviewThreads(first: 100) {
+            nodes {
+              isResolved
+              path
+              comments(first: 100) {
+                nodes {
+                  author { login }
+                  createdAt
+                  body
+                  line
+                  originalLine
+                  diffHunk
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
 
-    if not isinstance(item_data, dict):
-        print(
-            f"{os.path.basename(sys.argv[0])}: expected dictionary response for main item, got {type(item_data).__name__}",
-            file=sys.stderr,
-        )
+    variables = {
+        "owner": owner,
+        "repo": repo,
+        "number": number,
+    }
+
+    response = requests.post(
+        "https://api.github.com/graphql",
+        headers=headers,
+        json={"query": query, "variables": variables},
+    )
+
+    if response.status_code != 200:
+        print(f"API error: {response.status_code} - {response.text}", file=sys.stderr)
         sys.exit(1)
 
-    # Standard discussion comments are accessed via the issues endpoint
-    comments = fetch_data(f"{base_api}/issues/{number}/comments", token)
+    data = response.json()
+    
+    if "errors" in data:
+        print(f"GraphQL errors: {data['errors']}", file=sys.stderr)
+        sys.exit(1)
 
-    if isinstance(inline_comments, list):
-        inline_comments.sort(key=lambda x: x.get("created_at", ""))
+    if "data" in data and data["data"] and "repository" in data["data"] and data["data"]["repository"]:
+        pr = data["data"]["repository"]["pullRequest"]
+        if not pr:
+            print("Error: PR not found in repository", file=sys.stderr)
+            sys.exit(1)
     else:
-        inline_comments = []
+        print("Error: Repository or data missing in response", file=sys.stderr)
+        sys.exit(1)
 
+    # Format output
+    md = []
+    md.append(f"# PR: {pr['title']}")
+    md.append(f"**Author:** {(pr.get('author') or {}).get('login', 'Unknown')}")
+    md.append(f"**URL:** {pr['url']}")
+    md.append(f"**State:** {pr['state'].capitalize()}")
+    md.append(f"**Base Branch:** {pr['baseRefName']}")
+    md.append(f"**Head Branch:** {pr['headRefName']}")
+    
+    labels = [label["name"] for label in pr["labels"]["nodes"]]
+    md.append(f"**Labels:** {', '.join(labels) if labels else 'None'}")
+    md.append(f"**Created:** {pr['createdAt']}")
+    md.append("\n## Description\n")
+    
     def quote_body(body):
         if not body:
             return ""
         return "\n".join(f"> {line}" for line in body.splitlines())
 
-    state = item_data.get("state", "Unknown").capitalize()
-    if state == "Closed" and item_data.get("merged_at"):
-        state = "Merged"
-
-    labels = ", ".join(label["name"] for label in item_data.get("labels", []))
-    if not labels:
-        labels = "None"
-
-    # Format the Markdown output
-    md = []
-    title_prefix = "PR" if item_type == "pr" else "Issue"
-    md.append(f"# {title_prefix}: {item_data.get('title', 'Untitled')}")
-    md.append(f"**Author:** {item_data.get('user', {}).get('login', 'Unknown')}")
-    md.append(f"**URL:** {item_data.get('html_url', url)}")
-    md.append(f"**State:** {state}")
-    if item_type == "pr":
-        md.append(f"**Base Branch:** {item_data.get('base', {}).get('ref', 'Unknown')}")
-        md.append(f"**Head Branch:** {item_data.get('head', {}).get('ref', 'Unknown')}")
-    md.append(f"**Labels:** {labels}")
-    md.append(f"**Created:** {item_data.get('created_at', 'Unknown')}")
-    md.append("\n## Description\n")
-    md.append(quote_body(item_data.get("body")) or "*No description provided.*")
+    md.append(quote_body(pr["body"]) or "*No description provided.*")
     md.append("\n---\n")
 
-    if comments:
-        md.append("## Standard Comments\n")
-        for comment in comments:
-            author = comment.get("user", {}).get("login", "Unknown")
-            created_at = comment.get("created_at", "Unknown")
-            md.append(f"### Comment by {author} on {created_at}")
-            md.append(f"{quote_body(comment.get('body'))}\n")
-            md.append("---\n")
+    # Combine events for timeline
+    timeline = []
 
-    if reviews:
-        md.append("## Top-Level Reviews\n")
-        for review in reviews:
-            if not review.get("body"):  # Skip empty review submissions
-                continue
-            author = review.get("user", {}).get("login", "Unknown")
-            state_review = review.get("state", "COMMENTED")
-            submitted_at = review.get("submitted_at", "Unknown")
-            md.append(f"### Review ({state_review}) by {author} on {submitted_at}")
-            md.append(f"{quote_body(review.get('body'))}\n")
-            md.append("---\n")
+    for node in pr["comments"]["nodes"]:
+        timeline.append({
+            "type": "comment",
+            "date": node["createdAt"],
+            "data": node
+        })
 
-    if inline_comments:
-        md.append("## Inline Review Comments\n")
-        for ic in inline_comments:
-            author = ic.get("user", {}).get("login", "Unknown")
-            path = ic.get("path", "Unknown file")
-            line = ic.get("line") or ic.get("original_line", "Unknown line")
-            created_at = ic.get("created_at", "Unknown")
+    for node in pr["reviews"]["nodes"]:
+        if node["body"] or node["state"] != "COMMENTED":
+            timeline.append({
+                "type": "review",
+                "date": node["submittedAt"] or pr["createdAt"],
+                "data": node
+            })
 
-            md.append(
-                f"### Inline comment by {author} on `{path}` (Line {line}) at {created_at}"
-            )
+    for node in pr["reviewThreads"]["nodes"]:
+        if node["comments"]["nodes"]:
+            first_comment = node["comments"]["nodes"][0]
+            timeline.append({
+                "type": "thread",
+                "date": first_comment["createdAt"],
+                "data": node
+            })
 
-            # Optionally include the code diff snippet if useful for the agent
-            if diff_hunk := ic.get("diff_hunk"):
+    # Sort by date
+    timeline.sort(key=lambda x: x["date"])
+
+    # Render timeline
+    for item in timeline:
+        if item["type"] == "comment":
+            c = item["data"]
+            author = (c.get("author") or {}).get("login", "Unknown")
+            md.append(f"### Comment by {author} on {c['createdAt']}")
+            md.append(quote_body(c['body']))
+            md.append("\n---\n")
+            
+        elif item["type"] == "review":
+            r = item["data"]
+            author = (r.get("author") or {}).get("login", "Unknown")
+            state = r["state"].capitalize()
+            md.append(f"### Review ({state}) by {author} on {r['submittedAt']}")
+            if r["body"]:
+                md.append(quote_body(r["body"]))
+            md.append("\n---\n")
+            
+        elif item["type"] == "thread":
+            t = item["data"]
+            first_comment = t["comments"]["nodes"][0]
+            path = t["path"]
+            line = first_comment.get("line") or first_comment.get("originalLine") or "Unknown"
+            resolved_status = "[RESOLVED] " if t["isResolved"] else ""
+            
+            md.append(f"### Inline Thread {resolved_status}on `{path}` (Line {line})")
+            
+            # Show diff hunk from first comment if available
+            if first_comment.get("diffHunk"):
                 md.append("```diff")
-                md.append(diff_hunk)
+                md.append(first_comment["diffHunk"])
                 md.append("```")
-
-            md.append(f"{quote_body(ic.get('body'))}\n")
-            md.append("---\n")
+                
+            for c in t["comments"]["nodes"]:
+                author = (c.get("author") or {}).get("login", "Unknown")
+                md.append(f"**{author}** ({c['createdAt']}):")
+                md.append(quote_body(c["body"]))
+                md.append("")
+            md.append("\n---\n")
 
     print("\n".join(md))
-
 
 if __name__ == "__main__":
     main()

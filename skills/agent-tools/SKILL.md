@@ -84,14 +84,17 @@ scripts/popper "start an exercise"
 
 Fetch GitHub Pull Requests or Issues and format them as Markdown for LLM Agents.
 Includes the main description, standard comments, reviews, and inline review
-comments.
+comments with resolved status.
+
+Requires `GITHUB_API_KEY` environment variable to be set with a GitHub Personal
+Access Token. You can generate a token at
+<https://github.com/settings/personal-access-tokens>.
 
 ```bash
-scripts/gh-markdown URL [--token TOKEN]
+scripts/gh-markdown URL
 ```
 
-**Options:** `--token` (GitHub Personal Access Token for private repos or rate
-limits)
+**Environment:** `GITHUB_API_KEY` (Required)
 
 **Exit codes:** 0 success, 1 error
 
@@ -100,9 +103,6 @@ limits)
 ```bash
 # Fetch a PR
 scripts/gh-markdown https://github.com/owner/repo/pull/123
-
-# Fetch an issue with an auth token
-scripts/gh-markdown https://github.com/owner/repo/issues/456 --token "$GITHUB_TOKEN"
 ```
 
 ### context
