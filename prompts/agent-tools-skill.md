@@ -1,4 +1,4 @@
-# Prompt: Create AI Analysis Skill
+# Prompt: Create Agent Tools Skill
 
 Create an Agent Skill that helps agents perform AI-powered analysis tasks using
 the Gemini API. This skill should document CLI tools that delegate to AI models
