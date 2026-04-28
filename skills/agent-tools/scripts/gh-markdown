@@ -11,6 +11,7 @@ import requests
 import os
 from urllib.parse import urlparse
 
+
 def usage(file=sys.stdout):
     print(f"Usage: {os.path.basename(sys.argv[0])} <url>", file=file)
     print("", file=file)
@@ -21,13 +22,21 @@ def usage(file=sys.stdout):
     print("  --help      Display this help message and exit", file=file)
     print("", file=file)
     print("Examples:", file=file)
-    print(f"  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/pull/123", file=file)
+    print(
+        f"  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/pull/123",
+        file=file,
+    )
+
 
 def parse_github_url(url):
     path_parts = urlparse(url).path.strip("/").split("/")
-    if len(path_parts) >= 4 and path_parts[2] == "pull":
-        return path_parts[0], path_parts[1], int(path_parts[3])
-    raise ValueError("Invalid GitHub PR URL format.")
+    if len(path_parts) >= 4:
+        if path_parts[2] == "pull":
+            return path_parts[0], path_parts[1], int(path_parts[3]), "pr"
+        elif path_parts[2] == "issues":
+            return path_parts[0], path_parts[1], int(path_parts[3]), "issue"
+    raise ValueError("Invalid GitHub URL format. Must be a PR or Issue URL.")
+
 
 def main():
     if "-h" in sys.argv:
@@ -44,14 +53,14 @@ def main():
         sys.exit(0)
 
     url = sys.argv[1]
-    
+
     api_key = os.environ.get("GITHUB_API_KEY")
     if not api_key:
         print("Error: GITHUB_API_KEY environment variable is not set.", file=sys.stderr)
         sys.exit(1)
 
     try:
-        owner, repo, number = parse_github_url(url)
+        owner, repo, number, item_type = parse_github_url(url)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -63,7 +72,7 @@ def main():
 
     # We use the GraphQL API because the GitHub REST API for listing review comments
     # (/pulls/{number}/comments) does not expose the "resolved" status of review threads.
-    query = """
+    pr_query = """
     query($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
@@ -115,6 +124,32 @@ def main():
     }
     """
 
+    issue_query = """
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          title
+          url
+          state
+          author { login }
+          createdAt
+          body
+          labels(first: 100) { nodes { name } }
+          
+          comments(first: 100) {
+            nodes {
+              author { login }
+              createdAt
+              body
+            }
+          }
+        }
+      }
+    }
+    """
+
+    query = pr_query if item_type == "pr" else issue_query
+
     variables = {
         "owner": owner,
         "repo": repo,
@@ -132,15 +167,23 @@ def main():
         sys.exit(1)
 
     data = response.json()
-    
+
     if "errors" in data:
         print(f"GraphQL errors: {data['errors']}", file=sys.stderr)
         sys.exit(1)
 
-    if "data" in data and data["data"] and "repository" in data["data"] and data["data"]["repository"]:
-        pr = data["data"]["repository"]["pullRequest"]
+    if (
+        "data" in data
+        and data["data"]
+        and "repository" in data["data"]
+        and data["data"]["repository"]
+    ):
+        repo_data = data["data"]["repository"]
+        pr = repo_data["pullRequest"] if item_type == "pr" else repo_data["issue"]
         if not pr:
-            print("Error: PR not found in repository", file=sys.stderr)
+            print(
+                f"Error: {item_type.upper()} not found in repository", file=sys.stderr
+            )
             sys.exit(1)
     else:
         print("Error: Repository or data missing in response", file=sys.stderr)
@@ -148,18 +191,20 @@ def main():
 
     # Format output
     md = []
-    md.append(f"# PR: {pr['title']}")
+    title_prefix = "PR" if item_type == "pr" else "Issue"
+    md.append(f"# {title_prefix}: {pr['title']}")
     md.append(f"**Author:** {(pr.get('author') or {}).get('login', 'Unknown')}")
     md.append(f"**URL:** {pr['url']}")
     md.append(f"**State:** {pr['state'].capitalize()}")
-    md.append(f"**Base Branch:** {pr['baseRefName']}")
-    md.append(f"**Head Branch:** {pr['headRefName']}")
-    
+    if item_type == "pr":
+        md.append(f"**Base Branch:** {pr['baseRefName']}")
+        md.append(f"**Head Branch:** {pr['headRefName']}")
+
     labels = [label["name"] for label in pr["labels"]["nodes"]]
     md.append(f"**Labels:** {', '.join(labels) if labels else 'None'}")
     md.append(f"**Created:** {pr['createdAt']}")
     md.append("\n## Description\n")
-    
+
     def quote_body(body):
         if not body:
             return ""
@@ -172,28 +217,26 @@ def main():
     timeline = []
 
     for node in pr["comments"]["nodes"]:
-        timeline.append({
-            "type": "comment",
-            "date": node["createdAt"],
-            "data": node
-        })
+        timeline.append({"type": "comment", "date": node["createdAt"], "data": node})
 
-    for node in pr["reviews"]["nodes"]:
+    reviews_nodes = pr["reviews"]["nodes"] if item_type == "pr" else []
+    for node in reviews_nodes:
         if node["body"] or node["state"] != "COMMENTED":
-            timeline.append({
-                "type": "review",
-                "date": node["submittedAt"] or pr["createdAt"],
-                "data": node
-            })
+            timeline.append(
+                {
+                    "type": "review",
+                    "date": node["submittedAt"] or pr["createdAt"],
+                    "data": node,
+                }
+            )
 
-    for node in pr["reviewThreads"]["nodes"]:
+    threads_nodes = pr["reviewThreads"]["nodes"] if item_type == "pr" else []
+    for node in threads_nodes:
         if node["comments"]["nodes"]:
             first_comment = node["comments"]["nodes"][0]
-            timeline.append({
-                "type": "thread",
-                "date": first_comment["createdAt"],
-                "data": node
-            })
+            timeline.append(
+                {"type": "thread", "date": first_comment["createdAt"], "data": node}
+            )
 
     # Sort by date
     timeline.sort(key=lambda x: x["date"])
@@ -204,9 +247,9 @@ def main():
             c = item["data"]
             author = (c.get("author") or {}).get("login", "Unknown")
             md.append(f"### Comment by {author} on {c['createdAt']}")
-            md.append(quote_body(c['body']))
+            md.append(quote_body(c["body"]))
             md.append("\n---\n")
-            
+
         elif item["type"] == "review":
             r = item["data"]
             author = (r.get("author") or {}).get("login", "Unknown")
@@ -215,22 +258,26 @@ def main():
             if r["body"]:
                 md.append(quote_body(r["body"]))
             md.append("\n---\n")
-            
+
         elif item["type"] == "thread":
             t = item["data"]
             first_comment = t["comments"]["nodes"][0]
             path = t["path"]
-            line = first_comment.get("line") or first_comment.get("originalLine") or "Unknown"
+            line = (
+                first_comment.get("line")
+                or first_comment.get("originalLine")
+                or "Unknown"
+            )
             resolved_status = "[RESOLVED] " if t["isResolved"] else ""
-            
+
             md.append(f"### Inline Thread {resolved_status}on `{path}` (Line {line})")
-            
+
             # Show diff hunk from first comment if available
             if first_comment.get("diffHunk"):
                 md.append("```diff")
                 md.append(first_comment["diffHunk"])
                 md.append("```")
-                
+
             for c in t["comments"]["nodes"]:
                 author = (c.get("author") or {}).get("login", "Unknown")
                 md.append(f"**{author}** ({c['createdAt']}):")
@@ -239,6 +286,7 @@ def main():
             md.append("\n---\n")
 
     print("\n".join(md))
+
 
 if __name__ == "__main__":
     main()
