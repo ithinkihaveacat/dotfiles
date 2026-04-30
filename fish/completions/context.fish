@@ -33,3 +33,4 @@ complete -c context -f -n __fish_context_needs_topic -a homeassistant -d 'Home A
 complete -c context -f -l help -d 'Display help message and exit'
 complete -c context -f -l list -d 'List available topics (names only)'
 complete -c context -f -l force -d 'Force cache rebuild'
+complete -c context -f -l plugin-template -d 'Output a template/documentation for creating a Python plugin'

@@ -41,99 +41,48 @@ def _make_display_cmd(url, web_url=None):
     return cmd
 
 
-def get_dynamic_topics():
-    if os.path.isdir(CONTEXT_BASE_DIR):
-        return sorted(
-            [
-                d
-                for d in os.listdir(CONTEXT_BASE_DIR)
-                if os.path.isdir(os.path.join(CONTEXT_BASE_DIR, d))
-                or os.path.islink(os.path.join(CONTEXT_BASE_DIR, d))
-            ]
-        )
-    return []
+class ContextAPI:
+    def __init__(self, topics_dict):
+        self.topics = topics_dict
+
+    def add_topic(self, name, handler, description):
+        self.topics[name] = (handler, description)
+
+    def emit(self, display_cmd, content):
+        _emit_entry(display_cmd, content)
+
+    def entry_url(self, fetch_url, web_url=None):
+        entry_url(fetch_url, web_url)
+
+    def entry_file(self, local_path, display_url, web_url=None):
+        entry_file(local_path, display_url, web_url)
 
 
-def clean_url(url):
-    import re
+def load_plugins(topics_dict):
+    import importlib.util
 
-    # Replace all // with / except after protocol
-    url = re.sub(r"(?<!:)/+", "/", url)
-    return url
+    plugins_dir = os.path.expanduser("~/.config/context/plugins")
+    if not os.path.isdir(plugins_dir):
+        return
 
-
-def run_dynamic_topic(topic):
-    topic_dir = os.path.join(CONTEXT_BASE_DIR, topic)
-
-    if not os.path.exists(topic_dir):
-        print(
-            f"context: topic '{topic}' not found (or broken symlink at {topic_dir})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if not os.path.isdir(topic_dir):
-        print(f"context: topic '{topic}' is not a directory", file=sys.stderr)
-        sys.exit(1)
-
-    # Find files
-    files = []
-    for root, dirs, filenames in os.walk(topic_dir, followlinks=True):
-        for filename in filenames:
-            if filename.endswith(".txt") or filename.endswith(".md"):
-                files.append(os.path.join(root, filename))
-    files.sort()
-
-    for file in files:
-        rel = os.path.relpath(file, topic_dir)
-        display_cmd = ""
-
-        if topic.startswith("dac-"):
-            path = os.path.realpath(file)
-            marker = "/knowledge_base/latest/android"
-            base_url = "https://developer.android.com"
-            suffix = ""
-
-            if marker in path:
-                suffix = path[path.find(marker) + len(marker) :]
-            else:
-                suffix = f"/{rel}"
-
-            suffix = suffix.lstrip("/")
-            published = f"{base_url}/{suffix}"
-            raw_url = published  # Raw matches published structure initially
-
-            # Extension stripping
-            if published.endswith(".md.txt"):
-                published = published[: -len(".md.txt")]
-            elif published.endswith(".txt"):
-                published = published[: -len(".txt")]
-            elif published.endswith(".md"):
-                published = published[: -len(".md")]
-
-            # Index handling
-            if os.path.basename(published) == "index":
-                published = os.path.dirname(published)
-                if published == ".":
-                    published = ""
-
-            raw_url = clean_url(raw_url)
-            published = clean_url(published)
-            published = published.rstrip("/")
-
-            display_cmd = f"curl -s {raw_url}  # published to {published}"
-        else:
-            display_cmd = f"cat {topic_dir}/{rel}"
-
-        try:
-            with open(file, "r", encoding="utf-8") as f:
-                content = f.read()
-            _emit_entry(display_cmd, content)
-        except Exception as e:
-            print(
-                f"context: warning: skipping unreadable file: {file} ({e})",
-                file=sys.stderr,
-            )
+    api = ContextAPI(topics_dict)
+    for filename in os.listdir(plugins_dir):
+        if filename.endswith(".py"):
+            filepath = os.path.join(plugins_dir, filename)
+            module_name = f"context_plugin_{filename[:-3]}"
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, filepath)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)
+                    if hasattr(module, "register"):
+                        module.register(api)
+            except Exception as e:
+                print(
+                    f"context: warning: failed to load plugin {filepath}: {e}",
+                    file=sys.stderr,
+                )
 
 
 def _clean_notebook_data(data):
@@ -904,16 +853,12 @@ def main():
     }
 
     # Construct help description
+    load_plugins(topics)
+
     description = "Generate aggregated context for a specific topic. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.\n\nTopics:\n"
     for t in sorted(topics.keys()):
         func, desc = topics[t]
         description += f"  {t:<22} {desc}\n"
-
-    dynamic_topics = get_dynamic_topics()
-    if dynamic_topics:
-        description += "\nDynamic Topics:\n"
-        for t in sorted(dynamic_topics):
-            description += f"  {t}\n"
 
     parser = argparse.ArgumentParser(
         description=description,
@@ -936,13 +881,67 @@ def main():
         action="store_true",
         help="Force cache rebuild",
     )
+    parser.add_argument(
+        "--plugin-template",
+        action="store_true",
+        help="Output a template/documentation for creating a Python plugin",
+    )
     parser.add_argument("topic", nargs="?", help="Topic to generate context for")
 
     args = parser.parse_args()
 
+    if args.plugin_template:
+        print('''"""
+Example Plugin for the context script.
+Save this file as ~/.config/context/plugins/my_plugin.py
+"""
+import os
+
+def my_custom_topic_handler(api):
+    """
+    This function is called when the user requests this topic.
+    It should gather files or data and call api.emit(), api.entry_url(),
+    or api.entry_file() to add them to the context session.
+    """
+    
+    # 1. Emitting raw text content
+    api.emit(
+        display_cmd="echo 'Hello World'", 
+        content="This is custom content generated by the plugin."
+    )
+
+    # 2. Emitting a local file
+    # If the file exists, it will be read and added to the context.
+    # The 'web_url' is optional but recommended if the file is published online.
+    if os.path.exists("/etc/hosts"):
+        api.entry_file(
+            local_path="/etc/hosts", 
+            display_url="cat /etc/hosts",
+            web_url="https://example.com/docs/hosts"
+        )
+        
+    # 3. Emitting a remote URL
+    # The script will fetch the URL and add its content.
+    # api.entry_url(
+    #     fetch_url="https://raw.githubusercontent.com/.../README.md",
+    #     web_url="https://github.com/.../README.md"
+    # )
+
+def register(api):
+    """
+    This function is automatically called by `bin/context` when the plugin is loaded.
+    You must register your topics here using the provided `ContextAPI`.
+    """
+    api.add_topic(
+        name="my-custom-topic",
+        handler=lambda: my_custom_topic_handler(api),
+        description="A demonstration of a custom plugin topic"
+    )
+''')
+        sys.exit(0)
+
     if args.list:
-        all_topics = list(topics.keys()) + get_dynamic_topics()
-        for t in sorted(all_topics):
+        for t in sorted(topics.keys()):
             print(t)
         sys.exit(0)
 
@@ -950,13 +949,9 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    is_dynamic = False
     if args.topic not in topics:
-        if args.topic in get_dynamic_topics():
-            is_dynamic = True
-        else:
-            print(f"context: unknown topic: {args.topic}", file=sys.stderr)
-            sys.exit(1)
+        print(f"context: unknown topic: {args.topic}", file=sys.stderr)
+        sys.exit(1)
 
     cache_dir = os.path.join(
         os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "context"
@@ -979,12 +974,8 @@ def main():
             print(f.read(), end="")
         sys.exit(0)
 
-    if is_dynamic:
-        desc = f"Dynamic topic: {args.topic}"
-        run_dynamic_topic(args.topic)
-    else:
-        func, desc = topics[args.topic]
-        func()
+    func, desc = topics[args.topic]
+    func()
 
     xml_output = generate_xml(desc)
 
