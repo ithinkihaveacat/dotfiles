@@ -1,369 +1,243 @@
 # .dotfiles
 
-## About
+Public dotfiles for [fish](https://fishshell.com/), [git](https://git-scm.com/),
+[jed](https://www.jedsoft.org/jed/), [VS Code](https://code.visualstudio.com/),
+and various other tools.
 
-Config files for various tools I use, or have used in the past, such as
-[fish](http://fishshell.com/), [git](http://git-scm.com/),
-[jed](http://www.jedsoft.org/jed/), and
-[Visual Studio Code](https://code.visualstudio.com/).
+## Repository layout
 
-It's very unlikely that anyone will want to use this directly; the more
-interesting directories are:
-
-- [fish](fish) - configuration and startup files for fish shell.
-- [bin](bin) - bash scripts for various things.
-- [fish functions](fish/functions) - more scripts, generally those that are
-  awkward/impossible to write in bash.
-- [etc/git/templates](etc/git/templates) - git hooks
-- [docker](docker) - Dockerfile
-
-The idempotent [install script](./update) handles a few different operating
-systems and package managers (past and present) has a some interesting
-constructions that may be useful.
-
-## Prerequisites
-
-> **Getting locale-related errors when going through these steps?**
->
-> 1. Generate missing locales: `locale-gen en_GB.UTF-8`
-
-### [git](http://git-scm.com/)
-
-- **Ubuntu**: `sudo apt-get install git-core`
-- **OS X**: `xcode-select --install` (or install
-  [Xcode](https://developer.apple.com/xcode/downloads/))
-
-> No `sudo`? (If, for example, you're on a Gandi VPS.)
->
-> 1. Login as root: `ssh root@server`
-> 1. Install `sudo`: `apt-get install sudo`
-> 1. Edit `/etc/sudoers`: `visudo`
-> 1. Add the line: `mjs ALL=(ALL) NOPASSWD:ALL`
-
-### [fish](http://fishshell.com/)
-
-#### Ubuntu
-
-```sh
-sudo apt-get install fish
+```text
+.dotfiles/
+├── bin/                 # Shell scripts added directly to $PATH
+├── fish/
+│   ├── config.fish      # Main fish config; loads .private overlay if present
+│   ├── conf.d/          # Fish startup snippets
+│   ├── completions/     # Fish completions
+│   └── functions/       # Fish functions (autoloaded)
+├── home/                # Dotfiles symlinked into $HOME by update
+├── etc/                 # Tool-specific config (git templates, VS Code, etc.)
+├── skills/              # Agent skill definitions
+├── tests/               # TAP tests for bin/ scripts
+└── update               # Idempotent install script
 ```
 
-#### OS X
+`update` symlinks `home/.*` into `$HOME`, installs packages, and wires up
+tool-specific config. It is safe to run multiple times.
 
-Via [`brew`](http://brew.sh/):
+## Companion repository
 
-```sh
-brew install fish
-chsh -s /bin/bash # .bash_profile runs fish if available (zsh is default)
+A private companion repository can optionally be cloned to `~/.private`. It uses
+the same directory layout as this one, and `update` automatically overlays it —
+files in `~/.private` take precedence on name collision. This repository works
+fine without it.
+
+Expected layout:
+
+```text
+.private/
+├── fish/
+│   ├── conf.d/       # Startup snippets sourced by config.fish
+│   ├── completions/  # Completions prepended to fish_complete_path
+│   ├── functions/    # Functions prepended to fish_function_path
+│   └── secrets.fish  # API keys and tokens (chmod 600)
+├── home/             # Dotfiles symlinked into $HOME (e.g. .gitconfig.local)
+├── etc/              # Tool-specific config (e.g. etc/git/gitconfig.local)
+└── skills/           # Agent skills that shadow ~/.dotfiles/skills/ by name
 ```
 
-> **Don't already have [`brew`](http://brew.sh/)?**
->
-> _If you want to install into `/opt/homebrew` ..._
->
-> See <http://brew.sh>.
->
-> _If you want to install somewhere else ..._
->
-> See
-> [alternative installs](https://github.com/Homebrew/brew/blob/master/docs/Installation.md#alternative-installs).
-> (Installing into `~/local/homebrew`, and symlinking `brew` into
-> `~/local/homebrew/bin` might be a good option.)
->
-> Note that the binaries are symlinked into whatever directory `brew` is
-> installed into. (So if `brew` is symlinked into `/usr/local/bin`, then all
-> executables installed by `brew` will be symlinked into there as well.) This
-> can be useful if you want to install `brew` in your home directory, but
-> symlink binaries into `/usr/local/bin`.
+`fish/config.fish` prepends `~/.private/fish/functions` and
+`~/.private/fish/completions` to the fish search paths, and sources any
+`~/.private/fish/conf.d/*.fish` snippets at shell startup.
 
-#### Other Platforms
+To install: clone your private repo to `~/.private`, then run `./update` again.
 
-See <http://fishshell.com/>.
+## Secret management
+
+Secrets (API keys, tokens) live in `~/.private/fish/secrets.fish` and are not
+sourced in full at shell startup. Three fish functions provide on-demand access:
+
+<!-- markdownlint-disable MD013 -->
+
+| Function    | Usage                           | Description                                  |
+| ----------- | ------------------------------- | -------------------------------------------- |
+| `setsecret` | `setsecret NAME [NAME...]`      | Load secret(s) into the current shell        |
+| `getsecret` | `getsecret NAME`                | Print secret value(s) to stdout (array-safe) |
+| `envsecret` | `envsecret NAME [...] [--] CMD` | Run a command with secret(s) injected        |
+
+<!-- markdownlint-restore MD013 -->
+
+`envsecret` is the safest option for scripts: secrets are injected into the
+child process and never leak into the calling shell.
+
+A `~/.private/fish/conf.d/` snippet uses `setsecret --if-unset` to auto-load a
+small set of everyday secrets at shell startup.
+
+Run `setsecret --help`, `getsecret --help`, or `envsecret --help` for details.
+
+## Environment management
+
+[direnv](https://direnv.net/) handles per-project environment switching,
+configured via `~/.direnvrc` (symlinked from `home/.direnvrc`). To activate it
+in a project, create an `.envrc` file in the project root.
+
+### Node.js
+
+Node.js versions are managed by `bin/node-install` and direnv.
+
+```sh
+node-install 22        # installs latest 22.x into ~/.local/share/node/versions
+```
+
+Add to `.envrc`:
+
+```sh
+use node 22
+layout node            # adds node_modules/.bin to PATH
+```
+
+### Python
+
+Python environments use [uv](https://github.com/astral-sh/uv). Add to `.envrc`:
+
+```sh
+layout uv              # creates .venv if absent, activates it
+```
 
 ## Installation
 
 ```sh
-$ cd $HOME
-$ git clone https://github.com/ithinkihaveacat/dotfiles.git .dotfiles
-$ cd $HOME/.dotfiles
-# Pull from ro repo, push to rw
-$ git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
-$ ./update  # if macOS and brew in PATH
-$ PATH=~/local/homebrew/bin:/opt/homebrew/bin:$PATH ./update  # if not
-# On OS X, logout and login again
+cd $HOME
+git clone https://github.com/ithinkihaveacat/dotfiles.git .dotfiles
+cd .dotfiles
+git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
+./update
 ```
 
-Note that `update` may be destructive&#8212;if you have "unmanaged" files in
-locations such as `~/Library/KeyBindings` or `~/Library/Fonts`, they will be
-wiped out!
+After cloning `~/.private` (if available), run `./update` again so the overlay
+is applied.
 
-(Though it is safe to run `update` multiple times.)
+> **Note:** `update` may overwrite unmanaged files in locations such as
+> `~/Library/KeyBindings` and `~/Library/Fonts`. It is otherwise safe to run
+> multiple times.
 
-## Environment Management
+## Prerequisites
 
-This repository uses [direnv](https://direnv.net/) to automatically switch
-development environments when entering directories. This is configured via
-`~/.direnvrc` (linked from `home/.direnvrc`) and hooks in `fish/config.fish`.
+### git
 
-To configure a project, create an `.envrc` file in the project root.
+- **Ubuntu/Debian**: `sudo apt-get install git`
+- **macOS**: `xcode-select --install`
 
-### Node.js
+### fish
 
-Node.js versions are managed by the custom `node-install` script (found in
-`bin/`) and `direnv`.
+- **Ubuntu/Debian**: `sudo apt-get install fish`
+- **macOS**: `brew install fish`
+- **Other**: <https://fishshell.com/>
 
-1. **Install a Node.js version:**
+<!-- markdownlint-disable MD013 -->
 
-   ```sh
-   node-install 22  # Installs the latest 22.x release
-   ```
+> Standard apt packages lag significantly (Ubuntu 24.04: 3.7.0, Debian
+> bookworm/Raspberry Pi OS: 3.6.0, Debian trixie: 4.0.2). For fish 4.2+, install
+> from the OpenSUSE Build Service:
+>
+> ```bash
+> curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_Unstable/Release.key | \
+>   gpg --dearmor | sudo tee /usr/share/keyrings/fish-shell.gpg > /dev/null
+> echo 'deb [signed-by=/usr/share/keyrings/fish-shell.gpg] https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_Unstable/ /' | \
+>   sudo tee /etc/apt/sources.list.d/fish-shell.list
+> sudo apt update && sudo apt install -y fish
+> ```
 
-   This installs the version into `$HOME/.local/share/node/versions`.
+<!-- markdownlint-restore MD013 -->
 
-2. **Use it in a project:**
-
-   Add the following to your `.envrc`:
-
-   ```sh
-   use node 22
-   layout node
-   ```
-
-   `use node 22` selects the version, and `layout node` adds `node_modules/.bin`
-   to the PATH.
-
-### Python (via uv)
-
-Python environments are managed using [uv](https://github.com/astral-sh/uv).
-
-1. **Use it in a project:**
-
-   Add the following to your `.envrc`:
-
-   ```sh
-   layout uv
-   ```
-
-   This will automatically create a virtual environment (`.venv`) if one doesn't
-   exist (using `uv venv`) and activate it.
-
-### Environment Variables
-
-You can also use `.envrc` to set environment variables on a per-project basis.
-This is useful for API keys, configuration flags, or other project-specific
-settings.
-
-**Example:**
-
-```sh
-export GEMINI_API_KEY="your-api-key"
-export PORT=8080
-```
-
-When you enter the directory, these variables will be exported. When you leave,
-they will be unset.
-
-## Manual Changes
-
-### All Platforms
-
-#### [jed](http://www.jedsoft.org/jed/)
-
-If you have problems installing `jed` from packages, it can be installed
-manually via something like:
-
-```sh
-# slang
-wget http://www.jedsoft.org/snapshots/slang-pre2.3.1-40.tar.gz
-# extract
-./configure --prefix=$HOME/local \
-  --libdir=$HOME/local/homebrew/lib \
-  --includedir=$HOME/local/homebrew/include \
-  --without-x --without-png
-make
-make install
-
-# jed
-wget http://www.jedsoft.org/snapshots/jed-pre0.99.20-111.tar.gz
-# extract
-./configure --prefix=$HOME/local \
-  --libdir=$HOME/local/homebrew/lib \
-  --includedir=$HOME/local/homebrew/include \
-  --without-x
-make
-make install
-```
+## Platform-specific setup
 
 ### macOS
 
-(See [this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx)
-for some tips on how to change some of these settings automatically.)
+- **Terminal:** Import `etc/Solarized Dark.terminal` and set it as the default
+  profile.
+- **Keyboard:** System Preferences > Keyboard > Shortcuts > Services > File and
+  Folders: enable "New Terminal at Folder".
+- **Text Replacements:** If not shared via iCloud, restore from
+  `etc/Text Replacements.plist` — see
+  [Back up and share text replacements on Mac](https://support.apple.com/en-gb/guide/mac-help/mchl2a7bd795/mac).
+- **Lock Screen:** Add to Menu Bar via Keychain Access preferences.
+- **Volume:** Add to Menu Bar via Control Center > Sound > Always Show in Menu
+  Bar.
+- **Time Machine:** Disable local snapshots: `sudo tmutil disablelocal`
+- **Hot Corners:** Disable via System Preferences.
+- **Fonts:** See <https://typography.guru/journal/awesome-catalina-fonts/>.
+- **iA Writer theme:** <https://ia.net/writer/templates/>
+- **Network Link Conditioner** (for simulating degraded network conditions):
+  <https://developer.apple.com/download/more/?q=Additional%20Tools>
 
-#### Configure Terminal
-
-Import the [`etc/Solarized Dark.terminal`](etc/Solarized Dark.terminal) profile,
-and set it to the "default". (See
-[this script](https://github.com/mathiasbynens/dotfiles/blob/master/.osx) for
-some information on how to do this automatically.)
-
-#### Configure keyboard
-
-- Open System Preferences > Keyboard
-  - Open Shortcuts > Services > File and Folders, enable "New Terminal at
-    Folder".
-  - Open Text, disable "Correct spelling automatically".
-
-#### Configure Text Replacements
-
-If signed into the same iCloud account, these should be shared automatically.
-
-Otherwise, see
-[Back up and share text replacements on Mac](https://support.apple.com/en-gb/guide/mac-help/mchl2a7bd795/mac).
-Text replacements themselves are stored in [`etc/Text
-Replacements.plist`](etc/Text Replacements.plist)
-
-#### Add Lock Screen option to Menu Bar
-
-Configure via "Keychain Access" preferences.
-
-#### Add Volume Controls to Menu Bar
-
-Control Center | Sound | Always Show in Menu Bar.
-
-#### Disable local Time Machine backups
+### Ubuntu
 
 ```sh
-sudo tmutil disablelocal
-```
-
-#### Install "Network Link Conditioner"
-
-<https://developer.apple.com/download/more/?q=Additional%20Tools>
-
-This provides a way to simulate degraded network conditions
-([more info](http://nshipster.com/network-link-conditioner/)).
-
-#### Install GitHub theme for iA Writer
-
-See <https://ia.net/writer/templates/>.
-
-#### Disable Hot Corners
-
-Via System Preferences.
-
-#### Install optional fonts
-
-See <https://typography.guru/journal/awesome-catalina-fonts/>.
-
-### Ubuntu (Additional)
-
-#### Emacs Keybindings
-
-Get emacs keybindings across all gtk apps
-([source](http://superuser.com/a/348609)):
-
-```sh
+# Emacs keybindings across GTK apps
 gsettings set org.gnome.desktop.interface gtk-key-theme "Emacs"
 ```
 
-#### Compose Key
+**Compose key:** Set to Caps Lock via Settings > Keyboard. Enables e.g. Caps
+Lock + `---` → em dash.
 
-Set the [compose key](https://help.ubuntu.com/community/ComposeKey) to Caps Lock
-so that you can e.g. hold down Caps Lock and type `---` to get an mdash.
+### Raspberry Pi
 
-#### Fonts
+Complete setup sequence for a fresh Raspberry Pi OS install.
 
-Open "System Settings", change the fonts as below:
+1. Use the [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to write
+   the OS to an SD card or SSD.
+   - For a headless install: Raspberry Pi OS (other) > Raspberry Pi OS Lite.
+   - In OS customisation: enable SSH (Remote access section).
+   - (Optional) Configure Wi-Fi.
 
-![Fonts](https://i.imgur.com/oBF07hH.png)
+1. SSH in: `ssh mjs@lil.local` (substitute your username and hostname).
+   - (Optional) If using Ghostty, copy the terminfo from your local machine:
+     `infocmp -x xterm-ghostty | ssh mjs@lil.local -- tic -x -`
 
-#### Terminal
+1. Update the OS:
 
-##### Change Colour Scheme
-
-Run the following `gconftool` commands to set
-[Solarized](http://ethanschoonover.com/solarized) colours correctly:
-
-<http://stackoverflow.com/a/7734960>
-
-##### Change Font
-
-Use "Profile Preferences" to change the default font.
-
-##### Make Alt Available
-
-Open "Keyboard Shortcuts" and unselect "Enable menu access keys". (Otherwise Alt
-is used for accessing the menu.)
-
-##### Change Size
-
-Edit "Default" profile, change custom default terminal size to 100 columns, 60
-rows.
-
-### Raspberry Pi OS
-
-1. Use the Raspberry Pi Imager <https://www.raspberrypi.com/software/> to
-   install the OS on an SD card or external SSD.
-   1. For a "headless" version (i.e. without desktop apps), go to "Raspberry Pi
-      OS (other)" and select "Raspberry Pi OS Lite".
-   1. In the OS customization settings, enable SSH access in the "Remote access"
-      section.
-   1. (Optional) Configure Wi-Fi in the "Wi-Fi" section.
-1. SSH into the machine: `ssh mjs@lil.local` (where `mjs` is the username and
-   `lil` is the hostname provided in the "User" section of the imager).
-   1. (Optional) If using Ghostty, copy the terminfo (run from your local
-      machine): `infocmp -x xterm-ghostty | ssh mjs@lil.local -- tic -x -`
-1. Update the OS: `sudo apt-get update && sudo apt-get upgrade -y`
-   1. If `/var/run/reboot-required` exists (created if a package update requires
-      a reboot), reboot: `sudo reboot`.
-1. Install `fish` from the OpenSUSE Build Service (for the latest version):
-
-   <!-- markdownlint-disable MD013 -->
-
-   ```bash
-   curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_Unstable/Release.key | \
-     gpg --dearmor | sudo tee /usr/share/keyrings/fish-shell.gpg > /dev/null
-   echo 'deb [signed-by=/usr/share/keyrings/fish-shell.gpg] https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_Unstable/ /' | \
-     sudo tee /etc/apt/sources.list.d/fish-shell.list
-   sudo apt update && sudo apt install -y fish
+   ```sh
+   sudo apt-get update && sudo apt-get upgrade -y
    ```
 
-   <!-- markdownlint-restore MD013 -->
+   Reboot if `/var/run/reboot-required` exists: `sudo reboot`
 
-   Alternatively, install the (older) version from the Debian repos:
-   `sudo apt-get install fish`.
+1. Install fish (see [Prerequisites](#fish) for the OpenSUSE Build Service
+   instructions to get fish 4.2+, or use the older distro version):
 
-1. Install `git`: `sudo apt-get install git`.
-1. Install `tailscale`: `curl -fsSL https://tailscale.com/install.sh | sh`
-   <https://tailscale.com/download/linux>
-   1. Log in to Tailscale: `sudo tailscale up`
-1. (Optional) Install `nodejs` and `npm`: `sudo apt-get install nodejs npm`.
-   Note that these may be older versions; for newer versions, see the
-   [Node.js](#nodejs) section.
-1. (Optional) Disable WiFi and Bluetooth: add `dtoverlay=disable-wifi` and
-   `dtoverlay=disable-bt` on separate lines under the `[all]` section in
-   `/boot/firmware/config.txt`. (See the
-   [overlays README](https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/overlays/README)
-   for more info.)
-1. (Optional) Change the hostname: edit `/etc/hostname` and `/etc/hosts`,
-   replacing the old hostname with the new one in both files.
+   ```sh
+   sudo apt-get install fish
+   ```
 
-A reboot is recommended after performing any of the optional configuration steps
-above (such as disabling WiFi/Bluetooth or changing the hostname) to ensure that
-the changes are consistently applied across the system: `sudo reboot`.
+1. Install git: `sudo apt-get install git`
 
-Once complete, the Raspberry Pi is ready for user configuration. Proceed to the
-[Installation](#installation) section to clone these dotfiles and set up your
-environment.
+1. Install Tailscale: `curl -fsSL https://tailscale.com/install.sh | sh` then
+   `sudo tailscale up`
 
-Recommendation: use VS Code's
-[Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh)
-extension to edit files.
+1. (Optional) Install Node.js and npm: `sudo apt-get install nodejs npm` (for
+   newer versions see [Node.js](#nodejs)).
 
-## Manually Installing Binaries?
+1. (Optional) Disable WiFi and Bluetooth: add these lines under `[all]` in
+   `/boot/firmware/config.txt`:
 
-Put them in `~/local/bin`, and man pages (if you have them) in
-`~/local/share/man/man?`. (`man --path` lists the man page search path.)
+   ```text
+   dtoverlay=disable-wifi
+   dtoverlay=disable-bt
+   ```
+
+1. (Optional) Change hostname: edit `/etc/hostname` and `/etc/hosts`.
+
+1. Reboot after any optional steps above: `sudo reboot`
+
+Once complete, proceed to [Installation](#installation).
+
+> **Tip:** Use VS Code's
+> [Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh)
+> extension to edit files on the Pi.
+
+## Local binaries
+
+Put manually installed binaries in `~/.local/bin`.
 
 ## Author
 
