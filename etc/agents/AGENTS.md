@@ -6,7 +6,7 @@
 >
 > Agent Skills contain specialized, highly-curated workflows for this
 > environment. The available skills have been carefully selected to be valuable
-> to your tasks.
+> to your tasks. You should make liberal use of these installed skills.
 >
 > When a task aligns with a skill's description, OR if you are unsure if a skill
 > is relevant, you MUST investigate it by reading its `SKILL.md` file. You are
