@@ -24,14 +24,23 @@ and various other tools.
 `update` symlinks `home/.*` into `$HOME`, installs packages, and wires up
 tool-specific config. It is safe to run multiple times.
 
-## Companion repository
+## Private Companion Repositories
 
-A private companion repository can optionally be cloned to `~/.private`. It uses
-the same directory layout as this one, and `update` automatically overlays it —
-files in `~/.private` take precedence on name collision. This repository works
-fine without it.
+**SECURITY NOTE:** The `.dotfiles` repository is public. To prevent the leakage
+of sensitive information (such as API keys, corporate tool configurations, or
+internal pathnames), two private companion repositories can optionally be
+cloned: `~/.private` and `~/.corp`.
 
-Expected layout:
+This architecture is specifically designed to help both humans and AI agents
+understand what goes where and ensures private information remains strictly out
+of the public repository.
+
+These private repositories use the same directory layout as this one. The
+`update` script automatically overlays them in this order: `.dotfiles` ->
+`.private` -> `.corp`. Files in the private repositories take precedence on name
+collision. This repository works fine without them.
+
+Expected layout for `.private` (or `.corp`):
 
 ```text
 .private/
@@ -45,11 +54,12 @@ Expected layout:
 └── skills/           # Agent skills that shadow ~/.dotfiles/skills/ by name
 ```
 
-`fish/config.fish` prepends `~/.private/fish/functions` and
-`~/.private/fish/completions` to the fish search paths, and sources any
-`~/.private/fish/conf.d/*.fish` snippets at shell startup.
+`fish/config.fish` prepends `~/.private/fish/functions` (and `.corp`
+equivalents) and `~/.private/fish/completions` to the fish search paths, and
+sources any `~/.private/fish/conf.d/*.fish` snippets at shell startup.
 
-To install: clone your private repo to `~/.private`, then run `./update` again.
+To install: clone your private repos to `~/.private` and/or `~/.corp`, then run
+`./update` again.
 
 ## Secret management
 
@@ -113,8 +123,8 @@ git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
 ./update
 ```
 
-After cloning `~/.private` (if available), run `./update` again so the overlay
-is applied.
+After cloning `~/.private` and/or `~/.corp` (if available), run `./update` again
+so the overlay is applied.
 
 > **Note:** `update` may overwrite unmanaged files in locations such as
 > `~/Library/KeyBindings` and `~/Library/Fonts`. It is otherwise safe to run
