@@ -91,22 +91,32 @@ SRCDIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # (e.g., cloning to /tmp/fake-home/.dotfiles) and flexibility for non-standard locations.
 DSTDIR="$(cd -P "$(dirname "${SRCDIR}")" && pwd)"
 
+# Source roots in overlay order: ~/.dotfiles first, ~/.private second so its files
+# win on conflict. Only the home/ and skills/ trees are overlaid; everything else
+# (brew, defaults, fontconfig, etc.) remains scoped to ~/.dotfiles.
+SRCDIRS=("$SRCDIR")
+if [ -d "$DSTDIR/.private" ]; then
+  SRCDIRS+=("$DSTDIR/.private")
+fi
+
 # "dotfiles" that will end up in $HOME
 
-for f in "$SRCDIR"/home/.*; do
-
-  if [ -d "$f" ]; then
-    continue
-  fi
-
-  if [ "$(basename "$f")" = ".DS_Store" ]; then
-    continue
-  fi
-
-  if [ ! -L "$DSTDIR/$(basename "$f")" ]; then
+link_home_dotfiles() {
+  local src=$1
+  [ -d "$src/home" ] || return 0
+  for f in "$src"/home/.*; do
+    if [ -d "$f" ]; then
+      continue
+    fi
+    if [ "$(basename "$f")" = ".DS_Store" ]; then
+      continue
+    fi
     x ln -sf "$f" "$DSTDIR"
-  fi
+  done
+}
 
+for src in "${SRCDIRS[@]}"; do
+  link_home_dotfiles "$src"
 done
 
 # Remove dangling symlinks
@@ -647,7 +657,19 @@ if [ -f "$SRCDIR/etc/agents/AGENTS.md" ]; then
   x ln -sf "$SRCDIR/etc/agents/AGENTS.md" "$HOME/.claude/CLAUDE.md"
 fi
 
-if [ -d "$SRCDIR/skills" ]; then
+# Skills overlay: each skills/ subdir from any source root is symlinked into
+# ~/.agents/skills and ~/.claude/skills. ~/.private's skills (if any) are
+# linked second so they win on name collision.
+
+has_skills=0
+for src in "${SRCDIRS[@]}"; do
+  if [ -d "$src/skills" ]; then
+    has_skills=1
+    break
+  fi
+done
+
+if [ "$has_skills" = 1 ]; then
   # Each skills directory must be real so manual skills can be added alongside.
   for skills_parent in "$HOME/.agents" "$HOME/.claude"; do
     xmkdir "$skills_parent"
@@ -655,16 +677,23 @@ if [ -d "$SRCDIR/skills" ]; then
       x rm -rf "$skills_parent/skills"
     fi
     xmkdir "$skills_parent/skills"
+  done
 
-    for skill_dir in "$SRCDIR"/skills/*; do
-      if [ -d "$skill_dir" ]; then
-        skill_name=$(basename "$skill_dir")
-        x rm -rf "$skills_parent/skills/$skill_name"
-        x ln -sf "$skill_dir" "$skills_parent/skills/$skill_name"
-      fi
+  for src in "${SRCDIRS[@]}"; do
+    [ -d "$src/skills" ] || continue
+    for skills_parent in "$HOME/.agents" "$HOME/.claude"; do
+      for skill_dir in "$src"/skills/*; do
+        if [ -d "$skill_dir" ]; then
+          skill_name=$(basename "$skill_dir")
+          x rm -rf "$skills_parent/skills/$skill_name"
+          x ln -sf "$skill_dir" "$skills_parent/skills/$skill_name"
+        fi
+      done
     done
+  done
 
-    # Remove dangling symlinks
+  # Remove dangling symlinks (single pass after all sources contributed)
+  for skills_parent in "$HOME/.agents" "$HOME/.claude"; do
     for f in "$skills_parent/skills"/*; do
       if [ -L "$f" ] && [ ! -e "$f" ]; then
         x rm "$f"

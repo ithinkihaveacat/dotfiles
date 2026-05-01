@@ -173,8 +173,8 @@ set -x ADB_VENDOR_KEYS $HOME/.local/share/adb-security/adb # go/wear-productivit
 
 # acid
 
-if test -r ~/.ssh/etc/acid
-    set -x ACID_STARTUP_SCRIPT_PATH ~/.ssh/etc/acid
+if test -r ~/.private/etc/acid
+    set -x ACID_STARTUP_SCRIPT_PATH ~/.private/etc/acid
 end
 
 # mosh
@@ -225,9 +225,21 @@ type -q pbpaste; or alias pbpaste fish_clipboard_paste
 
 sourceif $HOME/.config/fish/solarized.fish
 
-sourceif $HOME/.ssh/etc/fish/envrc
-sourceif $HOME/.ssh/etc/fish/functions.fish
-sourceif $HOME/.ssh/etc/fish/config.fish
+# Private overlay: lazy-load functions/completions and run conf.d snippets.
+# Functions in ~/.private/fish/functions/ autoload on first invocation
+# (e.g. gemini-gfg, cloudtop). conf.d/*.fish runs at every shell startup
+# and is the right place for boot-time setsecret calls.
+if test -d $HOME/.private/fish/functions
+    set -p fish_function_path $HOME/.private/fish/functions
+end
+if test -d $HOME/.private/fish/completions
+    set -p fish_complete_path $HOME/.private/fish/completions
+end
+if test -d $HOME/.private/fish/conf.d
+    for f in $HOME/.private/fish/conf.d/*.fish
+        sourceif $f
+    end
+end
 
 function fish_prompt_notify --on-event fish_prompt
     # If commands takes longer than 10 seconds, notify user on completion if Terminal
