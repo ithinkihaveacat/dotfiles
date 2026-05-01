@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--dry-run]
+
+Strip Co-Authored-By trailers from unpushed commits on the current branch.
+
+Unpushed commits are those ahead of the upstream tracking branch. If no
+tracking branch is configured, falls back to origin/<branch> then
+upstream/<branch>.
+
+Options:
+  --dry-run   Show which commits would be modified without changing anything
+  --help      Display this help message and exit
+
+Examples:
+  $(basename "$0")
+  $(basename "$0") --dry-run
+EOF
+  exit 0
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$(basename "$0"): $1 not found" >&2
+    exit 127
+  }
+}
+
+require git
+
+dry_run=0
+for arg in "$@"; do
+  case "$arg" in
+    --help) usage ;;
+    --dry-run) dry_run=1 ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $arg" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      echo "$(basename "$0"): unexpected argument: $arg" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+done
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+  echo "$(basename "$0"): not on a branch" >&2
+  exit 1
+fi
+
+if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+  echo "$(basename "$0"): working tree has uncommitted changes; commit or stash them first" >&2
+  exit 1
+fi
+
+# Find the base commit — last commit shared with a remote
+base=""
+if upstream=$(git rev-parse --abbrev-ref "@{u}" 2>/dev/null); then
+  base=$(git rev-parse "$upstream")
+else
+  for remote in origin upstream; do
+    if git rev-parse --verify "$remote/$branch" >/dev/null 2>&1; then
+      base=$(git rev-parse "$remote/$branch")
+      break
+    fi
+  done
+fi
+
+if [ -z "$base" ]; then
+  echo "$(basename "$0"): no tracking branch found for '$branch'" >&2
+  echo "Set one with: git branch --set-upstream-to <remote>/<branch>" >&2
+  exit 1
+fi
+
+range="$base..HEAD"
+
+# Find commits that contain Co-Authored-By trailers
+matches=()
+while IFS= read -r hash; do
+  if git log -1 --format="%B" "$hash" | grep -q "^Co-Authored-By:"; then
+    matches+=("$hash")
+  fi
+done < <(git log --format="%H" "$range")
+
+if [ "${#matches[@]}" -eq 0 ]; then
+  echo "$(basename "$0"): no Co-Authored-By trailers found in unpushed commits"
+  exit 0
+fi
+
+if [ "$dry_run" -eq 1 ]; then
+  echo "Would strip Co-Authored-By from ${#matches[@]} commit(s):"
+  for hash in "${matches[@]}"; do
+    echo "  ${hash:0:12} $(git log -1 --format="%s" "$hash")"
+  done
+  exit 0
+fi
+
+# Write the message filter to a temp file to avoid shell quoting issues
+filter=$(mktemp /tmp/git-commit-clean.XXXXXX)
+trap 'rm -f "$filter"' EXIT
+cat >"$filter" <<'FILTER'
+#!/bin/sh
+grep -v "^Co-Authored-By:" | \
+  awk '{lines[NR]=$0} END{n=NR; while(n>0 && lines[n]~/^[[:space:]]*$/) n--; for(i=1;i<=n;i++) print lines[i]}'
+FILTER
+chmod +x "$filter"
+
+git filter-branch --force --msg-filter "$filter" -- "$range"
+
+# Remove the backup ref left by filter-branch
+git update-ref -d "refs/original/refs/heads/$branch" 2>/dev/null || true
+
+echo "Stripped Co-Authored-By from ${#matches[@]} commit(s)."

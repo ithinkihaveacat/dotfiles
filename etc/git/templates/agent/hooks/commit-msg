@@ -1,0 +1,73 @@
+#!/bin/sh
+# git-hooks-agent: commit-msg
+# Strips Co-Authored-By trailers and enforces commit message formatting.
+
+msg_file="$1"
+
+# Strip Co-Authored-By lines and any trailing blank lines they leave behind,
+# preserving git's comment lines (lines beginning with #).
+tmpfile=$(mktemp "${msg_file}.XXXXXX") || {
+  echo "commit-msg: mktemp failed" >&2
+  exit 1
+}
+if ! awk '
+  /^#/               { comments[++nc] = $0; next }
+  /^Co-Authored-By:/ { next }
+                     { lines[++nl] = $0 }
+  END {
+    while (nl > 0 && lines[nl] ~ /^[[:space:]]*$/) nl--
+    for (i = 1; i <= nl; i++) print lines[i]
+    for (i = 1; i <= nc; i++) print comments[i]
+  }
+' "$msg_file" >"$tmpfile"; then
+  rm -f "$tmpfile"
+  echo "commit-msg: failed to rewrite message file" >&2
+  exit 1
+fi
+mv "$tmpfile" "$msg_file"
+
+# Extract message content (without git's comment lines) for validation.
+cleaned=$(grep -v "^#" "$msg_file")
+subject=$(printf '%s\n' "$cleaned" | head -1)
+
+# Skip format checks for auto-generated commit messages.
+case "$subject" in
+  Merge\ * | Revert\ * | fixup!\ * | squash!\ *) exit 0 ;;
+esac
+
+# Subject must follow conventional commits: type(scope)!: description
+if ! printf '%s\n' "$subject" | grep -qE '^[a-z][a-z0-9-]*(\([^)]+\))?!?: .+'; then
+  echo "commit-msg: subject must follow 'type(scope): description' format" >&2
+  exit 1
+fi
+
+# Subject line must not exceed 50 characters.
+subj_len=${#subject}
+if [ "$subj_len" -gt 50 ]; then
+  echo "commit-msg: subject is $subj_len characters (limit: 50)" >&2
+  exit 1
+fi
+
+# If the message has a body, line 2 must be blank.
+line_count=$(printf '%s\n' "$cleaned" | wc -l | tr -d ' ')
+if [ "$line_count" -gt 1 ]; then
+  line2=$(printf '%s\n' "$cleaned" | sed -n '2p')
+  if [ -n "$line2" ]; then
+    echo "commit-msg: line 2 must be blank (separates subject from body)" >&2
+    exit 1
+  fi
+fi
+
+# Body and footer lines must not exceed 72 characters.
+err=$(printf '%s\n' "$cleaned" | awk '
+  NR > 2 && length > 72 {
+    printf "line %d is %d characters (limit: 72)", NR, length
+    exit
+  }
+')
+if [ -n "$err" ]; then
+  echo "commit-msg: $err" >&2
+  exit 1
+fi
+
+exit 0
