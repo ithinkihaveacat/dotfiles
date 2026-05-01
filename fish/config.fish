@@ -241,6 +241,19 @@ if test -d $HOME/.private/fish/conf.d
     end
 end
 
+# Corp overlay: lazy-load functions/completions and run conf.d snippets.
+if test -d $HOME/.corp/fish/functions
+    set -p fish_function_path $HOME/.corp/fish/functions
+end
+if test -d $HOME/.corp/fish/completions
+    set -p fish_complete_path $HOME/.corp/fish/completions
+end
+if test -d $HOME/.corp/fish/conf.d
+    for f in $HOME/.corp/fish/conf.d/*.fish
+        sourceif $f
+    end
+end
+
 function fish_prompt_notify --on-event fish_prompt
     # If commands takes longer than 10 seconds, notify user on completion if Terminal
     # in background. (Otherwise e.g. reading man pages for longer than 10 seconds will
