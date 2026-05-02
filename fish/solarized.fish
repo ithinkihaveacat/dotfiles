@@ -2,7 +2,7 @@
 
 # Use these settings if you've applied a Solarized theme to your terminal (for
 # example, if "ls -G" produces Solarized output). i.e. if "blue" is #268bd2, not
-# whatever the default is. (See "../etc/Solarized Dark.terminal" for OS X.)
+# whatever the default is. (See "../etc/macos/Solarized Dark.terminal".)
 
 set -l base03 "--bold black"
 set -l base02 black

@@ -171,12 +171,6 @@ end
 #set -x PIDCAT_IGNORED_TAGS (string join ";" $LOGCAT_IGNORED_TAGS)
 set -x ADB_VENDOR_KEYS $HOME/.local/share/adb-security/adb # go/wear-productivity-adb#adb-vendor-keys
 
-# acid
-
-if test -r ~/.private/etc/acid
-    set -x ACID_STARTUP_SCRIPT_PATH ~/.private/etc/acid
-end
-
 # mosh
 
 set -x MOSH_TITLE_NOPREFIX 1

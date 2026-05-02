@@ -36,9 +36,9 @@ understand what goes where and ensures private information remains strictly out
 of the public repository.
 
 These private repositories use the same directory layout as this one. The
-`update` script automatically overlays them in this order: `.dotfiles` ->
-`.private` -> `.corp`. Files in the private repositories take precedence on name
-collision. This repository works fine without them.
+`update` script automatically overlays `home/`, `etc/`, and `skills/` in this
+order: `.dotfiles` -> `.private` -> `.corp`. Files in later repositories take
+precedence on name collision. This repository works fine without them.
 
 Expected layout for `.private` (or `.corp`):
 
@@ -50,13 +50,18 @@ Expected layout for `.private` (or `.corp`):
 │   ├── functions/    # Functions prepended to fish_function_path
 │   └── secrets.fish  # API keys and tokens (chmod 600)
 ├── home/             # Dotfiles symlinked into $HOME (e.g. .gitconfig.local)
-├── etc/              # Tool-specific config (e.g. etc/git/gitconfig.local)
+├── etc/              # Tool-specific config that can override public etc/
 └── skills/           # Agent skills that shadow ~/.dotfiles/skills/ by name
 ```
 
 `fish/config.fish` prepends `~/.private/fish/functions` (and `.corp`
 equivalents) and `~/.private/fish/completions` to the fish search paths, and
 sources any `~/.private/fish/conf.d/*.fish` snippets at shell startup.
+
+For `etc/`, managed files and directories use the highest-priority matching
+path. For example, `~/.corp/etc/code/settings.json` overrides
+`~/.private/etc/code/settings.json`, which overrides
+`~/.dotfiles/etc/code/settings.json`.
 
 To install: clone your private repos to `~/.private` and/or `~/.corp`, then run
 `./update` again.
@@ -127,8 +132,7 @@ After cloning `~/.private` and/or `~/.corp` (if available), run `./update` again
 so the overlay is applied.
 
 > **Note:** `update` may overwrite unmanaged files in locations such as
-> `~/Library/KeyBindings` and `~/Library/Fonts`. It is otherwise safe to run
-> multiple times.
+> `~/Library/KeyBindings`. It is otherwise safe to run multiple times.
 
 ## Prerequisites
 
@@ -163,12 +167,12 @@ so the overlay is applied.
 
 ### macOS
 
-- **Terminal:** Import `etc/Solarized Dark.terminal` and set it as the default
-  profile.
+- **Terminal:** Import `etc/macos/Solarized Dark.terminal` and set it as the
+  default profile.
 - **Keyboard:** System Preferences > Keyboard > Shortcuts > Services > File and
   Folders: enable "New Terminal at Folder".
 - **Text Replacements:** If not shared via iCloud, restore from
-  `etc/Text Replacements.plist` — see
+  `etc/macos/Text Replacements.plist` — see
   [Back up and share text replacements on Mac](https://support.apple.com/en-gb/guide/mac-help/mchl2a7bd795/mac).
 - **Lock Screen:** Add to Menu Bar via Keychain Access preferences.
 - **Volume:** Add to Menu Bar via Control Center > Sound > Always Show in Menu

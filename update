@@ -91,9 +91,8 @@ SRCDIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # (e.g., cloning to /tmp/fake-home/.dotfiles) and flexibility for non-standard locations.
 DSTDIR="$(cd -P "$(dirname "${SRCDIR}")" && pwd)"
 
-# Source roots in overlay order: ~/.dotfiles first, ~/.private second so its files
-# win on conflict. Only the home/ and skills/ trees are overlaid; everything else
-# (brew, defaults, fontconfig, etc.) remains scoped to ~/.dotfiles.
+# Source roots in overlay order: ~/.dotfiles first, ~/.private second, ~/.corp
+# last so later roots win on conflict.
 SRCDIRS=("$SRCDIR")
 if [ -d "$DSTDIR/.private" ]; then
   SRCDIRS+=("$DSTDIR/.private")
@@ -101,6 +100,52 @@ fi
 if [ -d "$DSTDIR/.corp" ]; then
   SRCDIRS+=("$DSTDIR/.corp")
 fi
+
+overlay_path() {
+  local rel=$1
+  local i
+  local candidate
+
+  for ((i = ${#SRCDIRS[@]} - 1; i >= 0; i--)); do
+    candidate="${SRCDIRS[$i]}/$rel"
+    if [ -e "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+link_overlay_files() {
+  local rel=$1
+  local dst=$2
+  local src
+  local f
+  local target
+
+  for src in "${SRCDIRS[@]}"; do
+    [ -d "$src/$rel" ] || continue
+    for f in "$src/$rel"/*; do
+      [ -e "$f" ] || continue
+      target="$dst/$(basename "$f")"
+      x rm -rf "$target"
+      x ln -sf "$f" "$target"
+    done
+  done
+}
+
+link_overlay_path() {
+  local rel=$1
+  local dst=$2
+  local src
+
+  src=$(overlay_path "$rel") || return 0
+  if [ ! -L "$dst" ] || [ "$(readlink "$dst")" != "$src" ]; then
+    x rm -rf "$dst"
+    x ln -s "$src" "$dst"
+  fi
+}
 
 # "dotfiles" that will end up in $HOME
 
@@ -185,7 +230,10 @@ case "$PLATFORM" in
     # DefaultKeyBinding.dict if it's symlinked, or is in a symlinked directory,
     # so rsync instead of symlink... http://apple.stackexchange.com/a/53110/890
     # rdar://12429092
-    x rsync -a --delete "$SRCDIR/etc/KeyBindings" "$DSTDIR/Library"
+    keybindings_dir=$(overlay_path "etc/macos/KeyBindings") || keybindings_dir=""
+    if [ -n "$keybindings_dir" ]; then
+      x rsync -a --delete "$keybindings_dir/" "$DSTDIR/Library/KeyBindings/"
+    fi
 
     # https://github.com/mathiasbynens/dotfiles/blob/master/.macos
     # https://github.com/hjuutilainen/dotfiles/blob/master/bin/osx-user-defaults.sh
@@ -327,16 +375,10 @@ case "$PLATFORM" in
     fi
 
     # https://github.com/altercation/ethanschoonover.com/tree/master/projects/solarized/apple-colorpalette-solarized
-    if [ ! -f "$DSTDIR/Library/Colors/Solarized.clr" ]; then
-      x cp "$SRCDIR/etc/Solarized.clr" "$DSTDIR/Library/Colors"
+    solarized_clr=$(overlay_path "etc/macos/Solarized.clr") || solarized_clr=""
+    if [ -n "$solarized_clr" ]; then
+      x cp "$solarized_clr" "$DSTDIR/Library/Colors/Solarized.clr"
     fi
-    # https://plus.google.com/+RomanNurik/posts/4VwE8RrXsGd
-    if [ ! -f "$DSTDIR/Library/Colors/Material-Design.clr" ]; then
-      x cp "$SRCDIR/etc/Material-Design.clr" "$DSTDIR/Library/Colors"
-    fi
-
-    # Let's just assume Services is special and copy instead of symlink...
-    x rsync -a --delete "$SRCDIR/etc/Services/" "$DSTDIR/Library/Services/"
 
     if [[ -x /System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport ]]; then
       x ln -sf /System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport "$BINDIR"
@@ -356,19 +398,6 @@ case "$PLATFORM" in
     ;;
 
 esac
-
-# Fonts
-
-if [ ! -L "$HOME/.config/fontconfig" ]; then
-
-  heading "fonts"
-  if [ -d "$HOME/.config/fontconfig" ]; then
-    x rm -rf "$HOME/.config/fontconfig"
-  fi
-  xmkdir "$HOME/.config"
-  x ln -s "$SRCDIR/etc/fontconfig" "$HOME/.config/fontconfig"
-
-fi
 
 # fish
 
@@ -405,11 +434,8 @@ if exists shpool; then
 
   heading "shpool"
 
-  if [ ! -L "$HOME/.config/shpool/config.toml" ]; then
-    xmkdir "$HOME/.config/shpool"
-    x rm -rf "$HOME/.config/shpool/config.toml"
-    x ln -s "$SRCDIR/etc/shpool/config.toml" "$HOME/.config/shpool/config.toml"
-  fi
+  xmkdir "$HOME/.config/shpool"
+  link_overlay_path "etc/shpool/config.toml" "$HOME/.config/shpool/config.toml"
 
 fi
 
@@ -419,10 +445,7 @@ if exists starship; then
 
   heading "starship"
 
-  if [ ! -L "$HOME/.config/starship.toml" ]; then
-    x rm -rf "$HOME/.config/starship.toml"
-    x ln -s "$SRCDIR/etc/starship/starship.toml" "$HOME/.config/starship.toml"
-  fi
+  link_overlay_path "etc/starship/starship.toml" "$HOME/.config/starship.toml"
 
 fi
 
@@ -432,11 +455,8 @@ if exists ghostty; then
 
   heading "ghostty"
 
-  if [ ! -L "$HOME/.config/ghostty/config" ]; then
-    xmkdir "$HOME/.config/ghostty"
-    x rm -rf "$HOME/.config/ghostty/config"
-    x ln -s "$SRCDIR/etc/ghostty/config" "$HOME/.config/ghostty/config"
-  fi
+  xmkdir "$HOME/.config/ghostty"
+  link_overlay_path "etc/ghostty/config" "$HOME/.config/ghostty/config"
 
 fi
 
@@ -581,14 +601,7 @@ if exists code; then
 
   xmkdir "$DST"
 
-  for f in "$SRCDIR"/etc/code/*; do
-
-    if [ ! -L "$DST/$(basename "$f")" ]; then
-      x rm -rf "$DST/$(basename "$f")"
-      x ln -sf "$f" "$DST"
-    fi
-
-  done
+  link_overlay_files "etc/code" "$DST"
 
   # Let's try Settings Sync for now https://code.visualstudio.com/docs/editor/settings-sync
 
@@ -650,14 +663,15 @@ fi
 heading "agents"
 
 # Symlink user-supplied context for all agents
-if [ -f "$SRCDIR/etc/agents/AGENTS.md" ]; then
+agents_context=$(overlay_path "etc/agents/AGENTS.md") || agents_context=""
+if [ -n "$agents_context" ]; then
   xmkdir "$HOME/.codex"
   xmkdir "$HOME/.gemini"
   xmkdir "$HOME/.claude"
 
-  x ln -sf "$SRCDIR/etc/agents/AGENTS.md" "$HOME/.codex/AGENTS.md"
-  x ln -sf "$SRCDIR/etc/agents/AGENTS.md" "$HOME/.gemini/GEMINI.md"
-  x ln -sf "$SRCDIR/etc/agents/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+  x ln -sf "$agents_context" "$HOME/.codex/AGENTS.md"
+  x ln -sf "$agents_context" "$HOME/.gemini/GEMINI.md"
+  x ln -sf "$agents_context" "$HOME/.claude/CLAUDE.md"
 fi
 
 # Skills overlay: each skills/ subdir from any source root is symlinked into
@@ -719,4 +733,3 @@ if [ -x "$DSTDIR/.corp/update" ]; then
   heading "corp update"
   "$DSTDIR/.corp/update"
 fi
-
