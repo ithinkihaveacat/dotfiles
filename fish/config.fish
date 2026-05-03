@@ -268,6 +268,12 @@ end
 #     starship init fish | source
 # end
 
+# ghostty
+
 if set -q GHOSTTY_RESOURCES_DIR
     source $GHOSTTY_RESOURCES_DIR/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish
 end
+
+# uv
+
+set -x UV_EXCLUDE_NEWER "7 days"
