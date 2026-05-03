@@ -26,18 +26,6 @@ end
 # entries to avoid duplicates. See
 # https://github.com/fish-shell/fish-shell/issues/527#issuecomment-253775156
 
-function add_path
-    for p in $argv
-        test -d $p; and fish_add_path -gPm $p
-    end
-end
-
-function sourceif
-    if test -r $argv[1]
-        source $argv[1]
-    end
-end
-
 # java
 
 # Via mule:
@@ -245,22 +233,6 @@ end
 if test -d $HOME/.corp/fish/conf.d
     for f in $HOME/.corp/fish/conf.d/*.fish
         sourceif $f
-    end
-end
-
-function fish_prompt_notify --on-event fish_prompt
-    # If commands takes longer than 10 seconds, notify user on completion if Terminal
-    # in background. (Otherwise e.g. reading man pages for longer than 10 seconds will
-    # trigger the notification.) Inspired by https://github.com/jml/undistract-me/issues/32.
-    if test $CMD_DURATION
-        if test $CMD_DURATION -gt 10000
-            if not terminal-frontmost
-                set secs (math "$CMD_DURATION / 1000")
-                # It's not possible to raise the window via the notification; see
-                # https://stackoverflow.com/a/33808356
-                notify "$history[1]" "(status $status; $secs secs)"
-            end
-        end
     end
 end
 
