@@ -24,7 +24,7 @@ and various other tools.
 `update` symlinks `home/.*` into `$HOME`, installs packages, and wires up
 tool-specific config. It is safe to run multiple times.
 
-## Private Companion Repositories
+## Overlays
 
 **SECURITY NOTE:** The `.dotfiles` repository is public. To prevent the leakage
 of sensitive information (such as API keys, corporate tool configurations, or
@@ -33,35 +33,76 @@ cloned: `~/.private` and `~/.corp`.
 
 This architecture is specifically designed to help both humans and AI agents
 understand what goes where and ensures private information remains strictly out
-of the public repository.
+of the public repository. This repository works fine without them.
 
-These private repositories use the same directory layout as this one. The
-`update` script automatically overlays `home/`, `etc/`, and `skills/` in this
-order: `.dotfiles` -> `.private` -> `.corp`. Files in later repositories take
-precedence on name collision. This repository works fine without them.
+### Purpose of each layer
 
-Expected layout for `.private` (or `.corp`):
+| Repo | Intended for |
+| --- | --- |
+| `~/.dotfiles` | Public config, tools, and scripts |
+| `~/.private` | Personal secrets, API keys, private tooling |
+| `~/.corp` | Work machine config, internal tooling |
+
+### Precedence
+
+`update` processes overlays in this order: `.dotfiles` → `.private` → `.corp`.
+Later layers win on conflict. A file in `~/.corp` always beats the same path in
+`~/.private` or `~/.dotfiles`.
+
+### How files are applied
+
+Two functions handle overlay merging, with different semantics:
+
+- **`link_overlay_path rel dst`** — symlinks `dst` to the single highest-priority
+  source that provides `rel`. Used for whole-file configs where only one version
+  makes sense (e.g. `etc/starship/starship.toml`).
+
+- **`link_overlay_files rel dst`** — iterates every overlay in order and symlinks
+  each file it finds under `rel/` into `dst/`. All overlays contribute; later
+  layers win on filename collision. Used when multiple overlays may each add
+  files to a directory (e.g. `etc/code/`).
+
+`home/` dotfiles are linked by iterating all overlays in order with `ln -sf`, so
+the last overlay to provide a given filename wins.
+
+### Overlay-aware paths
+
+| Path | Mechanism | Notes |
+| --- | --- | --- |
+| `home/.*` | `link_home_dotfiles` (all overlays) | Last overlay wins per filename |
+| `etc/agents/AGENTS.md` | `overlay_path` (highest wins) | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` |
+| `etc/shpool/config.toml` | `link_overlay_path` | |
+| `etc/starship/starship.toml` | `link_overlay_path` | |
+| `etc/ghostty/config` | `link_overlay_path` | |
+| `etc/code/` | `link_overlay_files` | VS Code `settings.json`, `keybindings.json`, etc. |
+| `etc/macos/KeyBindings` | `overlay_path` | rsync'd (not symlinked) due to macOS bug |
+| `etc/macos/Solarized.clr` | `overlay_path` | Copied to `~/Library/Colors/` |
+| `skills/*/` | all overlays | Each skill dir linked into `~/.agents/skills/` and `~/.claude/skills/`; later overlays shadow by name |
+
+### Per-overlay `update` hooks
+
+After the main install, `update` runs `~/.private/update` and `~/.corp/update`
+if they exist and are executable. These hooks handle overlay-specific setup that
+cannot be expressed as file overlays (package installs, auth setup, etc.).
+
+### Expected layout
 
 ```text
-.private/
+.private/               # same structure for .corp
 ├── fish/
-│   ├── conf.d/       # Startup snippets sourced by config.fish
-│   ├── completions/  # Completions prepended to fish_complete_path
-│   ├── functions/    # Functions prepended to fish_function_path
-│   └── secrets.fish  # API keys and tokens (chmod 600)
-├── home/             # Dotfiles symlinked into $HOME (e.g. .gitconfig.local)
-├── etc/              # Tool-specific config that can override public etc/
-└── skills/           # Agent skills that shadow ~/.dotfiles/skills/ by name
+│   ├── conf.d/         # Startup snippets sourced by config.fish
+│   ├── completions/    # Completions prepended to fish_complete_path
+│   ├── functions/      # Functions prepended to fish_function_path
+│   └── secrets.fish    # API keys and tokens (chmod 600)
+├── home/               # Dotfiles symlinked into $HOME (e.g. .gitconfig.local)
+├── etc/                # Tool-specific config (see overlay-aware paths above)
+├── skills/             # Agent skills that shadow ~/.dotfiles/skills/ by name
+└── update              # Optional hook run at end of ./update
 ```
 
 `fish/config.fish` prepends `~/.private/fish/functions` (and `.corp`
 equivalents) and `~/.private/fish/completions` to the fish search paths, and
 sources any `~/.private/fish/conf.d/*.fish` snippets at shell startup.
-
-For `etc/`, managed files and directories use the highest-priority matching
-path. For example, `~/.corp/etc/code/settings.json` overrides
-`~/.private/etc/code/settings.json`, which overrides
-`~/.dotfiles/etc/code/settings.json`.
 
 To install: clone your private repos to `~/.private` and/or `~/.corp`, then run
 `./update` again.
