@@ -200,34 +200,8 @@ type -q pbpaste; or alias pbpaste fish_clipboard_paste
 
 sourceif $HOME/.config/fish/solarized.fish
 
-# Private overlay: lazy-load functions/completions and run conf.d snippets.
-# Functions in ~/.private/fish/functions/ autoload on first invocation
-# (e.g. gemini-gfg, cloudtop). conf.d/*.fish runs at every shell startup
-# and is the right place for boot-time setsecret calls.
-if test -d $HOME/.private/fish/functions
-    set -p fish_function_path $HOME/.private/fish/functions
-end
-if test -d $HOME/.private/fish/completions
-    set -p fish_complete_path $HOME/.private/fish/completions
-end
-if test -d $HOME/.private/fish/conf.d
-    for f in $HOME/.private/fish/conf.d/*.fish
-        sourceif $f
-    end
-end
-
-# Corp overlay: lazy-load functions/completions and run conf.d snippets.
-if test -d $HOME/.corp/fish/functions
-    set -p fish_function_path $HOME/.corp/fish/functions
-end
-if test -d $HOME/.corp/fish/completions
-    set -p fish_complete_path $HOME/.corp/fish/completions
-end
-if test -d $HOME/.corp/fish/conf.d
-    for f in $HOME/.corp/fish/conf.d/*.fish
-        sourceif $f
-    end
-end
+_load_overlay $HOME/.private
+_load_overlay $HOME/.corp
 
 # if type -q starship
 #     starship init fish | source
