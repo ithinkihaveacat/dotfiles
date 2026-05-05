@@ -22,7 +22,7 @@ function e -d 'Edit file, searching in a few different places'
 
         case file
 
-            if file ( type -p $name ) | grep text >/dev/null
+            if file -L (type -p $name) | grep text >/dev/null
                 eval $EDITOR ( type -p $name )
             else
                 echo "error: '$name' is not a text file"
