@@ -85,7 +85,7 @@ See `references/command-index.md` for detailed usage.
 - `scripts/adb-tile-add`: Add a tile component for debugging.
 - `scripts/adb-tile-show`: Show an added tile.
 - `scripts/adb-tile-remove`: Remove a tile.
-- `scripts/adb-tiles`: List currently added tiles.
+- `scripts/adb-tiles`: List available tiles and indicate which are in the carousel.
 - `scripts/adb-watchface-add`: Set the current watch face.
 
 ### Activity Discovery

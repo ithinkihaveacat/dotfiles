@@ -10,20 +10,23 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Lists all available tile and widget services on the connected device.
-By default, lists only services from user-installed (third-party) apps.
+By default, lists services from all packages (system and user).
 
-This script queries the package manager for services that:
-  - Require the 'BIND_TILE_PROVIDER' permission (Tiles)
-  - Handle the 'androidx.wear.tiles.action.BIND_TILE_PROVIDER' action (Tiles)
-  - Handle the 'androidx.glance.wear.action.BIND_WIDGET_PROVIDER' action (Widgets)
-
-By default, it lists both with indicators (T for Tile, W for Widget).
+Output format:
+  [Source][Tile][Widget][Carousel] Component
+  
+  Source:   S (System) or U (User)
+  Tile:     T or space
+  Widget:   W or space
+  Carousel: C or space
 
 Options:
-  --tiles-only    List only tile services (no indicators)
-  --widgets-only  List only widget services (no indicators)
-  --all           List services from all packages (including system apps)
-  --help          Display this help message and exit
+  --tiles-only     List only tile services
+  --widgets-only   List only widget services
+  --user-only      List only services from user-installed apps
+  --system-only    List only services from system apps
+  --carousel-only  List only services currently in the carousel
+  --help           Display this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
@@ -33,6 +36,7 @@ Environment:
 Examples:
   $(basename "$0")
   $(basename "$0") --tiles-only
+  $(basename "$0") --carousel-only
 EOF
   exit 0
 }
@@ -40,13 +44,17 @@ EOF
 # Parse args
 tiles_only=0
 widgets_only=0
-all_apps=0
+user_only=0
+system_only=0
+carousel_only=0
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --tiles-only) tiles_only=1 ;;
     --widgets-only) widgets_only=1 ;;
-    --all) all_apps=1 ;;
+    --user-only) user_only=1 ;;
+    --system-only) system_only=1 ;;
+    --carousel-only) carousel_only=1 ;;
     --help) usage ;;
     *)
       echo "$(basename "$0"): unknown option '$1'" >&2
@@ -80,30 +88,19 @@ if ! adb get-state >/dev/null 2>&1; then
   exit 1
 fi
 
-# Fetch user packages if filtering is enabled
+# Fetch user packages to distinguish system vs user apps
 declare -A user_pkgs
-if ((!all_apps)); then
-  while read -r line; do
-    pkg=${line#package:}
-    user_pkgs["$pkg"]=1
-  done < <(adb shell pm list packages -3 | tr -d '\r')
-fi
+while read -r line; do
+  pkg=${line#package:}
+  user_pkgs["$pkg"]=1
+done < <(adb shell pm list packages -3 | tr -d '\r')
 
-# Helper to filter output based on user_pkgs
-filter_and_print() {
-  while read -r comp; do
-    [[ -z "$comp" ]] && continue
-    if ((all_apps)); then
-      echo "$comp"
-    else
-      # Extract package name: com.example/Service -> com.example
-      local pkg="${comp%%/*}"
-      if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
-        echo "$comp"
-      fi
-    fi
-  done
-}
+# Fetch visible tiles in carousel
+declare -A visible_tiles
+while read -r comp; do
+  [[ -z "$comp" ]] && continue
+  visible_tiles["$comp"]=1
+done < <(adb shell dumpsys wear_service | awk '/Visible Tiles/ { in_visible = 1; next } in_visible && /TileInstance/ { if (match($0, /componentName=ComponentInfo\{([^}]+)\}/, arr)) { print arr[1] } } in_visible && /^[ ]{0,4}[^ ]/ { in_visible = 0 }' | tr -d '\r')
 
 # Define constants
 TILE_PERM="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
@@ -143,7 +140,7 @@ action_widgets=$(adb shell cmd package query-services -a "${WIDGET_ACTION}" 2>/d
 
 # Process and Merge using awk
 # We pass the three lists as separate input streams (process substitution)
-awk -v t_only="$tiles_only" -v w_only="$widgets_only" ' 
+awk '
   # Helper to clean component names
   function clean(c) {
     # Remove whitespace
@@ -175,16 +172,10 @@ awk -v t_only="$tiles_only" -v w_only="$widgets_only" '
       is_t = (c in tiles)
       is_w = (c in widgets)
       
-      if (t_only) {
-        if (is_t) print c
-      } else if (w_only) {
-        if (is_w) print c
-      } else {
-        t_mark = is_t ? "T" : " "
-        w_mark = is_w ? "W" : " "
-        # Print with TW indicators
-        printf "%s%s %s\n", t_mark, w_mark, c
-      }
+      t_mark = is_t ? "T" : " "
+      w_mark = is_w ? "W" : " "
+      # Print with TW indicators
+      printf "%s%s %s\n", t_mark, w_mark, c
     }
   }
 ' <(
@@ -193,24 +184,40 @@ awk -v t_only="$tiles_only" -v w_only="$widgets_only" '
   echo "$action_tiles" | awk '{print "TILE: " $0}'
   echo "$action_widgets" | awk '{print "WIDGET: " $0}'
 ) | sort | uniq | while read -r line; do
-  if ((all_apps)); then
-    echo "$line"
+  # line is "TW com.pkg/Svc"
+  type_str="${line:0:2}"
+  comp="${line:3}"
+
+  pkg=${comp%%/*}
+  if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
+    source_str="U"
   else
-    # line might be "TW com.pkg/Svc" or just "com.pkg/Svc" if flag set
-    # We need to extract the component cleanly
-
-    # If using flags, line is just "com.pkg/Svc"
-    if ((tiles_only || widgets_only)); then
-      comp="$line"
-    else
-      # line is "X Y com.pkg/Svc"
-      # Extract last field
-      comp=${line##* }
-    fi
-
-    pkg=${comp%%/*}
-    if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
-      echo "$line"
-    fi
+    source_str="S"
   fi
+
+  carousel_str=" "
+  if [[ -n "${visible_tiles[$comp]+_}" ]]; then
+    carousel_str="C"
+  fi
+
+  tags="${source_str}${type_str}${carousel_str}"
+
+  # Apply filters
+  if ((tiles_only)) && [[ "${type_str:0:1}" != "T" ]]; then
+    continue
+  fi
+  if ((widgets_only)) && [[ "${type_str:1:1}" != "W" ]]; then
+    continue
+  fi
+  if ((user_only)) && [[ "$source_str" != "U" ]]; then
+    continue
+  fi
+  if ((system_only)) && [[ "$source_str" != "S" ]]; then
+    continue
+  fi
+  if ((carousel_only)) && [[ "$carousel_str" != "C" ]]; then
+    continue
+  fi
+
+  echo "${tags} ${comp}"
 done
