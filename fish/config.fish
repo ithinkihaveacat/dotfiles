@@ -189,7 +189,10 @@ set -x VISUAL $EDITOR
 type -q pbcopy; or alias pbcopy fish_clipboard_copy
 type -q pbpaste; or alias pbpaste fish_clipboard_paste
 
-sourceif $HOME/.config/fish/solarized.fish
+
+
+# uv
+set -x UV_EXCLUDE_NEWER "7 days"
 
 _load_overlay $HOME/.private
 _load_overlay $HOME/.corp
@@ -203,7 +206,3 @@ _load_overlay $HOME/.corp
 if set -q GHOSTTY_RESOURCES_DIR
     source $GHOSTTY_RESOURCES_DIR/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish
 end
-
-# uv
-
-set -x UV_EXCLUDE_NEWER "7 days"
