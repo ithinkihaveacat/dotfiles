@@ -85,8 +85,18 @@ See `references/command-index.md` for detailed usage.
 - `scripts/adb-tile-add`: Add a tile component for debugging.
 - `scripts/adb-tile-show`: Show an added tile.
 - `scripts/adb-tile-remove`: Remove a tile.
-- `scripts/adb-tiles`: List available tiles and indicate which are in the carousel.
+- `scripts/adb-tiles`: List available tiles and indicate which are in the
+  carousel.
 - `scripts/adb-watchface-add`: Set the current watch face.
+
+> [!NOTE] **Tile Indexing (`Index=[0]`)**: When adding a new tile using
+> `scripts/adb-tile-add`, the output often indicates `Index=[0]`. This means the
+> tile was added to the **first position** in the carousel, pushing existing
+> tiles down. It does _not_ mean it has overwritten previous tiles.
+>
+> **Verifying Installed Tiles**: Use `scripts/adb-tiles` to list all available
+> tiles and see which ones are currently in the carousel. The output uses
+> prefixes like `UTWC` where `C` indicates it is in the carousel.
 
 ### Activity Discovery
 
