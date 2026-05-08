@@ -15,6 +15,21 @@ ephemeral document aimed at the maintainer or reviewer _right now_.
 - **Tone:** Persuasive but professional. You are explaining why the project
   needs this change.
 
+## Core Principle: Separating Goal from Implementation
+
+When a change is risky, originates from an untrusted source, or has multiple
+viable approaches, it is crucial to structurally separate the _goal_ of the PR
+from its _specific implementation details_.
+
+This separation allows reviewers to agree that the underlying problem should be
+solved (validating the goal), even if they determine the proposed approach (the
+implementation) should be discarded or rewritten.
+
+- **The Goal/Change:** Clearly articulate the underlying problem being solved
+  and why achieving this state is valuable to the project.
+- **The Implementation:** Detail how this specific PR achieves that goal,
+  acknowledging alternative approaches or trade-offs if relevant.
+
 ## Structural Archetypes
 
 Choose a structure that best fits the nature of your change.
@@ -30,15 +45,15 @@ Best for targeted fixes where the cause and effect are clear.
 
 ### The Feature / Broad Refactor
 
-Best for larger changes introducing new capabilities or restructuring code.
+Best for larger changes introducing new capabilities or restructuring code. It
+naturally separates the "why" from the "how".
 
-- **Summary / Goal:** A high-level overview of what the change achieves.
-- **Motivation:** Why this change is necessary for the broader project or
-  usecase.
-- **Proposed Changes:** A concise breakdown of the major components modified,
-  grouped logically.
+- **Summary / Goal:** A high-level overview of what the change achieves and why
+  it is necessary.
+- **Proposed Implementation:** A concise breakdown of the major components
+  modified to achieve the goal, grouped logically.
 - **Rationale & Safety:** Explain why the chosen approach is safe and discuss
-  any specific trade-offs.
+  any specific trade-offs or alternative implementations considered.
 - **Verification:** Detailed steps on how the change was tested, including
   environment details and manual reproduction steps.
 
