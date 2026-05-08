@@ -23,7 +23,9 @@ from its _specific implementation details_.
 
 This separation allows reviewers to agree that the underlying problem should be
 solved (validating the goal), even if they determine the proposed approach (the
-implementation) should be discarded or rewritten.
+implementation) should be discarded or rewritten. The goal and motivation should
+provide enough context that another engineer could independently arrive at a
+similar implementation without seeing your code.
 
 - **The Goal/Change:** Clearly articulate the underlying problem being solved
   and why achieving this state is valuable to the project.
