@@ -32,6 +32,14 @@ similar implementation without seeing your code.
 - **The Implementation:** Detail how this specific PR achieves that goal,
   acknowledging alternative approaches or trade-offs if relevant.
 
+## Self-Contained Requirement
+
+A PR description MUST be self-contained. Do NOT refer to the conversation with
+the agent, or to an artifact directory that may not be present for the reviewer.
+If you need to provide screenshots or files for the user to upload, specify
+their names and where they should be placed in the description, but do not
+assume the reviewer can access the agent's local environment.
+
 ## Structural Archetypes
 
 Choose a structure that best fits the nature of your change.
