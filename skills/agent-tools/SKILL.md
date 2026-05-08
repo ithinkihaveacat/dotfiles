@@ -108,11 +108,11 @@ scripts/gh-markdown https://github.com/owner/repo/pull/123
 ### context
 
 Gathers the very latest, authoritative, up-to-date context for deep research on
-various technical topics (e.g., `gemini-api`, `mcp`, `home-assistant`) or arbitrary
-GitHub directories. Run with `--list` to see all available topics. This script
-should be your first tool for gathering background knowledge or the latest
-documentation for an unfamiliar domain. Supports passing a full GitHub URL as a
-topic (e.g., `https://github.com/owner/repo/tree/branch/path`).
+various technical topics (e.g., `gemini-api`, `mcp`, `home-assistant`) or
+arbitrary GitHub directories. Run with `--list` to see all available topics.
+This script should be your first tool for gathering background knowledge or the
+latest documentation for an unfamiliar domain. Supports passing a full GitHub
+URL as a topic (e.g., `https://github.com/owner/repo/tree/branch/path`).
 
 **Warning:** Output can be very large. **Do not** read output directly into your
 conversation history. Pipe to `emerson` for analysis, or redirect to a file to
