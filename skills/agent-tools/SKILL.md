@@ -16,7 +16,8 @@ description: >
   architecture.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick
-  (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
+  (ImageMagick). Needs a Gemini API key (searches for `GEMINI_API_KEY` or
+  `GEMINI_CLI_GEMINI_API_KEY`) and network access to
   generativelanguage.googleapis.com.
 ---
 
@@ -42,7 +43,7 @@ functionality.
 
 ## Quick Start
 
-**Environment:** Set `GEMINI_API_KEY` before running AI commands. `gh-markdown`
+**Environment:** AI commands require a Gemini API key (reads from `GEMINI_API_KEY` or `GEMINI_CLI_GEMINI_API_KEY`). Scripts will report clear errors if no key is found. `gh-markdown`
 optionally accepts a `--token` for GitHub API access.
 
 **Dependencies:** `curl`, `jq`, `uv` (all tools); `base64`, `magick` (image
@@ -383,7 +384,7 @@ env ANDROID_SERIAL=12345 scripts/popper "open settings"
 ## Safety Notes
 
 - Scripts require network access to the Gemini API
-- `GEMINI_API_KEY` must be set in the environment
+- Requires a Gemini API key (reads from `GEMINI_API_KEY` or `GEMINI_CLI_GEMINI_API_KEY`)
 - API calls may incur usage costs
 - Large images increase request size and latency
 - Scripts do not store or log input data
