@@ -20,38 +20,29 @@ if test -d ~/citc
 end
 
 # java
+#
+# Temurin JDK casks are installed by update and land in:
+#   /Library/Java/JavaVirtualMachines/temurin-*.jdk/Contents/Home
+#
+# Not all tools rely on JAVA_HOME to find a JDK. Gradle toolchains, for
+# example, scan /Library/Java/JavaVirtualMachines/ directly and pick the
+# right version based on the project's declared requirement. JAVA_HOME is
+# mainly needed for tools like apkanalyzer that don't do their own discovery.
+#
+# JAVA_HOME is set to Android Studio's bundled JBR for compatibility with
+# apkanalyzer. Preview is preferred over stable when both are installed.
+#
+# To use a specific JDK version for a single command (macOS):
+#   JAVA_HOME=(/usr/libexec/java_home -v 17) ./gradlew ...
+#
+# On Linux, set JAVA_HOME manually (no java_home tool is available):
+#   JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ./gradlew ...
 
-# Via mule:
-#
-#   $ mule list | grep -o -E "jdk[0-9]+" | sort | tail -1 | xargs mule install
-
-# Via manual install:
-#
-# Oracle keep messing around with their distributions and licenses... For the
-# scripts below to work, you need to end up with the JRE distribution in the
-# directory ~/local/jre1.8.0_341.jre/Contents/Home, and the java binary
-# available at ~/local/jre1.8.0_341.jre/Contents/Home/bin/java.
-#
-# To do this:
-#
-# 1. Go to https://www.oracle.com/uk/java/technologies/javase/javase8u211-later-archive-downloads.html and accept cookies, etc.
-# 2. Download the Java SE Runtime Environment.
-#      Might be: https://www.oracle.com/webapps/redirect/signon?nexturl=https://download.oracle.com/otn/java/jdk/8u341-b10/424b9da4b48848379167015dcc250d8d/jre-8u341-macosx-x64.tar.gz
-# 3. Extract to ~/local.
-#
-#for d in ~/local/jre*/Contents/Home/bin
-#    add_path $d
-#end
-
-# Via Android Studio:
-#
-# https://developer.android.com/studio
-
-# JAVA_HOME is needed for apkanalyzer, and for some reason it's pretty picky about the version. It's compatible with the Android Studio version at least
-test -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home"; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
-test -d "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"; and set -x JAVA_HOME "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"
-#test -d /Library/Java/JavaVirtualMachines/default/Contents/Home/jre ; and set -x JAVA_HOME /Library/Java/JavaVirtualMachines/default/Contents/Home/jre
-#test -d "/Applications/Android Studio.app/Contents/jre/Contents/Home" ; and set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jre/Contents/Home"
+if test -d "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"
+    set -x JAVA_HOME "/Applications/Android Studio Preview.app/Contents/jbr/Contents/Home"
+else if test -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+    set -x JAVA_HOME "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+end
 
 # ghc
 #
@@ -188,8 +179,6 @@ set -x VISUAL $EDITOR
 
 type -q pbcopy; or alias pbcopy fish_clipboard_copy
 type -q pbpaste; or alias pbpaste fish_clipboard_paste
-
-
 
 # uv
 set -x UV_EXCLUDE_NEWER "7 days"
