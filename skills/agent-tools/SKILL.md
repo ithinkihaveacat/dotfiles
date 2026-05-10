@@ -99,18 +99,23 @@ and synthesis requiring external data or massive repository context.
 1. **Not for Quick Q&A:** The Oracle is designed for deep, context-heavy
    reasoning. It takes longer to run and consumes more tokens than standard
    tools. Do not use it for simple questions or basic syntax lookups.
-1. **Provide Exhaustive Context:** The Oracle is not a chat interface. It has no
-   memory of the previous conversation. You MUST provide all necessary context
-   via standard input or file arguments.
+1. **Self-Contained Prompts:** Write the prompt as if explaining the problem to
+   an expert who has zero prior knowledge of your task, because the Oracle has
+   no memory of your current session or previous steps. Do not use references
+   like "the solution we implemented" without explaining exactly what that
+   solution was.
+1. **Broad File Context:** Include source files and directories as positional
+   arguments because the Oracle needs the broadest possible view of the codebase
+   to reason effectively. Err on the side of providing too much
+   context—including files, directories, or documentation even if you think they
+   are only marginally relevant—so the Oracle can discover non-obvious
+   connections.
 1. **Define the Meta-Context:** Beyond raw files (code, PDFs, logs), the most
    effective Oracle queries explicitly define the "meta-context" in the prompt.
    Before calling the tool, package up your intent. Define the **persona**, the
    ultimate **goals**, the **success criteria**, **constraints**, desired
    **format/style**, and provide **examples** or **assumptions**. A large,
    detailed prompt is expected.
-1. **Specific Prompts:** The prompt must be self-contained and clear. Ask
-   complex architectural questions, request refactoring plans, or ask for
-   in-depth analysis of the provided context.
 1. **Describe What Didn't Work:** If you are calling the Oracle because you or
    an agent is stuck—e.g., many approaches have been tried but have failed or
    been rejected—explicitly summarise those failed attempts in the prompt.
