@@ -5,13 +5,15 @@ description: >
   up-to-date context for agents. Includes image description, screenshot
   comparison, smart cropping, token counting, technical essay generation,
   boolean condition evaluation, live context gathering, Android UI interaction
-  via popper, and GitHub PR/Issue formatting via gh-markdown. Use this skill
-  when the user needs to analyze images, count tokens, evaluate conditions,
-  gather the latest authoritative documentation for a topic, format GitHub data,
-  automate Android apps, or generate technical essays. Triggers: ai analysis,
-  describe image, visual diff, token count, generate essay, boolean evaluation,
-  gather context, latest docs, research topic, github, pull request,
-  gh-markdown, automate app.
+  via popper, GitHub PR/Issue formatting via gh-markdown, and deep reasoning
+  research via Oracle. Use this skill when the user needs to analyze images,
+  count tokens, evaluate conditions, gather the latest authoritative documentation,
+  format GitHub data, automate Android apps, generate technical essays, or
+  perform complex architectural reasoning requiring recursive directory traversal
+  and external search. Triggers: ai analysis, describe image, visual diff, token
+  count, generate essay, boolean evaluation, gather context, latest docs, research
+  topic, github, pull request, gh-markdown, automate app, oracle, deep research,
+  architecture.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
@@ -84,7 +86,10 @@ scripts/popper "start an exercise"
 
 Consult the Oracle for a very carefully researched and considered answer. The
 Oracle utilizes deep reasoning and Google Search grounding to provide the
-highest quality response possible.
+highest quality response possible. It accepts arbitrary files and directories as
+positional arguments, recursively walks directories, and automatically uploads
+media files. Use this tool for deep research, complex architectural reasoning,
+and synthesis requiring external data or massive repository context.
 
 **Important Usage Guidelines:**
 
@@ -256,8 +261,13 @@ fi
 ### emerson
 
 Generate essay-length (~3000 words) analysis from text input. Produces
-authoritative, footnoted Markdown. Can be combined with `context` to provide
-rich background material.
+authoritative, footnoted Markdown. Operates as a strict, sandboxed tool that
+relies entirely on the provided standard input (`stdin`). It performs
+closed-book analysis without external search and acts as an elite technical
+analyst instructed to treat the input as the sole source of truth to prevent
+hallucination. Use this tool when you need summarization or formatting of
+specific, pre-gathered text. Can be combined with `context` to provide rich
+background material.
 
 ```bash
 scripts/emerson "PROMPT" < input.txt

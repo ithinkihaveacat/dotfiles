@@ -7,6 +7,7 @@
 - [screenshot-describe](#screenshot-describe) - Generate alt-text from images
 - [screenshot-compare](#screenshot-compare) - Compare two images for differences
 - [photo-smart-crop](#photo-smart-crop) - Smart crop around detected people
+- [oracle](#oracle) - Deep reasoning and synthesis over files or directories
 - [emerson](#emerson) - Generate essay-length analysis from text
 - [pascal](#pascal) - Ask a question and get a short response
 - [context](#context) - Generate aggregated context for analysis
@@ -16,7 +17,7 @@
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
 - [Request Structure](#request-structure) - API request patterns
 
----
+______________________________________________________________________
 
 ## screenshot-describe
 
@@ -89,7 +90,7 @@ curl -s -X POST \
 | 1    | General error (API error, missing file, etc.) |
 | 127  | Missing required dependency                   |
 
----
+______________________________________________________________________
 
 ## screenshot-compare
 
@@ -166,7 +167,7 @@ curl -s -X POST \
 | 2    | Images are identical (no differences to describe)    |
 | 127  | Missing required dependency                          |
 
----
+______________________________________________________________________
 
 ## photo-smart-crop
 
@@ -217,12 +218,12 @@ scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3
 ### Processing Details
 
 1. Detects all people in the image using Gemini vision API
-2. Calculates bounding box around all detected faces (prioritizes heads over
+1. Calculates bounding box around all detected faces (prioritizes heads over
    bodies)
-3. Expands box by 20% for headroom
-4. Adjusts to match the requested aspect ratio
-5. If full body cannot fit, crops from bottom (preserving heads)
-6. Applies crop using ImageMagick with auto-orient for EXIF handling
+1. Expands box by 20% for headroom
+1. Adjusts to match the requested aspect ratio
+1. If full body cannot fit, crops from bottom (preserving heads)
+1. Applies crop using ImageMagick with auto-orient for EXIF handling
 
 ### Exit Codes
 
@@ -233,7 +234,7 @@ scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3
 | 2    | Rate limited (API returned 429)                                     |
 | 127  | Missing required dependency                                         |
 
----
+______________________________________________________________________
 
 ## photo-has-people
 
@@ -295,11 +296,70 @@ PROMPT="Do people feature prominently in this photo? This includes partial views
 | 1    | False (people do not feature prominently) |
 | 127  | Missing required dependency               |
 
----
+______________________________________________________________________
+
+## oracle
+
+Consult the Oracle for a very carefully researched and considered answer
+utilizing deep reasoning and Google Search grounding.
+
+### Synopsis
+
+```bash
+scripts/oracle "PROMPT" [FILE_OR_DIR ...]
+```
+
+### Arguments
+
+| Argument      | Description                                                                                                      |
+| ------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `PROMPT`      | The research question, analysis goal, or refactoring plan. Must be exhaustive and self-contained.                |
+| `FILE_OR_DIR` | Arbitrary files and directories. Directories are recursively walked, and media files are uploaded automatically. |
+
+### Options
+
+| Option       | Description                   |
+| ------------ | ----------------------------- |
+| `-h, --help` | Display help message and exit |
+
+### Environment Variables
+
+| Variable         | Required | Description         |
+| ---------------- | -------- | ------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+
+### Examples
+
+```bash
+# Evaluate an architectural pattern
+scripts/oracle "Evaluate this implementation against solid principles." src/
+
+# Time-sensitive research based on context
+scripts/oracle "What are the latest developments in this framework as of May 2026?" framework-docs.md
+```
+
+### Raw API Command
+
+Model: `gemini-3.1-pro-preview` with `thinking_level="high"` and Google Search
+tools enabled. *(Complex Python script recursively walking directories and
+processing media files.)*
+
+### Exit Codes
+
+| Code | Description                 |
+| ---- | --------------------------- |
+| 0    | Success                     |
+| 1    | General error               |
+| 127  | Missing required dependency |
+
+______________________________________________________________________
 
 ## emerson
 
 Generate essay-length (~3000 words) analysis from text input using Gemini 3 Pro.
+Operates as a strict, sandboxed, closed-book text-generation tool with no access
+to external search, instructed to prevent hallucination by strictly adhering to
+the provided text.
 
 ### Synopsis
 
@@ -382,7 +442,7 @@ curl -s -X POST \
 | 1    | General error (API error, no input, etc.) |
 | 127  | Missing required dependency               |
 
----
+______________________________________________________________________
 
 ## pascal
 
@@ -461,7 +521,7 @@ curl -s -X POST \
 | 1    | General error               |
 | 127  | Missing required dependency |
 
----
+______________________________________________________________________
 
 ## context
 
@@ -522,7 +582,7 @@ scripts/context mcp-server | grep "protocol"
 | 1    | General error (unknown topic, etc.) |
 | 127  | Missing required dependency         |
 
----
+______________________________________________________________________
 
 ## satisfies
 
@@ -627,7 +687,7 @@ fi
 | 1    | False (input does not satisfy the condition) |
 | 127  | Missing required dependency                  |
 
----
+______________________________________________________________________
 
 ## token-count
 
@@ -667,7 +727,7 @@ cat *.md | scripts/token-count
 | 1    | Error (empty input, API error) |
 | 127  | Missing required dependency    |
 
----
+______________________________________________________________________
 
 ## popper
 
@@ -737,7 +797,7 @@ details._
 | 1    | Error (task failed)      |
 | 2    | Timed out                |
 
----
+______________________________________________________________________
 
 ## Image Encoding
 
@@ -760,8 +820,8 @@ base64 -b 0  # Single-line output
 ### Encoding Process
 
 1. Convert to lossless WebP format
-2. Remove alpha channel (`-alpha off`)
-3. Encode to base64 (single line)
+1. Remove alpha channel (`-alpha off`)
+1. Encode to base64 (single line)
 
 ```bash
 # Full encoding command
@@ -780,7 +840,7 @@ The `-alpha off` flag removes transparency. Images differing only in alpha
 channel are treated as identical. This is intentional for comparing visual
 appearance on an opaque background.
 
----
+______________________________________________________________________
 
 ## Request Structure
 
