@@ -12,6 +12,7 @@
 # ///
 """The Oracle: A high-quality, researched, and authoritative reasoning tool."""
 
+import asyncio
 import os
 import sys
 import datetime
@@ -88,7 +89,12 @@ def is_text_file(path: Path) -> bool:
         return True
     if mime in ["application/json", "application/xml", "application/javascript"]:
         return True
-    return False
+    # For unrecognized files, sniff for null bytes — no nulls means text
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" not in f.read(8192)
+    except Exception:
+        return False
 
 
 def usage():
@@ -128,6 +134,8 @@ Input:
 
 Options:
   --force       Bypass context size limits (1MB for text, 20MB per media file).
+  --maps        Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
+  --code        Enable Code Execution for Python.
   --help        Display this help message and exit.
 
 Environment:
@@ -146,10 +154,16 @@ def main():
         sys.exit(0)
 
     force = False
+    use_maps = False
+    use_code = False
     args = []
     for arg in sys.argv[1:]:
         if arg == "--force":
             force = True
+        elif arg == "--maps":
+            use_maps = True
+        elif arg == "--code":
+            use_code = True
         else:
             args.append(arg)
 
@@ -206,12 +220,23 @@ def main():
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
                 text_context += f'<document path="{path}">\n<![CDATA[\n{content}\n]]>\n</document>\n'
+                print(
+                    f"{os.path.basename(sys.argv[0])}: inlining {path.name} into context ({size / 1024:.2f} KB)...",
+                    file=sys.stderr,
+                )
             except Exception as e:
                 print(
                     f"{os.path.basename(sys.argv[0])}: warning: failed to read {path}: {e}",
                     file=sys.stderr,
                 )
         else:
+            mime_type, _ = mimetypes.guess_type(str(path))
+            if not mime_type:
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: skipping {path.name}: unknown file type",
+                    file=sys.stderr,
+                )
+                continue
             if size > MAX_MEDIA_SIZE and not force:
                 print(
                     f"Error: Media file {path} exceeds 20MB threshold. Use --force to bypass.",
@@ -263,51 +288,100 @@ def main():
 
     print("--- Oracle Configuration ---", file=sys.stderr)
     print(f"Model: {model_id}", file=sys.stderr)
-    print("Tools: Google Search", file=sys.stderr)
+    tools_config = []
+    if use_maps:
+        tools_config.append(types.Tool(google_maps=types.GoogleMaps()))
+        print("Tools: Google Maps", file=sys.stderr)
+        if use_code:
+            print(
+                "Warning: Google Maps cannot be combined with Code Execution. Disabling Code Execution.",
+                file=sys.stderr,
+            )
+    else:
+        tools_config.append(types.Tool(google_search=types.GoogleSearch()))
+        if use_code:
+            tools_config.append(types.Tool(code_execution=types.ToolCodeExecution()))
+            print("Tools: Google Search, Code Execution", file=sys.stderr)
+        else:
+            print("Tools: Google Search", file=sys.stderr)
+
     print("Thinking: High", file=sys.stderr)
     if total_text_size > 0:
         print(f"Text Context Size: {total_text_size / 1024:.2f} KB", file=sys.stderr)
     if media_files_to_upload:
         print(f"Media Files to Upload: {len(media_files_to_upload)}", file=sys.stderr)
-    print("----------------------------", file=sys.stderr)
+    print("----------------------------\n", file=sys.stderr)
+
+    async def upload_all(paths: list) -> list:
+        async def upload_one(path: Path) -> types.File:
+            print(
+                f"{os.path.basename(sys.argv[0])}: uploading {path.name} ({path.stat().st_size / 1024 / 1024:.2f} MB)...",
+                file=sys.stderr,
+            )
+            mime_type, _ = mimetypes.guess_type(str(path))
+            return await client.aio.files.upload(
+                file=str(path),
+                config=types.UploadFileConfig(mime_type=mime_type),
+            )
+
+        return list(await asyncio.gather(*[upload_one(p) for p in paths]))
 
     uploaded_files = []
     try:
+        if media_files_to_upload:
+            uploaded_files = asyncio.run(upload_all(media_files_to_upload))
+
         parts = []
         if text_context:
             parts.append(
                 types.Part.from_text(text=f"<context>\n{text_context}\n</context>")
             )
-
-        for path in media_files_to_upload:
-            print(
-                f"{os.path.basename(sys.argv[0])}: uploading {path.name} ({path.stat().st_size / 1024 / 1024:.2f} MB)...",
-                file=sys.stderr,
+        for uf in uploaded_files:
+            parts.append(
+                types.Part.from_uri(
+                    file_uri=uf.uri,
+                    mime_type=uf.mime_type,
+                )
             )
-            uploaded_file = client.files.upload(file=str(path))
-            uploaded_files.append(uploaded_file)
-            parts.append(uploaded_file)
 
         parts.append(types.Part.from_text(text=f"<task>\n{user_prompt}\n</task>"))
 
-        response = client.models.generate_content(
+        response = client.models.generate_content_stream(
             model=model_id,
             contents=[types.Content(role="user", parts=parts)],
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                thinking_config=types.ThinkingConfig(thinking_level="high"),
+                tools=tools_config,
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="high", include_thoughts=True
+                ),
                 temperature=1.0,
             ),
         )
 
-        for part in response.candidates[0].content.parts:
-            if part.thought:
-                print("--- Oracle's Reasoning ---", file=sys.stderr)
-                print(part.text, file=sys.stderr)
-                print("--------------------------", file=sys.stderr)
-            elif part.text:
-                print(part.text)
+        in_thought = False
+        for chunk in response:
+            if not chunk.candidates:
+                continue
+            for part in chunk.candidates[0].content.parts:
+                if part.thought:
+                    if not in_thought:
+                        print(
+                            "\033[2m", end="", file=sys.stderr, flush=True
+                        )  # Dim start
+                        in_thought = True
+                    print(part.text, end="", file=sys.stderr, flush=True)
+                elif part.text:
+                    if in_thought:
+                        print(
+                            "\033[0m\n\n", end="", file=sys.stderr, flush=True
+                        )  # Dim end
+                        in_thought = False
+                    print(part.text, end="", flush=True)
+
+        if in_thought:
+            print("\033[0m\n", end="", file=sys.stderr, flush=True)
+        print()  # Final newline
 
     except Exception as e:
         print(f"{os.path.basename(sys.argv[0])}: error: {e}", file=sys.stderr)
