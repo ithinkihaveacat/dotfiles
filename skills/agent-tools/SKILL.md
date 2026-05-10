@@ -111,6 +111,13 @@ and synthesis requiring external data or massive repository context.
 1. **Specific Prompts:** The prompt must be self-contained and clear. Ask
    complex architectural questions, request refactoring plans, or ask for
    in-depth analysis of the provided context.
+1. **Describe What Didn't Work:** If you are calling the Oracle because you or
+   an agent is stuck—e.g., many approaches have been tried but have failed or
+   been rejected—explicitly summarise those failed attempts in the prompt.
+   Describe each approach, why it failed or was ruled out, and any error
+   messages or constraints encountered. This prevents the Oracle from
+   re-proposing the same dead ends and directs its reasoning toward genuinely
+   novel solutions.
 
 **Warning:** Output can be detailed and lengthy.
 
