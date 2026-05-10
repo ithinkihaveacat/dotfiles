@@ -12,7 +12,7 @@ description: >
   describe image, visual diff, token count, generate essay, boolean evaluation,
   gather context, latest docs, research topic, github, pull request,
   gh-markdown, automate app.
-compatibility: >
+compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs GEMINI_API_KEY environment variable and network access to
   generativelanguage.googleapis.com.
@@ -79,6 +79,50 @@ scripts/popper "start an exercise"
 ```
 
 ## Script Overview
+
+### oracle
+
+Consult the Oracle for a very carefully researched and considered answer. The
+Oracle utilizes deep reasoning and Google Search grounding to provide the
+highest quality response possible.
+
+**Important Usage Guidelines:**
+
+1. **Not for Quick Q&A:** The Oracle is designed for deep, context-heavy
+   reasoning. It takes longer to run and consumes more tokens than standard
+   tools. Do not use it for simple questions or basic syntax lookups.
+1. **Provide Exhaustive Context:** The Oracle is not a chat interface. It has no
+   memory of the previous conversation. You MUST provide all necessary context
+   via standard input or file arguments.
+1. **Define the Meta-Context:** Beyond raw files (code, PDFs, logs), the most
+   effective Oracle queries explicitly define the "meta-context" in the prompt.
+   Before calling the tool, package up your intent. Define the **persona**, the
+   ultimate **goals**, the **success criteria**, **constraints**, desired
+   **format/style**, and provide **examples** or **assumptions**. A large,
+   detailed prompt is expected.
+1. **Specific Prompts:** The prompt must be self-contained and clear. Ask
+   complex architectural questions, request refactoring plans, or ask for
+   in-depth analysis of the provided context.
+
+**Warning:** Output can be detailed and lengthy.
+
+```bash
+scripts/oracle "PROMPT" [FILE_OR_DIR ...]
+```
+
+**Environment:** `GEMINI_API_KEY` (Required)
+
+**Exit codes:** 0 success, 1 error
+
+**Examples:**
+
+```bash
+# Evaluate an architectural pattern
+scripts/oracle "Evaluate this implementation against solid principles and propose a refactoring plan." src/
+
+# Time-sensitive research based on context
+scripts/oracle "What are the latest developments in this framework as of May 2026?" framework-docs.md
+```
 
 ### gh-markdown
 

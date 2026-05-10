@@ -15,34 +15,127 @@
 import os
 import sys
 import datetime
+import mimetypes
+from pathlib import Path
 from google import genai
 from google.genai import types
+
+MAX_TEXT_SIZE = 1 * 1024 * 1024  # 1MB
+MAX_MEDIA_SIZE = 20 * 1024 * 1024  # 20MB
+
+TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".json",
+    ".xml",
+    ".html",
+    ".css",
+    ".js",
+    ".ts",
+    ".py",
+    ".java",
+    ".kt",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".rs",
+    ".go",
+    ".rb",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".fish",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".gradle",
+    ".properties",
+    ".bat",
+    ".ps1",
+    ".sql",
+    ".graphql",
+    ".graphqls",
+}
+
+IGNORED_DIRS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "env",
+    ".env",
+    ".idea",
+    ".vscode",
+    "build",
+    "dist",
+    "out",
+    "target",
+    ".next",
+    ".nuxt",
+}
+
+
+def is_text_file(path: Path) -> bool:
+    ext = path.suffix.lower()
+    if ext in TEXT_EXTENSIONS:
+        return True
+    mime, _ = mimetypes.guess_type(path)
+    if mime and mime.startswith("text/"):
+        return True
+    if mime in ["application/json", "application/xml", "application/javascript"]:
+        return True
+    return False
 
 
 def usage():
     print(
         f"""\
-Usage: {os.path.basename(sys.argv[0])} "PROMPT" < INPUT_FILE
+Usage: {os.path.basename(sys.argv[0])} [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 
 Consult the Oracle for a very carefully researched and considered answer.
 Designed for the highest quality response possible, utilizing deep reasoning
 and Google Search grounding.
 
+The Oracle is not a standard, quick-reply AI. It is designed to process massive
+amounts of information and synthesize authoritative answers. It has no memory
+of previous conversations.
+
+Best Practices for Context:
+  To get the most out of the Oracle, you must provide comprehensive context.
+  This goes beyond just providing source files. A high-quality prompt should
+  also explicitly define:
+  - Persona & Audience: Who are you, and who is this answer for?
+  - Goals & Intent: What is the ultimate objective of this request?
+  - Success Criteria: How will you know the answer is correct or useful?
+  - Format & Style: Should the output be a technical spec, an essay, or a report?
+  - Constraints: What must the Oracle explicitly avoid doing?
+  - Examples: Provide a "few-shot" example of what a good output looks like.
+  - Assumptions: Clarify ambiguous terms or state decisions already made.
+
 Arguments:
-  PROMPT      The specific question or task for the Oracle.
+  PROMPT        The specific question or task for the Oracle.
+  FILE_OR_DIR   Optional. Files or directories to include as context. Directories
+                are recursively walked (ignoring hidden files and standard ignore
+                lists like node_modules). Text files are inlined; media files are
+                uploaded to the Gemini API (and cleaned up automatically).
 
 Input:
-  stdin       The context or reference material (can be very large).
+  stdin         Optional. Context or reference material piped into the script.
 
 Options:
-  --help      Display this help message and exit
+  --force       Bypass context size limits (1MB for text, 20MB per media file).
+  --help        Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
 
 Examples:
-  cat codebase.md | {os.path.basename(sys.argv[0])} "Propose a refactoring plan for the networking layer"
-  {os.path.basename(sys.argv[0])} "What are the latest developments in Jetpack Compose (May 2026)?" < context.txt
+  cat codebase.md | {os.path.basename(sys.argv[0])} "Propose a refactoring plan"
+  {os.path.basename(sys.argv[0])} "Does this code match the spec?" src/ spec.pdf
 """
     )
 
@@ -52,7 +145,15 @@ def main():
         usage()
         sys.exit(0)
 
-    if len(sys.argv) < 2:
+    force = False
+    args = []
+    for arg in sys.argv[1:]:
+        if arg == "--force":
+            force = True
+        else:
+            args.append(arg)
+
+    if not args:
         print(
             f"{os.path.basename(sys.argv[0])}: error: prompt is required",
             file=sys.stderr,
@@ -60,18 +161,67 @@ def main():
         usage()
         sys.exit(1)
 
-    user_prompt = sys.argv[1]
+    user_prompt = args[0]
+    paths = args[1:]
 
-    # Read stdin for context
-    if sys.stdin.isatty():
-        print(
-            f"{os.path.basename(sys.argv[0])}: error: context must be provided on stdin",
-            file=sys.stderr,
-        )
-        usage()
-        sys.exit(1)
+    text_context = ""
+    media_files_to_upload = []
+    total_text_size = 0
 
-    context_data = sys.stdin.read()
+    # 1. Read stdin
+    if not sys.stdin.isatty():
+        stdin_content = sys.stdin.read()
+        if stdin_content:
+            text_context += f'<document path="stdin">\n<![CDATA[\n{stdin_content}\n]]>\n</document>\n'
+            total_text_size += len(stdin_content.encode("utf-8"))
+
+    # 2. Gather files
+    collected_files = []
+    for p in paths:
+        path = Path(p)
+        if path.is_file():
+            collected_files.append(path)
+        elif path.is_dir():
+            for root, dirs, files in os.walk(path):
+                dirs[:] = [
+                    d for d in dirs if not d.startswith(".") and d not in IGNORED_DIRS
+                ]
+                for file in files:
+                    if not file.startswith("."):
+                        collected_files.append(Path(root) / file)
+        else:
+            print(f"Warning: path not found: {p}", file=sys.stderr)
+
+    # 3. Categorize and enforce limits
+    for path in collected_files:
+        size = path.stat().st_size
+        if is_text_file(path):
+            total_text_size += size
+            if total_text_size > MAX_TEXT_SIZE and not force:
+                print(
+                    "Error: Text context exceeds 1MB threshold. Use --force to bypass.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+                text_context += f'<document path="{path}">\n<![CDATA[\n{content}\n]]>\n</document>\n'
+            except Exception as e:
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: failed to read {path}: {e}",
+                    file=sys.stderr,
+                )
+        else:
+            if size > MAX_MEDIA_SIZE and not force:
+                print(
+                    f"Error: Media file {path} exceeds 20MB threshold. Use --force to bypass.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            media_files_to_upload.append(path)
+
+    if not text_context and not media_files_to_upload:
+        print("Warning: No context provided via stdin or files.", file=sys.stderr)
 
     api_key = os.environ.get("GEMINI_CLI_GEMINI_API_KEY") or os.environ.get(
         "GEMINI_API_KEY"
@@ -86,7 +236,6 @@ def main():
     client = genai.Client(api_key=api_key)
     model_id = "gemini-3.1-pro-preview"
 
-    # Current date for context
     now = datetime.datetime.now()
     current_date_str = now.strftime("%A, %d %B %Y")
 
@@ -116,22 +265,34 @@ def main():
     print(f"Model: {model_id}", file=sys.stderr)
     print("Tools: Google Search", file=sys.stderr)
     print("Thinking: High", file=sys.stderr)
+    if total_text_size > 0:
+        print(f"Text Context Size: {total_text_size / 1024:.2f} KB", file=sys.stderr)
+    if media_files_to_upload:
+        print(f"Media Files to Upload: {len(media_files_to_upload)}", file=sys.stderr)
     print("----------------------------", file=sys.stderr)
 
+    uploaded_files = []
     try:
+        parts = []
+        if text_context:
+            parts.append(
+                types.Part.from_text(text=f"<context>\n{text_context}\n</context>")
+            )
+
+        for path in media_files_to_upload:
+            print(
+                f"{os.path.basename(sys.argv[0])}: uploading {path.name} ({path.stat().st_size / 1024 / 1024:.2f} MB)...",
+                file=sys.stderr,
+            )
+            uploaded_file = client.files.upload(file=str(path))
+            uploaded_files.append(uploaded_file)
+            parts.append(uploaded_file)
+
+        parts.append(types.Part.from_text(text=f"<task>\n{user_prompt}\n</task>"))
+
         response = client.models.generate_content(
             model=model_id,
-            contents=[
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_text(
-                            text=f"<context>\n{context_data}\n</context>"
-                        ),
-                        types.Part.from_text(text=f"<task>\n{user_prompt}\n</task>"),
-                    ],
-                )
-            ],
+            contents=[types.Content(role="user", parts=parts)],
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -140,7 +301,6 @@ def main():
             ),
         )
 
-        # Output thought summary if available (to stderr for transparency)
         for part in response.candidates[0].content.parts:
             if part.thought:
                 print("--- Oracle's Reasoning ---", file=sys.stderr)
@@ -152,6 +312,17 @@ def main():
     except Exception as e:
         print(f"{os.path.basename(sys.argv[0])}: error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    finally:
+        for uf in uploaded_files:
+            try:
+                print(f"Cleaning up {uf.name}...", file=sys.stderr)
+                client.files.delete(name=uf.name)
+            except Exception as e:
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: failed to delete {uf.name}: {e}",
+                    file=sys.stderr,
+                )
 
 
 if __name__ == "__main__":
