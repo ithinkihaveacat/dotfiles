@@ -60,23 +60,72 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Ensure mdformat and dependencies are installed
+TOOL_DIR=""
+if uv tool list | grep -q "^mdformat "; then
+  TOOL_DIR=$(uv tool list --show-paths | grep "^mdformat " | awk '{print $NF}' | tr -d '()')
+fi
+
+if [[ -z "$TOOL_DIR" ]] || ! "$TOOL_DIR/bin/python" -c "import ruamel.yaml" >/dev/null 2>&1; then
+  echo "mdformat or dependencies not found, installing..." >&2
+  if ! uv tool install mdformat --with mdformat-gfm --with mdformat-frontmatter --with ruamel.yaml; then
+    echo "$(basename "$0"): warning: failed to install mdformat with dependencies" >&2
+  else
+    # Refresh tool dir after install
+    TOOL_DIR=$(uv tool list --show-paths | grep "^mdformat " | awk '{print $NF}' | tr -d '()')
+  fi
+fi
+
 format_content() {
   local input_file="$1"
+  local wrap_width=80
 
-  # Check if mdformat is installed
-  if ! uv tool list | grep -q "^mdformat "; then
-    echo "mdformat not found, installing..." >&2
-    # We try to install with plugins. If this fails, we'll try to run via uvx anyway
-    # but at least the user will see the error.
-    if ! uv tool install mdformat --with mdformat-gfm --with mdformat-frontmatter; then
-      echo "$(basename "$0"): warning: failed to install mdformat, will try running via uvx" >&2
-    fi
+  # Format the YAML front matter if tool env is available
+  if [[ -n "$TOOL_DIR" ]] && "$TOOL_DIR/bin/python" -c "import ruamel.yaml" >/dev/null 2>&1; then
+    "$TOOL_DIR/bin/python" - "$input_file" "$wrap_width" << 'EOF'
+import sys
+import io
+from pathlib import Path
+from ruamel.yaml import YAML
+
+def format_yaml_frontmatter(path: str, wrap: int):
+    file_path = Path(path)
+    content = file_path.read_text(encoding='utf-8')
+
+    if not content.startswith('---\n'):
+        return
+
+    end_idx = content.find('\n---\n', 4)
+    if end_idx == -1:
+        return
+
+    frontmatter_str = content[4:end_idx+1]
+    markdown_str = content[end_idx+5:]
+
+    yaml = YAML()
+    yaml.width = wrap
+    yaml.preserve_quotes = True
+    yaml.default_flow_style = False
+
+    try:
+        data = yaml.load(frontmatter_str)
+        if not data:
+            return
+
+        buf = io.StringIO()
+        yaml.dump(data, buf)
+        new_content = f"---\n{buf.getvalue()}---\n{markdown_str}"
+        file_path.write_text(new_content, encoding='utf-8')
+    except Exception as e:
+        print(f"Warning: Failed to parse front matter in {path}: {e}", file=sys.stderr)
+
+if __name__ == '__main__':
+    format_yaml_frontmatter(sys.argv[1], int(sys.argv[2]))
+EOF
   fi
 
-  # Run mdformat. We use --with to ensure plugins are available even if not installed
-  # or if running via uvx. If it is installed, uv is smart enough to use the cached env.
-  # mdformat edits in-place when passed a file.
-  if ! uvx --with mdformat-gfm --with mdformat-frontmatter mdformat --wrap 80 "$input_file"; then
+  # Run mdformat for the Markdown content
+  if ! uvx --with mdformat-gfm --with mdformat-frontmatter mdformat --wrap "$wrap_width" "$input_file"; then
     echo "$(basename "$0"): error: mdformat failed on $input_file" >&2
     return 1
   fi
