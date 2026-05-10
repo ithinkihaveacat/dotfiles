@@ -34,6 +34,7 @@ require() {
 }
 
 require uvx
+require shasum
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
   usage
@@ -48,36 +49,38 @@ FILES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-  -*)
-    echo "$(basename "$0"): unknown option: $1" >&2
-    exit 1
-    ;;
-  *)
-    FILES+=("$1")
-    shift
-    ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      FILES+=("$1")
+      shift
+      ;;
   esac
 done
 
 format_content() {
   local input_file="$1"
-  local output_file="$2"
 
   # Check if mdformat is installed
-  if ! uv tool list | grep -q mdformat; then
+  if ! uv tool list | grep -q "^mdformat "; then
     echo "mdformat not found, installing..." >&2
-    uv tool install mdformat --with mdformat-gfm --with mdformat-frontmatter >/dev/null 2>&1
+    # We try to install with plugins. If this fails, we'll try to run via uvx anyway
+    # but at least the user will see the error.
+    if ! uv tool install mdformat --with mdformat-gfm --with mdformat-frontmatter; then
+      echo "$(basename "$0"): warning: failed to install mdformat, will try running via uvx" >&2
+    fi
   fi
 
-  # Run with uvx (will use installed version)
-  uvx --with mdformat-gfm --with mdformat-frontmatter mdformat --wrap 80 "$input_file" >/dev/null 2>&1
-  local status=$?
-
-  if [[ -n "$output_file" ]]; then
-    cat "$input_file" >"$output_file"
+  # Run mdformat. We use --with to ensure plugins are available even if not installed
+  # or if running via uvx. If it is installed, uv is smart enough to use the cached env.
+  # mdformat edits in-place when passed a file.
+  if ! uvx --with mdformat-gfm --with mdformat-frontmatter mdformat --wrap 80 "$input_file"; then
+    echo "$(basename "$0"): error: mdformat failed on $input_file" >&2
+    return 1
   fi
-  
-  return $status
+  return 0
 }
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
@@ -86,8 +89,11 @@ if [[ ${#FILES[@]} -eq 0 ]]; then
   TMPFILE="$TMPDIR/content.md"
   trap 'rm -rf -- "$TMPDIR"' EXIT
   cat >"$TMPFILE"
-  format_content "$TMPFILE"
-  cat "$TMPFILE"
+  if format_content "$TMPFILE" >&2; then
+    cat "$TMPFILE"
+  else
+    exit 1
+  fi
 else
   # Format files in place
   FAILED=0
@@ -97,8 +103,20 @@ else
       FAILED=1
       continue
     fi
-    format_content "$FILE"
-    echo "$(basename "$0"): $FILE: formatted"
+
+    # Track if file changed
+    OLD_HASH=$(shasum -a 256 "$FILE" | cut -d' ' -f1)
+
+    if format_content "$FILE" >&2; then
+      NEW_HASH=$(shasum -a 256 "$FILE" | cut -d' ' -f1)
+      if [[ "$OLD_HASH" != "$NEW_HASH" ]]; then
+        echo "$(basename "$0"): $FILE: formatted"
+      else
+        echo "$(basename "$0"): $FILE: already formatted"
+      fi
+    else
+      FAILED=1
+    fi
   done
   exit $FAILED
 fi
