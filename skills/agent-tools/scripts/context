@@ -27,6 +27,24 @@ CONTEXT_BASE_DIR = os.path.join(
     "context",
 )
 
+IGNORED_DIRS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "env",
+    ".env",
+    ".idea",
+    ".vscode",
+    "build",
+    "dist",
+    "out",
+    "target",
+    ".next",
+    ".nuxt",
+}
+
 
 def _emit_entry(display_cmd, content):
     global ENTRY_COUNTER
@@ -247,6 +265,39 @@ def handle_url_topic(url):
         web_url = f"https://github.com/{repo_full}/blob/{branch}/{rel_to_extract}"
 
         entry_file(file, display_url, web_url)
+
+
+def handle_local_dir(directory):
+    directory = os.path.abspath(directory)
+    if not os.path.exists(directory):
+        print(f"context: directory not found: {directory}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[local] Processing directory {directory}", file=sys.stderr)
+    
+    for root, dirs, files in os.walk(directory):
+        # Filter directories in-place
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in IGNORED_DIRS]
+        
+        for file in sorted(files):
+            if file.startswith("."):
+                continue
+            
+            file_path = os.path.join(root, file)
+            rel_path = os.path.relpath(file_path, directory)
+            
+            # Use cat <rel_path> as display_cmd
+            display_cmd = f"cat '{rel_path}'"
+            
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                _emit_entry(display_cmd, content)
+            except Exception as e:
+                print(
+                    f"context: warning: skipping unreadable file: {file_path} ({e})",
+                    file=sys.stderr,
+                )
 
 
 def topic_skills():
@@ -933,7 +984,7 @@ def main():
     # Construct help description
     load_plugins(topics)
 
-    description = "Generate aggregated context for a specific topic or a GitHub URL. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.\n\nGitHub URL support:\n  Pass a full GitHub URL as the topic to fetch and package its contents.\n  Example: https://github.com/owner/repo/tree/branch/path\n\nTopics:\n"
+    description = "Generate aggregated context for a specific topic, a GitHub URL, or a local directory. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.\n\nGitHub URL support:\n  Pass a full GitHub URL as the topic to fetch and package its contents.\n  Example: https://github.com/owner/repo/tree/branch/path\n\nLocal Directory support:\n  Pass a local directory path to package its contents.\n  Example: /path/to/local/dir\n\nTopics:\n"
     for t in sorted(topics.keys()):
         func, desc = topics[t]
         description += f"  {t:<22} {desc}\n"
@@ -1031,11 +1082,17 @@ def register(api):
         os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "context"
     )
 
+    is_dir_topic = False
     if args.topic.startswith("https://github.com/"):
         url_hash = hashlib.sha256(args.topic.encode("utf-8")).hexdigest()
         cache_file = os.path.join(cache_dir, f"url_{url_hash}.xml")
         desc = f"GitHub URL: {args.topic}"
         is_url_topic = True
+    elif os.path.isdir(args.topic):
+        cache_file = None  # Skip caching for directories
+        desc = f"Local Directory: {args.topic}"
+        is_url_topic = False
+        is_dir_topic = True
     else:
         if args.topic not in topics:
             print(f"context: unknown topic: {args.topic}", file=sys.stderr)
@@ -1046,7 +1103,7 @@ def register(api):
 
     # Check cache
     use_cache = False
-    if not args.force and os.path.exists(cache_file):
+    if cache_file and not args.force and os.path.exists(cache_file):
         import time
 
         mtime = os.path.getmtime(cache_file)
@@ -1055,25 +1112,28 @@ def register(api):
         if (time.time() - mtime) < 24 * 3600 and mtime > script_mtime:
             use_cache = True
 
-    if use_cache:
+    if use_cache and cache_file:
         with open(cache_file, "r") as f:
             print(f.read(), end="")
         sys.exit(0)
 
     if is_url_topic:
         handle_url_topic(args.topic)
+    elif is_dir_topic:
+        handle_local_dir(args.topic)
     else:
         func()
 
     xml_output = generate_xml(desc)
 
     # Save to cache
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(cache_file, "w") as f:
-            f.write(xml_output)
-    except Exception as e:
-        print(f"context: warning: failed to update cache: {e}", file=sys.stderr)
+    if cache_file:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_file, "w") as f:
+                f.write(xml_output)
+        except Exception as e:
+            print(f"context: warning: failed to update cache: {e}", file=sys.stderr)
 
     print(xml_output, end="")
 
