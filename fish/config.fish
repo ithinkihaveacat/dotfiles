@@ -5,6 +5,11 @@
 set -x LESS -XMcifR
 set -x TZ Europe/London
 
+# Enables compose-preview plugin application via init script.
+# See ~/.gradle/init.d/compose-ai-tools.gradle for details.
+set -gx COMPOSE_AI_TOOLS true
+
+
 # personal config
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
