@@ -123,6 +123,15 @@ and synthesis requiring external data or massive repository context.
    messages or constraints encountered. This prevents the Oracle from
    re-proposing the same dead ends and directs its reasoning toward genuinely
    novel solutions.
+1. **Planning Step:** The Oracle tool processes massive, expensive context
+   payloads. Before executing a live Oracle request, formulate your prompt and
+   target directories, and run the tool using the `--dry-run` flag:
+   `scripts/oracle --dry-run "PROMPT" [FILE_OR_DIR ...]` Present the resulting
+   dry-run summary (the total payload size, the list of resolved files, and your
+   drafted prompt) to the user in the chat. Ask the user if they want to add
+   more directories, exclude specific files, or tweak the focus of the prompt.
+   Proceed with the live command (without `--dry-run`) after the user approves
+   the plan.
 
 **Warning:** Output can be detailed and lengthy.
 
