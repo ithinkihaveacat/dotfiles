@@ -127,8 +127,23 @@ and synthesis requiring external data or massive repository context.
 **Warning:** Output can be detailed and lengthy.
 
 ```bash
-scripts/oracle "PROMPT" [FILE_OR_DIR ...]
+scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 ```
+
+**Options:**
+
+- `--force`: Bypass context size limits (1MB for text, 20MB per media file). Use
+  when you are confident the large context is necessary and the model can handle
+  it.
+- `--maps`: Use Google Maps grounding instead of Google Search. Use this for
+  queries about locations, places, or general routing options. **Warning:**
+  Specific details like live star ratings, current operating hours, or recent
+  business closures may still be inaccurate or outdated and should be verified.
+  Note: Cannot be combined with `--code`.
+- `--code`: Enable Code Execution for Python. Use this whenever the task
+  requires precise calculations, complex mathematics, data analysis on provided
+  files, or programmatic logic. The model will write and execute Python code in
+  a sandboxed environment.
 
 **Environment:** `GEMINI_API_KEY` (Required)
 
