@@ -149,9 +149,14 @@ add_path (realpath $HOME/.dotfiles/fish/../bin)
 
 # Ensure GEMINI_CLI_GEMINI_API_KEY is in sync with GEMINI_API_KEY
 # to work around CLI environment variable redaction.
-if set -q GEMINI_API_KEY; and not set -q GEMINI_CLI_GEMINI_API_KEY
-    set -gx GEMINI_CLI_GEMINI_API_KEY $GEMINI_API_KEY
+function __sync_gemini_cli_key --on-variable GEMINI_API_KEY
+    if set -q GEMINI_API_KEY
+        set -gx GEMINI_CLI_GEMINI_API_KEY $GEMINI_API_KEY
+    else
+        set -e GEMINI_CLI_GEMINI_API_KEY
+    end
 end
+__sync_gemini_cli_key # Initial sync at startup
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
 set fish_greeting
