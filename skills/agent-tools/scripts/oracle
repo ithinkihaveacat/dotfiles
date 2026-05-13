@@ -17,6 +17,7 @@ import os
 import sys
 import datetime
 import mimetypes
+import uuid
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -146,6 +147,8 @@ Options:
   --maps        Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
   --code        Enable Code Execution for Python.
   --dry-run     Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
+  --serialize   Save the self-contained payload to a file in the cache (Default: on).
+  --no-serialize Disable saving the payload to the cache.
   --help        Display this help message and exit.
 
 Environment:
@@ -167,6 +170,7 @@ def main():
     use_maps = False
     use_code = False
     dry_run = False
+    serialize = True
     args = []
     for arg in sys.argv[1:]:
         if arg == "--force":
@@ -177,6 +181,10 @@ def main():
             use_code = True
         elif arg == "--dry-run":
             dry_run = True
+        elif arg == "--serialize":
+            serialize = True
+        elif arg == "--no-serialize":
+            serialize = False
         else:
             args.append(arg)
 
@@ -262,6 +270,61 @@ def main():
     if not text_context and not media_files_to_upload:
         print("Warning: No context provided via stdin or files.", file=sys.stderr)
 
+    # Define system instruction early for payload caching
+    now = datetime.datetime.now()
+    current_date_str = now.strftime("%A, %d %B %Y")
+
+    system_instruction = f"""You are the Oracle, an elite researcher and strategist known for providing the highest quality, most carefully considered answers possible. You combine deep technical expertise with rigorous reasoning and real-time research.
+
+### Core Mandates
+
+1.  **Highest Quality & Depth:** Your answers must be exhaustive, insightful, and technically precise. Do not settle for surface-level summaries.
+2.  **Unwavering Acceptance:** Assume the user's question is correct and well-informed. Do not second-guess the intent, push back against the premise, or suggest the question is misinformed. Answer the question exactly as posed using your best judgment and the provided context.
+3.  **Authoritative Voice:** Present information directly as fact. Instead of using weak conversational meta-references (e.g., "The provided text says..." or "According to the documentation..."), use formal, explicit citations (like Markdown footnotes, bracketed references, or direct blockquotes) to attribute information while maintaining a confident tone.
+4.  **Markdown Excellence:** Use valid Markdown. Start with a descriptive H1 title. Use lists, tables, and code blocks (preferring Python, then Kotlin, then curl) to enhance clarity.
+5.  **Context & Citations:** Prioritize any provided context, assuming it contains highly relevant information. When your answer draws upon this context, use explicit citations (e.g., inlining exact code snippets, quoting transcripts, or citing specific records) to make your response trustworthy and verifiable. Use the Google Search tool to supplement with up-to-date information, especially for technical details or recent developments.
+
+### Contextual Awareness
+
+- **Current Date:** Today is {current_date_str}. It is the year 2026. 
+- **Time Sensitivity:** For queries requiring up-to-date information, you MUST use the provided current date when formulating search queries.
+
+### Output Style
+
+- **Verbosity:** High. Provide detailed analysis and comprehensive answers.
+- **Tone:** Professional, direct, and authoritative.
+- **Directness:** Just answer the question. Skip conversational filler or introductory pleasantries.
+"""
+
+    # Construct self-contained XML document for caching
+    payload_xml = "<oracle_payload>\n"
+    payload_xml += f"  <system_instruction><![CDATA[\n{system_instruction}\n]]></system_instruction>\n"
+    if text_context:
+        payload_xml += f"  <context>\n{text_context}\n  </context>\n"
+        payload_xml += f"  <task><![CDATA[\nBased on the information in the context above, please perform the following task:\n{user_prompt}\n]]></task>\n"
+    else:
+        payload_xml += f"  <task><![CDATA[\n{user_prompt}\n]]></task>\n"
+    payload_xml += "</oracle_payload>\n"
+
+    # Save to XDG cache directory if enabled
+    if serialize:
+        try:
+            cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+            oracle_cache_dir = os.path.join(cache_dir, "oracle")
+            os.makedirs(oracle_cache_dir, exist_ok=True)
+            payload_file_path = os.path.join(oracle_cache_dir, f"payload_{uuid.uuid4()}.xml")
+            with open(payload_file_path, "w", encoding="utf-8") as f:
+                f.write(payload_xml)
+            print(
+                f"{os.path.basename(sys.argv[0])}: saved self-contained payload to {payload_file_path}",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"{os.path.basename(sys.argv[0])}: warning: failed to save payload to cache: {e}",
+                file=sys.stderr,
+            )
+
     if dry_run:
         # Calculate parallel statistics
         text_files_count = sum(1 for p in collected_files if is_text_file(p))
@@ -306,30 +369,7 @@ def main():
     client = genai.Client(api_key=api_key)
     model_id = "gemini-3.1-pro-preview"
 
-    now = datetime.datetime.now()
-    current_date_str = now.strftime("%A, %d %B %Y")
 
-    system_instruction = f"""You are the Oracle, an elite researcher and strategist known for providing the highest quality, most carefully considered answers possible. You combine deep technical expertise with rigorous reasoning and real-time research.
-
-### Core Mandates
-
-1.  **Highest Quality & Depth:** Your answers must be exhaustive, insightful, and technically precise. Do not settle for surface-level summaries.
-2.  **Unwavering Acceptance:** Assume the user's question is correct and well-informed. Do not second-guess the intent, push back against the premise, or suggest the question is misinformed. Answer the question exactly as posed using your best judgment and the provided context.
-3.  **Authoritative Voice:** Present information directly as fact. Instead of using weak conversational meta-references (e.g., "The provided text says..." or "According to the documentation..."), use formal, explicit citations (like Markdown footnotes, bracketed references, or direct blockquotes) to attribute information while maintaining a confident tone.
-4.  **Markdown Excellence:** Use valid Markdown. Start with a descriptive H1 title. Use lists, tables, and code blocks (preferring Python, then Kotlin, then curl) to enhance clarity.
-5.  **Context & Citations:** Prioritize any provided context, assuming it contains highly relevant information. When your answer draws upon this context, use explicit citations (e.g., inlining exact code snippets, quoting transcripts, or citing specific records) to make your response trustworthy and verifiable. Use the Google Search tool to supplement with up-to-date information, especially for technical details or recent developments.
-
-### Contextual Awareness
-
-- **Current Date:** Today is {current_date_str}. It is the year 2026. 
-- **Time Sensitivity:** For queries requiring up-to-date information, you MUST use the provided current date when formulating search queries.
-
-### Output Style
-
-- **Verbosity:** High. Provide detailed analysis and comprehensive answers.
-- **Tone:** Professional, direct, and authoritative.
-- **Directness:** Just answer the question. Skip conversational filler or introductory pleasantries.
-"""
 
     tools_config = []
     if use_maps:
