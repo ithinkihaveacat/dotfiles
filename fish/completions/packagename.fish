@@ -22,7 +22,7 @@ end
 
 # Helper function: get list of installed packages
 function __fish_packagename_list_packages
-    adb shell pm list packages 2>/dev/null | string replace 'package:' ''
+    adb-packages 2>/dev/null
 end
 
 # Complete subcommands (when no subcommand given)
@@ -57,26 +57,26 @@ complete -c packagename -f -n __fish_packagename_needs_command -a playstore -d '
 complete -c packagename -f -n __fish_packagename_needs_command -a settings -d 'Open the settings page'
 
 # Complete package names for commands that need them
-complete -c packagename -f -n '__fish_packagename_using_command launch' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command force-stop' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command pid' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command logcat' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command dumpsys' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command version' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command permissions' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command services' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command services-dumpsys' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command jobscheduler' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command tiles' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command profile-status' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command profile-generate' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command pull' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command uninstall' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command clear-cache' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command reset-permissions' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command view' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command playstore' -a '(__fish_packagename_list_packages)' -d 'Package'
-complete -c packagename -f -n '__fish_packagename_using_command settings' -a '(__fish_packagename_list_packages)' -d 'Package'
+complete -c packagename -f -n '__fish_packagename_using_command launch' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command force-stop' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command pid' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command logcat' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command dumpsys' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command version' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command permissions' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command services' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command services-dumpsys' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command jobscheduler' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command tiles' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command profile-status' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command profile-generate' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command pull' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command uninstall' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command clear-cache' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command reset-permissions' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command view' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command playstore' -a '(__fish_packagename_list_packages)' -d Package
+complete -c packagename -f -n '__fish_packagename_using_command settings' -a '(__fish_packagename_list_packages)' -d Package
 
 # Complete flags
 complete -c packagename -f -s h -l help -d 'Display help message and exit'

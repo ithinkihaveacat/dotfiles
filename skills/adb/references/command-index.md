@@ -317,16 +317,6 @@ adb exec-out dumpsys activity service PACKAGE
     adb uninstall PACKAGE
 ```
 
-### `scripts/adb-logcat-package`
-
-**Purpose**: Show logcat filtered by a package's PID. **Dependencies**: `adb`
-**Usage**: `scripts/adb-logcat-package PACKAGE` **Raw Command**:
-
-```bash
-pid=$(adb exec-out pidof PACKAGE)
-adb logcat --pid="$pid"
-```
-
 ### `scripts/apk-tiles`
 
 **Purpose**: List tiles declared in an APK or ZIP. **Dependencies**:
@@ -394,16 +384,6 @@ these specific packages/components are very useful to know:
 ```bash
 adb exec-out dumpsys battery
 adb exec-out dumpsys settings | awk -v _match="match" '$2 ~ "name:(" _match ")"'
-```
-
-### `scripts/adb-jobscheduler`
-
-**Purpose**: Display dumpsys information for the Android JobScheduler.
-**Dependencies**: `adb` **Usage**: `scripts/adb-jobscheduler [PACKAGE]` **Raw
-Command**:
-
-```bash
-adb exec-out dumpsys jobscheduler
 ```
 
 ## Display & Demo Mode

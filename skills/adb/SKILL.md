@@ -110,8 +110,7 @@ See `references/command-index.md` for detailed usage.
 ### Package Operations
 
 - `scripts/packagename`: Comprehensive package tool (uninstall, launch, stop,
-  clear-cache).
-- `scripts/adb-logcat-package`: Show logcat filtered for a specific package.
+  clear-cache, logcat, jobscheduler).
 - `scripts/apk-tiles`: List tiles declared in an APK file.
 - `scripts/adb-packages`: List installed packages.
 - `scripts/apk-cat-manifest`: Display the AndroidManifest.xml from an APK.
@@ -119,8 +118,6 @@ See `references/command-index.md` for detailed usage.
 ### System & Dumpsys
 
 - `scripts/adb-battery-stats`: Display battery-related information and settings.
-- `scripts/adb-jobscheduler`: Display dumpsys information for the Android
-  JobScheduler.
 
 ### Display & Demo Mode
 
