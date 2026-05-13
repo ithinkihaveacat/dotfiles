@@ -379,6 +379,29 @@ cat file.txt | scripts/token-count
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
+### gemini-api-status
+
+Ping Gemini models to test API key validity and endpoint responsiveness.
+Runs checks in parallel and enforces a 60-second timeout.
+
+```bash
+scripts/gemini-api-status [MODELS...]
+```
+
+**Input:**
+  - stdin: API Key (if not set in environment).
+
+**Environment:** `GEMINI_API_KEY` (Optional. Used if set, otherwise reads from stdin)
+
+**Options:**
+  - `--help`: Display help message.
+
+**Examples:**
+  - `echo "YOUR_API_KEY" | scripts/gemini-api-status`
+  - `scripts/gemini-api-status gemini-3.1-flash-lite`
+
+**Exit codes:** 0 success, 1 error
+
 ### popper
 
 Interact with Android UIs using an AI agent powered by `uiautomator2` and

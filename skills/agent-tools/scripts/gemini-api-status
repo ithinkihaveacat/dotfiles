@@ -1,0 +1,124 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "google-genai",
+# ]
+# ///
+
+import argparse
+import asyncio
+import getpass
+import os
+import sys
+from google import genai
+from google.genai import errors as genai_errors
+
+DEFAULT_MODELS = [
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+]
+
+
+def get_client():
+    key = os.environ.get("GEMINI_CLI_GEMINI_API_KEY") or os.environ.get(
+        "GEMINI_API_KEY"
+    )
+    if not key:
+        print(
+            "Error: GEMINI_API_KEY environment variable not set",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return genai.Client(api_key=key)
+
+
+async def ping_model(client, model):
+    try:
+        # Use asyncio.wait_for for timeout
+        await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=model,
+                contents="Ping",
+            ),
+            timeout=60.0,
+        )
+        return model, True, "OK"
+    except asyncio.TimeoutError:
+        return model, False, "FAILED: Timeout after 60 seconds"
+    except genai_errors.APIError as e:
+        return model, False, f"FAILED (HTTP {e.code}): {e.message}"
+    except Exception as e:
+        return model, False, f"FAILED: {str(e)}"
+
+
+async def main_async():
+    parser = argparse.ArgumentParser(
+        description="Ping Gemini models to test API key validity. Takes API key from GEMINI_API_KEY environment variable or stdin.",
+        add_help=False,
+    )
+    parser.add_argument(
+        "--help", action="store_true", help="Show this help message and exit"
+    )
+    parser.add_argument(
+        "models",
+        nargs="*",
+        help="Models to ping. If omitted, uses defaults.",
+    )
+
+    # Handle 'help' command as requested by standards
+    if len(sys.argv) > 1 and sys.argv[1] == "help":
+        parser.print_help()
+        sys.exit(0)
+
+    args = parser.parse_args()
+
+    if args.help:
+        parser.print_help()
+        sys.exit(0)
+
+    # Read API key from stdin if not in environment
+    if not os.environ.get("GEMINI_API_KEY") and not os.environ.get(
+        "GEMINI_CLI_GEMINI_API_KEY"
+    ):
+        if sys.stdin.isatty():
+            key = getpass.getpass("Enter Gemini API Key: ")
+        else:
+            key = sys.stdin.read().strip()
+
+        if not key:
+            print("Error: API Key cannot be empty", file=sys.stderr)
+            sys.exit(1)
+        os.environ["GEMINI_API_KEY"] = key
+
+    client = get_client()
+
+    models_to_ping = args.models if args.models else DEFAULT_MODELS
+
+    print(
+        f"gemini-api-status: pinging {len(models_to_ping)} models in parallel (60s timeout)...",
+        file=sys.stderr,
+    )
+
+    tasks = [ping_model(client, model) for model in models_to_ping]
+
+    exit_code = 0
+    # Use as_completed to yield results as they complete
+    for coro in asyncio.as_completed(tasks):
+        model, success, message = await coro
+        if success:
+            print(f"gemini-api-status: {model}: {message}")
+        else:
+            print(f"gemini-api-status: {model}: {message}", file=sys.stderr)
+            exit_code = 1
+
+    sys.exit(exit_code)
+
+
+def main():
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()
