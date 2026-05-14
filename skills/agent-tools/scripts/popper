@@ -34,6 +34,7 @@ import json
 import datetime
 import xml.etree.ElementTree as ET
 import re
+import tempfile
 
 import uiautomator2 as u2
 from google import genai
@@ -93,6 +94,12 @@ Environment:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Enable/disable screenshot capture and transmission to the model (default: enabled)",
+    )
+    parser.add_argument(
+        "--screenshot-dir",
+        type=str,
+        metavar="DIR",
+        help="Directory to save screenshots (default: XDG_RUNTIME_DIR/popper or fallback to tmp)",
     )
     parser.add_argument(
         "--dump-layout",
@@ -158,6 +165,27 @@ Environment:
         sys.exit(1)
     os.environ["GEMINI_API_KEY"] = api_key
 
+    # Setup XDG-compliant run directory
+    session_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y%m%d_%H%M%S"
+    )
+    session_id = f"run_{session_timestamp}_{os.getpid()}"
+
+    if args.screenshot_dir:
+        base_temp_dir = args.screenshot_dir
+    else:
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        base_temp_dir = (
+            os.path.join(xdg_runtime, "popper")
+            if xdg_runtime
+            else os.path.join(tempfile.gettempdir(), "popper")
+        )
+
+    session_dir = os.path.join(base_temp_dir, session_id)
+    if args.screenshots:
+        os.makedirs(session_dir, exist_ok=True)
+        print(f"[local] Screenshots will be saved to: {session_dir}", file=sys.stderr)
+
     serial = os.environ.get("ANDROID_SERIAL")
     try:
         # Connect to the device
@@ -187,7 +215,6 @@ Environment:
                 if len(b) >= 4:
                     cx, cy = (b[0] + b[2]) // 2, (b[1] + b[3]) // 2
                     element_id = f"{step}:{idx}"
-                    current_layout_map[element_id] = (cx, cy)
                     item = {
                         "id": element_id,
                         "text": n.get("text"),
@@ -196,6 +223,12 @@ Environment:
                         if n.get("resource-id")
                         else "",
                         "center": f"[{cx},{cy}]",
+                    }
+                    current_layout_map[element_id] = {
+                        "coords": (cx, cy),
+                        "text": item["text"],
+                        "desc": item["content-desc"],
+                        "res_id": item["resource-id"],
                     }
                     res.append({k: v for k, v in item.items() if v})
             return json.dumps(res, ensure_ascii=False)
@@ -291,13 +324,14 @@ Environment:
     except Exception as e:
         print(f"[local] Warning: Failed to fetch model limits: {e}", file=sys.stderr)
 
-    def capture_state_as_parts():
-        """Attempts to dump the hierarchy and screenshot. Returns the XML string
-        and the screenshot formatted as a FunctionResponsePart.
+    def capture_state_as_parts(current_step: int):
+        """Attempts to dump the hierarchy and screenshot. Returns the XML string,
+        the screenshot formatted as a FunctionResponsePart, and the saved filepath.
         """
         xml = get_ui_state()
 
         img_part = None
+        screenshot_path = None
         if args.screenshots:
             try:
                 img = d.screenshot()
@@ -309,10 +343,21 @@ Environment:
                     data=img_bytes, mime_type="image/jpeg"
                 )
                 img_part.inline_data.display_name = "screenshot.jpg"
-            except Exception:
-                pass
 
-        return xml, img_part
+                # Write the already-encoded JPEG bytes directly to disk
+                screenshot_path = os.path.join(
+                    session_dir, f"step_{current_step:03d}.jpg"
+                )
+                with open(screenshot_path, "wb") as f:
+                    f.write(img_bytes)
+                print(f"[local] Saved screenshot: {screenshot_path}", file=sys.stderr)
+            except Exception as e:
+                print(
+                    f"[local] Warning: Failed to capture/save screenshot: {e}",
+                    file=sys.stderr,
+                )
+
+        return xml, img_part, screenshot_path
 
     # Define UI tools
     def tap_element(
@@ -378,8 +423,8 @@ Environment:
             element_id: The ID of the element to tap in 'step:index' format
                 (e.g. '1:5').
         """
-        print(f"[agent] Tapping by ID: {element_id}", file=sys.stderr)
         if element_id not in current_layout_map:
+            print(f"[agent] Tapping by ID: {element_id}", file=sys.stderr)
             try:
                 s, _ = map(int, element_id.split(":"))
                 if s != step:
@@ -394,7 +439,21 @@ Environment:
                 "message": f"Element ID '{element_id}' not found in current layout.",
             }
 
-        x, y = current_layout_map[element_id]
+        element_info = current_layout_map[element_id]
+        x, y = element_info["coords"]
+
+        label = (
+            element_info.get("text")
+            or element_info.get("desc")
+            or element_info.get("res_id")
+        )
+        if label:
+            if len(label) > 20:
+                label = label[:17] + "..."
+            print(f'[agent] Tapping by ID: {element_id} ("{label}")', file=sys.stderr)
+        else:
+            print(f"[agent] Tapping by ID: {element_id}", file=sys.stderr)
+
         try:
             d.click(x, y)
             time.sleep(1.5)
@@ -682,20 +741,30 @@ Constraints:
     # For the initial prompt, we must send the raw PIL Image if available.
     initial_xml = get_ui_state()
 
+    initial_screenshot_path = None
     try:
         initial_img = d.screenshot()
-    except Exception:
+        if args.screenshots:
+            initial_screenshot_path = os.path.join(session_dir, "step_000.jpg")
+            initial_img.save(initial_screenshot_path, format="JPEG", quality=85)
+            print(
+                f"[local] Saved screenshot: {initial_screenshot_path}", file=sys.stderr
+            )
+    except Exception as e:
+        print(
+            f"[local] Warning: Failed to save initial screenshot: {e}", file=sys.stderr
+        )
         initial_img = None
 
     prompt = [
         f"""Goal: {args.goal}
-
+ 
 Current UI State:
 {initial_xml}
-
+ 
 Element IDs use 'step:index' format such as '0:12'. When calling tap_by_id,
 use IDs from the latest UI state.
-
+ 
 What is your first action?"""
     ]
     if initial_img:
@@ -749,7 +818,11 @@ What is your first action?"""
         session_start = time.perf_counter()
 
         emit({"type": "start", "goal": args.goal, "device": device_info})
-        emit({"type": "hierarchy", "step": 0, "xml": initial_xml})
+
+        init_emit_data = {"type": "hierarchy", "step": 0, "xml": initial_xml}
+        if initial_screenshot_path:
+            init_emit_data["screenshot_path"] = initial_screenshot_path
+        emit(init_emit_data)
 
         response = send_with_retry(prompt)
         task_result = None
@@ -809,9 +882,19 @@ What is your first action?"""
                     # Capture state for the function response (unless complete)
                     parts_list = []
                     if fc.name != "complete_task":
-                        xml_str, img_part = capture_state_as_parts()
+                        xml_str, img_part, screenshot_path = capture_state_as_parts(
+                            step
+                        )
                         result["new_ui_hierarchy"] = xml_str
-                        emit({"type": "hierarchy", "step": step, "xml": xml_str})
+
+                        step_emit_data = {
+                            "type": "hierarchy",
+                            "step": step,
+                            "xml": xml_str,
+                        }
+                        if screenshot_path:
+                            step_emit_data["screenshot_path"] = screenshot_path
+                        emit(step_emit_data)
 
                         if restricted_package:
                             try:

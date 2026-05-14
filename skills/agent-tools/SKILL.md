@@ -406,7 +406,8 @@ scripts/gemini-api-status [MODELS...]
 
 Interact with Android UIs using an AI agent powered by `uiautomator2` and
 Gemini. This allows semantic control of the device by providing a goal in
-natural language.
+natural language. Screenshots are captured at each step and saved to a
+unique run directory in an XDG-compliant temporary location.
 
 ```bash
 scripts/popper "GOAL"
@@ -414,7 +415,8 @@ scripts/popper "GOAL"
 
 **Options:** `--launch PACKAGE` (launch a package before starting),
 `--stay-in-app` (restrict the run to a single application package),
-`--dump-layout` (print the current simplified UI layout as JSON and exit)
+`--dump-layout` (print the current simplified UI layout as JSON and exit),
+`--screenshot-dir DIR` (override directory to save screenshots)
 
 **Environment:** `ANDROID_SERIAL` (optional, target specific device)
 
