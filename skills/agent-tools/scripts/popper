@@ -90,10 +90,16 @@ Environment:
         help="Output format: 'text' (default, human-readable) or 'stream-json' (NDJSON to stdout)",
     )
     parser.add_argument(
-        "--screenshots",
+        "--agent-screenshots",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable/disable screenshot capture and transmission to the model (default: enabled)",
+        help="Enable/disable transmitting screenshots to the Gemini API (default: enabled)",
+    )
+    parser.add_argument(
+        "--local-screenshots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable saving screenshots to the local disk for debugging (default: enabled)",
     )
     parser.add_argument(
         "--screenshot-dir",
@@ -182,7 +188,7 @@ Environment:
         )
 
     session_dir = os.path.join(base_temp_dir, session_id)
-    if args.screenshots:
+    if args.local_screenshots:
         os.makedirs(session_dir, exist_ok=True)
         print(f"[local] Screenshots will be saved to: {session_dir}", file=sys.stderr)
 
@@ -332,28 +338,32 @@ Environment:
 
         img_part = None
         screenshot_path = None
-        if args.screenshots:
+
+        if args.agent_screenshots or args.local_screenshots:
             try:
                 img = d.screenshot()
                 img_byte_arr = io.BytesIO()
                 img.save(img_byte_arr, format="JPEG", quality=85)
                 img_bytes = img_byte_arr.getvalue()
 
-                img_part = types.FunctionResponsePart.from_bytes(
-                    data=img_bytes, mime_type="image/jpeg"
-                )
-                img_part.inline_data.display_name = "screenshot.jpg"
+                if args.agent_screenshots:
+                    img_part = types.FunctionResponsePart.from_bytes(
+                        data=img_bytes, mime_type="image/jpeg"
+                    )
+                    img_part.inline_data.display_name = f"step_{current_step:03d}.jpg"
 
-                # Write the already-encoded JPEG bytes directly to disk
-                screenshot_path = os.path.join(
-                    session_dir, f"step_{current_step:03d}.jpg"
-                )
-                with open(screenshot_path, "wb") as f:
-                    f.write(img_bytes)
-                print(f"[local] Saved screenshot: {screenshot_path}", file=sys.stderr)
+                if args.local_screenshots:
+                    screenshot_path = os.path.join(
+                        session_dir, f"step_{current_step:03d}.jpg"
+                    )
+                    with open(screenshot_path, "wb") as f:
+                        f.write(img_bytes)
+                    print(
+                        f"[local] Saved screenshot: {screenshot_path}", file=sys.stderr
+                    )
             except Exception as e:
                 print(
-                    f"[local] Warning: Failed to capture/save screenshot: {e}",
+                    f"[local] Warning: Failed to capture/process screenshot: {e}",
                     file=sys.stderr,
                 )
 
@@ -742,19 +752,24 @@ Constraints:
     initial_xml = get_ui_state()
 
     initial_screenshot_path = None
-    try:
-        initial_img = d.screenshot()
-        if args.screenshots:
-            initial_screenshot_path = os.path.join(session_dir, "step_000.jpg")
-            initial_img.save(initial_screenshot_path, format="JPEG", quality=85)
+    initial_img = None
+
+    if args.agent_screenshots or args.local_screenshots:
+        try:
+            initial_img = d.screenshot()
+            if args.local_screenshots:
+                initial_screenshot_path = os.path.join(session_dir, "step_000.jpg")
+                initial_img.save(initial_screenshot_path, format="JPEG", quality=85)
+                print(
+                    f"[local] Saved screenshot: {initial_screenshot_path}",
+                    file=sys.stderr,
+                )
+        except Exception as e:
             print(
-                f"[local] Saved screenshot: {initial_screenshot_path}", file=sys.stderr
+                f"[local] Warning: Failed to process initial screenshot: {e}",
+                file=sys.stderr,
             )
-    except Exception as e:
-        print(
-            f"[local] Warning: Failed to save initial screenshot: {e}", file=sys.stderr
-        )
-        initial_img = None
+            initial_img = None
 
     prompt = [
         f"""Goal: {args.goal}
@@ -767,7 +782,7 @@ use IDs from the latest UI state.
  
 What is your first action?"""
     ]
-    if initial_img:
+    if args.agent_screenshots and initial_img:
         prompt.append(initial_img)
 
     def should_retry(exception: Exception) -> bool:
@@ -915,7 +930,7 @@ What is your first action?"""
                                 result["message"] = task_result["reason"]
 
                         if img_part:
-                            result["screenshot"] = {"$ref": "screenshot.jpg"}
+                            result["screenshot"] = {"$ref": f"step_{step:03d}.jpg"}
                             parts_list.append(img_part)
 
                 tool_results.append(
