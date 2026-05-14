@@ -416,6 +416,8 @@ scripts/popper "GOAL"
 **Options:** `--launch PACKAGE` (launch a package before starting),
 `--stay-in-app` (restrict the run to a single application package),
 `--dump-layout` (print the current simplified UI layout as JSON and exit),
+`--agent-screenshots` / `--no-agent-screenshots` (enable/disable sending screenshots to API),
+`--local-screenshots` / `--no-local-screenshots` (enable/disable saving screenshots locally),
 `--screenshot-dir DIR` (override directory to save screenshots)
 
 **Environment:** `ANDROID_SERIAL` (optional, target specific device)
