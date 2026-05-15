@@ -102,10 +102,17 @@ Environment:
         help="Enable/disable saving screenshots to the local disk for debugging (default: enabled)",
     )
     parser.add_argument(
-        "--screenshot-dir",
+        "--local-screenshot-dir",
         type=str,
         metavar="DIR",
-        help="Directory to save screenshots (default: XDG_RUNTIME_DIR/popper or fallback to tmp)",
+        help="Directory to save step-by-step debug screenshots (default: XDG_RUNTIME_DIR/popper or fallback to tmp)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=".",
+        metavar="DIR",
+        help="Directory to save explicit screenshots requested by the agent (default: current directory)",
     )
     parser.add_argument(
         "--dump-layout",
@@ -177,8 +184,8 @@ Environment:
     )
     session_id = f"run_{session_timestamp}_{os.getpid()}"
 
-    if args.screenshot_dir:
-        base_temp_dir = args.screenshot_dir
+    if args.local_screenshot_dir:
+        base_temp_dir = args.local_screenshot_dir
     else:
         xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
         base_temp_dir = (
@@ -254,11 +261,33 @@ Environment:
     except Exception as e:
         print(f"[local] Warning: Failed to wake up screen: {e}", file=sys.stderr)
 
+    launch_success = False
     if args.launch:
         print(f"[local] Launching {args.launch}", file=sys.stderr)
         try:
             d.app_start(args.launch)
-            time.sleep(2)  # allow app launch animation to settle
+
+            # Polling via ADB is used because d.app_current() and d.app_wait() were
+            # unreliable/stale on some devices. Fixed sleep and polling app_current() failed.
+            timeout_seconds = 10.0
+            start_time = time.perf_counter()
+            while time.perf_counter() - start_time < timeout_seconds:
+                try:
+                    output = d.shell("dumpsys window | grep mCurrentFocus").output
+                    if args.launch in output:
+                        launch_success = True
+                        break
+                except Exception:
+                    # Fallback or ignore errors during polling
+                    pass
+                time.sleep(0.5)
+            else:
+                print(
+                    f"[local] Warning: {args.launch} did not reach foreground within {timeout_seconds}s (ADB check).",
+                    file=sys.stderr,
+                )
+            # Brief buffer to allow layout inflation and entry animations to fully settle
+            time.sleep(1.0)
         except Exception as e:
             print(f"popper: failed to launch {args.launch}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -270,6 +299,17 @@ Environment:
     try:
         device_info = d.app_current()
         initial_package = device_info.get("package", "")
+
+        # If we successfully verified launch via ADB but app_current is stale, override it
+        if args.launch and launch_success and initial_package != args.launch:
+            print(
+                f"[local] Overriding stale package '{initial_package}' with launched package '{args.launch}'",
+                file=sys.stderr,
+            )
+            initial_package = args.launch
+            device_info["package"] = args.launch
+            if "activity" in device_info:
+                del device_info["activity"]
 
         # Try to gather extra hardware context via shell to avoid uiautomator2 info crash
         try:
@@ -649,6 +689,35 @@ Environment:
         )
         return {"success": success, "reason": reason}
 
+    def save_screenshot(filename: str = None) -> dict:
+        """Saves a screenshot of the current UI state to the output directory.
+
+        Use this to provide visual proof of a completed task, record a final confirmation screen, or preserve important information.
+
+        Args:
+            filename: Optional. A descriptive name for the file (e.g., 'goal_completed', 'order_confirmation').
+        """
+        if not filename:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%H%M%S")
+            filename = f"agent_screenshot_{step:03d}_{timestamp}.jpg"
+
+        # Prevent directory traversal by forcing the file into the output_dir
+        safe_filename = os.path.basename(filename)
+        if not safe_filename.lower().endswith((".jpg", ".jpeg", ".png")):
+            safe_filename += ".jpg"
+
+        output_path = os.path.join(args.output_dir, safe_filename)
+        print(f"[agent] Saving screenshot to {output_path}", file=sys.stderr)
+
+        try:
+            img = d.screenshot()
+            save_format = "PNG" if safe_filename.lower().endswith(".png") else "JPEG"
+            img.save(output_path, format=save_format, quality=85)
+            time.sleep(0.5)
+            return {"status": "success", "message": f"Saved to {safe_filename}"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     ui_tools = [
         tap_element,
         tap_by_id,
@@ -659,6 +728,7 @@ Environment:
         open_quick_settings,
         observe,
         tap_coordinates,
+        save_screenshot,
         complete_task,
     ]
 
