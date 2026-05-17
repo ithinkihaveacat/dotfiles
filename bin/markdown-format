@@ -1,8 +1,33 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "mdformat",
+#     "mdformat-gfm",
+#     "mdformat-frontmatter",
+#     "ruamel.yaml",
+# ]
+# ///
 
-usage() {
-  cat <<EOF
-Usage: $(basename "$0") [FILE...]
+# Tests: tests/markdown-format/
+
+from __future__ import annotations
+
+import io
+import os
+import sys
+from pathlib import Path
+
+import mdformat
+from ruamel.yaml import YAML
+
+SCRIPT_NAME = os.path.basename(sys.argv[0])
+WRAP_WIDTH = 80
+
+
+def usage() -> None:
+    print(
+        f"""Usage: {SCRIPT_NAME} [FILE...]
 
 Format Markdown files using mdformat.
 
@@ -18,154 +43,107 @@ Options:
 Examples:
 
 # Format a file in place
-  $(basename "$0") README.md
+  {SCRIPT_NAME} README.md
 
 # Format reading from stdin
-  $(basename "$0") < notes.md
-EOF
-  exit 0
-}
+  {SCRIPT_NAME} < notes.md"""
+    )
 
-require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo >&2 "$(basename "$0"): $1 not found"
-    exit 127
-  }
-}
 
-require uvx
-require shasum
+def reformat_frontmatter(text: str) -> str:
+    # mdformat-frontmatter passes YAML through verbatim; ruamel.yaml is needed
+    # to reflow long folded scalars to WRAP_WIDTH (see tests/markdown-format).
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return text
 
-if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-  usage
-fi
-
-if [[ $# -eq 0 && -t 0 ]]; then
-  usage
-fi
-
-# Parse options
-FILES=()
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -*)
-      echo "$(basename "$0"): unknown option: $1" >&2
-      exit 1
-      ;;
-    *)
-      FILES+=("$1")
-      shift
-      ;;
-  esac
-done
-
-# Ensure mdformat and dependencies are installed
-TOOL_DIR=""
-if uv tool list | grep -q "^mdformat "; then
-  TOOL_DIR=$(uv tool list --show-paths | grep "^mdformat " | awk '{print $NF}' | tr -d '()')
-fi
-
-if [[ -z "$TOOL_DIR" ]] || ! "$TOOL_DIR/bin/python" -c "import ruamel.yaml" >/dev/null 2>&1; then
-  echo "mdformat or dependencies not found, installing..." >&2
-  if ! uv tool install mdformat --with mdformat-gfm --with mdformat-frontmatter --with ruamel.yaml; then
-    echo "$(basename "$0"): warning: failed to install mdformat with dependencies" >&2
-  else
-    # Refresh tool dir after install
-    TOOL_DIR=$(uv tool list --show-paths | grep "^mdformat " | awk '{print $NF}' | tr -d '()')
-  fi
-fi
-
-format_content() {
-  local input_file="$1"
-  local wrap_width=80
-
-  # Format the YAML front matter if tool env is available
-  if [[ -n "$TOOL_DIR" ]] && "$TOOL_DIR/bin/python" -c "import ruamel.yaml" >/dev/null 2>&1; then
-    "$TOOL_DIR/bin/python" - "$input_file" "$wrap_width" <<'EOF'
-import sys
-import io
-from pathlib import Path
-from ruamel.yaml import YAML
-
-def format_yaml_frontmatter(path: str, wrap: int):
-    file_path = Path(path)
-    content = file_path.read_text(encoding='utf-8')
-
-    if not content.startswith('---\n'):
-        return
-
-    end_idx = content.find('\n---\n', 4)
-    if end_idx == -1:
-        return
-
-    frontmatter_str = content[4:end_idx+1]
-    markdown_str = content[end_idx+5:]
+    frontmatter_str = text[4 : end + 1]
+    body = text[end + 5 :]
 
     yaml = YAML()
-    yaml.width = wrap
+    yaml.width = WRAP_WIDTH
     yaml.preserve_quotes = True
     yaml.default_flow_style = False
 
     try:
         data = yaml.load(frontmatter_str)
-        if not data:
-            return
-
-        buf = io.StringIO()
-        yaml.dump(data, buf)
-        new_content = f"---\n{buf.getvalue()}---\n{markdown_str}"
-        file_path.write_text(new_content, encoding='utf-8')
     except Exception as e:
-        print(f"Warning: Failed to parse front matter in {path}: {e}", file=sys.stderr)
+        print(
+            f"{SCRIPT_NAME}: warning: failed to parse front matter: {e}",
+            file=sys.stderr,
+        )
+        return text
 
-if __name__ == '__main__':
-    format_yaml_frontmatter(sys.argv[1], int(sys.argv[2]))
-EOF
-  fi
+    if not data:
+        return text
 
-  # Run mdformat for the Markdown content
-  if ! uvx --with mdformat-gfm --with mdformat-frontmatter mdformat --wrap "$wrap_width" "$input_file"; then
-    echo "$(basename "$0"): error: mdformat failed on $input_file" >&2
-    return 1
-  fi
-  return 0
-}
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    return f"---\n{buf.getvalue()}---\n{body}"
 
-if [[ ${#FILES[@]} -eq 0 ]]; then
-  # Read from stdin, write to stdout
-  TMPDIR=$(mktemp -d)
-  TMPFILE="$TMPDIR/content.md"
-  trap 'rm -rf -- "$TMPDIR"' EXIT
-  cat >"$TMPFILE"
-  if format_content "$TMPFILE" >&2; then
-    cat "$TMPFILE"
-  else
-    exit 1
-  fi
-else
-  # Format files in place
-  FAILED=0
-  for FILE in "${FILES[@]}"; do
-    if [[ ! -f "$FILE" ]]; then
-      echo "$(basename "$0"): $FILE: No such file or directory" >&2
-      FAILED=1
-      continue
-    fi
 
-    # Track if file changed
-    OLD_HASH=$(shasum -a 256 "$FILE" | cut -d' ' -f1)
+def format_text(text: str) -> str:
+    text = reformat_frontmatter(text)
+    return mdformat.text(
+        text,
+        options={"wrap": WRAP_WIDTH},
+        extensions={"gfm", "frontmatter"},
+    )
 
-    if format_content "$FILE" >&2; then
-      NEW_HASH=$(shasum -a 256 "$FILE" | cut -d' ' -f1)
-      if [[ "$OLD_HASH" != "$NEW_HASH" ]]; then
-        echo "$(basename "$0"): $FILE: formatted"
-      else
-        echo "$(basename "$0"): $FILE: already formatted"
-      fi
-    else
-      FAILED=1
-    fi
-  done
-  exit $FAILED
-fi
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args and args[0] in ("-h", "--help"):
+        usage()
+        return 0
+
+    if not args and sys.stdin.isatty():
+        usage()
+        return 0
+
+    files: list[str] = []
+    for arg in args:
+        if arg.startswith("-"):
+            print(f"{SCRIPT_NAME}: unknown option: {arg}", file=sys.stderr)
+            return 1
+        files.append(arg)
+
+    if not files:
+        try:
+            sys.stdout.write(format_text(sys.stdin.read()))
+        except Exception as e:
+            print(f"{SCRIPT_NAME}: error: {e}", file=sys.stderr)
+            return 1
+        return 0
+
+    failed = 0
+    for f in files:
+        path = Path(f)
+        if not path.is_file():
+            print(
+                f"{SCRIPT_NAME}: {f}: No such file or directory", file=sys.stderr
+            )
+            failed = 1
+            continue
+        try:
+            original = path.read_text(encoding="utf-8")
+            formatted = format_text(original)
+        except Exception as e:
+            print(
+                f"{SCRIPT_NAME}: error: mdformat failed on {f}: {e}",
+                file=sys.stderr,
+            )
+            failed = 1
+            continue
+        if formatted != original:
+            path.write_text(formatted, encoding="utf-8")
+            print(f"{SCRIPT_NAME}: {f}: formatted")
+        else:
+            print(f"{SCRIPT_NAME}: {f}: already formatted")
+    return failed
+
+
+if __name__ == "__main__":
+    sys.exit(main())
