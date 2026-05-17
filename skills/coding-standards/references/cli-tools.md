@@ -39,7 +39,7 @@ resource.
   used for users, do not use `get` for databases. Pick one (e.g., `list` for
   summaries, `get` for single items) and stick to it.
 
----
+______________________________________________________________________
 
 ## 2. The Help System
 
@@ -55,6 +55,7 @@ manual.
 **Behavior:**
 
 1. **Interchangeable Invocation:**
+
    - `tool help` and `tool --help` must produce **identical output**.
    - `tool help [command]` and `tool [command] --help` must produce **identical
      output**.
@@ -65,13 +66,15 @@ manual.
      `tool help`. (Simple utility tools should still fail when required
      arguments are missing).
 
-2. **No Pagers:**
+1. **No Pagers:**
+
    - **Negative Example:** Unlike `git`, the tool generally **must not** launch
      a pager (`less`) or open a browser (`man` page).
    - **Rationale:** Help output should be printed to `stdout` so it can be
      grepped (e.g., `tool help list | grep -- --json`).
 
-3. **Context Aware:**
+1. **Context Aware:**
+
    - `tool --help`: Shows available **verbs**.
    - `tool [verb] --help`: Shows available **nouns** for that verb.
    - `tool [verb] [noun] --help`: Shows specific flags for that operation.
@@ -91,7 +94,7 @@ We strictly follow the GNU Coreutils philosophy regarding the short flag `-h`.
   - **Negative Example:** Do not behave like `git commit -h` (which prints a
     summary).
 
----
+______________________________________________________________________
 
 ## 3. Exit Codes: The "Explicit vs. Implicit" Rule
 
@@ -119,11 +122,15 @@ has failed.
   arguments)
 - **Output:**
   1. Short error message to `stderr` ("Unknown flag: --invalid-flag").
-  2. Brief usage summary (or "Try 'tool --help' for details").
+  1. Brief usage summary (or "Try 'tool --help' for details").
 - **Exit Code:** `> 0` (e.g., `1` or `127`).
 - **Why:** This ensures scripts stop executing if a command is malformed.
 
----
+*Note: For language-specific exit code extensions (e.g., shell script dependency
+failures returning `127`), consult the relevant language standard (like
+`shell.md`).*
+
+______________________________________________________________________
 
 ## 4. Output, Logging & Progress
 
@@ -153,7 +160,7 @@ For operations taking longer than 2 seconds (e.g., `download`, `backup`,
   `tool list users > users.json` (Progress bars and "Fetching users..." logs
   appear on screen but are not saved to the file).
 
----
+______________________________________________________________________
 
 ## Appendix A: Specialized Patterns for Focused Tools
 
@@ -221,7 +228,7 @@ Options:
 
 ```
 
----
+______________________________________________________________________
 
 ## Summary Checklist for Developers
 

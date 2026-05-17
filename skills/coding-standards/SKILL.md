@@ -1,6 +1,6 @@
 ---
 name: coding-standards
-description: >
+description: >-
   Use this skill when writing, reviewing, or validating code (shell scripts,
   Python, Markdown) or CLI tools to ensure they follow repository coding
   standards and conventions. Also use when formatting git commit messages
@@ -34,15 +34,18 @@ tools. Target Python 3.11+.
 
 ### CLI Tool Design
 
-Standards for designing predictable and discoverable command-line interfaces,
-including command structure, help systems, and exit codes.
+The language-agnostic authority for designing predictable and discoverable
+command-line interfaces (UI/UX). This includes command structure, help systems,
+output streams, and exit code philosophy.
 
 @references/cli-tools.md
 
 ### Shell Script Quality
 
-All shell scripts must be linted with `shellcheck` and formatted with `shfmt`.
-Fish scripts use `fish_indent`. Scripts must have robust error handling.
+The language-specific implementation guide for shell scripts. All shell scripts
+must be linted with `shellcheck` and formatted with `shfmt`. Fish scripts use
+`fish_indent`. Scripts must have robust error handling and comply with the UX
+standards in `cli-tools.md`.
 
 @references/shell.md
 

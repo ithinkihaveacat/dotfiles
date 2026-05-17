@@ -61,12 +61,17 @@ conventions.
 
 ### Basic Structure
 
+For any shell script intended to be used interactively, its interface must fully
+comply with the rules defined in `cli-tools.md` (e.g., handling of help flags,
+exit codes, output streams). The following patterns demonstrate how to achieve
+this compliance in bash.
+
 Each script should include:
 
 1. A `usage()` function that displays help text
-2. Support for `-h` and `--help` flags
-3. Clear error messages following GNU coreutils patterns
-4. Practical examples demonstrating common use cases
+1. Support for the `--help` flag (do **not** use `-h` for help)
+1. Clear error messages following GNU coreutils patterns
+1. Practical examples demonstrating common use cases
 
 ### Function Naming
 
@@ -276,9 +281,11 @@ fi
 
 ### Exit Codes
 
-Follow these conventions:
+Shell scripts must respect the standard UI/UX exit codes defined in
+`cli-tools.md` (e.g., `0` for explicit help, `>0` for usage errors).
 
-- `exit 0` for successful operations and help display (`--help`)
+Additionally, follow these shell-specific conventions:
+
 - `exit 1` for general errors (missing arguments, invalid input)
 - `exit 127` for missing required commands (convention for "command not found")
 
@@ -312,9 +319,9 @@ scripts to crash with "Argument list too long."
 1. **Avoid reading large inputs into shell variables.** Reading a whole file
    into a variable (e.g., `DATA=$(cat file.txt)`) and then passing it to a
    command is brittle.
-2. **Use `jq` features for input.** Use `--rawfile` for files and `-R` (raw
+1. **Use `jq` features for input.** Use `--rawfile` for files and `-R` (raw
    input) for stdin.
-3. **Pipe stdin directly.** If processing stdin, pipe it directly into `jq`.
+1. **Pipe stdin directly.** If processing stdin, pipe it directly into `jq`.
 
 ### Examples
 
@@ -364,7 +371,7 @@ process via the `exec()` system call.
 
 1. `jq --arg ...` fails because the shell must pass the huge string to the `jq`
    process.
-2. `printf ... | jq` works because `printf` is a shell builtin in Bash. The
+1. `printf ... | jq` works because `printf` is a shell builtin in Bash. The
    shell handles the data internally and writes it to the pipe without creating
    a new process for `printf`, bypassing the `exec()` limit. `jq` then reads the
    data from stdin, which has no size limit.
