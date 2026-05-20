@@ -10,12 +10,16 @@ import sys
 import requests
 import os
 from urllib.parse import urlparse
+from datetime import datetime
 
 
 def usage(file=sys.stdout):
     print(f"Usage: {os.path.basename(sys.argv[0])} <url>", file=file)
     print("", file=file)
-    print("Fetches GitHub PR details and timeline using GraphQL.", file=file)
+    print(
+        "Fetches GitHub PR, Issue, or Workflow Run details and prints formatted Markdown.",
+        file=file,
+    )
     print("Requires GITHUB_API_KEY environment variable.", file=file)
     print("", file=file)
     print("Options:", file=file)
@@ -26,16 +30,61 @@ def usage(file=sys.stdout):
         f"  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/pull/123",
         file=file,
     )
+    print(
+        f"  {os.path.basename(sys.argv[0])} https://github.com/owner/repo/actions/runs/12345678",
+        file=file,
+    )
 
 
 def parse_github_url(url):
     path_parts = urlparse(url).path.strip("/").split("/")
+    if len(path_parts) >= 5:
+        if path_parts[2] == "actions" and path_parts[3] == "runs":
+            return path_parts[0], path_parts[1], int(path_parts[4]), "run"
     if len(path_parts) >= 4:
         if path_parts[2] == "pull":
             return path_parts[0], path_parts[1], int(path_parts[3]), "pr"
         elif path_parts[2] == "issues":
             return path_parts[0], path_parts[1], int(path_parts[3]), "issue"
-    raise ValueError("Invalid GitHub URL format. Must be a PR or Issue URL.")
+    raise ValueError(
+        "Invalid GitHub URL format. Must be a PR, Issue, or Workflow Run URL."
+    )
+
+
+STATUS_EMOJIS = {
+    "success": "✅",
+    "failure": "❌",
+    "cancelled": "🚫",
+    "skipped": "⏭️",
+    "in_progress": "⏳",
+    "queued": "💤",
+    "waiting": "⏸️",
+    "timed_out": "⏱️",
+}
+
+
+def get_status_emoji(conclusion, status):
+    if conclusion:
+        return STATUS_EMOJIS.get(conclusion.lower(), "❓")
+    if status:
+        return STATUS_EMOJIS.get(status.lower(), "⏳")
+    return "⏳"
+
+
+def format_duration(start_str, end_str):
+    if not start_str or not end_str:
+        return ""
+    try:
+        start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        duration = end - start
+        seconds = int(duration.total_seconds())
+        if seconds < 60:
+            return f"{seconds}s"
+        else:
+            return f"{seconds // 60}m {seconds % 60}s"
+    except Exception:
+        return ""
 
 
 def main():
@@ -64,6 +113,136 @@ def main():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if item_type == "run":
+        # Handle workflow run using REST API
+        run_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{number}"
+        jobs_url = (
+            f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{number}/jobs"
+        )
+
+        rest_headers = {
+            "Accept": "application/vnd.github+json",
+        }
+        if api_key:
+            rest_headers["Authorization"] = f"Bearer {api_key}"
+
+        run_response = requests.get(run_url, headers=rest_headers)
+        if run_response.status_code != 200:
+            print(
+                f"API error fetching run: {run_response.status_code} - {run_response.text}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        run_data = run_response.json()
+
+        jobs_response = requests.get(jobs_url, headers=rest_headers)
+        if jobs_response.status_code != 200:
+            print(
+                f"API error fetching jobs: {jobs_response.status_code} - {jobs_response.text}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        jobs_data = jobs_response.json()
+
+        # Build Markdown output
+        md = []
+        run_name = run_data.get("name", "Workflow Run")
+        run_number = run_data.get("run_number", "")
+        conclusion = run_data.get("conclusion")
+        status = run_data.get("status")
+
+        emoji = get_status_emoji(conclusion, status)
+
+        md.append(f"# Workflow Run: {run_name} #{run_number} {emoji}")
+        md.append(
+            f"**Triggered by:** @{run_data.get('actor', {}).get('login', 'unknown')} on branch `{run_data.get('head_branch')}`"
+        )
+        md.append(f"**Commit:** `{run_data.get('head_sha')}`")
+        md.append(f"**URL:** {run_data.get('html_url')}")
+        md.append(f"**Event:** `{run_data.get('event')}`")
+        md.append(f"**Status:** {status.capitalize() if status else 'Unknown'}")
+        if conclusion:
+            md.append(f"**Conclusion:** {conclusion.capitalize()}")
+        md.append(f"**Created:** {run_data.get('created_at')}")
+
+        # Compute total run duration
+        duration_str = format_duration(
+            run_data.get("run_started_at"), run_data.get("updated_at")
+        )
+        if duration_str:
+            md.append(f"**Duration:** {duration_str}")
+
+        md.append("\n## Jobs Summary\n")
+
+        failed_jobs = []
+
+        for job in jobs_data.get("jobs", []):
+            job_conclusion = job.get("conclusion")
+            job_status = job.get("status")
+            job_emoji = get_status_emoji(job_conclusion, job_status)
+            job_duration = format_duration(
+                job.get("started_at"), job.get("completed_at")
+            )
+            duration_suffix = f" ({job_duration})" if job_duration else ""
+
+            md.append(f"### {job_emoji} {job.get('name')}{duration_suffix}")
+            md.append(
+                f"**Status:** {job_status.capitalize() if job_status else 'Unknown'} | **Conclusion:** {job_conclusion.capitalize() if job_conclusion else 'None'}"
+            )
+            md.append(f"**Job URL:** {job.get('html_url')}")
+
+            if (
+                job_conclusion
+                and job_conclusion != "success"
+                and job_conclusion != "skipped"
+            ):
+                failed_jobs.append(job)
+
+            steps = job.get("steps", [])
+            if steps:
+                md.append("\n#### Steps:")
+                for step in steps:
+                    step_conclusion = step.get("conclusion")
+                    step_status = step.get("status")
+                    step_emoji = get_status_emoji(step_conclusion, step_status)
+                    step_duration = format_duration(
+                        step.get("started_at"), step.get("completed_at")
+                    )
+                    step_duration_str = f" ({step_duration})" if step_duration else ""
+                    md.append(
+                        f"- {step_emoji} **{step.get('name')}**{step_duration_str}"
+                    )
+
+            md.append("\n---\n")
+
+        # Inline failed job logs if requested
+        if failed_jobs:
+            md.append("## Failed Job Logs\n")
+            for job in failed_jobs:
+                job_id = job.get("id")
+                job_name = job.get("name")
+                log_url = f"https://api.github.com/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+
+                md.append(f"### Logs for failed job: `{job_name}`")
+
+                log_response = requests.get(log_url, headers=rest_headers)
+                if log_response.status_code == 200:
+                    log_text = log_response.text
+                    md.append("<details>")
+                    md.append(f"<summary>Click to expand {job_name} logs</summary>\n")
+                    md.append("```text")
+                    md.append(log_text)
+                    md.append("```")
+                    md.append("</details>")
+                else:
+                    md.append(
+                        f"*Could not fetch logs (HTTP {log_response.status_code})*"
+                    )
+                md.append("\n---\n")
+
+        print("\n".join(md))
+        sys.exit(0)
 
     headers = {
         "Authorization": f"bearer {api_key}",
