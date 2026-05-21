@@ -20,9 +20,7 @@ set -g CDPATH . ~
 if test -d ~/workspace
     set -g CDPATH $CDPATH ~/workspace
 end
-if test -d ~/citc
-    set -g CDPATH $CDPATH ~/citc
-end
+
 
 # java
 #
