@@ -5,7 +5,7 @@ description: >
   up-to-date context for agents. Includes image description, screenshot
   comparison, smart cropping, token counting, technical essay generation,
   boolean condition evaluation, live context gathering, Android UI interaction
-  via popper, GitHub PR/Issue formatting via gh-markdown, and deep reasoning
+  via popper, GitHub PR/Issue/Workflow Run formatting via gh-markdown, and deep reasoning
   research via Oracle. Use this skill when the user needs to analyze images,
   count tokens, evaluate conditions, gather the latest authoritative documentation,
   format GitHub data, automate Android apps, generate technical essays, or
@@ -55,7 +55,7 @@ tools only)
 # Gather context and analyze
 scripts/context gemini-api | scripts/emerson "Explain the key features"
 
-# Fetch a GitHub PR or Issue as Markdown
+# Fetch a GitHub PR, Issue, or Workflow Run as Markdown
 scripts/gh-markdown https://github.com/owner/repo/pull/123
 
 # Describe an image (generate alt-text)
@@ -170,13 +170,27 @@ scripts/oracle "What are the latest developments in this framework as of May 202
 
 ### gh-markdown
 
-Fetch GitHub Pull Requests or Issues and format them as Markdown for LLM Agents.
-Includes the main description, standard comments, reviews, and inline review
-comments with resolved status.
+Fetch GitHub Pull Requests, Issues, or Workflow Runs and format them as Markdown
+for LLM Agents.
+
+**Features:**
+
+- **PRs**: Includes main description, comments, reviews, inline threads, and
+  links to workflow runs for monitoring CI status.
+- **Issues**: Includes title, description, labels, and comments.
+- **Workflow Runs**: Includes run summary, duration, jobs, steps, and logs for
+  failed jobs.
 
 Requires `GITHUB_API_KEY` environment variable to be set with a GitHub Personal
-Access Token. You can generate a token at
+Access Token.
+
+**Token Setup:** You can generate a token at
 <https://github.com/settings/personal-access-tokens>.
+
+- **Minimum requirement for public repos**: Select **Repository access:
+  Read-only access to public repositories** with **Permissions: None**.
+- **For private repos**: Grant read access to Pull Requests, Issues, and Actions
+  as needed.
 
 ```bash
 scripts/gh-markdown URL
@@ -191,6 +205,9 @@ scripts/gh-markdown URL
 ```bash
 # Fetch a PR
 scripts/gh-markdown https://github.com/owner/repo/pull/123
+
+# Fetch a Workflow Run
+scripts/gh-markdown https://github.com/owner/repo/actions/runs/12345678
 ```
 
 ### context
@@ -381,24 +398,28 @@ cat file.txt | scripts/token-count
 
 ### gemini-api-status
 
-Ping Gemini models to test API key validity and endpoint responsiveness.
-Runs checks in parallel and enforces a 60-second timeout.
+Ping Gemini models to test API key validity and endpoint responsiveness. Runs
+checks in parallel and enforces a 60-second timeout.
 
 ```bash
 scripts/gemini-api-status [MODELS...]
 ```
 
 **Input:**
-  - stdin: API Key (if not set in environment).
 
-**Environment:** `GEMINI_API_KEY` (Optional. Used if set, otherwise reads from stdin)
+- stdin: API Key (if not set in environment).
+
+**Environment:** `GEMINI_API_KEY` (Optional. Used if set, otherwise reads from
+stdin)
 
 **Options:**
-  - `--help`: Display help message.
+
+- `--help`: Display help message.
 
 **Examples:**
-  - `echo "YOUR_API_KEY" | scripts/gemini-api-status`
-  - `scripts/gemini-api-status gemini-3.1-flash-lite`
+
+- `echo "YOUR_API_KEY" | scripts/gemini-api-status`
+- `scripts/gemini-api-status gemini-3.1-flash-lite`
 
 **Exit codes:** 0 success, 1 error
 
@@ -406,8 +427,8 @@ scripts/gemini-api-status [MODELS...]
 
 Interact with Android UIs using an AI agent powered by `uiautomator2` and
 Gemini. This allows semantic control of the device by providing a goal in
-natural language. Screenshots are captured at each step and saved to a
-unique run directory in an XDG-compliant temporary location.
+natural language. Screenshots are captured at each step and saved to a unique
+run directory in an XDG-compliant temporary location.
 
 ```bash
 scripts/popper "GOAL"
@@ -416,9 +437,10 @@ scripts/popper "GOAL"
 **Options:** `--launch PACKAGE` (launch a package before starting),
 `--stay-in-app` (restrict the run to a single application package),
 `--dump-layout` (print the current simplified UI layout as JSON and exit),
-`--agent-screenshots` / `--no-agent-screenshots` (enable/disable sending screenshots to API),
-`--local-screenshots` / `--no-local-screenshots` (enable/disable saving screenshots locally),
-`--screenshot-dir DIR` (override directory to save screenshots)
+`--agent-screenshots` / `--no-agent-screenshots` (enable/disable sending
+screenshots to API), `--local-screenshots` / `--no-local-screenshots`
+(enable/disable saving screenshots locally), `--screenshot-dir DIR` (override
+directory to save screenshots)
 
 **Environment:** `ANDROID_SERIAL` (optional, target specific device)
 
