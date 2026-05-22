@@ -28,6 +28,8 @@ complete -c context -f -n __fish_context_needs_topic -a prompting -d 'Prompt eng
 complete -c context -f -n __fish_context_needs_topic -a gemini-sdk-js -d 'Google Gemini JavaScript SDK codegen instructions'
 complete -c context -f -n __fish_context_needs_topic -a meshtastic -d 'Meshtastic documentation'
 complete -c context -f -n __fish_context_needs_topic -a homeassistant -d 'Home Assistant integration, automation, API and CLI documentation'
+complete -c context -f -n __fish_context_needs_topic -a compose-architecture -d 'Android Compose Architecture documentation'
+complete -c context -f -n __fish_context_needs_topic -a firebase -d 'Firebase CLI and hosting documentation'
 
 # Complete flags
 complete -c context -f -l help -d 'Display help message and exit'
