@@ -1,0 +1,365 @@
+#!/usr/bin/env bash
+
+set -eo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command> [skill...]
+
+Manage per-workspace agent skills as untracked symlinks under .claude/skills
+and .agents/skills, keeping git quiet via .git/info/exclude. Each command acts
+on every destination at once, so they stay in sync. Operates on the current
+git repository.
+
+Commands:
+  add SPEC...     Symlink a skill into .agents/skills and ignore it locally
+  remove NAME...  Remove a skill this tool added (symlink + ignore entry)
+  list            List skills this tool is managing in the current repo
+  clean           Remove all skills this tool added and its info/exclude block
+
+Aliases:
+  rm              Alias for remove
+
+Options:
+  --help         Display this help message and exit
+
+Skill specs:
+  A SPEC for 'add' may be any of:
+    name          A bare name resolved under SKILL_SOURCE_DIR
+    path          A path to a local skill directory
+    github url    A GitHub tree URL pointing at a skill directory, e.g.
+                  https://github.com/owner/repo/tree/main/skills/my-skill
+  GitHub skills are downloaded into SKILL_CACHE_DIR and symlinked from there,
+  so the cache is shared across workspaces. The skill name is the last path
+  component of the spec.
+
+Environment:
+  SKILL_SOURCE_DIR   Directory searched for skills by name
+                     (default: ~/.agents/skills)
+  SKILL_CACHE_DIR    Where GitHub skills are downloaded
+                     (default: \${XDG_CACHE_HOME:-~/.cache}/agent-skills)
+
+Examples:
+  $(basename "$0") add home-assistant-best-practices
+  $(basename "$0") add oracle context
+  $(basename "$0") add ~/src/my-skill
+  $(basename "$0") add https://github.com/homeassistant-ai/skills/tree/main/skills/home-assistant-best-practices
+  $(basename "$0") list
+  $(basename "$0") remove home-assistant-best-practices
+  $(basename "$0") clean
+
+Skills are added as symlinks and recorded in .git/info/exclude so git never
+reports them. The tool is purely additive: it never touches skills the repo
+tracks, and refuses to shadow a tracked skill of the same name.
+EOF
+  exit 0
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+die() {
+  echo >&2 "$(basename "$0"): $1"
+  exit 1
+}
+
+SKILL_SOURCE_DIR="${SKILL_SOURCE_DIR:-$HOME/.agents/skills}"
+SKILL_CACHE_DIR="${SKILL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/agent-skills}"
+
+# Project skill directories to populate, relative to the repo root. Claude Code
+# reads .claude/skills; Antigravity reads .agents/skills. A skill is symlinked
+# into each, and each link is recorded in info/exclude.
+DEST_DIRS=(".claude/skills" ".agents/skills")
+
+MARK_BEGIN="# >>> agent-skills (managed by 'skill') >>>"
+MARK_END="# <<< agent-skills (managed by 'skill') <<<"
+
+# Print the skill lines currently recorded in the managed block.
+read_managed() {
+  [ -f "$EXCLUDE" ] || return 0
+  awk -v s="$MARK_BEGIN" -v e="$MARK_END" \
+    '$0==s{b=1; next} $0==e{b=0; next} b{print}' "$EXCLUDE"
+}
+
+# Rewrite info/exclude: strip the old managed block, then append a fresh one
+# built from the arguments (sorted, unique). With no arguments the block is
+# removed entirely.
+rewrite_block() {
+  local tmp
+  tmp="$(mktemp)"
+  if [ -f "$EXCLUDE" ]; then
+    awk -v s="$MARK_BEGIN" -v e="$MARK_END" \
+      '$0==s{b=1; next} $0==e{b=0; next} !b{print}' "$EXCLUDE" >"$tmp"
+  fi
+  if [ "$#" -gt 0 ]; then
+    {
+      echo "$MARK_BEGIN"
+      printf '%s\n' "$@" | sort -u
+      echo "$MARK_END"
+    } >>"$tmp"
+  fi
+  mv "$tmp" "$EXCLUDE"
+}
+
+contains() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# Drop each skills directory (and its parent) if we have left it empty.
+prune_dirs() {
+  local d
+  for d in "${DEST_DIRS[@]}"; do
+    rmdir "$d" 2>/dev/null || true
+    rmdir "$(dirname "$d")" 2>/dev/null || true
+  done
+}
+
+# Download a subdirectory of a GitHub repo into the cache. Mirrors bin/context:
+# fetch the branch tarball and strip the top-level "<repo>-<branch>/" wrapper.
+# Args: owner repo branch subpath cachedir
+fetch_github() {
+  local owner="$1" repo="$2" branch="$3" subpath="$4" cachedir="$5"
+  require curl
+  require tar
+  local archive="https://github.com/$owner/$repo/archive/refs/heads/$branch.tar.gz"
+  local tmp
+  tmp="$(mktemp -d)"
+  echo "fetching $archive" >&2
+  if ! curl -fsSL "$archive" | tar -xz -C "$tmp" --strip-components=1; then
+    rm -rf "$tmp"
+    die "failed to fetch or extract $archive"
+  fi
+  local src="$tmp"
+  [ -n "$subpath" ] && src="$tmp/$subpath"
+  if [ ! -d "$src" ]; then
+    rm -rf "$tmp"
+    die "path not found in $owner/$repo@$branch: ${subpath:-/}"
+  fi
+  mkdir -p "$(dirname "$cachedir")"
+  rm -rf "$cachedir"
+  cp -R "$src" "$cachedir"
+  rm -rf "$tmp"
+}
+
+# Resolve a GitHub tree URL to a cached source directory.
+# Sets RESOLVED_SRC and RESOLVED_NAME.
+resolve_github() {
+  local url="$1"
+  case "$url" in
+    github.com/*) url="https://$url" ;;
+  esac
+  if [[ ! "$url" =~ ^https?://github\.com/([^/]+)/([^/]+)(/tree/([^/]+)(/(.*))?)?/?$ ]]; then
+    die "unrecognized github url: $url"
+  fi
+  local owner="${BASH_REMATCH[1]}"
+  local repo="${BASH_REMATCH[2]%.git}"
+  local branch="${BASH_REMATCH[4]:-main}"
+  local subpath="${BASH_REMATCH[6]%/}"
+  local name
+  if [ -n "$subpath" ]; then
+    name="$(basename "$subpath")"
+  else
+    name="$repo"
+  fi
+  local cachedir="$SKILL_CACHE_DIR/$owner/$repo/$branch${subpath:+/$subpath}"
+  if [ ! -d "$cachedir" ] || [ -z "$(ls -A "$cachedir" 2>/dev/null)" ]; then
+    fetch_github "$owner" "$repo" "$branch" "$subpath" "$cachedir"
+  else
+    echo "using cached $owner/$repo@$branch/${subpath} ($cachedir)" >&2
+  fi
+  RESOLVED_SRC="$cachedir"
+  RESOLVED_NAME="$name"
+}
+
+# Resolve a skill spec (bare name, local path, or GitHub URL) to a source
+# directory to symlink. Sets RESOLVED_SRC and RESOLVED_NAME.
+resolve_spec() {
+  local arg="$1"
+  case "$arg" in
+    https://github.com/* | http://github.com/* | github.com/*)
+      resolve_github "$arg"
+      ;;
+    http://* | https://*)
+      die "only github.com URLs are supported: $arg"
+      ;;
+    */*)
+      [ -d "$arg" ] || die "skill source not found: $arg"
+      RESOLVED_SRC="$arg"
+      RESOLVED_NAME="$(basename "$arg")"
+      ;;
+    *)
+      RESOLVED_SRC="$SKILL_SOURCE_DIR/$arg"
+      RESOLVED_NAME="$arg"
+      [ -d "$RESOLVED_SRC" ] || die "skill source not found: $RESOLVED_SRC"
+      ;;
+  esac
+}
+
+cmd_add() {
+  [ "$#" -ge 1 ] || die "add: skill name required"
+  local managed=()
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && managed+=("$line")
+  done < <(read_managed)
+
+  local arg src name d relpath line
+  for arg in "$@"; do
+    resolve_spec "$arg"
+    src="$RESOLVED_SRC"
+    name="$RESOLVED_NAME"
+
+    # Reject collisions across every destination before touching any of them.
+    for d in "${DEST_DIRS[@]}"; do
+      relpath="$d/$name"
+      if git ls-files --error-unmatch -- "$relpath" >/dev/null 2>&1; then
+        die "add: repo already tracks $relpath; refusing to shadow it"
+      fi
+      if [ -e "$relpath" ] && [ ! -L "$relpath" ]; then
+        die "add: $relpath exists and is not a symlink; refusing to overwrite"
+      fi
+    done
+
+    # Link into each destination, flushing the record after each link so the
+    # symlinks and info/exclude never disagree even if interrupted mid-skill.
+    for d in "${DEST_DIRS[@]}"; do
+      relpath="$d/$name"
+      line="/$d/$name"
+      mkdir -p "$d"
+      rm -f "$relpath"
+      ln -s "$src" "$relpath"
+      contains "$line" "${managed[@]}" || managed+=("$line")
+      rewrite_block "${managed[@]}"
+    done
+    echo "added $name -> $src" >&2
+  done
+}
+
+cmd_rm() {
+  [ "$#" -ge 1 ] || die "remove: skill name required"
+  local managed=()
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && managed+=("$line")
+  done < <(read_managed)
+
+  local arg name d relpath kept item removed
+  for arg in "$@"; do
+    name="$(basename "$arg")"
+    removed=0
+    for d in "${DEST_DIRS[@]}"; do
+      relpath="$d/$name"
+      line="/$d/$name"
+
+      if [ -L "$relpath" ]; then
+        rm -f "$relpath"
+        removed=1
+      elif [ -e "$relpath" ]; then
+        die "remove: $relpath is not a symlink we manage; leaving it untouched"
+      fi
+
+      kept=()
+      for item in "${managed[@]}"; do
+        [ "$item" = "$line" ] || kept+=("$item")
+      done
+      managed=("${kept[@]}")
+    done
+
+    if [ "$removed" -eq 1 ]; then
+      echo "removed $name" >&2
+    else
+      echo "remove: $name not present; clearing record" >&2
+    fi
+  done
+  rewrite_block "${managed[@]}"
+  prune_dirs
+}
+
+# List managed skill names, deduplicated across destinations.
+cmd_list() {
+  local line rel d
+  read_managed | while IFS= read -r line; do
+    rel="${line#/}"
+    for d in "${DEST_DIRS[@]}"; do
+      case "$rel" in
+        "$d"/*) echo "${rel#"$d"/}" ;;
+      esac
+    done
+  done | sort -u
+}
+
+cmd_clean() {
+  local managed=()
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && managed+=("$line")
+  done < <(read_managed)
+
+  local any_dir=0 d
+  for d in "${DEST_DIRS[@]}"; do
+    [ -d "$d" ] && any_dir=1
+  done
+  if [ "${#managed[@]}" -eq 0 ] && [ "$any_dir" -eq 0 ]; then
+    echo "clean: nothing to do" >&2
+    return 0
+  fi
+
+  local relpath removed=0 left=0
+  for line in "${managed[@]}"; do
+    relpath="${line#/}"
+    if [ -L "$relpath" ]; then
+      rm -f "$relpath"
+      removed=$((removed + 1))
+      echo "removed $relpath" >&2
+    elif [ -e "$relpath" ]; then
+      echo "clean: $relpath is not a symlink; leaving it in place" >&2
+      left=$((left + 1))
+    fi
+  done
+
+  rewrite_block
+  prune_dirs
+  echo "clean: removed $removed link(s); cleared exclude block" >&2
+  [ "$left" -eq 0 ] || echo "clean: $left path(s) left in place (not symlinks)" >&2
+}
+
+main() {
+  require git
+
+  case "${1:-}" in
+    "" | --help | help) usage ;;
+  esac
+
+  local root
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
+    die "not inside a git work tree"
+  cd "$root"
+  EXCLUDE="$(git rev-parse --git-path info/exclude)"
+  mkdir -p "$(dirname "$EXCLUDE")"
+
+  local cmd="$1"
+  shift
+  case "$cmd" in
+    add) cmd_add "$@" ;;
+    remove | rm) cmd_rm "$@" ;;
+    list) cmd_list "$@" ;;
+    clean) cmd_clean "$@" ;;
+    *)
+      echo >&2 "$(basename "$0"): unknown command '$cmd'"
+      echo >&2 "Try '$(basename "$0") --help' for more information."
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
