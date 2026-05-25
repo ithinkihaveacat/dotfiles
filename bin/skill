@@ -12,38 +12,47 @@ on every destination at once, so they stay in sync. Operates on the current
 git repository.
 
 Commands:
-  add SPEC...     Symlink a skill into .agents/skills and ignore it locally
+  add SPEC...     Add a skill: a local path or a registered topic name
   remove NAME...  Remove a skill this tool added (symlink + ignore entry)
   list            List skills this tool is managing in the current repo
+  update SPEC...  Re-fetch registered topics (--all for every managed skill)
   clean           Remove all skills this tool added and its info/exclude block
+  topics          List registered topics and their GitHub sources
 
 Aliases:
   rm              Alias for remove
 
 Options:
-  --help         Display this help message and exit
+  --help          Display this help message and exit
 
 Skill specs:
-  A SPEC for 'add' may be any of:
-    name          A bare name resolved under SKILL_SOURCE_DIR
-    path          A path to a local skill directory
-    github url    A GitHub tree URL pointing at a skill directory, e.g.
-                  https://github.com/owner/repo/tree/main/skills/my-skill
-  GitHub skills are downloaded into SKILL_CACHE_DIR and symlinked from there,
-  so the cache is shared across workspaces. The skill name is the last path
-  component of the spec.
+  'add' resolves a SPEC, in order, as:
+    path          A local skill directory (absolute, ./relative, or ~/...)
+    topic         A registered name (see 'topics'), fetched from GitHub into
+                  SKILL_CACHE_DIR and symlinked from there
+    name          A directory of that name under SKILL_SOURCE_DIR
+  Topics are downloaded once and reused; 'update' re-fetches them. Local skills
+  have no upstream, so update skips them.
+
+Registry:
+  Topics map a name to a GitHub source. Built-in topics live in this script.
+  Add your own (including private/internal repos) without editing it by writing
+  lines to ~/.config/skill/registry or ~/.config/skill/registry.d/*:
+    <name>  <owner>/<repo>  <ref>  <subpath>
+  Later definitions win. ref defaults to main; subpath may be omitted.
 
 Environment:
   SKILL_SOURCE_DIR   Directory searched for skills by name
                      (default: ~/.agents/skills)
-  SKILL_CACHE_DIR    Where GitHub skills are downloaded
+  SKILL_CACHE_DIR    Where topic downloads are cached
                      (default: \${XDG_CACHE_HOME:-~/.cache}/agent-skills)
 
 Examples:
   $(basename "$0") add home-assistant-best-practices
-  $(basename "$0") add oracle context
   $(basename "$0") add ~/src/my-skill
-  $(basename "$0") add https://github.com/homeassistant-ai/skills/tree/main/skills/home-assistant-best-practices
+  $(basename "$0") topics
+  $(basename "$0") update home-assistant-best-practices
+  $(basename "$0") update --all
   $(basename "$0") list
   $(basename "$0") remove home-assistant-best-practices
   $(basename "$0") clean
@@ -64,6 +73,12 @@ require() {
 
 die() {
   echo >&2 "$(basename "$0"): $1"
+  exit 1
+}
+
+# Git-style error for subcommands: "skill <subcommand>: <message>".
+cmderr() {
+  echo >&2 "$(basename "$0") $1: $2"
   exit 1
 }
 
@@ -125,17 +140,17 @@ prune_dirs() {
 }
 
 # Download a subdirectory of a GitHub repo into the cache. Mirrors bin/context:
-# fetch the branch tarball and strip the top-level "<repo>-<branch>/" wrapper.
-# Args: owner repo branch subpath cachedir
+# fetch the ref tarball and strip the top-level "<repo>-<ref>/" wrapper. The ref
+# may be a branch, tag, or commit. Args: owner repo ref subpath cachedir
 fetch_github() {
-  local owner="$1" repo="$2" branch="$3" subpath="$4" cachedir="$5"
+  local owner="$1" repo="$2" ref="$3" subpath="$4" cachedir="$5"
   require curl
   require tar
-  local archive="https://github.com/$owner/$repo/archive/refs/heads/$branch.tar.gz"
+  local archive="https://github.com/$owner/$repo/archive/$ref.tar.gz"
   local tmp
   tmp="$(mktemp -d)"
   echo "fetching $archive" >&2
-  if ! curl -fsSL "$archive" | tar -xz -C "$tmp" --strip-components=1; then
+  if ! curl -fsSL --netrc-optional "$archive" | tar -xz -C "$tmp" --strip-components=1; then
     rm -rf "$tmp"
     die "failed to fetch or extract $archive"
   fi
@@ -143,7 +158,7 @@ fetch_github() {
   [ -n "$subpath" ] && src="$tmp/$subpath"
   if [ ! -d "$src" ]; then
     rm -rf "$tmp"
-    die "path not found in $owner/$repo@$branch: ${subpath:-/}"
+    die "path not found in $owner/$repo@$ref: ${subpath:-/}"
   fi
   mkdir -p "$(dirname "$cachedir")"
   rm -rf "$cachedir"
@@ -151,62 +166,103 @@ fetch_github() {
   rm -rf "$tmp"
 }
 
-# Resolve a GitHub tree URL to a cached source directory.
-# Sets RESOLVED_SRC and RESOLVED_NAME.
-resolve_github() {
-  local url="$1"
-  case "$url" in
-    github.com/*) url="https://$url" ;;
-  esac
-  if [[ ! "$url" =~ ^https?://github\.com/([^/]+)/([^/]+)(/tree/([^/]+)(/(.*))?)?/?$ ]]; then
-    die "unrecognized github url: $url"
+# Built-in topic registry. Each non-comment line maps a topic name to a GitHub
+# source: "<name> <owner>/<repo> <ref> <subpath>". ref defaults to main and
+# subpath may be empty. Extend the registry without editing this script (see
+# registry_sources).
+builtin_registry() {
+  cat <<'EOF'
+home-assistant-best-practices  homeassistant-ai/skills  main  skills/home-assistant-best-practices
+EOF
+}
+
+# Emit the built-in registry followed by any plugin registry files, in order.
+# Drop "<name> <owner>/<repo> <ref> <subpath>" lines into
+# ~/.config/skill/registry or ~/.config/skill/registry.d/* to add topics
+# (including private repos); later definitions win.
+registry_sources() {
+  builtin_registry
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/skill"
+  [ -f "$dir/registry" ] && cat "$dir/registry"
+  if [ -d "$dir/registry.d" ]; then
+    local f
+    for f in "$dir"/registry.d/*; do
+      [ -f "$f" ] && cat "$f"
+    done
   fi
-  local owner="${BASH_REMATCH[1]}"
-  local repo="${BASH_REMATCH[2]%.git}"
-  local branch="${BASH_REMATCH[4]:-main}"
-  local subpath="${BASH_REMATCH[6]%/}"
-  local name
-  if [ -n "$subpath" ]; then
-    name="$(basename "$subpath")"
-  else
-    name="$repo"
-  fi
-  local cachedir="$SKILL_CACHE_DIR/$owner/$repo/$branch${subpath:+/$subpath}"
+  return 0
+}
+
+# Look up a topic by name. Echoes "<owner>/<repo>\t<ref>\t<subpath>" for the
+# last matching definition, or nothing if the name is not registered.
+registry_lookup() {
+  registry_sources | awk -v want="$1" '
+    /^[[:space:]]*#/ { next }
+    NF < 2 { next }
+    $1 == want { repo = $2; ref = $3; sp = $4 }
+    END {
+      if (repo != "") {
+        if (ref == "") ref = "main"
+        printf "%s\t%s\t%s\n", repo, ref, sp
+      }
+    }
+  '
+}
+
+# Fetch (or reuse) a registered topic into the cache.
+# Sets RESOLVED_SRC, RESOLVED_NAME, RESOLVED_KIND.
+resolve_topic() {
+  local name="$1" repo="$2" ref="$3" subpath="$4"
+  local owner="${repo%%/*}" reponame="${repo#*/}"
+  local cachedir="$SKILL_CACHE_DIR/$owner/$reponame/$ref${subpath:+/$subpath}"
   if [ ! -d "$cachedir" ] || [ -z "$(ls -A "$cachedir" 2>/dev/null)" ]; then
-    fetch_github "$owner" "$repo" "$branch" "$subpath" "$cachedir"
+    fetch_github "$owner" "$reponame" "$ref" "$subpath" "$cachedir"
   else
-    echo "using cached $owner/$repo@$branch/${subpath} ($cachedir)" >&2
+    echo "using cached $repo@$ref (run 'skill update $name' to refresh)" >&2
   fi
   RESOLVED_SRC="$cachedir"
   RESOLVED_NAME="$name"
 }
 
-# Resolve a skill spec (bare name, local path, or GitHub URL) to a source
-# directory to symlink. Sets RESOLVED_SRC and RESOLVED_NAME.
+# Resolve a skill spec to a source directory to symlink. A spec is a local path,
+# a registered topic name, or a name found under SKILL_SOURCE_DIR (in that
+# order). Sets RESOLVED_SRC, RESOLVED_NAME, RESOLVED_KIND.
 resolve_spec() {
-  local arg="$1"
+  local arg="$1" entry repo ref subpath
+  arg="${arg/#\~/$HOME}" # expand a leading ~ if the user quoted it
   case "$arg" in
-    https://github.com/* | http://github.com/* | github.com/*)
-      resolve_github "$arg"
-      ;;
     http://* | https://*)
-      die "only github.com URLs are supported: $arg"
+      die "URLs are not accepted; register '$arg' as a topic (see --help)"
       ;;
-    */*)
+    /* | ./* | ../*)
       [ -d "$arg" ] || die "skill source not found: $arg"
       RESOLVED_SRC="$arg"
       RESOLVED_NAME="$(basename "$arg")"
-      ;;
-    *)
-      RESOLVED_SRC="$SKILL_SOURCE_DIR/$arg"
-      RESOLVED_NAME="$arg"
-      [ -d "$RESOLVED_SRC" ] || die "skill source not found: $RESOLVED_SRC"
+      return
       ;;
   esac
+  if [[ "$arg" == */* ]]; then
+    [ -d "$arg" ] || die "skill source not found: $arg"
+    RESOLVED_SRC="$arg"
+    RESOLVED_NAME="$(basename "$arg")"
+    return
+  fi
+  entry="$(registry_lookup "$arg")"
+  if [ -n "$entry" ]; then
+    IFS=$'\t' read -r repo ref subpath <<<"$entry"
+    resolve_topic "$arg" "$repo" "$ref" "$subpath"
+    return
+  fi
+  if [ -d "$SKILL_SOURCE_DIR/$arg" ]; then
+    RESOLVED_SRC="$SKILL_SOURCE_DIR/$arg"
+    RESOLVED_NAME="$arg"
+    return
+  fi
+  die "unknown skill '$arg': not a path, a registered topic, or under $SKILL_SOURCE_DIR"
 }
 
 cmd_add() {
-  [ "$#" -ge 1 ] || die "add: skill name required"
+  [ "$#" -ge 1 ] || cmderr add "skill name required"
   local managed=()
   local line
   while IFS= read -r line; do
@@ -223,10 +279,10 @@ cmd_add() {
     for d in "${DEST_DIRS[@]}"; do
       relpath="$d/$name"
       if git ls-files --error-unmatch -- "$relpath" >/dev/null 2>&1; then
-        die "add: repo already tracks $relpath; refusing to shadow it"
+        cmderr add "repo already tracks $relpath; refusing to shadow it"
       fi
       if [ -e "$relpath" ] && [ ! -L "$relpath" ]; then
-        die "add: $relpath exists and is not a symlink; refusing to overwrite"
+        cmderr add "$relpath exists and is not a symlink; refusing to overwrite"
       fi
     done
 
@@ -246,7 +302,7 @@ cmd_add() {
 }
 
 cmd_rm() {
-  [ "$#" -ge 1 ] || die "remove: skill name required"
+  [ "$#" -ge 1 ] || cmderr remove "skill name required"
   local managed=()
   local line
   while IFS= read -r line; do
@@ -265,7 +321,7 @@ cmd_rm() {
         rm -f "$relpath"
         removed=1
       elif [ -e "$relpath" ]; then
-        die "remove: $relpath is not a symlink we manage; leaving it untouched"
+        cmderr remove "$relpath is not a symlink we manage; leaving it untouched"
       fi
 
       kept=()
@@ -333,12 +389,75 @@ cmd_clean() {
   [ "$left" -eq 0 ] || echo "clean: $left path(s) left in place (not symlinks)" >&2
 }
 
-main() {
-  require git
+# Re-fetch registered topics. Local skills have no upstream and are skipped.
+cmd_update() {
+  local names=()
+  if [ "${1:-}" = "--all" ]; then
+    local n
+    while IFS= read -r n; do
+      [ -n "$n" ] && names+=("$n")
+    done < <(cmd_list)
+  elif [ "$#" -ge 1 ]; then
+    names=("$@")
+  else
+    cmderr update "skill name or --all required"
+  fi
 
+  local name entry repo ref subpath owner reponame cachedir relpath target
+  for name in "${names[@]}"; do
+    relpath="${DEST_DIRS[0]}/$name"
+    if [ ! -L "$relpath" ]; then
+      echo "update: $name is not currently added; skipping" >&2
+      continue
+    fi
+    target="$(readlink "$relpath")"
+    case "$target" in
+      "$SKILL_CACHE_DIR"/*) : ;;
+      *)
+        echo "update: $name is local; nothing to update" >&2
+        continue
+        ;;
+    esac
+    entry="$(registry_lookup "$name")"
+    if [ -z "$entry" ]; then
+      echo "update: $name has no registry entry; cannot refresh" >&2
+      continue
+    fi
+    IFS=$'\t' read -r repo ref subpath <<<"$entry"
+    owner="${repo%%/*}"
+    reponame="${repo#*/}"
+    cachedir="$SKILL_CACHE_DIR/$owner/$reponame/$ref${subpath:+/$subpath}"
+    fetch_github "$owner" "$reponame" "$ref" "$subpath" "$cachedir"
+    echo "updated $name from $repo@$ref" >&2
+  done
+}
+
+# List registered topics and their GitHub sources, one "name<TAB>source" per
+# line. Needs no git repository.
+cmd_topics() {
+  registry_sources | awk '
+    /^[[:space:]]*#/ { next }
+    NF < 2 { next }
+    {
+      ref = ($3 == "" ? "main" : $3)
+      src = $2 "@" ref
+      if ($4 != "") src = src "/" $4
+      map[$1] = src
+    }
+    END { for (k in map) printf "%s\t%s\n", k, map[k] }
+  ' | sort
+}
+
+main() {
   case "${1:-}" in
     "" | --help | help) usage ;;
+    topics)
+      cmd_topics
+      return
+      ;;
   esac
+
+  require git
 
   local root
   root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
@@ -353,6 +472,7 @@ main() {
     add) cmd_add "$@" ;;
     remove | rm) cmd_rm "$@" ;;
     list) cmd_list "$@" ;;
+    update) cmd_update "$@" ;;
     clean) cmd_clean "$@" ;;
     *)
       echo >&2 "$(basename "$0"): unknown command '$cmd'"
