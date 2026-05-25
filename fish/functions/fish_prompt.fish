@@ -51,8 +51,17 @@ function fish_right_prompt --description 'Write out the right prompt'
         if __fish_is_git_repository
             set -l toplevel (git rev-parse --show-toplevel 2>/dev/null)
             if test -n "$toplevel"
+                set -l prefix ""
+                set -l exclude_file "$toplevel/.git/info/exclude"
+                if not test -f "$exclude_file"
+                    set exclude_file (git rev-parse --git-path info/exclude 2>/dev/null)
+                end
+                if test -f "$exclude_file"; and string match -q -r agent-skills <"$exclude_file"
+                    set prefix "[S] "
+                end
+
                 set_color yellow
-                string replace -r '^.*/' '' $toplevel
+                printf "%s%s" "$prefix" (string replace -r '^.*/' '' $toplevel)
                 set_color normal
                 echo -n " "
             end
