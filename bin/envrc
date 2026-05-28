@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+ENVRC_FILE=".envrc"
+
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME [options] <command> [args...]
+Manage specific configuration blocks within a .envrc file.
+Allows multiple configurations to co-exist safely.
+
+Options:
+  --output FILE  Path to the output file (default: .envrc)
+  --help         Display this help message and exit
+
+Commands:
+  add <type> [args...]   Add or update a configuration block
+  remove <type>          Remove a configuration block
+  list                   List active configuration types in .envrc
+  types                  List available configuration types
+
+Types:
+  git-identity-beebo     Adds Git author identity variables
+  node [VERSION]         Adds Node.js direnv layout (default version: 24)
+  firebase <PROJECT_ID>  Adds Firebase project variables
+  appengine <APP_ID> [URL] Adds Google App Engine variables
+  git-hooks-agent        Configures git to use agent hooks
+
+Examples:
+  $SCRIPT_NAME add git-identity-beebo
+  $SCRIPT_NAME add node 22
+  $SCRIPT_NAME add firebase my-project-id
+  $SCRIPT_NAME remove node
+EOF
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      ENVRC_FILE="$2"
+      shift 2
+      ;;
+    --help)
+      usage
+      ;;
+    -*)
+      echo "$SCRIPT_NAME: unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+COMMAND="$1"
+shift
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$SCRIPT_NAME: $1 not found"
+    exit 127
+  }
+}
+
+# Safely remove an existing managed block
+remove_block() {
+  local type="$1"
+  local mark_begin="# >>> envrc managed block: $type >>>"
+  local mark_end="# <<< envrc managed block: $type <<<"
+
+  if [[ -f "$ENVRC_FILE" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    awk -v s="$mark_begin" -v e="$mark_end" \
+      '$0==s{b=1; next} $0==e{b=0; next} !b{print}' "$ENVRC_FILE" >"$tmp"
+    mv "$tmp" "$ENVRC_FILE"
+  fi
+}
+
+# Append a new managed block
+append_block() {
+  local type="$1"
+  local content="$2"
+  local mark_begin="# >>> envrc managed block: $type >>>"
+  local mark_end="# <<< envrc managed block: $type <<<"
+  touch "$ENVRC_FILE"
+  {
+    echo "$mark_begin"
+    echo "$content"
+    echo "$mark_end"
+  } >>"$ENVRC_FILE"
+}
+
+cmd_list() {
+  if [[ ! -f "$ENVRC_FILE" ]]; then
+    echo "No active configurations (no $ENVRC_FILE found)"
+    return
+  fi
+
+  local active_types
+  active_types=$(sed -n 's/^# >>> envrc managed block: \(.*\) >>>/\1/p' "$ENVRC_FILE")
+
+  if [[ -z "$active_types" ]]; then
+    echo "No active configurations in $ENVRC_FILE"
+  else
+    echo "Active configurations in $ENVRC_FILE:"
+    echo "  ${active_types//$'\\n'/$'\\n'  }"
+  fi
+}
+
+cmd_types() {
+  echo "Available types:"
+  echo "  git-identity-beebo"
+  echo "  node"
+  echo "  firebase"
+  echo "  appengine"
+  echo "  git-hooks-agent"
+}
+
+cmd_remove() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME remove: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  remove_block "$type"
+
+  echo "$SCRIPT_NAME: removed '$type' configuration from $ENVRC_FILE" >&2
+
+  if [[ "$ENVRC_FILE" == ".envrc" ]] && command -v direnv >/dev/null 2>&1; then
+    direnv allow
+  fi
+}
+
+cmd_add() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME add: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  shift
+  local content=""
+
+  case "$type" in
+    git-identity-beebo)
+      content=$(
+        cat <<EOF
+export GIT_AUTHOR_NAME="Michael Stillwell"
+export GIT_AUTHOR_EMAIL="mjs@beebo.org"
+EOF
+      )
+      ;;
+
+    node)
+      if [[ -z "${NODE_VERSIONS:-}" || ! -d "$NODE_VERSIONS" ]]; then
+        echo "$SCRIPT_NAME: error: NODE_VERSIONS not set, or not a directory" >&2
+        exit 1
+      fi
+      local version="${1:-24}"
+      content=$(
+        cat <<EOF
+use node $version
+layout node
+EOF
+      )
+      ;;
+
+    firebase)
+      if [[ $# -lt 1 ]]; then
+        echo "$SCRIPT_NAME add firebase: missing PROJECT_ID" >&2
+        exit 1
+      fi
+      require firebase
+      local project_id="$1"
+      local project_url="${2:-https://${project_id}.firebaseapp.com}/"
+
+      if ! firebase projects:list | grep -q "$project_id"; then
+        echo "$SCRIPT_NAME: error: $project_id not a configured project (see firebase projects:list)" >&2
+        exit 1
+      fi
+
+      content=$(
+        cat <<EOF
+export FIREBASE_PROJECT_ID="$project_id"
+export FIREBASE_PROJECT_URL="$project_url"
+EOF
+      )
+      ;;
+
+    appengine)
+      if [[ $# -lt 1 ]]; then
+        echo "$SCRIPT_NAME add appengine: missing APP_ID" >&2
+        exit 1
+      fi
+      local app_id="$1"
+      local url="${2:-}"
+      content=$(
+        cat <<EOF
+export GAE_APP_ID="$app_id"
+export GAE_URL="$url"
+EOF
+      )
+      ;;
+
+    git-hooks-agent)
+      content="export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=\$HOME/.dotfiles/etc/git/templates/agent'\""
+      ;;
+
+    *)
+      echo "$SCRIPT_NAME: unknown configuration type: $type" >&2
+      exit 1
+      ;;
+  esac
+
+  remove_block "$type"
+  append_block "$type" "$content"
+
+  echo "$SCRIPT_NAME: added '$type' configuration to $ENVRC_FILE" >&2
+
+  if [[ "$ENVRC_FILE" == ".envrc" ]] && command -v direnv >/dev/null 2>&1; then
+    direnv allow
+  fi
+}
+
+case "$COMMAND" in
+  help)
+    usage
+    ;;
+  add)
+    cmd_add "$@"
+    ;;
+  remove | rm)
+    cmd_remove "$@"
+    ;;
+  list)
+    cmd_list
+    ;;
+  types)
+    cmd_types
+    ;;
+  *)
+    echo "$SCRIPT_NAME: unknown command: $COMMAND" >&2
+    exit 1
+    ;;
+esac
