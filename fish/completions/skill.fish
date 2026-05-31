@@ -12,14 +12,21 @@ function __fish_skill_using_command
     test (count $cmd) -gt 1; and test $argv[1] = $cmd[2]
 end
 
-# Helper function: list skills available under SKILL_SOURCE_DIR
+# Helper function: list skills available under any SKILL_SOURCE_DIRS entry
 function __fish_skill_source_skills
-    set -l base $SKILL_SOURCE_DIR
-    test -z "$base"; and set base $HOME/.agents/skills
-    test -d $base; or return 0
-    for d in $base/*/
-        basename $d
-    end
+    set -l dirs $SKILL_SOURCE_DIRS
+    test -z "$dirs"; and set dirs $HOME/.dotfiles/skills:$HOME/.private/skills:$HOME/.corp/skills
+    for base in (string split : -- $dirs)
+        test -d $base; or continue
+        for d in $base/*/
+            basename $d
+        end
+    end | sort -u
+end
+
+# Helper function: list built-in skill sets as @name
+function __fish_skill_sets
+    skill sets 2>/dev/null | awk -F'\t' '{print $1}'
 end
 
 # Helper function: list registered topics (name<tab>source)
@@ -39,8 +46,19 @@ complete -c skill -f -n __fish_skill_needs_command -a list -d 'List managed skil
 complete -c skill -f -n __fish_skill_needs_command -a update -d 'Re-fetch registered topics'
 complete -c skill -f -n __fish_skill_needs_command -a clean -d 'Remove all managed skills and the exclude block'
 complete -c skill -f -n __fish_skill_needs_command -a topics -d 'List registered topics and sources'
+complete -c skill -f -n __fish_skill_needs_command -a sets -d 'List built-in skill sets'
+complete -c skill -f -n __fish_skill_needs_command -a expand -d 'Print names a spec resolves to'
+complete -c skill -f -n __fish_skill_needs_command -a resolve -d 'Print source path for a name'
 
-# add: registered topics and source skills, plus file completion for local paths
+# expand: accepts @sets and source skill names
+complete -c skill -n '__fish_skill_using_command expand' -a '(__fish_skill_sets)' -d Set
+complete -c skill -n '__fish_skill_using_command expand' -a '(__fish_skill_source_skills)' -d Skill
+
+# resolve: source skill names only (no @sets, no topics)
+complete -c skill -f -n '__fish_skill_using_command resolve' -a '(__fish_skill_source_skills)' -d Skill
+
+# add: sets, registered topics, source skills, plus file completion for local paths
+complete -c skill -n '__fish_skill_using_command add' -a '(__fish_skill_sets)' -d Set
 complete -c skill -n '__fish_skill_using_command add' -a '(__fish_skill_topics)'
 complete -c skill -n '__fish_skill_using_command add' -a '(__fish_skill_source_skills)' -d Skill
 

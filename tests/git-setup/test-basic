@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+
+# Tests: tests/git-setup/
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../../bin/git-setup"
+export PATH="$DIR/../../bin:$PATH"
+export SKILL_SOURCE_DIRS="$DIR/../../skills"
+
+echo "1..14"
+
+# Test 1: --help succeeds and documents both modes
+if out=$("$BIN" --help 2>&1) &&
+  printf '%s' "$out" | grep -qi 'apply' &&
+  printf '%s' "$out" | grep -qi 'audit'; then
+  echo "ok 1 - --help documents apply and audit modes"
+else
+  echo "not ok 1 - --help missing or mode docs absent"
+fi
+
+# Test 2: refuses to run outside a git work tree
+NONREPO=$(mktemp -d "/tmp/git-setup-test.XXXXXX")
+if (cd "$NONREPO" && "$BIN") >/dev/null 2>err; then
+  echo "not ok 2 - should have failed outside git work tree"
+else
+  if grep -q "not inside a git work tree" err; then
+    echo "ok 2 - refuses outside git work tree"
+  else
+    echo "not ok 2 - failed but with unexpected message"
+    sed 's/^/# /' err
+  fi
+fi
+rm -f err
+rmdir "$NONREPO"
+
+# Test 3: apply mode on a fresh 'other' repo
+OTHER=$(mktemp -d "/tmp/git-setup-test-other.XXXXXX")
+git -C "$OTHER" init -q
+if out=$(cd "$OTHER" && "$BIN" 2>&1); then
+  if printf '%s' "$out" | grep -q 'apply mode' &&
+    printf '%s' "$out" | grep -q 'detected.*other\|installing.*@technical' &&
+    [ -L "$OTHER/.claude/skills/coding-standards" ] &&
+    [ ! -e "$OTHER/.claude/skills/adb" ] &&
+    [ -x "$OTHER/.git/hooks/commit-msg" ]; then
+    echo "ok 3 - apply: other repo gets @technical and commit-msg hook"
+  else
+    echo "not ok 3 - apply: other repo missing expected setup"
+    printf '%s\n' "$out" | sed 's/^/# /'
+  fi
+else
+  echo "not ok 3 - apply failed on other repo"
+fi
+
+# Test 4: apply mode on a fresh android repo
+ANDROID=$(mktemp -d "/tmp/git-setup-test-android.XXXXXX")
+git -C "$ANDROID" init -q
+touch "$ANDROID/build.gradle.kts"
+if out=$(cd "$ANDROID" && "$BIN" 2>&1); then
+  if printf '%s' "$out" | grep -q 'apply mode' &&
+    [ -L "$ANDROID/.claude/skills/adb" ] &&
+    [ -L "$ANDROID/.claude/skills/jetpack" ] &&
+    [ -L "$ANDROID/.claude/skills/coding-standards" ]; then
+    echo "ok 4 - apply: android repo gets @android"
+  else
+    echo "not ok 4 - apply: android repo missing expected setup"
+    printf '%s\n' "$out" | sed 's/^/# /'
+  fi
+else
+  echo "not ok 4 - apply failed on android repo"
+fi
+
+# Test 5: every Android marker file alone triggers android detection
+MARKERS="build.gradle build.gradle.kts settings.gradle settings.gradle.kts gradlew AndroidManifest.xml"
+all_pass=1
+for marker in $MARKERS; do
+  R=$(mktemp -d "/tmp/git-setup-test-marker.XXXXXX")
+  git -C "$R" init -q
+  touch "$R/$marker"
+  out=$(cd "$R" && "$BIN" 2>&1) || true
+  if ! printf '%s' "$out" | grep -q '@android'; then
+    all_pass=0
+    echo "# marker $marker did not trigger android"
+  fi
+  rm -rf "$R"
+done
+if [ "$all_pass" = 1 ]; then
+  echo "ok 5 - every Android marker triggers android detection"
+else
+  echo "not ok 5 - some Android markers did not trigger detection"
+fi
+
+# Test 6: clean re-run enters audit mode, reports all ok, exits 0, writes nothing
+before=$(find "$ANDROID/.claude" "$ANDROID/.agents" -type l | sort)
+out=$(cd "$ANDROID" && "$BIN" 2>&1)
+rc=$?
+after=$(find "$ANDROID/.claude" "$ANDROID/.agents" -type l | sort)
+if [ "$rc" = 0 ] &&
+  printf '%s' "$out" | grep -q 'audit mode' &&
+  ! printf '%s' "$out" | grep -qE '^  (missing|extra|drift|stale|unresolvable)' &&
+  [ "$before" = "$after" ]; then
+  echo "ok 6 - audit: clean re-run reports ok, exit 0, no writes"
+else
+  echo "not ok 6 - audit: clean re-run misbehaved (rc=$rc)"
+fi
+
+# Test 7: audit reports 'missing' when a managed skill's symlink is removed
+rm "$ANDROID/.claude/skills/jetpack"
+out=$(cd "$ANDROID" && "$BIN" 2>&1)
+rc=$?
+if [ "$rc" = 1 ] &&
+  printf '%s' "$out" | grep -q '^  missing       jetpack' &&
+  printf '%s' "$out" | grep -q 'skill rm jetpack && skill add jetpack'; then
+  echo "ok 7 - audit: detects missing skill, exit 1, suggests fix"
+else
+  echo "not ok 7 - audit: missing-skill detection wrong (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+# restore
+(cd "$ANDROID" && skill add jetpack >/dev/null 2>&1)
+
+# Test 8: audit reports 'drift' when a symlink targets a different source
+ALT=$(mktemp -d "/tmp/git-setup-test-alt.XXXXXX")
+mkdir -p "$ALT/adb"
+echo "x" >"$ALT/adb/SKILL.md"
+rm "$ANDROID/.claude/skills/adb"
+ln -s "$ALT/adb" "$ANDROID/.claude/skills/adb"
+out=$(cd "$ANDROID" && "$BIN" 2>&1)
+rc=$?
+if [ "$rc" = 1 ] &&
+  printf '%s' "$out" | grep -q '^  drift         adb' &&
+  printf '%s' "$out" | grep -q "current:.*$ALT/adb" &&
+  printf '%s' "$out" | grep -qF "expected: $DIR/../../skills/adb"; then
+  echo "ok 8 - audit: detects symlink drift with current/expected"
+else
+  echo "not ok 8 - audit: drift detection wrong (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+# restore
+rm "$ANDROID/.claude/skills/adb"
+ln -s "$DIR/../../skills/adb" "$ANDROID/.claude/skills/adb"
+rm -rf "$ALT"
+
+# Test 9: audit reports 'extra' for a managed skill not in the desired set
+EXTRA=$(mktemp -d "/tmp/git-setup-test-extra.XXXXXX")
+mkdir -p "$EXTRA/zzz-extra"
+echo "x" >"$EXTRA/zzz-extra/SKILL.md"
+(cd "$ANDROID" && skill add "$EXTRA/zzz-extra" >/dev/null 2>&1)
+out=$(cd "$ANDROID" && "$BIN" 2>&1)
+rc=$?
+if [ "$rc" = 1 ] &&
+  printf '%s' "$out" | grep -q '^  extra         zzz-extra' &&
+  printf '%s' "$out" | grep -q 'skill rm zzz-extra'; then
+  echo "ok 9 - audit: detects extra managed skill"
+else
+  echo "not ok 9 - audit: extra-skill detection wrong (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+(cd "$ANDROID" && skill rm zzz-extra >/dev/null 2>&1)
+rm -rf "$EXTRA"
+
+# Test 10: audit reports 'drift' when commit-msg is foreign (unmanaged)
+mv "$ANDROID/.git/hooks/commit-msg" "$ANDROID/.git/hooks/commit-msg.bak"
+echo '#!/bin/sh' >"$ANDROID/.git/hooks/commit-msg"
+chmod +x "$ANDROID/.git/hooks/commit-msg"
+out=$(cd "$ANDROID" && "$BIN" 2>&1)
+rc=$?
+if [ "$rc" = 1 ] &&
+  printf '%s' "$out" | grep -q 'drift.*present but unmanaged' &&
+  printf '%s' "$out" | grep -q 'git-hooks-agent --force'; then
+  echo "ok 10 - audit: detects foreign commit-msg hook"
+else
+  echo "not ok 10 - audit: hook-drift detection wrong (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+mv "$ANDROID/.git/hooks/commit-msg.bak" "$ANDROID/.git/hooks/commit-msg"
+
+# Test 11: audit reports 'missing' for commit-msg when hook absent
+rm "$ANDROID/.git/hooks/commit-msg"
+out=$(cd "$ANDROID" && "$BIN" 2>&1)
+rc=$?
+if [ "$rc" = 1 ] &&
+  printf '%s' "$out" | grep -q 'missing       hook absent' &&
+  printf '%s' "$out" | grep -q '^                git-hooks-agent$'; then
+  echo "ok 11 - audit: detects absent commit-msg"
+else
+  echo "not ok 11 - audit: hook-absent detection wrong (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+
+# Test 12: reset footer omits commit-msg removal when hook is unmanaged/absent
+if ! printf '%s' "$out" | grep -q 'rm -f.*commit-msg'; then
+  echo "ok 12 - reset footer omits hook removal when nothing to remove"
+else
+  echo "not ok 12 - reset footer still suggests removing a non-managed hook"
+fi
+# restore for cleanup
+(cd "$ANDROID" && git-hooks-agent) >/dev/null 2>&1
+
+# Test 13: pre-existing manual 'skill add' puts a fresh repo into audit mode
+PRE=$(mktemp -d "/tmp/git-setup-test-pre.XXXXXX")
+git -C "$PRE" init -q
+(cd "$PRE" && skill add coding-standards) >/dev/null 2>&1
+out=$(cd "$PRE" && "$BIN" 2>&1)
+rc=$?
+if printf '%s' "$out" | grep -q 'audit mode' &&
+  [ ! -x "$PRE/.git/hooks/commit-msg" ]; then
+  echo "ok 13 - pre-existing 'skill add' triggers audit on first git-setup run"
+else
+  echo "not ok 13 - pre-existing 'skill add' did not trigger audit (rc=$rc)"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+rm -rf "$PRE"
+
+# Test 14: --force prints a warning in audit mode (and does not write)
+hook_before=$(cat "$ANDROID/.git/hooks/commit-msg" 2>/dev/null | wc -l)
+out=$(cd "$ANDROID" && "$BIN" --force 2>&1)
+hook_after=$(cat "$ANDROID/.git/hooks/commit-msg" 2>/dev/null | wc -l)
+if printf '%s' "$out" | grep -q '\-\-force has no effect in audit mode' &&
+  [ "$hook_before" = "$hook_after" ]; then
+  echo "ok 14 - --force in audit mode warns and doesn't write"
+else
+  echo "not ok 14 - --force in audit mode misbehaved"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+
+rm -rf "$OTHER" "$ANDROID"

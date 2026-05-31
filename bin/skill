@@ -12,12 +12,15 @@ on every destination at once, so they stay in sync. Operates on the current
 git repository.
 
 Commands:
-  add SPEC...     Add a skill: a local path or a registered topic name
+  add SPEC...     Add a skill: a local path, a registered topic name, or @set
   remove NAME...  Remove a skill this tool added (symlink + ignore entry)
   list            List skills this tool is managing in the current repo
   update SPEC...  Re-fetch registered topics (--all for every managed skill)
   clean           Remove all skills this tool added and its info/exclude block
   topics          List registered topics and their GitHub sources
+  sets            List built-in skill sets and their contents
+  expand SPEC...  Print the skill names a list of specs resolves to
+  resolve NAME    Print the source path 'add NAME' would symlink to
 
 Aliases:
   rm              Alias for remove
@@ -27,10 +30,11 @@ Options:
 
 Skill specs:
   'add' resolves a SPEC, in order, as:
+    @set          A built-in set name (see 'sets'); expands to its members
     path          A local skill directory (absolute, ./relative, or ~/...)
     topic         A registered name (see 'topics'), fetched from GitHub into
                   SKILL_CACHE_DIR and symlinked from there
-    name          A directory of that name under SKILL_SOURCE_DIR
+    name          A directory of that name under any SKILL_SOURCE_DIRS entry
   Topics are downloaded once and reused; 'update' re-fetches them. Local skills
   have no upstream, so update skips them.
 
@@ -42,14 +46,16 @@ Registry:
   Later definitions win. ref defaults to main; subpath may be omitted.
 
 Environment:
-  SKILL_SOURCE_DIR   Directory searched for skills by name
-                     (default: ~/.agents/skills)
+  SKILL_SOURCE_DIRS  Colon-separated directories searched for skills by name
+                     (default: ~/.dotfiles/skills:~/.private/skills:~/.corp/skills)
   SKILL_CACHE_DIR    Where topic downloads are cached
                      (default: \${XDG_CACHE_HOME:-~/.cache}/agent-skills)
 
 Examples:
+  $(basename "$0") add @technical
   $(basename "$0") add home-assistant-best-practices
   $(basename "$0") add ~/src/my-skill
+  $(basename "$0") sets
   $(basename "$0") topics
   $(basename "$0") update home-assistant-best-practices
   $(basename "$0") update --all
@@ -82,7 +88,7 @@ cmderr() {
   exit 1
 }
 
-SKILL_SOURCE_DIR="${SKILL_SOURCE_DIR:-$HOME/.agents/skills}"
+SKILL_SOURCE_DIRS="${SKILL_SOURCE_DIRS:-$HOME/.dotfiles/skills:$HOME/.private/skills:$HOME/.corp/skills}"
 SKILL_CACHE_DIR="${SKILL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/agent-skills}"
 
 # Project skill directories to populate, relative to the repo root. Claude Code
@@ -254,12 +260,54 @@ resolve_spec() {
     resolve_topic "$arg" "$repo" "$ref" "$subpath"
     return
   fi
-  if [ -d "$SKILL_SOURCE_DIR/$arg" ]; then
-    RESOLVED_SRC="$SKILL_SOURCE_DIR/$arg"
-    RESOLVED_NAME="$arg"
-    return
-  fi
-  die "unknown skill '$arg': not a path, a registered topic, or under $SKILL_SOURCE_DIR"
+  local dirs dir
+  IFS=':' read -ra dirs <<<"$SKILL_SOURCE_DIRS"
+  for dir in "${dirs[@]}"; do
+    [ -n "$dir" ] || continue
+    if [ -d "$dir/$arg" ]; then
+      RESOLVED_SRC="$dir/$arg"
+      RESOLVED_NAME="$arg"
+      return
+    fi
+  done
+  die "unknown skill '$arg': not a path, a registered topic, or under any of SKILL_SOURCE_DIRS ($SKILL_SOURCE_DIRS)"
+}
+
+# Emit the skill names that make up a built-in set, one per line. Sets may
+# compose by calling other set functions. Add new sets here.
+skill_set() {
+  case "$1" in
+    technical)
+      cat <<EOF
+coding-standards
+technical-writing-style
+agent-tools
+EOF
+      ;;
+    android)
+      skill_set technical
+      cat <<EOF
+adb
+emumanager
+jetpack
+EOF
+      ;;
+    *)
+      die "unknown set '@$1' (try '$(basename "$0") sets')"
+      ;;
+  esac
+}
+
+# Expand each arg: '@name' becomes the set's members, anything else passes
+# through unchanged. Emits one name per line.
+expand_specs() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      @?*) skill_set "${arg#@}" ;;
+      *) printf '%s\n' "$arg" ;;
+    esac
+  done
 }
 
 cmd_add() {
@@ -270,8 +318,17 @@ cmd_add() {
     [ -n "$line" ] && managed+=("$line")
   done < <(read_managed)
 
+  # Use command substitution so an unknown @set propagates its failure
+  # (process substitution would swallow the subshell's exit code).
+  local expanded
+  expanded=$(expand_specs "$@") || exit 1
+  local args=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && args+=("$line")
+  done <<<"$expanded"
+
   local arg src name d relpath line
-  for arg in "$@"; do
+  for arg in "${args[@]}"; do
     resolve_spec "$arg"
     src="$RESOLVED_SRC"
     name="$RESOLVED_NAME"
@@ -433,6 +490,54 @@ cmd_update() {
   done
 }
 
+# Print the names a list of specs expands to, one per line. @sets are
+# expanded; everything else passes through unchanged. Intended for tooling
+# (e.g. git-setup uses it to enumerate a desired @set). Needs no git
+# repository.
+cmd_expand() {
+  [ "$#" -ge 1 ] || cmderr expand "spec required"
+  expand_specs "$@"
+}
+
+# Print the absolute path that 'skill add <name>' would symlink to, by
+# walking SKILL_SOURCE_DIRS. Topic resolution and local paths are not
+# considered (this is the predictable "name lookup" half of resolve_spec).
+# Exits 1 with no output if not found. Needs no git repository.
+cmd_resolve() {
+  [ "$#" -eq 1 ] || cmderr resolve "exactly one name required"
+  local name="$1" dirs dir
+  IFS=':' read -ra dirs <<<"$SKILL_SOURCE_DIRS"
+  for dir in "${dirs[@]}"; do
+    [ -n "$dir" ] || continue
+    if [ -d "$dir/$name" ]; then
+      printf '%s\n' "$dir/$name"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# List built-in sets and the skills each one resolves to. Needs no git
+# repository.
+cmd_sets() {
+  local sets="technical android"
+  local s name first
+  for s in $sets; do
+    first=1
+    printf '@%s\t' "$s"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if [ "$first" = 1 ]; then
+        printf '%s' "$name"
+        first=0
+      else
+        printf ', %s' "$name"
+      fi
+    done < <(skill_set "$s")
+    printf '\n'
+  done
+}
+
 # List registered topics and their GitHub sources, one "name<TAB>source" per
 # line. Needs no git repository.
 cmd_topics() {
@@ -454,6 +559,20 @@ main() {
     "" | --help | help) usage ;;
     topics)
       cmd_topics
+      return
+      ;;
+    sets)
+      cmd_sets
+      return
+      ;;
+    expand)
+      shift
+      cmd_expand "$@"
+      return
+      ;;
+    resolve)
+      shift
+      cmd_resolve "$@"
       return
       ;;
   esac

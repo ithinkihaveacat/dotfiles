@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+# Tests: tests/skill/
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../../bin/skill"
+export PATH="$DIR/../../bin:$PATH"
+
+# Point at a known source root so tests don't depend on the user's overlays.
+export SKILL_SOURCE_DIRS="$DIR/../../skills"
+
+echo "1..12"
+
+# Test 1: --help succeeds and mentions @set syntax
+if out=$("$BIN" --help 2>&1) && printf '%s' "$out" | grep -q '@set'; then
+  echo "ok 1 - --help advertises @set syntax"
+else
+  echo "not ok 1 - --help missing or doesn't mention @set"
+fi
+
+# Test 2: sets lists @technical and @android
+out=$("$BIN" sets 2>&1)
+if printf '%s' "$out" | grep -q '^@technical' && printf '%s' "$out" | grep -q '^@android'; then
+  echo "ok 2 - sets lists built-in @technical and @android"
+else
+  echo "not ok 2 - sets output missing expected entries"
+  printf '%s\n' "$out" | sed 's/^/# /'
+fi
+
+# Test 3: topics runs without a git repo
+if (cd /tmp && "$BIN" topics) >/dev/null 2>&1; then
+  echo "ok 3 - topics runs outside a git work tree"
+else
+  echo "not ok 3 - topics failed outside a git work tree"
+fi
+
+# Set up a throwaway git repo for the per-repo subcommands.
+REPO=$(mktemp -d "/tmp/skill-test.XXXXXX")
+trap 'rm -rf "$REPO"' EXIT
+git -C "$REPO" init -q
+
+# Test 4: add @technical creates symlinks in both destinations
+if (cd "$REPO" && "$BIN" add @technical) >/dev/null 2>&1 &&
+  [ -L "$REPO/.claude/skills/coding-standards" ] &&
+  [ -L "$REPO/.agents/skills/coding-standards" ]; then
+  echo "ok 4 - add @technical symlinks into .claude and .agents"
+else
+  echo "not ok 4 - add @technical did not create expected symlinks"
+fi
+
+# Test 5: list returns the three @technical members, sorted/unique
+expected=$'agent-tools\ncoding-standards\ntechnical-writing-style'
+actual=$(cd "$REPO" && "$BIN" list 2>/dev/null)
+if [ "$actual" = "$expected" ]; then
+  echo "ok 5 - list returns @technical members"
+else
+  echo "not ok 5 - list output mismatch"
+  printf '%s\n' "$actual" | sed 's/^/# got: /'
+fi
+
+# Test 6: managed block recorded in .git/info/exclude
+if grep -q "agent-skills (managed by 'skill')" "$REPO/.git/info/exclude"; then
+  echo "ok 6 - info/exclude contains managed block"
+else
+  echo "not ok 6 - info/exclude missing managed block"
+fi
+
+# Test 7: add @bogus reports an unknown-set error and exits non-zero
+if (cd "$REPO" && "$BIN" add @bogus) >/dev/null 2>err; then
+  echo "not ok 7 - add @bogus should have failed"
+else
+  if grep -q "unknown set '@bogus'" err; then
+    echo "ok 7 - add @bogus reports unknown set"
+  else
+    echo "not ok 7 - add @bogus failed but with unexpected message"
+    sed 's/^/# /' err
+  fi
+fi
+rm -f err
+
+# Test 8: remove drops the symlink and updates the exclude block
+if (cd "$REPO" && "$BIN" remove coding-standards) >/dev/null 2>&1 &&
+  [ ! -e "$REPO/.claude/skills/coding-standards" ] &&
+  ! grep -q "coding-standards" "$REPO/.git/info/exclude"; then
+  echo "ok 8 - remove deletes symlink and exclude entry"
+else
+  echo "not ok 8 - remove did not fully clean up"
+fi
+
+# Test 9: clean removes everything and clears the managed block
+if (cd "$REPO" && "$BIN" clean) >/dev/null 2>&1 &&
+  [ ! -e "$REPO/.claude/skills/agent-tools" ] &&
+  ! grep -q "agent-skills (managed by 'skill')" "$REPO/.git/info/exclude"; then
+  echo "ok 9 - clean removes links and managed block"
+else
+  echo "not ok 9 - clean left state behind"
+fi
+
+# Test 10: add resolves names against SKILL_SOURCE_DIRS overlays
+ALT=$(mktemp -d "/tmp/skill-test-alt.XXXXXX")
+trap 'rm -rf "$REPO" "$ALT"' EXIT
+mkdir -p "$ALT/custom-skill"
+printf '# custom\n' >"$ALT/custom-skill/SKILL.md"
+SKILL_SOURCE_DIRS="$ALT:$DIR/../../skills" \
+  bash -c 'cd "$1" && "$2" add custom-skill' _ "$REPO" "$BIN" >/dev/null 2>&1
+if [ -L "$REPO/.claude/skills/custom-skill" ] &&
+  [ "$(readlink "$REPO/.claude/skills/custom-skill")" = "$ALT/custom-skill" ]; then
+  echo "ok 10 - resolves names against SKILL_SOURCE_DIRS"
+else
+  echo "not ok 10 - SKILL_SOURCE_DIRS resolution failed"
+fi
+
+# Test 11: expand @technical prints the set members one per line
+expected=$'coding-standards\ntechnical-writing-style\nagent-tools'
+actual=$("$BIN" expand @technical 2>/dev/null)
+if [ "$actual" = "$expected" ]; then
+  echo "ok 11 - expand @technical lists members"
+else
+  echo "not ok 11 - expand @technical output mismatch"
+  printf '%s\n' "$actual" | sed 's/^/# got: /'
+fi
+
+# Test 12: resolve prints source path; non-existent name exits 1 with no output
+got=$("$BIN" resolve agent-tools 2>/dev/null)
+if [ "$got" = "$DIR/../../skills/agent-tools" ] &&
+  ! "$BIN" resolve no-such-skill >/dev/null 2>&1; then
+  echo "ok 12 - resolve returns source path; fails on unknown name"
+else
+  echo "not ok 12 - resolve misbehaved (got=$got)"
+fi
