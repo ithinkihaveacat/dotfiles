@@ -62,11 +62,3 @@ Agents must not commit changes automatically unless explicitly requested. Follow
 the specified commit message format.
 
 @references/git.md
-
-## Agent Function Notation (AFN)
-
-A notation for describing agent behaviour as functions of the form
-`G<type>(prompt, context…) = output`. Covers function variants, substitution,
-type fuzziness, and worked examples.
-
-@references/afn.md

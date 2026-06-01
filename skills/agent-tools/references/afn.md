@@ -63,7 +63,7 @@ This notation is intentionally loose in two respects:
    a number, a number expressed in words, and a numeral are all reasonable
    interpretations depending on context.
 
-2. **Context references are informal.** The prompt refers to context using
+1. **Context references are informal.** The prompt refers to context using
    natural language (e.g., "the first argument," "the two inputs," "the image")
    rather than formal parameter names. The agent interprets these references as
    a human reader would.
@@ -84,7 +84,7 @@ output is "four," which represents the number 4. Since the first value is 2, and
 
 **Answer:** X = 2
 
----
+______________________________________________________________________
 
 ### Example 2: Nested Judgement
 
