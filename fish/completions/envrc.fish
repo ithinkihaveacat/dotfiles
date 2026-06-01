@@ -14,7 +14,7 @@ end
 
 # Helper function: list available types
 function __fish_envrc_types
-    echo -e "git-identity-beebo\nnode\nfirebase\nappengine\ngit-hooks-agent"
+    echo -e "git-identity-beebo\nnode\nfirebase\nappengine"
 end
 
 # Complete subcommands
