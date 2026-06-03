@@ -13,7 +13,7 @@ Options:
   --help        Display this help message and exit
 
 Examples:
-  getsecret GITHUB_API_KEY
+  getsecret GITHUB_TOKEN
   set keys (getsecret GEMINI_API_KEYS)
   curl -H \"Authorization: Bearer (getsecret OPENAI_API_KEY)\" ..."
         return 0

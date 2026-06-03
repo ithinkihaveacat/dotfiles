@@ -17,7 +17,7 @@ Options:
   --help        Display this help message and exit
 
 Examples:
-  envsecret GITHUB_API_KEY gh api user
+  envsecret GITHUB_TOKEN gh api user
   envsecret OPENAI_API_KEY -- python3 script.py
   envsecret HASS_TOKEN HASS_SERVER ha state list"
         return 0

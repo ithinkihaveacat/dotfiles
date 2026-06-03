@@ -14,9 +14,9 @@ Options:
   --help        Display this help message and exit
 
 Examples:
-  setsecret GITHUB_API_KEY
+  setsecret GITHUB_TOKEN
   setsecret OPENAI_API_KEY MISTRAL_API_KEY
-  setsecret --if-unset GEMINI_API_KEY GITHUB_API_KEY"
+  setsecret --if-unset GEMINI_API_KEY GITHUB_TOKEN"
         return 0
     end
 

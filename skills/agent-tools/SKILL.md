@@ -181,7 +181,7 @@ for LLM Agents.
 - **Workflow Runs**: Includes run summary, duration, jobs, steps, and logs for
   failed jobs.
 
-Requires `GITHUB_API_KEY` environment variable to be set with a GitHub Personal
+Requires `GITHUB_TOKEN` environment variable to be set with a GitHub Personal
 Access Token.
 
 **Token Setup:** You can generate a token at
@@ -196,7 +196,7 @@ Access Token.
 scripts/gh-markdown URL
 ```
 
-**Environment:** `GITHUB_API_KEY` (Required)
+**Environment:** `GITHUB_TOKEN` (Required)
 
 **Exit codes:** 0 success, 1 error
 
