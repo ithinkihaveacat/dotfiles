@@ -1,0 +1,746 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "requests",
+# ]
+# ///
+
+import os
+import sys
+import shutil
+import tempfile
+import tarfile
+import subprocess
+from pathlib import Path
+
+# Built-in sets to be populated by plugins
+BUILTIN_SETS = {}
+
+
+def die(msg):
+    print(f"git skill: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmderr(cmd, msg):
+    print(f"git skill {cmd}: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+class SkillAPI:
+    def __init__(self, registry, sets):
+        self.registry = registry
+        self.sets = sets
+
+    def add_set(self, name: str, members: list[str]):
+        self.sets[name] = members
+
+    def extend_set(self, name: str, members: list[str]):
+        if name in self.sets:
+            self.sets[name].extend(members)
+        else:
+            self.sets[name] = members
+
+    def add_topic(
+        self,
+        name: str,
+        owner: str,
+        repo: str,
+        ref: str = "main",
+        subpath: str = None,
+    ):
+        self.registry[name] = {
+            "repo": f"{owner}/{repo}",
+            "ref": ref,
+            "subpath": subpath,
+        }
+
+
+def load_plugins(registry, sets):
+    import importlib.util
+
+    plugins_dir_str = os.environ.get("SKILL_PLUGINS_DIR")
+    if plugins_dir_str:
+        plugins_dir = Path(plugins_dir_str)
+    else:
+        plugins_dir = Path("~/.config/skill/plugins").expanduser()
+
+    if not plugins_dir.is_dir():
+        return
+
+    api = SkillAPI(registry, sets)
+    for filename in os.listdir(plugins_dir):
+        if filename.endswith(".py"):
+            filepath = os.path.join(plugins_dir, filename)
+            module_name = f"skill_plugin_{filename[:-3]}"
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, filepath)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)
+                    if hasattr(module, "register"):
+                        module.register(api)
+            except Exception as e:
+                print(
+                    f"git-skill: warning: failed to load plugin {filepath}: {e}",
+                    file=sys.stderr,
+                )
+
+
+def load_registry():
+    registry = {}
+
+    # Built-in registry
+    registry["gog"] = {
+        "repo": "openclaw/openclaw",
+        "ref": "main",
+        "subpath": "skills/gog",
+    }
+    registry["home-assistant-best-practices"] = {
+        "repo": "homeassistant-ai/skills",
+        "ref": "main",
+        "subpath": "skills/home-assistant-best-practices",
+    }
+
+    # Load custom registry files
+    config_dir = (
+        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser() / "skill"
+    )
+    registry_file = config_dir / "registry"
+    registry_d = config_dir / "registry.d"
+
+    def parse_file(path):
+        if not path.is_file():
+            return
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                name = parts[0]
+                repo = parts[1]
+                ref = parts[2] if len(parts) > 2 else "main"
+                subpath = parts[3] if len(parts) > 3 else None
+                registry[name] = {
+                    "repo": repo,
+                    "ref": ref,
+                    "subpath": subpath,
+                }
+
+    parse_file(registry_file)
+    if registry_d.is_dir():
+        for item in sorted(registry_d.iterdir()):
+            if item.is_file() and not item.name.startswith("."):
+                parse_file(item)
+
+    return registry
+
+
+def get_git_repo():
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        root = Path(res.stdout.strip())
+
+        res_ex = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        exclude_path = Path(res_ex.stdout.strip())
+        if not exclude_path.is_absolute():
+            exclude_path = (root / exclude_path).resolve()
+
+        return root, exclude_path
+    except subprocess.CalledProcessError:
+        die("not inside a git work tree (run 'git init' to create one)")
+
+
+MARK_BEGIN = "# >>> skills (managed by 'git-skill') >>>"
+MARK_END = "# <<< skills (managed by 'git-skill') <<<"
+
+
+def read_managed(exclude_file):
+    if not exclude_file.is_file():
+        return []
+    managed = []
+    in_block = False
+    with open(exclude_file, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line_stripped = line.strip()
+            if line_stripped == MARK_BEGIN:
+                in_block = True
+                continue
+            if line_stripped == MARK_END:
+                in_block = False
+                continue
+            if in_block and line_stripped:
+                managed.append(line_stripped)
+    return managed
+
+
+def rewrite_block(exclude_file, lines):
+    exclude_file.parent.mkdir(parents=True, exist_ok=True)
+
+    other_lines = []
+    if exclude_file.is_file():
+        in_block = False
+        with open(exclude_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_stripped = line.strip()
+                if line_stripped == MARK_BEGIN:
+                    in_block = True
+                    continue
+                if line_stripped == MARK_END:
+                    in_block = False
+                    continue
+                if not in_block:
+                    other_lines.append(line)
+
+    temp_fd, temp_path_str = tempfile.mkstemp()
+    temp_path = Path(temp_path_str)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+            for line in other_lines:
+                f.write(line)
+            if other_lines and not other_lines[-1].endswith("\n"):
+                f.write("\n")
+            if lines:
+                f.write(MARK_BEGIN + "\n")
+                for line in sorted(list(set(lines))):
+                    f.write(line + "\n")
+                f.write(MARK_END + "\n")
+
+        with open(exclude_file, "w", encoding="utf-8") as dest:
+            with open(temp_path, "r", encoding="utf-8") as src:
+                dest.write(src.read())
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def fetch_github(name, repo, ref, subpath):
+    import requests
+
+    owner, reponame = repo.split("/", 1)
+    cache_base = (
+        Path(
+            os.environ.get("SKILL_CACHE_DIR")
+            or os.environ.get("XDG_CACHE_HOME")
+            or "~/.cache"
+        ).expanduser()
+        / "agent-skills"
+    )
+    cachedir = cache_base / owner / reponame / ref
+    if subpath:
+        cachedir = cachedir / subpath
+
+    if cachedir.is_dir() and any(cachedir.iterdir()):
+        print(
+            f"using cached {repo}@{ref} (run 'git skill update {name}' to refresh)",
+            file=sys.stderr,
+        )
+        return cachedir
+
+    archive_url = f"https://github.com/{owner}/{reponame}/archive/{ref}.tar.gz"
+    print(f"fetching {archive_url}", file=sys.stderr)
+    try:
+        r = requests.get(archive_url, stream=True)
+        r.raise_for_status()
+    except Exception as e:
+        die(f"failed to fetch {archive_url}: {e}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        tar_path = tmp_path / "archive.tar.gz"
+        with open(tar_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        try:
+            with tarfile.open(tar_path, "r:gz") as tar:
+                tar.extractall(path=tmp_path)
+        except Exception as e:
+            die(f"failed to extract archive: {e}")
+
+        subdirs = [
+            x for x in tmp_path.iterdir() if x.is_dir() and x.name != "archive.tar.gz"
+        ]
+        if not subdirs:
+            die("extracted archive is empty")
+        wrapper_dir = subdirs[0]
+
+        src_dir = wrapper_dir
+        if subpath:
+            src_dir = wrapper_dir / subpath
+            if not src_dir.is_dir():
+                die(f"path not found in {owner}/{reponame}@{ref}: {subpath}")
+
+        if cachedir.exists():
+            shutil.rmtree(cachedir)
+        cachedir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_dir, cachedir, symlinks=True)
+
+    return cachedir
+
+
+def expand_specs(specs, sets_dict):
+    expanded = []
+    for spec in specs:
+        if spec.startswith("@"):
+            set_name = spec[1:]
+            if set_name in sets_dict:
+                expanded.extend(sets_dict[set_name])
+            else:
+                die(f"unknown set '{spec}' (try 'git skill sets')")
+        else:
+            expanded.append(spec)
+    return expanded
+
+
+def resolve_spec(spec, registry, source_dirs):
+    expanded_spec = os.path.expanduser(spec)
+
+    # 1. Local path check
+    if (
+        expanded_spec.startswith("/")
+        or expanded_spec.startswith("./")
+        or expanded_spec.startswith("../")
+        or "/" in expanded_spec
+    ):
+        path = Path(expanded_spec).resolve()
+        if not path.is_dir():
+            die(f"skill source not found: {spec}")
+        return path, path.name
+
+    # 2. Registry check
+    if spec in registry:
+        entry = registry[spec]
+        repo = entry["repo"]
+        ref = entry["ref"]
+        subpath = entry["subpath"]
+        src = fetch_github(spec, repo, ref, subpath)
+        return src, spec
+
+    # 3. SKILL_SOURCE_DIRS check
+    for d in source_dirs:
+        if not d:
+            continue
+        path = Path(d) / spec
+        if path.is_dir():
+            return path, spec
+
+    die(
+        f"unknown skill '{spec}': not a path, a registered topic, or under any of SKILL_SOURCE_DIRS ({':'.join(source_dirs)})"
+    )
+
+
+def cmd_add(specs, registry, source_dirs):
+    if not specs:
+        cmderr("add", "skill name required")
+
+    root, exclude_file = get_git_repo()
+    managed = read_managed(exclude_file)
+
+    resolved_skills = []
+    expanded = expand_specs(specs, BUILTIN_SETS)
+    for spec in expanded:
+        src, name = resolve_spec(spec, registry, source_dirs)
+        resolved_skills.append((src, name))
+
+    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+    for src, name in resolved_skills:
+        for d in dest_dirs:
+            relpath = d / name
+
+            try:
+                rel_to_root = relpath.relative_to(root)
+                res = subprocess.run(
+                    [
+                        "git",
+                        "ls-files",
+                        "--error-unmatch",
+                        "--",
+                        str(rel_to_root),
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode == 0:
+                    cmderr(
+                        "add",
+                        f"repo already tracks {rel_to_root}; refusing to shadow it",
+                    )
+            except Exception:
+                pass
+
+            if relpath.exists() and not relpath.is_symlink():
+                cmderr(
+                    "add",
+                    f"{relpath} exists and is not a symlink; refusing to overwrite",
+                )
+
+    for src, name in resolved_skills:
+        for d in dest_dirs:
+            relpath = d / name
+            line = f"/{relpath.relative_to(root)}"
+
+            d.mkdir(parents=True, exist_ok=True)
+            if relpath.is_symlink() or relpath.exists():
+                relpath.unlink()
+            relpath.symlink_to(src)
+
+            if line not in managed:
+                managed.append(line)
+        print(f"added {name} -> {src}", file=sys.stderr)
+
+    rewrite_block(exclude_file, managed)
+
+
+def prune_dirs(root):
+    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+    for d in dest_dirs:
+        try:
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+            parent = d.parent
+            if parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except Exception:
+            pass
+
+
+def cmd_remove(names):
+    if not names:
+        cmderr("remove", "skill name required")
+
+    root, exclude_file = get_git_repo()
+    managed = read_managed(exclude_file)
+
+    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+
+    for arg in names:
+        name = os.path.basename(arg)
+        removed = False
+        for d in dest_dirs:
+            relpath = d / name
+            line = f"/{relpath.relative_to(root)}"
+
+            if relpath.is_symlink():
+                relpath.unlink()
+                removed = True
+            elif relpath.exists():
+                cmderr(
+                    "remove",
+                    f"{relpath} is not a symlink we manage; leaving it untouched",
+                )
+
+            if line in managed:
+                managed.remove(line)
+
+        if removed:
+            print(f"removed {name}", file=sys.stderr)
+        else:
+            print(f"remove: {name} not present; clearing record", file=sys.stderr)
+
+    rewrite_block(exclude_file, managed)
+    prune_dirs(root)
+
+
+def cmd_list():
+    root, exclude_file = get_git_repo()
+    managed = read_managed(exclude_file)
+    dest_dirs = [".claude/skills", ".agents/skills"]
+    skills = set()
+    for line in managed:
+        rel = line.lstrip("/")
+        for d in dest_dirs:
+            if rel.startswith(d + "/"):
+                skills.add(rel[len(d) + 1 :])
+    for s in sorted(list(skills)):
+        print(s)
+
+
+def cmd_clean():
+    root, exclude_file = get_git_repo()
+    managed = read_managed(exclude_file)
+
+    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+    any_dir = any(d.is_dir() for d in dest_dirs)
+
+    if not managed and not any_dir:
+        print("clean: nothing to do", file=sys.stderr)
+        return
+
+    removed = 0
+    left = 0
+    for line in managed:
+        relpath = root / line.lstrip("/")
+        if relpath.is_symlink():
+            relpath.unlink()
+            removed += 1
+            print(f"removed {relpath.relative_to(root)}", file=sys.stderr)
+        elif relpath.exists():
+            print(
+                f"clean: {relpath.relative_to(root)} is not a symlink; leaving it in place",
+                file=sys.stderr,
+            )
+            left += 1
+
+    rewrite_block(exclude_file, [])
+    prune_dirs(root)
+    print(
+        f"clean: removed {removed} link(s); cleared exclude block",
+        file=sys.stderr,
+    )
+    if left > 0:
+        print(
+            f"clean: {left} path(s) left in place (not symlinks)",
+            file=sys.stderr,
+        )
+
+
+def cmd_update(names, registry):
+    root, exclude_file = get_git_repo()
+
+    if len(names) == 1 and names[0] == "--all":
+        dest_dirs = [".claude/skills", ".agents/skills"]
+        managed = read_managed(exclude_file)
+        skills = set()
+        for line in managed:
+            rel = line.lstrip("/")
+            for d in dest_dirs:
+                if rel.startswith(d + "/"):
+                    skills.add(rel[len(d) + 1 :])
+        names = sorted(list(skills))
+    elif not names:
+        cmderr("update", "skill name or --all required")
+
+    cache_base = (
+        Path(
+            os.environ.get("SKILL_CACHE_DIR")
+            or os.environ.get("XDG_CACHE_HOME")
+            or "~/.cache"
+        ).expanduser()
+        / "agent-skills"
+    )
+
+    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+
+    for name in names:
+        relpath = dest_dirs[0] / name
+        if not relpath.is_symlink():
+            print(
+                f"update: {name} is not currently added; skipping",
+                file=sys.stderr,
+            )
+            continue
+
+        try:
+            target = relpath.readlink().resolve()
+        except Exception:
+            continue
+
+        try:
+            target.relative_to(cache_base.resolve())
+        except ValueError:
+            print(f"update: {name} is local; nothing to update", file=sys.stderr)
+            continue
+
+        if name not in registry:
+            print(
+                f"update: {name} has no registry entry; cannot refresh",
+                file=sys.stderr,
+            )
+            continue
+
+        entry = registry[name]
+        repo = entry["repo"]
+        ref = entry["ref"]
+        subpath = entry["subpath"]
+
+        owner, reponame = repo.split("/", 1)
+        cachedir = cache_base / owner / reponame / ref
+        if subpath:
+            cachedir = cachedir / subpath
+        if cachedir.exists():
+            shutil.rmtree(cachedir)
+
+        fetch_github(name, repo, ref, subpath)
+        print(f"updated {name} from {repo}@{ref}", file=sys.stderr)
+
+
+def cmd_expand(specs):
+    if not specs:
+        cmderr("expand", "spec required")
+    expanded = expand_specs(specs, BUILTIN_SETS)
+    for name in expanded:
+        print(name)
+
+
+def cmd_resolve(name, source_dirs):
+    for d in source_dirs:
+        if not d:
+            continue
+        path = Path(d) / name
+        if path.is_dir():
+            print(path)
+            return
+    sys.exit(1)
+
+
+def cmd_sets():
+    for set_name in sorted(BUILTIN_SETS.keys()):
+        members = ", ".join(BUILTIN_SETS[set_name])
+        print(f"@{set_name}\t{members}")
+
+
+def cmd_topics(registry):
+    for name in sorted(registry.keys()):
+        entry = registry[name]
+        repo = entry["repo"]
+        ref = entry["ref"]
+        subpath = entry["subpath"]
+        url = f"https://github.com/{repo}/tree/{ref}"
+        if subpath:
+            url += f"/{subpath}"
+        print(f"{name}\t{url}")
+
+
+def usage():
+    print(
+        """Usage: git skill <command> [skill...]
+
+Manage per-workspace agent skills as untracked symlinks under .claude/skills
+and .agents/skills, keeping git quiet via .git/info/exclude. Each command acts
+on every destination at once, so they stay in sync. Operates on the current
+git repository.
+
+Commands:
+  add SPEC...     Add a skill: a local path, a registered topic name, or @set
+  remove NAME...  Remove a skill this tool added (symlink + ignore entry)
+  list            List skills this tool is managing in the current repo
+  update SPEC...  Re-fetch registered topics (--all for every managed skill)
+  clean           Remove all skills this tool added and its info/exclude block
+  topics          List registered topics and their GitHub sources
+  sets            List built-in skill sets and their contents
+  expand SPEC...  Print the skill names a list of specs resolves to
+  resolve NAME    Print the source path 'add NAME' would symlink to
+
+Aliases:
+  rm              Alias for remove
+
+Options:
+  --help          Display this help message and exit
+
+Skill specs:
+  'add' resolves a SPEC, in order, as:
+    @set          A built-in set name (see 'sets'); expands to its members
+    path          A local skill directory (absolute, ./relative, or ~/...)
+    topic         A registered name (see 'topics'), fetched from GitHub into
+                  SKILL_CACHE_DIR and symlinked from there
+    name          A directory of that name under any SKILL_SOURCE_DIRS entry
+  Topics are downloaded once and reused; 'update' re-fetches them. Local skills
+  have no upstream, so update skips them.
+
+Registry:
+  Topics map a name to a GitHub source. Built-in topics live in this script.
+  Add your own (including private/internal repos) without editing it by writing
+  lines to ~/.config/skill/registry or ~/.config/skill/registry.d/*:
+    <name>  <owner>/<repo>  <ref>  <subpath>
+  Later definitions win. ref defaults to main; subpath may be omitted.
+
+Environment:
+  SKILL_SOURCE_DIRS  Colon-separated directories searched for skills by name
+                     (default: ~/.dotfiles/skills:~/.private/skills:~/.corp/skills)
+  SKILL_CACHE_DIR    Where topic downloads are cached
+                     (default: ${XDG_CACHE_HOME:-~/.cache}/agent-skills)
+
+Examples:
+  git skill add @technical
+  git skill add home-assistant-best-practices
+  git skill add ~/src/my-skill
+  git skill sets
+  git skill topics
+  git skill update home-assistant-best-practices
+  git skill update --all
+  git skill list
+  git skill remove home-assistant-best-practices
+  git skill clean
+
+Skills are added as symlinks and recorded in .git/info/exclude so git never
+reports them. The tool is purely additive: it never touches skills the repo
+tracks, and refuses to shadow a tracked skill of the same name."""
+    )
+    sys.exit(0)
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "help"):
+        if len(sys.argv) > 2:
+            sub = sys.argv[2]
+            print(
+                f"Help for subcommand '{sub}' is not custom-defined. Refer to main usage below."
+            )
+            print()
+        usage()
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    if "--help" in args:
+        print(
+            f"Help for subcommand '{cmd}' is not custom-defined. Refer to main usage below."
+        )
+        print()
+        usage()
+
+    source_dirs_str = os.environ.get("SKILL_SOURCE_DIRS")
+    if not source_dirs_str:
+        home = Path.home()
+        source_dirs_str = (
+            f"{home}/.dotfiles/skills:{home}/.private/skills:{home}/.corp/skills"
+        )
+    source_dirs = source_dirs_str.split(":")
+
+    registry = load_registry()
+    load_plugins(registry, BUILTIN_SETS)
+
+    if cmd == "topics":
+        cmd_topics(registry)
+    elif cmd == "sets":
+        cmd_sets()
+    elif cmd == "expand":
+        cmd_expand(args)
+    elif cmd == "resolve":
+        if len(args) != 1:
+            cmderr("resolve", "exactly one name required")
+        cmd_resolve(args[0], source_dirs)
+    elif cmd == "add":
+        cmd_add(args, registry, source_dirs)
+    elif cmd in ("remove", "rm"):
+        cmd_remove(args)
+    elif cmd == "list":
+        cmd_list()
+    elif cmd == "update":
+        cmd_update(args, registry)
+    elif cmd == "clean":
+        cmd_clean()
+    else:
+        print(f"git skill: unknown command '{cmd}'", file=sys.stderr)
+        print("Try 'git skill --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
