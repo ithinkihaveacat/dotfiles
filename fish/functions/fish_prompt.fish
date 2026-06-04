@@ -58,8 +58,9 @@ function fish_right_prompt --description 'Write out the right prompt'
                 end
                 if test -f "$exclude_file"
                     if string match -q -r "skills \\(managed by 'git-skill'\\)" <"$exclude_file"
-                        set -l managed_skills (string match -r '^/\\.agents/skills/.+' <"$exclude_file")
-                        set -l skill_count (count $managed_skills)
+                        set -l managed_skills (string replace -r '^/\.(claude|agents)/skills/([^/]+)$' '$2' <"$exclude_file" | string match -r '^[^/#]+$')
+                        set -l unique_skills (printf '%s\n' $managed_skills | sort -u | string match -r '\S+')
+                        set -l skill_count (count $unique_skills)
                         if test $skill_count -gt 0
                             set prefix "[S:$skill_count] "
                         end
