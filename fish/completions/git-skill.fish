@@ -26,8 +26,7 @@ complete -f -c git -n __fish_git_skill_needs_command -a list -d 'List managed sk
 complete -f -c git -n __fish_git_skill_needs_command -a update -d 'Re-fetch registered topics'
 complete -f -c git -n __fish_git_skill_needs_command -a clean -d 'Remove all managed skills and the exclude block'
 complete -f -c git -n __fish_git_skill_needs_command -a topics -d 'List registered topics and sources'
-complete -f -c git -n __fish_git_skill_needs_command -a sets -d 'List built-in skill sets'
-complete -f -c git -n __fish_git_skill_needs_command -a expand -d 'Print names a spec resolves to'
+
 complete -f -c git -n __fish_git_skill_needs_command -a resolve -d 'Print source path for a name'
 complete -f -c git -n __fish_git_skill_needs_command -a apply -d 'Provision skills for this repository via skill-select'
 complete -f -c git -n __fish_git_skill_needs_command -a suggest -d 'Print skill-select recommendations without installing'
@@ -46,9 +45,7 @@ function __fish_git_skill_source_skills
     end | sort -u
 end
 
-function __fish_git_skill_sets
-    git skill sets 2>/dev/null | awk -F'\t' '{print $1}'
-end
+
 
 function __fish_git_skill_topics
     git skill topics 2>/dev/null
@@ -58,15 +55,12 @@ function __fish_git_skill_managed_skills
     git skill list 2>/dev/null
 end
 
-# expand: accepts @sets and source skill names
-complete -c git -n '__fish_git_skill_using_command expand' -a '(__fish_git_skill_sets)' -d Set
-complete -c git -n '__fish_git_skill_using_command expand' -a '(__fish_git_skill_source_skills)' -d Skill
+
 
 # resolve: source skill names only
 complete -f -c git -n '__fish_git_skill_using_command resolve' -a '(__fish_git_skill_source_skills)' -d Skill
 
-# add: sets, registered topics, source skills, plus file completion
-complete -c git -n '__fish_git_skill_using_command add' -a '(__fish_git_skill_sets)' -d Set
+
 complete -c git -n '__fish_git_skill_using_command add' -a '(__fish_git_skill_topics)'
 complete -c git -n '__fish_git_skill_using_command add' -a '(__fish_git_skill_source_skills)' -d Skill
 
@@ -80,6 +74,5 @@ complete -c git -f -n '__fish_git_skill_using_command update' -l all -d 'Update 
 
 # Complete flags
 complete -c git -f -n '__fish_git_skill_using_command skill' -l help -d 'Display help message and exit'
-complete -c git -f -n '__fish_git_skill_using_command apply' -l llm -d 'Force LLM fallback'
-complete -c git -f -n '__fish_git_skill_using_command suggest' -l llm -d 'Force LLM fallback'
+
 

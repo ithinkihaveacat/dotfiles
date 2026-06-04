@@ -6,9 +6,9 @@ description: Discover and select relevant agent skills based on a problem descri
 # Skill Select
 
 This skill provides discovery and selection of other agent skills relevant to
-your current repository or task. It uses deterministic rules for common project
-types (like Android) and falls back to LLM-based selection when the context is
-ambiguous.
+your current repository or task. It analyzes the repository's files to suggest
+sensible default skills, or uses LLM-based selection when context is provided.
+
 
 ## Usage
 
@@ -28,7 +28,7 @@ skill-select [DIR] [OPTIONS]
 - `--list`: Print the full catalog of available skills and exit.
 - `--json`: Emit structured JSON output (`name`, `path`, `reason`) instead of
   bare names.
-- `--llm`: Force the LLM fallback engine, bypassing fast deterministic rules.
+
 
 ## Context Guidelines
 
