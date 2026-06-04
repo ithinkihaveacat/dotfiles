@@ -9,7 +9,6 @@ set -x TZ Europe/London
 # See ~/.gradle/init.d/compose-ai-tools.gradle for details.
 set -gx COMPOSE_AI_TOOLS true
 
-
 # personal config
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
@@ -20,7 +19,6 @@ set -g CDPATH . ~
 if test -d ~/workspace
     set -g CDPATH $CDPATH ~/workspace
 end
-
 
 # java
 #
@@ -190,6 +188,9 @@ type -q pbpaste; or alias pbpaste fish_clipboard_paste
 
 # uv
 set -x UV_EXCLUDE_NEWER "7 days"
+
+# Search paths for agent skills
+set -gx SKILL_SOURCE_DIRS (string join : $HOME/.dotfiles/skills $HOME/.private/skills $HOME/.corp/skills $HOME/.gemini/config/skills $HOME/.gemini/jetski/skills)
 
 _load_overlay $HOME/.private
 _load_overlay $HOME/.corp
