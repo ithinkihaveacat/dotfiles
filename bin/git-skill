@@ -28,65 +28,28 @@ def cmderr(cmd, msg):
     sys.exit(1)
 
 
-class SkillAPI:
-    def __init__(self, registry, sets):
-        self.registry = registry
-        self.sets = sets
+def load_sets(sets_dict):
+    config_dir = (
+        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser() / "skill"
+    )
+    sets_file = config_dir / "sets"
 
-    def add_set(self, name: str, members: list[str]):
-        self.sets[name] = members
-
-    def extend_set(self, name: str, members: list[str]):
-        if name in self.sets:
-            self.sets[name].extend(members)
-        else:
-            self.sets[name] = members
-
-    def add_topic(
-        self,
-        name: str,
-        owner: str,
-        repo: str,
-        ref: str = "main",
-        subpath: str = None,
-    ):
-        self.registry[name] = {
-            "repo": f"{owner}/{repo}",
-            "ref": ref,
-            "subpath": subpath,
-        }
-
-
-def load_plugins(registry, sets):
-    import importlib.util
-
-    plugins_dir_str = os.environ.get("SKILL_PLUGINS_DIR")
-    if plugins_dir_str:
-        plugins_dir = Path(plugins_dir_str)
-    else:
-        plugins_dir = Path("~/.config/skill/plugins").expanduser()
-
-    if not plugins_dir.is_dir():
+    if not sets_file.is_file():
         return
 
-    api = SkillAPI(registry, sets)
-    for filename in os.listdir(plugins_dir):
-        if filename.endswith(".py"):
-            filepath = os.path.join(plugins_dir, filename)
-            module_name = f"skill_plugin_{filename[:-3]}"
-            try:
-                spec = importlib.util.spec_from_file_location(module_name, filepath)
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules[module_name] = module
-                    spec.loader.exec_module(module)
-                    if hasattr(module, "register"):
-                        module.register(api)
-            except Exception as e:
-                print(
-                    f"git-skill: warning: failed to load plugin {filepath}: {e}",
-                    file=sys.stderr,
-                )
+    with open(sets_file, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                name = parts[0]
+                members = parts[1:]
+                if name in sets_dict:
+                    sets_dict[name].extend(members)
+                else:
+                    sets_dict[name] = members
 
 
 def load_registry():
@@ -347,6 +310,10 @@ def resolve_spec(spec, registry, source_dirs):
 def cmd_add(specs, registry, source_dirs):
     if not specs:
         cmderr("add", "skill name required")
+    if len(specs) == 1 and specs[0] == "-":
+        specs = sys.stdin.read().split()
+        if not specs:
+            return
 
     root, exclude_file = get_git_repo()
     managed = read_managed(exclude_file)
@@ -357,7 +324,9 @@ def cmd_add(specs, registry, source_dirs):
         src, name = resolve_spec(spec, registry, source_dirs)
         resolved_skills.append((src, name))
 
-    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs = [root / d for d in dest_dirs_str.split(":") if d]
+
     for src, name in resolved_skills:
         for d in dest_dirs:
             relpath = d / name
@@ -408,7 +377,9 @@ def cmd_add(specs, registry, source_dirs):
 
 
 def prune_dirs(root):
-    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs = [root / d for d in dest_dirs_str.split(":") if d]
+
     for d in dest_dirs:
         try:
             if d.is_dir() and not any(d.iterdir()):
@@ -427,7 +398,8 @@ def cmd_remove(names):
     root, exclude_file = get_git_repo()
     managed = read_managed(exclude_file)
 
-    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs = [root / d for d in dest_dirs_str.split(":") if d]
 
     for arg in names:
         name = os.path.basename(arg)
@@ -460,11 +432,14 @@ def cmd_remove(names):
 def cmd_list():
     root, exclude_file = get_git_repo()
     managed = read_managed(exclude_file)
-    dest_dirs = [".claude/skills", ".agents/skills"]
+
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
+
     skills = set()
     for line in managed:
         rel = line.lstrip("/")
-        for d in dest_dirs:
+        for d in dest_dirs_rel:
             if rel.startswith(d + "/"):
                 skills.add(rel[len(d) + 1 :])
     for s in sorted(list(skills)):
@@ -475,7 +450,8 @@ def cmd_clean():
     root, exclude_file = get_git_repo()
     managed = read_managed(exclude_file)
 
-    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs = [root / d for d in dest_dirs_str.split(":") if d]
     any_dir = any(d.is_dir() for d in dest_dirs)
 
     if not managed and not any_dir:
@@ -513,13 +489,16 @@ def cmd_clean():
 def cmd_update(names, registry):
     root, exclude_file = get_git_repo()
 
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
+    dest_dirs = [root / d for d in dest_dirs_rel]
+
     if len(names) == 1 and names[0] == "--all":
-        dest_dirs = [".claude/skills", ".agents/skills"]
         managed = read_managed(exclude_file)
         skills = set()
         for line in managed:
             rel = line.lstrip("/")
-            for d in dest_dirs:
+            for d in dest_dirs_rel:
                 if rel.startswith(d + "/"):
                     skills.add(rel[len(d) + 1 :])
         names = sorted(list(skills))
@@ -534,8 +513,6 @@ def cmd_update(names, registry):
         ).expanduser()
         / "agent-skills"
     )
-
-    dest_dirs = [root / ".claude" / "skills", root / ".agents" / "skills"]
 
     for name in names:
         relpath = dest_dirs[0] / name
@@ -588,21 +565,18 @@ def cmd_expand(specs):
         print(name)
 
 
-def cmd_resolve(name, source_dirs):
-    for d in source_dirs:
-        if not d:
-            continue
-        path = Path(d) / name
-        if path.is_dir():
-            print(path)
-            return
-    sys.exit(1)
+def cmd_resolve(name, registry, source_dirs):
+    try:
+        path, _ = resolve_spec(name, registry, source_dirs)
+        print(path)
+    except SystemExit:
+        sys.exit(1)
 
 
 def cmd_sets():
     for set_name in sorted(BUILTIN_SETS.keys()):
         members = ", ".join(BUILTIN_SETS[set_name])
-        print(f"@{set_name}\t{members}")
+        print(f"@{set_name}\\t{members}")
 
 
 def cmd_topics(registry, source_dirs):
@@ -634,6 +608,118 @@ def cmd_topics(registry, source_dirs):
         print(f"{name:<{longest_name + 2}}{topics[name]}")
 
 
+def cmd_apply(args):
+    root, _ = get_git_repo()
+    print("git skill: determining skills via skill-select...", file=sys.stderr)
+    cmd = ["skill-select", str(root)] + args
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(res.stderr, file=sys.stderr)
+        die("skill-select failed")
+
+    skills = res.stdout.strip().split()
+    if not skills:
+        print("git skill: no skills recommended by skill-select", file=sys.stderr)
+        return
+
+    # Add the recommended skills
+    print(f"git skill: applying skills: {' '.join(skills)}", file=sys.stderr)
+    subprocess.run(["git", "skill", "add"] + skills, check=True)
+
+
+def cmd_suggest(args):
+    root, _ = get_git_repo()
+    cmd = ["skill-select", str(root)] + args
+    subprocess.run(cmd)
+
+
+def cmd_status(registry, source_dirs):
+    root, exclude_file = get_git_repo()
+    managed = read_managed(exclude_file)
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
+
+    skills = set()
+    for line in managed:
+        rel = line.lstrip("/")
+        for d in dest_dirs_rel:
+            if rel.startswith(d + "/"):
+                skills.add(rel[len(d) + 1 :])
+
+    rc = 0
+    all_skills = sorted(list(skills))
+
+    if not all_skills:
+        print("git skill: nothing managed")
+        sys.exit(0)
+
+    print("Skills:")
+    for name in all_skills:
+        # Get expected path
+        try:
+            exp_path, _ = resolve_spec(name, registry, source_dirs)
+        except SystemExit:
+            exp_path = None
+
+        # Get current paths for all dest dirs
+        cur_paths = []
+        for d in dest_dirs_rel:
+            p = root / d / name
+            if p.is_symlink():
+                try:
+                    cur_paths.append((p, p.readlink()))
+                except Exception:
+                    pass
+
+        if not cur_paths:
+            print(f"  missing      {name} (recorded but absent on disk)")
+            print(f"                git skill rm {name} && git skill add {name}")
+            rc = 1
+            continue
+
+        if not exp_path:
+            print(f"  unresolvable {name} (no source in SKILL_SOURCE_DIRS)")
+            rc = 1
+            continue
+
+        drift = False
+        for p, target in cur_paths:
+            # target is relative to link, make it absolute or compare carefully
+            resolved_target = (p.parent / target).resolve()
+            if resolved_target != exp_path.resolve():
+                print(f"  drift        {name} in {p.relative_to(root)}")
+                print(f"                current:  {resolved_target}")
+                print(f"                expected: {exp_path.resolve()}")
+                print(f"                git skill rm {name} && git skill add {name}")
+                drift = True
+                rc = 1
+
+        if not drift:
+            print(f"  ok           {name}")
+
+    # Check commit-msg hook
+    hook = root / ".git" / "hooks" / "commit-msg"
+    print("\ncommit-msg hook:")
+    if not hook.is_file():
+        print("  missing      hook absent")
+        print("                git-hooks-agent")
+        rc = 1
+    else:
+        try:
+            hook_content = hook.read_text()
+            if "git-hooks-agent" not in hook_content:
+                print("  drift        present but unmanaged")
+                print("                git-hooks-agent --force")
+                rc = 1
+            else:
+                print("  ok           installed and managed")
+        except Exception:
+            print("  error        could not read hook")
+            rc = 1
+
+    sys.exit(rc)
+
+
 def usage():
     print(
         """Usage: git skill <command> [skill...]
@@ -644,21 +730,23 @@ on every destination at once, so they stay in sync. Operates on the current
 git repository.
 
 Commands:
+  apply           Provision skills for this repository via skill-select (idempotent)
+  suggest         Print skill-select recommendations without installing them
   add SPEC...     Add a skill: a local path, a registered topic name, or @set
-  remove NAME...  Remove a skill this tool added (symlink + ignore entry)
+  add -           Read skill names from stdin
+  remove NAME...  Remove a skill this tool added (alias: rm)
   list            List skills this tool is managing in the current repo
   update SPEC...  Re-fetch registered topics (--all for every managed skill)
   clean           Remove all skills this tool added and its info/exclude block
+  status          Report drift between desired and on-disk state (read-only)
   topics          List registered topics and their GitHub sources
   sets            List built-in skill sets and their contents
   expand SPEC...  Print the skill names a list of specs resolves to
   resolve NAME    Print the source path 'add NAME' would symlink to
 
-Aliases:
-  rm              Alias for remove
-
 Options:
   --help          Display this help message and exit
+  --llm           For 'apply' and 'suggest': force LLM fallback for suggestions
 
 Skill specs:
   'add' resolves a SPEC, in order, as:
@@ -680,24 +768,18 @@ Registry:
 Environment:
   SKILL_SOURCE_DIRS  Colon-separated directories searched for skills by name
                      (default: ~/.dotfiles/skills:~/.private/skills:~/.corp/skills)
+  SKILL_DEST_DIRS    Colon-separated list of local repo paths to symlink skills into
+                     (default: .claude/skills:.agents/skills)
   SKILL_CACHE_DIR    Where topic downloads are cached
                      (default: ${XDG_CACHE_HOME:-~/.cache}/agent-skills)
 
 Examples:
+  git skill apply
+  git skill suggest --llm
   git skill add @technical
-  git skill add home-assistant-best-practices
-  git skill add ~/src/my-skill
-  git skill sets
-  git skill topics
-  git skill update home-assistant-best-practices
-  git skill update --all
+  git skill status
   git skill list
-  git skill remove home-assistant-best-practices
-  git skill clean
-
-Skills are added as symlinks and recorded in .git/info/exclude so git never
-reports them. The tool is purely additive: it never touches skills the repo
-tracks, and refuses to shadow a tracked skill of the same name."""
+  git skill clean"""
     )
     sys.exit(0)
 
@@ -731,7 +813,7 @@ def main():
     source_dirs = source_dirs_str.split(":")
 
     registry = load_registry()
-    load_plugins(registry, BUILTIN_SETS)
+    load_sets(BUILTIN_SETS)
 
     if cmd == "topics":
         cmd_topics(registry, source_dirs)
@@ -742,7 +824,7 @@ def main():
     elif cmd == "resolve":
         if len(args) != 1:
             cmderr("resolve", "exactly one name required")
-        cmd_resolve(args[0], source_dirs)
+        cmd_resolve(args[0], registry, source_dirs)
     elif cmd == "add":
         cmd_add(args, registry, source_dirs)
     elif cmd in ("remove", "rm"):
@@ -753,6 +835,12 @@ def main():
         cmd_update(args, registry)
     elif cmd == "clean":
         cmd_clean()
+    elif cmd == "apply":
+        cmd_apply(args)
+    elif cmd == "suggest":
+        cmd_suggest(args)
+    elif cmd == "status":
+        cmd_status(registry, source_dirs)
     else:
         print(f"git skill: unknown command '{cmd}'", file=sys.stderr)
         print("Try 'git skill --help' for more information.", file=sys.stderr)

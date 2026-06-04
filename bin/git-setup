@@ -3,73 +3,48 @@
 set -euo pipefail
 
 usage() {
-  cat <<EOF
+	cat <<EOF
 Usage: $(basename "$0") [--force]
 
-Configure the current git repository.
+Configure the current git repository by installing hooks and provisioning skills.
 
-Modes:
-  apply   Runs when nothing is yet managed: installs the agent commit-msg
-          hook and adds an appropriate built-in skill set based on simple
-          project-type detection.
-  audit   Runs when anything is already managed: prints a diff between
-          the current state and what apply mode would do today, with a
-          fix command for each row. Read-only; never writes. Exits 1 if
-          anything differs from the desired state.
-
-State is considered already managed if EITHER the '>>> skills' block
-exists in .git/info/exclude OR the commit-msg hook contains the
-'git-hooks-agent' marker. A pre-existing manual 'git skill add' therefore puts
-the tool in audit mode on its first invocation; this is intentional.
-
-Detection (root files only):
-  android   build.gradle, build.gradle.kts, settings.gradle,
-            settings.gradle.kts, gradlew, or AndroidManifest.xml
-  other     everything else
-
-Apply mode adds:
-  android   git skill add @android   (technical + adb, emumanager, jetpack)
-  other     git skill add @technical (coding-standards, technical-writing-style,
-                                  agent-tools)
-
-This command is also invoked automatically on 'git clone' by the
+This command is typically invoked automatically on 'git clone' by the
 post-checkout hook from ~/.dotfiles/etc/git/templates/global.
 
 Options:
-  --force   In apply mode, pass --force to git-hooks-agent (overwrite a
-            foreign commit-msg). Has no effect in audit mode.
+  --force   Pass --force to git-hooks-agent (overwrite a foreign commit-msg hook)
   --help    Display this help message and exit
 
 Examples:
   $(basename "$0")
   $(basename "$0") --force
 EOF
-  exit 0
+	exit 0
 }
 
 require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "$(basename "$0"): $1 not found" >&2
-    exit 127
-  }
+	command -v "$1" >/dev/null 2>&1 || {
+		echo "$(basename "$0"): $1 not found" >&2
+		exit 127
+	}
 }
 
 force=0
 for arg in "$@"; do
-  case "$arg" in
-    --help) usage ;;
-    --force) force=1 ;;
-    -*)
-      echo "$(basename "$0"): unknown option: $arg" >&2
-      echo "Try '$(basename "$0") --help' for more information." >&2
-      exit 1
-      ;;
-    *)
-      echo "$(basename "$0"): unexpected argument: $arg" >&2
-      echo "Try '$(basename "$0") --help' for more information." >&2
-      exit 1
-      ;;
-  esac
+	case "$arg" in
+	--help) usage ;;
+	--force) force=1 ;;
+	-*)
+		echo "$(basename "$0"): unknown option: $arg" >&2
+		echo "Try '$(basename "$0") --help' for more information." >&2
+		exit 1
+		;;
+	*)
+		echo "$(basename "$0"): unexpected argument: $arg" >&2
+		echo "Try '$(basename "$0") --help' for more information." >&2
+		exit 1
+		;;
+	esac
 done
 
 require git
@@ -77,176 +52,26 @@ require git-hooks-agent
 require git-skill
 
 if ! inside=$(git rev-parse --is-inside-work-tree 2>/dev/null) || [ "$inside" != "true" ]; then
-  echo "$(basename "$0"): not inside a git work tree (run 'git init' to create one)" >&2
-  exit 1
+	echo "$(basename "$0"): not inside a git work tree (run 'git init' to create one)" >&2
+	exit 1
 fi
 if [ "$(git rev-parse --is-bare-repository)" = "true" ]; then
-  echo "$(basename "$0"): refusing to run in a bare repository" >&2
-  exit 1
+	echo "$(basename "$0"): refusing to run in a bare repository" >&2
+	exit 1
 fi
 
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
-# Root-only Android detection: cheap, deterministic, catches every real
-# Android project at the repo root.
-detect_type() {
-  local marker
-  for marker in build.gradle build.gradle.kts settings.gradle settings.gradle.kts gradlew AndroidManifest.xml; do
-    if [ -e "$marker" ]; then
-      echo android
-      return
-    fi
-  done
-  if find . -maxdepth 2 -name .git -prune -o \( -name build.gradle -o -name build.gradle.kts -o -name AndroidManifest.xml \) -print 2>/dev/null | grep -q .; then
-    echo android
-    return
-  fi
-  echo other
-}
+echo "$(basename "$0"): installing hooks and provisioning skills"
 
-type=$(detect_type)
-case "$type" in
-  android) set_name=android ;;
-  other) set_name=technical ;;
-esac
+hook_args=()
+[ "$force" -eq 1 ] && hook_args+=(--force)
 
-exclude=$(git rev-parse --git-path info/exclude)
-hook=$(git rev-parse --git-path hooks/commit-msg)
-
-# State is "already managed" if either the skill block or the managed hook
-# marker is present. We never write a marker file of our own; both signals
-# already exist as side effects of apply.
-state_empty=1
-if [ -f "$exclude" ] && grep -qF "skills (managed by 'git-skill')" "$exclude"; then
-  state_empty=0
-fi
-if [ -f "$hook" ] && grep -q "git-hooks-agent" "$hook"; then
-  state_empty=0
-fi
-
-apply() {
-  echo "$(basename "$0"): apply mode (no managed state); installing hooks and @$set_name"
-  local hook_args=()
-  [ "$force" -eq 1 ] && hook_args+=(--force)
-  if [ "${#hook_args[@]}" -gt 0 ]; then
-    git-hooks-agent "${hook_args[@]}"
-  else
-    git-hooks-agent
-  fi
-  git skill add "@$set_name"
-}
-
-# Print one report row. Three columns: status, name, optional detail line(s).
-row() {
-  printf '  %-13s %s\n' "$1" "$2"
-}
-
-# Indented continuation line for a row, holding fix commands or details.
-note() {
-  printf '                %s\n' "$1"
-}
-
-audit() {
-  local rc=0
-  local desired actual all
-  local name in_desired in_actual cur_path exp_path
-  local has_skills=0 has_hook=0
-
-  echo "git-setup: audit mode (state already managed; read-only)"
-  echo
-  printf 'Detected:    %s\n' "$type"
-  printf 'Desired set: @%s\n' "$set_name"
-  echo
-
-  desired=$(git skill expand "@$set_name")
-  actual=$(git skill list 2>/dev/null || true)
-  all=$(printf '%s\n%s\n' "$desired" "$actual" | sort -u | sed '/^$/d')
-  [ -n "$actual" ] && has_skills=1
-
-  echo 'Skills:'
-  if [ -z "$all" ]; then
-    row "(none)" "no skills in desired set and none managed"
-  else
-    while IFS= read -r name; do
-      in_desired=0
-      in_actual=0
-      if printf '%s\n' "$desired" | grep -qxF "$name"; then in_desired=1; fi
-      if printf '%s\n' "$actual" | grep -qxF "$name"; then in_actual=1; fi
-
-      cur_path=""
-      if [ -L ".claude/skills/$name" ]; then
-        cur_path=$(readlink ".claude/skills/$name")
-      fi
-      exp_path=$(git skill resolve "$name" 2>/dev/null || true)
-
-      if [ "$in_desired" = 1 ] && [ "$in_actual" = 0 ]; then
-        if [ -z "$exp_path" ]; then
-          row unresolvable "$name (no source in SKILL_SOURCE_DIRS)"
-        else
-          row missing "$name"
-          note "git skill add $name"
-        fi
-        rc=1
-      elif [ "$in_desired" = 0 ] && [ "$in_actual" = 1 ]; then
-        if [ -z "$cur_path" ]; then
-          row stale "$name (recorded but absent on disk)"
-        else
-          row extra "$name (managed, not in @$set_name)"
-        fi
-        note "git skill rm $name"
-        rc=1
-      else
-        if [ -z "$cur_path" ]; then
-          row missing "$name (recorded but absent on disk)"
-          note "git skill rm $name && git skill add $name"
-          rc=1
-        elif [ -n "$exp_path" ] && [ "$cur_path" != "$exp_path" ]; then
-          row drift "$name"
-          note "current:  $cur_path"
-          note "expected: $exp_path"
-          note "git skill rm $name && git skill add $name"
-          rc=1
-        else
-          row ok "$name"
-        fi
-      fi
-    done <<<"$all"
-  fi
-
-  echo
-  echo 'commit-msg hook:'
-  if [ ! -f "$hook" ]; then
-    row missing "hook absent"
-    note "git-hooks-agent"
-    rc=1
-  elif ! grep -q "git-hooks-agent" "$hook"; then
-    row drift "present but unmanaged"
-    note "git-hooks-agent --force"
-    rc=1
-  else
-    row ok "installed and managed"
-    has_hook=1
-  fi
-
-  echo
-  if [ "$has_skills" = 0 ] && [ "$has_hook" = 0 ]; then
-    echo 'Nothing managed by git-setup. Re-run to apply.'
-  else
-    echo 'To clear everything git-setup manages and start fresh:'
-    [ "$has_skills" = 1 ] && echo '  git skill clean'
-    [ "$has_hook" = 1 ] && printf '  rm -f %s\n' "$hook"
-    echo '  git setup'
-  fi
-
-  return "$rc"
-}
-
-if [ "$state_empty" = 1 ]; then
-  apply
+if [ "${#hook_args[@]}" -gt 0 ]; then
+	git-hooks-agent "${hook_args[@]}"
 else
-  if [ "$force" -eq 1 ]; then
-    echo "$(basename "$0"): --force has no effect in audit mode" >&2
-  fi
-  audit || exit 1
+	git-hooks-agent
 fi
+
+git skill apply

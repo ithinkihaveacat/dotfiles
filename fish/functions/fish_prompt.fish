@@ -56,8 +56,14 @@ function fish_right_prompt --description 'Write out the right prompt'
                 if not test -f "$exclude_file"
                     set exclude_file (git rev-parse --git-path info/exclude 2>/dev/null)
                 end
-                if test -f "$exclude_file"; and string match -q -r agent-skills <"$exclude_file"
-                    set prefix "[S] "
+                if test -f "$exclude_file"
+                    if string match -q -r "skills \\(managed by 'git-skill'\\)" <"$exclude_file"
+                        set -l managed_skills (string match -r '^/\\.agents/skills/.+' <"$exclude_file")
+                        set -l skill_count (count $managed_skills)
+                        if test $skill_count -gt 0
+                            set prefix "[S:$skill_count] "
+                        end
+                    end
                 end
 
                 set_color yellow
