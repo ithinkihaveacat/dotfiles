@@ -21,6 +21,7 @@ complete -f -c git -n __fish_git_needs_command -a skill -d "Manage per-workspace
 # Complete subcommands
 complete -f -c git -n __fish_git_skill_needs_command -a add -d 'Add a skill (path or topic)'
 complete -f -c git -n __fish_git_skill_needs_command -a remove -d 'Remove a skill this tool added'
+complete -f -c git -n __fish_git_skill_needs_command -a rm -d 'Remove a skill this tool added (alias of remove)'
 complete -f -c git -n __fish_git_skill_needs_command -a list -d 'List managed skills in this repo'
 complete -f -c git -n __fish_git_skill_needs_command -a update -d 'Re-fetch registered topics'
 complete -f -c git -n __fish_git_skill_needs_command -a clean -d 'Remove all managed skills and the exclude block'
@@ -28,6 +29,10 @@ complete -f -c git -n __fish_git_skill_needs_command -a topics -d 'List register
 complete -f -c git -n __fish_git_skill_needs_command -a sets -d 'List built-in skill sets'
 complete -f -c git -n __fish_git_skill_needs_command -a expand -d 'Print names a spec resolves to'
 complete -f -c git -n __fish_git_skill_needs_command -a resolve -d 'Print source path for a name'
+complete -f -c git -n __fish_git_skill_needs_command -a apply -d 'Provision skills for this repository via skill-select'
+complete -f -c git -n __fish_git_skill_needs_command -a suggest -d 'Print skill-select recommendations without installing'
+complete -f -c git -n __fish_git_skill_needs_command -a status -d 'Report drift between desired and on-disk state'
+
 
 # Helper functions for fetching options/skills
 function __fish_git_skill_source_skills
@@ -75,3 +80,6 @@ complete -c git -f -n '__fish_git_skill_using_command update' -l all -d 'Update 
 
 # Complete flags
 complete -c git -f -n '__fish_git_skill_using_command skill' -l help -d 'Display help message and exit'
+complete -c git -f -n '__fish_git_skill_using_command apply' -l llm -d 'Force LLM fallback'
+complete -c git -f -n '__fish_git_skill_using_command suggest' -l llm -d 'Force LLM fallback'
+
