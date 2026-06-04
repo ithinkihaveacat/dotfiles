@@ -10,10 +10,13 @@ task.
 
 ## How to use it
 
-You can invoke the search tool via the script:
+You can invoke the search tool via the script `skill-search` (if installed in
+your PATH) or directly via the skill path:
 
 ```bash
-.agents/skills/skill-search/scripts/skill-search.py "PROBLEM_DESCRIPTION_OR_GOAL" [OPTIONS]
+skill-search "PROBLEM_DESCRIPTION_OR_GOAL" [OPTIONS]
+# Or:
+.agents/skills/skill-search/scripts/skill-search "PROBLEM_DESCRIPTION_OR_GOAL" [OPTIONS]
 ```
 
 ### Options:
@@ -26,5 +29,5 @@ You can invoke the search tool via the script:
 
 ```bash
 # Search for skills to help with python style issues
-.agents/skills/skill-search/scripts/skill-search.py "I need to format my python code and run tests"
+skill-search "I need to format my python code and run tests"
 ```
