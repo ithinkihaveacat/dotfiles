@@ -9,7 +9,6 @@ This skill provides discovery and selection of other agent skills relevant to
 your current repository or task. It analyzes the repository's files to suggest
 sensible default skills, or uses LLM-based selection when context is provided.
 
-
 ## Usage
 
 Invoke the selection tool via the `skill-select` script (available in `bin/`):
@@ -25,10 +24,10 @@ skill-select [DIR] [OPTIONS]
   below.
 - `--search-dirs PATHS`: Colon-separated extra paths to search for skills,
   overriding `SKILL_SOURCE_DIRS`.
-- `--list`: Print the full catalog of available skills and exit.
-- `--json`: Emit structured JSON output (`name`, `path`, `reason`) instead of
-  bare names.
-
+- --list: Print the full catalog of available skills and exit (formatted as
+  `name -> path`).
+- --json: Emit structured JSON output (`name`, `path`, `reason` / `description`)
+  instead of the formatted `name -> path` text.
 
 ## Context Guidelines
 
