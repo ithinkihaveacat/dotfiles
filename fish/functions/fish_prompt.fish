@@ -62,7 +62,7 @@ function fish_right_prompt --description 'Write out the right prompt'
                         set -l unique_skills (printf '%s\n' $managed_skills | sort -u | string match -r '\S+')
                         set -l skill_count (count $unique_skills)
                         if test $skill_count -gt 0
-                            set prefix "[S:$skill_count] "
+                            set prefix "✨ "
                         end
                     end
                 end
