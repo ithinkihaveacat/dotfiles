@@ -15,8 +15,6 @@ import subprocess
 from pathlib import Path
 
 
-
-
 def die(msg):
     print(f"git skill: {msg}", file=sys.stderr)
     sys.exit(1)
@@ -25,9 +23,6 @@ def die(msg):
 def cmderr(cmd, msg):
     print(f"git skill {cmd}: {msg}", file=sys.stderr)
     sys.exit(1)
-
-
-
 
 
 def load_registry():
@@ -234,9 +229,6 @@ def fetch_github(name, repo, ref, subpath):
     return cachedir
 
 
-
-
-
 def resolve_spec(spec, registry, source_dirs):
     expanded_spec = os.path.expanduser(spec)
 
@@ -270,7 +262,7 @@ def resolve_spec(spec, registry, source_dirs):
             return path, spec
 
     die(
-        f"unknown skill '{spec}': not a path, a registered topic, or under any of SKILL_SOURCE_DIRS ({':'.join(source_dirs)})"
+        f"unknown skill '{spec}': not a path, a registered catalog entry, or under any of SKILL_SOURCE_DIRS ({':'.join(source_dirs)})"
     )
 
 
@@ -408,8 +400,35 @@ def cmd_list():
         for d in dest_dirs_rel:
             if rel.startswith(d + "/"):
                 skills.add(rel[len(d) + 1 :])
+
+    home = str(Path.home())
+
+    def clean_p(p):
+        s = str(p)
+        if s.startswith(home):
+            return "~" + s[len(home) :]
+        return s
+
+    resolved_skills = []
     for s in sorted(list(skills)):
-        print(s)
+        target = None
+        for d in dest_dirs_rel:
+            p = root / d / s
+            if p.is_symlink():
+                try:
+                    target = clean_p((p.parent / p.readlink()).resolve())
+                    break
+                except Exception:
+                    pass
+        resolved_skills.append((s, target))
+
+    if resolved_skills:
+        max_len = max(len(name) for name, _ in resolved_skills)
+        for name, target in resolved_skills:
+            if target:
+                print(f"{name.ljust(max_len)} -> {target}")
+            else:
+                print(name)
 
 
 def cmd_clean():
@@ -531,15 +550,16 @@ def cmd_resolve(name, registry, source_dirs):
         sys.exit(1)
 
 
-def cmd_topics(registry, source_dirs):
+def cmd_catalog(registry, source_dirs):
     from collections import defaultdict
+
     grouped = defaultdict(list)
     home = str(Path.home())
 
     def clean_p(p):
         s = str(p)
         if s.startswith(home):
-            return "~" + s[len(home):]
+            return "~" + s[len(home) :]
         return s
 
     # Map cleaned source dirs to their index for sorting
@@ -552,20 +572,20 @@ def cmd_topics(registry, source_dirs):
                 source_order[resolved] = order_idx
                 order_idx += 1
 
-    # 1. Registry topics
+    # 1. Registry catalog entries
     for name in registry:
         entry = registry[name]
         repo = entry["repo"]
         ref = entry["ref"]
         subpath = entry["subpath"]
-        
+
         url = f"https://github.com/{repo}/tree/{ref}"
         if subpath:
             url += f"/{subpath}"
         # Group all registry items under "Registry" showing their full URL
         grouped["Registry"].append((name, url))
 
-    # 2. Local topics under source_dirs
+    # 2. Local catalog entries under source_dirs
     for d in source_dirs:
         if not d:
             continue
@@ -612,8 +632,6 @@ def cmd_topics(registry, source_dirs):
                 print(f"  {name}")
 
 
-
-
 def cmd_apply(args):
     root, _ = get_git_repo()
     print("git skill: determining skills via skill-select...", file=sys.stderr)
@@ -634,9 +652,38 @@ def cmd_apply(args):
 
 
 def cmd_suggest(args):
-    root, _ = get_git_repo()
+    root, exclude_file = get_git_repo()
+    managed = read_managed(exclude_file)
+
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
+
+    current_skills = set()
+    for line in managed:
+        rel = line.lstrip("/")
+        for d in dest_dirs_rel:
+            if rel.startswith(d + "/"):
+                current_skills.add(rel[len(d) + 1 :])
+
     cmd = ["skill-select", str(root)] + args
-    subprocess.run(cmd)
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(res.stderr, file=sys.stderr)
+        die("skill-select failed")
+
+    recommended_skills = set(res.stdout.strip().split())
+
+    added = recommended_skills - current_skills
+    removed = current_skills - recommended_skills
+
+    all_names = sorted(list(recommended_skills | current_skills))
+    for name in all_names:
+        if name in added:
+            print(f"+ {name}")
+        elif name in removed:
+            print(f"- {name}")
+        else:
+            print(f"  {name}")
 
 
 def cmd_status(registry, source_dirs):
@@ -738,14 +785,14 @@ git repository.
 Commands:
   apply           Provision skills for this repository via skill-select (idempotent)
   suggest         Print skill-select recommendations without installing them
-  add SPEC...     Add a skill: a local path or a registered topic name
+  add SPEC...     Add a skill: a local path or a registered catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill this tool added (alias: rm)
   list            List skills this tool is managing in the current repo
-  update SPEC...  Re-fetch registered topics (--all for every managed skill)
+  update SPEC...  Re-fetch registered catalog entries (--all for every managed skill)
   clean           Remove all skills this tool added and its info/exclude block
   status          Report drift between desired and on-disk state (read-only)
-  topics          List registered topics and their sources
+  catalog         List registered skills and their sources
   resolve NAME    Print the source path 'add NAME' would symlink to
 
 Options:
@@ -754,14 +801,14 @@ Options:
 Skill specs:
   'add' resolves a SPEC, in order, as:
     path          A local skill directory (absolute, ./relative, or ~/...)
-    topic         A registered name (see 'topics'), fetched from its source into
+    catalog entry A registered name (see 'catalog'), fetched from its source into
                   SKILL_CACHE_DIR and symlinked from there
     name          A directory of that name under any SKILL_SOURCE_DIRS entry
-  Topics are downloaded once and reused; 'update' re-fetches them. Local skills
+  Catalog entries are downloaded once and reused; 'update' re-fetches them. Local skills
   have no upstream, so update skips them.
 
 Registry:
-  Topics map a name to a source. Built-in topics live in this script.
+  Catalog entries map a name to a source. Built-in entries live in this script.
   Add your own (including private/internal repos) without editing it by writing
   lines to ~/.config/skill/registry or ~/.config/skill/registry.d/*:
     <name>  <owner>/<repo>  <ref>  <subpath>
@@ -772,7 +819,7 @@ Environment:
                      (default: ~/.dotfiles/skills:~/.private/skills:~/.corp/skills)
   SKILL_DEST_DIRS    Colon-separated list of local repo paths to symlink skills into
                      (default: .claude/skills:.agents/skills)
-  SKILL_CACHE_DIR    Where topic downloads are cached
+  SKILL_CACHE_DIR    Where catalog downloads are cached
                      (default: ${XDG_CACHE_HOME:-~/.cache}/skills)
 
 Examples:
@@ -816,8 +863,8 @@ def main():
 
     registry = load_registry()
 
-    if cmd == "topics":
-        cmd_topics(registry, source_dirs)
+    if cmd == "catalog":
+        cmd_catalog(registry, source_dirs)
     elif cmd == "resolve":
         if len(args) != 1:
             cmderr("resolve", "exactly one name required")

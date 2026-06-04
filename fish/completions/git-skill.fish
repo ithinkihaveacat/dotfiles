@@ -23,15 +23,14 @@ complete -f -c git -n __fish_git_skill_needs_command -a add -d 'Add a skill (pat
 complete -f -c git -n __fish_git_skill_needs_command -a remove -d 'Remove a skill this tool added'
 complete -f -c git -n __fish_git_skill_needs_command -a rm -d 'Remove a skill this tool added (alias of remove)'
 complete -f -c git -n __fish_git_skill_needs_command -a list -d 'List managed skills in this repo'
-complete -f -c git -n __fish_git_skill_needs_command -a update -d 'Re-fetch registered topics'
+complete -f -c git -n __fish_git_skill_needs_command -a update -d 'Re-fetch registered catalog entries'
 complete -f -c git -n __fish_git_skill_needs_command -a clean -d 'Remove all managed skills and the exclude block'
-complete -f -c git -n __fish_git_skill_needs_command -a topics -d 'List registered topics and sources'
+complete -f -c git -n __fish_git_skill_needs_command -a catalog -d 'List registered skills and sources'
 
 complete -f -c git -n __fish_git_skill_needs_command -a resolve -d 'Print source path for a name'
 complete -f -c git -n __fish_git_skill_needs_command -a apply -d 'Provision skills for this repository via skill-select'
 complete -f -c git -n __fish_git_skill_needs_command -a suggest -d 'Print skill-select recommendations without installing'
 complete -f -c git -n __fish_git_skill_needs_command -a status -d 'Report drift between desired and on-disk state'
-
 
 # Helper functions for fetching options/skills
 function __fish_git_skill_source_skills
@@ -45,23 +44,18 @@ function __fish_git_skill_source_skills
     end | sort -u
 end
 
-
-
-function __fish_git_skill_topics
-    git skill topics 2>/dev/null
+function __fish_git_skill_catalog
+    git skill catalog 2>/dev/null
 end
 
 function __fish_git_skill_managed_skills
-    git skill list 2>/dev/null
+    git skill list 2>/dev/null | string replace -r '\s*->.*' ''
 end
-
-
 
 # resolve: source skill names only
 complete -f -c git -n '__fish_git_skill_using_command resolve' -a '(__fish_git_skill_source_skills)' -d Skill
 
-
-complete -c git -n '__fish_git_skill_using_command add' -a '(__fish_git_skill_topics)'
+complete -c git -n '__fish_git_skill_using_command add' -a '(__fish_git_skill_catalog)'
 complete -c git -n '__fish_git_skill_using_command add' -a '(__fish_git_skill_source_skills)' -d Skill
 
 # remove (and rm)
@@ -74,5 +68,3 @@ complete -c git -f -n '__fish_git_skill_using_command update' -l all -d 'Update 
 
 # Complete flags
 complete -c git -f -n '__fish_git_skill_using_command skill' -l help -d 'Display help message and exit'
-
-
