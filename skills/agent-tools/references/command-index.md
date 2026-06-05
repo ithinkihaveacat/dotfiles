@@ -137,14 +137,14 @@ scripts/screenshot-compare production-capture.png ui-mockup.png
 
 ### Raw API Command
 
-Model: `gemini-3-flash-preview`
+Model: `gemini-3.5-flash`
 
 ```bash
 IMG1_B64=$(magick before.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 IMG2_B64=$(magick after.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -491,7 +491,7 @@ cat article.md | scripts/pascal "Summarize this article"
 
 ### Raw API Command
 
-Model: `gemini-3-flash-preview`
+Model: `gemini-3.5-flash`
 
 ```bash
 PROMPT="What is the capital of Peru?"
@@ -500,7 +500,7 @@ SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer 
 lists, or markdown formatting (like bold or headers). Just plain text."
 
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
