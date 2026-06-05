@@ -45,7 +45,7 @@ function __fish_git_skill_source_skills
 end
 
 function __fish_git_skill_catalog
-    git skill catalog 2>/dev/null
+    git skill catalog --json 2>/dev/null | jq -r '.[].name'
 end
 
 function __fish_git_skill_managed_skills
