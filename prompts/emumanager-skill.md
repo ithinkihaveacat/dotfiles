@@ -12,7 +12,7 @@ can use to:
 
 1. Run the bundled `emumanager` script directly (fast, deterministic, with
    helpful error messages and sensible defaults)
-2. Only fall back to raw SDK commands when the script fails due to missing
+1. Only fall back to raw SDK commands when the script fails due to missing
    dependencies
 
 **Important:** The `emumanager` script provides significant value beyond raw
@@ -25,11 +25,13 @@ and only consult raw commands as a last resort by reading the script source.
 Before creating files, research the following:
 
 1. **Review the Agent Skills specification and best practices**:
+
    - Specification: <https://agentskills.io/specification.md>
    - Best practices:
      <https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices>
 
-2. **Examine `skills/emumanager/scripts/emumanager` thoroughly**:
+1. **Examine `skills/emumanager/scripts/emumanager` thoroughly**:
+
    - All subcommands: `bootstrap`, `doctor`, `list`, `info`, `create`, `start`,
      `stop`, `delete`, `download`, `images`, `outdated`, `update`
    - The underlying `sdkmanager`, `avdmanager`, `emulator`, and `adb` commands
@@ -40,6 +42,7 @@ Before creating files, research the following:
    - Start mode flags (`--cold-boot`, `--wipe-data`)
 
    For each subcommand, understand:
+
    - Purpose and when to use it
    - The underlying raw commands
    - Input/output format
@@ -157,14 +160,14 @@ Add a prominent section at the top of SKILL.md body titled "Important: Use
 Script First" that:
 
 1. Tells agents to **ALWAYS use `scripts/emumanager`** over raw SDK commands
-2. Notes that the script is located in the `scripts/` subdirectory of the
+1. Notes that the script is located in the `scripts/` subdirectory of the
    skill's folder
-3. Lists specific features the script provides that raw commands don't:
+1. Lists specific features the script provides that raw commands don't:
    - Automatic system image selection for device types (--mobile, --wear, --tv)
    - Boot completion detection with timeout
    - Sensible defaults and helpful error messages
    - Diagnostics via `doctor` subcommand
-4. Explains when to read script source: if the script doesn't do exactly what's
+1. Explains when to read script source: if the script doesn't do exactly what's
    needed, or fails due to missing dependencies. The script encodes solutions to
    SDK quirks and boot detection edge cases—it serves as valuable reference when
    building similar functionality.
@@ -179,9 +182,9 @@ skill activates.
 - 5-6 highest-value commands to run first:
   - `scripts/emumanager bootstrap` (first-time setup)
   - `scripts/emumanager doctor` (diagnose issues)
-  - `scripts/emumanager create my_phone --mobile` (create AVD)
-  - `scripts/emumanager start my_phone` (start AVD)
-  - `scripts/emumanager list` (show all AVDs)
+  - `scripts/emumanager create avd my_phone --mobile` (create AVD)
+  - `scripts/emumanager start avd my_phone` (start AVD)
+  - `scripts/emumanager list avd` (show all AVDs)
 - Use paths relative to the skill: `scripts/emumanager`
 
 #### Subcommand Overview
@@ -196,17 +199,17 @@ Subcommands to document:
 
 1. **bootstrap** - Set up SDK environment (cmdline-tools, platform-tools,
    build-tools, emulator)
-2. **doctor** - Run diagnostics to check for common issues
-3. **list** - List all available AVDs with running status
-4. **info** - Show detailed information about an AVD
-5. **create** - Create a new AVD with device type or specific image
-6. **start** - Start an AVD with optional cold boot or wipe
-7. **stop** - Stop a running AVD
-8. **delete** - Delete an AVD and clean up files
-9. **download** - Download a specific system image
-10. **images** - List available system images (API level >= 33)
-11. **outdated** - Show outdated SDK packages
-12. **update** - Update all installed SDK packages
+1. **doctor** - Run diagnostics to check for common issues
+1. **list** - List all available AVDs with running status
+1. **info** - Show detailed information about an AVD
+1. **create** - Create a new AVD with device type or specific image
+1. **start** - Start an AVD with optional cold boot or wipe
+1. **stop** - Stop a running AVD
+1. **delete** - Delete an AVD and clean up files
+1. **download** - Download a specific system image
+1. **images** - List available system images (API level >= 33)
+1. **outdated** - Show outdated SDK packages
+1. **update** - Update all installed SDK packages
 
 #### Device Types
 

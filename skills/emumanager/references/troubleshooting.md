@@ -172,7 +172,7 @@ Or install manually:
 scripts/emumanager download package "system-images;android-36;google_apis_playstore;arm64-v8a"
 
 # Or list obtainable images and choose one
-scripts/emumanager catalog packages
+scripts/emumanager catalog package
 ```
 
 ### No Suitable Image Found
@@ -189,7 +189,7 @@ scripts/emumanager catalog packages
 
 ```bash
 # List all obtainable images
-scripts/emumanager catalog packages
+scripts/emumanager catalog package
 
 # Download a specific image
 scripts/emumanager download package "system-images;android-35;google_apis_playstore;arm64-v8a"
@@ -257,7 +257,7 @@ scripts/emumanager stop avd <avd_name>
 **Diagnosis**:
 
 ```bash
-scripts/emumanager list avds
+scripts/emumanager list avd
 ```
 
 **Solution**: Create the AVD first:
@@ -392,7 +392,7 @@ adb -s emulator-5554 shell ...
 
 ```bash
 # The list command shows serial numbers
-scripts/emumanager list avds
+scripts/emumanager list avd
 # my_phone (emulator-5554)
 # my_watch (emulator-5556)
 

@@ -15,12 +15,12 @@ environment and managing Android Virtual Devices (AVDs). It is useful for
 spinning up an emulator to diagnose a problem, verify a bug, or test a fix in a
 clean environment.
 
-- `emumanager create <name>`: Creates a new Wear OS AVD.
-- `emumanager start <name>`: Starts the specified AVD.
-- `emumanager list`: Lists all available AVDs.
+- `emumanager create avd <name>`: Creates a new AVD.
+- `emumanager start avd <name>`: Starts the specified AVD.
+- `emumanager list avd`: Lists all existing AVDs.
 
 ```bash
 # Create and start a new emulator for testing
-emumanager create test-avd
-emumanager start test-avd
+emumanager create avd test-avd
+emumanager start avd test-avd
 ```

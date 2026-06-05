@@ -93,12 +93,12 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-### list avds
+### list avd
 
 **Purpose**: List locally created AVDs with running status.
 
 **Synopsis**:
-`scripts/emumanager list avds [--names-only|--running-only|--stopped-only]`
+`scripts/emumanager list avd [--names-only|--running-only|--stopped-only]`
 
 **Options**:
 
@@ -109,11 +109,11 @@ ______________________________________________________________________
 **Examples**:
 
 ```bash
-scripts/emumanager list avds
+scripts/emumanager list avd
 # my_phone (emulator-5554)
 # my_watch
 
-scripts/emumanager list avds --names-only
+scripts/emumanager list avd --names-only
 # my_phone
 # my_watch
 ```
@@ -130,11 +130,11 @@ scripts/emumanager list avds --names-only
 
 ______________________________________________________________________
 
-### list packages
+### list package
 
 **Purpose**: List installed SDK packages, or packages with available updates.
 
-**Synopsis**: `scripts/emumanager list packages [--outdated]`
+**Synopsis**: `scripts/emumanager list package [--outdated]`
 
 **Options**:
 
@@ -145,10 +145,10 @@ ______________________________________________________________________
 
 ```bash
 # List all installed packages
-scripts/emumanager list packages
+scripts/emumanager list package
 
 # List only packages with updates
-scripts/emumanager list packages --outdated
+scripts/emumanager list package --outdated
 ```
 
 **Raw Commands**:
@@ -373,12 +373,12 @@ yes | "$SDKMANAGER" --licenses
 
 ______________________________________________________________________
 
-### catalog packages
+### catalog package
 
 **Purpose**: List obtainable system images (packages) for the host architecture
 (API >= 33) from the remote registry.
 
-**Synopsis**: `scripts/emumanager catalog packages`
+**Synopsis**: `scripts/emumanager catalog package`
 
 **Output**: Package names prefixed with `*` if installed.
 
@@ -394,11 +394,11 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-### update packages
+### update package
 
 **Purpose**: Update all installed SDK packages to latest versions.
 
-**Synopsis**: `scripts/emumanager update packages`
+**Synopsis**: `scripts/emumanager update package`
 
 **Raw Commands**:
 

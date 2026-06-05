@@ -62,7 +62,7 @@ scripts/emumanager create avd my_phone --mobile
 scripts/emumanager start avd my_phone
 
 # List all AVDs (shows running status)
-scripts/emumanager list avds
+scripts/emumanager list avd
 
 # Show detailed AVD information
 scripts/emumanager info avd my_phone
@@ -95,14 +95,14 @@ List local resources (AVDs or installed SDK packages).
 
 ```bash
 # List AVDs
-scripts/emumanager list avds              # Show all AVDs with status
-scripts/emumanager list avds --names-only # Just AVD names
-scripts/emumanager list avds --running-only
-scripts/emumanager list avds --stopped-only
+scripts/emumanager list avd              # Show all AVDs with status
+scripts/emumanager list avd --names-only # Just AVD names
+scripts/emumanager list avd --running-only
+scripts/emumanager list avd --stopped-only
 
 # List Packages
-scripts/emumanager list packages          # List all installed SDK packages
-scripts/emumanager list packages --outdated # List packages with updates
+scripts/emumanager list package          # List all installed SDK packages
+scripts/emumanager list package --outdated # List packages with updates
 ```
 
 ### info
@@ -167,7 +167,7 @@ List obtainable packages (system images) from the remote registry. Installed
 packages are marked with `*`.
 
 ```bash
-scripts/emumanager catalog packages
+scripts/emumanager catalog package
 ```
 
 ### update
@@ -175,7 +175,7 @@ scripts/emumanager catalog packages
 Update all installed SDK packages to latest versions.
 
 ```bash
-scripts/emumanager update packages
+scripts/emumanager update package
 ```
 
 ## Device Types
@@ -240,8 +240,8 @@ scripts/emumanager start avd my_phone --wipe-data
 ### Checking for SDK Updates
 
 ```bash
-scripts/emumanager list packages --outdated
-scripts/emumanager update packages
+scripts/emumanager list package --outdated
+scripts/emumanager update package
 ```
 
 ## Safety Notes
