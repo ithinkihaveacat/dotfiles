@@ -200,16 +200,17 @@ Subcommands to document:
 1. **bootstrap** - Set up SDK environment (cmdline-tools, platform-tools,
    build-tools, emulator)
 1. **doctor** - Run diagnostics to check for common issues
-1. **list** - List all available AVDs with running status
-1. **info** - Show detailed information about an AVD
-1. **create** - Create a new AVD with device type or specific image
-1. **start** - Start an AVD with optional cold boot or wipe
-1. **stop** - Stop a running AVD
-1. **delete** - Delete an AVD and clean up files
-1. **download** - Download a specific system image
-1. **images** - List available system images (API level >= 33)
-1. **outdated** - Show outdated SDK packages
-1. **update** - Update all installed SDK packages
+1. **list avd** - List all existing AVDs with running status
+1. **list package** - List installed SDK packages, or packages with available
+   updates
+1. **info avd** - Show detailed information about an AVD
+1. **create avd** - Create a new AVD
+1. **start avd** - Start an AVD with optional cold boot or wipe
+1. **stop avd** - Stop a running AVD
+1. **delete avd** - Delete an AVD and clean up files
+1. **download package** - Download a specific system image or package
+1. **catalog package** - List obtainable system images from the remote registry
+1. **update package** - Update all installed SDK packages
 
 #### Device Types
 
