@@ -195,13 +195,79 @@ acts on:
 - `add` / `remove` — for **membership in a set** (e.g. tiles in a carousel,
   skills in a repo). Bless **`rm` as the accepted alias** for `remove`.
 - `install` / `uninstall` — for **packages**.
+- `set` — for **single-value replacement** of an active/current selection (e.g.
+  the active watch face, the current theme). `set` replaces; it is not a
+  set-membership add. Use this instead of `add` when there is exactly one slot.
 
 Apply consistently within each tool; do not mix (e.g. don't pair `add` with
-`delete`).
+`delete`, and don't name a single-slot replacement `add`).
 
 ---
 
-## 6. Standard vs. practice — contradictions and gaps
+## 6. Finding E — the `adb-tile-*` / `adb-watchface-*` series
+
+These are flat `adb-*` utilities (one executable per action), not a Manager
+tool. They form the canonical "available set + add/remove + list" workflow:
+
+| Script | Action | Notes |
+| --- | --- | --- |
+| `adb-tiles` | "Lists all available tile and widget services" with `S`/`T`/`W`/`C` columns; `C` marks carousel members; `--carousel-only` filters to those | list |
+| `adb-tile-add COMPONENT` | "Adds a tile … to the carousel" | add (membership) |
+| `adb-tile-remove COMPONENT` | "Removes all tile instances on the carousel associated with COMPONENT" | remove (membership) |
+| `adb-tile-show TILE_INDEX` | "Activates a tile at the specified index … useful for switching between already added tiles" | switch active slot |
+| `adb-watchface-add COMPONENT` | "Sets the current watch face" | single-slot replacement |
+
+### 6.1 Should these be consolidated into a Manager tool?
+
+A `adb-tile <verb>` Manager tool (`adb-tile list`/`add`/`remove`/`switch`) would
+match `git skill` / `emumanager`. **Recommendation: do not consolidate.** The
+repo's house style for this domain is flat `adb-*` utilities (30+ scripts:
+`adb-activities`, `adb-packages`, `adb-screenshot`, …); a lone `adb-tile`
+Manager would be the odd one out, would fragment the `adb-*` namespace, and would
+break existing agent invocations and completions for marginal benefit. Keep the
+flat utilities and fix vocabulary instead.
+
+### 6.2 What is already correct
+
+- **`adb-tiles`** is the reference implementation of the **single-list +
+  state-column** model blessed in §2.3: it lists the available set and marks the
+  added (carousel) members with `C`, with `--carousel-only` as the
+  "list-added-only" view. No list/catalog rename is needed — it merges both
+  views cleanly. (Its one help-text quirk: it says "available," which is correct
+  here because it genuinely lists the obtainable set, not local-only items —
+  consistent with §2.4.)
+- **`adb-tile-add` / `adb-tile-remove`** are a correct `add`/`remove`
+  set-membership pair (§5.1). Keep as-is.
+- **Singular vs. plural** (`adb-tiles` to list many, `adb-tile-*` to act on one)
+  is intentional and acceptable — it mirrors `adb-packages` (list) vs.
+  `packagename` (act). No change.
+
+### 6.3 What should change
+
+1. **`adb-tile-show` → `adb-tile-switch`** (keep `adb-tile-show` as a symlink
+   alias). The verb "show" misleads: it does not display or list anything — it
+   *switches* the active carousel slot to a given index. "show" also collides
+   conceptually with the listing verb (`adb-tiles`). `switch` (or `activate`)
+   states the intent. Update the cross-reference in `adb-tile-add`'s help ("no
+   separate call to adb-tile-show is needed") and the companion-script example
+   in `skills/coding-standards/references/shell.md`, which currently cites
+   `adb-tile-add`/`adb-tile-show` as a paired workflow.
+
+2. **`adb-watchface-add` → `adb-watchface-set`** (keep `adb-watchface-add` as a
+   symlink alias). Its help already says *"Sets the current watch face"* — there
+   is exactly one active watch face, so this is single-slot replacement, not
+   set-membership. Per the new `set` verb in §5.1, `add` is the wrong verb;
+   `set` matches the behavior and avoids implying a carousel-like collection.
+
+### 6.4 Recommendation E (summary)
+
+Keep the flat utilities and the `adb-tiles` single-list model; keep
+`add`/`remove`; rename `adb-tile-show` → `adb-tile-switch` and
+`adb-watchface-add` → `adb-watchface-set`, preserving the old names as aliases.
+
+---
+
+## 7. Standard vs. practice — contradictions and gaps
 
 Measured against `cli-tools.md` / `shell.md`:
 
@@ -222,8 +288,8 @@ intends (and conflicting with its own `images` command). Fix the help text.
    `doctor` for diagnostics (canonical), `status <resource>` for resource state,
    `status`→`doctor` aliasing technique, non-zero exit on problems. Cite
    `git skill`.
-3. **add/remove verb pairs** (§5) — no guidance exists. Add the by-domain table
-   and the `rm` alias rule.
+3. **add/remove verb pairs** (§5) — no guidance exists. Add the by-domain table,
+   the `rm` alias rule, and the `set` verb for single-slot replacement.
 4. **Type 1 verb-slot clarification** (§4.1) — one sentence so noun-first
    commands aren't seen as acceptable.
 
@@ -233,7 +299,7 @@ help-text fix.
 
 ---
 
-## 7. Plan of action
+## 8. Plan of action
 
 Ordered by risk; doc additions first because they anchor every code change.
 
@@ -264,10 +330,17 @@ Ordered by risk; doc additions first because they anchor every code change.
 9. `emumanager outdated` → `list outdated` (keep `outdated` alias), optional.
 10. `jetpack versions` → `list versions`; `jetpack dependencies` →
     `list dependencies`; keep old names as aliases. Optional polish.
+11. `adb-tile-show` → `adb-tile-switch`; `adb-watchface-add` →
+    `adb-watchface-set` (Rec E). Keep old names as symlink aliases. Add new
+    `bin/` symlinks; rename/duplicate `fish/completions/*.fish`; update the
+    cross-references in `adb-tile-add` help, `skills/adb/SKILL.md`,
+    `skills/adb/references/command-index.md`,
+    `skills/adb/references/troubleshooting.md`, and the companion-script example
+    in `skills/coding-standards/references/shell.md`.
 
 ### Phase 4 — Deliberate decision
 
-11. Decide `socrates status` → `doctor` (if health) or keep (if progress), per
+12. Decide `socrates status` → `doctor` (if health) or keep (if progress), per
     §3.2.
 
 ### Cross-cutting requirements (from `CLAUDE.md`)
@@ -280,14 +353,15 @@ command names as aliases so existing agent invocations keep working.
 
 ---
 
-## 8. Summary table
+## 9. Summary table
 
 | # | Recommendation | Reference | Risk |
 | --- | --- | --- | --- |
 | A | `list` = local, `catalog`/`--available` = obtainable; ban "available" for local | `git skill` | low (doc) / med (renames) |
 | B | `doctor` canonical for diagnostics; `status` = resource state; alias `status`→`doctor` | `git skill` | low |
 | C | Noun-first commands → verb-first `list <noun>`; clarify Type 1 verb slot | — | low, optional |
-| D | Canonical add/remove pairs by domain; bless `rm` alias | `git skill` | low (doc) |
+| D | Canonical add/remove/`set` pairs by domain; bless `rm` alias | `git skill` | low (doc) |
+| E | Keep flat `adb-*` utilities + `adb-tiles` single-list model; rename `adb-tile-show`→`adb-tile-switch`, `adb-watchface-add`→`adb-watchface-set` (aliases kept) | `adb-tiles` | low |
 | — | Fix `emumanager list` help text | — | trivial |
 | — | `gemini-api-status` → `gemini-api-doctor` (alias kept) | `git skill` | low |
 | — | Decide `socrates status` vs `doctor` | — | decision |
