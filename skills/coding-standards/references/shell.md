@@ -215,8 +215,8 @@ and more maintainable.
 
 If a script has companion scripts that are commonly used together, their error
 and argument handling must be consistent. For example, the `adb-tile-add` and
-`adb-tile-show` scripts form a workflow, so they should handle errors in similar
-ways.
+`adb-tile-switch` scripts form a workflow, so they should handle errors in
+similar ways.
 
 It is acceptable—and often preferable—to duplicate error handling code across
 related scripts rather than introducing complex abstractions. When duplicating

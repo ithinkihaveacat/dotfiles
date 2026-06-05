@@ -5,7 +5,8 @@
 ## Contents
 
 - [version](#version)
-- [versions](#versions)
+- [list versions](#list-versions)
+- [list dependencies](#list-dependencies)
 - [resolve](#resolve)
 - [search](#search)
 - [source](#source)
@@ -39,14 +40,24 @@ curl -sSLf "https://dl.google.com/android/maven2/GROUP/PATH/ARTIFACT/maven-metad
 xmllint --xpath "//version/text()" - | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
 ```
 
-## versions
+## list versions
 
-**Purpose**: List all available versions for a package. **Synopsis**:
-`scripts/jetpack versions PACKAGE_NAME [REPO_URL]` **Arguments**:
+**Purpose**: List all versions for a package. **Synopsis**:
+`scripts/jetpack list versions PACKAGE_NAME [REPO_URL]` **Arguments**:
 
 - `PACKAGE_NAME`: Maven coordinate.
 - `REPO_URL`: Custom Maven repo URL. **Examples**:
-- `scripts/jetpack versions androidx.wear.tiles:tiles`
+- `scripts/jetpack list versions androidx.wear.tiles:tiles`
+
+## list dependencies
+
+**Purpose**: List direct Maven dependencies for an artifact. **Synopsis**:
+`scripts/jetpack list dependencies ARTIFACT [VERSION] [REPO_URL]` **Arguments**:
+
+- `ARTIFACT`: Maven coordinate.
+- `VERSION`: Version specifier (optional, defaults to `STABLE`).
+- `REPO_URL`: Custom Maven repo URL. **Examples**:
+- `scripts/jetpack list dependencies androidx.wear.tiles:tiles`
 
 ## resolve
 

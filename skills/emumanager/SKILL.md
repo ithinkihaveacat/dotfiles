@@ -7,7 +7,7 @@ description: >
   sdkmanager, avdmanager, emulator CLI. Triggers: android emulator, android
   virtual device, avd, system image, wear os emulator, tv emulator, automotive
   emulator, bootstrap android sdk.
-compatibility: >
+compatibility: >-
   Requires Java 17+, curl, and unzip. Hardware acceleration (KVM on Linux, HVF
   on macOS) required for emulators. Needs network access for downloading SDK
   components. Designed for filesystem-based agents with bash access.
@@ -56,16 +56,16 @@ scripts/emumanager bootstrap
 scripts/emumanager doctor
 
 # Create a mobile/phone AVD with latest API
-scripts/emumanager create my_phone --mobile
+scripts/emumanager create avd my_phone --mobile
 
 # Start the AVD
-scripts/emumanager start my_phone
+scripts/emumanager start avd my_phone
 
 # List all AVDs (shows running status)
-scripts/emumanager list
+scripts/emumanager list avds
 
 # Show detailed AVD information
-scripts/emumanager info my_phone
+scripts/emumanager info avd my_phone
 ```
 
 ## Subcommand Overview
@@ -91,36 +91,40 @@ scripts/emumanager doctor
 
 ### list
 
-List all available AVDs with running status.
+List local resources (AVDs or installed SDK packages).
 
 ```bash
-scripts/emumanager list              # Show all AVDs with status
-scripts/emumanager list --names-only # Just AVD names
-scripts/emumanager list --running-only
-scripts/emumanager list --stopped-only
+# List AVDs
+scripts/emumanager list avds              # Show all AVDs with status
+scripts/emumanager list avds --names-only # Just AVD names
+scripts/emumanager list avds --running-only
+scripts/emumanager list avds --stopped-only
+
+# List Packages
+scripts/emumanager list packages          # List all installed SDK packages
+scripts/emumanager list packages --outdated # List packages with updates
 ```
 
 ### info
 
-Show detailed information about an AVD: system image, API level, screen config,
-RAM, storage, Play Store status.
+Show detailed information about an AVD.
 
 ```bash
-scripts/emumanager info my_phone
+scripts/emumanager info avd my_phone
 ```
 
 ### create
 
-Create a new AVD with device type or specific image.
+Create a new AVD.
 
 ```bash
-scripts/emumanager create my_phone --mobile   # Mobile/phone (default)
-scripts/emumanager create my_watch --wear     # Wear OS
-scripts/emumanager create my_tv --tv          # Android/Google TV
-scripts/emumanager create my_car --auto       # Android Automotive
+scripts/emumanager create avd my_phone --mobile   # Mobile/phone (default)
+scripts/emumanager create avd my_watch --wear     # Wear OS
+scripts/emumanager create avd my_tv --tv          # Android/Google TV
+scripts/emumanager create avd my_car --auto       # Android Automotive
 
 # With specific system image
-scripts/emumanager create my_avd "system-images;android-36;google_apis_playstore;arm64-v8a"
+scripts/emumanager create avd my_avd "system-images;android-36;google_apis_playstore;arm64-v8a"
 ```
 
 ### start
@@ -128,9 +132,9 @@ scripts/emumanager create my_avd "system-images;android-36;google_apis_playstore
 Start an AVD. Waits for boot to complete.
 
 ```bash
-scripts/emumanager start my_phone              # Quick Boot (fast)
-scripts/emumanager start my_phone --cold-boot  # Cold boot (bypass snapshots)
-scripts/emumanager start my_phone --wipe-data  # Factory reset + cold boot
+scripts/emumanager start avd my_phone              # Quick Boot (fast)
+scripts/emumanager start avd my_phone --cold-boot  # Cold boot (bypass snapshots)
+scripts/emumanager start avd my_phone --wipe-data  # Factory reset + cold boot
 ```
 
 ### stop
@@ -138,7 +142,7 @@ scripts/emumanager start my_phone --wipe-data  # Factory reset + cold boot
 Stop a running AVD.
 
 ```bash
-scripts/emumanager stop my_phone
+scripts/emumanager stop avd my_phone
 ```
 
 ### delete
@@ -146,32 +150,24 @@ scripts/emumanager stop my_phone
 Delete an AVD and clean up files. Stops the AVD first if running.
 
 ```bash
-scripts/emumanager delete my_phone
+scripts/emumanager delete avd my_phone
 ```
 
 ### download
 
-Download a specific system image.
+Download a specific system image or SDK package.
 
 ```bash
-scripts/emumanager download "system-images;android-36;google_apis_playstore;arm64-v8a"
+scripts/emumanager download package "system-images;android-36;google_apis_playstore;arm64-v8a"
 ```
 
-### images
+### catalog
 
-List available system images for the host architecture (API level >= 33).
-Installed images are marked with `*`.
-
-```bash
-scripts/emumanager images
-```
-
-### outdated
-
-Show outdated SDK packages.
+List obtainable packages (system images) from the remote registry. Installed
+packages are marked with `*`.
 
 ```bash
-scripts/emumanager outdated
+scripts/emumanager catalog packages
 ```
 
 ### update
@@ -179,7 +175,7 @@ scripts/emumanager outdated
 Update all installed SDK packages to latest versions.
 
 ```bash
-scripts/emumanager update
+scripts/emumanager update packages
 ```
 
 ## Device Types
@@ -224,28 +220,28 @@ scripts/emumanager doctor
 ### Creating and Running a Phone Emulator
 
 ```bash
-scripts/emumanager create my_phone --mobile
-scripts/emumanager start my_phone
+scripts/emumanager create avd my_phone --mobile
+scripts/emumanager start avd my_phone
 ```
 
 ### Creating a Wear OS Emulator
 
 ```bash
-scripts/emumanager create my_watch --wear
-scripts/emumanager start my_watch
+scripts/emumanager create avd my_watch --wear
+scripts/emumanager start avd my_watch
 ```
 
 ### Factory Resetting an AVD
 
 ```bash
-scripts/emumanager start my_phone --wipe-data
+scripts/emumanager start avd my_phone --wipe-data
 ```
 
 ### Checking for SDK Updates
 
 ```bash
-scripts/emumanager outdated
-scripts/emumanager update
+scripts/emumanager list packages --outdated
+scripts/emumanager update packages
 ```
 
 ## Safety Notes

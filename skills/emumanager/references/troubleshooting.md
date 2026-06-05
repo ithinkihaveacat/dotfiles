@@ -74,7 +74,7 @@ grep -E 'vmx|svm' /proc/cpuinfo
 **Solution**:
 
 1. Enable virtualization in BIOS (Intel VT-x or AMD-V)
-2. Load KVM module:
+1. Load KVM module:
 
 ```bash
 sudo modprobe kvm
@@ -169,10 +169,10 @@ Or install manually:
 
 ```bash
 # Download the required image
-scripts/emumanager download "system-images;android-36;google_apis_playstore;arm64-v8a"
+scripts/emumanager download package "system-images;android-36;google_apis_playstore;arm64-v8a"
 
-# Or list available images and choose one
-scripts/emumanager images
+# Or list obtainable images and choose one
+scripts/emumanager catalog packages
 ```
 
 ### No Suitable Image Found
@@ -181,18 +181,18 @@ scripts/emumanager images
 
 **Causes**:
 
-- No images available for your host architecture
+- No images obtainable for your host architecture
 - Network issues preventing image list retrieval
-- All available images are blocklisted
+- All obtainable images are blocklisted
 
 **Solution**:
 
 ```bash
-# List all available images
-scripts/emumanager images
+# List all obtainable images
+scripts/emumanager catalog packages
 
 # Download a specific image
-scripts/emumanager download "system-images;android-35;google_apis_playstore;arm64-v8a"
+scripts/emumanager download package "system-images;android-35;google_apis_playstore;arm64-v8a"
 ```
 
 ## Emulator Startup Issues
@@ -220,9 +220,9 @@ pgrep -f 'qemu-system.*-avd'
 
 **Solutions**:
 
-1. Try cold boot: `scripts/emumanager start my_phone --cold-boot`
-2. Try factory reset: `scripts/emumanager start my_phone --wipe-data`
-3. Delete and recreate AVD: `scripts/emumanager delete my_phone`
+1. Try cold boot: `scripts/emumanager start avd my_phone --cold-boot`
+1. Try factory reset: `scripts/emumanager start avd my_phone --wipe-data`
+1. Delete and recreate AVD: `scripts/emumanager delete avd my_phone`
 
 ### AVD Already Running
 
@@ -245,7 +245,7 @@ To connect: `adb devices` will show the running emulator.
 adb devices
 
 # Stop some emulators
-scripts/emumanager stop <avd_name>
+scripts/emumanager stop avd <avd_name>
 ```
 
 ## AVD Management Issues
@@ -257,13 +257,13 @@ scripts/emumanager stop <avd_name>
 **Diagnosis**:
 
 ```bash
-scripts/emumanager list
+scripts/emumanager list avds
 ```
 
 **Solution**: Create the AVD first:
 
 ```bash
-scripts/emumanager create my_phone --mobile
+scripts/emumanager create avd my_phone --mobile
 ```
 
 ### Orphaned AVD Files
@@ -277,7 +277,7 @@ directories.
 
 ```bash
 # The delete command cleans up orphaned files
-scripts/emumanager delete <orphan_name>
+scripts/emumanager delete avd <orphan_name>
 ```
 
 Or manually:
@@ -297,11 +297,11 @@ rm -f "$ANDROID_USER_HOME/avd/<name>.ini"
 
 ```bash
 # Ensure AVD is stopped
-scripts/emumanager stop my_phone
+scripts/emumanager stop avd my_phone
 
 # Wait a moment, then delete
 sleep 2
-scripts/emumanager delete my_phone
+scripts/emumanager delete avd my_phone
 ```
 
 ## Disk Space Issues
@@ -314,9 +314,9 @@ scripts/emumanager delete my_phone
 
 **Solutions**:
 
-1. Remove unused AVDs: `scripts/emumanager delete <name>`
-2. Remove unused system images via sdkmanager
-3. Move ANDROID_HOME to a larger disk
+1. Remove unused AVDs: `scripts/emumanager delete avd <name>`
+1. Remove unused system images via sdkmanager
+1. Move ANDROID_HOME to a larger disk
 
 Check space usage:
 
@@ -348,8 +348,8 @@ Large system images (2-4GB) may fail to download on slow connections.
 **Solution**:
 
 1. Check internet connectivity
-2. Check proxy settings
-3. Try manual download from:
+1. Check proxy settings
+1. Try manual download from:
    <https://developer.android.com/studio#command-line-tools-only>
 
 ### Package Installation Timeout
@@ -392,7 +392,7 @@ adb -s emulator-5554 shell ...
 
 ```bash
 # The list command shows serial numbers
-scripts/emumanager list
+scripts/emumanager list avds
 # my_phone (emulator-5554)
 # my_watch (emulator-5556)
 

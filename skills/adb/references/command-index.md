@@ -154,10 +154,10 @@ adb shell am broadcast \
   --ecn component "com.example/.MyTileService"
 ```
 
-### `scripts/adb-tile-show`
+### `scripts/adb-tile-switch`
 
-**Purpose**: Show an added tile by index. **Dependencies**: `adb` **Usage**:
-`scripts/adb-tile-show INDEX` **Raw Command**:
+**Purpose**: Switch the active tile on the carousel by index. **Dependencies**:
+`adb` **Usage**: `scripts/adb-tile-switch INDEX` **Raw Command**:
 
 ```bash
 adb shell am broadcast \
@@ -188,10 +188,10 @@ adb shell dumpsys activity service com.google.android.wearable.app.tiles.TileSer
 # (Requires parsing output)
 ```
 
-### `scripts/adb-watchface-add`
+### `scripts/adb-watchface-set`
 
 **Purpose**: Set the current watch face on a Wear OS device. **Dependencies**:
-`adb` **Usage**: `scripts/adb-watchface-add COMPONENT_NAME` **Raw Command**:
+`adb` **Usage**: `scripts/adb-watchface-set COMPONENT_NAME` **Raw Command**:
 
 ```bash
 adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation set-watchface --es watchFaceId COMPONENT_NAME

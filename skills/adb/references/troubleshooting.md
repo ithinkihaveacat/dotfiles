@@ -18,9 +18,9 @@
 empty. **Solution**:
 
 1. Check USB connection.
-2. Ensure "USB Debugging" is enabled in Developer Options on the device.
-3. Run `adb devices`.
-4. If unauthorized, check device screen for the "Allow USB debugging?" prompt.
+1. Ensure "USB Debugging" is enabled in Developer Options on the device.
+1. Run `adb devices`.
+1. If unauthorized, check device screen for the "Allow USB debugging?" prompt.
 
 ### Unauthorized
 
@@ -29,9 +29,9 @@ empty. **Solution**:
 **Solution**:
 
 1. Unlock the device.
-2. Check for the RSA key fingerprint prompt.
-3. Tap "Allow".
-4. Run `adb devices` again to verify state changes from `unauthorized` to
+1. Check for the RSA key fingerprint prompt.
+1. Tap "Allow".
+1. Run `adb devices` again to verify state changes from `unauthorized` to
    `device`.
 
 ### Offline
@@ -39,8 +39,8 @@ empty. **Solution**:
 **Symptom**: Device status is `offline`. **Solution**:
 
 1. Reconnect USB cable.
-2. Restart ADB server: `adb kill-server && adb start-server`.
-3. Reboot device if persistent.
+1. Restart ADB server: `adb kill-server && adb start-server`.
+1. Reboot device if persistent.
 
 ## Targeting Specific Devices
 
@@ -63,7 +63,7 @@ empty. **Solution**:
    1A2B3C4D               device product:pixel_6 model:Pixel_6 device:oriole
    ```
 
-2. Run script with variable:
+1. Run script with variable:
 
    ```bash
    ANDROID_SERIAL=1A2B3C4D scripts/adb-screenshot
@@ -99,12 +99,12 @@ screenshots. **Solution**:
 
 ### Debug Broadcasts Not Working
 
-**Symptom**: `adb-tile-add` or `adb-tile-show` does nothing. **Cause**: The
+**Symptom**: `adb-tile-add` or `adb-tile-switch` does nothing. **Cause**: The
 system image might be a "User" build (production) which sometimes disables debug
 broadcasts, or Developer Options are not fully enabled. **Solution**:
 
 1. Ensure Developer Options are enabled on the watch.
-2. Some features require "wear-user-debug" or emulator images.
+1. Some features require "wear-user-debug" or emulator images.
 
 ### Square vs Round Screenshots
 
@@ -132,4 +132,5 @@ adb exec-out "screencap -p" > raw_screenshot.png
 **Cause**: Missing executable permission. **Solution**:
 
 - `chmod +x scripts/script-name`.
+
 <!-- markdownlint-restore MD013 -->

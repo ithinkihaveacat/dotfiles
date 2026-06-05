@@ -10,7 +10,7 @@ Produce a self-contained skill directory at `skills/adb/` that an agent can use
 to:
 
 1. Run bundled scripts directly (fast, deterministic, with extra features)
-2. Only fall back to raw ADB commands when scripts fail due to missing
+1. Only fall back to raw ADB commands when scripts fail due to missing
    dependencies
 
 **Important:** Scripts provide significant value beyond raw commands (e.g.,
@@ -26,7 +26,8 @@ Before creating files, research the following:
    <https://agentskills.io/specification.md> to understand frontmatter
    requirements, directory structure, and naming conventions.
 
-2. **Examine relevant scripts in `skills/adb/scripts/`**:
+1. **Examine relevant scripts in `skills/adb/scripts/`**:
+
    - All `adb-*` scripts (~40 scripts for device manipulation, screenshots,
      tiles, demo mode, key events, dumpsys, etc.)
    - All `wearableservice-*` scripts (4 scripts for Wear OS data layer
@@ -38,6 +39,7 @@ Before creating files, research the following:
    be runnable from PATH.
 
    For each script, understand:
+
    - Purpose and when to use it
    - The underlying `adb` commands
    - Dependencies (look for `require` lines)
@@ -154,14 +156,14 @@ Add a prominent section at the top of SKILL.md body titled "Important: Use
 Scripts First" that:
 
 1. Tells agents to **ALWAYS prefer scripts** over raw `adb` commands
-2. Notes that scripts are located in the `scripts/` subdirectory of the skill's
+1. Notes that scripts are located in the `scripts/` subdirectory of the skill's
    folder
-3. Lists specific features scripts provide that raw commands don't:
+1. Lists specific features scripts provide that raw commands don't:
    - Automatic circular masking for Wear OS screenshots
    - Device wake-up before capture
    - Clipboard integration on macOS
    - Sensible default filenames and error handling
-4. Explains when to read script source: if a script doesn't do exactly what's
+1. Explains when to read script source: if a script doesn't do exactly what's
    needed, or fails due to missing dependencies. The scripts encode solutions to
    edge cases and platform quirks—they serve as valuable reference when building
    similar functionality.
@@ -176,7 +178,7 @@ skill activates.
   - `adb-screenshot` — **always use instead of raw `adb shell screencap`**
     (auto-detects Wear OS, applies circular mask, wakes device, copies to
     clipboard)
-  - `adb-tile-add` + `adb-tile-show` workflow
+  - `adb-tile-add` + `adb-tile-switch` workflow
   - `adb-activities` (discover launcher, TV, settings activities)
   - `adb-uihierarchy` (dump UI XML)
   - `wearableservice-capabilities` / `wearableservice-nodes`
@@ -269,7 +271,7 @@ Before finalizing, verify:
 - [ ] `SKILL.md` has valid frontmatter matching the spec
 - [ ] Description is in third person and includes trigger phrases
 - [ ] Compatibility field lists required tools and environment (adb, magick,
-      etc.)
+  etc.)
 - [ ] `SKILL.md` body is under 500 lines
 - [ ] `SKILL.md` has "Important: Use Scripts First" section at top of body
 - [ ] `adb-screenshot` entry explicitly says to use it instead of raw screencap
@@ -280,7 +282,7 @@ Before finalizing, verify:
 - [ ] `references/troubleshooting.md` covers common issues
 - [ ] Raw ADB commands are NOT in SKILL.md body (agents read script source)
 - [ ] Every file in `scripts/` is documented in `references/command-index.md`
-      and referenced from the `SKILL.md` Script Index (no undocumented scripts)
+  and referenced from the `SKILL.md` Script Index (no undocumented scripts)
 - [ ] No extraneous files (README.md, etc.)
 - [ ] Examples use realistic Android component/package names
 

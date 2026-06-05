@@ -396,13 +396,13 @@ cat file.txt | scripts/token-count
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
-### gemini-api-status
+### gemini-api-doctor
 
 Ping Gemini models to test API key validity and endpoint responsiveness. Runs
 checks in parallel and enforces a 60-second timeout.
 
 ```bash
-scripts/gemini-api-status [MODELS...]
+scripts/gemini-api-doctor [MODELS...]
 ```
 
 **Input:**
@@ -418,8 +418,8 @@ stdin)
 
 **Examples:**
 
-- `echo "YOUR_API_KEY" | scripts/gemini-api-status`
-- `scripts/gemini-api-status gemini-3.1-flash-lite`
+- `echo "YOUR_API_KEY" | scripts/gemini-api-doctor`
+- `scripts/gemini-api-doctor gemini-3.1-flash-lite`
 
 **Exit codes:** 0 success, 1 error
 

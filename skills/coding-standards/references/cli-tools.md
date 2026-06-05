@@ -162,6 +162,56 @@ For operations taking longer than 2 seconds (e.g., `download`, `backup`,
 
 ______________________________________________________________________
 
+## 5. Standard Command Patterns and Vocabulary
+
+To maintain consistency across different tools, follow these standardized
+patterns for common operations.
+
+### 5.1 Listing: Local vs. Available State
+
+When a tool manages resources that can be installed or configured locally from a
+larger set of obtainable resources, use distinct commands:
+
+- **`list`**: Shows resources currently active, installed, or managed locally
+  (on-disk state).
+- **`catalog`**: Shows all resources available to be obtained or installed
+  (remote/registry state).
+- **Vocabulary Rule**: Never use the word "available" to describe resources that
+  are already locally present or installed.
+- **Single-List Exception**: If obtainable and installed resources are views of
+  one underlying list, use a single list command with a state column (e.g.,
+  `adb-tiles` marking carousel members with `C`) and a filter flag (e.g.,
+  `--carousel-only`).
+
+### 5.2 Diagnostics: `doctor` vs. `status`
+
+Distinguish between environmental health and resource progress:
+
+- **`doctor`**: Use for diagnostics, environment checks, and drift detection
+  (e.g., "is my environment set up correctly?").
+  - `doctor` must be read-only and must exit non-zero if it finds problems.
+  - If a legacy `status` command exists for diagnostics, keep it as a hidden
+    alias to avoid breaking callers, but advertise `doctor` as canonical.
+- **`status`**: Reserve for reporting the state or progress of a specific named
+  resource (e.g., `socrates status <db>` showing progress of a run).
+- **Avoid** using `check`, `verify`, or `validate` as command names for these
+  operations.
+
+### 5.3 Resource Management Verb Pairs
+
+Choose command verbs that accurately reflect the operation and domain:
+
+- **`create` / `delete`**: Use for resources the tool **authors or destroys**
+  (e.g., AVD instances).
+- **`add` / `remove`**: Use for managing **membership in a set** (e.g., tiles in
+  a carousel, skills in a repo). Always support **`rm`** as an alias for
+  `remove`.
+- **`install` / `uninstall`**: Use for **packages** or software installations.
+- **`set`**: Use for **single-slot replacement** of an active selection (e.g.,
+  the active watch face). Do not use `add` if there is only one slot.
+
+______________________________________________________________________
+
 ## Appendix A: Specialized Patterns for Focused Tools
 
 While the **Standard Pattern** (`tool [verb] [noun]`) is ideal for complex
@@ -179,6 +229,9 @@ actions**._
 - **Example:** `packagename launch com.foo`
 - **Implicit Meaning:** "(On the domain of) **packagename**, **launch** the
   instance **com.foo**."
+
+The first argument must be a verb; the `[Instance]` may be omitted, as in
+`git skill doctor`.
 
 #### Reference Implementation: `packagename`
 

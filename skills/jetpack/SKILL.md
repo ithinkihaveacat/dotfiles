@@ -8,7 +8,7 @@ description: >
   code, checking library versions (alpha/beta/stable/snapshot), or inspecting
   AndroidX class implementations. Triggers: androidx, jetpack, maven coordinate,
   jetpack source, library version, snapshot, alpha, beta.
-compatibility: >
+compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
   access to dl.google.com, androidx.dev, and cs.android.com.
 ---
@@ -58,10 +58,10 @@ heuristics—use it as reference when building similar functionality.
 package. **Usage**: `scripts/jetpack version PACKAGE [TYPE] [REPO]` **Options**:
 `ALPHA`, `BETA`, `RC`, `STABLE`, `LATEST`, `SNAPSHOT`.
 
-### `versions`
+### `list versions`
 
-**Purpose**: List all available versions for a package. **Usage**:
-`scripts/jetpack versions PACKAGE [REPO]`
+**Purpose**: List all versions for a package. **Usage**:
+`scripts/jetpack list versions PACKAGE [REPO]`
 
 ### `resolve`
 
@@ -88,10 +88,10 @@ specify destination, `--find PATTERN` to locate specific files.
 quickly checking implementation details; uses code search if direct resolution
 fails.
 
-### `dependencies`
+### `list dependencies`
 
 **Purpose**: List direct Maven dependencies for an artifact. **Usage**:
-`scripts/jetpack dependencies ARTIFACT [VERSION]`
+`scripts/jetpack list dependencies ARTIFACT [VERSION]`
 
 ### `resolve-exceptions`
 
@@ -103,8 +103,9 @@ fails.
 ### `scripts/jetpack-samples`
 
 **Purpose**: Download non-published reference samples and integration tests.
-**Usage**: `scripts/jetpack-samples ARTIFACT [--output DIR]`
-**Details**: Locates files from the AOSP source structure and aggregates into readable components locally.
+**Usage**: `scripts/jetpack-samples ARTIFACT [--output DIR]` **Details**:
+Locates files from the AOSP source structure and aggregates into readable
+components locally.
 
 ## Version Types
 
@@ -150,7 +151,7 @@ scripts/jetpack search RemoteImage
 
 ```bash
 # List all versions
-scripts/jetpack versions androidx.wear.tiles:tiles
+scripts/jetpack list versions androidx.wear.tiles:tiles
 
 # Check specific version types
 scripts/jetpack version androidx.wear.tiles:tiles ALPHA

@@ -15,8 +15,8 @@
   - [stop](#stop)
   - [delete](#delete)
   - [download](#download)
-  - [images](#images)
-  - [outdated](#outdated)
+  - [catalog](#catalog)
+  - [list-outdated](#list-outdated)
   - [update](#update)
 - [Device Types](#device-types)
 - [Architecture Detection](#architecture-detection)
@@ -45,10 +45,10 @@
 **What it installs**:
 
 1. cmdline-tools (sdkmanager, avdmanager)
-2. platform-tools (adb)
-3. build-tools (specified version)
-4. platforms (specified Android version)
-5. emulator (unless `--no-emulator`)
+1. platform-tools (adb)
+1. build-tools (specified version)
+1. platforms (specified Android version)
+1. emulator (unless `--no-emulator`)
 
 **Raw Commands**:
 
@@ -71,7 +71,7 @@ yes | "$SDKMANAGER" --licenses
 
 **Exit Codes**: 0 on success, non-zero on failure
 
----
+______________________________________________________________________
 
 ### doctor
 
@@ -91,14 +91,14 @@ yes | "$SDKMANAGER" --licenses
 
 **Exit Codes**: 0 if no errors, 1 if errors found
 
----
+______________________________________________________________________
 
-### list
+### list avds
 
-**Purpose**: List all available AVDs with running status.
+**Purpose**: List locally created AVDs with running status.
 
 **Synopsis**:
-`scripts/emumanager list [--names-only|--running-only|--stopped-only]`
+`scripts/emumanager list avds [--names-only|--running-only|--stopped-only]`
 
 **Options**:
 
@@ -109,11 +109,11 @@ yes | "$SDKMANAGER" --licenses
 **Examples**:
 
 ```bash
-scripts/emumanager list
+scripts/emumanager list avds
 # my_phone (emulator-5554)
 # my_watch
 
-scripts/emumanager list --names-only
+scripts/emumanager list avds --names-only
 # my_phone
 # my_watch
 ```
@@ -128,13 +128,46 @@ scripts/emumanager list --names-only
 "$ANDROID_HOME/platform-tools/adb" -s emulator-5554 shell getprop ro.boot.qemu.avd_name
 ```
 
----
+______________________________________________________________________
 
-### info
+### list packages
+
+**Purpose**: List installed SDK packages, or packages with available updates.
+
+**Synopsis**: `scripts/emumanager list packages [--outdated]`
+
+**Options**:
+
+- `--outdated`: List only installed packages that have updates available in the
+  remote registry.
+
+**Examples**:
+
+```bash
+# List all installed packages
+scripts/emumanager list packages
+
+# List only packages with updates
+scripts/emumanager list packages --outdated
+```
+
+**Raw Commands**:
+
+```bash
+# List installed packages
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed
+
+# List packages with updates (manually parsed from --list)
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list | grep -A 1000 "Available Updates:"
+```
+
+______________________________________________________________________
+
+### info avd
 
 **Purpose**: Show detailed information about an AVD.
 
-**Synopsis**: `scripts/emumanager info <name>`
+**Synopsis**: `scripts/emumanager info avd <name>`
 
 **Arguments**:
 
@@ -157,13 +190,13 @@ cat "$ANDROID_USER_HOME/avd/my_phone.ini"
 cat "$ANDROID_USER_HOME/avd/my_phone.avd/config.ini"
 ```
 
----
+______________________________________________________________________
 
-### create
+### create avd
 
 **Purpose**: Create a new AVD with device type or specific image.
 
-**Synopsis**: `scripts/emumanager create <name> [options] [image]`
+**Synopsis**: `scripts/emumanager create avd <name> [options] [image]`
 
 **Arguments**:
 
@@ -181,11 +214,11 @@ cat "$ANDROID_USER_HOME/avd/my_phone.avd/config.ini"
 
 ```bash
 # Create with device type (auto-selects latest image)
-scripts/emumanager create my_phone --mobile
-scripts/emumanager create my_watch --wear
+scripts/emumanager create avd my_phone --mobile
+scripts/emumanager create avd my_watch --wear
 
 # Create with specific image
-scripts/emumanager create my_avd "system-images;android-36;google_apis_playstore;arm64-v8a"
+scripts/emumanager create avd my_avd "system-images;android-36;google_apis_playstore;arm64-v8a"
 ```
 
 **Raw Commands**:
@@ -209,13 +242,13 @@ echo "no" | "$AVDMANAGER" create avd \
 
 **Exit Codes**: 0 on success, non-zero if AVD creation fails
 
----
+______________________________________________________________________
 
-### start
+### start avd
 
 **Purpose**: Start an AVD and wait for boot to complete.
 
-**Synopsis**: `scripts/emumanager start <name> [--cold-boot|--wipe-data]`
+**Synopsis**: `scripts/emumanager start avd <name> [--cold-boot|--wipe-data]`
 
 **Arguments**:
 
@@ -229,9 +262,9 @@ echo "no" | "$AVDMANAGER" create avd \
 **Examples**:
 
 ```bash
-scripts/emumanager start my_phone              # Quick Boot
-scripts/emumanager start my_phone --cold-boot  # Cold boot
-scripts/emumanager start my_phone --wipe-data  # Factory reset
+scripts/emumanager start avd my_phone              # Quick Boot
+scripts/emumanager start avd my_phone --cold-boot  # Cold boot
+scripts/emumanager start avd my_phone --wipe-data  # Factory reset
 ```
 
 **Raw Commands**:
@@ -257,13 +290,13 @@ done
 
 **Exit Codes**: 0 on success, non-zero on timeout or failure
 
----
+______________________________________________________________________
 
-### stop
+### stop avd
 
 **Purpose**: Stop a running AVD.
 
-**Synopsis**: `scripts/emumanager stop <name>`
+**Synopsis**: `scripts/emumanager stop avd <name>`
 
 **Arguments**:
 
@@ -282,13 +315,13 @@ for serial in $(adb devices | grep emulator- | awk '{print $1}'); do
 done
 ```
 
----
+______________________________________________________________________
 
-### delete
+### delete avd
 
 **Purpose**: Delete an AVD and clean up files.
 
-**Synopsis**: `scripts/emumanager delete <name>`
+**Synopsis**: `scripts/emumanager delete avd <name>`
 
 **Arguments**:
 
@@ -313,22 +346,22 @@ rm -rf "$ANDROID_USER_HOME/avd/my_phone.avd"
 rm -f "$ANDROID_USER_HOME/avd/my_phone.ini"
 ```
 
----
+______________________________________________________________________
 
-### download
+### download package
 
-**Purpose**: Download a specific system image.
+**Purpose**: Download a specific system image or SDK package.
 
-**Synopsis**: `scripts/emumanager download <image>`
+**Synopsis**: `scripts/emumanager download package <image>`
 
 **Arguments**:
 
-- `<image>`: System image package name (required)
+- `<image>`: Package name (required)
 
 **Example**:
 
 ```bash
-scripts/emumanager download "system-images;android-36;google_apis_playstore;arm64-v8a"
+scripts/emumanager download package "system-images;android-36;google_apis_playstore;arm64-v8a"
 ```
 
 **Raw Commands**:
@@ -338,47 +371,34 @@ yes | "$SDKMANAGER" --licenses
 "$SDKMANAGER" --install "system-images;android-36;google_apis_playstore;arm64-v8a"
 ```
 
----
+______________________________________________________________________
 
-### images
+### catalog packages
 
-**Purpose**: List available system images for the host architecture (API >= 33).
+**Purpose**: List obtainable system images (packages) for the host architecture
+(API >= 33) from the remote registry.
 
-**Synopsis**: `scripts/emumanager images`
+**Synopsis**: `scripts/emumanager catalog packages`
 
 **Output**: Package names prefixed with `*` if installed.
 
 **Raw Commands**:
 
 ```bash
-# List all available system images
+# List all obtainable system images
 "$SDKMANAGER" --list | grep "system-images;android-"
 
 # List installed packages
 "$SDKMANAGER" --list_installed
 ```
 
----
+______________________________________________________________________
 
-### outdated
-
-**Purpose**: Show outdated SDK packages.
-
-**Synopsis**: `scripts/emumanager outdated`
-
-**Raw Commands**:
-
-```bash
-"$SDKMANAGER" --list | grep -A 1000 "Updates"
-```
-
----
-
-### update
+### update packages
 
 **Purpose**: Update all installed SDK packages to latest versions.
 
-**Synopsis**: `scripts/emumanager update`
+**Synopsis**: `scripts/emumanager update packages`
 
 **Raw Commands**:
 
@@ -396,9 +416,9 @@ yes | "$SDKMANAGER" --licenses
 | TV           | `--tv`                | `google-tv`, `android-tv`                            | (default)            |
 | Automotive   | `--auto`              | `android-automotive-playstore`, `android-automotive` | (default)            |
 
-The script automatically selects the latest available image for the device type
+The script automatically selects the latest obtainable image for the device type
 and host architecture. Preferred variants (e.g., `google_apis_playstore` over
-`google_apis`) are selected when available.
+`google_apis`) are selected when obtainable.
 
 ## Architecture Detection
 

@@ -7,7 +7,7 @@ description: >
   with adb, Android devices, Wear OS watches, tiles, wearable data layer,
   dumpsys, or device debugging. Triggers: adb, android device, wear os,
   wearable, tile, screenshot, screen recording, dumpsys, logcat.
-compatibility: >
+compatibility: >-
   Requires adb. Some scripts require magick (ImageMagick), aapt, or scrcpy.
   Designed for filesystem-based agents with bash access.
 ---
@@ -42,7 +42,7 @@ multiple devices are connected.
 
 - **Wear OS Tile Debugging Workflow:**
   `scripts/adb-tile-add com.example/.MyTileService` -> output gives INDEX
-  `scripts/adb-tile-show INDEX`
+  `scripts/adb-tile-switch INDEX`
 
 - **Inspect Wear OS Data Layer:**
   `adb exec-out dumpsys activity service WearableService`
@@ -83,11 +83,11 @@ See `references/command-index.md` for detailed usage.
 ### Tile Management (Wear OS)
 
 - `scripts/adb-tile-add`: Add a tile component for debugging.
-- `scripts/adb-tile-show`: Show an added tile.
+- `scripts/adb-tile-switch`: Switch the active tile.
 - `scripts/adb-tile-remove`: Remove a tile.
 - `scripts/adb-tiles`: List available tiles and indicate which are in the
   carousel.
-- `scripts/adb-watchface-add`: Set the current watch face.
+- `scripts/adb-watchface-set`: Set the current watch face.
 
 > [!NOTE] **Tile Indexing (`Index=[0]`)**: When adding a new tile using
 > `scripts/adb-tile-add`, the output often indicates `Index=[0]`. This means the
