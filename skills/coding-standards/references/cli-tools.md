@@ -183,6 +183,11 @@ larger set of obtainable resources, use distinct commands:
   `adb-tiles` marking carousel members with `C`) and a filter flag (e.g.,
   `--carousel-only`).
 
+This applies to tools exposing both an installed set and an obtainable set. A
+single-set utility that only enumerates the obtainable set should still call it
+`catalog` (as a subcommand or `--catalog` flag), not `list`/`--list`, to stay
+consistent with tools like `git skill`.
+
 ### 5.2 Diagnostics: `doctor` vs. `status`
 
 Distinguish between environmental health and resource progress:
