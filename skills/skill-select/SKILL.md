@@ -11,10 +11,12 @@ sensible default skills, or uses LLM-based selection when context is provided.
 
 ## Usage
 
-Invoke the selection tool via the `skill-select` script (available in `bin/`):
+Invoke the selection tool via the `scripts/skill-select` script. It is also
+symlinked into `bin/` so you can run it directly as `skill-select` if `bin/` is
+in your PATH:
 
 ```bash
-skill-select [DIR] [OPTIONS]
+scripts/skill-select [DIR] [OPTIONS]
 ```
 
 ### Options
@@ -24,10 +26,70 @@ skill-select [DIR] [OPTIONS]
   below.
 - `--search-dirs PATHS`: Colon-separated extra paths to search for skills,
   overriding `SKILL_SOURCE_DIRS`.
-- --list: Print the full catalog of available skills and exit (formatted as
+- --catalog: Print the full catalog of available skills and exit (formatted as
   `name -> path`).
 - --json: Emit structured JSON output (`name`, `path`, `reason` / `description`)
   instead of the formatted `name -> path` text.
+
+## Actioning Results: Installing Selected Skills
+
+Once `skill-select` returns a list of recommended skills, you should make them
+available to your Jetski agent.
+
+### Local Linking (Strongly Recommended for Projects)
+
+If you are looking for skills relevant to your **current project or workspace**,
+you should strongly prefer linking them **locally** into your project's agent
+configuration. This keeps the project self-contained, ensures that the tools are
+versioned with your project, and guarantees that any agent working on this
+codebase has access to the same specialized workflows.
+
+#### Using `git-skill` (Recommended for Git Repositories)
+
+If your project is in a **Git repository**, it is highly recommended to use the
+`git-skill` tool to handle the linking. `git-skill` automatically manages the
+symlink creation under `.agents/skills/` (and `.claude/skills/` if applicable)
+and ensures that the linked skills are properly excluded from Git tracking
+(using `.git/info/exclude` to keep your git status clean without dirtying
+`.gitignore`).
+
+To link a skill using the `git-skill` script (located in `scripts/git-skill` and
+symlinked as `git skill`), run this command from your repository root:
+
+```bash
+git skill add /google/src/files/head/depot/google3/path/to/skill
+```
+
+Or if running the script directly:
+
+```bash
+scripts/git-skill add /google/src/files/head/depot/google3/path/to/skill
+```
+
+*(This will automatically resolve the path, create the symlink, and configure
+the Git exclusion).*
+
+#### Manual Linking (Fallback)
+
+If you are not using Git, or prefer manual control, you can create a symlink in
+your workspace's `.agents/skills/` directory pointing to the skill's source path
+(ideally using the stable `head` path in google3 if it is an internal skill):
+
+```bash
+ln -s /google/src/files/head/depot/google3/path/to/skill /path/to/your/workspace/.agents/skills/skill-name
+```
+
+### Other Options
+
+While local linking is the best practice for project-specific workflows, other
+options are possible:
+
+- **Global Installation**: If you want the skill to be available across all your
+  projects, you can link it into your global skills directory (typically
+  `~/.agents/skills/`, which is often symlinked to `~/.gemini/jetski/skills/`).
+- **Ad-hoc Reference**: You can also simply read the skill's `SKILL.md` file to
+  manually follow its instructions or reference its guidelines in your prompts
+  without performing a full installation.
 
 ## Context Guidelines
 
@@ -78,5 +140,5 @@ skill-select . --context "Goal: Implement a new Wear OS tile. Codebase: Kotlin A
 **JSON Output:** List all available skills as structured JSON for parsing:
 
 ```bash
-skill-select --list --json
+skill-select --catalog --json
 ```
