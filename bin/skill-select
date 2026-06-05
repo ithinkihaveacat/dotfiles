@@ -87,14 +87,14 @@ def gather_context(target_dir: Path) -> str:
     # 1. Try to get git files if inside a repo
     try:
         res = subprocess.run(
-            ["git", "ls-files"],
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
             cwd=target_dir,
             capture_output=True,
             text=True,
             check=True,
         )
         files = res.stdout.splitlines()
-        context += "Tracked Files (first 50):\\n" + "\\n".join(files[:50]) + "\\n"
+        context += "Tracked Files (first 50):\n" + "\n".join(files[:50]) + "\n"
     except Exception:
         # Fallback to local files
         try:
@@ -103,9 +103,9 @@ def gather_context(target_dir: Path) -> str:
                 for p in target_dir.iterdir()
                 if not p.name.startswith(".")
             ]
-            context += "Files in current directory:\\n" + "\\n".join(items[:30]) + "\\n"
+            context += "Files in current directory:\n" + "\n".join(items[:30]) + "\n"
         except Exception as e:
-            context += f"Could not list directory: {e}\\n"
+            context += f"Could not list directory: {e}\n"
 
     # 2. Try to get .gitignore
     gitignore = target_dir / ".gitignore"
@@ -114,8 +114,8 @@ def gather_context(target_dir: Path) -> str:
             content = gitignore.read_text(encoding="utf-8", errors="replace")
             # Clip to 1KB
             if len(content) > 1024:
-                content = content[:1024] + "\\n... [TRUNCATED]"
-            context += f"\\n.gitignore content:\\n{content}\\n"
+                content = content[:1024] + "\n... [TRUNCATED]"
+            context += f"\n.gitignore content:\n{content}\n"
         except Exception:
             pass
     return context
@@ -129,9 +129,60 @@ def clean_p(p):
     return s
 
 
+def resolve_selection(results, skills):
+    """Rewrite model-selected items to the authoritative skill we discovered.
+
+    Matches each selection to a gathered skill by path first (the model is shown
+    real paths and normally echoes them), then by unique name. The emitted
+    'name' and 'path' come from the gathered catalog, never the model, so a
+    hallucinated or renamed entry cannot reach a consumer like 'git skill apply'.
+    Unmatched selections are dropped with a warning.
+    """
+    by_path = {}
+    by_name = {}
+    for s in skills:
+        by_path[str(Path(s["path"]).resolve())] = s
+        by_name.setdefault(s["name"], []).append(s)
+
+    resolved = []
+    for item in results:
+        match = None
+        path = item.get("path", "")
+        if path:
+            match = by_path.get(str(Path(os.path.expanduser(path)).resolve()))
+        if match is None:
+            candidates = by_name.get(item.get("name", ""), [])
+            if len(candidates) == 1:
+                match = candidates[0]
+        if match is None:
+            print(
+                f"skill-select: warning: dropping unrecognized selection "
+                f"{item.get('name', '?')!r} ({path or 'no path'})",
+                file=sys.stderr,
+            )
+            continue
+        resolved.append(
+            {
+                "name": match["name"],
+                "path": match["path"],
+                "reason": item.get("reason", ""),
+            }
+        )
+    return resolved
+
+
 def main():
+    # add_help=False so we can expose --help without binding -h, which our CLI
+    # standard reserves for --human-readable (see coding-standards/cli-tools.md).
     parser = argparse.ArgumentParser(
-        description="Skill Select: Discover relevant agent skills."
+        description="Skill Select: Discover relevant agent skills.",
+        add_help=False,
+    )
+    parser.add_argument(
+        "--help",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="Display this help message and exit.",
     )
     parser.add_argument(
         "dir", nargs="?", default=".", help="Directory to analyze (default: current)."
@@ -219,7 +270,7 @@ def main():
     if not query:
         repo_ctx = gather_context(target_dir)
         query = (
-            "Bootstrap this repository with sensible default skills. Here is the repository context:\\n"
+            "Bootstrap this repository with sensible default skills. Here is the repository context:\n"
             + repo_ctx
         )
 
@@ -262,14 +313,14 @@ Example Output:
     # Format skills for context
     skills_context = ""
     for s in skills:
-        skills_context += f"=== Skill: {s['name']} ===\\n"
-        skills_context += f"Path: {s['path']}\\n"
-        skills_context += f"Description: {s['description']}\\n"
-        skills_context += f"Content:\\n{s['content']}\\n\\n"
+        skills_context += f"=== Skill: {s['name']} ===\n"
+        skills_context += f"Path: {s['path']}\n"
+        skills_context += f"Description: {s['description']}\n"
+        skills_context += f"Content:\n{s['content']}\n\n"
 
     user_prompt = (
-        f"<context>\\nAvailable Skills:\\n{skills_context}</context>\\n\\n"
-        f"<task>\\nBased on the available skills above, select the most relevant ones for the following problem or goal:\\n{query}\\n</task>"
+        f"<context>\nAvailable Skills:\n{skills_context}</context>\n\n"
+        f"<task>\nBased on the available skills above, select the most relevant ones for the following problem or goal:\n{query}\n</task>"
     )
 
     print(f"skill-select: running LLM inference for {target_dir}...", file=sys.stderr)
@@ -305,6 +356,11 @@ Example Output:
         # Output logic
         try:
             results = json.loads(response.text.strip())
+            # Resolve each selection back to a skill we actually discovered, so
+            # the emitted path is authoritative rather than echoed (and possibly
+            # hallucinated) by the model. Consumers such as 'git skill apply'
+            # symlink this directory directly, so it must be trustworthy.
+            results = resolve_selection(results, skills)
             if args.json:
                 for item in results:
                     print(json.dumps(item))

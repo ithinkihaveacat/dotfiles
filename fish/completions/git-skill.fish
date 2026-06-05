@@ -30,7 +30,7 @@ complete -f -c git -n __fish_git_skill_needs_command -a catalog -d 'List registe
 complete -f -c git -n __fish_git_skill_needs_command -a resolve -d 'Print source path for a name'
 complete -f -c git -n __fish_git_skill_needs_command -a apply -d 'Provision skills for this repository via skill-select'
 complete -f -c git -n __fish_git_skill_needs_command -a suggest -d 'Print skill-select recommendations without installing'
-complete -f -c git -n __fish_git_skill_needs_command -a status -d 'Report drift between desired and on-disk state'
+complete -f -c git -n __fish_git_skill_needs_command -a doctor -d 'Diagnose drift between desired and on-disk skills'
 
 # Helper functions for fetching options/skills
 function __fish_git_skill_source_skills
