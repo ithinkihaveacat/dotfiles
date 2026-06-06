@@ -12,7 +12,7 @@ export PATH="$DIR/../../bin:$PATH"
 export SKILL_SOURCE_DIRS="$DIR/../../skills"
 export XDG_CONFIG_HOME="$DIR/../../etc"
 
-echo "1..11"
+echo "1..14"
 
 # Test 1: --help succeeds and mentions SKILL_SOURCE_DIRS
 if out=$("$BIN" --help 2>&1) && printf '%s' "$out" | grep -q 'SKILL_SOURCE_DIRS'; then
@@ -131,4 +131,50 @@ if grep -q "/\.claude/skills/agent-tools" "$REPO/.git/info/exclude" &&
 	echo "ok 11 - add from subdirectory updates top-level exclude"
 else
 	echo "not ok 11 - add from subdirectory failed to update top-level exclude"
+fi
+
+# The remaining tests exercise the catalog metadata index. They are hermetic:
+# they use a throwaway SKILL_CACHE_DIR and never reach the network (an empty
+# registry short-circuits; doctor is read-only).
+CACHE=$(mktemp -d "/tmp/skill-test-cache.XXXXXX")
+CFG=$(mktemp -d "/tmp/skill-test-cfg.XXXXXX")
+REPO2=$(mktemp -d "/tmp/skill-test-repo2.XXXXXX")
+trap 'rm -rf "$REPO" "$ALT" "$CACHE" "$CFG" "$REPO2"' EXIT
+
+# Test 12: 'update --catalog' with an empty registry must NOT prune the catalog.
+# A missing/unreadable registry yields {} and must never trigger destructive GC.
+mkdir -p "$CACHE/skills/catalog/orphan" "$CACHE/skills/catalog/.meta"
+printf '# orphan\n' >"$CACHE/skills/catalog/orphan/SKILL.md"
+: >"$CACHE/skills/catalog/.meta/orphan"
+SKILL_CACHE_DIR="$CACHE" "$BIN" update --catalog >/dev/null 2>&1
+if [ -d "$CACHE/skills/catalog/orphan" ]; then
+	echo "ok 12 - update --catalog with empty registry preserves catalog (GC guard)"
+else
+	echo "not ok 12 - empty-registry GC wrongly removed a catalog stub"
+fi
+
+# Test 13: doctor flags missing/stale/orphaned stubs when the registry is set.
+mkdir -p "$CFG/skill"
+printf 'foo https://github.com/o/r/tree/main/skills/foo\n' >"$CFG/skill/registry"
+mkdir -p "$CACHE/skills/catalog/foo" "$CACHE/skills/catalog/bar"
+printf '# foo\n' >"$CACHE/skills/catalog/foo/SKILL.md"
+printf '# bar\n' >"$CACHE/skills/catalog/bar/SKILL.md"
+: >"$CACHE/skills/catalog/.meta/foo"
+git -C "$REPO2" init -q
+out=$(cd "$REPO2" && SKILL_CACHE_DIR="$CACHE" XDG_CONFIG_HOME="$CFG" "$BIN" doctor 2>&1)
+rc_doctor=$?
+if [ "$rc_doctor" -ne 0 ] &&
+	printf '%s' "$out" | grep -q 'orphan' &&
+	printf '%s' "$out" | grep -q 'bar'; then
+	echo "ok 13 - doctor flags orphaned catalog stub"
+else
+	echo "not ok 13 - doctor did not flag orphan (rc=$rc_doctor)"
+	printf '%s\n' "$out" | sed 's/^/# /'
+fi
+
+# Test 14: help documents 'update --catalog'
+if "$BIN" --help 2>&1 | grep -q -- '--catalog'; then
+	echo "ok 14 - help documents update --catalog"
+else
+	echo "not ok 14 - help missing --catalog"
 fi

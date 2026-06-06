@@ -63,8 +63,10 @@ complete -c git -f -n '__fish_git_skill_using_command remove' -a '(__fish_git_sk
 complete -c git -f -n '__fish_git_skill_using_command rm' -a '(__fish_git_skill_managed_skills)' -d 'Managed skill'
 
 # update
+complete -c git -f -n '__fish_git_skill_using_command update' -a '(__fish_git_skill_catalog)' -d 'Registry skill'
 complete -c git -f -n '__fish_git_skill_using_command update' -a '(__fish_git_skill_managed_skills)' -d 'Managed skill'
 complete -c git -f -n '__fish_git_skill_using_command update' -l all -d 'Update every managed skill'
+complete -c git -f -n '__fish_git_skill_using_command update' -l catalog -d 'Refresh the whole metadata index'
 
 # Complete flags
 complete -c git -f -n '__fish_git_skill_using_command skill' -l help -d 'Display help message and exit'
