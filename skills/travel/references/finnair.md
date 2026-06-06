@@ -9,7 +9,7 @@ deliberately narrow: it documents Finnair's booking-URL mechanics only. This
 document provides the URL structure, worked examples, and code rather than
 exhaustive tables.
 
----
+______________________________________________________________________
 
 ## Coverage
 
@@ -17,16 +17,16 @@ This reference follows the shared guide pattern, but Finnair booking-URL
 engineering is its only subject. The standard guide sections are listed here for
 consistency; most are out of scope and not collected in this skill.
 
-| Standard guide section | In this reference |
-|------------------------|-------------------|
-| Earning / transfer partners | Not provided — Finnair Plus is an Avios group member; see the [BA Avios guide](./ba.md) |
-| Reward types | Not provided |
-| Award chart / points pricing | Not provided |
-| Carrier surcharges | Not provided — the [BA](./ba.md) and [Qantas](./qantas.md) guides note Finnair's low-to-no carrier charges |
-| Key routes | Not provided |
-| Technical: booking URL construction | **Covered in full below** |
+| Standard guide section              | In this reference                                                                                          |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Earning / transfer partners         | Not provided — Finnair Plus is an Avios group member; see the [BA Avios guide](./ba.md)                    |
+| Reward types                        | Not provided                                                                                               |
+| Award chart / points pricing        | Not provided                                                                                               |
+| Carrier surcharges                  | Not provided — the [BA](./ba.md) and [Qantas](./qantas.md) guides note Finnair's low-to-no carrier charges |
+| Key routes                          | Not provided                                                                                               |
+| Technical: booking URL construction | **Covered in full below**                                                                                  |
 
----
+______________________________________________________________________
 
 ## Base URL
 
@@ -35,7 +35,8 @@ https://www.finnair.com/gb-en/booking/flight-selection?json=<URL-encoded JSON>
 ```
 
 > 🔓 **No login required** — the URL works from a cold start with no Finnair
-> session, cookie, or prior homepage visit (see [Quirks](#no-sessioncookie-required)).
+> session, cookie, or prior homepage visit (see
+> [Quirks](#no-sessioncookie-required)).
 
 The locale segment (`gb-en`) can be changed for other markets (e.g. `fi-fi`,
 `us-en`), but prices and availability may differ. Use `gb-en` for GBP pricing.
@@ -106,12 +107,34 @@ redirects to the Finnair homepage with no error.
 
 ### Passenger counts (integers, required — use 0 if none)
 
-| Field      | Meaning                                         |
-| ---------- | ----------------------------------------------- |
-| `adults`   | Adults (18+)                                    |
-| `c15s`     | Children aged 12–15 (Finnair-specific category) |
-| `children` | Children aged 2–11                              |
-| `infants`  | Infants aged 0–2                                |
+| Field      | Meaning                                        |
+| ---------- | ---------------------------------------------- |
+| `adults`   | Adults (16+ in Finnair's banding)              |
+| `c15s`     | Young passengers aged 12–15 (Finnair-specific) |
+| `children` | Children aged 2–11                             |
+| `infants`  | Infants aged 0–2                               |
+
+> **Why `c15s` exists — and why it looks "wrong" if you assume Oneworld
+> defaults.** Finnair uses its **own** passenger age-banding in its booking
+> engine, which is *not* the generic IATA/Oneworld convention. Under the common
+> Oneworld/airline-API model, a passenger aged 2–11 is a "child" and **anyone 12
+> or older is treated as an adult** for fare and ticketing purposes — so a
+> reviewer applying that rule will flag `c15s` as a mistake. It isn't: Finnair
+> carves out **12–15-year-olds as a distinct booking category** (`c15s`),
+> separate from both `adults` and `children`, even though they are generally
+> charged adult-level fares. Finnair's own pages treat 12–15 as a special group
+> (e.g. the
+> [unaccompanied-minor service covers 12–17](https://www.finnair.com/us-en/special-assistance-and-health/children-travelling-alone-and-young-travellers),
+> and its FAQ notes a
+> [15-year-old is booked outside the standard child fare](https://www.finnair.com/en/frequently-asked-questions/bookings-and-payments/my-child-is-15-years-of-age--can-i-book-him-an-adult-ticket--1890474)).
+>
+> **Verified against the live booking engine (June 2026):** loading the booking
+> URL with `"c15s":2` makes Finnair's fare-selection screen render the journey
+> for **"1 adult, 2 children"** — i.e. the field is parsed as a real, distinct
+> passenger type, not ignored. If `c15s` were not a genuine Finnair parameter it
+> would have no effect on the passenger summary. Do **not** "normalise" `c15s`
+> into `adults`/`children` to match Oneworld conventions — that would break the
+> URL's correspondence with Finnair's own system.
 
 ______________________________________________________________________
 
@@ -276,16 +299,20 @@ ______________________________________________________________________
 
 ### Official Finnair
 
-- [Finnair booking flow](https://www.finnair.com/gb-en/booking/flight-selection) — Live booking page targeted by the URLs in this reference
+- [Finnair booking flow](https://www.finnair.com/gb-en/booking/flight-selection)
+  — Live booking page targeted by the URLs in this reference
 
 ### Related guides
 
-- [BA Avios Flight Redemption Reference](./ba.md) — Finnair as an Avios group member and oneworld partner (UK-origin redemptions)
-- [Qantas Points & Amex MR Flight Redemption Reference](./qantas.md) — Finnair as a Qantas partner (Australia-origin redemptions)
+- [BA Avios Flight Redemption Reference](./ba.md) — Finnair as an Avios group
+  member and oneworld partner (UK-origin redemptions)
+- [Qantas Points & Amex MR Flight Redemption Reference](./qantas.md) — Finnair
+  as a Qantas partner (Australia-origin redemptions)
 
 ### Editorial standard
 
-- [Travel Booking Guides — Meta Reference](./guide-meta.md) — Shared standards for the guides in this skill
+- [Travel Booking Guides — Meta Reference](./guide-meta.md) — Shared standards
+  for the guides in this skill
 
 ______________________________________________________________________
 
