@@ -1,13 +1,41 @@
-# Finnair Multi-City Booking URL Reference
+# Finnair: Booking URL Engineering Reference
 
-This document provides a technical guide for constructing and using Finnair's
-multi-city booking URLs by percent-encoding custom JSON payloads.
+A practical reference for constructing direct Finnair booking URLs —
+deep-linking to the fare-selection screen with custom segments, cabin classes,
+and passenger counts by percent-encoding a JSON payload.
+
+Unlike the BA Avios and Qantas Points guides in this skill, this reference is
+deliberately narrow: it documents Finnair's booking-URL mechanics only. This
+document provides the URL structure, worked examples, and code rather than
+exhaustive tables.
+
+---
+
+## Coverage
+
+This reference follows the shared guide pattern, but Finnair booking-URL
+engineering is its only subject. The standard guide sections are listed here for
+consistency; most are out of scope and not collected in this skill.
+
+| Standard guide section | In this reference |
+|------------------------|-------------------|
+| Earning / transfer partners | Not provided — Finnair Plus is an Avios group member; see the [BA Avios guide](./ba.md) |
+| Reward types | Not provided |
+| Award chart / points pricing | Not provided |
+| Carrier surcharges | Not provided — the [BA](./ba.md) and [Qantas](./qantas.md) guides note Finnair's low-to-no carrier charges |
+| Key routes | Not provided |
+| Technical: booking URL construction | **Covered in full below** |
+
+---
 
 ## Base URL
 
 ```
 https://www.finnair.com/gb-en/booking/flight-selection?json=<URL-encoded JSON>
 ```
+
+> 🔓 **No login required** — the URL works from a cold start with no Finnair
+> session, cookie, or prior homepage visit (see [Quirks](#no-sessioncookie-required)).
 
 The locale segment (`gb-en`) can be changed for other markets (e.g. `fi-fi`,
 `us-en`), but prices and availability may differ. Use `gb-en` for GBP pricing.
@@ -241,3 +269,25 @@ const params = {
 };
 const url = `https://www.finnair.com/gb-en/booking/flight-selection?json=${encodeURIComponent(JSON.stringify(params))}`;
 ```
+
+______________________________________________________________________
+
+## Resources
+
+### Official Finnair
+
+- [Finnair booking flow](https://www.finnair.com/gb-en/booking/flight-selection) — Live booking page targeted by the URLs in this reference
+
+### Related guides
+
+- [BA Avios Flight Redemption Reference](./ba.md) — Finnair as an Avios group member and oneworld partner (UK-origin redemptions)
+- [Qantas Points & Amex MR Flight Redemption Reference](./qantas.md) — Finnair as a Qantas partner (Australia-origin redemptions)
+
+### Editorial standard
+
+- [Travel Booking Guides — Meta Reference](./guide-meta.md) — Shared standards for the guides in this skill
+
+______________________________________________________________________
+
+*Guide compiled June 2026. Finnair's booking-URL structure may change with site
+rebuilds; URL behaviour verified June 2026.*
