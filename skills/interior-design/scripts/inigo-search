@@ -1,0 +1,191 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Search Inigo listings via the /all-homes or /past-sales index page.
+
+Default output is one listing-detail URL per line on stdout, suitable for
+piping into inigo-gallery. With --json, emits the matched listing summaries
+as a JSON array.
+
+Inigo's index pages only embed the first 20 summaries plus a server-side
+`resultsCount`; pagination is JS-only and not URL-addressable, so a single
+invocation here sees at most 20 properties (plus 6 more if
+--include-featured is set). The total catalogue size is printed to stderr.
+
+Filters run client-side. The fields populated on the 20 summaries are
+limited: price (formatted string) and address. Bedroom count, location,
+and property type are null on the summaries — they are only populated on
+featured listings, so the --bedrooms filter only meaningfully narrows
+when --include-featured is set.
+
+Examples:
+  inigo-search                              # 20 active listing URLs
+  inigo-search --sold                       # 20 sold listing URLs
+  inigo-search --price-to 800               # active listings up to £800k
+  inigo-search --address london --json      # London listings, summary JSON
+  inigo-search --include-featured           # add 6 hand-curated featured listings
+  inigo-search --sold --price-to 500 | xargs -n1 inigo-gallery | wget -i -
+"""
+
+import argparse
+import json
+import re
+import sys
+import urllib.request
+
+UA = "Mozilla/5.0 (compatible; inigo-search)"
+BASE = "https://www.inigo.com"
+
+
+def fetch(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", errors="replace")
+
+
+def extract_index_payload(html: str):
+    """Parse the RSC chunk that holds initialData + featuredListings."""
+    for raw in re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.DOTALL):
+        decoded = raw.encode("raw_unicode_escape").decode(
+            "unicode_escape", errors="replace"
+        )
+        if '"initialData"' not in decoded or '"properties"' not in decoded:
+            continue
+        for line in decoded.splitlines():
+            if '"initialData"' not in line:
+                continue
+            try:
+                outer = json.loads(re.sub(r"^\d+:", "", line.strip()))
+            except json.JSONDecodeError:
+                continue
+            return outer[3] if isinstance(outer, list) and len(outer) > 3 else outer
+    return None
+
+
+def parse_price(s):
+    """'£550,000' → 550000.  Returns None for non-numeric (e.g. 'POA')."""
+    if s is None:
+        return None
+    if isinstance(s, int):
+        return s
+    m = re.search(r"[\d,]+", str(s))
+    if not m:
+        return None
+    try:
+        return int(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def normalise(item, sold_section: bool) -> dict:
+    """Map either an initialData.properties summary or a featuredListings
+    item to a common shape."""
+    slug = (
+        item["slug"]["current"]
+        if isinstance(item.get("slug"), dict)
+        else item.get("slug")
+    )
+    return {
+        "slug": slug,
+        "price": parse_price(item.get("price")),
+        "bedrooms": item.get("bedrooms") or item.get("bedroomCount") or 0,
+        "sold": item.get("sold") if item.get("sold") is not None else sold_section,
+        "address": item.get("address") or "",
+    }
+
+
+def matches(item, args) -> bool:
+    if args.price_from is not None:
+        if item["price"] is None or item["price"] < args.price_from * 1000:
+            return False
+    if args.price_to is not None:
+        if item["price"] is None or item["price"] > args.price_to * 1000:
+            return False
+    if args.bedrooms is not None and item["bedrooms"] != args.bedrooms:
+        return False
+    if args.min_bedrooms is not None and item["bedrooms"] < args.min_bedrooms:
+        return False
+    if args.address and args.address.lower() not in item["address"].lower():
+        return False
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+    )
+    ap.add_argument("--help", action="help", help="Show this help message and exit")
+    ap.add_argument(
+        "--sold", action="store_true", help="Search /past-sales instead of /all-homes"
+    )
+    ap.add_argument(
+        "--price-from", type=int, metavar="K", help="Minimum price in £000s"
+    )
+    ap.add_argument("--price-to", type=int, metavar="K", help="Maximum price in £000s")
+    ap.add_argument("--bedrooms", type=int, help="Exact bedroom count")
+    ap.add_argument("--min-bedrooms", type=int, help="Minimum bedroom count")
+    ap.add_argument("--address", help="Case-insensitive substring of address")
+    ap.add_argument(
+        "--include-featured",
+        action="store_true",
+        help="Also include the hand-curated featured listings "
+        "(may overlap with results)",
+    )
+    ap.add_argument("--limit", type=int, help="Cap number of results")
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit summary objects as a JSON array instead of URLs",
+    )
+    args = ap.parse_args()
+
+    section = "past-sales" if args.sold else "all-homes"
+    detail = "past-sales" if args.sold else "sales-list"
+
+    html = fetch(f"{BASE}/{section}")
+    payload = extract_index_payload(html)
+    if not payload:
+        print(f"error: could not find listing data on /{section}", file=sys.stderr)
+        sys.exit(1)
+
+    init = payload.get("initialData", {})
+    total = init.get("resultsCount")
+    if total is not None:
+        print(
+            f"# /{section}: {len(init.get('properties', []))} of {total} listings "
+            f"available without pagination",
+            file=sys.stderr,
+        )
+
+    items, seen = [], set()
+    if args.include_featured:
+        for f in payload.get("featuredListings", []):
+            n = normalise(f, args.sold)
+            if n["slug"] and n["slug"] not in seen:
+                seen.add(n["slug"])
+                items.append(n)
+    for p in init.get("properties", []):
+        n = normalise(p, args.sold)
+        if n["slug"] and n["slug"] not in seen:
+            seen.add(n["slug"])
+            items.append(n)
+
+    hits = [i for i in items if matches(i, args)]
+    if args.limit:
+        hits = hits[: args.limit]
+
+    if args.json:
+        for h in hits:
+            h["url"] = f"{BASE}/{detail}/{h['slug']}"
+        json.dump(hits, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        for h in hits:
+            print(f"{BASE}/{detail}/{h['slug']}")
+
+
+if __name__ == "__main__":
+    main()
