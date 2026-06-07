@@ -7,6 +7,8 @@
 - [screenshot-describe](#screenshot-describe) - Generate alt-text from images
 - [screenshot-compare](#screenshot-compare) - Compare two images for differences
 - [photo-smart-crop](#photo-smart-crop) - Smart crop around detected people
+- [photo-query](#photo-query) - Ask Gemini about photos (boolean / schema /
+  free-text)
 - [oracle](#oracle) - Deep reasoning and synthesis over files or directories
 - [emerson](#emerson) - Generate essay-length analysis from text
 - [pascal](#pascal) - Ask a question and get a short response
@@ -236,28 +238,58 @@ scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3
 
 ______________________________________________________________________
 
-## photo-has-people
+## photo-query
 
-Detect if people feature prominently in a photo using the Gemini API.
+Ask Gemini a question about one or more photos. Built-in queries handle common
+cases (`has-people`, `describe`) and a generic `ask` subcommand runs arbitrary
+schema-constrained or free-text queries. Image pre-processing (EXIF rotation,
+alpha flatten, resize, WebP encode) is content-addressed-cached so repeated
+queries against the same images skip all redundant work.
 
 ### Synopsis
 
 ```bash
-scripts/photo-has-people [OPTIONS] IMAGE
+scripts/photo-query QUERY [QUERY_OPTIONS] FILE_OR_DIR [FILE_OR_DIR ...]
 ```
+
+### Subcommands
+
+| Subcommand   | Description                                                          |
+| ------------ | -------------------------------------------------------------------- |
+| `has-people` | Do people feature prominently? Boolean.                              |
+| `describe`   | Short free-text description per image.                               |
+| `ask`        | Generic query: `--prompt`, optional `--schema`, optional `--filter`. |
 
 ### Arguments
 
-| Argument | Description                                               |
-| -------- | --------------------------------------------------------- |
-| `IMAGE`  | Path to input image (any format supported by ImageMagick) |
+| Argument      | Description                                                                    |
+| ------------- | ------------------------------------------------------------------------------ |
+| `FILE_OR_DIR` | One or more image files, or directories (top-level only unless `--recursive`). |
 
-### Options
+### Global Options
 
-| Option        | Description                     |
-| ------------- | ------------------------------- |
-| `-q, --quiet` | Suppress output; exit code only |
-| `-h, --help`  | Display help message and exit   |
+| Option         | Description                                                              |
+| -------------- | ------------------------------------------------------------------------ |
+| `--max-size N` | Longest-edge resize cap, px. Defaults: 384 (`has-people`), 768 (others). |
+| `--model M`    | Override Gemini model (default `gemini-3.5-flash`).                      |
+| `--no-cache`   | Skip the resize cache and re-process every image.                        |
+| `--recursive`  | Recurse into directory arguments (`*.{jpg,jpeg,png,webp,heic,heif}`).    |
+| `--help`       | Display per-subcommand help and exit.                                    |
+
+### `ask` Options
+
+| Option           | Description                                                                                         |
+| ---------------- | --------------------------------------------------------------------------------------------------- |
+| `--prompt TEXT`  | (Required) the question to ask about each image.                                                    |
+| `--schema SPEC`  | llm-style DSL: comma-separated `name [type] [: description]`. Types: `bool`, `int`, `float`, `str`. |
+| `--filter FIELD` | Print only paths whose boolean FIELD is true (requires `--schema`).                                 |
+| `-v, --verbose`  | In single-file boolean mode, echo `true`/`false` to **stderr**.                                     |
+
+### `has-people` Options
+
+| Option          | Description                                            |
+| --------------- | ------------------------------------------------------ |
+| `-v, --verbose` | Echo `true`/`false` to **stderr** in single-file mode. |
 
 ### Environment Variables
 
@@ -268,33 +300,48 @@ scripts/photo-has-people [OPTIONS] IMAGE
 ### Examples
 
 ```bash
-# Basic usage
-scripts/photo-has-people photo.jpg
+# Boolean exit-code idiom (single file)
+if scripts/photo-query has-people photo.jpg; then echo "Found"; fi
 
-# Use in conditional (quiet mode)
-if scripts/photo-has-people -q image.png; then
-  echo "People detected"
-fi
+# Multi-file boolean: tab-separated <path> <true|false> on stdout
+scripts/photo-query has-people *.jpg
+
+# Schema-constrained ask with filter (one-field bool also exit-codable)
+scripts/photo-query ask \
+  --prompt "Does this image feature a bedside table?" \
+  --schema "has_bedside_table bool" \
+  --filter has_bedside_table \
+  --recursive ./photos/
+
+# Multi-field schema, JSON output per file
+scripts/photo-query ask \
+  --prompt "Does this image show a fireplace? Artwork above it?" \
+  --schema "fireplace bool, art_over_fireplace bool" \
+  *.jpg
+
+# Free-text description
+scripts/photo-query describe room.jpg
 ```
 
-### Raw API Command
+### Cache
 
-Model: `gemini-2.5-flash`
+Pre-processed WebP bytes are stored at
+`~/.cache/agent-tools/photo-query/<sha256>-<max_size>-v<N>.webp`. Cache key
+includes the file's content hash, so renames/moves still hit. Clear manually if
+it grows unbounded; no automatic eviction.
 
-```bash
-# (Encoding is same as other image tools)
-PROMPT="Do people feature prominently in this photo? This includes partial views..."
+### Exit-Code Semantics
 
-# ... (Standard curl request with schema for boolean response) ...
-```
+The exit code encodes the answer **only** when a single file is passed and the
+query produces a single boolean field (`has-people`, or `ask` with a one-field
+bool schema). Otherwise the exit code reflects success/failure only.
 
-### Exit Codes
-
-| Code | Description                               |
-| ---- | ----------------------------------------- |
-| 0    | True (people feature prominently)         |
-| 1    | False (people do not feature prominently) |
-| 127  | Missing required dependency               |
+| Mode                      | Code | Description                                |
+| ------------------------- | ---- | ------------------------------------------ |
+| Single-file boolean       | 0    | True                                       |
+| Single-file boolean       | 1    | False                                      |
+| Multi-file or non-boolean | 0    | All images processed successfully          |
+| Any mode                  | 2    | Error (network, parse, missing file, etc.) |
 
 ______________________________________________________________________
 

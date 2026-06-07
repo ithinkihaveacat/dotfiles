@@ -65,8 +65,12 @@ scripts/screenshot-compare before.png after.png
 # Smart crop image around detected people
 scripts/photo-smart-crop photo.jpg cropped.jpg
 
-# Check if a photo prominently features people
-scripts/photo-has-people photo.jpg
+# Check if a photo prominently features people (exit code = answer)
+scripts/photo-query has-people photo.jpg
+
+# Generic image query with a JSON schema
+scripts/photo-query ask --prompt "Is there a fireplace?" \
+  --schema "has_fireplace bool" photo.jpg
 
 # Generate essay-length analysis from text
 scripts/emerson "Summarize the key changes" < documentation.md
@@ -291,26 +295,48 @@ scripts/photo-smart-crop --ratio 16:9 portrait.jpg thumbnail.jpg
 scripts/photo-smart-crop --ratio 1:1 headshot.png avatar.png
 ```
 
-### photo-has-people
+### photo-query
 
-Detect if people feature prominently in a photo. Returns boolean via exit code.
+Ask Gemini a question about one or more photos. Subcommands:
+
+- `has-people FILE...` — boolean: do people feature prominently? Single-file
+  mode encodes the answer in the exit code (`0` true / `1` false / `2` error);
+  stdout silent; `-v` echoes `true`/`false` to **stderr**. Defaults to a 384px
+  resize (single-tile token cost).
+- `describe FILE...` — short free-text description per file. Optional `--prompt`
+  overrides the default description prompt.
+- `ask FILE... --prompt TEXT [--schema SPEC] [--filter FIELD]` — generic query.
+  `--schema` uses llm-style DSL like `'has_bed bool, count int'`;
+  `--filter FIELD` prints only paths whose boolean field is true.
+
+Multiple files (or non-boolean queries) emit per-file lines on stdout; exit code
+only reflects success/failure.
+
+Deterministic image prep (EXIF rotate, alpha flatten, resize to `--max-size`
+(default 768, 384 for `has-people`), WebP encode) is content-addressed-cached at
+`~/.cache/agent-tools/photo-query/` so repeated queries against the same images
+skip the resize entirely. Use `--no-cache` to bypass.
 
 ```bash
-scripts/photo-has-people IMAGE
+# Boolean check (exit code idiom)
+if scripts/photo-query has-people photo.jpg; then echo "Found people"; fi
+
+# Multi-file boolean: per-line `<path>\t<true|false>` on stdout
+scripts/photo-query has-people *.jpg
+
+# Schema-constrained query with filter
+scripts/photo-query ask --recursive \
+  --prompt "Does this image feature a bedside table?" \
+  --schema "has_bedside_table bool" \
+  --filter has_bedside_table \
+  ./photos/
+
+# Free-text description per file
+scripts/photo-query describe room.jpg
 ```
 
-**Options:** `-q, --quiet` (suppress output)
-
-**Exit codes:** 0 true (has people), 1 false (no people), 127 missing dependency
-
-**Examples:**
-
-```bash
-# Check if photo has people
-if scripts/photo-has-people photo.jpg; then
-  echo "Found people"
-fi
-```
+**Exit codes:** 0 success (or true for single-file boolean), 1 false (only for
+single-file boolean), 2 error (network, parse, missing file).
 
 ### emerson
 

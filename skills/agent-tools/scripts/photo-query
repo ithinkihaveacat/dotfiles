@@ -1,0 +1,465 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pillow",
+#     "pillow-heif",
+# ]
+# ///
+"""Ask Gemini a question about one or more photos.
+
+Built-in queries amortise the deterministic image work (EXIF rotation, alpha
+flatten, resize, WebP encode) across calls via a content-addressed disk cache
+at ~/.cache/agent-tools/photo-query/. Pre-processed bytes are reused on
+subsequent invocations against the same image.
+
+Subcommands:
+  has-people    boolean: do people feature prominently?
+  describe      free-text description (UI/scene)
+  ask           generic schema-constrained or free-text query
+
+Run `photo-query SUBCOMMAND --help` for per-subcommand flags.
+"""
+
+import argparse
+import base64
+import hashlib
+import io
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+import pillow_heif
+from PIL import Image, ImageOps
+
+pillow_heif.register_heif_opener()
+
+
+CACHE_FORMAT_VERSION = 1
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+
+
+def cache_dir() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    d = Path(base) / "agent-tools" / "photo-query"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def preprocess(path: Path, max_size: int, use_cache: bool) -> bytes:
+    """Return WebP-encoded bytes ready for upload, applying:
+    EXIF transpose, alpha flatten on white, thumbnail to max_size."""
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    cache_key = f"{digest}-{max_size}-v{CACHE_FORMAT_VERSION}.webp"
+    cache_path = cache_dir() / cache_key
+
+    if use_cache and cache_path.exists():
+        return cache_path.read_bytes()
+
+    with Image.open(io.BytesIO(raw)) as img:
+        img = ImageOps.exif_transpose(img)
+        if img.mode in ("RGBA", "LA") or (
+            img.mode == "P" and "transparency" in img.info
+        ):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+            img = bg
+        else:
+            img = img.convert("RGB")
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="WEBP", quality=85, method=4)
+        encoded = buf.getvalue()
+
+    if use_cache:
+        tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        tmp.write_bytes(encoded)
+        tmp.rename(cache_path)
+    return encoded
+
+
+def parse_schema_dsl(spec: str) -> dict:
+    """Minimal subset of llm.schema_dsl: 'name [type] [: description]'
+    fields, comma-separated. Supported types: bool, int, float, str (default)."""
+    type_map = {"bool": "boolean", "int": "integer", "float": "number", "str": "string"}
+    props, required = {}, []
+    for raw_field in spec.split(","):
+        field = raw_field.strip()
+        if not field:
+            continue
+        desc = None
+        if ":" in field:
+            field, desc = (s.strip() for s in field.split(":", 1))
+        parts = field.split()
+        name = parts[0]
+        type_tok = parts[1] if len(parts) > 1 else "str"
+        if type_tok not in type_map:
+            raise ValueError(f"unknown type {type_tok!r} in schema field {raw_field!r}")
+        prop: dict = {"type": type_map[type_tok]}
+        if desc:
+            prop["description"] = desc
+        props[name] = prop
+        required.append(name)
+    return {"type": "object", "properties": props, "required": required}
+
+
+def gemini_request(
+    api_key: str,
+    model: str,
+    image_bytes: bytes,
+    prompt: str,
+    schema: dict | None,
+) -> dict:
+    payload: dict = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "inlineData": {
+                            "mimeType": "image/webp",
+                            "data": base64.b64encode(image_bytes).decode("ascii"),
+                        }
+                    },
+                    {"text": prompt},
+                ]
+            }
+        ]
+    }
+    if schema is not None:
+        payload["generationConfig"] = {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": schema,
+        }
+
+    req = urllib.request.Request(
+        GEMINI_URL.format(model=model),
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")
+        try:
+            msg = json.loads(err).get("error", {}).get("message", err)
+        except json.JSONDecodeError:
+            msg = err
+        raise RuntimeError(f"Gemini API error: {msg}") from None
+
+    if "error" in body:
+        raise RuntimeError(f"Gemini API error: {body['error'].get('message', body)}")
+    candidates = body.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"no candidates in response: {body}")
+    parts = candidates[0].get("content", {}).get("parts") or []
+    if not parts:
+        raise RuntimeError(f"no parts in response: {body}")
+    text = parts[0].get("text", "")
+    if schema is None:
+        return {"text": text}
+    return json.loads(text)
+
+
+HAS_PEOPLE_PROMPT = """<role>You are an expert photo analyst.</role>
+<task>Analyze the provided image and determine if people feature prominently in it.</task>
+<instructions>
+Return true if people (or partial views like hands, backs of heads, silhouettes, or any visible human body parts) are a significant part of the image. Return false otherwise. Provide the minimal required JSON response.
+</instructions>
+<examples>
+- A landscape with a tiny unrecognizable figure in the distance -> false
+- A close-up of a hand holding a phone -> true
+- A crowd of silhouettes at a concert -> true
+- An empty room with a chair -> false
+</examples>"""
+
+DESCRIBE_PROMPT = """<role>You are an expert visual analyst.</role>
+<task>Describe what is shown in this image concisely.</task>
+<instructions>
+Focus on subject, setting, notable objects, and composition. Keep the description under 300 characters. Do not speculate about what is outside the frame.
+</instructions>"""
+
+
+@dataclass
+class Query:
+    name: str
+    default_max_size: int
+    default_model: str
+    prompt: str | None
+    schema: dict | None
+    boolean_field: str | None
+
+    def render_line(self, parsed: dict, path: Path) -> str:
+        if self.boolean_field:
+            value = "true" if parsed.get(self.boolean_field) else "false"
+            return f"{path}\t{value}"
+        if self.schema is None:
+            return f"{path}\t{parsed['text']}"
+        return f"{path}\t{json.dumps(parsed, ensure_ascii=False)}"
+
+
+BUILTINS = {
+    "has-people": Query(
+        name="has-people",
+        default_max_size=384,
+        default_model="gemini-3.5-flash",
+        prompt=HAS_PEOPLE_PROMPT,
+        schema={
+            "type": "object",
+            "properties": {
+                "has_people": {
+                    "type": "boolean",
+                    "description": "True if people feature prominently in the photo",
+                }
+            },
+            "required": ["has_people"],
+        },
+        boolean_field="has_people",
+    ),
+    "describe": Query(
+        name="describe",
+        default_max_size=768,
+        default_model="gemini-3.5-flash",
+        prompt=DESCRIBE_PROMPT,
+        schema=None,
+        boolean_field=None,
+    ),
+}
+
+
+def expand_paths(args_paths: list[str], recursive: bool) -> list[Path]:
+    out: list[Path] = []
+    for p in args_paths:
+        path = Path(p)
+        if path.is_file():
+            out.append(path)
+        elif path.is_dir():
+            it = path.rglob("*") if recursive else path.iterdir()
+            out.extend(
+                sorted(c for c in it if c.is_file() and c.suffix.lower() in IMAGE_EXTS)
+            )
+        else:
+            raise FileNotFoundError(p)
+    return out
+
+
+def add_global_flags(
+    ap: argparse.ArgumentParser, *, default_max_size: int, default_model: str
+) -> None:
+    ap.add_argument("--help", action="help", help="Show this help message and exit")
+    ap.add_argument(
+        "--max-size",
+        type=int,
+        default=default_max_size,
+        metavar="N",
+        help=f"Longest-edge resize cap, in px (default: {default_max_size})",
+    )
+    ap.add_argument(
+        "--model",
+        default=default_model,
+        help=f"Gemini model id (default: {default_model})",
+    )
+    ap.add_argument("--no-cache", action="store_true", help="Bypass the resize cache")
+    ap.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Recurse into directory arguments",
+    )
+
+
+def run_query(
+    query: Query,
+    paths: list[Path],
+    args: argparse.Namespace,
+    api_key: str,
+    verbose: bool,
+    filter_field: str | None,
+) -> int:
+    """Returns process exit code."""
+    single_boolean = (
+        len(paths) == 1 and query.boolean_field is not None and filter_field is None
+    )
+    any_error = False
+    boolean_result = None
+
+    for path in paths:
+        try:
+            img_bytes = preprocess(path, args.max_size, use_cache=not args.no_cache)
+            assert query.prompt is not None
+            parsed = gemini_request(
+                api_key, args.model, img_bytes, query.prompt, query.schema
+            )
+        except Exception as e:
+            print(f"photo-query: {path}: {e}", file=sys.stderr)
+            any_error = True
+            continue
+
+        if single_boolean:
+            assert query.boolean_field is not None
+            boolean_result = bool(parsed.get(query.boolean_field))
+            if verbose:
+                print("true" if boolean_result else "false", file=sys.stderr)
+            continue
+
+        if filter_field is not None:
+            if parsed.get(filter_field):
+                print(path)
+            continue
+
+        print(query.render_line(parsed, path))
+
+    if any_error:
+        return 2
+    if single_boolean:
+        return 0 if boolean_result else 1
+    return 0
+
+
+def cmd_has_people(argv: list[str], api_key: str) -> int:
+    q = BUILTINS["has-people"]
+    ap = argparse.ArgumentParser(
+        prog="photo-query has-people",
+        description="Detect if people feature prominently in a photo.",
+        add_help=False,
+    )
+    add_global_flags(
+        ap, default_max_size=q.default_max_size, default_model=q.default_model
+    )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Echo true/false to stderr (single-file mode)",
+    )
+    ap.add_argument("paths", nargs="+", metavar="FILE_OR_DIR")
+    args = ap.parse_args(argv)
+    paths = expand_paths(args.paths, args.recursive)
+    if not paths:
+        print("photo-query: no image files found", file=sys.stderr)
+        return 2
+    return run_query(q, paths, args, api_key, args.verbose, None)
+
+
+def cmd_describe(argv: list[str], api_key: str) -> int:
+    q = BUILTINS["describe"]
+    ap = argparse.ArgumentParser(
+        prog="photo-query describe",
+        description="Generate a short text description of each image.",
+        add_help=False,
+    )
+    add_global_flags(
+        ap, default_max_size=q.default_max_size, default_model=q.default_model
+    )
+    ap.add_argument(
+        "--prompt",
+        help="Override the default description prompt",
+    )
+    ap.add_argument("paths", nargs="+", metavar="FILE_OR_DIR")
+    args = ap.parse_args(argv)
+    if args.prompt:
+        q = Query(**{**q.__dict__, "prompt": args.prompt})
+    paths = expand_paths(args.paths, args.recursive)
+    if not paths:
+        print("photo-query: no image files found", file=sys.stderr)
+        return 2
+    return run_query(q, paths, args, api_key, False, None)
+
+
+def cmd_ask(argv: list[str], api_key: str) -> int:
+    ap = argparse.ArgumentParser(
+        prog="photo-query ask",
+        description="Generic image query with optional schema and filter.",
+        add_help=False,
+    )
+    add_global_flags(ap, default_max_size=768, default_model="gemini-3.5-flash")
+    ap.add_argument("--prompt", required=True, help="Question to ask about each image")
+    ap.add_argument(
+        "--schema",
+        help="llm-style schema_dsl, e.g. 'has_bed bool, count int'",
+    )
+    ap.add_argument(
+        "--filter",
+        dest="filter_field",
+        help="Print only paths whose boolean FIELD is true (requires --schema)",
+    )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Echo true/false to stderr (single-file boolean mode)",
+    )
+    ap.add_argument("paths", nargs="+", metavar="FILE_OR_DIR")
+    args = ap.parse_args(argv)
+
+    if args.filter_field and not args.schema:
+        print("photo-query: --filter requires --schema", file=sys.stderr)
+        return 2
+
+    schema = parse_schema_dsl(args.schema) if args.schema else None
+    bool_field = None
+    if schema is not None:
+        bool_fields = [
+            n for n, p in schema["properties"].items() if p["type"] == "boolean"
+        ]
+        if len(bool_fields) == 1 and len(schema["properties"]) == 1:
+            bool_field = bool_fields[0]
+
+    q = Query(
+        name="ask",
+        default_max_size=args.max_size,
+        default_model=args.model,
+        prompt=args.prompt,
+        schema=schema,
+        boolean_field=bool_field,
+    )
+    paths = expand_paths(args.paths, args.recursive)
+    if not paths:
+        print("photo-query: no image files found", file=sys.stderr)
+        return 2
+    return run_query(q, paths, args, api_key, args.verbose, args.filter_field)
+
+
+COMMANDS: dict[str, Callable[[list[str], str], int]] = {
+    "has-people": cmd_has_people,
+    "describe": cmd_describe,
+    "ask": cmd_ask,
+}
+
+
+def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] in {"--help", "help"}:
+        print(__doc__)
+        print("Available subcommands:")
+        for name in COMMANDS:
+            print(f"  {name}")
+        print("\nCache: ~/.cache/agent-tools/photo-query/")
+        return 0
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print("photo-query: missing or unknown subcommand", file=sys.stderr)
+        print(f"Try one of: {', '.join(COMMANDS)}", file=sys.stderr)
+        print("Run 'photo-query --help' for more information.", file=sys.stderr)
+        return 2
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        print(
+            "photo-query: GEMINI_API_KEY environment variable not set", file=sys.stderr
+        )
+        return 2
+
+    sub = sys.argv[1]
+    return COMMANDS[sub](sys.argv[2:], api_key)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

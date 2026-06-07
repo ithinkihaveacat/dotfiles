@@ -202,14 +202,3 @@ Soft-404 detection: missing listing URLs (`/past-sales/<bad-slug>` or
 If the URL paths themselves change (e.g. `/sales-list/<slug>` starts returning a
 real 404), grep an index page for the slug of a known property — Inigo's slugs
 are stable, so the surrounding URL path tells you the new convention.
-
-## LLM model notes
-
-`query-llm.py` defaults to `gemini/gemini-2.5-flash-lite`.
-`gemini-2.0-flash-lite` (the original default) was retired by Google in 2026.
-List currently available models with:
-
-```bash
-uv run --with llm --with llm-gemini python3 -c \
-  "import llm; [print(m.model_id) for m in llm.get_models()]"
-```
