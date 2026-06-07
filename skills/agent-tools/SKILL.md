@@ -66,10 +66,10 @@ scripts/screenshot-compare before.png after.png
 scripts/photo-smart-crop photo.jpg cropped.jpg
 
 # Check if a photo prominently features people (exit code = answer)
-scripts/photo-query has-people photo.jpg
+scripts/photo-query @people photo.jpg
 
 # Generic image query with a JSON schema
-scripts/photo-query ask --prompt "Is there a fireplace?" \
+scripts/photo-query "Is there a fireplace?" \
   --schema "has_fireplace bool" photo.jpg
 
 # Generate essay-length analysis from text
@@ -297,42 +297,45 @@ scripts/photo-smart-crop --ratio 1:1 headshot.png avatar.png
 
 ### photo-query
 
-Ask Gemini a question about one or more photos. Subcommands:
+Ask Gemini a question about one or more photos. The QUERY positional is either
+an `@`-prefixed built-in or a free-form prompt:
 
-- `has-people FILE...` — boolean: do people feature prominently? Single-file
-  mode encodes the answer in the exit code (`0` true / `1` false / `2` error);
-  stdout silent; `-v` echoes `true`/`false` to **stderr**. Defaults to a 384px
-  resize (single-tile token cost).
-- `describe FILE...` — short free-text description per file. Optional `--prompt`
-  overrides the default description prompt.
-- `ask FILE... --prompt TEXT [--schema SPEC] [--filter FIELD]` — generic query.
-  `--schema` uses llm-style DSL like `'has_bed bool, count int'`;
-  `--filter FIELD` prints only paths whose boolean field is true.
+- `@people` — boolean: do people feature prominently? Single-file mode encodes
+  the answer in the exit code (`0` true / `1` false / `2` error); stdout
+  silent; `-v` echoes `true`/`false` to **stderr**. Defaults to a 384px resize
+  (single-tile token cost).
+- Any free-form text is sent as the prompt. Add `--schema SPEC` (llm-style DSL
+  like `'has_bed bool, count int'`) for structured output and `--filter FIELD`
+  to print only paths whose boolean field is true.
 
-Multiple files (or non-boolean queries) emit per-file lines on stdout; exit code
-only reflects success/failure.
+Multiple files (or non-boolean queries) emit per-file lines on stdout; exit
+code only reflects success/failure.
+
+Default model is `gemini-3.1-flash-lite` — the cheapest/fastest Gemini 3 tier,
+appropriate for high-volume classification and lightweight visual Q&A. Override
+with `--model` for harder questions.
 
 Deterministic image prep (EXIF rotate, alpha flatten, resize to `--max-size`
-(default 768, 384 for `has-people`), WebP encode) is content-addressed-cached at
+(default 768, 384 for `@people`), WebP encode) is content-addressed-cached at
 `~/.cache/agent-tools/photo-query/` so repeated queries against the same images
 skip the resize entirely. Use `--no-cache` to bypass.
 
 ```bash
 # Boolean check (exit code idiom)
-if scripts/photo-query has-people photo.jpg; then echo "Found people"; fi
+if scripts/photo-query @people photo.jpg; then echo "Found people"; fi
 
 # Multi-file boolean: per-line `<path>\t<true|false>` on stdout
-scripts/photo-query has-people *.jpg
+scripts/photo-query @people *.jpg
 
 # Schema-constrained query with filter
-scripts/photo-query ask --recursive \
-  --prompt "Does this image feature a bedside table?" \
+scripts/photo-query --recursive \
   --schema "has_bedside_table bool" \
   --filter has_bedside_table \
+  "Does this image feature a bedside table?" \
   ./photos/
 
 # Free-text description per file
-scripts/photo-query describe room.jpg
+scripts/photo-query "Describe the scene in under 200 chars." room.jpg
 ```
 
 **Exit codes:** 0 success (or true for single-file boolean), 1 false (only for

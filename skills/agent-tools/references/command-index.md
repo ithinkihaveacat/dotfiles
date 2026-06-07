@@ -240,56 +240,43 @@ ______________________________________________________________________
 
 ## photo-query
 
-Ask Gemini a question about one or more photos. Built-in queries handle common
-cases (`has-people`, `describe`) and a generic `ask` subcommand runs arbitrary
-schema-constrained or free-text queries. Image pre-processing (EXIF rotation,
-alpha flatten, resize, WebP encode) is content-addressed-cached so repeated
-queries against the same images skip all redundant work.
+Ask Gemini a question about one or more photos. The QUERY positional is either
+an `@`-prefixed built-in (e.g. `@people`) or a free-form prompt; built-ins
+ship with their own prompt, schema, and tuned defaults. Image pre-processing
+(EXIF rotation, alpha flatten, resize, WebP encode) is content-addressed-cached
+so repeated queries against the same images skip all redundant work.
 
 ### Synopsis
 
 ```bash
-scripts/photo-query QUERY [QUERY_OPTIONS] FILE_OR_DIR [FILE_OR_DIR ...]
+scripts/photo-query [OPTIONS] QUERY FILE_OR_DIR [FILE_OR_DIR ...]
 ```
 
-### Subcommands
+### Built-in queries
 
-| Subcommand   | Description                                                          |
-| ------------ | -------------------------------------------------------------------- |
-| `has-people` | Do people feature prominently? Boolean.                              |
-| `describe`   | Short free-text description per image.                               |
-| `ask`        | Generic query: `--prompt`, optional `--schema`, optional `--filter`. |
+| Name      | Description                                                  |
+| --------- | ------------------------------------------------------------ |
+| `@people` | Do people feature prominently? Boolean. 384px resize default. |
 
 ### Arguments
 
 | Argument      | Description                                                                    |
 | ------------- | ------------------------------------------------------------------------------ |
+| `QUERY`       | `@name` built-in, or free-form prompt text.                                    |
 | `FILE_OR_DIR` | One or more image files, or directories (top-level only unless `--recursive`). |
 
-### Global Options
-
-| Option         | Description                                                              |
-| -------------- | ------------------------------------------------------------------------ |
-| `--max-size N` | Longest-edge resize cap, px. Defaults: 384 (`has-people`), 768 (others). |
-| `--model M`    | Override Gemini model (default `gemini-3.5-flash`).                      |
-| `--no-cache`   | Skip the resize cache and re-process every image.                        |
-| `--recursive`  | Recurse into directory arguments (`*.{jpg,jpeg,png,webp,heic,heif}`).    |
-| `--help`       | Display per-subcommand help and exit.                                    |
-
-### `ask` Options
+### Options
 
 | Option           | Description                                                                                         |
 | ---------------- | --------------------------------------------------------------------------------------------------- |
-| `--prompt TEXT`  | (Required) the question to ask about each image.                                                    |
-| `--schema SPEC`  | llm-style DSL: comma-separated `name [type] [: description]`. Types: `bool`, `int`, `float`, `str`. |
-| `--filter FIELD` | Print only paths whose boolean FIELD is true (requires `--schema`).                                 |
+| `--max-size N`   | Longest-edge resize cap, px. Default: 768 (built-ins may use a smaller default, e.g. 384 for `@people`). |
+| `--model M`      | Override Gemini model (default `gemini-3.1-flash-lite` — cheapest/fastest Gemini 3 tier).           |
+| `--no-cache`     | Skip the resize cache and re-process every image.                                                   |
+| `--recursive`    | Recurse into directory arguments (`*.{jpg,jpeg,png,webp,heic,heif}`).                               |
+| `--schema SPEC`  | llm-style DSL: comma-separated `name [type] [: description]`. Types: `bool`, `int`, `float`, `str`. Not allowed with built-ins. |
+| `--filter FIELD` | Print only paths whose boolean FIELD is true (requires a schema, built-in or `--schema`).           |
 | `-v, --verbose`  | In single-file boolean mode, echo `true`/`false` to **stderr**.                                     |
-
-### `has-people` Options
-
-| Option          | Description                                            |
-| --------------- | ------------------------------------------------------ |
-| `-v, --verbose` | Echo `true`/`false` to **stderr** in single-file mode. |
+| `--help`         | Display help and exit.                                                                              |
 
 ### Environment Variables
 
@@ -301,26 +288,26 @@ scripts/photo-query QUERY [QUERY_OPTIONS] FILE_OR_DIR [FILE_OR_DIR ...]
 
 ```bash
 # Boolean exit-code idiom (single file)
-if scripts/photo-query has-people photo.jpg; then echo "Found"; fi
+if scripts/photo-query @people photo.jpg; then echo "Found"; fi
 
 # Multi-file boolean: tab-separated <path> <true|false> on stdout
-scripts/photo-query has-people *.jpg
+scripts/photo-query @people *.jpg
 
-# Schema-constrained ask with filter (one-field bool also exit-codable)
-scripts/photo-query ask \
-  --prompt "Does this image feature a bedside table?" \
+# Schema-constrained free-form prompt with filter (one-field bool also exit-codable)
+scripts/photo-query --recursive \
   --schema "has_bedside_table bool" \
   --filter has_bedside_table \
-  --recursive ./photos/
+  "Does this image feature a bedside table?" \
+  ./photos/
 
 # Multi-field schema, JSON output per file
-scripts/photo-query ask \
-  --prompt "Does this image show a fireplace? Artwork above it?" \
+scripts/photo-query \
   --schema "fireplace bool, art_over_fireplace bool" \
+  "Does this image show a fireplace? Artwork above it?" \
   *.jpg
 
 # Free-text description
-scripts/photo-query describe room.jpg
+scripts/photo-query "Describe the scene in under 200 chars." room.jpg
 ```
 
 ### Cache
@@ -333,8 +320,8 @@ it grows unbounded; no automatic eviction.
 ### Exit-Code Semantics
 
 The exit code encodes the answer **only** when a single file is passed and the
-query produces a single boolean field (`has-people`, or `ask` with a one-field
-bool schema). Otherwise the exit code reflects success/failure only.
+query produces a single boolean field (`@people`, or a free-form prompt with a
+one-field bool schema). Otherwise the exit code reflects success/failure only.
 
 | Mode                      | Code | Description                                |
 | ------------------------- | ---- | ------------------------------------------ |
