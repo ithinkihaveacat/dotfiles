@@ -69,6 +69,37 @@ scripts/git-skill add /google/src/files/head/depot/google3/path/to/skill
 *(This will automatically resolve the path, create the symlink, and configure
 the Git exclusion).*
 
+#### Using `p4-skill` (Recommended for Perforce-Compatible Workspaces)
+
+If your project is in a **Perforce-compatible workspace**, it is highly
+recommended to use the `p4-skill` tool. It automatically manages the symlink
+creation:
+
+- **For workspaces using a centralized personal config layout**: It links skills
+  under `configs/users/<username>/_agents/skills/` (where agents automatically
+  discover them) and tracks them in `.p4-skills-managed` in that directory. This
+  is typically used in large enterprise environments with centralized user
+  configurations.
+- **For standard Perforce workspaces**: It links skills under `.agents/skills/`
+  (and `.claude/skills/`) and tracks them in `.p4-skills-managed` at the client
+  root.
+
+To link a skill using the `p4-skill` script, run this command from your
+workspace:
+
+```bash
+p4-skill add /google/src/files/head/depot/google3/path/to/skill
+```
+
+Or if running the script directly:
+
+```bash
+scripts/p4-skill add /google/src/files/head/depot/google3/path/to/skill
+```
+
+*(This will automatically resolve the path, detect your environment, and create
+the symlinks in the correct customization root).*
+
 #### Manual Linking (Fallback)
 
 If you are not using Git, or prefer manual control, you can create a symlink in

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Find script path relative to test
+TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${TEST_DIR}/../../bin/p4-skill"
+
+echo "1..15"
+
+# Need a temporary directory for workspace simulation
+TMPDIR=$(mktemp -d)
+trap 'rm -rf -- "$TMPDIR" "$MOCK_BIN_DIR"' EXIT
+
+# Mock p4 command
+MOCK_BIN_DIR=$(mktemp -d)
+cat <<'EOF' >"$MOCK_BIN_DIR/p4"
+#!/usr/bin/env bash
+cmd=$1
+shift
+if [ "$cmd" = "info" ]; then
+  echo "User name: testuser"
+  echo "Client root: $MOCK_CLIENT_ROOT"
+  echo "Server address: $MOCK_SERVER_ADDRESS"
+  exit 0
+elif [ "$cmd" = "fstat" ]; then
+  if [ -n "${MOCK_TRACKED_FILES:-}" ] && echo "$MOCK_TRACKED_FILES" | grep -q "$1"; then
+    echo "depotFile //depot/something"
+    exit 0
+  fi
+  echo "no such file" >&2
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN_DIR/p4"
+
+# Set up environment
+export PATH="$MOCK_BIN_DIR:$PATH"
+export SKILL_SOURCE_DIRS="${TMPDIR}/skills"
+export XDG_CONFIG_HOME="${TMPDIR}/.config"
+export XDG_CACHE_HOME="${TMPDIR}/.cache"
+
+# Create source skills
+mkdir -p "${TMPDIR}/skills/coding-standards" "${TMPDIR}/skills/emumanager"
+
+# ==========================================
+# PART 1: Test Google3 CitC Mode
+# ==========================================
+export MOCK_CLIENT_ROOT="${TMPDIR}/citc_ws"
+export MOCK_SERVER_ADDRESS="piper-frontend.google.com:8101"
+mkdir -p "${MOCK_CLIENT_ROOT}/main-repo"
+touch "${MOCK_CLIENT_ROOT}/main-repo/WORKSPACE"
+mkdir -p "${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents"
+
+# Test 1: catalog runs
+if "${SCRIPT}" catalog >/dev/null 2>&1; then
+	echo "ok 1 - [CitC] catalog runs"
+else
+	echo "not ok 1 - [CitC] catalog failed"
+fi
+
+# Test 2: add multiple skills
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+	DEST_DIR="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/skills"
+	if [ -L "${DEST_DIR}/coding-standards" ] && [ -L "${DEST_DIR}/emumanager" ]; then
+		echo "ok 2 - [CitC] add multiple skills"
+	else
+		echo "not ok 2 - [CitC] add did not create symlinks"
+	fi
+else
+	echo "not ok 2 - [CitC] add failed"
+fi
+
+# Test 3: list
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+	echo "ok 3 - [CitC] list returns members"
+else
+	echo "not ok 3 - [CitC] list failed"
+fi
+
+# Test 4: state file
+STATE_FILE="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/.p4-skills-managed"
+if grep -q "coding-standards" "$STATE_FILE"; then
+	echo "ok 4 - [CitC] state file updated"
+else
+	echo "not ok 4 - [CitC] state file missing entries"
+fi
+
+# Test 5: clean
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+	DEST_DIR="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/skills"
+	if [ ! -d "${DEST_DIR}" ] && [ ! -f "$STATE_FILE" ]; then
+		echo "ok 5 - [CitC] clean removes links and state"
+	else
+		echo "not ok 5 - [CitC] clean left files"
+	fi
+else
+	echo "not ok 5 - [CitC] clean failed"
+fi
+
+# ==========================================
+# PART 2: Test Public Perforce Mode
+# ==========================================
+export MOCK_CLIENT_ROOT="${TMPDIR}/public_ws"
+export MOCK_SERVER_ADDRESS="perforce.example.com:1666"
+mkdir -p "${MOCK_CLIENT_ROOT}"
+
+# Test 6: add multiple skills (public mode uses .agents/skills and .claude/skills)
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+	if [ -L "${MOCK_CLIENT_ROOT}/.agents/skills/coding-standards" ] && [ -L "${MOCK_CLIENT_ROOT}/.claude/skills/emumanager" ]; then
+		echo "ok 6 - [Public] add multiple skills"
+	else
+		echo "not ok 6 - [Public] add did not create symlinks in standard locations"
+	fi
+else
+	echo "not ok 6 - [Public] add failed"
+fi
+
+# Test 7: list
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+	echo "ok 7 - [Public] list returns members"
+else
+	echo "not ok 7 - [Public] list failed"
+fi
+
+# Test 8: state file (public mode uses root .p4-skills-managed)
+STATE_FILE_PUB="${MOCK_CLIENT_ROOT}/.p4-skills-managed"
+if grep -q "coding-standards" "$STATE_FILE_PUB"; then
+	echo "ok 8 - [Public] state file updated at root"
+else
+	echo "not ok 8 - [Public] state file missing at root"
+fi
+
+# Test 9: clean
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+	if [ ! -d "${MOCK_CLIENT_ROOT}/.agents" ] && [ ! -d "${MOCK_CLIENT_ROOT}/.claude" ] && [ ! -f "$STATE_FILE_PUB" ]; then
+		echo "ok 9 - [Public] clean removes links and state"
+	else
+		echo "not ok 9 - [Public] clean left files"
+	fi
+else
+	echo "not ok 9 - [Public] clean failed"
+fi
+
+# ==========================================
+# PART 3: Generic Tests
+# ==========================================
+# Test 10: add bogus-skill-name reports unknown skill
+if ! "${SCRIPT}" add bogus-skill-name >/dev/null 2>&1; then
+	echo "ok 10 - add bogus-skill-name reports unknown skill"
+else
+	echo "not ok 10 - add bogus-skill-name succeeded unexpectedly"
+fi
+
+# Test 11: resolves names against SKILL_SOURCE_DIRS
+mkdir -p "${TMPDIR}/custom-skills/test-skill"
+if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill >/dev/null 2>&1; then
+	echo "ok 11 - resolves names against SKILL_SOURCE_DIRS"
+else
+	echo "not ok 11 - failed to resolve custom skill"
+fi
+
+# Test 12: resolve returns source path; fails on unknown name
+if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill | grep -q 'custom-skills/test-skill'; then
+	if ! "${SCRIPT}" resolve nope >/dev/null 2>&1; then
+		echo "ok 12 - resolve returns source path; fails on unknown name"
+	else
+		echo "not ok 12 - resolve succeeded on unknown name"
+	fi
+else
+	echo "not ok 12 - resolve failed to return source path"
+fi
+
+# Test 13: refuse to overwrite tracked files
+mkdir -p "${MOCK_CLIENT_ROOT}/.agents/skills"
+touch "${MOCK_CLIENT_ROOT}/.agents/skills/coding-standards"
+export MOCK_TRACKED_FILES="${MOCK_CLIENT_ROOT}/.agents/skills/coding-standards"
+
+if ! "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+	echo "ok 13 - refuse to overwrite tracked files"
+else
+	echo "not ok 13 - overwrote tracked file unexpectedly"
+fi
+unset MOCK_TRACKED_FILES
+rm -f "${MOCK_CLIENT_ROOT}/.agents/skills/coding-standards"
+
+# Test 14: update --catalog with empty registry preserves catalog
+mkdir -p "${XDG_CACHE_HOME}/skill-select/catalog/dummy"
+touch "${XDG_CACHE_HOME}/skill-select/catalog/dummy/SKILL.md"
+if "${SCRIPT}" update --catalog >/dev/null 2>&1; then
+	if [ -d "${XDG_CACHE_HOME}/skill-select/catalog/dummy" ]; then
+		echo "ok 14 - update --catalog with empty registry preserves catalog"
+	else
+		echo "not ok 14 - update --catalog destroyed unrelated catalog"
+	fi
+else
+	echo "not ok 14 - update --catalog failed"
+fi
+
+# Test 15: help documents update --catalog
+if "${SCRIPT}" --help 2>&1 | grep -q '\-\-catalog'; then
+	echo "ok 15 - help documents update --catalog"
+else
+	echo "not ok 15 - help does not document update --catalog"
+fi
