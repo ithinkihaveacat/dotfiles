@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Find script path relative to test
+TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${TEST_DIR}/../../bin/skill"
+
+echo "1..21"
+
+# Need a temporary directory for workspace simulations
+TMPDIR=$(mktemp -d)
+MOCK_BIN_DIR=$(mktemp -d)
+trap 'rm -rf -- "$TMPDIR" "$MOCK_BIN_DIR"' EXIT
+
+# Create source skills in a central location
+mkdir -p "${TMPDIR}/sources/coding-standards" "${TMPDIR}/sources/emumanager"
+# Add dummy SKILL.md to sources so they are valid skills
+echo -e "---\nname: coding-standards\n---\nbody" > "${TMPDIR}/sources/coding-standards/SKILL.md"
+echo -e "---\nname: emumanager\n---\nbody" > "${TMPDIR}/sources/emumanager/SKILL.md"
+
+# Set up common environment
+export SKILL_SOURCE_DIRS="${TMPDIR}/sources"
+export XDG_CONFIG_HOME="${TMPDIR}/.config"
+export XDG_CACHE_HOME="${TMPDIR}/.cache"
+# Ensure p4 is not found by default during Git/Unmanaged tests
+export PATH="$MOCK_BIN_DIR:$PATH"
+
+# Write a dummy p4 that fails, to ensure we don't accidentally detect P4
+cat <<'EOF' >"$MOCK_BIN_DIR/p4"
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$MOCK_BIN_DIR/p4"
+
+
+# ==============================================================================
+# PART 1: Unmanaged (Default) Workspace Mode
+# ==============================================================================
+UNMANAGED_DIR="${TMPDIR}/unmanaged"
+mkdir -p "$UNMANAGED_DIR"
+cd "$UNMANAGED_DIR"
+
+# Test 1: catalog runs
+if "${SCRIPT}" catalog >/dev/null 2>&1; then
+  echo "ok 1 - [Unmanaged] catalog runs"
+else
+  echo "not ok 1 - [Unmanaged] catalog failed"
+fi
+
+# Test 2: add multiple skills
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+  if [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/emumanager ]; then
+    echo "ok 2 - [Unmanaged] add multiple skills"
+  else
+    echo "not ok 2 - [Unmanaged] add did not create symlinks"
+  fi
+else
+  echo "not ok 2 - [Unmanaged] add failed"
+fi
+
+# Test 3: list returns members
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+  echo "ok 3 - [Unmanaged] list returns members"
+else
+  echo "not ok 3 - [Unmanaged] list failed"
+fi
+
+# Test 4: state file .skills-managed updated
+if [ -f .skills-managed ] && grep -q "coding-standards" .skills-managed; then
+  echo "ok 4 - [Unmanaged] state file updated"
+else
+  echo "not ok 4 - [Unmanaged] state file missing or empty"
+fi
+
+# Test 5: clean removes links and state file
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  if [ ! -d .claude ] && [ ! -d .agents ] && [ ! -f .skills-managed ]; then
+    echo "ok 5 - [Unmanaged] clean removes links and state"
+  else
+    echo "not ok 5 - [Unmanaged] clean left files"
+  fi
+else
+  echo "not ok 5 - [Unmanaged] clean failed"
+fi
+
+
+# ==============================================================================
+# PART 2: Git Workspace Mode
+# ==============================================================================
+GIT_DIR="${TMPDIR}/git_repo"
+mkdir -p "$GIT_DIR"
+cd "$GIT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+
+# Test 6: add multiple skills
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+  if [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/emumanager ]; then
+    echo "ok 6 - [Git] add multiple skills"
+  else
+    echo "not ok 6 - [Git] add did not create symlinks"
+  fi
+else
+  echo "not ok 6 - [Git] add failed"
+fi
+
+# Test 7: list returns members
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+  echo "ok 7 - [Git] list returns members"
+else
+  echo "not ok 7 - [Git] list failed"
+fi
+
+# Test 8: info/exclude contains managed block
+if [ -f .git/info/exclude ] && grep -q "managed by 'skill'" .git/info/exclude; then
+  echo "ok 8 - [Git] info/exclude contains managed block"
+else
+  echo "not ok 8 - [Git] info/exclude missing managed entries"
+fi
+
+# Test 9: remove deletes symlink and exclude entry
+if "${SCRIPT}" remove emumanager >/dev/null 2>&1; then
+  if [ ! -L .agents/skills/emumanager ] && ! grep -q "emumanager" .git/info/exclude; then
+    echo "ok 9 - [Git] remove deletes symlink and exclude entry"
+  else
+    echo "not ok 9 - [Git] remove left symlink or exclude entry"
+  fi
+else
+  echo "not ok 9 - [Git] remove failed"
+fi
+
+# Test 10: clean removes links and managed block
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  if [ ! -L .claude/skills/coding-standards ] && ! grep -q "coding-standards" .git/info/exclude; then
+    echo "ok 10 - [Git] clean removes links and exclude block"
+  else
+    echo "not ok 10 - [Git] clean left links or exclude block"
+  fi
+else
+  echo "not ok 10 - [Git] clean failed"
+fi
+
+# Test 11: add from subdirectory updates top-level exclude
+mkdir -p sub
+cd sub
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+  if grep -q "/.claude/skills/coding-standards" ../.git/info/exclude; then
+    echo "ok 11 - [Git] add from subdirectory updates top-level exclude"
+  else
+    echo "not ok 11 - [Git] top-level exclude not updated"
+  fi
+else
+  echo "not ok 11 - [Git] add from subdirectory failed"
+fi
+cd ..
+
+
+# ==============================================================================
+# PART 3: Perforce Workspace Mode
+# ==============================================================================
+# Re-mock p4 command to succeed and return simulated workspace info
+cat <<'EOF' >"$MOCK_BIN_DIR/p4"
+#!/usr/bin/env bash
+cmd=$1
+shift
+if [ "$cmd" = "info" ]; then
+  echo "User name: testuser"
+  echo "Client root: $MOCK_CLIENT_ROOT"
+  exit 0
+elif [ "$cmd" = "fstat" ]; then
+  if [ -n "${MOCK_TRACKED_FILES:-}" ] && echo "$MOCK_TRACKED_FILES" | grep -q "$1"; then
+    echo "depotFile //depot/something"
+    exit 0
+  fi
+  echo "no such file" >&2
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN_DIR/p4"
+
+# --- Centralized Mode ---
+export MOCK_CLIENT_ROOT="${TMPDIR}/centralized_ws"
+mkdir -p "${MOCK_CLIENT_ROOT}/main-repo"
+touch "${MOCK_CLIENT_ROOT}/main-repo/WORKSPACE"
+mkdir -p "${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents"
+
+cd "${MOCK_CLIENT_ROOT}/main-repo"
+
+# Test 12: add multiple skills (centralized)
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+  DEST_DIR="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/skills"
+  if [ -L "${DEST_DIR}/coding-standards" ] && [ -L "${DEST_DIR}/emumanager" ]; then
+    echo "ok 12 - [P4-Centralized] add multiple skills"
+  else
+    echo "not ok 12 - [P4-Centralized] add did not create symlinks"
+  fi
+else
+  echo "not ok 12 - [P4-Centralized] add failed"
+fi
+
+# Test 13: list
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+  echo "ok 13 - [P4-Centralized] list returns members"
+else
+  echo "not ok 13 - [P4-Centralized] list failed"
+fi
+
+# Test 14: state file
+STATE_FILE="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/.p4-skills-managed"
+if [ -f "$STATE_FILE" ] && grep -q "coding-standards" "$STATE_FILE"; then
+  echo "ok 14 - [P4-Centralized] state file updated"
+else
+  echo "not ok 14 - [P4-Centralized] state file missing entries"
+fi
+
+# Test 15: clean
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  DEST_DIR="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/skills"
+  if [ ! -d "${DEST_DIR}" ] && [ ! -f "$STATE_FILE" ]; then
+    echo "ok 15 - [P4-Centralized] clean removes links and state"
+  else
+    echo "not ok 15 - [P4-Centralized] clean left files"
+  fi
+else
+  echo "not ok 15 - [P4-Centralized] clean failed"
+fi
+
+# --- Standard P4 Mode (Local) ---
+export MOCK_CLIENT_ROOT="${TMPDIR}/public_ws"
+mkdir -p "${MOCK_CLIENT_ROOT}"
+cd "${MOCK_CLIENT_ROOT}"
+
+# Test 16: add multiple skills (public mode uses .agents/skills and .claude/skills)
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+  if [ -L ".agents/skills/coding-standards" ] && [ -L ".claude/skills/emumanager" ]; then
+    echo "ok 16 - [P4-Standard] add multiple skills"
+  else
+    echo "not ok 16 - [P4-Standard] add did not create symlinks in standard locations"
+  fi
+else
+  echo "not ok 16 - [P4-Standard] add failed"
+fi
+
+# Test 17: clean
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  if [ ! -d ".agents" ] && [ ! -d ".claude" ] && [ ! -f ".p4-skills-managed" ]; then
+    echo "ok 17 - [P4-Standard] clean removes links and state"
+  else
+    echo "not ok 17 - [P4-Standard] clean left files"
+  fi
+else
+  echo "not ok 17 - [P4-Standard] clean failed"
+fi
+
+
+# ==============================================================================
+# PART 4: Generic / Error Handling / Help Tests
+# ==============================================================================
+# Test 18: add bogus-skill-name reports unknown skill
+if ! "${SCRIPT}" add bogus-skill-name >/dev/null 2>&1; then
+  echo "ok 18 - add bogus-skill-name reports unknown skill"
+else
+  echo "not ok 18 - add bogus-skill-name succeeded unexpectedly"
+fi
+
+# Test 19: resolves names against SKILL_SOURCE_DIRS
+mkdir -p "${TMPDIR}/custom-skills/test-skill"
+echo -e "---\nname: test-skill\n---\nbody" > "${TMPDIR}/custom-skills/test-skill/SKILL.md"
+if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill | grep -q 'custom-skills/test-skill'; then
+  echo "ok 19 - resolves names against SKILL_SOURCE_DIRS"
+else
+  echo "not ok 19 - failed to resolve custom skill"
+fi
+
+# Test 20: update --catalog with empty registry preserves catalog
+mkdir -p "${XDG_CACHE_HOME}/skill-select/catalog/dummy"
+touch "${XDG_CACHE_HOME}/skill-select/catalog/dummy/SKILL.md"
+if "${SCRIPT}" update --catalog >/dev/null 2>&1; then
+  if [ -d "${XDG_CACHE_HOME}/skill-select/catalog/dummy" ]; then
+    echo "ok 20 - update --catalog with empty registry preserves catalog (GC guard)"
+  else
+    echo "not ok 20 - update --catalog destroyed unrelated catalog"
+  fi
+else
+  echo "not ok 20 - update --catalog failed"
+fi
+
+# Test 21: help documents update --catalog
+if "${SCRIPT}" --help 2>&1 | grep -q '\-\-catalog'; then
+  echo "ok 21 - help documents update --catalog"
+else
+  echo "not ok 21 - help does not document update --catalog"
+fi
