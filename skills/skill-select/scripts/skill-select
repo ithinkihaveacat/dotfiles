@@ -84,12 +84,18 @@ def load_registry():
                 if len(parts) < 2:
                     continue
                 name = parts[0]
-                repo, ref, subpath = parse_github_url(parts[1])
-                registry[name] = {
-                    "repo": repo,
-                    "ref": ref,
-                    "subpath": subpath,
-                }
+                value = parts[1]
+                if value.startswith("http://") or value.startswith("https://"):
+                    repo, ref, subpath = parse_github_url(value)
+                    registry[name] = {
+                        "repo": repo,
+                        "ref": ref,
+                        "subpath": subpath,
+                    }
+                else:
+                    # Treat as local path and expand ~
+                    expanded_path = os.path.expanduser(value)
+                    registry[name] = {"path": expanded_path}
 
     parse_file(registry_file)
     if registry_d.is_dir():
@@ -253,6 +259,28 @@ def ensure_catalog_index(registry, force=False):
     total = len(registry)
     for i, name in enumerate(sorted(registry), 1):
         entry = registry[name]
+
+        if "path" in entry:
+            # Local registry entry: symlink the directory into catalog
+            target_path = Path(entry["path"]).resolve()
+            if not target_path.is_dir():
+                print(
+                    f"skill: warning: local path for {name} does not exist: {target_path}",
+                    file=sys.stderr,
+                )
+                continue
+
+            stub_dir = catalog_dir / name
+            if not stub_dir.is_symlink() or os.readlink(stub_dir) != str(target_path):
+                if stub_dir.exists() or stub_dir.is_symlink():
+                    if stub_dir.is_symlink():
+                        stub_dir.unlink()
+                    else:
+                        shutil.rmtree(stub_dir)
+                stub_dir.parent.mkdir(parents=True, exist_ok=True)
+                stub_dir.symlink_to(target_path)
+            continue
+
         meta = meta_dir / name
         stub_md = catalog_dir / name / "SKILL.md"
         fresh = (
@@ -321,11 +349,17 @@ def resolve_spec(spec, registry, source_dirs):
     # 2. Registry check
     if spec in registry:
         entry = registry[spec]
-        repo = entry["repo"]
-        ref = entry["ref"]
-        subpath = entry["subpath"]
-        src = fetch_github(spec, repo, ref, subpath)
-        return src, spec
+        if "path" in entry:
+            path = Path(entry["path"]).resolve()
+            if not path.is_dir():
+                die(f"skill source not found: {entry['path']} (registered as {spec})")
+            return path, spec
+        else:
+            repo = entry["repo"]
+            ref = entry["ref"]
+            subpath = entry["subpath"]
+            src = fetch_github(spec, repo, ref, subpath)
+            return src, spec
 
     # 3. SKILL_SOURCE_DIRS check
     for d in source_dirs:
@@ -354,6 +388,12 @@ def cmd_update(names, registry):
     for name in names:
         if name in registry:
             entry = registry[name]
+            if "path" in entry:
+                print(
+                    f"update: {name} is a local skill; nothing to update",
+                    file=sys.stderr,
+                )
+                continue
             fetch_skill_md(
                 name, entry["repo"], entry["ref"], entry["subpath"], force=True
             )
@@ -408,15 +448,18 @@ def cmd_catalog(registry, source_dirs, as_json=False):
     # 1. Registry catalog entries
     for name in registry:
         entry = registry[name]
-        repo = entry["repo"]
-        ref = entry["ref"]
-        subpath = entry["subpath"]
+        if "path" in entry:
+            grouped["Registry"].append((name, entry["path"]))
+        else:
+            repo = entry["repo"]
+            ref = entry["ref"]
+            subpath = entry["subpath"]
 
-        url = f"https://github.com/{repo}/tree/{ref}"
-        if subpath:
-            url += f"/{subpath}"
-        # Group all registry items under "Registry" showing their full URL
-        grouped["Registry"].append((name, url))
+            url = f"https://github.com/{repo}/tree/{ref}"
+            if subpath:
+                url += f"/{subpath}"
+            # Group all registry items under "Registry" showing their full URL
+            grouped["Registry"].append((name, url))
 
     # 2. Local catalog entries under source_dirs
     for d in source_dirs:

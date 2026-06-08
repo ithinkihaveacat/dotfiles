@@ -1,0 +1,170 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pyyaml",
+# ]
+# ///
+import os
+import sys
+import tempfile
+import importlib.util
+from pathlib import Path
+from importlib.machinery import SourceFileLoader
+
+# Load skill-select module
+test_dir = Path(__file__).resolve().parent
+script_path = (
+    test_dir.parents[1] / "skills" / "skill-select" / "scripts" / "skill-select"
+)
+if not script_path.exists():
+    print("1..1")
+    print("not ok 1 - skill-select script not found at", script_path)
+    sys.exit(1)
+
+loader = SourceFileLoader("skill_select", str(script_path))
+spec = importlib.util.spec_from_loader("skill_select", loader)
+skill_select = importlib.util.module_from_spec(spec)
+try:
+    loader.exec_module(skill_select)
+except Exception as e:
+    print("1..1")
+    print(f"not ok 1 - failed to import skill-select: {e}")
+    sys.exit(1)
+
+print("1..5")
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    tmp_path = Path(tmpdir)
+
+    # Set up mock XDG_CONFIG_HOME
+    os.environ["XDG_CONFIG_HOME"] = str(tmp_path)
+    config_dir = tmp_path / "skill-select"
+    registry_d = config_dir / "registry.d"
+    registry_d.mkdir(parents=True, exist_ok=True)
+
+    # Mock home directory for expansion tests
+    mock_home = tmp_path / "mock_home"
+    mock_home.mkdir()
+    os.environ["HOME"] = str(mock_home)
+
+    # Create some dummy local skill directories
+    local_skill_dir = mock_home / "local-skill"
+    local_skill_dir.mkdir()
+    (local_skill_dir / "SKILL.md").write_text(
+        "---\nname: local-skill\ndescription: A local skill\n---\nBody"
+    )
+
+    corp_skill_dir = mock_home / "corp-skill"
+    corp_skill_dir.mkdir()
+    (corp_skill_dir / "SKILL.md").write_text(
+        "---\nname: corp-skill\ndescription: A corp skill\n---\nBody"
+    )
+
+    # 1. Test Parsing & Expansion
+    # Create 50-dotfiles
+    dotfiles_registry = registry_d / "50-dotfiles"
+    dotfiles_registry.write_text(
+        "gog             https://github.com/openclaw/openclaw/tree/main/skills/gog\n"
+        "local-skill     ~/local-skill\n"
+        "conflict-skill  https://github.com/dotfiles/conflict/tree/main/skills/conflict\n"
+    )
+
+    registry = skill_select.load_registry()
+
+    # Verify gog (GitHub)
+    if "gog" in registry and registry["gog"].get("repo") == "openclaw/openclaw":
+        print("ok 1 - load_registry parses GitHub URLs")
+    else:
+        print(
+            f"not ok 1 - load_registry failed to parse GitHub URL: {registry.get('gog')}"
+        )
+
+    # Verify local-skill (Local path with ~ expansion)
+    expected_local_path = str(local_skill_dir)
+    if (
+        "local-skill" in registry
+        and registry["local-skill"].get("path") == expected_local_path
+    ):
+        print("ok 2 - load_registry parses local paths and expands ~")
+    else:
+        print(
+            f"not ok 2 - load_registry failed local path: {registry.get('local-skill')}, expected {expected_local_path}"
+        )
+
+    # 2. Test Precedence
+    # Create 60-corp which overrides conflict-skill and adds corp-skill
+    corp_registry = registry_d / "60-corp"
+    corp_registry.write_text(
+        "conflict-skill  ~/corp-skill\ncorp-skill      ~/corp-skill\n"
+    )
+
+    registry = skill_select.load_registry()
+
+    # Verify conflict-skill is overridden by corp (local path)
+    expected_corp_path = str(corp_skill_dir)
+    if (
+        "conflict-skill" in registry
+        and registry["conflict-skill"].get("path") == expected_corp_path
+    ):
+        print(
+            "ok 3 - load_registry respects registry.d precedence (corp overrides dotfiles)"
+        )
+    else:
+        print(
+            f"not ok 3 - load_registry precedence failed: {registry.get('conflict-skill')}, expected {expected_corp_path}"
+        )
+
+    # 3. Test Resolution (resolve_spec)
+    # Resolve local-skill
+    try:
+        # resolve_spec expects registry and source_dirs
+        # We need to mock get_cache_base for fetch_github if we were testing github,
+        # but we are testing local resolution here.
+        path, name = skill_select.resolve_spec("local-skill", registry, [])
+        if path == local_skill_dir and name == "local-skill":
+            print("ok 4 - resolve_spec resolves local registry entries")
+        else:
+            print(
+                f"not ok 4 - resolve_spec resolved to wrong path: {path}, expected {local_skill_dir}"
+            )
+    except Exception as e:
+        print(f"not ok 4 - resolve_spec failed with exception: {e}")
+
+    # 4. Test Indexing (ensure_catalog_index & gather_skills)
+    # We need to mock get_catalog_dir to point to our temp dir
+    # skill-select uses get_cache_base() / "catalog"
+    # get_cache_base uses SKILL_SELECT_CACHE_DIR env var
+    cache_dir = tmp_path / "cache"
+    os.environ["SKILL_SELECT_CACHE_DIR"] = str(cache_dir)
+
+    try:
+        # Filter out non-local skills (like 'gog') to avoid network requests during test
+        local_only_registry = {k: v for k, v in registry.items() if "path" in v}
+        skill_select.ensure_catalog_index(local_only_registry)
+
+        # Verify symlink was created in catalog
+        catalog_dir = skill_select.get_catalog_dir()
+        stub_dir = catalog_dir / "local-skill"
+
+        if stub_dir.is_symlink() and stub_dir.resolve() == local_skill_dir:
+            # Test gather_skills
+            skills = skill_select.gather_skills([catalog_dir])
+            # Find local-skill in gathered skills
+            local_skill_data = next(
+                (s for s in skills if s["name"] == "local-skill"), None
+            )
+            if local_skill_data and local_skill_data["path"] == str(local_skill_dir):
+                print(
+                    "ok 5 - ensure_catalog_index symlinks local skills and gather_skills resolves them"
+                )
+            else:
+                print(
+                    f"not ok 5 - gather_skills failed to find or resolve local-skill: {local_skill_data}"
+                )
+        else:
+            print(
+                f"not ok 5 - ensure_catalog_index did not create correct symlink: is_symlink={stub_dir.is_symlink()}, points to={stub_dir.resolve() if stub_dir.exists() else 'nothing'}"
+            )
+    except Exception as e:
+        print(f"not ok 5 - indexing failed with exception: {e}")
