@@ -1,11 +1,42 @@
-# Script Quality Guidelines
+# Development Guidelines
 
-This document provides guidelines for script entrypoints in `bin/`, canonical
+This document provides development guidelines for this repository, covering
+privacy, information control, and script quality. These rules apply to all
+commits, including code, configurations, and documentation.
+
+## Privacy and Information Control
+
+This repository is strictly public. You must enforce rigid data segregation
+across all code, documentation, commit messages, and metadata to protect
+personal privacy and proprietary information.
+
+- **Public Safety:** All commits must be strictly safe for public consumption.
+  Never include unreleased features, internal API endpoints, private
+  credentials, or proprietary algorithms.
+- **Employer Anonymity:** Never leak internal, proprietary, or employer-specific
+  information. It must remain impossible to identify the user's current or past
+  employers from any data, context, or code structure in this repository.
+  - *Action:* Route all employer-specific work, architecture, configurations,
+    and documentation exclusively to the `corp` repository.
+- **Biographical & Location Security:** Never leak granular, real-time, or
+  sensitive personal telemetry. While broad, static associations (such as
+  general relevance to London or Melbourne) are acceptable, you must never
+  expose exact locations, specific addresses, real-time travel plans, or holiday
+  schedules.
+  - *Action:* Route all sensitive, personal, or autobiographical data
+    exclusively to the `private` repository.
+- **Pre-Commit Sanitization:** Before finalizing any commit, verify that no
+  protected data (corporate or personal) has been inadvertently included in code
+  comments, test fixtures, or documentation.
+
+## Script Quality and Development
+
+This section provides guidelines for script entrypoints in `bin/`, canonical
 script sources in `skills/*/scripts/`, as well as the `./update` script.
 
-## General Script Requirements
+### General Script Requirements
 
-### Dependency Checking
+#### Dependency Checking
 
 All scripts must declare their command-line dependencies using the `require()`
 function. This function checks for the existence of the specified commands and
@@ -17,7 +48,7 @@ require adb
 require apkanalyzer
 ```
 
-### File Output
+#### File Output
 
 If a script produces a new file or directory as output, it must support an
 optional `--output` switch to allow callers to specify the output path. This is
@@ -39,7 +70,7 @@ my-script --output /tmp/my-output.txt
 another-script --output /tmp/my-output-dir
 ```
 
-### Compatibility
+#### Compatibility
 
 Scripts must be compatible with standard utilities (e.g., `grep`, `awk`, `tr`)
 found in any macOS or Debian stable release that was current within the last two
@@ -85,7 +116,7 @@ Examples of features to avoid:
 - Obscure parameter expansions that harm readability
 - Any feature that would confuse maintainers familiar with basic Bash
 
-### Handling APK Archives
+#### Handling APK Archives
 
 Many scripts in this repository need to operate on a base APK. This base APK may
 be provided as a standalone `.apk` file or may be contained within a `.zip`
@@ -116,7 +147,7 @@ fi
 This block assumes that the input file path is in `$1`. If your script uses a
 different variable for the input path, you must adapt the code accordingly.
 
-## CLI Design and Documentation
+### CLI Design and Documentation
 
 Scripts must follow the predictable standard for command-line interfaces and
 comprehensive documentation guidelines.
@@ -124,13 +155,13 @@ comprehensive documentation guidelines.
 @skills/coding-standards/references/cli-tools.md
 @skills/coding-standards/references/shell.md
 
-## Fish Shell Completions
+### Fish Shell Completions
 
 Scripts in `bin/` may have corresponding Fish shell completion files in
 `fish/completions/`. When updating a script, you must also update its completion
 file if one exists.
 
-### Completion Requirements
+#### Completion Requirements
 
 - Completion files are named `<script-name>.fish` in `fish/completions/`
 - When adding, removing, or modifying command-line options in a script, update
@@ -140,7 +171,7 @@ file if one exists.
 - Completion files should provide completions for all documented options and
   subcommands
 
-### Finding Completion Files
+#### Finding Completion Files
 
 Check if a completion file exists for a script:
 
@@ -155,13 +186,13 @@ If you modify `bin/emumanager` to add a new subcommand or option, you must also
 update `fish/completions/emumanager.fish` to include completions for the new
 functionality.
 
-## Tests
+### Tests
 
 Some scripts have associated tests in the `tests/` directory. Tests use the TAP
 (Test Anything Protocol) format and can be run with `prove` or executed
 directly.
 
-### Directory Structure
+#### Directory Structure
 
 ```text
 tests/
@@ -170,7 +201,7 @@ tests/
     └── fixtures/            # Test data (images, sample files, etc.)
 ```
 
-### Test Requirements
+#### Test Requirements
 
 - Test files should be executable and output TAP format
 - Tests must be safe to run in parallel (avoid shared temporary files or state)
@@ -181,7 +212,7 @@ tests/
 - Tests that call external APIs (e.g., Gemini) are expensive and slow; run them
   manually when making substantive changes to the tested script
 
-### Finding Tests
+#### Finding Tests
 
 Check if a script has associated tests:
 
@@ -193,7 +224,7 @@ grep '# Tests:' bin/my-script
 ls tests/my-script/
 ```
 
-## Examples from This Repository
+### Examples from This Repository
 
 See these scripts for reference implementations:
 
