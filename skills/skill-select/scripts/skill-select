@@ -2,27 +2,562 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "google-genai",
-#     "pyyaml",
+#   "google-genai",
+#   "pyyaml",
+#   "requests",
 # ]
-# [tool.uv.sources]
-# google-genai = { index = "pypi" }
-# [[tool.uv.index]]
-# name = "pypi"
-# url = "https://pypi.org/simple"
 # ///
-"""Skill Select: Discover relevant agent skills."""
 
-import argparse
-import json
 import os
-import subprocess
 import sys
+import time
+import shutil
+import argparse
+import tempfile
+import tarfile
+import subprocess
 from pathlib import Path
-from google import genai
-from google.genai import types
-import yaml
+from urllib.parse import urlparse
 
+# --- MOVED REGISTRY & NETWORK CODE ---
+
+# Catalog index stub (SKILL.md) freshness: how long a discovered metadata stub
+# is trusted before re-fetching during 'suggest'/'apply'.
+CATALOG_TTL = 7 * 24 * 3600  # 7 days
+# Full-repo freshness on provision: how old a cached repo may be before 'apply'
+# force-refreshes it while adding a registry skill to a workspace.
+PROVISION_TTL = 8 * 3600  # 8 hours
+
+def get_cache_base():
+    return (
+        Path(
+            os.environ.get("SKILL_CACHE_DIR")
+            or os.environ.get("XDG_CACHE_HOME")
+            or "~/.cache"
+        ).expanduser()
+        / "skills"
+    )
+
+
+
+def get_catalog_dir():
+    return get_cache_base() / "catalog"
+
+
+
+def parse_github_url(url):
+    """Parse a GitHub tree URL into (repo, ref, subpath).
+
+    Accepts: https://github.com/{owner}/{repo}/tree/{ref}[/{subpath}]
+    """
+    parsed = urlparse(url)
+    if parsed.netloc != "github.com":
+        die(f"registry: unsupported URL (only github.com is supported): {url}")
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) < 4 or parts[2] != "tree":
+        die(f"registry: cannot parse GitHub URL: {url}")
+    owner, repo, _, ref = parts[:4]
+    subpath = "/".join(parts[4:]) or None
+    return f"{owner}/{repo}", ref, subpath
+
+
+
+def load_registry():
+    registry = {}
+
+    # Load custom registry files
+    config_dir = (
+        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser() / "skill"
+    )
+    registry_file = config_dir / "registry"
+    registry_d = config_dir / "registry.d"
+
+    def parse_file(path):
+        if not path.is_file():
+            return
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                name = parts[0]
+                repo, ref, subpath = parse_github_url(parts[1])
+                registry[name] = {
+                    "repo": repo,
+                    "ref": ref,
+                    "subpath": subpath,
+                }
+
+    parse_file(registry_file)
+    if registry_d.is_dir():
+        for item in sorted(registry_d.iterdir()):
+            if item.is_file() and not item.name.startswith("."):
+                parse_file(item)
+
+    return registry
+
+
+
+def _atomic_replace_dir(src, dest):
+    """Install src as dest atomically, swapping within dest's parent directory.
+
+    Uses sibling temp names (not '.with_suffix', which mangles refs containing
+    dots) and os.replace (which cannot overwrite a non-empty directory) by
+    moving any existing dest aside first. Both renames stay within one
+    directory, so they are atomic and safe under concurrent fetches.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / f"{dest.name}.tmp-{os.getpid()}"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    try:
+        shutil.copytree(src, tmp, symlinks=True)
+        if dest.exists():
+            trash = dest.parent / f"{dest.name}.old-{os.getpid()}"
+            if trash.exists():
+                shutil.rmtree(trash)
+            os.replace(dest, trash)
+            os.replace(tmp, dest)
+            shutil.rmtree(trash, ignore_errors=True)
+        else:
+            os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+def fetch_github(name, repo, ref, subpath, force=False):
+    import requests
+
+    owner, reponame = repo.split("/", 1)
+    cache_base = get_cache_base()
+    cachedir = cache_base / owner / reponame / ref
+    if subpath:
+        cachedir = cachedir / subpath
+
+    have_cache = cachedir.is_dir() and any(cachedir.iterdir())
+    if not force and have_cache:
+        print(
+            f"using cached {repo}@{ref} (run 'git skill update {name}' to refresh)",
+            file=sys.stderr,
+        )
+        return cachedir
+
+    archive_url = f"https://github.com/{owner}/{reponame}/archive/{ref}.tar.gz"
+    print(f"fetching {archive_url}", file=sys.stderr)
+    try:
+        r = requests.get(archive_url, stream=True)
+        r.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        # Offline / network failure: fall back to an existing cache so already
+        # provisioned skills keep working; only fail if nothing is cached.
+        if have_cache:
+            print(f"git skill: {archive_url}: {e}; using stale cache", file=sys.stderr)
+            return cachedir
+        die(f"failed to fetch {archive_url}: {e}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        tar_path = tmp_path / "archive.tar.gz"
+        with open(tar_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        try:
+            with tarfile.open(tar_path, "r:gz") as tar:
+                tar.extractall(path=tmp_path)
+        except Exception as e:
+            die(f"failed to extract archive: {e}")
+
+        subdirs = [
+            x for x in tmp_path.iterdir() if x.is_dir() and x.name != "archive.tar.gz"
+        ]
+        if not subdirs:
+            die("extracted archive is empty")
+        wrapper_dir = subdirs[0]
+
+        src_dir = wrapper_dir
+        if subpath:
+            src_dir = wrapper_dir / subpath
+            if not src_dir.is_dir():
+                die(f"path not found in {owner}/{reponame}@{ref}: {subpath}")
+
+        _atomic_replace_dir(src_dir, cachedir)
+
+    return cachedir
+
+
+
+def fetch_skill_md(name, repo, ref, subpath, force=False):
+    """Fetch only SKILL.md for a registry entry into a lightweight catalog stub.
+
+    This is the metadata-only discovery path: it lets skill-select see and rank
+    a registry skill without downloading the whole repository. The full repo is
+    materialized lazily on 'add'/provision via fetch_github. Returns the stub
+    directory, or None if SKILL.md could not be obtained and no stub exists.
+    """
+    import requests
+
+    owner, reponame = repo.split("/", 1)
+    catalog_dir = get_catalog_dir()
+    stub = catalog_dir / name
+    meta_dir = catalog_dir / ".meta"
+    meta = meta_dir / name
+    stub_md = stub / "SKILL.md"
+
+    if not force and meta.is_file() and stub_md.is_file():
+        if (time.time() - meta.stat().st_mtime) < CATALOG_TTL:
+            return stub
+
+    sub = f"{subpath}/" if subpath else ""
+    url = f"https://raw.githubusercontent.com/{owner}/{reponame}/{ref}/{sub}SKILL.md"
+    try:
+        r = requests.get(url)
+        r.raise_for_status()
+        content = r.content
+    except requests.exceptions.RequestException as e:
+        # Degrade gracefully: keep any existing stub when offline, and skip
+        # (never die) so one bad entry does not break discovery of the rest.
+        if stub_md.is_file():
+            return stub
+        print(f"git skill: {url}: {e}; skipping {name}", file=sys.stderr)
+        return None
+
+    stub.mkdir(parents=True, exist_ok=True)
+    tmp = stub / f".SKILL.md.tmp-{os.getpid()}"
+    try:
+        tmp.write_bytes(content)
+        os.replace(tmp, stub_md)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    meta.touch()
+    return stub
+
+
+
+def ensure_catalog_index(registry, force=False):
+    """Populate/refresh the catalog/ index of metadata stubs for registry skills.
+
+    Fetches only SKILL.md per entry (fast, offline-friendly cold start), then
+    garbage-collects stubs whose names are no longer registered. Returns early
+    when the registry is empty so a missing/unreadable config never triggers a
+    destructive GC of an otherwise-populated catalog.
+    """
+    if not registry:
+        return
+
+    catalog_dir = get_catalog_dir()
+    meta_dir = catalog_dir / ".meta"
+    total = len(registry)
+    for i, name in enumerate(sorted(registry), 1):
+        entry = registry[name]
+        meta = meta_dir / name
+        stub_md = catalog_dir / name / "SKILL.md"
+        fresh = (
+            not force
+            and meta.is_file()
+            and stub_md.is_file()
+            and (time.time() - meta.stat().st_mtime) < CATALOG_TTL
+        )
+        if fresh:
+            continue
+        print(f"git skill: [{i}/{total}] indexing {name}...", file=sys.stderr)
+        fetch_skill_md(
+            name, entry["repo"], entry["ref"], entry["subpath"], force=force
+        )
+
+    # Garbage-collect orphaned stubs (registry is non-empty here, so this cannot
+    # wipe a catalog just because a config file went missing).
+    if catalog_dir.is_dir():
+        for item in catalog_dir.iterdir():
+            if item.name.startswith("."):
+                continue
+            if item.name in registry:
+                continue
+            if item.is_symlink() or not item.is_dir():
+                item.unlink()
+            else:
+                shutil.rmtree(item, ignore_errors=True)
+            stale_meta = meta_dir / item.name
+            if stale_meta.exists():
+                stale_meta.unlink()
+
+
+
+def provision_registry_skill(name, entry):
+    """Ensure a registry skill's full repo is cached and fresh before adding.
+
+    Force-refreshes when the cache is missing or older than PROVISION_TTL so a
+    just-added skill reflects a recent upstream, then leaves fetch_github's own
+    reuse to make the subsequent 'add' a cache hit.
+    """
+    cache_base = get_cache_base()
+    owner, reponame = entry["repo"].split("/", 1)
+    cachedir = cache_base / owner / reponame / entry["ref"]
+    if entry["subpath"]:
+        cachedir = cachedir / entry["subpath"]
+    stale = (
+        not cachedir.is_dir()
+        or not any(cachedir.iterdir())
+        or (time.time() - cachedir.stat().st_mtime) > PROVISION_TTL
+    )
+    fetch_github(name, entry["repo"], entry["ref"], entry["subpath"], force=stale)
+
+
+
+def resolve_spec(spec, registry, source_dirs):
+    expanded_spec = os.path.expanduser(spec)
+
+    # 1. Local path check
+    if (
+        expanded_spec.startswith("/")
+        or expanded_spec.startswith("./")
+        or expanded_spec.startswith("../")
+        or "/" in expanded_spec
+    ):
+        path = Path(expanded_spec).resolve()
+        if not path.is_dir():
+            die(f"skill source not found: {spec}")
+        return path, path.name
+
+    # 2. Registry check
+    if spec in registry:
+        entry = registry[spec]
+        repo = entry["repo"]
+        ref = entry["ref"]
+        subpath = entry["subpath"]
+        src = fetch_github(spec, repo, ref, subpath)
+        return src, spec
+
+    # 3. SKILL_SOURCE_DIRS check
+    for d in source_dirs:
+        if not d:
+            continue
+        path = Path(d) / spec
+        if path.is_dir():
+            return path, spec
+
+    die(
+        f"unknown skill '{spec}': not a path, a registered catalog entry, or under any of SKILL_SOURCE_DIRS ({':'.join(source_dirs)})"
+    )
+
+
+
+def cmd_update(names, registry):
+    # 'update --catalog' refreshes the global metadata index (and prunes orphans)
+    # without needing a workspace; handle it before requiring a git repo.
+    if len(names) == 1 and names[0] == "--catalog":
+        ensure_catalog_index(registry, force=True)
+        print("update: refreshed catalog index", file=sys.stderr)
+        return
+
+    root, exclude_file = get_git_repo()
+
+    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
+    dest_dirs = [root / d for d in dest_dirs_rel]
+
+    if len(names) == 1 and names[0] == "--all":
+        managed = read_managed(exclude_file)
+        skills = set()
+        for line in managed:
+            rel = line.lstrip("/")
+            for d in dest_dirs_rel:
+                if rel.startswith(d + "/"):
+                    skills.add(rel[len(d) + 1 :])
+        names = sorted(list(skills))
+    elif not names:
+        cmderr("update", "skill name, --all, or --catalog required")
+
+    cache_base = get_cache_base()
+
+    for name in names:
+        # Registry entries can be refreshed whether or not they are currently
+        # added: always refresh the lightweight metadata stub, and re-fetch the
+        # full repo in place only when one is already cached (so 'update' never
+        # downloads a whole repo for a skill that was only ever discovered).
+        if name in registry:
+            entry = registry[name]
+            fetch_skill_md(
+                name, entry["repo"], entry["ref"], entry["subpath"], force=True
+            )
+            owner, reponame = entry["repo"].split("/", 1)
+            cachedir = cache_base / owner / reponame / entry["ref"]
+            if entry["subpath"]:
+                cachedir = cachedir / entry["subpath"]
+            if cachedir.is_dir() and any(cachedir.iterdir()):
+                fetch_github(
+                    name, entry["repo"], entry["ref"], entry["subpath"], force=True
+                )
+            print(
+                f"updated {name} from {entry['repo']}@{entry['ref']}", file=sys.stderr
+            )
+            continue
+
+        relpath = dest_dirs[0] / name
+        if not relpath.is_symlink():
+            print(
+                f"update: {name} is not currently added; skipping",
+                file=sys.stderr,
+            )
+            continue
+
+        try:
+            target = relpath.readlink().resolve()
+        except Exception:
+            continue
+
+        try:
+            target.relative_to(cache_base.resolve())
+        except ValueError:
+            print(f"update: {name} is local; nothing to update", file=sys.stderr)
+            continue
+
+        print(
+            f"update: {name} has no registry entry; cannot refresh",
+            file=sys.stderr,
+        )
+
+
+
+def cmd_resolve(name, registry, source_dirs):
+    try:
+        path, _ = resolve_spec(name, registry, source_dirs)
+        print(path)
+    except SystemExit:
+        sys.exit(1)
+
+
+
+def cmd_catalog(registry, source_dirs, as_json=False):
+    import json as _json
+    from collections import defaultdict
+
+    grouped = defaultdict(list)
+    home = str(Path.home())
+
+    def clean_p(p):
+        s = str(p)
+        if s.startswith(home):
+            return "~" + s[len(home) :]
+        return s
+
+    # Map cleaned source dirs to their index for sorting
+    source_order = {}
+    order_idx = 0
+    for d in source_dirs:
+        if d:
+            resolved = clean_p(Path(d).resolve())
+            if resolved not in source_order:
+                source_order[resolved] = order_idx
+                order_idx += 1
+
+    # 1. Registry catalog entries
+    for name in registry:
+        entry = registry[name]
+        repo = entry["repo"]
+        ref = entry["ref"]
+        subpath = entry["subpath"]
+
+        url = f"https://github.com/{repo}/tree/{ref}"
+        if subpath:
+            url += f"/{subpath}"
+        # Group all registry items under "Registry" showing their full URL
+        grouped["Registry"].append((name, url))
+
+    # 2. Local catalog entries under source_dirs
+    for d in source_dirs:
+        if not d:
+            continue
+        path = Path(d)
+        if path.is_dir():
+            resolved_parent = str(path.resolve())
+            group_key = clean_p(resolved_parent)
+            for item in path.iterdir():
+                if item.is_dir() and not item.name.startswith("."):
+                    target = None
+                    if item.is_symlink():
+                        target = clean_p(item.resolve())
+                    # Remove it from registry if it was there to avoid duplicates
+                    for grp in list(grouped.keys()):
+                        grouped[grp] = [x for x in grouped[grp] if x[0] != item.name]
+                    grouped[group_key].append((item.name, target))
+
+    # Clean up empty groups
+    for grp in list(grouped.keys()):
+        if not grouped[grp]:
+            del grouped[grp]
+
+    def sort_key(grp):
+        if grp == "Registry":
+            return (2, grp)
+        if grp in source_order:
+            return (0, source_order[grp])
+        return (1, grp)
+
+    if as_json:
+        entries = []
+        for grp in sorted(grouped.keys(), key=sort_key):
+            for name, target in sorted(grouped[grp], key=lambda x: x[0]):
+                entries.append({"name": name, "source": grp, "target": target})
+        print(_json.dumps(entries))
+        return
+
+    # Display output grouped by source path/prefix
+    first = True
+    for grp in sorted(grouped.keys(), key=sort_key):
+        if not first:
+            print()
+        first = False
+        print(f"{grp}:")
+        items = sorted(grouped[grp], key=lambda x: x[0])
+        has_targets = [x for x in items if x[1]]
+        max_len = max(len(name) for name, _ in has_targets) if has_targets else 0
+        for name, target in items:
+            if target:
+                print(f"  {name.ljust(max_len)} -> {target}")
+            else:
+                print(f"  {name}")
+
+
+
+def cmd_doctor(registry, source_dirs):
+    catalog_dir = get_catalog_dir()
+    meta_dir = catalog_dir / ".meta"
+    issues = []
+    for name in sorted(registry):
+        stub_md = catalog_dir / name / "SKILL.md"
+        meta = meta_dir / name
+        if not stub_md.is_file():
+            issues.append(f"  missing      {name} (not indexed)")
+        elif meta.is_file() and (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
+            issues.append(
+                f"  stale        {name} (older than {CATALOG_TTL}s)"
+            )
+
+    if catalog_dir.is_dir():
+        for item in sorted(catalog_dir.iterdir()):
+            if item.name.startswith("."):
+                continue
+            if item.name not in registry:
+                issues.append(
+                    f"  orphan       {item.name} (not in registry)"
+                )
+
+    if issues:
+        print()
+        print("Catalog:")
+        for line in sorted(issues):
+            print(line)
+        print("                skill-select --update --catalog")
+        sys.exit(1)
+    sys.exit(0)
 
 def load_skill_md(path: Path, default_name: str | None = None) -> dict | None:
     """Reads SKILL.md and extracts frontmatter and content."""
@@ -201,9 +736,12 @@ def resolve_selection(results, skills):
     return resolved
 
 
+
+def die(msg):
+    print(f"skill-select: {msg}", file=sys.stderr)
+    sys.exit(1)
+
 def main():
-    # add_help=False so we can expose --help without binding -h, which our CLI
-    # standard reserves for --human-readable (see coding-standards/cli-tools.md).
     parser = argparse.ArgumentParser(
         description="Skill Select: Discover relevant agent skills.",
         add_help=False,
@@ -219,11 +757,7 @@ def main():
     )
     parser.add_argument(
         "--context",
-        help=(
-            "Comprehensive, self-contained context to guide selection. Include the "
-            "goal, codebase shape/type, recently faced obstacles, and anticipated "
-            "problems (auth, environment, tooling unfamiliarity)."
-        ),
+        help="Comprehensive, self-contained context to guide selection.",
     )
     parser.add_argument(
         "--search-dirs",
@@ -244,12 +778,26 @@ def main():
         action="store_true",
         help="Emit structured output (name, source, reason) instead of bare names.",
     )
+    parser.add_argument(
+        "--update",
+        nargs="*",
+        help="Re-fetch a registered catalog entry; --all for every managed skill, --catalog to refresh the whole metadata index",
+    )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Diagnose drift between desired and on-disk skills (read-only)",
+    )
+    parser.add_argument(
+        "--resolve",
+        metavar="NAME",
+        help="Print the source path for a skill",
+    )
 
     args = parser.parse_args()
+    
+    registry = load_registry()
 
-    target_dir = Path(args.dir).resolve()
-
-    # Resolve search directories
     search_paths = []
     if args.search_dirs:
         search_paths.extend([Path(p) for p in args.search_dirs.split(":")])
@@ -258,32 +806,42 @@ def main():
         if env_dirs:
             search_paths.extend([Path(p) for p in env_dirs.split(":")])
         else:
-            # Mirror git-skill's default layout, including the catalog metadata
-            # cache so registry skills are discoverable out of the box.
             home = Path.home()
-            cache_base = (
-                Path(
-                    os.environ.get("SKILL_CACHE_DIR")
-                    or os.environ.get("XDG_CACHE_HOME")
-                    or "~/.cache"
-                ).expanduser()
-                / "skills"
-            )
             search_paths.extend(
                 [
                     home / ".dotfiles/skills",
                     home / ".private/skills",
                     home / ".corp/skills",
-                    cache_base / "catalog",
                 ]
             )
+        
+        cache_base = get_catalog_dir().parent
+        search_paths.append(cache_base / "catalog")
+        
+    source_dirs = [str(p) for p in search_paths]
+
+    if args.catalog or args.list:
+        cmd_catalog(registry, source_dirs, as_json=args.json)
+        sys.exit(0)
+        
+    if args.resolve:
+        cmd_resolve(args.resolve, registry, source_dirs)
+        sys.exit(0)
+        
+    if args.update is not None:
+        cmd_update(args.update, registry)
+        sys.exit(0)
+        
+    if args.doctor:
+        cmd_doctor(registry, source_dirs)
+        sys.exit(0)
 
     if not search_paths:
-        print(
-            "skill-select: Error: No search paths configured. Please set SKILL_SOURCE_DIRS.",
-            file=sys.stderr,
-        )
+        print("skill-select: Error: No search paths configured. Please set SKILL_SOURCE_DIRS.", file=sys.stderr)
         sys.exit(1)
+
+    # Auto-heal the metadata index (TTL-cached) before discovery
+    ensure_catalog_index(registry)
 
     skills = gather_skills(search_paths)
 
@@ -291,154 +849,100 @@ def main():
         print("skill-select: No skills found in search paths.", file=sys.stderr)
         sys.exit(0)
 
-    if args.catalog or args.list:
-        if args.json:
-            for s in sorted(skills, key=lambda x: x["name"]):
-                print(
-                    json.dumps(
-                        {
-                            "name": s["name"],
-                            "path": s["path"],
-                            "description": s["description"],
-                        }
-                    )
-                )
-        else:
-            sorted_skills = sorted(skills, key=lambda x: x["name"])
-            max_len = max(len(s["name"]) for s in sorted_skills) if sorted_skills else 0
-            for s in sorted_skills:
-                print(f"{s['name'].ljust(max_len)} -> {clean_p(s['path'])}")
-        sys.exit(0)
-
-    # LLM Fallback (or forced)
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print(
-            "skill-select: error: GEMINI_API_KEY not set. Please set GEMINI_API_KEY to enable LLM skill selection.",
-            file=sys.stderr,
-        )
+    target_dir = Path(args.dir).resolve()
+    if not target_dir.is_dir():
+        print(f"skill-select: Error: target directory '{target_dir}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
-    query = args.context
-    if not query:
-        repo_ctx = gather_context(target_dir)
-        query = (
-            "Bootstrap this repository with sensible default skills. Here is the repository context:\n"
-            + repo_ctx
-        )
+    if args.context:
+        context_text = args.context
+    else:
+        context_text = "Standard workspace directory."
 
-    # System instruction for selection
-    system_instruction = """<role>
-You are an expert developer assistant. Your task is to select the most relevant AI agent skills from a list of available skills to help solve a user's problem or goal.
-</role>
-
-<instructions>
-1. Evaluate the user's problem or goal.
-2. Review the provided list of available skills.
-3. Select the most relevant skills based on the selection constraints.
-</instructions>
-
-<constraints>
-- **Hierarchy of Preferences**: 
-  - Personal skills (custom workflows, personal style guides, etc.) are highly preferred and should almost always be suggested if they are even marginally relevant.
-  - General tools (e.g., 'agent-tools') are next.
-  - Specific workspace tools (e.g., 'adb', 'emumanager') should only be suggested if the context implies their use (e.g., Android, emulator).
-- **Relevance**: Only suggest skills that actually help with the described problem. Do not suggest unrelated skills.
-- **Duplicates**: If multiple skills with the same name exist at different paths, you may suggest multiple of them if their content differs and both are relevant.
-- **Defaults**: If the user is asking to bootstrap or has no specific query, suggest a set of sensible defaults based on the project structure (like general coding tools for coding repos).
-- **Format**: Your output must conform strictly to the specified JSON schema.
-</constraints>
-
-<output_format>
-You must return a JSON list of objects, where each object represents a selected skill and contains:
-- "name": The name of the skill.
-- "path": The path to the skill.
-- "reason": A brief explanation of why this skill is relevant.
-
-Example Output:
-[
-  {"name": "coding-standards", "path": "/path/to/personal/coding-standards", "reason": "User needs to format code and check style."},
-  {"name": "agent-tools", "path": "/path/to/agent-tools", "reason": "Provides general utility scripts."}
-]
-</output_format>
-"""
-
-    # Format skills for context
-    skills_context = ""
-    for s in skills:
-        skills_context += f"=== Skill: {s['name']} ===\n"
-        skills_context += f"Path: {s['path']}\n"
-        skills_context += f"Description: {s['description']}\n"
-        skills_context += f"Content:\n{s['content']}\n\n"
-
-    user_prompt = (
-        f"<context>\nAvailable Skills:\n{skills_context}</context>\n\n"
-        f"<task>\nBased on the available skills above, select the most relevant ones for the following problem or goal:\n{query}\n</task>"
-    )
-
-    print(f"skill-select: running LLM inference for {target_dir}...", file=sys.stderr)
+    repo_context = gather_context(target_dir)
 
     try:
-        client = genai.Client(api_key=api_key)
-        model_id = "gemini-3.5-flash"
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        print("skill-select: Error: The 'google-genai' package is required.", file=sys.stderr)
+        sys.exit(1)
 
-        skill_schema = types.Schema(
-            type=types.Type.ARRAY,
-            items=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "name": types.Schema(type=types.Type.STRING),
-                    "path": types.Schema(type=types.Type.STRING),
-                    "reason": types.Schema(type=types.Type.STRING),
-                },
-                required=["name", "path", "reason"],
-            ),
-        )
+    system_instruction = """
+You are a development environment orchestrator.
+Your goal is to recommend the best agent "skills" to activate for the given project directory and task.
+You will be provided with:
+1. The available skills (name and description).
+2. The user's goal/context.
+3. Information about the target directory (e.g. files, gitignore, READMEs).
 
+Recommend exactly the skills that are directly relevant. Err on the side of caution: if a skill is clearly relevant to the tech stack or task, include it. If it is completely irrelevant, do not include it.
+
+Your response must be ONLY a valid JSON array of objects.
+Each object must have:
+- "name": the EXACT name of the skill
+- "reason": a brief 1-sentence explanation of why it is relevant
+
+Return an empty array [] if no skills apply.
+"""
+
+    prompt = f"""
+AVAILABLE SKILLS:
+{skills}
+
+USER CONTEXT/GOAL:
+{context_text}
+
+TARGET DIRECTORY INFO:
+{repo_context}
+"""
+
+    client = genai.Client()
+    try:
         response = client.models.generate_content(
-            model=model_id,
-            contents=user_prompt,
+            model="gemini-2.5-flash",
+            contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.0,
                 response_mime_type="application/json",
-                response_schema=skill_schema,
             ),
         )
-
-        # Output logic
-        try:
-            results = json.loads(response.text.strip())
-            # Resolve each selection back to a skill we actually discovered, so
-            # the emitted path is authoritative rather than echoed (and possibly
-            # hallucinated) by the model. Consumers such as 'git skill apply'
-            # symlink this directory directly, so it must be trustworthy.
-            results = resolve_selection(results, skills)
-            if args.json:
-                for item in results:
-                    print(json.dumps(item))
-            else:
-                max_len = (
-                    max(len(item.get("name", "")) for item in results) if results else 0
-                )
-                for item in results:
-                    name = item.get("name", "")
-                    path = item.get("path", "")
-                    if path:
-                        print(f"{name.ljust(max_len)} -> {clean_p(path)}")
-                    else:
-                        print(name)
-        except json.JSONDecodeError:
-            print(
-                "skill-select: error: failed to parse LLM response as JSON",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
     except Exception as e:
-        print(f"skill-select: error calling Gemini API: {e}", file=sys.stderr)
+        print(f"skill-select: Error calling Gemini API: {e}", file=sys.stderr)
         sys.exit(1)
 
+    import json
+    try:
+        results = json.loads(response.text)
+    except json.JSONDecodeError as e:
+        print(f"skill-select: Error: Could not parse JSON response: {e}\n{response.text}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(results, list):
+        print(f"skill-select: Error: Expected a JSON array, got: {type(results)}\n{response.text}", file=sys.stderr)
+        sys.exit(1)
+
+    resolved = resolve_selection(results, skills)
+    
+    # Provision registry skills and update paths to the fully cloned repositories
+    for item in resolved:
+        name = item["name"]
+        if name in registry:
+            provision_registry_skill(name, registry[name])
+            entry = registry[name]
+            owner, reponame = entry["repo"].split("/", 1)
+            cachedir = get_cache_base() / owner / reponame / entry["ref"]
+            if entry["subpath"]:
+                cachedir = cachedir / entry["subpath"]
+            item["path"] = str(cachedir)
+
+    if args.json:
+        for item in resolved:
+            print(json.dumps(item))
+    else:
+        for item in resolved:
+            print(item["name"])
 
 if __name__ == "__main__":
     main()

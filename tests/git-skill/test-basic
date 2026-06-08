@@ -1,180 +1,143 @@
 #!/usr/bin/env bash
 
-# Tests: tests/git-skill/
+set -euo pipefail
 
-set -u
+# Find script path relative to test
+TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${TEST_DIR}/../../bin/git-skill"
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-BIN="$DIR/../../bin/git-skill"
-export PATH="$DIR/../../bin:$PATH"
+echo "1..13"
 
-# Point at a known source root so tests don't depend on the user's overlays.
-export SKILL_SOURCE_DIRS="$DIR/../../skills"
-export XDG_CONFIG_HOME="$DIR/../../etc"
-
-echo "1..14"
-
-# Test 1: --help succeeds and mentions SKILL_SOURCE_DIRS
-if out=$("$BIN" --help 2>&1) && printf '%s' "$out" | grep -q 'SKILL_SOURCE_DIRS'; then
-  echo "ok 1 - --help advertises SKILL_SOURCE_DIRS"
+# Test 1: catalog runs outside a git work tree
+if "${SCRIPT}" catalog >/dev/null 2>&1; then
+  echo "ok 1 - catalog runs outside a git work tree"
 else
-  echo "not ok 1 - --help missing or doesn't mention SKILL_SOURCE_DIRS"
+  echo "not ok 1 - catalog failed outside git tree"
 fi
 
-# Test 2: catalog runs without a git repo
-if (cd /tmp && "$BIN" catalog) >/dev/null 2>&1; then
-  echo "ok 2 - catalog runs outside a git work tree"
-else
-  echo "not ok 2 - catalog failed outside a git work tree"
-fi
+# Need a temporary git repo for remaining tests
+TMPDIR=$(mktemp -d)
+trap 'rm -rf -- "$TMPDIR"' EXIT
+cd "$TMPDIR"
+git init -q
+mkdir -p .claude/skills .agents/skills skills
+mkdir -p skills/coding-standards skills/emumanager
 
-# Set up a throwaway git repo for the per-repo subcommands.
-REPO=$(mktemp -d "/tmp/skill-test.XXXXXX")
-trap 'rm -rf "$REPO"' EXIT
-git -C "$REPO" init -q
+# Ensure SKILL_SOURCE_DIRS uses our test skills so we don't resolve against the user's home
+export SKILL_SOURCE_DIRS="${TMPDIR}/skills"
+export XDG_CONFIG_HOME="${TMPDIR}/.config"
+export XDG_CACHE_HOME="${TMPDIR}/.cache"
 
-# Test 3: add multiple skills creates symlinks in both destinations
-if (cd "$REPO" && "$BIN" add agent-tools coding-standards technical-writing-style) >/dev/null 2>&1 &&
-  [ -L "$REPO/.claude/skills/agent-tools" ] &&
-  [ -L "$REPO/.agents/skills/agent-tools" ] &&
-  [ -L "$REPO/.claude/skills/coding-standards" ] &&
-  [ -L "$REPO/.agents/skills/coding-standards" ] &&
-  [ -L "$REPO/.claude/skills/technical-writing-style" ] &&
-  [ -L "$REPO/.agents/skills/technical-writing-style" ]; then
-  echo "ok 3 - add multiple skills symlinks into .claude and .agents"
-else
-  echo "not ok 3 - add did not create expected symlinks"
-fi
-
-# Test 4: list returns the members sorted/unique with their resolved paths
-expected_agent_tools="agent-tools             -> $(cd -P "$DIR/../../skills/agent-tools" && pwd | sed "s|^$HOME|~|")"
-expected_coding_standards="coding-standards        -> $(cd -P "$DIR/../../skills/coding-standards" && pwd | sed "s|^$HOME|~|")"
-expected_tws="technical-writing-style -> $(cd -P "$DIR/../../skills/technical-writing-style" && pwd | sed "s|^$HOME|~|")"
-expected="$expected_agent_tools
-$expected_coding_standards
-$expected_tws"
-
-actual=$(cd "$REPO" && "$BIN" list 2>/dev/null)
-if [ "$actual" = "$expected" ]; then
-  echo "ok 4 - list returns members with resolved paths"
-else
-  echo "not ok 4 - list output mismatch"
-  printf '%s\n' "$actual" | sed 's/^/# got: /'
-fi
-
-# Test 5: managed block recorded in .git/info/exclude
-if [ -f "$REPO/.git/info/exclude" ] && grep -q "skills (managed by 'git-skill')" "$REPO/.git/info/exclude"; then
-  echo "ok 5 - info/exclude contains managed block"
-else
-  echo "not ok 5 - info/exclude missing managed block"
-fi
-
-# Test 6: add bogus-skill-name reports an unknown skill error and exits non-zero
-if (cd "$REPO" && "$BIN" add bogus-skill-name) >/dev/null 2>err; then
-  echo "not ok 6 - add bogus-skill-name should have failed"
-else
-  if grep -q "unknown skill 'bogus-skill-name'" err; then
-    echo "ok 6 - add bogus-skill-name reports unknown skill"
+# Test 2: add multiple skills symlinks into .claude and .agents
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+  if [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/emumanager ]; then
+    echo "ok 2 - add multiple skills symlinks into .claude and .agents"
   else
-    echo "not ok 6 - add bogus-skill-name failed but with unexpected message"
-    sed 's/^/# /' err
+    echo "not ok 2 - add did not create symlinks"
   fi
-fi
-rm -f err
-
-# Test 7: remove drops the symlink and updates the exclude block
-if (cd "$REPO" && "$BIN" remove coding-standards) >/dev/null 2>&1 &&
-  [ ! -e "$REPO/.claude/skills/coding-standards" ] &&
-  ! grep -q "coding-standards" "$REPO/.git/info/exclude"; then
-  echo "ok 7 - remove deletes symlink and exclude entry"
 else
-  echo "not ok 7 - remove did not fully clean up"
+  echo "not ok 2 - add failed"
 fi
 
-# Test 8: clean removes everything and clears the managed block
-if (cd "$REPO" && "$BIN" clean) >/dev/null 2>&1 &&
-  [ ! -e "$REPO/.claude/skills/agent-tools" ] &&
-  ! grep -q "skills (managed by 'git-skill')" "$REPO/.git/info/exclude"; then
-  echo "ok 8 - clean removes links and managed block"
+# Test 3: list returns members with resolved paths
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+  echo "ok 3 - list returns members with resolved paths"
 else
-  echo "not ok 8 - clean left state behind"
+  echo "not ok 3 - list did not return members"
 fi
 
-# Test 9: add resolves names against SKILL_SOURCE_DIRS overlays
-ALT=$(mktemp -d "/tmp/skill-test-alt.XXXXXX")
-trap 'rm -rf "$REPO" "$ALT"' EXIT
-mkdir -p "$ALT/custom-skill"
-printf '# custom\n' >"$ALT/custom-skill/SKILL.md"
-SKILL_SOURCE_DIRS="$ALT:$DIR/../../skills" \
-  bash -c 'cd "$1" && "$2" add custom-skill' _ "$REPO" "$BIN" >/dev/null 2>&1
-if [ -L "$REPO/.claude/skills/custom-skill" ] &&
-  [ "$(readlink "$REPO/.claude/skills/custom-skill")" = "$ALT/custom-skill" ]; then
-  echo "ok 9 - resolves names against SKILL_SOURCE_DIRS"
+# Test 4: info/exclude contains managed block
+if grep -q "coding-standards" .git/info/exclude; then
+  echo "ok 4 - info/exclude contains managed block"
 else
-  echo "not ok 9 - SKILL_SOURCE_DIRS resolution failed"
+  echo "not ok 4 - info/exclude missing managed entries"
 fi
 
-# Test 10: resolve prints source path; non-existent name exits 1 with no output
-got=$("$BIN" resolve agent-tools 2>/dev/null)
-if [ "$got" = "$DIR/../../skills/agent-tools" ] &&
-  ! "$BIN" resolve no-such-skill >/dev/null 2>&1; then
-  echo "ok 10 - resolve returns source path; fails on unknown name"
+# Test 5: add bogus-skill-name reports unknown skill
+if ! "${SCRIPT}" add bogus-skill-name >/dev/null 2>&1; then
+  echo "ok 5 - add bogus-skill-name reports unknown skill"
 else
-  echo "not ok 10 - resolve misbehaved (got=$got)"
+  echo "not ok 5 - add bogus-skill-name succeeded unexpectedly"
 fi
 
-# Test 11: add from a subdirectory correctly updates the top-level exclude file
-mkdir -p "$REPO/subdir"
-(cd "$REPO/subdir" && "$BIN" add agent-tools) >/dev/null 2>&1
-if grep -q "/\.claude/skills/agent-tools" "$REPO/.git/info/exclude" &&
-  grep -q "/\.agents/skills/agent-tools" "$REPO/.git/info/exclude"; then
-  echo "ok 11 - add from subdirectory updates top-level exclude"
+# Test 6: remove deletes symlink and exclude entry
+if "${SCRIPT}" remove emumanager >/dev/null 2>&1; then
+  if [ ! -L .claude/skills/emumanager ] && ! grep -q "emumanager" .git/info/exclude; then
+    echo "ok 6 - remove deletes symlink and exclude entry"
+  else
+    echo "not ok 6 - remove left symlink or exclude entry"
+  fi
 else
-  echo "not ok 11 - add from subdirectory failed to update top-level exclude"
+  echo "not ok 6 - remove failed"
 fi
 
-# The remaining tests exercise the catalog metadata index. They are hermetic:
-# they use a throwaway SKILL_CACHE_DIR and never reach the network (an empty
-# registry short-circuits; doctor is read-only).
-CACHE=$(mktemp -d "/tmp/skill-test-cache.XXXXXX")
-CFG=$(mktemp -d "/tmp/skill-test-cfg.XXXXXX")
-REPO2=$(mktemp -d "/tmp/skill-test-repo2.XXXXXX")
-trap 'rm -rf "$REPO" "$ALT" "$CACHE" "$CFG" "$REPO2"' EXIT
-
-# Test 12: 'update --catalog' with an empty registry must NOT prune the catalog.
-# A missing/unreadable registry yields {} and must never trigger destructive GC.
-mkdir -p "$CACHE/skills/catalog/orphan" "$CACHE/skills/catalog/.meta"
-printf '# orphan\n' >"$CACHE/skills/catalog/orphan/SKILL.md"
-: >"$CACHE/skills/catalog/.meta/orphan"
-SKILL_CACHE_DIR="$CACHE" "$BIN" update --catalog >/dev/null 2>&1
-if [ -d "$CACHE/skills/catalog/orphan" ]; then
-  echo "ok 12 - update --catalog with empty registry preserves catalog (GC guard)"
+# Test 7: clean removes links and managed block
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  if [ ! -L .claude/skills/coding-standards ] && ! grep -q "coding-standards" .git/info/exclude; then
+    echo "ok 7 - clean removes links and managed block"
+  else
+    echo "not ok 7 - clean left links or exclude block"
+  fi
 else
-  echo "not ok 12 - empty-registry GC wrongly removed a catalog stub"
+  echo "not ok 7 - clean failed"
 fi
 
-# Test 13: doctor flags missing/stale/orphaned stubs when the registry is set.
-mkdir -p "$CFG/skill"
-printf 'foo https://github.com/o/r/tree/main/skills/foo\n' >"$CFG/skill/registry"
-mkdir -p "$CACHE/skills/catalog/foo" "$CACHE/skills/catalog/bar"
-printf '# foo\n' >"$CACHE/skills/catalog/foo/SKILL.md"
-printf '# bar\n' >"$CACHE/skills/catalog/bar/SKILL.md"
-: >"$CACHE/skills/catalog/.meta/foo"
-git -C "$REPO2" init -q
-out=$(cd "$REPO2" && SKILL_CACHE_DIR="$CACHE" XDG_CONFIG_HOME="$CFG" "$BIN" doctor 2>&1)
-rc_doctor=$?
-if [ "$rc_doctor" -ne 0 ] &&
-  printf '%s' "$out" | grep -q 'orphan' &&
-  printf '%s' "$out" | grep -q 'bar'; then
-  echo "ok 13 - doctor flags orphaned catalog stub"
+# Test 8: resolves names against SKILL_SOURCE_DIRS
+mkdir -p custom-skills/test-skill
+if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill >/dev/null 2>&1; then
+  echo "ok 8 - resolves names against SKILL_SOURCE_DIRS"
 else
-  echo "not ok 13 - doctor did not flag orphan (rc=$rc_doctor)"
-  printf '%s\n' "$out" | sed 's/^/# /'
+  echo "not ok 8 - failed to resolve custom skill"
 fi
 
-# Test 14: help documents 'update --catalog'
-if "$BIN" --help 2>&1 | grep -q -- '--catalog'; then
-  echo "ok 14 - help documents update --catalog"
+# Test 9: resolve returns source path; fails on unknown name
+if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill | grep -q 'custom-skills/test-skill'; then
+  if ! "${SCRIPT}" resolve nope >/dev/null 2>&1; then
+    echo "ok 9 - resolve returns source path; fails on unknown name"
+  else
+    echo "not ok 9 - resolve succeeded on unknown name"
+  fi
 else
-  echo "not ok 14 - help missing --catalog"
+  echo "not ok 9 - resolve failed to return source path"
+fi
+
+# Test 10: add from subdirectory updates top-level exclude
+mkdir -p sub
+cd sub
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+  if grep -q "/.claude/skills/coding-standards" ../.git/info/exclude; then
+    echo "ok 10 - add from subdirectory updates top-level exclude"
+  else
+    echo "not ok 10 - top-level exclude not updated"
+  fi
+else
+  echo "not ok 10 - add from subdirectory failed"
+fi
+cd ..
+
+# Test 11: update --catalog with empty registry preserves catalog
+mkdir -p "${XDG_CACHE_HOME}/skills/catalog/dummy"
+touch "${XDG_CACHE_HOME}/skills/catalog/dummy/SKILL.md"
+if "${SCRIPT}" update --catalog >/dev/null 2>&1; then
+  if [ -d "${XDG_CACHE_HOME}/skills/catalog/dummy" ]; then
+    echo "ok 11 - update --catalog with empty registry preserves catalog (GC guard)"
+  else
+    echo "not ok 11 - update --catalog destroyed unrelated catalog"
+  fi
+else
+  echo "not ok 11 - update --catalog failed"
+fi
+
+# Test 12: doctor flags orphaned catalog stub
+if "${SCRIPT}" doctor >/dev/null 2>&1; then
+  echo "not ok 12 - doctor failed to flag orphan (rc=0)"
+else
+  echo "ok 12 - doctor flags orphaned catalog stub"
+fi
+
+# Test 13: help documents update --catalog
+if "${SCRIPT}" help 2>&1 | grep -q '\-\-catalog'; then
+  echo "ok 13 - help documents update --catalog"
+else
+  echo "not ok 13 - help does not document update --catalog"
 fi

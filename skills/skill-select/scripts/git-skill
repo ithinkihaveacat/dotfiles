@@ -1,108 +1,21 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = [
-#   "requests",
-# ]
 # ///
 
 import os
 import sys
-import time
-import shutil
 import tempfile
-import tarfile
 import subprocess
 from pathlib import Path
-from urllib.parse import urlparse
-
-
-# Catalog index stub (SKILL.md) freshness: how long a discovered metadata stub
-# is trusted before re-fetching during 'suggest'/'apply'.
-CATALOG_TTL = 7 * 24 * 3600  # 7 days
-# Full-repo freshness on provision: how old a cached repo may be before 'apply'
-# force-refreshes it while adding a registry skill to a workspace.
-PROVISION_TTL = 8 * 3600  # 8 hours
-
 
 def die(msg):
     print(f"git skill: {msg}", file=sys.stderr)
     sys.exit(1)
 
-
-def get_cache_base():
-    return (
-        Path(
-            os.environ.get("SKILL_CACHE_DIR")
-            or os.environ.get("XDG_CACHE_HOME")
-            or "~/.cache"
-        ).expanduser()
-        / "skills"
-    )
-
-
-def get_catalog_dir():
-    return get_cache_base() / "catalog"
-
-
 def cmderr(cmd, msg):
     print(f"git skill {cmd}: {msg}", file=sys.stderr)
     sys.exit(1)
-
-
-def parse_github_url(url):
-    """Parse a GitHub tree URL into (repo, ref, subpath).
-
-    Accepts: https://github.com/{owner}/{repo}/tree/{ref}[/{subpath}]
-    """
-    parsed = urlparse(url)
-    if parsed.netloc != "github.com":
-        die(f"registry: unsupported URL (only github.com is supported): {url}")
-    parts = parsed.path.strip("/").split("/")
-    if len(parts) < 4 or parts[2] != "tree":
-        die(f"registry: cannot parse GitHub URL: {url}")
-    owner, repo, _, ref = parts[:4]
-    subpath = "/".join(parts[4:]) or None
-    return f"{owner}/{repo}", ref, subpath
-
-
-def load_registry():
-    registry = {}
-
-    # Load custom registry files
-    config_dir = (
-        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser() / "skill"
-    )
-    registry_file = config_dir / "registry"
-    registry_d = config_dir / "registry.d"
-
-    def parse_file(path):
-        if not path.is_file():
-            return
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-                name = parts[0]
-                repo, ref, subpath = parse_github_url(parts[1])
-                registry[name] = {
-                    "repo": repo,
-                    "ref": ref,
-                    "subpath": subpath,
-                }
-
-    parse_file(registry_file)
-    if registry_d.is_dir():
-        for item in sorted(registry_d.iterdir()):
-            if item.is_file() and not item.name.startswith("."):
-                parse_file(item)
-
-    return registry
-
 
 def get_git_repo():
     try:
@@ -126,10 +39,8 @@ def get_git_repo():
     except subprocess.CalledProcessError:
         die("not inside a git work tree (run 'git init' to create one)")
 
-
 MARK_BEGIN = "# >>> skills (managed by 'git-skill') >>>"
 MARK_END = "# <<< skills (managed by 'git-skill') <<<"
-
 
 def read_managed(exclude_file):
     if not exclude_file.is_file():
@@ -148,7 +59,6 @@ def read_managed(exclude_file):
             if in_block and line_stripped:
                 managed.append(line_stripped)
     return managed
-
 
 def rewrite_block(exclude_file, lines):
     exclude_file.parent.mkdir(parents=True, exist_ok=True)
@@ -188,250 +98,7 @@ def rewrite_block(exclude_file, lines):
     finally:
         temp_path.unlink(missing_ok=True)
 
-
-def _atomic_replace_dir(src, dest):
-    """Install src as dest atomically, swapping within dest's parent directory.
-
-    Uses sibling temp names (not '.with_suffix', which mangles refs containing
-    dots) and os.replace (which cannot overwrite a non-empty directory) by
-    moving any existing dest aside first. Both renames stay within one
-    directory, so they are atomic and safe under concurrent fetches.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.parent / f"{dest.name}.tmp-{os.getpid()}"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    try:
-        shutil.copytree(src, tmp, symlinks=True)
-        if dest.exists():
-            trash = dest.parent / f"{dest.name}.old-{os.getpid()}"
-            if trash.exists():
-                shutil.rmtree(trash)
-            os.replace(dest, trash)
-            os.replace(tmp, dest)
-            shutil.rmtree(trash, ignore_errors=True)
-        else:
-            os.replace(tmp, dest)
-    finally:
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
-
-
-def fetch_github(name, repo, ref, subpath, force=False):
-    import requests
-
-    owner, reponame = repo.split("/", 1)
-    cache_base = get_cache_base()
-    cachedir = cache_base / owner / reponame / ref
-    if subpath:
-        cachedir = cachedir / subpath
-
-    have_cache = cachedir.is_dir() and any(cachedir.iterdir())
-    if not force and have_cache:
-        print(
-            f"using cached {repo}@{ref} (run 'git skill update {name}' to refresh)",
-            file=sys.stderr,
-        )
-        return cachedir
-
-    archive_url = f"https://github.com/{owner}/{reponame}/archive/{ref}.tar.gz"
-    print(f"fetching {archive_url}", file=sys.stderr)
-    try:
-        r = requests.get(archive_url, stream=True)
-        r.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        # Offline / network failure: fall back to an existing cache so already
-        # provisioned skills keep working; only fail if nothing is cached.
-        if have_cache:
-            print(f"git skill: {archive_url}: {e}; using stale cache", file=sys.stderr)
-            return cachedir
-        die(f"failed to fetch {archive_url}: {e}")
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        tar_path = tmp_path / "archive.tar.gz"
-        with open(tar_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        try:
-            with tarfile.open(tar_path, "r:gz") as tar:
-                tar.extractall(path=tmp_path)
-        except Exception as e:
-            die(f"failed to extract archive: {e}")
-
-        subdirs = [
-            x for x in tmp_path.iterdir() if x.is_dir() and x.name != "archive.tar.gz"
-        ]
-        if not subdirs:
-            die("extracted archive is empty")
-        wrapper_dir = subdirs[0]
-
-        src_dir = wrapper_dir
-        if subpath:
-            src_dir = wrapper_dir / subpath
-            if not src_dir.is_dir():
-                die(f"path not found in {owner}/{reponame}@{ref}: {subpath}")
-
-        _atomic_replace_dir(src_dir, cachedir)
-
-    return cachedir
-
-
-def fetch_skill_md(name, repo, ref, subpath, force=False):
-    """Fetch only SKILL.md for a registry entry into a lightweight catalog stub.
-
-    This is the metadata-only discovery path: it lets skill-select see and rank
-    a registry skill without downloading the whole repository. The full repo is
-    materialized lazily on 'add'/provision via fetch_github. Returns the stub
-    directory, or None if SKILL.md could not be obtained and no stub exists.
-    """
-    import requests
-
-    owner, reponame = repo.split("/", 1)
-    catalog_dir = get_catalog_dir()
-    stub = catalog_dir / name
-    meta_dir = catalog_dir / ".meta"
-    meta = meta_dir / name
-    stub_md = stub / "SKILL.md"
-
-    if not force and meta.is_file() and stub_md.is_file():
-        if (time.time() - meta.stat().st_mtime) < CATALOG_TTL:
-            return stub
-
-    sub = f"{subpath}/" if subpath else ""
-    url = f"https://raw.githubusercontent.com/{owner}/{reponame}/{ref}/{sub}SKILL.md"
-    try:
-        r = requests.get(url)
-        r.raise_for_status()
-        content = r.content
-    except requests.exceptions.RequestException as e:
-        # Degrade gracefully: keep any existing stub when offline, and skip
-        # (never die) so one bad entry does not break discovery of the rest.
-        if stub_md.is_file():
-            return stub
-        print(f"git skill: {url}: {e}; skipping {name}", file=sys.stderr)
-        return None
-
-    stub.mkdir(parents=True, exist_ok=True)
-    tmp = stub / f".SKILL.md.tmp-{os.getpid()}"
-    try:
-        tmp.write_bytes(content)
-        os.replace(tmp, stub_md)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    meta.touch()
-    return stub
-
-
-def ensure_catalog_index(registry, force=False):
-    """Populate/refresh the catalog/ index of metadata stubs for registry skills.
-
-    Fetches only SKILL.md per entry (fast, offline-friendly cold start), then
-    garbage-collects stubs whose names are no longer registered. Returns early
-    when the registry is empty so a missing/unreadable config never triggers a
-    destructive GC of an otherwise-populated catalog.
-    """
-    if not registry:
-        return
-
-    catalog_dir = get_catalog_dir()
-    meta_dir = catalog_dir / ".meta"
-    total = len(registry)
-    for i, name in enumerate(sorted(registry), 1):
-        entry = registry[name]
-        meta = meta_dir / name
-        stub_md = catalog_dir / name / "SKILL.md"
-        fresh = (
-            not force
-            and meta.is_file()
-            and stub_md.is_file()
-            and (time.time() - meta.stat().st_mtime) < CATALOG_TTL
-        )
-        if fresh:
-            continue
-        print(f"git skill: [{i}/{total}] indexing {name}...", file=sys.stderr)
-        fetch_skill_md(
-            name, entry["repo"], entry["ref"], entry["subpath"], force=force
-        )
-
-    # Garbage-collect orphaned stubs (registry is non-empty here, so this cannot
-    # wipe a catalog just because a config file went missing).
-    if catalog_dir.is_dir():
-        for item in catalog_dir.iterdir():
-            if item.name.startswith("."):
-                continue
-            if item.name in registry:
-                continue
-            if item.is_symlink() or not item.is_dir():
-                item.unlink()
-            else:
-                shutil.rmtree(item, ignore_errors=True)
-            stale_meta = meta_dir / item.name
-            if stale_meta.exists():
-                stale_meta.unlink()
-
-
-def provision_registry_skill(name, entry):
-    """Ensure a registry skill's full repo is cached and fresh before adding.
-
-    Force-refreshes when the cache is missing or older than PROVISION_TTL so a
-    just-added skill reflects a recent upstream, then leaves fetch_github's own
-    reuse to make the subsequent 'add' a cache hit.
-    """
-    cache_base = get_cache_base()
-    owner, reponame = entry["repo"].split("/", 1)
-    cachedir = cache_base / owner / reponame / entry["ref"]
-    if entry["subpath"]:
-        cachedir = cachedir / entry["subpath"]
-    stale = (
-        not cachedir.is_dir()
-        or not any(cachedir.iterdir())
-        or (time.time() - cachedir.stat().st_mtime) > PROVISION_TTL
-    )
-    fetch_github(name, entry["repo"], entry["ref"], entry["subpath"], force=stale)
-
-
-def resolve_spec(spec, registry, source_dirs):
-    expanded_spec = os.path.expanduser(spec)
-
-    # 1. Local path check
-    if (
-        expanded_spec.startswith("/")
-        or expanded_spec.startswith("./")
-        or expanded_spec.startswith("../")
-        or "/" in expanded_spec
-    ):
-        path = Path(expanded_spec).resolve()
-        if not path.is_dir():
-            die(f"skill source not found: {spec}")
-        return path, path.name
-
-    # 2. Registry check
-    if spec in registry:
-        entry = registry[spec]
-        repo = entry["repo"]
-        ref = entry["ref"]
-        subpath = entry["subpath"]
-        src = fetch_github(spec, repo, ref, subpath)
-        return src, spec
-
-    # 3. SKILL_SOURCE_DIRS check
-    for d in source_dirs:
-        if not d:
-            continue
-        path = Path(d) / spec
-        if path.is_dir():
-            return path, spec
-
-    die(
-        f"unknown skill '{spec}': not a path, a registered catalog entry, or under any of SKILL_SOURCE_DIRS ({':'.join(source_dirs)})"
-    )
-
-
-def cmd_add(specs, registry, source_dirs):
+def cmd_add(specs):
     if not specs:
         cmderr("add", "skill name required")
     if len(specs) == 1 and specs[0] == "-":
@@ -444,8 +111,22 @@ def cmd_add(specs, registry, source_dirs):
 
     resolved_skills = []
     for spec in specs:
-        src, name = resolve_spec(spec, registry, source_dirs)
-        resolved_skills.append((src, name))
+        # Call skill-select to resolve the spec
+        res = subprocess.run(["skill-select", "--resolve", spec], capture_output=True, text=True)
+        if res.returncode != 0:
+            print(res.stderr, file=sys.stderr, end="")
+            sys.exit(res.returncode)
+        
+        output = res.stdout.strip()
+        if not output: continue
+        parts = output.split('\t')
+        if len(parts) == 2:
+            src, name = parts
+        else:
+            src = parts[0]
+            name = Path(src).name
+            
+        resolved_skills.append((Path(src), name))
 
     dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
     dest_dirs = [root / d for d in dest_dirs_str.split(":") if d]
@@ -498,7 +179,6 @@ def cmd_add(specs, registry, source_dirs):
 
     rewrite_block(exclude_file, managed)
 
-
 def prune_dirs(root):
     dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
     dest_dirs = [root / d for d in dest_dirs_str.split(":") if d]
@@ -512,7 +192,6 @@ def prune_dirs(root):
                 parent.rmdir()
         except Exception:
             pass
-
 
 def cmd_remove(names):
     if not names:
@@ -550,7 +229,6 @@ def cmd_remove(names):
 
     rewrite_block(exclude_file, managed)
     prune_dirs(root)
-
 
 def cmd_list():
     root, exclude_file = get_git_repo()
@@ -595,7 +273,6 @@ def cmd_list():
             else:
                 print(name)
 
-
 def cmd_clean():
     root, exclude_file = get_git_repo()
     managed = read_managed(exclude_file)
@@ -635,195 +312,16 @@ def cmd_clean():
             file=sys.stderr,
         )
 
-
-def cmd_update(names, registry):
-    # 'update --catalog' refreshes the global metadata index (and prunes orphans)
-    # without needing a workspace; handle it before requiring a git repo.
-    if len(names) == 1 and names[0] == "--catalog":
-        ensure_catalog_index(registry, force=True)
-        print("update: refreshed catalog index", file=sys.stderr)
-        return
-
-    root, exclude_file = get_git_repo()
-
-    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
-    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
-    dest_dirs = [root / d for d in dest_dirs_rel]
-
-    if len(names) == 1 and names[0] == "--all":
-        managed = read_managed(exclude_file)
-        skills = set()
-        for line in managed:
-            rel = line.lstrip("/")
-            for d in dest_dirs_rel:
-                if rel.startswith(d + "/"):
-                    skills.add(rel[len(d) + 1 :])
-        names = sorted(list(skills))
-    elif not names:
-        cmderr("update", "skill name, --all, or --catalog required")
-
-    cache_base = get_cache_base()
-
-    for name in names:
-        # Registry entries can be refreshed whether or not they are currently
-        # added: always refresh the lightweight metadata stub, and re-fetch the
-        # full repo in place only when one is already cached (so 'update' never
-        # downloads a whole repo for a skill that was only ever discovered).
-        if name in registry:
-            entry = registry[name]
-            fetch_skill_md(
-                name, entry["repo"], entry["ref"], entry["subpath"], force=True
-            )
-            owner, reponame = entry["repo"].split("/", 1)
-            cachedir = cache_base / owner / reponame / entry["ref"]
-            if entry["subpath"]:
-                cachedir = cachedir / entry["subpath"]
-            if cachedir.is_dir() and any(cachedir.iterdir()):
-                fetch_github(
-                    name, entry["repo"], entry["ref"], entry["subpath"], force=True
-                )
-            print(
-                f"updated {name} from {entry['repo']}@{entry['ref']}", file=sys.stderr
-            )
-            continue
-
-        relpath = dest_dirs[0] / name
-        if not relpath.is_symlink():
-            print(
-                f"update: {name} is not currently added; skipping",
-                file=sys.stderr,
-            )
-            continue
-
-        try:
-            target = relpath.readlink().resolve()
-        except Exception:
-            continue
-
-        try:
-            target.relative_to(cache_base.resolve())
-        except ValueError:
-            print(f"update: {name} is local; nothing to update", file=sys.stderr)
-            continue
-
-        print(
-            f"update: {name} has no registry entry; cannot refresh",
-            file=sys.stderr,
-        )
-
-
-def cmd_resolve(name, registry, source_dirs):
-    try:
-        path, _ = resolve_spec(name, registry, source_dirs)
-        print(path)
-    except SystemExit:
-        sys.exit(1)
-
-
-def cmd_catalog(registry, source_dirs, as_json=False):
-    import json as _json
-    from collections import defaultdict
-
-    grouped = defaultdict(list)
-    home = str(Path.home())
-
-    def clean_p(p):
-        s = str(p)
-        if s.startswith(home):
-            return "~" + s[len(home) :]
-        return s
-
-    # Map cleaned source dirs to their index for sorting
-    source_order = {}
-    order_idx = 0
-    for d in source_dirs:
-        if d:
-            resolved = clean_p(Path(d).resolve())
-            if resolved not in source_order:
-                source_order[resolved] = order_idx
-                order_idx += 1
-
-    # 1. Registry catalog entries
-    for name in registry:
-        entry = registry[name]
-        repo = entry["repo"]
-        ref = entry["ref"]
-        subpath = entry["subpath"]
-
-        url = f"https://github.com/{repo}/tree/{ref}"
-        if subpath:
-            url += f"/{subpath}"
-        # Group all registry items under "Registry" showing their full URL
-        grouped["Registry"].append((name, url))
-
-    # 2. Local catalog entries under source_dirs
-    for d in source_dirs:
-        if not d:
-            continue
-        path = Path(d)
-        if path.is_dir():
-            resolved_parent = str(path.resolve())
-            group_key = clean_p(resolved_parent)
-            for item in path.iterdir():
-                if item.is_dir() and not item.name.startswith("."):
-                    target = None
-                    if item.is_symlink():
-                        target = clean_p(item.resolve())
-                    # Remove it from registry if it was there to avoid duplicates
-                    for grp in list(grouped.keys()):
-                        grouped[grp] = [x for x in grouped[grp] if x[0] != item.name]
-                    grouped[group_key].append((item.name, target))
-
-    # Clean up empty groups
-    for grp in list(grouped.keys()):
-        if not grouped[grp]:
-            del grouped[grp]
-
-    def sort_key(grp):
-        if grp == "Registry":
-            return (2, grp)
-        if grp in source_order:
-            return (0, source_order[grp])
-        return (1, grp)
-
-    if as_json:
-        entries = []
-        for grp in sorted(grouped.keys(), key=sort_key):
-            for name, target in sorted(grouped[grp], key=lambda x: x[0]):
-                entries.append({"name": name, "source": grp, "target": target})
-        print(_json.dumps(entries))
-        return
-
-    # Display output grouped by source path/prefix
-    first = True
-    for grp in sorted(grouped.keys(), key=sort_key):
-        if not first:
-            print()
-        first = False
-        print(f"{grp}:")
-        items = sorted(grouped[grp], key=lambda x: x[0])
-        has_targets = [x for x in items if x[1]]
-        max_len = max(len(name) for name, _ in has_targets) if has_targets else 0
-        for name, target in items:
-            if target:
-                print(f"  {name.ljust(max_len)} -> {target}")
-            else:
-                print(f"  {name}")
-
-
-def cmd_apply(args, registry):
+def cmd_apply(args):
     root, _ = get_git_repo()
-    # Refresh the metadata index so skill-select can see every registry skill.
-    ensure_catalog_index(registry)
     print("git skill: determining skills via skill-select...", file=sys.stderr)
     cmd = ["skill-select", str(root), "--json"] + args
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        print(res.stderr, file=sys.stderr)
+        print(res.stderr, file=sys.stderr, end="")
         die("skill-select failed")
 
     import json
-
     specs = []
     names = []
     for line in res.stdout.strip().splitlines():
@@ -833,23 +331,14 @@ def cmd_apply(args, registry):
             item = json.loads(line)
         except Exception:
             continue
+        
         name = item.get("name")
-        if not name:
+        path = item.get("path")
+        if not name or not path:
             continue
+            
         names.append(name)
-        if name in registry:
-            # Registry skill: materialize the full repo just-in-time and pass the
-            # registry NAME, not the resolved stub/cache path (whose basename can
-            # differ from the registry name when a subpath is set), so 'add'
-            # records it under a name that 'update' can later resolve.
-            provision_registry_skill(name, registry[name])
-            specs.append(name)
-        else:
-            # Local skill: prefer the directory skill-select resolved so we
-            # symlink exactly what it discovered, rather than re-resolving the
-            # bare name against the local namespace (which can be ambiguous when
-            # a name exists in several source dirs).
-            specs.append(item.get("path") or name)
+        specs.append(path)
 
     if not specs:
         print("git skill: no skills recommended by skill-select", file=sys.stderr)
@@ -858,154 +347,12 @@ def cmd_apply(args, registry):
     print(f"git skill: applying skills: {' '.join(names)}", file=sys.stderr)
     subprocess.run(["git", "skill", "add"] + specs, check=True)
 
-
-def cmd_suggest(args, registry):
-    root, exclude_file = get_git_repo()
-    # Refresh the metadata index so registry skills appear in recommendations.
-    ensure_catalog_index(registry)
-    managed = read_managed(exclude_file)
-
-    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
-    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
-
-    current_skills = set()
-    for line in managed:
-        rel = line.lstrip("/")
-        for d in dest_dirs_rel:
-            if rel.startswith(d + "/"):
-                current_skills.add(rel[len(d) + 1 :])
-
-    cmd = ["skill-select", str(root), "--json"] + args
-    res = subprocess.run(cmd, capture_output=True, text=True)
+def cmd_suggest(args):
+    root, _ = get_git_repo()
+    cmd = ["skill-select", str(root)] + args
+    res = subprocess.run(cmd)
     if res.returncode != 0:
-        print(res.stderr, file=sys.stderr)
-        die("skill-select failed")
-
-    import json
-
-    recommended_skills = set()
-    for line in res.stdout.strip().splitlines():
-        if line.strip():
-            try:
-                recommended_skills.add(json.loads(line)["name"])
-            except Exception:
-                pass
-
-    added = recommended_skills - current_skills
-    removed = current_skills - recommended_skills
-
-    all_names = sorted(list(recommended_skills | current_skills))
-    for name in all_names:
-        if name in added:
-            print(f"+ {name}")
-        elif name in removed:
-            print(f"- {name}")
-        else:
-            print(f"  {name}")
-
-
-def cmd_doctor(registry, source_dirs):
-    root, exclude_file = get_git_repo()
-    managed = read_managed(exclude_file)
-    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
-    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
-
-    skills = set()
-    for line in managed:
-        rel = line.lstrip("/")
-        for d in dest_dirs_rel:
-            if rel.startswith(d + "/"):
-                skills.add(rel[len(d) + 1 :])
-
-    rc = 0
-    all_skills = sorted(list(skills))
-
-    if not all_skills:
-        print("git skill: nothing managed")
-        rc = catalog_doctor(registry, rc)
-        sys.exit(rc)
-
-    print("Skills:")
-    for name in all_skills:
-        # Get expected path
-        try:
-            exp_path, _ = resolve_spec(name, registry, source_dirs)
-        except SystemExit:
-            exp_path = None
-
-        # Get current paths for all dest dirs
-        cur_paths = []
-        for d in dest_dirs_rel:
-            p = root / d / name
-            if p.is_symlink():
-                try:
-                    cur_paths.append((p, p.readlink()))
-                except Exception:
-                    pass
-
-        if not cur_paths:
-            print(f"  missing      {name} (recorded but absent on disk)")
-            print(f"                git skill rm {name} && git skill add {name}")
-            rc = 1
-            continue
-
-        if not exp_path:
-            print(f"  unresolvable {name} (no source in SKILL_SOURCE_DIRS)")
-            rc = 1
-            continue
-
-        drift = False
-        for p, target in cur_paths:
-            # target is relative to link, make it absolute or compare carefully
-            resolved_target = (p.parent / target).resolve()
-            if resolved_target != exp_path.resolve():
-                print(f"  drift        {name} in {p.relative_to(root)}")
-                print(f"                current:  {resolved_target}")
-                print(f"                expected: {exp_path.resolve()}")
-                print(f"                git skill rm {name} && git skill add {name}")
-                drift = True
-                rc = 1
-
-        if not drift:
-            print(f"  ok           {name}")
-
-    rc = catalog_doctor(registry, rc)
-    sys.exit(rc)
-
-
-def catalog_doctor(registry, rc):
-    """Read-only catalog index health check. Reports problems, never mutates."""
-    if not registry:
-        return rc
-
-    catalog_dir = get_catalog_dir()
-    meta_dir = catalog_dir / ".meta"
-    issues = []
-    for name in sorted(registry):
-        stub_md = catalog_dir / name / "SKILL.md"
-        meta = meta_dir / name
-        if not stub_md.is_file():
-            issues.append(f"  missing      {name} (not indexed)")
-        elif meta.is_file() and (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
-            issues.append(
-                f"  stale        {name} (index older than {CATALOG_TTL // 86400}d)"
-            )
-    if catalog_dir.is_dir():
-        for item in catalog_dir.iterdir():
-            if item.name.startswith("."):
-                continue
-            if item.name not in registry:
-                issues.append(f"  orphan       {item.name} (no registry entry)")
-
-    if issues:
-        print()
-        print("Catalog:")
-        for line in sorted(issues):
-            print(line)
-        print("                git skill update --catalog")
-        rc = 1
-    return rc
-
+        sys.exit(res.returncode)
 
 def usage():
     print(
@@ -1033,110 +380,41 @@ Commands:
 Options:
   --help          Display this help message and exit
 
-Skill specs:
-  'add' resolves a SPEC, in order, as:
-    path          A local skill directory (absolute, ./relative, or ~/...)
-    catalog entry A registered name (see 'catalog'), fetched from its source into
-                  SKILL_CACHE_DIR and symlinked from there
-    name          A directory of that name under any SKILL_SOURCE_DIRS entry
-  Catalog entries are downloaded once and reused; 'update' re-fetches them. Local skills
-  have no upstream, so update skips them.
-
-Discovery:
-  'suggest' and 'apply' index every registered skill into a metadata cache under
-  SKILL_CACHE_DIR/catalog (one SKILL.md per skill) so skill-select can see and
-  rank them without cloning whole repositories. That catalog directory is on the
-  default SKILL_SOURCE_DIRS, the index is cached for a week, and the full repo is
-  downloaded lazily only when a registry skill is actually added. Stubs for names
-  no longer in the registry are pruned automatically. 'update --catalog' refreshes
-  the whole index on demand; 'doctor' reports missing, stale, or orphaned stubs.
-
-Registry:
-  Catalog entries map a name to a source. Built-in entries live in this script.
-  Add your own (including private/internal repos) without editing it by writing
-  lines to ~/.config/skill/registry or ~/.config/skill/registry.d/*:
-    <name>  <owner>/<repo>  <ref>  <subpath>
-  Later definitions win. ref defaults to main; subpath may be omitted.
-
-Environment:
-  SKILL_SOURCE_DIRS  Colon-separated directories searched for skills by name
-                     (default: ~/.dotfiles/skills:~/.private/skills:~/.corp/skills
-                     plus SKILL_CACHE_DIR/catalog)
-  SKILL_DEST_DIRS    Colon-separated list of local repo paths to symlink skills into
-                     (default: .claude/skills:.agents/skills)
-  SKILL_CACHE_DIR    Where catalog downloads are cached
-                     (default: ${XDG_CACHE_HOME:-~/.cache}/skills)
-
-Examples:
-  git skill apply
-  git skill suggest
-  git skill add coding-standards
-  git skill doctor
-  git skill list
-  git skill clean"""
+Note: registry, network, and AI functions are delegated to 'skill-select'."""
     )
     sys.exit(0)
 
-
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "help"):
-        if len(sys.argv) > 2:
-            sub = sys.argv[2]
-            print(
-                f"Help for subcommand '{sub}' is not custom-defined. Refer to main usage below."
-            )
-            print()
         usage()
 
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
     if "--help" in args:
-        print(
-            f"Help for subcommand '{cmd}' is not custom-defined. Refer to main usage below."
-        )
-        print()
         usage()
 
-    source_dirs_str = os.environ.get("SKILL_SOURCE_DIRS")
-    if not source_dirs_str:
-        home = Path.home()
-        source_dirs_str = (
-            f"{home}/.dotfiles/skills:{home}/.private/skills:"
-            f"{home}/.corp/skills:{get_catalog_dir()}"
-        )
-    source_dirs = source_dirs_str.split(":")
+    # Pass-through commands to skill-select
+    if cmd in ("catalog", "resolve", "update", "doctor"):
+        res = subprocess.run(["skill-select", f"--{cmd}"] + args)
+        sys.exit(res.returncode)
 
-    registry = load_registry()
-
-    if cmd == "catalog":
-        as_json = "--json" in args
-        cmd_catalog(registry, source_dirs, as_json=as_json)
-    elif cmd == "resolve":
-        if len(args) != 1:
-            cmderr("resolve", "exactly one name required")
-        cmd_resolve(args[0], registry, source_dirs)
-    elif cmd == "add":
-        cmd_add(args, registry, source_dirs)
+    if cmd == "add":
+        cmd_add(args)
     elif cmd in ("remove", "rm"):
         cmd_remove(args)
     elif cmd == "list":
         cmd_list()
-    elif cmd == "update":
-        cmd_update(args, registry)
     elif cmd == "clean":
         cmd_clean()
     elif cmd == "apply":
-        cmd_apply(args, registry)
+        cmd_apply(args)
     elif cmd == "suggest":
-        cmd_suggest(args, registry)
-    elif cmd in ("doctor", "status"):
-        cmd_doctor(registry, source_dirs)
+        cmd_suggest(args)
     else:
         print(f"git skill: unknown command '{cmd}'", file=sys.stderr)
         print("Try 'git skill --help' for more information.", file=sys.stderr)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
