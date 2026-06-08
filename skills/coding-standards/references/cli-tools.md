@@ -186,7 +186,7 @@ larger set of obtainable resources, use distinct commands:
 This applies to tools exposing both an installed set and an obtainable set. A
 single-set utility that only enumerates the obtainable set should still call it
 `catalog` (as a subcommand or `--catalog` flag), not `list`/`--list`, to stay
-consistent with tools like `git skill`.
+consistent with tools like `skill`.
 
 ### 5.2 Diagnostics: `doctor` vs. `status`
 
@@ -236,7 +236,7 @@ actions**._
   instance **com.foo**."
 
 The first argument must be a verb; the `[Instance]` may be omitted, as in
-`git skill doctor`.
+`skill doctor`.
 
 #### Reference Implementation: `packagename`
 
