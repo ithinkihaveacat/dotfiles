@@ -5,8 +5,8 @@ description: >
   Pairs with `agent-tools/scripts/photo-query` for triaging downloaded
   photography with an LLM (e.g. find rooms with a bedside table, a fireplace
   with art above, mismatched dining chairs). Captures the Inigo-specific JSON
-  paths (both the legacy __NEXT_DATA__ form and the current React Server
-  Components form). Use when scraping inigo.com listings or cataloguing
+  paths (the React Server Components chunk format the App Router site uses).
+  Use when scraping inigo.com listings or cataloguing
   interior-design reference photos. Triggers: inigo, inigo.com, interior
   design, property photography, gallery scrape, image triage, bedside table,
   fireplace, mismatched chairs.
@@ -25,14 +25,14 @@ compatibility: >-
 parsing.** They encode site-specific knowledge that is otherwise easy to get
 wrong:
 
-- The exact JSON paths Inigo uses for gallery images (different in the current
-  App-Router site versus the legacy Pages-Router pages)
+- The exact JSON path Inigo uses for gallery images
+  (`.listing.gallery.images[].imageUrl`)
 - Unwrapping the RSC `self.__next_f.push(...)` chunk format to get to the
   listing payload
 
 **When to read the script source:** if a script doesn't do what you need, or
 fails because Inigo has changed their page structure again, read the source —
-it's short, and the format-detection edge cases are the actual value.
+it's short, and the parsing details are the actual value.
 
 ## Quick Start
 

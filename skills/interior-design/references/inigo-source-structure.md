@@ -23,42 +23,24 @@ Slug values are the third segment of any listing URL and are the join key across
 the API: index pages list them, detail pages are addressed by them, and they
 appear in the listing's CMS payload as `slug.current`.
 
-The `inigo-gallery` script accepts any listing-detail URL (active or sold) and
-works against both site formats (App Router today, Pages Router legacy).
+The `inigo-gallery` script accepts any listing-detail URL (active or sold).
 
 ## Per-listing detail pages
 
-### Current format: App Router / RSC
-
-Data is embedded in `self.__next_f.push([1,"..."])` inline scripts. Each chunk
-is a JSON-escaped string; the chunk containing the listing starts with an RSC
-line like `5:[...]` whose 4th array element is the props object. The listing
-payload is at `.listing` inside those props, and image URLs are at:
+Data is embedded in `self.__next_f.push([1,"..."])` inline scripts (Next.js App
+Router / RSC). Each chunk is a JSON-escaped string; the chunk containing the
+listing starts with an RSC line like `5:[...]` whose 4th array element is the
+props object. The listing payload is at `.listing` inside those props, and image
+URLs are at:
 
 ```
 .listing.gallery.images[].imageUrl
 ```
 
 CDN host: `cdn.themodernhouse.com`. Filenames are sequential integers (`1.jpg`,
-`2.jpg`, …) inside listing-specific path segments.
-
-### Legacy format: Pages Router (pre-2026 archive data)
-
-The full image manifest was embedded in a `__NEXT_DATA__` script tag:
-
-```html
-<script id="__NEXT_DATA__" type="application/json">{ ... }</script>
-```
-
-Image URLs were at:
-
-```
-.props.pageProps.gallery[].imageRetina
-```
-
-Each entry also had `.image` (smaller variant); `imageRetina` was the ~1600 px
-version. CDN host: `inigo-media.inigo.com`. Filenames were descriptive (see
-patterns below).
+`2.jpg`, …) inside listing-specific path segments. This format is the only one
+served by inigo.com today — verified against the oldest sitemap entries
+(2025-11) on 2026-06-08.
 
 ### Listing payload shape (`--json` output)
 
@@ -168,9 +150,8 @@ choice).
 
 ## Observed image filename patterns
 
-Useful for recognising Inigo-sourced files in mixed directories.
-
-**Current format (App Router, `cdn.themodernhouse.com`):**
+Useful for recognising Inigo-sourced files in mixed directories. All current
+listings are served from `cdn.themodernhouse.com`:
 
 - Sequential integers: `1.jpg`, `2.jpg`, … `18.jpg`
 - Full URL shape:
@@ -178,16 +159,6 @@ Useful for recognising Inigo-sourced files in mixed directories.
 - A second pattern seen on active listings uses Salesforce IDs embedded in the
   path:
   `https://cdn.themodernhouse.com/<orgId>/<hash>/a0OP6XXX_NN_jpg/a0OP6XXX_NN_webres.jpg`
-
-**Legacy format (`inigo-media.inigo.com`, descriptive names):**
-
-- Salesforce asset IDs: `a0OP60000048pntMAA_N103_webres.jpg`,
-  `a0O8e000003BHvVEAW_N18_webres.jpg`
-- Photographer / shoot names: `AF_Inigo_Bushey-Hill-Road_Web-55-1600x1067.jpg`,
-  `INIGO_WOBURN-WALK_LOWRES_16-1600x2401.jpg`, `DGLA3196_HighgateWestHill.jpg`,
-  `20230531_OGT_INIGO_TERRETTSPLACE_045.jpg`
-- WordPress-resized siblings (suffix encodes rendered size):
-  `...-1600x1067.jpg`, `...-1600x2400.jpg`
 
 ## Verification
 
