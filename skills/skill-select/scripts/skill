@@ -33,17 +33,22 @@ def prune_dirs(dest_dirs):
         except Exception:
             pass
 
+
 # ==============================================================================
 # Workspace Abstractions
 # ==============================================================================
 
+
 class Workspace:
     """Base class defining the workspace interface."""
+
     def __init__(self, root):
         self.root = root
 
     def get_dest_dirs(self) -> list[Path]:
-        dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
+        dest_dirs_str = os.environ.get(
+            "SKILL_DEST_DIRS", ".claude/skills:.agents/skills"
+        )
         return [self.root / d for d in dest_dirs_str.split(":") if d]
 
     def get_managed_skills(self) -> list[str]:
@@ -75,13 +80,17 @@ class GitWorkspace(Workspace):
             # Check if we are inside a git repo and get the top-level
             res = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, check=True
+                capture_output=True,
+                text=True,
+                check=True,
             )
             root = Path(res.stdout.strip())
             # Get the path to the exclude file
             res_ex = subprocess.run(
                 ["git", "rev-parse", "--git-path", "info/exclude"],
-                capture_output=True, text=True, check=True
+                capture_output=True,
+                text=True,
+                check=True,
             )
             exclude_path = Path(res_ex.stdout.strip()).resolve()
             return cls(root, exclude_path)
@@ -113,7 +122,7 @@ class GitWorkspace(Workspace):
             managed = self._read_block(self.legacy_mark_begin, self.legacy_mark_end)
         if managed is None:
             return []
-        
+
         # Git exclude stores paths like "/.agents/skills/name". Extract the name.
         skills = set()
         dest_dirs = self.get_dest_dirs()
@@ -164,7 +173,7 @@ class GitWorkspace(Workspace):
                     f.write(line)
                 if other_lines and not other_lines[-1].endswith("\n"):
                     f.write("\n")
-                if skills: # Only write block if there are skills
+                if skills:  # Only write block if there are skills
                     f.write(self.mark_begin + "\n")
                     for line in sorted(list(set(lines))):
                         f.write(line + "\n")
@@ -181,7 +190,9 @@ class GitWorkspace(Workspace):
             rel_to_root = relpath.relative_to(self.root)
             res = subprocess.run(
                 ["git", "ls-files", "--error-unmatch", "--", str(rel_to_root)],
-                cwd=self.root, capture_output=True, text=True
+                cwd=self.root,
+                capture_output=True,
+                text=True,
             )
             if res.returncode == 0:
                 return f"repo already tracks {rel_to_root}; refusing to shadow it"
@@ -201,14 +212,23 @@ class P4Workspace(Workspace):
         self.repo_dir = None
         for path in self.root.iterdir():
             if path.is_dir() and not path.name.startswith("."):
-                if (path / "WORKSPACE").is_file() or (path / "WORKSPACE.bazel").is_file():
+                if (path / "WORKSPACE").is_file() or (
+                    path / "WORKSPACE.bazel"
+                ).is_file():
                     self.repo_dir = path
                     break
 
         configs_dir = self.root / "configs"
         if self.repo_dir and configs_dir.is_dir():
             # Personal config layout convention (centralized)
-            self.state_file = self.root / "configs" / "users" / self.username / "_agents" / ".p4-skills-managed"
+            self.state_file = (
+                self.root
+                / "configs"
+                / "users"
+                / self.username
+                / "_agents"
+                / ".p4-skills-managed"
+            )
             self.analyze_dir = self.repo_dir
             self.is_personal = True
         else:
@@ -220,7 +240,9 @@ class P4Workspace(Workspace):
     @classmethod
     def detect(cls):
         try:
-            res = subprocess.run(["p4", "info"], capture_output=True, text=True, check=True)
+            res = subprocess.run(
+                ["p4", "info"], capture_output=True, text=True, check=True
+            )
             client_root = None
             username = None
             for line in res.stdout.splitlines():
@@ -236,7 +258,9 @@ class P4Workspace(Workspace):
 
     def get_dest_dirs(self) -> list[Path]:
         if self.is_personal:
-            return [self.root / "configs" / "users" / self.username / "_agents" / "skills"]
+            return [
+                self.root / "configs" / "users" / self.username / "_agents" / "skills"
+            ]
         return super().get_dest_dirs()
 
     def get_managed_skills(self):
@@ -257,17 +281,99 @@ class P4Workspace(Workspace):
 
     def check_conflict(self, relpath):
         if relpath.exists() and not relpath.is_symlink():
-            res = subprocess.run(["p4", "fstat", str(relpath)], capture_output=True, text=True)
+            res = subprocess.run(
+                ["p4", "fstat", str(relpath)], capture_output=True, text=True
+            )
             if res.returncode == 0:
                 return f"workspace already tracks {relpath.relative_to(self.root)}; refusing to shadow it"
         return None
 
     def get_analyze_dir(self):
-        return self.repo_dir if (self.is_personal and self.repo_dir) else self.analyze_dir
+        return (
+            self.repo_dir if (self.is_personal and self.repo_dir) else self.analyze_dir
+        )
+
+
+class VfsWorkspace(Workspace):
+    """Support for virtual/mapped workspaces."""
+
+    def __init__(self, root, vfs_root):
+        super().__init__(root)
+        self.vfs_root = vfs_root
+        self.state_file = self.root / ".skills-managed"
+
+    @classmethod
+    def detect(cls):
+        curr = Path.cwd()
+        vfs_root = None
+        # Walk up to find the metadata directory
+        for p in [curr] + list(curr.parents):
+            if (p / ".citc").is_dir():
+                vfs_root = p
+                break
+
+        if not vfs_root:
+            return None
+
+        # Verify workspace type by checking manifest metadata
+        manifest_path = vfs_root / ".citc" / "manifest.ascii"
+        if not manifest_path.is_file():
+            return None
+
+        is_matched = False
+        try:
+            with open(manifest_path, "r", encoding="utf-8", errors="replace") as f:
+                # Read first few KB to find markers
+                content = f.read(4096)
+                if "cog.use_jj" in content or "devtools_srcfs" in content:
+                    is_matched = True
+        except Exception:
+            pass
+
+        if not is_matched:
+            return None
+
+        # Find the repository root.
+        # Typically there is one main directory that is not hidden (e.g., 'android').
+        repo_dir = None
+        try:
+            for path in vfs_root.iterdir():
+                if path.is_dir() and not path.name.startswith("."):
+                    repo_dir = path
+                    break
+        except Exception:
+            pass
+
+        if not repo_dir:
+            repo_dir = vfs_root
+
+        return cls(repo_dir, vfs_root)
+
+    def get_managed_skills(self):
+        if not self.state_file.is_file():
+            return []
+        with open(self.state_file, "r", encoding="utf-8", errors="replace") as f:
+            return sorted([line.strip() for line in f if line.strip()])
+
+    def save_managed_skills(self, skills):
+        if not skills:
+            if self.state_file.is_file():
+                self.state_file.unlink()
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state_file, "w", encoding="utf-8") as f:
+            for item in sorted(list(set(skills))):
+                f.write(item + "\n")
+
+    def check_conflict(self, relpath):
+        if relpath.exists() and not relpath.is_symlink():
+            return f"{relpath} exists and is not a symlink; refusing to overwrite"
+        return None
 
 
 class DefaultWorkspace(Workspace):
     """Fallback for non-VCS directories."""
+
     def __init__(self, root):
         super().__init__(root)
         self.state_file = self.root / ".skills-managed"
@@ -293,9 +399,11 @@ class DefaultWorkspace(Workspace):
             return f"{relpath} exists and is not a symlink; refusing to overwrite"
         return None
 
+
 # ==============================================================================
 # Auto-Detection
 # ==============================================================================
+
 
 def get_workspace() -> Workspace:
     ws = GitWorkspace.detect()
@@ -304,11 +412,16 @@ def get_workspace() -> Workspace:
     ws = P4Workspace.detect()
     if ws:
         return ws
+    ws = VfsWorkspace.detect()
+    if ws:
+        return ws
     return DefaultWorkspace(Path.cwd())
+
 
 # ==============================================================================
 # CLI Command Implementations
 # ==============================================================================
+
 
 def cmd_add(specs):
     if not specs:
@@ -351,7 +464,10 @@ def cmd_add(specs):
             if conflict:
                 cmderr("add", conflict)
             if relpath.exists() and not relpath.is_symlink():
-                cmderr("add", f"{relpath} exists and is not a symlink; refusing to overwrite")
+                cmderr(
+                    "add",
+                    f"{relpath} exists and is not a symlink; refusing to overwrite",
+                )
 
     # Apply symlinks
     for src, name in resolved_skills:
@@ -386,7 +502,10 @@ def cmd_remove(names):
                 relpath.unlink()
                 removed = True
             elif relpath.exists():
-                cmderr("remove", f"{relpath} is not a symlink we manage; leaving it untouched")
+                cmderr(
+                    "remove",
+                    f"{relpath} is not a symlink we manage; leaving it untouched",
+                )
 
         if name in managed:
             managed.remove(name)
