@@ -43,9 +43,17 @@ output streams, and exit code philosophy.
 ### Shell Script Quality
 
 The language-specific implementation guide for shell scripts. All shell scripts
-must be linted with `shellcheck` and formatted with `shfmt`. Fish scripts use
-`fish_indent`. Scripts must have robust error handling and comply with the UX
-standards in `cli-tools.md`.
+must be linted with `shellcheck` and formatted with `shfmt`.
+
+When formatting shell scripts, you **MUST** use the following specific switches
+for `shfmt` to ensure correct indentation (2 spaces, indented switch cases):
+
+```bash
+shfmt -w -i 2 -ci FILENAME
+```
+
+Fish scripts use `fish_indent`. Scripts must have robust error handling and
+comply with the UX standards in `cli-tools.md`.
 
 @references/shell.md
 
