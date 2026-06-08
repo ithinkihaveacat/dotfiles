@@ -38,17 +38,25 @@ it's short, and the format-detection edge cases are the actual value.
 
 ### Find listings matching criteria
 
+Two modes:
+
 ```bash
-scripts/inigo-search                       # 20 active listing URLs
-scripts/inigo-search --sold --price-to 500 # sold listings up to £500k
-scripts/inigo-search --address london --json
+scripts/inigo-search website [filters]    # live data, ≤26 per section, filterable
+scripts/inigo-search sitemap [filters]    # full catalogue (~700 URLs), slug only
 ```
 
-Prints one listing-detail URL per line on stdout (or full summaries with
-`--json`). Inigo's index pages only embed the first 20 results plus 6 optional
-`--include-featured` — pagination is JS-only and not URL-addressable, so a
-single invocation sees ≤ 26 listings. The total catalogue size is printed to
-stderr.
+`website` queries the embedded `initialData` on `/all-homes` and `/past-sales`
+(merging both by default; pass `--active` or `--sold` to narrow). Pagination is
+JS-only, so each section yields ≤ 20 summaries plus 6 with `--include-featured`.
+Supports price/bedrooms/address filters; emits URLs (or full summaries with
+`--json`).
+
+`sitemap` enumerates every listing URL from `https://www.inigo.com/sitemap.xml`
+— ~520 sold + ~170 active. Best for archive enumeration or initial pulls. Only
+slug-substring filtering is available because the sitemap carries no metadata
+beyond `<loc>` and `<lastmod>`.
+
+Both modes print catalogue counts to stderr.
 
 ### Get gallery image URLs
 
@@ -68,7 +76,7 @@ mkdir <slug> && scripts/inigo-gallery <URL> | wget -i - -P <slug>/
 ### Search → download in one pipeline
 
 ```bash
-scripts/inigo-search --sold --price-to 500 --limit 3 \
+scripts/inigo-search website --sold --price-to 500 --limit 3 \
   | while read url; do
       slug=$(basename "$url"); mkdir -p "$slug"
       scripts/inigo-gallery "$url" | wget -q -i - -P "$slug/"
@@ -101,11 +109,16 @@ parsed JSON per file. See the `agent-tools` skill for full subcommand docs
 
 ## Scripts
 
-- `scripts/inigo-search [filters]` — print listing-detail URLs from `/all-homes`
-  (or `/past-sales` with `--sold`). Filters: `--price-from K`, `--price-to K`
-  (£000s), `--bedrooms N`, `--min-bedrooms N`, `--address SUBSTR`,
-  `--include-featured`, `--limit N`, `--json`. Limited to 20–26 listings per
-  invocation; see the reference doc for why. Zero deps.
+- `scripts/inigo-search website [filters]` — query the live index pages
+  (`/all-homes`, `/past-sales`). Filters: `--active`/`--sold` (default merges
+  both), `--price-from K`, `--price-to K` (£000s), `--bedrooms N`,
+  `--min-bedrooms N`, `--address SUBSTR`, `--include-featured`, `--limit N`,
+  `--json`. Limited to ≤ 26 listings per section because pagination is JS-only;
+  see the reference doc for why. Zero deps.
+- `scripts/inigo-search sitemap [filters]` — enumerate every listing URL via
+  `sitemap.xml` (~690 URLs). Filters: `--active`/`--sold` (default merges both),
+  `--address` (slug substring), `--limit N`, `--json`. Use for archive
+  enumeration or initial pulls. Zero deps.
 - `scripts/inigo-gallery URL` — print gallery image URLs from an Inigo listing.
   `--json` emits the full listing payload instead. Zero deps. See
   [references/inigo-source-structure.md](references/inigo-source-structure.md)

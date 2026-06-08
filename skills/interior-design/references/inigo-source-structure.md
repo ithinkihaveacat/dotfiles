@@ -126,17 +126,34 @@ the action ID is bundled into the JS). There is no `?page=`, `?cursor=`, or
 `/page/N` URL pattern that the server honours — tested empirically. So:
 
 - The first 20 + featured (6, overlap possible) are the only listings you can
-  get with a single GET.
-- For complete enumeration you'd have to reverse-engineer the Server Action
-  protocol (fragile — action IDs change with every deploy) or drive a real
-  browser.
+  get with a single GET to an index page.
+- For complete enumeration, use `sitemap.xml` instead — it lists every listing
+  URL (see below). Reverse-engineering the Server Action protocol is fragile
+  (action IDs change on every deploy) and driving a real browser is heavyweight;
+  neither is needed.
 - `resultsCount` tells you the total so you at least know what you're missing.
 
-A practical workaround for "enumerate everything": fetch each section's index,
-take the 20 summaries plus 6 featured, then use whatever listing-detail URL you
-can construct from elsewhere (the user's own data directory, sitemap, etc.).
-Inigo's `sitemap.xml` is worth investigating if this becomes a need; we haven't
-yet.
+## Sitemap
+
+`https://www.inigo.com/sitemap.xml` (advertised in `robots.txt`, ~240 KB
+uncompressed) carries every listing URL Inigo publishes. As of 2026-06-08:
+
+- 520 `<loc>…/past-sales/<slug></loc>` entries (matches the live `resultsCount`
+  on `/past-sales`)
+- 168 `<loc>…/sales-list/<slug></loc>` entries (matches `resultsCount` on
+  `/all-homes`; note the URL section is `sales-list`, not `all-homes`, on detail
+  pages)
+- ~660 `/almanac/<slug>` entries (editorial content, not listings) and a handful
+  of static pages
+
+Each entry is wrapped in
+`<url><loc>…</loc><lastmod>YYYY-MM-DDTHH:MM:SSZ</lastmod></url>` with no other
+metadata. That makes the sitemap ideal for URL enumeration (archive backfill,
+initial pulls) but useless for price/bedrooms/address filtering — those require
+fetching each detail page.
+
+`inigo-search sitemap` uses this; `inigo-search website` retains the live
+filterable behaviour against the index pages.
 
 ## No browser needed
 

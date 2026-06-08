@@ -2,30 +2,20 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Search Inigo listings via the /all-homes or /past-sales index page.
+# Tests: tests/inigo-search/
+"""Search Inigo property listings.
 
-Default output is one listing-detail URL per line on stdout, suitable for
-piping into inigo-gallery. With --json, emits the matched listing summaries
-as a JSON array.
+Two modes:
+  website   Query the live index pages (≤26 per section, full metadata
+            for filters). Pagination is JS-only; not all results are
+            reachable.
+  sitemap   Enumerate every listing URL via sitemap.xml (~700 URLs,
+            slug only). Best for archive enumeration or initial pulls.
 
-Inigo's index pages only embed the first 20 summaries plus a server-side
-`resultsCount`; pagination is JS-only and not URL-addressable, so a single
-invocation here sees at most 20 properties (plus 6 more if
---include-featured is set). The total catalogue size is printed to stderr.
+Both modes default to merging active and sold sections. Use --active
+or --sold to narrow.
 
-Filters run client-side. The fields populated on the 20 summaries are
-limited: price (formatted string) and address. Bedroom count, location,
-and property type are null on the summaries — they are only populated on
-featured listings, so the --bedrooms filter only meaningfully narrows
-when --include-featured is set.
-
-Examples:
-  inigo-search                              # 20 active listing URLs
-  inigo-search --sold                       # 20 sold listing URLs
-  inigo-search --price-to 800               # active listings up to £800k
-  inigo-search --address london --json      # London listings, summary JSON
-  inigo-search --include-featured           # add 6 hand-curated featured listings
-  inigo-search --sold --price-to 500 | xargs -n1 inigo-gallery | wget -i -
+See 'inigo-search MODE --help' for mode-specific options.
 """
 
 import argparse
@@ -36,6 +26,7 @@ import urllib.request
 
 UA = "Mozilla/5.0 (compatible; inigo-search)"
 BASE = "https://www.inigo.com"
+SITEMAP_URL = f"{BASE}/sitemap.xml"
 
 
 def fetch(url: str) -> str:
@@ -79,8 +70,7 @@ def parse_price(s):
 
 
 def normalise(item, sold_section: bool) -> dict:
-    """Map either an initialData.properties summary or a featuredListings
-    item to a common shape."""
+    """Map an initialData.properties or featuredListings item to a common shape."""
     slug = (
         item["slug"]["current"]
         if isinstance(item.get("slug"), dict)
@@ -95,7 +85,7 @@ def normalise(item, sold_section: bool) -> dict:
     }
 
 
-def matches(item, args) -> bool:
+def matches_website(item, args) -> bool:
     if args.price_from is not None:
         if item["price"] is None or item["price"] < args.price_from * 1000:
             return False
@@ -111,80 +101,240 @@ def matches(item, args) -> bool:
     return True
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=False,
-    )
-    ap.add_argument("--help", action="help", help="Show this help message and exit")
-    ap.add_argument(
-        "--sold", action="store_true", help="Search /past-sales instead of /all-homes"
-    )
-    ap.add_argument(
-        "--price-from", type=int, metavar="K", help="Minimum price in £000s"
-    )
-    ap.add_argument("--price-to", type=int, metavar="K", help="Maximum price in £000s")
-    ap.add_argument("--bedrooms", type=int, help="Exact bedroom count")
-    ap.add_argument("--min-bedrooms", type=int, help="Minimum bedroom count")
-    ap.add_argument("--address", help="Case-insensitive substring of address")
-    ap.add_argument(
-        "--include-featured",
-        action="store_true",
-        help="Also include the hand-curated featured listings "
-        "(may overlap with results)",
-    )
-    ap.add_argument("--limit", type=int, help="Cap number of results")
-    ap.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit summary objects as a JSON array instead of URLs",
-    )
-    args = ap.parse_args()
+def sections_for(args):
+    """Translate --active/--sold flags into a list of (index_section, sold_flag).
 
-    section = "past-sales" if args.sold else "all-homes"
-    detail = "past-sales" if args.sold else "sales-list"
+    Default (neither flag) → both sections.
+    """
+    if args.active and not args.sold:
+        return [("all-homes", False)]
+    if args.sold and not args.active:
+        return [("past-sales", True)]
+    return [("all-homes", False), ("past-sales", True)]
 
-    html = fetch(f"{BASE}/{section}")
-    payload = extract_index_payload(html)
-    if not payload:
-        print(f"error: could not find listing data on /{section}", file=sys.stderr)
-        sys.exit(1)
 
-    init = payload.get("initialData", {})
-    total = init.get("resultsCount")
-    if total is not None:
-        print(
-            f"# /{section}: {len(init.get('properties', []))} of {total} listings "
-            f"available without pagination",
-            file=sys.stderr,
-        )
+def detail_prefix(sold: bool) -> str:
+    return "past-sales" if sold else "sales-list"
 
+
+def cmd_website(args):
     items, seen = [], set()
-    if args.include_featured:
-        for f in payload.get("featuredListings", []):
-            n = normalise(f, args.sold)
+    for section, sold_section in sections_for(args):
+        html = fetch(f"{BASE}/{section}")
+        payload = extract_index_payload(html)
+        if not payload:
+            print(
+                f"inigo-search: could not find listing data on /{section}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        init = payload.get("initialData", {})
+        total = init.get("resultsCount")
+        if total is not None:
+            print(
+                f"# /{section}: {len(init.get('properties', []))} of {total} "
+                f"listings available without pagination",
+                file=sys.stderr,
+            )
+
+        if args.include_featured:
+            for f in payload.get("featuredListings", []):
+                n = normalise(f, sold_section)
+                if n["slug"] and n["slug"] not in seen:
+                    seen.add(n["slug"])
+                    items.append(n)
+        for p in init.get("properties", []):
+            n = normalise(p, sold_section)
             if n["slug"] and n["slug"] not in seen:
                 seen.add(n["slug"])
                 items.append(n)
-    for p in init.get("properties", []):
-        n = normalise(p, args.sold)
-        if n["slug"] and n["slug"] not in seen:
-            seen.add(n["slug"])
-            items.append(n)
 
-    hits = [i for i in items if matches(i, args)]
+    hits = [i for i in items if matches_website(i, args)]
     if args.limit:
         hits = hits[: args.limit]
 
     if args.json:
         for h in hits:
-            h["url"] = f"{BASE}/{detail}/{h['slug']}"
+            h["url"] = f"{BASE}/{detail_prefix(h['sold'])}/{h['slug']}"
         json.dump(hits, sys.stdout, indent=2, ensure_ascii=False)
         sys.stdout.write("\n")
     else:
         for h in hits:
-            print(f"{BASE}/{detail}/{h['slug']}")
+            print(f"{BASE}/{detail_prefix(h['sold'])}/{h['slug']}")
+
+
+def parse_sitemap(xml: str):
+    """Yield (url, slug, lastmod, sold) for every listing URL in sitemap.xml.
+
+    Only /past-sales/<slug> and /sales-list/<slug> entries are listings;
+    /almanac/<slug> and static pages are skipped.
+    """
+    for block in re.findall(r"<url>(.*?)</url>", xml, re.DOTALL):
+        loc_m = re.search(r"<loc>([^<]+)</loc>", block)
+        if not loc_m:
+            continue
+        loc = loc_m.group(1).strip()
+        m = re.search(r"/(past-sales|sales-list)/([^/]+?)/?$", loc)
+        if not m:
+            continue
+        section, slug = m.group(1), m.group(2)
+        sold = section == "past-sales"
+        lastmod_m = re.search(r"<lastmod>([^<]+)</lastmod>", block)
+        lastmod = lastmod_m.group(1).strip() if lastmod_m else None
+        # Normalise host so downstream tools see consistent URLs.
+        url = re.sub(r"^https?://[^/]+", BASE, loc)
+        yield url, slug, lastmod, sold
+
+
+def cmd_sitemap(args):
+    xml = fetch(SITEMAP_URL)
+    entries = list(parse_sitemap(xml))
+    n_active = sum(1 for _, _, _, sold in entries if not sold)
+    n_sold = sum(1 for _, _, _, sold in entries if sold)
+    print(
+        f"# sitemap.xml: {n_active} active, {n_sold} sold ({n_active + n_sold} total)",
+        file=sys.stderr,
+    )
+
+    sections = sections_for(args)
+    keep_active = any(not sold for _, sold in sections)
+    keep_sold = any(sold for _, sold in sections)
+    needle = args.address.lower() if args.address else None
+
+    hits = []
+    for url, slug, lastmod, sold in entries:
+        if sold and not keep_sold:
+            continue
+        if (not sold) and not keep_active:
+            continue
+        if needle and needle not in slug.lower():
+            continue
+        hits.append({"url": url, "slug": slug, "lastmod": lastmod, "sold": sold})
+
+    if args.limit:
+        hits = hits[: args.limit]
+
+    if args.json:
+        json.dump(hits, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        for h in hits:
+            print(h["url"])
+
+
+def add_section_flags(p):
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--active",
+        action="store_true",
+        help="Restrict to active listings (default: both active and sold)",
+    )
+    g.add_argument(
+        "--sold",
+        action="store_true",
+        help="Restrict to sold listings (default: both active and sold)",
+    )
+
+
+def normalise_argv(argv):
+    """Map 'inigo-search help [MODE]' to 'inigo-search [MODE] --help'.
+
+    Required by the project's CLI standard (cli-tools.md §2.1): `tool help`
+    and `tool --help` must produce identical output, and likewise for
+    `tool help MODE` vs `tool MODE --help`.
+    """
+    if len(argv) >= 2 and argv[1] == "help":
+        return [argv[0]] + argv[2:] + ["--help"]
+    return argv
+
+
+def main():
+    sys.argv = normalise_argv(sys.argv)
+
+    ap = argparse.ArgumentParser(
+        prog="inigo-search",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+    )
+    ap.add_argument("--help", action="help", help="Show this help message and exit")
+    sub = ap.add_subparsers(dest="mode", metavar="MODE")
+
+    web = sub.add_parser(
+        "website",
+        add_help=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Query Inigo's live index pages (/all-homes and /past-sales).\n"
+            "By default merges both sections. Pagination is JS-only, so each\n"
+            "section yields at most 20 summaries (plus 6 featured listings\n"
+            "with --include-featured). Filters run client-side."
+        ),
+        help="Query the live index pages (≤26 per section, full metadata)",
+        epilog=(
+            "Examples:\n"
+            "  inigo-search website                            # active + sold\n"
+            "  inigo-search website --sold --price-to 800      # sold up to £800k\n"
+            "  inigo-search website --address london --json"
+        ),
+    )
+    web.add_argument("--help", action="help", help="Show this help message and exit")
+    add_section_flags(web)
+    web.add_argument(
+        "--price-from", type=int, metavar="K", help="Minimum price in £000s"
+    )
+    web.add_argument("--price-to", type=int, metavar="K", help="Maximum price in £000s")
+    web.add_argument("--bedrooms", type=int, help="Exact bedroom count")
+    web.add_argument("--min-bedrooms", type=int, help="Minimum bedroom count")
+    web.add_argument("--address", help="Case-insensitive substring of address")
+    web.add_argument(
+        "--include-featured",
+        action="store_true",
+        help="Also include the hand-curated featured listings "
+        "(may overlap with results)",
+    )
+    web.add_argument("--limit", type=int, help="Cap number of results")
+    web.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit summary objects as a JSON array instead of URLs",
+    )
+    web.set_defaults(func=cmd_website)
+
+    site = sub.add_parser(
+        "sitemap",
+        add_help=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Enumerate every listing URL Inigo publishes via sitemap.xml.\n"
+            "Returns the full catalogue (~700 URLs) with slug + lastmod only —\n"
+            "price, bedrooms and address require fetching each detail page."
+        ),
+        help="Enumerate every listing URL via sitemap.xml (~700 URLs)",
+        epilog=(
+            "Examples:\n"
+            "  inigo-search sitemap                            # all ~700 URLs\n"
+            "  inigo-search sitemap --sold                     # ~520 past-sales URLs\n"
+            "  inigo-search sitemap --address hill --json"
+        ),
+    )
+    site.add_argument("--help", action="help", help="Show this help message and exit")
+    add_section_flags(site)
+    site.add_argument("--address", help="Case-insensitive substring of slug")
+    site.add_argument("--limit", type=int, help="Cap number of results")
+    site.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit objects with url/slug/lastmod/sold as a JSON array",
+    )
+    site.set_defaults(func=cmd_sitemap)
+
+    args = ap.parse_args()
+    if not args.mode:
+        ap.print_help()
+        sys.exit(0)
+    args.func(args)
 
 
 if __name__ == "__main__":
