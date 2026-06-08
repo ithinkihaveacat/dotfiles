@@ -16,6 +16,7 @@ import argparse
 import tempfile
 import tarfile
 import subprocess
+import yaml
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -28,6 +29,7 @@ CATALOG_TTL = 7 * 24 * 3600  # 7 days
 # force-refreshes it while adding a registry skill to a workspace.
 PROVISION_TTL = 8 * 3600  # 8 hours
 
+
 def get_cache_base():
     return (
         Path(
@@ -39,10 +41,8 @@ def get_cache_base():
     )
 
 
-
 def get_catalog_dir():
     return get_cache_base() / "catalog"
-
 
 
 def parse_github_url(url):
@@ -61,13 +61,13 @@ def parse_github_url(url):
     return f"{owner}/{repo}", ref, subpath
 
 
-
 def load_registry():
     registry = {}
 
     # Load custom registry files
     config_dir = (
-        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser() / "skill-select"
+        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser()
+        / "skill-select"
     )
     registry_file = config_dir / "registry"
     registry_d = config_dir / "registry.d"
@@ -100,7 +100,6 @@ def load_registry():
     return registry
 
 
-
 def _atomic_replace_dir(src, dest):
     """Install src as dest atomically, swapping within dest's parent directory.
 
@@ -127,7 +126,6 @@ def _atomic_replace_dir(src, dest):
     finally:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
-
 
 
 def fetch_github(name, repo, ref, subpath, force=False):
@@ -191,7 +189,6 @@ def fetch_github(name, repo, ref, subpath, force=False):
     return cachedir
 
 
-
 def fetch_skill_md(name, repo, ref, subpath, force=False):
     """Fetch only SKILL.md for a registry entry into a lightweight catalog stub.
 
@@ -240,7 +237,6 @@ def fetch_skill_md(name, repo, ref, subpath, force=False):
     return stub
 
 
-
 def ensure_catalog_index(registry, force=False):
     """Populate/refresh the catalog/ index of metadata stubs for registry skills.
 
@@ -268,9 +264,7 @@ def ensure_catalog_index(registry, force=False):
         if fresh:
             continue
         print(f"git skill: [{i}/{total}] indexing {name}...", file=sys.stderr)
-        fetch_skill_md(
-            name, entry["repo"], entry["ref"], entry["subpath"], force=force
-        )
+        fetch_skill_md(name, entry["repo"], entry["ref"], entry["subpath"], force=force)
 
     # Garbage-collect orphaned stubs (registry is non-empty here, so this cannot
     # wipe a catalog just because a config file went missing).
@@ -287,7 +281,6 @@ def ensure_catalog_index(registry, force=False):
             stale_meta = meta_dir / item.name
             if stale_meta.exists():
                 stale_meta.unlink()
-
 
 
 def provision_registry_skill(name, entry):
@@ -308,7 +301,6 @@ def provision_registry_skill(name, entry):
         or (time.time() - cachedir.stat().st_mtime) > PROVISION_TTL
     )
     fetch_github(name, entry["repo"], entry["ref"], entry["subpath"], force=stale)
-
 
 
 def resolve_spec(spec, registry, source_dirs):
@@ -348,40 +340,18 @@ def resolve_spec(spec, registry, source_dirs):
     )
 
 
-
 def cmd_update(names, registry):
-    # 'update --catalog' refreshes the global metadata index (and prunes orphans)
-    # without needing a workspace; handle it before requiring a git repo.
+    if not names:
+        die("update requires skill name or --catalog")
+
     if len(names) == 1 and names[0] == "--catalog":
         ensure_catalog_index(registry, force=True)
         print("update: refreshed catalog index", file=sys.stderr)
         return
 
-    root, exclude_file = get_git_repo()
-
-    dest_dirs_str = os.environ.get("SKILL_DEST_DIRS", ".claude/skills:.agents/skills")
-    dest_dirs_rel = [d for d in dest_dirs_str.split(":") if d]
-    dest_dirs = [root / d for d in dest_dirs_rel]
-
-    if len(names) == 1 and names[0] == "--all":
-        managed = read_managed(exclude_file)
-        skills = set()
-        for line in managed:
-            rel = line.lstrip("/")
-            for d in dest_dirs_rel:
-                if rel.startswith(d + "/"):
-                    skills.add(rel[len(d) + 1 :])
-        names = sorted(list(skills))
-    elif not names:
-        cmderr("update", "skill name, --all, or --catalog required")
-
     cache_base = get_cache_base()
 
     for name in names:
-        # Registry entries can be refreshed whether or not they are currently
-        # added: always refresh the lightweight metadata stub, and re-fetch the
-        # full repo in place only when one is already cached (so 'update' never
-        # downloads a whole repo for a skill that was only ever discovered).
         if name in registry:
             entry = registry[name]
             fetch_skill_md(
@@ -398,32 +368,10 @@ def cmd_update(names, registry):
             print(
                 f"updated {name} from {entry['repo']}@{entry['ref']}", file=sys.stderr
             )
-            continue
-
-        relpath = dest_dirs[0] / name
-        if not relpath.is_symlink():
+        else:
             print(
-                f"update: {name} is not currently added; skipping",
-                file=sys.stderr,
+                f"update: {name} has no registry entry; cannot refresh", file=sys.stderr
             )
-            continue
-
-        try:
-            target = relpath.readlink().resolve()
-        except Exception:
-            continue
-
-        try:
-            target.relative_to(cache_base.resolve())
-        except ValueError:
-            print(f"update: {name} is local; nothing to update", file=sys.stderr)
-            continue
-
-        print(
-            f"update: {name} has no registry entry; cannot refresh",
-            file=sys.stderr,
-        )
-
 
 
 def cmd_resolve(name, registry, source_dirs):
@@ -432,7 +380,6 @@ def cmd_resolve(name, registry, source_dirs):
         print(path)
     except SystemExit:
         sys.exit(1)
-
 
 
 def cmd_catalog(registry, source_dirs, as_json=False):
@@ -526,7 +473,6 @@ def cmd_catalog(registry, source_dirs, as_json=False):
                 print(f"  {name}")
 
 
-
 def cmd_doctor(registry, source_dirs):
     catalog_dir = get_catalog_dir()
     meta_dir = catalog_dir / ".meta"
@@ -537,18 +483,14 @@ def cmd_doctor(registry, source_dirs):
         if not stub_md.is_file():
             issues.append(f"  missing      {name} (not indexed)")
         elif meta.is_file() and (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
-            issues.append(
-                f"  stale        {name} (older than {CATALOG_TTL}s)"
-            )
+            issues.append(f"  stale        {name} (older than {CATALOG_TTL}s)")
 
     if catalog_dir.is_dir():
         for item in sorted(catalog_dir.iterdir()):
             if item.name.startswith("."):
                 continue
             if item.name not in registry:
-                issues.append(
-                    f"  orphan       {item.name} (not in registry)"
-                )
+                issues.append(f"  orphan       {item.name} (not in registry)")
 
     if issues:
         print()
@@ -558,6 +500,7 @@ def cmd_doctor(registry, source_dirs):
         print("                skill-select --update --catalog")
         sys.exit(1)
     sys.exit(0)
+
 
 def load_skill_md(path: Path, default_name: str | None = None) -> dict | None:
     """Reads SKILL.md and extracts frontmatter and content."""
@@ -736,10 +679,10 @@ def resolve_selection(results, skills):
     return resolved
 
 
-
 def die(msg):
     print(f"skill-select: {msg}", file=sys.stderr)
     sys.exit(1)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -795,7 +738,7 @@ def main():
     )
 
     args = parser.parse_args()
-    
+
     registry = load_registry()
 
     search_paths = []
@@ -814,30 +757,33 @@ def main():
                     home / ".corp/skills",
                 ]
             )
-        
+
         cache_base = get_catalog_dir().parent
         search_paths.append(cache_base / "catalog")
-        
+
     source_dirs = [str(p) for p in search_paths]
 
     if args.catalog or args.list:
         cmd_catalog(registry, source_dirs, as_json=args.json)
         sys.exit(0)
-        
+
     if args.resolve:
         cmd_resolve(args.resolve, registry, source_dirs)
         sys.exit(0)
-        
+
     if args.update is not None:
         cmd_update(args.update, registry)
         sys.exit(0)
-        
+
     if args.doctor:
         cmd_doctor(registry, source_dirs)
         sys.exit(0)
 
     if not search_paths:
-        print("skill-select: Error: No search paths configured. Please set SKILL_SOURCE_DIRS.", file=sys.stderr)
+        print(
+            "skill-select: Error: No search paths configured. Please set SKILL_SOURCE_DIRS.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Auto-heal the metadata index (TTL-cached) before discovery
@@ -851,7 +797,10 @@ def main():
 
     target_dir = Path(args.dir).resolve()
     if not target_dir.is_dir():
-        print(f"skill-select: Error: target directory '{target_dir}' does not exist.", file=sys.stderr)
+        print(
+            f"skill-select: Error: target directory '{target_dir}' does not exist.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.context:
@@ -865,7 +814,10 @@ def main():
         from google import genai
         from google.genai import types
     except ImportError:
-        print("skill-select: Error: The 'google-genai' package is required.", file=sys.stderr)
+        print(
+            "skill-select: Error: The 'google-genai' package is required.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     system_instruction = """
@@ -911,20 +863,26 @@ TARGET DIRECTORY INFO:
     except Exception as e:
         print(f"skill-select: Error calling Gemini API: {e}", file=sys.stderr)
         sys.exit(1)
-
     import json
+
     try:
         results = json.loads(response.text)
     except json.JSONDecodeError as e:
-        print(f"skill-select: Error: Could not parse JSON response: {e}\n{response.text}", file=sys.stderr)
+        print(
+            f"skill-select: Error: Could not parse JSON response: {e}\n{response.text}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if not isinstance(results, list):
-        print(f"skill-select: Error: Expected a JSON array, got: {type(results)}\n{response.text}", file=sys.stderr)
+        print(
+            f"skill-select: Error: Expected a JSON array, got: {type(results)}\n{response.text}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     resolved = resolve_selection(results, skills)
-    
+
     # Provision registry skills and update paths to the fully cloned repositories
     for item in resolved:
         name = item["name"]
@@ -943,6 +901,7 @@ TARGET DIRECTORY INFO:
     else:
         for item in resolved:
             print(item["name"])
+
 
 if __name__ == "__main__":
     main()
