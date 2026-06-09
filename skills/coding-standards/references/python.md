@@ -186,7 +186,10 @@ if __name__ == "__main__":
 
 For async tools, use the event loop's signal handlers and task cancellation. We
 track `_signal_received` to ensure that internal application cancellations do
-not mistakenly report exit code `130` (user interrupt).
+not mistakenly report exit code `130` (user interrupt). Adopting
+`asyncio.run(main())` guarantees that all asynchronous generators, default
+executors, and pending background tasks are cleanly drained and shut down on
+exit.
 
 ```python
 import asyncio
@@ -197,48 +200,62 @@ import sys
 _signal_received = False
 
 async def main():
-    # Your async main logic here
-    ...
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
 
-def shutdown_handler(main_task, signum):
-    global _signal_received
-    _signal_received = True
-    main_task.cancel()
-
-if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    main_task = loop.create_task(main())
+    # Define the shutdown handler inside main to capture main_task via closure
+    def shutdown_handler():
+        global _signal_received
+        _signal_received = True
+        main_task.cancel()
 
     # Register handlers on the loop
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, shutdown_handler, main_task, sig)
+            loop.add_signal_handler(sig, shutdown_handler)
         except NotImplementedError:
-            pass # Windows fallback
+            # Safe guard for platforms (like Windows) that do not support loop signal handlers.
+            # On these platforms, SIGINT will fall back to raising KeyboardInterrupt.
+            pass
 
     try:
-        loop.run_until_complete(main_task)
+        # --- YOUR ACTUAL APPLICATION LOGIC HERE ---
+        await asyncio.sleep(10)  # Example work
+        # ------------------------------------------
     except asyncio.CancelledError:
-        if _signal_received:
-            sys.exit(130)
-        else:
-            # Task was cancelled by internal logic, not a user interrupt
-            sys.exit(1)
+        # Propagate cancellation to allow asyncio.run() to perform clean teardown
+        raise
     finally:
-        # Mask signals during final cleanup
+        # Remove signal handlers during cleanup to prevent re-entrancy
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.remove_signal_handler(sig)
             except Exception:
                 pass
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except asyncio.CancelledError:
+        if _signal_received:
+            try:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            sys.exit(130)
+        else:
+            # Task was cancelled by internal application logic, not a signal
+            sys.exit(1)
+    except KeyboardInterrupt:
+        # Fallback catch for platforms without loop signal handlers (e.g. Windows)
+        # or if a SIGINT lands outside the active event loop.
         try:
             sys.stderr.write("\n")
             sys.stderr.flush()
         except Exception:
             pass
-        loop.close()
+        sys.exit(130)
 ```
 
 #### Advanced Caveats & Requirements
