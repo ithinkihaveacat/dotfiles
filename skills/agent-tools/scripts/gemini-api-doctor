@@ -12,6 +12,7 @@ import getpass
 import os
 import sys
 import time
+import signal
 from google import genai
 from google.genai import errors as genai_errors
 
@@ -57,72 +58,117 @@ async def ping_model(client, model):
         return model, False, f"FAILED: {str(e)}", duration
 
 
+_signal_received = False
+
+
 async def main_async():
-    parser = argparse.ArgumentParser(
-        description="Ping Gemini models to test API key validity. Takes API key from GEMINI_API_KEY environment variable or stdin.",
-        add_help=False,
-    )
-    parser.add_argument(
-        "--help", action="store_true", help="Show this help message and exit"
-    )
-    parser.add_argument(
-        "models",
-        nargs="*",
-        help="Models to ping. If omitted, uses defaults.",
-    )
+    global _signal_received
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
 
-    # Handle 'help' command as requested by standards
-    if len(sys.argv) > 1 and sys.argv[1] == "help":
-        parser.print_help()
-        sys.exit(0)
+    def shutdown_handler():
+        global _signal_received
+        _signal_received = True
+        main_task.cancel()
 
-    args = parser.parse_args()
+    # Register handlers
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, shutdown_handler)
+        except NotImplementedError:
+            pass
 
-    if args.help:
-        parser.print_help()
-        sys.exit(0)
+    try:
+        parser = argparse.ArgumentParser(
+            description="Ping Gemini models to test API key validity. Takes API key from GEMINI_API_KEY environment variable or stdin.",
+            add_help=False,
+        )
+        parser.add_argument(
+            "--help", action="store_true", help="Show this help message and exit"
+        )
+        parser.add_argument(
+            "models",
+            nargs="*",
+            help="Models to ping. If omitted, uses defaults.",
+        )
 
-    # Read API key from stdin if not in environment
-    if not os.environ.get("GEMINI_API_KEY"):
-        if sys.stdin.isatty():
-            key = getpass.getpass("Enter Gemini API Key: ")
-        else:
-            key = sys.stdin.read().strip()
+        # Handle 'help' command as requested by standards
+        if len(sys.argv) > 1 and sys.argv[1] == "help":
+            parser.print_help()
+            sys.exit(0)
 
-        if not key:
-            print("Error: API Key cannot be empty", file=sys.stderr)
-            sys.exit(1)
-        os.environ["GEMINI_API_KEY"] = key
+        args = parser.parse_args()
 
-    client = get_client()
+        if args.help:
+            parser.print_help()
+            sys.exit(0)
 
-    models_to_ping = args.models if args.models else DEFAULT_MODELS
+        # Read API key from stdin if not in environment
+        if not os.environ.get("GEMINI_API_KEY"):
+            if sys.stdin.isatty():
+                key = getpass.getpass("Enter Gemini API Key: ")
+            else:
+                key = sys.stdin.read().strip()
 
-    print(
-        f"gemini-api-doctor: pinging {len(models_to_ping)} models in parallel (60s timeout)...",
-        file=sys.stderr,
-    )
+            if not key:
+                print("Error: API Key cannot be empty", file=sys.stderr)
+                sys.exit(1)
+            os.environ["GEMINI_API_KEY"] = key
 
-    tasks = [ping_model(client, model) for model in models_to_ping]
+        client = get_client()
 
-    exit_code = 0
-    # Use as_completed to yield results as they complete
-    for coro in asyncio.as_completed(tasks):
-        model, success, message, duration = await coro
-        if success:
-            print(f"gemini-api-doctor: {model}: {message} ({duration:.2f}s)")
-        else:
-            print(
-                f"gemini-api-doctor: {model}: {message} ({duration:.2f}s)",
-                file=sys.stderr,
-            )
-            exit_code = 1
+        models_to_ping = args.models if args.models else DEFAULT_MODELS
 
-    sys.exit(exit_code)
+        print(
+            f"gemini-api-doctor: pinging {len(models_to_ping)} models in parallel (60s timeout)...",
+            file=sys.stderr,
+        )
+
+        tasks = [ping_model(client, model) for model in models_to_ping]
+
+        exit_code = 0
+        # Use as_completed to yield results as they complete
+        for coro in asyncio.as_completed(tasks):
+            model, success, message, duration = await coro
+            if success:
+                print(f"gemini-api-doctor: {model}: {message} ({duration:.2f}s)")
+            else:
+                print(
+                    f"gemini-api-doctor: {model}: {message} ({duration:.2f}s)",
+                    file=sys.stderr,
+                )
+                exit_code = 1
+
+        sys.exit(exit_code)
+    finally:
+        # Unregister loop handlers to restore default signal behavior on exit
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.remove_signal_handler(sig)
+            except Exception:
+                pass
 
 
 def main():
-    asyncio.run(main_async())
+    try:
+        asyncio.run(main_async())
+    except asyncio.CancelledError:
+        if _signal_received:
+            try:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            sys.exit(130)
+        else:
+            sys.exit(1)
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
 
 
 if __name__ == "__main__":
