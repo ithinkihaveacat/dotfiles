@@ -3,18 +3,20 @@
 ## Formatting and Linting
 
 All Markdown files, whether new or updated, _must_ be linted and formatted. Use
-the `markdown-format` command to apply both tools automatically.
+the `scripts/markdown-format` script to apply both tools automatically. You can
+also pass the `--check` option to verify formatting without modifying files
+(e.g. for lint checks).
 
 To format a file in place:
 
 ```bash
-markdown-format README.md
+scripts/markdown-format README.md
 ```
 
 To format from stdin to stdout:
 
 ```bash
-cat README.md | markdown-format > formatted.md
+cat README.md | scripts/markdown-format > formatted.md
 ```
 
 ## Heading Style

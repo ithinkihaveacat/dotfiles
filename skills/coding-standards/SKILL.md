@@ -19,11 +19,30 @@ repository, as well as documentation for notations that agents may encounter.
 
 ### Markdown Quality
 
-All Markdown files must be formatted and linted with `markdown-format`. Use
-standard heading styles without additional formatting or ALL CAPS. Do not add
-numbers to headings.
+All Markdown files must be formatted and linted with `scripts/markdown-format`.
+Use standard heading styles without additional formatting or ALL CAPS. Do not
+add numbers to headings.
 
 @references/markdown.md
+
+## Formatting Scripts
+
+This skill includes several formatting helper scripts in the `scripts/`
+directory. All scripts support formatting multiple files in place, or reading
+from stdin and writing to stdout when no arguments are provided.
+
+- **`scripts/json-format`**: Format JSON files using `jq`.
+- **`scripts/kotlin-format`**: Format Kotlin files using `ktfmt` with kotlinlang
+  style.
+- **`scripts/markdown-format`**: Format Markdown files using `mdformat` with
+  GFM/frontmatter preservation and wrapping (supports `--check` for clean
+  verification).
+- **`scripts/python-format`**: Format and lint Python files using `ruff`
+  (supports `--check`, and recursive directory scanning).
+- **`scripts/xml-format`**: Format XML files using `xmllint`.
+
+Always prefer the scripts in `scripts/` over raw tool invocations to ensure
+consistent formatting rules are applied across the repository.
 
 ### Python Development
 
