@@ -106,6 +106,11 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        # Protect teardown logic from subsequent SIGINT/SIGTERM signals
+        # (prevents crash if user mashes Ctrl+C during cleanup)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
         # Print a newline to stderr, guarded against broken pipes
         try:
             sys.stderr.write("\n")
@@ -133,6 +138,60 @@ if __name__ == "__main__":
   (`SIGTERM`) converge on the same clean exit and teardown flow (`finally`
   blocks, context managers, and `atexit` handlers).
 
+## The Asyncio Pattern
+
+If your CLI tool is asynchronous (using `asyncio`), standard `signal.signal`
+handlers can conflict with the event loop. Instead, use the loop's
+`add_signal_handler` to cancel the main task, allowing async context managers
+and `finally` blocks to clean up resources gracefully.
+
+```python
+import asyncio
+import signal
+import sys
+
+async def main():
+    # Your async main logic here
+    ...
+
+def shutdown_handler(main_task):
+    # Cancel the main task to trigger CancelledError and run async cleanup
+    main_task.cancel()
+
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    main_task = loop.create_task(main())
+
+    # Register handlers on the loop
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, shutdown_handler, main_task)
+        except NotImplementedError:
+            # Windows fallback if add_signal_handler is not supported
+            pass
+
+    try:
+        loop.run_until_complete(main_task)
+    except asyncio.CancelledError:
+        # Indicates graceful shutdown was requested via signal
+        sys.exit(130)
+    finally:
+        # Protect final cleanup from signal re-entrancy
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.remove_signal_handler(sig)
+            except Exception:
+                pass
+
+        try:
+            sys.stderr.write("\n")
+        except Exception:
+            pass
+        loop.close()
+```
+
 ### Important Caveats
 
 1. **Cleanup Handling:** `sys.exit(130)` raises `SystemExit`. This is preferred
@@ -155,3 +214,12 @@ if __name__ == "__main__":
    - *Note:* In interactive terminal sessions, a `Ctrl+C` is delivered to the
      entire foreground process group, so child processes may already be
      terminating; explicit termination is a robust fallback.
+   - **Recommended Teardown Pattern:**
+     ```python
+     try:
+         proc.terminate()
+         proc.wait(timeout=5.0)  # Wait for graceful exit
+     except subprocess.TimeoutExpired:
+         proc.kill()             # Force kill if hung
+         proc.wait()             # Reap the zombie
+     ```
