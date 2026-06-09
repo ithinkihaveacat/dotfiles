@@ -1,6 +1,6 @@
 ---
-name: technical-writing-style
-description: >
+name: technical-writing
+description: >-
   Use this skill when authoring, reviewing, or editing technical documents,
   including bug reports, known issues, friction logs, PR descriptions, and the
   structural content and tone of commit messages. Use to ensure engineering
