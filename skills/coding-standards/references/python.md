@@ -78,3 +78,54 @@ script metadata:
 # requires-python = ">=3.11"
 # ///
 ```
+
+## Handling Ctrl+C (KeyboardInterrupt)
+
+To prevent Python scripts from dumping ugly tracebacks when interrupted by the
+user, always wrap the entry point execution in a `try/except KeyboardInterrupt`
+block in the `__main__` guard.
+
+### The Standard Pattern
+
+```python
+import sys
+
+def main():
+    # Your main logic here
+    ...
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Print a newline to prevent the ^C from mangling the next terminal prompt
+        print()
+        # 130 is the standard POSIX exit code for a script terminated by Ctrl-C
+        sys.exit(130)
+```
+
+### Rationale
+
+- **No Traceback:** Prevents the default Python behavior of printing a noisy
+  `Traceback (most recent call last): ... KeyboardInterrupt` to `stderr`, which
+  looks like an application crash.
+- **Clean Prompt:** Printing a blank line ensures the next shell prompt starts
+  on a new line, even if the script was interrupted mid-output.
+- **Correct Exit Code:** Returning `130` allows calling scripts and shells to
+  correctly identify that the process was terminated by `SIGINT`.
+
+### Important Caveats
+
+1. **Cleanup Handling:** `sys.exit(130)` raises `SystemExit`. This is preferred
+   over `os._exit` because it allows `finally` blocks, context managers, and
+   `atexit` handlers to run normally. Ensure you place critical teardown logic
+   (closing files, restoring terminal states, resetting device configs) in these
+   mechanisms so they run reliably on interrupt.
+1. **Threading:** `KeyboardInterrupt` is only delivered to the *main thread*.
+   The script will hang on exit if there are active, non-daemon threads. Spawn
+   background threads with `daemon=True` or explicitly signal them to stop
+   during cleanup.
+1. **Subprocesses:** If managing long-running child processes (e.g. via
+   `subprocess.Popen`), ensure you explicitly terminate them
+   (`proc.terminate()`) in a `finally` or `atexit` block to prevent leaving
+   orphan processes when exiting early.

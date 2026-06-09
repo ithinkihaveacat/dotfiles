@@ -130,6 +130,22 @@ has failed.
 failures returning `127`), consult the relevant language standard (like
 `shell.md`).*
 
+### 3.3 Scenario C: Interruption (Ctrl+C / SIGINT)
+
+If the user interrupts the tool using `Ctrl+C` (SIGINT), the tool must exit
+cleanly without dumping raw interpreter stack traces or internal error messages.
+
+- **Output:**
+  1. A single newline to `stdout` or `stderr` to ensure the TTY-echoed `^C` does
+     not mangle the subsequent shell prompt.
+  1. No stack trace or crash dump.
+- **Exit Code:** `130` (The standard POSIX exit status for SIGINT, calculated as
+  `128 + 2`).
+- **Process Hygiene:** The tool must ensure that any spawned subprocesses or
+  external resources are gracefully terminated or released before exiting.
+- **Why:** Interruption is a normal user action, not a software crash. The tool
+  should respect the user's decision and exit gracefully.
+
 ______________________________________________________________________
 
 ## 4. Output, Logging & Progress
