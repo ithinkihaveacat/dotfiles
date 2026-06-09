@@ -10,6 +10,20 @@ This repository is strictly public. You must enforce rigid data segregation
 across all code, documentation, commit messages, and metadata to protect
 personal privacy and proprietary information.
 
+### Companion Repositories
+
+This public repository works in tandem with two private companion repositories:
+
+1. **`private`** (at `~/.private`): For personal secrets and private
+   configurations.
+1. **`corp`** (at `~/.corp`): For employer-specific work and internal tools.
+
+When operating in either of these companion workspaces, you MUST locate and
+adhere to their respective `AGENTS.md` files. The companion `AGENTS.md` files
+provide domain-specific privacy constraints that supersede the rules here, while
+all general coding standards and script requirements from this document still
+apply.
+
 - **Public Safety:** All commits must be strictly safe for public consumption.
   Never include unreleased features, internal API endpoints, private
   credentials, or proprietary algorithms.
