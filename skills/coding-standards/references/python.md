@@ -222,11 +222,8 @@ async def main():
         # --- YOUR ACTUAL APPLICATION LOGIC HERE ---
         await asyncio.sleep(10)  # Example work
         # ------------------------------------------
-    except asyncio.CancelledError:
-        # Propagate cancellation to allow asyncio.run() to perform clean teardown
-        raise
     finally:
-        # Remove signal handlers during cleanup to prevent re-entrancy
+        # Unregister loop handlers to restore default signal behavior on exit
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.remove_signal_handler(sig)
