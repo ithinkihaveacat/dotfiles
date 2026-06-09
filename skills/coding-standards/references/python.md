@@ -98,8 +98,11 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        # Print a newline to prevent the ^C from mangling the next terminal prompt
-        print()
+        # Print a newline to stderr, guarded against broken pipes
+        try:
+            sys.stderr.write("\n")
+        except Exception:
+            pass
         # 130 is the standard POSIX exit code for a script terminated by Ctrl-C
         sys.exit(130)
 ```
@@ -109,8 +112,11 @@ if __name__ == "__main__":
 - **No Traceback:** Prevents the default Python behavior of printing a noisy
   `Traceback (most recent call last): ... KeyboardInterrupt` to `stderr`, which
   looks like an application crash.
-- **Clean Prompt:** Printing a blank line ensures the next shell prompt starts
-  on a new line, even if the script was interrupted mid-output.
+- **Clean Prompt & Pipeline Safety:** Writing the newline to `sys.stderr`
+  ensures it does not pollute redirected `stdout` data (e.g. `tool > file.txt`).
+  Guarding the write prevents `BrokenPipeError` crashes if the script is
+  interrupted in a pipeline where the reader has already closed the pipe (e.g.
+  `tool | head`).
 - **Correct Exit Code:** Returning `130` allows calling scripts and shells to
   correctly identify that the process was terminated by `SIGINT`.
 
@@ -122,10 +128,17 @@ if __name__ == "__main__":
    (closing files, restoring terminal states, resetting device configs) in these
    mechanisms so they run reliably on interrupt.
 1. **Threading:** `KeyboardInterrupt` is only delivered to the *main thread*.
-   The script will hang on exit if there are active, non-daemon threads. Spawn
-   background threads with `daemon=True` or explicitly signal them to stop
-   during cleanup.
+   The script will hang on exit if there are active, non-daemon threads.
+   - **Note:** Spawned `daemon=True` threads are terminated abruptly at exit,
+     and their `finally` blocks or `atexit` handlers **do not run**. If your
+     background threads require clean teardown, do not use `daemon=True`;
+     instead, use an explicit stop `Event` and `join()` them during main thread
+     cleanup.
 1. **Subprocesses:** If managing long-running child processes (e.g. via
    `subprocess.Popen`), ensure you explicitly terminate them
-   (`proc.terminate()`) in a `finally` or `atexit` block to prevent leaving
-   orphan processes when exiting early.
+   (`proc.terminate()`) and **reap them** using `proc.wait(timeout=...)`
+   (falling back to `proc.kill()` if necessary) in a `finally` or `atexit`
+   block. This prevents leaving zombie or orphaned processes.
+   - *Note:* In interactive terminal sessions, a `Ctrl+C` is delivered to the
+     entire foreground process group, so child processes may already be
+     terminating; explicit termination is a robust fallback.

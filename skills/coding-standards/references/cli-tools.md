@@ -136,8 +136,9 @@ If the user interrupts the tool using `Ctrl+C` (SIGINT), the tool must exit
 cleanly without dumping raw interpreter stack traces or internal error messages.
 
 - **Output:**
-  1. A single newline to `stdout` or `stderr` to ensure the TTY-echoed `^C` does
-     not mangle the subsequent shell prompt.
+  1. A single newline to **stderr** (guarded against write errors) to ensure the
+     TTY-echoed `^C` does not mangle the subsequent shell prompt, and to avoid
+     polluting redirected `stdout` data.
   1. No stack trace or crash dump.
 - **Exit Code:** `130` (The standard POSIX exit status for SIGINT, calculated as
   `128 + 2`).
