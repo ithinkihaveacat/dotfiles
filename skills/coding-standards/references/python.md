@@ -88,13 +88,21 @@ block in the `__main__` guard.
 ### The Standard Pattern
 
 ```python
+import signal
 import sys
 
 def main():
     # Your main logic here
     ...
 
+def sigterm_handler(signum, frame):
+    # Raise KeyboardInterrupt to trigger the clean exit and teardown
+    raise KeyboardInterrupt
+
 if __name__ == "__main__":
+    # Register SIGTERM handler to ensure clean exit on automated kills
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
     try:
         main()
     except KeyboardInterrupt:
@@ -119,6 +127,11 @@ if __name__ == "__main__":
   `tool | head`).
 - **Correct Exit Code:** Returning `130` allows calling scripts and shells to
   correctly identify that the process was terminated by `SIGINT`.
+- **SIGTERM Convergence:** By default, Python does not translate `SIGTERM` into
+  a `KeyboardInterrupt`. Registering a handler that raises `KeyboardInterrupt`
+  ensures that both interactive interrupts (`SIGINT`) and automated terminations
+  (`SIGTERM`) converge on the same clean exit and teardown flow (`finally`
+  blocks, context managers, and `atexit` handlers).
 
 ### Important Caveats
 
