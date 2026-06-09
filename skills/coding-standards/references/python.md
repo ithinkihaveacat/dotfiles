@@ -79,13 +79,77 @@ script metadata:
 # ///
 ```
 
-## Handling Ctrl+C (KeyboardInterrupt)
+### Handling Ctrl+C and Signals
 
-To prevent Python scripts from dumping ugly tracebacks when interrupted by the
-user, always wrap the entry point execution in a `try/except KeyboardInterrupt`
-block in the `__main__` guard.
+To ensure a professional user experience, Python CLI tools in this repository
+should exit cleanly without dumping raw interpreter tracebacks when interrupted
+by the user.
 
-### The Standard Pattern
+We follow a **tiered approach** depending on the complexity of the script.
+
+______________________________________________________________________
+
+### Tier 1: The Baseline Pattern (For Simple Scripts)
+
+For 90% of Python scripts—those that are synchronous, single-threaded, and do
+not spawn subprocesses—you only need to catch `KeyboardInterrupt` at the top
+level, write a guarded, flushed newline to `stderr`, and exit with `130`.
+
+#### The Baseline Snippet
+
+```python
+import sys
+
+def main():
+    # Your main logic here
+    ...
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Print a newline to stderr, guarded against broken pipes
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        # 130 is the standard POSIX exit code for a script terminated by Ctrl-C
+        sys.exit(130)
+```
+
+#### Rationale
+
+- **No Traceback:** Suppresses the noisy CPython traceback on `Ctrl+C`, keeping
+  the CLI feeling like a native system utility.
+- **Pipeline Safe:** Writing to `sys.stderr` and guarding the write prevents
+  `BrokenPipeError` crashes if the script is interrupted in a pipeline (e.g.,
+  `tool | head` where the reader has already closed the pipe).
+- **No Redirection Pollution:** Writing the newline to `stderr` instead of
+  `stdout` prevents polluting redirected output files (e.g. `tool > data.txt`).
+- **Guaranteed Output:** Explicitly flushing `sys.stderr` ensures the newline is
+  written before the interpreter completes its shutdown sequence.
+
+______________________________________________________________________
+
+### Tier 2: The Advanced Pattern (Opt-in / "Only if...")
+
+If your script is more sophisticated and meets **any** of the following
+criteria, you must adopt the advanced pattern:
+
+- It spawns **child processes** (e.g., via `subprocess.Popen`).
+- It uses **background threads**.
+- It is **asynchronous** (uses `asyncio`).
+- It performs critical **device cleanup** or state restoration (like `popper`).
+- It holds **external locks or transactional state** (e.g., file locks, database
+  transactions, API leases) managed by context managers (`with`) that must be
+  cleanly released.
+
+In these scenarios, a simple interrupt handler is insufficient because automated
+kills (`SIGTERM`) will bypass it, leaving orphaned processes, locked resources,
+or uncommitted transactions.
+
+#### The Advanced Snippet (Synchronous)
 
 ```python
 import signal
@@ -96,66 +160,49 @@ def main():
     ...
 
 def sigterm_handler(signum, frame):
-    # Raise KeyboardInterrupt to trigger the clean exit and teardown
+    # Translate SIGTERM into KeyboardInterrupt to trigger clean teardown
     raise KeyboardInterrupt
 
 if __name__ == "__main__":
-    # Register SIGTERM handler to ensure clean exit on automated kills
+    # Converge SIGTERM and SIGINT into the same cleanup path
     signal.signal(signal.SIGTERM, sigterm_handler)
 
     try:
         main()
     except KeyboardInterrupt:
-        # Protect teardown logic from subsequent SIGINT/SIGTERM signals
-        # (prevents crash if user mashes Ctrl+C during cleanup)
+        # Protect teardown logic from re-entrant signals (user mashing Ctrl+C)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-        # Print a newline to stderr, guarded against broken pipes
         try:
             sys.stderr.write("\n")
+            sys.stderr.flush()
         except Exception:
             pass
-        # 130 is the standard POSIX exit code for a script terminated by Ctrl-C
         sys.exit(130)
 ```
 
-### Rationale
+#### The Advanced Snippet (Asynchronous / Asyncio)
 
-- **No Traceback:** Prevents the default Python behavior of printing a noisy
-  `Traceback (most recent call last): ... KeyboardInterrupt` to `stderr`, which
-  looks like an application crash.
-- **Clean Prompt & Pipeline Safety:** Writing the newline to `sys.stderr`
-  ensures it does not pollute redirected `stdout` data (e.g. `tool > file.txt`).
-  Guarding the write prevents `BrokenPipeError` crashes if the script is
-  interrupted in a pipeline where the reader has already closed the pipe (e.g.
-  `tool | head`).
-- **Correct Exit Code:** Returning `130` allows calling scripts and shells to
-  correctly identify that the process was terminated by `SIGINT`.
-- **SIGTERM Convergence:** By default, Python does not translate `SIGTERM` into
-  a `KeyboardInterrupt`. Registering a handler that raises `KeyboardInterrupt`
-  ensures that both interactive interrupts (`SIGINT`) and automated terminations
-  (`SIGTERM`) converge on the same clean exit and teardown flow (`finally`
-  blocks, context managers, and `atexit` handlers).
-
-## The Asyncio Pattern
-
-If your CLI tool is asynchronous (using `asyncio`), standard `signal.signal`
-handlers can conflict with the event loop. Instead, use the loop's
-`add_signal_handler` to cancel the main task, allowing async context managers
-and `finally` blocks to clean up resources gracefully.
+For async tools, use the event loop's signal handlers and task cancellation. We
+track `_signal_received` to ensure that internal application cancellations do
+not mistakenly report exit code `130` (user interrupt).
 
 ```python
 import asyncio
 import signal
 import sys
 
+# Global flag to track if cancellation was triggered by a signal
+_signal_received = False
+
 async def main():
     # Your async main logic here
     ...
 
-def shutdown_handler(main_task):
-    # Cancel the main task to trigger CancelledError and run async cleanup
+def shutdown_handler(main_task, signum):
+    global _signal_received
+    _signal_received = True
     main_task.cancel()
 
 if __name__ == "__main__":
@@ -167,59 +214,51 @@ if __name__ == "__main__":
     # Register handlers on the loop
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, shutdown_handler, main_task)
+            loop.add_signal_handler(sig, shutdown_handler, main_task, sig)
         except NotImplementedError:
-            # Windows fallback if add_signal_handler is not supported
-            pass
+            pass # Windows fallback
 
     try:
         loop.run_until_complete(main_task)
     except asyncio.CancelledError:
-        # Indicates graceful shutdown was requested via signal
-        sys.exit(130)
+        if _signal_received:
+            sys.exit(130)
+        else:
+            # Task was cancelled by internal logic, not a user interrupt
+            sys.exit(1)
     finally:
-        # Protect final cleanup from signal re-entrancy
+        # Mask signals during final cleanup
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.remove_signal_handler(sig)
             except Exception:
                 pass
-
         try:
             sys.stderr.write("\n")
+            sys.stderr.flush()
         except Exception:
             pass
         loop.close()
 ```
 
-### Important Caveats
+#### Advanced Caveats & Requirements
 
-1. **Cleanup Handling:** `sys.exit(130)` raises `SystemExit`. This is preferred
-   over `os._exit` because it allows `finally` blocks, context managers, and
-   `atexit` handlers to run normally. Ensure you place critical teardown logic
-   (closing files, restoring terminal states, resetting device configs) in these
-   mechanisms so they run reliably on interrupt.
-1. **Threading:** `KeyboardInterrupt` is only delivered to the *main thread*.
-   The script will hang on exit if there are active, non-daemon threads.
-   - **Note:** Spawned `daemon=True` threads are terminated abruptly at exit,
-     and their `finally` blocks or `atexit` handlers **do not run**. If your
-     background threads require clean teardown, do not use `daemon=True`;
-     instead, use an explicit stop `Event` and `join()` them during main thread
-     cleanup.
-1. **Subprocesses:** If managing long-running child processes (e.g. via
-   `subprocess.Popen`), ensure you explicitly terminate them
-   (`proc.terminate()`) and **reap them** using `proc.wait(timeout=...)`
-   (falling back to `proc.kill()` if necessary) in a `finally` or `atexit`
-   block. This prevents leaving zombie or orphaned processes.
-   - *Note:* In interactive terminal sessions, a `Ctrl+C` is delivered to the
-     entire foreground process group, so child processes may already be
-     terminating; explicit termination is a robust fallback.
-   - **Recommended Teardown Pattern:**
-     ```python
-     try:
-         proc.terminate()
-         proc.wait(timeout=5.0)  # Wait for graceful exit
-     except subprocess.TimeoutExpired:
-         proc.kill()             # Force kill if hung
-         proc.wait()             # Reap the zombie
-     ```
+1. **Process Hygiene (Subprocesses):** You must explicitly terminate and
+   **reap** child processes in a `finally` or `atexit` block. Wrap `proc.kill()`
+   to prevent crashes if the process exits in the microscopic window before the
+   signal is sent.
+   ```python
+   try:
+       proc.terminate()
+       proc.wait(timeout=5.0)  # Wait for graceful exit
+   except subprocess.TimeoutExpired:
+       try:
+           proc.kill()         # Force kill if hung
+       except ProcessLookupError:
+           pass                # Prevent crash if process exited just in time
+       proc.wait()             # Reap the zombie
+   ```
+1. **Thread Cleanup:** Background threads spawned with `daemon=True` are killed
+   abruptly at exit and **do not run cleanup**. If your threads require clean
+   teardown, do not use `daemon=True`; instead, use an explicit stop `Event` and
+   `join()` them during main thread cleanup.
