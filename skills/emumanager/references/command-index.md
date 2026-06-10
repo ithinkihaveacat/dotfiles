@@ -4,6 +4,7 @@
 
 ## Contents
 
+- [Help](#help)
 - [Environment Variables](#environment-variables)
 - [Subcommands](#subcommands)
   - [bootstrap](#bootstrap)
@@ -20,6 +21,58 @@
   - [update package](#update-package)
 - [Device Types](#device-types)
 - [Architecture Detection](#architecture-detection)
+
+## Help
+
+The block below is `scripts/emumanager --help`, kept in sync by
+`command-index-sync` (coding-standards skill); do not edit it by hand. The
+sections that follow add per-subcommand detail and raw commands. (The marker
+pins `ANDROID_HOME` to its documented default so the generated output is
+machine-independent.)
+
+<!-- generated: env ANDROID_HOME=$HOME/.local/share/android-sdk ../scripts/emumanager --help -->
+
+```text
+Usage: emumanager [COMMAND]
+
+A script to set up and manage the Android SDK, emulator, and system images.
+
+Environment:
+  ANDROID_HOME: $HOME/.local/share/android-sdk
+
+Commands:
+  bootstrap [--no-emulator]
+                      Bootstrap SDK environment and patch tools.
+  doctor              Run diagnostics to check for common issues.
+  list <resource>     List local resources (avd, package).
+  info avd <name>     Show detailed information about an AVD.
+  create avd <name>   Create a new AVD.
+  start avd <name>    Start an AVD.
+  stop avd <name>     Stop a running AVD.
+  delete avd <name>   Delete an AVD.
+  download package <image>
+                      Download a specific package.
+  catalog package     List obtainable system images.
+  update package      Update all installed SDK packages.
+
+Options:
+  --help              Display this help message and exit
+
+Examples:
+  # Create a mobile/phone AVD with the latest obtainable image
+  emumanager create avd my_phone --mobile
+
+  # Start the AVD
+  emumanager start avd my_phone
+
+  # List AVDs
+  emumanager list avd
+
+  # List package updates
+  emumanager list package --outdated
+```
+
+<!-- /generated -->
 
 ## Environment Variables
 

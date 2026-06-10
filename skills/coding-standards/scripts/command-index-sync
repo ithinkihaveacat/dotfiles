@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Refresh generated blocks in Markdown files from command output.
+
+See usage() for the marker format and behavior.
+"""
+
+# Tests: tests/command-index-sync/
+
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+SCRIPT_NAME = os.path.basename(sys.argv[0])
+
+BEGIN_RE = re.compile(r"^<!-- generated: (?P<command>.+?) -->$")
+END_MARKER = "<!-- /generated -->"
+
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv"}
+
+
+def usage(code=0):
+    print(
+        f"""Usage: {SCRIPT_NAME} [OPTIONS] FILE [FILE ...]
+       {SCRIPT_NAME} [OPTIONS] --all
+
+Refresh generated blocks in Markdown files from command output. Used to keep
+command-index.md files in sync with their scripts' --help output.
+
+A generated block is delimited by a pair of HTML-comment markers:
+
+  <!-- generated: ../scripts/pascal --help -->
+  (replaced content)
+  <!-- /generated -->
+
+For each block, the command named in the opening marker is run with its
+working directory set to the directory containing the Markdown file, and the
+content between the markers is replaced by the command's stdout inside a
+fenced ```text code block. Files are rewritten only when content changes.
+
+Arguments:
+  FILE        Markdown file(s) to process.
+
+Options:
+  --all       Discover and process every *.md file containing generated
+              markers under the current directory (recursively).
+  --check     Do not write; exit 1 if any file is stale, listing it on stderr.
+  --help      Display this help message and exit.
+
+Exit Codes:
+  0    Success (all files up to date, or updated)
+  1    Error (bad markers, command failure), or stale files in --check mode
+
+Examples:
+  {SCRIPT_NAME} skills/agent-tools/references/command-index.md
+  {SCRIPT_NAME} --all
+  {SCRIPT_NAME} --check --all   # detect drift, e.g. from ./update
+""",
+        file=sys.stdout if code == 0 else sys.stderr,
+    )
+    sys.exit(code)
+
+
+def error(message):
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run_command(command, cwd):
+    """Run a marker command and return its stdout, or raise RuntimeError."""
+    argv = shlex.split(command)
+    env = dict(os.environ, COLUMNS="80")  # stable argparse wrapping
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(f"command not found: {argv[0]}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"command timed out: {command}")
+    if result.returncode != 0:
+        stderr = result.stderr.strip().splitlines()
+        detail = f": {stderr[0]}" if stderr else ""
+        raise RuntimeError(
+            f"command failed with exit {result.returncode}: {command}{detail}"
+        )
+    output = "\n".join(line.rstrip() for line in result.stdout.splitlines()).strip("\n")
+    if not output:
+        raise RuntimeError(f"command produced no output: {command}")
+    if "```" in output:
+        raise RuntimeError(f"command output contains a code fence: {command}")
+    return output
+
+
+def fence_states(lines):
+    """Return per-line booleans: True if the line is inside a code fence.
+
+    Markers inside fenced code blocks (e.g. documentation examples) must be
+    ignored. The fence delimiter lines themselves count as "inside".
+    """
+    states = []
+    in_fence = False
+    for line in lines:
+        is_delimiter = line.lstrip().startswith("```")
+        if is_delimiter and not in_fence:
+            in_fence = True
+            states.append(True)
+        elif is_delimiter:
+            states.append(True)
+            in_fence = False
+        else:
+            states.append(in_fence)
+    return states
+
+
+def sync_text(text, cwd, path):
+    """Return the file text with all generated blocks refreshed."""
+    out_lines = []
+    lines = text.splitlines()
+    fenced = fence_states(lines)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if fenced[i]:
+            out_lines.append(line)
+            i += 1
+            continue
+        if line.strip() == END_MARKER:
+            raise RuntimeError(f"{path}:{i + 1}: end marker without begin marker")
+        out_lines.append(line)
+        match = BEGIN_RE.match(line.strip())
+        if match is None:
+            i += 1
+            continue
+        # Find the matching end marker, rejecting nested begin markers. The
+        # block's own ```text fence flips the fence state, so markers are
+        # matched only at even fence depth (i.e. outside the inner fence).
+        end = None
+        for j in range(i + 1, len(lines)):
+            if fenced[j]:
+                continue
+            if BEGIN_RE.match(lines[j].strip()):
+                raise RuntimeError(f"{path}:{j + 1}: nested begin marker")
+            if lines[j].strip() == END_MARKER:
+                end = j
+                break
+        if end is None:
+            raise RuntimeError(f"{path}:{i + 1}: begin marker without end marker")
+        output = run_command(match.group("command"), cwd)
+        out_lines.extend(["", "```text", *output.splitlines(), "```", ""])
+        out_lines.append(lines[end])
+        i = end + 1
+    result = "\n".join(out_lines)
+    if text.endswith("\n"):
+        result += "\n"
+    return result
+
+
+def discover():
+    found = []
+    for root, dirs, files in os.walk("."):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for name in sorted(files):
+            if not name.endswith(".md"):
+                continue
+            path = os.path.normpath(os.path.join(root, name))
+            try:
+                with open(path, encoding="utf-8") as f:
+                    if "<!-- generated: " in f.read():
+                        found.append(path)
+            except (OSError, UnicodeDecodeError):
+                continue
+    return found
+
+
+def main():
+    check = False
+    all_files = False
+    paths = []
+    for arg in sys.argv[1:]:
+        if arg == "--help":
+            usage(0)
+        elif arg == "--check":
+            check = True
+        elif arg == "--all":
+            all_files = True
+        elif arg.startswith("-"):
+            print(f"{SCRIPT_NAME}: unknown option: {arg}", file=sys.stderr)
+            print(f"Try '{SCRIPT_NAME} --help' for more information.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            paths.append(arg)
+
+    if all_files:
+        if paths:
+            error("--all cannot be combined with FILE arguments")
+        paths = discover()
+    elif not paths:
+        print(f"{SCRIPT_NAME}: missing file operand", file=sys.stderr)
+        print(f"Try '{SCRIPT_NAME} --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+
+    stale = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            error(f"{path}: {e.strerror}")
+        try:
+            new_text = sync_text(text, os.path.dirname(os.path.abspath(path)), path)
+        except RuntimeError as e:
+            error(str(e))
+        if new_text == text:
+            continue
+        if check:
+            stale.append(path)
+            print(
+                f"{SCRIPT_NAME}: {path}: stale (run '{SCRIPT_NAME} {path}' to update)",
+                file=sys.stderr,
+            )
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            print(f"{SCRIPT_NAME}: {path}: updated", file=sys.stderr)
+
+    sys.exit(1 if stale else 0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)

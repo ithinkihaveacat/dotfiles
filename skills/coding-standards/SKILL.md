@@ -31,6 +31,9 @@ This skill includes several formatting helper scripts in the `scripts/`
 directory. All scripts support formatting multiple files in place, or reading
 from stdin and writing to stdout when no arguments are provided.
 
+- **`scripts/command-index-sync`**: Refresh generated `--help` blocks in
+  `command-index.md` files (marker comments; supports `--check` and `--all` for
+  drift detection).
 - **`scripts/json-format`**: Format JSON files using `jq`.
 - **`scripts/kotlin-format`**: Format Kotlin files using `ktfmt` with kotlinlang
   style.
