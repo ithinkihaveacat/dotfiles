@@ -83,11 +83,12 @@ script metadata:
 # ///
 ```
 
-### Handling Ctrl+C and Signals
+### Handling Ctrl+C, Signals, and Broken Pipes
 
 To ensure a professional user experience, Python CLI tools in this repository
 should exit cleanly without dumping raw interpreter tracebacks when interrupted
-by the user.
+by the user or when their output pipe is closed by a downstream process (e.g.,
+when piped to `head`).
 
 We follow a **tiered approach** depending on the complexity of the script.
 
@@ -120,19 +121,29 @@ if __name__ == "__main__":
             pass
         # 130 is the standard POSIX exit code for a script terminated by Ctrl-C
         sys.exit(130)
+    except BrokenPipeError:
+        # Python flushes standard streams on exit; redirect remaining output
+        # to devnull to avoid another BrokenPipeError at shutdown
+        import os
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        # 141 is the standard POSIX exit code for a script terminated by SIGPIPE
+        sys.exit(141)
 ```
 
 #### Rationale
 
-- **No Traceback:** Suppresses the noisy CPython traceback on `Ctrl+C`, keeping
-  the CLI feeling like a native system utility.
-- **Pipeline Safe:** Writing to `sys.stderr` and guarding the write prevents
-  `BrokenPipeError` crashes if the script is interrupted in a pipeline (e.g.,
-  `tool | head` where the reader has already closed the pipe).
-- **No Redirection Pollution:** Writing the newline to `stderr` instead of
-  `stdout` prevents polluting redirected output files (e.g. `tool > data.txt`).
-- **Guaranteed Output:** Explicitly flushing `sys.stderr` ensures the newline is
-  written before the interpreter completes its shutdown sequence.
+- **No Traceback:** Suppresses noisy CPython tracebacks on `Ctrl+C` and broken
+  pipes, keeping the CLI feeling like a native system utility.
+- **Pipeline Safe:** Catching `BrokenPipeError` at the top level and redirecting
+  standard output to `/dev/null` ensures the script exits cleanly and silently
+  when its output is piped into another command that terminates early (e.g.,
+  `tool | head`).
+- **No Redirection Pollution:** Writing the cosmetic interrupt newline to
+  `stderr` instead of `stdout` prevents polluting redirected output files (e.g.
+  `tool > data.txt`).
+- **Guaranteed Output:** Explicitly flushing standard streams ensures all output
+  is written before the interpreter completes its shutdown sequence.
 
 ______________________________________________________________________
 
@@ -184,6 +195,14 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(130)
+    except BrokenPipeError:
+        # Python flushes standard streams on exit; redirect remaining output
+        # to devnull to avoid another BrokenPipeError at shutdown
+        import os
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        # 141 is the standard POSIX exit code for a script terminated by SIGPIPE
+        sys.exit(141)
 ```
 
 #### The Advanced Snippet (Asynchronous / Asyncio)
@@ -257,6 +276,14 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(130)
+    except BrokenPipeError:
+        # Python flushes standard streams on exit; redirect remaining output
+        # to devnull to avoid another BrokenPipeError at shutdown
+        import os
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        # 141 is the standard POSIX exit code for a script terminated by SIGPIPE
+        sys.exit(141)
 ```
 
 #### Advanced Caveats & Requirements
