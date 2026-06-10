@@ -46,6 +46,11 @@ functionality.
 `GEMINI_API_KEY`). Scripts will report clear errors if no key is found.
 `gh-markdown` optionally accepts a `--token` for GitHub API access.
 
+**Model selection:** Every Gemini-backed script accepts `--model MODEL` and
+honors the `GEMINI_MODEL` environment variable (`--model` wins; each script's
+built-in default applies when neither is set). Defaults vary per tool and are
+tuned for its task; only override when you have a reason.
+
 **Dependencies:** `curl`, `jq`, `uv` (all tools); `base64`, `magick` (image
 tools only)
 
@@ -62,7 +67,7 @@ scripts/screenshot-describe screenshot.png
 # Compare two images for visual differences
 scripts/screenshot-compare before.png after.png
 
-# Smart crop image around detected people
+# Smart crop image around the detected primary subject
 scripts/photo-smart-crop photo.jpg cropped.jpg
 
 # Check if a photo prominently features people (exit code = answer)
@@ -265,13 +270,15 @@ changes, padding, and text updates.
 scripts/screenshot-compare IMAGE1 IMAGE2 [PROMPT]
 ```
 
-**Exit codes:** 0 differences found, 1 error, 2 images identical, 127 missing
-dependency
+**Exit codes:** 0 differences found, 1 error (including missing ImageMagick), 2
+images identical
 
 ### photo-smart-crop
 
-Smart crop images around detected people with a specified aspect ratio.
-Prioritizes faces, expands for headroom, enforces aspect ratio.
+Smart crop images around the detected primary subject (people, food, focal
+points in a landscape) with a specified aspect ratio. Centers the maximal crop
+box on the subject and enforces the aspect ratio. If no specific focal point is
+found, crops around the central compositional area.
 
 ```bash
 scripts/photo-smart-crop [--ratio W:H] INPUT OUTPUT
@@ -279,8 +286,8 @@ scripts/photo-smart-crop [--ratio W:H] INPUT OUTPUT
 
 **Options:** `--ratio W:H` (default 5:3)
 
-**Exit codes:** 0 success, 1 error (no people found, API error), 2 rate limited,
-127 missing dependency
+**Exit codes:** 0 success, 1 error (API error, invalid arguments), 2 rate
+limited, 127 missing dependency
 
 **Examples:**
 
@@ -301,15 +308,15 @@ Ask Gemini a question about one or more photos. The QUERY positional is either
 an `@`-prefixed built-in or a free-form prompt:
 
 - `@people` — boolean: do people feature prominently? Single-file mode encodes
-  the answer in the exit code (`0` true / `1` false / `2` error); stdout
-  silent; `-v` echoes `true`/`false` to **stderr**. Defaults to a 384px resize
+  the answer in the exit code (`0` true / `1` false / `2` error); stdout silent;
+  `-v` echoes `true`/`false` to **stderr**. Defaults to a 384px resize
   (single-tile token cost).
 - Any free-form text is sent as the prompt. Add `--schema SPEC` (llm-style DSL
   like `'has_bed bool, count int'`) for structured output and `--filter FIELD`
   to print only paths whose boolean field is true.
 
-Multiple files (or non-boolean queries) emit per-file lines on stdout; exit
-code only reflects success/failure.
+Multiple files (or non-boolean queries) emit per-file lines on stdout; exit code
+only reflects success/failure.
 
 Default model is `gemini-3.1-flash-lite` — the cheapest/fastest Gemini 3 tier,
 appropriate for high-volume classification and lightweight visual Q&A. Override
@@ -364,10 +371,11 @@ Ask a question and get a short, paragraph-style response (wrapped to 80
 columns). Optimized for quick answers.
 
 ```bash
-scripts/pascal "QUESTION"
+scripts/pascal [-] "QUESTION"
 ```
 
-**Input:** Optional context via stdin
+**Input:** Optional context via stdin. Pass `-` as the first argument to read
+it; without `-`, stdin is ignored.
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
@@ -378,10 +386,10 @@ scripts/pascal "QUESTION"
 scripts/pascal "What is the capital of Peru?"
 
 # Summarize a file
-cat article.md | scripts/pascal "Summarize this article"
+cat article.md | scripts/pascal - "Summarize this article"
 
 # Explain code
-scripts/pascal "Explain this code" < script.sh
+scripts/pascal - "Explain this code" < script.sh
 ```
 
 ### satisfies
@@ -488,9 +496,12 @@ env ANDROID_SERIAL=12345 scripts/popper "open settings"
 
 ## Image Encoding Notes
 
-- Images converted to lossless WebP for consistent encoding
-- Alpha channel removed (`-alpha off`) so transparency-only differences are
-  ignored
+- Screenshot tools encode to lossless WebP; `photo-query` uses lossy WebP and
+  `photo-smart-crop` uses HEIF (both resize first to limit token cost)
+- Alpha handling varies by tool: `screenshot-describe` drops the alpha channel
+  (`-alpha off`); `screenshot-compare` flattens onto a magenta background, so
+  transparency differences show up in comparisons; `photo-query` flattens onto
+  white
 - Base64: use `-w 0` (Linux) or `-b 0` (macOS) for single-line output
 - Single-image prompts: image before text (Gemini best practice)
 - Multi-image comparison: text before images (Gemini best practice)

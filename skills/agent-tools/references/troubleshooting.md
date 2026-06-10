@@ -10,7 +10,7 @@
 - [Popper (Android UI) Issues](#popper-android-ui-issues)
 - [Platform Differences](#platform-differences)
 
----
+______________________________________________________________________
 
 ## Environment Issues
 
@@ -34,7 +34,7 @@ export GEMINI_API_KEY="your-api-key-here"
 echo $GEMINI_API_KEY
 ```
 
----
+______________________________________________________________________
 
 ## Dependency Issues
 
@@ -120,7 +120,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 ```
 
----
+______________________________________________________________________
 
 ## API Errors
 
@@ -135,8 +135,8 @@ API error: API key not valid. Please pass a valid API key.
 **Solution:**
 
 1. Verify your API key is correct
-2. Check for extra whitespace or newlines
-3. Regenerate key at [Google AI Studio](https://aistudio.google.com/apikey)
+1. Check for extra whitespace or newlines
+1. Regenerate key at [Google AI Studio](https://aistudio.google.com/apikey)
 
 ### Rate Limits
 
@@ -149,8 +149,8 @@ API error: Resource has been exhausted (e.g. check quota).
 **Solution:**
 
 1. Wait and retry after a few seconds
-2. Check your quota at Google Cloud Console
-3. Consider using a different API key or project
+1. Check your quota at Google Cloud Console
+1. Consider using a different API key or project
 
 ### Quota Exceeded
 
@@ -163,8 +163,8 @@ API error: Quota exceeded for quota metric
 **Solution:**
 
 1. Wait for quota to reset (usually daily)
-2. Request quota increase in Google Cloud Console
-3. Use a paid tier if on free tier
+1. Request quota increase in Google Cloud Console
+1. Use a paid tier if on free tier
 
 ### Model Not Found
 
@@ -177,10 +177,10 @@ API error: models/model-name is not found
 **Solution:**
 
 1. Verify the model name is correct
-2. Check if model is available in your region
-3. Some models require specific API access
+1. Check if model is available in your region
+1. Some models require specific API access
 
----
+______________________________________________________________________
 
 ## File Issues
 
@@ -195,8 +195,8 @@ script-name: path/to/image.png: No such file or directory
 **Solution:**
 
 1. Check file path is correct
-2. Use absolute path if relative path fails
-3. Verify file exists: `ls -la path/to/image.png`
+1. Use absolute path if relative path fails
+1. Verify file exists: `ls -la path/to/image.png`
 
 ### Unsupported Image Format
 
@@ -205,13 +205,14 @@ script-name: path/to/image.png: No such file or directory
 **Solution:**
 
 1. Use common formats: PNG, JPEG, WebP, GIF
-2. Convert manually first:
+
+1. Convert manually first:
 
    ```bash
    magick input.bmp output.png
    ```
 
-3. Check ImageMagick supports the format:
+1. Check ImageMagick supports the format:
 
    ```bash
    magick identify input.file
@@ -231,7 +232,7 @@ ls -la image.png
 chmod 644 image.png
 ```
 
----
+______________________________________________________________________
 
 ## Output Issues
 
@@ -246,14 +247,14 @@ script-name: no response text received from API
 **Causes:**
 
 1. Content was blocked by safety filters
-2. Request was malformed
-3. API returned empty response
+1. Request was malformed
+1. API returned empty response
 
 **Solution:**
 
 1. Try with a different image
-2. Check if image contains sensitive content
-3. Verify request format matches expected schema
+1. Check if image contains sensitive content
+1. Verify request format matches expected schema
 
 ### Images Are Identical (screenshot-compare)
 
@@ -272,27 +273,19 @@ are byte-identical after encoding.
 **If images look different but report as identical:**
 
 1. Check if difference is only in alpha channel (transparency)
-2. Verify you're comparing the correct files
-3. Check for invisible differences (metadata only)
+1. Verify you're comparing the correct files
+1. Check for invisible differences (metadata only)
 
-### No People Found (photo-smart-crop)
+### Unexpected Crop Region (photo-smart-crop)
 
-**Error:**
-
-```text
-photo-smart-crop: no people found in image: photo.jpg
-```
-
-**Exit code:** 1
-
-**Cause:** The Gemini API did not detect any people in the image.
+**Cause:** The Gemini API picks the primary subject (people, food, focal
+points); if it finds no specific focal point, it returns a box covering the
+central compositional area, so the script always produces a crop.
 
 **Solutions:**
 
-1. Verify the image actually contains people
-2. Try with a clearer or higher-resolution image
-3. Ensure faces are visible (not obscured or too small)
-4. The API may miss people in unusual poses or partial views
+1. Try with a clearer or higher-resolution image
+1. Adjust `--ratio` if the subject does not fit the requested aspect ratio
 
 ### Rate Limited (photo-smart-crop)
 
@@ -303,8 +296,8 @@ photo-smart-crop: no people found in image: photo.jpg
 **Solutions:**
 
 1. Wait and retry after a few seconds
-2. Implement exponential backoff in calling scripts
-3. Check your Gemini API quota
+1. Implement exponential backoff in calling scripts
+1. Check your Gemini API quota
 
 ### Invalid Ratio Format (photo-smart-crop)
 
@@ -329,15 +322,15 @@ scripts/photo-smart-crop --ratio 1:1 input.jpg output.jpg
 content:
 
 1. Break input into smaller chunks
-2. Process incrementally
-3. Combine results
+1. Process incrementally
+1. Combine results
 
 ### Missing or Empty Input (token-count, satisfies)
 
 **Error:**
 
 ```text
-token-count: empty input
+token-count: no input provided on stdin
 satisfies: missing input from stdin
 ```
 
@@ -362,8 +355,8 @@ scripts/satisfies "condition"  # Will fail
 **Possible causes:**
 
 1. Condition is ambiguous
-2. Input text doesn't clearly match/contradict the condition
-3. AI model interpretation differs from expectation
+1. Input text doesn't clearly match/contradict the condition
+1. AI model interpretation differs from expectation
 
 **Solutions:**
 
@@ -377,10 +370,11 @@ scripts/satisfies "condition"  # Will fail
    cat file.txt | scripts/satisfies "contains the word 'approved'"
    ```
 
-2. Test with known inputs first
-3. Use explicit phrasing like "contains", "mentions", "starts with"
+1. Test with known inputs first
 
----
+1. Use explicit phrasing like "contains", "mentions", "starts with"
+
+______________________________________________________________________
 
 ## Popper (Android UI) Issues
 
@@ -428,7 +422,7 @@ interacting with system dialogs or other apps, run `popper` without the
 `--stay-in-app` flag. If you want to start in a specific app and keep the run
 inside it, combine `--launch PACKAGE --stay-in-app`.
 
----
+______________________________________________________________________
 
 ## Platform Differences
 
@@ -463,7 +457,7 @@ scripts/screenshot-describe ./images/screenshot.png
 scripts/screenshot-describe /mnt/c/Users/name/screenshot.png
 ```
 
----
+______________________________________________________________________
 
 ## Network Issues
 
@@ -474,8 +468,10 @@ scripts/screenshot-describe /mnt/c/Users/name/screenshot.png
 **Solution:**
 
 1. Check internet connectivity
-2. Verify firewall allows HTTPS to `generativelanguage.googleapis.com`
-3. Try with explicit timeout:
+
+1. Verify firewall allows HTTPS to `generativelanguage.googleapis.com`
+
+1. Try with explicit timeout:
 
    ```bash
    curl --connect-timeout 30 ...
@@ -494,10 +490,11 @@ scripts/screenshot-describe /mnt/c/Users/name/screenshot.png
    sudo apt-get update && sudo apt-get install ca-certificates
    ```
 
-2. Check system time is correct
-3. Verify no proxy is interfering
+1. Check system time is correct
 
----
+1. Verify no proxy is interfering
+
+______________________________________________________________________
 
 ## Large Image Handling
 
@@ -513,7 +510,7 @@ scripts/screenshot-describe /mnt/c/Users/name/screenshot.png
    magick large.png -resize 2048x2048\> resized.png
    ```
 
-2. Increase compression (lossy):
+1. Increase compression (lossy):
 
    ```bash
    magick large.png -quality 85 compressed.jpg
@@ -526,5 +523,5 @@ scripts/screenshot-describe /mnt/c/Users/name/screenshot.png
 **Solution:**
 
 1. Resize images to reasonable dimensions (2048px max recommended)
-2. Use JPEG for photos (smaller than PNG)
-3. Process in batches if comparing many images
+1. Use JPEG for photos (smaller than PNG)
+1. Process in batches if comparing many images

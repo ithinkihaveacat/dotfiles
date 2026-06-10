@@ -4,34 +4,31 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") PROMPT
+Usage: $(basename "$0") [OPTIONS] [-] PROMPT
 
 Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
 response (wrapped to 80 columns).
 
 Arguments:
+  -           Read context from stdin and include it with the question.
+              Without a leading '-', stdin is ignored.
   PROMPT      The question to ask.
 
-Input:
-  stdin       Optional context to include with the question.
-
 Options:
-  --help      Display this help message and exit
+  --help         Display this help message and exit
+  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
 
 Examples:
   $(basename "$0") "What is the capital of Peru?"
-  cat article.md | $(basename "$0") "Summarize this article"
-  $(basename "$0") "Explain this code" < script.sh
+  cat article.md | $(basename "$0") - "Summarize this article"
+  $(basename "$0") - "Explain this code" < script.sh
 EOF
   exit 0
 }
-
-if [[ "${1:-}" == "--help" ]]; then
-  usage
-fi
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -44,25 +41,55 @@ require curl
 require jq
 require fmt
 
+MODEL="${GEMINI_MODEL:-gemini-3.5-flash}"
+READ_STDIN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help)
+      usage
+      ;;
+    --model)
+      if [[ $# -lt 2 ]]; then
+        echo "$(basename "$0"): --model requires an argument" >&2
+        echo "Try '$(basename "$0") --help' for more information." >&2
+        exit 1
+      fi
+      MODEL="$2"
+      shift 2
+      ;;
+    -)
+      READ_STDIN=true
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
   echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
   exit 1
 fi
 
-READ_STDIN=false
-if [[ "${1:-}" == "-" ]]; then
-  READ_STDIN=true
-  shift
-fi
-
 if [[ $# -lt 1 ]]; then
-  usage
+  echo "$(basename "$0"): missing PROMPT argument" >&2
+  echo "Try '$(basename "$0") --help' for more information." >&2
+  exit 1
 fi
 
 USER_PROMPT="$*"
-
-MODEL="gemini-3.5-flash"
 URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
 
 # System Instruction
@@ -70,11 +97,15 @@ SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer 
 
 # Construct the JSON payload
 if $READ_STDIN; then
-  STDIN_CONTENT=$(cat)
+  # Read stdin into a temp file and use --rawfile to avoid ARG_MAX limits on
+  # large inputs (see shell.md "Handling Large Inputs with jq").
+  STDIN_FILE=$(mktemp)
+  trap 'rm -f "$STDIN_FILE"' EXIT
+  cat >"$STDIN_FILE"
   REQUEST_BODY=$(jq -n \
     --arg system_instruction "$SYSTEM_INSTRUCTION" \
     --arg user_prompt "$USER_PROMPT" \
-    --arg stdin_content "$STDIN_CONTENT" \
+    --rawfile stdin_content "$STDIN_FILE" \
     '{
       system_instruction: {
         parts: [{ text: $system_instruction }]
