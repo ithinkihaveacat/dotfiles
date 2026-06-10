@@ -2,9 +2,9 @@
 name: interior-design
 description: >
   Extracts image URLs and listing metadata from inigo.com property listings.
-  Pairs with `agent-tools/scripts/photo-query` for triaging downloaded
-  photography with an LLM (e.g. find rooms with a bedside table, a fireplace
-  with art above, mismatched dining chairs). Captures the Inigo-specific JSON
+  Pairs well with an LLM image-query tool for triaging downloaded photography
+  (e.g. find rooms with a bedside table, a fireplace with art above,
+  mismatched dining chairs). Captures the Inigo-specific JSON
   paths (the React Server Components chunk format the App Router site uses).
   Use when scraping inigo.com listings or cataloguing
   interior-design reference photos. Triggers: inigo, inigo.com, interior
@@ -12,9 +12,9 @@ description: >
   fireplace, mismatched chairs.
 compatibility: >-
   inigo-search and inigo-gallery are zero-dependency Python 3 (stdlib only).
-  To download images, pipe inigo-gallery into wget/curl/aria2c. For
-  image triage, use `photo-query` from the agent-tools skill (requires
-  GEMINI_API_KEY).
+  To download images, pipe inigo-gallery into wget/curl/aria2c. Image
+  triage needs an LLM image-query tool (typically requiring an API key such
+  as GEMINI_API_KEY).
 ---
 
 # Interior Design (Inigo)
@@ -91,21 +91,16 @@ scripts/inigo-gallery <URL> | xargs -n1 -P4 -I{} curl -sO --output-dir <slug>/ {
 
 ### Triage downloaded images with an LLM
 
-Triage is delegated to `photo-query` from the agent-tools skill — it handles
-EXIF rotation, resizing, and caches pre-processed bytes so multiple queries
-against the same directory don't re-encode.
+Triage is best delegated to a dedicated LLM image-query tool rather than
+hand-rolled API calls. The right shape of tool takes a free-form question plus a
+structured-output schema (e.g. `"has_bedside_table bool"`), runs it against a
+directory of images, and can filter to just the paths whose boolean field is
+true — ideally handling EXIF rotation, resizing, and caching of pre-processed
+bytes so repeated queries don't re-encode.
 
-```bash
-~/.claude/skills/agent-tools/scripts/photo-query ask --recursive \
-  --prompt "Does this image feature a bedside table?" \
-  --schema "has_bedside_table bool" \
-  --filter has_bedside_table \
-  ./<slug>
-```
-
-Prints paths whose boolean field is true. Omit `--filter` to emit the full
-parsed JSON per file. See the `agent-tools` skill for full subcommand docs
-(`has-people`, `describe`, `ask`).
+Search the installed skills for such a tool before writing anything yourself —
+this dotfiles ecosystem ships one. Check the available skills (and `bin/`) for
+an image- or photo-query tool and use its documented interface.
 
 ## Scripts
 
@@ -124,15 +119,15 @@ parsed JSON per file. See the `agent-tools` skill for full subcommand docs
   [references/inigo-source-structure.md](references/inigo-source-structure.md)
   for the JSON paths used.
 
-For LLM-based image triage, use the `photo-query` script from the `agent-tools`
-skill (no duplicate here).
+For LLM-based image triage, use a dedicated image-query tool from the installed
+skills (no duplicate here; see "Triage downloaded images with an LLM" above).
 
 ## Example queries
 
-Worked-in-practice prompts the existing data was triaged with, run via
-`photo-query ask`:
+Worked-in-practice prompts the existing data was triaged with, run via an LLM
+image-query tool (prompt plus structured-output schema):
 
-| Topic                | `--prompt`                                                                                 | `--schema`                                               |
+| Topic                | Prompt                                                                                     | Schema                                                   |
 | -------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
 | Bedside table        | `"Does this image feature a bed? Does it feature a bedside table?"`                        | `"has_bed bool, has_bedside_table bool"`                 |
 | Mismatched chairs    | `"Does this image feature a dining table with mismatched chairs (not in the same style)?"` | `"has_mismatched_chairs bool"`                           |
@@ -142,9 +137,9 @@ Worked-in-practice prompts the existing data was triaged with, run via
 
 - `inigo-gallery` only fetches HTML; it does not download images. The caller
   decides what to do with the URLs.
-- `photo-query` (in the agent-tools skill) sends each resized image to the
-  Gemini API. Costs scale with directory size × queries; its disk cache only
-  amortises the local resize/encode step, not the per-query API spend.
+- LLM image triage sends each (resized) image to a remote API. Costs scale with
+  directory size × queries; a local disk cache only amortises the resize/encode
+  step, not the per-query API spend.
 
 ## Reference Material
 

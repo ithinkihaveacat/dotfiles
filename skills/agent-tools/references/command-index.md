@@ -6,7 +6,7 @@
 
 - [screenshot-describe](#screenshot-describe) - Generate alt-text from images
 - [screenshot-compare](#screenshot-compare) - Compare two images for differences
-- [photo-smart-crop](#photo-smart-crop) - Smart crop around detected people
+- [photo-smart-crop](#photo-smart-crop) - Smart crop around the primary subject
 - [photo-query](#photo-query) - Ask Gemini about photos (boolean / schema /
   free-text)
 - [oracle](#oracle) - Deep reasoning and synthesis over files or directories
@@ -28,27 +28,29 @@ Generate a text description of a screenshot using the Gemini API.
 ### Synopsis
 
 ```bash
-scripts/screenshot-describe IMAGE [PROMPT]
+scripts/screenshot-describe [OPTIONS] [IMAGE] [PROMPT]
 ```
 
 ### Arguments
 
-| Argument | Description                                                |
-| -------- | ---------------------------------------------------------- |
-| `IMAGE`  | Path to a screenshot (any format supported by ImageMagick) |
-| `PROMPT` | Custom prompt for the AI model (optional)                  |
+| Argument | Description                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------- |
+| `IMAGE`  | Path to a screenshot (any format supported by ImageMagick), or `-` for stdin (default: `-`) |
+| `PROMPT` | Custom prompt for the AI model (optional)                                                   |
 
 ### Options
 
-| Option       | Description                   |
-| ------------ | ----------------------------- |
-| `-h, --help` | Display help message and exit |
+| Option          | Description                                       |
+| --------------- | ------------------------------------------------- |
+| `--help`        | Display help message and exit                     |
+| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -65,13 +67,13 @@ scripts/screenshot-describe login-screen.png "What objects are in this image?"
 
 ### Raw API Command
 
-Model: `gemini-2.5-flash`
+Model: `gemini-3.5-flash`
 
 ```bash
 IMAGE_BASE64=$(magick image.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -106,23 +108,28 @@ scripts/screenshot-compare IMAGE1 IMAGE2 [PROMPT]
 
 ### Arguments
 
-| Argument | Description                                      |
-| -------- | ------------------------------------------------ |
-| `IMAGE1` | Path to the first screenshot (baseline/before)   |
-| `IMAGE2` | Path to the second screenshot (comparison/after) |
-| `PROMPT` | Custom prompt for the AI model (optional)        |
+| Argument | Description                                                        |
+| -------- | ------------------------------------------------------------------ |
+| `IMAGE1` | Path to the first screenshot (baseline/before), or `-` for stdin   |
+| `IMAGE2` | Path to the second screenshot (comparison/after), or `-` for stdin |
+| `PROMPT` | Custom prompt for the AI model (optional)                          |
+
+Only one of `IMAGE1`/`IMAGE2` may be `-`.
 
 ### Options
 
-| Option       | Description                   |
-| ------------ | ----------------------------- |
-| `-h, --help` | Display help message and exit |
+| Option          | Description                                       |
+| --------------- | ------------------------------------------------- |
+| `--help`        | Display help message and exit                     |
+| `--version`     | Display version number and exit                   |
+| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -142,8 +149,8 @@ scripts/screenshot-compare production-capture.png ui-mockup.png
 Model: `gemini-3.5-flash`
 
 ```bash
-IMG1_B64=$(magick before.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
-IMG2_B64=$(magick after.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
+IMG1_B64=$(magick before.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0)
+IMG2_B64=$(magick after.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0)
 
 curl -s -X POST \
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent" \
@@ -162,18 +169,18 @@ curl -s -X POST \
 
 ### Exit Codes
 
-| Code | Description                                          |
-| ---- | ---------------------------------------------------- |
-| 0    | Success (differences found and described)            |
-| 1    | General error (API error, usage, missing file, etc.) |
-| 2    | Images are identical (no differences to describe)    |
-| 127  | Missing required dependency                          |
+| Code | Description                                                               |
+| ---- | ------------------------------------------------------------------------- |
+| 0    | Success (differences found and described)                                 |
+| 1    | General error (API error, usage, missing file, missing ImageMagick, etc.) |
+| 2    | Images are identical (no differences to describe)                         |
 
 ______________________________________________________________________
 
 ## photo-smart-crop
 
-Smart crop images around detected people using Gemini API for face detection.
+Smart crop images around the primary subject (people, food, focal points in a
+landscape) detected via the Gemini API.
 
 ### Synopsis
 
@@ -190,16 +197,18 @@ scripts/photo-smart-crop [OPTIONS] INPUT OUTPUT
 
 ### Options
 
-| Option        | Description                          |
-| ------------- | ------------------------------------ |
-| `--ratio W:H` | Aspect ratio for crop (default: 5:3) |
-| `-h, --help`  | Display help message and exit        |
+| Option          | Description                                       |
+| --------------- | ------------------------------------------------- |
+| `--ratio W:H`   | Aspect ratio for crop (default: 5:3)              |
+| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
+| `--help`        | Display help message and exit                     |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -219,32 +228,34 @@ scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3
 
 ### Processing Details
 
-1. Detects all people in the image using Gemini vision API
-1. Calculates bounding box around all detected faces (prioritizes heads over
-   bodies)
-1. Expands box by 20% for headroom
-1. Adjusts to match the requested aspect ratio
-1. If full body cannot fit, crops from bottom (preserving heads)
-1. Applies crop using ImageMagick with auto-orient for EXIF handling
+1. Asks the Gemini vision API for a bounding box around the primary subject (for
+   people, centered on the face/head area; otherwise the most aesthetically
+   pleasing focal region)
+1. If no specific focal point is found, the model returns a box covering the
+   central compositional area
+1. Converts the normalized (0-1000) coordinates to pixels
+1. Computes the maximum crop box with the requested aspect ratio and centers it
+   on the subject, clamped to the image boundaries
+1. Applies the crop using ImageMagick with auto-orient for EXIF handling
 
 ### Exit Codes
 
-| Code | Description                                                         |
-| ---- | ------------------------------------------------------------------- |
-| 0    | Success (cropped output written)                                    |
-| 1    | Error (no people found, API error, invalid arguments, missing file) |
-| 2    | Rate limited (API returned 429)                                     |
-| 127  | Missing required dependency                                         |
+| Code | Description                                        |
+| ---- | -------------------------------------------------- |
+| 0    | Success (cropped output written)                   |
+| 1    | Error (API error, invalid arguments, missing file) |
+| 2    | Rate limited (API returned 429)                    |
+| 127  | Missing required dependency                        |
 
 ______________________________________________________________________
 
 ## photo-query
 
 Ask Gemini a question about one or more photos. The QUERY positional is either
-an `@`-prefixed built-in (e.g. `@people`) or a free-form prompt; built-ins
-ship with their own prompt, schema, and tuned defaults. Image pre-processing
-(EXIF rotation, alpha flatten, resize, WebP encode) is content-addressed-cached
-so repeated queries against the same images skip all redundant work.
+an `@`-prefixed built-in (e.g. `@people`) or a free-form prompt; built-ins ship
+with their own prompt, schema, and tuned defaults. Image pre-processing (EXIF
+rotation, alpha flatten, resize, WebP encode) is content-addressed-cached so
+repeated queries against the same images skip all redundant work.
 
 ### Synopsis
 
@@ -254,8 +265,8 @@ scripts/photo-query [OPTIONS] QUERY FILE_OR_DIR [FILE_OR_DIR ...]
 
 ### Built-in queries
 
-| Name      | Description                                                  |
-| --------- | ------------------------------------------------------------ |
+| Name      | Description                                                   |
+| --------- | ------------------------------------------------------------- |
 | `@people` | Do people feature prominently? Boolean. 384px resize default. |
 
 ### Arguments
@@ -267,22 +278,23 @@ scripts/photo-query [OPTIONS] QUERY FILE_OR_DIR [FILE_OR_DIR ...]
 
 ### Options
 
-| Option           | Description                                                                                         |
-| ---------------- | --------------------------------------------------------------------------------------------------- |
-| `--max-size N`   | Longest-edge resize cap, px. Default: 768 (built-ins may use a smaller default, e.g. 384 for `@people`). |
-| `--model M`      | Override Gemini model (default `gemini-3.1-flash-lite` — cheapest/fastest Gemini 3 tier).           |
-| `--no-cache`     | Skip the resize cache and re-process every image.                                                   |
-| `--recursive`    | Recurse into directory arguments (`*.{jpg,jpeg,png,webp,heic,heif}`).                               |
+| Option           | Description                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--max-size N`   | Longest-edge resize cap, px. Default: 768 (built-ins may use a smaller default, e.g. 384 for `@people`).                        |
+| `--model M`      | Override Gemini model (default: `$GEMINI_MODEL` if set, else `gemini-3.1-flash-lite` — cheapest/fastest Gemini 3 tier).         |
+| `--no-cache`     | Skip the resize cache and re-process every image.                                                                               |
+| `--recursive`    | Recurse into directory arguments (`*.{jpg,jpeg,png,webp,heic,heif}`).                                                           |
 | `--schema SPEC`  | llm-style DSL: comma-separated `name [type] [: description]`. Types: `bool`, `int`, `float`, `str`. Not allowed with built-ins. |
-| `--filter FIELD` | Print only paths whose boolean FIELD is true (requires a schema, built-in or `--schema`).           |
-| `-v, --verbose`  | In single-file boolean mode, echo `true`/`false` to **stderr**.                                     |
-| `--help`         | Display help and exit.                                                                              |
+| `--filter FIELD` | Print only paths whose boolean FIELD is true (requires a schema, built-in or `--schema`).                                       |
+| `-v, --verbose`  | In single-file boolean mode, echo `true`/`false` to **stderr**.                                                                 |
+| `--help`         | Display help and exit.                                                                                                          |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -340,27 +352,35 @@ utilizing deep reasoning and Google Search grounding.
 ### Synopsis
 
 ```bash
-scripts/oracle "PROMPT" [FILE_OR_DIR ...]
+scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 ```
 
 ### Arguments
 
-| Argument      | Description                                                                                                      |
-| ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `PROMPT`      | The research question, analysis goal, or refactoring plan. Must be exhaustive and self-contained.                |
-| `FILE_OR_DIR` | Arbitrary files and directories. Directories are recursively walked, and media files are uploaded automatically. |
+| Argument      | Description                                                                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PROMPT`      | The research question, analysis goal, or refactoring plan. Must be exhaustive and self-contained.                                                     |
+| `FILE_OR_DIR` | Arbitrary files and directories. Directories are recursively walked, and media files are uploaded automatically. Pass `-` to read context from stdin. |
 
 ### Options
 
-| Option       | Description                   |
-| ------------ | ----------------------------- |
-| `-h, --help` | Display help message and exit |
+| Option           | Description                                                                       |
+| ---------------- | --------------------------------------------------------------------------------- |
+| `--force`        | Bypass context size limits (1MB for text, 20MB per media file)                    |
+| `--maps`         | Use Google Maps grounding instead of Google Search (cannot combine with `--code`) |
+| `--code`         | Enable Code Execution for Python                                                  |
+| `--dry-run`      | Summarize the payload (files, sizes, prompt) without calling the API              |
+| `--model MODEL`  | Gemini model to use (default: `gemini-3.1-pro-preview`)                           |
+| `--serialize`    | Save the self-contained payload to the cache (default: on)                        |
+| `--no-serialize` | Disable saving the payload to the cache                                           |
+| `--help`         | Display help message and exit                                                     |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -398,7 +418,7 @@ the provided text.
 ### Synopsis
 
 ```bash
-scripts/emerson "PROMPT" < INPUT_FILE
+scripts/emerson [OPTIONS] "PROMPT" < INPUT_FILE
 ```
 
 ### Arguments
@@ -415,15 +435,17 @@ scripts/emerson "PROMPT" < INPUT_FILE
 
 ### Options
 
-| Option       | Description                   |
-| ------------ | ----------------------------- |
-| `-h, --help` | Display help message and exit |
+| Option          | Description                                             |
+| --------------- | ------------------------------------------------------- |
+| `--help`        | Display help message and exit                           |
+| `--model MODEL` | Gemini model to use (default: `gemini-3.1-pro-preview`) |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -443,18 +465,18 @@ scripts/emerson "What are the breaking changes?" < api-spec.md
 
 ### Raw API Command
 
-Model: `gemini-3-pro-preview`
+Model: `gemini-3.1-pro-preview`
 
 ```bash
-INPUT_TEXT=$(cat document.txt)
 PROMPT="Summarize the key points"
 
+# --rawfile avoids ARG_MAX limits on large inputs
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
-    --arg text "$INPUT_TEXT" \
+    --rawfile text document.txt \
     --arg prompt "$PROMPT" \
     '{
       contents: [{
@@ -486,32 +508,35 @@ response (wrapped to 80 columns).
 ### Synopsis
 
 ```bash
-scripts/pascal PROMPT
+scripts/pascal [OPTIONS] [-] PROMPT
 ```
 
 ### Arguments
 
-| Argument | Description          |
-| -------- | -------------------- |
-| `PROMPT` | The question to ask. |
+| Argument | Description                                       |
+| -------- | ------------------------------------------------- |
+| `-`      | Read context from stdin (must precede the prompt) |
+| `PROMPT` | The question to ask.                              |
 
 ### Input
 
-| Source  | Description                                    |
-| ------- | ---------------------------------------------- |
-| `stdin` | Optional context to include with the question. |
+| Source  | Description                                                                                 |
+| ------- | ------------------------------------------------------------------------------------------- |
+| `stdin` | Optional context to include with the question. Only read when `-` is passed as an argument. |
 
 ### Options
 
-| Option       | Description                   |
-| ------------ | ----------------------------- |
-| `-h, --help` | Display help message and exit |
+| Option          | Description                                       |
+| --------------- | ------------------------------------------------- |
+| `--help`        | Display help message and exit                     |
+| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -519,8 +544,8 @@ scripts/pascal PROMPT
 # Ask a question
 scripts/pascal "What is the capital of Peru?"
 
-# Summarize an article
-cat article.md | scripts/pascal "Summarize this article"
+# Summarize an article (note the '-' to read stdin)
+cat article.md | scripts/pascal - "Summarize this article"
 ```
 
 ### Raw API Command
@@ -583,10 +608,12 @@ scripts/context --list
 
 ### Options
 
-| Option       | Description                   |
-| ------------ | ----------------------------- |
-| `--list`     | List available topics         |
-| `-h, --help` | Display help message and exit |
+| Option              | Description                                    |
+| ------------------- | ---------------------------------------------- |
+| `--list`            | List available topics (names only)             |
+| `--force`           | Force cache rebuild                            |
+| `--plugin-template` | Output a template for creating a Python plugin |
+| `--help`            | Display help message and exit                  |
 
 ### Environment Variables
 
@@ -643,16 +670,18 @@ echo "text" | scripts/satisfies [OPTIONS] "CONDITION"
 
 ### Options
 
-| Option          | Description                        |
-| --------------- | ---------------------------------- |
-| `-v, --verbose` | Output "true" or "false" to stderr |
-| `-h, --help`    | Display help message and exit      |
+| Option          | Description                                            |
+| --------------- | ------------------------------------------------------ |
+| `-v, --verbose` | Output "true" or "false" to stderr                     |
+| `--model MODEL` | Gemini model to use (default: `gemini-2.5-flash-lite`) |
+| `--help`        | Display help message and exit                          |
 
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -677,15 +706,15 @@ cat README.md | scripts/satisfies "has installation instructions" && echo "Ready
 Model: `gemini-2.5-flash-lite`
 
 ```bash
-INPUT_TEXT=$(cat file.txt)
 CONDITION="mentions Elvis"
 
+# --rawfile avoids ARG_MAX limits on large inputs
 RESPONSE=$(curl -s -X POST \
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
-    --arg input "$INPUT_TEXT" \
+    --rawfile input file.txt \
     --arg cond "$CONDITION" \
     '{
       contents: [{
@@ -734,11 +763,19 @@ cat file.txt | scripts/token-count
 echo "text" | scripts/token-count
 ```
 
+### Options
+
+| Option          | Description                                       |
+| --------------- | ------------------------------------------------- |
+| `--help`        | Display help message and exit                     |
+| `--model MODEL` | Gemini model to use (default: `gemini-2.0-flash`) |
+
 ### Environment Variables
 
-| Variable         | Required | Description         |
-| ---------------- | -------- | ------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key |
+| Variable         | Required | Description                             |
+| ---------------- | -------- | --------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -777,27 +814,32 @@ scripts/popper [OPTIONS] "GOAL"
 
 ### Arguments
 
-| Argument | Required | Description                                        |
-| -------- | -------- | -------------------------------------------------- |
-| `GOAL`   | Yes      | The natural language goal for the agent to achieve |
+| Argument | Required | Description                                                                          |
+| -------- | -------- | ------------------------------------------------------------------------------------ |
+| `GOAL`   | Yes      | The natural language goal for the agent to achieve (not needed with `--dump-layout`) |
 
 ### Options
 
-| Option             | Description                                                                                                                                 |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--launch PACKAGE` | Launch the specified package before starting.                                                                                               |
-| `--stay-in-app`    | Restrict the agent to a single application package for the entire run. If used with `--launch`, that launched package becomes the boundary. |
-| `--timeout SEC`    | Maximum execution time in seconds. Exits with code `2` on timeout.                                                                          |
-| `--output-format`  | Output format: `text` or `stream-json` (NDJSON telemetry to stdout).                                                                        |
-| `--screenshots`    | Enable screenshot capture and transmission to the model. Enabled by default.                                                                |
-| `--no-screenshots` | Disable screenshot capture and transmission to the model.                                                                                   |
-| `--dump-layout`    | Print the current simplified UI layout as JSON and exit.                                                                                    |
+| Option                                           | Description                                                                                                                                 |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--launch PACKAGE`                               | Launch the specified package before starting.                                                                                               |
+| `--stay-in-app`                                  | Restrict the agent to a single application package for the entire run. If used with `--launch`, that launched package becomes the boundary. |
+| `--timeout SEC`                                  | Maximum execution time in seconds (default: 180). Exits with code `2` on timeout.                                                           |
+| `--output-format`                                | Output format: `text` or `stream-json` (NDJSON telemetry to stdout).                                                                        |
+| `--agent-screenshots` / `--no-agent-screenshots` | Enable/disable transmitting screenshots to the Gemini API (default: enabled).                                                               |
+| `--local-screenshots` / `--no-local-screenshots` | Enable/disable saving debug screenshots to local disk (default: enabled).                                                                   |
+| `--local-screenshot-dir DIR`                     | Directory for step-by-step debug screenshots (default: `XDG_RUNTIME_DIR/popper` or tmp).                                                    |
+| `--output-dir DIR`                               | Directory for screenshots explicitly requested by the agent (default: current directory).                                                   |
+| `--model MODEL`                                  | Gemini model to use (default: `gemini-3.5-flash`).                                                                                          |
+| `--dump-layout`                                  | Print the current simplified UI layout as JSON and exit.                                                                                    |
+| `--help`                                         | Display help message and exit.                                                                                                              |
 
 ### Environment Variables
 
 | Variable         | Required | Description                               |
 | ---------------- | -------- | ----------------------------------------- |
 | `GEMINI_API_KEY` | Yes      | Your Gemini API key                       |
+| `GEMINI_MODEL`   | No       | Default model if `--model` is not given   |
 | `ANDROID_SERIAL` | No       | Target a specific Android device/emulator |
 
 ### Examples
@@ -868,11 +910,13 @@ magick input.png -alpha off -define webp:lossless=true webp:- | base64 -w 0
 - Consistent encoding across different input formats
 - Smaller payload than uncompressed formats
 
-### Alpha Channel Removal
+### Alpha Channel Handling
 
-The `-alpha off` flag removes transparency. Images differing only in alpha
-channel are treated as identical. This is intentional for comparing visual
-appearance on an opaque background.
+The `-alpha off` flag (used by `screenshot-describe`) removes transparency, so
+images differing only in alpha channel are treated as identical.
+`screenshot-compare` instead flattens onto a magenta background
+(`-background magenta -flatten`), which makes transparency differences visible
+in comparisons. `photo-query` flattens onto white.
 
 ______________________________________________________________________
 

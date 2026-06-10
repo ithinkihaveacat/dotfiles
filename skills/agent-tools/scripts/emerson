@@ -4,11 +4,11 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") "PROMPT" < INPUT_FILE
+Usage: $(basename "$0") [OPTIONS] "PROMPT" < INPUT_FILE
 
 Generates an essay-length answer (approx. 3000 words) to the PROMPT, based
 primarily on the text provided via standard input. Uses the Gemini 3 Pro
-Preview model.
+Preview model by default.
 
 Arguments:
   PROMPT      The question or topic to address.
@@ -17,10 +17,12 @@ Input:
   stdin       The reference material (text) to use for the response.
 
 Options:
-  --help      Display this help message and exit
+  --help         Display this help message and exit
+  --model MODEL  Gemini model to use (default: gemini-3.1-pro-preview)
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
 
 Examples:
   cat documentation.md | $(basename "$0") "Summarize the key architectural changes"
@@ -28,10 +30,6 @@ Examples:
 EOF
   exit 0
 }
-
-if [[ "${1:-}" == "--help" ]]; then
-  usage
-fi
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -43,17 +41,56 @@ require() {
 require curl
 require jq
 
-if [[ $# -lt 1 ]]; then
-  usage
+MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
+USER_PROMPT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help)
+      usage
+      ;;
+    --model)
+      if [[ $# -lt 2 ]]; then
+        echo "$(basename "$0"): --model requires an argument" >&2
+        echo "Try '$(basename "$0") --help' for more information." >&2
+        exit 1
+      fi
+      MODEL="$2"
+      shift 2
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$USER_PROMPT" ]]; then
+        USER_PROMPT="$1"
+        shift
+      else
+        echo "$(basename "$0"): too many arguments" >&2
+        echo "Try '$(basename "$0") --help' for more information." >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+if [[ -z "$USER_PROMPT" ]]; then
+  echo "$(basename "$0"): missing PROMPT argument" >&2
+  echo "Try '$(basename "$0") --help' for more information." >&2
+  exit 1
 fi
 
-USER_PROMPT="$1"
-
-# Read stdin into a variable
-STDIN_CONTENT=$(cat)
-if [[ -z "$STDIN_CONTENT" ]]; then
+# Read stdin into a temp file and use --rawfile to avoid ARG_MAX limits on
+# large inputs (see shell.md "Handling Large Inputs with jq").
+STDIN_FILE=$(mktemp)
+trap 'rm -f "$STDIN_FILE"' EXIT
+cat >"$STDIN_FILE"
+if [[ ! -s "$STDIN_FILE" ]]; then
   echo "$(basename "$0"): no input provided on stdin" >&2
-  usage
+  echo "Try '$(basename "$0") --help' for more information." >&2
+  exit 1
 fi
 
 GEMINI_API_KEY="${GEMINI_API_KEY:-}"
@@ -61,8 +98,6 @@ if [[ -z "${GEMINI_API_KEY:-}" ]]; then
   echo "$(basename "$0"): GEMINI_API_KEY environment variable not set" >&2
   exit 1
 fi
-
-MODEL="gemini-3.1-pro-preview"
 URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"
 
 # System Instruction: A detailed guide for the model
@@ -112,8 +147,8 @@ EOF
 REQUEST_BODY=$(jq -n \
   --arg system_instruction "$SYSTEM_INSTRUCTION" \
   --arg user_prompt "$USER_PROMPT" \
-  --arg stdin_content "$STDIN_CONTENT" \
-  '{ 
+  --rawfile stdin_content "$STDIN_FILE" \
+  '{
                     system_instruction: { 
                       parts: [{ text: $system_instruction }] 
                     }, 
@@ -159,8 +194,10 @@ if [[ -z "$TEXT" ]]; then
   exit 1
 fi
 
-if command -v markdown-format >/dev/null 2>&1; then
-  echo "$TEXT" | markdown-format 2>/dev/null
+# Prefer formatted output, but never discard the generated text if
+# markdown-format is missing or fails.
+if FORMATTED=$(echo "$TEXT" | markdown-format 2>/dev/null); then
+  echo "$FORMATTED"
 else
   echo "$TEXT"
 fi
