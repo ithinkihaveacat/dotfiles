@@ -1,6 +1,6 @@
 ---
-name: skill-select
-description: Discover and select relevant agent skills based on a problem description, goal, or repository context. Use this to determine which skills apply to a workspace, or when you are unsure which tools are best suited for your current task.
+name: workspace-config
+description: Discover and select relevant agent skills, and manage workspace tool execution permissions. Use this to determine which skills apply to a workspace, and to manage allow/deny rules for local agent tool execution.
 ---
 
 # Skill Select & Skill Manager
@@ -100,9 +100,7 @@ permission <command> [arguments] [options]
   rules.
 - **`clean`**: Clear all permission rules for the workspace.
 
-See the \[Command
-Index\](file:///usr/local/google/home/stillers/workspace/dotfiles/skills/skill-select/references/command-index.md)
-for full help details.
+See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 

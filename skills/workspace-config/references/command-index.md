@@ -90,20 +90,18 @@ The block below is `scripts/permission --help`, kept in sync by
 <!-- generated: ../scripts/permission --help -->
 
 ```text
-usage: permission [-h] {add,remove,rm,list,ls,clean} ...
+Usage: permission <command> [arguments]
 
 Manage workspace-specific agent permissions.
 
-positional arguments:
-  {add,remove,rm,list,ls,clean}
-                        Subcommands
-    add                 Add a tool permission rule
-    remove (rm)         Remove a tool permission rule
-    list (ls)           List permission rules
-    clean               Clear all workspace-specific permission rules
+Commands:
+  add             Add a tool permission rule
+  remove          Remove a tool permission rule (alias: rm)
+  list            List permission rules (alias: ls)
+  clean           Clear all workspace-specific permission rules
 
-options:
-  -h, --help            show this help message and exit
+Options:
+  --help          Display this help message and exit
 ```
 
 <!-- /generated -->
