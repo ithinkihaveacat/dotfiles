@@ -200,6 +200,33 @@ If you modify `bin/emumanager` to add a new subcommand or option, you must also
 update `fish/completions/emumanager.fish` to include completions for the new
 functionality.
 
+### Generated Command Index Blocks
+
+Some `references/command-index.md` files contain blocks generated from a
+script's `--help` output, delimited by marker comments:
+
+```markdown
+<!-- generated: ../scripts/my-script --help -->
+(generated fenced block)
+<!-- /generated -->
+```
+
+Never edit the content between these markers by hand: it is overwritten by
+`bin/command-index-sync`. The script's `usage()`/help text is the single source
+of truth.
+
+After changing any script's interface or help text, refresh the generated
+blocks:
+
+```bash
+bin/command-index-sync --all
+```
+
+`./update` runs `command-index-sync --check --all` and warns when blocks have
+drifted. The command named in a marker is executed with its working directory
+set to the directory containing the Markdown file (hence the `../scripts/`
+prefix).
+
 ### Tests
 
 Some scripts have associated tests in the `tests/` directory. Tests use the TAP

@@ -4,6 +4,7 @@
 
 ## Contents
 
+- [Help](#help)
 - [version](#version)
 - [list versions](#list-versions)
 - [list dependencies](#list-dependencies)
@@ -13,6 +14,88 @@
 - [inspect](#inspect)
 - [resolve-exceptions](#resolve-exceptions)
 - [Exceptions Table](#exceptions-table)
+
+## Help
+
+The block below is `scripts/jetpack --help`, kept in sync by
+`command-index-sync` (coding-standards skill); do not edit it by hand. The
+sections that follow add per-subcommand detail and raw commands.
+
+<!-- generated: ../scripts/jetpack --help -->
+
+```text
+Usage: jetpack <command> [arguments]
+
+Jetpack library utilities for working with AndroidX packages.
+This tool helps resolve Maven artifacts, finding versions, and downloading
+source code for AndroidX libraries, including support for SNAPSHOT builds.
+
+Commands:
+  version <artifact> [type] [repo]
+                      Get the version string for a Maven artifact.
+                      Types: ALPHA, BETA, RC, STABLE, LATEST, SNAPSHOT, or BUILD_ID.
+                      Default: STABLE.
+  list versions <artifact> [repo]
+                      List all versions for a given Maven artifact.
+  list dependencies <artifact> [version]
+                      List direct Maven dependencies for a given Maven artifact.
+  resolve <name>      Convert a fully qualified class name or package prefix to
+                      its corresponding Maven artifact (GROUP_ID:ARTIFACT_ID).
+                      Uses internal heuristics and an exceptions table.
+  search <query> [--force]
+                      Search for artifacts by package name (using cached index)
+                      or class name (using Android Code Search).
+                      Use --force to rebuild the local package index.
+  source <artifact>... [version]
+                      Download and extract source JARs for one or more Maven artifacts.
+                      Supports symbolic versions (e.g. ALPHA) or pinned versions.
+                      Handles Kotlin Multiplatform platform sources automatically.
+                      Options: --output <dir>, --find <pattern>
+  inspect <name> [version]
+                      Convenience wrapper that resolves a class name to an artifact
+                      and then downloads its source.
+                      Equivalent to: resolve -> source.
+  resolve-exceptions <artifact>
+                      Analyze a Maven artifact to find packages that don't follow standard
+                      naming conventions (for updating the resolve command).
+
+Options:
+  --help              Display this help message and exit
+
+Environment Variables:
+  XDG_CACHE_HOME      Base directory for cache (default: $HOME/.cache)
+
+Examples:
+  # Check the latest stable version
+  jetpack version androidx.wear.tiles:tiles STABLE
+
+  # Check the latest alpha version
+  jetpack version androidx.wear.tiles:tiles ALPHA
+
+  # Resolve a class to its artifact
+  jetpack resolve androidx.core.splashscreen.SplashScreen
+  # Output: androidx.core:core-splashscreen
+
+  # Search for libraries related to 'compose'
+  jetpack search androidx.wear.compose
+
+  # Force update the search index
+  jetpack search --force androidx.wear
+
+  # Download source code for the latest SNAPSHOT
+  jetpack source androidx.wear.tiles:tiles SNAPSHOT
+
+  # Inspect source code for a class (downloads and extracts)
+  jetpack inspect androidx.lifecycle.ViewModel
+
+  # List all versions
+  jetpack list versions androidx.wear.tiles:tiles
+
+  # Download specific snapshot build by ID
+  jetpack source androidx.wear.tiles:tiles 14765146
+```
+
+<!-- /generated -->
 
 ## version
 

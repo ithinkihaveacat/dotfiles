@@ -16,8 +16,18 @@
 - [satisfies](#satisfies) - Evaluate boolean conditions against text
 - [token-count](#token-count) - Count tokens in text
 - [popper](#popper) - Interact with Android UIs using an AI agent
+- [gh-markdown](#gh-markdown) - Format GitHub PRs/Issues/Runs as Markdown
+- [gemini-api-doctor](#gemini-api-doctor) - Ping Gemini models to test the API
+  key
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
 - [Request Structure](#request-structure) - API request patterns
+
+## Maintenance
+
+The `Help` sections below are generated from each script's `--help` output by
+`command-index-sync` (in the coding-standards skill). Do not edit the fenced
+blocks between `<!-- generated: ... -->` markers by hand: change the script's
+`usage()` text instead, then run `command-index-sync` on this file.
 
 ______________________________________________________________________
 
@@ -25,45 +35,41 @@ ______________________________________________________________________
 
 Generate a text description of a screenshot using the Gemini API.
 
-### Synopsis
+### Help
 
-```bash
-scripts/screenshot-describe [OPTIONS] [IMAGE] [PROMPT]
+<!-- generated: ../scripts/screenshot-describe --help -->
+
+```text
+Usage: screenshot-describe [OPTIONS] [IMAGE] [PROMPT]
+
+Generate a text description of a screenshot using the Gemini API. Optimized for
+screenshots and UI captures; the default prompt focuses on UI elements, text,
+colors, and layout.
+
+Arguments:
+  IMAGE       Path to a screenshot, or '-' for stdin (default: '-')
+  PROMPT      Custom prompt for the AI model (optional)
+
+Options:
+  --help         Display this help message and exit
+  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Exit Codes:
+  0    Success
+  1    General error (API error, missing file)
+  127  Missing required dependency
+
+Examples:
+  screenshot-describe screenshot.png
+  screenshot-describe screen-capture.png "What objects are in this image?"
+  screenshot-describe ui-mockup.png "List all UI elements visible"
 ```
 
-### Arguments
-
-| Argument | Description                                                                                 |
-| -------- | ------------------------------------------------------------------------------------------- |
-| `IMAGE`  | Path to a screenshot (any format supported by ImageMagick), or `-` for stdin (default: `-`) |
-| `PROMPT` | Custom prompt for the AI model (optional)                                                   |
-
-### Options
-
-| Option          | Description                                       |
-| --------------- | ------------------------------------------------- |
-| `--help`        | Display help message and exit                     |
-| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Basic usage with default prompt
-scripts/screenshot-describe screenshot.png
-
-# Custom prompt for specific analysis
-scripts/screenshot-describe ui-mockup.png "List all UI elements visible"
-
-# Analyze login screen
-scripts/screenshot-describe login-screen.png "What objects are in this image?"
-```
+<!-- /generated -->
 
 ### Raw API Command
 
@@ -86,63 +92,47 @@ curl -s -X POST \
   }' | jq -r '.candidates[0].content.parts[0].text'
 ```
 
-### Exit Codes
-
-| Code | Description                                   |
-| ---- | --------------------------------------------- |
-| 0    | Success                                       |
-| 1    | General error (API error, missing file, etc.) |
-| 127  | Missing required dependency                   |
-
 ______________________________________________________________________
 
 ## screenshot-compare
 
 Compare two screenshots using the Gemini API to identify visual differences.
 
-### Synopsis
+### Help
 
-```bash
-scripts/screenshot-compare IMAGE1 IMAGE2 [PROMPT]
+<!-- generated: ../scripts/screenshot-compare --help -->
+
+```text
+Usage: screenshot-compare IMAGE1 IMAGE2 [PROMPT]
+
+Compare two screenshots using the Gemini API. Identifies visual differences like
+layout shifts, color changes, padding, or text updates.
+
+Arguments:
+  IMAGE1      Path to the first screenshot (baseline/before), or '-' for stdin
+  IMAGE2      Path to the second screenshot (comparison/after), or '-' for stdin
+  PROMPT      Custom prompt for the AI model (optional)
+
+Options:
+  --help         Display this help message and exit
+  --version      Display version number and exit
+  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Examples:
+  screenshot-compare before.png after.png
+  screenshot-compare v1.png v2.png "Check for font size changes in the header"
+
+Exit Codes:
+  0    Success (differences found and described)
+  1    General error (API error, usage, missing file, etc.)
+  2    Images are identical (no differences to describe)
 ```
 
-### Arguments
-
-| Argument | Description                                                        |
-| -------- | ------------------------------------------------------------------ |
-| `IMAGE1` | Path to the first screenshot (baseline/before), or `-` for stdin   |
-| `IMAGE2` | Path to the second screenshot (comparison/after), or `-` for stdin |
-| `PROMPT` | Custom prompt for the AI model (optional)                          |
-
-Only one of `IMAGE1`/`IMAGE2` may be `-`.
-
-### Options
-
-| Option          | Description                                       |
-| --------------- | ------------------------------------------------- |
-| `--help`        | Display help message and exit                     |
-| `--version`     | Display version number and exit                   |
-| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Basic comparison
-scripts/screenshot-compare before.png after.png
-
-# Check for specific changes
-scripts/screenshot-compare v1-header.png v2-header.png "Check for font size changes in the header"
-
-# Compare UI states
-scripts/screenshot-compare production-capture.png ui-mockup.png
-```
+<!-- /generated -->
 
 ### Raw API Command
 
@@ -167,14 +157,6 @@ curl -s -X POST \
   }' | jq -r '.candidates[0].content.parts[0].text'
 ```
 
-### Exit Codes
-
-| Code | Description                                                               |
-| ---- | ------------------------------------------------------------------------- |
-| 0    | Success (differences found and described)                                 |
-| 1    | General error (API error, usage, missing file, missing ImageMagick, etc.) |
-| 2    | Images are identical (no differences to describe)                         |
-
 ______________________________________________________________________
 
 ## photo-smart-crop
@@ -182,49 +164,46 @@ ______________________________________________________________________
 Smart crop images around the primary subject (people, food, focal points in a
 landscape) detected via the Gemini API.
 
-### Synopsis
+### Help
 
-```bash
-scripts/photo-smart-crop [OPTIONS] INPUT OUTPUT
+<!-- generated: ../scripts/photo-smart-crop --help -->
+
+```text
+Usage: photo-smart-crop [OPTIONS] <input> <output>
+
+Smart crop images to focus on the primary subject with a specified aspect ratio.
+
+Arguments:
+  input        Input image file
+  output       Output image file (explicit path)
+
+Options:
+  --ratio W:H    Aspect ratio for crop (default: 5:3)
+  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+  --help         Display this help message and exit
+
+Processing:
+  Uses Gemini API to detect the primary subject (people, food, landscapes, etc.)
+  and calculates the maximum possible crop box with the specified aspect ratio,
+  centered on the subject. Works with any input orientation (portrait or landscape).
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Exit Codes:
+  0    Success (cropped output written)
+  1    Error (API error, missing file, invalid arguments)
+  2    Rate limited (API returned 429)
+  127  Missing required command
+
+Examples:
+  photo-smart-crop photo.jpg cropped.jpg
+  photo-smart-crop --ratio 16:9 portrait.jpg landscape-16x9.jpg
+  photo-smart-crop --ratio 4:3 ~/Photos/family.jpg ./output/family-4x3.jpg
 ```
 
-### Arguments
-
-| Argument | Description                                               |
-| -------- | --------------------------------------------------------- |
-| `INPUT`  | Path to input image (any format supported by ImageMagick) |
-| `OUTPUT` | Path for cropped output image                             |
-
-### Options
-
-| Option          | Description                                       |
-| --------------- | ------------------------------------------------- |
-| `--ratio W:H`   | Aspect ratio for crop (default: 5:3)              |
-| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
-| `--help`        | Display help message and exit                     |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Default 5:3 aspect ratio
-scripts/photo-smart-crop family.jpg family-cropped.jpg
-
-# 16:9 for video thumbnails
-scripts/photo-smart-crop --ratio 16:9 portrait.jpg landscape-16x9.jpg
-
-# Square crop for profile pictures
-scripts/photo-smart-crop --ratio 1:1 headshot.png avatar.png
-
-# 4:3 standard photo ratio
-scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3.jpg
-```
+<!-- /generated -->
 
 ### Processing Details
 
@@ -238,15 +217,6 @@ scripts/photo-smart-crop --ratio 4:3 ~/Photos/vacation.jpg ./output/vacation-4x3
    on the subject, clamped to the image boundaries
 1. Applies the crop using ImageMagick with auto-orient for EXIF handling
 
-### Exit Codes
-
-| Code | Description                                        |
-| ---- | -------------------------------------------------- |
-| 0    | Success (cropped output written)                   |
-| 1    | Error (API error, invalid arguments, missing file) |
-| 2    | Rate limited (API returned 429)                    |
-| 127  | Missing required dependency                        |
-
 ______________________________________________________________________
 
 ## photo-query
@@ -257,44 +227,44 @@ with their own prompt, schema, and tuned defaults. Image pre-processing (EXIF
 rotation, alpha flatten, resize, WebP encode) is content-addressed-cached so
 repeated queries against the same images skip all redundant work.
 
-### Synopsis
+### Help
 
-```bash
-scripts/photo-query [OPTIONS] QUERY FILE_OR_DIR [FILE_OR_DIR ...]
+<!-- generated: ../scripts/photo-query --help -->
+
+```text
+usage: photo-query [--help] [--max-size N] [--model MODEL] [--no-cache]
+                   [--recursive] [--schema SCHEMA] [--filter FILTER_FIELD]
+                   [-v]
+                   QUERY FILE_OR_DIR [FILE_OR_DIR ...]
+
+Ask Gemini a question about one or more photos.
+
+positional arguments:
+  QUERY                 @-prefixed built-in (@people) or a free-form prompt
+  FILE_OR_DIR
+
+options:
+  --help                Show this help message and exit
+  --max-size N          Longest-edge resize cap, in px (default: 768; built-
+                        ins may use a smaller default)
+  --model MODEL         Gemini model id (default: $GEMINI_MODEL if set, else
+                        gemini-3.1-flash-lite)
+  --no-cache            Bypass the resize cache
+  --recursive           Recurse into directory arguments
+  --schema SCHEMA       llm-style schema_dsl, e.g. 'has_bed bool, count int'.
+                        Not allowed with @ built-ins.
+  --filter FILTER_FIELD
+                        Print only paths whose boolean FIELD is true
+  -v, --verbose         Echo true/false to stderr (single-file boolean mode)
 ```
+
+<!-- /generated -->
 
 ### Built-in queries
 
 | Name      | Description                                                   |
 | --------- | ------------------------------------------------------------- |
 | `@people` | Do people feature prominently? Boolean. 384px resize default. |
-
-### Arguments
-
-| Argument      | Description                                                                    |
-| ------------- | ------------------------------------------------------------------------------ |
-| `QUERY`       | `@name` built-in, or free-form prompt text.                                    |
-| `FILE_OR_DIR` | One or more image files, or directories (top-level only unless `--recursive`). |
-
-### Options
-
-| Option           | Description                                                                                                                     |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `--max-size N`   | Longest-edge resize cap, px. Default: 768 (built-ins may use a smaller default, e.g. 384 for `@people`).                        |
-| `--model M`      | Override Gemini model (default: `$GEMINI_MODEL` if set, else `gemini-3.1-flash-lite` — cheapest/fastest Gemini 3 tier).         |
-| `--no-cache`     | Skip the resize cache and re-process every image.                                                                               |
-| `--recursive`    | Recurse into directory arguments (`*.{jpg,jpeg,png,webp,heic,heif}`).                                                           |
-| `--schema SPEC`  | llm-style DSL: comma-separated `name [type] [: description]`. Types: `bool`, `int`, `float`, `str`. Not allowed with built-ins. |
-| `--filter FIELD` | Print only paths whose boolean FIELD is true (requires a schema, built-in or `--schema`).                                       |
-| `-v, --verbose`  | In single-file boolean mode, echo `true`/`false` to **stderr**.                                                                 |
-| `--help`         | Display help and exit.                                                                                                          |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
 
 ### Examples
 
@@ -349,48 +319,72 @@ ______________________________________________________________________
 Consult the Oracle for a very carefully researched and considered answer
 utilizing deep reasoning and Google Search grounding.
 
-### Synopsis
+### Help
 
-```bash
-scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
+<!-- generated: ../scripts/oracle --help -->
+
+```text
+Usage: oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
+
+Consult the Oracle for a very carefully researched and considered answer.
+Designed for the highest quality response possible, utilizing deep reasoning
+and Google Search grounding.
+
+The Oracle is not a standard, quick-reply AI. It is designed to process massive
+amounts of information and synthesize authoritative answers. It has no memory
+of previous conversations or your current session.
+
+Best Practices for Context:
+  To get the most out of the Oracle, you must provide comprehensive context.
+  - Self-Contained Prompts: Write the prompt as if explaining the problem to an
+    expert who has zero prior knowledge of your task. Do not use references like
+    "the solution we implemented" without explaining exactly what it was.
+  - Broad File Context: Include source files and directories as positional
+    arguments. Err on the side of providing too much context—including files,
+    directories, or documentation even if you think they are only marginally
+    relevant—so the Oracle can discover non-obvious connections.
+  - Persona & Audience: Who are you, and who is this answer for?
+  - Goals & Intent: What is the ultimate objective of this request?
+  - Success Criteria: How will you know the answer is correct or useful?
+  - Format & Style: Should the output be a technical spec, an essay, or a report?
+  - Constraints: What must the Oracle explicitly avoid doing?
+  - Examples: Provide a "few-shot" example of what a good output looks like.
+  - Assumptions: Clarify ambiguous terms or state decisions already made.
+  - Failed Attempts: If you are stuck, describe what approaches have already
+    been tried and why each failed or was rejected (including any error messages
+    or constraints). This prevents the Oracle from re-proposing dead ends and
+    focuses its reasoning on genuinely novel solutions.
+
+Arguments:
+  PROMPT        The specific question or task for the Oracle.
+  FILE_OR_DIR   Optional. Files or directories to include as context. Directories
+                are recursively walked (ignoring hidden files and standard ignore
+                lists like node_modules). Text files are inlined; media files are
+                uploaded to the Gemini API (and cleaned up automatically).
+
+Input:
+  stdin         Optional. Context or reference material piped into the script.
+
+Options:
+  --force       Bypass context size limits (1MB for text, 20MB per media file).
+  --maps        Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
+  --code        Enable Code Execution for Python.
+  --dry-run     Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
+  --model MODEL Gemini model to use (default: gemini-3.1-pro-preview).
+  --serialize   Save the self-contained payload to a file in the cache (Default: on).
+  --no-serialize Disable saving the payload to the cache.
+  --help        Display this help message and exit.
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Examples:
+  cat codebase.md | oracle "Propose a refactoring plan" -
+  oracle "Does this code match the spec?" src/ spec.pdf
 ```
 
-### Arguments
-
-| Argument      | Description                                                                                                                                           |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PROMPT`      | The research question, analysis goal, or refactoring plan. Must be exhaustive and self-contained.                                                     |
-| `FILE_OR_DIR` | Arbitrary files and directories. Directories are recursively walked, and media files are uploaded automatically. Pass `-` to read context from stdin. |
-
-### Options
-
-| Option           | Description                                                                       |
-| ---------------- | --------------------------------------------------------------------------------- |
-| `--force`        | Bypass context size limits (1MB for text, 20MB per media file)                    |
-| `--maps`         | Use Google Maps grounding instead of Google Search (cannot combine with `--code`) |
-| `--code`         | Enable Code Execution for Python                                                  |
-| `--dry-run`      | Summarize the payload (files, sizes, prompt) without calling the API              |
-| `--model MODEL`  | Gemini model to use (default: `gemini-3.1-pro-preview`)                           |
-| `--serialize`    | Save the self-contained payload to the cache (default: on)                        |
-| `--no-serialize` | Disable saving the payload to the cache                                           |
-| `--help`         | Display help message and exit                                                     |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Evaluate an architectural pattern
-scripts/oracle "Evaluate this implementation against solid principles." src/
-
-# Time-sensitive research based on context
-scripts/oracle "What are the latest developments in this framework as of May 2026?" framework-docs.md
-```
+<!-- /generated -->
 
 ### Raw API Command
 
@@ -415,53 +409,42 @@ Operates as a strict, sandboxed, closed-book text-generation tool with no access
 to external search, instructed to prevent hallucination by strictly adhering to
 the provided text.
 
-### Synopsis
+### Help
 
-```bash
-scripts/emerson [OPTIONS] "PROMPT" < INPUT_FILE
+<!-- generated: ../scripts/emerson --help -->
+
+```text
+Usage: emerson [OPTIONS] "PROMPT" < INPUT_FILE
+
+Generates an essay-length answer (approx. 3000 words) to the PROMPT, based
+primarily on the text provided via standard input. Uses the Gemini 3 Pro
+Preview model by default.
+
+Arguments:
+  PROMPT      The question or topic to address.
+
+Input:
+  stdin       The reference material (text) to use for the response.
+
+Options:
+  --help         Display this help message and exit
+  --model MODEL  Gemini model to use (default: gemini-3.1-pro-preview)
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Exit Codes:
+  0    Success
+  1    General error (usage, no input, API error)
+  127  Missing required dependency
+
+Examples:
+  cat documentation.md | emerson "Summarize the key architectural changes"
+  emerson "Explain the new features" < release_notes.txt
 ```
 
-### Arguments
-
-| Argument | Description                      |
-| -------- | -------------------------------- |
-| `PROMPT` | The question or topic to address |
-
-### Input
-
-| Source  | Description                                       |
-| ------- | ------------------------------------------------- |
-| `stdin` | Reference material (text) to use for the response |
-
-### Options
-
-| Option          | Description                                             |
-| --------------- | ------------------------------------------------------- |
-| `--help`        | Display help message and exit                           |
-| `--model MODEL` | Gemini model to use (default: `gemini-3.1-pro-preview`) |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Summarize documentation
-cat documentation.md | scripts/emerson "Summarize the key architectural changes"
-
-# Context-aware analysis
-scripts/context gemini-api | scripts/emerson "Explain the key features"
-
-# Analyze release notes
-scripts/emerson "Explain the new features" < release_notes.txt
-
-# Generate report from API spec
-scripts/emerson "What are the breaking changes?" < api-spec.md
-```
+<!-- /generated -->
 
 ### Raw API Command
 
@@ -490,14 +473,6 @@ curl -s -X POST \
     }')" | jq -r '.candidates[0].content.parts[0].text'
 ```
 
-### Exit Codes
-
-| Code | Description                               |
-| ---- | ----------------------------------------- |
-| 0    | Success                                   |
-| 1    | General error (API error, no input, etc.) |
-| 127  | Missing required dependency               |
-
 ______________________________________________________________________
 
 ## pascal
@@ -505,48 +480,41 @@ ______________________________________________________________________
 Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
 response (wrapped to 80 columns).
 
-### Synopsis
+### Help
 
-```bash
-scripts/pascal [OPTIONS] [-] PROMPT
+<!-- generated: ../scripts/pascal --help -->
+
+```text
+Usage: pascal [OPTIONS] [-] PROMPT
+
+Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
+response (wrapped to 80 columns).
+
+Arguments:
+  -           Read context from stdin and include it with the question.
+              Without a leading '-', stdin is ignored.
+  PROMPT      The question to ask.
+
+Options:
+  --help         Display this help message and exit
+  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Exit Codes:
+  0    Success
+  1    General error (usage, API error)
+  127  Missing required dependency
+
+Examples:
+  pascal "What is the capital of Peru?"
+  cat article.md | pascal - "Summarize this article"
+  pascal - "Explain this code" < script.sh
 ```
 
-### Arguments
-
-| Argument | Description                                       |
-| -------- | ------------------------------------------------- |
-| `-`      | Read context from stdin (must precede the prompt) |
-| `PROMPT` | The question to ask.                              |
-
-### Input
-
-| Source  | Description                                                                                 |
-| ------- | ------------------------------------------------------------------------------------------- |
-| `stdin` | Optional context to include with the question. Only read when `-` is passed as an argument. |
-
-### Options
-
-| Option          | Description                                       |
-| --------------- | ------------------------------------------------- |
-| `--help`        | Display help message and exit                     |
-| `--model MODEL` | Gemini model to use (default: `gemini-3.5-flash`) |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Ask a question
-scripts/pascal "What is the capital of Peru?"
-
-# Summarize an article (note the '-' to read stdin)
-cat article.md | scripts/pascal - "Summarize this article"
-```
+<!-- /generated -->
 
 ### Raw API Command
 
@@ -572,14 +540,6 @@ curl -s -X POST \
     }')" | jq -r '.candidates[0].content.parts[0].text' | fmt -w 80
 ```
 
-### Exit Codes
-
-| Code | Description                 |
-| ---- | --------------------------- |
-| 0    | Success                     |
-| 1    | General error               |
-| 127  | Missing required dependency |
-
 ______________________________________________________________________
 
 ## context
@@ -593,31 +553,49 @@ suitable for `emerson`.
 this output directly. Instead, pipe it to `emerson` for analysis, or redirect it
 to a file to search locally.
 
-### Synopsis
+### Help
 
-```bash
-scripts/context TOPIC
-scripts/context --list
+<!-- generated: ../scripts/context --help -->
+
+```text
+usage: context [--help] [--list] [--force] [--plugin-template] [topic]
+
+Generate aggregated context for a specific topic, a GitHub URL, or a local directory. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.
+
+GitHub URL support:
+  Pass a full GitHub URL as the topic to fetch and package its contents.
+  Example: https://github.com/owner/repo/tree/branch/path
+
+Local Directory support:
+  Pass a local directory path to package its contents.
+  Example: /path/to/local/dir
+
+Topics:
+  compose-architecture   Android Compose Architecture documentation
+  firebase               Firebase CLI and hosting documentation
+  gemini-api             Gemini API documentation and examples
+  gemini-cli             Gemini CLI documentation
+  gemini-sdk-js          Google Gemini JavaScript SDK codegen instructions
+  homeassistant          Home Assistant integration, automation, API and CLI documentation
+  inkyframe              Pimoroni Inky Frame documentation
+  mcp-server             MCP server documentation and specification
+  meshtastic             Meshtastic documentation
+  prompting              Prompt engineering guides for Claude, Gemini, and OpenAI
+  rpi                    Raspberry Pi documentation
+  skills                 Agent skills format specification and authoring guide
+
+positional arguments:
+  topic              Topic to generate context for
+
+options:
+  --help             show this help message and exit
+  --list             List available topics (names only)
+  --force            Force cache rebuild
+  --plugin-template  Output a template/documentation for creating a Python
+                     plugin
 ```
 
-### Arguments
-
-| Argument | Description                                  |
-| -------- | -------------------------------------------- |
-| `TOPIC`  | The topic to generate context for (required) |
-
-### Options
-
-| Option              | Description                                    |
-| ------------------- | ---------------------------------------------- |
-| `--list`            | List available topics (names only)             |
-| `--force`           | Force cache rebuild                            |
-| `--plugin-template` | Output a template for creating a Python plugin |
-| `--help`            | Display help message and exit                  |
-
-### Environment Variables
-
-None required. (Uses `curl`, `jq`, `python3`)
+<!-- /generated -->
 
 ### Examples
 
@@ -650,56 +628,38 @@ ______________________________________________________________________
 Evaluate whether input text satisfies a condition using the Gemini API. Returns
 a boolean result via exit code.
 
-### Synopsis
+### Help
 
-```bash
-echo "text" | scripts/satisfies [OPTIONS] "CONDITION"
+<!-- generated: ../scripts/satisfies --help -->
+
+```text
+Usage: satisfies PROMPT
+
+Evaluates if the input from stdin satisfies the PROMPT.
+Returns true (exit 0) or false (exit 1).
+
+Arguments:
+  PROMPT      The condition or question to evaluate (e.g., "mentions Elvis")
+
+Options:
+  --help         Display this help message and exit
+  --model MODEL  Gemini model to use (default: gemini-2.5-flash-lite)
+  -v, --verbose  Output "true" or "false" to stderr
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Exit Codes:
+  0  True (satisfies prompt)
+  1  False (does not satisfy prompt)
+
+Examples:
+  cat file.txt | satisfies "mentions Elvis"
+  echo "hello world" | satisfies "is a greeting" && echo "It is!"
 ```
 
-### Arguments
-
-| Argument    | Description                                             |
-| ----------- | ------------------------------------------------------- |
-| `CONDITION` | The condition or question to evaluate against the input |
-
-### Input
-
-| Source  | Description              |
-| ------- | ------------------------ |
-| `stdin` | Text content to evaluate |
-
-### Options
-
-| Option          | Description                                            |
-| --------------- | ------------------------------------------------------ |
-| `-v, --verbose` | Output "true" or "false" to stderr                     |
-| `--model MODEL` | Gemini model to use (default: `gemini-2.5-flash-lite`) |
-| `--help`        | Display help message and exit                          |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Check if text mentions a topic
-cat file.txt | scripts/satisfies "mentions Elvis"
-
-# Use in shell conditionals
-if cat log.txt | scripts/satisfies "contains error messages"; then
-  echo "Errors detected"
-fi
-
-# Validate content
-cat response.json | scripts/satisfies "is valid JSON with an 'id' field"
-
-# Chain with other commands
-cat README.md | scripts/satisfies "has installation instructions" && echo "Ready to use"
-```
+<!-- /generated -->
 
 ### Raw API Command
 
@@ -742,61 +702,45 @@ else
 fi
 ```
 
-### Exit Codes
-
-| Code | Description                                  |
-| ---- | -------------------------------------------- |
-| 0    | True (input satisfies the condition)         |
-| 1    | False (input does not satisfy the condition) |
-| 127  | Missing required dependency                  |
-
 ______________________________________________________________________
 
 ## token-count
 
 Count tokens in text using the Gemini API's countTokens endpoint.
 
-### Synopsis
+### Help
 
-```bash
-cat file.txt | scripts/token-count
-echo "text" | scripts/token-count
+<!-- generated: ../scripts/token-count --help -->
+
+```text
+Usage: token-count < INPUT_FILE
+       echo "text" | token-count
+
+Counts the tokens in the text provided via standard input using the Gemini API.
+
+Input:
+  stdin       The text to count tokens for.
+
+Options:
+  --help         Display this help message and exit
+  --model MODEL  Gemini model to use (default: gemini-2.0-flash)
+
+Environment:
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
+
+Exit Codes:
+  0    Success (outputs token count)
+  1    General error (usage, empty input, API error)
+  127  Missing required dependency
+
+Examples:
+  echo "The quick brown fox jumps over the lazy dog." | token-count
+  token-count < document.txt
+  cat *.md | token-count
 ```
 
-### Options
-
-| Option          | Description                                       |
-| --------------- | ------------------------------------------------- |
-| `--help`        | Display help message and exit                     |
-| `--model MODEL` | Gemini model to use (default: `gemini-2.0-flash`) |
-
-### Environment Variables
-
-| Variable         | Required | Description                             |
-| ---------------- | -------- | --------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                     |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given |
-
-### Examples
-
-```bash
-# Count tokens in a file
-cat document.md | scripts/token-count
-
-# Count tokens in a string
-echo "The quick brown fox" | scripts/token-count
-
-# Count tokens across multiple files
-cat *.md | scripts/token-count
-```
-
-### Exit Codes
-
-| Code | Description                    |
-| ---- | ------------------------------ |
-| 0    | Success (outputs token count)  |
-| 1    | Error (empty input, API error) |
-| 127  | Missing required dependency    |
+<!-- /generated -->
 
 ______________________________________________________________________
 
@@ -806,41 +750,60 @@ Interact with Android UIs using an AI agent powered by `uiautomator2` and
 Gemini. This allows semantic control of the device by providing a goal in
 natural language.
 
-### Synopsis
+### Help
 
-```bash
-scripts/popper [OPTIONS] "GOAL"
+<!-- generated: ../scripts/popper --help -->
+
+```text
+usage: popper [--launch PACKAGE] [--stay-in-app] [--timeout SECONDS]
+              [--output-format {text,stream-json}]
+              [--agent-screenshots | --no-agent-screenshots]
+              [--local-screenshots | --no-local-screenshots]
+              [--local-screenshot-dir DIR] [--output-dir DIR] [--dump-layout]
+              [--model MODEL] [--help]
+              [goal]
+
+Interact with Android UIs using an AI agent.
+
+positional arguments:
+  goal                  The goal for the AI to achieve (e.g. 'start an
+                        exercise')
+
+options:
+  --launch PACKAGE      Launch the specified app before starting (e.g.
+                        com.example.fitness)
+  --stay-in-app         Restrict the agent to a single application package for
+                        the entire run
+  --timeout SECONDS     Maximum execution time in seconds (default: 180; exit
+                        code 2 on timeout)
+  --output-format {text,stream-json}
+                        Output format: 'text' (default, human-readable) or
+                        'stream-json' (NDJSON to stdout)
+  --agent-screenshots, --no-agent-screenshots
+                        Enable/disable transmitting screenshots to the Gemini
+                        API (default: enabled)
+  --local-screenshots, --no-local-screenshots
+                        Enable/disable saving screenshots to the local disk
+                        for debugging (default: enabled)
+  --local-screenshot-dir DIR
+                        Directory to save step-by-step debug screenshots
+                        (default: XDG_RUNTIME_DIR/popper or fallback to tmp)
+  --output-dir DIR      Directory to save explicit screenshots requested by
+                        the agent (default: current directory)
+  --dump-layout         Dump the UI layout as JSON and exit
+  --model MODEL         Gemini model to use (default: $GEMINI_MODEL if set,
+                        else gemini-3.5-flash)
+  --help                show this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  To target a specific device, use:
+                    env ANDROID_SERIAL=<serial> popper "accept all permissions"
+  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_MODEL    Optional. Default model if --model is not given.
 ```
 
-### Arguments
-
-| Argument | Required | Description                                                                          |
-| -------- | -------- | ------------------------------------------------------------------------------------ |
-| `GOAL`   | Yes      | The natural language goal for the agent to achieve (not needed with `--dump-layout`) |
-
-### Options
-
-| Option                                           | Description                                                                                                                                 |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--launch PACKAGE`                               | Launch the specified package before starting.                                                                                               |
-| `--stay-in-app`                                  | Restrict the agent to a single application package for the entire run. If used with `--launch`, that launched package becomes the boundary. |
-| `--timeout SEC`                                  | Maximum execution time in seconds (default: 180). Exits with code `2` on timeout.                                                           |
-| `--output-format`                                | Output format: `text` or `stream-json` (NDJSON telemetry to stdout).                                                                        |
-| `--agent-screenshots` / `--no-agent-screenshots` | Enable/disable transmitting screenshots to the Gemini API (default: enabled).                                                               |
-| `--local-screenshots` / `--no-local-screenshots` | Enable/disable saving debug screenshots to local disk (default: enabled).                                                                   |
-| `--local-screenshot-dir DIR`                     | Directory for step-by-step debug screenshots (default: `XDG_RUNTIME_DIR/popper` or tmp).                                                    |
-| `--output-dir DIR`                               | Directory for screenshots explicitly requested by the agent (default: current directory).                                                   |
-| `--model MODEL`                                  | Gemini model to use (default: `gemini-3.5-flash`).                                                                                          |
-| `--dump-layout`                                  | Print the current simplified UI layout as JSON and exit.                                                                                    |
-| `--help`                                         | Display help message and exit.                                                                                                              |
-
-### Environment Variables
-
-| Variable         | Required | Description                               |
-| ---------------- | -------- | ----------------------------------------- |
-| `GEMINI_API_KEY` | Yes      | Your Gemini API key                       |
-| `GEMINI_MODEL`   | No       | Default model if `--model` is not given   |
-| `ANDROID_SERIAL` | No       | Target a specific Android device/emulator |
+<!-- /generated -->
 
 ### Examples
 
@@ -860,10 +823,10 @@ env ANDROID_SERIAL=12345 scripts/popper "open settings"
 
 ### Raw API Command
 
-_This script delegates complex control flow, image capture, XML parsing, and
+*This script delegates complex control flow, image capture, XML parsing, and
 planning to a python script (`uv run --script`). It cannot be reasonably reduced
 to a single curl command. Please see `scripts/popper` for the implementation
-details._
+details.*
 
 ### Exit Codes
 
@@ -872,6 +835,78 @@ details._
 | 0    | Success (task completed) |
 | 1    | Error (task failed)      |
 | 2    | Timed out                |
+
+______________________________________________________________________
+
+## gh-markdown
+
+Fetch GitHub Pull Requests, Issues, or Workflow Runs and format them as Markdown
+for LLM agents, including review threads (with resolution status) and logs for
+failed workflow jobs. See the skill's SKILL.md for GitHub token setup.
+
+### Help
+
+<!-- generated: ../scripts/gh-markdown --help -->
+
+```text
+Usage: gh-markdown <url>
+
+Fetches GitHub PR, Issue, or Workflow Run details and prints formatted Markdown.
+Requires GITHUB_TOKEN environment variable.
+
+Options:
+  --help      Display this help message and exit
+
+Examples:
+  gh-markdown https://github.com/owner/repo/pull/123
+  gh-markdown https://github.com/owner/repo/actions/runs/12345678
+```
+
+<!-- /generated -->
+
+### Exit Codes
+
+| Code | Description                                |
+| ---- | ------------------------------------------ |
+| 0    | Success                                    |
+| 1    | General error (API error, unsupported URL) |
+
+______________________________________________________________________
+
+## gemini-api-doctor
+
+Ping Gemini models to test API key validity and endpoint responsiveness. Runs
+checks in parallel with a 60-second timeout; successes go to stdout, failures to
+stderr.
+
+### Help
+
+<!-- generated: ../scripts/gemini-api-doctor --help -->
+
+```text
+usage: gemini-api-doctor [--help] [--model MODEL] [models ...]
+
+Ping Gemini models to test API key validity. Takes API key from GEMINI_API_KEY
+environment variable or stdin.
+
+positional arguments:
+  models         Models to ping. If omitted, uses $GEMINI_MODEL if set, else
+                 defaults.
+
+options:
+  --help         Show this help message and exit
+  --model MODEL  Ping a single model (equivalent to passing it as a positional
+                 argument)
+```
+
+<!-- /generated -->
+
+### Exit Codes
+
+| Code | Description                 |
+| ---- | --------------------------- |
+| 0    | All pinged models responded |
+| 1    | At least one model failed   |
 
 ______________________________________________________________________
 

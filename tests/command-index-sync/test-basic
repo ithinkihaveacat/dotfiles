@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+
+# Tests: tests/command-index-sync/
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../../bin/command-index-sync"
+
+echo "1..8"
+
+WORK=$(mktemp -d)
+trap 'rm -rf -- "$WORK"' EXIT
+
+# Fixture: a fake script and a Markdown file referencing it
+mkdir -p "$WORK/scripts" "$WORK/references"
+cat >"$WORK/scripts/hello" <<'EOF'
+#!/usr/bin/env bash
+echo "Usage: hello"
+echo "Says hello."
+EOF
+chmod +x "$WORK/scripts/hello"
+
+cat >"$WORK/references/index.md" <<'EOF'
+# Index
+
+## hello
+
+<!-- generated: ../scripts/hello -->
+<!-- /generated -->
+
+Trailing prose.
+EOF
+
+# Test 1: sync fills the block
+if "$BIN" "$WORK/references/index.md" 2>/dev/null &&
+  grep -q "Says hello." "$WORK/references/index.md" &&
+  grep -q '```text' "$WORK/references/index.md"; then
+  echo "ok 1 - sync fills generated block from command output"
+else
+  echo "not ok 1 - sync fills generated block from command output"
+fi
+
+# Test 2: idempotent (second run is a no-op, --check is clean)
+if "$BIN" --check "$WORK/references/index.md" 2>/dev/null; then
+  echo "ok 2 - check passes immediately after sync"
+else
+  echo "not ok 2 - check passes immediately after sync"
+fi
+
+# Test 3: hand-written content outside markers is preserved
+if grep -q "Trailing prose." "$WORK/references/index.md"; then
+  echo "ok 3 - content outside markers preserved"
+else
+  echo "not ok 3 - content outside markers preserved"
+fi
+
+# Test 4: --check detects drift after the script changes
+echo 'echo "New flag: --frobnicate"' >>"$WORK/scripts/hello"
+if "$BIN" --check "$WORK/references/index.md" 2>/dev/null; then
+  echo "not ok 4 - check detects drift (expected non-zero exit)"
+else
+  echo "ok 4 - check detects drift"
+fi
+
+# Test 5: sync resolves the drift
+if "$BIN" "$WORK/references/index.md" 2>/dev/null &&
+  grep -q -- "--frobnicate" "$WORK/references/index.md" &&
+  "$BIN" --check "$WORK/references/index.md" 2>/dev/null; then
+  echo "ok 5 - sync resolves drift"
+else
+  echo "not ok 5 - sync resolves drift"
+fi
+
+# Test 6: unbalanced markers are an error and the file is untouched
+cat >"$WORK/references/broken.md" <<'EOF'
+<!-- generated: ../scripts/hello -->
+no end marker
+EOF
+BEFORE=$(cat "$WORK/references/broken.md")
+if "$BIN" "$WORK/references/broken.md" 2>/dev/null; then
+  echo "not ok 6 - unbalanced markers rejected (expected non-zero exit)"
+else
+  if [[ "$(cat "$WORK/references/broken.md")" == "$BEFORE" ]]; then
+    echo "ok 6 - unbalanced markers rejected, file untouched"
+  else
+    echo "not ok 6 - unbalanced markers rejected but file modified"
+  fi
+fi
+
+# Test 7: failing command is an error and the file is untouched
+cat >"$WORK/references/failing.md" <<'EOF'
+<!-- generated: ../scripts/no-such-script -->
+<!-- /generated -->
+EOF
+BEFORE=$(cat "$WORK/references/failing.md")
+if "$BIN" "$WORK/references/failing.md" 2>/dev/null; then
+  echo "not ok 7 - failing command rejected (expected non-zero exit)"
+else
+  if [[ "$(cat "$WORK/references/failing.md")" == "$BEFORE" ]]; then
+    echo "ok 7 - failing command rejected, file untouched"
+  else
+    echo "not ok 7 - failing command rejected but file modified"
+  fi
+fi
+
+# Test 8: markers inside code fences (documentation examples) are ignored
+cat >"$WORK/references/fenced.md" <<'EOF'
+# Docs
+
+Example marker usage:
+
+```markdown
+<!-- generated: ../scripts/no-such-script -->
+(generated fenced block)
+<!-- /generated -->
+```
+EOF
+BEFORE=$(cat "$WORK/references/fenced.md")
+if "$BIN" "$WORK/references/fenced.md" 2>/dev/null; then
+  if [[ "$(cat "$WORK/references/fenced.md")" == "$BEFORE" ]]; then
+    echo "ok 8 - markers inside code fences ignored"
+  else
+    echo "not ok 8 - fenced markers were processed"
+  fi
+else
+  echo "not ok 8 - fenced markers caused an error"
+fi
