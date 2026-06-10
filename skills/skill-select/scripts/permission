@@ -1,0 +1,410 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+# Tests: tests/permission/
+
+import os
+import sys
+import json
+import uuid
+import argparse
+from pathlib import Path
+
+# Paths
+AGENT_CONFIG_HOME = Path(os.environ.get("AGENT_CONFIG_HOME", Path.home() / ".gemini"))
+
+
+def get_workspace_root() -> Path:
+    # Walk up to find VCS indicators
+    curr = Path.cwd().resolve()
+    for parent in [curr] + list(curr.parents):
+        if (
+            (parent / ".git").is_dir()
+            or (parent / ".citc").is_dir()
+            or (parent / ".hg").is_dir()
+        ):
+            return parent
+    return curr
+
+
+def translate_to_rule(pattern: str) -> str:
+    pattern = pattern.strip()
+
+    # Parse tokens
+    tokens = pattern.split()
+    if not tokens:
+        return ""
+
+    # Format the first token (executable)
+    exec_tok = tokens[0]
+    if exec_tok != "*" and "/" not in exec_tok and not exec_tok.startswith("(?:"):
+        exec_tok = f"(?:.*/)?{exec_tok}"
+
+    tokens[0] = exec_tok
+    rule_content = " ".join(tokens)
+    return f"command({rule_content})"
+
+
+# ==============================================================================
+# Adapter Architecture
+# ==============================================================================
+
+
+class PermissionAdapter:
+    """Interface for agent-specific permission configuration."""
+
+    def name(self) -> str:
+        raise NotImplementedError
+
+    def is_active(self, workspace_root: Path) -> bool:
+        return False
+
+    def is_initialized(self, workspace_root: Path) -> bool:
+        return False
+
+    def add(self, workspace_root: Path, pattern: str, is_deny: bool) -> None:
+        raise NotImplementedError
+
+    def remove(self, workspace_root: Path, pattern: str) -> None:
+        raise NotImplementedError
+
+    def list(self, workspace_root: Path) -> tuple[list[str], list[str]]:
+        """Returns a tuple of (allowlist_rules, denylist_rules)."""
+        return [], []
+
+    def clean(self, workspace_root: Path) -> None:
+        raise NotImplementedError
+
+
+class AgyProjectAdapter(PermissionAdapter):
+    def name(self) -> str:
+        return "agy"
+
+    def _get_cache_path(self) -> Path:
+        # Mapped to the compiled binary's hardcoded caching location
+        return AGENT_CONFIG_HOME / "jetski/cli/cache/projects.json"
+
+    def _get_projects_dir(self) -> Path:
+        return AGENT_CONFIG_HOME / "config/projects"
+
+    def is_active(self, workspace_root: Path) -> bool:
+        return self._get_cache_path().is_file()
+
+    def is_initialized(self, workspace_root: Path) -> bool:
+        project_file = self._get_project_file(workspace_root)
+        return project_file is not None and project_file.is_file()
+
+    def _get_project_file(self, workspace_root: Path) -> Path | None:
+        cache_path = self._get_cache_path()
+        if not cache_path.is_file():
+            return None
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        except Exception:
+            return None
+
+        ws_key = str(workspace_root)
+        if ws_key in cache:
+            return self._get_projects_dir() / f"{cache[ws_key]}.json"
+        return None
+
+    def _get_or_create_project_file(self, workspace_root: Path) -> Path:
+        cache_path = self._get_cache_path()
+        projects_dir = self._get_projects_dir()
+
+        # Ensure parent directories exist
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cache = {}
+        if cache_path.is_file():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+            except Exception:
+                pass
+
+        ws_key = str(workspace_root)
+        if ws_key in cache:
+            project_file = projects_dir / f"{cache[ws_key]}.json"
+            if project_file.is_file():
+                return project_file
+
+        # Not found or project file missing: initialize a new project mapping
+        project_id = str(uuid.uuid4())
+        cache[ws_key] = project_id
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+
+        # Create the project file
+        project_path = projects_dir / f"{project_id}.json"
+        projects_dir.mkdir(parents=True, exist_ok=True)
+        project_data = {
+            "id": project_id,
+            "name": workspace_root.name,
+            "projectResources": {
+                "resources": [{"folderUri": f"file://{workspace_root.as_posix()}"}]
+            },
+            "permissionGrants": {"permissionGrants": {"allow": [], "deny": []}},
+        }
+        with open(project_path, "w", encoding="utf-8") as f:
+            json.dump(project_data, f, indent=2)
+
+        print(
+            f"Initialized configuration file for {self.name()}: {workspace_root}",
+            file=sys.stderr,
+        )
+        return project_path
+
+    def add(self, workspace_root: Path, pattern: str, is_deny: bool) -> None:
+        project_path = self._get_or_create_project_file(workspace_root)
+
+        rule = translate_to_rule(pattern)
+        if not rule:
+            return
+
+        try:
+            with open(project_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(
+                f"[{self.name()}] Error reading project config: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        grants_wrapper = data.setdefault("permissionGrants", {})
+        grants = grants_wrapper.setdefault("permissionGrants", {})
+        if grants.get("allow") is None:
+            grants["allow"] = []
+        if grants.get("deny") is None:
+            grants["deny"] = []
+
+        target_list = grants["deny"] if is_deny else grants["allow"]
+        if rule not in target_list:
+            target_list.append(rule)
+
+        try:
+            with open(project_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(
+                f"[{self.name()}] Error writing project config: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        list_name = "deny" if is_deny else "allow"
+        print(f"[{self.name()}] Added to {list_name}: {rule}", file=sys.stderr)
+
+    def remove(self, workspace_root: Path, pattern: str) -> None:
+        project_path = self._get_project_file(workspace_root)
+        if not project_path or not project_path.is_file():
+            return
+
+        rule = translate_to_rule(pattern)
+        if not rule:
+            return
+
+        try:
+            with open(project_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(
+                f"[{self.name()}] Error reading project config: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        grants_wrapper = data.get("permissionGrants", {})
+        grants = grants_wrapper.get("permissionGrants", {})
+        if not grants:
+            return
+
+        removed = False
+        for list_name in ["allow", "deny"]:
+            lst = grants.get(list_name)
+            if lst and rule in lst:
+                lst.remove(rule)
+                removed = True
+                print(
+                    f"[{self.name()}] Removed from {list_name}: {rule}",
+                    file=sys.stderr,
+                )
+
+        if not removed:
+            return
+
+        try:
+            with open(project_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(
+                f"[{self.name()}] Error writing project config: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    def list(self, workspace_root: Path) -> tuple[list[str], list[str]]:
+        project_path = self._get_project_file(workspace_root)
+        if not project_path or not project_path.is_file():
+            return [], []
+
+        try:
+            with open(project_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(
+                f"[{self.name()}] Error reading project config: {e}",
+                file=sys.stderr,
+            )
+            return [], []
+
+        grants_wrapper = data.get("permissionGrants", {})
+        grants = grants_wrapper.get("permissionGrants", {})
+        if not grants:
+            return [], []
+
+        return grants.get("allow") or [], grants.get("deny") or []
+
+    def clean(self, workspace_root: Path) -> None:
+        project_path = self._get_project_file(workspace_root)
+        if not project_path or not project_path.is_file():
+            return
+
+        try:
+            with open(project_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(
+                f"[{self.name()}] Error reading project config: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        grants_wrapper = data.get("permissionGrants", {})
+        grants = grants_wrapper.get("permissionGrants", {})
+        if grants:
+            grants["allow"] = []
+            grants["deny"] = []
+
+            try:
+                with open(project_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+            except Exception as e:
+                print(
+                    f"[{self.name()}] Error writing project config: {e}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        print(f"[{self.name()}] Cleared all permission rules.", file=sys.stderr)
+
+
+# Registry of all available adapters
+ADAPTERS: list[PermissionAdapter] = [
+    AgyProjectAdapter(),
+]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Manage workspace-specific agent permissions."
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+
+    add_parser = subparsers.add_parser("add", help="Add a tool permission rule")
+    add_parser.add_argument("pattern", help="Clean pattern of the tool/command")
+    add_parser.add_argument(
+        "--deny", action="store_true", help="Add to the denylist instead of allow"
+    )
+
+    remove_parser = subparsers.add_parser(
+        "remove", aliases=["rm"], help="Remove a tool permission rule"
+    )
+    remove_parser.add_argument("pattern", help="Clean pattern of the tool/command")
+
+    subparsers.add_parser("list", aliases=["ls"], help="List permission rules")
+    subparsers.add_parser("clean", help="Clear all workspace-specific permission rules")
+
+    args = parser.parse_args()
+
+    ws = get_workspace_root()
+
+    # Determine initialized and active adapters
+    initialized_adapters = [a for a in ADAPTERS if a.is_initialized(ws)]
+
+    if args.command == "add":
+        # If no configurations are active/initialized, we bootstrap Agy (default)
+        if not initialized_adapters:
+            # Check if any is active globally
+            active_globally = [a for a in ADAPTERS if a.is_active(ws)]
+            if active_globally:
+                target_adapters = active_globally
+            else:
+                target_adapters = [AgyProjectAdapter()]
+        else:
+            target_adapters = initialized_adapters
+
+        for a in target_adapters:
+            a.add(ws, args.pattern, args.deny)
+
+    elif args.command in ("remove", "rm"):
+        if not initialized_adapters:
+            print(
+                "Error: Workspace not initialized. Run 'permission add' to configure first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for a in initialized_adapters:
+            a.remove(ws, args.pattern)
+
+    elif args.command in ("list", "ls"):
+        if not initialized_adapters:
+            print("Workspace not initialized. Run 'permission add' to configure first.")
+            return
+
+        has_any = False
+        for a in initialized_adapters:
+            allows, denies = a.list(ws)
+            if allows or denies:
+                print(f"[{a.name()}]")
+                if allows:
+                    print("  Allow:")
+                    for rule in allows:
+                        print(f"    - {rule}")
+                if denies:
+                    print("  Deny:")
+                    for rule in denies:
+                        print(f"    - {rule}")
+                has_any = True
+
+        if not has_any:
+            print("No permission rules configured.")
+
+    elif args.command == "clean":
+        if not initialized_adapters:
+            print(
+                "Error: Workspace not initialized. Run 'permission add' to configure first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for a in initialized_adapters:
+            a.clean(ws)
+
+    else:
+        parser.print_help()
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
