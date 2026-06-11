@@ -37,11 +37,11 @@ of the public repository. This repository works fine without them.
 
 ### Purpose of each layer
 
-| Repo | Intended for |
-| --- | --- |
-| `~/.dotfiles` | Public config, tools, and scripts |
-| `~/.private` | Personal secrets, API keys, private tooling |
-| `~/.corp` | Work machine config, internal tooling |
+| Repo          | Intended for                                |
+| ------------- | ------------------------------------------- |
+| `~/.dotfiles` | Public config, tools, and scripts           |
+| `~/.private`  | Personal secrets, API keys, private tooling |
+| `~/.corp`     | Work machine config, internal tooling       |
 
 ### Precedence
 
@@ -53,31 +53,31 @@ Later layers win on conflict. A file in `~/.corp` always beats the same path in
 
 Two functions handle overlay merging, with different semantics:
 
-- **`link_overlay_path rel dst`** — symlinks `dst` to the single highest-priority
-  source that provides `rel`. Used for whole-file configs where only one version
-  makes sense (e.g. `etc/starship/starship.toml`).
+- **`link_overlay_path rel dst`** — symlinks `dst` to the single
+  highest-priority source that provides `rel`. Used for whole-file configs where
+  only one version makes sense (e.g. `etc/starship/starship.toml`).
 
-- **`link_overlay_files rel dst`** — iterates every overlay in order and symlinks
-  each file it finds under `rel/` into `dst/`. All overlays contribute; later
-  layers win on filename collision. Used when multiple overlays may each add
-  files to a directory (e.g. `etc/code/`).
+- **`link_overlay_files rel dst`** — iterates every overlay in order and
+  symlinks each file it finds under `rel/` into `dst/`. All overlays contribute;
+  later layers win on filename collision. Used when multiple overlays may each
+  add files to a directory (e.g. `etc/code/`).
 
 `home/` dotfiles are linked by iterating all overlays in order with `ln -sf`, so
 the last overlay to provide a given filename wins.
 
 ### Overlay-aware paths
 
-| Path | Mechanism | Notes |
-| --- | --- | --- |
-| `home/.*` | `link_home_dotfiles` (all overlays) | Last overlay wins per filename |
-| `etc/agents/AGENTS.md` | `overlay_path` (highest wins) | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` |
-| `etc/shpool/config.toml` | `link_overlay_path` | |
-| `etc/starship/starship.toml` | `link_overlay_path` | |
-| `etc/ghostty/config` | `link_overlay_path` | |
-| `etc/code/` | `link_overlay_files` | VS Code `settings.json`, `keybindings.json`, etc. |
-| `etc/macos/KeyBindings` | `overlay_path` | rsync'd (not symlinked) due to macOS bug |
-| `etc/macos/Solarized.clr` | `overlay_path` | Copied to `~/Library/Colors/` |
-| `skills/*/` | all overlays | Each skill dir linked into `~/.agents/skills/` and `~/.claude/skills/`; later overlays shadow by name |
+| Path                         | Mechanism                           | Notes                                                                                                 |
+| ---------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `home/.*`                    | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                        |
+| `etc/agents/AGENTS.md`       | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` (gated on their respective binaries)             |
+| `etc/shpool/config.toml`     | `link_overlay_path`                 |                                                                                                       |
+| `etc/starship/starship.toml` | `link_overlay_path`                 |                                                                                                       |
+| `etc/ghostty/config`         | `link_overlay_path`                 |                                                                                                       |
+| `etc/code/`                  | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                                     |
+| `etc/macos/KeyBindings`      | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                              |
+| `etc/macos/Solarized.clr`    | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                         |
+| `skills/*/`                  | all overlays                        | Each skill dir linked into `~/.agents/skills/` and `~/.claude/skills/`; later overlays shadow by name |
 
 ### Per-overlay `update` hooks
 
@@ -241,11 +241,13 @@ Complete setup sequence for a fresh Raspberry Pi OS install.
 
 1. Use the [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to write
    the OS to an SD card or SSD.
+
    - For a headless install: Raspberry Pi OS (other) > Raspberry Pi OS Lite.
    - In OS customisation: enable SSH (Remote access section).
    - (Optional) Configure Wi-Fi.
 
 1. SSH in: `ssh mjs@lil.local` (substitute your username and hostname).
+
    - (Optional) If using Ghostty, copy the terminfo from your local machine:
      `infocmp -x xterm-ghostty | ssh mjs@lil.local -- tic -x -`
 
