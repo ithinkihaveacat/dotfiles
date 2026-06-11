@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../../bin/skill"
 
-echo "1..25"
+echo "1..27"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -103,251 +103,310 @@ else
   echo "not ok 6 - [Git] add failed"
 fi
 
-# Test 7: list returns members
-if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
-  echo "ok 7 - [Git] list returns members"
+# Test 7: authoritative state lives in .git/info/skills
+if [ -f .git/info/skills ] && grep -q 'coding-standards' .git/info/skills &&
+  grep -q 'emumanager' .git/info/skills; then
+  echo "ok 7 - [Git] state recorded in .git/info/skills"
 else
-  echo "not ok 7 - [Git] list failed"
+  echo "not ok 7 - [Git] .git/info/skills missing entries"
 fi
 
-# Test 8: info/exclude contains managed block
-if [ -f .git/info/exclude ] && grep -q "managed by 'skill'" .git/info/exclude; then
+# Test 8: info/exclude contains regenerated managed block
+if [ -f .git/info/exclude ] && grep -q "managed by 'skill'" .git/info/exclude &&
+  grep -q '/.claude/skills/coding-standards' .git/info/exclude; then
   echo "ok 8 - [Git] info/exclude contains managed block"
 else
   echo "not ok 8 - [Git] info/exclude missing managed entries"
 fi
 
-# Test 9: remove deletes symlink and exclude entry
+# Test 9: list --json emits names and resolved paths
+if out=$("${SCRIPT}" list --json 2>/dev/null) &&
+  printf '%s' "$out" | grep -q '"name": *"coding-standards"' &&
+  printf '%s' "$out" | grep -q '"path": *"'; then
+  echo "ok 9 - [Git] list --json emits names and paths"
+else
+  echo "not ok 9 - [Git] list --json failed: $out"
+fi
+
+# Test 10: exclude block is regenerable: corrupt it, doctor flags, repair fixes
+sed -i '/skills/d' .git/info/exclude
+if "${SCRIPT}" doctor >/dev/null 2>&1; then
+  echo "not ok 10 - [Git] doctor should flag exclude drift"
+else
+  if "${SCRIPT}" repair >/dev/null 2>&1 &&
+    grep -q '/.claude/skills/coding-standards' .git/info/exclude &&
+    "${SCRIPT}" doctor >/dev/null 2>&1; then
+    echo "ok 10 - [Git] doctor flags exclude drift; repair regenerates it"
+  else
+    echo "not ok 10 - [Git] repair did not restore exclude block"
+  fi
+fi
+
+# Test 11: remove deletes symlink, state entry, and exclude entry
 if "${SCRIPT}" remove emumanager >/dev/null 2>&1; then
-  if [ ! -L .agents/skills/emumanager ] && ! grep -q "emumanager" .git/info/exclude; then
-    echo "ok 9 - [Git] remove deletes symlink and exclude entry"
+  if [ ! -L .agents/skills/emumanager ] && ! grep -q "emumanager" .git/info/exclude &&
+    ! grep -q "emumanager" .git/info/skills; then
+    echo "ok 11 - [Git] remove deletes symlink, state, and exclude entry"
   else
-    echo "not ok 9 - [Git] remove left symlink or exclude entry"
+    echo "not ok 11 - [Git] remove left symlink, state, or exclude entry"
   fi
 else
-  echo "not ok 9 - [Git] remove failed"
+  echo "not ok 11 - [Git] remove failed"
 fi
 
-# Test 10: clean removes links and managed block
+# Test 12: clean removes links, state file, and managed block
 if "${SCRIPT}" clean >/dev/null 2>&1; then
-  if [ ! -L .claude/skills/coding-standards ] && ! grep -q "coding-standards" .git/info/exclude; then
-    echo "ok 10 - [Git] clean removes links and exclude block"
+  if [ ! -L .claude/skills/coding-standards ] && [ ! -f .git/info/skills ] &&
+    ! grep -q "coding-standards" .git/info/exclude; then
+    echo "ok 12 - [Git] clean removes links, state, and exclude block"
   else
-    echo "not ok 10 - [Git] clean left links or exclude block"
+    echo "not ok 12 - [Git] clean left links, state, or exclude block"
   fi
 else
-  echo "not ok 10 - [Git] clean failed"
+  echo "not ok 12 - [Git] clean failed"
 fi
 
-# Test 11: add from subdirectory updates top-level exclude
+# Test 13: add from subdirectory updates top-level exclude and state
 mkdir -p sub
 cd sub
 if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
-  if grep -q "/.claude/skills/coding-standards" ../.git/info/exclude; then
-    echo "ok 11 - [Git] add from subdirectory updates top-level exclude"
+  if grep -q "/.claude/skills/coding-standards" ../.git/info/exclude &&
+    grep -q "coding-standards" ../.git/info/skills; then
+    echo "ok 13 - [Git] add from subdirectory updates top-level records"
   else
-    echo "not ok 11 - [Git] top-level exclude not updated"
+    echo "not ok 13 - [Git] top-level records not updated"
   fi
 else
-  echo "not ok 11 - [Git] add from subdirectory failed"
+  echo "not ok 13 - [Git] add from subdirectory failed"
 fi
 cd ..
 
+# Test 14: legacy migration: managed list parsed from old exclude block
+LEGACY_DIR="${TMPDIR}/git_legacy"
+mkdir -p "$LEGACY_DIR"
+cd "$LEGACY_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${TMPDIR}/sources/coding-standards" .claude/skills/coding-standards
+ln -s "${TMPDIR}/sources/coding-standards" .agents/skills/coding-standards
+cat <<'EOF' >.git/info/exclude
+# >>> skills (managed by 'skill') >>>
+/.claude/skills/coding-standards
+/.agents/skills/coding-standards
+# <<< skills (managed by 'skill') <<<
+EOF
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+  # Any state change migrates the list to .git/info/skills
+  "${SCRIPT}" add emumanager >/dev/null 2>&1
+  if grep -q 'coding-standards' .git/info/skills && grep -q 'emumanager' .git/info/skills; then
+    echo "ok 14 - [Git] legacy exclude-block state is read and migrated"
+  else
+    echo "not ok 14 - [Git] migration did not preserve legacy entries"
+  fi
+else
+  echo "not ok 14 - [Git] legacy exclude-block state not read: $out"
+fi
+
 # ==============================================================================
-# PART 3: Perforce Workspace Mode
+# PART 3: Perforce Workspace Mode (standard layout)
 # ==============================================================================
 # Re-mock p4 command to succeed and return simulated workspace info
 cat <<'EOF' >"$MOCK_BIN_DIR/p4"
 #!/usr/bin/env bash
-cmd=$1
-shift
-if [ "$cmd" = "info" ]; then
+if [ "$1" = "info" ]; then
   echo "User name: testuser"
   echo "Client root: $MOCK_CLIENT_ROOT"
   exit 0
-elif [ "$cmd" = "fstat" ]; then
-  if [ -n "${MOCK_TRACKED_FILES:-}" ] && echo "$MOCK_TRACKED_FILES" | grep -q "$1"; then
-    echo "depotFile //depot/something"
-    exit 0
-  fi
-  echo "no such file" >&2
-  exit 1
 fi
+exit 1
 EOF
 chmod +x "$MOCK_BIN_DIR/p4"
 
-# --- Centralized Mode ---
-export MOCK_CLIENT_ROOT="${TMPDIR}/centralized_ws"
-mkdir -p "${MOCK_CLIENT_ROOT}/main-repo"
-touch "${MOCK_CLIENT_ROOT}/main-repo/WORKSPACE"
-mkdir -p "${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents"
-
-cd "${MOCK_CLIENT_ROOT}/main-repo"
-
-# Test 12: add multiple skills (centralized)
-if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
-  DEST_DIR="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/skills"
-  if [ -L "${DEST_DIR}/coding-standards" ] && [ -L "${DEST_DIR}/emumanager" ]; then
-    echo "ok 12 - [P4-Centralized] add multiple skills"
-  else
-    echo "not ok 12 - [P4-Centralized] add did not create symlinks"
-  fi
-else
-  echo "not ok 12 - [P4-Centralized] add failed"
-fi
-
-# Test 13: list
-if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
-  echo "ok 13 - [P4-Centralized] list returns members"
-else
-  echo "not ok 13 - [P4-Centralized] list failed"
-fi
-
-# Test 14: state file
-STATE_FILE="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/.p4-skills-managed"
-if [ -f "$STATE_FILE" ] && grep -q "coding-standards" "$STATE_FILE"; then
-  echo "ok 14 - [P4-Centralized] state file updated"
-else
-  echo "not ok 14 - [P4-Centralized] state file missing entries"
-fi
-
-# Test 15: clean
-if "${SCRIPT}" clean >/dev/null 2>&1; then
-  DEST_DIR="${MOCK_CLIENT_ROOT}/configs/users/testuser/_agents/skills"
-  if [ ! -d "${DEST_DIR}" ] && [ ! -f "$STATE_FILE" ]; then
-    echo "ok 15 - [P4-Centralized] clean removes links and state"
-  else
-    echo "not ok 15 - [P4-Centralized] clean left files"
-  fi
-else
-  echo "not ok 15 - [P4-Centralized] clean failed"
-fi
-
-# --- Standard P4 Mode (Local) ---
 export MOCK_CLIENT_ROOT="${TMPDIR}/public_ws"
 mkdir -p "${MOCK_CLIENT_ROOT}"
 cd "${MOCK_CLIENT_ROOT}"
 
-# Test 16: add multiple skills (public mode uses .agents/skills and .claude/skills)
+# Test 15: add multiple skills (standard locations)
 if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
   if [ -L ".agents/skills/coding-standards" ] && [ -L ".claude/skills/emumanager" ]; then
-    echo "ok 16 - [P4-Standard] add multiple skills"
+    echo "ok 15 - [P4] add multiple skills"
   else
-    echo "not ok 16 - [P4-Standard] add did not create symlinks in standard locations"
+    echo "not ok 15 - [P4] add did not create symlinks in standard locations"
   fi
 else
-  echo "not ok 16 - [P4-Standard] add failed"
+  echo "not ok 15 - [P4] add failed"
+fi
+
+# Test 16: state file at client root
+if [ -f .p4-skills-managed ] && grep -q "coding-standards" .p4-skills-managed; then
+  echo "ok 16 - [P4] state file updated"
+else
+  echo "not ok 16 - [P4] state file missing entries"
 fi
 
 # Test 17: clean
 if "${SCRIPT}" clean >/dev/null 2>&1; then
   if [ ! -d ".agents" ] && [ ! -d ".claude" ] && [ ! -f ".p4-skills-managed" ]; then
-    echo "ok 17 - [P4-Standard] clean removes links and state"
+    echo "ok 17 - [P4] clean removes links and state"
   else
-    echo "not ok 17 - [P4-Standard] clean left files"
+    echo "not ok 17 - [P4] clean left files"
   fi
 else
-  echo "not ok 17 - [P4-Standard] clean failed"
+  echo "not ok 17 - [P4] clean failed"
+fi
+
+# Test 18: p4 client is ignored when cwd is outside the client root
+OUTSIDE="${TMPDIR}/outside_p4"
+mkdir -p "$OUTSIDE"
+cd "$OUTSIDE"
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+  if [ -f "$OUTSIDE/.skills-managed" ] && [ ! -f "${MOCK_CLIENT_ROOT}/.p4-skills-managed" ]; then
+    echo "ok 18 - [P4] cwd outside client root falls back to unmanaged"
+  else
+    echo "not ok 18 - [P4] adopted a client root we are not inside"
+  fi
+  "${SCRIPT}" clean >/dev/null 2>&1
+else
+  echo "not ok 18 - [P4] add failed outside client root"
 fi
 
 # ==============================================================================
 # PART 4: Generic / Error Handling / Help Tests
 # ==============================================================================
-# Test 18: add bogus-skill-name reports unknown skill
+# Test 19: add bogus-skill-name reports unknown skill
 if ! "${SCRIPT}" add bogus-skill-name >/dev/null 2>&1; then
-  echo "ok 18 - add bogus-skill-name reports unknown skill"
+  echo "ok 19 - add bogus-skill-name reports unknown skill"
 else
-  echo "not ok 18 - add bogus-skill-name succeeded unexpectedly"
+  echo "not ok 19 - add bogus-skill-name succeeded unexpectedly"
 fi
 
-# Test 19: resolves names against SKILL_SOURCE_DIRS
+# Test 20: resolves names against SKILL_SOURCE_DIRS
 mkdir -p "${TMPDIR}/custom-skills/test-skill"
 echo -e "---\nname: test-skill\n---\nbody" >"${TMPDIR}/custom-skills/test-skill/SKILL.md"
 if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill | grep -q 'custom-skills/test-skill'; then
-  echo "ok 19 - resolves names against SKILL_SOURCE_DIRS"
+  echo "ok 20 - resolves names against SKILL_SOURCE_DIRS"
 else
-  echo "not ok 19 - failed to resolve custom skill"
+  echo "not ok 20 - failed to resolve custom skill"
 fi
 
-# Test 20: update --catalog with empty registry preserves catalog
+# Test 21: update --catalog with empty registry preserves catalog
 mkdir -p "${XDG_CACHE_HOME}/skill-select/catalog/dummy"
 touch "${XDG_CACHE_HOME}/skill-select/catalog/dummy/SKILL.md"
 if "${SCRIPT}" update --catalog >/dev/null 2>&1; then
   if [ -d "${XDG_CACHE_HOME}/skill-select/catalog/dummy" ]; then
-    echo "ok 20 - update --catalog with empty registry preserves catalog (GC guard)"
+    echo "ok 21 - update --catalog with empty registry preserves catalog (GC guard)"
   else
-    echo "not ok 20 - update --catalog destroyed unrelated catalog"
+    echo "not ok 21 - update --catalog destroyed unrelated catalog"
   fi
 else
-  echo "not ok 20 - update --catalog failed"
+  echo "not ok 21 - update --catalog failed"
 fi
 
-# Test 21: help documents update --catalog
+# Test 22: help documents update --catalog
 if "${SCRIPT}" --help 2>&1 | grep -q '\-\-catalog'; then
-  echo "ok 21 - help documents update --catalog"
+  echo "ok 22 - help documents update --catalog"
 else
-  echo "not ok 21 - help does not document update --catalog"
+  echo "not ok 22 - help does not document update --catalog"
+fi
+
+# Test 23: help documents repair and list --json
+if out=$("${SCRIPT}" --help 2>&1) && printf '%s' "$out" | grep -q 'repair' &&
+  printf '%s' "$out" | grep -q 'list \[--json\]'; then
+  echo "ok 23 - help documents repair and list --json"
+else
+  echo "not ok 23 - help missing repair or list --json"
 fi
 
 # ==============================================================================
-# PART 5: Virtual Workspace Mode (VfsWorkspace)
+# PART 5: Workspace Detector Plugins
 # ==============================================================================
-# Reset p4 mock to fail, so we don't detect P4 workspace
+# Reset p4 mock to fail
 cat <<'EOF' >"$MOCK_BIN_DIR/p4"
 #!/usr/bin/env bash
 exit 1
 EOF
 chmod +x "$MOCK_BIN_DIR/p4"
 
-VFS_ROOT="${TMPDIR}/vfs_workspace"
-mkdir -p "${VFS_ROOT}/.citc"
-# Write simulated manifest with markers
-echo -e "cog.use_jj\ndevtools_srcfs" >"${VFS_ROOT}/.citc/manifest.ascii"
-# Create the repository directory inside the workspace
-mkdir -p "${VFS_ROOT}/android"
+mkdir -p "${XDG_CONFIG_HOME}/skill/plugins"
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/testws.py"
+from pathlib import Path
 
-cd "${VFS_ROOT}/android"
 
-# Test 22: add skill from root
+def register(api):
+    class MarkerWorkspace(api.FileStateMixin, api.Workspace):
+        def __init__(self, root):
+            super().__init__(root)
+            self.state_file = self.root / ".marker-skills"
+
+        @classmethod
+        def detect(cls):
+            curr = Path.cwd().resolve()
+            for parent in [curr] + list(curr.parents):
+                if (parent / ".marker-ws").is_dir():
+                    return cls(parent)
+            return None
+
+    api.register_workspace(MarkerWorkspace)
+EOF
+
+PLUGIN_DIR="${TMPDIR}/plugin_ws"
+mkdir -p "${PLUGIN_DIR}/.marker-ws" "${PLUGIN_DIR}/sub"
+
+# Test 24: plugin workspace detected from a subdirectory
+cd "${PLUGIN_DIR}/sub"
 if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
-  if [ -L .claude/skills/coding-standards ]; then
-    echo "ok 22 - [Vfs] add skill from root"
+  if [ -L "${PLUGIN_DIR}/.claude/skills/coding-standards" ] &&
+    [ -f "${PLUGIN_DIR}/.marker-skills" ] && [ ! -d .claude ]; then
+    echo "ok 24 - [Plugin] custom workspace detected, links at plugin root"
   else
-    echo "not ok 22 - [Vfs] add did not create symlink"
+    echo "not ok 24 - [Plugin] links or state in wrong location"
   fi
 else
-  echo "not ok 22 - [Vfs] add failed"
+  echo "not ok 24 - [Plugin] add failed"
 fi
 
-# Test 23: list returns members
-if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
-  echo "ok 23 - [Vfs] list returns members"
-else
-  echo "not ok 23 - [Vfs] list failed"
-fi
-
-# Test 24: add from subdirectory resolves to repo root
-mkdir -p wear
-cd wear
-if "${SCRIPT}" add emumanager >/dev/null 2>&1; then
-  # Should be at the repo root (parent), not here
-  if [ -L ../.agents/skills/emumanager ] && [ ! -d .agents ] && [ ! -f .skills-managed ]; then
-    echo "ok 24 - [Vfs] add from subdirectory resolves to repo root"
+# Test 25: plugin detector takes precedence over git
+GIT_IN_PLUGIN="${TMPDIR}/plugin_git"
+mkdir -p "${GIT_IN_PLUGIN}/.marker-ws"
+git -C "${GIT_IN_PLUGIN}" init -q
+cd "${GIT_IN_PLUGIN}"
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+  if [ -f .marker-skills ] && [ ! -f .git/info/skills ]; then
+    echo "ok 25 - [Plugin] plugin detector takes precedence over git"
   else
-    echo "not ok 24 - [Vfs] installed in subdirectory instead of root"
+    echo "not ok 25 - [Plugin] git detector ran despite plugin match"
   fi
 else
-  echo "not ok 24 - [Vfs] add from subdirectory failed"
+  echo "not ok 25 - [Plugin] add failed in git+plugin workspace"
 fi
-cd ..
 
-# Test 25: clean removes links and state at root
-if "${SCRIPT}" clean >/dev/null 2>&1; then
-  if [ ! -d .claude ] && [ ! -d .agents ] && [ ! -f .skills-managed ]; then
-    echo "ok 25 - [Vfs] clean removes links and state"
+# Test 26: broken plugin is skipped with a warning, built-ins still work
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/broken.py"
+raise RuntimeError("boom")
+EOF
+NOPLUGIN_DIR="${TMPDIR}/noplugin"
+mkdir -p "$NOPLUGIN_DIR"
+cd "$NOPLUGIN_DIR"
+if out=$("${SCRIPT}" add coding-standards 2>&1); then
+  if printf '%s' "$out" | grep -q 'failed to load plugin' && [ -f .skills-managed ]; then
+    echo "ok 26 - [Plugin] broken plugin warns and is skipped"
   else
-    echo "not ok 25 - [Vfs] clean left files at root"
+    echo "not ok 26 - [Plugin] missing warning or fallback: $out"
   fi
 else
-  echo "not ok 25 - [Vfs] clean failed"
+  echo "not ok 26 - [Plugin] add failed with broken plugin present"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/broken.py"
+
+# Test 27: doctor flags a managed-but-missing symlink
+cd "${PLUGIN_DIR}"
+rm .claude/skills/coding-standards
+if out=$("${SCRIPT}" doctor 2>&1); then
+  echo "not ok 27 - doctor should flag missing symlink"
+else
+  if printf '%s' "$out" | grep -q 'missing'; then
+    echo "ok 27 - doctor flags managed-but-missing symlink"
+  else
+    echo "not ok 27 - doctor failed without expected output: $out"
+  fi
 fi

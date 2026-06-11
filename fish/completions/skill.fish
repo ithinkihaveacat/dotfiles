@@ -32,6 +32,10 @@ complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path f
 complete -f -c skill -n __fish_use_subcommand -a apply -d 'Provision skills for this workspace via skill-select'
 complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print skill-select recommendations without installing'
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Diagnose drift between desired and on-disk skills'
+complete -f -c skill -n __fish_use_subcommand -a repair -d 'Re-link managed skills and regenerate tracking records'
+
+# list
+complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, path)'
 
 # resolve: source skill names only
 complete -f -c skill -n '__fish_seen_subcommand_from resolve' -a '(__fish_skill_source_skills)' -d Skill

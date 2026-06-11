@@ -19,7 +19,8 @@ Usage: skill <command> [skill...]
 
 Manage per-workspace agent skills as untracked symlinks. Automatically detects
 whether the current directory is a Git repository, Perforce workspace, or an
-unmanaged directory, and applies the appropriate tracking mechanism.
+unmanaged directory, and applies the appropriate tracking mechanism. Extra
+workspace types can be added via plugins in ~/.config/skill/plugins/.
 
 Commands:
   apply           Provision skills for this workspace via skill-select (idempotent)
@@ -27,11 +28,12 @@ Commands:
   add SPEC...     Add a skill: a local path or a registered catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill this tool added (alias: rm)
-  list            List skills this tool is managing in the current workspace
+  list [--json]   List skills this tool is managing in the current workspace
   update SPEC...  Re-fetch a registered catalog entry; --all for every managed
                   skill, --catalog to refresh the whole metadata index
   clean           Remove all skills this tool added and clear the tracking record
   doctor          Diagnose drift between desired and on-disk skills (read-only)
+  repair          Re-link managed skills and regenerate tracking records
   catalog         List registered skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
 
@@ -92,16 +94,27 @@ The block below is `scripts/permission --help`, kept in sync by
 ```text
 Usage: permission <command> [arguments]
 
-Manage workspace-specific agent permissions.
+Manage per-workspace agent tool permissions (allow/deny/ask rules) across
+all detected local agents. Rules are written as clean command patterns
+(e.g. "git show"); each agent backend translates to its native syntax.
 
 Commands:
-  add             Add a tool permission rule
-  remove          Remove a tool permission rule (alias: rm)
-  list            List permission rules (alias: ls)
-  clean           Clear all workspace-specific permission rules
+  add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
+                     for the other lists); 'add -' reads patterns from stdin
+  remove PATTERN...  Remove rule patterns from all lists (alias: rm)
+  list               List permission rules per agent (alias: ls)
+  apply              Pre-approve the safe commands declared by this
+                     workspace's installed skills (idempotent)
+  clean              Clear all workspace-specific permission rules
+  doctor             Report missing or drifted rules (read-only)
 
 Options:
-  --help          Display this help message and exit
+  --agent NAME       Operate on a single agent backend (agy, claude)
+  --help             Display this help message and exit
+
+Agents:
+  agy                Antigravity/jetski project config (under ~/.gemini)
+  claude             Claude Code (.claude/settings.local.json, untracked)
 ```
 
 <!-- /generated -->

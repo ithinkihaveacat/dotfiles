@@ -2,7 +2,9 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
+# Tests: tests/skill/
 
+import json
 import os
 import sys
 import tempfile
@@ -20,6 +22,14 @@ def die(msg):
 def cmderr(cmd, msg):
     print(f"skill {cmd}: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def clean_p(p):
+    home = str(Path.home())
+    s = str(p)
+    if s.startswith(home):
+        return "~" + s[len(home) :]
+    return s
 
 
 def prune_dirs(dest_dirs):
@@ -59,16 +69,53 @@ class Workspace:
 
     def check_conflict(self, relpath: Path) -> str | None:
         """Returns an error message if there is a conflict, else None."""
-        raise NotImplementedError
+        if relpath.exists() and not relpath.is_symlink():
+            return f"{relpath} exists and is not a symlink; refusing to overwrite"
+        return None
 
     def get_analyze_dir(self) -> Path:
         return self.root
 
+    def doctor_issues(self) -> list[str]:
+        """Returns backend-specific drift findings (read-only)."""
+        return []
 
-class GitWorkspace(Workspace):
-    def __init__(self, root, exclude_file):
+
+class FileStateMixin:
+    """Stores the managed-skill list as one name per line in self.state_file."""
+
+    def get_managed_skills(self):
+        if not self.state_file.is_file():
+            return []
+        with open(self.state_file, "r", encoding="utf-8", errors="replace") as f:
+            return sorted({line.strip() for line in f if line.strip()})
+
+    def save_managed_skills(self, skills):
+        skills = sorted(set(skills))
+        if not skills:
+            if self.state_file.is_file():
+                self.state_file.unlink()
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state_file, "w", encoding="utf-8") as f:
+            for item in skills:
+                f.write(item + "\n")
+
+
+class GitWorkspace(FileStateMixin, Workspace):
+    """Git repositories.
+
+    The authoritative managed-skill list lives in .git/info/skills (inside the
+    git dir, so it can never be tracked or collide with other tools). The
+    marker block in .git/info/exclude is a regenerated artifact that only
+    keeps 'git status' clean; if another tool rewrites the exclude file, no
+    state is lost and 'skill repair' restores the block.
+    """
+
+    def __init__(self, root, exclude_file, state_file):
         super().__init__(root)
         self.exclude_file = exclude_file
+        self.state_file = state_file
         self.mark_begin = "# >>> skills (managed by 'skill') >>>"
         self.mark_end = "# <<< skills (managed by 'skill') <<<"
         self.legacy_mark_begin = "# >>> skills (managed by 'git-skill') >>>"
@@ -77,7 +124,6 @@ class GitWorkspace(Workspace):
     @classmethod
     def detect(cls):
         try:
-            # Check if we are inside a git repo and get the top-level
             res = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True,
@@ -85,15 +131,17 @@ class GitWorkspace(Workspace):
                 check=True,
             )
             root = Path(res.stdout.strip())
-            # Get the path to the exclude file
-            res_ex = subprocess.run(
-                ["git", "rev-parse", "--git-path", "info/exclude"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            exclude_path = Path(res_ex.stdout.strip()).resolve()
-            return cls(root, exclude_path)
+
+            def git_path(rel):
+                r = subprocess.run(
+                    ["git", "rev-parse", "--git-path", rel],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return Path(r.stdout.strip()).resolve()
+
+            return cls(root, git_path("info/exclude"), git_path("info/skills"))
         except (subprocess.CalledProcessError, FileNotFoundError):
             return None
 
@@ -115,18 +163,11 @@ class GitWorkspace(Workspace):
                     managed.append(line_stripped)
         return managed if (in_block or managed) else None
 
-    def get_managed_skills(self):
-        # Try new marker first, then fallback to legacy git-skill marker
-        managed = self._read_block(self.mark_begin, self.mark_end)
-        if managed is None:
-            managed = self._read_block(self.legacy_mark_begin, self.legacy_mark_end)
-        if managed is None:
-            return []
-
-        # Git exclude stores paths like "/.agents/skills/name". Extract the name.
+    def _names_from_exclude_lines(self, lines):
+        # Exclude lines look like "/.agents/skills/name". Extract the name.
         skills = set()
         dest_dirs = self.get_dest_dirs()
-        for line in managed:
+        for line in lines:
             rel = line.lstrip("/")
             for d in dest_dirs:
                 try:
@@ -136,19 +177,32 @@ class GitWorkspace(Workspace):
                 except ValueError:
                     # d is not relative to root (e.g. if SKILL_DEST_DIRS was customized with absolute paths)
                     pass
-        return sorted(list(skills))
+        return sorted(skills)
 
-    def save_managed_skills(self, skills):
-        dest_dirs = self.get_dest_dirs()
-        lines = []
+    def get_managed_skills(self):
+        if self.state_file.is_file():
+            return super().get_managed_skills()
+        # Legacy layout: the managed list used to live only in the exclude
+        # block. Parse it once; the next save migrates it to the state file.
+        lines = self._read_block(self.mark_begin, self.mark_end)
+        if lines is None:
+            lines = self._read_block(self.legacy_mark_begin, self.legacy_mark_end)
+        if lines is None:
+            return []
+        return self._names_from_exclude_lines(lines)
+
+    def _expected_exclude_lines(self, skills):
+        lines = set()
         for name in skills:
-            for d in dest_dirs:
+            for d in self.get_dest_dirs():
                 try:
-                    lines.append(f"/{d.relative_to(self.root)}/{name}")
+                    lines.add(f"/{d.relative_to(self.root)}/{name}")
                 except ValueError:
                     # Fallback if dest_dirs are not relative to root
-                    lines.append(f"/{d.name}/{name}")
+                    lines.add(f"/{d.name}/{name}")
+        return sorted(lines)
 
+    def _write_exclude_block(self, skills):
         self.exclude_file.parent.mkdir(parents=True, exist_ok=True)
         other_lines = []
         if self.exclude_file.is_file():
@@ -175,7 +229,7 @@ class GitWorkspace(Workspace):
                     f.write("\n")
                 if skills:  # Only write block if there are skills
                     f.write(self.mark_begin + "\n")
-                    for line in sorted(list(set(lines))):
+                    for line in self._expected_exclude_lines(skills):
                         f.write(line + "\n")
                     f.write(self.mark_end + "\n")
 
@@ -184,6 +238,11 @@ class GitWorkspace(Workspace):
                     dest.write(src.read())
         finally:
             temp_path.unlink(missing_ok=True)
+
+    def save_managed_skills(self, skills):
+        skills = sorted(set(skills))
+        super().save_managed_skills(skills)
+        self._write_exclude_block(skills)
 
     def check_conflict(self, relpath):
         try:
@@ -200,42 +259,34 @@ class GitWorkspace(Workspace):
             pass
         return None
 
-
-class P4Workspace(Workspace):
-    def __init__(self, root, username):
-        super().__init__(root)
-        self.username = username
-        self._init_paths()
-
-    def _init_paths(self):
-        # Search for a directory at the client root that contains a Bazel-style WORKSPACE file.
-        self.repo_dir = None
-        for path in self.root.iterdir():
-            if path.is_dir() and not path.name.startswith("."):
-                if (path / "WORKSPACE").is_file() or (
-                    path / "WORKSPACE.bazel"
-                ).is_file():
-                    self.repo_dir = path
-                    break
-
-        configs_dir = self.root / "configs"
-        if self.repo_dir and configs_dir.is_dir():
-            # Personal config layout convention (centralized)
-            self.state_file = (
-                self.root
-                / "configs"
-                / "users"
-                / self.username
-                / "_agents"
-                / ".p4-skills-managed"
+    def doctor_issues(self):
+        issues = []
+        skills = self.get_managed_skills()
+        if skills and not self.state_file.is_file():
+            issues.append(
+                f"legacy state  managed list still lives in {clean_p(self.exclude_file)} "
+                f"(migrates to {clean_p(self.state_file)} on the next change)"
             )
-            self.analyze_dir = self.repo_dir
-            self.is_personal = True
-        else:
-            # Standard Perforce convention (local, mirroring git-skill)
-            self.state_file = self.root / ".p4-skills-managed"
-            self.analyze_dir = self.root
-            self.is_personal = False
+        actual = self._read_block(self.mark_begin, self.mark_end) or []
+        if self._read_block(self.legacy_mark_begin, self.legacy_mark_end) is not None:
+            issues.append(f"legacy block  'git-skill' markers in {clean_p(self.exclude_file)}")
+        if self.state_file.is_file() and sorted(set(actual)) != self._expected_exclude_lines(skills):
+            issues.append(
+                f"exclude drift {clean_p(self.exclude_file)} block does not match the managed list"
+            )
+        return issues
+
+
+class P4Workspace(FileStateMixin, Workspace):
+    """Standard Perforce client workspaces.
+
+    Untracked files are invisible to Perforce unless reconciled, so skills
+    are tracked in a .p4-skills-managed file at the client root.
+    """
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.state_file = self.root / ".p4-skills-managed"
 
     @classmethod
     def detect(cls):
@@ -243,173 +294,98 @@ class P4Workspace(Workspace):
             res = subprocess.run(
                 ["p4", "info"], capture_output=True, text=True, check=True
             )
-            client_root = None
-            username = None
-            for line in res.stdout.splitlines():
-                if line.startswith("Client root:"):
-                    client_root = Path(line.split(":", 1)[1].strip())
-                elif line.startswith("User name:"):
-                    username = line.split(":", 1)[1].strip()
-            if client_root and username:
-                return cls(client_root, username)
         except (subprocess.CalledProcessError, FileNotFoundError):
             return None
-        return None
-
-    def get_dest_dirs(self) -> list[Path]:
-        # Always place skills inside the writable repository directory (under dot-directories)
-        # so they are ignored by Perforce but discovered by the agent.
-        base = self.repo_dir if self.repo_dir else self.root
-        return [base / ".agents" / "skills"]
-
-    def get_managed_skills(self):
-        if not self.state_file.is_file():
-            return []
-        with open(self.state_file, "r", encoding="utf-8", errors="replace") as f:
-            return sorted([line.strip() for line in f if line.strip()])
-
-    def save_managed_skills(self, skills):
-        if not skills:
-            if self.state_file.is_file():
-                self.state_file.unlink()
-            return
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, "w", encoding="utf-8") as f:
-            for item in sorted(list(set(skills))):
-                f.write(item + "\n")
-
-    def check_conflict(self, relpath):
-        if relpath.exists() and not relpath.is_symlink():
-            return f"{relpath} exists and is not a symlink; refusing to overwrite"
-        return None
-
-    def get_analyze_dir(self):
-        return (
-            self.repo_dir if (self.is_personal and self.repo_dir) else self.analyze_dir
-        )
-
-
-class VfsWorkspace(Workspace):
-    """Support for virtual/mapped workspaces."""
-
-    def __init__(self, root, vfs_root):
-        super().__init__(root)
-        self.vfs_root = vfs_root
-        self.state_file = self.root / ".skills-managed"
-
-    @classmethod
-    def detect(cls):
-        curr = Path.cwd()
-        vfs_root = None
-        # Walk up to find the metadata directory
-        for p in [curr] + list(curr.parents):
-            if (p / ".citc").is_dir():
-                vfs_root = p
-                break
-
-        if not vfs_root:
+        client_root = None
+        for line in res.stdout.splitlines():
+            if line.startswith("Client root:"):
+                client_root = Path(line.split(":", 1)[1].strip())
+        if not client_root:
             return None
-
-        # Verify workspace type by checking manifest metadata
-        manifest_path = vfs_root / ".citc" / "manifest.ascii"
-        if not manifest_path.is_file():
-            return None
-
-        is_matched = False
+        # 'p4 info' succeeds with a default client from anywhere; only claim
+        # the workspace when the current directory is actually inside it.
         try:
-            with open(manifest_path, "r", encoding="utf-8", errors="replace") as f:
-                # Read first few KB to find markers
-                content = f.read(4096)
-                if "cog.use_jj" in content or "devtools_srcfs" in content:
-                    is_matched = True
-        except Exception:
-            pass
-
-        if not is_matched:
+            Path.cwd().resolve().relative_to(client_root.resolve())
+        except (ValueError, OSError):
             return None
-
-        # Find the repository root.
-        # Typically there is one main directory that is not hidden (e.g., 'android').
-        repo_dir = None
-        try:
-            for path in vfs_root.iterdir():
-                if path.is_dir() and not path.name.startswith("."):
-                    repo_dir = path
-                    break
-        except Exception:
-            pass
-
-        if not repo_dir:
-            repo_dir = vfs_root
-
-        return cls(repo_dir, vfs_root)
-
-    def get_managed_skills(self):
-        if not self.state_file.is_file():
-            return []
-        with open(self.state_file, "r", encoding="utf-8", errors="replace") as f:
-            return sorted([line.strip() for line in f if line.strip()])
-
-    def save_managed_skills(self, skills):
-        if not skills:
-            if self.state_file.is_file():
-                self.state_file.unlink()
-            return
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, "w", encoding="utf-8") as f:
-            for item in sorted(list(set(skills))):
-                f.write(item + "\n")
-
-    def check_conflict(self, relpath):
-        if relpath.exists() and not relpath.is_symlink():
-            return f"{relpath} exists and is not a symlink; refusing to overwrite"
-        return None
+        return cls(client_root)
 
 
-class DefaultWorkspace(Workspace):
+class DefaultWorkspace(FileStateMixin, Workspace):
     """Fallback for non-VCS directories."""
 
     def __init__(self, root):
         super().__init__(root)
         self.state_file = self.root / ".skills-managed"
 
-    def get_managed_skills(self):
-        if not self.state_file.is_file():
-            return []
-        with open(self.state_file, "r", encoding="utf-8", errors="replace") as f:
-            return sorted([line.strip() for line in f if line.strip()])
-
-    def save_managed_skills(self, skills):
-        if not skills:
-            if self.state_file.is_file():
-                self.state_file.unlink()
-            return
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, "w", encoding="utf-8") as f:
-            for item in sorted(list(set(skills))):
-                f.write(item + "\n")
-
-    def check_conflict(self, relpath):
-        if relpath.exists() and not relpath.is_symlink():
-            return f"{relpath} exists and is not a symlink; refusing to overwrite"
-        return None
-
 
 # ==============================================================================
-# Auto-Detection
+# Plugins & Auto-Detection
 # ==============================================================================
+
+
+class SkillAPI:
+    """API surface passed to a plugin's register() function.
+
+    Plugins live in $XDG_CONFIG_HOME/skill/plugins/*.py and may register
+    additional Workspace subclasses (subclass api.Workspace and implement a
+    'detect()' classmethod returning an instance or None). Plugin detectors
+    are consulted before the built-in Git/Perforce/Default detection, in
+    sorted filename order.
+    """
+
+    Workspace = Workspace
+    FileStateMixin = FileStateMixin
+
+    def __init__(self):
+        self.workspace_classes = []
+
+    def register_workspace(self, cls):
+        self.workspace_classes.append(cls)
+
+
+def load_plugins() -> SkillAPI:
+    import importlib.util
+
+    api = SkillAPI()
+    plugins_dir = (
+        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser()
+        / "skill"
+        / "plugins"
+    )
+    if not plugins_dir.is_dir():
+        return api
+    for filepath in sorted(plugins_dir.glob("*.py")):
+        module_name = f"skill_plugin_{filepath.stem}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                if hasattr(module, "register"):
+                    module.register(api)
+        except Exception as e:
+            print(
+                f"skill: warning: failed to load plugin {filepath}: {e}",
+                file=sys.stderr,
+            )
+    return api
 
 
 def get_workspace() -> Workspace:
-    ws = GitWorkspace.detect()
-    if ws:
-        return ws
-    ws = P4Workspace.detect()
-    if ws:
-        return ws
-    ws = VfsWorkspace.detect()
-    if ws:
-        return ws
+    api = load_plugins()
+    for cls in api.workspace_classes + [GitWorkspace, P4Workspace]:
+        try:
+            ws = cls.detect()
+        except Exception as e:
+            print(
+                f"skill: warning: workspace detector {cls.__name__} failed: {e}",
+                file=sys.stderr,
+            )
+            continue
+        if ws:
+            return ws
     return DefaultWorkspace(Path.cwd())
 
 
@@ -514,37 +490,47 @@ def cmd_remove(names):
     prune_dirs(dest_dirs)
 
 
-def cmd_list():
-    ws = get_workspace()
-    managed = ws.get_managed_skills()
+def resolve_installed(ws):
+    """Returns [(name, resolved_target_path_or_None)] for managed skills."""
     dest_dirs = ws.get_dest_dirs()
-
-    home = str(Path.home())
-
-    def clean_p(p):
-        s = str(p)
-        if s.startswith(home):
-            return "~" + s[len(home) :]
-        return s
-
-    resolved_skills = []
-    for name in sorted(managed):
+    resolved = []
+    for name in sorted(ws.get_managed_skills()):
         target = None
         for d in dest_dirs:
             p = d / name
             if p.is_symlink():
                 try:
-                    target = clean_p((p.parent / p.readlink()).resolve())
-                    break
+                    candidate = (p.parent / p.readlink()).resolve()
+                    if candidate.exists():
+                        target = candidate
+                        break
                 except Exception:
                     pass
-        resolved_skills.append((name, target))
+        resolved.append((name, target))
+    return resolved
+
+
+def cmd_list(args):
+    as_json = "--json" in args
+    ws = get_workspace()
+    resolved_skills = resolve_installed(ws)
+
+    if as_json:
+        print(
+            json.dumps(
+                [
+                    {"name": name, "path": str(target) if target else None}
+                    for name, target in resolved_skills
+                ]
+            )
+        )
+        return
 
     if resolved_skills:
         max_len = max(len(name) for name, _ in resolved_skills)
         for name, target in resolved_skills:
             if target:
-                print(f"{name.ljust(max_len)} -> {target}")
+                print(f"{name.ljust(max_len)} -> {clean_p(target)}")
             else:
                 print(name)
 
@@ -612,8 +598,6 @@ def cmd_apply(args):
         print(res.stderr, file=sys.stderr, end="")
         die("skill-select failed")
 
-    import json
-
     specs = []
     names = []
     for line in res.stdout.strip().splitlines():
@@ -648,11 +632,26 @@ def cmd_suggest(args):
         sys.exit(res.returncode)
 
 
+def cmd_repair():
+    ws = get_workspace()
+    managed = ws.get_managed_skills()
+    if not managed:
+        ws.save_managed_skills([])
+        print("repair: nothing managed", file=sys.stderr)
+        return
+    # Re-resolving and re-adding every managed skill re-links any missing
+    # symlinks and rewrites both the state file and the exclude block.
+    cmd_add(managed)
+    print(f"repair: verified {len(managed)} skill(s)", file=sys.stderr)
+
+
 def cmd_doctor():
     ws = get_workspace()
+    managed = ws.get_managed_skills()
     dest_dirs = ws.get_dest_dirs()
 
     dangling = []
+    missing = []
     for d in dest_dirs:
         if not d.is_dir():
             continue
@@ -663,24 +662,39 @@ def cmd_doctor():
                 except Exception:
                     target = "unknown"
                 dangling.append((item, target))
+    for name in managed:
+        for d in dest_dirs:
+            p = d / name
+            if not p.is_symlink():
+                missing.append(p)
 
+    backend_issues = ws.doctor_issues()
+
+    if not (dangling or missing or backend_issues):
+        return True
+
+    def rel(p):
+        try:
+            return p.relative_to(ws.root)
+        except ValueError:
+            return p
+
+    print("Workspace Skills:", file=sys.stderr)
+    for item, target in dangling:
+        print(f"  dangling      {rel(item)} -> {target}", file=sys.stderr)
+    for p in missing:
+        print(f"  missing       {rel(p)} (managed but not linked)", file=sys.stderr)
+    for issue in backend_issues:
+        print(f"  {issue}", file=sys.stderr)
+
+    hints = []
     if dangling:
-        print("Workspace Skills:", file=sys.stderr)
-        for item, target in dangling:
-            try:
-                rel = item.relative_to(ws.root)
-            except ValueError:
-                rel = item
-            print(f"  dangling     {rel} -> {target}", file=sys.stderr)
-
-        names_to_remove = sorted(list(set(item.name for item, _ in dangling)))
-        remove_cmd = f"skill remove {' '.join(names_to_remove)}"
-        print(
-            f"\n  hint: run '{remove_cmd}' to clean them up, or 'skill clean && skill apply' to reset to recommended skills\n",
-            file=sys.stderr,
-        )
-        return False
-    return True
+        names_to_remove = sorted(set(item.name for item, _ in dangling))
+        hints.append(f"'skill remove {' '.join(names_to_remove)}' to drop dangling links")
+    if missing or backend_issues:
+        hints.append("'skill repair' to re-link and regenerate tracking records")
+    print(f"\n  hint: run {', or '.join(hints)}\n", file=sys.stderr)
+    return False
 
 
 def usage():
@@ -689,7 +703,8 @@ def usage():
 
 Manage per-workspace agent skills as untracked symlinks. Automatically detects
 whether the current directory is a Git repository, Perforce workspace, or an
-unmanaged directory, and applies the appropriate tracking mechanism.
+unmanaged directory, and applies the appropriate tracking mechanism. Extra
+workspace types can be added via plugins in ~/.config/skill/plugins/.
 
 Commands:
   apply           Provision skills for this workspace via skill-select (idempotent)
@@ -697,11 +712,12 @@ Commands:
   add SPEC...     Add a skill: a local path or a registered catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill this tool added (alias: rm)
-  list            List skills this tool is managing in the current workspace
+  list [--json]   List skills this tool is managing in the current workspace
   update SPEC...  Re-fetch a registered catalog entry; --all for every managed
                   skill, --catalog to refresh the whole metadata index
   clean           Remove all skills this tool added and clear the tracking record
   doctor          Diagnose drift between desired and on-disk skills (read-only)
+  repair          Re-link managed skills and regenerate tracking records
   catalog         List registered skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
 
@@ -742,13 +758,15 @@ def main():
     elif cmd in ("remove", "rm"):
         cmd_remove(args)
     elif cmd == "list":
-        cmd_list()
+        cmd_list(args)
     elif cmd == "clean":
         cmd_clean()
     elif cmd == "apply":
         cmd_apply(args)
     elif cmd == "suggest":
         cmd_suggest(args)
+    elif cmd == "repair":
+        cmd_repair()
     else:
         print(f"skill: unknown command '{cmd}'", file=sys.stderr)
         print("Try 'skill --help' for more information.", file=sys.stderr)
