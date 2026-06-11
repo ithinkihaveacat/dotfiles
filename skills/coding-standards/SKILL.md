@@ -42,6 +42,9 @@ from stdin and writing to stdout when no arguments are provided.
   verification).
 - **`scripts/python-format`**: Format and lint Python files using `ruff`
   (supports `--check`, and recursive directory scanning).
+- **`scripts/shell-format`**: Format and lint shell scripts (POSIX/Bash) using
+  `shfmt` and `shellcheck` (supports `--check` and recursive directory
+  scanning).
 - **`scripts/xml-format`**: Format XML files using `xmllint`.
 
 Always prefer the scripts in `scripts/` over raw tool invocations to ensure
@@ -67,12 +70,18 @@ output streams, and exit code philosophy.
 The language-specific implementation guide for shell scripts. All shell scripts
 must be linted with `shellcheck` and formatted with `shfmt`.
 
-When formatting shell scripts, you **MUST** use the following specific switches
-for `shfmt` to ensure correct indentation (2 spaces, indented switch cases):
+To ensure consistent formatting and linting, you **MUST** use the
+`scripts/shell-format` helper script, which automatically runs `shfmt` with the
+correct options (2 spaces, indented switch cases) and executes `shellcheck` for
+static analysis:
 
 ```bash
-shfmt -w -i 2 -ci FILENAME
+scripts/shell-format FILENAME
 ```
+
+If `shell-format` reports lint errors that cannot be automatically resolved, it
+will print them and exit with a non-zero status. You must resolve these static
+analysis issues before submitting.
 
 Fish scripts use `fish_indent`. Scripts must have robust error handling and
 comply with the UX standards in `cli-tools.md`.

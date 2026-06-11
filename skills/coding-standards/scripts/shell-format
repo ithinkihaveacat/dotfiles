@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# bash 3.2+ compatible (macOS default). Do not use bash 4+ features
+# (declare -A, readarray, ${var,,}, |&).
+
+# Tests: tests/shell-format/
+
+set -euo pipefail
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require shfmt
+require shellcheck
+
+SCRIPT_NAME=$(basename "$0")
+
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME [OPTION] [PATH...]
+
+Format and lint shell scripts using shfmt and shellcheck.
+
+When PATHs are provided, formats and lints files in place. If a directory is
+provided, recursively processes all shell files in it (files ending in .sh or
+.bash, or files with a shell shebang).
+When no PATH is provided, reads from standard input and writes to standard output.
+
+Arguments:
+  PATH...           Paths to shell files or directories to format/lint (optional)
+
+Options:
+  --check           Check for lint errors and formatting without making changes
+  --help            Display this help message and exit
+
+Examples:
+
+# Format and lint a file in place
+  $SCRIPT_NAME script.sh
+
+# Format and lint in a directory recursively
+  $SCRIPT_NAME bin/
+
+# Check a file for issues without modifying it
+  $SCRIPT_NAME --check script.sh
+
+# Format reading from stdin
+  $SCRIPT_NAME < script.sh
+EOF
+}
+
+CHECK_MODE=0
+PATHS=()
+
+for arg in "$@"; do
+  case "$arg" in
+    --help)
+      usage
+      exit 0
+      ;;
+    --check)
+      CHECK_MODE=1
+      ;;
+    -*)
+      echo "$SCRIPT_NAME: unknown option: $arg" >&2
+      exit 1
+      ;;
+    *)
+      PATHS+=("$arg")
+      ;;
+  esac
+done
+
+# Helper to check if a file is a shell script
+is_shell_script() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    return 1
+  fi
+  # Check extension
+  if [[ "$file" == *.sh || "$file" == *.bash ]]; then
+    return 0
+  fi
+  # Check shebang
+  local first_line
+  if read -r first_line <"$file" 2>/dev/null; then
+    case "$first_line" in
+      *bin/sh | *bin/bash | *bin/dash | *bin/ksh | *bin/sh\ * | *bin/bash\ * | *bin/dash\ * | *bin/ksh\ *)
+        return 0
+        ;;
+      *env\ sh | *env\ bash | *env\ dash | *env\ ksh | *env\ sh\ * | *env\ bash\ * | *env\ dash\ * | *env\ ksh\ *)
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
+# Run shfmt and shellcheck on a single file
+process_file() {
+  local file="$1"
+  if [ "$CHECK_MODE" -eq 1 ]; then
+    local failed=0
+    if ! shfmt -d -i 2 -ci "$file" >&2; then
+      echo "$SCRIPT_NAME: $file: needs formatting" >&2
+      failed=1
+    fi
+
+    local shellcheck_opts=()
+    if ! grep -q "^#\!" "$file"; then
+      shellcheck_opts+=("-s" "bash")
+    fi
+    if ! shellcheck "${shellcheck_opts[@]}" "$file" >&2; then
+      failed=1
+    fi
+    return "$failed"
+  else
+    if ! shfmt -w -i 2 -ci "$file"; then
+      echo "$SCRIPT_NAME: $file: failed to format" >&2
+      return 1
+    fi
+
+    local shellcheck_opts=()
+    if ! grep -q "^#\!" "$file"; then
+      shellcheck_opts+=("-s" "bash")
+    fi
+    if ! shellcheck "${shellcheck_opts[@]}" "$file"; then
+      return 1
+    fi
+    return 0
+  fi
+}
+
+# Recursively find and process shell scripts in a directory
+process_dir() {
+  local dir="$1"
+  local failed=0
+
+  while IFS= read -r file; do
+    if is_shell_script "$file"; then
+      if ! process_file "$file"; then
+        failed=1
+      fi
+    fi
+  done < <(find "$dir" -type f)
+
+  return "$failed"
+}
+
+if [ ${#PATHS[@]} -eq 0 ]; then
+  if [ -t 0 ]; then
+    usage
+    exit 1
+  fi
+
+  # Stdin mode
+  TMPFILE=$(mktemp "/tmp/shell-format.XXXXXX.sh")
+  trap 'rm -f "$TMPFILE"' EXIT
+
+  cat >"$TMPFILE"
+
+  # We need to ensure shellcheck knows the shell dialect.
+  has_shebang=1
+  if ! grep -q "^#\!" "$TMPFILE"; then
+    has_shebang=0
+  fi
+
+  if [ "$CHECK_MODE" -eq 1 ]; then
+    shellcheck_opts=()
+    if [ "$has_shebang" -eq 0 ]; then
+      shellcheck_opts+=("-s" "bash")
+    fi
+    shfmt -d -i 2 -ci "$TMPFILE" >&2 && shellcheck "${shellcheck_opts[@]}" "$TMPFILE" >&2
+    exit $?
+  else
+    if shfmt -i 2 -ci "$TMPFILE" >"${TMPFILE}.formatted"; then
+      shellcheck_opts=()
+      if [ "$has_shebang" -eq 0 ]; then
+        shellcheck_opts+=("-s" "bash")
+      fi
+      if shellcheck "${shellcheck_opts[@]}" "${TMPFILE}.formatted" >&2; then
+        cat "${TMPFILE}.formatted"
+        exit 0
+      else
+        exit 1
+      fi
+    else
+      exit 1
+    fi
+  fi
+else
+  # Path mode
+  for p in "${PATHS[@]}"; do
+    if [ ! -e "$p" ]; then
+      echo "$SCRIPT_NAME: $p: No such file or directory" >&2
+      exit 1
+    fi
+  done
+
+  failed=0
+  for p in "${PATHS[@]}"; do
+    if [ -d "$p" ]; then
+      if ! process_dir "$p"; then
+        failed=1
+      fi
+    elif [ -f "$p" ]; then
+      if is_shell_script "$p"; then
+        if ! process_file "$p"; then
+          failed=1
+        fi
+      else
+        echo "$SCRIPT_NAME: $p: Not a recognized shell script" >&2
+        failed=1
+      fi
+    fi
+  done
+  exit "$failed"
+fi
