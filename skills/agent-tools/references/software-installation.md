@@ -58,6 +58,30 @@ Called automatically by the `update` script when `claude` is in PATH. Native
 installs also auto-update in the background. For Homebrew installs, use
 `brew upgrade claude-code` instead.
 
+**Release channels:**
+
+Native installs follow a release channel that controls when updates arrive:
+
+- `latest` — every release ships immediately (default)
+- `stable` — about a week behind latest
+
+To switch to a channel (or reinstall from it to pick up the latest build):
+
+```bash
+claude install latest   # switch to latest channel
+claude install stable   # switch to stable channel
+```
+
+You can also install a specific version number:
+
+```bash
+claude install 2.1.89
+```
+
+If a new model or feature isn't appearing, running `claude install latest` is
+often the fix. See [Install a specific version][cc-versioning] in the docs for
+full details.
+
 ## Codex
 
 OpenAI's terminal coding agent. Open source, built in Rust.
@@ -84,3 +108,5 @@ codex update
 ```
 
 Called automatically by the `update` script when `codex` is in PATH.
+
+[cc-versioning]: https://code.claude.com/docs/en/setup.md#install-a-specific-version
