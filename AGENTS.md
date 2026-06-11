@@ -62,6 +62,16 @@ require adb
 require apkanalyzer
 ```
 
+#### Safe-Command Declarations
+
+`permission apply` pre-approves every executable in a skill's `scripts/`
+directory for local agents by default. If a script (or one of its subcommands)
+is destructive, irreversible, or otherwise should always prompt, it must be
+listed in that skill's `permissions/unsafe` file (one pattern per line; a bare
+script name suppresses pre-approval entirely, a `script subcommand` line guards
+just that subcommand). When adding or modifying a script with destructive
+behavior, update this file. See `skills/workspace-config/SKILL.md` for details.
+
 #### File Output
 
 If a script produces a new file or directory as output, it must support an
