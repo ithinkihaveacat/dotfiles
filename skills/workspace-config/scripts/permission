@@ -19,9 +19,7 @@ AGY_CONFIG_HOME = Path(
     or os.environ.get("AGENT_CONFIG_HOME")  # legacy name
     or Path.home() / ".gemini"
 )
-CLAUDE_CONFIG_DIR = Path(
-    os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
-)
+CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
 MODES = ("allow", "deny", "ask")
 
@@ -109,7 +107,7 @@ class PermissionAdapter:
     # supports prompt-anyway rules, otherwise "deny".
     guard_mode = "deny"
 
-    def is_available(self) -> bool:
+    def is_available(self, workspace_root: Path) -> bool:
         """True if this agent appears to be in use on this machine."""
         return False
 
@@ -146,8 +144,14 @@ class AgyProjectAdapter(PermissionAdapter):
     def _get_projects_dir(self) -> Path:
         return AGY_CONFIG_HOME / "config/projects"
 
-    def is_available(self) -> bool:
-        return AGY_CONFIG_HOME.is_dir()
+    def is_available(self, workspace_root: Path) -> bool:
+        import shutil
+
+        return bool(
+            shutil.which("agy")
+            or shutil.which("jetski")
+            or self.is_initialized(workspace_root)
+        )
 
     def is_initialized(self, workspace_root: Path) -> bool:
         project_file = self._get_project_file(workspace_root)
@@ -326,8 +330,10 @@ class ClaudeSettingsAdapter(PermissionAdapter):
     def _settings_path(self, workspace_root: Path) -> Path:
         return workspace_root / ".claude" / "settings.local.json"
 
-    def is_available(self) -> bool:
-        return CLAUDE_CONFIG_DIR.is_dir()
+    def is_available(self, workspace_root: Path) -> bool:
+        import shutil
+
+        return bool(shutil.which("claude") or self.is_initialized(workspace_root))
 
     def is_initialized(self, workspace_root: Path) -> bool:
         return self._settings_path(workspace_root).is_file()
@@ -356,7 +362,14 @@ class ClaudeSettingsAdapter(PermissionAdapter):
             return
         try:
             res_ex = subprocess.run(
-                ["git", "-C", str(workspace_root), "rev-parse", "--git-path", "info/exclude"],
+                [
+                    "git",
+                    "-C",
+                    str(workspace_root),
+                    "rev-parse",
+                    "--git-path",
+                    "info/exclude",
+                ],
                 capture_output=True,
                 text=True,
                 check=True,
@@ -369,7 +382,9 @@ class ClaudeSettingsAdapter(PermissionAdapter):
             with open(exclude_file, "a", encoding="utf-8") as f:
                 if existing and not existing.endswith("\n"):
                     f.write("\n")
-                f.write(f"# added by 'permission' to keep local agent settings untracked\n/{rel}\n")
+                f.write(
+                    f"# added by 'permission' to keep local agent settings untracked\n/{rel}\n"
+                )
         except Exception as e:
             print(
                 f"[{self.name}] warning: could not update info/exclude: {e}",
@@ -437,8 +452,7 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         data = self._load(settings_path)
         perms = data.get("permissions", {})
         return {
-            mode: [self.untranslate(r) for r in perms.get(mode) or []]
-            for mode in MODES
+            mode: [self.untranslate(r) for r in perms.get(mode) or []] for mode in MODES
         }
 
     def clean(self, workspace_root: Path) -> None:
@@ -460,7 +474,7 @@ ADAPTERS: list[PermissionAdapter] = [
 ]
 
 
-def select_adapters(agent: str | None) -> list[PermissionAdapter]:
+def select_adapters(agent: str | None, workspace_root: Path) -> list[PermissionAdapter]:
     """Returns the adapters to operate on: the one named by --agent, or every
     adapter whose agent appears to be in use. May be empty; commands that
     cannot proceed without one should call require_adapters instead."""
@@ -470,11 +484,13 @@ def select_adapters(agent: str | None) -> list[PermissionAdapter]:
             names = ", ".join(a.name for a in ADAPTERS)
             die(f"unknown agent '{agent}' (expected one of: {names})")
         return matches
-    return [a for a in ADAPTERS if a.is_available()]
+    return [a for a in ADAPTERS if a.is_available(workspace_root)]
 
 
-def require_adapters(agent: str | None) -> list[PermissionAdapter]:
-    adapters = select_adapters(agent)
+def require_adapters(
+    agent: str | None, workspace_root: Path
+) -> list[PermissionAdapter]:
+    adapters = select_adapters(agent, workspace_root)
     if not adapters:
         die(
             "no supported agent configuration found "
@@ -537,9 +553,7 @@ def compute_skill_rules(name: str, skill_dir: Path) -> tuple[list[str], list[str
 
 def compute_workspace_rules() -> tuple[list[str], list[str]]:
     """Aggregates (allow, guard) patterns over all installed skills."""
-    res = subprocess.run(
-        [SKILL_BIN, "list", "--json"], capture_output=True, text=True
-    )
+    res = subprocess.run([SKILL_BIN, "list", "--json"], capture_output=True, text=True)
     if res.returncode != 0:
         print(res.stderr, file=sys.stderr, end="")
         die("'skill list' failed")
@@ -567,11 +581,11 @@ def compute_workspace_rules() -> tuple[list[str], list[str]]:
 
 
 def cmd_apply(agent: str | None):
-    adapters = select_adapters(agent)
+    ws = get_workspace_root()
+    adapters = select_adapters(agent, ws)
     if not adapters:
         print("apply: no supported agents detected; nothing to do", file=sys.stderr)
         return
-    ws = get_workspace_root()
     allow, guard = compute_workspace_rules()
     if not allow and not guard:
         print(
@@ -593,10 +607,10 @@ def cmd_apply(agent: str | None):
 
 
 def cmd_doctor(agent: str | None):
-    adapters = select_adapters(agent)
+    ws = get_workspace_root()
+    adapters = select_adapters(agent, ws)
     if not adapters:
         return
-    ws = get_workspace_root()
     allow, guard = compute_workspace_rules()
     issues = []
     for adapter in adapters:
@@ -637,7 +651,7 @@ def cmd_add(patterns: list[str], mode: str, agent: str | None):
         print("Try 'permission add --help' for more information.", file=sys.stderr)
         sys.exit(1)
     ws = get_workspace_root()
-    for adapter in require_adapters(agent):
+    for adapter in require_adapters(agent, ws):
         for pattern in patterns:
             if adapter.add(ws, pattern, mode):
                 print(f"[{adapter.name}] added to {mode}: {pattern}", file=sys.stderr)
@@ -654,7 +668,7 @@ def cmd_remove(patterns: list[str], agent: str | None):
         print("Try 'permission remove --help' for more information.", file=sys.stderr)
         sys.exit(1)
     ws = get_workspace_root()
-    for adapter in require_adapters(agent):
+    for adapter in require_adapters(agent, ws):
         if not adapter.is_initialized(ws):
             continue
         for pattern in patterns:
@@ -671,7 +685,7 @@ def cmd_remove(patterns: list[str], agent: str | None):
 def cmd_list(agent: str | None):
     ws = get_workspace_root()
     has_any = False
-    for adapter in select_adapters(agent):
+    for adapter in select_adapters(agent, ws):
         if not adapter.is_initialized(ws):
             continue
         rules = adapter.rules(ws)
@@ -692,7 +706,7 @@ def cmd_list(agent: str | None):
 def cmd_clean(agent: str | None):
     ws = get_workspace_root()
     cleaned = False
-    for adapter in select_adapters(agent):
+    for adapter in select_adapters(agent, ws):
         if adapter.is_initialized(ws):
             adapter.clean(ws)
             cleaned = True
