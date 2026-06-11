@@ -75,9 +75,8 @@ options:
   --json                Emit structured output (name, source, reason) instead
                         of bare names.
   --update [UPDATE ...]
-                        Re-fetch a plugin-provided catalog entry; --all for
-                        every managed skill, --catalog to refresh the whole
-                        metadata index
+                        Re-fetch a plugin-provided catalog entry by name;
+                        'catalog' refreshes the whole metadata index
   --doctor              Diagnose drift between desired and on-disk skills
                         (read-only)
   --resolve NAME        Print the source path for a skill

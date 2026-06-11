@@ -25,9 +25,9 @@ complete -f -c skill -n __fish_use_subcommand -a add -d 'Add a skill (path or to
 complete -f -c skill -n __fish_use_subcommand -a remove -d 'Remove a skill this tool added'
 complete -f -c skill -n __fish_use_subcommand -a rm -d 'Remove a skill this tool added (alias of remove)'
 complete -f -c skill -n __fish_use_subcommand -a list -d 'List managed skills in this workspace'
-complete -f -c skill -n __fish_use_subcommand -a update -d 'Re-fetch registered catalog entries'
+complete -f -c skill -n __fish_use_subcommand -a update -d 'Re-fetch plugin-provided catalog entries'
 complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed skills'
-complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List registered skills and sources'
+complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List plugin-provided skills and sources'
 complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path for a name'
 complete -f -c skill -n __fish_use_subcommand -a apply -d 'Provision skills for this workspace via skill-select'
 complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print skill-select recommendations without installing'
@@ -48,10 +48,11 @@ complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_source_
 complete -c skill -f -n '__fish_seen_subcommand_from remove rm' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
 
 # update
-complete -c skill -f -n '__fish_seen_subcommand_from update' -a '(__fish_skill_catalog)' -d 'Registry skill'
+complete -c skill -f -n '__fish_seen_subcommand_from update' -a '(__fish_skill_catalog)' -d 'Catalog skill'
 complete -c skill -f -n '__fish_seen_subcommand_from update' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
 complete -c skill -f -n '__fish_seen_subcommand_from update' -l all -d 'Update every managed skill'
 complete -c skill -f -n '__fish_seen_subcommand_from update' -l catalog -d 'Refresh the whole metadata index'
 
 # Complete flags
 complete -c skill -f -l help -d 'Display help message and exit'
+complete -c skill -f -l plugin-template -d 'Output a template for creating a Workspace plugin'
