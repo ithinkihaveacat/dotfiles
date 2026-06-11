@@ -85,17 +85,27 @@ ______________________________________________________________________
 Invoke the selection tool via `skill-select` (symlinked in `bin/`):
 
 ```bash
-skill-select [DIR] [OPTIONS]
+skill-select <command> [arguments]
 ```
+
+### Commands
+
+- **`suggest [DIR]`**: Recommend skills for a directory (default: current
+  directory) via the Gemini API.
+- **`catalog`**: List every available skill and its source.
+- **`resolve NAME`**: Print the source path for a skill.
+- **`update NAME...`**: Re-fetch plugin-provided catalog entries;
+  `update catalog` refreshes the whole metadata index.
+- **`doctor`** / **`repair`**: Diagnose / heal the catalog index.
 
 ### Options
 
-- `--context TEXT`: A comprehensive, self-contained explanation of your task to
-  guide LLM-based selection.
-- `--search-dirs PATHS`: Colon-separated extra paths to search for skills,
-  overriding `SKILL_SOURCE_DIRS`.
-- `--catalog`: Print the full catalog of available skills and exit.
-- `--json`: Emit structured JSON output instead of formatted text.
+- `--context TEXT` (`suggest`): A comprehensive, self-contained explanation of
+  your task to guide LLM-based selection.
+- `--search-dirs PATHS` (`suggest`, `catalog`, `resolve`): Colon-separated
+  extra paths to search for skills, overriding `SKILL_SOURCE_DIRS`.
+- `--json` (`suggest`, `catalog`): Emit structured JSON output instead of
+  formatted text.
 
 ______________________________________________________________________
 

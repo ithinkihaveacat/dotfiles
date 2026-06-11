@@ -54,36 +54,27 @@ The block below is `scripts/skill-select --help`, kept in sync by
 <!-- generated: ../scripts/skill-select --help -->
 
 ```text
-usage: skill-select [--help] [--context CONTEXT] [--search-dirs SEARCH_DIRS]
-                    [--catalog] [--json] [--update [UPDATE ...]] [--doctor]
-                    [--resolve NAME] [--repair] [--plugin-template]
-                    [dir]
+Usage: skill-select <command> [arguments]
 
-Skill Select: Discover relevant agent skills.
+Discover and recommend agent skills, and maintain the catalog of
+plugin-provided skills. Plumbing for the higher-level 'skill' tool.
 
-positional arguments:
-  dir                   Directory to analyze (default: current).
+Commands:
+  suggest [DIR]   Recommend skills for DIR via the Gemini API (default: cwd)
+  catalog         List every available skill and its source
+  resolve NAME    Print the source path for a skill
+  update NAME...  Re-fetch plugin-provided catalog entries; 'update catalog'
+                  refreshes the whole metadata index
+  doctor          Diagnose drift in the catalog index (read-only)
+  repair          Repair the catalog index (heal missing stubs)
 
-options:
-  --help                Display this help message and exit.
-  --context CONTEXT     Comprehensive, self-contained context to guide
-                        selection.
-  --search-dirs SEARCH_DIRS
-                        Colon-separated search directories (overrides
-                        environment).
-  --catalog             Print the full catalog of available skills and exit.
-  --json                Emit structured output (name, source, reason) instead
-                        of bare names.
-  --update [UPDATE ...]
-                        Re-fetch a plugin-provided catalog entry by name;
-                        'catalog' refreshes the whole metadata index
-  --doctor              Diagnose drift between desired and on-disk skills
-                        (read-only)
-  --resolve NAME        Print the source path for a skill
-  --repair              Repair catalog index (heal missing stubs without
-                        forcing updates)
-  --plugin-template     Output a template/documentation for creating a Python
-                        plugin
+Options:
+  --context TEXT       Self-contained context to guide selection (suggest)
+  --search-dirs DIRS   Colon-separated skill search directories, overriding
+                       SKILL_SOURCE_DIRS (suggest, catalog, resolve)
+  --json               Emit structured output (suggest, catalog)
+  --help               Display this help message and exit
+  --plugin-template    Output a template for creating a skill-select plugin
 ```
 
 <!-- /generated -->
