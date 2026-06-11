@@ -20,8 +20,8 @@ action) removes the ambiguity.
 A plugin that fails to load currently produces only a one-line stderr warning
 that scrolls past; `doctor` then reports a healthy catalog that is silently
 missing that plugin's skills. The loader should record load failures and
-`doctor` should list them (e.g. "plugin 20_corp.py failed to load"), fitting
-the doctor-as-drift-detection pattern.
+`doctor` should list them (e.g. "plugin 20_corp.py failed to load"), fitting the
+doctor-as-drift-detection pattern.
 
 ## skill-select Cleanups and Legacy Shim Retirement
 
@@ -29,8 +29,35 @@ the doctor-as-drift-detection pattern.
   plugin_catalog" — it actually edits the grouped output).
 - `[ ]` Collapse the `load_plugins`/`load_plugins_catalog` pair into one
   function.
-- `[ ]` After a deprecation window, delete the `LEGACY_FLAGS` migration shim
-  and the hidden `list` alias for `catalog` in `skill-select`.
+- `[ ]` After a deprecation window, delete the `LEGACY_FLAGS` migration shim and
+  the hidden `list` alias for `catalog` in `skill-select`.
+
+## Duplicate Skill Detection and Resolution
+
+We recently introduced duplicate collapsing in `gather_skills` to prevent
+warnings in `resolve_selection` when a skill is found in multiple search paths
+(e.g., both active and in the catalog cache, or across different CitC clients).
+
+### Current Tradeoffs
+
+- **Robustness:** We collapse duplicates by name, keeping the first one
+  encountered (based on search path precedence). This ensures `suggest` always
+  works and doesn't drop recommendations.
+- **Visibility:** To prevent silently hiding configuration issues (like stale
+  symlinks pointing to old CitC clients), we print a warning to `stderr` showing
+  both the kept and ignored paths with their sources.
+
+### Future Work
+
+- `[ ]` **Report Duplicates in Catalog:** Update `skill catalog` to list skills
+  in all groups they are found in (instead of silently deduplicating them), and
+  highlight conflicting duplicates (same name, different targets) with a
+  `(! CONFLICT)` marker.
+- `[ ]` **Integrate with `doctor`:** Make `skill-select doctor` detect and
+  report these duplicate conflicts as environmental drift.
+- `[ ]` **Pruning Tooling:** Provide a way to easily prune stale active symlinks
+  (e.g., `skill prune` or automatic cleanup in `repair` if the target client is
+  gone).
 
 ## Incorporation of GMaven Indices into `jetpack`
 
@@ -73,9 +100,9 @@ When the bug is resolved, the following indices should be used:
 1. **Caching**: Implement a mechanism to download these files to a cache
    directory (e.g., `~/.cache/jetpack`) and refresh them if they are older than
    24 hours.
-2. **Querying**: Use `jq` to query the uncompressed JSON files. They are large
+1. **Querying**: Use `jq` to query the uncompressed JSON files. They are large
    but `jq` handles them quickly (under 0.5s).
-3. **Test Compatibility**: The existing test `tests/jetpack/test-search` mocks
+1. **Test Compatibility**: The existing test `tests/jetpack/test-search` mocks
    the old index format (an array of objects with a `"group"` key). The updated
    `search_index` function must auto-detect the file format (array vs object) to
    ensure tests continue to pass without modification.
