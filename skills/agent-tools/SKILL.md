@@ -522,3 +522,6 @@ env ANDROID_SERIAL=12345 scripts/popper "open settings"
   [references/troubleshooting.md](references/troubleshooting.md).
 - **Agent Function Notation (AFN)**: A notation for describing agent behaviour
   as functions. See [references/afn.md](references/afn.md).
+- **Software Installation**: How to install optional CLI tools such as codex,
+  claude, and agy. See
+  [references/software-installation.md](references/software-installation.md).
