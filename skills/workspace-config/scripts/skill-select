@@ -248,7 +248,7 @@ def fetch_skill_md(name, repo, ref, subpath, force=False):
     return stub
 
 
-def ensure_catalog_index(registry, force=False):
+def ensure_catalog_index(registry, force=False) -> bool:
     """Populate/refresh the catalog/ index of metadata stubs for registry skills.
 
     Fetches only SKILL.md per entry (fast, offline-friendly cold start), then
@@ -257,11 +257,12 @@ def ensure_catalog_index(registry, force=False):
     destructive GC of an otherwise-populated catalog.
     """
     if not registry:
-        return
+        return True
 
     catalog_dir = get_catalog_dir()
     meta_dir = catalog_dir / ".meta"
     total = len(registry)
+    has_errors = False
     for i, name in enumerate(sorted(registry), 1):
         entry = registry[name]
 
@@ -270,9 +271,10 @@ def ensure_catalog_index(registry, force=False):
             target_path = Path(entry["path"]).resolve()
             if not target_path.is_dir():
                 print(
-                    f"skill: warning: local path for {name} does not exist: {target_path}",
+                    f"skill-select: error: local path for {name} does not exist: {target_path}",
                     file=sys.stderr,
                 )
+                has_errors = True
                 continue
 
             stub_dir = catalog_dir / name
@@ -296,8 +298,10 @@ def ensure_catalog_index(registry, force=False):
         )
         if fresh:
             continue
-        print(f"skill: [{i}/{total}] indexing {name}...", file=sys.stderr)
-        fetch_skill_md(name, entry["repo"], entry["ref"], entry["subpath"], force=force)
+        print(f"skill-select: [{i}/{total}] indexing {name}...", file=sys.stderr)
+        res = fetch_skill_md(name, entry["repo"], entry["ref"], entry["subpath"], force=force)
+        if res is None:
+            has_errors = True
 
     # Garbage-collect orphaned stubs (registry is non-empty here, so this cannot
     # wipe a catalog just because a config file went missing).
@@ -314,6 +318,8 @@ def ensure_catalog_index(registry, force=False):
             stale_meta = meta_dir / item.name
             if stale_meta.exists():
                 stale_meta.unlink()
+
+    return not has_errors
 
 
 def provision_registry_skill(name, entry):
@@ -383,7 +389,7 @@ def cmd_update(names, registry):
     if not names:
         die("update requires skill name or --catalog")
 
-    if len(names) == 1 and names[0] == "--catalog":
+    if len(names) == 1 and names[0] in ("--catalog", "catalog"):
         ensure_catalog_index(registry, force=True)
         print("update: refreshed catalog index", file=sys.stderr)
         return
@@ -525,29 +531,55 @@ def cmd_doctor(registry, source_dirs):
     catalog_dir = get_catalog_dir()
     meta_dir = catalog_dir / ".meta"
     issues = []
+    unresolvable_local = False
     for name in sorted(registry):
+        entry = registry[name]
         stub_md = catalog_dir / name / "SKILL.md"
         meta = meta_dir / name
+
+        if "path" in entry:
+            target_path = Path(entry["path"]).resolve()
+            if not target_path.is_dir():
+                issues.append(
+                    f"  error        {name} (registry path does not exist: {target_path})"
+                )
+                unresolvable_local = True
+                continue
+
         if not stub_md.is_file():
-            issues.append(f"  missing      {name} (not indexed)")
+            issues.append(
+                f"  missing      {name} (registered but not indexed in catalog)"
+            )
         elif meta.is_file() and (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
-            issues.append(f"  stale        {name} (older than {CATALOG_TTL}s)")
+            issues.append(f"  stale        {name} (catalog index is stale)")
 
     if catalog_dir.is_dir():
         for item in sorted(catalog_dir.iterdir()):
             if item.name.startswith("."):
                 continue
             if item.name not in registry:
-                issues.append(f"  orphan       {item.name} (not in registry)")
+                issues.append(
+                    f"  orphan       {item.name} (in catalog cache but not in registry)"
+                )
 
     if issues:
         print()
         print("Catalog:")
         for line in sorted(issues):
             print(line)
-        print("                skill-select --update --catalog")
+        if unresolvable_local:
+            print("                (fix missing local paths first)")
+        else:
+            print("                skill-select --repair")
         sys.exit(1)
     sys.exit(0)
+
+
+def cmd_repair(registry):
+    if not ensure_catalog_index(registry, force=False):
+        print("repair: error: failed to heal some catalog entries", file=sys.stderr)
+        sys.exit(1)
+    print("repair: healed catalog index", file=sys.stderr)
 
 
 def load_skill_md(path: Path, default_name: str | None = None) -> dict | None:
@@ -784,6 +816,11 @@ def main():
         metavar="NAME",
         help="Print the source path for a skill",
     )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Repair catalog index (heal missing stubs without forcing updates)",
+    )
 
     args = parser.parse_args()
 
@@ -811,16 +848,25 @@ def main():
 
     source_dirs = [str(p) for p in search_paths]
 
+    if args.repair:
+        cmd_repair(registry)
+        sys.exit(0)
+
+    if args.update is not None:
+        # Fix hijack: if --catalog was also passed as a flag, and --update has no other args,
+        # we treat it as --update catalog.
+        if args.catalog and not args.update:
+            cmd_update(["catalog"], registry)
+        else:
+            cmd_update(args.update, registry)
+        sys.exit(0)
+
     if args.catalog or args.list:
         cmd_catalog(registry, source_dirs, as_json=args.json)
         sys.exit(0)
 
     if args.resolve:
         cmd_resolve(args.resolve, registry, source_dirs)
-        sys.exit(0)
-
-    if args.update is not None:
-        cmd_update(args.update, registry)
         sys.exit(0)
 
     if args.doctor:
