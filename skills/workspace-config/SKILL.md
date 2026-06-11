@@ -13,7 +13,7 @@ control ever seeing the configuration. It consists of three tools:
    unmanaged directories; more via plugins).
 1. **`skill-select`**: The discovery engine. Analyzes a workspace to suggest
    sensible default skills, or uses LLM-based selection when task context is
-   provided. Also owns the registry, network, and cache machinery.
+   provided. Also owns the plugins, network, and cache machinery.
 1. **`permission`**: The permission manager. Maintains per-workspace
    allow/deny/ask rules for every detected local agent, including pre-approving
    the safe commands declared by installed skills.
@@ -59,22 +59,22 @@ skill <command> [arguments]
 - **`apply`**: Provision recommended skills for this workspace via
   `skill-select` (idempotent). Consults an LLM, so it needs network access.
 - **`suggest`**: Print recommendations without installing them.
-- **`add SPEC...`**: Add a skill (a local path or a registered catalog entry).
+- **`add SPEC...`**: Add a skill (a local path or a plugin-provided catalog entry).
 - **`remove NAME...`** (alias: **`rm`**): Remove a managed skill.
 - **`list [--json]`**: List skills currently managed in this workspace.
-- **`update SPEC...`**: Re-fetch a registered catalog entry (`--all` for all,
+- **`update SPEC...`**: Re-fetch a plugin-provided catalog entry (`--all` for all,
   `--catalog` for the catalog index).
 - **`clean`**: Remove all managed skills and clear tracking records.
 - **`doctor`**: Diagnose drift between desired and on-disk skills (read-only).
 - **`repair`**: Re-link managed skills and regenerate tracking records.
-- **`catalog`**: List all registered skills and their sources.
+- **`catalog`**: List all plugin-provided skills and their sources.
 - **`resolve NAME`**: Print the source path a skill name would resolve to.
 
 ### Environment
 
 - `SKILL_SOURCE_DIRS`: Colon-separated directories searched for skills by name
   (default: `~/.dotfiles/skills:~/.private/skills:~/.corp/skills` plus the
-  registry cache).
+  catalog cache).
 - `SKILL_DEST_DIRS`: Colon-separated link destinations relative to the workspace
   root (default: `.claude/skills:.agents/skills`).
 

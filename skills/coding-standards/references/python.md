@@ -307,3 +307,55 @@ if __name__ == "__main__":
    abruptly at exit and **do not run cleanup**. If your threads require clean
    teardown, do not use `daemon=True`; instead, use an explicit stop `Event` and
    `join()` them during main thread cleanup.
+
+## Extensibility and Plugins
+
+If a Python tool or script requires an extensibility mechanism (a plugin system), you **must** follow the unified plugin pattern established in this repository. This ensures consistency, simplifies debugging, and provides a predictable interface for developers and AI agents.
+
+### The Plugin Pattern
+
+The pattern consists of:
+1.  **A Plugin Directory**: Plugins are loaded from `~/.config/<tool-name>/plugins/*.py` (where `<tool-name>` is the name of the tool, e.g., `skill-select`, `context`, `permission`).
+2.  **An API Class**: The tool defines a `PluginAPI` class that wraps the internal state and methods exposed to plugins.
+3.  **A `register(api)` Entrypoint**: Each plugin must define a top-level `register(api)` function that receives an instance of the `PluginAPI`.
+4.  **Alphabetical Precedence**: Plugins are loaded in alphabetical order of their filenames. Later plugins can override settings registered by earlier ones. Use numeric prefixes (e.g., `10_`, `20_`, `30_`) to explicitly control loading order.
+5.  **A `--plugin-template` Switch**: The tool must support a `--plugin-template` CLI switch that prints a clean, documented template of a plugin to stdout.
+6.  **Traceback Debugging**: The tool must support a `<TOOL_NAME>_DEBUG` environment variable (e.g., `SKILL_SELECT_DEBUG=1`). When set, any exceptions during plugin loading (like syntax errors) must print a full Python traceback to `stderr` instead of a silent warning.
+
+### Standard Loader Boilerplate
+
+Use this standard boilerplate to load plugins in your tool. This implementation enforces alphabetical sorting, handles registration, and supports traceback debugging:
+
+```python
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+def load_plugins(api_instance, plugins_dir: Path, prefix: str):
+    """Loads plugins from plugins_dir and registers them with api_instance.
+    
+    prefix is used for naming the imported modules and for the debug env var
+    (e.g., prefix='skill_select' checks SKILL_SELECT_DEBUG).
+    """
+    if not plugins_dir.is_dir():
+        return
+        
+    for filepath in sorted(plugins_dir.glob("*.py")):
+        module_name = f"{prefix}_plugin_{filepath.stem}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                if hasattr(module, "register"):
+                    module.register(api_instance)
+        except Exception as e:
+            print(f"{prefix.replace('_', '-')}: warning: failed to load plugin {filepath}: {e}", file=sys.stderr)
+            if os.environ.get(f"{prefix.upper()}_DEBUG") == "1":
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+```
+
+By adhering to this pattern, you guarantee that all tools in the repository remain easy to extend and maintain for both humans and AI agents.

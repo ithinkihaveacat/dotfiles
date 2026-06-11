@@ -61,49 +61,81 @@ def parse_github_url(url):
     return f"{owner}/{repo}", ref, subpath
 
 
-def load_registry():
-    registry = {}
+class SkillSelectAPI:
+    """API surface passed to a plugin's register() function."""
 
-    # Load custom registry files
-    config_dir = (
+    def __init__(self, plugin_catalog):
+        self.plugin_catalog = plugin_catalog
+
+    def register_skill(self, name, spec):
+        """Register a skill in the catalog.
+
+        spec must be:
+        - A dict with 'path' (local path, automatically ~ expanded)
+        - OR a dict with 'repo' and 'ref' (GitHub, with optional 'subpath')
+        """
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"Skill '{name}': spec must be a dictionary, got {type(spec).__name__}"
+            )
+
+        if "path" in spec:
+            if any(k in spec for k in ("repo", "ref", "subpath")):
+                raise ValueError(
+                    f"Skill '{name}': 'path' cannot be mixed with GitHub parameters."
+                )
+            # Normalize path (expand ~) immediately at registration time
+            import os
+
+            spec["path"] = os.path.expanduser(spec["path"])
+        elif "repo" in spec and "ref" in spec:
+            spec.setdefault("subpath", None)
+        else:
+            raise ValueError(
+                f"Skill '{name}': spec must contain either 'path' or both 'repo' and 'ref'."
+            )
+
+        self.plugin_catalog[name] = spec
+
+
+def load_plugins(plugin_catalog):
+    import importlib.util
+
+    plugins_dir = (
         Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser()
         / "skill-select"
+        / "plugins"
     )
-    registry_file = config_dir / "registry"
-    registry_d = config_dir / "registry.d"
+    if not plugins_dir.is_dir():
+        return
 
-    def parse_file(path):
-        if not path.is_file():
-            return
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-                name = parts[0]
-                value = parts[1]
-                if value.startswith("http://") or value.startswith("https://"):
-                    repo, ref, subpath = parse_github_url(value)
-                    registry[name] = {
-                        "repo": repo,
-                        "ref": ref,
-                        "subpath": subpath,
-                    }
-                else:
-                    # Treat as local path and expand ~
-                    expanded_path = os.path.expanduser(value)
-                    registry[name] = {"path": expanded_path}
+    api = SkillSelectAPI(plugin_catalog)
 
-    parse_file(registry_file)
-    if registry_d.is_dir():
-        for item in sorted(registry_d.iterdir()):
-            if item.is_file() and not item.name.startswith("."):
-                parse_file(item)
+    for filepath in sorted(plugins_dir.glob("*.py")):
+        module_name = f"skill_select_plugin_{filepath.stem}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                if hasattr(module, "register"):
+                    module.register(api)
+        except Exception as e:
+            print(
+                f"skill-select: warning: failed to load plugin {filepath}: {e}",
+                file=sys.stderr,
+            )
+            if os.environ.get("SKILL_SELECT_DEBUG") == "1":
+                import traceback
 
-    return registry
+                traceback.print_exc(file=sys.stderr)
+
+
+def load_plugins_catalog():
+    plugin_catalog = {}
+    load_plugins(plugin_catalog)
+    return plugin_catalog
 
 
 def _atomic_replace_dir(src, dest):
@@ -248,26 +280,26 @@ def fetch_skill_md(name, repo, ref, subpath, force=False):
     return stub
 
 
-def ensure_catalog_index(registry, force=False) -> bool:
-    """Populate/refresh the catalog/ index of metadata stubs for registry skills.
+def ensure_catalog_index(plugin_catalog, force=False) -> bool:
+    """Populate/refresh the catalog/ index of metadata stubs for plugin-defined skills.
 
     Fetches only SKILL.md per entry (fast, offline-friendly cold start), then
-    garbage-collects stubs whose names are no longer registered. Returns early
-    when the registry is empty so a missing/unreadable config never triggers a
+    garbage-collects stubs whose names are no longer defined. Returns early
+    when the catalog is empty so a missing/unreadable config never triggers a
     destructive GC of an otherwise-populated catalog.
     """
-    if not registry:
+    if not plugin_catalog:
         return True
 
     catalog_dir = get_catalog_dir()
     meta_dir = catalog_dir / ".meta"
-    total = len(registry)
+    total = len(plugin_catalog)
     has_errors = False
-    for i, name in enumerate(sorted(registry), 1):
-        entry = registry[name]
+    for i, name in enumerate(sorted(plugin_catalog), 1):
+        entry = plugin_catalog[name]
 
         if "path" in entry:
-            # Local registry entry: symlink the directory into catalog
+            # Local entry: symlink the directory into catalog
             target_path = Path(entry["path"]).resolve()
             if not target_path.is_dir():
                 print(
@@ -299,17 +331,19 @@ def ensure_catalog_index(registry, force=False) -> bool:
         if fresh:
             continue
         print(f"skill-select: [{i}/{total}] indexing {name}...", file=sys.stderr)
-        res = fetch_skill_md(name, entry["repo"], entry["ref"], entry["subpath"], force=force)
+        res = fetch_skill_md(
+            name, entry["repo"], entry["ref"], entry["subpath"], force=force
+        )
         if res is None:
             has_errors = True
 
-    # Garbage-collect orphaned stubs (registry is non-empty here, so this cannot
+    # Garbage-collect orphaned stubs (plugin_catalog is non-empty here, so this cannot
     # wipe a catalog just because a config file went missing).
     if catalog_dir.is_dir():
         for item in catalog_dir.iterdir():
             if item.name.startswith("."):
                 continue
-            if item.name in registry:
+            if item.name in plugin_catalog:
                 continue
             if item.is_symlink() or not item.is_dir():
                 item.unlink()
@@ -322,8 +356,8 @@ def ensure_catalog_index(registry, force=False) -> bool:
     return not has_errors
 
 
-def provision_registry_skill(name, entry):
-    """Ensure a registry skill's full repo is cached and fresh before adding.
+def provision_plugin_skill(name, entry):
+    """Ensure a plugin-provided skill's full repo is cached and fresh before adding.
 
     Force-refreshes when the cache is missing or older than PROVISION_TTL so a
     just-added skill reflects a recent upstream, then leaves fetch_github's own
@@ -342,7 +376,7 @@ def provision_registry_skill(name, entry):
     fetch_github(name, entry["repo"], entry["ref"], entry["subpath"], force=stale)
 
 
-def resolve_spec(spec, registry, source_dirs):
+def resolve_spec(spec, plugin_catalog, source_dirs):
     expanded_spec = os.path.expanduser(spec)
 
     # 1. Local path check
@@ -357,13 +391,15 @@ def resolve_spec(spec, registry, source_dirs):
             die(f"skill source not found: {spec}")
         return path, path.name
 
-    # 2. Registry check
-    if spec in registry:
-        entry = registry[spec]
+    # 2. Plugin catalog check
+    if spec in plugin_catalog:
+        entry = plugin_catalog[spec]
         if "path" in entry:
             path = Path(entry["path"]).resolve()
             if not path.is_dir():
-                die(f"skill source not found: {entry['path']} (registered as {spec})")
+                die(
+                    f"skill source not found: {entry['path']} (defined by plugin as {spec})"
+                )
             return path, spec
         else:
             repo = entry["repo"]
@@ -381,24 +417,24 @@ def resolve_spec(spec, registry, source_dirs):
             return path, spec
 
     die(
-        f"unknown skill '{spec}': not a path, a registered catalog entry, or under any of SKILL_SOURCE_DIRS ({':'.join(source_dirs)})"
+        f"unknown skill '{spec}': not a path, a plugin-provided catalog entry, or under any of SKILL_SOURCE_DIRS ({':'.join(source_dirs)})"
     )
 
 
-def cmd_update(names, registry):
+def cmd_update(names, plugin_catalog):
     if not names:
         die("update requires skill name or --catalog")
 
     if len(names) == 1 and names[0] in ("--catalog", "catalog"):
-        ensure_catalog_index(registry, force=True)
+        ensure_catalog_index(plugin_catalog, force=True)
         print("update: refreshed catalog index", file=sys.stderr)
         return
 
     cache_base = get_cache_base()
 
     for name in names:
-        if name in registry:
-            entry = registry[name]
+        if name in plugin_catalog:
+            entry = plugin_catalog[name]
             if "path" in entry:
                 print(
                     f"update: {name} is a local skill; nothing to update",
@@ -421,19 +457,20 @@ def cmd_update(names, registry):
             )
         else:
             print(
-                f"update: {name} has no registry entry; cannot refresh", file=sys.stderr
+                f"update: {name} is not defined by any plugin; cannot refresh",
+                file=sys.stderr,
             )
 
 
-def cmd_resolve(name, registry, source_dirs):
+def cmd_resolve(name, plugin_catalog, source_dirs):
     try:
-        path, actual_name = resolve_spec(name, registry, source_dirs)
+        path, actual_name = resolve_spec(name, plugin_catalog, source_dirs)
         print(f"{path}\t{actual_name}")
     except SystemExit:
         sys.exit(1)
 
 
-def cmd_catalog(registry, source_dirs, as_json=False):
+def cmd_catalog(plugin_catalog, source_dirs, as_json=False):
     import json as _json
     from collections import defaultdict
 
@@ -456,11 +493,11 @@ def cmd_catalog(registry, source_dirs, as_json=False):
                 source_order[resolved] = order_idx
                 order_idx += 1
 
-    # 1. Registry catalog entries
-    for name in registry:
-        entry = registry[name]
+    # 1. Plugin catalog entries
+    for name in plugin_catalog:
+        entry = plugin_catalog[name]
         if "path" in entry:
-            grouped["Registry"].append((name, entry["path"]))
+            grouped["Plugins"].append((name, entry["path"]))
         else:
             repo = entry["repo"]
             ref = entry["ref"]
@@ -469,8 +506,8 @@ def cmd_catalog(registry, source_dirs, as_json=False):
             url = f"https://github.com/{repo}/tree/{ref}"
             if subpath:
                 url += f"/{subpath}"
-            # Group all registry items under "Registry" showing their full URL
-            grouped["Registry"].append((name, url))
+            # Group all plugin items under "Plugins" showing their full URL
+            grouped["Plugins"].append((name, url))
 
     # 2. Local catalog entries under source_dirs
     for d in source_dirs:
@@ -485,7 +522,7 @@ def cmd_catalog(registry, source_dirs, as_json=False):
                     target = None
                     if item.is_symlink():
                         target = clean_p(item.resolve())
-                    # Remove it from registry if it was there to avoid duplicates
+                    # Remove it from plugin_catalog if it was there to avoid duplicates
                     for grp in list(grouped.keys()):
                         grouped[grp] = [x for x in grouped[grp] if x[0] != item.name]
                     grouped[group_key].append((item.name, target))
@@ -496,7 +533,7 @@ def cmd_catalog(registry, source_dirs, as_json=False):
             del grouped[grp]
 
     def sort_key(grp):
-        if grp == "Registry":
+        if grp == "Plugins":
             return (2, grp)
         if grp in source_order:
             return (0, source_order[grp])
@@ -527,13 +564,13 @@ def cmd_catalog(registry, source_dirs, as_json=False):
                 print(f"  {name}")
 
 
-def cmd_doctor(registry, source_dirs):
+def cmd_doctor(plugin_catalog, source_dirs):
     catalog_dir = get_catalog_dir()
     meta_dir = catalog_dir / ".meta"
     issues = []
     unresolvable_local = False
-    for name in sorted(registry):
-        entry = registry[name]
+    for name in sorted(plugin_catalog):
+        entry = plugin_catalog[name]
         stub_md = catalog_dir / name / "SKILL.md"
         meta = meta_dir / name
 
@@ -541,14 +578,14 @@ def cmd_doctor(registry, source_dirs):
             target_path = Path(entry["path"]).resolve()
             if not target_path.is_dir():
                 issues.append(
-                    f"  error        {name} (registry path does not exist: {target_path})"
+                    f"  error        {name} (plugin-provided path does not exist: {target_path})"
                 )
                 unresolvable_local = True
                 continue
 
         if not stub_md.is_file():
             issues.append(
-                f"  missing      {name} (registered but not indexed in catalog)"
+                f"  missing      {name} (plugin-defined but not indexed in catalog)"
             )
         elif meta.is_file() and (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
             issues.append(f"  stale        {name} (catalog index is stale)")
@@ -557,9 +594,9 @@ def cmd_doctor(registry, source_dirs):
         for item in sorted(catalog_dir.iterdir()):
             if item.name.startswith("."):
                 continue
-            if item.name not in registry:
+            if item.name not in plugin_catalog:
                 issues.append(
-                    f"  orphan       {item.name} (in catalog cache but not in registry)"
+                    f"  orphan       {item.name} (in catalog cache but not defined by any plugin)"
                 )
 
     if issues:
@@ -575,8 +612,8 @@ def cmd_doctor(registry, source_dirs):
     sys.exit(0)
 
 
-def cmd_repair(registry):
-    if not ensure_catalog_index(registry, force=False):
+def cmd_repair(plugin_catalog):
+    if not ensure_catalog_index(plugin_catalog, force=False):
         print("repair: error: failed to heal some catalog entries", file=sys.stderr)
         sys.exit(1)
     print("repair: healed catalog index", file=sys.stderr)
@@ -804,7 +841,7 @@ def main():
     parser.add_argument(
         "--update",
         nargs="*",
-        help="Re-fetch a registered catalog entry; --all for every managed skill, --catalog to refresh the whole metadata index",
+        help="Re-fetch a plugin-provided catalog entry; --all for every managed skill, --catalog to refresh the whole metadata index",
     )
     parser.add_argument(
         "--doctor",
@@ -821,10 +858,41 @@ def main():
         action="store_true",
         help="Repair catalog index (heal missing stubs without forcing updates)",
     )
+    parser.add_argument(
+        "--plugin-template",
+        action="store_true",
+        help="Output a template/documentation for creating a Python plugin",
+    )
 
     args = parser.parse_args()
 
-    registry = load_registry()
+    if args.plugin_template:
+        print('''"""
+Example Plugin for skill-select.
+Save this file as ~/.config/skill-select/plugins/my_plugin.py
+"""
+
+def register(api):
+    """
+    This function is automatically called by `skill-select` when the plugin is loaded.
+    You can register your custom skills here using the provided `SkillSelectAPI`.
+    """
+    
+    # 1. Register a local skill (paths starting with ~ are automatically expanded)
+    api.register_skill("my-local-skill", {
+        "path": "~/workspace/my-local-skill"
+    })
+
+    # 2. Register a GitHub skill
+    api.register_skill("my-remote-skill", {
+        "repo": "owner/repo",
+        "ref": "main",          # Branch, tag, or commit SHA
+        "subpath": "skills/my"  # Optional subdirectory within the repo
+    })
+''')
+        sys.exit(0)
+
+    plugin_catalog = load_plugins_catalog()
 
     search_paths = []
     if args.search_dirs:
@@ -849,28 +917,28 @@ def main():
     source_dirs = [str(p) for p in search_paths]
 
     if args.repair:
-        cmd_repair(registry)
+        cmd_repair(plugin_catalog)
         sys.exit(0)
 
     if args.update is not None:
         # Fix hijack: if --catalog was also passed as a flag, and --update has no other args,
         # we treat it as --update catalog.
         if args.catalog and not args.update:
-            cmd_update(["catalog"], registry)
+            cmd_update(["catalog"], plugin_catalog)
         else:
-            cmd_update(args.update, registry)
+            cmd_update(args.update, plugin_catalog)
         sys.exit(0)
 
     if args.catalog or args.list:
-        cmd_catalog(registry, source_dirs, as_json=args.json)
+        cmd_catalog(plugin_catalog, source_dirs, as_json=args.json)
         sys.exit(0)
 
     if args.resolve:
-        cmd_resolve(args.resolve, registry, source_dirs)
+        cmd_resolve(args.resolve, plugin_catalog, source_dirs)
         sys.exit(0)
 
     if args.doctor:
-        cmd_doctor(registry, source_dirs)
+        cmd_doctor(plugin_catalog, source_dirs)
         sys.exit(0)
 
     if not search_paths:
@@ -881,7 +949,7 @@ def main():
         sys.exit(1)
 
     # Auto-heal the metadata index (TTL-cached) before discovery
-    ensure_catalog_index(registry)
+    ensure_catalog_index(plugin_catalog)
 
     skills = gather_skills(search_paths)
 
@@ -978,12 +1046,12 @@ TARGET DIRECTORY INFO:
 
     resolved = resolve_selection(results, skills)
 
-    # Provision registry skills and update paths to the fully cloned repositories
+    # Provision plugin skills and update paths to the fully cloned repositories
     for item in resolved:
         name = item["name"]
-        if name in registry and "repo" in registry[name]:
-            provision_registry_skill(name, registry[name])
-            entry = registry[name]
+        if name in plugin_catalog and "repo" in plugin_catalog[name]:
+            provision_plugin_skill(name, plugin_catalog[name])
+            entry = plugin_catalog[name]
             owner, reponame = entry["repo"].split("/", 1)
             cachedir = get_cache_base() / owner / reponame / entry["ref"]
             if entry["subpath"]:

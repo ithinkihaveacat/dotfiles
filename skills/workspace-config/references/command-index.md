@@ -25,22 +25,23 @@ workspace types can be added via plugins in ~/.config/skill/plugins/.
 Commands:
   apply           Provision skills for this workspace via skill-select (idempotent)
   suggest         Print skill-select recommendations without installing them
-  add SPEC...     Add a skill: a local path or a registered catalog entry
+  add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill this tool added (alias: rm)
   list [--json]   List skills this tool is managing in the current workspace
-  update SPEC...  Re-fetch a registered catalog entry; --all for every managed
+  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every managed
                   skill, --catalog to refresh the whole metadata index
   clean           Remove all skills this tool added and clear the tracking record
   doctor          Diagnose drift between desired and on-disk skills (read-only)
   repair          Re-link managed skills and regenerate tracking records
-  catalog         List registered skills and sources
+  catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
 
 Options:
-  --help          Display this help message and exit
+  --help             Display this help message and exit
+  --plugin-template  Output a template/documentation for creating a Workspace plugin
 
-Note: registry, network, and AI functions are delegated to 'skill-select'.
+Note: plugins, network, and AI functions are delegated to 'skill-select'.
 ```
 
 <!-- /generated -->
@@ -55,7 +56,7 @@ The block below is `scripts/skill-select --help`, kept in sync by
 ```text
 usage: skill-select [--help] [--context CONTEXT] [--search-dirs SEARCH_DIRS]
                     [--catalog] [--json] [--update [UPDATE ...]] [--doctor]
-                    [--resolve NAME]
+                    [--resolve NAME] [--repair] [--plugin-template]
                     [dir]
 
 Skill Select: Discover relevant agent skills.
@@ -74,12 +75,16 @@ options:
   --json                Emit structured output (name, source, reason) instead
                         of bare names.
   --update [UPDATE ...]
-                        Re-fetch a registered catalog entry; --all for every
-                        managed skill, --catalog to refresh the whole metadata
-                        index
+                        Re-fetch a plugin-provided catalog entry; --all for
+                        every managed skill, --catalog to refresh the whole
+                        metadata index
   --doctor              Diagnose drift between desired and on-disk skills
                         (read-only)
   --resolve NAME        Print the source path for a skill
+  --repair              Repair catalog index (heal missing stubs without
+                        forcing updates)
+  --plugin-template     Output a template/documentation for creating a Python
+                        plugin
 ```
 
 <!-- /generated -->
@@ -111,6 +116,7 @@ Commands:
 Options:
   --agent NAME       Operate on a single agent backend (agy, claude)
   --help             Display this help message and exit
+  --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
   agy                Antigravity/jetski project config (under ~/.gemini)
