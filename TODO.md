@@ -1,5 +1,37 @@
 # TODO
 
+## Align shellcheck Versions Between CI Jobs
+
+- `[ ]` Install the same pinned shellcheck (v0.11.0, from GitHub releases) in
+  the `test` job of `.github/workflows/lint.yml` as in the `shellcheck-shfmt`
+  job, instead of apt's older version.
+
+The lint job pins v0.11.0 while the test job (and typical local apt installs)
+gets 0.9.x. The versions disagree on findings (e.g. apt's 0.9.x flags
+SC2120/SC2119 in `jetpack` and `video-find-hd` that v0.11 does not), so "passes
+locally" and "passes in CI" can diverge. A shared install step (or composite
+action) removes the ambiguity.
+
+## Surface Plugin Load Failures in `doctor`
+
+- `[ ]` Make `skill-select doctor` (and the other plugin-loading tools' doctor
+  commands) report plugins that failed to load.
+
+A plugin that fails to load currently produces only a one-line stderr warning
+that scrolls past; `doctor` then reports a healthy catalog that is silently
+missing that plugin's skills. The loader should record load failures and
+`doctor` should list them (e.g. "plugin 20_corp.py failed to load"), fitting
+the doctor-as-drift-detection pattern.
+
+## skill-select Cleanups and Legacy Shim Retirement
+
+- `[ ]` Fix the misleading dedup comment in `cmd_catalog` ("Remove it from
+  plugin_catalog" — it actually edits the grouped output).
+- `[ ]` Collapse the `load_plugins`/`load_plugins_catalog` pair into one
+  function.
+- `[ ]` After a deprecation window, delete the `LEGACY_FLAGS` migration shim
+  and the hidden `list` alias for `catalog` in `skill-select`.
+
 ## Incorporation of GMaven Indices into `jetpack`
 
 - `[ ]` Replace custom search and indexing in `jetpack` script with pre-built

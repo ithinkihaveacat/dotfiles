@@ -321,6 +321,7 @@ The pattern consists of:
 4.  **Alphabetical Precedence**: Plugins are loaded in alphabetical order of their filenames. Later plugins can override settings registered by earlier ones. Use numeric prefixes (e.g., `10_`, `20_`, `30_`) to explicitly control loading order.
 5.  **A `--plugin-template` Switch**: The tool must support a `--plugin-template` CLI switch that prints a clean, documented template of a plugin to stdout.
 6.  **Traceback Debugging**: The tool must support a `<TOOL_NAME>_DEBUG` environment variable (e.g., `SKILL_SELECT_DEBUG=1`). When set, any exceptions during plugin loading (like syntax errors) must print a full Python traceback to `stderr` instead of a silent warning.
+7.  **Fast, Side-Effect-Free Registration**: `register(api)` runs on every tool invocation, so it must be fast and side-effect-free: no network calls, subprocesses, or filesystem writes. The `--plugin-template` output must state this constraint.
 
 ### Standard Loader Boilerplate
 

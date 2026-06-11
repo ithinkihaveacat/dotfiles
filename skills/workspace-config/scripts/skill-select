@@ -78,6 +78,8 @@ class SkillSelectAPI:
             raise ValueError(
                 f"Skill '{name}': spec must be a dictionary, got {type(spec).__name__}"
             )
+        # Copy so registration never mutates (or aliases) the plugin's dict
+        spec = dict(spec)
 
         if "path" in spec:
             if any(k in spec for k in ("repo", "ref", "subpath")):
@@ -85,8 +87,6 @@ class SkillSelectAPI:
                     f"Skill '{name}': 'path' cannot be mixed with GitHub parameters."
                 )
             # Normalize path (expand ~) immediately at registration time
-            import os
-
             spec["path"] = os.path.expanduser(spec["path"])
         elif "repo" in spec and "ref" in spec:
             spec.setdefault("subpath", None)
@@ -423,7 +423,7 @@ def resolve_spec(spec, plugin_catalog, source_dirs):
 
 def cmd_update(names, plugin_catalog):
     if not names:
-        die("update requires skill name or --catalog")
+        die("update requires a skill name or 'catalog'")
 
     if len(names) == 1 and names[0] in ("--catalog", "catalog"):
         ensure_catalog_index(plugin_catalog, force=True)
@@ -564,7 +564,7 @@ def cmd_catalog(plugin_catalog, source_dirs, as_json=False):
                 print(f"  {name}")
 
 
-def cmd_doctor(plugin_catalog, source_dirs):
+def cmd_doctor(plugin_catalog):
     catalog_dir = get_catalog_dir()
     meta_dir = catalog_dir / ".meta"
     issues = []
@@ -607,7 +607,7 @@ def cmd_doctor(plugin_catalog, source_dirs):
         if unresolvable_local:
             print("                (fix missing local paths first)")
         else:
-            print("                skill-select --repair")
+            print("                skill-select repair")
         sys.exit(1)
     sys.exit(0)
 
@@ -801,75 +801,12 @@ def die(msg):
     sys.exit(1)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Skill Select: Discover relevant agent skills.",
-        add_help=False,
-    )
-    parser.add_argument(
-        "--help",
-        action="help",
-        default=argparse.SUPPRESS,
-        help="Display this help message and exit.",
-    )
-    parser.add_argument(
-        "dir", nargs="?", default=".", help="Directory to analyze (default: current)."
-    )
-    parser.add_argument(
-        "--context",
-        help="Comprehensive, self-contained context to guide selection.",
-    )
-    parser.add_argument(
-        "--search-dirs",
-        help="Colon-separated search directories (overrides environment).",
-    )
-    parser.add_argument(
-        "--catalog",
-        action="store_true",
-        help="Print the full catalog of available skills and exit.",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit structured output (name, source, reason) instead of bare names.",
-    )
-    parser.add_argument(
-        "--update",
-        nargs="*",
-        help="Re-fetch a plugin-provided catalog entry; --all for every managed skill, --catalog to refresh the whole metadata index",
-    )
-    parser.add_argument(
-        "--doctor",
-        action="store_true",
-        help="Diagnose drift between desired and on-disk skills (read-only)",
-    )
-    parser.add_argument(
-        "--resolve",
-        metavar="NAME",
-        help="Print the source path for a skill",
-    )
-    parser.add_argument(
-        "--repair",
-        action="store_true",
-        help="Repair catalog index (heal missing stubs without forcing updates)",
-    )
-    parser.add_argument(
-        "--plugin-template",
-        action="store_true",
-        help="Output a template/documentation for creating a Python plugin",
-    )
-
-    args = parser.parse_args()
-
-    if args.plugin_template:
-        print('''"""
+PLUGIN_TEMPLATE = '''"""
 Example Plugin for skill-select.
 Save this file as ~/.config/skill-select/plugins/my_plugin.py
+
+register() runs on every skill-select invocation. Keep it fast and
+side-effect-free: no network calls, subprocesses, or filesystem writes.
 """
 
 def register(api):
@@ -877,7 +814,7 @@ def register(api):
     This function is automatically called by `skill-select` when the plugin is loaded.
     You can register your custom skills here using the provided `SkillSelectAPI`.
     """
-    
+
     # 1. Register a local skill (paths starting with ~ are automatically expanded)
     api.register_skill("my-local-skill", {
         "path": "~/workspace/my-local-skill"
@@ -889,57 +826,139 @@ def register(api):
         "ref": "main",          # Branch, tag, or commit SHA
         "subpath": "skills/my"  # Optional subdirectory within the repo
     })
-''')
+'''
+
+
+def usage():
+    print("""Usage: skill-select <command> [arguments]
+
+Discover and recommend agent skills, and maintain the catalog of
+plugin-provided skills. Plumbing for the higher-level 'skill' tool.
+
+Commands:
+  suggest [DIR]   Recommend skills for DIR via the Gemini API (default: cwd)
+  catalog         List every available skill and its source
+  resolve NAME    Print the source path for a skill
+  update NAME...  Re-fetch plugin-provided catalog entries; 'update catalog'
+                  refreshes the whole metadata index
+  doctor          Diagnose drift in the catalog index (read-only)
+  repair          Repair the catalog index (heal missing stubs)
+
+Options:
+  --context TEXT       Self-contained context to guide selection (suggest)
+  --search-dirs DIRS   Colon-separated skill search directories, overriding
+                       SKILL_SOURCE_DIRS (suggest, catalog, resolve)
+  --json               Emit structured output (suggest, catalog)
+  --help               Display this help message and exit
+  --plugin-template    Output a template for creating a skill-select plugin""")
+    sys.exit(0)
+
+
+def compute_search_paths(search_dirs=None):
+    """Resolve skill search paths from --search-dirs, SKILL_SOURCE_DIRS, or the
+    built-in defaults (which also include the plugin catalog index)."""
+    if search_dirs:
+        return [Path(p) for p in search_dirs.split(":")]
+    env_dirs = os.environ.get("SKILL_SOURCE_DIRS")
+    if env_dirs:
+        search_paths = [Path(p) for p in env_dirs.split(":")]
+    else:
+        home = Path.home()
+        search_paths = [
+            home / ".dotfiles/skills",
+            home / ".private/skills",
+            home / ".corp/skills",
+        ]
+    search_paths.append(get_catalog_dir())
+    return search_paths
+
+
+# Pre-subcommand spellings, kept only to point callers at the new syntax.
+LEGACY_FLAGS = {
+    "--catalog": "catalog",
+    "--list": "catalog",
+    "--update": "update",
+    "--doctor": "doctor",
+    "--resolve": "resolve",
+    "--repair": "repair",
+}
+
+
+def main():
+    argv = sys.argv[1:]
+
+    if "--plugin-template" in argv:
+        print(PLUGIN_TEMPLATE)
         sys.exit(0)
+
+    # Help handling: bare invocation, 'help', '--help' anywhere.
+    if not argv or argv[0] in ("--help", "help"):
+        usage()
+
+    cmd = argv[0]
+    args = argv[1:]
+
+    if "--help" in args:
+        usage()
+
+    if cmd in LEGACY_FLAGS:
+        print(
+            f"skill-select: '{cmd}' is now a subcommand: use 'skill-select {LEGACY_FLAGS[cmd]}'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     plugin_catalog = load_plugins_catalog()
 
-    search_paths = []
-    if args.search_dirs:
-        search_paths.extend([Path(p) for p in args.search_dirs.split(":")])
-    else:
-        env_dirs = os.environ.get("SKILL_SOURCE_DIRS")
-        if env_dirs:
-            search_paths.extend([Path(p) for p in env_dirs.split(":")])
-        else:
-            home = Path.home()
-            search_paths.extend(
-                [
-                    home / ".dotfiles/skills",
-                    home / ".private/skills",
-                    home / ".corp/skills",
-                ]
-            )
-
-        cache_base = get_catalog_dir().parent
-        search_paths.append(cache_base / "catalog")
-
-    source_dirs = [str(p) for p in search_paths]
-
-    if args.repair:
+    if cmd == "repair":
         cmd_repair(plugin_catalog)
         sys.exit(0)
 
-    if args.update is not None:
-        # Fix hijack: if --catalog was also passed as a flag, and --update has no other args,
-        # we treat it as --update catalog.
-        if args.catalog and not args.update:
-            cmd_update(["catalog"], plugin_catalog)
-        else:
-            cmd_update(args.update, plugin_catalog)
+    if cmd == "update":
+        cmd_update(args, plugin_catalog)
         sys.exit(0)
 
-    if args.catalog or args.list:
-        cmd_catalog(plugin_catalog, source_dirs, as_json=args.json)
+    if cmd == "doctor":
+        cmd_doctor(plugin_catalog)  # exits with its own status
+
+    if cmd in ("catalog", "list"):  # 'list' is a hidden legacy alias
+        parser = argparse.ArgumentParser(prog="skill-select catalog", add_help=False)
+        parser.add_argument("--json", action="store_true")
+        parser.add_argument("--search-dirs")
+        opts = parser.parse_args(args)
+        source_dirs = [str(p) for p in compute_search_paths(opts.search_dirs)]
+        cmd_catalog(plugin_catalog, source_dirs, as_json=opts.json)
         sys.exit(0)
 
-    if args.resolve:
-        cmd_resolve(args.resolve, plugin_catalog, source_dirs)
+    if cmd == "resolve":
+        parser = argparse.ArgumentParser(prog="skill-select resolve", add_help=False)
+        parser.add_argument("name")
+        parser.add_argument("--search-dirs")
+        opts = parser.parse_args(args)
+        source_dirs = [str(p) for p in compute_search_paths(opts.search_dirs)]
+        cmd_resolve(opts.name, plugin_catalog, source_dirs)
         sys.exit(0)
 
-    if args.doctor:
-        cmd_doctor(plugin_catalog, source_dirs)
+    if cmd == "suggest":
+        parser = argparse.ArgumentParser(prog="skill-select suggest", add_help=False)
+        parser.add_argument("dir", nargs="?", default=".")
+        parser.add_argument("--context")
+        parser.add_argument("--search-dirs")
+        parser.add_argument("--json", action="store_true")
+        opts = parser.parse_args(args)
+        cmd_suggest(opts, plugin_catalog)
         sys.exit(0)
+
+    hint = ""
+    if Path(cmd).is_dir():
+        hint = " (directory analysis is now 'skill-select suggest DIR')"
+    print(f"skill-select: unknown command '{cmd}'{hint}", file=sys.stderr)
+    print("Try 'skill-select --help' for more information.", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_suggest(args, plugin_catalog):
+    search_paths = compute_search_paths(args.search_dirs)
 
     if not search_paths:
         print(

@@ -16,6 +16,7 @@ complete -f -c permission -n __fish_use_subcommand -a doctor -d 'Report missing 
 
 # Options
 complete -f -c permission -l help -d 'Display help and exit'
+complete -f -c permission -l plugin-template -d 'Output a template for creating a Permission plugin'
 complete -x -c permission -l agent -a 'agy claude' -d 'Operate on a single agent backend'
 complete -f -c permission -n '__fish_seen_subcommand_from add' -l deny -d 'Add to the denylist'
 complete -f -c permission -n '__fish_seen_subcommand_from add' -l ask -d 'Add to the ask list (Claude Code only)'
