@@ -285,3 +285,23 @@ See these scripts for reference implementations:
 - `bin/macos-finder-reveal` - Multiple files, macOS-specific
 
 Each demonstrates proper GNU coreutils style documentation.
+
+### Skill Development and Zero-Duplication
+
+When creating or modifying agent skills under `skills/`, adhere to a strict
+**zero-duplication policy** for helper scripts and CLI tools.
+
+- **Prefer General Capabilities**: Do not package generic scripts (e.g., for
+  capturing screenshots, recording video, managing Wear OS Tiles, or setting
+  system themes) inside specialized skills. If another skill (like the **`adb`**
+  skill) already contains dedicated, pre-approved scripts for these tasks, the
+  new skill must remain **reference-only (no scripts/ directory)**.
+- **Instruct via References**: Within the skill's reference guides, describe the
+  *general capability* (e.g., "To dynamically add a Tile on the watch...") and
+  explicitly direct the reader/agent to search other active skills (like `adb`)
+  for the automation scripts that implement it.
+- **Centralize Development Guidelines**: Do not write meta-guidelines (such as
+  "do not duplicate scripts") inside a skill's main `SKILL.md`. Keep the
+  `SKILL.md` focused entirely on user-facing and agent-facing usage. Place all
+  skill development, styling, and coding guidelines here in `AGENTS.md` or under
+  the `coding-standards` skill.
