@@ -34,8 +34,8 @@ spoofing limits).
   `references/system-states-and-connectivity.md` (Bluetooth proxy bottlenecks,
   Wi-Fi failovers, Doze mode, and battery simulation).
 - **Location & Sensors**: `references/location-and-sensors.md` (Fused Location
-  Provider security, Mock Location App requirements, and Wear OS Health Services
-  synthetic data).
+  Provider security, Mock Location App requirements, Wear OS Health Services
+  synthetic data, and One-Handed Gestures (Double-Pinch) simulation/overrides).
 - **Permissions & OS Behavior**: `references/permissions-and-os-behavior.md`
   (Foreground Service types, API 30-36 changes, and Wear OS granular health
   permissions).
