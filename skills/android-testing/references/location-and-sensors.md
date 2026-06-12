@@ -290,14 +290,49 @@ behavior:
 - Once the user successfully performs/consumes the gesture, the hints are
   suppressed.
 
-#### Forcing Hints via ADB (Resetting the Budget)
+#### Forcing Hints & Resetting the Education Budget
 
-To force the visual ripples and scroll-hint dots to appear again during
-development and testing, you must clear the system's hint history for your
-application:
+During testing, once the hints disappear, you can force the system to show them
+again by resetting the app's gesture history. There are two ways to do this
+depending on your device's build type:
+
+##### Method 1: Using `hint clear` (Requires `adb root`)
+
+If you are testing on an **Emulator** or an **Internal Developer Device**
+running a `userdebug` or `eng` build, you can restart ADB as root and clear the
+hint history directly:
 
 ```bash
+# Restart adbd as root
+adb root
+
+# Clear the hint history for your package
 adb shell cmd IWearGestureService hint clear <package_name>
+```
+
+> [!IMPORTANT] **Who can run `adb root`?**
+>
+> - **Allowed**: Emulators (AVDs) and internal developer devices running
+>   `userdebug` or `eng` builds.
+> - **Blocked**: Commercial/retail devices running production `user` builds. On
+>   these devices, `adb root` will fail with
+>   `adbd cannot run as root in production builds`.
+> - *Note on Network Debugging*: Running `adb root` over a network/Wi-Fi
+>   connection (like `localhost:41027`) will temporarily disconnect your
+>   debugging session. You must run `adb connect <address>` to reconnect after
+>   `adbd` restarts as root.
+
+##### Method 2: Using `pm clear` (Root-Free Fallback for Retail Devices)
+
+If you are testing on a **retail physical watch** (where `adb root` is blocked),
+you can achieve the exact same result by clearing the application's local
+package data. This resets the app's lifetime and forces the gesture service to
+treat the next launch as a "first-time discovery" event, triggering the hints
+immediately:
+
+```bash
+# Wipes app data, resetting the gesture education budget (Works on ALL devices)
+adb shell pm clear <package_name>
 ```
 
 #### Verifying Hint Config in Dumpsys
