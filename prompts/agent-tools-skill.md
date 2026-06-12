@@ -225,7 +225,7 @@ skill activates.
   - `scripts/photo-has-people photo.jpg` (check for people)
   - `cat file.txt | scripts/token-count` (count tokens)
   - `scripts/emerson "Question" < document.txt` (essay-length analysis)
-  - `scripts/context gemini-api | scripts/emerson "Question"` (context +
+  - `scripts/context show gemini-api | scripts/emerson "Question"` (context +
     analysis)
   - `echo "text" | scripts/satisfies "condition"` (boolean evaluation)
   - `scripts/popper "start an exercise"` (interact with Android UI)

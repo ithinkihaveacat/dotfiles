@@ -558,19 +558,11 @@ to a file to search locally.
 <!-- generated: ../scripts/context --help -->
 
 ```text
-usage: context [--help] [--list] [--force] [--plugin-template] [topic]
+usage: context [-h] {catalog,show,template} ...
 
-Generate aggregated context for a specific topic, a GitHub URL, or a local directory. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.
+Generate aggregated context for a specific catalog entry, a GitHub URL, or a local directory. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.
 
-GitHub URL support:
-  Pass a full GitHub URL as the topic to fetch and package its contents.
-  Example: https://github.com/owner/repo/tree/branch/path
-
-Local Directory support:
-  Pass a local directory path to package its contents.
-  Example: /path/to/local/dir
-
-Topics:
+Catalog Entries:
   compose-architecture   Android Compose Architecture documentation
   firebase               Firebase CLI and hosting documentation
   gemini-api             Gemini API documentation and examples
@@ -585,14 +577,14 @@ Topics:
   skills                 Agent skills format specification and authoring guide
 
 positional arguments:
-  topic              Topic to generate context for
+  {catalog,show,template}
+                        Subcommands
+    catalog             List available catalog entries
+    show                Show context for a target
+    template            Output a template for creating a Python plugin
 
 options:
-  --help             show this help message and exit
-  --list             List available topics (names only)
-  --force            Force cache rebuild
-  --plugin-template  Output a template/documentation for creating a Python
-                     plugin
+  -h, --help            show this help message and exit
 ```
 
 <!-- /generated -->

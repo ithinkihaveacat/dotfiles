@@ -286,25 +286,26 @@ _Use this when your tool performs exactly **one primary action**._
 
 - **Concept:** The tool's name acts as the **Verb**. The first argument is the
   **Target/Noun**.
-- **Syntax:** `[Verb-Tool] [Instance]`
-- **Example:** `context gemini-api`
-- **Implicit Meaning:** "**Generate context** for **gemini-api**."
+- **Syntax:** `[Verb-Tool] [Instance] [Arguments]`
+- **Example:** `apk-cat-file app.apk AndroidManifest.xml`
+- **Implicit Meaning:** "**Extract and display** from `app.apk` the file `AndroidManifest.xml`."
 
-#### Reference Implementation: `context`
+#### Reference Implementation: `apk-cat-file`
 
 ```text
-Usage: context <topic> [options]
+Usage: apk-cat-file APK_FILE FILE_PATH
 
-Generate aggregated context for a specific topic.
+Extracts and displays a file from an Android APK or app bundle.
 
-Topics:
-  gemini-api             Gemini API documentation and examples
-  mcp-server             MCP server documentation and specification
+The script supports both standalone APKs and ZIP archives containing split APKs.
+It automatically formats XML files for readability.
+
+Arguments:
+  APK_FILE    Path to an APK file or ZIP archive.
+  FILE_PATH   Path to the file within the APK to extract.
 
 Options:
-  --help                 Display this help message and exit
-  --force                Force cache rebuild
-
+  --help  Display this help message and exit
 ```
 
 ______________________________________________________________________

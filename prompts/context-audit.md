@@ -1,14 +1,14 @@
-# Prompt: Audit a Context Topic
+# Prompt: Audit a Context Catalog Entry
 
-Perform a periodic audit of a topic in the `context` command. This audit ensures
-the topic output remains comprehensive, accurate, and reflects the latest
+Perform a periodic audit of a catalog entry in the `context` command. This audit ensures
+the entry output remains comprehensive, accurate, and reflects the latest
 authoritative information about the subject.
 
 ## How the Context Command Works
 
 The `context` command (canonical source: `skills/agent-tools/scripts/context`,
 with `bin/context` as the PATH symlink) generates aggregated documentation for
-specific topics. Each topic is a bash function that gathers content from
+specific catalog entries. Each entry is a Python function that gathers content from
 multiple sources and outputs it in XML format suitable for AI agent consumption.
 
 ### Output Format
@@ -25,7 +25,7 @@ retrieval behind the scenes.
 
 ### Source Patterns
 
-Topics use several patterns to gather content:
+Entries use several patterns to gather content:
 
 **Repository fetches with attributed URLs**: Download entire repos locally, then
 iterate through files while attributing them to their raw GitHub URLs.
@@ -60,32 +60,32 @@ run "curl -sfS 'https://x.io/page.md'  # published to https://x.io/page" \
   curl -sfS 'https://x.io/page.md'
 ```
 
-### Available Topics
+### Available Catalog Entries
 
-Run `context --list` to see available topics. Each topic has a description in
-the TOPICS array in `skills/agent-tools/scripts/context`.
+Run `context catalog` to see available entries. Each entry has a description in
+the `catalog` dictionary in `skills/agent-tools/scripts/context`.
 
 ## Goal
 
-Review and update a specific topic to ensure:
+Review and update a specific catalog entry to ensure:
 
 1. All sources are accessible and return expected content
 2. Content hasn't moved, been deprecated, or significantly changed
 3. No new authoritative content is missing
 4. Published URL comments are accurate
-5. The topic description remains accurate
+5. The entry description remains accurate
 
 This audit should be performed periodically or when you suspect documentation
 has changed significantly.
 
 ## Phase 1: Examine Current Output
 
-### 1.1 Run the Topic
+### 1.1 Run the Entry
 
 Generate the current output and examine its structure:
 
 ```bash
-context <topic-name> 2>/dev/null | grep '<command>'
+context show <entry-name> 2>/dev/null | grep '<command>'
 ```
 
 This shows all the attributed sources. Review the list to understand:
@@ -94,13 +94,13 @@ This shows all the attributed sources. Review the list to understand:
 - What individual URLs are being downloaded
 - What published URLs are referenced
 
-### 1.2 Read the Topic Function
+### 1.2 Read the Entry Function
 
-Read the topic function in `skills/agent-tools/scripts/context` to understand
+Read the entry function in `skills/agent-tools/scripts/context` to understand
 how it gathers content:
 
 ```bash
-grep -A 50 'topic_<name>()' skills/agent-tools/scripts/context
+grep -A 50 'entry_<name>()' skills/agent-tools/scripts/context
 ```
 
 Note the fetch patterns, URL lists, and any filtering or processing applied.
@@ -108,7 +108,7 @@ Understanding the actual retrieval method helps when debugging issues.
 
 ## Phase 2: Verify Existing Sources
 
-For each source in the topic, verify it remains valid and appropriate.
+For each source in the entry, verify it remains valid and appropriate.
 
 ### 2.1 Check URL Accessibility
 
@@ -132,7 +132,7 @@ Common issues:
 
 For each source, briefly check that the content is still relevant:
 
-- Does the page still cover the expected topic?
+- Does the page still cover the expected subject?
 - Has the content been deprecated or superseded?
 - Is there a notice about the content moving elsewhere?
 
@@ -152,10 +152,10 @@ This requires investigation and judgment.
 
 ### 3.1 Check for Documentation Changes
 
-Use web search to find recent changes to the topic's documentation:
+Use web search to find recent changes to the subject's documentation:
 
 ```text
-"<topic name>" documentation 2026
+"<subject name>" documentation 2026
 "<product name>" changelog 2026
 ```
 
@@ -168,7 +168,7 @@ Look for:
 
 ### 3.2 Explore Repository Structures
 
-For topics that fetch from repositories, check if the repository structure has
+For entries that fetch from repositories, check if the repository structure has
 changed:
 
 - New documentation directories
@@ -177,7 +177,7 @@ changed:
 
 ### 3.3 Check Related Documentation
 
-For topics covering standards or specifications:
+For entries covering standards or specifications:
 
 - Has the standard been adopted by new tools?
 - Are there new official implementations or examples?
@@ -185,7 +185,7 @@ For topics covering standards or specifications:
 
 ### 3.4 Review Sibling Content
 
-If a topic fetches `docs/overview.md`, check if related files exist:
+If an entry fetches `docs/overview.md`, check if related files exist:
 
 - `docs/best-practices.md`
 - `docs/quickstart.md`
@@ -202,21 +202,21 @@ If you identify new content in Phase 3 that should be added:
 2. **Inspect the content**: Briefly describe what these files contain and why
    they are relevant.
 3. **Request Confirmation**: Ask the user if they want these files added to the
-   topic.
+   entry.
 
 _Note: You do not need to ask for confirmation to fix broken URLs or apply minor
 corrections to existing sources. Proceed with those fixes in Phase 5._
 
 ## Phase 5: Make Updates
 
-Apply necessary changes to the topic function in
+Apply necessary changes to the entry function in
 `skills/agent-tools/scripts/context`.
 
 ### 5.1 Add New Sources
 
 When adding new URLs:
 
-1. Use the same pattern as existing sources in the topic
+1. Use the same pattern as existing sources in the entry
 2. Include `# published to` comments for markdown files with HTML equivalents
 3. Add appropriate comments explaining the source
 
@@ -232,24 +232,24 @@ When URLs have moved:
 
 When content is no longer available or relevant:
 
-1. Remove the URL from the topic
+1. Remove the URL from the entry
 2. Consider whether replacement content exists
 
-### 5.4 Update Topic Description
+### 5.4 Update Entry Description
 
-If the scope of the topic has changed, update its description in the TOPICS
-array.
+If the scope of the entry has changed, update its description in the `catalog`
+dictionary.
 
 ### 5.5 Validate Changes
 
-After making changes, run the topic and verify:
+After making changes, run the entry and verify:
 
 ```bash
 # Check for errors
-context <topic-name> 2>&1 | head -20
+context show <entry-name> 2>&1 | head -20
 
 # Verify all sources are fetched
-context <topic-name> 2>/dev/null | grep '<command>'
+context show <entry-name> 2>/dev/null | grep '<command>'
 ```
 
 Run `shellcheck` on `skills/agent-tools/scripts/context` to catch any syntax
@@ -259,7 +259,7 @@ errors.
 
 After completing the audit, provide a summary:
 
-1. **Topic audited**: Name and description
+1. **Entry audited**: Name and description
 2. **Sources verified**: Count of URLs/repos checked
 3. **Issues found**: List of problems discovered
 4. **Changes made**: List of modifications
@@ -278,7 +278,7 @@ After completing the audit, provide a summary:
 
 - Major restructuring of documentation site
 - Content deprecated with no clear replacement
-- Significant scope change (should topic be split or merged?)
+- Significant scope change (should entry be split or merged?)
 - New authoritative source with overlapping content
 - New documentation page added to existing repository
 
@@ -286,7 +286,7 @@ After completing the audit, provide a summary:
 
 Before completing the audit:
 
-- [ ] Topic output generated and examined
+- [ ] Entry output generated and examined
 - [ ] All URLs tested for accessibility
 - [ ] Content relevance verified
 - [ ] Web search performed for new documentation
@@ -294,5 +294,5 @@ Before completing the audit:
 - [ ] Related/sibling content checked
 - [ ] Proposed additions confirmed by user
 - [ ] Changes applied (if any)
-- [ ] Topic runs without errors after changes
+- [ ] Entry runs without errors after changes
 - [ ] Summary provided

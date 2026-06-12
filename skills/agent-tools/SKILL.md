@@ -56,7 +56,7 @@ tools only)
 
 ```bash
 # Gather context and analyze
-scripts/context gemini-api | scripts/emerson "Explain the key features"
+scripts/context show gemini-api | scripts/emerson "Explain the key features"
 
 # Fetch a GitHub PR, Issue, or Workflow Run as Markdown
 scripts/gh-markdown https://github.com/owner/repo/pull/123
@@ -220,35 +220,35 @@ scripts/gh-markdown https://github.com/owner/repo/actions/runs/12345678
 ### context
 
 Gathers the very latest, authoritative, up-to-date context for deep research on
-various technical topics (e.g., `gemini-api`, `mcp`, `home-assistant`) or
-arbitrary GitHub directories. Run with `--list` to see all available topics.
+various technical subjects (e.g., `gemini-api`, `mcp`, `home-assistant`) or
+arbitrary GitHub directories. Run `context catalog` to see all available entries.
 This script should be your first tool for gathering background knowledge or the
 latest documentation for an unfamiliar domain. Supports passing a full GitHub
-URL as a topic (e.g., `https://github.com/owner/repo/tree/branch/path`).
+URL as a target (e.g., `https://github.com/owner/repo/tree/branch/path`).
 
 **Warning:** Output can be very large. **Do not** read output directly into your
 conversation history. Pipe to `emerson` for analysis, or redirect to a file to
 search/read locally.
 
 ```bash
-scripts/context TOPIC
+scripts/context show TARGET
 ```
 
-**Options:** `--list` (list available topics)
+**Commands:** `catalog` (list available entries), `show` (show context for target), `template` (output plugin template)
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
 **Examples:**
 
 ```bash
-# List available topics
-scripts/context --list
+# List available catalog entries
+scripts/context catalog
 
 # Gather context for Gemini API
-scripts/context gemini-api > gemini-context.xml
+scripts/context show gemini-api > gemini-context.xml
 
 # Pipe context directly to analysis
-scripts/context gemini-cli | scripts/emerson "How do commands work?"
+scripts/context show gemini-cli | scripts/emerson "How do commands work?"
 ```
 
 ### screenshot-describe
