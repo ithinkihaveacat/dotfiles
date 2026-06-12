@@ -14,6 +14,8 @@
 - [pascal](#pascal) - Ask a question and get a short response
 - [context](#context) - Generate aggregated context for analysis
 - [satisfies](#satisfies) - Evaluate boolean conditions against text
+- [pacioli](#pacioli) - Extract a structured purchase record from a receipt
+  email
 - [token-count](#token-count) - Count tokens in text
 - [popper](#popper) - Interact with Android UIs using an AI agent
 - [gh-markdown](#gh-markdown) - Format GitHub PRs/Issues/Runs as Markdown
@@ -692,6 +694,51 @@ if [ "$RESULT" = "true" ]; then
 else
   exit 1
 fi
+```
+
+______________________________________________________________________
+
+## pacioli
+
+Extract a structured purchase record (vendor, brands, items, category, order
+number/date, currency, total, `is_purchase`) from a receipt or
+order-confirmation email. Reads one email on stdin and prints a single JSON
+object, so a driver can fan it out across a mailbox in parallel.
+
+### Help
+
+<!-- generated: ../scripts/pacioli --help -->
+
+```text
+usage: pacioli [--help] [--model MODEL] [--max-chars N] [--text-only]
+
+Extract a structured purchase record from a receipt email (stdin -> JSON).
+
+options:
+  --help         Show this help message and exit
+  --model MODEL  Gemini model id (default: $GEMINI_MODEL if set, else
+                 gemini-3.1-flash-lite)
+  --max-chars N  Truncate email text to N chars before the model call
+                 (default: 12000)
+  --text-only    Print the stripped email text instead of calling the model
+                 (debugging)
+```
+
+<!-- /generated -->
+
+### Examples
+
+```bash
+# Extract from a saved email
+scripts/pacioli < order.eml
+
+# Pipe a Gmail message body through (see the gog skill)
+gog gmail get "$id" --json \
+  | jq -r '"From: \(.headers.from)\nSubject: \(.headers.subject)\n\n" + .body' \
+  | scripts/pacioli
+
+# Inspect the stripped text the model receives (no API call)
+scripts/pacioli --text-only < order.eml
 ```
 
 ______________________________________________________________________

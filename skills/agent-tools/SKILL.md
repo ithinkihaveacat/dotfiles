@@ -83,6 +83,9 @@ scripts/emerson "Summarize the key changes" < documentation.md
 # Evaluate a boolean condition against text
 echo "Hello world" | scripts/satisfies "is a greeting"
 
+# Extract a structured purchase record from a receipt email
+scripts/pacioli < order.eml
+
 # Count tokens in text
 cat document.md | scripts/token-count
 
@@ -221,10 +224,11 @@ scripts/gh-markdown https://github.com/owner/repo/actions/runs/12345678
 
 Gathers the very latest, authoritative, up-to-date context for deep research on
 various technical subjects (e.g., `gemini-api`, `mcp`, `home-assistant`) or
-arbitrary GitHub directories. Run `context catalog` to see all available entries.
-This script should be your first tool for gathering background knowledge or the
-latest documentation for an unfamiliar domain. Supports passing a full GitHub
-URL as a target (e.g., `https://github.com/owner/repo/tree/branch/path`).
+arbitrary GitHub directories. Run `context catalog` to see all available
+entries. This script should be your first tool for gathering background
+knowledge or the latest documentation for an unfamiliar domain. Supports passing
+a full GitHub URL as a target (e.g.,
+`https://github.com/owner/repo/tree/branch/path`).
 
 **Warning:** Output can be very large. **Do not** read output directly into your
 conversation history. Pipe to `emerson` for analysis, or redirect to a file to
@@ -234,7 +238,8 @@ search/read locally.
 scripts/context show TARGET
 ```
 
-**Commands:** `catalog` (list available entries), `show` (show context for target), `template` (output plugin template)
+**Commands:** `catalog` (list available entries), `show` (show context for
+target), `template` (output plugin template)
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
@@ -419,6 +424,39 @@ cat response.json | scripts/satisfies "is valid JSON with an 'id' field"
 if cat log.txt | scripts/satisfies "contains error messages"; then
   echo "Errors detected"
 fi
+```
+
+### pacioli
+
+Extract a structured purchase record from a receipt or order-confirmation email.
+Reads one email (raw text or HTML) on stdin and prints a single JSON object:
+vendor, brands, line items, category, order number/date, currency, total, and an
+`is_purchase` flag. Category-agnostic and one-email-per-invocation, so a driver
+can fan it out across a mailbox in parallel.
+
+```bash
+scripts/pacioli < order.eml
+```
+
+**Input:** the email on stdin; optional `From:/Subject:/Date:` header lines on
+top help. HTML is stripped to text and truncated before the model call.
+
+**Options:** `--model MODEL`, `--max-chars N`, `--text-only` (print the stripped
+text instead of calling the model — useful for debugging)
+
+**Exit codes:** 0 success, 1 API error, 2 usage/no input
+
+**Examples:**
+
+```bash
+# Extract from a saved email
+scripts/pacioli < order.eml
+
+# Pipe a Gmail message body through (see the gog skill)
+gog gmail get "$id" --json | jq -r '"From: \(.headers.from)\nSubject: \(.headers.subject)\n\n" + .body' | scripts/pacioli
+
+# Inspect what the model actually sees
+scripts/pacioli --text-only < order.eml
 ```
 
 ### token-count

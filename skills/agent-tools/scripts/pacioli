@@ -1,0 +1,330 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+# Tests: tests/pacioli/
+"""Extract a structured purchase record from a receipt/order-confirmation email.
+
+Reads one email on stdin (raw text or HTML, optionally with From:/Subject:/Date:
+header lines on top) and prints a single JSON object on stdout describing the
+purchase: vendor, brands, line items, category, order number/date, and total.
+
+Category-agnostic: works for clothing, homeware, electronics, food, etc. The
+caller decides what to keep. Designed to be run one-email-per-invocation so a
+driver can parallelise across a mailbox.
+
+  pacioli < order.eml
+  printf 'From: ...\\nSubject: ...\\n\\n<body>' | pacioli
+  gog gmail get "$id" --json | jq -r ... | pacioli
+
+HTML is stripped to text and truncated before the model call, so passing a raw
+HTML body is fine.
+"""
+
+import argparse
+import html
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from html.parser import HTMLParser
+
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
+# Character budget for the email text sent to the model. Receipts are mostly
+# boilerplate; the order summary appears early, so a generous head slice keeps
+# token cost (and latency) down without losing the items.
+MAX_CHARS = 12000
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_purchase": {
+            "type": "boolean",
+            "description": (
+                "True only if this email confirms an actual purchase/order with "
+                "items. False for shipping/delivery notices, returns/refunds, "
+                "marketing, receipts for subscriptions with no shopped items, or "
+                "anything that is not an order confirmation."
+            ),
+        },
+        "vendor": {
+            "type": "string",
+            "description": (
+                "The store or retailer the order was placed with, e.g. "
+                "'William Ellery', 'David Jones', 'Amazon'. Empty string if unknown."
+            ),
+        },
+        "brands": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Distinct product brands/labels of the items purchased. For a "
+                "single-brand store this is just the store's own brand. For a "
+                "department store or marketplace, list the actual brands of the "
+                "items (e.g. ['Nike', 'Veja']). Empty if not determinable."
+            ),
+        },
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "brand": {"type": "string"},
+                    "qty": {"type": "integer"},
+                    "unit_price": {"type": "number"},
+                },
+                "required": ["description"],
+            },
+            "description": "Line items in the order.",
+        },
+        "category": {
+            "type": "string",
+            "enum": [
+                "clothing",
+                "footwear",
+                "accessories",
+                "homeware",
+                "food",
+                "electronics",
+                "tools",
+                "beauty",
+                "media",
+                "services",
+                "other",
+            ],
+            "description": "Best single-category guess for the order overall.",
+        },
+        "order_number": {"type": "string"},
+        "order_date": {
+            "type": "string",
+            "description": "Order date in ISO 8601 (YYYY-MM-DD) if determinable, else empty.",
+        },
+        "currency": {
+            "type": "string",
+            "description": "ISO 4217 currency code (e.g. GBP, USD, EUR, AUD) if determinable.",
+        },
+        "total": {
+            "type": ["number", "null"],
+            "description": "Order grand total as a number, or null if not determinable.",
+        },
+    },
+    "required": [
+        "is_purchase",
+        "vendor",
+        "brands",
+        "items",
+        "category",
+        "order_number",
+        "order_date",
+        "currency",
+        "total",
+    ],
+}
+
+PROMPT = """<role>You extract structured purchase data from receipt and order-confirmation emails.</role>
+<task>Read the email below and return JSON matching the provided schema describing the purchase.</task>
+<instructions>
+- Determine the vendor (the store the order was placed with).
+- Identify the brand(s) of the purchased items. For a single-brand retailer the brand equals the store; for a department store or marketplace (e.g. Amazon, David Jones, John Lewis) identify the actual product brands from the item descriptions.
+- List the line items with their descriptions (and brand/qty/price when stated).
+- Pick the best overall category.
+- Extract order number, order date (ISO 8601), currency (ISO 4217), and grand total.
+- Set is_purchase=false for shipping/delivery updates, returns, refunds, cancellations, marketing, or anything that is not an order confirmation with items; still fill in what you can.
+- Use empty strings / empty arrays / null when a value is genuinely not present. Do not invent data.
+</instructions>"""
+
+
+class _TextExtractor(HTMLParser):
+    """Collapse HTML to readable text, dropping script/style and adding
+    whitespace around block-level elements."""
+
+    _SKIP = {"script", "style", "head", "title"}
+    _BLOCK = {
+        "p",
+        "div",
+        "br",
+        "tr",
+        "td",
+        "th",
+        "li",
+        "ul",
+        "ol",
+        "table",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "section",
+        "header",
+        "footer",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skipping = 0
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        if tag in self._SKIP:
+            self._skipping += 1
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP and self._skipping:
+            self._skipping -= 1
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skipping and data.strip():
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+def to_text(raw: str) -> str:
+    """Best-effort convert an email body (HTML or plain) to compact text."""
+    looks_html = (
+        "<html" in raw[:2000].lower()
+        or "<body" in raw[:2000].lower()
+        or (raw.count("<") > 20 and "</" in raw)
+    )
+    if looks_html:
+        parser = _TextExtractor()
+        try:
+            parser.feed(raw)
+            text = parser.text()
+        except Exception:
+            text = re.sub(r"(?s)<[^>]+>", " ", raw)
+        text = html.unescape(text)
+    else:
+        text = raw
+    # Collapse runs of blank lines and trailing whitespace.
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def gemini_extract(api_key: str, model: str, email_text: str) -> dict:
+    payload = {
+        "contents": [
+            {"parts": [{"text": PROMPT + "\n\n<email>\n" + email_text + "\n</email>"}]}
+        ],
+        # No temperature/top_p/top_k overrides: Gemini 3.x models misbehave
+        # (looping, degraded reasoning) when sampling is constrained below the
+        # defaults. Rigidity comes from the response schema, not low temperature.
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": SCHEMA,
+        },
+    }
+    req = urllib.request.Request(
+        GEMINI_URL.format(model=model),
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")
+        try:
+            msg = json.loads(err).get("error", {}).get("message", err)
+        except json.JSONDecodeError:
+            msg = err
+        raise RuntimeError(f"Gemini API error: {msg}") from None
+
+    if "error" in body:
+        raise RuntimeError(f"Gemini API error: {body['error'].get('message', body)}")
+    candidates = body.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"no candidates in response: {body}")
+    parts = candidates[0].get("content", {}).get("parts") or []
+    if not parts:
+        reason = candidates[0].get("finishReason", "UNKNOWN")
+        raise RuntimeError(f"no text in response (finish reason: {reason})")
+    return json.loads(parts[0].get("text", ""))
+
+
+def make_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="pacioli",
+        description="Extract a structured purchase record from a receipt email (stdin -> JSON).",
+        add_help=False,
+    )
+    ap.add_argument("--help", action="help", help="Show this help message and exit")
+    ap.add_argument(
+        "--model",
+        default=os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
+        help=f"Gemini model id (default: $GEMINI_MODEL if set, else {DEFAULT_MODEL})",
+    )
+    ap.add_argument(
+        "--max-chars",
+        type=int,
+        default=MAX_CHARS,
+        metavar="N",
+        help=f"Truncate email text to N chars before the model call (default: {MAX_CHARS})",
+    )
+    ap.add_argument(
+        "--text-only",
+        action="store_true",
+        help="Print the stripped email text instead of calling the model (debugging)",
+    )
+    return ap
+
+
+def main() -> int:
+    ap = make_parser()
+    args = ap.parse_args()
+
+    raw = sys.stdin.read()
+    if not raw.strip():
+        print("pacioli: no input on stdin", file=sys.stderr)
+        return 2
+
+    email_text = to_text(raw)
+    if len(email_text) > args.max_chars:
+        email_text = email_text[: args.max_chars]
+
+    if args.text_only:
+        print(email_text)
+        return 0
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        print("pacioli: GEMINI_API_KEY environment variable not set", file=sys.stderr)
+        return 2
+
+    try:
+        record = gemini_extract(api_key, args.model, email_text)
+    except Exception as e:
+        print(f"pacioli: {e}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
