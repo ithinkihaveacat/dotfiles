@@ -90,6 +90,7 @@ add_path $HOME/local/homebrew/bin
 add_path $HOME/local/homebrew/sbin
 
 add_path $HOME/.local/bin
+add_path $HOME/.local/share/npm/bin
 
 # Google Cloud SDK (gcloud)
 #
