@@ -261,3 +261,64 @@ Key sections to inspect in the dump:
   currently has focus.
 - **Overridden Constraints**: Confirms which developer overrides are currently
   active.
+
+### E. Testing UI Hints & Smart Nudging
+
+To prevent visual clutter and annoying experienced users, the Wear OS gesture
+framework implements a **Smart Nudging** policy.
+
+#### How Hints Work (Mechanics)
+
+1. **Deciding to Hint**: When a gesture-aware screen is composed, the
+   `oneHandedGesture` modifier queries the system to check if the user needs
+   education.
+1. **Interaction Stream**: If the system decides a hint is warranted, the
+   modifier emits a **Hint Interaction** into the element's Compose
+   `InteractionSource`.
+1. **Visual Glow**: The `OneHandedGestureIndicator` (or
+   `OneHandedGestureScrollIndicator`) listens to this `InteractionSource` and
+   renders the animated radial ripple or scroll dots only when the hint
+   interaction is active.
+
+#### The Education Budget (Why Hints Disappear)
+
+During manual testing, you will notice that the visual ripples and scroll dots
+**disappear after a few views** and stop animating. This is expected system
+behavior:
+
+- The system caps gesture hints at a maximum of **3 views/nudges** per session.
+- Once the user successfully performs/consumes the gesture, the hints are
+  suppressed.
+
+#### Forcing Hints via ADB (Resetting the Budget)
+
+To force the visual ripples and scroll-hint dots to appear again during
+development and testing, you must clear the system's hint history for your
+application:
+
+```bash
+adb shell cmd IWearGestureService hint clear <package_name>
+```
+
+#### Verifying Hint Config in Dumpsys
+
+You can inspect the system's active nudge delays and session limits under the
+`GestureHintConfigurationProvider` section of the dumpsys:
+
+```bash
+adb shell dumpsys IWearGestureService | grep -A 5 "GestureHintConfigurationProvider"
+```
+
+*Expected Output*:
+
+```
+  GestureHintConfigurationProvider: 
+    millisBeforeNudge=0
+    useGestureTime=true
+    useHintCount=true
+    useGestureCount=true
+    maxSessionHints: first=3 nudge=1
+```
+
+This confirms the maximum session hints (e.g., `first=3`) before the system
+silences the visual cues.
