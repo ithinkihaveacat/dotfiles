@@ -36,6 +36,7 @@ Commands:
   repair          Re-link managed skills and regenerate tracking records
   catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
+  show/info NAME  Show details and metadata of a skill
 
 Options:
   --help             Display this help message and exit
@@ -63,6 +64,7 @@ Commands:
   suggest [DIR]   Recommend skills for DIR via the Gemini API (default: cwd)
   catalog         List every available skill and its source
   resolve NAME    Print the source path for a skill
+  show/info NAME  Show details and metadata of a skill
   update NAME...  Re-fetch plugin-provided catalog entries; 'update catalog'
                   refreshes the whole metadata index
   doctor          Diagnose drift in the catalog index (read-only)

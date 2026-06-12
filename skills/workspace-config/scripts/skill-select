@@ -484,6 +484,135 @@ def cmd_resolve(name, plugin_catalog, source_dirs):
         sys.exit(1)
 
 
+def cmd_info(name, plugin_catalog, source_dirs):
+    try:
+        path, actual_name = resolve_spec(name, plugin_catalog, source_dirs)
+    except SystemExit:
+        sys.exit(1)
+
+    if not path.is_dir():
+        print(f"skill-select: error: resolved path '{path}' is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    skill_md = path / "SKILL.md"
+    if not skill_md.is_file():
+        print(f"skill-select: error: SKILL.md not found in '{path}'", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with open(skill_md, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"skill-select: error: failed to read '{skill_md}': {e}", file=sys.stderr)
+        sys.exit(1)
+
+    description = None
+    yaml_content = ""
+    lines = content.splitlines()
+    if lines and lines[0].strip() == "---":
+        fm_lines = []
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            fm_lines.append(line)
+        yaml_content = "\n".join(fm_lines)
+
+        try:
+            metadata = yaml.safe_load(yaml_content)
+            if metadata and isinstance(metadata, dict):
+                description = metadata.get("description")
+        except Exception:
+            pass
+
+    if not description:
+        for line in yaml_content.splitlines():
+            if line.startswith("description:"):
+                description = line[len("description:"):].strip()
+                break
+
+    if not description:
+        description = "No description found in SKILL.md frontmatter."
+
+    # Gather metadata
+    dir_stats = {}
+    total_size = 0
+    total_files = 0
+    root_files = 0
+    root_size = 0
+
+    for item in path.iterdir():
+        if item.is_file():
+            if item.name.startswith("."):
+                continue
+            try:
+                sz = item.stat().st_size
+                root_files += 1
+                root_size += sz
+                total_files += 1
+                total_size += sz
+            except Exception:
+                pass
+        elif item.is_dir():
+            if item.name.startswith(".") or item.name == "__pycache__":
+                continue
+            files_count = 0
+            dir_size = 0
+            for root, dirs, files in os.walk(item):
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
+                for f in files:
+                    if f.startswith("."):
+                        continue
+                    fpath = Path(root) / f
+                    try:
+                        sz = fpath.stat().st_size
+                        files_count += 1
+                        dir_size += sz
+                    except Exception:
+                        pass
+            if files_count > 0:
+                dir_stats[item.name] = (files_count, dir_size)
+                total_files += files_count
+                total_size += dir_size
+
+    if root_files > 0:
+        dir_stats["(root)"] = (root_files, root_size)
+
+    home = str(Path.home())
+    def clean_p(p):
+        s = str(p)
+        if s.startswith(home):
+            return "~" + s[len(home) :]
+        return s
+
+    def format_size(size_bytes):
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+    print(f"Skill: {actual_name}")
+    print(f"Path:  {clean_p(path)}")
+    print()
+    print("Description:")
+    import textwrap
+    wrapped_desc = textwrap.fill(description, width=80, initial_indent="  ", subsequent_indent="  ")
+    print(wrapped_desc)
+    print()
+    print("Metadata:")
+    print(f"  Total Size:  {format_size(total_size)} ({total_files} files)")
+    if dir_stats:
+        print("  Structure:")
+        sorted_dirs = sorted([d for d in dir_stats.keys() if d != "(root)"])
+        if "(root)" in dir_stats:
+            sorted_dirs.insert(0, "(root)")
+        for d in sorted_dirs:
+            count, size = dir_stats[d]
+            d_label = d if d == "(root)" else f"{d}/"
+            print(f"    {d_label:<15} : {count:>2} files ({format_size(size)})")
+
+
 def cmd_catalog(plugin_catalog, source_dirs, as_json=False):
     import json as _json
     from collections import defaultdict
@@ -883,6 +1012,7 @@ Commands:
   suggest [DIR]   Recommend skills for DIR via the Gemini API (default: cwd)
   catalog         List every available skill and its source
   resolve NAME    Print the source path for a skill
+  show/info NAME  Show details and metadata of a skill
   update NAME...  Re-fetch plugin-provided catalog entries; 'update catalog'
                   refreshes the whole metadata index
   doctor          Diagnose drift in the catalog index (read-only)
@@ -981,6 +1111,15 @@ def main():
         opts = parser.parse_args(args)
         source_dirs = [str(p) for p in compute_search_paths(opts.search_dirs)]
         cmd_resolve(opts.name, plugin_catalog, source_dirs)
+        sys.exit(0)
+
+    if cmd in ("info", "show"):
+        parser = argparse.ArgumentParser(prog=f"skill-select {cmd}", add_help=False)
+        parser.add_argument("name")
+        parser.add_argument("--search-dirs")
+        opts = parser.parse_args(args)
+        source_dirs = [str(p) for p in compute_search_paths(opts.search_dirs)]
+        cmd_info(opts.name, plugin_catalog, source_dirs)
         sys.exit(0)
 
     if cmd == "suggest":
