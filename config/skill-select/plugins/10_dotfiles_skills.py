@@ -24,3 +24,8 @@ def register(api):
         "chrome-devtools-cli",
         "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli",
     )
+
+    api.register_skill(
+        "claude-frontend-design",
+        "https://github.com/anthropics/claude-code/tree/main/plugins/frontend-design/skills/frontend-design",
+    )
