@@ -28,6 +28,7 @@ add numbers to headings.
 ## Formatting Scripts
 
 This skill includes several formatting helper scripts in the `scripts/`
+directory. References to `scripts/...` in this skill are relative to this skill
 directory. All scripts support formatting multiple files in place, or reading
 from stdin and writing to stdout when no arguments are provided.
 

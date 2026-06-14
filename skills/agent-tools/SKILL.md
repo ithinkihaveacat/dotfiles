@@ -26,7 +26,8 @@ compatibility: >-
 
 **ALWAYS prefer the scripts in `scripts/` over raw `curl` API calls.** Scripts
 are located in the `scripts/` subdirectory of this skill's folder. They provide
-features that raw commands do not:
+features that raw commands do not. References to `scripts/...` in this skill are
+relative to this skill directory.
 
 - Proper image encoding (WebP conversion, alpha removal)
 - Appropriate model selection for each task
