@@ -17,7 +17,8 @@ compatibility: >-
 ## Important: Use Scripts First
 
 **ALWAYS prefer the scripts in `scripts/` over raw `adb` commands.** Scripts are
-located in the `scripts/` subdirectory of this skill's folder. They provide
+located in the `scripts/` subdirectory of this skill's folder. References to
+`scripts/...` in this skill are relative to this skill directory. They provide
 features that raw commands do not, such as:
 
 - Automatic circular masking for Wear OS screenshots

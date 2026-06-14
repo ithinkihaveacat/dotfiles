@@ -19,7 +19,8 @@ compatibility: >-
 
 **ALWAYS use `scripts/emumanager` over raw `sdkmanager`, `avdmanager`, or
 `emulator` commands.** The script is located in the `scripts/` subdirectory of
-this skill's folder. It provides features that raw commands do not:
+this skill's folder. References to `scripts/...` in this skill are relative to
+this skill directory. It provides features that raw commands do not:
 
 - Automatic system image selection for device types (--mobile, --wear, --tv)
 - Boot completion detection with timeout

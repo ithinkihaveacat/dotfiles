@@ -18,8 +18,9 @@ compatibility: >-
 ## Important: Use Script First
 
 **ALWAYS use `scripts/jetpack` over raw `curl` and `xmllint` commands.** The
-script is located in the `scripts/` subdirectory of this skill's folder. It
-provides features that raw commands do not:
+script is located in the `scripts/` subdirectory of this skill's folder.
+References to `scripts/...` in this skill are relative to this skill directory.
+It provides features that raw commands do not:
 
 - Package-to-coordinate resolution with exceptions table
 - Code search integration for finding artifacts by class name

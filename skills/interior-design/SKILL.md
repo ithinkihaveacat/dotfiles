@@ -104,6 +104,8 @@ an image- or photo-query tool and use its documented interface.
 
 ## Scripts
 
+References to `scripts/...` in this skill are relative to this skill directory.
+
 - `scripts/inigo-search website [filters]` — query the live index pages
   (`/all-homes`, `/past-sales`). Filters: `--active`/`--sold` (default merges
   both), `--price-from K`, `--price-to K` (£000s), `--bedrooms N`,
