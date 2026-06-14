@@ -46,6 +46,21 @@ than depending directly on a `python` or `python3` executable in the shebang. In
 other words, if the file is meant to be run as a standalone script, the runtime
 dependency should normally be the `uv` executable.
 
+### Naming
+
+Standalone scripts must follow these naming rules:
+
+- **No `.py` extension.** Scripts invoked via `uv run` do not need — and should
+  not have — a `.py` suffix. The shebang makes the interpreter explicit; the
+  extension adds no useful information and looks wrong in a `bin/` directory
+  alongside shell scripts.
+- **Dashes, not underscores.** Use `clip-index`, not `clip_index` or
+  `clip_index.py`. This matches shell-script convention and is consistent with
+  how the scripts are invoked on the command line.
+
+These rules apply to new scripts and to scripts being significantly reworked.
+Renaming an existing script solely for style is not required.
+
 Use this pattern:
 
 ```python
@@ -310,22 +325,42 @@ if __name__ == "__main__":
 
 ## Extensibility and Plugins
 
-If a Python tool or script requires an extensibility mechanism (a plugin system), you **must** follow the unified plugin pattern established in this repository. This ensures consistency, simplifies debugging, and provides a predictable interface for developers and AI agents.
+If a Python tool or script requires an extensibility mechanism (a plugin
+system), you **must** follow the unified plugin pattern established in this
+repository. This ensures consistency, simplifies debugging, and provides a
+predictable interface for developers and AI agents.
 
 ### The Plugin Pattern
 
 The pattern consists of:
-1.  **A Plugin Directory**: Plugins are loaded from `~/.config/<tool-name>/plugins/*.py` (where `<tool-name>` is the name of the tool, e.g., `skill-select`, `context`, `permission`).
-2.  **An API Class**: The tool defines a `PluginAPI` class that wraps the internal state and methods exposed to plugins.
-3.  **A `register(api)` Entrypoint**: Each plugin must define a top-level `register(api)` function that receives an instance of the `PluginAPI`.
-4.  **Alphabetical Precedence**: Plugins are loaded in alphabetical order of their filenames. Later plugins can override settings registered by earlier ones. Use numeric prefixes (e.g., `10_`, `20_`, `30_`) to explicitly control loading order.
-5.  **A `--plugin-template` Switch**: The tool must support a `--plugin-template` CLI switch that prints a clean, documented template of a plugin to stdout.
-6.  **Traceback Debugging**: The tool must support a `<TOOL_NAME>_DEBUG` environment variable (e.g., `SKILL_SELECT_DEBUG=1`). When set, any exceptions during plugin loading (like syntax errors) must print a full Python traceback to `stderr` instead of a silent warning.
-7.  **Fast, Side-Effect-Free Registration**: `register(api)` runs on every tool invocation, so it must be fast and side-effect-free: no network calls, subprocesses, or filesystem writes. The `--plugin-template` output must state this constraint.
+
+1. **A Plugin Directory**: Plugins are loaded from
+   `~/.config/<tool-name>/plugins/*.py` (where `<tool-name>` is the name of the
+   tool, e.g., `skill-select`, `context`, `permission`).
+1. **An API Class**: The tool defines a `PluginAPI` class that wraps the
+   internal state and methods exposed to plugins.
+1. **A `register(api)` Entrypoint**: Each plugin must define a top-level
+   `register(api)` function that receives an instance of the `PluginAPI`.
+1. **Alphabetical Precedence**: Plugins are loaded in alphabetical order of
+   their filenames. Later plugins can override settings registered by earlier
+   ones. Use numeric prefixes (e.g., `10_`, `20_`, `30_`) to explicitly control
+   loading order.
+1. **A `--plugin-template` Switch**: The tool must support a `--plugin-template`
+   CLI switch that prints a clean, documented template of a plugin to stdout.
+1. **Traceback Debugging**: The tool must support a `<TOOL_NAME>_DEBUG`
+   environment variable (e.g., `SKILL_SELECT_DEBUG=1`). When set, any exceptions
+   during plugin loading (like syntax errors) must print a full Python traceback
+   to `stderr` instead of a silent warning.
+1. **Fast, Side-Effect-Free Registration**: `register(api)` runs on every tool
+   invocation, so it must be fast and side-effect-free: no network calls,
+   subprocesses, or filesystem writes. The `--plugin-template` output must state
+   this constraint.
 
 ### Standard Loader Boilerplate
 
-Use this standard boilerplate to load plugins in your tool. This implementation enforces alphabetical sorting, handles registration, and supports traceback debugging:
+Use this standard boilerplate to load plugins in your tool. This implementation
+enforces alphabetical sorting, handles registration, and supports traceback
+debugging:
 
 ```python
 import importlib.util
@@ -359,4 +394,5 @@ def load_plugins(api_instance, plugins_dir: Path, prefix: str):
                 traceback.print_exc(file=sys.stderr)
 ```
 
-By adhering to this pattern, you guarantee that all tools in the repository remain easy to extend and maintain for both humans and AI agents.
+By adhering to this pattern, you guarantee that all tools in the repository
+remain easy to extend and maintain for both humans and AI agents.
