@@ -31,3 +31,21 @@ We only care about supporting this behavior in modern browsers; legacy browsers
 are explicitly out of scope. The overarching goal is to provide the very best
 reasonably possible behavior regarding preserving state on browser navigation
 (often referred to as leveraging the bfcache or History API state restoration).
+
+## Keyboard Navigation
+
+Keyboard navigation must be generally well supported, prioritizing practical
+usability over exhaustive, visually disruptive focus indicators on every DOM
+node.
+
+- **Focus Management:** Utilize `:focus-visible` to restrict focus rings
+  strictly to keyboard navigation contexts, avoiding visual clutter for pointer
+  users.
+- **Spatial Navigation:** Implement roving `tabindex` and arrow key navigation
+  for composite UI patterns (such as image carousels, data grids, and
+  listboxes). Users should be able to `Tab` into a widget and seamlessly use
+  arrow keys to navigate its internal items.
+- **Link Collections:** A grid of independent navigational links (e.g. search
+  results) is exempt — expose each link as its own tab stop in source order. The
+  test is semantic, not visual: widgets whose items select shared in-place state
+  (carousels, listboxes, tabs) remain roving.
