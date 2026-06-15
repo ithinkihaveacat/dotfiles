@@ -18,6 +18,10 @@ This includes:
 - **Visual Correctness:** It is acceptable if some elements need to be reloaded
   or re-fetched as the user scrolls, provided that the result is visually
   correct and the scroll bar position does not jump.
+- **Transient In-Component State:** For carousel-like components, persist only
+  the resting position (e.g. via `replaceState`, so it survives reload and is
+  shareable); do not push a history entry per intermediate step, as that hijacks
+  the back button into rewinding the component instead of leaving the page.
 - **Hard Reloads:** The requirements are reduced if the user explicitly reloads
   the page. While preserving scroll position on reload can be difficult, you
   should still preserve as much state as reasonably possible (e.g., maintaining
