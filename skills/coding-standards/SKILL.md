@@ -2,12 +2,13 @@
 name: coding-standards
 description: >-
   Use this skill when writing, reviewing, or validating code (shell scripts,
-  Python, Markdown) or CLI tools to ensure they follow repository coding
+  Python, Markdown, Web) or CLI tools to ensure they follow repository coding
   standards and conventions. Also use when formatting git commit messages
   (Conventional Commits syntax, line wrapping) or checking code for style
   compliance. Triggers: coding standards, style guide, validate change,
   review conventions, shellcheck, shfmt, markdown format, python, ruff,
-  uvx, lint, commit message format, CLI design, code review, formatting.
+  uvx, lint, commit message format, CLI design, code review, formatting,
+  web development, state management, scroll position, frontend.
 ---
 
 # Coding Standards
@@ -95,6 +96,13 @@ Tools for working with Android Jetpack libraries, ADB operations, APK analysis,
 package management, Wear OS debugging, and emulator management.
 
 @references/android.md
+
+### Web Development
+
+Guidelines for web development, focusing on state management and browser
+navigation behavior.
+
+@references/web.md
 
 ### Git Operations
 
