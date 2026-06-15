@@ -39,7 +39,9 @@
 >   `shellcheck` for Bash) exactly as instructed.
 > - **Version control**: When preparing to commit changes, ensure you format
 >   your commit messages according to the exact style and rules outlined in the
->   project's standards or workflow skills.
+>   project's standards or workflow skills. Note that a local git hook strictly
+>   enforces a 50-character limit on the subject line and a 72-character hard
+>   wrap on the body. Your commits will fail if you exceed these limits.
 >
 > ## Summary
 >
