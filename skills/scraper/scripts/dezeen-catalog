@@ -1,0 +1,272 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["playwright"]
+# ///
+"""Enumerate dezeen.com article URLs for a tag.
+
+Point it at a Dezeen tag (a slug like 'london-extensions' or a full tag URL)
+and it walks the tag's paginated index — /tag/<slug>/page/N/ — yielding every
+article URL on stdout, one per line.
+
+  dezeen-catalog london-extensions
+  dezeen-catalog https://www.dezeen.com/tag/london-extensions/ --limit 10
+  dezeen-catalog london-extensions --json     # title/author/date/excerpt cards
+
+Pagination is server-rendered; the script keeps fetching pages until one 404s
+or contains no articles (a --pages cap guards against runaways). Catalogue
+progress is printed to stderr.
+
+Dezeen sits behind Cloudflare bot management that blocks scripted HTTP clients,
+so rather than fetch the HTML ourselves we drive a real Chrome you launch
+yourself and read the rendered DOM (see dezeen-gallery and
+references/dezeen-source-structure.md). Launch one first:
+
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \\
+        --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-dezeen-profile &
+"""
+
+import argparse
+import html as htmllib
+import json
+import os
+import re
+import signal
+import sys
+import time
+
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import sync_playwright
+
+BASE = "https://www.dezeen.com"
+
+# DevTools endpoint of the user-launched Chrome we drive. See dezeen-gallery for
+# the matching implementation and the reasoning behind the browser approach.
+CDP_URL = os.environ.get("DEZEEN_CDP_URL", "http://127.0.0.1:9222")
+
+# Cloudflare interstitial / managed-challenge titles. A babysitting human clears
+# one once and the session cookie covers the rest, so we wait rather than fail.
+CHALLENGE_RE = re.compile(r"just a moment|attention required|verify you", re.I)
+
+
+def launch_hint(prog: str) -> str:
+    return (
+        f"{prog}: cannot reach a debuggable Chrome at {CDP_URL}.\n\n"
+        "This scraper drives a real Chrome you launch yourself, so Cloudflare\n"
+        "sees a human browser rather than an automated one. Start one with:\n\n"
+        '  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \\\n'
+        "      --remote-debugging-port=9222 \\\n"
+        "      --user-data-dir=/tmp/chrome-dezeen-profile &\n\n"
+        "then re-run. Override the endpoint with DEZEEN_CDP_URL."
+    )
+
+
+def await_human(page, prog: str, solve_timeout: int) -> None:
+    """Block while a Cloudflare challenge is on screen, up to solve_timeout secs.
+
+    Polls the document title; a babysitting human clears the challenge in the
+    Chrome window and we continue once the real page loads. On timeout we return
+    anyway and let the caller deal with the (challenge) DOM.
+    """
+    if not CHALLENGE_RE.search(page.title() or ""):
+        return
+    print(
+        f"{prog}: Cloudflare challenge — solve it in the Chrome window "
+        f"(waiting up to {solve_timeout}s)…",
+        file=sys.stderr,
+        flush=True,
+    )
+    deadline = time.time() + solve_timeout
+    while CHALLENGE_RE.search(page.title() or ""):
+        if time.time() > deadline:
+            return
+        time.sleep(2)
+    print(f"{prog}: challenge cleared, continuing.", file=sys.stderr, flush=True)
+
+
+def render(
+    url: str,
+    prog: str,
+    *,
+    wait_selector: str | None = None,
+    nav_timeout: int = 45000,
+    solve_timeout: int = 180,
+) -> tuple[int | None, str]:
+    """Navigate the connected Chrome to url and return (http_status, html)."""
+    with sync_playwright() as pw:
+        try:
+            browser = pw.chromium.connect_over_cdp(CDP_URL)
+        except Exception:
+            sys.exit(launch_hint(prog))
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.new_page()
+        try:
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
+            status = resp.status if resp else None
+            await_human(page, prog, solve_timeout)
+            if wait_selector:
+                try:
+                    page.wait_for_selector(wait_selector, timeout=10000)
+                except PlaywrightError:
+                    pass  # selector may legitimately be absent (e.g. empty page)
+            return status, page.content()
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+
+def fetch(url: str) -> str | None:
+    """Return tag-page HTML, or None on a 404 (end of pagination)."""
+    status, html = render(url, "dezeen-catalog", wait_selector="article")
+    if status == 404:
+        return None
+    return html
+
+
+def tag_url(tag: str) -> str:
+    """Normalise a tag slug or URL to a /tag/<slug>/ base URL."""
+    if tag.startswith("http"):
+        return tag.rstrip("/") + "/"
+    return f"{BASE}/tag/{tag.strip('/')}/"
+
+
+def parse_cards(html: str) -> list[dict]:
+    """Extract per-article summary cards from a tag index page, in order.
+
+    Each result is an <article data-article-id=...> block carrying a title,
+    article URL, thumbnail, author, publish date and excerpt.
+    """
+    cards = []
+    for block in re.findall(r"<article\b.*?</article>", html, re.DOTALL):
+        url_m = re.search(
+            r'<h3[^>]*>\s*<a href="(https://www\.dezeen\.com/\d{4}/\d{2}/\d{2}/[^"]+)"',
+            block,
+        )
+        if not url_m:
+            continue
+        url = url_m.group(1).rstrip("/") + "/"
+        title_m = re.search(r"<h3[^>]*>\s*<a [^>]*>(.*?)</a>", block, re.DOTALL)
+        author_m = re.search(r'rel="author"[^>]*>(.*?)</a>', block, re.DOTALL)
+        date_m = re.search(r'<time[^>]*datetime="([^"]+)"', block)
+        thumb_m = re.search(
+            r'<img[^>]*src="(https://static\.dezeen\.com/[^"]+)"', block
+        )
+        excerpt_m = re.search(r"<p>(.*?)</p>", block, re.DOTALL)
+
+        def clean(m):
+            if not m:
+                return None
+            return htmllib.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
+
+        slug = url.rstrip("/").split("/")[-1]
+        cards.append(
+            {
+                "slug": slug,
+                "url": url,
+                "title": clean(title_m),
+                "author": clean(author_m),
+                "date": date_m.group(1) if date_m else None,
+                "thumbnail": thumb_m.group(1) if thumb_m else None,
+                "excerpt": clean(excerpt_m),
+            }
+        )
+    return cards
+
+
+def crawl(tag: str, max_pages: int):
+    """Yield article cards across a tag's pages, de-duplicated, in order.
+
+    Stops at the first 404 (out-of-range page) or empty page. Cloudflare
+    challenges are handled inside the fetch by waiting for a human to clear them,
+    so a page that still yields no cards is treated as the end of the catalogue.
+    """
+    base = tag_url(tag)
+    seen: set[str] = set()
+    page = 1
+    while page <= max_pages:
+        url = base if page == 1 else f"{base}page/{page}/"
+        html = fetch(url)
+        if html is None:
+            break
+        cards = parse_cards(html)
+        if not cards:
+            break
+        new = 0
+        for c in cards:
+            if c["url"] in seen:
+                continue
+            seen.add(c["url"])
+            new += 1
+            yield c
+        print(f"# page {page}: {new} new articles ({len(seen)} total)", file=sys.stderr)
+        page += 1
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+    )
+    ap.add_argument("--help", action="help", help="Show this help message and exit")
+    ap.add_argument("tag", help="tag slug (e.g. london-extensions) or full tag URL")
+    ap.add_argument("--limit", type=int, help="cap number of articles")
+    ap.add_argument(
+        "--pages", type=int, default=100, help="max pages to walk (default 100)"
+    )
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit summary objects as a JSON array instead of URLs",
+    )
+    args = ap.parse_args()
+
+    if args.json:
+        # A JSON array can't be streamed validly, so collect then dump.
+        hits = []
+        for card in crawl(args.tag, args.pages):
+            hits.append(card)
+            if args.limit and len(hits) >= args.limit:
+                break
+        json.dump(hits, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        # Stream URLs as they're found (flushing each line) so a downstream
+        # consumer — e.g. download-dezeen-tag stopping at an image target — gets
+        # results incrementally and can close the pipe early instead of forcing
+        # a full crawl.
+        n = 0
+        for card in crawl(args.tag, args.pages):
+            print(card["url"], flush=True)
+            n += 1
+            if args.limit and n >= args.limit:
+                break
+
+
+def _sigterm_handler(signum, frame):
+    # Converge SIGTERM with SIGINT so the Playwright driver subprocess is torn
+    # down cleanly (the sync_playwright context manager runs on KeyboardInterrupt).
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    try:
+        main()
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        import os
+
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
