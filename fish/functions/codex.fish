@@ -1,5 +1,6 @@
 # Wrapper for codex that keeps a few local write/network allowances readable.
 function codex --description 'Run codex with local writable dirs and sandbox defaults'
+    _agent_preflight codex; or return
     set -lx TMPDIR (mktemp -d /tmp/codex.XXXXXXXXXX)
 
     set -l codex_writable_dirs \

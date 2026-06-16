@@ -10,19 +10,11 @@ function fish_right_prompt --description 'Write out the right prompt'
             set -l toplevel (git rev-parse --show-toplevel 2>/dev/null)
             if test -n "$toplevel"
                 set -l prefix ""
-                set -l exclude_file "$toplevel/.git/info/exclude"
-                if not test -f "$exclude_file"
-                    set exclude_file (git rev-parse --git-path info/exclude 2>/dev/null)
-                end
-                if test -f "$exclude_file"
-                    if string match -q -r "skills \\(managed by 'skill'\\)" <"$exclude_file"
-                        set -l managed_skills (string replace -r '^/\.(claude|agents)/skills/([^/]+)$' '$2' <"$exclude_file" | string match -r '^[^/#]+$')
-                        set -l unique_skills (printf '%s\n' $managed_skills | sort -u | string match -r '\S+')
-                        set -l skill_count (count $unique_skills)
-                        if test $skill_count -gt 0
-                            set prefix "✨ "
-                        end
-                    end
+                # Sparkle only when skills are managed AND skill doctor last
+                # verified them healthy (cache written by _agent_preflight at
+                # agent launch). Absence of the sparkle is the neutral default.
+                if _skill_is_managed "$toplevel"; and _skill_doctor_fresh_ok "$toplevel"
+                    set prefix "✨ "
                 end
 
                 set_color yellow
