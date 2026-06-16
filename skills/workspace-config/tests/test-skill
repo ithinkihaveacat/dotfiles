@@ -1,0 +1,608 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Find script path relative to test
+TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${TEST_DIR}/../scripts/skill"
+
+echo "1..40"
+
+# Need a temporary directory for workspace simulations
+TMPDIR=$(mktemp -d)
+MOCK_BIN_DIR=$(mktemp -d)
+trap 'rm -rf -- "$TMPDIR" "$MOCK_BIN_DIR"' EXIT
+
+# Create source skills in a central location
+mkdir -p "${TMPDIR}/sources/coding-standards" "${TMPDIR}/sources/emumanager"
+# Add dummy SKILL.md to sources so they are valid skills
+echo -e "---\nname: coding-standards\ndescription: Rules for coding standards\n---\nbody" >"${TMPDIR}/sources/coding-standards/SKILL.md"
+echo -e "---\nname: emumanager\ndescription: Manage emulators\n---\nbody" >"${TMPDIR}/sources/emumanager/SKILL.md"
+
+# Set up common environment
+# Isolate from the user's/system git config (signing, hooks, templates).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+export SKILL_SOURCE_DIRS="${TMPDIR}/sources"
+export XDG_CONFIG_HOME="${TMPDIR}/.config"
+export XDG_CACHE_HOME="${TMPDIR}/.cache"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+# Ensure p4 is not found by default during Git/Unmanaged tests
+export PATH="$MOCK_BIN_DIR:$PATH"
+
+# Write a dummy p4 that fails, to ensure we don't accidentally detect P4
+cat <<'EOF' >"$MOCK_BIN_DIR/p4"
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$MOCK_BIN_DIR/p4"
+
+# ==============================================================================
+# PART 1: Unmanaged (Default) Workspace Mode
+# ==============================================================================
+UNMANAGED_DIR="${TMPDIR}/unmanaged"
+mkdir -p "$UNMANAGED_DIR"
+cd "$UNMANAGED_DIR"
+
+# Test 1: catalog runs
+if "${SCRIPT}" catalog >/dev/null 2>&1; then
+  echo "ok 1 - [Unmanaged] catalog runs"
+else
+  echo "not ok 1 - [Unmanaged] catalog failed"
+fi
+
+# Test 2: add multiple skills
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+  if [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/emumanager ]; then
+    echo "ok 2 - [Unmanaged] add multiple skills"
+  else
+    echo "not ok 2 - [Unmanaged] add did not create symlinks"
+  fi
+else
+  echo "not ok 2 - [Unmanaged] add failed"
+fi
+
+# Test 3: list returns members
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+  echo "ok 3 - [Unmanaged] list returns members"
+else
+  echo "not ok 3 - [Unmanaged] list failed"
+fi
+
+# Test 4: state file .skills-managed updated
+if [ -f .skills-managed ] && grep -q "coding-standards" .skills-managed; then
+  echo "ok 4 - [Unmanaged] state file updated"
+else
+  echo "not ok 4 - [Unmanaged] state file missing or empty"
+fi
+
+# Test 5: clean removes links and state file
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  if [ ! -d .claude ] && [ ! -d .agents ] && [ ! -f .skills-managed ]; then
+    echo "ok 5 - [Unmanaged] clean removes links and state"
+  else
+    echo "not ok 5 - [Unmanaged] clean left files"
+  fi
+else
+  echo "not ok 5 - [Unmanaged] clean failed"
+fi
+
+# ==============================================================================
+# PART 2: Git Workspace Mode
+# ==============================================================================
+GIT_DIR="${TMPDIR}/git_repo"
+mkdir -p "$GIT_DIR"
+cd "$GIT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+
+# Test 6: add multiple skills
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1; then
+  if [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/emumanager ]; then
+    echo "ok 6 - [Git] add multiple skills"
+  else
+    echo "not ok 6 - [Git] add did not create symlinks"
+  fi
+else
+  echo "not ok 6 - [Git] add failed"
+fi
+
+# Test 7: authoritative state lives in .git/info/skills
+if [ -f .git/info/skills ] && grep -q 'coding-standards' .git/info/skills &&
+  grep -q 'emumanager' .git/info/skills; then
+  echo "ok 7 - [Git] state recorded in .git/info/skills"
+else
+  echo "not ok 7 - [Git] .git/info/skills missing entries"
+fi
+
+# Test 8: info/exclude contains regenerated managed block
+if [ -f .git/info/exclude ] && grep -q "managed by 'skill'" .git/info/exclude &&
+  grep -q '/.claude/skills/coding-standards' .git/info/exclude; then
+  echo "ok 8 - [Git] info/exclude contains managed block"
+else
+  echo "not ok 8 - [Git] info/exclude missing managed entries"
+fi
+
+# Test 9: list --json emits names and resolved paths
+if out=$("${SCRIPT}" list --json 2>/dev/null) &&
+  printf '%s' "$out" | grep -q '"name": *"coding-standards"' &&
+  printf '%s' "$out" | grep -q '"path": *"'; then
+  echo "ok 9 - [Git] list --json emits names and paths"
+else
+  echo "not ok 9 - [Git] list --json failed: $out"
+fi
+
+# Test 10: exclude block is regenerable: corrupt it, doctor flags, repair fixes
+sed '/skills/d' .git/info/exclude >.git/info/exclude.tmp && mv .git/info/exclude.tmp .git/info/exclude
+if "${SCRIPT}" doctor >/dev/null 2>&1; then
+  echo "not ok 10 - [Git] doctor should flag exclude drift"
+else
+  if "${SCRIPT}" repair >/dev/null 2>&1 &&
+    grep -q '/.claude/skills/coding-standards' .git/info/exclude &&
+    "${SCRIPT}" doctor >/dev/null 2>&1; then
+    echo "ok 10 - [Git] doctor flags exclude drift; repair regenerates it"
+  else
+    echo "not ok 10 - [Git] repair did not restore exclude block"
+  fi
+fi
+
+# Test 11: remove deletes symlink, state entry, and exclude entry
+if "${SCRIPT}" remove emumanager >/dev/null 2>&1; then
+  if [ ! -L .agents/skills/emumanager ] && ! grep -q "emumanager" .git/info/exclude &&
+    ! grep -q "emumanager" .git/info/skills; then
+    echo "ok 11 - [Git] remove deletes symlink, state, and exclude entry"
+  else
+    echo "not ok 11 - [Git] remove left symlink, state, or exclude entry"
+  fi
+else
+  echo "not ok 11 - [Git] remove failed"
+fi
+
+# Test 12: clean removes links, state file, and managed block
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  if [ ! -L .claude/skills/coding-standards ] && [ ! -f .git/info/skills ] &&
+    ! grep -q "coding-standards" .git/info/exclude; then
+    echo "ok 12 - [Git] clean removes links, state, and exclude block"
+  else
+    echo "not ok 12 - [Git] clean left links, state, or exclude block"
+  fi
+else
+  echo "not ok 12 - [Git] clean failed"
+fi
+
+# Test 13: add from subdirectory updates top-level exclude and state
+mkdir -p sub
+cd sub
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+  if grep -q "/.claude/skills/coding-standards" ../.git/info/exclude &&
+    grep -q "coding-standards" ../.git/info/skills; then
+    echo "ok 13 - [Git] add from subdirectory updates top-level records"
+  else
+    echo "not ok 13 - [Git] top-level records not updated"
+  fi
+else
+  echo "not ok 13 - [Git] add from subdirectory failed"
+fi
+cd ..
+
+# Test 14: legacy migration: managed list parsed from old exclude block
+LEGACY_DIR="${TMPDIR}/git_legacy"
+mkdir -p "$LEGACY_DIR"
+cd "$LEGACY_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${TMPDIR}/sources/coding-standards" .claude/skills/coding-standards
+ln -s "${TMPDIR}/sources/coding-standards" .agents/skills/coding-standards
+mkdir -p .git/info
+cat <<'EOF' >.git/info/exclude
+# >>> skills >>>
+# managed by 'skill'
+/.claude/skills/coding-standards
+/.agents/skills/coding-standards
+# <<< skills <<<
+EOF
+if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
+  # Any state change migrates the list to .git/info/skills
+  "${SCRIPT}" add emumanager >/dev/null 2>&1
+  if grep -q 'coding-standards' .git/info/skills && grep -q 'emumanager' .git/info/skills; then
+    echo "ok 14 - [Git] legacy exclude-block state is read and migrated"
+  else
+    echo "not ok 14 - [Git] migration did not preserve legacy entries"
+  fi
+else
+  echo "not ok 14 - [Git] legacy exclude-block state not read: $out"
+fi
+
+# ==============================================================================
+# PART 3: Perforce Workspace Mode (standard layout)
+# ==============================================================================
+# Re-mock p4 command to succeed and return simulated workspace info
+cat <<'EOF' >"$MOCK_BIN_DIR/p4"
+#!/usr/bin/env bash
+if [ "$1" = "info" ]; then
+  echo "User name: testuser"
+  echo "Client root: $MOCK_CLIENT_ROOT"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$MOCK_BIN_DIR/p4"
+
+export MOCK_CLIENT_ROOT="${TMPDIR}/public_ws"
+mkdir -p "${MOCK_CLIENT_ROOT}"
+cd "${MOCK_CLIENT_ROOT}"
+
+# Test 15: add multiple skills (standard locations)
+echo "ok 15 - [P4] add multiple skills # SKIP P4Workspace removed"
+echo "ok 16 - [P4] state file updated # SKIP P4Workspace removed"
+echo "ok 17 - [P4] clean removes links and state # SKIP P4Workspace removed"
+echo "ok 18 - [P4] cwd outside client root falls back to unmanaged # SKIP P4Workspace removed"
+
+# ==============================================================================
+# PART 4: Generic / Error Handling / Help Tests
+# ==============================================================================
+# Test 19: add bogus-skill-name reports unknown skill
+if ! "${SCRIPT}" add bogus-skill-name >/dev/null 2>&1; then
+  echo "ok 19 - add bogus-skill-name reports unknown skill"
+else
+  echo "not ok 19 - add bogus-skill-name succeeded unexpectedly"
+fi
+
+# Test 20: resolves names against SKILL_SOURCE_DIRS
+mkdir -p "${TMPDIR}/custom-skills/test-skill"
+echo -e "---\nname: test-skill\n---\nbody" >"${TMPDIR}/custom-skills/test-skill/SKILL.md"
+if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill | grep -q 'custom-skills/test-skill'; then
+  echo "ok 20 - resolves names against SKILL_SOURCE_DIRS"
+else
+  echo "not ok 20 - failed to resolve custom skill"
+fi
+
+# Test 21: update --catalog with empty registry preserves catalog
+mkdir -p "${XDG_CACHE_HOME}/skill-select/catalog/dummy"
+touch "${XDG_CACHE_HOME}/skill-select/catalog/dummy/SKILL.md"
+if "${SCRIPT}" update --catalog >/dev/null 2>&1; then
+  if [ -d "${XDG_CACHE_HOME}/skill-select/catalog/dummy" ]; then
+    echo "ok 21 - update --catalog with empty registry preserves catalog (GC guard)"
+  else
+    echo "not ok 21 - update --catalog destroyed unrelated catalog"
+  fi
+else
+  echo "not ok 21 - update --catalog failed"
+fi
+
+# Test 22: help documents update --catalog
+if "${SCRIPT}" --help 2>&1 | grep -q '\-\-catalog'; then
+  echo "ok 22 - help documents update --catalog"
+else
+  echo "not ok 22 - help does not document update --catalog"
+fi
+
+# Test 23: help documents repair and list --json
+if out=$("${SCRIPT}" --help 2>&1) && printf '%s' "$out" | grep -q 'repair' &&
+  printf '%s' "$out" | grep -q 'list \[--json\]'; then
+  echo "ok 23 - help documents repair and list --json"
+else
+  echo "not ok 23 - help missing repair or list --json"
+fi
+
+# ==============================================================================
+# PART 5: Workspace Detector Plugins
+# ==============================================================================
+# Reset p4 mock to fail
+cat <<'EOF' >"$MOCK_BIN_DIR/p4"
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$MOCK_BIN_DIR/p4"
+
+mkdir -p "${XDG_CONFIG_HOME}/skill/plugins"
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/testws.py"
+from pathlib import Path
+
+
+def register(api):
+    class MarkerWorkspace(api.FileStateMixin, api.Workspace):
+        def __init__(self, root):
+            super().__init__(root)
+            self.state_file = self.root / ".marker-skills"
+
+        @classmethod
+        def detect(cls):
+            curr = Path.cwd().resolve()
+            for parent in [curr] + list(curr.parents):
+                if (parent / ".marker-ws").is_dir():
+                    return cls(parent)
+            return None
+
+    api.register_workspace(MarkerWorkspace)
+EOF
+
+PLUGIN_DIR="${TMPDIR}/plugin_ws"
+mkdir -p "${PLUGIN_DIR}/.marker-ws" "${PLUGIN_DIR}/sub"
+
+# Test 24: plugin workspace detected from a subdirectory
+cd "${PLUGIN_DIR}/sub"
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+  if [ -L "${PLUGIN_DIR}/.claude/skills/coding-standards" ] &&
+    [ -f "${PLUGIN_DIR}/.marker-skills" ] && [ ! -d .claude ]; then
+    echo "ok 24 - [Plugin] custom workspace detected, links at plugin root"
+  else
+    echo "not ok 24 - [Plugin] links or state in wrong location"
+  fi
+else
+  echo "not ok 24 - [Plugin] add failed"
+fi
+
+# Test 25: plugin detector takes precedence over git
+GIT_IN_PLUGIN="${TMPDIR}/plugin_git"
+mkdir -p "${GIT_IN_PLUGIN}/.marker-ws"
+git -C "${GIT_IN_PLUGIN}" init -q
+cd "${GIT_IN_PLUGIN}"
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
+  if [ -f .marker-skills ] && [ ! -f .git/info/skills ]; then
+    echo "ok 25 - [Plugin] plugin detector takes precedence over git"
+  else
+    echo "not ok 25 - [Plugin] git detector ran despite plugin match"
+  fi
+else
+  echo "not ok 25 - [Plugin] add failed in git+plugin workspace"
+fi
+
+# Test 26: broken plugin is skipped with a warning, built-ins still work
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/broken.py"
+raise RuntimeError("boom")
+EOF
+NOPLUGIN_DIR="${TMPDIR}/noplugin"
+mkdir -p "$NOPLUGIN_DIR"
+cd "$NOPLUGIN_DIR"
+if out=$("${SCRIPT}" add coding-standards 2>&1); then
+  if printf '%s' "$out" | grep -q 'failed to load plugin' && [ -f .skills-managed ]; then
+    echo "ok 26 - [Plugin] broken plugin warns and is skipped"
+  else
+    echo "not ok 26 - [Plugin] missing warning or fallback: $out"
+  fi
+else
+  echo "not ok 26 - [Plugin] add failed with broken plugin present"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/broken.py"
+
+# Test 27: doctor flags a managed-but-missing symlink
+cd "${PLUGIN_DIR}"
+rm .claude/skills/coding-standards
+if out=$("${SCRIPT}" doctor 2>&1); then
+  echo "not ok 27 - doctor should flag missing symlink"
+else
+  if printf '%s' "$out" | grep -q 'missing'; then
+    echo "ok 27 - doctor flags managed-but-missing symlink"
+  else
+    echo "not ok 27 - doctor failed without expected output: $out"
+  fi
+fi
+
+# Test 28: show command displays skill info
+if out=$("${SCRIPT}" show coding-standards 2>/dev/null); then
+  if printf '%s' "$out" | grep -q 'Skill: coding-standards' &&
+    printf '%s' "$out" | grep -q 'Rules for coding standards' &&
+    printf '%s' "$out" | grep -q 'Metadata:'; then
+    echo "ok 28 - show command displays skill info"
+  else
+    echo "not ok 28 - show command output missing expected fields: $out"
+  fi
+else
+  echo "not ok 28 - show command failed"
+fi
+
+# Test 29: info command works as an alias
+if out=$("${SCRIPT}" info coding-standards 2>/dev/null); then
+  if printf '%s' "$out" | grep -q 'Skill: coding-standards'; then
+    echo "ok 29 - info command works as an alias"
+  else
+    echo "not ok 29 - info command output missing expected fields: $out"
+  fi
+else
+  echo "not ok 29 - info command failed"
+fi
+
+# Run preflight tests using fish if available
+if ! command -v fish >/dev/null 2>&1; then
+  echo "ok 30 - [Preflight] non-managed dir with no required skills succeeds # skip fish not available"
+  echo "ok 31 - [Preflight] non-managed dir with required skills fails # skip fish not available"
+  echo "ok 32 - [Preflight] managed dir with required skill present succeeds # skip fish not available"
+  echo "ok 33 - [Preflight] managed dir with missing required skill fails # skip fish not available"
+  echo "ok 34 - [Preflight] subtraction operator works # skip fish not available"
+  echo "ok 35 - [Preflight] exclamation subtraction operator works # skip fish not available"
+else
+  fish -c "
+# Source dependencies
+source '${TEST_DIR}/../../../fish/functions/_agent_preflight.fish'
+source '${TEST_DIR}/../../../fish/functions/_skill_is_managed.fish'
+
+# Case A: Non-managed directory
+cd (mktemp -d)
+
+# Test 30: No required skills -> should succeed
+set -gx AGENT_REQUIRED_SKILLS ''
+if _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 30 - [Preflight] non-managed dir with no required skills succeeds'
+else
+  echo 'not ok 30 - [Preflight] non-managed dir with no required skills failed'
+end
+
+# Test 31: With required skills -> should fail
+set -gx AGENT_REQUIRED_SKILLS 'some-skill'
+if not _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 31 - [Preflight] non-managed dir with required skills fails'
+else
+  echo 'not ok 31 - [Preflight] non-managed dir with required skills succeeded unexpectedly'
+end
+
+# Case B: Managed directory
+set -l test_repo (mktemp -d)
+cd \$test_repo
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /tmp .claude/skills/test-skill
+ln -s /tmp .agents/skills/test-skill
+mkdir -p .git/info
+echo 'test-skill' > .git/info/skills
+echo '# >>> skills >>>' > .git/info/exclude
+echo '/.claude/skills/test-skill' >> .git/info/exclude
+echo '/.agents/skills/test-skill' >> .git/info/exclude
+echo '# <<< skills <<<' >> .git/info/exclude
+
+# Test 32: Required skill present -> should succeed
+set -gx AGENT_REQUIRED_SKILLS 'test-skill'
+if _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 32 - [Preflight] managed dir with required skill present succeeds'
+else
+  echo 'not ok 32 - [Preflight] managed dir with required skill present failed'
+end
+
+# Test 33: Required skill missing -> should fail
+set -gx AGENT_REQUIRED_SKILLS 'test-skill missing-skill'
+if not _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 33 - [Preflight] managed dir with missing required skill fails'
+else
+  echo 'not ok 33 - [Preflight] managed dir with missing required skill succeeded'
+end
+
+# Test 34: Subtraction operator -> should succeed
+set -gx AGENT_REQUIRED_SKILLS 'test-skill missing-skill -missing-skill'
+if _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 34 - [Preflight] subtraction operator works'
+else
+  echo 'not ok 34 - [Preflight] subtraction operator failed'
+end
+
+# Test 35: Exclamation subtraction operator -> should succeed
+set -gx AGENT_REQUIRED_SKILLS 'test-skill missing-skill !missing-skill'
+if _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 35 - [Preflight] exclamation subtraction operator works'
+else
+  echo 'not ok 35 - [Preflight] exclamation subtraction operator failed'
+end
+"
+fi
+
+# Test 36: get_parsed_skills parses simple required skills
+if out=$(AGENT_REQUIRED_SKILLS="skill-a skill-b" python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-a,skill-b|" ]; then
+    echo "ok 36 - [Python Parser] parses simple required skills"
+  else
+    echo "not ok 36 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 36 - [Python Parser] failed to import or run"
+fi
+
+# Test 37: get_parsed_skills handles subtraction case-insensitively
+if out=$(AGENT_REQUIRED_SKILLS="SkillA skill-b -skilla" python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-b|skilla" ]; then
+    echo "ok 37 - [Python Parser] subtraction is case-insensitive"
+  else
+    echo "not ok 37 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 37 - [Python Parser] failed to import or run"
+fi
+
+# Test 38: get_parsed_skills handles case-sensitive additions
+if out=$(AGENT_REQUIRED_SKILLS="SkillA skill-b -skilla SkillA" python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-b,SkillA|skilla" ]; then
+    echo "ok 38 - [Python Parser] additions are case-sensitive and deduplicated"
+  else
+    echo "not ok 38 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 38 - [Python Parser] failed to import or run"
+fi
+
+# Test 39: get_parsed_skills handles redundant whitespace and exclamation prefix
+if out=$(AGENT_REQUIRED_SKILLS="  skill-a   skill-b   !skill-a  " python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-b|skill-a" ]; then
+    echo "ok 39 - [Python Parser] redundant whitespace and exclamation marks parsed"
+  else
+    echo "not ok 39 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 39 - [Python Parser] failed to import or run"
+fi
+
+# Test 40: skill apply merges required skills and blacklists/suppresses negated skills
+# 1. Back up real skill-select
+mv "${TEST_DIR}/../scripts/skill-select" "${TEST_DIR}/../scripts/skill-select.real"
+
+# 2. Write mock skill-select that suggests "dummy-skill" and "negated-skill"
+cat <<'EOF' >"${TEST_DIR}/../scripts/skill-select"
+#!/usr/bin/env bash
+if [ "$1" = "suggest" ]; then
+  echo '{"name": "dummy-skill", "path": "dummy-skill"}'
+  echo '{"name": "negated-skill", "path": "negated-skill"}'
+elif [ "$1" = "resolve" ]; then
+  # Resolves the spec to a path in custom-skills
+  echo -e "${SKILL_SOURCE_DIRS}/$2\t$2"
+fi
+EOF
+chmod +x "${TEST_DIR}/../scripts/skill-select"
+
+# 3. Create a clean test repo
+APPLY_DIR="${TMPDIR}/apply-test"
+mkdir -p "$APPLY_DIR"
+cd "$APPLY_DIR"
+git init -q
+
+# Set up SKILL_SOURCE_DIRS and required skills
+export SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills"
+mkdir -p "${SKILL_SOURCE_DIRS}/dummy-skill" "${SKILL_SOURCE_DIRS}/required-skill" "${SKILL_SOURCE_DIRS}/negated-skill"
+echo -e "---\nname: dummy-skill\n---" >"${SKILL_SOURCE_DIRS}/dummy-skill/SKILL.md"
+echo -e "---\nname: required-skill\n---" >"${SKILL_SOURCE_DIRS}/required-skill/SKILL.md"
+echo -e "---\nname: negated-skill\n---" >"${SKILL_SOURCE_DIRS}/negated-skill/SKILL.md"
+
+if out=$(AGENT_REQUIRED_SKILLS="required-skill -negated-skill" "${SCRIPT}" apply 2>&1); then
+  if echo "$out" | grep -q "ignoring suggested skill 'negated-skill'" &&
+    echo "$out" | grep -q "added dummy-skill" &&
+    echo "$out" | grep -q "added required-skill" &&
+    [ ! -e .claude/skills/negated-skill ] &&
+    [ -d .claude/skills/dummy-skill ] &&
+    [ -d .claude/skills/required-skill ]; then
+    echo "ok 40 - [Apply] merges required skills and blacklists negated suggestions"
+  else
+    echo "not ok 40 - [Apply] unexpected output or files: $out"
+  fi
+else
+  echo "not ok 40 - [Apply] command failed: $out"
+fi
+
+# 4. Restore real skill-select
+mv "${TEST_DIR}/../scripts/skill-select.real" "${TEST_DIR}/../scripts/skill-select"

@@ -1,127 +1,130 @@
 # Tests
 
-This directory contains tests for scripts in `bin/`. Tests use TAP (Test
-Anything Protocol) format.
+Tests in this repository are **co-located** and **flattened** under their
+respective scopes to keep them together in the directory structure.
 
-## Directory Structure
+- Tests for skills (e.g., `skills/bar/scripts/foo`) live directly under that
+  skill's `tests/` folder as a flat executable file (e.g.,
+  `skills/bar/tests/test-foo`).
+- Tests for global utilities (scripts in `bin/`) live directly under the global
+  `tests/` folder as a flat executable file (e.g., `tests/test-git-setup`).
+- Test data and resources are stored in a `fixtures/` subdirectory under the
+  corresponding `tests/` folder (e.g.,
+  `skills/agent-tools/tests/fixtures/pacioli/`).
 
-```text
-tests/
-├── README.md
-├── script-name/
-│   ├── test-basic       # TAP test file (executable)
-│   └── fixtures/        # Test data (optional)
-└── another-script/
-    └── test-basic
-```
+> [!NOTE] **Run tests selectively!** You only need to run the tests for the
+> skill or script you actually touched or modified, rather than the entire test
+> suite. This keeps development fast and avoids running slow or heavy
+> external-dependency tests unnecessarily.
 
 ## Running Tests
 
-The following examples assume you are running from the `tests/` directory.
+Tests use the TAP (Test Anything Protocol) format and can be run using the
+standard `prove` utility.
 
-### Run All Tests
+### Run All Tests in the Repo
+
+From the repository root:
 
 ```bash
-prove */test-*
+prove tests/test-* skills/*/tests/test-*
 ```
 
-### Run Tests in Parallel
-
-Tests can be run in parallel to speed up execution:
+You can run the tests in parallel to speed up execution by using the `-j` flag:
 
 ```bash
-prove -j 9 */test-*
+# Run in parallel with 9 jobs
+prove -j 9 tests/test-* skills/*/tests/test-*
 ```
 
-Or with verbose output:
+### Run Tests for a Particular Skill
+
+To run all tests for a specific skill (e.g., `coding-standards`):
 
 ```bash
-prove -v */test-*
+prove skills/coding-standards/tests/test-*
 ```
 
-### Run a Single Test Suite
+### Run a Specific Test File
+
+You can run a single test file using `prove`:
 
 ```bash
-prove jetpack/test-*
+prove skills/workspace-config/tests/test-permission
 ```
 
-### Run a Single Test File
+Or execute the test script directly:
 
 ```bash
-prove jetpack/test-basic
+./skills/workspace-config/tests/test-permission
 ```
 
-Or execute directly:
+## Offline & Isolated Environments
+
+To ensure tests run reliably in sandboxed local environments and CI, you should
+utilize the following environment variables:
+
+### 1. Registry Auth Bypass (`UV_OFFLINE=1`)
+
+In isolated developer sandboxes (like local agent environments), `uv` may try to
+query corporate Python package registries and fail with `401 Unauthorized`
+errors.
+
+- **Solution**: Run the tests with `UV_OFFLINE=1` set in the environment. This
+  instructs `uv` to completely bypass network registry checks and resolve
+  dependencies using only locally cached packages.
+- **Usage**:
+  ```bash
+  UV_OFFLINE=1 prove tests/test-* skills/*/tests/test-*
+  ```
+
+### 2. Skipping External API Tests (`GEMINI_API_KEY=""`)
+
+Some tests (like `test-pacioli` and `test-git-setup`) include integration tests
+that make actual network calls to the Gemini API. These can be slow, cost quota,
+and be non-deterministic.
+
+- **Solution**: Set `GEMINI_API_KEY=""` (empty string) in the environment. These
+  tests are written to detect the empty key and will gracefully skip their
+  API-dependent assertions while passing the rest of the local suite.
+- **Usage**:
+  ```bash
+  GEMINI_API_KEY="" prove tests/test-* skills/*/tests/test-*
+  ```
+
+### Combined Command for Local Sandboxes & CI
+
+To run the entire test suite in a completely fast, local-only, offline, and
+deterministic mode:
 
 ```bash
-./jetpack/test-basic
-```
-
-## File Naming Convention
-
-Test files are named `test-*` (e.g., `test-basic`, `test-edge-cases`) rather
-than using the `.t` extension. While `.t` is prove's default extension, the
-`test-*` pattern:
-
-- Works identically with prove via `prove */test-*`
-- Can be executed directly without prove
-- Is more self-documenting for shell scripts
-
-## Tests with External Dependencies
-
-Some tests require external services or API keys. These tests use TAP's skip
-mechanism to gracefully handle missing dependencies.
-
-### screenshot-compare
-
-Requires `GEMINI_API_KEY` environment variable. Tests are automatically skipped
-if not set:
-
-```bash
-# Without key - tests are skipped
-prove screenshot-compare/test-*
-# Output: skipped: GEMINI_API_KEY not set
-
-# With key - tests run (slow, incurs API costs)
-GEMINI_API_KEY=your-key prove screenshot-compare/test-*
+UV_OFFLINE=1 GEMINI_API_KEY="" prove tests/test-* skills/*/tests/test-*
 ```
 
 ## Writing Tests
 
-Tests should:
+When writing new tests or modifying existing ones, follow these guidelines:
 
-1. Output TAP format (plan line `1..N`, then `ok`/`not ok` lines)
-2. Be executable (`chmod +x`)
-3. Use `#!/usr/bin/env bash` shebang
-4. Skip gracefully when dependencies are missing using `1..0 # SKIP reason`
-5. Be safe to run in parallel (avoid shared temporary files or global state)
-
-Example test structure:
-
-```bash
-#!/usr/bin/env bash
-
-set -u
-
-# Skip if dependency missing
-if [[ -z "${SOME_API_KEY:-}" ]]; then
-  echo "1..0 # SKIP SOME_API_KEY not set"
-  exit 0
-fi
-
-echo "1..2"
-
-# Test 1
-if some_condition; then
-  echo "ok 1 - description"
-else
-  echo "not ok 1 - description"
-fi
-
-# Test 2
-if other_condition; then
-  echo "ok 2 - another test"
-else
-  echo "not ok 2 - another test"
-fi
-```
+1. **Output TAP format**: The test must print a plan line (e.g., `1..N`)
+   followed by `ok` or `not ok` lines for each assertion.
+1. **Co-locate and flatten**:
+   - If the script is part of a skill `skills/bar/scripts/foo`, its tests must
+     be placed directly at `skills/bar/tests/test-foo` (as a file, not a
+     directory).
+   - For global utilities, place the test directly at `tests/test-foo`.
+1. **Use self-contained paths**: Reference the script under test using relative
+   paths (e.g., `../scripts/foo` for skill tests, or `../bin/foo` for global
+   tests) rather than relying on the user's global `PATH`. This ensures tests
+   are completely self-contained.
+1. **Be executable**: Run `chmod +x` on test scripts.
+1. **Graceful skips**: If a test requires external dependencies or credentials
+   (like `GEMINI_API_KEY`), detect their absence and skip gracefully using TAP
+   skip syntax:
+   ```bash
+   if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+     echo "1..0 # SKIP GEMINI_API_KEY not set"
+     exit 0
+   fi
+   ```
+1. **Parallel-safe**: Avoid hardcoding temporary filenames or writing to shared
+   global locations. Always use `mktemp -d` and clean up on exit.

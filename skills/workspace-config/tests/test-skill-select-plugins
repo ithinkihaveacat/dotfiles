@@ -1,0 +1,297 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pyyaml",
+# ]
+# ///
+import os
+import sys
+import tempfile
+import importlib.util
+from pathlib import Path
+from importlib.machinery import SourceFileLoader
+
+# Load skill-select module
+test_dir = Path(__file__).resolve().parent
+script_path = test_dir.parents[0] / "scripts" / "skill-select"
+if not script_path.exists():
+    print("1..1")
+    print("not ok 1 - skill-select script not found at", script_path)
+    sys.exit(1)
+
+loader = SourceFileLoader("skill_select", str(script_path))
+spec = importlib.util.spec_from_loader("skill_select", loader)
+skill_select = importlib.util.module_from_spec(spec)
+try:
+    loader.exec_module(skill_select)
+except Exception as e:
+    print("1..1")
+    print(f"not ok 1 - failed to import skill-select: {e}")
+    sys.exit(1)
+
+# We have 7 tests
+print("1..7")
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    tmp_path = Path(tmpdir).resolve()
+
+    # Keep an unmutated copy for subprocesses (uv resolves its cache via HOME)
+    orig_env = dict(os.environ)
+
+    # Set up mock XDG_CONFIG_HOME
+    os.environ["XDG_CONFIG_HOME"] = str(tmp_path)
+    config_dir = tmp_path / "skill-select"
+    plugins_dir = config_dir / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mock home directory for expansion tests
+    mock_home = tmp_path / "mock_home"
+    mock_home.mkdir()
+    os.environ["HOME"] = str(mock_home)
+
+    # Create some dummy local skill directories
+    local_skill_dir = mock_home / "local-skill"
+    local_skill_dir.mkdir()
+    (local_skill_dir / "SKILL.md").write_text(
+        "---\nname: local-skill\ndescription: A local skill\n---\nBody"
+    )
+
+    corp_skill_dir = mock_home / "corp-skill"
+    corp_skill_dir.mkdir()
+    (corp_skill_dir / "SKILL.md").write_text(
+        "---\nname: corp-skill\ndescription: A corp skill\n---\nBody"
+    )
+
+    # ==========================================
+    # 1. Test Plugin Loading & Precedence
+    # ==========================================
+    # Write 50_base.py
+    (plugins_dir / "50_base.py").write_text("""
+def register(api):
+    api.register_skill("conflict-skill", {
+        "repo": "dotfiles/conflict",
+        "ref": "main"
+    })
+    api.register_skill("local-skill", {
+        "path": "~/local-skill"
+    })
+""")
+
+    # Write 60_override.py (overrides conflict-skill and adds corp-skill)
+    (plugins_dir / "60_override.py").write_text("""
+def register(api):
+    api.register_skill("conflict-skill", {
+        "path": "~/corp-skill"
+    })
+    api.register_skill("corp-skill", {
+        "path": "~/corp-skill"
+    })
+""")
+
+    catalog = skill_select.load_plugins_catalog()
+
+    # Verify local-skill was loaded and ~ expanded correctly (Test 1)
+    expected_local_path = str(local_skill_dir)
+    if (
+        "local-skill" in catalog
+        and catalog["local-skill"].get("path") == expected_local_path
+    ):
+        print("ok 1 - load_plugins_catalog loads plugins and expands ~ paths")
+    else:
+        print(
+            f"not ok 1 - load_plugins_catalog failed local path: {catalog.get('local-skill')}, expected {expected_local_path}"
+        )
+
+    # Verify conflict-skill is overridden by 60_override (Test 2)
+    expected_corp_path = str(corp_skill_dir)
+    if (
+        "conflict-skill" in catalog
+        and catalog["conflict-skill"].get("path") == expected_corp_path
+    ):
+        print("ok 2 - load_plugins_catalog respects alphabetical/numeric precedence")
+    else:
+        print(
+            f"not ok 2 - load_plugins_catalog precedence failed: {catalog.get('conflict-skill')}, expected {expected_corp_path}"
+        )
+
+    # ==========================================
+    # 2. Test API Validation
+    # ==========================================
+    api = skill_select.SkillSelectAPI({})
+    validation_ok = True
+
+    # Test mixing path and repo
+    try:
+        api.register_skill(
+            "bad-skill", {"path": "/some/path", "repo": "owner/repo", "ref": "main"}
+        )
+        print("not ok 3 - API failed to reject mixed path and repo")
+        validation_ok = False
+    except ValueError:
+        pass  # Expected
+
+    # Test missing ref for GitHub
+    try:
+        api.register_skill("bad-skill", {"repo": "owner/repo"})
+        print("not ok 3 - API failed to reject missing ref for GitHub")
+        validation_ok = False
+    except ValueError:
+        pass  # Expected
+
+    if validation_ok:
+        print("ok 3 - SkillSelectAPI strictly validates schemas")
+
+    # ==========================================
+    # 3. Test Resolution (resolve_spec)
+    # ==========================================
+    try:
+        path, name = skill_select.resolve_spec("local-skill", catalog, [])
+        if path == local_skill_dir and name == "local-skill":
+            print("ok 4 - resolve_spec resolves plugin-defined local entries")
+        else:
+            print(
+                f"not ok 4 - resolve_spec resolved to wrong path: {path}, expected {local_skill_dir}"
+            )
+    except Exception as e:
+        print(f"not ok 4 - resolve_spec failed with exception: {e}")
+
+    # ==========================================
+    # 4. Test Template Self-Test
+    # ==========================================
+    try:
+        # Run skill-select --plugin-template via subprocess to capture output.
+        # Execute the script directly (its uv shebang supplies its own
+        # dependencies) so this test never drifts from skill-select's deps.
+        import subprocess
+
+        result = subprocess.run(
+            [str(script_path), "--plugin-template"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=orig_env,
+        )
+
+        # Write the template output to a new plugin file
+        template_plugin = plugins_dir / "90_template_test.py"
+        template_plugin.write_text(result.stdout)
+
+        # Reload catalog and verify it loads without throwing exceptions
+        # The template registers 'my-local-skill' and 'my-remote-skill'
+        test_catalog = skill_select.load_plugins_catalog()
+
+        if "my-local-skill" in test_catalog and "my-remote-skill" in test_catalog:
+            print("ok 5 - --plugin-template output is valid and executes successfully")
+        else:
+            print(
+                f"not ok 5 - template plugin failed to register expected skills: {test_catalog.keys()}"
+            )
+    except subprocess.CalledProcessError as e:
+        print(f"not ok 5 - template self-test failed: {e}\n# stderr: {e.stderr}")
+    except Exception as e:
+        print(f"not ok 5 - template self-test failed with exception: {e}")
+
+    # ==========================================
+    # 5. Test URL Registration
+    # ==========================================
+    url_catalog = {}
+    url_api = skill_select.SkillSelectAPI(url_catalog)
+
+    # Test valid GitHub URL
+    url_api.register_skill(
+        "url-skill", "https://github.com/owner/repo/tree/main/skills/sub"
+    )
+
+    # Test valid GitHub URL without subpath
+    url_api.register_skill(
+        "url-skill-no-sub", "https://github.com/owner/repo/tree/main"
+    )
+
+    # Test invalid URL
+    url_validation_ok = True
+    try:
+        url_api.register_skill("bad-url-skill", "https://notgithub.com/owner/repo")
+        print("not ok 6 - API failed to reject non-GitHub URL")
+        url_validation_ok = False
+    except ValueError:
+        pass
+
+    try:
+        url_api.register_skill("bad-url-format", "https://github.com/owner/repo")
+        print("not ok 6 - API failed to reject malformed GitHub URL")
+        url_validation_ok = False
+    except ValueError:
+        pass
+
+    if (
+        url_validation_ok
+        and url_catalog.get("url-skill")
+        == {"repo": "owner/repo", "ref": "main", "subpath": "skills/sub"}
+        and url_catalog.get("url-skill-no-sub")
+        == {"repo": "owner/repo", "ref": "main", "subpath": None}
+    ):
+        print("ok 6 - SkillSelectAPI supports and correctly parses GitHub URL strings")
+    else:
+        print(f"not ok 6 - URL registration failed. Catalog: {url_catalog}")
+
+    # ==========================================
+    # 6. Test Duplicate Collapsing in gather_skills
+    # ==========================================
+    # Create two mock search directories
+    dir1 = tmp_path / "search_dir1"
+    dir2 = tmp_path / "search_dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+
+    # Create same skill in both dirs, but with different content/paths
+    skill1_dir = dir1 / "duplicate-skill"
+    skill1_dir.mkdir()
+    (skill1_dir / "SKILL.md").write_text(
+        "---\nname: duplicate-skill\ndescription: First version\n---\nBody 1"
+    )
+
+    skill2_dir = dir2 / "duplicate-skill"
+    skill2_dir.mkdir()
+    (skill2_dir / "SKILL.md").write_text(
+        "---\nname: duplicate-skill\ndescription: Second version\n---\nBody 2"
+    )
+
+    # Capture stderr to verify the warning
+    import io
+
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+
+    # Gather skills from both directories (dir1 has precedence)
+    gathered = skill_select.gather_skills([dir1, dir2])
+
+    warning_output = sys.stderr.getvalue()
+    sys.stderr = old_stderr
+
+    # We should only have ONE skill named 'duplicate-skill', and it should be the first one (from dir1)
+    dup_skills = [s for s in gathered if s["name"] == "duplicate-skill"]
+
+    collapse_ok = len(dup_skills) == 1
+    precedence_ok = collapse_ok and dup_skills[0]["description"] == "First version"
+
+    # Verify warning was printed and contains both paths and sources (cleaned paths)
+    cleaned_dir1 = skill_select.clean_p(dir1.resolve())
+    cleaned_dir2 = skill_select.clean_p(dir2.resolve())
+
+    warning_ok = (
+        "warning: duplicate skill 'duplicate-skill' found" in warning_output
+        and str(skill1_dir) in warning_output
+        and f"(from {cleaned_dir1})" in warning_output
+        and str(skill2_dir) in warning_output
+        and f"(from {cleaned_dir2})" in warning_output
+    )
+
+    if collapse_ok and precedence_ok and warning_ok:
+        print(
+            "ok 7 - gather_skills collapses duplicates by name, respects directory precedence, and warns with sources"
+        )
+    else:
+        print(
+            f"not ok 7 - duplicate collapsing failed. len: {len(dup_skills)}, warning_ok: {warning_ok}\n# Warning: {warning_output}"
+        )
