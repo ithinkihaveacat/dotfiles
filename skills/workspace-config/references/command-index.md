@@ -33,6 +33,7 @@ Commands:
                   skill, --catalog to refresh the whole metadata index
   clean           Remove all skills this tool added and clear the tracking record
   doctor          Diagnose drift between desired and on-disk skills (read-only)
+  preflight LABEL Verify required skills and workspace health before agent launch
   repair          Re-link managed skills and regenerate tracking records
   catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
