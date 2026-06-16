@@ -32,6 +32,7 @@ complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path f
 complete -f -c skill -n __fish_use_subcommand -a apply -d 'Provision skills for this workspace via skill-select'
 complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print skill-select recommendations without installing'
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Diagnose drift between desired and on-disk skills'
+complete -f -c skill -n __fish_use_subcommand -a preflight -d 'Verify required skills and workspace health before agent launch'
 complete -f -c skill -n __fish_use_subcommand -a repair -d 'Re-link managed skills and regenerate tracking records'
 
 # list

@@ -80,6 +80,10 @@ class Workspace:
         """Returns backend-specific drift findings (read-only)."""
         return []
 
+    def is_managed(self) -> bool:
+        """Returns True if this workspace has been initialized to manage skills."""
+        return False
+
 
 class FileStateMixin:
     """Stores the managed-skill list as one name per line in self.state_file."""
@@ -100,6 +104,9 @@ class FileStateMixin:
         with open(self.state_file, "w", encoding="utf-8") as f:
             for item in skills:
                 f.write(item + "\n")
+
+    def is_managed(self) -> bool:
+        return self.state_file.is_file()
 
 
 class GitWorkspace(FileStateMixin, Workspace):
@@ -191,6 +198,9 @@ class GitWorkspace(FileStateMixin, Workspace):
         if lines is None:
             return []
         return self._names_from_exclude_lines(lines)
+
+    def is_managed(self) -> bool:
+        return self.state_file.is_file() or self._read_block(self.mark_begin, self.mark_end) is not None
 
     def _expected_exclude_lines(self, skills):
         lines = set()
@@ -644,6 +654,54 @@ def cmd_apply(args):
         print("skill: no skills recommended by skill-select", file=sys.stderr)
 
 
+def cmd_preflight(caller_label):
+    if os.environ.get("_agent_preflight_skip"):
+        print(f"{caller_label}: skill check skipped (_agent_preflight_skip set)", file=sys.stderr)
+        sys.exit(0)
+
+    required_skills, negated_skills = get_parsed_skills()
+    ws = get_workspace()
+
+    # Case A: Unmanaged Workspace
+    if not ws.is_managed():
+        if required_skills:
+            c_red = "\033[1;31m"
+            c_green = "\033[1;32m"
+            c_reset = "\033[0m"
+
+            print(f"\n{c_red}{caller_label}: Launch aborted! This directory has no skills managed, but required skills are configured.{c_reset}\n", file=sys.stderr)
+            print(f"  Required:  {', '.join(required_skills)}", file=sys.stderr)
+            print(f"\nTo automatically set up this repository with the required skills, run:", file=sys.stderr)
+            print(f"  {c_green}git-setup{c_reset}\n", file=sys.stderr)
+            sys.exit(1)
+        
+        print(f"{caller_label}: not a skill-managed repo; skipping skill doctor", file=sys.stderr)
+        sys.exit(0)
+
+    # Case B: Managed Workspace
+    managed = ws.get_managed_skills()
+    missing_skills = [req for req in required_skills if req not in managed]
+
+    if missing_skills:
+        c_red = "\033[1;31m"
+        c_green = "\033[1;32m"
+        c_reset = "\033[0m"
+
+        print(f"\n{c_red}{caller_label}: Launch aborted due to missing required skills in this repository!{c_reset}\n", file=sys.stderr)
+        print(f"  Required:  {', '.join(required_skills)}", file=sys.stderr)
+        print(f"  Active:    {', '.join(managed)}", file=sys.stderr)
+        print(f"  {c_red}Missing:   {', '.join(missing_skills)}{c_reset}\n", file=sys.stderr)
+        print("To automatically heal this repository (install missing skills and apply permissions), run:", file=sys.stderr)
+        print(f"  {c_green}git-setup{c_reset}\n", file=sys.stderr)
+        print("Or, to manually add the missing skill(s):", file=sys.stderr)
+        print(f"  {c_green}skill add {' '.join(missing_skills)}{c_reset}\n", file=sys.stderr)
+        sys.exit(1)
+
+    # All required skills are present; execute doctor and map bool status to exit code
+    is_healthy = cmd_doctor()
+    sys.exit(0 if is_healthy else 1)
+
+
 def cmd_suggest(args):
     ws = get_workspace()
     analyze_dir = ws.get_analyze_dir()
@@ -746,6 +804,7 @@ Commands:
                   skill, --catalog to refresh the whole metadata index
   clean           Remove all skills this tool added and clear the tracking record
   doctor          Diagnose drift between desired and on-disk skills (read-only)
+  preflight LABEL Verify required skills and workspace health before agent launch
   repair          Re-link managed skills and regenerate tracking records
   catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
@@ -840,6 +899,9 @@ def register(api):
         cmd_apply(args)
     elif cmd == "suggest":
         cmd_suggest(args)
+    elif cmd == "preflight":
+        caller_label = args[0] if args else "agent"
+        cmd_preflight(caller_label)
     elif cmd == "repair":
         cmd_repair()
     else:
