@@ -10,10 +10,8 @@ function fish_right_prompt --description 'Write out the right prompt'
             set -l toplevel (git rev-parse --show-toplevel 2>/dev/null)
             if test -n "$toplevel"
                 set -l prefix ""
-                # Sparkle only when skills are managed AND skill doctor last
-                # verified them healthy (cache written by _agent_preflight at
-                # agent launch). Absence of the sparkle is the neutral default.
-                if _skill_is_managed "$toplevel"; and _skill_doctor_fresh_ok "$toplevel"
+                # Sparkle when skills are managed.
+                if _skill_is_managed "$toplevel"
                     set prefix "✨ "
                 end
 

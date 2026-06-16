@@ -19,7 +19,7 @@ function _skill_is_managed --description "True if the repo has skills managed by
     end
     test -f "$exclude_file"; or return 1
 
-    string match -q -r "skills \\(managed by 'skill'\\)" <"$exclude_file"; or return 1
+    string match -q -r ">>> skills >>>" <"$exclude_file"; or return 1
 
     set -l managed_skills (string replace -r '^/\.(claude|agents)/skills/([^/]+)$' '$2' <"$exclude_file" | string match -r '^[^/#]+$')
     set -l unique_skills (printf '%s\n' $managed_skills | sort -u | string match -r '\S+')
