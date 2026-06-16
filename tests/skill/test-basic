@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../../bin/skill"
 
-echo "1..35"
+echo "1..40"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -479,3 +479,127 @@ else
   echo 'not ok 35 - [Preflight] exclamation subtraction operator failed'
 end
 "
+
+# Test 36: get_parsed_skills parses simple required skills
+if out=$(AGENT_REQUIRED_SKILLS="skill-a skill-b" python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../../skills/workspace-config/scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-a,skill-b|" ]; then
+    echo "ok 36 - [Python Parser] parses simple required skills"
+  else
+    echo "not ok 36 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 36 - [Python Parser] failed to import or run"
+fi
+
+# Test 37: get_parsed_skills handles subtraction case-insensitively
+if out=$(AGENT_REQUIRED_SKILLS="SkillA skill-b -skilla" python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../../skills/workspace-config/scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-b|skilla" ]; then
+    echo "ok 37 - [Python Parser] subtraction is case-insensitive"
+  else
+    echo "not ok 37 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 37 - [Python Parser] failed to import or run"
+fi
+
+# Test 38: get_parsed_skills handles case-sensitive additions
+if out=$(AGENT_REQUIRED_SKILLS="SkillA skill-b -skilla SkillA" python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../../skills/workspace-config/scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-b,SkillA|skilla" ]; then
+    echo "ok 38 - [Python Parser] additions are case-sensitive and deduplicated"
+  else
+    echo "not ok 38 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 38 - [Python Parser] failed to import or run"
+fi
+
+# Test 39: get_parsed_skills handles redundant whitespace and exclamation prefix
+if out=$(AGENT_REQUIRED_SKILLS="  skill-a   skill-b   !skill-a  " python3 -c "
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('skill_module', '${TEST_DIR}/../../skills/workspace-config/scripts/skill')
+spec = importlib.util.spec_from_loader('skill_module', loader)
+skill_module = importlib.util.module_from_spec(spec)
+loader.exec_module(skill_module)
+req, neg = skill_module.get_parsed_skills()
+print(','.join(req) + '|' + ','.join(neg))
+" 2>/dev/null); then
+  if [ "$out" = "skill-b|skill-a" ]; then
+    echo "ok 39 - [Python Parser] redundant whitespace and exclamation marks parsed"
+  else
+    echo "not ok 39 - [Python Parser] unexpected output: $out"
+  fi
+else
+  echo "not ok 39 - [Python Parser] failed to import or run"
+fi
+
+# Test 40: skill apply merges required skills and blacklists/suppresses negated skills
+# 1. Back up real skill-select
+mv "${TEST_DIR}/../../skills/workspace-config/scripts/skill-select" "${TEST_DIR}/../../skills/workspace-config/scripts/skill-select.real"
+
+# 2. Write mock skill-select that suggests "dummy-skill" and "negated-skill"
+cat <<'EOF' >"${TEST_DIR}/../../skills/workspace-config/scripts/skill-select"
+#!/usr/bin/env bash
+if [ "$1" = "suggest" ]; then
+  echo '{"name": "dummy-skill", "path": "dummy-skill"}'
+  echo '{"name": "negated-skill", "path": "negated-skill"}'
+elif [ "$1" = "resolve" ]; then
+  # Resolves the spec to a path in custom-skills
+  echo -e "${SKILL_SOURCE_DIRS}/$2\t$2"
+fi
+EOF
+chmod +x "${TEST_DIR}/../../skills/workspace-config/scripts/skill-select"
+
+# 3. Create a clean test repo
+APPLY_DIR="${TMPDIR}/apply-test"
+mkdir -p "$APPLY_DIR"
+cd "$APPLY_DIR"
+git init -q
+
+# Set up SKILL_SOURCE_DIRS and required skills
+export SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills"
+mkdir -p "${SKILL_SOURCE_DIRS}/dummy-skill" "${SKILL_SOURCE_DIRS}/required-skill" "${SKILL_SOURCE_DIRS}/negated-skill"
+echo -e "---\nname: dummy-skill\n---" >"${SKILL_SOURCE_DIRS}/dummy-skill/SKILL.md"
+echo -e "---\nname: required-skill\n---" >"${SKILL_SOURCE_DIRS}/required-skill/SKILL.md"
+echo -e "---\nname: negated-skill\n---" >"${SKILL_SOURCE_DIRS}/negated-skill/SKILL.md"
+
+if out=$(AGENT_REQUIRED_SKILLS="required-skill -negated-skill" "${SCRIPT}" apply 2>&1); then
+  if echo "$out" | grep -q "ignoring suggested skill 'negated-skill'" &&
+     echo "$out" | grep -q "added dummy-skill" &&
+     echo "$out" | grep -q "added required-skill" &&
+     [ ! -e .claude/skills/negated-skill ] &&
+     [ -d .claude/skills/dummy-skill ] &&
+     [ -d .claude/skills/required-skill ]; then
+    echo "ok 40 - [Apply] merges required skills and blacklists negated suggestions"
+  else
+    echo "not ok 40 - [Apply] unexpected output or files: $out"
+  fi
+else
+  echo "not ok 40 - [Apply] command failed: $out"
+fi
+
+# 4. Restore real skill-select
+mv "${TEST_DIR}/../../skills/workspace-config/scripts/skill-select.real" "${TEST_DIR}/../../skills/workspace-config/scripts/skill-select"

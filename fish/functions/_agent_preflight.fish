@@ -41,8 +41,8 @@ function _agent_preflight --description 'Verify skill health before launching an
 
             echo -e "\n$c_red$label: Launch aborted! This directory has no skills managed, but required skills are configured.$c_reset\n" >&2
             echo "  Required:  "(string join ', ' $required_set) >&2
-            echo -e "\nTo initialize skill management with the required skills, run:" >&2
-            echo -e "  $c_green""skill add "(string join ' ' $required_set)"$c_reset\n" >&2
+            echo -e "\nTo automatically set up this repository with the required skills, run:" >&2
+            echo -e "  $c_green""git-setup""$c_reset\n" >&2
             return 1
         end
         echo "$label: not a skill-managed repo; skipping skill doctor" >&2
@@ -69,7 +69,9 @@ function _agent_preflight --description 'Verify skill health before launching an
             echo "  Required:  "(string join ', ' $required_set) >&2
             echo "  Active:    "(string join ', ' $active_skills) >&2
             echo -e "  $c_red""Missing:   "(string join ', ' $missing_skills)"$c_reset\n" >&2
-            echo "To resolve this, run the following command in the repository root:" >&2
+            echo "To automatically heal this repository (install missing skills and apply permissions), run:" >&2
+            echo -e "  $c_green""git-setup""$c_reset\n" >&2
+            echo "Or, to manually add the missing skill(s):" >&2
             echo -e "  $c_green""skill add "(string join ' ' $missing_skills)"$c_reset\n" >&2
             return 1
         end
