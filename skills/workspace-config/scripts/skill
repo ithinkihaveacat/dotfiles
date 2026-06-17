@@ -1,17 +1,22 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
+# dependencies = [
+#   "google-genai",
+# ]
 # ///
 # Tests: tests/skill/
 
 import json
 import os
 import sys
+import time
+import tarfile
 import tempfile
 import subprocess
+import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
-
-SKILL_SELECT_BIN = str(Path(__file__).resolve().parent / "skill-select")
 
 
 def die(msg):
@@ -319,61 +324,294 @@ class DefaultWorkspace(Workspace):
 # ==============================================================================
 
 
-class SkillAPI:
-    """API surface passed to a plugin's register() function.
+# --- Catalog Caching & Registry Settings ---
+CATALOG_TTL = 7 * 24 * 3600  # 7 days
+PROVISION_TTL = 8 * 3600  # 8 hours
 
-    Plugins live in $XDG_CONFIG_HOME/skill/plugins/*.py and may register
-    additional Workspace subclasses (subclass api.Workspace and implement a
-    'detect()' classmethod returning an instance or None). Plugin detectors
-    are consulted before the built-in Git/Perforce/Default detection, in
-    sorted filename order.
-    """
+
+def get_cache_base() -> Path:
+    return (
+        Path(
+            os.environ.get("SKILL_SELECT_CACHE_DIR")
+            or os.environ.get("XDG_CACHE_HOME")
+            or "~/.cache"
+        ).expanduser()
+        / "skill-select"
+    )
+
+
+def get_catalog_dir() -> Path:
+    return get_cache_base() / "catalog"
+
+
+def parse_github_url(url: str) -> tuple[str, str, str | None]:
+    parsed = urlparse(url)
+    if parsed.netloc != "github.com":
+        raise ValueError(
+            f"registry: unsupported URL (only github.com is supported): {url}"
+        )
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) < 4 or parts[2] != "tree":
+        raise ValueError(f"registry: cannot parse GitHub URL: {url}")
+    owner, repo, _, ref = parts[:4]
+    subpath = "/".join(parts[4:]) or None
+    return f"{owner}/{repo}", ref, subpath
+
+
+def fetch_github(
+    name: str, repo: str, ref: str, subpath: str | None, force: bool = False
+) -> str:
+    owner, reponame = repo.split("/", 1)
+    dest_base = get_cache_base() / owner / reponame / ref
+    target_dir = dest_base / subpath if subpath else dest_base
+    meta_file = get_catalog_dir() / ".meta" / name
+
+    if not force and target_dir.is_dir() and meta_file.is_file():
+        if (time.time() - meta_file.stat().st_mtime) < PROVISION_TTL:
+            return str(target_dir)
+
+    url = f"https://github.com/{repo}/archive/{ref}.tar.gz"
+    print(f"skill: downloading remote skill '{name}' from GitHub...", file=sys.stderr)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_tar = Path(tmpdir) / "archive.tar.gz"
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Antigravity-Skill-Manager/1.0"}
+            )
+            with (
+                urllib.request.urlopen(req, timeout=30) as response,
+                open(tmp_tar, "wb") as out_file,
+            ):
+                out_file.write(response.read())
+        except Exception as e:
+            die(f"failed to download {url}: {e}")
+
+        try:
+            with tarfile.open(tmp_tar, "r:gz") as tar:
+                tar.extractall(path=tmpdir)
+        except Exception as e:
+            die(f"failed to extract archive: {e}")
+
+        extracted_folders = [p for p in Path(tmpdir).iterdir() if p.is_dir()]
+        if not extracted_folders:
+            die("archive did not contain an extracted folder")
+        src_folder = extracted_folders[0]
+
+        dest_base.parent.mkdir(parents=True, exist_ok=True)
+        if dest_base.exists():
+            import shutil
+
+            shutil.rmtree(dest_base)
+
+        os.rename(src_folder, dest_base)
+
+    meta_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(meta_file, "w", encoding="utf-8") as f:
+        f.write(str(time.time()))
+
+    src_skill_md = target_dir / "SKILL.md"
+    if src_skill_md.is_file():
+        catalog_skill_dir = get_catalog_dir() / name
+        catalog_skill_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        shutil.copy(src_skill_md, catalog_skill_dir / "SKILL.md")
+
+    return str(target_dir)
+
+
+def fetch_skill_md(
+    name: str, repo: str, ref: str, subpath: str | None, force: bool = False
+) -> None:
+    catalog_skill_dir = get_catalog_dir() / name
+    stub_md = catalog_skill_dir / "SKILL.md"
+    meta_file = get_catalog_dir() / ".meta" / name
+
+    if not force and stub_md.is_file() and meta_file.is_file():
+        if (time.time() - meta_file.stat().st_mtime) < CATALOG_TTL:
+            return
+
+    sub_part = f"/{subpath}" if subpath else ""
+    url = f"https://raw.githubusercontent.com/{repo}/{ref}{sub_part}/SKILL.md"
+    catalog_skill_dir.mkdir(parents=True, exist_ok=True)
+    meta_file.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Antigravity-Skill-Manager/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            content = response.read().decode("utf-8")
+        with open(stub_md, "w", encoding="utf-8") as f:
+            f.write(content)
+        with open(meta_file, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except Exception as e:
+        print(
+            f"skill: warning: failed to fetch metadata for '{name}': {e}",
+            file=sys.stderr,
+        )
+
+
+def load_skill_md_frontmatter(content: str) -> dict:
+    """Parses a simple YAML frontmatter block from a SKILL.md file string."""
+    meta = {}
+    lines = content.strip().splitlines()
+    if not lines or lines[0] != "---":
+        return meta
+    for line in lines[1:]:
+        if line == "---":
+            break
+        if ":" in line:
+            key, val = line.split(":", 1)
+            meta[key.strip()] = val.strip().strip("'\"")
+    return meta
+
+
+def get_skill_metadata(skill_dir: Path, default_name: str) -> dict:
+    """Reads SKILL.md in the given directory and returns its frontmatter metadata."""
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return {"name": default_name, "description": ""}
+    try:
+        with open(skill_md, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        meta = load_skill_md_frontmatter(content)
+        return {
+            "name": meta.get("name") or default_name,
+            "description": meta.get("description") or "",
+        }
+    except Exception:
+        return {"name": default_name, "description": ""}
+
+
+def ensure_catalog_index(plugin_catalog, force: bool = False) -> None:
+    """Ensures all plugin catalog stubs are downloaded and cached."""
+    for name, entry in plugin_catalog.items():
+        if "repo" in entry and "ref" in entry:
+            fetch_skill_md(
+                name, entry["repo"], entry["ref"], entry["subpath"], force=force
+            )
+
+
+class SkillAPI:
+    """Unified API surface passed to a plugin's register() function."""
 
     Workspace = Workspace
     FileStateMixin = FileStateMixin
 
     def __init__(self):
         self.workspace_classes = []
+        self.plugin_catalog = {}
 
     def register_workspace(self, cls):
         self.workspace_classes.append(cls)
+
+    def register_skill(self, name, spec):
+        if isinstance(spec, str):
+            if spec.startswith("https://github.com/") or spec.startswith(
+                "http://github.com/"
+            ):
+                repo, ref, subpath = parse_github_url(spec)
+                spec = {"repo": repo, "ref": ref, "subpath": subpath}
+            else:
+                raise ValueError(
+                    f"Skill '{name}': string spec must be a GitHub URL, got '{spec}'"
+                )
+
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"Skill '{name}': spec must be a dictionary or a GitHub URL string, got {type(spec).__name__}"
+            )
+
+        spec = dict(spec)
+
+        if "path" in spec:
+            if any(k in spec for k in ("repo", "ref", "subpath")):
+                raise ValueError(
+                    f"Skill '{name}': 'path' cannot be mixed with GitHub parameters."
+                )
+            spec["path"] = os.path.expanduser(spec["path"])
+        elif "repo" in spec and "ref" in spec:
+            spec.setdefault("subpath", None)
+        else:
+            raise ValueError(
+                f"Skill '{name}': spec must contain either 'path' or both 'repo' and 'ref'."
+            )
+
+        self.plugin_catalog[name] = spec
+
+
+_LOADED_API = None
+
+
+def get_api() -> SkillAPI:
+    global _LOADED_API
+    if _LOADED_API is None:
+        _LOADED_API = load_plugins()
+    return _LOADED_API
 
 
 def load_plugins() -> SkillAPI:
     import importlib.util
 
     api = SkillAPI()
+
+    # Check legacy directory for deprecation warning
+    legacy_dir = (
+        Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser()
+        / "skill-select"
+        / "plugins"
+    )
+    if legacy_dir.is_dir() and any(legacy_dir.glob("*.py")):
+        print(
+            f"skill: warning: legacy plugin directory detected: {legacy_dir}\n"
+            f"Please migrate your plugins to the new directory: ~/.config/skill/plugins/",
+            file=sys.stderr,
+        )
+
     plugins_dir = (
         Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser()
         / "skill"
         / "plugins"
     )
-    if not plugins_dir.is_dir():
-        return api
-    for filepath in sorted(plugins_dir.glob("*.py")):
-        module_name = f"skill_plugin_{filepath.stem}"
-        try:
-            spec = importlib.util.spec_from_file_location(module_name, filepath)
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                spec.loader.exec_module(module)
-                if hasattr(module, "register"):
-                    module.register(api)
-        except Exception as e:
-            print(
-                f"skill: warning: failed to load plugin {filepath}: {e}",
-                file=sys.stderr,
-            )
-            if os.environ.get("SKILL_DEBUG") == "1":
-                import traceback
 
-                traceback.print_exc(file=sys.stderr)
+    scandirs = []
+    if legacy_dir.is_dir():
+        scandirs.append(legacy_dir)
+    if plugins_dir.is_dir():
+        scandirs.append(plugins_dir)
+
+    loaded = set()
+    for pdir in scandirs:
+        for filepath in sorted(pdir.glob("*.py")):
+            if filepath.name in loaded:
+                continue
+            loaded.add(filepath.name)
+            module_name = f"skill_plugin_{filepath.stem}"
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, filepath)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)
+                    if hasattr(module, "register"):
+                        module.register(api)
+            except Exception as e:
+                print(
+                    f"skill: warning: failed to load plugin {filepath}: {e}",
+                    file=sys.stderr,
+                )
+                if os.environ.get("SKILL_DEBUG") == "1":
+                    import traceback
+
+                    traceback.print_exc(file=sys.stderr)
     return api
 
 
 def get_workspace() -> Workspace:
-    api = load_plugins()
+    api = get_api()
     for cls in api.workspace_classes + [GitWorkspace]:
         try:
             ws = cls.detect()
@@ -393,6 +631,59 @@ def get_workspace() -> Workspace:
 # ==============================================================================
 
 
+def resolve_skill_spec(spec: str) -> tuple[Path, str]:
+    """Resolves a skill spec/name to its (absolute_source_path, skill_name)."""
+    api = get_api()
+
+    # 1. If it is an absolute or relative path pointing directly to a SKILL.md
+    path_candidate = Path(spec).expanduser()
+    if path_candidate.is_dir() and (path_candidate / "SKILL.md").is_file():
+        meta = get_skill_metadata(path_candidate, path_candidate.name)
+        return path_candidate.resolve(), meta["name"]
+
+    # 2. Check local search paths (SKILL_SOURCE_DIRS)
+    source_dirs = []
+    if "SKILL_SOURCE_DIRS" in os.environ:
+        source_dirs = [
+            Path(p).expanduser()
+            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
+            if p
+        ]
+    else:
+        source_dirs = [
+            Path("~/.dotfiles/skills").expanduser(),
+            Path("~/.private/skills").expanduser(),
+            Path("~/.corp/skills").expanduser(),
+            get_catalog_dir(),
+        ]
+
+    for d in source_dirs:
+        candidate = d / spec
+        if candidate.is_dir() and (candidate / "SKILL.md").is_file():
+            meta = get_skill_metadata(candidate, spec)
+            return candidate.resolve(), meta["name"]
+
+    # 3. Check registered plugin catalog
+    if spec in api.plugin_catalog:
+        entry = api.plugin_catalog[spec]
+        if "path" in entry:
+            target_path = Path(entry["path"]).expanduser()
+            if not target_path.is_dir():
+                raise ValueError(f"plugin path does not exist: {target_path}")
+            meta = get_skill_metadata(target_path, spec)
+            return target_path.resolve(), meta["name"]
+        elif "repo" in entry and "ref" in entry:
+            # Provision/Download the GitHub plugin if not present
+            target_dir_str = fetch_github(
+                spec, entry["repo"], entry["ref"], entry["subpath"]
+            )
+            target_path = Path(target_dir_str)
+            meta = get_skill_metadata(target_path, spec)
+            return target_path.resolve(), meta["name"]
+
+    raise ValueError(f"cannot resolve skill '{spec}'")
+
+
 def cmd_add(specs):
     if not specs:
         cmderr("add", "skill name required")
@@ -410,26 +701,13 @@ def cmd_add(specs):
     resolved_skills = []
     has_errors = False
     for spec in specs:
-        res = subprocess.run(
-            [SKILL_SELECT_BIN, "resolve", spec], capture_output=True, text=True
-        )
-        if res.returncode != 0:
-            print(f"skill: error: failed to resolve '{spec}':", file=sys.stderr)
-            print(res.stderr, file=sys.stderr, end="")
+        try:
+            src_path, name = resolve_skill_spec(spec)
+            resolved_skills.append((src_path, name))
+        except Exception as e:
+            print(f"skill: error: failed to resolve '{spec}': {e}", file=sys.stderr)
             has_errors = True
             continue
-
-        output = res.stdout.strip()
-        if not output:
-            continue
-        parts = output.split("\t")
-        if len(parts) == 2:
-            src, name = parts
-        else:
-            src = parts[0]
-            name = Path(src).name
-
-        resolved_skills.append((Path(src), name))
 
     # Check for conflicts across all destinations first
     for src, name in resolved_skills:
@@ -597,21 +875,38 @@ def cmd_update(names):
     if not names:
         cmderr("update", "skill name, --all, or --catalog required")
 
-    if len(names) == 1 and names[0] == "--catalog":
-        res = subprocess.run([SKILL_SELECT_BIN, "update", "catalog"])
-        sys.exit(res.returncode)
+    api = get_api()
 
-    ws = get_workspace()
+    if len(names) == 1 and names[0] == "--catalog":
+        print("skill: refreshing catalog metadata index...", file=sys.stderr)
+        ensure_catalog_index(api.plugin_catalog, force=True)
+        print("catalog: metadata index updated", file=sys.stderr)
+        return
 
     if len(names) == 1 and names[0] == "--all":
-        actual_skills, _, _ = ws.get_actual_skills()
-        names = list(actual_skills)
-        if not names:
-            print("update: nothing to do", file=sys.stderr)
-            return
+        # Update all registered plugins in the catalog
+        for name, entry in api.plugin_catalog.items():
+            if "repo" in entry:
+                fetch_github(
+                    name, entry["repo"], entry["ref"], entry["subpath"], force=True
+                )
+        return
 
-    res = subprocess.run([SKILL_SELECT_BIN, "update"] + names)
-    sys.exit(res.returncode)
+    # Update specific skill names
+    for name in names:
+        if name in api.plugin_catalog:
+            entry = api.plugin_catalog[name]
+            if "repo" in entry:
+                fetch_github(
+                    name, entry["repo"], entry["ref"], entry["subpath"], force=True
+                )
+            else:
+                print(
+                    f"skill update: '{name}' is a local skill; nothing to update",
+                    file=sys.stderr,
+                )
+        else:
+            print(f"skill update: unknown skill '{name}'", file=sys.stderr)
 
 
 def get_parsed_skills():
@@ -645,7 +940,7 @@ def cmd_apply(args):
             file=sys.stderr,
         )
         print(
-            "To discover recommended skills for this workspace, run 'skill-select suggest'.",
+            "To discover recommended skills for this workspace, run 'skill suggest'.",
             file=sys.stderr,
         )
         return
@@ -695,13 +990,272 @@ def cmd_preflight(caller_label):
     sys.exit(0 if is_healthy else 1)
 
 
+def cmd_resolve(name):
+    try:
+        src_path, _ = resolve_skill_spec(name)
+        print(src_path)
+    except Exception as e:
+        die(str(e))
+
+
+def cmd_info(name):
+    try:
+        src_path, _ = resolve_skill_spec(name)
+    except Exception as e:
+        die(str(e))
+
+    skill_md = src_path / "SKILL.md"
+    metadata = get_skill_metadata(src_path, name)
+
+    print(f"Skill: {name}")
+    print(f"Path:  {clean_p(src_path)}")
+
+    print("\nMetadata:")
+    for k, v in metadata.items():
+        print(f"  {k}: {v}")
+
+    print("\nDocumentation (SKILL.md):")
+    if not skill_md.is_file():
+        print("  (No SKILL.md found)")
+        return
+
+    try:
+        with open(skill_md, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read().strip()
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) == 3:
+                    content = parts[2].strip()
+            print(content)
+    except Exception as e:
+        die(f"failed to read SKILL.md: {e}")
+
+
+def cmd_catalog(as_json=False):
+    api = get_api()
+    ensure_catalog_index(api.plugin_catalog)
+
+    source_dirs = []
+    if "SKILL_SOURCE_DIRS" in os.environ:
+        source_dirs = [
+            Path(p).expanduser()
+            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
+            if p
+        ]
+    else:
+        source_dirs = [
+            Path("~/.dotfiles/skills").expanduser(),
+            Path("~/.private/skills").expanduser(),
+            Path("~/.corp/skills").expanduser(),
+            get_catalog_dir(),
+        ]
+
+    skills_info = []
+
+    # Scan filesystem skills
+    for d in source_dirs:
+        if not d.is_dir():
+            continue
+        for item in d.iterdir():
+            if item.name.startswith("."):
+                continue
+            if item.is_dir() and (item / "SKILL.md").is_file():
+                meta = get_skill_metadata(item, item.name)
+                skills_info.append(
+                    {
+                        "name": meta["name"],
+                        "description": meta["description"],
+                        "source": str(item.resolve()),
+                    }
+                )
+
+    # Scan registered plugin skills
+    for name, entry in api.plugin_catalog.items():
+        if any(s["name"] == name for s in skills_info):
+            continue
+        if "path" in entry:
+            meta = get_skill_metadata(Path(entry["path"]), name)
+            skills_info.append(
+                {
+                    "name": name,
+                    "description": meta["description"],
+                    "source": f"local-plugin: {clean_p(entry['path'])}",
+                }
+            )
+        elif "repo" in entry:
+            stub_dir = get_catalog_dir() / name
+            meta = get_skill_metadata(stub_dir, name)
+            skills_info.append(
+                {
+                    "name": name,
+                    "description": meta["description"],
+                    "source": f"github: {entry['repo']}@{entry['ref']}",
+                }
+            )
+
+    if as_json:
+        for s in sorted(skills_info, key=lambda x: x["name"]):
+            print(json.dumps(s))
+    else:
+        print("Workspace Catalog:", file=sys.stderr)
+        for s in sorted(skills_info, key=lambda x: x["name"]):
+            print(f"  {s['name'].ljust(25)} {s['description']} ({s['source']})")
+
+
 def cmd_suggest(args):
-    ws = get_workspace()
-    analyze_dir = ws.get_analyze_dir()
-    cmd = [SKILL_SELECT_BIN, "suggest", str(analyze_dir)] + args
-    res = subprocess.run(cmd)
-    if res.returncode != 0:
-        sys.exit(res.returncode)
+    # Lazy import of heavyweight LLM dependencies
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        die(
+            "The 'google-genai' package is required for suggestions. Please install it or run via 'uv'."
+        )
+
+    target_dir = Path(args[0]).resolve() if args else Path.cwd()
+    if not target_dir.is_dir():
+        die(f"target directory '{target_dir}' does not exist")
+
+    print("skill: scanning workspace to compile recommendations...", file=sys.stderr)
+
+    api = get_api()
+    ensure_catalog_index(api.plugin_catalog)
+
+    source_dirs = []
+    if "SKILL_SOURCE_DIRS" in os.environ:
+        source_dirs = [
+            Path(p).expanduser()
+            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
+            if p
+        ]
+    else:
+        source_dirs = [
+            Path("~/.dotfiles/skills").expanduser(),
+            Path("~/.private/skills").expanduser(),
+            Path("~/.corp/skills").expanduser(),
+            get_catalog_dir(),
+        ]
+
+    available_skills = []
+    for d in source_dirs:
+        if not d.is_dir():
+            continue
+        for item in d.iterdir():
+            if item.name.startswith("."):
+                continue
+            if item.is_dir() and (item / "SKILL.md").is_file():
+                meta = get_skill_metadata(item, item.name)
+                available_skills.append(
+                    {"name": meta["name"], "description": meta["description"]}
+                )
+    for name, entry in api.plugin_catalog.items():
+        if any(s["name"] == name for s in available_skills):
+            continue
+        if "path" in entry:
+            meta = get_skill_metadata(Path(entry["path"]), name)
+            available_skills.append({"name": name, "description": meta["description"]})
+        elif "repo" in entry:
+            stub_dir = get_catalog_dir() / name
+            meta = get_skill_metadata(stub_dir, name)
+            available_skills.append({"name": name, "description": meta["description"]})
+
+    if not available_skills:
+        print(
+            "skill suggest: no available skills found in catalog or paths",
+            file=sys.stderr,
+        )
+        return
+
+    # Gather directory info (context) to feed into prompt
+    repo_files = []
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        depth = len(Path(root).relative_to(target_dir).parts)
+        if depth > 3:
+            continue
+        for file in files:
+            if file.startswith("."):
+                continue
+            repo_files.append(str(Path(root).relative_to(target_dir) / file))
+            if len(repo_files) > 150:
+                break
+        if len(repo_files) > 150:
+            break
+
+    readme_content = ""
+    for readme_name in ("README.md", "README.txt", "README"):
+        readme_path = target_dir / readme_name
+        if readme_path.is_file():
+            try:
+                with open(readme_path, "r", encoding="utf-8", errors="replace") as f:
+                    readme_content = f.read(1500)
+                break
+            except Exception:
+                pass
+
+    repo_context = "FILES:\n" + "\n".join(repo_files[:100])
+    if readme_content:
+        repo_context += f"\n\nREADME EXCERPT:\n{readme_content}"
+
+    system_instruction = """
+You are a development environment orchestrator.
+Your goal is to recommend the best agent "skills" to activate for the given project directory and task.
+You will be provided with:
+1. The available skills (name and description).
+2. Information about the target directory (e.g. file structure, README).
+
+Recommend exactly the skills that are directly relevant. Err on the side of caution: if a skill is clearly relevant to the tech stack or task, include it. If it is completely irrelevant, do not include it.
+
+Your response must be ONLY a valid JSON array of objects.
+Each object must have:
+- "name": the EXACT name of the skill
+- "reason": a brief 1-sentence explanation of why it is relevant
+
+Return an empty array [] if no skills apply.
+"""
+
+    prompt = f"""
+AVAILABLE SKILLS:
+{available_skills}
+
+TARGET DIRECTORY INFO:
+{repo_context}
+"""
+
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+    client = genai.Client()
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
+    except Exception as e:
+        die(f"Error calling Gemini API: {e}")
+
+    try:
+        results = json.loads(response.text)
+    except Exception as e:
+        die(f"Could not parse JSON response from LLM: {e}\n{response.text}")
+
+    if not isinstance(results, list):
+        die(f"Expected JSON array, got: {type(results)}\n{response.text}")
+
+    as_json = "--json" in sys.argv or "--json" in args
+    if as_json:
+        for s in results:
+            print(json.dumps(s))
+    else:
+        print("\nRecommended Skills for this Workspace:", file=sys.stderr)
+        if not results:
+            print("  (None recommended)", file=sys.stderr)
+        for s in results:
+            print(f"  * {s['name'].ljust(20)} - {s['reason']}", file=sys.stderr)
+        print("\nTo install a recommendation, run: skill add <name>", file=sys.stderr)
 
 
 def cmd_doctor():
@@ -716,7 +1270,6 @@ def cmd_doctor():
         except ValueError:
             return p
 
-    # Calculate mismatches
     dest_dirs = []
     try:
         dest_dirs = ws.get_dest_dirs()
@@ -799,6 +1352,58 @@ def cmd_doctor():
     return False
 
 
+def cmd_doctor_all():
+    local_ok = cmd_doctor()
+
+    catalog_ok = True
+    api = get_api()
+    catalog_dir = get_catalog_dir()
+    meta_dir = catalog_dir / ".meta"
+    issues = []
+    unresolvable_local = False
+
+    # Run catalog index stubs doctor natively
+    for name, entry in api.plugin_catalog.items():
+        stub_md = catalog_dir / name / "SKILL.md"
+        meta = meta_dir / name
+
+        if "path" in entry:
+            target_path = Path(entry["path"]).expanduser()
+            if not target_path.is_dir():
+                issues.append(
+                    f"  error        {name} (plugin-provided path does not exist: {clean_p(target_path)})"
+                )
+                unresolvable_local = True
+                catalog_ok = False
+                continue
+
+        if not stub_md.is_file():
+            issues.append(
+                f"  missing      {name} (plugin-defined but not indexed in catalog)"
+            )
+            catalog_ok = False
+        elif meta.is_file():
+            if (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
+                issues.append(f"  stale        {name} (catalog index is stale)")
+                catalog_ok = False
+
+    if issues:
+        print("\nCatalog Mismatches / Issues:", file=sys.stderr)
+        for line in sorted(issues):
+            print(line, file=sys.stderr)
+        if unresolvable_local:
+            print("                (fix missing local paths first)", file=sys.stderr)
+        else:
+            print(
+                "                To repair catalog, run 'skill update --catalog'",
+                file=sys.stderr,
+            )
+
+    if not local_ok or not catalog_ok:
+        sys.exit(1)
+    sys.exit(0)
+
+
 def usage():
     print(
         """Usage: skill <command> [skill...]
@@ -810,7 +1415,7 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
-  suggest         Print skill-select recommendations
+  suggest         Print advisory LLM skill recommendations (requires google-genai)
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
@@ -872,19 +1477,20 @@ def register(api):
     if "--help" in args:
         usage()
 
-    # Pass-through commands to skill-select
-    if cmd in ("catalog", "resolve", "info", "show"):
-        res = subprocess.run([SKILL_SELECT_BIN, cmd] + args)
-        sys.exit(res.returncode)
-
     if cmd == "doctor":
-        local_ok = cmd_doctor()
-        res = subprocess.run([SKILL_SELECT_BIN, "doctor"] + args)
-        if not local_ok or res.returncode != 0:
-            sys.exit(1)
-        sys.exit(0)
-
-    if cmd == "update":
+        cmd_doctor_all()
+    elif cmd == "catalog":
+        as_json = "--json" in args
+        cmd_catalog(as_json=as_json)
+    elif cmd == "resolve":
+        if not args:
+            cmderr("resolve", "skill name required")
+        cmd_resolve(args[0])
+    elif cmd in ("info", "show"):
+        if not args:
+            cmderr(cmd, "skill name required")
+        cmd_info(args[0])
+    elif cmd == "update":
         cmd_update(args)
     elif cmd == "add":
         cmd_add(args)
