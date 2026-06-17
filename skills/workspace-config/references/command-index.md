@@ -23,7 +23,9 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
-  suggest         Print advisory LLM skill recommendations (requires google-genai)
+  suggest [DIR] [-] [PROMPT] Print advisory LLM skill recommendations guided by an
+                          optional task prompt (pass '-' to read from stdin)
+                          (requires google-genai)
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
