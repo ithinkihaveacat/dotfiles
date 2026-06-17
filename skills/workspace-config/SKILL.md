@@ -6,15 +6,13 @@ description: Discover and select relevant agent skills, and manage workspace too
 # Workspace Configuration
 
 This skill configures a workspace for agent-assisted development without version
-control ever seeing the configuration. It consists of three tools:
+control ever seeing the configuration. It consists of two tools:
 
 1. **`skill`**: The workspace manager. Installs and tracks skills as untracked
    symlinks, automatically adapting to the environment (Git, Perforce, or
-   unmanaged directories; more via plugins).
-1. **`skill-select`**: The discovery engine. Analyzes a workspace to suggest
-   sensible default skills, or uses LLM-based selection when task context is
-   provided. Also owns the plugins, network, and cache machinery.
-1. **`permission`**: The permission manager. Maintains per-workspace
+   unmanaged directories; more via plugins). Also provides advisory LLM-based
+   skill recommendations (`skill suggest`) and manages remote plugin caching.
+2. **`permission`**: The permission manager. Maintains per-workspace
    allow/deny/ask rules for every detected local agent, including pre-approving
    the safe commands declared by installed skills.
 
@@ -74,36 +72,7 @@ skill <command> [arguments]
 
 ______________________________________________________________________
 
-## 2. Discovering Skills (`skill-select`)
-
-Invoke the selection tool via `skill-select` (symlinked in `bin/`):
-
-```bash
-skill-select <command> [arguments]
-```
-
-### Commands
-
-- **`suggest [DIR]`**: Recommend skills for a directory (default: current
-  directory) via the Gemini API.
-- **`catalog`**: List every available skill and its source.
-- **`resolve NAME`**: Print the source path for a skill.
-- **`update NAME...`**: Re-fetch plugin-provided catalog entries;
-  `update catalog` refreshes the whole metadata index.
-- **`doctor`** / **`repair`**: Diagnose / heal the catalog index.
-
-### Options
-
-- `--context TEXT` (`suggest`): A comprehensive, self-contained explanation of
-  your task to guide LLM-based selection.
-- `--search-dirs PATHS` (`suggest`, `catalog`, `resolve`): Colon-separated
-  extra paths to search for skills, overriding `SKILL_SOURCE_DIRS`.
-- `--json` (`suggest`, `catalog`): Emit structured JSON output instead of
-  formatted text.
-
-______________________________________________________________________
-
-## 3. Managing Workspace Permissions (`permission`)
+## 2. Managing Workspace Permissions (`permission`)
 
 The `permission` tool (symlinked in `bin/`) manages workspace-specific agent
 tool permissions. Rules are written as clean command patterns (e.g.

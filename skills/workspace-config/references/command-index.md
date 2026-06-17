@@ -5,7 +5,6 @@
 ## Contents
 
 - [skill](#skill)
-- [skill-select](#skill-select)
 - [permission](#permission)
 
 ## skill
@@ -24,7 +23,7 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
-  suggest         Print skill-select recommendations
+  suggest         Print advisory LLM skill recommendations (requires google-genai)
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
@@ -41,40 +40,6 @@ Commands:
 Options:
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Workspace plugin
-```
-
-<!-- /generated -->
-
-## skill-select
-
-The block below is `scripts/skill-select --help`, kept in sync by
-`command-index-sync`.
-
-<!-- generated: ../scripts/skill-select --help -->
-
-```text
-Usage: skill-select <command> [arguments]
-
-Discover and recommend agent skills, and maintain the catalog of
-plugin-provided skills. Plumbing for the higher-level 'skill' tool.
-
-Commands:
-  suggest [DIR]   Recommend skills for DIR via the Gemini API (default: cwd)
-  catalog         List every available skill and its source
-  resolve NAME    Print the source path for a skill
-  show/info NAME  Show details and metadata of a skill
-  update NAME...  Re-fetch plugin-provided catalog entries; 'update catalog'
-                  refreshes the whole metadata index
-  doctor          Diagnose drift in the catalog index (read-only)
-  repair          Repair the catalog index (heal missing stubs)
-
-Options:
-  --context TEXT       Self-contained context to guide selection (suggest)
-  --search-dirs DIRS   Colon-separated skill search directories, overriding
-                       SKILL_SOURCE_DIRS (suggest, catalog, resolve)
-  --json               Emit structured output (suggest, catalog)
-  --help               Display this help message and exit
-  --plugin-template    Output a template for creating a skill-select plugin
 ```
 
 <!-- /generated -->

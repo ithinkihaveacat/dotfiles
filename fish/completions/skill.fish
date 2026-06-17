@@ -30,7 +30,7 @@ complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed sk
 complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List plugin-provided skills and sources'
 complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path for a name'
 complete -f -c skill -n __fish_use_subcommand -a apply -d 'Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS'
-complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print skill-select recommendations without installing'
+complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print advisory LLM skill recommendations'
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Diagnose drift between desired and on-disk skills'
 complete -f -c skill -n __fish_use_subcommand -a preflight -d 'Verify required skills and workspace health before agent launch'
 
