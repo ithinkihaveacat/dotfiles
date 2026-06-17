@@ -57,19 +57,30 @@ class Workspace:
 
     def get_dest_dirs(self) -> list[Path]:
         if "SKILL_DEST_DIRS" in os.environ:
-            return [self.root / d for d in os.environ["SKILL_DEST_DIRS"].split(":") if d]
+            return [
+                self.root / d for d in os.environ["SKILL_DEST_DIRS"].split(":") if d
+            ]
 
-        import shutil
         dest_dirs = []
-        # Claude uses .claude/skills
-        if shutil.which("claude"):
-            dest_dirs.append(".claude/skills")
-        # Codex, Agy, and Jetski use .agents/skills
-        if shutil.which("codex") or shutil.which("agy") or shutil.which("jetski"):
-            dest_dirs.append(".agents/skills")
+        # 1. Scan on-disk layout first to prevent orphaning existing links
+        for candidate in (".claude/skills", ".agents/skills"):
+            if (self.root / candidate).is_dir():
+                dest_dirs.append(candidate)
 
+        # 2. If nothing exists on disk yet, fall back to PATH-based detection
         if not dest_dirs:
-            raise RuntimeError("No supported agent executable (claude, codex, agy, jetski) detected on PATH.")
+            import shutil
+
+            if shutil.which("claude"):
+                dest_dirs.append(".claude/skills")
+            if shutil.which("codex") or shutil.which("agy") or shutil.which("jetski"):
+                dest_dirs.append(".agents/skills")
+
+        # 3. If still nothing found, raise RuntimeError
+        if not dest_dirs:
+            raise RuntimeError(
+                "No supported agent executable (claude, codex, agy, jetski) detected on PATH, and no existing skill directories found in the workspace."
+            )
 
         return [self.root / d for d in dest_dirs]
 
@@ -118,16 +129,6 @@ class Workspace:
     def doctor_issues(self) -> list[str]:
         """Returns backend-specific findings (read-only)."""
         return []
-
-    def is_managed(self) -> bool:
-        """Under the environment-driven model, a workspace is managed if expected skills are configured or actual symlinks exist."""
-        try:
-            self.get_dest_dirs()
-        except RuntimeError:
-            return False
-        expected = self.get_expected_skills()
-        actual, _, _ = self.get_actual_skills()
-        return bool(expected or actual)
 
 
 class FileStateMixin:
@@ -309,6 +310,7 @@ class GitWorkspace(Workspace):
 
 class DefaultWorkspace(Workspace):
     """Fallback for non-VCS directories."""
+
     pass
 
 
@@ -447,14 +449,13 @@ def cmd_add(specs):
         for d in dest_dirs:
             relpath = d / name
             d.mkdir(parents=True, exist_ok=True)
-            
+
             # Atomic symlink replacement (concurrency-safe swap)
             tmp_link = relpath.with_name(f".{relpath.name}.tmp-{os.getpid()}")
+            tmp_link.unlink(missing_ok=True)
             try:
                 tmp_link.symlink_to(src)
                 os.replace(tmp_link, relpath)
-            except FileExistsError:
-                tmp_link.unlink(missing_ok=True)
             except Exception:
                 tmp_link.unlink(missing_ok=True)
                 raise
@@ -584,6 +585,8 @@ def cmd_clean():
 
     if hasattr(ws, "save_exclude_block"):
         ws.save_exclude_block([])
+    if hasattr(ws, "save_managed_skills"):
+        ws.save_managed_skills([])
     prune_dirs(dest_dirs)
     print(f"clean: removed {removed} link(s); cleared git excludes", file=sys.stderr)
     if left > 0:
@@ -623,7 +626,9 @@ def get_parsed_skills():
         if spec.startswith("-") or spec.startswith("!"):
             clean_name = spec[1:]
             negated_set.append(clean_name.lower())
-            required_set = [req for req in required_set if req.lower() != clean_name.lower()]
+            required_set = [
+                req for req in required_set if req.lower() != clean_name.lower()
+            ]
         else:
             if spec not in required_set:
                 required_set.append(spec)
@@ -632,61 +637,53 @@ def get_parsed_skills():
 
 def cmd_apply(args):
     ws = get_workspace()
-    analyze_dir = ws.get_analyze_dir()
-    print("skill: determining skills via skill-select...", file=sys.stderr)
-    cmd = [SKILL_SELECT_BIN, "suggest", str(analyze_dir), "--json"] + args
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    expected_skills = ws.get_expected_skills()
 
-    specs = []
-    names = []
-    required_skills, negated_skills = get_parsed_skills()
+    if not expected_skills:
+        print(
+            "skill: AGENT_REQUIRED_SKILLS is empty. No skills to apply.",
+            file=sys.stderr,
+        )
+        print(
+            "To discover recommended skills for this workspace, run 'skill-select suggest'.",
+            file=sys.stderr,
+        )
+        return
 
-    if res.returncode != 0:
-        print("skill: warning: skill-select suggest failed (offline or unauthorized). Continuing with required skills only.", file=sys.stderr)
-        if res.stderr:
-            print(res.stderr, file=sys.stderr, end="")
-    else:
-        for line in res.stdout.strip().splitlines():
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except Exception:
-                continue
+    print(
+        f"skill: synchronizing workspace skills to match AGENT_REQUIRED_SKILLS: {' '.join(expected_skills)}",
+        file=sys.stderr,
+    )
 
-            name = item.get("name")
-            path = item.get("path")
-            if not name or not path:
-                continue
+    # Deterministic Local Sync:
+    # 1. Resolve and add/symlink all expected skills
+    cmd_add(expected_skills)
 
-            # Suppress suggestions that are explicitly negated in the environment (opt-out/blacklist)
-            if name.lower() in negated_skills:
-                print(f"skill: ignoring suggested skill '{name}' (explicitly negated in AGENT_REQUIRED_SKILLS)", file=sys.stderr)
-                continue
-
-            names.append(name)
-            specs.append(path)
-
-    # Merge any missing required skills from the environment
-    for req in required_skills:
-        if req not in names:
-            names.append(req)
-            specs.append(req)  # cmd_add automatically resolves names to paths
-
-    if specs:
-        print(f"skill: applying skills: {' '.join(names)}", file=sys.stderr)
-        cmd_add(specs)
-    else:
-        print("skill: no skills recommended by skill-select", file=sys.stderr)
+    # 2. Prune any actual symlinks on disk that are NOT in expected_skills
+    try:
+        ws.get_dest_dirs()
+    except RuntimeError:
+        return
+    actual_skills, _, _ = ws.get_actual_skills()
+    extra_skills = [s for s in actual_skills if s not in expected_skills]
+    if extra_skills:
+        print(
+            f"skill: pruning extra symlinks not in AGENT_REQUIRED_SKILLS: {' '.join(extra_skills)}",
+            file=sys.stderr,
+        )
+        cmd_remove(extra_skills)
 
 
 def cmd_preflight(caller_label):
     if os.environ.get("_agent_preflight_skip"):
-        print(f"{caller_label}: skill check skipped (_agent_preflight_skip set)", file=sys.stderr)
+        print(
+            f"{caller_label}: skill check skipped (_agent_preflight_skip set)",
+            file=sys.stderr,
+        )
         sys.exit(0)
 
     ws = get_workspace()
-    
+
     # Retrieve destinations (errors out if no agent is detected)
     try:
         ws.get_dest_dirs()
@@ -709,7 +706,7 @@ def cmd_suggest(args):
 
 def cmd_doctor():
     ws = get_workspace()
-    
+
     expected_skills = ws.get_expected_skills()
     actual_skills, unmanaged, dangling = ws.get_actual_skills()
 
@@ -739,23 +736,34 @@ def cmd_doctor():
         missing = list(expected_skills)
 
     extra = [s for s in actual_skills if s not in expected_skills]
-    
+
     backend_issues = ws.doctor_issues()
 
     if not (missing or extra or unmanaged or dangling or backend_issues):
         return True
 
-    print("skill: Mismatched / unhealthy skill configuration detected!", file=sys.stderr)
+    print(
+        "skill: Mismatched / unhealthy skill configuration detected!", file=sys.stderr
+    )
     if missing:
-        print("  missing skills (declared in AGENT_REQUIRED_SKILLS but not linked on disk):", file=sys.stderr)
+        print(
+            "  missing skills (declared in AGENT_REQUIRED_SKILLS but not linked on disk):",
+            file=sys.stderr,
+        )
         for s in missing:
             print(f"    - {s}", file=sys.stderr)
     if extra:
-        print("  extra skills (linked on disk but not in AGENT_REQUIRED_SKILLS):", file=sys.stderr)
+        print(
+            "  extra skills (linked on disk but not in AGENT_REQUIRED_SKILLS):",
+            file=sys.stderr,
+        )
         for s in extra:
             print(f"    - {s}", file=sys.stderr)
     if unmanaged:
-        print("  unmanaged artifacts (files/directories in skill folders that are not symlinks):", file=sys.stderr)
+        print(
+            "  unmanaged artifacts (files/directories in skill folders that are not symlinks):",
+            file=sys.stderr,
+        )
         for item in unmanaged:
             print(f"    - {rel(item)}", file=sys.stderr)
     if dangling:
@@ -767,14 +775,26 @@ def cmd_doctor():
 
     print("\nTo resolve this:", file=sys.stderr)
     if missing or dangling or backend_issues:
-        print("  - To synchronize and repair your configuration, run 'git-setup' or 'skill apply'.", file=sys.stderr)
+        print(
+            "  - To synchronize and repair your configuration, run 'git-setup' or 'skill apply'.",
+            file=sys.stderr,
+        )
     if extra:
-        print("  - Add the extra skill(s) to your AGENT_REQUIRED_SKILLS in .envrc:", file=sys.stderr)
-        print(f"      export AGENT_REQUIRED_SKILLS=\"$AGENT_REQUIRED_SKILLS {' '.join(extra)}\"", file=sys.stderr)
+        print(
+            "  - Add the extra skill(s) to your AGENT_REQUIRED_SKILLS in .envrc:",
+            file=sys.stderr,
+        )
+        print(
+            f'      export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"',
+            file=sys.stderr,
+        )
         print("  - Or remove the local symlink(s):", file=sys.stderr)
         print(f"      skill remove {' '.join(extra)}", file=sys.stderr)
     if unmanaged:
-        print("  - Manually delete or move the unmanaged files/directories out of the skill folders.", file=sys.stderr)
+        print(
+            "  - Manually delete or move the unmanaged files/directories out of the skill folders.",
+            file=sys.stderr,
+        )
     print("", file=sys.stderr)
     return False
 

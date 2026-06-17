@@ -539,18 +539,14 @@ else
   echo "not ok 39 - [Python Parser] failed to import or run"
 fi
 
-# Test 40: skill apply merges required skills and blacklists/suppresses negated skills
+# Test 40: skill apply synchronizes required skills and prunes extras
 # 1. Back up real skill-select
 mv "${TEST_DIR}/../scripts/skill-select" "${TEST_DIR}/../scripts/skill-select.real"
 
-# 2. Write mock skill-select that suggests "dummy-skill" and "negated-skill"
+# 2. Write mock skill-select that implements resolve
 cat <<'EOF' >"${TEST_DIR}/../scripts/skill-select"
 #!/usr/bin/env bash
-if [ "$1" = "suggest" ]; then
-  echo '{"name": "dummy-skill", "path": "dummy-skill"}'
-  echo '{"name": "negated-skill", "path": "negated-skill"}'
-elif [ "$1" = "resolve" ]; then
-  # Resolves the spec to a path in custom-skills
+if [ "$1" = "resolve" ]; then
   echo -e "${SKILL_SOURCE_DIRS}/$2\t$2"
 fi
 EOF
@@ -561,28 +557,35 @@ APPLY_DIR="${TMPDIR}/apply-test"
 mkdir -p "$APPLY_DIR"
 cd "$APPLY_DIR"
 git init -q
+mkdir -p .claude/skills .agents/skills
 
-# Set up SKILL_SOURCE_DIRS and required skills
+# Set up SKILL_SOURCE_DIRS and skills
 export SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills"
-mkdir -p "${SKILL_SOURCE_DIRS}/dummy-skill" "${SKILL_SOURCE_DIRS}/required-skill" "${SKILL_SOURCE_DIRS}/negated-skill"
-echo -e "---\nname: dummy-skill\n---" >"${SKILL_SOURCE_DIRS}/dummy-skill/SKILL.md"
+mkdir -p "${SKILL_SOURCE_DIRS}/required-skill" "${SKILL_SOURCE_DIRS}/extra-skill"
 echo -e "---\nname: required-skill\n---" >"${SKILL_SOURCE_DIRS}/required-skill/SKILL.md"
-echo -e "---\nname: negated-skill\n---" >"${SKILL_SOURCE_DIRS}/negated-skill/SKILL.md"
+echo -e "---\nname: extra-skill\n---" >"${SKILL_SOURCE_DIRS}/extra-skill/SKILL.md"
 
-if out=$(AGENT_REQUIRED_SKILLS="required-skill -negated-skill" "${SCRIPT}" apply 2>&1); then
-  if echo "$out" | grep -q "ignoring suggested skill 'negated-skill'" &&
-    echo "$out" | grep -q "added dummy-skill" &&
-    echo "$out" | grep -q "added required-skill" &&
-    [ ! -e .claude/skills/negated-skill ] &&
-    [ -d .claude/skills/dummy-skill ] &&
-    [ -d .claude/skills/required-skill ]; then
-    echo "ok 40 - [Apply] merges required skills and blacklists negated suggestions"
+# Manually seed an extra symlink (drift)
+ln -s "${SKILL_SOURCE_DIRS}/extra-skill" .claude/skills/extra-skill
+ln -s "${SKILL_SOURCE_DIRS}/extra-skill" .agents/skills/extra-skill
+
+# Run apply to sync to AGENT_REQUIRED_SKILLS
+export AGENT_REQUIRED_SKILLS="required-skill"
+if out=$("${SCRIPT}" apply 2>&1); then
+  if [ -L .claude/skills/required-skill ] && [ -L .agents/skills/required-skill ] &&
+    [ ! -e .claude/skills/extra-skill ] && [ ! -e .agents/skills/extra-skill ] &&
+    grep -q '/.claude/skills/required-skill' .git/info/exclude &&
+    ! grep -q 'extra-skill' .git/info/exclude; then
+    echo "ok 40 - [Apply] synchronizes required skills and prunes extras"
   else
-    echo "not ok 40 - [Apply] unexpected output or files: $out"
+    echo "not ok 40 - [Apply] unexpected files or excludes after sync"
+    printf '%s\n' "$out" | sed 's/^/# /'
   fi
 else
-  echo "not ok 40 - [Apply] command failed: $out"
+  echo "not ok 40 - [Apply] command failed"
+  printf '%s\n' "$out" | sed 's/^/# /'
 fi
+export AGENT_REQUIRED_SKILLS="" # Clean up
 
 # 4. Restore real skill-select
 mv "${TEST_DIR}/../scripts/skill-select.real" "${TEST_DIR}/../scripts/skill-select"
