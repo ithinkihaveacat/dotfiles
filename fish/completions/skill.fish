@@ -13,7 +13,7 @@ function __fish_skill_source_skills
 end
 
 function __fish_skill_catalog
-    skill catalog --json 2>/dev/null | jq -r '.[].name'
+    skill catalog --json 2>/dev/null | jq -r '.name'
 end
 
 function __fish_skill_managed_skills
@@ -33,12 +33,25 @@ complete -f -c skill -n __fish_use_subcommand -a apply -d 'Synchronize workspace
 complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print advisory LLM skill recommendations'
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Diagnose drift between desired and on-disk skills'
 complete -f -c skill -n __fish_use_subcommand -a preflight -d 'Verify required skills and workspace health before agent launch'
+complete -f -c skill -n __fish_use_subcommand -a show -d 'Show details and metadata of a skill (alias: info)'
+complete -f -c skill -n __fish_use_subcommand -a info -d 'Show details and metadata of a skill'
 
 # list
 complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, path)'
 
-# resolve: source skill names only
+# catalog
+complete -c skill -f -n '__fish_seen_subcommand_from catalog' -l json -d 'Emit JSON'
+
+# suggest
+complete -c skill -f -n '__fish_seen_subcommand_from suggest' -l json -d 'Emit JSON'
+
+# resolve
+complete -f -c skill -n '__fish_seen_subcommand_from resolve' -a '(__fish_skill_catalog)' -d 'Catalog skill'
 complete -f -c skill -n '__fish_seen_subcommand_from resolve' -a '(__fish_skill_source_skills)' -d Skill
+
+# show (and info)
+complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skill_catalog)' -d 'Catalog skill'
+complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skill_source_skills)' -d Skill
 
 # add
 complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_catalog)'
