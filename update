@@ -20,6 +20,8 @@ OPTIONS:
   --trace       Print each wrapped command to stderr before running it
   --force       Overwrite existing real files when laying down overlay symlinks
                 (default: refuse and exit)
+  --non-interactive
+                Run without prompting or interactive terminal-session validation
 
 EXAMPLES:
   $(basename "$0")            # Install dotfiles
@@ -33,6 +35,7 @@ TRACE=0
 FORCE=0
 HAS_SUDO=false
 REBOOT_REQUIRED=0
+NON_INTERACTIVE=0
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -48,6 +51,10 @@ while [[ $# -gt 0 ]]; do
       FORCE=1
       shift
       ;;
+    --non-interactive)
+      NON_INTERACTIVE=1
+      shift
+      ;;
     -*)
       echo "$(basename "$0"): unknown option: $1" >&2
       usage 1 >&2
@@ -58,6 +65,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Auto-detect non-interactive mode if stdin is not a TTY
+if [ ! -t 0 ]; then
+  NON_INTERACTIVE=1
+fi
 
 case "$(uname -s)" in
   Darwin) PLATFORM=darwin ;;
@@ -74,6 +86,9 @@ if [ "$PLATFORM" = "linux" ]; then
   # Check if sudo requires a password first
   if sudo -n true 2>/dev/null; then
     # Passwordless sudo is configured, no need to prompt
+    HAS_SUDO=true
+  elif [ "$NON_INTERACTIVE" = 1 ]; then
+    echo "Non-interactive mode: skipping interactive sudo validation"
     HAS_SUDO=true
   else
     echo "This script requires sudo access for package management."
@@ -248,6 +263,7 @@ LOCAL="$HOME/.local"
 xmkdir "$LOCAL"
 BINDIR="$LOCAL/bin"
 xmkdir "$BINDIR"
+export PATH="$BINDIR:$PATH"
 
 case "$PLATFORM" in
 
@@ -433,7 +449,7 @@ if [ "$PLATFORM" = "linux" ]; then
 
   if exists apt-get && $HAS_SUDO; then
 
-    x sudo apt-get -y update # refresh package lists
+    x sudo apt-get update # refresh package lists
 
     expected="apt-file direnv command-not-found dnsutils apache2-utils htop iftop iotop lsof mosh traceroute mtr-tiny whois sysstat dstat hdparm psmisc locate wget curl pv zip unzip libxml2-utils jed sqlite3 jq entr ripgrep nodejs npm shfmt chafa fzf"
     # Optional packages to consider adding to the list above:
@@ -442,15 +458,20 @@ if [ "$PLATFORM" = "linux" ]; then
     # TODO: JDK installation on Linux (not yet documented; see fish/config.fish
     # for context on how JAVA_HOME is set and what the macOS approach looks like)
 
-    comm -13 <(dpkg-query -f '${binary:Package}\n' -W | sort) <(echo "$expected" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install
+    comm -13 <(dpkg-query -f '${binary:Package}\n' -W | sort) <(echo "$expected" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
     # Can't remove any packages because not possible to determine which were
     # user-installed. Use `apt-get remove` to remove manually.
 
-    x sudo apt-get -y autoremove --purge # remove unnecessary dependencies and configs
-    x sudo apt-get -y autoclean          # remove old (unneeded) cached .deb files
+    # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
+    x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"
+
+    # Autoclean is typically restricted, so ignore failures gracefully
+    x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping"
     # x sudo apt-get -y clean # remove current .deb files
     # x sudo apt-get -y upgrade # update packages, if no new dependencies needed
-    x sudo apt-get -y full-upgrade # update packages, including ones that require new dependencies
+
+    # Ignore upgrade failures if they are restricted
+    x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
 
     if [ -f /var/run/reboot-required ]; then
       REBOOT_REQUIRED=1
@@ -485,7 +506,7 @@ heading "vscode"
 
 # Don't use system tools to update VS Code
 if [ -e /etc/apt/sources.list.d/vscode.list ] && $HAS_SUDO; then
-  x sudo rm -f /etc/apt/sources.list.d/vscode.list
+  x sudo rm -f /etc/apt/sources.list.d/vscode.list || true
 fi
 
 if ! exists code; then
