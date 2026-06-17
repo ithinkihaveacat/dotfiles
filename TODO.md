@@ -56,7 +56,7 @@ warnings in `resolve_selection` when a skill is found in multiple search paths
 - `[ ]` **Integrate with `doctor`:** Make `skill-select doctor` detect and
   report these duplicate conflicts as environmental drift.
 - `[ ]` **Pruning Tooling:** Provide a way to easily prune stale active symlinks
-  (e.g., `skill prune` or automatic cleanup in `repair` if the target client is
+  (e.g., `skill prune` or automatic cleanup in `apply` if the target client is
   gone).
 
 ## Incorporation of GMaven Indices into `jetpack`

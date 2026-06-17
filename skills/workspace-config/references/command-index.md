@@ -18,23 +18,22 @@ The block below is `scripts/skill --help`, kept in sync by `command-index-sync`.
 Usage: skill <command> [skill...]
 
 Manage per-workspace agent skills as untracked symlinks. Automatically detects
-whether the current directory is a Git repository, Perforce workspace, or an
-unmanaged directory, and applies the appropriate tracking mechanism. Extra
-workspace types can be added via plugins in ~/.config/skill/plugins/.
+which agent is installed on PATH and applies symlinks and local git ignores:
+  - Claude          -> .claude/skills
+  - Codex/Agy/Jetski -> .agents/skills
 
 Commands:
-  apply           Provision skills for this workspace via skill-select (idempotent)
-  suggest         Print skill-select recommendations without installing them
+  apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
+  suggest         Print skill-select recommendations
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
-  remove NAME...  Remove a skill this tool added (alias: rm)
-  list [--json]   List skills this tool is managing in the current workspace
-  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every managed
+  remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
+  list [--json]   List active skills on disk in the current workspace
+  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every active
                   skill, --catalog to refresh the whole metadata index
-  clean           Remove all skills this tool added and clear the tracking record
-  doctor          Diagnose drift between desired and on-disk skills (read-only)
+  clean           Remove all skills and clear git excludes
+  doctor          Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
-  repair          Re-link managed skills and regenerate tracking records
   catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
   show/info NAME  Show details and metadata of a skill
@@ -42,8 +41,6 @@ Commands:
 Options:
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Workspace plugin
-
-Note: plugins, network, and AI functions are delegated to 'skill-select'.
 ```
 
 <!-- /generated -->

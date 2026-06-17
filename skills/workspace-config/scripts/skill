@@ -56,16 +56,55 @@ class Workspace:
         self.root = root
 
     def get_dest_dirs(self) -> list[Path]:
-        dest_dirs_str = os.environ.get(
-            "SKILL_DEST_DIRS", ".claude/skills:.agents/skills"
-        )
-        return [self.root / d for d in dest_dirs_str.split(":") if d]
+        if "SKILL_DEST_DIRS" in os.environ:
+            return [self.root / d for d in os.environ["SKILL_DEST_DIRS"].split(":") if d]
 
-    def get_managed_skills(self) -> list[str]:
-        raise NotImplementedError
+        import shutil
+        dest_dirs = []
+        # Claude uses .claude/skills
+        if shutil.which("claude"):
+            dest_dirs.append(".claude/skills")
+        # Codex, Agy, and Jetski use .agents/skills
+        if shutil.which("codex") or shutil.which("agy") or shutil.which("jetski"):
+            dest_dirs.append(".agents/skills")
 
-    def save_managed_skills(self, skills: list[str]):
-        raise NotImplementedError
+        if not dest_dirs:
+            raise RuntimeError("No supported agent executable (claude, codex, agy, jetski) detected on PATH.")
+
+        return [self.root / d for d in dest_dirs]
+
+    def get_expected_skills(self) -> list[str]:
+        if hasattr(self, "get_managed_skills"):
+            return self.get_managed_skills()
+        required, _ = get_parsed_skills()
+        return required
+
+    def get_actual_skills(self) -> tuple[set[str], list[Path], list[Path]]:
+        """Scans destination directories and returns:
+        (actual_skills_set, unmanaged_artifacts, dangling_symlinks)
+        """
+        actual = set()
+        unmanaged = []
+        dangling = []
+        try:
+            dest_dirs = self.get_dest_dirs()
+        except RuntimeError:
+            return actual, unmanaged, dangling
+
+        for d in dest_dirs:
+            if not d.is_dir():
+                continue
+            for item in d.iterdir():
+                if item.name.startswith("."):
+                    continue
+                if item.is_symlink():
+                    if item.exists():
+                        actual.add(item.name)
+                    else:
+                        dangling.append(item)
+                else:
+                    unmanaged.append(item)
+        return actual, unmanaged, dangling
 
     def check_conflict(self, relpath: Path) -> str | None:
         """Returns an error message if there is a conflict, else None."""
@@ -77,12 +116,18 @@ class Workspace:
         return self.root
 
     def doctor_issues(self) -> list[str]:
-        """Returns backend-specific drift findings (read-only)."""
+        """Returns backend-specific findings (read-only)."""
         return []
 
     def is_managed(self) -> bool:
-        """Returns True if this workspace has been initialized to manage skills."""
-        return False
+        """Under the environment-driven model, a workspace is managed if expected skills are configured or actual symlinks exist."""
+        try:
+            dest_dirs = self.get_dest_dirs()
+        except RuntimeError:
+            return False
+        expected = self.get_expected_skills()
+        actual, _, _ = self.get_actual_skills()
+        return bool(expected or actual)
 
 
 class FileStateMixin:
@@ -109,24 +154,19 @@ class FileStateMixin:
         return self.state_file.is_file()
 
 
-class GitWorkspace(FileStateMixin, Workspace):
+class GitWorkspace(Workspace):
     """Git repositories.
 
     VCS Cleanliness (CL safety):
-    1. State File: Stored in '.git/info/skills'. Because it is inside the
-       internal '.git/' directory, it is physically invisible to Git tracking
-       and can never be accidentally committed.
-    2. Symlinks & Local State: The '.skills-managed' file and the symlinks in
-       '.claude/skills' or '.agents/skills' are automatically appended to
-       '.git/info/exclude'. This is a local-only ignore file (not tracked by
-       Git), keeping your 'git status' perfectly clean without polluting
-       the repository's shared '.gitignore' file.
+    1. Symlinks & Local State: The symlinks in '.claude/skills' or '.agents/skills'
+       are automatically appended to '.git/info/exclude'. This is a local-only
+       ignore file (not tracked by Git), keeping your 'git status' perfectly clean
+       without polluting the repository's shared '.gitignore' file.
     """
 
-    def __init__(self, root, exclude_file, state_file):
+    def __init__(self, root, exclude_file):
         super().__init__(root)
         self.exclude_file = exclude_file
-        self.state_file = state_file
         self.mark_begin = "# >>> skills >>>"
         self.mark_end = "# <<< skills <<<"
 
@@ -150,7 +190,7 @@ class GitWorkspace(FileStateMixin, Workspace):
                 )
                 return Path(r.stdout.strip()).resolve()
 
-            return cls(root, git_path("info/exclude"), git_path("info/skills"))
+            return cls(root, git_path("info/exclude"))
         except (subprocess.CalledProcessError, FileNotFoundError):
             return None
 
@@ -185,22 +225,9 @@ class GitWorkspace(FileStateMixin, Workspace):
                     if rel.startswith(str(rel_d) + "/"):
                         skills.add(rel[len(str(rel_d)) + 1 :])
                 except ValueError:
-                    # d is not relative to root (e.g. if SKILL_DEST_DIRS was customized with absolute paths)
+                    # d is not relative to root
                     pass
         return sorted(skills)
-
-    def get_managed_skills(self):
-        if self.state_file.is_file():
-            return super().get_managed_skills()
-        # Legacy layout: the managed list used to live only in the exclude
-        # block. Parse it once; the next save migrates it to the state file.
-        lines = self._read_block(self.mark_begin, self.mark_end)
-        if lines is None:
-            return []
-        return self._names_from_exclude_lines(lines)
-
-    def is_managed(self) -> bool:
-        return self.state_file.is_file() or self._read_block(self.mark_begin, self.mark_end) is not None
 
     def _expected_exclude_lines(self, skills):
         lines = set()
@@ -230,7 +257,8 @@ class GitWorkspace(FileStateMixin, Workspace):
                     if not in_block:
                         other_lines.append(line)
 
-        temp_fd, temp_path_str = tempfile.mkstemp()
+        # Write to temp file in same directory for atomic replace (concurrency safety)
+        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(self.exclude_file.parent))
         temp_path = Path(temp_path_str)
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
@@ -245,15 +273,12 @@ class GitWorkspace(FileStateMixin, Workspace):
                         f.write(line + "\n")
                     f.write(self.mark_end + "\n")
 
-            with open(self.exclude_file, "w", encoding="utf-8") as dest:
-                with open(temp_path, "r", encoding="utf-8") as src:
-                    dest.write(src.read())
-        finally:
+            os.replace(temp_path, self.exclude_file)
+        except Exception:
             temp_path.unlink(missing_ok=True)
+            raise
 
-    def save_managed_skills(self, skills):
-        skills = sorted(set(skills))
-        super().save_managed_skills(skills)
+    def save_exclude_block(self, skills):
         self._write_exclude_block(skills)
 
     def check_conflict(self, relpath):
@@ -273,35 +298,18 @@ class GitWorkspace(FileStateMixin, Workspace):
 
     def doctor_issues(self):
         issues = []
-        skills = self.get_managed_skills()
-        if skills and not self.state_file.is_file():
+        actual_skills, _, _ = self.get_actual_skills()
+        actual_exclude = self._read_block(self.mark_begin, self.mark_end) or []
+        if sorted(set(actual_exclude)) != self._expected_exclude_lines(actual_skills):
             issues.append(
-                f"legacy state  managed list still lives in {clean_p(self.exclude_file)} "
-                f"(migrates to {clean_p(self.state_file)} on the next change)"
-            )
-        actual = self._read_block(self.mark_begin, self.mark_end) or []
-        if self.state_file.is_file() and sorted(
-            set(actual)
-        ) != self._expected_exclude_lines(skills):
-            issues.append(
-                f"exclude drift {clean_p(self.exclude_file)} block does not match the managed list"
+                f"exclude drift  {clean_p(self.exclude_file)} block does not match the actual on-disk skills"
             )
         return issues
 
 
-class DefaultWorkspace(FileStateMixin, Workspace):
-    """Fallback for non-VCS directories.
-
-    VCS Cleanliness (CL safety):
-    - Because this is a fallback for unmanaged directories, it stores state
-      locally in a '.skills-managed' file. If you later initialize a VCS
-      in this directory, you may need to manually ignore '.skills-managed'
-      and your '.agents/' or '.claude/' directories.
-    """
-
-    def __init__(self, root):
-        super().__init__(root)
-        self.state_file = self.root / ".skills-managed"
+class DefaultWorkspace(Workspace):
+    """Fallback for non-VCS directories."""
+    pass
 
 
 # ==============================================================================
@@ -392,8 +400,10 @@ def cmd_add(specs):
             return
 
     ws = get_workspace()
-    managed = ws.get_managed_skills()
-    dest_dirs = ws.get_dest_dirs()
+    try:
+        dest_dirs = ws.get_dest_dirs()
+    except RuntimeError as e:
+        cmderr("add", str(e))
 
     resolved_skills = []
     has_errors = False
@@ -437,15 +447,26 @@ def cmd_add(specs):
         for d in dest_dirs:
             relpath = d / name
             d.mkdir(parents=True, exist_ok=True)
-            if relpath.is_symlink() or relpath.exists():
-                relpath.unlink()
-            relpath.symlink_to(src)
-
-            if name not in managed:
-                managed.append(name)
+            
+            # Atomic symlink replacement (concurrency-safe swap)
+            tmp_link = relpath.with_name(f".{relpath.name}.tmp-{os.getpid()}")
+            try:
+                tmp_link.symlink_to(src)
+                os.replace(tmp_link, relpath)
+            except FileExistsError:
+                tmp_link.unlink(missing_ok=True)
+            except Exception:
+                tmp_link.unlink(missing_ok=True)
+                raise
         print(f"added {name} -> {src}", file=sys.stderr)
 
-    ws.save_managed_skills(managed)
+    # Re-sync exclude block for the active set of skills on disk
+    actual_skills, _, _ = ws.get_actual_skills()
+    if hasattr(ws, "save_exclude_block"):
+        ws.save_exclude_block(actual_skills)
+    if hasattr(ws, "save_managed_skills"):
+        ws.save_managed_skills(list(actual_skills))
+
     if has_errors:
         sys.exit(1)
 
@@ -455,40 +476,43 @@ def cmd_remove(names):
         cmderr("remove", "skill name required")
 
     ws = get_workspace()
-    managed = ws.get_managed_skills()
-    dest_dirs = ws.get_dest_dirs()
+    try:
+        dest_dirs = ws.get_dest_dirs()
+    except RuntimeError as e:
+        cmderr("remove", str(e))
 
     for arg in names:
         name = os.path.basename(arg)
         removed = False
         for d in dest_dirs:
             relpath = d / name
-            if relpath.is_symlink():
-                relpath.unlink()
+            if relpath.is_symlink() or relpath.exists():
+                relpath.unlink(missing_ok=True)
                 removed = True
-            elif relpath.exists():
-                cmderr(
-                    "remove",
-                    f"{relpath} is not a symlink we manage; leaving it untouched",
-                )
-
-        if name in managed:
-            managed.remove(name)
 
         if removed:
             print(f"removed {name}", file=sys.stderr)
         else:
             print(f"remove: {name} not present; clearing record", file=sys.stderr)
 
-    ws.save_managed_skills(managed)
+    # Re-sync exclude block
+    actual_skills, _, _ = ws.get_actual_skills()
+    if hasattr(ws, "save_exclude_block"):
+        ws.save_exclude_block(actual_skills)
+    if hasattr(ws, "save_managed_skills"):
+        ws.save_managed_skills(list(actual_skills))
     prune_dirs(dest_dirs)
 
 
 def resolve_installed(ws):
-    """Returns [(name, resolved_target_path_or_None)] for managed skills."""
-    dest_dirs = ws.get_dest_dirs()
+    """Returns [(name, resolved_target_path_or_None)] for active skills."""
+    try:
+        dest_dirs = ws.get_dest_dirs()
+    except RuntimeError:
+        return []
+    actual_skills, _, _ = ws.get_actual_skills()
     resolved = []
-    for name in sorted(ws.get_managed_skills()):
+    for name in sorted(actual_skills):
         target = None
         for d in dest_dirs:
             p = d / name
@@ -531,21 +555,24 @@ def cmd_list(args):
 
 def cmd_clean():
     ws = get_workspace()
-    managed = ws.get_managed_skills()
-    dest_dirs = ws.get_dest_dirs()
+    try:
+        dest_dirs = ws.get_dest_dirs()
+    except RuntimeError as e:
+        cmderr("clean", str(e))
+    actual_skills, _, _ = ws.get_actual_skills()
 
     any_dir = any(d.is_dir() for d in dest_dirs)
-    if not managed and not any_dir:
+    if not actual_skills and not any_dir:
         print("clean: nothing to do", file=sys.stderr)
         return
 
     removed = 0
     left = 0
-    for name in managed:
+    for name in actual_skills:
         for d in dest_dirs:
             relpath = d / name
             if relpath.is_symlink():
-                relpath.unlink()
+                relpath.unlink(missing_ok=True)
                 removed += 1
                 print(f"removed {relpath.relative_to(ws.root)}", file=sys.stderr)
             elif relpath.exists():
@@ -555,9 +582,10 @@ def cmd_clean():
                 )
                 left += 1
 
-    ws.save_managed_skills([])
+    if hasattr(ws, "save_exclude_block"):
+        ws.save_exclude_block([])
     prune_dirs(dest_dirs)
-    print(f"clean: removed {removed} link(s); cleared managed list", file=sys.stderr)
+    print(f"clean: removed {removed} link(s); cleared git excludes", file=sys.stderr)
     if left > 0:
         print(f"clean: {left} path(s) left in place (not symlinks)", file=sys.stderr)
 
@@ -573,7 +601,8 @@ def cmd_update(names):
     ws = get_workspace()
 
     if len(names) == 1 and names[0] == "--all":
-        names = ws.get_managed_skills()
+        actual_skills, _, _ = ws.get_actual_skills()
+        names = list(actual_skills)
         if not names:
             print("update: nothing to do", file=sys.stderr)
             return
@@ -586,9 +615,6 @@ def get_parsed_skills():
     """
     Parses AGENT_REQUIRED_SKILLS from environment.
     Returns a tuple: (required_set, negated_set)
-    Matches the exact case-sensitivity logic of the Fish preflight script:
-    - Case-sensitive additions.
-    - Case-insensitive negations/removals.
     """
     env_val = os.environ.get("AGENT_REQUIRED_SKILLS", "")
     required_set = []
@@ -597,10 +623,8 @@ def get_parsed_skills():
         if spec.startswith("-") or spec.startswith("!"):
             clean_name = spec[1:]
             negated_set.append(clean_name.lower())
-            # Case-insensitive removal (equivalent to Fish `contains -i`)
             required_set = [req for req in required_set if req.lower() != clean_name.lower()]
         else:
-            # Case-sensitive addition (equivalent to Fish `contains`)
             if spec not in required_set:
                 required_set.append(spec)
     return required_set, negated_set
@@ -659,45 +683,15 @@ def cmd_preflight(caller_label):
         print(f"{caller_label}: skill check skipped (_agent_preflight_skip set)", file=sys.stderr)
         sys.exit(0)
 
-    required_skills, negated_skills = get_parsed_skills()
     ws = get_workspace()
-
-    # Case A: Unmanaged Workspace
-    if not ws.is_managed():
-        if required_skills:
-            c_red = "\033[1;31m"
-            c_green = "\033[1;32m"
-            c_reset = "\033[0m"
-
-            print(f"\n{c_red}{caller_label}: Launch aborted! This directory has no skills managed, but required skills are configured.{c_reset}\n", file=sys.stderr)
-            print(f"  Required:  {', '.join(required_skills)}", file=sys.stderr)
-            print("\nTo automatically set up this repository with the required skills, run:", file=sys.stderr)
-            print(f"  {c_green}git-setup{c_reset}\n", file=sys.stderr)
-            sys.exit(1)
-        
-        print(f"{caller_label}: not a skill-managed repo; skipping skill doctor", file=sys.stderr)
-        sys.exit(0)
-
-    # Case B: Managed Workspace
-    managed = ws.get_managed_skills()
-    missing_skills = [req for req in required_skills if req not in managed]
-
-    if missing_skills:
-        c_red = "\033[1;31m"
-        c_green = "\033[1;32m"
-        c_reset = "\033[0m"
-
-        print(f"\n{c_red}{caller_label}: Launch aborted due to missing required skills in this repository!{c_reset}\n", file=sys.stderr)
-        print(f"  Required:  {', '.join(required_skills)}", file=sys.stderr)
-        print(f"  Active:    {', '.join(managed)}", file=sys.stderr)
-        print(f"  {c_red}Missing:   {', '.join(missing_skills)}{c_reset}\n", file=sys.stderr)
-        print("To automatically heal this repository (install missing skills and apply permissions), run:", file=sys.stderr)
-        print(f"  {c_green}git-setup{c_reset}\n", file=sys.stderr)
-        print("Or, to manually add the missing skill(s):", file=sys.stderr)
-        print(f"  {c_green}skill add {' '.join(missing_skills)}{c_reset}\n", file=sys.stderr)
+    
+    # Retrieve destinations (errors out if no agent is detected)
+    try:
+        ws.get_dest_dirs()
+    except RuntimeError as e:
+        print(f"{caller_label}: error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # All required skills are present; execute doctor and map bool status to exit code
     is_healthy = cmd_doctor()
     sys.exit(0 if is_healthy else 1)
 
@@ -711,52 +705,11 @@ def cmd_suggest(args):
         sys.exit(res.returncode)
 
 
-def cmd_repair():
-    ws = get_workspace()
-    managed = ws.get_managed_skills()
-
-    # First repair the catalog index
-    res = subprocess.run([SKILL_SELECT_BIN, "repair"])
-    if res.returncode != 0:
-        print("repair: warning: failed to repair catalog index", file=sys.stderr)
-
-    if not managed:
-        ws.save_managed_skills([])
-        print("repair: nothing managed", file=sys.stderr)
-        return
-    # Re-resolving and re-adding every managed skill re-links any missing
-    # symlinks and rewrites both the state file and the exclude block.
-    cmd_add(managed)
-    print(f"repair: verified {len(managed)} skill(s)", file=sys.stderr)
-
-
 def cmd_doctor():
     ws = get_workspace()
-    managed = ws.get_managed_skills()
-    dest_dirs = ws.get_dest_dirs()
-
-    dangling = []
-    missing = []
-    for d in dest_dirs:
-        if not d.is_dir():
-            continue
-        for item in d.iterdir():
-            if item.is_symlink() and not item.exists():
-                try:
-                    target = item.readlink()
-                except Exception:
-                    target = "unknown"
-                dangling.append((item, target))
-    for name in managed:
-        for d in dest_dirs:
-            p = d / name
-            if not p.is_symlink():
-                missing.append(p)
-
-    backend_issues = ws.doctor_issues()
-
-    if not (dangling or missing or backend_issues):
-        return True
+    
+    expected_skills = ws.get_expected_skills()
+    actual_skills, unmanaged, dangling = ws.get_actual_skills()
 
     def rel(p):
         try:
@@ -764,23 +717,63 @@ def cmd_doctor():
         except ValueError:
             return p
 
-    print("Workspace Skills:", file=sys.stderr)
-    for item, target in dangling:
-        print(f"  dangling      {rel(item)} -> {target}", file=sys.stderr)
-    for p in missing:
-        print(f"  missing       {rel(p)} (managed but not linked)", file=sys.stderr)
+    # Calculate mismatches
+    dest_dirs = []
+    try:
+        dest_dirs = ws.get_dest_dirs()
+    except RuntimeError:
+        pass
+
+    missing = []
+    if dest_dirs:
+        for s in expected_skills:
+            for d in dest_dirs:
+                p = d / s
+                if not p.is_symlink() or not p.exists():
+                    label = f"{s} (missing in {rel(d)})" if len(dest_dirs) > 1 else s
+                    if label not in missing:
+                        missing.append(label)
+    else:
+        missing = list(expected_skills)
+
+    extra = [s for s in actual_skills if s not in expected_skills]
+    
+    backend_issues = ws.doctor_issues()
+
+    if not (missing or extra or unmanaged or dangling or backend_issues):
+        return True
+
+    print("skill: Mismatched / unhealthy skill configuration detected!", file=sys.stderr)
+    if missing:
+        print("  missing skills (declared in AGENT_REQUIRED_SKILLS but not linked on disk):", file=sys.stderr)
+        for s in missing:
+            print(f"    - {s}", file=sys.stderr)
+    if extra:
+        print("  extra skills (linked on disk but not in AGENT_REQUIRED_SKILLS):", file=sys.stderr)
+        for s in extra:
+            print(f"    - {s}", file=sys.stderr)
+    if unmanaged:
+        print("  unmanaged artifacts (files/directories in skill folders that are not symlinks):", file=sys.stderr)
+        for item in unmanaged:
+            print(f"    - {rel(item)}", file=sys.stderr)
+    if dangling:
+        print("  dangling/broken symlinks:", file=sys.stderr)
+        for item in dangling:
+            print(f"    - {rel(item)}", file=sys.stderr)
     for issue in backend_issues:
         print(f"  {issue}", file=sys.stderr)
 
-    hints = []
-    if dangling:
-        names_to_remove = sorted(set(item.name for item, _ in dangling))
-        hints.append(
-            f"'skill remove {' '.join(names_to_remove)}' to drop dangling links"
-        )
-    if missing or backend_issues:
-        hints.append("'skill repair' to re-link and regenerate tracking records")
-    print(f"\n  hint: run {', or '.join(hints)}\n", file=sys.stderr)
+    print("\nTo resolve this:", file=sys.stderr)
+    if missing or dangling or backend_issues:
+        print("  - To synchronize and repair your configuration, run 'git-setup' or 'skill apply'.", file=sys.stderr)
+    if extra:
+        print("  - Add the extra skill(s) to your AGENT_REQUIRED_SKILLS in .envrc:", file=sys.stderr)
+        print(f"      export AGENT_REQUIRED_SKILLS=\"$AGENT_REQUIRED_SKILLS {' '.join(extra)}\"", file=sys.stderr)
+        print("  - Or remove the local symlink(s):", file=sys.stderr)
+        print(f"      skill remove {' '.join(extra)}", file=sys.stderr)
+    if unmanaged:
+        print("  - Manually delete or move the unmanaged files/directories out of the skill folders.", file=sys.stderr)
+    print("", file=sys.stderr)
     return False
 
 
@@ -789,32 +782,29 @@ def usage():
         """Usage: skill <command> [skill...]
 
 Manage per-workspace agent skills as untracked symlinks. Automatically detects
-whether the current directory is a Git repository, Perforce workspace, or an
-unmanaged directory, and applies the appropriate tracking mechanism. Extra
-workspace types can be added via plugins in ~/.config/skill/plugins/.
+which agent is installed on PATH and applies symlinks and local git ignores:
+  - Claude          -> .claude/skills
+  - Codex/Agy/Jetski -> .agents/skills
 
 Commands:
-  apply           Provision skills for this workspace via skill-select (idempotent)
-  suggest         Print skill-select recommendations without installing them
+  apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
+  suggest         Print skill-select recommendations
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
-  remove NAME...  Remove a skill this tool added (alias: rm)
-  list [--json]   List skills this tool is managing in the current workspace
-  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every managed
+  remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
+  list [--json]   List active skills on disk in the current workspace
+  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every active
                   skill, --catalog to refresh the whole metadata index
-  clean           Remove all skills this tool added and clear the tracking record
-  doctor          Diagnose drift between desired and on-disk skills (read-only)
+  clean           Remove all skills and clear git excludes
+  doctor          Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
-  repair          Re-link managed skills and regenerate tracking records
   catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
   show/info NAME  Show details and metadata of a skill
 
 Options:
   --help             Display this help message and exit
-  --plugin-template  Output a template/documentation for creating a Workspace plugin
-
-Note: plugins, network, and AI functions are delegated to 'skill-select'."""
+  --plugin-template  Output a template/documentation for creating a Workspace plugin"""
     )
     sys.exit(0)
 
@@ -844,23 +834,10 @@ def register(api):
 
             Return an instance of MyCustomWorkspace if detected, else None.
             """
-            # Example detection: check for a specific file
-            # import pathlib
-            # if (pathlib.Path.cwd() / ".my-workspace-marker").exists():
-            #     return cls(pathlib.Path.cwd())
             return None
 
-        def get_managed_skills(self) -> list[str]:
-            """Return the list of skill names currently managed in this workspace."""
-            # Implement your state-reading logic here
+        def get_expected_skills(self) -> list[str]:
             return []
-
-        def save_managed_skills(self, skills: list[str]):
-            """Save the list of managed skills for this workspace."""
-            # Implement your state-saving logic here
-            pass
-
-    api.register_workspace(MyCustomWorkspace)
 ''')
         sys.exit(0)
 
@@ -902,8 +879,6 @@ def register(api):
     elif cmd == "preflight":
         caller_label = args[0] if args else "agent"
         cmd_preflight(caller_label)
-    elif cmd == "repair":
-        cmd_repair()
     else:
         print(f"skill: unknown command '{cmd}'", file=sys.stderr)
         print("Try 'skill --help' for more information.", file=sys.stderr)

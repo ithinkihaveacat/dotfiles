@@ -29,11 +29,10 @@ complete -f -c skill -n __fish_use_subcommand -a update -d 'Re-fetch plugin-prov
 complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed skills'
 complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List plugin-provided skills and sources'
 complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path for a name'
-complete -f -c skill -n __fish_use_subcommand -a apply -d 'Provision skills for this workspace via skill-select'
+complete -f -c skill -n __fish_use_subcommand -a apply -d 'Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS'
 complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print skill-select recommendations without installing'
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Diagnose drift between desired and on-disk skills'
 complete -f -c skill -n __fish_use_subcommand -a preflight -d 'Verify required skills and workspace health before agent launch'
-complete -f -c skill -n __fish_use_subcommand -a repair -d 'Re-link managed skills and regenerate tracking records'
 
 # list
 complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, path)'

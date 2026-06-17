@@ -38,16 +38,12 @@ skill <command> [arguments]
 ### Supported Environments
 
 - **Git Repositories**: Links skills under `.agents/skills/` and
-  `.claude/skills/`. The authoritative managed list lives in `.git/info/skills`
-  (inside the git dir, so it can never be tracked), and a marker block in
-  `.git/info/exclude` is regenerated from it to keep `git status` clean without
-  dirtying the shared `.gitignore`. If another tool rewrites the exclude file,
-  `skill doctor` detects it and `skill repair` regenerates the block.
-- **Perforce Workspaces**: Links skills under `.agents/skills/` and
-  `.claude/skills/` and tracks them in `.p4-skills-managed` at the client root
-  (untracked files are invisible to Perforce unless reconciled).
-- **Unmanaged Directories**: Works in plain directories without VCS. Tracks
-  skills in a local `.skills-managed` file.
+  `.claude/skills/`. A marker block in `.git/info/exclude` is dynamically
+  generated to keep `git status` clean without dirtying the shared
+  `.gitignore`. If another tool rewrites the exclude file, `skill doctor`
+  detects the drift, and running `skill apply` resolves it.
+- **Unmanaged Directories**: Works in plain directories without VCS, symlinking
+  skills under local destination folders.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
   file into `~/.config/skill/plugins/` that defines `register(api)` and calls
   `api.register_workspace(cls)` with a subclass of `api.Workspace` (see also
@@ -65,8 +61,7 @@ skill <command> [arguments]
 - **`update SPEC...`**: Re-fetch a plugin-provided catalog entry (`--all` for all,
   `--catalog` for the catalog index).
 - **`clean`**: Remove all managed skills and clear tracking records.
-- **`doctor`**: Diagnose drift between desired and on-disk skills (read-only).
-- **`repair`**: Re-link managed skills and regenerate tracking records.
+- **`doctor`**: Diagnose mismatch between desired and on-disk skills (read-only).
 - **`catalog`**: List all plugin-provided skills and their sources.
 - **`resolve NAME`**: Print the source path a skill name would resolve to.
 
@@ -213,9 +208,9 @@ permission list
 ### Health Checks
 
 ```bash
-skill doctor       # symlink/state/exclude drift (read-only)
+skill doctor       # symlink/exclude drift (read-only)
 permission doctor  # missing pre-approvals (read-only)
-skill repair       # re-link and regenerate tracking records
+skill apply        # synchronize and repair the workspace configuration
 ```
 
 ### Cleaning Up

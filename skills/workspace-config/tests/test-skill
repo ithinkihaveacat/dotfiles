@@ -13,6 +13,10 @@ TMPDIR=$(mktemp -d)
 MOCK_BIN_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMPDIR" "$MOCK_BIN_DIR"' EXIT
 
+# Create mock executables so skill detects both Claude and Codex paths by default in tests
+touch "$MOCK_BIN_DIR/claude" "$MOCK_BIN_DIR/codex"
+chmod +x "$MOCK_BIN_DIR/claude" "$MOCK_BIN_DIR/codex"
+
 # Create source skills in a central location
 mkdir -p "${TMPDIR}/sources/coding-standards" "${TMPDIR}/sources/emumanager"
 # Add dummy SKILL.md to sources so they are valid skills
@@ -68,17 +72,17 @@ else
   echo "not ok 3 - [Unmanaged] list failed"
 fi
 
-# Test 4: state file .skills-managed updated
-if [ -f .skills-managed ] && grep -q "coding-standards" .skills-managed; then
-  echo "ok 4 - [Unmanaged] state file updated"
+# Test 4: state file .skills-managed NOT created (stateless model)
+if [ ! -f .skills-managed ]; then
+  echo "ok 4 - [Unmanaged] state file not created (stateless model)"
 else
-  echo "not ok 4 - [Unmanaged] state file missing or empty"
+  echo "not ok 4 - [Unmanaged] state file was created unexpectedly"
 fi
 
-# Test 5: clean removes links and state file
+# Test 5: clean removes links and does not leave state file
 if "${SCRIPT}" clean >/dev/null 2>&1; then
   if [ ! -d .claude ] && [ ! -d .agents ] && [ ! -f .skills-managed ]; then
-    echo "ok 5 - [Unmanaged] clean removes links and state"
+    echo "ok 5 - [Unmanaged] clean removes links successfully"
   else
     echo "not ok 5 - [Unmanaged] clean left files"
   fi
@@ -106,12 +110,11 @@ else
   echo "not ok 6 - [Git] add failed"
 fi
 
-# Test 7: authoritative state lives in .git/info/skills
-if [ -f .git/info/skills ] && grep -q 'coding-standards' .git/info/skills &&
-  grep -q 'emumanager' .git/info/skills; then
-  echo "ok 7 - [Git] state recorded in .git/info/skills"
+# Test 7: authoritative state file .git/info/skills NOT created (stateless model)
+if [ ! -f .git/info/skills ]; then
+  echo "ok 7 - [Git] state file .git/info/skills not created"
 else
-  echo "not ok 7 - [Git] .git/info/skills missing entries"
+  echo "not ok 7 - [Git] state file .git/info/skills was created unexpectedly"
 fi
 
 # Test 8: info/exclude contains regenerated managed block
@@ -131,86 +134,63 @@ else
   echo "not ok 9 - [Git] list --json failed: $out"
 fi
 
-# Test 10: exclude block is regenerable: corrupt it, doctor flags, repair fixes
+# Test 10: exclude block is regenerable: corrupt it, doctor flags, apply fixes
+export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
 sed '/skills/d' .git/info/exclude >.git/info/exclude.tmp && mv .git/info/exclude.tmp .git/info/exclude
 if "${SCRIPT}" doctor >/dev/null 2>&1; then
   echo "not ok 10 - [Git] doctor should flag exclude drift"
 else
-  if "${SCRIPT}" repair >/dev/null 2>&1 &&
+  if "${SCRIPT}" apply >/dev/null 2>&1 &&
     grep -q '/.claude/skills/coding-standards' .git/info/exclude &&
     "${SCRIPT}" doctor >/dev/null 2>&1; then
-    echo "ok 10 - [Git] doctor flags exclude drift; repair regenerates it"
+    echo "ok 10 - [Git] doctor flags exclude drift; apply regenerates it"
   else
-    echo "not ok 10 - [Git] repair did not restore exclude block"
+    echo "not ok 10 - [Git] apply did not restore exclude block"
   fi
 fi
+export AGENT_REQUIRED_SKILLS="" # Clean up
 
-# Test 11: remove deletes symlink, state entry, and exclude entry
+# Test 11: remove deletes symlink and exclude entry
 if "${SCRIPT}" remove emumanager >/dev/null 2>&1; then
   if [ ! -L .agents/skills/emumanager ] && ! grep -q "emumanager" .git/info/exclude &&
-    ! grep -q "emumanager" .git/info/skills; then
-    echo "ok 11 - [Git] remove deletes symlink, state, and exclude entry"
+    [ ! -f .git/info/skills ]; then
+    echo "ok 11 - [Git] remove deletes symlink and exclude entry"
   else
-    echo "not ok 11 - [Git] remove left symlink, state, or exclude entry"
+    echo "not ok 11 - [Git] remove left symlink or exclude entry"
   fi
 else
   echo "not ok 11 - [Git] remove failed"
 fi
 
-# Test 12: clean removes links, state file, and managed block
+# Test 12: clean removes links and exclude block
 if "${SCRIPT}" clean >/dev/null 2>&1; then
   if [ ! -L .claude/skills/coding-standards ] && [ ! -f .git/info/skills ] &&
     ! grep -q "coding-standards" .git/info/exclude; then
-    echo "ok 12 - [Git] clean removes links, state, and exclude block"
+    echo "ok 12 - [Git] clean removes links and exclude block"
   else
-    echo "not ok 12 - [Git] clean left links, state, or exclude block"
+    echo "not ok 12 - [Git] clean left links or exclude block"
   fi
 else
   echo "not ok 12 - [Git] clean failed"
 fi
 
-# Test 13: add from subdirectory updates top-level exclude and state
+# Test 13: add from subdirectory updates top-level exclude
 mkdir -p sub
 cd sub
 if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
   if grep -q "/.claude/skills/coding-standards" ../.git/info/exclude &&
-    grep -q "coding-standards" ../.git/info/skills; then
-    echo "ok 13 - [Git] add from subdirectory updates top-level records"
+    [ ! -f ../.git/info/skills ]; then
+    echo "ok 13 - [Git] add from subdirectory updates top-level exclude"
   else
-    echo "not ok 13 - [Git] top-level records not updated"
+    echo "not ok 13 - [Git] top-level exclude not updated"
   fi
 else
   echo "not ok 13 - [Git] add from subdirectory failed"
 fi
 cd ..
 
-# Test 14: legacy migration: managed list parsed from old exclude block
-LEGACY_DIR="${TMPDIR}/git_legacy"
-mkdir -p "$LEGACY_DIR"
-cd "$LEGACY_DIR"
-git init -q
-mkdir -p .claude/skills .agents/skills
-ln -s "${TMPDIR}/sources/coding-standards" .claude/skills/coding-standards
-ln -s "${TMPDIR}/sources/coding-standards" .agents/skills/coding-standards
-mkdir -p .git/info
-cat <<'EOF' >.git/info/exclude
-# >>> skills >>>
-# managed by 'skill'
-/.claude/skills/coding-standards
-/.agents/skills/coding-standards
-# <<< skills <<<
-EOF
-if out=$("${SCRIPT}" list 2>/dev/null) && printf '%s' "$out" | grep -q 'coding-standards'; then
-  # Any state change migrates the list to .git/info/skills
-  "${SCRIPT}" add emumanager >/dev/null 2>&1
-  if grep -q 'coding-standards' .git/info/skills && grep -q 'emumanager' .git/info/skills; then
-    echo "ok 14 - [Git] legacy exclude-block state is read and migrated"
-  else
-    echo "not ok 14 - [Git] migration did not preserve legacy entries"
-  fi
-else
-  echo "not ok 14 - [Git] legacy exclude-block state not read: $out"
-fi
+# Test 14: legacy migration (skipped in stateless model)
+echo "ok 14 - [Git] legacy exclude-block state migration skipped # SKIP"
 
 # ==============================================================================
 # PART 3: Perforce Workspace Mode (standard layout)
@@ -276,12 +256,12 @@ else
   echo "not ok 22 - help does not document update --catalog"
 fi
 
-# Test 23: help documents repair and list --json
-if out=$("${SCRIPT}" --help 2>&1) && printf '%s' "$out" | grep -q 'repair' &&
+# Test 23: help documents apply and list --json
+if out=$("${SCRIPT}" --help 2>&1) && printf '%s' "$out" | grep -q 'apply' &&
   printf '%s' "$out" | grep -q 'list \[--json\]'; then
-  echo "ok 23 - help documents repair and list --json"
+  echo "ok 23 - help documents apply and list --json"
 else
-  echo "not ok 23 - help missing repair or list --json"
+  echo "not ok 23 - help missing apply or list --json"
 fi
 
 # ==============================================================================
@@ -355,7 +335,7 @@ NOPLUGIN_DIR="${TMPDIR}/noplugin"
 mkdir -p "$NOPLUGIN_DIR"
 cd "$NOPLUGIN_DIR"
 if out=$("${SCRIPT}" add coding-standards 2>&1); then
-  if printf '%s' "$out" | grep -q 'failed to load plugin' && [ -f .skills-managed ]; then
+  if printf '%s' "$out" | grep -q 'failed to load plugin' && [ ! -f .skills-managed ]; then
     echo "ok 26 - [Plugin] broken plugin warns and is skipped"
   else
     echo "not ok 26 - [Plugin] missing warning or fallback: $out"
