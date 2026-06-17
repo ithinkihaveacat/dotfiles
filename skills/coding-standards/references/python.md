@@ -336,7 +336,7 @@ The pattern consists of:
 
 1. **A Plugin Directory**: Plugins are loaded from
    `~/.config/<tool-name>/plugins/*.py` (where `<tool-name>` is the name of the
-   tool, e.g., `skill-select`, `context`, `permission`).
+   tool, e.g., `skill`, `context`, `permission`).
 1. **An API Class**: The tool defines a `PluginAPI` class that wraps the
    internal state and methods exposed to plugins.
 1. **A `register(api)` Entrypoint**: Each plugin must define a top-level

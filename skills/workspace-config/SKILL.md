@@ -12,7 +12,7 @@ control ever seeing the configuration. It consists of two tools:
    symlinks, automatically adapting to the environment (Git, Perforce, or
    unmanaged directories; more via plugins). Also provides advisory LLM-based
    skill recommendations (`skill suggest`) and manages remote plugin caching.
-2. **`permission`**: The permission manager. Maintains per-workspace
+1. **`permission`**: The permission manager. Maintains per-workspace
    allow/deny/ask rules for every detected local agent, including pre-approving
    the safe commands declared by installed skills.
 
@@ -37,9 +37,9 @@ skill <command> [arguments]
 
 - **Git Repositories**: Links skills under `.agents/skills/` and
   `.claude/skills/`. A marker block in `.git/info/exclude` is dynamically
-  generated to keep `git status` clean without dirtying the shared
-  `.gitignore`. If another tool rewrites the exclude file, `skill doctor`
-  detects the drift, and running `skill apply` resolves it.
+  generated to keep `git status` clean without dirtying the shared `.gitignore`.
+  If another tool rewrites the exclude file, `skill doctor` detects the drift,
+  and running `skill apply` resolves it.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
   skills under local destination folders.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
@@ -50,15 +50,19 @@ skill <command> [arguments]
 
 ### Commands
 
-- **`apply`**: Synchronize workspace symlinks to match `AGENT_REQUIRED_SKILLS` (local-only, fast, and deterministic).
-- **`suggest`**: Print recommendations without installing them (delegates to `skill-select suggest` as an advisory tool).
-- **`add SPEC...`**: Add a skill (a local path or a plugin-provided catalog entry).
+- **`apply`**: Synchronize workspace symlinks to match `AGENT_REQUIRED_SKILLS`
+  (local-only, fast, and deterministic).
+- **`suggest`**: Print recommendations without installing them (implements
+  advisory LLM skill recommendations).
+- **`add SPEC...`**: Add a skill (a local path or a plugin-provided catalog
+  entry).
 - **`remove NAME...`** (alias: **`rm`**): Remove a managed skill.
 - **`list [--json]`**: List skills currently managed in this workspace.
-- **`update SPEC...`**: Re-fetch a plugin-provided catalog entry (`--all` for all,
-  `--catalog` for the catalog index).
+- **`update SPEC...`**: Re-fetch a plugin-provided catalog entry (`--all` for
+  all, `--catalog` for the catalog index).
 - **`clean`**: Remove all managed skills and clear tracking records.
-- **`doctor`**: Diagnose mismatch between desired and on-disk skills (read-only).
+- **`doctor`**: Diagnose mismatch between desired and on-disk skills
+  (read-only).
 - **`catalog`**: List all plugin-provided skills and their sources.
 - **`resolve NAME`**: Print the source path a skill name would resolve to.
 

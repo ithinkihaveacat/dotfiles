@@ -14,7 +14,7 @@ action) removes the ambiguity.
 
 ## Surface Plugin Load Failures in `doctor`
 
-- `[ ]` Make `skill-select doctor` (and the other plugin-loading tools' doctor
+- `[ ]` Make `skill doctor` (and the other plugin-loading tools' doctor
   commands) report plugins that failed to load.
 
 A plugin that fails to load currently produces only a one-line stderr warning
@@ -23,14 +23,14 @@ missing that plugin's skills. The loader should record load failures and
 `doctor` should list them (e.g. "plugin 20_corp.py failed to load"), fitting the
 doctor-as-drift-detection pattern.
 
-## skill-select Cleanups and Legacy Shim Retirement
+## skill Cleanups and Legacy Shim Retirement
 
 - `[ ]` Fix the misleading dedup comment in `cmd_catalog` ("Remove it from
   plugin_catalog" — it actually edits the grouped output).
 - `[ ]` Collapse the `load_plugins`/`load_plugins_catalog` pair into one
   function.
 - `[ ]` After a deprecation window, delete the `LEGACY_FLAGS` migration shim and
-  the hidden `list` alias for `catalog` in `skill-select`.
+  the hidden `list` alias for `catalog` in `skill`.
 
 ## Duplicate Skill Detection and Resolution
 
@@ -53,8 +53,8 @@ warnings in `resolve_selection` when a skill is found in multiple search paths
   in all groups they are found in (instead of silently deduplicating them), and
   highlight conflicting duplicates (same name, different targets) with a
   `(! CONFLICT)` marker.
-- `[ ]` **Integrate with `doctor`:** Make `skill-select doctor` detect and
-  report these duplicate conflicts as environmental drift.
+- `[ ]` **Integrate with `doctor`:** Make `skill doctor` detect and report these
+  duplicate conflicts as environmental drift.
 - `[ ]` **Pruning Tooling:** Provide a way to easily prune stale active symlinks
   (e.g., `skill prune` or automatic cleanup in `apply` if the target client is
   gone).
