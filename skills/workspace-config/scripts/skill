@@ -5,7 +5,7 @@
 #   "google-genai",
 # ]
 # ///
-# Tests: tests/skill/
+# Tests: skills/workspace-config/tests/test-skill
 
 import json
 import os
@@ -663,6 +663,18 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
             meta = get_skill_metadata(candidate, spec)
             return candidate.resolve(), meta["name"]
 
+    # 2b. Fallback: Scan directories to match canonical frontmatter name
+    for d in source_dirs:
+        if not d.is_dir():
+            continue
+        for item in d.iterdir():
+            if item.name.startswith("."):
+                continue
+            if item.is_dir() and (item / "SKILL.md").is_file():
+                meta = get_skill_metadata(item, item.name)
+                if meta["name"].lower() == spec.lower():
+                    return item.resolve(), meta["name"]
+
     # 3. Check registered plugin catalog
     if spec in api.plugin_catalog:
         entry = api.plugin_catalog[spec]
@@ -684,7 +696,12 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     raise ValueError(f"cannot resolve skill '{spec}'")
 
 
-def cmd_add(specs):
+def is_using_envrc(ws) -> bool:
+    """Checks if the workspace is using direnv or has a local .envrc file."""
+    return "DIRENV_DIR" in os.environ or (ws.root / ".envrc").is_file()
+
+
+def cmd_add(specs, is_apply=False):
     if not specs:
         cmderr("add", "skill name required")
     if len(specs) == 1 and specs[0] == "-":
@@ -738,6 +755,17 @@ def cmd_add(specs):
                 tmp_link.unlink(missing_ok=True)
                 raise
         print(f"added {name} -> {src}", file=sys.stderr)
+        if not is_apply:
+            if is_using_envrc(ws):
+                print(
+                    f"skill: note: to make this permanent, add '{name}' to AGENT_REQUIRED_SKILLS in your .envrc",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"skill: note: to make this permanent, add '{name}' to the AGENT_REQUIRED_SKILLS environment variable",
+                    file=sys.stderr,
+                )
 
     # Re-sync exclude block for the active set of skills on disk
     actual_skills, _, _ = ws.get_actual_skills()
@@ -747,7 +775,10 @@ def cmd_add(specs):
         ws.save_managed_skills(list(actual_skills))
 
     if has_errors:
+        if is_apply:
+            return False
         sys.exit(1)
+    return True
 
 
 def cmd_remove(names):
@@ -952,21 +983,34 @@ def cmd_apply(args):
 
     # Deterministic Local Sync:
     # 1. Resolve and add/symlink all expected skills
-    cmd_add(expected_skills)
+    add_ok = cmd_add(expected_skills, is_apply=True)
 
     # 2. Prune any actual symlinks on disk that are NOT in expected_skills
     try:
         ws.get_dest_dirs()
     except RuntimeError:
-        return
+        sys.exit(0 if add_ok else 1)
+
     actual_skills, _, _ = ws.get_actual_skills()
     extra_skills = [s for s in actual_skills if s not in expected_skills]
     if extra_skills:
-        print(
-            f"skill: pruning extra symlinks not in AGENT_REQUIRED_SKILLS: {' '.join(extra_skills)}",
-            file=sys.stderr,
-        )
+        for s in extra_skills:
+            if is_using_envrc(ws):
+                print(
+                    f"skill: pruning extra symlink not in AGENT_REQUIRED_SKILLS: '{s}'. "
+                    f"(To keep it, add it to AGENT_REQUIRED_SKILLS in your .envrc)",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"skill: pruning extra symlink not in AGENT_REQUIRED_SKILLS: '{s}'. "
+                    f"(To keep it, add it to the AGENT_REQUIRED_SKILLS environment variable)",
+                    file=sys.stderr,
+                )
         cmd_remove(extra_skills)
+
+    if not add_ok:
+        sys.exit(1)
 
 
 def cmd_preflight(caller_label):
@@ -1109,7 +1153,7 @@ def cmd_suggest(args):
         from google.genai import types
     except ImportError:
         die(
-            "The 'google-genai' package is required for suggestions. Please install it or run via 'uv'."
+            "The 'google-genai' package is required for suggestions. Please install it."
         )
 
     target_dir = Path(args[0]).resolve() if args else Path.cwd()
@@ -1333,10 +1377,16 @@ def cmd_doctor():
             file=sys.stderr,
         )
     if extra:
-        print(
-            "  - Add the extra skill(s) to your AGENT_REQUIRED_SKILLS in .envrc:",
-            file=sys.stderr,
-        )
+        if is_using_envrc(ws):
+            print(
+                "  - Add the extra skill(s) to your AGENT_REQUIRED_SKILLS in .envrc:",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "  - Add the extra skill(s) to the AGENT_REQUIRED_SKILLS environment variable:",
+                file=sys.stderr,
+            )
         print(
             f'      export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"',
             file=sys.stderr,
@@ -1502,7 +1552,7 @@ def register(api):
         cmd_clean()
     elif cmd == "apply":
         cmd_apply(args)
-    elif cmd == "suggest":
+    elif cmd in ("suggest", "suggest-internal"):
         cmd_suggest(args)
     elif cmd == "preflight":
         caller_label = args[0] if args else "agent"
