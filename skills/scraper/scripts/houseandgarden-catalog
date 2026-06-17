@@ -1,0 +1,136 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Enumerate article URLs from a houseandgarden.co.uk topic page.
+
+Each topic lives at https://www.houseandgarden.co.uk/topic/<TOPIC> and paginates
+via ?page=N. The script walks all pages until it gets a 404 or finds no next-page
+link, collecting article URLs from the JSON-LD ItemList embedded on each page.
+
+Examples:
+  houseandgarden-catalog london-houses
+  houseandgarden-catalog london-houses --limit 40 --json
+  houseandgarden-catalog london-houses --pages 3
+"""
+
+import argparse
+import json
+import re
+import sys
+import urllib.error
+import urllib.request
+
+UA = "Mozilla/5.0 (compatible; houseandgarden-catalog)"
+BASE = "https://www.houseandgarden.co.uk"
+
+
+def fetch(url: str) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-GB,en;q=0.5",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", errors="replace")
+
+
+def extract_items(html: str) -> list[dict]:
+    """Parse article list from the JSON-LD ItemList on a topic page."""
+    m = re.search(
+        r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL
+    )
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return []
+    if data.get("@type") != "ItemList":
+        return []
+    return data.get("itemListElement", [])
+
+
+def has_next_page(html: str, page: int) -> bool:
+    return f"?page={page + 1}" in html or f"page={page + 1}" in html
+
+
+def cmd_catalog(args):
+    items = []
+    page = 1
+    while True:
+        url = f"{BASE}/topic/{args.topic}" + (f"?page={page}" if page > 1 else "")
+        try:
+            html = fetch(url)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                break
+            print(f"houseandgarden-catalog: HTTP {e.code} on page {page}", file=sys.stderr)
+            sys.exit(1)
+
+        page_items = extract_items(html)
+        if not page_items:
+            print(
+                f"houseandgarden-catalog: no items found on page {page}",
+                file=sys.stderr,
+            )
+            break
+
+        items.extend(page_items)
+        print(
+            f"# page {page}: {len(page_items)} items ({len(items)} total)",
+            file=sys.stderr,
+        )
+
+        if args.limit and len(items) >= args.limit:
+            items = items[: args.limit]
+            break
+        if args.pages and page >= args.pages:
+            break
+        if not has_next_page(html, page):
+            break
+        page += 1
+
+    if args.json:
+        out = [{"url": it["url"], "title": it.get("name", "")} for it in items]
+        json.dump(out, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        for it in items:
+            print(it["url"])
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="houseandgarden-catalog",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+    )
+    ap.add_argument("--help", action="help", help="Show this help message and exit")
+    ap.add_argument("topic", help="Topic slug, e.g. london-houses")
+    ap.add_argument("--limit", type=int, metavar="N", help="Stop after N articles")
+    ap.add_argument("--pages", type=int, metavar="N", help="Stop after N pages")
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit [{url, title}] JSON array instead of one URL per line",
+    )
+    ap.set_defaults(func=cmd_catalog)
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)

@@ -5,13 +5,16 @@ description: >
   websites. Ships paired per-site primitives — a `catalog` script that
   enumerates a site's items and a `gallery` script that pulls one item's image
   URLs (or full JSON payload). Currently covers inigo.com property listings
-  (zero-dependency stdlib) and dezeen.com article galleries (a real Chrome you
-  launch yourself, to clear Cloudflare). Pairs well with an LLM image-query tool
-  for triaging downloaded photography. Use when scraping inigo.com or dezeen.com,
-  enumerating a site's listings/articles, or cataloguing reference photos.
+  (zero-dependency stdlib), dezeen.com article galleries (a real Chrome you
+  launch yourself, to clear Cloudflare), and houseandgarden.co.uk gallery
+  articles (zero-dependency stdlib). Pairs well with an LLM image-query tool
+  for triaging downloaded photography. Use when scraping inigo.com, dezeen.com,
+  or houseandgarden.co.uk, enumerating a site's listings/articles, or
+  cataloguing reference photos.
   Triggers: scrape, scraper, gallery scrape, image triage, catalog listings,
-  inigo, inigo.com, dezeen, dezeen.com, playwright, cloudflare, property
-  photography, interior design, bedside table, fireplace, kitchen extension.
+  inigo, inigo.com, dezeen, dezeen.com, houseandgarden, house and garden,
+  houseandgarden.co.uk, playwright, cloudflare, property photography, interior
+  design, bedside table, fireplace, kitchen extension.
 compatibility: >-
   The inigo-* scripts are zero-dependency Python 3 (stdlib only). The dezeen-*
   scripts need Playwright (auto-installed via the uv script header) and a real
@@ -121,6 +124,32 @@ browser; images download straight from `static.dezeen.com` with `wget`. See
 [references/dezeen-source-structure.md](references/dezeen-source-structure.md)
 for the full findings.
 
+### House & Garden (houseandgarden.co.uk) — zero-dependency stdlib
+
+Interior design article galleries. Both scripts are pure Python 3 stdlib
+(no install step). Plain HTTP works — no Cloudflare or bot management.
+
+```bash
+# Enumerate a topic's articles (walks all pages, ~20/page)
+scripts/houseandgarden-catalog london-houses
+scripts/houseandgarden-catalog london-houses --limit 40 --json   # summary cards
+
+# One article's gallery
+scripts/houseandgarden-gallery https://www.houseandgarden.co.uk/gallery/<slug>          # image URLs
+scripts/houseandgarden-gallery https://www.houseandgarden.co.uk/gallery/<slug> --json   # full payload
+```
+
+`houseandgarden-catalog` walks `?page=N` until a 404 — the `london-houses`
+topic has 21 pages / ~418 articles. Topics may contain both `/gallery/` and
+`/article/` URLs; only gallery pages have the slideshow format.
+
+`houseandgarden-gallery` extracts images from `GallerySlideWrapper` elements,
+upgrades to 2560px master-ratio, and pairs captions from `data-item` attributes.
+The site uses a metered paywall — unauthenticated access yields 8–18 images per
+article (the image HTML is in the DOM; some slides are not rendered). See
+[references/houseandgarden-source-structure.md](references/houseandgarden-source-structure.md)
+for the JSON-LD structure, image CDN URL format, and verification probes.
+
 ## Triage downloaded images with an LLM
 
 Once images are on disk, triage is best delegated to a dedicated LLM image-query
@@ -161,6 +190,11 @@ Worked-in-practice prompts:
 - `scripts/dezeen-gallery URL [--json]` — print one Dezeen article's gallery
   image URLs (captioned in `--json`), or its full article payload. Needs
   Playwright + launched Chrome.
+- `scripts/houseandgarden-catalog TOPIC [--limit N] [--pages N] [--json]` —
+  enumerate a House & Garden topic's article URLs (walks all pages). Zero deps.
+- `scripts/houseandgarden-gallery URL [--json]` — print one House & Garden
+  gallery article's image URLs (captioned in `--json`), or its full payload.
+  Zero deps.
 
 ## Safety Notes
 
@@ -180,3 +214,6 @@ Worked-in-practice prompts:
 - [references/dezeen-source-structure.md](references/dezeen-source-structure.md)
   — Dezeen URL surface, the Cloudflare findings, article JSON-LD + gallery DOM
   shapes, verification probes.
+- [references/houseandgarden-source-structure.md](references/houseandgarden-source-structure.md)
+  — H&G URL surface, topic pagination, gallery DOM structure, image CDN format,
+  caption extraction, verification probes.
