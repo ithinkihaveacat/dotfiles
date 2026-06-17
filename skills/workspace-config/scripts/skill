@@ -1256,9 +1256,51 @@ def cmd_suggest(args):
             "The 'google-genai' package is required for suggestions. Please install it."
         )
 
-    target_dir = Path(args[0]).resolve() if args else Path.cwd()
+    # Separate flags from positional arguments (preserving '-' as a positional)
+    flags = [a for a in args if a.startswith("-") and a != "-"]
+    positional_args = [a for a in args if not a.startswith("-") or a == "-"]
+
+    # Detect explicit stdin request ("-")
+    read_stdin = False
+    if "-" in positional_args:
+        read_stdin = True
+        positional_args.remove("-")
+
+    target_dir = Path.cwd()
+    positional_prompt = None
+
+    if positional_args:
+        # Smart Positional Parsing:
+        # Check if the first argument is a directory on disk.
+        first_arg_path = Path(positional_args[0]).expanduser()
+        if first_arg_path.is_dir():
+            target_dir = first_arg_path.resolve()
+            if len(positional_args) > 1:
+                positional_prompt = " ".join(positional_args[1:])
+        else:
+            # If not a directory, treat the entire list as the prompt.
+            positional_prompt = " ".join(positional_args)
+
     if not target_dir.is_dir():
         die(f"target directory '{target_dir}' does not exist")
+
+    # Read from stdin if explicitly requested
+    stdin_prompt = None
+    if read_stdin:
+        print("skill: reading task prompt from stdin...", file=sys.stderr)
+        try:
+            stdin_prompt = sys.stdin.read().strip()
+        except Exception as e:
+            die(f"failed to read from stdin: {e}")
+
+    # Combine prompts if both are present
+    prompt_context = None
+    if positional_prompt and stdin_prompt:
+        prompt_context = f"{positional_prompt}\n\nAdditional Context:\n{stdin_prompt}"
+    elif positional_prompt:
+        prompt_context = positional_prompt
+    elif stdin_prompt:
+        prompt_context = stdin_prompt
 
     print("skill: scanning workspace to compile recommendations...", file=sys.stderr)
 
@@ -1346,7 +1388,8 @@ You are a development environment orchestrator.
 Your goal is to recommend the best agent "skills" to activate for the given project directory and task.
 You will be provided with:
 1. The available skills (name and description).
-2. Information about the target directory (e.g. file structure, README).
+2. The user's task or context (optional).
+3. Information about the target directory (e.g. file structure, README).
 
 Recommend exactly the skills that are directly relevant. Err on the side of caution: if a skill is clearly relevant to the tech stack or task, include it. If it is completely irrelevant, do not include it.
 
@@ -1361,7 +1404,15 @@ Return an empty array [] if no skills apply.
     prompt = f"""
 AVAILABLE SKILLS:
 {available_skills}
+"""
 
+    if prompt_context:
+        prompt += f"""
+USER CONTEXT / TASK:
+{prompt_context}
+"""
+
+    prompt += f"""
 TARGET DIRECTORY INFO:
 {repo_context}
 """
@@ -1389,7 +1440,7 @@ TARGET DIRECTORY INFO:
     if not isinstance(results, list):
         die(f"Expected JSON array, got: {type(results)}\n{response.text}")
 
-    as_json = "--json" in sys.argv or "--json" in args
+    as_json = "--json" in sys.argv or "--json" in flags
     if as_json:
         for s in results:
             print(json.dumps(s))
@@ -1565,7 +1616,9 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
-  suggest         Print advisory LLM skill recommendations (requires google-genai)
+  suggest [DIR] [-] [PROMPT] Print advisory LLM skill recommendations guided by an
+                          optional task prompt (pass '-' to read from stdin)
+                          (requires google-genai)
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)

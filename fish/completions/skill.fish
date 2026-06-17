@@ -44,12 +44,14 @@ complete -c skill -f -n '__fish_seen_subcommand_from catalog' -l json -d 'Emit J
 
 # suggest
 complete -c skill -f -n '__fish_seen_subcommand_from suggest' -l json -d 'Emit JSON'
+complete -c skill -n '__fish_seen_subcommand_from suggest' -a - -d 'Read prompt from stdin'
 
 # resolve
 complete -f -c skill -n '__fish_seen_subcommand_from resolve' -a '(__fish_skill_catalog)' -d 'Catalog skill'
 complete -f -c skill -n '__fish_seen_subcommand_from resolve' -a '(__fish_skill_source_skills)' -d Skill
 
 # show (and info)
+complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
 complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skill_catalog)' -d 'Catalog skill'
 complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skill_source_skills)' -d Skill
 
