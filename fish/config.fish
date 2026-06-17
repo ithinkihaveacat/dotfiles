@@ -184,7 +184,7 @@ set -x UV_EXCLUDE_NEWER "7 days"
 set -gx SKILL_SOURCE_DIRS (string join : $HOME/.dotfiles/skills $HOME/.private/skills $HOME/.corp/skills $HOME/.gemini/config/skills $HOME/.gemini/jetski/skills)
 
 # Default required skills for agent CLI preflight checks
-set -gx AGENT_REQUIRED_SKILLS agent-tools coding-standards workspace-config
+set -gx AGENT_REQUIRED_SKILLS agent-tools coding-standards workspace-config technical-writing
 
 _load_overlay $HOME/.private
 _load_overlay $HOME/.corp
