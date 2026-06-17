@@ -52,9 +52,8 @@ skill <command> [arguments]
 
 ### Commands
 
-- **`apply`**: Provision recommended skills for this workspace via
-  `skill-select` (idempotent). Consults an LLM, so it needs network access.
-- **`suggest`**: Print recommendations without installing them.
+- **`apply`**: Synchronize workspace symlinks to match `AGENT_REQUIRED_SKILLS` (local-only, fast, and deterministic).
+- **`suggest`**: Print recommendations without installing them (delegates to `skill-select suggest` as an advisory tool).
 - **`add SPEC...`**: Add a skill (a local path or a plugin-provided catalog entry).
 - **`remove NAME...`** (alias: **`rm`**): Remove a managed skill.
 - **`list [--json]`**: List skills currently managed in this workspace.
