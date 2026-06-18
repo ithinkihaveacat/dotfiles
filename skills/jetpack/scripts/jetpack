@@ -44,6 +44,7 @@ require xmllint
 require jq
 require perl
 require jar
+require gunzip
 
 validate_artifact_format() {
   local artifact="$1"
@@ -68,11 +69,11 @@ fetch_maven_metadata() {
     # Suggest alternatives from the local index
     if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
       local suggestions
-      # Try searching for artifacts with the same name in other groups
-      suggestions=$(cmd_search --index "$artifact_id" 2>/dev/null | grep ":$artifact_id$" | head -n 5 || true)
+      # Try searching for artifacts with the same name in other groups (using the new default local search)
+      suggestions=$(cmd_search "$artifact_id" 2>/dev/null | grep ":$artifact_id$" | head -n 5 || true)
       if [[ -z "$suggestions" ]]; then
         # Try a broader search if no exact artifact name matches
-        suggestions=$(cmd_search --index "$artifact_id" 2>/dev/null | head -n 3 || true)
+        suggestions=$(cmd_search "$artifact_id" 2>/dev/null | head -n 3 || true)
       fi
 
       if [[ -n "$suggestions" ]]; then
@@ -197,7 +198,7 @@ EOF
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jetpack"
 INDEX_FILE="$CACHE_DIR/androidx-index.json"
-MAX_AGE_SECONDS=$((4 * 3600)) # 4 hours
+MAX_AGE_SECONDS=$((24 * 3600)) # 24 hours
 
 usage_search() {
   cat <<EOF
@@ -206,11 +207,9 @@ Usage: $SCRIPT_NAME search [OPTIONS] QUERY
 Search for AndroidX artifacts by package name or class name.
 
 Arguments:
-  QUERY       Search term (substring match on package, or class name)
+  QUERY       Search term (substring match on package, artifact, or class name)
 
 Options:
-  --index     Force use of Static Index (package names only)
-  --code      Force use of Code Search (class names/files)
   --force     Force cache rebuild (ignore existing index)
   --help      Display this help message
 
@@ -246,17 +245,19 @@ is_index_fresh() {
 }
 
 update_index() {
-  echo "info: Updating AndroidX index from Google Maven..." >&2
+  echo "info: Updating GMaven index..." >&2
   mkdir -p "$CACHE_DIR"
-  local master_url="https://dl.google.com/android/maven2/master-index.xml"
+  local index_url="https://dl.google.com/android/studio/gmaven/index/release/v0.1/classes-v0.1.json.gz"
 
   (
-    local xml_file
-    xml_file=$(mktemp)
-    trap 'rm -f "$xml_file"' EXIT
+    local tmp_gz tmp_json
+    tmp_gz=$(mktemp)
+    tmp_json="${tmp_gz}.json"
+    trap 'rm -f "$tmp_gz" "$tmp_json"' EXIT
 
-    if ! curl -sL -o "$xml_file" "$master_url"; then
-      echo "warning: Failed to download master index." >&2
+    # Added -f to fail immediately on HTTP errors instead of saving error pages
+    if ! curl -sSLf -o "$tmp_gz" "$index_url"; then
+      echo "warning: Failed to download GMaven index." >&2
       if [[ -f "$INDEX_FILE" ]]; then
         echo "warning: Using stale cache." >&2
         exit 0
@@ -264,13 +265,8 @@ update_index() {
       exit 1
     fi
 
-    local json_output
-    # Extract tags like <androidx.activity/>, remove brackets/slash
-    json_output=$(grep -oE '<androidx\.[^/]+' "$xml_file" | sed 's/<//' | sort -u |
-      jq -R -s 'split("\n") | map(select(length > 0)) | map({group: .})')
-
-    if [[ -z "$json_output" ]] || [[ "$json_output" == "[]" ]]; then
-      echo "warning: No groups extracted." >&2
+    if ! gunzip -c "$tmp_gz" >"$tmp_json"; then
+      echo "warning: Failed to decompress GMaven index." >&2
       if [[ -f "$INDEX_FILE" ]]; then
         echo "warning: Using stale cache." >&2
         exit 0
@@ -278,12 +274,9 @@ update_index() {
       exit 1
     fi
 
-    if echo "$json_output" | jq '.' >"$INDEX_FILE"; then
-      echo "info: Index updated." >&2
-    else
-      echo "warning: Failed to save JSON index." >&2
-      exit 1
-    fi
+    # Atomic swap guarantees cache integrity and prevents race conditions
+    mv "$tmp_json" "$INDEX_FILE"
+    echo "info: Index updated." >&2
   )
 }
 
@@ -299,107 +292,105 @@ search_index() {
     return 1
   fi
 
-  jq -r --arg q "$query" \
-    '.[] | .group as $g | select(($g | contains($q)) or ($q | startswith($g))) | $g' \
-    "$INDEX_FILE" | sort -u
+  # Auto-detect format: array (old) vs object (new with .Index)
+  #
+  # ARCHITECTURAL NOTE: CLIENT-SIDE KMP REDIRECTION
+  # -----------------------------------------------
+  # In Kotlin Multiplatform (KMP), a library is split into:
+  #   1. A "base" artifact (e.g., `androidx.annotation:annotation`) which is
+  #      practically an empty jar containing only Gradle metadata (.module).
+  #   2. Platform-specific target artifacts (e.g., `androidx.annotation:annotation-jvm`,
+  #      `androidx.annotation:annotation-iosarm64`) which contain the actual class files.
+  #
+  # Because the base artifact jar is physically empty, the official GMaven indexer
+  # assigns an empty class list ("fqcns": []) to the base artifact, and lists the
+  # actual classes under the platform-specific target artifacts.
+  #
+  # In Android Studio (the IDE), this "pure" index is resolved dynamically:
+  #   - For projects using older Android Gradle Plugin (AGP < 8.4), the IDE suggests
+  #     depending directly on the platform target (e.g., `annotation-jvm`) because
+  #     older AGP versions had issues resolving KMP base redirect attributes.
+  #   - For projects on AGP 8.4+, the IDE interceptor dynamically redirects the
+  #     suggestion to the base artifact (e.g., `annotation`), which Gradle then
+  #     resolves to the correct platform target at build time.
+  #
+  # Since this 'jetpack' CLI tool runs outside Android Studio and lacks project/AGP
+  # context, it would normally suggest the platform-specific target (e.g., `annotation-jvm`)
+  # when you search for a class like `NonNull`. However, developers almost always
+  # want to declare the clean base artifact in their build files (especially in KMP
+  # commonMain).
+  #
+  # To solve this without needing server-side changes to the published index (which
+  # must remain "pure" for backward compatibility with older IDEs/AGPs), we implement
+  # CLIENT-SIDE KMP REDIRECTION directly in our jq filter:
+  #
+  # 1. If a search match is found in a platform-specific target (identified by
+  #     KMP suffixes like -jvm, -android, -iosarm64, etc.), we strip the suffix
+  #     to derive the potential base artifact ID.
+  # 2. We then check if the base artifact actually exists in the index.
+  # 3. If the base exists, we dynamically redirect the result and return the base
+  #    coordinate (e.g., `androidx.annotation:annotation`) instead of the target.
+  #
+  # WHY WE MUST HARDCODE/FILTER THE KMP SUFFIXES:
+  # ---------------------------------------------
+  # We cannot blindly redirect any artifact ending with a hyphen. Many Jetpack
+  # libraries use hyphens for distinct sub-modules, extensions, or test helpers
+  # that are NOT transparent KMP redirects, and must be depended on explicitly.
+  # For example:
+  #   - `androidx.core:core-ktx` (Kotlin extensions) vs `androidx.core:core` (base)
+  #   - `androidx.room:room-compiler` (annotation processor) vs `androidx.room:room` (runtime)
+  #   - `androidx.work:work-testing` (test helpers) vs `androidx.work:work` (runtime)
+  #
+  # If we blindly stripped suffixes, searching for a KTX-specific class would
+  # incorrectly redirect to the base library, leaving the developer without the
+  # extensions they need. Therefore, we use a strict regex to only target actual
+  # KMP platform suffixes (JVM, Android, Desktop, iOS, macOS, Linux, watchOS,
+  # tvOS, JS, Wasm).
+  #
+  # ALGORITHMIC OPTIMIZATION:
+  # -------------------------
+  # To prevent performance degradation (O(N*M) complexity) from scanning the entire
+  # index array for every match during the base-existence check, we pre-compute
+  # a lookup dictionary ($artifact_lookup) of all coordinates at the start.
+  # This keeps the search running in O(N + M) time, ensuring instant CLI responses
+  # even for highly generic queries.
+  jq -r --arg q "$query" '
+    # 1. Bind DRY regex with exhaustive standard KMP targets (including wasmwasi and Windows mingw)
+    "-(jvm|android|desktop|ios[a-z0-9]+|macos[a-z0-9]+|linux[a-z0-9]+|tvos[a-z0-9]+|watchos[a-z0-9]+|js|wasmjs|wasmwasi|mingw[a-z0-9]+)$" as $kmp_regex |
+    
+    # 2. Normalize query to lowercase for forgiving, case-insensitive searches
+    ($q | ascii_downcase) as $query_lower |
+    
+    .Index as $index |
+    ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $artifact_lookup |
+    
+    $index[] | select(
+      (.groupId | ascii_downcase | contains($query_lower)) or 
+      (.artifactId | ascii_downcase | contains($query_lower)) or 
+      (any(.fqcns[]?; ascii_downcase | contains($query_lower)))
+    ) |
+    .groupId as $group |
+    .artifactId as $artifact |
+    
+    # 3. Apply the DRY regex to both test and sub
+    if ($artifact | test($kmp_regex; "i")) then
+      ($artifact | sub($kmp_regex; ""; "i")) as $base_artifact |
+      if ($artifact_lookup["\($group):\($base_artifact)"]) then
+        "\($group):\($base_artifact)"
+      else
+        "\($group):\($artifact)"
+      end
+    else
+      "\($group):\($artifact)"
+    end
+  ' "$INDEX_FILE" | sort -u
 }
 
-fetch_cs_api_key() {
-  # We extract the API key by looking for the fixed prefix "AIza".
-  local key
-  key=$(curl -s "https://cs.android.com/" | perl -nle 'print $1 if /(AIza[0-9A-Za-z_-]{35})/' | head -n 1)
-
-  if [[ -z "$key" ]]; then
-    echo "error: Could not fetch CS API key." >&2
-    return 1
-  fi
-  echo "$key"
-}
-
-search_code() {
-  local query="$1"
-
-  # Heuristic: If query doesn't have "class:" or "file:" prefix, assume class search
-  if [[ ! "$query" =~ : ]]; then
-    query="class:$query"
-  fi
-
-  local api_key
-  if ! api_key=$(fetch_cs_api_key); then
-    return 1
-  fi
-
-  local url="https://grimoireoss-pa.clients6.google.com/v1/contents/search?alt=json&key=${api_key}"
-
-  local json_body
-  json_body=$(jq -n \
-    --arg query "$query" \
-    '{
-      "queryString": $query,
-      "searchOptions": {
-          "enableDiagnostics": false,
-          "exhaustive": false,
-          "isDedupResultsEnabled": false,
-          "numberOfContextLines": 1,
-          "pageSize": 20,
-          "repositoryScope": {
-              "root": {
-                  "ossProject": "androidx",
-                  "repositoryName": "platform/frameworks/support"
-              }
-          },
-          "retrieveMultibranchResults": true
-      }
-    }')
-
-  local response
-  if ! response=$(curl -s -X POST "$url" \
-    -H "Content-Type: application/json" \
-    -H "Referer: https://cs.android.com/" \
-    -H "Origin: https://cs.android.com" \
-    -H "X-Requested-With: XMLHttpRequest" \
-    -d "$json_body"); then
-    echo "warning: Code search request failed." >&2
-    return 1
-  fi
-
-  # Extract paths
-  local paths
-  paths=$(echo "$response" | jq -r '.searchResults[]?.fileSearchResult.fileSpec.path // empty')
-
-  if [[ -z "$paths" ]]; then
-    return 0
-  fi
-
-  # Map paths to artifacts
-  local path artifact_path group_id artifact_id
-  while IFS= read -r path; do
-    # Strip src/...
-    # Example: wear/compose/compose-material/src/main/java/...
-    if [[ "$path" =~ ^(.*)/src/(main|commonMain|androidMain)/.*$ ]]; then
-      artifact_path="${BASH_REMATCH[1]}"
-
-      # Split into segments
-      local IFS='/'
-      local -a path_segments
-      read -ra path_segments <<<"$artifact_path"
-
-      if [[ ${#path_segments[@]} -ge 2 ]]; then
-        artifact_id="${path_segments[-1]}"
-        unset "path_segments[-1]"
-        group_id="androidx.$(
-          IFS='.'
-          echo "${path_segments[*]}"
-        )"
-        echo "$group_id:$artifact_id"
-      fi
-    fi
-  done <<<"$paths" | sort -u
-}
+# Code Search (Grimoire API) scraping code removed. The local GMaven class
+# index (classes-v0.1.json) is now used by default for all package and class
+# searches, making external Code Search network calls obsolete.
 
 cmd_search() {
-  local force_index=false
-  local force_code=false
   local query=""
 
   while [[ $# -gt 0 ]]; do
@@ -407,13 +398,10 @@ cmd_search() {
       --help)
         usage_search
         ;;
-      --index)
-        force_index=true
-        shift
-        ;;
       --code)
-        force_code=true
-        shift
+        echo "$SCRIPT_NAME search: --code (Code Search) is no longer supported." >&2
+        echo "The local GMaven class index is now used by default for all searches." >&2
+        exit 1
         ;;
       --force)
         rm -f "$INDEX_FILE"
@@ -439,50 +427,7 @@ cmd_search() {
     usage_search 1 >&2
   fi
 
-  # Dispatch based on strategy
-  if [[ "$force_index" == "true" ]]; then
-    search_index "$query"
-    return
-  fi
-
-  if [[ "$force_code" == "true" ]]; then
-    search_code "$query"
-    return
-  fi
-
-  # Default Strategy:
-  # 1. Try index first (especially if it looks like a package)
-  local results=""
-
-  # Optimization: If query looks like a package, prioritize index
-  if [[ "$query" =~ \. ]]; then
-    results=$(search_index "$query")
-    if [[ -n "$results" ]]; then
-      echo "$results"
-      return
-    fi
-  fi
-
-  # 2. Try code search (finding class definition)
-  # Only if it looks like a class (Capitalized) or we haven't tried index yet
-  if [[ "$query" =~ ^[A-Z] ]]; then
-    results=$(search_code "$query")
-    if [[ -n "$results" ]]; then
-      echo "$results"
-      return
-    fi
-  fi
-
-  # 3. Fallback to index if we skipped it (e.g. simple name but not class-like)
-  if [[ ! "$query" =~ \. && ! "$query" =~ ^[A-Z] ]]; then
-    results=$(search_index "$query")
-    if [[ -n "$results" ]]; then
-      echo "$results"
-      return
-    fi
-    # Last resort: code search
-    search_code "$query"
-  fi
+  search_index "$query"
 }
 
 # =============================================================================

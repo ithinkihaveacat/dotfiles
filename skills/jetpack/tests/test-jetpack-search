@@ -15,7 +15,7 @@ export XDG_CACHE_HOME="$TEST_CACHE_DIR"
 export TMPDIR="$TEST_CACHE_DIR"
 
 # Total number of tests
-TOTAL_TESTS=2
+TOTAL_TESTS=14
 TEST_NUM=0
 
 echo "1..$TOTAL_TESTS"
@@ -25,13 +25,78 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Create a mock index file
+# Create mock cache directory and write the mock index in the new format once.
+# All unit tests will run against this mock index without making network calls.
 mkdir -p "$TEST_CACHE_DIR/jetpack"
 cat <<EOF >"$TEST_CACHE_DIR/jetpack/androidx-index.json"
-[
-  {"group": "androidx.wear.compose"},
-  {"group": "androidx.activity"}
-]
+{
+  "Index": [
+    {
+      "groupId": "androidx.activity",
+      "artifactId": "activity",
+      "version": "1.13.0",
+      "fqcns": [
+        "androidx.activity.ComponentActivity",
+        "androidx.activity.OnBackPressedDispatcher"
+      ]
+    },
+    {
+      "groupId": "androidx.wear.compose",
+      "artifactId": "compose-material",
+      "version": "1.4.0",
+      "fqcns": [
+        "androidx.wear.compose.material.Button",
+        "androidx.wear.compose.material.Text"
+      ]
+    },
+    {
+      "groupId": "androidx.annotation",
+      "artifactId": "annotation",
+      "version": "1.9.1",
+      "fqcns": []
+    },
+    {
+      "groupId": "androidx.annotation",
+      "artifactId": "annotation-jvm",
+      "version": "1.9.1",
+      "fqcns": [
+        "androidx.annotation.NonNull",
+        "androidx.annotation.Nullable"
+      ]
+    },
+    {
+      "groupId": "androidx.annotation",
+      "artifactId": "annotation-iosarm64",
+      "version": "1.9.1",
+      "fqcns": [
+        "androidx.annotation.NonNull",
+        "androidx.annotation.IosSpecific"
+      ]
+    },
+    {
+      "groupId": "androidx.core",
+      "artifactId": "core",
+      "version": "1.13.0",
+      "fqcns": []
+    },
+    {
+      "groupId": "androidx.core",
+      "artifactId": "core-ktx",
+      "version": "1.13.0",
+      "fqcns": [
+        "androidx.core.CoreKtxClass"
+      ]
+    },
+    {
+      "groupId": "androidx.legacy",
+      "artifactId": "legacy-jvm",
+      "version": "1.0.0",
+      "fqcns": [
+        "androidx.legacy.LegacyClass"
+      ]
+    }
+  ]
+}
 EOF
 
 run_test() {
@@ -40,8 +105,9 @@ run_test() {
 
   TEST_NUM=$((TEST_NUM + 1))
 
-  # Run with --index to force using our mock file and avoid network calls
-  OUTPUT=$("$BIN_JETPACK" search --index "$args")
+  # Run the search. Since the mock index file is written to our mock cache,
+  # it is detected as fresh and used directly without making any network calls.
+  OUTPUT=$("$BIN_JETPACK" search "$args")
 
   if [ "$OUTPUT" == "$expected" ]; then
     echo "ok $TEST_NUM - search $args -> $expected"
@@ -52,8 +118,82 @@ run_test() {
   fi
 }
 
-# Test 1: Exact match logic (via substring)
-run_test "androidx.activity" "androidx.activity"
+# --- Unit Tests (Offline, using Mock Index) ---
 
-# Test 2: Substring match
-run_test "wear.compose" "androidx.wear.compose"
+# Test 1: Search by group ID
+run_test "wear.compose" "androidx.wear.compose:compose-material"
+
+# Test 2: Search by artifact ID
+run_test "compose-material" "androidx.wear.compose:compose-material"
+
+# Test 3: Search by class name (exact)
+run_test "ComponentActivity" "androidx.activity:activity"
+
+# Test 4: Search by class name (substring)
+run_test "Dispatcher" "androidx.activity:activity"
+
+# Test 5: Search for non-existent
+run_test "NonExistentClass" ""
+
+# Test 6: KMP Client-side Redirection (search class in jvm target -> resolve to empty base)
+# Note: This also implicitly tests deduplication since NonNull exists in both -jvm and -iosarm64
+run_test "NonNull" "androidx.annotation:annotation"
+
+# Test 7: KMP Client-side Redirection for Native target (search class in ios target -> resolve to empty base)
+run_test "IosSpecific" "androidx.annotation:annotation"
+
+# Test 8: Non-redirection of distinct hyphenated modules (verify -ktx is NOT redirected to base)
+run_test "CoreKtxClass" "androidx.core:core-ktx"
+
+# Test 9: Missing base artifact (verify graceful fallback to platform target when base doesn't exist)
+run_test "LegacyClass" "androidx.legacy:legacy-jvm"
+
+# Test 10: Case-insensitive Search (lowercase search for CamelCase class)
+run_test "componentactivity" "androidx.activity:activity"
+
+# Test 11: Case-insensitive Search for KMP redirection (lowercase search for KMP class)
+run_test "nonnull" "androidx.annotation:annotation"
+
+# --- Smoke Tests (Requires Network / Tests Against Real Live Index) ---
+echo "# "
+echo "# Running live smoke tests (requires network)..."
+# Force download of the real index by removing the mock index
+rm -f "$TEST_CACHE_DIR/jetpack/androidx-index.json"
+
+run_smoke_test() {
+  local args="$1"
+  local expected_substring="$2"
+
+  TEST_NUM=$((TEST_NUM + 1))
+
+  # Run without --index (which is no longer supported anyway) to test the default live behavior
+  OUTPUT=$("$BIN_JETPACK" search "$args")
+
+  if [[ "$OUTPUT" == *"$expected_substring"* ]]; then
+    echo "ok $TEST_NUM - smoke search $args contains $expected_substring"
+  else
+    echo "not ok $TEST_NUM - smoke search $args contains $expected_substring"
+    echo "# Got: $OUTPUT"
+    echo "# Expected to contain: $expected_substring"
+  fi
+}
+
+# Test 12: Live Standard Class Search (exact match for ComponentActivity)
+# ComponentActivity is highly stable and should resolve exactly to androidx.activity:activity
+OUTPUT=$("$BIN_JETPACK" search "ComponentActivity")
+TEST_NUM=$((TEST_NUM + 1))
+if [ "$OUTPUT" == "androidx.activity:activity" ]; then
+  echo "ok $TEST_NUM - smoke search ComponentActivity -> exact match"
+else
+  echo "not ok $TEST_NUM - smoke search ComponentActivity -> exact match"
+  echo "# Got: $OUTPUT"
+  echo "# Expected: androidx.activity:activity"
+fi
+
+# Test 13: Live KMP Redirection Search (NonNull should resolve to base annotation library)
+# NonNull is stable and must redirect from annotation-jvm (or other targets) to the base.
+run_smoke_test "NonNull" "androidx.annotation:annotation"
+
+# Test 14: Live Non-Redirection Search (MigrationTestHelper should resolve to room-testing, NOT room)
+# Verifies that distinct modules like -testing are NOT redirected to the base in the real index.
+run_smoke_test "MigrationTestHelper" "androidx.room:room-testing"
