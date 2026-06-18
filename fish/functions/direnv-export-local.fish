@@ -46,6 +46,6 @@ Examples:
     end
 
     env -C $real_dir direnv export json 2>/dev/null \
-        | jq -r 'to_entries[] | "set -lx \(.key) \((if .value == null then "" else .value end) | @sh)"' \
+        | jq -r 'to_entries[] | select(.key | startswith("DIRENV_") | not) | "set -lx \(.key) \((if .value == null then "" else .value end) | @sh)"' \
         | string collect
 end
