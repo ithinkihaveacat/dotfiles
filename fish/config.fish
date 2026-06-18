@@ -180,6 +180,16 @@ type -q pbpaste; or alias pbpaste fish_clipboard_paste
 # uv
 set -x UV_EXCLUDE_NEWER "7 days"
 
+# Force uv to use its own managed/hermetic Python installations instead of system ones.
+# On macOS, official Python.org installers (which land in /Library/Frameworks/Python.framework)
+# do not install root certificates by default, leaving Python's SSL context without any trusted
+# CA bundle. This causes all HTTPS requests made via Python's built-in urllib or standard ssl
+# library to fail with: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed.
+# By default, uv will search for and use system-installed Pythons if they satisfy version
+# requirements (e.g., >=3.11). Forcing 'managed' ensures uv uses hermetic Python builds that
+# have working root certificates out of the box, avoiding SSL validation failures in user scripts.
+set -x UV_PYTHON_PREFERENCE managed
+
 # Search paths for agent skills
 set -gx SKILL_SOURCE_DIRS (string join : $HOME/.dotfiles/skills $HOME/.private/skills $HOME/.corp/skills $HOME/.gemini/config/skills $HOME/.gemini/jetski/skills)
 
