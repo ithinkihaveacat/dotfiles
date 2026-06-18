@@ -17,9 +17,9 @@ Pipe to a downloader to fetch the images:
     houseandgarden-gallery URL | wget -i - -P dir/
     houseandgarden-gallery URL | xargs -n1 -P4 curl -sO
 
-House & Garden is behind a metered paywall: some slides on each page are
-rendered as placeholder wrappers without an <img> tag. Only slides whose
-images are present in the HTML are returned — typically 8–18 per article.
+Slides are identified by their /master/ image transform (see extract_images),
+which captures the whole carousel on both page templates H&G serves while
+excluding the square recirculation thumbnails and social-card crops.
 """
 
 import argparse
@@ -102,34 +102,47 @@ def extract_captions(html: str) -> dict[str, dict]:
 
 
 def extract_images(html: str, captions: dict[str, dict]) -> list[dict]:
-    """Extract gallery slide images, upgrading to 2560px master-ratio."""
+    """Extract gallery slide images by their master-ratio renderings.
+
+    Each carousel slide is served from media.houseandgarden.co.uk under a
+    ``/master/`` transform (the full, uncropped ratio). Recirculation /
+    "related" thumbnails and social-card images use fixed-aspect transforms
+    (``1:1``, ``16:9``, …) instead, so keying on ``/master/`` isolates the
+    gallery cleanly — and across both page templates H&G serves (an older one
+    that renders most slides far from any ``GallerySlideWrapper`` marker, and a
+    newer one that renders each slide inline). Slides are deduplicated by photo
+    id in document order and normalised to the largest master width (2560px).
+
+    Extraction is anchored to the ``src`` / ``srcSet`` HTML attribute (read out
+    of its literal-double-quote value). That excludes the entity-encoded
+    ``data-item`` JSON — where the same ``/master/`` URLs recur but quotes are
+    ``&quot;``, so a raw scan would run past the filename into the JSON — while
+    still allowing filenames that legitimately contain ``&amp;`` (e.g. an
+    ``H&amp;G`` shoot code). Within an attribute value a single URL ends at
+    whitespace (the ``srcSet`` width descriptor) or the value's end.
+    """
     images: list[dict] = []
     seen_ids: set[str] = set()
-    for m in re.finditer(r"GallerySlideWrapper", html):
-        window = html[m.start() : m.start() + 3000]
-        img_m = re.search(
-            r'<img[^>]+src="(https://media\.houseandgarden\.co\.uk/photos/[^"]+)"',
-            window,
-        )
-        if not img_m:
-            continue
-        raw_url = img_m.group(1).replace("%2C", ",")
-        pid_m = re.search(r"/photos/([a-f0-9]{24})/", raw_url)
-        if not pid_m:
-            continue
-        pid = pid_m.group(1)
-        if pid in seen_ids:
-            continue
-        seen_ids.add(pid)
-        hires = re.sub(r"w_\d+,c_limit", "w_2560,c_limit", raw_url)
-        cap = captions.get(pid, {})
-        images.append(
-            {
-                "imageUrl": hires,
-                "caption": cap.get("caption", ""),
-                "credit": cap.get("credit", ""),
-            }
-        )
+    for attr in re.finditer(r'\b(?:src|src[Ss]et)="([^"]*)"', html):
+        for m in re.finditer(
+            r"/photos/([a-f0-9]{24})/master/[^/]+/([^/\s,]+)", attr.group(1)
+        ):
+            pid, fname = m.group(1), m.group(2)
+            if pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            url = (
+                f"https://media.houseandgarden.co.uk/photos/{pid}"
+                f"/master/w_2560,c_limit/{fname}"
+            )
+            cap = captions.get(pid, {})
+            images.append(
+                {
+                    "imageUrl": url,
+                    "caption": cap.get("caption", ""),
+                    "credit": cap.get("credit", ""),
+                }
+            )
     return images
 
 

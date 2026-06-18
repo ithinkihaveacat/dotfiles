@@ -64,34 +64,45 @@ Tags come from the `<meta name="keywords" content="…">` element, comma-separat
 
 ### Gallery slides
 
-Slides are identified by `GallerySlideWrapper` in the HTML. Each article has
-roughly 2× as many `GallerySlideWrapper` occurrences as images — alternate
-wrappers are navigational/caption metadata elements without `<img>` tags.
-
-**Image slides** contain:
+Gallery slide images are identified by their **`/master/` image transform** — the
+full, uncropped rendition each carousel slide uses:
 
 ```html
-<picture …><img … src="https://media.houseandgarden.co.uk/photos/<24-hex-id>/master/w_1024%2Cc_limit/<filename>.jpg" …></picture>
+<picture …><source srcSet="…/photos/<24-hex-id>/master/w_1024%2Cc_limit/<filename>.jpg …"><img … src="…/photos/<24-hex-id>/master/w_2560,c_limit/<filename>.jpg" …></picture>
 ```
 
-The URL uses URL-encoded commas (`%2C`). Replace `w_1024%2Cc_limit` (or any
-`w_N,c_limit`) with `w_2560,c_limit` for the largest available rendition.
-`master` preserves the original image aspect ratio.
+Collect every distinct 24-hex photo id appearing under `/master/`, in document
+order, and normalise the width to `w_2560,c_limit` for the largest rendition.
+The same id recurs many times per slide (one per `srcSet` width, across
+`<source>` and `<img>`), so dedupe by id. Widths carry a literal or
+`%2C`-encoded comma — match both.
 
-**Caption slides** contain a `data-item="…"` attribute with HTML-entity-encoded
-JSON:
+> **Do not key on `GallerySlideWrapper`.** H&G serves two page templates: a newer
+> one renders each slide inline next to its wrapper, but an older one (the
+> majority of the sampled `london-houses` articles) renders most slides far from
+> any wrapper marker. The previous scraper scanned a fixed window after each
+> `GallerySlideWrapper` and so silently truncated old-template galleries to the
+> first ~4–6 slides. The `/master/` transform is template-independent.
+
+**Recirculation / social crops are excluded for free.** "Related"/"more from"
+cards and social-card images are *also* `media.houseandgarden.co.uk/photos/…`
+URLs, but they use fixed-aspect transforms (`1:1`, `16:9`, …), never `/master/`.
+The one image this drops is a lead/cover shot rendered solely as a `16:9` social
+crop (not a carousel slide).
+
+**Captions** come from `data-item="…"` attributes — HTML-entity-encoded JSON:
 
 ```html
 <div … data-item="{&quot;id&quot;:&quot;<24-hex-id>&quot;,&quot;image&quot;:{&quot;caption&quot;:&quot;…&quot;,&quot;credit&quot;:&quot;…&quot;,…}}">
 ```
 
-The photo ID (`id` field) matches the 24-hex segment in the image slide's URL,
-allowing caption–image pairing. Parse with `html.unescape()` then `json.loads()`.
-The regex `data-item="(\{[^"]*)"` extracts the attribute value reliably (the
-attribute content uses `&quot;` for inner quotes, never literal `"`).
+The `id` field matches the photo id in the slide URL, pairing caption to image.
+Parse with `html.unescape()` then `json.loads()`. The regex `data-item="(\{[^"]*)"`
+extracts the attribute reliably (inner quotes are `&quot;`, never literal `"`).
+This manifest is partial — it covers only some slides — so it is used for
+captions only, never as the image list.
 
-**Count:** The metered paywall restricts some slides from rendering `<img>` tags.
-Unauthenticated access typically yields 8–18 images per article.
+**Count:** typically ~8–35 slides per article, captured in full.
 
 ### Image CDN
 
@@ -127,4 +138,4 @@ Both verified live on 2026-06-17:
   ItemList JSON-LD with 20 items; `<link rel="next">` pointing to `?page=2`.
 - **`https://www.houseandgarden.co.uk/gallery/chelsea-townhouse-reimagined-by-lonika-chande`**
   — should return a NewsArticle JSON-LD with `headline` containing "Chelsea
-  townhouse" and at least 8 `GallerySlideWrapper` elements with `<img>` tags.
+  townhouse" and ~13 distinct `/master/` photo ids (the gallery slides).

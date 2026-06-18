@@ -143,10 +143,11 @@ scripts/houseandgarden-gallery https://www.houseandgarden.co.uk/gallery/<slug> -
 topic has 21 pages / ~418 articles. Topics may contain both `/gallery/` and
 `/article/` URLs; only gallery pages have the slideshow format.
 
-`houseandgarden-gallery` extracts images from `GallerySlideWrapper` elements,
-upgrades to 2560px master-ratio, and pairs captions from `data-item` attributes.
-The site uses a metered paywall — unauthenticated access yields 8–18 images per
-article (the image HTML is in the DOM; some slides are not rendered). See
+`houseandgarden-gallery` extracts the carousel by its `/master/` image
+transform (the full-ratio rendering each slide uses), upgrades to 2560px, and
+pairs captions from `data-item` attributes. Keying on `/master/` captures the
+whole gallery on both page templates H&G serves and excludes the square (`1:1`)
+recirculation thumbnails and social-card crops. See
 [references/houseandgarden-source-structure.md](references/houseandgarden-source-structure.md)
 for the JSON-LD structure, image CDN URL format, and verification probes.
 
