@@ -463,7 +463,7 @@ if exists brew; then
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
   # These packages are optional (don't remove if present)
-  optional="imagemagick-full yt-dlp go ffmpeg apktool git composer protobuf bundletool scrcpy git-lfs llm firebase-cli mosquitto gh openclaw/tap/gogcli"
+  optional="imagemagick-full yt-dlp go ffmpeg apktool git composer protobuf bundletool scrcpy git-lfs llm firebase-cli mosquitto gh openclaw/tap/gogcli hcloud"
 
   # These packages are versioned packages that need to be force-linked
   # (typically used when a specific version is needed instead of the default)
