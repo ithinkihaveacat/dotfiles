@@ -6,10 +6,11 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..41"
+echo "1..44"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
+TMPDIR=$(python3 -c "import pathlib; print(pathlib.Path('${TMPDIR}').resolve())")
 MOCK_BIN_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMPDIR" "$MOCK_BIN_DIR"' EXIT
 
@@ -18,10 +19,11 @@ touch "$MOCK_BIN_DIR/claude" "$MOCK_BIN_DIR/codex"
 chmod +x "$MOCK_BIN_DIR/claude" "$MOCK_BIN_DIR/codex"
 
 # Create source skills in a central location
-mkdir -p "${TMPDIR}/sources/coding-standards" "${TMPDIR}/sources/emumanager"
+mkdir -p "${TMPDIR}/sources/coding-standards" "${TMPDIR}/sources/emumanager" "${TMPDIR}/sources/test-skill"
 # Add dummy SKILL.md to sources so they are valid skills
 echo -e "---\nname: coding-standards\ndescription: Rules for coding standards\n---\nbody" >"${TMPDIR}/sources/coding-standards/SKILL.md"
 echo -e "---\nname: emumanager\ndescription: Manage emulators\n---\nbody" >"${TMPDIR}/sources/emumanager/SKILL.md"
+echo -e "---\nname: test-skill\ndescription: Test skill\n---\nbody" >"${TMPDIR}/sources/test-skill/SKILL.md"
 
 # Set up common environment
 # Isolate from the user's/system git config (signing, hooks, templates).
@@ -420,8 +422,8 @@ set -l test_repo (mktemp -d)
 cd \$test_repo
 git init -q
 mkdir -p .claude/skills .agents/skills
-ln -s /tmp .claude/skills/test-skill
-ln -s /tmp .agents/skills/test-skill
+ln -s \"${TMPDIR}/sources/test-skill\" .claude/skills/test-skill
+ln -s \"${TMPDIR}/sources/test-skill\" .agents/skills/test-skill
 mkdir -p .git/info
 echo 'test-skill' > .git/info/skills
 echo '# >>> skills >>>' > .git/info/exclude
@@ -592,3 +594,72 @@ else
   fi
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/corpmount.py"
+
+# ==============================================================================
+# PART 4: Namespacing and Ambiguity Tests
+# ==============================================================================
+
+# Create mock skills for namespacing
+mkdir -p "${TMPDIR}/bar1" "${TMPDIR}/bar2"
+echo -e "---\nname: bar\n---" >"${TMPDIR}/bar1/SKILL.md"
+echo -e "---\nname: bar\n---" >"${TMPDIR}/bar2/SKILL.md"
+
+# Index them in the catalog so doctor does not throw catalog mismatch warnings!
+mkdir -p "${XDG_CACHE_HOME}/skill-select/catalog/foo:bar" "${XDG_CACHE_HOME}/skill-select/catalog/baz:bar"
+echo -e "---\nname: bar\n---" >"${XDG_CACHE_HOME}/skill-select/catalog/foo:bar/SKILL.md"
+echo -e "---\nname: bar\n---" >"${XDG_CACHE_HOME}/skill-select/catalog/baz:bar/SKILL.md"
+
+# Write a mock plugin to register foo:bar and baz:bar
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
+def register(api):
+    api.register_skill("foo:bar", {"path": "${TMPDIR}/bar1"})
+    api.register_skill("baz:bar", {"path": "${TMPDIR}/bar2"})
+EOF
+
+# Test 42: Strict namespaced resolution succeeds
+if out=$("${SCRIPT}" resolve foo:bar 2>/dev/null); then
+  if [ "$out" = "${TMPDIR}/bar1" ]; then
+    echo "ok 42 - [Namespacing] strict foo:bar resolves uniquely"
+  else
+    echo "not ok 42 - [Namespacing] strict resolved to incorrect path: $out"
+  fi
+else
+  echo "not ok 42 - [Namespacing] strict resolve failed"
+fi
+
+# Test 43: Ambiguity error raised when resolving optional namespace with collision
+if out=$("${SCRIPT}" resolve bar 2>&1); then
+  echo "not ok 43 - [Namespacing] resolving ambiguous 'bar' should have failed"
+else
+  if printf '%s' "$out" | grep -q "Ambiguous skill spec 'bar'" &&
+    printf '%s' "$out" | grep -q "foo:bar" &&
+    printf '%s' "$out" | grep -q "baz:bar"; then
+    echo "ok 43 - [Namespacing] optional 'bar' fails with clear ambiguity error"
+  else
+    echo "not ok 43 - [Namespacing] incorrect error message for ambiguity: $out"
+  fi
+fi
+
+# Test 44: Target-based doctor and apply handles namespaced specs correctly
+NS_TEST_DIR="${TMPDIR}/ns-test"
+mkdir -p "$NS_TEST_DIR"
+cd "$NS_TEST_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+
+export AGENT_REQUIRED_SKILLS="foo:bar"
+if "${SCRIPT}" apply >/dev/null 2>&1; then
+  # Symlink name must be the target's basename (i.e. 'bar1' pointing to ${TMPDIR}/bar1)
+  if [ -L .claude/skills/bar1 ] && [ -L .agents/skills/bar1 ] &&
+    "${SCRIPT}" doctor >/dev/null 2>&1; then
+    echo "ok 44 - [Namespacing] target-based apply and doctor verify and keep namespaced skills"
+  else
+    echo "not ok 44 - [Namespacing] apply did not link target basename or doctor flagged healthy config"
+  fi
+else
+  echo "not ok 44 - [Namespacing] apply command failed for namespaced spec"
+fi
+
+# Clean up
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
+export AGENT_REQUIRED_SKILLS=""

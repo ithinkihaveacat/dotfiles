@@ -542,7 +542,9 @@ def ensure_catalog_index(plugin_catalog, force: bool = False) -> None:
                         stub_md.symlink_to(src_md)
                     except Exception:
                         pass
-                elif force or (stub_md.is_symlink() and stub_md.resolve() != src_md.resolve()):
+                elif force or (
+                    stub_md.is_symlink() and stub_md.resolve() != src_md.resolve()
+                ):
                     stub_md.unlink(missing_ok=True)
                     try:
                         stub_md.symlink_to(src_md)
@@ -697,12 +699,14 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     for d in source_dirs:
         candidate_path = d / req_name
         if candidate_path.is_dir() and (candidate_path / "SKILL.md").is_file():
-            candidates.append({
-                "path": candidate_path.resolve(),
-                "namespace": "local",
-                "name": req_name,
-                "full_spec": f"local:{req_name}"
-            })
+            candidates.append(
+                {
+                    "path": Path(os.path.abspath(candidate_path)),
+                    "namespace": "local",
+                    "name": req_name,
+                    "full_spec": f"local:{req_name}",
+                }
+            )
 
     # Fallback/frontmatter match in local search dirs
     for d in source_dirs:
@@ -715,14 +719,16 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                 meta = get_skill_metadata(item, item.name)
                 canonical_name = meta["name"]
                 if canonical_name.lower() == req_name.lower():
-                    resolved_path = item.resolve()
+                    resolved_path = Path(os.path.abspath(item))
                     if not any(c["path"] == resolved_path for c in candidates):
-                        candidates.append({
-                            "path": resolved_path,
-                            "namespace": "local",
-                            "name": canonical_name,
-                            "full_spec": f"local:{canonical_name}"
-                        })
+                        candidates.append(
+                            {
+                                "path": resolved_path,
+                                "namespace": "local",
+                                "name": canonical_name,
+                                "full_spec": f"local:{canonical_name}",
+                            }
+                        )
 
     # B. Scan registered plugins (api.plugin_catalog)
     for key, entry in api.plugin_catalog.items():
@@ -737,12 +743,14 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
             if "path" in entry:
                 target_path = Path(entry["path"]).expanduser()
                 if target_path.is_dir():
-                    candidates.append({
-                        "path": target_path.resolve(),
-                        "namespace": ns,
-                        "name": short_name,
-                        "full_spec": key
-                    })
+                    candidates.append(
+                        {
+                            "path": Path(os.path.abspath(target_path)),
+                            "namespace": ns,
+                            "name": short_name,
+                            "full_spec": key,
+                        }
+                    )
             elif "repo" in entry and "ref" in entry:
                 # Resolve/Provision remote plugin
                 try:
@@ -751,12 +759,14 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                     )
                     target_path = Path(target_dir_str)
                     if target_path.is_dir():
-                        candidates.append({
-                            "path": target_path.resolve(),
-                            "namespace": ns,
-                            "name": short_name,
-                            "full_spec": key
-                        })
+                        candidates.append(
+                            {
+                                "path": Path(os.path.abspath(target_path)),
+                                "namespace": ns,
+                                "name": short_name,
+                                "full_spec": key,
+                            }
+                        )
                 except Exception:
                     pass
 
@@ -764,7 +774,9 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     if req_ns:
         filtered = [c for c in candidates if c["namespace"].lower() == req_ns.lower()]
         if not filtered:
-            raise ValueError(f"cannot resolve skill '{spec}': no match in namespace '{req_ns}'")
+            raise ValueError(
+                f"cannot resolve skill '{spec}': no match in namespace '{req_ns}'"
+            )
         return filtered[0]["path"], filtered[0]["name"]
 
     # No namespace requested
@@ -823,7 +835,14 @@ def cmd_add(specs, is_apply=False):
     # Check for conflicts across all destinations first
     for src, name in resolved_skills:
         for d in dest_dirs:
-            relpath = d / name
+            # UNIQUENESS CONSTRAINT:
+            # We create the symlink using the target directory's basename (src.name)
+            # rather than the registered name (which can be anything, e.g., wear-vcs).
+            # This decouples the namespacing/lookup name from the actual symlink,
+            # but implies that all installed skills in a workspace must have unique
+            # directory basenames to avoid name collisions in .agents/skills/.
+            link_name = src.name
+            relpath = d / link_name
             conflict = ws.check_conflict(relpath)
             if conflict:
                 cmderr("add", conflict)
@@ -836,7 +855,8 @@ def cmd_add(specs, is_apply=False):
     # Apply symlinks
     for src, name in resolved_skills:
         for d in dest_dirs:
-            relpath = d / name
+            link_name = src.name
+            relpath = d / link_name
             d.mkdir(parents=True, exist_ok=True)
 
             # Atomic symlink replacement (concurrency-safe swap)
@@ -886,18 +906,26 @@ def cmd_remove(names):
         cmderr("remove", str(e))
 
     for arg in names:
-        name = os.path.basename(arg)
+        # Try to resolve to find the physical target's basename
+        link_name = arg
+        try:
+            src, _ = resolve_skill_spec(arg)
+            link_name = src.name
+        except Exception:
+            # Fallback to direct name if it cannot be resolved (e.g. if plugin is disabled)
+            link_name = os.path.basename(arg)
+
         removed = False
         for d in dest_dirs:
-            relpath = d / name
+            relpath = d / link_name
             if relpath.is_symlink() or relpath.exists():
                 relpath.unlink(missing_ok=True)
                 removed = True
 
         if removed:
-            print(f"removed {name}", file=sys.stderr)
+            print(f"removed {link_name}", file=sys.stderr)
         else:
-            print(f"remove: {name} not present; clearing record", file=sys.stderr)
+            print(f"remove: {link_name} not present; clearing record", file=sys.stderr)
 
     # Re-sync exclude block
     actual_skills, _, _ = ws.get_actual_skills()
@@ -1055,15 +1083,6 @@ def get_parsed_skills():
     return required_set, negated_set
 
 
-def get_short_name(spec: str) -> str:
-    """Extracts the canonical short name from a namespaced or path spec."""
-    if ":" in spec:
-        return spec.split(":")[-1]
-    if "/" in spec or "\\" in spec:
-        return Path(spec).name
-    return spec
-
-
 def cmd_apply(args):
     ws = get_workspace()
     expected_skills = ws.get_expected_skills()
@@ -1088,15 +1107,38 @@ def cmd_apply(args):
     # 1. Resolve and add/symlink all expected skills
     add_ok = cmd_add(expected_skills, is_apply=True)
 
-    # 2. Prune any actual symlinks on disk that are NOT in expected_skills
+    # 2. Prune any actual symlinks on disk that are NOT expected target paths
     try:
-        ws.get_dest_dirs()
+        dest_dirs = ws.get_dest_dirs()
     except RuntimeError:
         sys.exit(0 if add_ok else 1)
 
     actual_skills, _, _ = ws.get_actual_skills()
-    expected_short_names = {get_short_name(s) for s in expected_skills}
-    extra_skills = [s for s in actual_skills if s not in expected_short_names]
+
+    # Resolve all expected skills to their physical target paths
+    expected_targets = set()
+    for spec in expected_skills:
+        try:
+            src_path, _ = resolve_skill_spec(spec)
+            expected_targets.add(Path(os.path.abspath(src_path)))
+        except Exception:
+            pass
+
+    # Find any symlink whose target is not in the expected targets
+    extra_skills = []
+    for s in actual_skills:
+        for d in dest_dirs:
+            p = d / s
+            if p.is_symlink():
+                try:
+                    target = os.readlink(p)
+                    target_abs = Path(os.path.abspath(p.parent / target))
+                    if target_abs not in expected_targets:
+                        if s not in extra_skills:
+                            extra_skills.append(s)
+                except Exception:
+                    pass
+
     if extra_skills:
         for s in extra_skills:
             if is_using_envrc(ws):
@@ -1323,9 +1365,7 @@ def cmd_catalog(as_json=False):
             if local_skills:
                 print("Local Skills:")
                 for s in sorted(local_skills, key=lambda x: x["name"]):
-                    print(
-                        f"  {s['name'].ljust(max_len)} -> {s['source']}"
-                    )
+                    print(f"  {s['name'].ljust(max_len)} -> {s['source']}")
                 print("")
 
             # Group 2: Plugin Skills
@@ -1333,9 +1373,7 @@ def cmd_catalog(as_json=False):
             if plugin_skills:
                 print("Plugin Skills:")
                 for s in sorted(plugin_skills, key=lambda x: x["name"]):
-                    print(
-                        f"  {s['name'].ljust(max_len)} -> {s['source']}"
-                    )
+                    print(f"  {s['name'].ljust(max_len)} -> {s['source']}")
                 print("")
 
             # Group 3: Remote Skills
@@ -1343,9 +1381,7 @@ def cmd_catalog(as_json=False):
             if remote_skills:
                 print("Remote Skills:")
                 for s in sorted(remote_skills, key=lambda x: x["name"]):
-                    print(
-                        f"  {s['name'].ljust(max_len)} -> {s['source']}"
-                    )
+                    print(f"  {s['name'].ljust(max_len)} -> {s['source']}")
 
 
 def cmd_suggest(args):
@@ -1573,20 +1609,59 @@ def cmd_doctor():
     except RuntimeError:
         pass
 
+    # Resolve all expected skills to their physical target paths
+    expected_targets = {}  # Path(abspath) -> spec_string
     missing = []
-    expected_short_to_spec = {get_short_name(s): s for s in expected_skills}
-    if dest_dirs:
-        for short_name, spec in expected_short_to_spec.items():
-            for d in dest_dirs:
-                p = d / short_name
-                if not p.is_symlink() or not p.exists():
-                    label = f"{spec} (missing in {rel(d)})" if len(dest_dirs) > 1 else spec
-                    if label not in missing:
-                        missing.append(label)
-    else:
-        missing = list(expected_skills)
 
-    extra = [s for s in actual_skills if s not in expected_short_to_spec]
+    for spec in expected_skills:
+        try:
+            src_path, _ = resolve_skill_spec(spec)
+            abs_src = Path(os.path.abspath(src_path))
+            expected_targets[abs_src] = spec
+
+            # Verify symlink exists pointing to this target
+            if dest_dirs:
+                for d in dest_dirs:
+                    p = d / src_path.name
+                    if not p.is_symlink():
+                        label = (
+                            f"{spec} (missing in {rel(d)})"
+                            if len(dest_dirs) > 1
+                            else spec
+                        )
+                        if label not in missing:
+                            missing.append(label)
+                    else:
+                        # Read the symlink target and compare its absolute path
+                        target = os.readlink(p)
+                        target_abs = Path(os.path.abspath(p.parent / target))
+                        if target_abs != abs_src:
+                            label = (
+                                f"{spec} (missing in {rel(d)})"
+                                if len(dest_dirs) > 1
+                                else spec
+                            )
+                            if label not in missing:
+                                missing.append(label)
+        except Exception:
+            # Spec cannot be resolved - definitely missing!
+            missing.append(spec)
+
+    # Compute extra skills: symlinks whose resolved targets are not expected
+    extra = []
+    if dest_dirs:
+        for s in actual_skills:
+            for d in dest_dirs:
+                p = d / s
+                if p.is_symlink():
+                    try:
+                        target = os.readlink(p)
+                        target_abs = Path(os.path.abspath(p.parent / target))
+                        if target_abs not in expected_targets:
+                            if s not in extra:
+                                extra.append(s)
+                    except Exception:
+                        pass
 
     backend_issues = ws.doctor_issues()
 
