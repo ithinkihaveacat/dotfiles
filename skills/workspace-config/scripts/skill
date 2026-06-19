@@ -647,13 +647,16 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     """Resolves a skill spec/name to its (absolute_source_path, skill_name)."""
     api = get_api()
 
-    # 1. If it is an absolute or relative path pointing directly to a SKILL.md
-    path_candidate = Path(spec).expanduser()
-    if path_candidate.is_dir() and (path_candidate / "SKILL.md").is_file():
-        # Use the physical directory name by default
-        return path_candidate.resolve(), path_candidate.name
+    # 1. Parse the requested spec for namespace
+    req_ns = None
+    req_name = spec
+    if ":" in spec:
+        req_ns, req_name = spec.split(":", 1)
 
-    # 2. Check local search paths (SKILL_SOURCE_DIRS)
+    # We will gather all candidates as dicts: {"path": Path, "namespace": str, "name": str, "full_spec": str}
+    candidates = []
+
+    # A. Scan local search directories (SKILL_SOURCE_DIRS)
     source_dirs = []
     if "SKILL_SOURCE_DIRS" in os.environ:
         source_dirs = [
@@ -669,13 +672,19 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
             get_catalog_dir(),
         ]
 
+    # For local search directories, the namespace is implicitly "local"
+    # Direct match in local search dirs
     for d in source_dirs:
-        candidate = d / spec
-        if candidate.is_dir() and (candidate / "SKILL.md").is_file():
-            # Use the directory name (which matches spec) by default
-            return candidate.resolve(), candidate.name
+        candidate_path = d / req_name
+        if candidate_path.is_dir() and (candidate_path / "SKILL.md").is_file():
+            candidates.append({
+                "path": candidate_path.resolve(),
+                "namespace": "local",
+                "name": req_name,
+                "full_spec": f"local:{req_name}"
+            })
 
-    # 2b. Fallback: Scan directories to match canonical frontmatter name
+    # Fallback/frontmatter match in local search dirs
     for d in source_dirs:
         if not d.is_dir():
             continue
@@ -684,28 +693,81 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                 continue
             if item.is_dir() and (item / "SKILL.md").is_file():
                 meta = get_skill_metadata(item, item.name)
-                if meta["name"].lower() == spec.lower():
-                    return item.resolve(), meta["name"]
+                canonical_name = meta["name"]
+                if canonical_name.lower() == req_name.lower():
+                    resolved_path = item.resolve()
+                    if not any(c["path"] == resolved_path for c in candidates):
+                        candidates.append({
+                            "path": resolved_path,
+                            "namespace": "local",
+                            "name": canonical_name,
+                            "full_spec": f"local:{canonical_name}"
+                        })
 
-    # 3. Check registered plugin catalog
-    if spec in api.plugin_catalog:
-        entry = api.plugin_catalog[spec]
-        if "path" in entry:
-            target_path = Path(entry["path"]).expanduser()
-            if not target_path.is_dir():
-                raise ValueError(f"plugin path does not exist: {target_path}")
-            # Use the registered name (spec) instead of transforming it to meta["name"]
-            return target_path.resolve(), spec
-        elif "repo" in entry and "ref" in entry:
-            # Provision/Download the GitHub plugin if not present
-            target_dir_str = fetch_github(
-                spec, entry["repo"], entry["ref"], entry["subpath"]
-            )
-            target_path = Path(target_dir_str)
-            # Use the registered name (spec) instead of transforming it to meta["name"]
-            return target_path.resolve(), spec
+    # B. Scan registered plugins (api.plugin_catalog)
+    for key, entry in api.plugin_catalog.items():
+        # Parse registered key
+        ns = "local"
+        short_name = key
+        if ":" in key:
+            ns, short_name = key.split(":", 1)
 
-    raise ValueError(f"cannot resolve skill '{spec}'")
+        # Check if the short name matches
+        if short_name.lower() == req_name.lower():
+            if "path" in entry:
+                target_path = Path(entry["path"]).expanduser()
+                if target_path.is_dir():
+                    candidates.append({
+                        "path": target_path.resolve(),
+                        "namespace": ns,
+                        "name": short_name,
+                        "full_spec": key
+                    })
+            elif "repo" in entry and "ref" in entry:
+                # Resolve/Provision remote plugin
+                try:
+                    target_dir_str = fetch_github(
+                        key, entry["repo"], entry["ref"], entry["subpath"]
+                    )
+                    target_path = Path(target_dir_str)
+                    if target_path.is_dir():
+                        candidates.append({
+                            "path": target_path.resolve(),
+                            "namespace": ns,
+                            "name": short_name,
+                            "full_spec": key
+                        })
+                except Exception:
+                    pass
+
+    # Filter candidates by namespace if one was requested
+    if req_ns:
+        filtered = [c for c in candidates if c["namespace"].lower() == req_ns.lower()]
+        if not filtered:
+            raise ValueError(f"cannot resolve skill '{spec}': no match in namespace '{req_ns}'")
+        return filtered[0]["path"], filtered[0]["name"]
+
+    # No namespace requested
+    if not candidates:
+        raise ValueError(f"cannot resolve skill '{spec}'")
+
+    # Deduplicate candidates by path to prevent false ambiguities
+    unique_candidates = []
+    seen_paths = set()
+    for c in candidates:
+        if c["path"] not in seen_paths:
+            seen_paths.add(c["path"])
+            unique_candidates.append(c)
+
+    if len(unique_candidates) == 1:
+        return unique_candidates[0]["path"], unique_candidates[0]["name"]
+
+    # Multiple matches found - raise ambiguity error!
+    options = ", ".join(c["full_spec"] for c in unique_candidates)
+    raise ValueError(
+        f"Ambiguous skill spec '{spec}'. Multiple matches found: {options}. "
+        f"Please specify the namespace (e.g. {unique_candidates[0]['full_spec']}) to disambiguate."
+    )
 
 
 def is_using_envrc(ws) -> bool:
@@ -1179,7 +1241,7 @@ def cmd_catalog(as_json=False):
                 meta = get_skill_metadata(item, item.name)
                 skills_info.append(
                     {
-                        "name": meta["name"],
+                        "name": f"local:{meta['name']}",
                         "description": meta["description"],
                         "source": str(item.resolve()),
                         "type": "local",
@@ -1216,40 +1278,37 @@ def cmd_catalog(as_json=False):
         for s in sorted(skills_info, key=lambda x: x["name"]):
             print(json.dumps(s))
     else:
-        print("Workspace Catalog:\n", file=sys.stderr)
+        print("Workspace Catalog:\n")
         if skills_info:
             max_len = max(len(s["name"]) for s in skills_info)
 
             # Group 1: Local Skills
             local_skills = [s for s in skills_info if s["type"] == "local"]
             if local_skills:
-                print("Local Skills:", file=sys.stderr)
+                print("Local Skills:")
                 for s in sorted(local_skills, key=lambda x: x["name"]):
                     print(
-                        f"  {s['name'].ljust(max_len)} -> {s['source']}",
-                        file=sys.stderr,
+                        f"  {s['name'].ljust(max_len)} -> {s['source']}"
                     )
-                print("", file=sys.stderr)
+                print("")
 
             # Group 2: Plugin Skills
             plugin_skills = [s for s in skills_info if s["type"] == "plugin"]
             if plugin_skills:
-                print("Plugin Skills:", file=sys.stderr)
+                print("Plugin Skills:")
                 for s in sorted(plugin_skills, key=lambda x: x["name"]):
                     print(
-                        f"  {s['name'].ljust(max_len)} -> {s['source']}",
-                        file=sys.stderr,
+                        f"  {s['name'].ljust(max_len)} -> {s['source']}"
                     )
-                print("", file=sys.stderr)
+                print("")
 
             # Group 3: Remote Skills
             remote_skills = [s for s in skills_info if s["type"] == "remote"]
             if remote_skills:
-                print("Remote Skills:", file=sys.stderr)
+                print("Remote Skills:")
                 for s in sorted(remote_skills, key=lambda x: x["name"]):
                     print(
-                        f"  {s['name'].ljust(max_len)} -> {s['source']}",
-                        file=sys.stderr,
+                        f"  {s['name'].ljust(max_len)} -> {s['source']}"
                     )
 
 
