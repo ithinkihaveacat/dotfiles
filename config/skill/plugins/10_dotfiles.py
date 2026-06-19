@@ -29,3 +29,8 @@ def register(api):
         "remote:claude-frontend-design",
         "https://github.com/anthropics/claude-code/tree/main/plugins/frontend-design/skills/frontend-design",
     )
+
+    api.register_skill(
+        "remote:skill-creator",
+        "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+    )
