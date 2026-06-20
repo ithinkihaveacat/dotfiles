@@ -14,17 +14,17 @@ and various other tools.
 │   ├── conf.d/          # Fish startup snippets
 │   ├── completions/     # Fish completions
 │   └── functions/       # Fish functions (autoloaded)
-├── home/                # Dotfiles symlinked into $HOME by update
+├── home/                # Dotfiles symlinked into $HOME by install.sh
 ├── etc/                 # Tool-specific config (git templates, VS Code, etc.)
 ├── skills/              # Agent skill definitions
 ├── tests/               # TAP tests for bin/ scripts
-└── install              # Idempotent install/update script
+└── install.sh           # Idempotent install/update script
 ```
 
-`install` symlinks `home/.*` into `$HOME`, installs packages, and wires up
+`install.sh` symlinks `home/.*` into `$HOME`, installs packages, and wires up
 tool-specific config. It is safe to run multiple times, and doubles as the
 updater: an existing checkout is fast-forwarded before applying. It can be run
-locally (`./install`) or piped straight from the network (see
+locally (`./install.sh`) or piped straight from the network (see
 [Installation](#installation)).
 
 ## Overlays
@@ -48,7 +48,7 @@ of the public repository. This repository works fine without them.
 
 ### Precedence
 
-`install` processes overlays in this order: `.dotfiles` → `.private` → `.corp`.
+`install.sh` processes overlays in this order: `.dotfiles` → `.private` → `.corp`.
 Later layers win on conflict. A file in `~/.corp` always beats the same path in
 `~/.private` or `~/.dotfiles`.
 
@@ -84,7 +84,7 @@ the last overlay to provide a given filename wins.
 
 ### Per-overlay `update` hooks
 
-After the main install, `install` runs `~/.private/update` and `~/.corp/update`
+After the main install, `install.sh` runs `~/.private/update` and `~/.corp/update`
 if they exist and are executable. These hooks handle overlay-specific setup that
 cannot be expressed as file overlays (package installs, auth setup, etc.).
 
@@ -100,7 +100,7 @@ cannot be expressed as file overlays (package installs, auth setup, etc.).
 ├── home/               # Dotfiles symlinked into $HOME (e.g. .gitconfig.local)
 ├── etc/                # Tool-specific config (see overlay-aware paths above)
 ├── skills/             # Agent skills that shadow ~/.dotfiles/skills/ by name
-└── update              # Optional hook run at end of ./install
+└── update              # Optional hook run at end of ./install.sh
 ```
 
 `fish/config.fish` prepends `~/.private/fish/functions` (and `.corp`
@@ -108,7 +108,7 @@ equivalents) and `~/.private/fish/completions` to the fish search paths, and
 sources any `~/.private/fish/conf.d/*.fish` snippets at shell startup.
 
 To install: clone your private repos to `~/.private` and/or `~/.corp`, then run
-`./install` again.
+`./install.sh` again.
 
 ## Secret management
 
@@ -164,32 +164,42 @@ layout uv              # creates .venv if absent, activates it
 
 ## Installation
 
-Install (or update) with a single command:
+The same `install.sh` script both installs and updates, and runs in two ways.
+`git` must already be installed either way (see [Prerequisites](#git)).
+
+### Option 1: Straight from the network
+
+Clones the repo to `~/.dotfiles` (if absent), points the push remote at SSH,
+then installs — and on later runs, updates (it fast-forwards `~/.dotfiles`
+before applying):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install | bash
+curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash
 ```
 
-This clones the repository to `~/.dotfiles` (if not already present), points the
-push remote at SSH, then runs the installer. Re-running it updates an existing
-checkout (it fast-forwards `~/.dotfiles` before applying). `git` must already be
-installed (see [Prerequisites](#git)). Pass flags after `-s --`, e.g.
-`… | bash -s -- --force`.
+It must be piped to `bash`, not `sh` — the script is bash and refuses to run
+under other shells. Pass flags after `-s --`, e.g.
+`… | bash -s -- --force`. To download the whole script before running anything
+(rather than streaming it into the interpreter), use the equivalent:
 
-To install from a local checkout instead:
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh)"
+```
+
+### Option 2: From a local checkout
 
 ```sh
 cd $HOME
 git clone https://github.com/ithinkihaveacat/dotfiles.git .dotfiles
 cd .dotfiles
 git remote set-url origin --push git@github.com:ithinkihaveacat/dotfiles.git
-./install
+./install.sh
 ```
 
-After cloning `~/.private` and/or `~/.corp` (if available), run `./install`
+After cloning `~/.private` and/or `~/.corp` (if available), run `./install.sh`
 again so the overlay is applied.
 
-> **Note:** `install` may overwrite unmanaged files in locations such as
+> **Note:** `install.sh` may overwrite unmanaged files in locations such as
 > `~/Library/KeyBindings`. It is otherwise safe to run multiple times.
 
 ## Prerequisites
