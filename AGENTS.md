@@ -46,7 +46,7 @@ apply.
 ## Script Quality and Development
 
 This section provides guidelines for script entrypoints in `bin/`, canonical
-script sources in `skills/*/scripts/`, as well as the `./update` script.
+script sources in `skills/*/scripts/`, as well as the `./install.sh` script.
 
 ### General Script Requirements
 
@@ -232,7 +232,7 @@ blocks:
 bin/command-index-sync --all
 ```
 
-`./update` runs `command-index-sync --check --all` and warns when blocks have
+`./install.sh` runs `command-index-sync --check --all` and warns when blocks have
 drifted. The command named in a marker is executed with its working directory
 set to the directory containing the Markdown file (hence the `../scripts/`
 prefix).

@@ -2,18 +2,69 @@
 # bash 3.2+ compatible (macOS default). Do not use bash 4+ features
 # (declare -A, readarray, ${var,,}, |&).
 
+# When piped from the network the caller picks the interpreter
+# (`curl ... | bash`), so the shebang above is bypassed. The body of this script
+# is bash (arrays, [[ ]], process substitution, printf %q), so fail fast with a
+# clear message if it is fed to a non-bash shell, an ancient bash, or a bash in
+# POSIX mode (which disables process substitution). These three checks use only
+# POSIX sh syntax so they degrade gracefully under dash/sh/zsh/ksh instead of
+# emitting cryptic syntax errors. They run before `set -euo pipefail` because
+# `pipefail` itself is not POSIX.
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "install.sh: must be run with bash, e.g.:" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash" >&2
+  exit 1
+fi
+if [ "${BASH_VERSINFO[0]}" -lt 3 ] || { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
+  echo "install.sh: bash 3.2 or newer required (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+if [ -n "${POSIXLY_CORRECT+1}" ]; then
+  echo "install.sh: bash must not run in POSIX mode; unset POSIXLY_CORRECT and retry" >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 # Symlinks and copies files from the ~/.dotfiles directory into their
 # correct locations: $HOME, $HOME/.config/fish, $HOME/.config/templates,
 # etc.
 
+# Bootstrap: when piped from curl (e.g. `curl -fsSL .../install.sh | bash`) the
+# script has no path on disk, so BASH_SOURCE[0] is empty and the self-location
+# logic below cannot find the repo. In that case, clone the repo to ~/.dotfiles
+# if it is not already present, point the push remote at SSH, then re-exec the
+# on-disk copy with the same arguments. A local run (./install.sh) has a real
+# BASH_SOURCE and skips this block entirely; an existing checkout is left for
+# the `git pull` step further down to fast-forward.
+if [ ! -f "${BASH_SOURCE[0]:-}" ]; then
+  DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
+  if [ ! -d "$DOTFILES/.git" ]; then
+    command -v git >/dev/null 2>&1 || {
+      echo "install.sh: git not found; install git and re-run" >&2
+      exit 127
+    }
+    echo "Cloning dotfiles into $DOTFILES..."
+    git clone https://github.com/ithinkihaveacat/dotfiles.git "$DOTFILES"
+    git -C "$DOTFILES" remote set-url origin --push \
+      git@github.com:ithinkihaveacat/dotfiles.git
+  fi
+  exec "$DOTFILES/install.sh" "$@"
+fi
+
 # Show usage information
 function usage {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Symlinks and copies dotfiles from ~/.dotfiles to their correct locations.
+Installs and updates dotfiles. Symlinks and copies dotfiles from ~/.dotfiles to
+their correct locations, installs packages, and wires up tool-specific config.
+Safe to run repeatedly; an existing checkout is fast-forwarded first.
+
+Can also be run directly from the network, which clones the repo to ~/.dotfiles
+(if absent) before installing:
+
+  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash
 
 OPTIONS:
   --help        Show this help message and exit
@@ -24,8 +75,11 @@ OPTIONS:
                 Run without prompting or interactive terminal-session validation
 
 EXAMPLES:
-  $(basename "$0")            # Install dotfiles
+  $(basename "$0")            # Install or update dotfiles
   $(basename "$0") --trace    # Same, but log each wrapped command
+
+  # Install/update over the network, passing flags after '-s --':
+  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --force
 
 EOF
   exit "${1:-0}"

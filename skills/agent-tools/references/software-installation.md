@@ -1,8 +1,8 @@
 # Software Installation
 
 This document covers installation of CLI tools that are managed as optional
-entries in the dotfiles `update` script. These tools are installed manually and
-self-update via their own update commands; the `update` script calls those
+entries in the dotfiles `install.sh` script. These tools are installed manually and
+self-update via their own update commands; the `install.sh` script calls those
 commands automatically when the tool is present in PATH.
 
 ## Antigravity (agy)
@@ -24,7 +24,7 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 agy update
 ```
 
-Called automatically by the `update` script when `agy` is in PATH.
+Called automatically by the `install.sh` script when `agy` is in PATH.
 
 ## Claude Code
 
@@ -54,7 +54,7 @@ Two casks are available: `claude-code` (stable, ~1 week behind) and
 claude update
 ```
 
-Called automatically by the `update` script when `claude` is in PATH. Native
+Called automatically by the `install.sh` script when `claude` is in PATH. Native
 installs also auto-update in the background. For Homebrew installs, use
 `brew upgrade claude-code` instead.
 
@@ -107,6 +107,6 @@ brew install --cask codex
 codex update
 ```
 
-Called automatically by the `update` script when `codex` is in PATH.
+Called automatically by the `install.sh` script when `codex` is in PATH.
 
 [cc-versioning]: https://code.claude.com/docs/en/setup.md#install-a-specific-version
