@@ -544,7 +544,7 @@ if exists brew; then
   fi
 
   # Core packages: always installed, on every run.
-  core="fish coreutils dict tig wget direnv entr jq pv prettyping exiftool mtr htop pwgen pidcat shellcheck mosh shfmt yazi fzf sevenzip ripgrep viu chafa uv"
+  core="fish coreutils dict tig wget direnv entr jq pv prettyping exiftool mtr htop pwgen pidcat shellcheck mosh shfmt yazi fzf sevenzip ripgrep viu chafa uv node"
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
@@ -554,30 +554,13 @@ if exists brew; then
   # extras; add to this list as needed.
   full=""
 
-  # These packages are versioned packages that need to be force-linked
-  # (typically used when a specific version is needed instead of the default)
-  # To completely remove a versioned package: brew remove --force node@24
-  versioned="node@24" # e.g. node@24
-
   # The allowlist is every package the script knows about. Any `brew leaves`
   # entry outside it is unmanaged: reported, and removed only with --prune.
-  allowlist="$core $custom $optional $full $versioned"
+  allowlist="$core $custom $optional $full"
 
   install_set=$(install_set_for_tier "$core" "$optional" "$full")
 
   comm -13 <(brew leaves | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -n 1 brew install
-
-  # Install versioned packages (specific versions for compatibility/requirements)
-  for pkg in $versioned; do
-    if ! brew list "$pkg" >/dev/null 2>&1; then
-      x brew install "$pkg"
-    fi
-    # Force link versioned packages to make them available in PATH
-    # This may override the default version of the package
-    if ! brew link --dry-run "$pkg" 2>&1 | grep -q "Already linked"; then
-      x brew link --force --overwrite "$pkg"
-    fi
-  done
 
   # Special handling for imagemagick-full (needs manual linking due to conflicts)
   if brew list imagemagick-full >/dev/null 2>&1; then
