@@ -66,17 +66,30 @@ Can also be run directly from the network, which clones the repo to ~/.dotfiles
 
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash
 
+Packages are grouped into tiers: a core set that is always installed, an
+optional set, and a full set. By default only core is installed. Pass
+--install-optional to add the optional set, or --install-all to add both the
+optional and full sets. Packages outside every tier are left alone and merely
+reported, unless --prune is given.
+
 OPTIONS:
   --help        Show this help message and exit
   --trace       Print each wrapped command to stderr before running it
   --force       Overwrite existing real files when laying down overlay symlinks
                 (default: refuse and exit)
+  --install-optional
+                Install the core and optional package sets
+  --install-all Install the core, optional, and full package sets
+  --prune       Remove installed packages not in any tier (brew only; prompts
+                first and is skipped when non-interactive). Default: warn only
   --non-interactive
                 Run without prompting or interactive terminal-session validation
 
 EXAMPLES:
-  $(basename "$0")            # Install or update dotfiles
-  $(basename "$0") --trace    # Same, but log each wrapped command
+  $(basename "$0")                   # Install or update; core packages only
+  $(basename "$0") --trace           # Same, but log each wrapped command
+  $(basename "$0") --install-optional  # Also install the optional package set
+  $(basename "$0") --install-all --prune  # Full set; offer to remove extras
 
   # Install/update over the network, passing flags after '-s --':
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --force
@@ -90,6 +103,8 @@ FORCE=0
 HAS_SUDO=false
 REBOOT_REQUIRED=0
 NON_INTERACTIVE=0
+INSTALL_TIER=core
+PRUNE=0
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -103,6 +118,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force)
       FORCE=1
+      shift
+      ;;
+    --install-optional)
+      if [ "$INSTALL_TIER" = all ]; then
+        echo "$(basename "$0"): --install-optional and --install-all are mutually exclusive" >&2
+        usage 1 >&2
+      fi
+      INSTALL_TIER=optional
+      shift
+      ;;
+    --install-all)
+      if [ "$INSTALL_TIER" = optional ]; then
+        echo "$(basename "$0"): --install-optional and --install-all are mutually exclusive" >&2
+        usage 1 >&2
+      fi
+      INSTALL_TIER=all
+      shift
+      ;;
+    --prune)
+      PRUNE=1
       shift
       ;;
     --non-interactive)
@@ -186,6 +221,55 @@ function is_codex_agent {
 
 function heading {
   printf '# %s\n' "$@"
+}
+
+# Echo the space-separated package list for the active INSTALL_TIER, given the
+# core, optional, and full sets as $1, $2, $3. core is always included.
+function install_set_for_tier {
+  case "$INSTALL_TIER" in
+    all) printf '%s %s %s' "$1" "$2" "$3" ;;
+    optional) printf '%s %s' "$1" "$2" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Report brew leaves that are not in the allowlist ($1, space-separated). With
+# --prune, offer to remove them (interactive only; never removes when
+# non-interactive). Without --prune, warn and leave them in place.
+function prune_brew_extras {
+  local allowlist=$1
+  local extras indented
+  extras=$(comm -23 <(brew leaves | sort) <(echo "$allowlist" | tr ' ' '\n' | sort))
+  [ -n "$extras" ] || return 0
+  # shellcheck disable=SC2001 # sed prefixes every line, including the first
+  indented=$(echo "$extras" | sed 's/^/  /')
+
+  if [ "$PRUNE" != 1 ]; then
+    echo "warning: unmanaged brew packages present (not in any tier):" >&2
+    echo "$indented" >&2
+    echo "hint: remove with 'brew remove <pkg>', or re-run with --prune" >&2
+    return 0
+  fi
+
+  if [ "$NON_INTERACTIVE" = 1 ]; then
+    echo "warning: --prune requested but running non-interactively; not removing:" >&2
+    echo "$indented" >&2
+    return 0
+  fi
+
+  echo "The following unmanaged brew packages will be removed:" >&2
+  echo "$indented" >&2
+  printf 'Remove these packages? [y/N] ' >&2
+  local reply=""
+  read -r reply || reply=""
+  case "$reply" in
+    [yY] | [yY][eE][sS])
+      echo "$extras" | xargs -n 1 brew remove
+      ;;
+    *)
+      echo "Skipping removal." >&2
+      ;;
+  esac
 }
 
 # SRCDIR is the root of the git repo
@@ -459,30 +543,24 @@ if exists brew; then
     x brew install jed --HEAD
   fi
 
-  expected="fish coreutils dict tig wget direnv entr jq pv prettyping exiftool mtr htop pwgen pidcat shellcheck mosh shfmt yazi fzf sevenzip ripgrep viu chafa uv"
+  # Core packages: always installed, on every run.
+  core="fish coreutils wget direnv jq mtr htop shellcheck shfmt sevenzip ripgrep chafa node"
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
-  # These packages are optional (don't remove if present)
-  optional="imagemagick-full yt-dlp go ffmpeg apktool git composer protobuf bundletool scrcpy git-lfs llm firebase-cli mosquitto gh openclaw/tap/gogcli hcloud"
+  # Optional packages: installed only with --install-optional or --install-all.
+  # Known packages, so they are kept (not flagged) when present on a core run.
+  optional="imagemagick-full yt-dlp go ffmpeg apktool git composer protobuf bundletool scrcpy git-lfs llm firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf"
+  # Full packages: installed only with --install-all. Heaviest or least-used
+  # extras; add to this list as needed.
+  full=""
 
-  # These packages are versioned packages that need to be force-linked
-  # (typically used when a specific version is needed instead of the default)
-  # To completely remove a versioned package: brew remove --force node@24
-  versioned="node@24" # e.g. node@24
+  # The allowlist is every package the script knows about. Any `brew leaves`
+  # entry outside it is unmanaged: reported, and removed only with --prune.
+  allowlist="$core $custom $optional $full"
 
-  comm -13 <(brew leaves | sort) <(echo "$expected" | tr ' ' '\n' | sort) | xargs -n 1 brew install
+  install_set=$(install_set_for_tier "$core" "$optional" "$full")
 
-  # Install versioned packages (specific versions for compatibility/requirements)
-  for pkg in $versioned; do
-    if ! brew list "$pkg" >/dev/null 2>&1; then
-      x brew install "$pkg"
-    fi
-    # Force link versioned packages to make them available in PATH
-    # This may override the default version of the package
-    if ! brew link --dry-run "$pkg" 2>&1 | grep -q "Already linked"; then
-      x brew link --force --overwrite "$pkg"
-    fi
-  done
+  comm -13 <(brew leaves | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -n 1 brew install
 
   # Special handling for imagemagick-full (needs manual linking due to conflicts)
   if brew list imagemagick-full >/dev/null 2>&1; then
@@ -494,7 +572,7 @@ if exists brew; then
   # Upgrade all packages
   brew upgrade --yes
 
-  comm -23 <(brew leaves | sort) <(echo "$expected" "$custom" "$optional" "$versioned" | tr ' ' '\n' | sort) | xargs -n 1 brew remove
+  prune_brew_extras "$allowlist"
 
   # Final cleanup of unused dependencies and cache
   brew autoremove
@@ -520,14 +598,20 @@ if [ "$PLATFORM" = "linux" ]; then
 
     x sudo apt-get update # refresh package lists
 
-    expected="apt-file direnv command-not-found dnsutils apache2-utils htop iftop iotop lsof mosh traceroute mtr-tiny whois sysstat dstat hdparm psmisc locate wget curl pv zip unzip libxml2-utils jed sqlite3 jq entr ripgrep nodejs npm shfmt chafa fzf"
-    # Optional packages to consider adding to the list above:
-    # zlib1g-dev repo
+    # Core packages: always installed, on every run.
+    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep nodejs npm shfmt chafa"
+    # Optional packages: installed only with --install-optional or --install-all.
+    # Candidates to add: zlib1g-dev
+    optional="pv entr fzf"
+    # Full packages: installed only with --install-all.
+    full=""
 
     # TODO: JDK installation on Linux (not yet documented; see fish/config.fish
     # for context on how JAVA_HOME is set and what the macOS approach looks like)
 
-    comm -13 <(dpkg-query -f '${binary:Package}\n' -W | sort) <(echo "$expected" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
+    install_set=$(install_set_for_tier "$core" "$optional" "$full")
+
+    comm -13 <(dpkg-query -f '${binary:Package}\n' -W | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
     # Can't remove any packages because not possible to determine which were
     # user-installed. Use `apt-get remove` to remove manually.
 
@@ -552,18 +636,80 @@ if [ "$PLATFORM" = "linux" ]; then
 
 fi
 
-if [ "$PLATFORM" = "linux" ]; then
-  heading "uv"
-  if ! exists uv; then
-    echo "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-  else
-    echo "Updating uv..."
-    uv self update
+# fish: Debian packages an out-of-date fish (trixie ships 4.0.2, but our config
+# targets 4.2+), so when fish is missing on Debian 13 we install fish 4 from the
+# OpenSUSE Build Service instead of the distro package. Other systems install
+# fish themselves (Homebrew on macOS, manually otherwise). If fish is already
+# present we leave it untouched and only warn when it predates 4.2.
+heading "fish"
+
+FISH_MIN_VERSION="4.2"
+
+if exists fish; then
+
+  # Warn about (but do not replace) an installed fish older than the version our
+  # config relies on. `fish --version` prints e.g. "fish, version 4.0.2".
+  fish_version=$(fish --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1) || fish_version=""
+  if [ -n "$fish_version" ]; then
+    fish_major=${fish_version%%.*}
+    fish_rest=${fish_version#*.}
+    fish_minor=${fish_rest%%.*}
+    min_major=${FISH_MIN_VERSION%%.*}
+    min_minor=${FISH_MIN_VERSION#*.}
+    if [ "$fish_major" -lt "$min_major" ] ||
+      { [ "$fish_major" -eq "$min_major" ] && [ "$fish_minor" -lt "$min_minor" ]; }; then
+      echo "warning: fish $fish_version is older than $FISH_MIN_VERSION; some config may not work" >&2
+      echo "hint: Debian's packaged fish is out of date; see README for fish $FISH_MIN_VERSION+ install instructions" >&2
+    fi
   fi
-  echo "Upgrading uv tools..."
-  uv tool upgrade --all
+
+elif [ "$PLATFORM" = "linux" ]; then
+
+  # shellcheck disable=SC1091 # /etc/os-release is provided by the host, not the repo
+  read -r os_id os_ver < <(
+    . /etc/os-release 2>/dev/null
+    printf '%s %s\n' "${ID:-}" "${VERSION_ID:-}"
+  )
+
+  if ! { exists apt-get && $HAS_SUDO; }; then
+    echo "warning: cannot install fish without apt-get and sudo; install manually (see README)" >&2
+  elif [ "$os_id" = debian ] && [ "$os_ver" = 13 ]; then
+    echo "Debian's packaged fish is out of date; installing fish $FISH_MIN_VERSION+ from the OpenSUSE Build Service (Debian 13)..."
+    # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
+    if echo 'deb http://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/ /' |
+      x sudo tee /etc/apt/sources.list.d/shells:fish:release:4.list >/dev/null &&
+      curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_13/Release.key |
+      gpg --dearmor |
+        x sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_4.gpg >/dev/null &&
+      x sudo apt-get update &&
+      x sudo apt-get -y install fish; then
+      echo "Installed fish."
+    else
+      echo "warning: fish installation failed; install manually (see README)" >&2
+    fi
+  else
+    echo "warning: fish not available for '${os_id:-unknown} ${os_ver:-?}'; install manually (see README)" >&2
+  fi
+
+else
+  echo "warning: fish not installed; install it (e.g. 'brew install fish', see README)" >&2
 fi
+
+# uv is installed via the standalone astral installer on every platform (it is
+# not a brew/apt package here) because many scripts use `uv run` shebangs.
+heading "uv"
+if ! exists uv; then
+  echo "Installing uv..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+else
+  echo "Updating uv..."
+  # `uv self update` only works for the standalone installer; a uv provided by a
+  # package manager (e.g. a leftover brew uv mid-migration) will refuse, so warn
+  # rather than abort.
+  uv self update || echo "warning: uv self update failed (uv may be package-managed)"
+fi
+echo "Upgrading uv tools..."
+uv tool upgrade --all || echo "warning: uv tool upgrade failed"
 
 heading "git"
 
