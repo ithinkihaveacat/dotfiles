@@ -544,12 +544,12 @@ if exists brew; then
   fi
 
   # Core packages: always installed, on every run.
-  core="fish coreutils dict tig wget direnv entr jq pv prettyping exiftool mtr htop pwgen pidcat shellcheck mosh shfmt yazi fzf sevenzip ripgrep viu chafa uv node"
+  core="fish coreutils wget direnv jq mtr htop shellcheck shfmt sevenzip ripgrep chafa node"
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
   # Known packages, so they are kept (not flagged) when present on a core run.
-  optional="imagemagick-full yt-dlp go ffmpeg apktool git composer protobuf bundletool scrcpy git-lfs llm firebase-cli mosquitto gh openclaw/tap/gogcli hcloud"
+  optional="imagemagick-full yt-dlp go ffmpeg apktool git composer protobuf bundletool scrcpy git-lfs llm firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf"
   # Full packages: installed only with --install-all. Heaviest or least-used
   # extras; add to this list as needed.
   full=""
@@ -599,10 +599,10 @@ if [ "$PLATFORM" = "linux" ]; then
     x sudo apt-get update # refresh package lists
 
     # Core packages: always installed, on every run.
-    core="apt-file direnv command-not-found dnsutils apache2-utils htop iftop iotop lsof mosh traceroute mtr-tiny whois sysstat dstat hdparm psmisc locate wget curl gnupg pv zip unzip libxml2-utils jed sqlite3 jq entr ripgrep nodejs npm shfmt chafa fzf"
+    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep nodejs npm shfmt chafa"
     # Optional packages: installed only with --install-optional or --install-all.
     # Candidates to add: zlib1g-dev
-    optional=""
+    optional="pv entr fzf"
     # Full packages: installed only with --install-all.
     full=""
 
@@ -695,18 +695,21 @@ else
   echo "warning: fish not installed; install it (e.g. 'brew install fish', see README)" >&2
 fi
 
-if [ "$PLATFORM" = "linux" ]; then
-  heading "uv"
-  if ! exists uv; then
-    echo "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-  else
-    echo "Updating uv..."
-    uv self update
-  fi
-  echo "Upgrading uv tools..."
-  uv tool upgrade --all
+# uv is installed via the standalone astral installer on every platform (it is
+# not a brew/apt package here) because many scripts use `uv run` shebangs.
+heading "uv"
+if ! exists uv; then
+  echo "Installing uv..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+else
+  echo "Updating uv..."
+  # `uv self update` only works for the standalone installer; a uv provided by a
+  # package manager (e.g. a leftover brew uv mid-migration) will refuse, so warn
+  # rather than abort.
+  uv self update || echo "warning: uv self update failed (uv may be package-managed)"
 fi
+echo "Upgrading uv tools..."
+uv tool upgrade --all || echo "warning: uv tool upgrade failed"
 
 heading "git"
 
