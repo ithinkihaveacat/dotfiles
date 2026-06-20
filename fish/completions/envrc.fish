@@ -1,34 +1,89 @@
 # Fish completion script for envrc
 
-# Helper function: check if we need a command
-function __fish_envrc_needs_command
+# Helper function: parse the command line to extract the subcommand and its arguments,
+# skipping options/flags and their arguments.
+function __fish_envrc_parse
     set -l cmd (commandline -opc)
-    test (count $cmd) -eq 1
+    set -e cmd[1] # Remove 'envrc'
+
+    set -l subcommand ""
+    set -l subcommand_args
+    set -l i 1
+    while test $i -le (count $cmd)
+        switch $cmd[$i]
+            case --output
+                set i (math $i + 2)
+            case --help
+                set i (math $i + 1)
+            case '-*'
+                set i (math $i + 1)
+            case '*'
+                set subcommand $cmd[$i]
+                if test $i -lt (count $cmd)
+                    set subcommand_args $cmd[(math $i + 1)..-1]
+                end
+                break
+        end
+    end
+
+    echo "$subcommand"
+    for arg in $subcommand_args
+        echo "$arg"
+    end
 end
 
-# Helper function: check if using specific command
-function __fish_envrc_using_command
-    set -l cmd (commandline -opc)
-    test (count $cmd) -gt 1; and test $argv[1] = $cmd[2]
+# Helper function: check if we need a subcommand
+function __fish_envrc_needs_command
+    set -l parsed (__fish_envrc_parse)
+    test (count $parsed) -eq 0
+end
+
+# Helper function: check if we are completing the configuration type
+function __fish_envrc_needs_type
+    set -l parsed (__fish_envrc_parse)
+    test (count $parsed) -eq 1; and contains "$parsed[1]" add remove rm
+end
+
+# Helper function: check if we are completing the node version
+function __fish_envrc_needs_node_version
+    set -l parsed (__fish_envrc_parse)
+    test (count $parsed) -eq 2; and test "$parsed[1]" = add; and test "$parsed[2]" = node
 end
 
 # Helper function: list available types
 function __fish_envrc_types
-    echo -e "git-identity-beebo\nnode\nfirebase\nappengine"
+    echo -e "git-identity-beebo\nnode\nfirebase\nappengine\nskills"
 end
 
+# Helper function: list local Node.js versions
+function __fish_envrc_node_versions
+    if test -n "$NODE_VERSIONS"; and test -d "$NODE_VERSIONS"
+        for d in $NODE_VERSIONS/node-*
+            set -l full (string replace -r '^.*/node-v' '' $d | string replace -r '/$' '')
+            set -l major (string split -m 1 . $full)[1]
+            echo $full
+            echo $major
+        end | sort -un
+    end
+end
+
+# Disable file completion by default
+complete -c envrc -f
+
 # Complete subcommands
-complete -c envrc -f -n __fish_envrc_needs_command -a add -d 'Add or update a configuration block'
-complete -c envrc -f -n __fish_envrc_needs_command -a remove -d 'Remove a configuration block'
-complete -c envrc -f -n __fish_envrc_needs_command -a rm -d 'Remove a configuration block'
-complete -c envrc -f -n __fish_envrc_needs_command -a list -d 'List active configuration types in .envrc'
-complete -c envrc -f -n __fish_envrc_needs_command -a types -d 'List available configuration types'
+complete -c envrc -n __fish_envrc_needs_command -a add -d 'Add or update a configuration block'
+complete -c envrc -n __fish_envrc_needs_command -a remove -d 'Remove a configuration block'
+complete -c envrc -n __fish_envrc_needs_command -a rm -d 'Remove a configuration block'
+complete -c envrc -n __fish_envrc_needs_command -a list -d 'List active configuration types in .envrc'
+complete -c envrc -n __fish_envrc_needs_command -a types -d 'List available configuration types'
+complete -c envrc -n __fish_envrc_needs_command -a help -d 'Display help message and exit'
 
-# Complete types for add and remove
-complete -c envrc -f -n '__fish_envrc_using_command add' -a '(__fish_envrc_types)'
-complete -c envrc -f -n '__fish_envrc_using_command remove' -a '(__fish_envrc_types)'
-complete -c envrc -f -n '__fish_envrc_using_command rm' -a '(__fish_envrc_types)'
+# Complete types for add, remove, rm
+complete -c envrc -n __fish_envrc_needs_type -a '(__fish_envrc_types)'
 
-# Complete flags
-complete -c envrc -f -l help -d 'Display help message and exit'
+# Complete node versions
+complete -c envrc -n __fish_envrc_needs_node_version -a '(__fish_envrc_node_versions)'
+
+# Complete global flags
+complete -c envrc -l help -d 'Display help message and exit'
 complete -c envrc -r -l output -d 'Path to the output file'
