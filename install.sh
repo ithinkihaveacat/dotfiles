@@ -599,7 +599,7 @@ if [ "$PLATFORM" = "linux" ]; then
     x sudo apt-get update # refresh package lists
 
     # Core packages: always installed, on every run.
-    core="apt-file direnv command-not-found dnsutils apache2-utils htop iftop iotop lsof mosh traceroute mtr-tiny whois sysstat dstat hdparm psmisc locate wget curl pv zip unzip libxml2-utils jed sqlite3 jq entr ripgrep nodejs npm shfmt chafa fzf"
+    core="apt-file direnv command-not-found dnsutils apache2-utils htop iftop iotop lsof mosh traceroute mtr-tiny whois sysstat dstat hdparm psmisc locate wget curl gnupg pv zip unzip libxml2-utils jed sqlite3 jq entr ripgrep nodejs npm shfmt chafa fzf"
     # Optional packages: installed only with --install-optional or --install-all.
     # Candidates to add: zlib1g-dev
     optional=""
@@ -632,6 +632,42 @@ if [ "$PLATFORM" = "linux" ]; then
 
   else
     echo "$(basename "$0"): no supported package manager (apt-get) found, skipping" >&2
+  fi
+
+fi
+
+# fish is not packaged at a usable version in Debian stable (trixie ships 4.0.2;
+# we want 4.2+), so on Debian 13 install fish 4 from the OpenSUSE Build Service.
+# Other systems must install fish themselves (see README); we only warn. The
+# block self-skips once fish is present, so the repo is added at most once.
+if [ "$PLATFORM" = "linux" ] && ! exists fish; then
+
+  heading "fish"
+
+  # shellcheck disable=SC1091 # /etc/os-release is provided by the host, not the repo
+  read -r os_id os_ver < <(
+    . /etc/os-release 2>/dev/null
+    printf '%s %s\n' "${ID:-}" "${VERSION_ID:-}"
+  )
+
+  if ! { exists apt-get && $HAS_SUDO; }; then
+    echo "warning: cannot install fish without apt-get and sudo; install manually (see README)" >&2
+  elif [ "$os_id" = debian ] && [ "$os_ver" = 13 ]; then
+    echo "Installing fish 4 from the OpenSUSE Build Service (Debian 13)..."
+    # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
+    if echo 'deb http://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/ /' |
+      x sudo tee /etc/apt/sources.list.d/shells:fish:release:4.list >/dev/null &&
+      curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_13/Release.key |
+      gpg --dearmor |
+        x sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_4.gpg >/dev/null &&
+      x sudo apt-get update &&
+      x sudo apt-get -y install fish; then
+      echo "Installed fish."
+    else
+      echo "warning: fish installation failed; install manually (see README)" >&2
+    fi
+  else
+    echo "warning: fish not available for '${os_id:-unknown} ${os_ver:-?}'; install manually (see README)" >&2
   fi
 
 fi

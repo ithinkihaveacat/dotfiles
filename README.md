@@ -211,8 +211,11 @@ again so the overlay is applied.
 
 ### fish
 
-- **Ubuntu/Debian**: `sudo apt-get install fish`
-- **macOS**: `brew install fish`
+On **Debian 13** and **macOS**, `install.sh` installs fish for you (fish 4 from
+the OpenSUSE Build Service on Debian 13; via Homebrew on macOS), so you can skip
+this step. On other systems, install it first:
+
+- **Ubuntu/other Debian**: `sudo apt-get install fish`
 - **Other**: <https://fishshell.com/>
 
 <!-- markdownlint-disable MD013 -->
