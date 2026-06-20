@@ -211,9 +211,11 @@ again so the overlay is applied.
 
 ### fish
 
-On **Debian 13** and **macOS**, `install.sh` installs fish for you (fish 4 from
-the OpenSUSE Build Service on Debian 13; via Homebrew on macOS), so you can skip
-this step. On other systems, install it first:
+On **Debian 13** and **macOS**, `install.sh` installs fish for you, so you can
+skip this step. Debian's packaged fish is out of date, so on Debian 13 it pulls
+fish 4 from the OpenSUSE Build Service; on macOS it uses Homebrew. If fish is
+already installed at a version older than 4.2, `install.sh` warns rather than
+replacing it. On other systems, install it first:
 
 - **Ubuntu/other Debian**: `sudo apt-get install fish`
 - **Other**: <https://fishshell.com/>

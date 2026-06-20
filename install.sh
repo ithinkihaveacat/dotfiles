@@ -636,13 +636,34 @@ if [ "$PLATFORM" = "linux" ]; then
 
 fi
 
-# fish is not packaged at a usable version in Debian stable (trixie ships 4.0.2;
-# we want 4.2+), so on Debian 13 install fish 4 from the OpenSUSE Build Service.
-# Other systems must install fish themselves (see README); we only warn. The
-# block self-skips once fish is present, so the repo is added at most once.
-if [ "$PLATFORM" = "linux" ] && ! exists fish; then
+# fish: Debian packages an out-of-date fish (trixie ships 4.0.2, but our config
+# targets 4.2+), so when fish is missing on Debian 13 we install fish 4 from the
+# OpenSUSE Build Service instead of the distro package. Other systems install
+# fish themselves (Homebrew on macOS, manually otherwise). If fish is already
+# present we leave it untouched and only warn when it predates 4.2.
+heading "fish"
 
-  heading "fish"
+FISH_MIN_VERSION="4.2"
+
+if exists fish; then
+
+  # Warn about (but do not replace) an installed fish older than the version our
+  # config relies on. `fish --version` prints e.g. "fish, version 4.0.2".
+  fish_version=$(fish --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1) || fish_version=""
+  if [ -n "$fish_version" ]; then
+    fish_major=${fish_version%%.*}
+    fish_rest=${fish_version#*.}
+    fish_minor=${fish_rest%%.*}
+    min_major=${FISH_MIN_VERSION%%.*}
+    min_minor=${FISH_MIN_VERSION#*.}
+    if [ "$fish_major" -lt "$min_major" ] ||
+      { [ "$fish_major" -eq "$min_major" ] && [ "$fish_minor" -lt "$min_minor" ]; }; then
+      echo "warning: fish $fish_version is older than $FISH_MIN_VERSION; some config may not work" >&2
+      echo "hint: Debian's packaged fish is out of date; see README for fish $FISH_MIN_VERSION+ install instructions" >&2
+    fi
+  fi
+
+elif [ "$PLATFORM" = "linux" ]; then
 
   # shellcheck disable=SC1091 # /etc/os-release is provided by the host, not the repo
   read -r os_id os_ver < <(
@@ -653,7 +674,7 @@ if [ "$PLATFORM" = "linux" ] && ! exists fish; then
   if ! { exists apt-get && $HAS_SUDO; }; then
     echo "warning: cannot install fish without apt-get and sudo; install manually (see README)" >&2
   elif [ "$os_id" = debian ] && [ "$os_ver" = 13 ]; then
-    echo "Installing fish 4 from the OpenSUSE Build Service (Debian 13)..."
+    echo "Debian's packaged fish is out of date; installing fish $FISH_MIN_VERSION+ from the OpenSUSE Build Service (Debian 13)..."
     # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
     if echo 'deb http://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/ /' |
       x sudo tee /etc/apt/sources.list.d/shells:fish:release:4.list >/dev/null &&
@@ -670,6 +691,8 @@ if [ "$PLATFORM" = "linux" ] && ! exists fish; then
     echo "warning: fish not available for '${os_id:-unknown} ${os_ver:-?}'; install manually (see README)" >&2
   fi
 
+else
+  echo "warning: fish not installed; install it (e.g. 'brew install fish', see README)" >&2
 fi
 
 if [ "$PLATFORM" = "linux" ]; then
