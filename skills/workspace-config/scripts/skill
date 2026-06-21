@@ -67,24 +67,28 @@ class Workspace:
             ]
 
         dest_dirs = []
-        # 1. Scan on-disk layout first to prevent orphaning existing links
-        for candidate in (".claude/skills", ".agents/skills"):
-            if (self.root / candidate).is_dir():
-                dest_dirs.append(candidate)
+        home = Path.home()
 
-        # 2. If nothing exists on disk yet, fall back to PATH-based detection
-        if not dest_dirs:
-            import shutil
+        # Check Claude: manage if global config directory ~/.claude exists OR local directory exists.
+        # We use the existence of global configuration directories rather than binary checks
+        # to determine installation because launcher scripts or shell functions might exist
+        # on PATH without the full agent configuration being present.
+        if (home / ".claude").is_dir() or (self.root / ".claude/skills").is_dir():
+            dest_dirs.append(".claude/skills")
 
-            if shutil.which("claude"):
-                dest_dirs.append(".claude/skills")
-            if shutil.which("codex") or shutil.which("agy") or shutil.which("jetski"):
-                dest_dirs.append(".agents/skills")
+        # Check Codex / Antigravity-CLI: manage if global config directories (~/.codex or ~/.gemini/antigravity-cli)
+        # exist OR local directory exists
+        if (
+            (home / ".codex").is_dir()
+            or (home / ".gemini/antigravity-cli").is_dir()
+            or (self.root / ".agents/skills").is_dir()
+        ):
+            dest_dirs.append(".agents/skills")
 
-        # 3. If still nothing found, raise RuntimeError
+        # If still nothing found, raise RuntimeError
         if not dest_dirs:
             raise RuntimeError(
-                "No supported agent executable (claude, codex, agy, jetski) detected on PATH, and no existing skill directories found in the workspace."
+                "No supported agent configuration directory (~/.claude, ~/.codex, ~/.gemini/antigravity-cli) detected, and no existing skill directories found in the workspace."
             )
 
         return [self.root / d for d in dest_dirs]
@@ -1663,9 +1667,29 @@ def cmd_doctor():
                     except Exception:
                         pass
 
+    # Check for orphaned directories (local directory exists but global configuration directory does not)
+    home = Path.home()
+    orphaned = []
+    if (ws.root / ".claude/skills").is_dir() and not (home / ".claude").is_dir():
+        orphaned.append(
+            (
+                ".claude/skills",
+                "local folder exists, but ~/.claude config directory does not exist",
+            )
+        )
+    if (ws.root / ".agents/skills").is_dir() and not (
+        (home / ".codex").is_dir() or (home / ".gemini/antigravity-cli").is_dir()
+    ):
+        orphaned.append(
+            (
+                ".agents/skills",
+                "local folder exists, but neither ~/.codex nor ~/.gemini/antigravity-cli config directory exists",
+            )
+        )
+
     backend_issues = ws.doctor_issues()
 
-    if not (missing or extra or unmanaged or dangling or backend_issues):
+    if not (missing or extra or unmanaged or dangling or orphaned or backend_issues):
         return True
 
     print(
@@ -1697,6 +1721,13 @@ def cmd_doctor():
         print("  dangling/broken symlinks:", file=sys.stderr)
         for item in dangling:
             print(f"    - {rel(item)}", file=sys.stderr)
+    if orphaned:
+        print(
+            "  orphaned skill directories (local directory exists but global agent configuration directory does not):",
+            file=sys.stderr,
+        )
+        for path, reason in orphaned:
+            print(f"    - {path} ({reason})", file=sys.stderr)
     for issue in backend_issues:
         print(f"  {issue}", file=sys.stderr)
 
@@ -1728,6 +1759,13 @@ def cmd_doctor():
             "  - Manually delete or move the unmanaged files/directories out of the skill folders.",
             file=sys.stderr,
         )
+    if orphaned:
+        print(
+            "  - Delete the orphaned directory/directories if you no longer use those agents:",
+            file=sys.stderr,
+        )
+        for path, _ in orphaned:
+            print(f"      rm -rf {path}", file=sys.stderr)
     print("", file=sys.stderr)
     return False
 

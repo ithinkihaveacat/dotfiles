@@ -6,12 +6,14 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..44"
+echo "1..45"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
 TMPDIR=$(python3 -c "import pathlib; print(pathlib.Path('${TMPDIR}').resolve())")
 MOCK_BIN_DIR=$(mktemp -d)
+MOCK_HOME="${TMPDIR}/mock_home"
+mkdir -p "$MOCK_HOME/.claude" "$MOCK_HOME/.gemini/antigravity-cli"
 trap 'rm -rf -- "$TMPDIR" "$MOCK_BIN_DIR"' EXIT
 
 # Create mock executables so skill detects both Claude and Codex paths by default in tests
@@ -27,11 +29,12 @@ echo -e "---\nname: test-skill\ndescription: Test skill\n---\nbody" >"${TMPDIR}/
 
 # Set up common environment
 # Isolate from the user's/system git config (signing, hooks, templates).
+export HOME="$MOCK_HOME"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export SKILL_SOURCE_DIRS="${TMPDIR}/sources"
 export XDG_CONFIG_HOME="${TMPDIR}/.config"
 export XDG_CACHE_HOME="${TMPDIR}/.cache"
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$MOCK_HOME/.cache/uv}"
 # Ensure p4 is not found by default during Git/Unmanaged tests
 export PATH="$MOCK_BIN_DIR:$PATH"
 
@@ -659,6 +662,31 @@ if "${SCRIPT}" apply >/dev/null 2>&1; then
 else
   echo "not ok 44 - [Namespacing] apply command failed for namespaced spec"
 fi
+
+# Test 45: doctor flags orphaned skill directories
+ORPHANED_TEST_DIR="${TMPDIR}/orphaned-test"
+mkdir -p "$ORPHANED_TEST_DIR"
+cd "$ORPHANED_TEST_DIR"
+git init -q
+mkdir -p .claude/skills
+
+# Rename ~/.claude config directory to simulate Claude not installed
+mv "$MOCK_HOME/.claude" "$MOCK_HOME/.claude-backup"
+
+# Run doctor and capture output
+if out=$("${SCRIPT}" doctor 2>&1); then
+  echo "not ok 45 - [Orphaned] doctor should fail when .claude/skills is orphaned"
+else
+  if printf '%s' "$out" | grep -q "orphaned skill directories" &&
+    printf '%s' "$out" | grep -q ".claude/skills (local folder exists, but ~/.claude config directory does not exist)"; then
+    echo "ok 45 - [Orphaned] doctor flags orphaned local directories"
+  else
+    echo "not ok 45 - [Orphaned] doctor did not report correct warning message: $out"
+  fi
+fi
+
+# Restore ~/.claude config directory
+mv "$MOCK_HOME/.claude-backup" "$MOCK_HOME/.claude"
 
 # Clean up
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
