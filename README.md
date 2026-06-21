@@ -175,6 +175,11 @@ layout ruby            # project-local gems in .direnv/ruby
 `layout ruby` keeps gems inside the project, so `gem install kamal` makes `kamal`
 available on `PATH` without touching the system Ruby.
 
+Because each version is compiled against the system libraries present at build
+time, an installed Ruby can later fail to start with a library load error (for
+example after a Homebrew `openssl` upgrade removes a library it was linked
+against). The fix is to rebuild that version: `ruby-install 3.4`.
+
 ### Python
 
 Python environments use [uv](https://github.com/astral-sh/uv). Add to `.envrc`:
