@@ -50,9 +50,15 @@ function __fish_envrc_needs_node_version
     test (count $parsed) -eq 2; and test "$parsed[1]" = add; and test "$parsed[2]" = node
 end
 
+# Helper function: check if we are completing the ruby version
+function __fish_envrc_needs_ruby_version
+    set -l parsed (__fish_envrc_parse)
+    test (count $parsed) -eq 2; and test "$parsed[1]" = add; and test "$parsed[2]" = ruby
+end
+
 # Helper function: list available types
 function __fish_envrc_types
-    echo -e "git-identity-beebo\nnode\nfirebase\nappengine\nskills"
+    echo -e "git-identity-beebo\nnode\nruby\nfirebase\nappengine\nskills"
 end
 
 # Helper function: list local Node.js versions
@@ -60,6 +66,18 @@ function __fish_envrc_node_versions
     if test -n "$NODE_VERSIONS"; and test -d "$NODE_VERSIONS"
         for d in $NODE_VERSIONS/node-*
             set -l full (string replace -r '^.*/node-v' '' $d | string replace -r '/$' '')
+            set -l major (string split -m 1 . $full)[1]
+            echo $full
+            echo $major
+        end | sort -un
+    end
+end
+
+# Helper function: list local Ruby versions
+function __fish_envrc_ruby_versions
+    if test -n "$RUBY_VERSIONS"; and test -d "$RUBY_VERSIONS"
+        for d in $RUBY_VERSIONS/ruby-*
+            set -l full (string replace -r '^.*/ruby-v' '' $d | string replace -r '/$' '')
             set -l major (string split -m 1 . $full)[1]
             echo $full
             echo $major
@@ -83,6 +101,9 @@ complete -c envrc -n __fish_envrc_needs_type -a '(__fish_envrc_types)'
 
 # Complete node versions
 complete -c envrc -n __fish_envrc_needs_node_version -a '(__fish_envrc_node_versions)'
+
+# Complete ruby versions
+complete -c envrc -n __fish_envrc_needs_ruby_version -a '(__fish_envrc_ruby_versions)'
 
 # Complete global flags
 complete -c envrc -l help -d 'Display help message and exit'

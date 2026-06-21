@@ -154,6 +154,27 @@ use node 22
 layout node            # adds node_modules/.bin to PATH
 ```
 
+### Ruby
+
+Ruby versions are managed by `bin/ruby-install` and direnv. Versions are compiled
+from source via [ruby-build](https://github.com/rbenv/ruby-build) (the toolchain
+and its build dependencies install with `install.sh --install-optional`), so the
+first install of a version takes a few minutes.
+
+```sh
+ruby-install 3.4       # compiles latest 3.4.x into ~/.local/share/ruby/versions
+```
+
+Add to `.envrc`:
+
+```sh
+use ruby 3.4
+layout ruby            # project-local gems in .direnv/ruby
+```
+
+`layout ruby` keeps gems inside the project, so `gem install kamal` makes `kamal`
+available on `PATH` without touching the system Ruby.
+
 ### Python
 
 Python environments use [uv](https://github.com/astral-sh/uv). Add to `.envrc`:
