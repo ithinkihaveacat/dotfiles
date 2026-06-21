@@ -549,7 +549,7 @@ if exists brew; then
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
   # Known packages, so they are kept (not flagged) when present on a core run.
-  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf"
+  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf pwgen"
   # Full packages: installed only with --install-all. Heaviest or least-used
   # extras; add to this list as needed.
   full=""
@@ -602,7 +602,7 @@ if [ "$PLATFORM" = "linux" ]; then
     core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep nodejs npm shfmt chafa"
     # Optional packages: installed only with --install-optional or --install-all.
     # Candidates to add: zlib1g-dev
-    optional="pv entr fzf"
+    optional="pv entr fzf pwgen"
     # Full packages: installed only with --install-all.
     full=""
 
