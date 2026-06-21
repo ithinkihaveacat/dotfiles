@@ -572,6 +572,7 @@ Catalog Entries:
   gemini-sdk-js          Google Gemini JavaScript SDK codegen instructions
   homeassistant          Home Assistant integration, automation, API and CLI documentation
   inkyframe              Pimoroni Inky Frame documentation
+  kamal                  Kamal deployment documentation
   mcp-server             MCP server documentation and specification
   meshtastic             Meshtastic documentation
   prompting              Prompt engineering guides for Claude, Gemini, and OpenAI
