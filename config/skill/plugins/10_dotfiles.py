@@ -34,3 +34,8 @@ def register(api):
         "remote:skill-creator",
         "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
     )
+
+    api.register_skill(
+        "remote:playwright-cli",
+        "https://github.com/microsoft/playwright-cli/tree/main/skills/playwright-cli",
+    )
