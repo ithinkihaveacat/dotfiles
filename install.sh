@@ -549,7 +549,7 @@ if exists brew; then
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
   # Known packages, so they are kept (not flagged) when present on a core run.
-  optional="imagemagick-full yt-dlp go ffmpeg apktool git composer protobuf bundletool scrcpy git-lfs llm firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf"
+  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf"
   # Full packages: installed only with --install-all. Heaviest or least-used
   # extras; add to this list as needed.
   full=""
