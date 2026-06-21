@@ -549,7 +549,9 @@ if exists brew; then
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
   # Known packages, so they are kept (not flagged) when present on a core run.
-  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf pwgen"
+  # ruby-build compiles Ruby for ruby-install/direnv; brew pulls its build deps
+  # (openssl, libyaml, readline) automatically.
+  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf pwgen ruby-build"
   # Full packages: installed only with --install-all. Heaviest or least-used
   # extras; add to this list as needed.
   full=""
@@ -601,8 +603,10 @@ if [ "$PLATFORM" = "linux" ]; then
     # Core packages: always installed, on every run.
     core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep nodejs npm shfmt chafa"
     # Optional packages: installed only with --install-optional or --install-all.
-    # Candidates to add: zlib1g-dev
-    optional="pv entr fzf pwgen"
+    # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
+    # ruby-build binary itself is bootstrapped from git below, as the apt package
+    # is too old to build current Ruby). rustc (YJIT) is omitted to stay lean.
+    optional="pv entr fzf pwgen build-essential autoconf libssl-dev libyaml-dev libreadline-dev zlib1g-dev libffi-dev libgmp-dev libncurses-dev libgdbm-dev"
     # Full packages: installed only with --install-all.
     full=""
 
@@ -614,6 +618,23 @@ if [ "$PLATFORM" = "linux" ]; then
     comm -13 <(dpkg-query -f '${binary:Package}\n' -W | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
     # Can't remove any packages because not possible to determine which were
     # user-installed. Use `apt-get remove` to remove manually.
+
+    # ruby-build: the engine behind ruby-install. Installed alongside the Ruby
+    # build deps above whenever the optional/all tier is selected, so the two
+    # always arrive together. apt's ruby-build is too old to build current Ruby,
+    # so bootstrap a current copy from git into ~/.local (binary at
+    # ~/.local/bin/ruby-build, where ruby-install looks for it).
+    if [ "$INSTALL_TIER" != core ] && exists git; then
+      RUBY_BUILD_SRC="$HOME/.local/share/ruby-build"
+      if [ -d "$RUBY_BUILD_SRC/.git" ]; then
+        x git -C "$RUBY_BUILD_SRC" pull --ff-only || echo "warning: ruby-build update failed"
+      else
+        x git clone https://github.com/rbenv/ruby-build.git "$RUBY_BUILD_SRC" || echo "warning: ruby-build clone failed"
+      fi
+      if [ -x "$RUBY_BUILD_SRC/install.sh" ]; then
+        x env PREFIX="$HOME/.local" "$RUBY_BUILD_SRC/install.sh" || echo "warning: ruby-build install failed"
+      fi
+    fi
 
     # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
     x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"

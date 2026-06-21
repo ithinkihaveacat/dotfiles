@@ -100,13 +100,11 @@ add_path $HOME/.local/share/google-cloud-sdk/bin
 
 # Ruby
 #
-# Install gems via:
-#
-#   $ gem install $name --user-install
+# direnv looks in RUBY_VERSIONS for different versions of ruby; ruby-install has
+# been configured to install them there. See ~/.direnvrc for usage instructions.
 
-#set -x GEM_HOME ~/.gem
-
-#for d in ~/.gem/ruby/*/bin; add_path $d; end
+set -x RUBY_VERSIONS $HOME/.local/share/ruby/versions
+mkdir -p $RUBY_VERSIONS
 
 # Node
 #

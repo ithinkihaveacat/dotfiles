@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+
+# Installs a specific version of Ruby to a given prefix directory.
+# Compiles from source via ruby-build (https://github.com/rbenv/ruby-build).
+
+set -o errexit
+set -o errtrace
+set -o nounset
+
+readonly DEFAULT_PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/ruby/versions"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] VERSION [PREFIX]
+       $(basename "$0") --list
+       $(basename "$0") --installed
+
+Compiles and installs a specific version of Ruby from source.
+
+Arguments:
+  VERSION     Ruby version to install. Supports partial versions:
+              - "3.4.1" installs exactly 3.4.1
+              - "3.4" installs the latest 3.4.x
+              - "3" installs the latest 3.x.x
+  PREFIX      Directory where Ruby will be installed (optional).
+              A subdirectory named ruby-vVERSION will be created.
+              Default: \$XDG_DATA_HOME/ruby/versions or ~/.local/share/ruby/versions
+
+Options:
+  -l, --list       List all installable stable Ruby versions
+  -i, --installed  List all installed Ruby versions
+  --help           Display this help message and exit
+
+Examples:
+  # Install latest Ruby 3.4.x
+  $(basename "$0") 3.4
+
+  # List installable versions
+  $(basename "$0") --list
+
+  # List installed versions
+  $(basename "$0") --installed
+
+Versions are compiled from source, so the first install of a version takes a few
+minutes. The build is performed by ruby-build; if a system library is missing it
+will report which one at configure time.
+EOF
+  exit 0
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+# Locate the ruby-build executable. Checks PATH, then the standalone install
+# location (~/.local/bin), then the rbenv plugin directory.
+find_ruby_build() {
+  if command -v ruby-build >/dev/null 2>&1; then
+    command -v ruby-build
+    return 0
+  fi
+
+  local candidate="$HOME/.local/bin/ruby-build"
+  if [[ -x "$candidate" ]]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  local rbenv_root
+  if command -v rbenv >/dev/null 2>&1; then
+    rbenv_root=$(rbenv root 2>/dev/null)
+    candidate="$rbenv_root/plugins/ruby-build/bin/ruby-build"
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# List installable stable MRI versions (plain X.Y.Z, no engine prefix or
+# pre-release suffix), sorted ascending.
+list_versions() {
+  "$RUBY_BUILD" --definitions |
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' |
+    sort -V
+}
+
+# List locally installed versions.
+list_installed() {
+  local dir="${1:-$DEFAULT_PREFIX}"
+  if [[ ! -d "$dir" ]]; then
+    echo "$(basename "$0"): no versions found in $dir" >&2
+    return
+  fi
+
+  find "$dir" -maxdepth 1 -name "ruby-v*" -type d |
+    sed 's|.*/ruby-||' |
+    sort -V
+}
+
+# Resolve a partial version to the highest matching full version.
+# Supports: "3" -> "3.x.x", "3.4" -> "3.4.x", "3.4.1" -> "3.4.1"
+# Returns the full version number or empty if not found.
+resolve_version() {
+  local input="$1"
+  local pattern
+
+  # Count dots to determine version specificity.
+  # Note: Use arithmetic expansion to handle macOS wc whitespace padding.
+  local dots
+  dots=$(($(echo "$input" | tr -cd '.' | wc -c)))
+
+  case "$dots" in
+    0) pattern="^${input}\\." ;; # "3" matches "3.*"
+    1) pattern="^${input}\\." ;; # "3.4" matches "3.4.*"
+    2) pattern="^${input}$" ;;   # "3.4.1" matches exactly
+    *) pattern="^${input}$" ;;
+  esac
+
+  list_versions | grep -E "$pattern" | tail -1
+}
+
+# Handle --help first so it works even without dependencies installed.
+if [[ "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+RUBY_BUILD=$(find_ruby_build) || {
+  echo "$(basename "$0"): ruby-build not found (needed to compile Ruby from source)" >&2
+  exit 127
+}
+require cc
+
+# Handle --list and --installed before checking argument count.
+case "${1:-}" in
+  -l | --list)
+    list_versions
+    exit 0
+    ;;
+  -i | --installed)
+    PREFIX="${2:-$DEFAULT_PREFIX}"
+    list_installed "$PREFIX"
+    exit 0
+    ;;
+esac
+
+# Show help if no arguments provided.
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+# Parse positional arguments.
+VERSION_INPUT=$(echo "$1" | tr -d 'vV')
+PREFIX="${2:-$DEFAULT_PREFIX}"
+
+# Resolve partial version to full version (e.g., "3.4" -> "3.4.1").
+VERSION=$(resolve_version "$VERSION_INPUT")
+if [[ -z "$VERSION" ]]; then
+  echo "$(basename "$0"): no Ruby version matching '$VERSION_INPUT' found" >&2
+  echo "Use '$(basename "$0") --list' to see installable versions." >&2
+  exit 1
+fi
+
+TARGET="$PREFIX/ruby-v$VERSION"
+
+# Check for existing installation.
+if [[ -d "$TARGET" ]]; then
+  echo "$(basename "$0"): '$TARGET' already exists" >&2
+  exit 1
+fi
+
+mkdir -p "$PREFIX"
+
+echo "Building Ruby $VERSION (this may take a few minutes)..." >&2
+"$RUBY_BUILD" "$VERSION" "$TARGET"
+
+echo "$TARGET"
+echo ""
+echo "Tip: use direnv to switch Ruby versions. See ~/.direnvrc for usage." >&2
