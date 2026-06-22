@@ -1180,7 +1180,7 @@ def cmd_preflight(caller_label):
         print(f"{caller_label}: error in {ws.root}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    is_healthy = cmd_doctor()
+    is_healthy = cmd_doctor(verbose=False, check_catalog=False, stream=sys.stderr)
     sys.exit(0 if is_healthy else 1)
 
 
@@ -1595,8 +1595,29 @@ TARGET DIRECTORY INFO:
         print("\nTo install a recommendation, run: skill add <name>", file=sys.stderr)
 
 
-def cmd_doctor():
+def colorize(text: str, color_name: str, enabled: bool = True) -> str:
+    """Applies ANSI terminal styling to text if enabled."""
+    if not enabled:
+        return text
+    codes = {
+        "green": "\033[32m",
+        "yellow": "\033[33m",
+        "red": "\033[31m",
+        "bold": "\033[1m",
+        "reset": "\033[0m",
+    }
+    return f"{codes.get(color_name, '')}{text}{codes['reset']}"
+
+
+def cmd_doctor(
+    verbose: bool = False, check_catalog: bool = False, stream=sys.stderr
+) -> bool:
+    """Diagnoses the health of the workspace, skill configuration, and catalog.
+
+    Returns True if healthy (no errors or warnings), False otherwise.
+    """
     ws = get_workspace()
+    use_color = stream.isatty() if hasattr(stream, "isatty") else False
 
     expected_skills = ws.get_expected_skills()
     actual_skills, unmanaged, dangling = ws.get_actual_skills()
@@ -1608,14 +1629,50 @@ def cmd_doctor():
             return p
 
     dest_dirs = []
+    dest_err = None
     try:
         dest_dirs = ws.get_dest_dirs()
-    except RuntimeError:
-        pass
+    except RuntimeError as e:
+        dest_err = str(e)
 
-    # Resolve all expected skills to their physical target paths
-    expected_targets = {}  # Path(abspath) -> spec_string
+    checks = []
+
+    # Check 1: Workspace Detection
+    ws_type = "Git repository" if isinstance(ws, GitWorkspace) else "Non-VCS directory"
+    checks.append(
+        {
+            "name": "Workspace",
+            "status": "OK",
+            "summary": f"{ws_type} detected at {clean_p(ws.root)}",
+            "details": [],
+        }
+    )
+
+    # Check 2: Agent Configuration
+    if dest_err:
+        checks.append(
+            {
+                "name": "Agent Configuration",
+                "status": "ERROR",
+                "summary": "No active agent configuration detected",
+                "details": [dest_err],
+            }
+        )
+    else:
+        dest_desc = ", ".join(clean_p(d) for d in dest_dirs)
+        checks.append(
+            {
+                "name": "Agent Configuration",
+                "status": "OK",
+                "summary": f"Found active destination(s): {dest_desc}",
+                "details": [],
+            }
+        )
+
+    # Check 3: Required Skills (Alignment)
     missing = []
+    extra = []
+    expected_targets = {}
 
     for spec in expected_skills:
         try:
@@ -1623,7 +1680,6 @@ def cmd_doctor():
             abs_src = Path(os.path.abspath(src_path))
             expected_targets[abs_src] = spec
 
-            # Verify symlink exists pointing to this target
             if dest_dirs:
                 for d in dest_dirs:
                     p = d / src_path.name
@@ -1636,7 +1692,6 @@ def cmd_doctor():
                         if label not in missing:
                             missing.append(label)
                     else:
-                        # Read the symlink target and compare its absolute path
                         target = os.readlink(p)
                         target_abs = Path(os.path.abspath(p.parent / target))
                         if target_abs != abs_src:
@@ -1647,12 +1702,11 @@ def cmd_doctor():
                             )
                             if label not in missing:
                                 missing.append(label)
+            else:
+                missing.append(spec)
         except Exception:
-            # Spec cannot be resolved - definitely missing!
             missing.append(spec)
 
-    # Compute extra skills: symlinks whose resolved targets are not expected
-    extra = []
     if dest_dirs:
         for s in actual_skills:
             for d in dest_dirs:
@@ -1667,7 +1721,78 @@ def cmd_doctor():
                     except Exception:
                         pass
 
-    # Check for orphaned directories (local directory exists but global configuration directory does not)
+    skill_details = []
+    if missing:
+        skill_details.append("Missing skills (declared but not linked on disk):")
+        for s in missing:
+            skill_details.append(f"  - {s}")
+    if extra:
+        skill_details.append("Extra skills (linked on disk but not declared):")
+        for s in extra:
+            skill_details.append(f"  - {s}")
+
+    if missing or extra:
+        checks.append(
+            {
+                "name": "Required Skills",
+                "status": "ERROR",
+                "summary": f"Mismatched skill configuration ({len(missing)} missing, {len(extra)} extra)",
+                "details": skill_details,
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Required Skills",
+                "status": "OK",
+                "summary": f"All {len(expected_skills)} expected skills are correctly installed and symlinked",
+                "details": [],
+            }
+        )
+
+    # Check 4: Symlink Health
+    if dangling:
+        checks.append(
+            {
+                "name": "Symlink Health",
+                "status": "ERROR",
+                "summary": f"Found {len(dangling)} broken or dangling symlink(s)",
+                "details": ["Dangling symlinks:"]
+                + [f"  - {rel(item)}" for item in dangling],
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Symlink Health",
+                "status": "OK",
+                "summary": "No dangling or broken symlinks detected",
+                "details": [],
+            }
+        )
+
+    # Check 5: Directory Cleanliness
+    if unmanaged:
+        checks.append(
+            {
+                "name": "Directory Cleanliness",
+                "status": "ERROR",
+                "summary": f"Found {len(unmanaged)} unmanaged file(s) or directory/directories in skill folders",
+                "details": ["Unmanaged artifacts (should be moved or deleted):"]
+                + [f"  - {rel(item)}" for item in unmanaged],
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Directory Cleanliness",
+                "status": "OK",
+                "summary": "No unmanaged files or directories in skill folders",
+                "details": [],
+            }
+        )
+
+    # Check 6: Orphaned Directories
     home = Path.home()
     orphaned = []
     if (ws.root / ".claude/skills").is_dir() and not (home / ".claude").is_dir():
@@ -1687,139 +1812,227 @@ def cmd_doctor():
             )
         )
 
-    backend_issues = ws.doctor_issues()
-
-    if not (missing or extra or unmanaged or dangling or orphaned or backend_issues):
-        return True
-
-    print(
-        f"skill: Mismatched / unhealthy skill configuration detected in {ws.root}!",
-        file=sys.stderr,
-    )
-    if missing:
-        print(
-            "  missing skills (declared in AGENT_REQUIRED_SKILLS but not linked on disk):",
-            file=sys.stderr,
-        )
-        for s in missing:
-            print(f"    - {s}", file=sys.stderr)
-    if extra:
-        print(
-            "  extra skills (linked on disk but not in AGENT_REQUIRED_SKILLS):",
-            file=sys.stderr,
-        )
-        for s in extra:
-            print(f"    - {s}", file=sys.stderr)
-    if unmanaged:
-        print(
-            "  unmanaged artifacts (files/directories in skill folders that are not symlinks):",
-            file=sys.stderr,
-        )
-        for item in unmanaged:
-            print(f"    - {rel(item)}", file=sys.stderr)
-    if dangling:
-        print("  dangling/broken symlinks:", file=sys.stderr)
-        for item in dangling:
-            print(f"    - {rel(item)}", file=sys.stderr)
     if orphaned:
-        print(
-            "  orphaned skill directories (local directory exists but global agent configuration directory does not):",
-            file=sys.stderr,
+        checks.append(
+            {
+                "name": "Orphaned Directories",
+                "status": "WARNING",
+                "summary": f"Found {len(orphaned)} orphaned skill directory/directories",
+                "details": ["Orphaned folders:"]
+                + [f"  - {path} ({reason})" for path, reason in orphaned],
+            }
         )
-        for path, reason in orphaned:
-            print(f"    - {path} ({reason})", file=sys.stderr)
-    for issue in backend_issues:
-        print(f"  {issue}", file=sys.stderr)
+    else:
+        checks.append(
+            {
+                "name": "Orphaned Directories",
+                "status": "OK",
+                "summary": "No orphaned skill directories detected",
+                "details": [],
+            }
+        )
 
-    print("\nTo resolve this:", file=sys.stderr)
+    # Check 7: Workspace Exclusions (Git-specific)
+    backend_issues = ws.doctor_issues()
+    if backend_issues:
+        checks.append(
+            {
+                "name": "Workspace Exclusions",
+                "status": "ERROR",
+                "summary": "Exclude configuration drift detected",
+                "details": ["Exclude drift issues:"]
+                + [f"  - {issue}" for issue in backend_issues],
+            }
+        )
+    elif isinstance(ws, GitWorkspace):
+        checks.append(
+            {
+                "name": "Workspace Exclusions",
+                "status": "OK",
+                "summary": f"{clean_p(ws.exclude_file)} is fully synchronized",
+                "details": [],
+            }
+        )
+
+    # Catalog-specific checks
+    unresolvable_local = False
+    catalog_index_issues = []
+    catalog_stale_issues = []
+    plugin_path_issues = []
+
+    if check_catalog:
+        api = get_api()
+        catalog_dir = get_catalog_dir()
+        meta_dir = catalog_dir / ".meta"
+
+        for name, entry in api.plugin_catalog.items():
+            stub_md = catalog_dir / name / "SKILL.md"
+            meta = meta_dir / name
+
+            if "path" in entry:
+                target_path = Path(entry["path"]).expanduser()
+                if not target_path.is_dir():
+                    plugin_path_issues.append(
+                        f"  - {name} (path does not exist: {clean_p(target_path)})"
+                    )
+                    unresolvable_local = True
+                    continue
+
+            if not stub_md.is_file():
+                catalog_index_issues.append(f"  - {name} (not indexed in catalog)")
+            elif meta.is_file():
+                if (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
+                    catalog_stale_issues.append(f"  - {name} (index is stale)")
+
+        # Check 8: Plugin Local Paths
+        if plugin_path_issues:
+            checks.append(
+                {
+                    "name": "Plugin Local Paths",
+                    "status": "ERROR",
+                    "summary": f"Found {len(plugin_path_issues)} missing plugin-defined local path(s)",
+                    "details": ["Missing plugin paths:"] + plugin_path_issues,
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "name": "Plugin Local Paths",
+                    "status": "OK",
+                    "summary": "All plugin-defined local paths exist",
+                    "details": [],
+                }
+            )
+
+        # Check 9: Catalog Cache
+        catalog_details = []
+        if catalog_index_issues:
+            catalog_details.append("Missing from catalog index:")
+            for issue in catalog_index_issues:
+                catalog_details.append(f"  {issue}")
+        if catalog_stale_issues:
+            catalog_details.append("Stale catalog indexes:")
+            for issue in catalog_stale_issues:
+                catalog_details.append(f"  {issue}")
+
+        if catalog_index_issues or catalog_stale_issues:
+            status = "ERROR" if catalog_index_issues else "WARNING"
+            checks.append(
+                {
+                    "name": "Catalog Cache",
+                    "status": status,
+                    "summary": f"Catalog cache issues detected ({len(catalog_index_issues)} missing, {len(catalog_stale_issues)} stale)",
+                    "details": catalog_details,
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "name": "Catalog Cache",
+                    "status": "OK",
+                    "summary": "All remote catalog stubs are indexed and fresh",
+                    "details": [],
+                }
+            )
+
+    # Render checks
+    has_issues = any(c["status"] != "OK" for c in checks)
+
+    def format_status(status):
+        if status == "OK":
+            icon = "✓"
+            color_name = "green"
+        elif status == "WARNING":
+            icon = "!"
+            color_name = "yellow"
+        else:
+            icon = "✗"
+            color_name = "red"
+        return colorize(f"[{icon}]", color_name, use_color)
+
+    if verbose or has_issues:
+        for check in checks:
+            if verbose or check["status"] != "OK":
+                print(
+                    f"{format_status(check['status'])} {check['name']}: {check['summary']}",
+                    file=stream,
+                )
+                if check["details"]:
+                    for line in check["details"]:
+                        print(f"    {line}", file=stream)
+
+    # Collect resolution steps
+    resolutions = []
     if missing or dangling or backend_issues:
-        print(
-            "  - To synchronize and repair your configuration, run 'git-setup' or 'skill apply'.",
-            file=sys.stderr,
+        resolutions.append(
+            "To synchronize and repair your configuration, run 'git-setup' or 'skill apply'."
         )
     if extra:
         if is_using_envrc(ws):
-            print(
-                "  - Add the extra skill(s) to your AGENT_REQUIRED_SKILLS in .envrc:",
-                file=sys.stderr,
+            resolutions.append(
+                "Add the extra skill(s) to your AGENT_REQUIRED_SKILLS in .envrc:\n"
+                f'      export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"\n'
+                "  - Or remove the local symlink(s):\n"
+                f"      skill remove {' '.join(extra)}"
             )
         else:
-            print(
-                "  - Add the extra skill(s) to the AGENT_REQUIRED_SKILLS environment variable:",
-                file=sys.stderr,
+            resolutions.append(
+                "Add the extra skill(s) to the AGENT_REQUIRED_SKILLS environment variable:\n"
+                f'      export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"\n'
+                "  - Or remove the local symlink(s):\n"
+                f"      skill remove {' '.join(extra)}"
             )
-        print(
-            f'      export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"',
-            file=sys.stderr,
-        )
-        print("  - Or remove the local symlink(s):", file=sys.stderr)
-        print(f"      skill remove {' '.join(extra)}", file=sys.stderr)
     if unmanaged:
-        print(
-            "  - Manually delete or move the unmanaged files/directories out of the skill folders.",
-            file=sys.stderr,
+        resolutions.append(
+            "Manually delete or move the unmanaged files/directories out of the skill folders."
         )
     if orphaned:
-        print(
-            "  - Delete the orphaned directory/directories if you no longer use those agents:",
-            file=sys.stderr,
+        rm_cmds = " && ".join(f"rm -rf {path}" for path, _ in orphaned)
+        resolutions.append(
+            f"Delete the orphaned directory/directories if you no longer use those agents:\n"
+            f"      {rm_cmds}"
         )
-        for path, _ in orphaned:
-            print(f"      rm -rf {path}", file=sys.stderr)
-    print("", file=sys.stderr)
-    return False
+    if plugin_path_issues:
+        resolutions.append(
+            "Fix the missing local paths for your plugins in your configuration."
+        )
+    if catalog_index_issues or catalog_stale_issues:
+        if not unresolvable_local:
+            resolutions.append(
+                "To repair the catalog cache, run 'skill update --catalog'."
+            )
+
+    if has_issues:
+        if resolutions:
+            print(
+                colorize("\nTo resolve these issues:", "bold", use_color), file=stream
+            )
+            for r in resolutions:
+                lines = r.split("\n")
+                print(f"  • {lines[0]}", file=stream)
+                for line in lines[1:]:
+                    print(f"    {line}", file=stream)
+        return False
+
+    if verbose:
+        print(
+            colorize(
+                "\n✔ Workspace is healthy and skills are fully synchronized!",
+                "green",
+                use_color,
+            ),
+            file=stream,
+        )
+    return True
 
 
 def cmd_doctor_all():
-    local_ok = cmd_doctor()
+    """Canonical entrypoint for the 'skill doctor' command.
 
-    catalog_ok = True
-    api = get_api()
-    catalog_dir = get_catalog_dir()
-    meta_dir = catalog_dir / ".meta"
-    issues = []
-    unresolvable_local = False
-
-    # Run catalog index stubs doctor natively
-    for name, entry in api.plugin_catalog.items():
-        stub_md = catalog_dir / name / "SKILL.md"
-        meta = meta_dir / name
-
-        if "path" in entry:
-            target_path = Path(entry["path"]).expanduser()
-            if not target_path.is_dir():
-                issues.append(
-                    f"  error        {name} (plugin-provided path does not exist: {clean_p(target_path)})"
-                )
-                unresolvable_local = True
-                catalog_ok = False
-                continue
-
-        if not stub_md.is_file():
-            issues.append(
-                f"  missing      {name} (plugin-defined but not indexed in catalog)"
-            )
-            catalog_ok = False
-        elif meta.is_file():
-            if (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
-                issues.append(f"  stale        {name} (catalog index is stale)")
-                catalog_ok = False
-
-    if issues:
-        print("\nCatalog Mismatches / Issues:", file=sys.stderr)
-        for line in sorted(issues):
-            print(line, file=sys.stderr)
-        if unresolvable_local:
-            print("                (fix missing local paths first)", file=sys.stderr)
-        else:
-            print(
-                "                To repair catalog, run 'skill update --catalog'",
-                file=sys.stderr,
-            )
-
-    if not local_ok or not catalog_ok:
-        sys.exit(1)
-    sys.exit(0)
+    Runs both local and catalog diagnostics, printing to stdout with verbose reporting.
+    """
+    healthy = cmd_doctor(verbose=True, check_catalog=True, stream=sys.stdout)
+    sys.exit(0 if healthy else 1)
 
 
 def usage():
