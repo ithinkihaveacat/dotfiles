@@ -49,6 +49,58 @@ def prune_dirs(dest_dirs):
             pass
 
 
+def print_workspace_root(ws, stream=sys.stderr) -> None:
+    """Announce the resolved workspace root before a mutating operation.
+
+    The skill-anchor walk (see find_skill_anchor) can bind the workspace to an
+    ancestor of the current directory, so symlinks created by 'add'/'apply' (and
+    removed by 'remove'/'clean') may land somewhere other than where the command
+    was run. Print that resolved location to stderr (it is status, not data) and
+    flag the redirect explicitly when the anchor sits above the current
+    directory.
+    """
+    root = ws.root
+    cwd = Path.cwd().resolve()
+    if root == cwd:
+        print(f"skill: workspace root: {clean_p(root)}", file=stream)
+    else:
+        print(
+            f"skill: workspace root: {clean_p(root)} "
+            f"(anchor above current directory {clean_p(cwd)})",
+            file=stream,
+        )
+
+
+def anchor_subdirs() -> list[str]:
+    """The skill destination subpaths that mark a directory as a workspace anchor."""
+    if "SKILL_DEST_DIRS" in os.environ:
+        return [d for d in os.environ["SKILL_DEST_DIRS"].split(":") if d]
+    return [".claude/skills", ".agents/skills"]
+
+
+def find_skill_anchor(start: Path, boundary: Path) -> Path:
+    """Resolve the workspace anchor the way an agent discovers project skills.
+
+    Agents (Claude, Codex) load skills from the starting directory and every
+    parent directory up to the repository root. To keep 'skill' aligned with
+    that behavior, we walk from 'start' up to and including 'boundary' (the repo
+    root) and bind to the nearest ancestor that already contains a skills
+    directory. If none exists yet, we fall back to 'boundary' so a fresh 'apply'
+    installs once at the repo root, where an agent launched anywhere below will
+    discover it.
+    """
+    subdirs = anchor_subdirs()
+    chain = [start]
+    cur = start
+    while cur != boundary and boundary in cur.parents:
+        cur = cur.parent
+        chain.append(cur)
+    for d in chain:  # nearest first
+        if any((d / sd).is_dir() for sd in subdirs):
+            return d
+    return boundary
+
+
 # ==============================================================================
 # Workspace Abstractions
 # ==============================================================================
@@ -197,8 +249,11 @@ class GitWorkspace(Workspace):
                 text=True,
                 check=True,
             )
-            git_root = Path(res.stdout.strip())
-            root = Path.cwd().resolve()
+            git_root = Path(res.stdout.strip()).resolve()
+            # Bind to the anchor an agent would discover (cwd up to the repo
+            # root), not cwd itself, so 'apply' and 'preflight' agree no matter
+            # which depth each is invoked from.
+            root = find_skill_anchor(Path.cwd().resolve(), git_root)
 
             def git_path(rel):
                 r = subprocess.run(
@@ -875,6 +930,9 @@ def cmd_add(specs, is_apply=False):
     except RuntimeError as e:
         cmderr("add", str(e))
 
+    if not is_apply:
+        print_workspace_root(ws)
+
     resolved_skills = []
     has_errors = False
     for spec in specs:
@@ -949,7 +1007,7 @@ def cmd_add(specs, is_apply=False):
     return True
 
 
-def cmd_remove(names):
+def cmd_remove(names, announce=True):
     if not names:
         cmderr("remove", "skill name required")
 
@@ -958,6 +1016,9 @@ def cmd_remove(names):
         dest_dirs = ws.get_dest_dirs()
     except RuntimeError as e:
         cmderr("remove", str(e))
+
+    if announce:
+        print_workspace_root(ws)
 
     for arg in names:
         # Try to resolve to find the physical target's basename
@@ -1045,6 +1106,9 @@ def cmd_clean():
         dest_dirs = ws.get_dest_dirs()
     except RuntimeError as e:
         cmderr("clean", str(e))
+
+    print_workspace_root(ws)
+
     actual_skills, _, _ = ws.get_actual_skills()
 
     any_dir = any(d.is_dir() for d in dest_dirs)
@@ -1139,6 +1203,7 @@ def get_parsed_skills():
 
 def cmd_apply(args):
     ws = get_workspace()
+    print_workspace_root(ws)
     expected_skills = ws.get_expected_skills()
 
     if not expected_skills:
@@ -1207,7 +1272,7 @@ def cmd_apply(args):
                     f"(To keep it, add it to the AGENT_REQUIRED_SKILLS environment variable)",
                     file=sys.stderr,
                 )
-        cmd_remove(extra_skills)
+        cmd_remove(extra_skills, announce=False)
 
     if not add_ok:
         sys.exit(1)
@@ -1688,13 +1753,20 @@ def cmd_doctor(
     checks = []
 
     # Check 1: Workspace Detection
+    # The workspace root is the most critical path in the report: every skill
+    # symlink and exclude entry is relative to it, and the anchor walk can
+    # resolve it above the current directory. Lead with it and label it plainly.
     ws_type = "Git repository" if isinstance(ws, GitWorkspace) else "Non-VCS directory"
+    cwd = Path.cwd().resolve()
+    ws_details = [f"Root: {clean_p(ws.root)}"]
+    if ws.root != cwd:
+        ws_details.append(f"Anchor resolved above current directory {clean_p(cwd)}")
     checks.append(
         {
             "name": "Workspace",
             "status": "OK",
-            "summary": f"{ws_type} detected at {clean_p(ws.root)}",
-            "details": [],
+            "summary": ws_type,
+            "details": ws_details,
         }
     )
 

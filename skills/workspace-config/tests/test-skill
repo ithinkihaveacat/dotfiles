@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..49"
+echo "1..50"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -179,22 +179,31 @@ else
   echo "not ok 12 - [Git] clean failed"
 fi
 
-# Test 13: add from subdirectory creates skills in subdirectory and updates top-level exclude
+# Test 13: from a subdirectory with no local skills dir, 'add' binds to the
+# anchor an agent would discover (the repo root), installs there rather than
+# scattering a skills dir into the subdirectory, and a 'preflight' run from the
+# subdirectory agrees with that install (the apply<->preflight composability
+# the cwd-as-root regression broke).
 mkdir -p sub
 cd sub
+export AGENT_REQUIRED_SKILLS="coding-standards"
 if "${SCRIPT}" add coding-standards >/dev/null 2>&1; then
-  if [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/coding-standards ] &&
-    grep -q "/sub/.claude/skills/coding-standards" ../.git/info/exclude &&
-    grep -q "/sub/.agents/skills/coding-standards" ../.git/info/exclude &&
+  if [ -L ../.claude/skills/coding-standards ] && [ -L ../.agents/skills/coding-standards ] &&
+    [ ! -e .claude/skills/coding-standards ] && [ ! -e .agents/skills/coding-standards ] &&
+    grep -q "/.claude/skills/coding-standards" ../.git/info/exclude &&
+    grep -q "/.agents/skills/coding-standards" ../.git/info/exclude &&
+    "${SCRIPT}" preflight claude >/dev/null 2>&1 &&
     [ ! -f ../.git/info/skills ]; then
-    echo "ok 13 - [Git] add from subdirectory installs locally and updates top-level exclude"
+    echo "ok 13 - [Git] subdirectory add binds to repo-root anchor; preflight agrees"
   else
-    echo "not ok 13 - [Git] subdirectory install or top-level exclude failed"
+    echo "not ok 13 - [Git] subdirectory anchor/exclude/preflight mismatch"
   fi
 else
   echo "not ok 13 - [Git] add from subdirectory failed"
 fi
+export AGENT_REQUIRED_SKILLS=""
 cd ..
+"${SCRIPT}" clean >/dev/null 2>&1 || true
 
 # Test 14: legacy migration (skipped in stateless model)
 echo "ok 14 - [Git] legacy exclude-block state migration skipped # SKIP"
@@ -708,6 +717,7 @@ export AGENT_REQUIRED_SKILLS="coding-standards"
 # Test 46: skill doctor on success outputs detailed report
 if doctor_out=$("${SCRIPT}" doctor 2>&1); then
   if printf '%s\n' "$doctor_out" | grep -q "\[✓\] Workspace:" &&
+    printf '%s\n' "$doctor_out" | grep -q "Root: ${UI_TEST_DIR}" &&
     printf '%s\n' "$doctor_out" | grep -q "\[✓\] Required Skills:" &&
     printf '%s\n' "$doctor_out" | grep -q "Workspace is healthy and skills are fully synchronized!"; then
     echo "ok 46 - [Doctor UI] success outputs beautiful detailed report"
@@ -754,6 +764,26 @@ else
     echo "not ok 49 - [Preflight UI] failure report missing errors or resolution instructions: $preflight_fail_out"
   fi
 fi
+
+# Test 50: a mutating command run from a subdirectory announces the resolved
+# workspace root and flags that the anchor sits above the current directory, so
+# the user can see skills land at the repo root rather than where they ran it.
+ROOT_NOTE_DIR="${TMPDIR}/root-note"
+mkdir -p "${ROOT_NOTE_DIR}/nested"
+git -C "${ROOT_NOTE_DIR}" init -q
+cd "${ROOT_NOTE_DIR}/nested"
+if root_note_out=$("${SCRIPT}" add coding-standards 2>&1); then
+  if printf '%s\n' "$root_note_out" | grep -q "workspace root: ${ROOT_NOTE_DIR}" &&
+    printf '%s\n' "$root_note_out" | grep -q "anchor above current directory ${ROOT_NOTE_DIR}/nested"; then
+    echo "ok 50 - [Output] subdirectory mutation announces resolved root anchor"
+  else
+    echo "not ok 50 - [Output] missing or wrong workspace-root announcement: $root_note_out"
+  fi
+else
+  echo "not ok 50 - [Output] add from subdirectory failed"
+fi
+"${SCRIPT}" clean >/dev/null 2>&1 || true
+cd "$TMPDIR"
 
 # Clean up
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
