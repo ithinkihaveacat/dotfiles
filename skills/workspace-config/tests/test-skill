@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..50"
+echo "1..51"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -785,6 +785,57 @@ fi
 "${SCRIPT}" clean >/dev/null 2>&1 || true
 cd "$TMPDIR"
 
+# Test 51: Respects 'resolve: False' to avoid os.path.realpath on dynamic/symlinked paths
+RESOLVE_TEST_DIR="${TMPDIR}/resolve-test"
+mkdir -p "${RESOLVE_TEST_DIR}/real-target"
+# Create a dummy SKILL.md in real-target so it's a valid skill
+echo -e "---\nname: noresolve-skill\n---" >"${RESOLVE_TEST_DIR}/real-target/SKILL.md"
+
+# Create a symlink pointing to the real target
+ln -s "real-target" "${RESOLVE_TEST_DIR}/sym-link"
+
+# Index it in the catalog to avoid doctor mismatch warnings if needed
+mkdir -p "${XDG_CACHE_HOME}/skill-select/catalog/test:noresolve-skill"
+echo -e "---\nname: noresolve-skill\n---" >"${XDG_CACHE_HOME}/skill-select/catalog/test:noresolve-skill/SKILL.md"
+
+# Register the skill with resolve: False
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_noresolve.py"
+def register(api):
+    api.register_skill("test:noresolve-skill", {"path": "${RESOLVE_TEST_DIR}/sym-link", "resolve": False})
+EOF
+
+# Test resolve output
+resolved_out=$("${SCRIPT}" resolve test:noresolve-skill 2>/dev/null)
+if [ "$resolved_out" = "${RESOLVE_TEST_DIR}/sym-link" ]; then
+  # Also test that apply creates a symlink pointing to the unresolved path
+  APPLY_RESOLVE_DIR="${TMPDIR}/apply-resolve-test"
+  mkdir -p "$APPLY_RESOLVE_DIR"
+  cd "$APPLY_RESOLVE_DIR"
+  git init -q
+  mkdir -p .claude/skills .agents/skills
+  
+  export AGENT_REQUIRED_SKILLS="test:noresolve-skill"
+  if "${SCRIPT}" apply >/dev/null 2>&1; then
+    # The symlink in .agents/skills/sym-link should point to the unresolved path
+    symlink_target=$(readlink .agents/skills/sym-link)
+    if [ "$symlink_target" = "${RESOLVE_TEST_DIR}/sym-link" ] && "${SCRIPT}" doctor >/dev/null 2>&1; then
+      echo "ok 51 - [Resolve flag] respect resolve: False in plugins and keeps symlinks stable"
+    else
+      echo "not ok 51 - [Resolve flag] symlink target resolved unexpectedly or doctor failed: target=$symlink_target"
+    fi
+  else
+    echo "not ok 51 - [Resolve flag] apply failed"
+  fi
+  export AGENT_REQUIRED_SKILLS=""
+else
+  echo "not ok 51 - [Resolve flag] resolve command returned resolved path: $resolved_out (expected: ${RESOLVE_TEST_DIR}/sym-link)"
+fi
+
+# Clean up
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_noresolve.py"
+cd "$TMPDIR"
+
 # Clean up
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
 export AGENT_REQUIRED_SKILLS=""
+
