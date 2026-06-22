@@ -232,10 +232,10 @@ blocks:
 bin/command-index-sync --all
 ```
 
-`./install.sh` runs `command-index-sync --check --all` and warns when blocks have
-drifted. The command named in a marker is executed with its working directory
-set to the directory containing the Markdown file (hence the `../scripts/`
-prefix).
+`./install.sh` runs `command-index-sync --check --all` and warns when blocks
+have drifted. The command named in a marker is executed with its working
+directory set to the directory containing the Markdown file (hence the
+`../scripts/` prefix).
 
 ### Tests
 
@@ -274,6 +274,40 @@ grep '# Tests:' bin/my-script
 # Or check the tests directory
 ls tests/my-script/
 ```
+
+#### Isolated Environments & Dependency Caching
+
+Some test suites in this repository (such as
+`tests/workspace-config/test-skill`) run scripts in an isolated, hermetic
+environment by overriding `HOME` or `XDG_CONFIG_HOME` (e.g., to
+`/tmp/.../mock_home`).
+
+This isolation is crucial for testing clean environments, but it prevents
+package managers (like `uv` or `pip`) from accessing your corporate or personal
+credentials (like `gpkg` or `gcloud` tokens stored in your real `HOME`
+directory), resulting in `401 Unauthorized` errors when they attempt to download
+dependencies.
+
+To run these tests successfully:
+
+1. **Warm the Cache**: Run a command that uses the dependency outside the
+   isolated test environment first (or run the tool itself) to ensure the
+   packages are downloaded and cached in your host's package manager cache
+   (e.g., `~/.cache/uv`).
+1. **Share the Cache**: Execute the test runner while passing/exporting your
+   host's cache directory environment variable. The isolated package manager
+   will then resolve dependencies offline from the local cache without hitting
+   the network or requiring authentication.
+
+For `uv`-based tests, you can execute the test suite by exporting
+`UV_CACHE_DIR`:
+
+```bash
+UV_CACHE_DIR=~/.cache/uv ./skills/workspace-config/tests/test-skill
+```
+
+This is a robust and fast way to run hermetic tests that rely on external
+packages.
 
 ### Examples from This Repository
 
