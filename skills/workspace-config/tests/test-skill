@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..51"
+echo "1..52"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -813,7 +813,7 @@ if [ "$resolved_out" = "${RESOLVE_TEST_DIR}/sym-link" ]; then
   cd "$APPLY_RESOLVE_DIR"
   git init -q
   mkdir -p .claude/skills .agents/skills
-  
+
   export AGENT_REQUIRED_SKILLS="test:noresolve-skill"
   if "${SCRIPT}" apply >/dev/null 2>&1; then
     # The symlink in .agents/skills/sym-link should point to the unresolved path
@@ -835,7 +835,48 @@ fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_noresolve.py"
 cd "$TMPDIR"
 
+# Test 52: Respects negated/excluded skills in env, flags them as stale, and prunes them with 'apply'
+NEGATE_TEST_DIR="${TMPDIR}/negate-test"
+mkdir -p "$NEGATE_TEST_DIR"
+cd "$NEGATE_TEST_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+
+# Seed a stale symlink for emumanager (which is a valid skill in SKILL_SOURCE_DIRS)
+ln -s "${SKILL_SOURCE_DIRS}/emumanager" .claude/skills/emumanager
+ln -s "${SKILL_SOURCE_DIRS}/emumanager" .agents/skills/emumanager
+
+# Set environment with emumanager negated/excluded
+export AGENT_REQUIRED_SKILLS="coding-standards !emumanager"
+
+# Run doctor and check output
+if doctor_out=$("${SCRIPT}" doctor 2>&1); then
+  echo "not ok 52 - [Negated skills] doctor should have failed but succeeded"
+else
+  if printf '%s\n' "$doctor_out" | grep -q "Stale excluded skills (linked on disk but explicitly negated in env):" &&
+    printf '%s\n' "$doctor_out" | grep -q "  - emumanager" &&
+    ! printf '%s\n' "$doctor_out" | grep -q "export AGENT_REQUIRED_SKILLS.*emumanager" &&
+    printf '%s\n' "$doctor_out" | grep -q "run 'git-setup' or 'skill apply'"; then
+
+    # Run apply to prune the stale symlink
+    if "${SCRIPT}" apply >/dev/null 2>&1; then
+      # Verify symlink is gone and doctor now passes
+      if [ ! -L .claude/skills/emumanager ] && [ ! -L .agents/skills/emumanager ] &&
+        "${SCRIPT}" doctor >/dev/null 2>&1; then
+        echo "ok 52 - [Negated skills] doctor flags stale exclusions; apply successfully prunes them"
+      else
+        echo "not ok 52 - [Negated skills] symlink not pruned or doctor still failing"
+      fi
+    else
+      echo "not ok 52 - [Negated skills] apply command failed"
+    fi
+  else
+    echo "not ok 52 - [Negated skills] doctor failed to flag stale exclusions or printed wrong suggestions: $doctor_out"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
 # Clean up
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
 export AGENT_REQUIRED_SKILLS=""
-
