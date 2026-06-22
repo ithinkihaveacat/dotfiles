@@ -695,13 +695,25 @@ elif [ "$PLATFORM" = "linux" ]; then
   if ! { exists apt-get && $HAS_SUDO; }; then
     echo "warning: cannot install fish without apt-get and sudo; install manually (see README)" >&2
   elif [ "$os_id" = debian ] && [ "$os_ver" = 13 ]; then
-    echo "Debian's packaged fish is out of date; installing fish $FISH_MIN_VERSION+ from the OpenSUSE Build Service (Debian 13)..."
+    echo "Installing fish $FISH_MIN_VERSION+ from the OpenSUSE Build Service (Debian 13)..."
     # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
     if echo 'deb http://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/ /' |
       x sudo tee /etc/apt/sources.list.d/shells:fish:release:4.list >/dev/null &&
       curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_13/Release.key |
       gpg --dearmor |
         x sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_4.gpg >/dev/null &&
+      x sudo apt-get update &&
+      x sudo apt-get -y install fish; then
+      echo "Installed fish."
+    else
+      echo "warning: fish installation failed; install manually (see README)" >&2
+    fi
+  elif [ "$os_id" = ubuntu ]; then
+    echo "Installing fish $FISH_MIN_VERSION+ from the official Launchpad PPA (ppa:fish-shell/release-4)..."
+    if ! exists add-apt-repository; then
+      x sudo apt-get update && x sudo apt-get -y install software-properties-common
+    fi
+    if x sudo add-apt-repository -y ppa:fish-shell/release-4 &&
       x sudo apt-get update &&
       x sudo apt-get -y install fish; then
       echo "Installed fish."
