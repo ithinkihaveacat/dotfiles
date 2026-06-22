@@ -181,8 +181,9 @@ class GitWorkspace(Workspace):
        without polluting the repository's shared '.gitignore' file.
     """
 
-    def __init__(self, root, exclude_file):
+    def __init__(self, root, git_root, exclude_file):
         super().__init__(root)
+        self.git_root = git_root
         self.exclude_file = exclude_file
         self.mark_begin = "# >>> skills >>>"
         self.mark_end = "# <<< skills <<<"
@@ -196,7 +197,8 @@ class GitWorkspace(Workspace):
                 text=True,
                 check=True,
             )
-            root = Path(res.stdout.strip())
+            git_root = Path(res.stdout.strip())
+            root = Path.cwd().resolve()
 
             def git_path(rel):
                 r = subprocess.run(
@@ -207,7 +209,7 @@ class GitWorkspace(Workspace):
                 )
                 return Path(r.stdout.strip()).resolve()
 
-            return cls(root, git_path("info/exclude"))
+            return cls(root, git_root, git_path("info/exclude"))
         except (subprocess.CalledProcessError, FileNotFoundError):
             return None
 
@@ -238,11 +240,11 @@ class GitWorkspace(Workspace):
             rel = line.lstrip("/")
             for d in dest_dirs:
                 try:
-                    rel_d = d.relative_to(self.root)
+                    rel_d = d.relative_to(self.git_root)
                     if rel.startswith(str(rel_d) + "/"):
                         skills.add(rel[len(str(rel_d)) + 1 :])
                 except ValueError:
-                    # d is not relative to root
+                    # d is not relative to git_root
                     pass
         return sorted(skills)
 
@@ -251,15 +253,16 @@ class GitWorkspace(Workspace):
         for name in skills:
             for d in self.get_dest_dirs():
                 try:
-                    lines.add(f"/{d.relative_to(self.root)}/{name}")
+                    lines.add(f"/{d.relative_to(self.git_root)}/{name}")
                 except ValueError:
-                    # Fallback if dest_dirs are not relative to root
+                    # Fallback if dest_dirs are not relative to git_root
                     lines.add(f"/{d.name}/{name}")
         return sorted(lines)
 
     def _write_exclude_block(self, skills):
         self.exclude_file.parent.mkdir(parents=True, exist_ok=True)
         other_lines = []
+        existing_block_lines = []
         if self.exclude_file.is_file():
             in_block = False
             with open(self.exclude_file, "r", encoding="utf-8", errors="replace") as f:
@@ -271,8 +274,34 @@ class GitWorkspace(Workspace):
                     if line_stripped == self.mark_end:
                         in_block = False
                         continue
-                    if not in_block:
+                    if in_block:
+                        if line_stripped and not line_stripped.startswith("#"):
+                            existing_block_lines.append(line_stripped)
+                    else:
                         other_lines.append(line)
+
+        # Separate existing block lines into ours vs others
+        our_rel_dest_dirs = []
+        for d in self.get_dest_dirs():
+            try:
+                our_rel_dest_dirs.append(str(d.relative_to(self.git_root)))
+            except ValueError:
+                our_rel_dest_dirs.append(d.name)
+
+        preserved_block_lines = []
+        for line in existing_block_lines:
+            rel = line.lstrip("/")
+            is_ours = False
+            for rdd in our_rel_dest_dirs:
+                if rel.startswith(rdd + "/"):
+                    is_ours = True
+                    break
+            if not is_ours:
+                preserved_block_lines.append(line)
+
+        # Generate new lines and combine with preserved lines
+        new_lines = self._expected_exclude_lines(skills)
+        combined_lines = sorted(set(preserved_block_lines + new_lines))
 
         # Write to temp file in same directory for atomic replace (concurrency safety)
         temp_fd, temp_path_str = tempfile.mkstemp(dir=str(self.exclude_file.parent))
@@ -283,10 +312,10 @@ class GitWorkspace(Workspace):
                     f.write(line)
                 if other_lines and not other_lines[-1].endswith("\n"):
                     f.write("\n")
-                if skills:  # Only write block if there are skills
+                if combined_lines:  # Only write block if there are active lines
                     f.write(self.mark_begin + "\n")
                     f.write("# managed by 'skill'\n")
-                    for line in self._expected_exclude_lines(skills):
+                    for line in combined_lines:
                         f.write(line + "\n")
                     f.write(self.mark_end + "\n")
 
@@ -316,8 +345,29 @@ class GitWorkspace(Workspace):
     def doctor_issues(self):
         issues = []
         actual_skills, _, _ = self.get_actual_skills()
-        actual_exclude = self._read_block(self.mark_begin, self.mark_end) or []
-        if sorted(set(actual_exclude)) != self._expected_exclude_lines(actual_skills):
+
+        # Read the block
+        block_lines = self._read_block(self.mark_begin, self.mark_end) or []
+
+        # Filter the block lines to only include those belonging to our workspace
+        our_rel_dest_dirs = []
+        for d in self.get_dest_dirs():
+            try:
+                our_rel_dest_dirs.append(str(d.relative_to(self.git_root)))
+            except ValueError:
+                our_rel_dest_dirs.append(d.name)
+
+        our_actual_exclude = []
+        for line in block_lines:
+            rel = line.lstrip("/")
+            for rdd in our_rel_dest_dirs:
+                if rel.startswith(rdd + "/"):
+                    our_actual_exclude.append(line)
+                    break
+
+        if sorted(set(our_actual_exclude)) != self._expected_exclude_lines(
+            actual_skills
+        ):
             issues.append(
                 f"exclude drift  {clean_p(self.exclude_file)} block does not match the actual on-disk skills"
             )
@@ -705,7 +755,7 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
         if candidate_path.is_dir() and (candidate_path / "SKILL.md").is_file():
             candidates.append(
                 {
-                    "path": Path(os.path.abspath(candidate_path)),
+                    "path": Path(os.path.realpath(candidate_path)),
                     "namespace": "local",
                     "name": req_name,
                     "full_spec": f"local:{req_name}",
@@ -723,7 +773,7 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                 meta = get_skill_metadata(item, item.name)
                 canonical_name = meta["name"]
                 if canonical_name.lower() == req_name.lower():
-                    resolved_path = Path(os.path.abspath(item))
+                    resolved_path = Path(os.path.realpath(item))
                     if not any(c["path"] == resolved_path for c in candidates):
                         candidates.append(
                             {
@@ -749,7 +799,7 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                 if target_path.is_dir():
                     candidates.append(
                         {
-                            "path": Path(os.path.abspath(target_path)),
+                            "path": Path(os.path.realpath(target_path)),
                             "namespace": ns,
                             "name": short_name,
                             "full_spec": key,
@@ -765,7 +815,7 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                     if target_path.is_dir():
                         candidates.append(
                             {
-                                "path": Path(os.path.abspath(target_path)),
+                                "path": Path(os.path.realpath(target_path)),
                                 "namespace": ns,
                                 "name": short_name,
                                 "full_spec": key,
