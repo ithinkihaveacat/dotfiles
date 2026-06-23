@@ -2,7 +2,7 @@
 
 ## Align shellcheck Versions Between CI Jobs
 
-- `[ ]` Install the same pinned shellcheck (v0.11.0, from GitHub releases) in
+- `[x]` Install the same pinned shellcheck (v0.11.0, from GitHub releases) in
   the `test` job of `.github/workflows/lint.yml` as in the `shellcheck-shfmt`
   job, instead of apt's older version.
 
