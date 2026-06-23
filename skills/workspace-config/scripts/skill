@@ -1300,7 +1300,9 @@ def cmd_preflight(caller_label):
         print(f"{caller_label}: error in {ws.root}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    is_healthy = cmd_doctor(verbose=False, check_catalog=False, stream=sys.stderr)
+    is_healthy = cmd_doctor(
+        verbose=False, check_catalog=False, stream=sys.stderr, errors_only=True
+    )
     sys.exit(0 if is_healthy else 1)
 
 
@@ -1730,11 +1732,17 @@ def colorize(text: str, color_name: str, enabled: bool = True) -> str:
 
 
 def cmd_doctor(
-    verbose: bool = False, check_catalog: bool = False, stream=sys.stderr
+    verbose: bool = False,
+    check_catalog: bool = False,
+    stream=sys.stderr,
+    errors_only: bool = False,
 ) -> bool:
     """Diagnoses the health of the workspace, skill configuration, and catalog.
 
-    Returns True if healthy (no errors or warnings), False otherwise.
+    Returns True if healthy, False otherwise. By default (a full 'doctor' audit)
+    both WARNING and ERROR findings count as unhealthy. With errors_only=True
+    (the 'preflight' launch gate) only ERROR-severity findings fail; WARNING
+    findings are suppressed from the report and do not block agent launch.
     """
     ws = get_workspace()
     use_color = stream.isatty() if hasattr(stream, "isatty") else False
@@ -2079,8 +2087,26 @@ def cmd_doctor(
                 }
             )
 
-    # Render checks
-    has_issues = any(c["status"] != "OK" for c in checks)
+    # Render checks.
+    #
+    # 'doctor' is a full audit: every non-OK check (WARNING or ERROR) is a
+    # finding and makes the command exit non-zero. 'preflight' passes
+    # errors_only=True as a launch gate: only ERROR-severity checks block an
+    # agent from starting, so a WARNING-only workspace renders nothing and
+    # passes. A check is rendered only when it is "visible".
+    def is_visible(check):
+        if verbose:
+            return True
+        if check["status"] == "ERROR":
+            return True
+        if check["status"] == "WARNING":
+            return not errors_only
+        return False
+
+    fail = any(
+        (c["status"] == "ERROR") if errors_only else (c["status"] != "OK")
+        for c in checks
+    )
 
     def format_status(status):
         if status == "OK":
@@ -2094,16 +2120,15 @@ def cmd_doctor(
             color_name = "red"
         return colorize(f"[{icon}]", color_name, use_color)
 
-    if verbose or has_issues:
-        for check in checks:
-            if verbose or check["status"] != "OK":
-                print(
-                    f"{format_status(check['status'])} {check['name']}: {check['summary']}",
-                    file=stream,
-                )
-                if check["details"]:
-                    for line in check["details"]:
-                        print(f"    {line}", file=stream)
+    for check in checks:
+        if is_visible(check):
+            print(
+                f"{format_status(check['status'])} {check['name']}: {check['summary']}",
+                file=stream,
+            )
+            if check["details"]:
+                for line in check["details"]:
+                    print(f"    {line}", file=stream)
 
     # Collect resolution steps
     resolutions = []
@@ -2135,7 +2160,7 @@ def cmd_doctor(
         resolutions.append(
             "Manually delete or move the unmanaged files/directories out of the skill folders."
         )
-    if orphaned:
+    if orphaned and not errors_only:
         rm_cmds = " && ".join(f"rm -rf {path}" for path, _ in orphaned)
         resolutions.append(
             f"Delete the orphaned directory/directories if you no longer use those agents:\n"
@@ -2151,7 +2176,7 @@ def cmd_doctor(
                 "To repair the catalog cache, run 'skill update --catalog'."
             )
 
-    if has_issues:
+    if fail:
         if resolutions:
             print(
                 colorize("\nTo resolve these issues:", "bold", use_color), file=stream

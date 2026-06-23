@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..52"
+echo "1..53"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -880,3 +880,51 @@ cd "$TMPDIR"
 # Clean up
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
 export AGENT_REQUIRED_SKILLS=""
+
+# ==============================================================================
+# PART 8: Preflight severity (WARNING vs ERROR)
+# ==============================================================================
+
+# Test 53: a WARNING-only workspace must pass 'preflight' (the launch gate)
+# while 'doctor' (the full audit) still flags it. Regression: an orphaned skill
+# directory — which 'apply' itself produces via the local-dir fallback when no
+# global agent config is present — is advisory and must not block agent launch.
+PREFLIGHT_WARN_DIR="${TMPDIR}/preflight-warn"
+mkdir -p "$PREFLIGHT_WARN_DIR"
+cd "$PREFLIGHT_WARN_DIR"
+git init -q
+mkdir -p .agents/skills
+
+export SKILL_SOURCE_DIRS="${TMPDIR}/sources"
+export AGENT_REQUIRED_SKILLS="coding-standards"
+
+# Orphan .agents/skills: remove every global agent config so the directory is a
+# managed destination only via the local-dir fallback (a WARNING, not an ERROR).
+# (~/.codex is already absent in the fixture.)
+mv "$MOCK_HOME/.claude" "$MOCK_HOME/.claude-bak53"
+mv "$MOCK_HOME/.gemini/antigravity-cli" "$MOCK_HOME/.gemini/antigravity-cli-bak53"
+
+apply_rc=0
+"${SCRIPT}" apply >/dev/null 2>&1 || apply_rc=$?
+
+preflight_rc=0
+preflight_out=$("${SCRIPT}" preflight claude 2>&1) || preflight_rc=$?
+
+doctor_rc=0
+doctor_out=$("${SCRIPT}" doctor 2>&1) || doctor_rc=$?
+
+# Restore the global agent config directories before asserting.
+mv "$MOCK_HOME/.claude-bak53" "$MOCK_HOME/.claude"
+mv "$MOCK_HOME/.gemini/antigravity-cli-bak53" "$MOCK_HOME/.gemini/antigravity-cli"
+
+if [ "$apply_rc" -eq 0 ] &&
+  [ "$preflight_rc" -eq 0 ] && [ -z "$preflight_out" ] &&
+  [ "$doctor_rc" -ne 0 ] &&
+  printf '%s\n' "$doctor_out" | grep -q "Orphaned Directories" &&
+  printf '%s\n' "$doctor_out" | grep -q ".agents/skills (local folder exists"; then
+  echo "ok 53 - [Preflight] warning-only orphan passes preflight but fails doctor"
+else
+  echo "not ok 53 - [Preflight] apply_rc=$apply_rc preflight_rc=$preflight_rc preflight_out='$preflight_out' doctor_rc=$doctor_rc"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"

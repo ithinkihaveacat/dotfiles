@@ -74,6 +74,10 @@ skill <command> [arguments]
 - `SKILL_DEST_DIRS`: Colon-separated link destinations relative to the workspace
   root (default: `.claude/skills:.agents/skills`).
 
+For the underlying model — what `apply` touches, the invariants `doctor` audits,
+and the one place `doctor` and `preflight` deliberately differ — see
+[The workspace-config model](references/model.md).
+
 ______________________________________________________________________
 
 ## 2. Managing Workspace Permissions (`permission`)
