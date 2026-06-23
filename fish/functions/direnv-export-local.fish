@@ -45,7 +45,10 @@ Examples:
         return 127
     end
 
-    env -C $real_dir direnv export json 2>/dev/null \
-        | jq -r 'to_entries[] | select(.key | startswith("DIRENV_") | not) | "set -lx \(.key) \((if .value == null then "" else .value end) | @sh)"' \
-        | string collect
+    set -l json (env -C $real_dir direnv export json 2>/dev/null)
+    if test -n "$json" -a "$json" != "{}"
+        echo $json \
+            | jq -r 'to_entries[] | select(.key | startswith("DIRENV_") | not) | "set -lx \(.key) \((if .value == null then "" else .value end) | @sh)"' \
+            | string collect
+    end
 end
