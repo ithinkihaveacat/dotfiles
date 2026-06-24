@@ -619,6 +619,14 @@ if [ "$PLATFORM" = "linux" ]; then
     # Can't remove any packages because not possible to determine which were
     # user-installed. Use `apt-get remove` to remove manually.
 
+    # sysstat was removed from this script (it recommends pcp, which installs 6
+    # heavyweight daemon services). Warn so it can be purged on existing machines.
+    if dpkg-query -W -f='${Status}' sysstat 2>/dev/null | grep -q "install ok installed"; then
+      echo "⚠️  warning: sysstat is installed but no longer managed by this script."
+      echo "   It pulls in pcp (6 daemon services). Remove with:"
+      echo "   sudo apt-get remove --purge sysstat pcp"
+    fi
+
     # ruby-build: the engine behind ruby-install. Installed alongside the Ruby
     # build deps above whenever the optional/all tier is selected, so the two
     # always arrive together. apt's ruby-build is too old to build current Ruby,
