@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..49"
+echo "1..52"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -845,8 +845,15 @@ apply_rc=0
 preflight_rc=0
 preflight_out=$("${SCRIPT}" preflight claude 2>&1) || preflight_rc=$?
 
+# 1. Verify it is orphaned when all are absent
 doctor_rc=0
 doctor_out=$("${SCRIPT}" doctor 2>&1) || doctor_rc=$?
+
+# 2. Verify it is NOT orphaned when Jetski config is present
+mkdir -p "$MOCK_HOME/.gemini/jetski/cli"
+doctor_jetski_rc=0
+doctor_jetski_out=$("${SCRIPT}" doctor 2>&1) || doctor_jetski_rc=$?
+rm -rf "$MOCK_HOME/.gemini/jetski/cli"
 
 # Restore the global agent config directories before asserting.
 mv "$MOCK_HOME/.claude-bak45" "$MOCK_HOME/.claude"
@@ -856,10 +863,12 @@ if [ "$apply_rc" -eq 0 ] &&
   [ "$preflight_rc" -eq 0 ] && [ -z "$preflight_out" ] &&
   [ "$doctor_rc" -ne 0 ] &&
   printf '%s\n' "$doctor_out" | grep -q "Orphaned Directories" &&
-  printf '%s\n' "$doctor_out" | grep -q ".agents/skills (local folder exists"; then
+  printf '%s\n' "$doctor_out" | grep -q ".agents/skills (local folder exists" &&
+  [ "$doctor_jetski_rc" -eq 0 ] &&
+  printf '%s\n' "$doctor_jetski_out" | grep -q "\[✓\] Orphaned Directories"; then
   echo "ok 45 - [Preflight] warning-only orphan passes preflight but fails doctor"
 else
-  echo "not ok 45 - [Preflight] apply_rc=$apply_rc preflight_rc=$preflight_rc preflight_out='$preflight_out' doctor_rc=$doctor_rc"
+  echo "not ok 45 - [Preflight] orphan test failed (doctor_rc=$doctor_rc, jetski_rc=$doctor_jetski_rc)"
 fi
 export AGENT_REQUIRED_SKILLS=""
 cd "$TMPDIR"
@@ -943,5 +952,49 @@ if [ "$conflict_rc" -ne 0 ] &&
   echo "ok 49 - [Conflict] add refuses to overwrite a real file"
 else
   echo "not ok 49 - [Conflict] add did not refuse cleanly (rc=$conflict_rc): $conflict_out"
+fi
+cd "$TMPDIR"
+
+# Test 50: doctor ignores a tracked real directory in a skills directory (local skill)
+TRACKED_DIR="${TMPDIR}/tracked-skill"
+mkdir -p "$TRACKED_DIR"
+cd "$TRACKED_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+mkdir -p .claude/skills/local-skill
+printf 'local' >.claude/skills/local-skill/SKILL.md
+git add .claude/skills/local-skill/SKILL.md
+tracked_rc=0
+tracked_out=$("${SCRIPT}" doctor 2>&1) || tracked_rc=$?
+if [ "$tracked_rc" -eq 0 ] && ! printf '%s\n' "$tracked_out" | grep -q "Unmanaged artifacts"; then
+  echo "ok 50 - [Directory Cleanliness] doctor ignores tracked skill directory"
+else
+  echo "not ok 50 - [Directory Cleanliness] doctor failed on tracked skill (rc=$tracked_rc): $tracked_out"
+fi
+cd "$TMPDIR"
+
+# Test 51: 'remove' refuses to delete a tracked skill directory
+cd "$TRACKED_DIR"
+remove_rc=0
+remove_out=$("${SCRIPT}" remove local-skill 2>&1) || remove_rc=$?
+if [ -d .claude/skills/local-skill ] && [ -f .claude/skills/local-skill/SKILL.md ]; then
+  echo "ok 51 - [Conflict] remove ignores tracked skill directory"
+else
+  echo "not ok 51 - [Conflict] remove deleted tracked skill directory (rc=$remove_rc): $remove_out"
+fi
+cd "$TMPDIR"
+
+# Test 52: doctor lists VCS-managed skills in its report
+cd "$TRACKED_DIR"
+# (TRACKED_DIR has a tracked skill 'local-skill' from Test 50)
+doctor_list_rc=0
+doctor_list_out=$("${SCRIPT}" doctor 2>&1) || doctor_list_rc=$?
+if [ "$doctor_list_rc" -eq 0 ] &&
+  printf '%s\n' "$doctor_list_out" | grep -q "VCS-Managed Skills" &&
+  printf '%s\n' "$doctor_list_out" | grep -q "Found 1 skill(s) committed to the repository" &&
+  printf '%s\n' "$doctor_list_out" | grep -q "local-skill"; then
+  echo "ok 52 - [Diagnostics] doctor lists VCS-managed skills"
+else
+  echo "not ok 52 - [Diagnostics] doctor failed to list VCS-managed skills (rc=$doctor_list_rc): $doctor_list_out"
 fi
 cd "$TMPDIR"

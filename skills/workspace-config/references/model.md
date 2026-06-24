@@ -56,8 +56,9 @@ These are what `skill doctor` audits (read-only) and `skill apply` repairs:
   severity ERROR.)
 - **I2 — Live links.** Every managed symlink resolves to an existing target;
   none dangle. (doctor: *Symlink Health*; ERROR.)
-- **I3 — Clean folders.** Destination folders contain only managed symlinks — no
-  real files or stray directories. (doctor: *Directory Cleanliness*; ERROR.)
+- **I3 — Clean folders.** Destination folders contain only managed symlinks or
+  VCS-managed (tracked) files/directories — no untracked real files or stray
+  directories. (doctor: *Directory Cleanliness*; ERROR.)
 - **I4 — Quiet VCS.** The exclude marker block exactly matches the managed
   symlinks; no drift. (doctor: *Workspace Exclusions*; ERROR — git only.)
 

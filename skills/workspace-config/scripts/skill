@@ -75,7 +75,7 @@ def anchor_subdirs() -> list[str]:
     """The skill destination subpaths that mark a directory as a workspace anchor."""
     if "SKILL_DEST_DIRS" in os.environ:
         return [d for d in os.environ["SKILL_DEST_DIRS"].split(":") if d]
-    return [".claude/skills", ".agents/skills"]
+    return list(Workspace.get_supported_configs().keys())
 
 
 def find_skill_anchor(start: Path, boundary: Path) -> Path:
@@ -112,6 +112,19 @@ class Workspace:
     def __init__(self, root):
         self.root = root
 
+    @classmethod
+    def get_supported_configs(cls) -> dict[str, list[Path]]:
+        """Returns a mapping of local destination folders to their global config directories."""
+        home = Path.home()
+        return {
+            ".claude/skills": [home / ".claude"],
+            ".agents/skills": [
+                home / ".codex",
+                home / ".gemini/antigravity-cli",
+                home / ".gemini/jetski/cli",
+            ],
+        }
+
     def get_dest_dirs(self) -> list[Path]:
         if "SKILL_DEST_DIRS" in os.environ:
             return [
@@ -119,32 +132,44 @@ class Workspace:
             ]
 
         dest_dirs = []
-        home = Path.home()
+        configs = self.get_supported_configs()
 
-        # Check Claude: manage if global config directory ~/.claude exists OR local directory exists.
-        # We use the existence of global configuration directories rather than binary checks
-        # to determine installation because launcher scripts or shell functions might exist
-        # on PATH without the full agent configuration being present.
-        if (home / ".claude").is_dir() or (self.root / ".claude/skills").is_dir():
-            dest_dirs.append(".claude/skills")
+        for dest, sources in configs.items():
+            if any(src.is_dir() for src in sources) or (self.root / dest).is_dir():
+                dest_dirs.append(dest)
 
-        # Check Codex / Antigravity-CLI: manage if global config directories (~/.codex or ~/.gemini/antigravity-cli)
-        # exist OR local directory exists
-        if (
-            (home / ".codex").is_dir()
-            or (home / ".gemini/antigravity-cli").is_dir()
-            or (home / ".gemini/jetski/cli").is_dir()
-            or (self.root / ".agents/skills").is_dir()
-        ):
-            dest_dirs.append(".agents/skills")
-
-        # If still nothing found, raise RuntimeError
         if not dest_dirs:
+            home = Path.home()
+            all_sources = []
+            for sources in configs.values():
+                for src in sources:
+                    formatted = f"~/{src.relative_to(home)}" if src.is_relative_to(home) else str(src)
+                    if formatted not in all_sources:
+                        all_sources.append(formatted)
+            
             raise RuntimeError(
-                "No supported agent configuration directory (~/.claude, ~/.codex, ~/.gemini/antigravity-cli) detected, and no existing skill directories found in the workspace."
+                f"No supported agent configuration directory ({', '.join(all_sources)}) detected, "
+                f"and no existing skill directories found in the workspace."
             )
 
         return [self.root / d for d in dest_dirs]
+
+    def get_tracked_skills(self) -> list[Path]:
+        """Returns a list of VCS-tracked skill paths in the destination directories."""
+        tracked = []
+        try:
+            dest_dirs = self.get_dest_dirs()
+        except RuntimeError:
+            return []
+        for d in dest_dirs:
+            if not d.is_dir():
+                continue
+            for item in d.iterdir():
+                if item.name.startswith("."):
+                    continue
+                if not item.is_symlink() and self.is_tracked(item):
+                    tracked.append(item)
+        return sorted(tracked, key=lambda p: p.name)
 
     def get_expected_skills(self) -> list[str]:
         if hasattr(self, "get_managed_skills"):
@@ -183,6 +208,8 @@ class Workspace:
                             str(item),
                         ) from e
                 else:
+                    if self.is_tracked(item):
+                        continue
                     unmanaged.append(item)
         return actual, unmanaged, dangling
 
@@ -191,6 +218,10 @@ class Workspace:
         if relpath.exists() and not relpath.is_symlink():
             return f"{relpath} exists and is not a symlink; refusing to overwrite"
         return None
+
+    def is_tracked(self, path: Path) -> bool:
+        """Returns True if the path is tracked by the VCS."""
+        return False
 
     def get_analyze_dir(self) -> Path:
         return self.root
@@ -397,6 +428,20 @@ class GitWorkspace(Workspace):
         except Exception:
             pass
         return None
+
+    def is_tracked(self, path: Path) -> bool:
+        """Returns True if the path is tracked by Git (or contains tracked files)."""
+        try:
+            rel_to_root = path.relative_to(self.root)
+            res = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", "--", str(rel_to_root)],
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
 
     def doctor_issues(self):
         issues = []
@@ -1039,6 +1084,8 @@ def cmd_remove(names, announce=True):
         removed = False
         for d in dest_dirs:
             relpath = d / link_name
+            if ws.is_tracked(relpath):
+                continue
             if relpath.is_symlink() or relpath.exists():
                 relpath.unlink(missing_ok=True)
                 removed = True
@@ -1949,25 +1996,34 @@ def cmd_doctor(
             }
         )
 
+    # Check 5b: VCS-Managed Skills (Informational)
+    tracked_skills = ws.get_tracked_skills()
+    if tracked_skills:
+        checks.append(
+            {
+                "name": "VCS-Managed Skills",
+                "status": "OK",
+                "summary": f"Found {len(tracked_skills)} skill(s) committed to the repository",
+                "details": [f"  - {rel(item)}" for item in tracked_skills],
+            }
+        )
+
     # Check 6: Orphaned Directories
     home = Path.home()
     orphaned = []
-    if (ws.root / ".claude/skills").is_dir() and not (home / ".claude").is_dir():
-        orphaned.append(
-            (
-                ".claude/skills",
-                "local folder exists, but ~/.claude config directory does not exist",
-            )
-        )
-    if (ws.root / ".agents/skills").is_dir() and not (
-        (home / ".codex").is_dir() or (home / ".gemini/antigravity-cli").is_dir()
-    ):
-        orphaned.append(
-            (
-                ".agents/skills",
-                "local folder exists, but neither ~/.codex nor ~/.gemini/antigravity-cli config directory exists",
-            )
-        )
+    configs = ws.get_supported_configs()
+    
+    for dest, sources in configs.items():
+        if (ws.root / dest).is_dir() and not any(src.is_dir() for src in sources):
+            formatted_sources = [
+                f"~/{src.relative_to(home)}" if src.is_relative_to(home) else str(src)
+                for src in sources
+            ]
+            if len(formatted_sources) == 1:
+                msg = f"local folder exists, but {formatted_sources[0]} config directory does not exist"
+            else:
+                msg = f"local folder exists, but none of the config directories ({', '.join(formatted_sources)}) exist"
+            orphaned.append((dest, msg))
 
     if orphaned:
         checks.append(
