@@ -79,22 +79,6 @@ screenshots. **Solution**:
 - macOS: `brew install imagemagick`
 - Debian/Ubuntu: `sudo apt-get install imagemagick`
 
-### `apkanalyzer` not found
-
-**Context**: `apk-cat-manifest` requires Android command-line tools.
-**Solution**:
-
-- Install Android Command Line Tools via Android Studio or SDK Manager.
-- Ensure `cmdline-tools/bin` is in your PATH.
-
-### `xpath` not found
-
-**Context**: `apk-tiles` uses `xpath` to parse manifests. **Solution**:
-
-- macOS: Comes with Perl, but if missing: `brew install libxml2` (includes
-  xmllint) or check perl modules.
-- Debian/Ubuntu: `sudo apt-get install libxml-xpath-perl`
-
 ## Wear OS Specifics
 
 ### Debug Broadcasts Not Working
