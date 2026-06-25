@@ -27,34 +27,23 @@ and formatting output XML files for readability.
 
 See `references/command-index.md` for detailed usage.
 
-### Information & Manifest Inspection
+### Unified Inspection CLI
 
-- `scripts/apk-packagename`: Extract the application ID/package name.
-- `scripts/apk-cat-manifest`: Display a formatted, readable AndroidManifest.xml.
-- `scripts/apk-version-code` / `scripts/apk-version-name`: Read version
-  metadata.
-- `scripts/apk-version-whs` / `scripts/apk-version-wear-compose`: Read specific
-  library versions inside the APK.
-
-### Wear OS Specializations
-
-- `scripts/apk-tiles`: List all Wear OS tiles services declared in the manifest.
-- `scripts/apk-complications`: List all Wear OS complications data providers
-  declared.
+- `scripts/apk-info`: The unified read-only APK metadata and file inspector.
+  Supports subcommands (`package`, `manifest`, `version`, `tiles`,
+  `complications`, `launcher`, `file`).
 
 ### Extraction & Decoding
 
-- `scripts/apk-unzip`: Unzip files from the APK.
-- `scripts/apk-cat-file`: Extract and print the contents of a specific file
-  inside the APK.
-- `scripts/apk-cat-launcher`: Extract and print the launcher icon file contents.
-- `scripts/apk-launcher-icon-extract`: Decompile and extract the launcher icon
-  as a PNG.
-- `scripts/apk-decode`: Decompile the entire APK using apktool.
+- `scripts/apk-decode`: Decompile the entire APK using apktool to inspect
+  resources.
+- `scripts/apk-launcher-icon-extract`: Decompile and extract the launcher and
+  round launcher icons as files.
+- `scripts/apk-unzip`: Unzip ZIP archives, split APK bundles, or app bundles.
 
 ### Device Interaction
 
-- `scripts/apk-install-and-launch`: Install the APK and launch its main
-  activity.
-- `scripts/apk-launch`: Launch the main activity of an already installed
-  package.
+- `scripts/apk-install-and-launch`: Install the APK/ZIP on a connected device
+  and launch its main activity.
+- `scripts/apk-launch`: Launch the main activity of an already installed package
+  on a device.
