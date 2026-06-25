@@ -69,24 +69,11 @@ Ensure these executable files exist in `scripts/` as canonical implementations:
 - All `scripts/wearableservice-*` scripts
 - `scripts/packagename`
 
-**Optional (if directly useful for ADB workflows):**
+**Prohibited:**
 
-- `scripts/apk-*` scripts that analyze installed packages (e.g., `apk-tiles`)
+- Do not include any `apk-*` scripts (e.g., `apk-tiles`, `apk-cat-manifest`) in this skill. They are managed separately by the dedicated `apk` skill.
 
 Preserve filenames and executable permissions.
-
-### Transitive Script Dependencies (Required)
-
-If any script invokes other scripts by name (for example, `apk-tiles` calling
-`apk-cat-manifest`), ensure those invoked scripts also exist in `scripts/` and
-have corresponding `bin/` symlink entrypoints.
-
-How to detect this:
-
-- Search for direct invocations of other script commands (`apk-cat-manifest`,
-  `adb-*`, etc.) in the script body.
-- Do not rely on `require` lines alone; scripts may call other scripts without
-  declaring them via `require`.
 
 ## SKILL.md Requirements
 

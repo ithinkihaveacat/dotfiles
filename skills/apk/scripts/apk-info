@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+# apk-info - Unified Android APK metadata and inspection tool
+#
+# A collection of utilities for inspecting APK properties, manifests,
+# internal Jetpack library versions, and files offline.
+
+set -euo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+
+# Global variables for base APK extraction and cleanup
+BASEAPK=""
+TMPDIR=""
+
+cleanup() {
+  if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
+    rm -rf "$TMPDIR"
+  fi
+}
+trap cleanup EXIT
+
+# Helper to extract split-APKs from ZIP or use standalone APK
+prepare_apk() {
+  local apk_path="$1"
+  if [ -z "$apk_path" ]; then
+    echo "$SCRIPT_NAME: APK file path required" >&2
+    exit 1
+  fi
+  if [ ! -f "$apk_path" ]; then
+    echo "$SCRIPT_NAME: $apk_path: No such file or directory" >&2
+    exit 1
+  fi
+
+  if [[ "$apk_path" == *.zip ]]; then
+    TMPDIR=$(mktemp -d)
+    unzip -q -j "$apk_path" '*-base-split.apk' -d "$TMPDIR"
+    local base_apks=("$TMPDIR"/*-base-split.apk)
+    BASEAPK="${base_apks[0]:-}"
+    if [ ! -f "$BASEAPK" ]; then
+      echo "$SCRIPT_NAME: *-base-split.apk not found in zip, aborting" >&2
+      exit 1
+    fi
+  else
+    BASEAPK="$apk_path"
+  fi
+}
+
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME <command> [arguments]
+
+A unified tool for inspecting Android APK files and split-APK ZIP archives.
+
+Commands:
+  package              Print the package name (application ID) of the APK.
+  manifest             Display the formatted AndroidManifest.xml.
+  version              Print package version details (name and code).
+  libraries            List or query embedded Jetpack/Kotlinx library versions.
+  tiles                List Wear OS tiles services declared in the manifest.
+  complications        List Wear OS complications data providers.
+  launcher             Print the path of the launcher icon resource.
+  file <path>          Extract and print the contents of a specific file from the APK.
+
+Options:
+  --help               Display this help message and exit.
+
+Examples:
+  $SCRIPT_NAME package app.apk
+  $SCRIPT_NAME version app.apk
+  $SCRIPT_NAME libraries --json app.zip
+  $SCRIPT_NAME libraries --only androidx.wear.compose_compose-foundation app.apk
+EOF
+  exit "${1:-0}"
+}
+
+if [[ $# -lt 1 ]]; then
+  usage 1 >&2
+fi
+
+case "$1" in
+  help | --help)
+    usage 0
+    ;;
+  *)
+    COMMAND="$1"
+    shift
+    ;;
+esac
+
+# Check dependencies
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$SCRIPT_NAME: $1 not found"
+    exit 127
+  }
+}
+
+require apkanalyzer
+require unzip
+
+# =============================================================================
+# COMMAND IMPLEMENTATIONS
+# =============================================================================
+
+cmd_package() {
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME package: APK file path required" >&2
+    exit 1
+  fi
+  prepare_apk "$1"
+  apkanalyzer manifest application-id "$BASEAPK"
+}
+
+cmd_manifest() {
+  require xmllint
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME manifest: APK file path required" >&2
+    exit 1
+  fi
+  prepare_apk "$1"
+  apkanalyzer manifest print "$BASEAPK" | xmllint --format -
+}
+
+get_library_version() {
+  local lib="$1"
+  local file=""
+
+  if [[ "$lib" == "whs" || "$lib" == "androidx.health_health-services-client" ]]; then
+    file=$(apkanalyzer files list "$BASEAPK" | grep -E -m1 '/(META-INF/androidx.health_health-services-client\.version|whs\.properties)$')
+  else
+    file=$(apkanalyzer files list "$BASEAPK" | grep -E -m1 "/META-INF/${lib}\.version$")
+  fi
+
+  if [ -n "$file" ]; then
+    local raw_val
+    raw_val=$(apkanalyzer files cat --file "$file" "$BASEAPK" 2>/dev/null | tr -d '\r\n')
+    if [[ "$file" == *whs.properties ]]; then
+      if [[ "$raw_val" == *"="* ]]; then
+        echo "$raw_val" | awk -F= '/version/ {print $2}' | tr -d ' '
+      else
+        echo "$raw_val"
+      fi
+    else
+      echo "$raw_val"
+    fi
+  fi
+}
+
+list_all_libraries_json() {
+  require jq
+  local files
+  files=$(apkanalyzer files list "$BASEAPK" | grep -E '/META-INF/.*\.version$')
+
+  if apkanalyzer files list "$BASEAPK" | grep -q '/whs.properties$' && ! echo "$files" | grep -q 'androidx.health_health-services-client'; then
+    files=$(printf "%s\n%s" "$files" "/whs.properties")
+  fi
+
+  if [ -z "$files" ]; then
+    echo "{}"
+    return
+  fi
+
+  local tsv_data
+  # Run the entire loop inside a single command substitution block to preserve newlines
+  tsv_data=$(
+    while read -r file; do
+      [ -z "$file" ] && continue
+      local lib_id
+      if [[ "$file" == *whs.properties ]]; then
+        lib_id="whs"
+      else
+        lib_id=$(basename "$file" .version)
+      fi
+
+      local version_val
+      version_val=$(apkanalyzer files cat --file "$file" "$BASEAPK" 2>/dev/null | tr -d '\r\n')
+      if [[ "$file" == *whs.properties && "$version_val" == *"="* ]]; then
+        version_val=$(echo "$version_val" | awk -F= '/version/ {print $2}' | tr -d ' ')
+      fi
+
+      if [ -n "$version_val" ]; then
+        printf "%s\t%s\n" "$lib_id" "$version_val"
+      fi
+    done <<<"$files"
+  )
+
+  if [ -z "$tsv_data" ]; then
+    echo "{}"
+  else
+    echo "$tsv_data" | jq -Rs 'split("\n") | map(select(length > 0) | split("\t")) | map({(.[0]): .[1]}) | add'
+  fi
+}
+
+cmd_version() {
+  local mode="all"
+
+  usage_version() {
+    cat <<EOF
+Usage: $SCRIPT_NAME version [options] APK_FILE
+
+Print package version details (name and code).
+
+Options:
+  --code               Print only the application version code string.
+  --name               Print only the application version name string.
+  --help               Display this help message and exit.
+EOF
+    exit "${1:-0}"
+  }
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      help | --help)
+        usage_version 0
+        ;;
+      --code)
+        mode="code"
+        shift
+        ;;
+      --name)
+        mode="name"
+        shift
+        ;;
+      -*)
+        echo "$SCRIPT_NAME version: unknown option: $1" >&2
+        exit 1
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME version: APK file path required" >&2
+    exit 1
+  fi
+
+  prepare_apk "$1"
+
+  case "$mode" in
+    code)
+      apkanalyzer manifest version-code "$BASEAPK"
+      ;;
+    name)
+      apkanalyzer manifest version-name "$BASEAPK"
+      ;;
+    all)
+      local code name
+      code=$(apkanalyzer manifest version-code "$BASEAPK")
+      name=$(apkanalyzer manifest version-name "$BASEAPK")
+      echo "Version Name: $name"
+      echo "Version Code: $code"
+      ;;
+  esac
+}
+
+cmd_libraries() {
+  local json_out=false
+  local only_lib=""
+
+  usage_libraries() {
+    cat <<EOF
+Usage: $SCRIPT_NAME libraries [options] APK_FILE
+
+List or query embedded Jetpack/Kotlinx library versions.
+
+Options:
+  --json               Output all library versions as a JSON map.
+  --only | --library   Print only the version string of a specific library.
+  --help               Display this help message and exit.
+
+Common Jetpack Library IDs:
+  androidx.wear.compose_compose-foundation
+  androidx.health_health-services-client
+EOF
+    exit "${1:-0}"
+  }
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      help | --help)
+        usage_libraries 0
+        ;;
+      --json)
+        json_out=true
+        shift
+        ;;
+      --only | --library)
+        if [ -z "${2:-}" ]; then
+          echo "$SCRIPT_NAME libraries: $1 requires an argument" >&2
+          exit 1
+        fi
+        only_lib="$2"
+        shift 2
+        ;;
+      -*)
+        echo "$SCRIPT_NAME libraries: unknown option: $1" >&2
+        exit 1
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME libraries: APK file path required" >&2
+    exit 1
+  fi
+
+  prepare_apk "$1"
+
+  if [ -n "$only_lib" ]; then
+    # OPTIMIZED DIRECT QUERY PATH
+    local ver
+    ver=$(get_library_version "$only_lib")
+    if [ -n "$ver" ]; then
+      echo "$ver"
+    else
+      echo "$SCRIPT_NAME libraries: library '$only_lib' not found in APK" >&2
+      exit 1
+    fi
+  elif [ "$json_out" = true ]; then
+    list_all_libraries_json
+  else
+    # TABULAR OUTPUT (Space-aligned columns via column)
+    require jq
+    require column
+    local libs
+    libs=$(list_all_libraries_json)
+    if [ "$libs" = "{}" ]; then
+      echo "No internal libraries detected."
+      return
+    fi
+
+    (
+      printf "%s\t%s\n" "Library" "Version"
+      printf "%s\t%s\n" "-------" "-------"
+      echo "$libs" | jq -r 'to_entries | map("\(.key)\t\(.value)") | .[]'
+    ) | column -t -s $'\t'
+  fi
+}
+
+cmd_tiles() {
+  require xpath
+  require xmllint
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME tiles: APK file path required" >&2
+    exit 1
+  fi
+  prepare_apk "$1"
+  apkanalyzer manifest print "$BASEAPK" | xmllint --format - | xpath -n -q -e \
+    "//service[intent-filter/action[@android:name='androidx.wear.tiles.action.BIND_TILE_PROVIDER']]"
+}
+
+cmd_complications() {
+  require xpath
+  require xmllint
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME complications: APK file path required" >&2
+    exit 1
+  fi
+  prepare_apk "$1"
+  apkanalyzer manifest print "$BASEAPK" | xmllint --format - | xpath -n -q -e \
+    "//service[intent-filter/action[@android:name='android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST']]"
+}
+
+cmd_launcher() {
+  require aapt
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME launcher: APK file path required" >&2
+    exit 1
+  fi
+  prepare_apk "$1"
+  local launcher_path
+  launcher_path=$(aapt d badging "$BASEAPK" | awk -F\' '/^application:/ {print $4}')
+  if [ -n "$launcher_path" ]; then
+    echo "$launcher_path"
+  else
+    echo "$SCRIPT_NAME launcher: launcher icon not found" >&2
+    exit 1
+  fi
+}
+
+cmd_file() {
+  require xmllint
+  if [ $# -lt 2 ]; then
+    echo "Usage: $SCRIPT_NAME file APK_FILE FILE_PATH" >&2
+    exit 1
+  fi
+  prepare_apk "$1"
+  local path="$2"
+
+  if [[ "$path" == *.xml ]]; then
+    if apkanalyzer files cat --file "$path" "$BASEAPK" >/dev/null 2>&1; then
+      apkanalyzer files cat --file "$path" "$BASEAPK" | xmllint --format -
+    else
+      unzip -p "$BASEAPK" "$path" | xmllint --format -
+    fi
+  else
+    if apkanalyzer files cat --file "$path" "$BASEAPK" >/dev/null 2>&1; then
+      apkanalyzer files cat --file "$path" "$BASEAPK"
+    else
+      unzip -p "$BASEAPK" "$path"
+    fi
+  fi
+}
+
+# =============================================================================
+# ROUTING MAIN
+# =============================================================================
+
+CMD_FUNC="cmd_${COMMAND//-/_}"
+if ! declare -f "$CMD_FUNC" >/dev/null 2>&1; then
+  echo "$SCRIPT_NAME: unknown command: $COMMAND" >&2
+  echo "Run '$SCRIPT_NAME --help' to see available commands" >&2
+  exit 1
+fi
+
+"$CMD_FUNC" "$@"

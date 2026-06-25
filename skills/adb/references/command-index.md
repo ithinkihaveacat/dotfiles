@@ -317,17 +317,6 @@ adb exec-out dumpsys activity service PACKAGE
     adb uninstall PACKAGE
 ```
 
-### `scripts/apk-tiles`
-
-**Purpose**: List tiles declared in an APK or ZIP. **Dependencies**:
-`apk-cat-manifest`, `xpath` **Usage**: `scripts/apk-tiles APK_FILE` **Raw
-Command**:
-
-```bash
-apk-cat-manifest APK_FILE | xpath -n -q -e \
-  "//service[intent-filter/action[@android:name='androidx.wear.tiles.action.BIND_TILE_PROVIDER']]"
-```
-
 ### `scripts/adb-packages`
 
 **Purpose**: List installed packages on the connected device. **Dependencies**:
@@ -335,16 +324,6 @@ apk-cat-manifest APK_FILE | xpath -n -q -e \
 
 ```bash
 adb exec-out pm list packages -3 | cut -b 9- | sort
-```
-
-### `scripts/apk-cat-manifest`
-
-**Purpose**: Display the AndroidManifest.xml from an APK. **Dependencies**:
-`apkanalyzer`, `xmllint` **Usage**: `scripts/apk-cat-manifest APK_FILE` **Raw
-Command**:
-
-```bash
-apkanalyzer manifest print APK_FILE | xmllint --format -
 ```
 
 ## Raw Dumpsys & Service Commands
