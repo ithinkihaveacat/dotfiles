@@ -27,10 +27,8 @@ and formatting output XML files for readability.
 
 See `references/command-index.md` for detailed usage.
 
-### Unified Inspection CLI
-
 - `scripts/apk-info`: The unified read-only APK metadata and file inspector.
-  Supports subcommands (`package`, `manifest`, `version`, `tiles`,
+  Supports subcommands (`package`, `manifest`, `version`, `libraries`, `tiles`,
   `complications`, `launcher`, `file`).
 
 ### Extraction & Decoding

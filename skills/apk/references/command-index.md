@@ -54,7 +54,8 @@ A unified tool for inspecting Android APK files and split-APK ZIP archives.
 Commands:
   package              Print the package name (application ID) of the APK.
   manifest             Display the formatted AndroidManifest.xml.
-  version              Print package and internal library version details.
+  version              Print package version details (name and code).
+  libraries            List or query embedded Jetpack/Kotlinx library versions.
   tiles                List Wear OS tiles services declared in the manifest.
   complications        List Wear OS complications data providers.
   launcher             Print the path of the launcher icon resource.
@@ -65,9 +66,9 @@ Options:
 
 Examples:
   apk-info package app.apk
-  apk-info version --libraries app.zip
-  apk-info tiles app.apk
-  apk-info file app.apk res/values/strings.xml
+  apk-info version app.apk
+  apk-info libraries --json app.zip
+  apk-info libraries --only androidx.wear.compose_compose-foundation app.apk
 ```
 
 <!-- /generated -->

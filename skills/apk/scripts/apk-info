@@ -54,7 +54,8 @@ A unified tool for inspecting Android APK files and split-APK ZIP archives.
 Commands:
   package              Print the package name (application ID) of the APK.
   manifest             Display the formatted AndroidManifest.xml.
-  version              Print package and internal library version details.
+  version              Print package version details (name and code).
+  libraries            List or query embedded Jetpack/Kotlinx library versions.
   tiles                List Wear OS tiles services declared in the manifest.
   complications        List Wear OS complications data providers.
   launcher             Print the path of the launcher icon resource.
@@ -65,9 +66,9 @@ Options:
 
 Examples:
   $SCRIPT_NAME package app.apk
-  $SCRIPT_NAME version --libraries app.zip
-  $SCRIPT_NAME tiles app.apk
-  $SCRIPT_NAME file app.apk res/values/strings.xml
+  $SCRIPT_NAME version app.apk
+  $SCRIPT_NAME libraries --json app.zip
+  $SCRIPT_NAME libraries --only androidx.wear.compose_compose-foundation app.apk
 EOF
   exit "${1:-0}"
 }
@@ -192,24 +193,17 @@ list_all_libraries_json() {
 
 cmd_version() {
   local mode="all"
-  local target_lib=""
   
   usage_version() {
     cat <<EOF
 Usage: $SCRIPT_NAME version [options] APK_FILE
 
-Print package and internal Jetpack library version details.
+Print package version details (name and code).
 
 Options:
-  --code               Print only the application version code.
-  --name               Print only the application version name.
-  --libraries          Print all detected Jetpack library versions as JSON.
-  --library <id>       Print the version of a specific library (e.g. 'androidx.wear.compose_compose-foundation').
+  --code               Print only the application version code string.
+  --name               Print only the application version name string.
   --help               Display this help message and exit.
-
-Common Jetpack Library IDs:
-  androidx.wear.compose_compose-foundation
-  androidx.health_health-services-client
 EOF
     exit "${1:-0}"
   }
@@ -226,19 +220,6 @@ EOF
       --name)
         mode="name"
         shift
-        ;;
-      --libraries)
-        mode="libraries"
-        shift
-        ;;
-      --library)
-        if [ -z "${2:-}" ]; then
-          echo "$SCRIPT_NAME version: --library requires an argument" >&2
-          exit 1
-        fi
-        mode="library"
-        target_lib="$2"
-        shift 2
         ;;
       -*)
         echo "$SCRIPT_NAME version: unknown option: $1" >&2
@@ -264,40 +245,101 @@ EOF
     name)
       apkanalyzer manifest version-name "$BASEAPK"
       ;;
-    libraries)
-      list_all_libraries_json
-      ;;
-    library)
-      local ver
-      ver=$(get_library_version "$target_lib")
-      if [ -n "$ver" ]; then
-        echo "$ver"
-      else
-        echo "$SCRIPT_NAME version: library '$target_lib' not found in APK" >&2
-        exit 1
-      fi
-      ;;
     all)
-      local pkg_name code name libs
-      pkg_name=$(apkanalyzer manifest application-id "$BASEAPK")
+      local code name
       code=$(apkanalyzer manifest version-code "$BASEAPK")
       name=$(apkanalyzer manifest version-name "$BASEAPK")
-      
-      echo "Application Version:"
-      echo "  Package Name:  $pkg_name"
-      echo "  Version Name:  $name"
-      echo "  Version Code:  $code"
-      
-      # List libraries in readable form
-      require jq
-      libs=$(list_all_libraries_json)
-      if [ "$libs" != "{}" ]; then
-        echo ""
-        echo "Detected Libraries:"
-        echo "$libs" | jq -r 'to_entries | map("  \(.key): \(.value)") | .[]'
-      fi
+      echo "Version Name: $name"
+      echo "Version Code: $code"
       ;;
   esac
+}
+
+cmd_libraries() {
+  local json_out=false
+  local only_lib=""
+  
+  usage_libraries() {
+    cat <<EOF
+Usage: $SCRIPT_NAME libraries [options] APK_FILE
+
+List or query embedded Jetpack/Kotlinx library versions.
+
+Options:
+  --json               Output all library versions as a JSON map.
+  --only | --library   Print only the version string of a specific library.
+  --help               Display this help message and exit.
+
+Common Jetpack Library IDs:
+  androidx.wear.compose_compose-foundation
+  androidx.health_health-services-client
+EOF
+    exit "${1:-0}"
+  }
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      help | --help)
+        usage_libraries 0
+        ;;
+      --json)
+        json_out=true
+        shift
+        ;;
+      --only | --library)
+        if [ -z "${2:-}" ]; then
+          echo "$SCRIPT_NAME libraries: $1 requires an argument" >&2
+          exit 1
+        fi
+        only_lib="$2"
+        shift 2
+        ;;
+      -*)
+        echo "$SCRIPT_NAME libraries: unknown option: $1" >&2
+        exit 1
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if [ $# -lt 1 ]; then
+    echo "$SCRIPT_NAME libraries: APK file path required" >&2
+    exit 1
+  fi
+
+  prepare_apk "$1"
+
+  if [ -n "$only_lib" ]; then
+    # OPTIMIZED DIRECT QUERY PATH
+    local ver
+    ver=$(get_library_version "$only_lib")
+    if [ -n "$ver" ]; then
+      echo "$ver"
+    else
+      echo "$SCRIPT_NAME libraries: library '$only_lib' not found in APK" >&2
+      exit 1
+    fi
+  elif [ "$json_out" = true ]; then
+    list_all_libraries_json
+  else
+    # TABULAR OUTPUT (Space-aligned columns via column)
+    require jq
+    require column
+    local libs
+    libs=$(list_all_libraries_json)
+    if [ "$libs" = "{}" ]; then
+      echo "No internal libraries detected."
+      return
+    fi
+    
+    (
+      printf "%s\t%s\n" "Library" "Version"
+      printf "%s\t%s\n" "-------" "-------"
+      echo "$libs" | jq -r 'to_entries | map("\(.key)\t\(.value)") | .[]'
+    ) | column -t -s $'\t'
+  fi
 }
 
 cmd_tiles() {
