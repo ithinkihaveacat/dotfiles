@@ -112,9 +112,7 @@ See `references/command-index.md` for detailed usage.
 
 - `scripts/packagename`: Comprehensive package tool (uninstall, launch, stop,
   clear-cache, logcat, jobscheduler).
-- `scripts/apk-tiles`: List tiles declared in an APK file.
 - `scripts/adb-packages`: List installed packages.
-- `scripts/apk-cat-manifest`: Display the AndroidManifest.xml from an APK.
 
 ### System & Dumpsys
 
