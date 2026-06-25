@@ -30,11 +30,11 @@ complete -c apk-info -n "__fish_seen_subcommand_from libraries" -l help -d "Disp
 
 # Common libraries for autocompleting the argument of --only / --library
 set -l common_libs \
-  androidx.wear.compose_compose-foundation \
-  androidx.health_health-services-client \
-  androidx.core_core \
-  androidx.compose.ui_ui \
-  androidx.lifecycle_lifecycle-runtime
+    androidx.wear.compose_compose-foundation \
+    androidx.health_health-services-client \
+    androidx.core_core \
+    androidx.compose.ui_ui \
+    androidx.lifecycle_lifecycle-runtime
 
 complete -c apk-info -n "__fish_seen_subcommand_from libraries" -l only -r -a "$common_libs" -d "Print only the version of a specific library"
 complete -c apk-info -n "__fish_seen_subcommand_from libraries" -l library -r -a "$common_libs" -d "Print only the version of a specific library"
