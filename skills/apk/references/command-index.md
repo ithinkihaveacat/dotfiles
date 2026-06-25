@@ -21,6 +21,7 @@
 - [apk-version-whs](#apk-version-whs)
 
 ## apk-cat-file
+
 <!-- generated: ../scripts/apk-cat-file --help -->
 
 ```text
@@ -52,6 +53,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-cat-launcher
+
 <!-- generated: ../scripts/apk-cat-launcher --help -->
 
 ```text
@@ -79,6 +81,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-cat-manifest
+
 <!-- generated: ../scripts/apk-cat-manifest --help -->
 
 ```text
@@ -105,6 +108,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-complications
+
 <!-- generated: ../scripts/apk-complications --help -->
 
 ```text
@@ -133,6 +137,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-decode
+
 <!-- generated: ../scripts/apk-decode --help -->
 
 ```text
@@ -163,6 +168,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-install-and-launch
+
 <!-- generated: ../scripts/apk-install-and-launch --help -->
 
 ```text
@@ -201,6 +207,7 @@ set to the right version of java.
 <!-- /generated -->
 
 ## apk-launch
+
 <!-- generated: ../scripts/apk-launch --help -->
 
 ```text
@@ -230,6 +237,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-launcher-icon-extract
+
 <!-- generated: ../scripts/apk-launcher-icon-extract --help -->
 
 ```text
@@ -260,6 +268,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-packagename
+
 <!-- generated: ../scripts/apk-packagename --help -->
 
 ```text
@@ -287,6 +296,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-tiles
+
 <!-- generated: ../scripts/apk-tiles --help -->
 
 ```text
@@ -314,6 +324,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-unzip
+
 <!-- generated: ../scripts/apk-unzip --help -->
 
 ```text
@@ -343,6 +354,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-version-code
+
 <!-- generated: ../scripts/apk-version-code --help -->
 
 ```text
@@ -370,6 +382,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-version-name
+
 <!-- generated: ../scripts/apk-version-name --help -->
 
 ```text
@@ -397,6 +410,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-version-wear-compose
+
 <!-- generated: ../scripts/apk-version-wear-compose --help -->
 
 ```text
@@ -424,6 +438,7 @@ Examples:
 <!-- /generated -->
 
 ## apk-version-whs
+
 <!-- generated: ../scripts/apk-version-whs --help -->
 
 ```text
