@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import uuid
+import tempfile
 import subprocess
 from pathlib import Path
 
@@ -364,19 +365,10 @@ class ClaudeSettingsAdapter(PermissionAdapter):
             inner = inner[: -len(":*")]
         return inner
 
-    def _ensure_ignored(self, workspace_root: Path) -> None:
-        """Keeps settings.local.json out of 'git status' via info/exclude."""
-        rel = ".claude/settings.local.json"
-        res = subprocess.run(
-            ["git", "-C", str(workspace_root), "check-ignore", "-q", rel],
-            capture_output=True,
-        )
-        if res.returncode == 0:  # already ignored
-            return
-        if res.returncode != 1:  # not a git repository
-            return
+    def _sync_exclude_block(self, workspace_root: Path, paths: list[str]) -> None:
+        """Manages a '# >>> permission >>>' block in .git/info/exclude."""
         try:
-            res_ex = subprocess.run(
+            res = subprocess.run(
                 [
                     "git",
                     "-C",
@@ -389,18 +381,46 @@ class ClaudeSettingsAdapter(PermissionAdapter):
                 text=True,
                 check=True,
             )
-            exclude_file = (workspace_root / res_ex.stdout.strip()).resolve()
-            exclude_file.parent.mkdir(parents=True, exist_ok=True)
-            existing = ""
-            if exclude_file.is_file():
-                existing = exclude_file.read_text(encoding="utf-8", errors="replace")
-            with open(exclude_file, "a", encoding="utf-8") as f:
-                if existing and not existing.endswith("\n"):
+            exclude_file = (workspace_root / res.stdout.strip()).resolve()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return
+
+        mark_begin = "# >>> permission >>>"
+        mark_end = "# <<< permission <<<"
+
+        other_lines: list[str] = []
+        if exclude_file.is_file():
+            in_block = False
+            with open(exclude_file, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped == mark_begin:
+                        in_block = True
+                        continue
+                    if stripped == mark_end:
+                        in_block = False
+                        continue
+                    if not in_block:
+                        other_lines.append(line)
+
+        exclude_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(exclude_file.parent))
+        temp_path = Path(temp_path_str)
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+                for line in other_lines:
+                    f.write(line)
+                if other_lines and not other_lines[-1].endswith("\n"):
                     f.write("\n")
-                f.write(
-                    f"# added by 'permission' to keep local agent settings untracked\n/{rel}\n"
-                )
+                if paths:
+                    f.write(mark_begin + "\n")
+                    f.write("# managed by 'permission'\n")
+                    for p in sorted(paths):
+                        f.write(p + "\n")
+                    f.write(mark_end + "\n")
+            os.replace(temp_path, exclude_file)
         except Exception as e:
+            temp_path.unlink(missing_ok=True)
             print(
                 f"[{self.name}] warning: could not update info/exclude: {e}",
                 file=sys.stderr,
@@ -430,7 +450,7 @@ class ClaudeSettingsAdapter(PermissionAdapter):
                 f"[{self.name}] initialized {settings_path}",
                 file=sys.stderr,
             )
-        self._ensure_ignored(workspace_root)
+        self._sync_exclude_block(workspace_root, ["/.claude/settings.local.json"])
 
     def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
         rule = self.translate(pattern)
