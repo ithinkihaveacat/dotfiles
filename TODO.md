@@ -25,11 +25,11 @@ doctor-as-drift-detection pattern.
 
 ## skill Cleanups and Legacy Shim Retirement
 
-- `[ ]` Fix the misleading dedup comment in `cmd_catalog` ("Remove it from
+- `[x]` Fix the misleading dedup comment in `cmd_catalog` ("Remove it from
   plugin_catalog" — it actually edits the grouped output).
-- `[ ]` Collapse the `load_plugins`/`load_plugins_catalog` pair into one
+- `[x]` Collapse the `load_plugins`/`load_plugins_catalog` pair into one
   function.
-- `[ ]` After a deprecation window, delete the `LEGACY_FLAGS` migration shim and
+- `[x]` After a deprecation window, delete the `LEGACY_FLAGS` migration shim and
   the hidden `list` alias for `catalog` in `skill`.
 
 ## Duplicate Skill Detection and Resolution
