@@ -43,5 +43,14 @@ See `references/command-index.md` for detailed usage.
 
 - `scripts/apk-install-and-launch`: Install the APK/ZIP on a connected device
   and launch its main activity.
-- `scripts/apk-launch`: Launch the main activity of an already installed package
-  on a device.
+
+> [!TIP] If the application is already installed on the device and you want to
+> launch it without reinstalling (preserving state and cache), you can compose
+> the
+> \[apk-info\](file:///Users/stillers/workspace/dotfiles/skills/apk/scripts/apk-info)
+> package query with the
+> \[packagename\](file:///Users/stillers/workspace/dotfiles/bin/packagename)
+> utility from the `adb` skill:
+>
+> - **Fish:** `packagename launch (apk-info package app.apk)`
+> - **Bash/Zsh:** `packagename launch $(apk-info package app.apk)`

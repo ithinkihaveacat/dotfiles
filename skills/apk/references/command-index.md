@@ -7,7 +7,6 @@
 - [apk-decode](#apk-decode)
 - [apk-info](#apk-info)
 - [apk-install-and-launch](#apk-install-and-launch)
-- [apk-launch](#apk-launch)
 - [apk-launcher-icon-extract](#apk-launcher-icon-extract)
 - [apk-unzip](#apk-unzip)
 
@@ -108,36 +107,6 @@ If this script breaks, it's probably because apkanalyzer doesn't
 work. See if running "apkanalyzer" by itself emits its help page, or
 an error. If an error, you probably want to check that JAVA_HOME is
 set to the right version of java.
-```
-
-<!-- /generated -->
-
-## apk-launch
-
-<!-- generated: ../scripts/apk-launch --help -->
-
-```text
-Usage: apk-launch APK_FILE
-
-Launches an application on a connected Android device using its APK.
-
-This script determines the package ID from the APK and uses 'adb monkey'
-to launch the main activity.
-
-Arguments:
-  APK_FILE    Path to the APK file of the application to launch.
-
-Options:
-  --help      Display this help message and exit
-
-Environment:
-  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
-                  To target a specific device, use:
-                    env ANDROID_SERIAL=<serial> apk-launch
-
-Examples:
-  # Launch the application corresponding to an APK
-  apk-launch /path/to/your/app.apk
 ```
 
 <!-- /generated -->
