@@ -36,7 +36,8 @@ doctor-as-drift-detection pattern.
 
 We recently introduced duplicate collapsing in `gather_skills` to prevent
 warnings in `resolve_selection` when a skill is found in multiple search paths
-(e.g., both active and in the catalog cache, or across different CitC clients).
+(e.g., both active and in the catalog cache, or across different local
+checkouts).
 
 ### Current Tradeoffs
 
@@ -44,8 +45,8 @@ warnings in `resolve_selection` when a skill is found in multiple search paths
   encountered (based on search path precedence). This ensures `suggest` always
   works and doesn't drop recommendations.
 - **Visibility:** To prevent silently hiding configuration issues (like stale
-  symlinks pointing to old CitC clients), we print a warning to `stderr` showing
-  both the kept and ignored paths with their sources.
+  symlinks pointing to old local checkouts), we print a warning to `stderr`
+  showing both the kept and ignored paths with their sources.
 
 ### Future Work
 
