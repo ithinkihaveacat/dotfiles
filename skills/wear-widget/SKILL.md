@@ -187,9 +187,14 @@ from your code layout.
 
 #### Step A: Define the Previews in Code
 
-Depending on your framework, define the preview state:
+Depending on your framework and supported sizes, define the preview state:
 
 - **Glance (Compose)**: Use standard `@Preview` and `@Composable` annotations.
+  - If your widget supports both small and large sizes, use
+    **`SquircleAllWidgetPreviewParams`** as your `@PreviewParameter` to generate
+    renders for both sizes across multiple screen configurations.
+  - If it only supports a single size, use `SquircleSmallWidgetPreviewParams` or
+    `SquircleLargeWidgetPreviewParams`.
 - **ProtoLayout (Tiles API)**: Use `@Preview` alongside `TilePreviewData` to
   construct layout snapshots.
 
@@ -201,9 +206,19 @@ minimize APK bloat.
 
 #### Step C: Register in Widget Info
 
-1. Copy the generated assets to your project's `nodpi` drawable directory (e.g.,
-   `res/drawable-nodpi/my_widget_preview_small.webp`). **Do not use default
-   density-dependent drawable folders.**
+To provide the best visual experience across different watch sizes, leverage
+Android's resource resolution algorithm to provide display-specific previews:
+
+1. **Default/Small Screens (< 225dp)**: Copy the small-screen renders (e.g.,
+   `PARAM_0` for small, `PARAM_2` for large) to your default `nodpi` directory:
+   `res/drawable-nodpi/my_widget_preview_small.webp`
+   `res/drawable-nodpi/my_widget_preview_large.webp`
+1. **Large Screens (>= 225dp)**: Copy the large-screen renders (e.g., `PARAM_1`
+   for small, `PARAM_3` for large) to your large-screen `nodpi` directory using
+   the **exact same filenames**:
+   `res/drawable-w225dp-nodpi/my_widget_preview_small.webp`
+   `res/drawable-w225dp-nodpi/my_widget_preview_large.webp` *(Note: See the
+   qualifier ordering rule in the Gotchas section below).*
 1. Reference them in your widget provider XML (e.g.,
    `res/xml/my_widget_info.xml`):
    ```xml
@@ -254,12 +269,23 @@ ______________________________________________________________________
 
 ### 3. Key Gotchas & Best Practices
 
-- **The `nodpi` Requirement**: Always place static raster previews (both widget
-  picker and tile previews) in `res/drawable-nodpi/`. Images placed in standard
-  density folders (like `drawable/` or `drawable-xxhdpi/`) will be scaled up by
-  the system at runtime. For Wear OS displays, scaling a `360x360` image up can
-  instantly exceed RemoteViews and Binder IPC memory limits, resulting in a
-  rendering crash (often showing a blank background with a warning icon).
+- **The `nodpi` Requirement & Memory Limits**: Always place static raster
+  previews (both widget picker and tile previews) in `nodpi` directories. Images
+  placed in standard density folders (like `drawable/` or `drawable-xxhdpi/`)
+  will be scaled up by the system at runtime. For Wear OS displays, scaling a
+  `360x360` image up can instantly exceed RemoteViews and Binder IPC memory
+  limits, resulting in a rendering crash (often showing a blank background with
+  a warning icon).
+- **Strict Qualifier Ordering Rule**: Android resource directories must follow a
+  strict precedence order for qualifiers. The screen width qualifier (`w<N>dp`)
+  has higher precedence than the pixel density qualifier (`nodpi`) and **must**
+  come first:
+  - **Correct**: `res/drawable-w225dp-nodpi/`
+  - **Incorrect**: `res/drawable-nodpi-w225dp/` (this will fail the build with
+    `Invalid resource directory name`).
+- **The 225dp Breakpoint**: Use **`225dp`** as the official Wear OS threshold
+  for distinguishing small and large watch displays when creating
+  display-specific resources.
 - **Strict 1:1 Aspect Ratio**: The Android build system enforces the
   `TilePreviewImageFormat` lint rule. Your registered Tile carousel preview
   image must have a perfect 1:1 (square) aspect ratio, or your build will flag
