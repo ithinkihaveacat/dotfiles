@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+import os
+import sys
+import re
+import subprocess
+import xml.etree.ElementTree as ET
+
+HELP_TEXT = """Usage: avd-to-png [options] AVD_FILE RES_DIR
+
+Converts an Android Vector Drawable (AVD) XML file to a standard SVG and renders it to a high-quality PNG.
+
+Arguments:
+  AVD_FILE            Path to the Android Vector Drawable (.xml).
+  RES_DIR             Path to the Android resource directory (used to resolve @color references).
+
+Options:
+  -o, --output PATH   Path to the output PNG file. If not specified, outputs to the current directory with the same basename.
+  --help              Display this help message and exit
+"""
+
+def print_help():
+    print(HELP_TEXT)
+    sys.exit(0)
+
+def print_error(msg):
+    print(f"Error: {msg}", file=sys.stderr)
+    print("Run 'avd-to-png --help' for usage details.", file=sys.stderr)
+    sys.exit(1)
+
+def parse_android_color(color_str, colors_dict):
+    """Resolves and formats Android colors into standard CSS/SVG colors."""
+    color_str = color_str.strip()
+    
+    # 1. Resolve @color reference
+    if color_str.startswith("@color/"):
+        color_name = color_str.split("/")[-1]
+        if color_name in colors_dict:
+            return parse_android_color(colors_dict[color_name], colors_dict)
+        else:
+            print(f"Warning: Color resource '{color_str}' not found in colors.xml", file=sys.stderr)
+            return "#000000" # Fallback
+            
+    # 2. Convert #AARRGGBB to rgba(R, G, B, A) or #RRGGBB
+    if color_str.startswith("#"):
+        hex_val = color_str[1:]
+        if len(hex_val) == 8: # AARRGGBB
+            a = int(hex_val[0:2], 16) / 255.0
+            r = int(hex_val[2:4], 16)
+            g = int(hex_val[4:6], 16)
+            b = int(hex_val[6:8], 16)
+            return f"rgba({r}, {g}, {b}, {a:.3f})"
+        elif len(hex_val) == 6: # RRGGBB
+            return color_str
+        elif len(hex_val) == 4: # ARGB (short)
+            a = int(hex_val[0], 16) / 15.0
+            r = int(hex_val[1], 16) * 17
+            g = int(hex_val[2], 16) * 17
+            b = int(hex_val[3], 16) * 17
+            return f"rgba({r}, {g}, {b}, {a:.3f})"
+        elif len(hex_val) == 3: # RGB (short)
+            return color_str
+
+    return color_str
+
+def load_colors_xml(colors_xml_path):
+    """Parses colors.xml and returns a dictionary of color names to hex strings."""
+    colors = {}
+    if not os.path.exists(colors_xml_path):
+        return colors
+        
+    try:
+        tree = ET.parse(colors_xml_path)
+        root = tree.getroot()
+        for color_node in root.findall("color"):
+            name = color_node.attrib.get("name")
+            if name and color_node.text:
+                colors[name] = color_node.text.strip()
+    except Exception as e:
+        print(f"Warning: Error parsing colors.xml: {e}", file=sys.stderr)
+        
+    return colors
+
+def convert_avd_to_svg(avd_path, colors_dict):
+    """Converts Android Vector Drawable XML to a standard SVG string."""
+    ET.register_namespace("", "http://www.w3.org/2000/svg")
+    
+    try:
+        avd_tree = ET.parse(avd_path)
+        avd_root = avd_tree.getroot()
+    except Exception as e:
+        print_error(f"Failed to parse AVD file {avd_path}: {e}")
+
+    android_ns = "http://schemas.android.com/apk/res/android"
+    
+    def get_android_attr(element, name):
+        return element.attrib.get(f"{{{android_ns}}}{name}")
+
+    # Extract dimensions and viewport
+    width_str = get_android_attr(avd_root, "width") or "24dp"
+    height_str = get_android_attr(avd_root, "height") or "24dp"
+    
+    # Remove units for SVG
+    width = re.sub(r'[a-zA-Z]+', '', width_str)
+    height = re.sub(r'[a-zA-Z]+', '', height_str)
+    
+    viewport_width = get_android_attr(avd_root, "viewportWidth") or width
+    viewport_height = get_android_attr(avd_root, "viewportHeight") or height
+
+    # Create SVG root
+    svg_root = ET.Element("svg", {
+        "xmlns": "http://www.w3.org/2000/svg",
+        "width": width,
+        "height": height,
+        "viewBox": f"0 0 {viewport_width} {viewport_height}"
+    })
+
+    # Map elements
+    def process_element(avd_elem, svg_parent):
+        tag = avd_elem.tag
+        
+        if tag == "path":
+            svg_path_attribs = {}
+            
+            path_data = get_android_attr(avd_elem, "pathData")
+            if path_data:
+                svg_path_attribs["d"] = path_data
+                
+            fill_color = get_android_attr(avd_elem, "fillColor")
+            if fill_color:
+                svg_path_attribs["fill"] = parse_android_color(fill_color, colors_dict)
+            else:
+                svg_path_attribs["fill"] = "none"
+                
+            stroke_color = get_android_attr(avd_elem, "strokeColor")
+            if stroke_color:
+                svg_path_attribs["stroke"] = parse_android_color(stroke_color, colors_dict)
+                stroke_width = get_android_attr(avd_elem, "strokeWidth")
+                if stroke_width:
+                    svg_path_attribs["stroke-width"] = stroke_width
+                    
+            fill_alpha = get_android_attr(avd_elem, "fillAlpha")
+            if fill_alpha:
+                svg_path_attribs["fill-opacity"] = fill_alpha
+            stroke_alpha = get_android_attr(avd_elem, "strokeAlpha")
+            if stroke_alpha:
+                svg_path_attribs["stroke-opacity"] = stroke_alpha
+                
+            ET.SubElement(svg_parent, "path", svg_path_attribs)
+            
+        elif tag == "group":
+            svg_group_attribs = {}
+            transforms = []
+            
+            tx = get_android_attr(avd_elem, "translateX")
+            ty = get_android_attr(avd_elem, "translateY")
+            if tx or ty:
+                transforms.append(f"translate({tx or 0} {ty or 0})")
+                
+            rot = get_android_attr(avd_elem, "rotation")
+            if rot:
+                px = get_android_attr(avd_elem, "pivotX") or "0"
+                py = get_android_attr(avd_elem, "pivotY") or "0"
+                transforms.append(f"rotate({rot} {px} {py})")
+                
+            sx = get_android_attr(avd_elem, "scaleX")
+            sy = get_android_attr(avd_elem, "scaleY")
+            if sx or sy:
+                transforms.append(f"scale({sx or 1} {sy or 1})")
+                
+            if transforms:
+                svg_group_attribs["transform"] = " ".join(transforms)
+                
+            svg_group = ET.SubElement(svg_parent, "g", svg_group_attribs)
+            for child in avd_elem:
+                process_element(child, svg_group)
+                
+        elif tag == "vector":
+            for child in avd_elem:
+                process_element(child, svg_parent)
+
+    for child in avd_root:
+        process_element(child, svg_root)
+
+    return ET.tostring(svg_root, encoding="utf-8").decode("utf-8")
+
+def main():
+    args = sys.argv[1:]
+    
+    # 1. Parse Help
+    if "--help" in args or "help" in args:
+        print_help()
+        
+    # 2. Parse Output Flag
+    output_png = None
+    if "-o" in args or "--output" in args:
+        try:
+            idx = args.index("-o") if "-o" in args else args.index("--output")
+            output_png = args[idx + 1]
+            # Remove flag and value from args list
+            args.pop(idx)
+            args.pop(idx) # Index shifts
+        except IndexError:
+            print_error("Missing value for output path flag.")
+            
+    # 3. Parse Positional Arguments
+    if len(args) < 2:
+        print_error("Missing required arguments. Both AVD_FILE and RES_DIR must be specified.")
+        
+    avd_path = args[0]
+    res_dir = args[1]
+    
+    if not os.path.exists(avd_path):
+        print_error(f"AVD file not found at: {avd_path}")
+        
+    if not os.path.exists(res_dir):
+        print_error(f"Resource directory not found at: {res_dir}")
+
+    # 4. Resolve Output Path if not specified
+    if not output_png:
+        basename = os.path.splitext(os.path.basename(avd_path))[0]
+        output_png = os.path.join(os.getcwd(), f"{basename}.png")
+
+    # 5. Check Render Dependencies (rsvg-convert or convert)
+    has_rsvg = subprocess.run(["which", "rsvg-convert"], capture_output=True).returncode == 0
+    has_convert = subprocess.run(["which", "convert"], capture_output=True).returncode == 0
+    
+    if not (has_rsvg or has_convert):
+        print_error("Neither 'rsvg-convert' nor 'convert' (ImageMagick) is installed. Please install one of them to enable rendering.")
+
+    # 6. Load colors.xml if available
+    colors_xml = os.path.join(res_dir, "values", "colors.xml")
+    colors_dict = load_colors_xml(colors_xml)
+    
+    # 7. Convert AVD to SVG
+    svg_content = convert_avd_to_svg(avd_path, colors_dict)
+    if not svg_content:
+        print_error("Failed to translate Android Vector XML to SVG format.")
+        
+    # Write temp SVG
+    temp_svg_path = output_png + ".temp.svg"
+    try:
+        with open(temp_svg_path, "w") as f:
+            f.write(svg_content)
+    except Exception as e:
+        print_error(f"Failed to write temporary SVG file: {e}")
+        
+    # 8. Render to PNG
+    try:
+        if has_rsvg:
+            subprocess.run(["rsvg-convert", temp_svg_path, "-o", output_png], check=True)
+        else:
+            subprocess.run(["convert", temp_svg_path, output_png], check=True)
+        print(f"Rendered vector drawable to: {output_png}", file=sys.stderr)
+    except Exception as e:
+        print_error(f"Failed to render SVG to PNG using system utilities: {e}")
+    finally:
+        if os.path.exists(temp_svg_path):
+            os.remove(temp_svg_path)
+
+if __name__ == "__main__":
+    main()
