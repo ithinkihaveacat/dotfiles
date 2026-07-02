@@ -54,11 +54,6 @@ Commands:
   inspect <name> [version]
                       Convenience wrapper that resolves a class name to an artifact
                       and then downloads its source.
-                      Equivalent to: resolve -> source.
-  resolve-exceptions <artifact>
-                      Analyze a Maven artifact to find packages that don't follow standard
-                      naming conventions (for updating the resolve command).
-
 Options:
   --help              Display this help message and exit
 
