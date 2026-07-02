@@ -28,6 +28,15 @@ adb exec-out getprop ro.build.version.release
 adb exec-out getprop ro.build.version.sdk
 ```
 
+### `scripts/adb-log`
+
+**Purpose**: Write a message to the Android system log. **Dependencies**: `adb`
+**Usage**: `scripts/adb-log MESSAGE` **Raw Command**:
+
+```bash
+adb exec-out log -p f -t TAG MESSAGE
+```
+
 ## Media Capture
 
 ### `scripts/adb-screenshot`
@@ -285,13 +294,6 @@ parsing; there are deliberately no wrapper scripts for them.
   `scrcpy --always-on-top`
 
 ### Logging
-
-- **Write a marker message to the system log** (priority must be FATAL, `-p f`,
-  because lower-priority messages seem to be dropped):
-
-  ```bash
-  adb exec-out log -p f -t MYTAG "message"
-  ```
 
 - **Stream logcat filtered by tag:**
 

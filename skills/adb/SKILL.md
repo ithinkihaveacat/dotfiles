@@ -64,10 +64,11 @@ See `references/command-index.md` for detailed usage.
 
 - `scripts/adb-device-properties`: Show key device properties (model,
   manufacturer, API level, display size, etc.).
+- `scripts/adb-log`: Write a message to the system log.
 
 For simple one-shot operations (listing device serials, waking or sleeping the
-device, writing to the log, filtering logcat by tag, sending VIEW intents,
-toggling "Show touches"), use raw `adb` commands. See
+device, filtering logcat by tag, sending VIEW intents, toggling "Show
+touches"), use raw `adb` commands. See
 [references/command-index.md](references/command-index.md#raw-adb-commands) for
 the exact invocations, including non-obvious flags.
 
