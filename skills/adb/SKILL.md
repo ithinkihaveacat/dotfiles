@@ -104,6 +104,7 @@ the exact invocations, including non-obvious flags.
   TV/Leanback, Settings). Use `--launcher-only`, `--tv-only`, `--settings-only`
   to filter. Add `--all` to include system apps.
 - `scripts/adb-uihierarchy`: Dump the UI hierarchy to an XML file.
+- `scripts/adb-currentfocus`: Display the package name that currently has focus.
 
 ### Package Operations
 

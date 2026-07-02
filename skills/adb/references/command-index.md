@@ -199,6 +199,16 @@ adb exec-out uiautomator dump /dev/stdout
 # (Piped to xml format)
 ```
 
+### `scripts/adb-currentfocus`
+
+**Purpose**: Display the package name of the application that currently has
+focus. **Dependencies**: `adb` **Usage**: `scripts/adb-currentfocus` **Raw
+Command**:
+
+```bash
+adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }' | awk -F '/' '{ print $1 }'
+```
+
 ## Package Operations
 
 ### `scripts/packagename`
@@ -287,12 +297,6 @@ parsing; there are deliberately no wrapper scripts for them.
 
   ```bash
   adb logcat -v time "*:S MYTAG"
-  ```
-
-- **Display the package that currently has focus:**
-
-  ```bash
-  adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }' | awk -F '/' '{ print $1 }'
   ```
 
 ### Common System Dumpsys
