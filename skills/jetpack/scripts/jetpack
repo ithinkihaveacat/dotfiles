@@ -716,17 +716,18 @@ cmd_resolve() {
     return 1
   fi
 
-  local current_query="$input"
-  local results=""
+  # 3. Pre-compute all fallback query variations to avoid reading the large index file multiple times.
+  local temp_query="$input"
+  local -a query_targets=()
+  local -a prefix_targets=()
 
-  while [[ -n "$current_query" && "$current_query" == *.* ]]; do
-    # 3. Extract search_target (stops at top-level class) and package_prefix (stops before top-level class)
+  while [[ -n "$temp_query" && "$temp_query" == *.* ]]; do
     local -a all_segments
     local -a pkg_segments=()
     local -a top_class_segments=()
     local in_class=0
 
-    IFS='.' read -ra all_segments <<<"$current_query"
+    IFS='.' read -ra all_segments <<<"$temp_query"
     for segment in "${all_segments[@]}"; do
       if [[ "$segment" =~ ^[A-Z] ]]; then
         in_class=1
@@ -753,73 +754,93 @@ cmd_resolve() {
       echo "${pkg_segments[*]}"
     )
 
-    # 4. Query the index
-    results=$(jq -r --arg q "$search_target" --arg p "$package_prefix" '
-      # Strict KMP regex: Excludes lint, testing, samples
-      "-(jvm|android|desktop|ios[a-z0-9]+|macos[a-z0-9]+|linux[a-z0-9]+|tvos[a-z0-9]+|watchos[a-z0-9]+|js|wasmjs|wasmwasi|mingw[a-z0-9]+)$" as $kmp_regex |
-      .Index as $index |
-      ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $artifact_lookup |
-      
-      $index | map(
-        .groupId as $group |
-        .artifactId as $artifact |
-        
-        # Scoring:
-        # 3.0: Exact match on search_target in fqcns
-        # 2.0: Prefix match on search_target in fqcns
-        # 1.0: Prefix match on package_prefix in fqcns
-        (if any(.fqcns[]?; . == $q) then 3.0
-         elif any(.fqcns[]?; startswith($q + ".")) then 2.0
-         elif any(.fqcns[]?; startswith($p + ".")) then 1.0
-         else 0.0 end) as $class_score |
-         
-        # Fuzzy fallback score if fqcns are empty
-        (if $class_score == 0.0 then
-           if ($p | startswith($group + ".")) then
-             ($p | sub($group + "\\."; "")) as $rem |
-             (if ($artifact | gsub("[.-]"; "") | contains($rem | gsub("[.-]"; ""))) then 1.0 else 0.0 end)
-           elif ($group == $p) then 1.0
-           else 0.0 end
-         else 0.0 end) as $fuzzy_score |
-         
-        # Group match tie-breaker bonus:
-        # 0.8 if group matches package prefix exactly
-        # 0.4 if group is a prefix of package prefix
-        (if ($group == $p) then 0.8
-         elif ($p | startswith($group + ".")) then 0.4
-         else 0.0 end) as $group_bonus |
-         
-        ($class_score + $fuzzy_score) as $base_score |
-        select($base_score > 0.0) |
-        ($base_score + $group_bonus) as $score |
-        
-        # Client-Side KMP Redirection
-        (if ($artifact | test($kmp_regex; "i")) then
-           ($artifact | sub($kmp_regex; ""; "i")) as $base_artifact |
-           if ($artifact_lookup["\($group):\($base_artifact)"]) then "\($group):\($base_artifact)"
-           else "\($group):\($artifact)" end
-         else "\($group):\($artifact)" end) as $coord |
-         
-        { coord: $coord, score: $score, len: ($coord | length) }
-      ) | 
-      # Group by coordinate to remove duplicates
-      group_by(.coord) | map(sort_by(-.score) | .[0]) |
-      # Sort by Score (Desc), then by Length (Asc)
-      sort_by(-.score, .len) | 
-      .[0].coord // empty
-    ' "$INDEX_FILE")
+    query_targets+=("$search_target")
+    prefix_targets+=("$package_prefix")
 
-    if [[ -n "$results" ]]; then
-      echo "$results"
-      return 0
-    fi
-
-    # Strip the last segment and retry
-    current_query="${current_query%.*}"
+    temp_query="${temp_query%.*}"
   done
 
-  echo "$SCRIPT_NAME resolve: could not resolve '$input'" >&2
-  return 1
+  if [[ ${#query_targets[@]} -eq 0 ]]; then
+    echo "$SCRIPT_NAME resolve: could not resolve '$input'" >&2
+    return 1
+  fi
+
+  # Serialize Bash arrays to JSON arrays
+  local q_json p_json
+  q_json=$(printf '%s\n' "${query_targets[@]}" | jq -R . | jq -s -c .)
+  p_json=$(printf '%s\n' "${prefix_targets[@]}" | jq -R . | jq -s -c .)
+
+  # 4. Query the index in a single pass
+  local results
+  results=$(jq -r --argjson q_arr "$q_json" --argjson p_arr "$p_json" '
+    # Helper to check if a prefix is allowed for prefix/fuzzy matching (prevents generic short prefix false positives)
+    def is_allowed_prefix(p):
+      (p | startswith("androidx.")) or (p | split(".") | length >= 3);
+
+    # Strict KMP regex: Excludes lint, testing, samples
+    "-(jvm|android|desktop|ios[a-z0-9]+|macos[a-z0-9]+|linux[a-z0-9]+|tvos[a-z0-9]+|watchos[a-z0-9]+|js|wasmjs|wasmwasi|mingw[a-z0-9]+)$" as $kmp_regex |
+    .Index as $index |
+    ($index | map({key: "\(.groupId):\(.artifactId)", value: true}) | from_entries) as $artifact_lookup |
+    
+    $index | map(
+      .groupId as $group |
+      .artifactId as $artifact |
+      
+      # For each fallback query variation, compute its match score and take the maximum.
+      # i is weighted heavily so that the longest matching query (smallest i) always wins.
+      [range(0; $q_arr | length) as $i |
+       $q_arr[$i] as $q |
+       $p_arr[$i] as $p |
+       
+       (if any(.fqcns[]?; . == $q) then 3.0
+        elif (any(.fqcns[]?; startswith($q + ".")) and is_allowed_prefix($q)) then 2.0
+        elif (any(.fqcns[]?; startswith($p + ".")) and is_allowed_prefix($p)) then 1.0
+        else 0.0 end) as $class_score |
+        
+       # Fuzzy fallback score if fqcns are empty
+       (if $class_score == 0.0 then
+          if ($p | startswith($group + ".")) then
+            $p[($group | length) + 1:] as $rem |
+            (if (($artifact | gsub("[.-]"; "") | contains($rem | gsub("[.-]"; ""))) and is_allowed_prefix($p)) then 1.0 else 0.0 end)
+          elif ($group == $p) then 1.0
+          else 0.0 end
+        else 0.0 end) as $fuzzy_score |
+        
+       # Group match tie-breaker bonus:
+       # 0.8 if group matches package prefix exactly
+       # 0.4 if group is a prefix of package prefix
+       (if ($group == $p) then 0.8
+        elif ($p | startswith($group + ".")) then 0.4
+        else 0.0 end) as $group_bonus |
+        
+       ($class_score + $fuzzy_score) as $base_score |
+       (if $base_score > 0.0 then (((10 - $i) * 10.0) + $base_score + $group_bonus) else 0.0 end)
+      ] | max // 0.0 as $score |
+      
+      select($score > 0.0) |
+      
+      # Client-Side KMP Redirection
+      (if ($artifact | test($kmp_regex; "i")) then
+         ($artifact | sub($kmp_regex; ""; "i")) as $base_artifact |
+         if ($artifact_lookup["\($group):\($base_artifact)"]) then "\($group):\($base_artifact)"
+         else "\($group):\($artifact)" end
+       else "\($group):\($artifact)" end) as $coord |
+       
+      { coord: $coord, score: $score, len: ($coord | length) }
+    ) | 
+    # Group by coordinate to remove duplicates
+    group_by(.coord) | map(sort_by(-.score) | .[0]) |
+    # Sort by Score (Desc), then by Length (Asc)
+    sort_by(-.score, .len) | 
+    .[0].coord // empty
+  ' "$INDEX_FILE")
+
+  if [[ -z "$results" ]]; then
+    echo "$SCRIPT_NAME resolve: could not resolve '$input'" >&2
+    return 1
+  fi
+
+  echo "$results"
 }
 
 # =============================================================================
