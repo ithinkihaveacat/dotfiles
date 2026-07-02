@@ -8,8 +8,8 @@ description: >
   dumpsys, or device debugging. Triggers: adb, android device, wear os,
   wearable, tile, screenshot, screen recording, dumpsys, logcat.
 compatibility: >-
-  Requires adb. Some scripts require magick (ImageMagick), aapt, or scrcpy.
-  Designed for filesystem-based agents with bash access.
+  Requires adb. Some scripts require magick (ImageMagick), scrcpy, ffmpeg, or
+  jq. Designed for filesystem-based agents with bash access.
 ---
 
 # Android ADB
@@ -62,14 +62,14 @@ See `references/command-index.md` for detailed usage.
 
 ### Device Basics
 
-- `scripts/adb-devices`: List connected devices.
 - `scripts/adb-device-properties`: Show key device properties (model,
-  manufacturer, etc.).
-- `scripts/adb-api-level`: Get the device API level (SDK version).
-- `scripts/adb-keyevent-wakeup` / `sleep`: Wake up or put device to sleep.
-- `scripts/adb-log`: Write a message to the system log.
-- `scripts/adb-logcat-tag`: Stream logcat output filtered by a specific tag.
-- `scripts/adb-version-sft`: Extract the Health Tracking GmsModule version.
+  manufacturer, API level, display size, etc.).
+
+For simple one-shot operations (listing device serials, waking or sleeping the
+device, writing to the log, filtering logcat by tag, sending VIEW intents,
+toggling "Show touches"), use raw `adb` commands. See
+[references/command-index.md](references/command-index.md#raw-adb-commands) for
+the exact invocations, including non-obvious flags.
 
 ### Media Capture
 
@@ -78,7 +78,6 @@ See `references/command-index.md` for detailed usage.
   applies circular mask, wakes device before capture, copies to macOS clipboard,
   generates timestamped filenames by default.
 - `scripts/adb-screenrecord`: Record the screen to a file.
-- `scripts/adb-screenmirror`: Mirror the device screen using scrcpy.
 - `scripts/adb-screenrecord-raw`: Record the screen using raw frames and ffmpeg.
 
 ### Tile Management (Wear OS)
@@ -105,8 +104,6 @@ See `references/command-index.md` for detailed usage.
   TV/Leanback, Settings). Use `--launcher-only`, `--tv-only`, `--settings-only`
   to filter. Add `--all` to include system apps.
 - `scripts/adb-uihierarchy`: Dump the UI hierarchy to an XML file.
-- `scripts/adb-currentfocus`: Display the package name that currently has focus.
-- `scripts/adb-intent-view`: Start an activity with a VIEW intent.
 
 ### Package Operations
 
@@ -120,13 +117,14 @@ See `references/command-index.md` for detailed usage.
 
 ### Display & Demo Mode
 
-- `scripts/adb-demo-on` / `off`: Toggle Android demo mode (clean status bar).
-- `scripts/adb-fontscale-default` / `large`: Change font size.
+- `scripts/adb-demo`: Toggle Android demo mode (`on` / `off`): clean status bar,
+  fixed clock, show touches, long screen timeout.
+- `scripts/adb-fontscale`: Get or set the system font scale (`get` /
+  `set default|large|NUMBER`).
 - `scripts/adb-theme`: Get or set system theme customization (e.g., set to
   'lemongrass'). Requires Wear OS 6+ (API 36+).
 - `scripts/adb-settings-theme`: Open system theme settings (requires
   root/debuggable build).
-- `scripts/adb-touches-on` / `off`: Show/hide taps on screen.
 
 ## Safety Notes
 
