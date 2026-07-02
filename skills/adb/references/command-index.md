@@ -9,86 +9,23 @@
 - [Tile Management (Wear OS)](#tile-management-wear-os)
 - [Activity Discovery](#activity-discovery)
 - [Package Operations](#package-operations)
-- [Raw Dumpsys & Service Commands](#raw-dumpsys--service-commands)
+- [Raw ADB Commands](#raw-adb-commands)
 - [System & Dumpsys](#system--dumpsys)
 - [Display & Demo Mode](#display--demo-mode)
 
 ## Device Basics
 
-### `scripts/adb-devices`
-
-**Purpose**: List connected devices (serial numbers only). **Dependencies**:
-`adb` **Usage**: `scripts/adb-devices` **Raw Command**:
-
-```bash
-adb devices -l | tail +2 | awk 'length { print $1 }'
-```
-
 ### `scripts/adb-device-properties`
 
-**Purpose**: Show key device properties (model, manufacturer, release, SDK).
-**Dependencies**: `adb` **Usage**: `scripts/adb-device-properties` **Raw
-Command**:
+**Purpose**: Show key device properties (model, manufacturer, release, SDK,
+display resolution and density). **Dependencies**: `adb` **Usage**:
+`scripts/adb-device-properties` **Raw Command**:
 
 ```bash
 adb exec-out getprop ro.product.model
 adb exec-out getprop ro.product.manufacturer
 adb exec-out getprop ro.build.version.release
 adb exec-out getprop ro.build.version.sdk
-```
-
-### `scripts/adb-api-level`
-
-**Purpose**: Get the device API level. **Dependencies**: `adb` **Usage**:
-`scripts/adb-api-level` **Raw Command**:
-
-```bash
-adb exec-out getprop ro.build.version.sdk
-```
-
-### `scripts/adb-keyevent-wakeup`
-
-**Purpose**: Wake up the device. **Dependencies**: `adb` **Usage**:
-`scripts/adb-keyevent-wakeup` **Raw Command**:
-
-```bash
-adb exec-out input keyevent KEYCODE_WAKEUP
-```
-
-### `scripts/adb-keyevent-sleep`
-
-**Purpose**: Put the device to sleep. **Dependencies**: `adb` **Usage**:
-`scripts/adb-keyevent-sleep` **Raw Command**:
-
-```bash
-adb exec-out input keyevent KEYCODE_SLEEP
-```
-
-### `scripts/adb-log`
-
-**Purpose**: Write a message to the Android system log. **Dependencies**: `adb`
-**Usage**: `scripts/adb-log MESSAGE` **Raw Command**:
-
-```bash
-adb exec-out log -p f -t TAG MESSAGE
-```
-
-### `scripts/adb-logcat-tag`
-
-**Purpose**: Stream logcat output filtered by a specific tag. **Dependencies**:
-`adb` **Usage**: `scripts/adb-logcat-tag TAG` **Raw Command**:
-
-```bash
-adb logcat -v time "*:S TAG"
-```
-
-### `scripts/adb-version-sft`
-
-**Purpose**: Extract the Health Tracking GmsModule version. **Dependencies**:
-`adb` **Usage**: `scripts/adb-version-sft` **Raw Command**:
-
-```bash
-adb exec-out dumpsys activity provider com.google.android.gms.chimera.container.GmsModuleProvider | grep com.google.android.gms.health_tracking__wearable
 ```
 
 ## Media Capture
@@ -119,15 +56,6 @@ adb exec-out "screencap -p" | magick - \
 ```bash
 adb shell screenrecord /sdcard/screen.mp4
 # (Then pull the file)
-```
-
-### `scripts/adb-screenmirror`
-
-**Purpose**: Mirror the screen using scrcpy. **Dependencies**: `scrcpy`
-**Usage**: `scripts/adb-screenmirror` **Raw Command**:
-
-```bash
-scrcpy --always-on-top
 ```
 
 ### `scripts/adb-screenrecord-raw`
@@ -271,26 +199,6 @@ adb exec-out uiautomator dump /dev/stdout
 # (Piped to xml format)
 ```
 
-### `scripts/adb-currentfocus`
-
-**Purpose**: Display the package name of the application that currently has
-focus. **Dependencies**: `adb` **Usage**: `scripts/adb-currentfocus` **Raw
-Command**:
-
-```bash
-adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }' | awk -F '/' '{ print $1 }'
-```
-
-### `scripts/adb-intent-view`
-
-**Purpose**: Start an activity with an android.intent.action.VIEW intent for a
-deeplink. **Dependencies**: `adb` **Usage**: `scripts/adb-intent-view DEEPLINK`
-**Raw Command**:
-
-```bash
-adb exec-out am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d DEEPLINK
-```
-
 ## Package Operations
 
 ### `scripts/packagename`
@@ -326,10 +234,66 @@ adb exec-out dumpsys activity service PACKAGE
 adb exec-out pm list packages -3 | cut -b 9- | sort
 ```
 
-## Raw Dumpsys & Service Commands
+## Raw ADB Commands
 
 Instead of using wrapper scripts, you should use raw ADB commands for simple
-dumpsys operations. Here are the most useful service names and raw commands:
+one-shot operations. The commands below encode the non-obvious flags and
+parsing; there are deliberately no wrapper scripts for them.
+
+### Device & Input
+
+- **List connected device serials** (for `ANDROID_SERIAL`):
+
+  ```bash
+  adb devices -l | tail +2 | awk 'length { print $1 }'
+  ```
+
+- **Get the device API level:** `adb exec-out getprop ro.build.version.sdk`
+
+- **Wake up / sleep the device:**
+
+  ```bash
+  adb exec-out input keyevent KEYCODE_WAKEUP
+  adb exec-out input keyevent KEYCODE_SLEEP
+  ```
+
+- **Show/hide visual feedback for taps:**
+
+  ```bash
+  adb exec-out settings put system show_touches 1   # on
+  adb exec-out settings put system show_touches 0   # off
+  ```
+
+- **Open a deeplink with a VIEW intent** (use `packagename view PACKAGE URL` to
+  target a specific package):
+
+  ```bash
+  adb exec-out am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d "https://example.com/deeplink"
+  ```
+
+- **Mirror the screen** (interactive; requires scrcpy):
+  `scrcpy --always-on-top`
+
+### Logging
+
+- **Write a marker message to the system log** (priority must be FATAL, `-p f`,
+  because lower-priority messages seem to be dropped):
+
+  ```bash
+  adb exec-out log -p f -t MYTAG "message"
+  ```
+
+- **Stream logcat filtered by tag:**
+
+  ```bash
+  adb logcat -v time "*:S MYTAG"
+  ```
+
+- **Display the package that currently has focus:**
+
+  ```bash
+  adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }' | awk -F '/' '{ print $1 }'
+  ```
 
 ### Common System Dumpsys
 
@@ -340,6 +304,11 @@ dumpsys operations. Here are the most useful service names and raw commands:
 - **Battery state simulation:**
   - Unplug charger: `adb exec-out dumpsys battery unplug`
   - Reset charging state: `adb exec-out dumpsys battery reset`
+- **Health Tracking GmsModule version (Wear OS):**
+
+  ```bash
+  adb exec-out dumpsys activity provider com.google.android.gms.chimera.container.GmsModuleProvider | grep com.google.android.gms.health_tracking__wearable
+  ```
 
 ### Useful Package and Service Names
 
@@ -367,44 +336,33 @@ adb exec-out dumpsys settings | awk -v _match="match" '$2 ~ "name:(" _match ")"'
 
 ## Display & Demo Mode
 
-### `scripts/adb-demo-on`
+### `scripts/adb-demo`
 
-**Purpose**: Enable demo mode (clean status bar, 100% battery, 16:20 time).
-**Dependencies**: `adb` **Usage**: `scripts/adb-demo-on` **Raw Command**:
+**Purpose**: Enable or disable demo mode (clean status bar, 100% battery, 16:20
+time, show touches, long screen timeout, DND). **Dependencies**: `adb`
+**Usage**: `scripts/adb-demo on|off` **Raw Command**:
 
 ```bash
+# on
 adb exec-out settings put global sysui_demo_allowed 1
 adb exec-out am broadcast -a com.android.systemui.demo -e command enter
 adb exec-out am broadcast -a com.android.systemui.demo -e command clock -e hhmm 1620
-# ... (see script for full list of broadcasts)
-```
+# ... (see script for full list of broadcasts and settings)
 
-### `scripts/adb-demo-off`
-
-**Purpose**: Disable demo mode. **Dependencies**: `adb` **Usage**:
-`scripts/adb-demo-off` **Raw Command**:
-
-```bash
+# off
 adb exec-out am broadcast -a com.android.systemui.demo -e command exit
 ```
 
-### `scripts/adb-fontscale-default`
+### `scripts/adb-fontscale`
 
-**Purpose**: Reset font scale to 1.0. **Dependencies**: `adb` **Usage**:
-`scripts/adb-fontscale-default` **Raw Command**:
-
-```bash
-adb exec-out settings put system font_scale 1.0
-```
-
-### `scripts/adb-fontscale-large`
-
-**Purpose**: Set font scale to large (e.g., 1.3 or 1.15). **Dependencies**:
-`adb` **Usage**: `scripts/adb-fontscale-large` **Raw Command**:
+**Purpose**: Get or set the system font scale (presets: `default` = 1.0,
+`large` = 1.24, or any numeric value). **Dependencies**: `adb` **Usage**:
+`scripts/adb-fontscale get`, `scripts/adb-fontscale set default|large|NUMBER`
+**Raw Command**:
 
 ```bash
-# (Value may vary by script version)
-adb exec-out settings put system font_scale 1.15
+adb exec-out settings get system font_scale
+adb exec-out settings put system font_scale 1.24
 ```
 
 ### `scripts/adb-theme`
@@ -429,24 +387,6 @@ adb exec-out settings put secure theme_customization_overlay_packages '{"android
 
 ```bash
 adb exec-out am start -a com.google.android.clockwork.sysui.ACTION_SYSTEM_THEME_SETTINGS
-```
-
-### `scripts/adb-touches-on`
-
-**Purpose**: Show visual feedback for taps. **Dependencies**: `adb` **Usage**:
-`scripts/adb-touches-on` **Raw Command**:
-
-```bash
-adb exec-out settings put system show_touches 1
-```
-
-### `scripts/adb-touches-off`
-
-**Purpose**: Disable the "Show touches" setting. **Dependencies**: `adb`
-**Usage**: `scripts/adb-touches-off` **Raw Command**:
-
-```bash
-adb exec-out settings put system show_touches 0
 ```
 
 <!-- markdownlint-restore MD013 -->
