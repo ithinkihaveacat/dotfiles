@@ -62,12 +62,23 @@ skill <command> [arguments]
   all, `--catalog` for the catalog index).
 - **`clean`**: Remove all managed skills and clear tracking records.
 - **`doctor`**: Diagnose mismatch between desired and on-disk skills
-  (read-only).
+  (read-only). Also warns when `AGENT_REQUIRED_SKILLS` looks stale relative to
+  the workspace's `.envrc` skills declaration (fix: `direnv reload`).
 - **`catalog`**: List all plugin-provided skills and their sources.
 - **`resolve NAME`**: Print the source path a skill name would resolve to.
 
 ### Environment
 
+Variable names follow a two-tier rule: `AGENT_*` variables are **policy** a
+human sets (what agents should do in this workspace); `SKILL_*` variables are
+**plumbing** for this tool (how it finds and links things, rarely touched).
+
+- `AGENT_REQUIRED_SKILLS`: Space-separated skill names this workspace requires;
+  prefix a name with `-` or `!` to exclude a globally required skill. Managed
+  per-workspace via `envrc add skills` / `envrc remove skills` (`.envrc`).
+- `AGENT_PREFLIGHT_SKIP`: When set, `skill preflight` passes without checking —
+  bypass the agent launch gate once with `AGENT_PREFLIGHT_SKIP=1 claude`. (The
+  legacy spelling `_agent_preflight_skip` is still honored.)
 - `SKILL_SOURCE_DIRS`: Colon-separated directories searched for skills by name
   (default: `~/.dotfiles/skills:~/.private/skills:~/.corp/skills` plus the
   catalog cache).
@@ -170,6 +181,14 @@ Add a specific skill from the catalog or a local path:
 ```bash
 skill add coding-standards
 skill add /path/to/custom-skill
+```
+
+An ad-hoc `skill add` is pruned by the next `skill apply` unless the skill is
+also declared in `AGENT_REQUIRED_SKILLS`. To persist it, record it in the
+workspace's `.envrc` (the `envrc` command manages the declaration):
+
+```bash
+envrc add skills coding-standards
 ```
 
 ### Managing Permissions by Hand

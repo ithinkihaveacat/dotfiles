@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+set -u
+
+BIN="$(cd "$(dirname "$0")/../.." && pwd)/bin/envrc"
+TMP=$(mktemp -d)
+trap 'rm -rf -- "$TMP"' EXIT
+
+# All invocations use --output with an absolute path, so 'direnv allow' is
+# never triggered and the tests are hermetic and parallel-safe.
+
+n=0
+ok() {
+  n=$((n + 1))
+  echo "ok $n - $1"
+}
+fail() {
+  n=$((n + 1))
+  echo "not ok $n - $1"
+}
+
+echo "1..19"
+export AGENT_REQUIRED_SKILLS=""
+
+f="$TMP/a.envrc"
+
+# 1: create skills with initial items writes the canonical line
+"$BIN" --output "$f" create skills foo bar >/dev/null 2>&1
+if grep -qx 'skills foo bar' "$f"; then
+  ok "create skills writes canonical 'skills' line"
+else
+  fail "create skills writes canonical 'skills' line: $(cat "$f")"
+fi
+
+# 2: create refuses to overwrite an existing skills block
+if "$BIN" --output "$f" create skills >/dev/null 2>&1; then
+  fail "create refuses existing skills block"
+else
+  ok "create refuses existing skills block"
+fi
+
+# 3: add merges new items into the existing block
+"$BIN" --output "$f" add skills baz >/dev/null 2>&1
+if grep -qx 'skills foo bar baz' "$f"; then
+  ok "add merges a new item"
+else
+  fail "add merges a new item: $(cat "$f")"
+fi
+
+# 4: adding an existing item is a no-op
+"$BIN" --output "$f" add skills foo >/dev/null 2>&1
+if grep -qx 'skills foo bar baz' "$f" && [ "$(grep -c '^skills ' "$f")" -eq 1 ]; then
+  ok "add of an existing item is a no-op"
+else
+  fail "add of an existing item is a no-op: $(cat "$f")"
+fi
+
+# 5: add auto-creates a missing skills block
+f2="$TMP/b.envrc"
+"$BIN" --output "$f2" add skills alpha >/dev/null 2>&1
+if grep -qx 'skills alpha' "$f2" && grep -qF '# >>> envrc managed block: skills >>>' "$f2"; then
+  ok "add auto-creates the skills block"
+else
+  fail "add auto-creates the skills block: $(cat "$f2")"
+fi
+
+# 6: remove drops an item present in the block
+"$BIN" --output "$f" remove skills bar >/dev/null 2>&1
+if grep -qx 'skills foo baz' "$f"; then
+  ok "remove drops a block item"
+else
+  fail "remove drops a block item: $(cat "$f")"
+fi
+
+# 7: remove of a default-provided skill writes a negation instead
+AGENT_REQUIRED_SKILLS="globaldefault" "$BIN" --output "$f" remove skills globaldefault >/dev/null 2>&1
+if grep -qx 'skills foo baz -globaldefault' "$f"; then
+  ok "remove negates a default-provided skill"
+else
+  fail "remove negates a default-provided skill: $(cat "$f")"
+fi
+
+# 8: add re-enables a negated skill by dropping the negation
+"$BIN" --output "$f" add skills globaldefault >/dev/null 2>&1
+if grep -qx 'skills foo baz' "$f"; then
+  ok "add removes an existing negation"
+else
+  fail "add removes an existing negation: $(cat "$f")"
+fi
+
+# 9: add of an explicit negation excludes the skill
+"$BIN" --output "$f" add skills -foo >/dev/null 2>&1
+if grep -qx 'skills baz -foo' "$f"; then
+  ok "add of '-name' drops the positive and adds the negation"
+else
+  fail "add of '-name' drops the positive and adds the negation: $(cat "$f")"
+fi
+
+# 10: remove of an explicit negation re-enables the default
+"$BIN" --output "$f" remove skills -foo >/dev/null 2>&1
+if grep -qx 'skills baz' "$f"; then
+  ok "remove of '-name' drops the negation token"
+else
+  fail "remove of '-name' drops the negation token: $(cat "$f")"
+fi
+
+# 11: removing an unknown name leaves the file untouched
+before=$(cat "$f")
+"$BIN" --output "$f" remove skills no-such-skill >/dev/null 2>&1
+if [ "$(cat "$f")" = "$before" ]; then
+  ok "remove of an unknown name is a no-op"
+else
+  fail "remove of an unknown name is a no-op: $(cat "$f")"
+fi
+
+# 12: list skills prints one item per line on stdout
+"$BIN" --output "$f" add skills qux >/dev/null 2>&1
+out=$("$BIN" --output "$f" list skills 2>/dev/null)
+if [ "$out" = "baz
+qux" ]; then
+  ok "list skills prints items one per line"
+else
+  fail "list skills prints items one per line: $out"
+fi
+
+# 13: delete removes the whole block including markers
+"$BIN" --output "$f" delete skills >/dev/null 2>&1
+if ! grep -q 'skills' "$f"; then
+  ok "delete removes the whole skills block"
+else
+  fail "delete removes the whole skills block: $(cat "$f")"
+fi
+
+# 14: legacy raw-export blocks are parsed and rewritten canonically
+f3="$TMP/c.envrc"
+cat >"$f3" <<'EOF'
+# >>> envrc managed block: skills >>>
+# a comment that should be dropped on rewrite
+export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS old1 old2"
+# <<< envrc managed block: skills <<<
+EOF
+"$BIN" --output "$f3" add skills new1 >/dev/null 2>&1
+if grep -qx 'skills old1 old2 new1' "$f3" && ! grep -q 'export AGENT_REQUIRED_SKILLS' "$f3"; then
+  ok "legacy export block is migrated to the canonical line"
+else
+  fail "legacy export block is migrated to the canonical line: $(cat "$f3")"
+fi
+
+# 15: unrecognized block content is refused, not clobbered
+f4="$TMP/d.envrc"
+cat >"$f4" <<'EOF'
+# >>> envrc managed block: skills >>>
+if [ -n "$SOMETHING" ]; then skills extra; fi
+# <<< envrc managed block: skills <<<
+EOF
+before=$(cat "$f4")
+if "$BIN" --output "$f4" add skills new1 >/dev/null 2>&1; then
+  fail "unrecognized block content is refused"
+elif [ "$(cat "$f4")" = "$before" ]; then
+  ok "unrecognized block content is refused"
+else
+  fail "unrecognized block content is refused (file was modified): $(cat "$f4")"
+fi
+
+# 16: add on a scalar (non-list) type errors and points at create
+if out=$("$BIN" --output "$f" add node 22 2>&1); then
+  fail "add on a scalar type errors"
+elif printf '%s\n' "$out" | grep -q 'envrc create node'; then
+  ok "add on a scalar type errors and suggests create"
+else
+  fail "add on a scalar type errors and suggests create: $out"
+fi
+
+# 17: remove skills with no names errors and mentions delete
+if out=$("$BIN" --output "$f" remove skills 2>&1); then
+  fail "remove skills with no names errors"
+elif printf '%s\n' "$out" | grep -q 'delete skills'; then
+  ok "remove skills with no names errors and mentions delete"
+else
+  fail "remove skills with no names errors and mentions delete: $out"
+fi
+
+# 18: blocks of different types coexist; delete only touches its own block
+f5="$TMP/e.envrc"
+"$BIN" --output "$f5" create git-identity-beebo >/dev/null 2>&1
+"$BIN" --output "$f5" add skills one two >/dev/null 2>&1
+"$BIN" --output "$f5" delete skills >/dev/null 2>&1
+if grep -q 'GIT_AUTHOR_NAME' "$f5" && ! grep -q 'skills' "$f5"; then
+  ok "delete leaves other blocks intact"
+else
+  fail "delete leaves other blocks intact: $(cat "$f5")"
+fi
+
+# 19: mutating a live .envrc (direnv present) prints the reload hint
+live="$TMP/live"
+mkdir -p "$live/bin"
+cat >"$live/bin/direnv" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$live/bin/direnv"
+out=$(cd "$live" && PATH="$live/bin:$PATH" "$BIN" add skills foo 2>&1)
+if printf '%s\n' "$out" | grep -q "direnv reload" && grep -qx 'skills foo' "$live/.envrc"; then
+  ok "mutating a live .envrc prints the reload hint"
+else
+  fail "mutating a live .envrc prints the reload hint: $out"
+fi

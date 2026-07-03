@@ -38,22 +38,28 @@ function __fish_envrc_needs_command
     test (count $parsed) -eq 0
 end
 
-# Helper function: check if we are completing the configuration type
+# Helper function: check if we are completing the block type for create/delete
 function __fish_envrc_needs_type
     set -l parsed (__fish_envrc_parse)
-    test (count $parsed) -eq 1; and contains "$parsed[1]" add remove rm
+    test (count $parsed) -eq 1; and contains "$parsed[1]" create delete
+end
+
+# Helper function: check if we are completing the list type for add/remove/list
+function __fish_envrc_needs_list_type
+    set -l parsed (__fish_envrc_parse)
+    test (count $parsed) -eq 1; and contains "$parsed[1]" add remove rm list
 end
 
 # Helper function: check if we are completing the node version
 function __fish_envrc_needs_node_version
     set -l parsed (__fish_envrc_parse)
-    test (count $parsed) -eq 2; and test "$parsed[1]" = add; and test "$parsed[2]" = node
+    test (count $parsed) -eq 2; and test "$parsed[1]" = create; and test "$parsed[2]" = node
 end
 
 # Helper function: check if we are completing the ruby version
 function __fish_envrc_needs_ruby_version
     set -l parsed (__fish_envrc_parse)
-    test (count $parsed) -eq 2; and test "$parsed[1]" = add; and test "$parsed[2]" = ruby
+    test (count $parsed) -eq 2; and test "$parsed[1]" = create; and test "$parsed[2]" = ruby
 end
 
 # Helper function: list available types
@@ -89,15 +95,20 @@ end
 complete -c envrc -f
 
 # Complete subcommands
-complete -c envrc -n __fish_envrc_needs_command -a add -d 'Add or update a configuration block'
-complete -c envrc -n __fish_envrc_needs_command -a remove -d 'Remove a configuration block'
-complete -c envrc -n __fish_envrc_needs_command -a rm -d 'Remove a configuration block'
-complete -c envrc -n __fish_envrc_needs_command -a list -d 'List active configuration types in .envrc'
-complete -c envrc -n __fish_envrc_needs_command -a types -d 'List available configuration types'
+complete -c envrc -n __fish_envrc_needs_command -a create -d 'Create a configuration block'
+complete -c envrc -n __fish_envrc_needs_command -a delete -d 'Delete an entire configuration block'
+complete -c envrc -n __fish_envrc_needs_command -a add -d 'Add skills to the skills block'
+complete -c envrc -n __fish_envrc_needs_command -a remove -d 'Remove skills from the skills block'
+complete -c envrc -n __fish_envrc_needs_command -a rm -d 'Remove skills from the skills block'
+complete -c envrc -n __fish_envrc_needs_command -a list -d 'List active blocks or skills'
+complete -c envrc -n __fish_envrc_needs_command -a catalog -d 'List available configuration types'
 complete -c envrc -n __fish_envrc_needs_command -a help -d 'Display help message and exit'
 
-# Complete types for add, remove, rm
+# Complete types for create, delete
 complete -c envrc -n __fish_envrc_needs_type -a '(__fish_envrc_types)'
+
+# Complete list-valued types for add, remove, rm, list
+complete -c envrc -n __fish_envrc_needs_list_type -a skills -d 'Agent skills list'
 
 # Complete node versions
 complete -c envrc -n __fish_envrc_needs_node_version -a '(__fish_envrc_node_versions)'
