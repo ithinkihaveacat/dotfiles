@@ -69,6 +69,16 @@ skill <command> [arguments]
 
 ### Environment
 
+Variable names follow a two-tier rule: `AGENT_*` variables are **policy** a
+human sets (what agents should do in this workspace); `SKILL_*` variables are
+**plumbing** for this tool (how it finds and links things, rarely touched).
+
+- `AGENT_REQUIRED_SKILLS`: Space-separated skill names this workspace requires;
+  prefix a name with `-` or `!` to exclude a globally required skill. Managed
+  per-workspace via `envrc add skills` / `envrc remove skills` (`.envrc`).
+- `AGENT_PREFLIGHT_SKIP`: When set, `skill preflight` passes without checking —
+  bypass the agent launch gate once with `AGENT_PREFLIGHT_SKIP=1 claude`. (The
+  legacy spelling `_agent_preflight_skip` is still honored.)
 - `SKILL_SOURCE_DIRS`: Colon-separated directories searched for skills by name
   (default: `~/.dotfiles/skills:~/.private/skills:~/.corp/skills` plus the
   catalog cache).

@@ -108,7 +108,9 @@ so they weigh findings differently:
 - **`skill preflight LABEL`** is the gate run just before an agent launches (it
   calls `cmd_doctor(errors_only=True)`). Only **ERROR**-severity findings block
   launch; WARNING findings are suppressed from its output and do not stop the
-  agent.
+  agent. Setting `AGENT_PREFLIGHT_SKIP` (legacy spelling:
+  `_agent_preflight_skip`) bypasses the gate entirely; the failure message
+  advertises this escape hatch so it never has to be remembered.
 
 This is the single, deliberate asymmetry in the model. It exists because three
 checks are advisory rather than blocking:
