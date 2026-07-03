@@ -69,13 +69,15 @@ ad-hoc or manual fashion across the `envrc` command, `skill` command, and
 - `[ ]` **Move general functionality into `envrc` command:** Transition generic
   block modification, section parsing, and updating of environment variables
   into [envrc](bin/envrc).
-- `[ ]` **Support list-based environment variables:** Allow `envrc` to push,
+- `[x]` **Support list-based environment variables:** Allow `envrc` to push,
   pop, or modify values within space-separated environment variables (e.g., list
-  manipulation) in `.envrc`.
-- `[ ]` **Automate `AGENT_REQUIRED_SKILLS` updates:** Provide a way to
+  manipulation) in `.envrc`. *(Done for the skills block: `envrc add|remove|list
+  skills` operate on items; `envrc create|delete` manage whole blocks.)*
+- `[x]` **Automate `AGENT_REQUIRED_SKILLS` updates:** Provide a way to
   automatically add/remove/negate items in the `AGENT_REQUIRED_SKILLS` variable
   when using `skill add` / `skill remove` rather than printing manual
-  directions.
+  directions. *(Resolved: `skill` now prints ready-to-run `envrc add skills ...`
+  commands; deliberately does not invoke `envrc` automatically.)*
 - `[ ]` **Standardize write paths:** Audit where other commands (such as
   `permission` or setup scripts) prompt or modify environment configuration, and
   ensure they route their operations through the unified `envrc` utility to

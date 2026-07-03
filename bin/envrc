@@ -1,39 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Tests: tests/envrc/
+
 SCRIPT_NAME=$(basename "$0")
 ENVRC_FILE=".envrc"
 
 usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME [options] <command> [args...]
-Manage specific configuration blocks within a .envrc file.
-Allows multiple configurations to co-exist safely.
+
+Manage configuration blocks within a .envrc file. Blocks are delimited by
+managed marker comments so multiple configurations can co-exist safely. The
+'skills' block holds a list that can be edited item-by-item.
 
 Options:
   --output FILE  Path to the output file (default: .envrc)
   --help         Display this help message and exit
 
 Commands:
-  add <type> [args...]   Add or update a configuration block
-  remove <type>          Remove a configuration block
-  list                   List active configuration types in .envrc
-  types                  List available configuration types
+  create <type> [args...]  Create a configuration block
+  delete <type>            Delete an entire configuration block
+  add skills NAME...       Add skills to the skills block (creates it if needed)
+  remove skills NAME...    Remove skills from the skills block (alias: rm);
+                           names provided by the environment default are
+                           excluded with a '-NAME' negation instead
+  list [skills]            List active blocks, or the skills in the skills block
+  catalog                  List available configuration types
 
 Types:
-  git-identity-beebo     Adds Git author identity variables
-  node [VERSION]         Adds Node.js direnv layout (default version: 24)
-  ruby [VERSION]         Adds Ruby direnv layout (default version: 3.4)
-  firebase <PROJECT_ID>  Adds Firebase project variables
+  git-identity-beebo       Adds Git author identity variables
+  node [VERSION]           Adds Node.js direnv layout (default version: 24)
+  ruby [VERSION]           Adds Ruby direnv layout (default version: 3.4)
+  firebase <PROJECT_ID>    Adds Firebase project variables
   appengine <APP_ID> [URL] Adds Google App Engine variables
-  skills                 Adds agent skills environment variables
+  skills [NAME...]         Adds the agent skills list (AGENT_REQUIRED_SKILLS)
 
 Examples:
-  $SCRIPT_NAME add git-identity-beebo
-  $SCRIPT_NAME add node 22
-  $SCRIPT_NAME add firebase my-project-id
-  $SCRIPT_NAME add skills
-  $SCRIPT_NAME remove node
+  $SCRIPT_NAME create git-identity-beebo
+  $SCRIPT_NAME create node 22
+  $SCRIPT_NAME add skills adb jetpack
+  $SCRIPT_NAME remove skills stillers
+  $SCRIPT_NAME list skills
+  $SCRIPT_NAME delete node
+
+The skills block contains a 'skills NAME...' line (a direnv function defined
+in ~/.direnvrc) that appends to the AGENT_REQUIRED_SKILLS environment
+variable. Prefix a name with '-' or '!' to exclude a globally required skill;
+'remove' writes the negation automatically when the name comes from the
+environment default rather than from the block itself.
 EOF
   exit 0
 }
@@ -71,6 +86,26 @@ require() {
   }
 }
 
+lc() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+is_list_type() {
+  [[ "$1" == "skills" ]]
+}
+
+block_exists() {
+  [[ -f "$ENVRC_FILE" ]] && grep -qF "# >>> envrc managed block: $1 >>>" "$ENVRC_FILE"
+}
+
+# Print the lines between (excluding) a block's markers
+get_block_content() {
+  local mark_begin="# >>> envrc managed block: $1 >>>"
+  local mark_end="# <<< envrc managed block: $1 <<<"
+  awk -v s="$mark_begin" -v e="$mark_end" \
+    '$0==s{b=1; next} $0==e{b=0; next} b{print}' "$ENVRC_FILE"
+}
+
 # Safely remove an existing managed block
 remove_block() {
   local type="$1"
@@ -103,7 +138,150 @@ append_block() {
   } >>"$ENVRC_FILE"
 }
 
+allow_direnv() {
+  if [[ "$ENVRC_FILE" == ".envrc" ]] && command -v direnv >/dev/null 2>&1; then
+    direnv allow
+  fi
+}
+
+# Case-insensitive membership test: list_contains NEEDLE ITEM...
+list_contains() {
+  local needle item
+  needle=$(lc "$1")
+  shift
+  for item in "$@"; do
+    if [[ "$(lc "$item")" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Print ITEM... with TOKEN dropped (case-insensitive): drop_token TOKEN ITEM...
+drop_token() {
+  local target item out=""
+  target=$(lc "$1")
+  shift
+  for item in "$@"; do
+    if [[ "$(lc "$item")" != "$target" ]]; then
+      out="${out:+$out }$item"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Print the skills block's items, one per line. Understands the canonical
+# 'skills NAME...' line as well as the legacy raw-export form (which gets
+# rewritten canonically on the next mutation). Returns 1 on any line it does
+# not understand, so hand-crafted blocks are never silently clobbered.
+read_skills_items() {
+  local content line trimmed rest item
+  # shellcheck disable=SC2016 # single quotes intended: match a literal '$AGENT_REQUIRED_SKILLS'
+  local legacy_re='^export[[:space:]]+AGENT_REQUIRED_SKILLS="\$AGENT_REQUIRED_SKILLS([^"]*)"$'
+  content=$(get_block_content skills)
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" || "$trimmed" == "#"* ]]; then
+      continue
+    fi
+    rest=""
+    if [[ "$trimmed" == "skills" ]]; then
+      :
+    elif [[ "$trimmed" == skills\ * ]]; then
+      rest="${trimmed#skills }"
+    elif [[ "$trimmed" =~ $legacy_re ]]; then
+      rest="${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
+    # shellcheck disable=SC2086 # word splitting of the item list is intended
+    for item in $rest; do
+      printf '%s\n' "$item"
+    done
+  done <<<"$content"
+  return 0
+}
+
+# Load the skills block items into $ITEMS (space-separated), or exit with an
+# error if the block content is not machine-editable.
+load_skills_items() {
+  local caller="$1" raw
+  ITEMS=""
+  if ! raw=$(read_skills_items); then
+    echo "$SCRIPT_NAME $caller: skills block in $ENVRC_FILE has unrecognized content;" \
+      "edit it manually or run '$SCRIPT_NAME delete skills' and recreate it" >&2
+    exit 1
+  fi
+  local item
+  # shellcheck disable=SC2086 # word splitting of the item list is intended
+  for item in $raw; do
+    ITEMS="${ITEMS:+$ITEMS }$item"
+  done
+}
+
+write_skills_block() {
+  local items="$1" content="skills"
+  if [[ -n "$items" ]]; then
+    content="skills $items"
+  fi
+  remove_block skills
+  append_block skills "$content"
+}
+
+# Print the effective required-skills list from the inherited environment,
+# applying the '-name'/'!name' negation mini-language (mirrors 'skill').
+env_required_skills() {
+  local tok name item out="" newout
+  # shellcheck disable=SC2086 # word splitting of the env list is intended
+  for tok in ${AGENT_REQUIRED_SKILLS:-}; do
+    case "$tok" in
+      -* | !*)
+        name="${tok#?}"
+        newout=""
+        # shellcheck disable=SC2086
+        for item in $out; do
+          if [[ "$(lc "$item")" != "$(lc "$name")" ]]; then
+            newout="${newout:+$newout }$item"
+          fi
+        done
+        out="$newout"
+        ;;
+      *)
+        # shellcheck disable=SC2086
+        if ! list_contains "$tok" $out; then
+          out="${out:+$out }$tok"
+        fi
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 cmd_list() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -ge 1 ]]; then
+    local type="$1"
+    if ! is_list_type "$type"; then
+      echo "$SCRIPT_NAME list: '$type' is not a list-valued block" >&2
+      exit 1
+    fi
+    if ! block_exists skills; then
+      echo "No skills block in $ENVRC_FILE" >&2
+      return
+    fi
+    load_skills_items list
+    local item
+    # shellcheck disable=SC2086 # word splitting of the item list is intended
+    for item in $ITEMS; do
+      printf '%s\n' "$item"
+    done
+    return
+  fi
+
   if [[ ! -f "$ENVRC_FILE" ]]; then
     echo "No active configurations (no $ENVRC_FILE found)"
     return
@@ -120,14 +298,105 @@ cmd_list() {
   fi
 }
 
-cmd_types() {
+cmd_catalog() {
   echo "Available types:"
-  echo "  git-identity-beebo"
-  echo "  node"
-  echo "  ruby"
-  echo "  firebase"
-  echo "  appengine"
-  echo "  skills"
+  echo "  git-identity-beebo       Git author identity variables"
+  echo "  node [VERSION]           Node.js direnv layout"
+  echo "  ruby [VERSION]           Ruby direnv layout"
+  echo "  firebase PROJECT_ID      Firebase project variables"
+  echo "  appengine APP_ID [URL]   Google App Engine variables"
+  echo "  skills [NAME...]         Agent skills list (supports add/remove/list)"
+}
+
+cmd_delete() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME delete: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  if ! block_exists "$type"; then
+    echo "$SCRIPT_NAME delete: no '$type' block in $ENVRC_FILE" >&2
+    return
+  fi
+  remove_block "$type"
+
+  echo "$SCRIPT_NAME: deleted '$type' configuration block from $ENVRC_FILE" >&2
+  allow_direnv
+}
+
+cmd_add() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME add: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  shift
+  if ! is_list_type "$type"; then
+    echo "$SCRIPT_NAME add: '$type' is not a list-valued block; use '$SCRIPT_NAME create $type'" >&2
+    exit 1
+  fi
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME add: skill name required (to create an empty block, use '$SCRIPT_NAME create skills')" >&2
+    exit 1
+  fi
+
+  ITEMS=""
+  if block_exists skills; then
+    load_skills_items add
+  fi
+
+  local changed=0 name bare
+  for name in "$@"; do
+    case "$name" in
+      -* | !*)
+        # Explicit negation request: exclude the named skill
+        bare="${name#?}"
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "-$bare" $ITEMS || list_contains "!$bare" $ITEMS; then
+          echo "$SCRIPT_NAME add: '$bare' is already excluded" >&2
+        else
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "$bare" $ITEMS)
+          ITEMS="${ITEMS:+$ITEMS }-$bare"
+          changed=1
+          echo "$SCRIPT_NAME: excluded '$bare'" >&2
+        fi
+        ;;
+      *)
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "-$name" $ITEMS || list_contains "!$name" $ITEMS; then
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "-$name" $ITEMS)
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "!$name" $ITEMS)
+          changed=1
+          echo "$SCRIPT_NAME: re-enabled '$name' (removed negation)" >&2
+        elif list_contains "$name" $ITEMS; then
+          echo "$SCRIPT_NAME add: '$name' already present" >&2
+        else
+          ITEMS="${ITEMS:+$ITEMS }$name"
+          changed=1
+          echo "$SCRIPT_NAME: added '$name'" >&2
+        fi
+        ;;
+    esac
+  done
+
+  if [[ $changed -eq 1 ]]; then
+    write_skills_block "$ITEMS"
+    echo "$SCRIPT_NAME: updated skills block in $ENVRC_FILE" >&2
+    allow_direnv
+  fi
 }
 
 cmd_remove() {
@@ -141,22 +410,74 @@ cmd_remove() {
   fi
 
   local type="$1"
-  remove_block "$type"
+  shift
+  if ! is_list_type "$type"; then
+    echo "$SCRIPT_NAME remove: '$type' is not a list-valued block; to delete the block, use '$SCRIPT_NAME delete $type'" >&2
+    exit 1
+  fi
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME remove: skill name required (to delete the whole block, use '$SCRIPT_NAME delete skills')" >&2
+    exit 1
+  fi
 
-  echo "$SCRIPT_NAME: removed '$type' configuration from $ENVRC_FILE" >&2
+  ITEMS=""
+  if block_exists skills; then
+    load_skills_items remove
+  fi
 
-  if [[ "$ENVRC_FILE" == ".envrc" ]] && command -v direnv >/dev/null 2>&1; then
-    direnv allow
+  local env_base changed=0 name bare
+  env_base=$(env_required_skills)
+  for name in "$@"; do
+    case "$name" in
+      -* | !*)
+        # Remove an existing negation token (re-enable the default)
+        bare="${name#?}"
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "-$bare" $ITEMS || list_contains "!$bare" $ITEMS; then
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "-$bare" $ITEMS)
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "!$bare" $ITEMS)
+          changed=1
+          echo "$SCRIPT_NAME: removed negation of '$bare'" >&2
+        else
+          echo "$SCRIPT_NAME remove: '$name' not present; nothing to do" >&2
+        fi
+        ;;
+      *)
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "$name" $ITEMS; then
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "$name" $ITEMS)
+          changed=1
+          echo "$SCRIPT_NAME: removed '$name'" >&2
+        elif list_contains "-$name" $ITEMS || list_contains "!$name" $ITEMS; then
+          echo "$SCRIPT_NAME remove: '$name' is already excluded" >&2
+        elif list_contains "$name" $env_base; then
+          ITEMS="${ITEMS:+$ITEMS }-$name"
+          changed=1
+          echo "$SCRIPT_NAME: excluded default skill '$name' (added '-$name')" >&2
+        else
+          echo "$SCRIPT_NAME remove: '$name' not present; nothing to do" >&2
+        fi
+        ;;
+    esac
+  done
+
+  if [[ $changed -eq 1 ]]; then
+    write_skills_block "$ITEMS"
+    echo "$SCRIPT_NAME: updated skills block in $ENVRC_FILE" >&2
+    allow_direnv
   fi
 }
 
-cmd_add() {
+cmd_create() {
   if [[ "${1:-}" == "--help" ]]; then
     usage
   fi
 
   if [[ $# -lt 1 ]]; then
-    echo "$SCRIPT_NAME add: missing configuration type" >&2
+    echo "$SCRIPT_NAME create: missing configuration type" >&2
     exit 1
   fi
 
@@ -204,7 +525,7 @@ EOF
 
     firebase)
       if [[ $# -lt 1 ]]; then
-        echo "$SCRIPT_NAME add firebase: missing PROJECT_ID" >&2
+        echo "$SCRIPT_NAME create firebase: missing PROJECT_ID" >&2
         exit 1
       fi
       require firebase
@@ -226,7 +547,7 @@ EOF
 
     appengine)
       if [[ $# -lt 1 ]]; then
-        echo "$SCRIPT_NAME add appengine: missing APP_ID" >&2
+        echo "$SCRIPT_NAME create appengine: missing APP_ID" >&2
         exit 1
       fi
       local app_id="$1"
@@ -240,19 +561,17 @@ EOF
       ;;
 
     skills)
-      if grep -q "AGENT_REQUIRED_SKILLS=" "$ENVRC_FILE" 2>/dev/null; then
-        echo "$SCRIPT_NAME: error: skills block already exists in $ENVRC_FILE. Edit it manually to manage AGENT_REQUIRED_SKILLS." >&2
+      if block_exists skills; then
+        echo "$SCRIPT_NAME create: skills block already exists in $ENVRC_FILE (use '$SCRIPT_NAME add skills NAME...' to modify it)" >&2
         exit 1
       fi
-      content=$(
-        cat <<'EOF'
-# Set the required agent skills for this workspace.
-# The AGENT_REQUIRED_SKILLS variable supports a mini-language:
-#   - Space-separated names to require skills (e.g. "coding-standards adb")
-#   - Prefix with '-' or '!' to negate/exclude skills (e.g. "-travel" or "!emumanager")
-export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS"
-EOF
-      )
+      if [[ -f "$ENVRC_FILE" ]] && grep -q "AGENT_REQUIRED_SKILLS" "$ENVRC_FILE"; then
+        echo "$SCRIPT_NAME: warning: $ENVRC_FILE already references AGENT_REQUIRED_SKILLS outside a managed block" >&2
+      fi
+      content="skills"
+      if [[ $# -gt 0 ]]; then
+        content="skills $*"
+      fi
       ;;
 
     *)
@@ -264,16 +583,19 @@ EOF
   remove_block "$type"
   append_block "$type" "$content"
 
-  echo "$SCRIPT_NAME: added '$type' configuration to $ENVRC_FILE" >&2
-
-  if [[ "$ENVRC_FILE" == ".envrc" ]] && command -v direnv >/dev/null 2>&1; then
-    direnv allow
-  fi
+  echo "$SCRIPT_NAME: created '$type' configuration block in $ENVRC_FILE" >&2
+  allow_direnv
 }
 
 case "$COMMAND" in
   help)
     usage
+    ;;
+  create)
+    cmd_create "$@"
+    ;;
+  delete)
+    cmd_delete "$@"
     ;;
   add)
     cmd_add "$@"
@@ -282,13 +604,14 @@ case "$COMMAND" in
     cmd_remove "$@"
     ;;
   list)
-    cmd_list
+    cmd_list "$@"
     ;;
-  types)
-    cmd_types
+  catalog | types)
+    cmd_catalog
     ;;
   *)
     echo "$SCRIPT_NAME: unknown command: $COMMAND" >&2
+    echo "Try '$SCRIPT_NAME --help' for more information." >&2
     exit 1
     ;;
 esac

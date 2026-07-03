@@ -172,6 +172,14 @@ skill add coding-standards
 skill add /path/to/custom-skill
 ```
 
+An ad-hoc `skill add` is pruned by the next `skill apply` unless the skill is
+also declared in `AGENT_REQUIRED_SKILLS`. To persist it, record it in the
+workspace's `.envrc` (the `envrc` command manages the declaration):
+
+```bash
+envrc add skills coding-standards
+```
+
 ### Managing Permissions by Hand
 
 ```bash
