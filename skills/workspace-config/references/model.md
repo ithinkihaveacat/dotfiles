@@ -66,6 +66,38 @@ Health is the conjunction of these (plus the agent, plugin-path, and catalog
 checks). `apply` is the idempotent fixpoint: running it makes a workspace
 healthy, and running it again changes nothing.
 
+## The freshness check (advisory)
+
+`AGENT_REQUIRED_SKILLS` is the source of truth `skill` acts on — but in a
+direnv workspace it is a *cache*: the `.envrc` managed skills block (written by
+`envrc`, evaluated via the `skills` function in `~/.direnvrc`) records changes
+that only reach the environment at the next prompt. Between an `.envrc` edit
+and the next direnv reload, the cache is stale.
+
+`check_env_freshness()` detects this by statically parsing the managed block
+(never executing shell) and asserting that every name the block adds appears in
+the parsed environment, and every name it negates does not. Detection is
+deliberately **one-directional**: a name present in the environment but absent
+from the block is unjudgeable, because the base layer (global defaults from the
+shell config) cannot be observed separately. That asymmetry is safe — the
+detectable direction (block declares, env lacks) is the one where acting on the
+stale cache would *destroy* state, while the undetectable direction merely
+delays convergence by one reload.
+
+The result is strictly advisory: it may cause `skill` to **say more or do
+less, never to do something different**:
+
+- **`doctor`** renders it as the *Environment Freshness* check (WARNING) with a
+  `direnv reload` resolution step.
+- **`apply`** declines to run its pruning phase while stale (additions still
+  proceed; they are harmless), telling the user to reload and re-run.
+- Nothing ever merges block contents into the expected-skills set. If that
+  ever seems desirable, the correct design is to recompute the environment via
+  `direnv export` — not a partial merge here.
+
+A block whose content the parser does not recognize yields *no* freshness data
+(the check disappears entirely): an advisory signal must not guess.
+
 ## The one exception: doctor vs. preflight severity
 
 `doctor` and `preflight` run the *same* checks but answer different questions,
@@ -78,7 +110,7 @@ so they weigh findings differently:
   launch; WARNING findings are suppressed from its output and do not stop the
   agent.
 
-This is the single, deliberate asymmetry in the model. It exists because two
+This is the single, deliberate asymmetry in the model. It exists because three
 checks are advisory rather than blocking:
 
 - **Orphaned Directories** (WARNING): a `.claude/skills` or `.agents/skills`
@@ -93,6 +125,11 @@ checks are advisory rather than blocking:
 - **Catalog Cache** staleness (WARNING): a cached remote catalog stub is older
   than its source. Advisory only, and never consulted at launch — `preflight`
   runs with `check_catalog=False`.
+- **Environment Freshness** (WARNING): the `.envrc` managed skills block
+  declares changes that `AGENT_REQUIRED_SKILLS` does not reflect yet (see "The
+  freshness check" above). The skills an agent actually loads come from the
+  on-disk symlinks, which may well match the declared intent — only the
+  environment copy is behind — so blocking launch on it would be wrong.
 
 Everything else a `doctor` reports is an ERROR and blocks launch: a missing
 skill, a dangling symlink, unmanaged junk, exclude drift, a missing plugin local

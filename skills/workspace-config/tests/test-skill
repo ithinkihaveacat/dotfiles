@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..52"
+echo "1..55"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -375,6 +375,14 @@ if ! command -v fish >/dev/null 2>&1; then
   echo "ok 26 - [Preflight] managed dir with missing required skill fails # skip fish not available"
   echo "ok 27 - [Preflight] subtraction operator works # skip fish not available"
 else
+  # _agent_preflight calls the bare 'skill' command; make sure that resolves
+  # to the script under test. (procps ships /usr/bin/skill, which would
+  # otherwise shadow it on systems where the dotfiles bin/ is not on PATH.)
+  cat >"$MOCK_BIN_DIR/skill" <<EOF
+#!/usr/bin/env bash
+exec "${SCRIPT}" "\$@"
+EOF
+  chmod +x "$MOCK_BIN_DIR/skill"
   fish -c "
 # Source dependencies
 source '${TEST_DIR}/../../../fish/functions/_agent_preflight.fish'
@@ -997,4 +1005,137 @@ if [ "$doctor_list_rc" -eq 0 ] &&
 else
   echo "not ok 52 - [Diagnostics] doctor failed to list VCS-managed skills (rc=$doctor_list_rc): $doctor_list_out"
 fi
+cd "$TMPDIR"
+
+# ==============================================================================
+# PART 12: Environment Freshness (.envrc managed block vs AGENT_REQUIRED_SKILLS)
+# ==============================================================================
+
+# Test 53: 'apply' declines to prune while the environment is stale (.envrc
+# declares a skill the environment does not reflect), then prunes normally
+# once the environment is fresh.
+FRESH_DIR="${TMPDIR}/freshness-apply"
+mkdir -p "$FRESH_DIR"
+cd "$FRESH_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+cat >.envrc <<'EOF'
+# >>> envrc managed block: skills >>>
+skills emumanager
+# <<< envrc managed block: skills <<<
+EOF
+ln -s "${TMPDIR}/sources/emumanager" .claude/skills/emumanager
+ln -s "${TMPDIR}/sources/emumanager" .agents/skills/emumanager
+
+# Phase 1: stale (env lacks emumanager) -- the extra symlink must survive
+export AGENT_REQUIRED_SKILLS="coding-standards"
+stale_rc=0
+stale_out=$("${SCRIPT}" apply 2>&1) || stale_rc=$?
+phase1_ok=0
+if [ "$stale_rc" -eq 0 ] && [ -L .claude/skills/emumanager ] &&
+  printf '%s\n' "$stale_out" | grep -q "not pruning" &&
+  printf '%s\n' "$stale_out" | grep -q "direnv reload"; then
+  phase1_ok=1
+fi
+
+# Phase 2: fresh (simulated reload) -- emumanager is now desired and stays
+export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
+"${SCRIPT}" apply >/dev/null 2>&1
+phase2_ok=0
+if [ -L .claude/skills/emumanager ] && "${SCRIPT}" doctor >/dev/null 2>&1; then
+  phase2_ok=1
+fi
+
+# Phase 3: a genuinely-extra symlink is still pruned when the env is fresh
+ln -s "${TMPDIR}/sources/test-skill" .claude/skills/test-skill
+ln -s "${TMPDIR}/sources/test-skill" .agents/skills/test-skill
+"${SCRIPT}" apply >/dev/null 2>&1
+phase3_ok=0
+if [ ! -L .claude/skills/test-skill ] && [ ! -L .agents/skills/test-skill ]; then
+  phase3_ok=1
+fi
+
+if [ "$phase1_ok" -eq 1 ] && [ "$phase2_ok" -eq 1 ] && [ "$phase3_ok" -eq 1 ]; then
+  echo "ok 53 - [Freshness] apply skips pruning while stale, prunes when fresh"
+else
+  echo "not ok 53 - [Freshness] apply guard failed (p1=$phase1_ok p2=$phase2_ok p3=$phase3_ok): $stale_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 54: doctor reports Environment Freshness as a WARNING (fails doctor,
+# passes preflight), covering both directions: a declared-but-missing skill
+# and a negated-but-still-present skill.
+FRESH_DOC_DIR="${TMPDIR}/freshness-doctor"
+mkdir -p "$FRESH_DOC_DIR"
+cd "$FRESH_DOC_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+cat >.envrc <<'EOF'
+# >>> envrc managed block: skills >>>
+skills test-skill -emumanager
+# <<< envrc managed block: skills <<<
+EOF
+
+# Stale environment, but disk fully matches it (warning-only workspace)
+export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
+"${SCRIPT}" apply >/dev/null 2>&1
+doctor_fresh_rc=0
+doctor_fresh_out=$("${SCRIPT}" doctor 2>&1) || doctor_fresh_rc=$?
+preflight_fresh_rc=0
+preflight_fresh_out=$("${SCRIPT}" preflight 2>&1) || preflight_fresh_rc=$?
+stale_phase_ok=0
+if [ "$doctor_fresh_rc" -ne 0 ] &&
+  printf '%s\n' "$doctor_fresh_out" | grep -q "\[!\] Environment Freshness:" &&
+  printf '%s\n' "$doctor_fresh_out" | grep -q "Declared in .envrc but not reflected in the environment:" &&
+  printf '%s\n' "$doctor_fresh_out" | grep -q "  - test-skill" &&
+  printf '%s\n' "$doctor_fresh_out" | grep -q "Negated in .envrc but still present in the environment:" &&
+  printf '%s\n' "$doctor_fresh_out" | grep -q "  - emumanager" &&
+  printf '%s\n' "$doctor_fresh_out" | grep -q "direnv reload" &&
+  [ "$preflight_fresh_rc" -eq 0 ] && [ -z "$preflight_fresh_out" ]; then
+  stale_phase_ok=1
+fi
+
+# Fresh environment: the check goes green and doctor passes
+export AGENT_REQUIRED_SKILLS="coding-standards test-skill"
+"${SCRIPT}" apply >/dev/null 2>&1
+doctor_ok_rc=0
+doctor_ok_out=$("${SCRIPT}" doctor 2>&1) || doctor_ok_rc=$?
+ok_phase_ok=0
+if [ "$doctor_ok_rc" -eq 0 ] &&
+  printf '%s\n' "$doctor_ok_out" | grep -q "\[✓\] Environment Freshness:"; then
+  ok_phase_ok=1
+fi
+
+if [ "$stale_phase_ok" -eq 1 ] && [ "$ok_phase_ok" -eq 1 ]; then
+  echo "ok 54 - [Freshness] doctor warns on stale env; preflight passes; fresh env is green"
+else
+  echo "not ok 54 - [Freshness] doctor/preflight severity wrong (stale=$stale_phase_ok ok=$ok_phase_ok): $doctor_fresh_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 55: an unrecognized skills block yields no freshness data -- the check
+# is advisory and must not guess, so doctor simply omits it.
+FRESH_BAD_DIR="${TMPDIR}/freshness-bad"
+mkdir -p "$FRESH_BAD_DIR"
+cd "$FRESH_BAD_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+cat >.envrc <<'EOF'
+# >>> envrc managed block: skills >>>
+if [ -n "$SOMETHING" ]; then skills extra; fi
+# <<< envrc managed block: skills <<<
+EOF
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+doctor_bad_rc=0
+doctor_bad_out=$("${SCRIPT}" doctor 2>&1) || doctor_bad_rc=$?
+if [ "$doctor_bad_rc" -eq 0 ] &&
+  ! printf '%s\n' "$doctor_bad_out" | grep -q "Environment Freshness"; then
+  echo "ok 55 - [Freshness] unrecognized block content disables the check"
+else
+  echo "not ok 55 - [Freshness] unrecognized block mishandled (rc=$doctor_bad_rc): $doctor_bad_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
 cd "$TMPDIR"

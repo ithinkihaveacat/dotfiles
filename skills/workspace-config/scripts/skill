@@ -9,6 +9,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 import tarfile
@@ -1237,15 +1238,15 @@ def cmd_update(names):
             print(f"skill update: unknown skill '{name}'", file=sys.stderr)
 
 
-def get_parsed_skills():
+def parse_skill_tokens(tokens):
     """
-    Parses AGENT_REQUIRED_SKILLS from environment.
-    Returns a tuple: (required_set, negated_set)
+    Folds a list of skill tokens ('name', '-name', '!name') into
+    (required_set, negated_set) — the same mini-language AGENT_REQUIRED_SKILLS
+    uses, applied to any token source.
     """
-    env_val = os.environ.get("AGENT_REQUIRED_SKILLS", "")
     required_set = []
     negated_set = []
-    for spec in env_val.split():
+    for spec in tokens:
         if spec.startswith("-") or spec.startswith("!"):
             clean_name = spec[1:]
             negated_set.append(clean_name.lower())
@@ -1256,6 +1257,94 @@ def get_parsed_skills():
             if spec not in required_set:
                 required_set.append(spec)
     return required_set, negated_set
+
+
+def get_parsed_skills():
+    """
+    Parses AGENT_REQUIRED_SKILLS from environment.
+    Returns a tuple: (required_set, negated_set)
+    """
+    return parse_skill_tokens(os.environ.get("AGENT_REQUIRED_SKILLS", "").split())
+
+
+ENVRC_SKILLS_MARK_BEGIN = "# >>> envrc managed block: skills >>>"
+ENVRC_SKILLS_MARK_END = "# <<< envrc managed block: skills <<<"
+ENVRC_LEGACY_EXPORT_RE = re.compile(
+    r'^export\s+AGENT_REQUIRED_SKILLS="\$AGENT_REQUIRED_SKILLS([^"]*)"$'
+)
+
+
+def read_envrc_declared_skills(ws):
+    """Statically read the skill tokens declared in the workspace's .envrc
+    managed skills block (written by 'envrc'), without executing any shell.
+
+    Returns the token list, or None when there is nothing trustworthy to read:
+    no .envrc, no managed block, or block content the parser does not
+    recognize. The freshness check built on this is advisory, so it must never
+    guess.
+    """
+    envrc = ws.root / ".envrc"
+    if not envrc.is_file():
+        return None
+    try:
+        lines = envrc.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    in_block = False
+    found = False
+    tokens = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == ENVRC_SKILLS_MARK_BEGIN:
+            in_block = True
+            found = True
+            continue
+        if stripped == ENVRC_SKILLS_MARK_END:
+            in_block = False
+            continue
+        if not in_block or not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "skills" or stripped.startswith("skills "):
+            tokens.extend(stripped.split()[1:])
+            continue
+        m = ENVRC_LEGACY_EXPORT_RE.match(stripped)
+        if m:
+            tokens.extend(m.group(1).split())
+            continue
+        return None
+    if not found:
+        return None
+    return tokens
+
+
+def check_env_freshness(ws):
+    """Compare the skills declared in .envrc's managed block against the
+    inherited AGENT_REQUIRED_SKILLS (the source of truth skill acts on).
+
+    Returns None when there is nothing to compare, else a tuple
+    (declared_but_missing, negated_but_still_present): names the block adds
+    that the environment does not reflect, and names the block negates that
+    the environment still contains. Either being non-empty means the
+    environment is a stale cache of the .envrc (direnv has not reloaded yet).
+
+    The detection is deliberately one-directional: the reverse (a name in the
+    environment that the block no longer mentions) is unjudgeable, because the
+    base layer (global defaults) cannot be observed separately. The result is
+    advisory only — callers may warn or decline destructive work, but must
+    never merge it into the desired set.
+    """
+    tokens = read_envrc_declared_skills(ws)
+    if tokens is None:
+        return None
+    decl_required, decl_negated = parse_skill_tokens(tokens)
+    env_required, _ = get_parsed_skills()
+    env_lower = {r.lower() for r in env_required}
+    missing = [d for d in decl_required if d.lower() not in env_lower]
+    stale_negated = []
+    for n in decl_negated:
+        if n in env_lower and n not in stale_negated:
+            stale_negated.append(n)
+    return missing, stale_negated
 
 
 def cmd_apply(args):
@@ -1316,20 +1405,50 @@ def cmd_apply(args):
                     pass
 
     if extra_skills:
-        for s in extra_skills:
-            if is_using_envrc(ws):
-                print(
-                    f"skill: pruning extra symlink not in AGENT_REQUIRED_SKILLS: '{s}'. "
-                    f"(To keep it, run: envrc add skills {s})",
-                    file=sys.stderr,
+        # Freshness interlock: when .envrc declares changes the environment
+        # does not reflect yet, the desired set we are about to enforce is a
+        # stale cache. Do less, not different: skip the destructive prune and
+        # tell the human how to refresh. (Adding symlinks above is harmless
+        # and proceeds regardless.)
+        freshness = check_env_freshness(ws)
+        if freshness is not None and (freshness[0] or freshness[1]):
+            fresh_missing, fresh_negated = freshness
+            reasons = []
+            if fresh_missing:
+                reasons.append(
+                    f".envrc declares {', '.join(repr(s) for s in fresh_missing)} "
+                    "not reflected in AGENT_REQUIRED_SKILLS"
                 )
-            else:
-                print(
-                    f"skill: pruning extra symlink not in AGENT_REQUIRED_SKILLS: '{s}'. "
-                    f"(To keep it, add it to the AGENT_REQUIRED_SKILLS environment variable)",
-                    file=sys.stderr,
+            if fresh_negated:
+                reasons.append(
+                    f".envrc negates {', '.join(repr(s) for s in fresh_negated)} "
+                    "still present in AGENT_REQUIRED_SKILLS"
                 )
-        cmd_remove(extra_skills, announce=False)
+            print(
+                f"skill: environment looks stale for this workspace: {'; '.join(reasons)}",
+                file=sys.stderr,
+            )
+            print(
+                f"skill: not pruning {len(extra_skills)} extra symlink(s) while the "
+                "environment is stale; run 'direnv reload' (or start a new prompt), "
+                "then re-run 'skill apply'",
+                file=sys.stderr,
+            )
+        else:
+            for s in extra_skills:
+                if is_using_envrc(ws):
+                    print(
+                        f"skill: pruning extra symlink not in AGENT_REQUIRED_SKILLS: '{s}'. "
+                        f"(To keep it, run: envrc add skills {s})",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"skill: pruning extra symlink not in AGENT_REQUIRED_SKILLS: '{s}'. "
+                        f"(To keep it, add it to the AGENT_REQUIRED_SKILLS environment variable)",
+                        file=sys.stderr,
+                    )
+            cmd_remove(extra_skills, announce=False)
 
     if not add_ok:
         sys.exit(1)
@@ -1958,6 +2077,46 @@ def cmd_doctor(
             }
         )
 
+    # Check 3b: Environment Freshness (advisory).
+    # Compares the .envrc managed skills block (the recording) against
+    # AGENT_REQUIRED_SKILLS (the truth skill acts on). Only rendered when the
+    # workspace has a readable block; WARNING severity so it fails 'doctor'
+    # (a full audit) but never blocks 'preflight' (the launch gate).
+    freshness = check_env_freshness(ws)
+    fresh_missing = []
+    fresh_negated = []
+    if freshness is not None:
+        fresh_missing, fresh_negated = freshness
+        fresh_details = []
+        if fresh_missing:
+            fresh_details.append(
+                "Declared in .envrc but not reflected in the environment:"
+            )
+            fresh_details += [f"  - {s}" for s in fresh_missing]
+        if fresh_negated:
+            fresh_details.append(
+                "Negated in .envrc but still present in the environment:"
+            )
+            fresh_details += [f"  - {s}" for s in fresh_negated]
+        if fresh_details:
+            checks.append(
+                {
+                    "name": "Environment Freshness",
+                    "status": "WARNING",
+                    "summary": "AGENT_REQUIRED_SKILLS does not reflect this workspace's .envrc (stale environment?)",
+                    "details": fresh_details,
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "name": "Environment Freshness",
+                    "status": "OK",
+                    "summary": "The environment reflects .envrc's skills declaration",
+                    "details": [],
+                }
+            )
+
     # Check 4: Symlink Health
     if dangling:
         checks.append(
@@ -2199,6 +2358,11 @@ def cmd_doctor(
 
     # Collect resolution steps
     resolutions = []
+    if fresh_missing or fresh_negated:
+        resolutions.append(
+            "Reload this workspace's environment so AGENT_REQUIRED_SKILLS picks up .envrc:\n"
+            "      direnv reload   # or start a new prompt, then re-run 'skill apply'"
+        )
     if missing or dangling or backend_issues or extra or negated_extra:
         resolutions.append(
             "To synchronize and repair your configuration, run 'git-setup' or 'skill apply'."
