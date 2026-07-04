@@ -333,18 +333,34 @@ Designed for the highest quality response possible, utilizing deep reasoning
 and Google Search grounding.
 
 The Oracle is not a standard, quick-reply AI. It is designed to process massive
-amounts of information and synthesize authoritative answers. It has no memory
-of previous conversations or your current session.
+amounts of information and synthesize authoritative answers.
+
+Stateless: every invocation is an independent, one-shot consultation. The
+Oracle retains nothing between calls — including your own earlier oracle calls
+in the same session. Never write "as you suggested earlier"; attach the earlier
+answer instead (answers are saved to the cache, see --serialize).
 
 Best Practices for Context:
   To get the most out of the Oracle, you must provide comprehensive context.
+  The model on the other side handles very large context, and what you send is
+  all it has. A well-fed consultation is typically tens to hundreds of KB of
+  context; if your payload is under ~50 KB you have probably under-provided.
+  The 1MB ceiling is a guardrail, not a target.
   - Self-Contained Prompts: Write the prompt as if explaining the problem to an
     expert who has zero prior knowledge of your task. Do not use references like
     "the solution we implemented" without explaining exactly what it was.
+    Prompts of several hundred words are normal; a one-line prompt is almost
+    always a mistake.
   - Broad File Context: Include source files and directories as positional
-    arguments. Err on the side of providing too much context—including files,
-    directories, or documentation even if you think they are only marginally
-    relevant—so the Oracle can discover non-obvious connections.
+    arguments. Err on the side of providing too much context—whole directories
+    rather than hand-picked excerpts, plus documentation, even if only
+    marginally relevant—so the Oracle can discover non-obvious connections.
+  - Session Brief: Much of what the Oracle needs is not in any file —
+    requirements, decisions, and history from your conversation. Write them
+    into a notes file and pass it as context; do not rely on the prompt alone.
+  - Follow-ups: To continue a previous consultation, attach the saved answer
+    (and, if useful, the saved payload) from the cache as context files
+    alongside your new question.
   - Persona & Audience: Who are you, and who is this answer for?
   - Goals & Intent: What is the ultimate objective of this request?
   - Success Criteria: How will you know the answer is correct or useful?
@@ -373,8 +389,9 @@ Options:
   --code        Enable Code Execution for Python.
   --dry-run     Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL Gemini model to use (default: gemini-3.1-pro-preview).
-  --serialize   Save the self-contained payload to a file in the cache (Default: on).
-  --no-serialize Disable saving the payload to the cache.
+  --serialize   Save the request payload and the answer to files in the cache
+                (~/.cache/oracle/). (Default: on).
+  --no-serialize Disable saving the payload and answer to the cache.
   --help        Display this help message and exit.
 
 Environment:

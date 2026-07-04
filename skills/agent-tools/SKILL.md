@@ -110,17 +110,33 @@ and synthesis requiring external data or massive repository context.
 1. **Not for Quick Q&A:** The Oracle is designed for deep, context-heavy
    reasoning. It takes longer to run and consumes more tokens than standard
    tools. Do not use it for simple questions or basic syntax lookups.
+1. **Stateless — One-Shot Consultations:** Every invocation is independent. The
+   Oracle retains nothing between calls — including your own earlier Oracle
+   calls in the same session. Never write "as you suggested earlier" or refer to
+   a previous consultation; the Oracle has never seen it. To follow up, attach
+   the previous answer as a context file (answers are saved automatically to
+   `~/.cache/oracle/answer_*.md`; the path is printed after each run) along with
+   your new question and any critique.
 1. **Self-Contained Prompts:** Write the prompt as if explaining the problem to
-   an expert who has zero prior knowledge of your task, because the Oracle has
-   no memory of your current session or previous steps. Do not use references
+   an expert who has zero prior knowledge of your task. Do not use references
    like "the solution we implemented" without explaining exactly what that
-   solution was.
+   solution was. Prompts of several hundred words are normal; a one-line prompt
+   is almost always a mistake.
 1. **Broad File Context:** Include source files and directories as positional
    arguments because the Oracle needs the broadest possible view of the codebase
    to reason effectively. Err on the side of providing too much
    context—including files, directories, or documentation even if you think they
    are only marginally relevant—so the Oracle can discover non-obvious
-   connections.
+   connections. The model on the other side handles very large context, and what
+   you send is all it has: a well-fed consultation is typically tens to hundreds
+   of KB. If your payload is under ~50 KB you have probably under-provided —
+   prefer whole directories to hand-picked excerpts. The 1 MB ceiling is a
+   guardrail, not a target.
+1. **Write a Session Brief:** Much of what the Oracle needs is not in any file —
+   requirements, decisions, constraints, and history from your conversation.
+   Write them into a notes file (e.g. in your scratchpad directory) and pass it
+   as context alongside the source files; do not rely on the prompt alone to
+   carry them.
 1. **Define the Meta-Context:** Beyond raw files (code, PDFs, logs), the most
    effective Oracle queries explicitly define the "meta-context" in the prompt.
    Before calling the tool, package up your intent. Define the **persona**, the
@@ -137,12 +153,14 @@ and synthesis requiring external data or massive repository context.
 1. **Planning Step:** The Oracle tool processes massive, expensive context
    payloads. Before executing a live Oracle request, formulate your prompt and
    target directories, and run the tool using the `--dry-run` flag:
-   `scripts/oracle --dry-run "PROMPT" [FILE_OR_DIR ...]` Present the resulting
-   dry-run summary (the total payload size, the list of resolved files, and your
-   drafted prompt) to the user in the chat. Ask the user if they want to add
-   more directories, exclude specific files, or tweak the focus of the prompt.
-   Proceed with the live command (without `--dry-run`) after the user approves
-   the plan.
+   `scripts/oracle --dry-run "PROMPT" [FILE_OR_DIR ...]` First check the summary
+   yourself against the size guidance above — if the payload is thin, go back
+   and gather more context before involving anyone. Then present the dry-run
+   summary (the total payload size, the list of resolved files, and your drafted
+   prompt) to the user in the chat and ask whether to add more directories,
+   exclude files, or tweak the prompt — unless the user has already specified
+   the context and approved the run, in which case proceed directly with the
+   live command (without `--dry-run`).
 
 **Warning:** Output can be detailed and lengthy.
 

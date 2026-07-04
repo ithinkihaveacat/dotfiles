@@ -25,6 +25,7 @@ from google.genai import types
 
 MAX_TEXT_SIZE = 1 * 1024 * 1024  # 1MB
 MAX_MEDIA_SIZE = 20 * 1024 * 1024  # 20MB
+SMALL_PAYLOAD_SIZE = 50 * 1024  # below this, nudge the caller to add context
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -109,18 +110,34 @@ Designed for the highest quality response possible, utilizing deep reasoning
 and Google Search grounding.
 
 The Oracle is not a standard, quick-reply AI. It is designed to process massive
-amounts of information and synthesize authoritative answers. It has no memory
-of previous conversations or your current session.
+amounts of information and synthesize authoritative answers.
+
+Stateless: every invocation is an independent, one-shot consultation. The
+Oracle retains nothing between calls — including your own earlier oracle calls
+in the same session. Never write "as you suggested earlier"; attach the earlier
+answer instead (answers are saved to the cache, see --serialize).
 
 Best Practices for Context:
   To get the most out of the Oracle, you must provide comprehensive context.
+  The model on the other side handles very large context, and what you send is
+  all it has. A well-fed consultation is typically tens to hundreds of KB of
+  context; if your payload is under ~50 KB you have probably under-provided.
+  The 1MB ceiling is a guardrail, not a target.
   - Self-Contained Prompts: Write the prompt as if explaining the problem to an
     expert who has zero prior knowledge of your task. Do not use references like
     "the solution we implemented" without explaining exactly what it was.
+    Prompts of several hundred words are normal; a one-line prompt is almost
+    always a mistake.
   - Broad File Context: Include source files and directories as positional
-    arguments. Err on the side of providing too much context—including files,
-    directories, or documentation even if you think they are only marginally
-    relevant—so the Oracle can discover non-obvious connections.
+    arguments. Err on the side of providing too much context—whole directories
+    rather than hand-picked excerpts, plus documentation, even if only
+    marginally relevant—so the Oracle can discover non-obvious connections.
+  - Session Brief: Much of what the Oracle needs is not in any file —
+    requirements, decisions, and history from your conversation. Write them
+    into a notes file and pass it as context; do not rely on the prompt alone.
+  - Follow-ups: To continue a previous consultation, attach the saved answer
+    (and, if useful, the saved payload) from the cache as context files
+    alongside your new question.
   - Persona & Audience: Who are you, and who is this answer for?
   - Goals & Intent: What is the ultimate objective of this request?
   - Success Criteria: How will you know the answer is correct or useful?
@@ -149,8 +166,9 @@ Options:
   --code        Enable Code Execution for Python.
   --dry-run     Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL Gemini model to use (default: gemini-3.1-pro-preview).
-  --serialize   Save the self-contained payload to a file in the cache (Default: on).
-  --no-serialize Disable saving the payload to the cache.
+  --serialize   Save the request payload and the answer to files in the cache
+                (~/.cache/oracle/). (Default: on).
+  --no-serialize Disable saving the payload and answer to the cache.
   --help        Display this help message and exit.
 
 Environment:
@@ -348,6 +366,8 @@ def main():
     payload_xml += "</oracle_payload>\n"
 
     # Save to XDG cache directory if enabled
+    session_id = uuid.uuid4()
+    oracle_cache_dir = None
     if serialize:
         try:
             cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser(
@@ -356,7 +376,7 @@ def main():
             oracle_cache_dir = os.path.join(cache_dir, "oracle")
             os.makedirs(oracle_cache_dir, exist_ok=True)
             payload_file_path = os.path.join(
-                oracle_cache_dir, f"payload_{uuid.uuid4()}.xml"
+                oracle_cache_dir, f"payload_{session_id}.xml"
             )
             with open(payload_file_path, "w", encoding="utf-8") as f:
                 f.write(payload_xml)
@@ -382,7 +402,7 @@ def main():
 
         print("Payload Summary:", file=sys.stdout)
         print(
-            f"  Text Context:  {text_files_count} file(s){stdin_note} ({total_text_size / 1024:.2f} KB)",
+            f"  Text Context:  {text_files_count} file(s){stdin_note} ({total_text_size / 1024:.2f} KB, ~{total_text_size / 4 / 1000:.0f}k tokens)",
             file=sys.stdout,
         )
         print(
@@ -404,8 +424,20 @@ def main():
         if not collected_files and not stdin_note:
             print("  (No files or context resolved)", file=sys.stdout)
 
+        if total_text_size < SMALL_PAYLOAD_SIZE and not media_files_to_upload:
+            print(
+                "\nNote: this payload is small. The Oracle handles hundreds of"
+                " KB, and this is all it gets — consider adding whole"
+                " directories, documentation, prior attempts, session notes,"
+                " and previous Oracle answers.",
+                file=sys.stdout,
+            )
+
         print(
-            "\n[Action Required] Present this summary to the user for confirmation.",
+            "\n[Action Required] Present this summary to the user for"
+            " confirmation — unless the user already specified the context and"
+            " approved the run, in which case check the payload against the"
+            " size guidance yourself and proceed.",
             file=sys.stdout,
         )
         sys.exit(0)
@@ -448,6 +480,13 @@ def main():
         f"{os.path.basename(sys.argv[0])}: {model_id} | {tools_str} | thinking=high | {context_str}",
         file=sys.stderr,
     )
+    if total_text_size < SMALL_PAYLOAD_SIZE and not media_files_to_upload:
+        print(
+            f"{os.path.basename(sys.argv[0])}: note: payload is small"
+            f" ({total_text_size / 1024:.0f} KB); the Oracle handles hundreds"
+            " of KB of context",
+            file=sys.stderr,
+        )
 
     async def upload_all(paths: list) -> list:
         async def upload_one(path: Path) -> types.File:
@@ -496,6 +535,7 @@ def main():
         )
 
         in_thought = False
+        answer_chunks = []
         for chunk in response:
             if not chunk.candidates:
                 continue
@@ -517,10 +557,28 @@ def main():
                         )  # Dim end
                         in_thought = False
                     print(part.text, end="", flush=True)
+                    answer_chunks.append(part.text)
 
         if in_thought:
             print("\033[0m\n", end="", file=sys.stderr, flush=True)
-        print()  # Final newline
+        print(flush=True)  # Final newline
+
+        if oracle_cache_dir and answer_chunks:
+            try:
+                answer_file_path = os.path.join(
+                    oracle_cache_dir, f"answer_{session_id}.md"
+                )
+                with open(answer_file_path, "w", encoding="utf-8") as f:
+                    f.write("".join(answer_chunks))
+                print(
+                    f"{os.path.basename(sys.argv[0])}: saved answer to {answer_file_path} (attach it as context to follow up)",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: failed to save answer to cache: {e}",
+                    file=sys.stderr,
+                )
 
     except Exception as e:
         print(f"{os.path.basename(sys.argv[0])}: error: {e}", file=sys.stderr)
