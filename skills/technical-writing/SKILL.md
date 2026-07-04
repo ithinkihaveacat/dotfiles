@@ -2,11 +2,12 @@
 name: technical-writing
 description: >-
   Use this skill when authoring, reviewing, or editing technical documents,
-  including bug reports, known issues, friction logs, PR descriptions, and the
-  structural content and tone of commit messages. Use to ensure engineering
-  content maintains a clear, factual, and constructive tone. Triggers: technical
-  writing, bug report, known issue, friction log, PR description, pull request,
-  commit message tone, review document.
+  including bug reports, known issues, friction logs, PR descriptions, TODO
+  items, and the structural content and tone of commit messages. Use to ensure
+  engineering content maintains a clear, factual, and constructive tone.
+  Triggers: technical writing, bug report, known issue, friction log, PR
+  description, pull request, commit message tone, review document, TODO,
+  TODO.md, task list, backlog item.
 ---
 
 # Technical Writing Style Guidelines
@@ -80,3 +81,10 @@ persuasively justified and broad context is provided for reviewers. **See:**
 Use when authoring or reviewing comments across different contexts (e.g., code
 reviews, bug reports). Ensures the content is direct, concise, and factual.
 **See:** [references/comments.md](references/comments.md)
+
+### 7. TODO Items
+
+Use when adding, updating, or completing items in a repository's `TODO.md` task
+list. Ensures each item states its goal, end condition, and the writer's
+solution sketch without hardening into a plan. **See:**
+[references/todos.md](references/todos.md)
