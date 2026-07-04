@@ -103,6 +103,6 @@ behavior in their own environment.
 > **Example:**
 >
 > 1. Publish the library locally: `./gradlew publishToMavenLocal`
-> 2. Run previews in the sample app: `./gradlew renderPreviews`
-> 3. Verify screenshots are generated in `app/build/compose-previews/renders/`
+> 1. Run previews in the sample app: `./gradlew renderPreviews`
+> 1. Verify screenshots are generated in `app/build/compose-previews/renders/`
 >    and are not blank.

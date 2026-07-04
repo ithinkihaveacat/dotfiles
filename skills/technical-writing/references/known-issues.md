@@ -30,9 +30,9 @@ Understanding the shift in perspective is key to writing effective Known Issues.
 A **Known Issue** is often the final stage in the lifecycle of a **Bug Report**.
 
 1. **Bug Report Submitted:** A user reports a defect.
-2. **Triage Decision:** Maintainers decide the code will not change (e.g.,
+1. **Triage Decision:** Maintainers decide the code will not change (e.g.,
    "WontFix", "Infeasible").
-3. **Conversion:** The bug report is rewritten as a Known Issue to document the
+1. **Conversion:** The bug report is rewritten as a Known Issue to document the
    behavior for future users.
 
 Writing a Known Issue implies, "We accept this behavior/limitation for now."
@@ -60,16 +60,16 @@ Writing a Known Issue implies, "We accept this behavior/limitation for now."
 **Bug report structure:**
 
 1. **The Defect:** What is wrong.
-2. **Expectation:** How it should work.
-3. **Root Cause/Context:** Deep technical context (stack traces, internal logic)
+1. **Expectation:** How it should work.
+1. **Root Cause/Context:** Deep technical context (stack traces, internal logic)
    to help the maintainer debug.
-4. **Suggested Fix:** (Optional) Code changes.
+1. **Suggested Fix:** (Optional) Code changes.
 
 **Known issue structure:**
 
 1. **The Symptom:** What the user might encounter.
-2. **The Workaround:** Immediate steps to unblock the user.
-3. **Context:** Brief explanation of _why_ (deep technical causality is omitted
+1. **The Workaround:** Immediate steps to unblock the user.
+1. **Context:** Brief explanation of _why_ (deep technical causality is omitted
    unless it helps identify the symptom).
 
 _Note: Known issues lead with the solution; bug reports lead with the problem._
@@ -133,5 +133,5 @@ The raw technical content is often identical, but the framing determines the
 action required.
 
 1. **Action:** Who needs to do the work? (Maintainer vs. User)
-2. **Acceptance:** Is this a problem to be eradicated (Bug) or a reality to be
+1. **Acceptance:** Is this a problem to be eradicated (Bug) or a reality to be
    navigated (Known Issue)?

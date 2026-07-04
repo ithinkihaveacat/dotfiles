@@ -40,49 +40,50 @@ structural principles:
 - **Prohibition on Speculation:** Maintain objectivity. Do not interpret intent
   or attach qualitative judgment to behavior. Describe observable symptoms and
   factual outcomes. Save technical reasoning, hypotheses, and root cause
-  analysis for dedicated "Analysis" or "Rationale" sections.
+  analysis for dedicated "Analysis" or "Rationale" sections (or, in TODO items,
+  the "Ideas" field).
 
 ## Document Types
 
 Depending on the specific document you are asked to write or review, consult the
 relevant reference guide below:
 
-### 1. Friction Logs
+### Friction Logs
 
 Use when documenting a first-time user experience or walkthrough of a new tool,
 CLI, or API. **See:** [references/friction-logs.md](references/friction-logs.md)
 
-### 2. Bug Reports
+### Bug Reports
 
 Use when documenting a defect, crash, or unexpected behavior that requires a fix
 from library/tool maintainers. **See:**
 [references/bug-reports.md](references/bug-reports.md)
 
-### 3. Known Issues
+### Known Issues
 
 Use when translating a "working as intended" bug or unfixable limitation into
 documentation intended to help end-users navigate the current state of a
 library. **See:** [references/known-issues.md](references/known-issues.md)
 
-### 4. Commit Messages
+### Commit Messages
 
 Use when authoring or reviewing git commit messages. Ensures the immediate
 technical "why" and factual record are clearly communicated for the permanent
 history. **See:** [references/commit-messages.md](references/commit-messages.md)
 
-### 5. Pull Request Descriptions
+### Pull Request Descriptions
 
 Use when authoring or reviewing pull request descriptions. Ensures the change is
 persuasively justified and broad context is provided for reviewers. **See:**
 [references/pr-descriptions.md](references/pr-descriptions.md)
 
-### 6. Writing Comments
+### Comments
 
 Use when authoring or reviewing comments across different contexts (e.g., code
 reviews, bug reports). Ensures the content is direct, concise, and factual.
 **See:** [references/comments.md](references/comments.md)
 
-### 7. TODO Items
+### TODO Items
 
 Use when adding, updating, or completing items in a repository's `TODO.md` task
 list. Ensures each item states its goal, end condition, and the writer's

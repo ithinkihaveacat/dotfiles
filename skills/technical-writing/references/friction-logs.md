@@ -19,7 +19,7 @@ Provide the context of the evaluation:
 
 - **Date:** The date the evaluation took place.
 - **Environment:** The operating system and relevant environment details.
-- **Perspective:** Your role (e.g., Android DevRel Engineer) and mindset.
+- **Perspective:** Your role (e.g., integration engineer) and mindset.
 - **Introduction Paragraph:** A brief paragraph introducing why you are
   evaluating the tool and framing the document as a helpful contribution.
 
@@ -39,8 +39,8 @@ issues identified during the walkthrough. Frame these constructively.
 
 - Avoid authoritative judgments like "This lack of observability is a critical
   failure."
-- Prefer constructive framing like "Adding `--verbose` flags would be super
-  helpful for debugging."
+- Prefer constructive framing like "Adding `--verbose` flags would be helpful
+  for debugging."
 
 ### 3. Chronological Walkthrough (The "Log")
 
@@ -50,9 +50,9 @@ Installation, Setup, Core Command Execution).
 For each step:
 
 1. **Context/Action:** Describe what you were trying to do.
-2. **Commands & Outputs:** Include the exact shell commands executed and their
+1. **Commands & Outputs:** Include the exact shell commands executed and their
    literal output (truncated if overly long). This proves _what_ happened.
-3. **Observation:** Factually state what occurred or where the friction lies.
+1. **Observation:** Factually state what occurred or where the friction lies.
    Frame limitations as suggested improvements.
 
 _Example Observation Block:_

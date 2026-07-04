@@ -1,18 +1,9 @@
-# Writing Comments
+# Comment Guidelines
 
 Guidelines for writing effective, concise, and factual comments across different
-contexts.
-
-## General Principles
-
-- **Be Direct and Concise:** Avoid unnecessary filler words. State the
-  conclusion first.
-- **Factual and Objective:** Explain _why_ something is happening based on
-  technical facts, not assumptions.
-- **Acknowledge Context:** Reference the specific behavior or tool being
-  discussed.
-
----
+contexts. The skill's core principles apply with particular force here: be
+direct, state the conclusion first, and ground every claim in the specific
+behavior or tool being discussed.
 
 ## Code Review Comments
 
@@ -39,17 +30,7 @@ change in behavior.
 > ListScreenTest performs a scroll before capturing the second screenshot
 > (\_end), the TimeText disappears as intended.
 
-#### Refined Version (Tighter and more direct)
-
-> Hi @username, yes, this is expected. In Wear Compose Material 3,
-> ScreenScaffold automatically hides the TimeText during scrolling to maximize
-> content space. The previous Horologist test harness did not accurately
-> simulate this on-device behavior. By migrating to native Material 3
-> components, the screenshot tests now correctly reflect the actual behavior on
-> a physical watch. Since ListScreenTest scrolls before capturing the \_end
-> screenshot, the TimeText disappears as intended by the scaffold design.
-
-#### Final Version (Tightest and most effective)
+#### Refined Version (Tightest and most effective)
 
 > @username I believe this is expected. In Wear Compose Material 3,
 > ScreenScaffold automatically hides the TimeText during scrolling to maximize
@@ -62,10 +43,3 @@ change in behavior.
 - **State the conclusion first** ("I believe this is expected").
 - **Merge sentences** to remove transitions and filler.
 - **State the contrast directly** ("Horologist didn't... but Material 3 does").
-
----
-
-## Bug Report Comments
-
-_(Placeholder for future guidelines on commenting on bug reports, e.g.,
-providing logs, reproduction steps, or status updates.)_
