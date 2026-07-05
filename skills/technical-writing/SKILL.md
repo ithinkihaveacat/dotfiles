@@ -41,7 +41,7 @@ structural principles:
   or attach qualitative judgment to behavior. Describe observable symptoms and
   factual outcomes. Save technical reasoning, hypotheses, and root cause
   analysis for dedicated "Analysis" or "Rationale" sections (or, in TODO items,
-  the "Ideas" field).
+  the "Sketch" field).
 
 ## Document Types
 

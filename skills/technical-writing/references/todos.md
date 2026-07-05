@@ -34,18 +34,23 @@ The body is a sequence of **bold run-in labels**, each starting a paragraph. A
 field may grow supporting material beneath it (lists, tables, code blocks,
 evidence) — the labels keep long and short items structurally identical.
 
+- **Problem** (optional): How the current system behaves and why that is a
+  problem — the mechanics, not just the motivation. Evidence (query output,
+  measurements, reproduction data) belongs beneath this field. Use it when the
+  background outgrows the sentence or two that Goal can carry; when present it
+  precedes Goal. Omit it when Goal's background already covers the ground.
 - **Goal** (required): The outcome — what should be true once the item is done,
   stated as requirements rather than implementation. Include a sentence or two
   of background: why this matters now, and what larger effort it serves (the
   meta-goal), so the item makes sense in isolation.
-- **Done when** (required where definable): The end condition — an observable,
-  checkable state, the equivalent of acceptance criteria. Quantify it whenever
-  the task has a size, count, or performance dimension ("under 50 ms warm",
-  "zero rows matching this audit query"). Avoid criteria that merely restate an
-  aspiration ("the code is cleaner", "search feels fast") — if a reviewer could
-  not check it, it is not an end condition. If no crisp condition exists, say
-  what evidence would settle it.
-- **Ideas** (optional): The writer's sketch of a solution — candidate
+- **Criteria** (required where definable): The end condition — an observable,
+  checkable state. Quantify it whenever the task has a size, count, or
+  performance dimension ("under 50 ms warm", "zero rows matching this audit
+  query"). Avoid criteria that merely restate an aspiration ("the code is
+  cleaner", "search feels fast") — if a reviewer could not check it, it is not
+  an end condition. If no crisp condition exists, say what evidence would settle
+  it.
+- **Sketch** (optional): The writer's early thinking on a solution — candidate
   approaches, findings from research, pointers to relevant code
   (`src/config.ts:43`), approaches already ruled out and why. This is knowledge
   transfer, not instructions. See "A TODO Is Not a Plan" below.
@@ -58,7 +63,9 @@ evidence) — the labels keep long and short items structurally identical.
 
 Omit fields that have nothing to say rather than padding them.
 
-### Example
+### Examples
+
+An item whose background fits inside Goal:
 
 ```markdown
 ## Cache the search matrix in process memory
@@ -69,17 +76,45 @@ matrix (~40 MB at today's corpus); at the target corpus size this load will
 dominate query latency. Part of keeping brute-force search viable without
 introducing a vector database.
 
-**Done when:** A warm query spends under 10 ms loading embeddings (measured,
+**Criteria:** A warm query spends under 10 ms loading embeddings (measured,
 not estimated), and the web server serves concurrent queries from one shared
 matrix.
 
-**Ideas:** Load the matrix once at startup and reuse it across requests,
+**Sketch:** Load the matrix once at startup and reuse it across requests,
 invalidating on re-index. `load_matrix()` (`src/app/db.py:88`) is the single
 entry point, so a small cache keyed by `(source, model)` may suffice.
 Memory-mapping was considered and looks unnecessary at this scale.
 
 **Constraints:** No new dependencies. A real vector index (FAISS,
 `sqlite-vec`) is out of scope until brute force is measured to be too slow.
+```
+
+An item whose problem-side analysis needs its own field:
+
+```markdown
+## Retire orphaned variant rows after ID reissue
+
+**Problem:** `updateProductInDb` (`src/products/update.ts`) upserts variants
+keyed on `(product_id, shopify_id)`, so when the upstream API reissues a
+product's variant IDs, the old rows are never touched again — a new ID for
+the same size is simply a new row. Nothing marks the old row unavailable
+when it drops out of the API response; the pipeline has this cleanup at the
+product level but never got the variant equivalent. An audit (2026-07-02)
+found over 2,000 `(product, size)` groups where a stale row still reads
+`available = 1`, so sizes that sold out months ago still surface in search.
+
+**Goal:** A variant row that disappears from the API response is retired on
+the next update of its product. Part of keeping availability filters — the
+product's core feature — trustworthy.
+
+**Criteria:** The audit query returns zero groups after a full update run,
+and an integration test reproducing an ID reissue shows the stale rows
+retired.
+
+**Sketch:** After upserting a product's current variants, diff the remaining
+`available = 1` rows against the response and retire absentees through the
+normal history-recording path, so downstream caches keyed on availability
+heal without a separate fix.
 ```
 
 ## A TODO Is Not a Plan
@@ -108,7 +143,7 @@ moment the codebase moves. When converting a plan into a TODO item, keep the
 
 **A sketch of the same knowledge:**
 
-> **Ideas:** A `defaultGender` field on the store config would override the
+> **Sketch:** A `defaultGender` field on the store config would override the
 > title heuristic; `updateProductInDb()` (`src/products/update.ts:262`) already
 > has the category in scope at the point gender is assigned, so scoping the
 > override to clothing types is cheap if wanted.
@@ -136,7 +171,7 @@ The default is to **update the item in place** rather than delete it:
    `## Filter floor plans out of the index — done`.
 1. Rewrite the body as a short past-tense record: what shipped, where it lives
    (commit, module, README section), and any deliberate leftovers. Trim the
-   Ideas and Constraints that no longer matter.
+   Sketch and Constraints that no longer matter.
 
 Keep the record brief — a paragraph or two. The commit message and PR
 description are the home for the full verification story; the TODO entry just
