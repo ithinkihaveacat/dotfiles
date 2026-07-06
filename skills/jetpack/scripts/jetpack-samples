@@ -23,7 +23,6 @@ require() {
 check_deps() {
   require curl
   require jq
-  require perl
 }
 
 usage() {
@@ -116,47 +115,26 @@ trap_failure() {
 }
 trap trap_failure ERR
 
-fetch_cs_api_key() {
-  curl -s "https://cs.android.com/" | perl -nle 'print $1 if /(AIza[0-9A-Za-z_-]{35})/' | head -n 1
-}
+CURL_RETRY_OPTS=(--retry 3 --retry-delay 2 --retry-connrefused)
 
-API_KEY=$(fetch_cs_api_key)
-if [[ -z "$API_KEY" ]]; then
-  echo "$(basename "$0"): failed to fetch Code Search API key" >&2
+# Gitiles (the browser behind android.googlesource.com, the same host used
+# below to download matched directories) can list a directory's full
+# recursive file tree as JSON in a single request, scoped to just the
+# derived path. This replaces an older approach that scraped an API key out
+# of cs.android.com's HTML to query Google's internal, undocumented Code
+# Search backend.
+GITILES_URL="https://android.googlesource.com/platform/frameworks/support/+/refs/heads/androidx-main/${DERIVED_PATH}?format=JSON&recursive=1"
+
+if ! RESPONSE=$(curl -sS "${CURL_RETRY_OPTS[@]}" -f "$GITILES_URL"); then
+  echo "$(basename "$0"): no files found for path $DERIVED_PATH" >&2
   exit 1
 fi
 
-CS_QUERY="file:$DERIVED_PATH/.*(integration-tests|samples)/.* package"
-URL="https://grimoireoss-pa.clients6.google.com/v1/contents/search?alt=json&key=${API_KEY}"
-
-JSON_BODY=$(jq -n \
-  --arg query "$CS_QUERY" \
-  '{
-    "queryString": $query,
-    "searchOptions": {
-        "enableDiagnostics": false,
-        "exhaustive": false,
-        "isDedupResultsEnabled": false,
-        "numberOfContextLines": 0,
-        "pageSize": 100,
-        "repositoryScope": {
-            "root": {
-                "ossProject": "androidx",
-                "repositoryName": "platform/frameworks/support"
-            }
-        },
-        "retrieveMultibranchResults": true
-    }
-  }')
-
-RESPONSE=$(curl -s -X POST "$URL" \
-  -H "Content-Type: application/json" \
-  -H "Referer: https://cs.android.com/" \
-  -H "Origin: https://cs.android.com" \
-  -H "X-Requested-With: XMLHttpRequest" \
-  -d "$JSON_BODY")
-
-PATHS=$(echo "$RESPONSE" | jq -r '.searchResults[]?.fileSearchResult.fileSpec.path // empty' | sort -u)
+# Gitiles prefixes JSON responses with an anti-XSSI line ()]}'); strip it
+# before parsing, then reconstruct each entry's path relative to the repo
+# root (the API returns paths relative to the requested directory).
+PATHS=$(echo "$RESPONSE" | tail -n +2 | jq -r --arg prefix "$DERIVED_PATH" \
+  '.entries[]? | select(.type == "blob") | "\($prefix)/\(.name)"' | sort -u)
 
 if [[ -z "$PATHS" ]]; then
   echo "$(basename "$0"): no files found for path $DERIVED_PATH" >&2
@@ -176,7 +154,7 @@ if [[ -n "$MODULE_DIRS" ]]; then
       echo "info: Downloading optimized archive for $mod_dir..." >&2
       TAR_URL="https://android.googlesource.com/platform/frameworks/support/+archive/refs/heads/androidx-main/${mod_dir}.tar.gz"
 
-      if curl -sSLf "$TAR_URL" | tar -xz -C "$TARGET_PATH"; then
+      if curl -sSLf "${CURL_RETRY_OPTS[@]}" "$TAR_URL" | tar -xz -C "$TARGET_PATH"; then
         FOUND_SAMPLES=$((FOUND_SAMPLES + 1))
       fi
     fi
