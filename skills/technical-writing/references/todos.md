@@ -30,6 +30,16 @@ subject: "Move the scraper primitives into this repo", "Filter floor plans out
 of the index". Bug-shaped items are still phrased as the action: "Retire
 orphaned variant rows after ID reissue", not "Orphaned variant rows".
 
+The heading ends with the item's **creation date**, in parentheses, using the
+absolute date the item was written (not a relative phrase, and not updated
+later): `## Filter floor plans out of the index (2026-07-04)`. This is what
+makes recency-ordering (below) checkable without relying on git history.
+
+New items are inserted **immediately below the `# TODO` heading**, not
+appended at the end of the file: the file is kept sorted with the
+most-recently-created item first. Do not reorder existing items when their
+status changes — the sort key is creation date, not last-touched date.
+
 The body is a sequence of **bold run-in labels**, each starting a paragraph. A
 field may grow supporting material beneath it (lists, tables, code blocks,
 evidence) — the labels keep long and short items structurally identical.
@@ -68,7 +78,7 @@ Omit fields that have nothing to say rather than padding them.
 An item whose background fits inside Goal:
 
 ```markdown
-## Cache the search matrix in process memory
+## Cache the search matrix in process memory (2026-06-18)
 
 **Goal:** Search queries should stop re-reading the entire embedding matrix
 from SQLite on every request. Each query currently deserialises the full
@@ -92,7 +102,7 @@ Memory-mapping was considered and looks unnecessary at this scale.
 An item whose problem-side analysis needs its own field:
 
 ```markdown
-## Retire orphaned variant rows after ID reissue
+## Retire orphaned variant rows after ID reissue (2026-07-02)
 
 **Problem:** `updateProductInDb` (`src/products/update.ts`) upserts variants
 keyed on `(product_id, shopify_id)`, so when the upstream API reissues a
@@ -167,11 +177,14 @@ into `TODO.md` itself.
 
 The default is to **update the item in place** rather than delete it:
 
-1. Append `— done` to the heading:
-   `## Filter floor plans out of the index — done`.
+1. Append `— done` to the heading, after the creation date:
+   `## Filter floor plans out of the index (2026-07-04) — done`.
 1. Rewrite the body as a short past-tense record: what shipped, where it lives
    (commit, module, README section), and any deliberate leftovers. Trim the
    Sketch and Constraints that no longer matter.
+
+Leave the item in its existing position rather than moving it — the file's
+sort order is creation date, and completion does not change that.
 
 Keep the record brief — a paragraph or two. The commit message and PR
 description are the home for the full verification story; the TODO entry just
