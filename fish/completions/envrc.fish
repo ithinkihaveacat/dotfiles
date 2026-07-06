@@ -38,10 +38,10 @@ function __fish_envrc_needs_command
     test (count $parsed) -eq 0
 end
 
-# Helper function: check if we are completing the block type for create/delete
+# Helper function: check if we are completing the block type for create/delete/show
 function __fish_envrc_needs_type
     set -l parsed (__fish_envrc_parse)
-    test (count $parsed) -eq 1; and contains "$parsed[1]" create delete
+    test (count $parsed) -eq 1; and contains "$parsed[1]" create delete show
 end
 
 # Helper function: check if we are completing the list type for add/remove/list
@@ -64,7 +64,7 @@ end
 
 # Helper function: list available types
 function __fish_envrc_types
-    echo -e "git-identity-beebo\nnode\nruby\nfirebase\nappengine\nskills"
+    echo -e "git-identity-beebo\nnode\nruby\nuv\nfirebase\nappengine\nskills\nblock"
 end
 
 # Helper function: list local Node.js versions
@@ -101,6 +101,10 @@ complete -c envrc -n __fish_envrc_needs_command -a add -d 'Add skills to the ski
 complete -c envrc -n __fish_envrc_needs_command -a remove -d 'Remove skills from the skills block'
 complete -c envrc -n __fish_envrc_needs_command -a rm -d 'Remove skills from the skills block'
 complete -c envrc -n __fish_envrc_needs_command -a list -d 'List active blocks or skills'
+complete -c envrc -n __fish_envrc_needs_command -a show -d "Print a block's content"
+complete -c envrc -n __fish_envrc_needs_command -a set -d 'Set an environment variable in the env block'
+complete -c envrc -n __fish_envrc_needs_command -a unset -d 'Remove an environment variable from the env block'
+complete -c envrc -n __fish_envrc_needs_command -a get -d "Print a variable's value from any managed block"
 complete -c envrc -n __fish_envrc_needs_command -a catalog -d 'List available configuration types'
 complete -c envrc -n __fish_envrc_needs_command -a help -d 'Display help message and exit'
 

@@ -151,6 +151,31 @@ See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 
+## 3. Managing `.envrc` (`envrc`)
+
+The `envrc` tool (symlinked in `bin/`) is the single write path for `.envrc`
+files: it manages marker-delimited configuration blocks so multiple
+configurations co-exist safely and other tools never edit `.envrc` directly.
+
+- **`create <type> [args...]`** / **`delete <type>`** / **`show <type>`**:
+  Create, delete, or print a typed block (`node`, `ruby`, `uv`, `firebase`,
+  `appengine`, `git-identity-beebo`, `skills`, or a raw `block NAME` whose
+  content is read from stdin).
+- **`add skills NAME...`** / **`remove skills NAME...`** / **`list [skills]`**:
+  Edit the workspace's required-skills declaration item-by-item (see section 1).
+- **`set VAR VALUE`** / **`unset VAR`** / **`get VAR`**: Manage individual
+  environment variables in a managed `env` block. Values are written
+  single-quoted, so they are always literal data — shell syntax is never
+  evaluated when direnv loads the file — and `get` reads the file statically
+  without executing any shell.
+
+Because `envrc create block` writes arbitrary stdin content that direnv later
+executes, it is declared unsafe (see `permissions/unsafe`) and always prompts.
+
+See the [Command Index](references/command-index.md) for full help details.
+
+______________________________________________________________________
+
 ## Usage Examples
 
 ### Default Discovery & Apply (Recommended for new workspaces)
