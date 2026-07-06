@@ -1,0 +1,883 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Tests: skills/workspace-config/tests/
+
+SCRIPT_NAME=$(basename "$0")
+ENVRC_FILE=".envrc"
+
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME [options] <command> [args...]
+
+Manage configuration blocks within a .envrc file. Blocks are delimited by
+managed marker comments so multiple configurations can co-exist safely. The
+'skills' block holds a list that can be edited item-by-item; the 'env' block
+holds environment variables managed with set/unset/get.
+
+Options:
+  --output FILE  Path to the output file (default: .envrc)
+  --help         Display this help message and exit
+
+Commands:
+  create <type> [args...]  Create a configuration block
+  delete <type>            Delete an entire configuration block
+  show <type>              Print a block's content
+  add skills NAME...       Add skills to the skills block (creates it if needed)
+  remove skills NAME...    Remove skills from the skills block (alias: rm);
+                           names provided by the environment default are
+                           excluded with a '-NAME' negation instead
+  list [skills]            List active blocks, or the skills in the skills block
+  set VAR VALUE            Set an environment variable in the env block
+                           (creates the block if needed)
+  unset VAR                Remove an environment variable from the env block
+  get VAR                  Print a variable's value from any managed block
+  catalog                  List available configuration types
+
+Types:
+  git-identity-beebo       Adds Git author identity variables
+  node [VERSION]           Adds Node.js direnv layout (default version: 24)
+  ruby [VERSION]           Adds Ruby direnv layout (default version: 3.4)
+  uv                       Adds Python uv direnv layout
+  firebase <PROJECT_ID>    Adds Firebase project variables
+  appengine <APP_ID> [URL] Adds Google App Engine variables
+  skills [NAME...]         Adds the agent skills list (AGENT_REQUIRED_SKILLS)
+  block <NAME>             Adds a raw block named NAME; content is read from
+                           stdin
+
+Examples:
+  $SCRIPT_NAME create git-identity-beebo
+  $SCRIPT_NAME create node 22
+  $SCRIPT_NAME create uv
+  $SCRIPT_NAME add skills adb jetpack
+  $SCRIPT_NAME remove skills stillers
+  $SCRIPT_NAME list skills
+  $SCRIPT_NAME set API_ORIGIN https://api.example.com
+  $SCRIPT_NAME get API_ORIGIN
+  $SCRIPT_NAME create block corp <corp-fragment.sh
+  $SCRIPT_NAME delete node
+
+The skills block contains a 'skills NAME...' line (a direnv function defined
+in ~/.direnvrc) that appends to the AGENT_REQUIRED_SKILLS environment
+variable. Prefix a name with '-' or '!' to exclude a globally required skill;
+'remove' writes the negation automatically when the name comes from the
+environment default rather than from the block itself.
+
+'set' writes single-quoted values, so values are always literal data: shell
+syntax like \$(...) is never evaluated when direnv loads the file. 'get' reads
+the file statically (no shell is executed) and unquotes simple single- or
+double-quoted values.
+EOF
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      ENVRC_FILE="$2"
+      shift 2
+      ;;
+    --help)
+      usage
+      ;;
+    -*)
+      echo "$SCRIPT_NAME: unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+COMMAND="$1"
+shift
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$SCRIPT_NAME: $1 not found"
+    exit 127
+  }
+}
+
+lc() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+is_list_type() {
+  [[ "$1" == "skills" ]]
+}
+
+block_exists() {
+  [[ -f "$ENVRC_FILE" ]] && grep -qF "# >>> envrc managed block: $1 >>>" "$ENVRC_FILE"
+}
+
+# Print the lines between (excluding) a block's markers
+get_block_content() {
+  local mark_begin="# >>> envrc managed block: $1 >>>"
+  local mark_end="# <<< envrc managed block: $1 <<<"
+  awk -v s="$mark_begin" -v e="$mark_end" \
+    '$0==s{b=1; next} $0==e{b=0; next} b{print}' "$ENVRC_FILE"
+}
+
+# Safely remove an existing managed block
+remove_block() {
+  local type="$1"
+  local mark_begin="# >>> envrc managed block: $type >>>"
+  local mark_end="# <<< envrc managed block: $type <<<"
+
+  if [[ -f "$ENVRC_FILE" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    awk -v s="$mark_begin" -v e="$mark_end" \
+      '$0==s{b=1; next} $0==e{b=0; next} !b{print}' "$ENVRC_FILE" >"$tmp"
+    mv "$tmp" "$ENVRC_FILE"
+  fi
+}
+
+# Append a new managed block
+append_block() {
+  local type="$1"
+  local content="$2"
+  local mark_begin="# >>> envrc managed block: $type >>>"
+  local mark_end="# <<< envrc managed block: $type <<<"
+  if [[ ! -f "$ENVRC_FILE" ]]; then
+    printf '%s\n\n' '# -*- sh -*-' >"$ENVRC_FILE"
+  fi
+  touch "$ENVRC_FILE"
+  {
+    echo "$mark_begin"
+    echo "$content"
+    echo "$mark_end"
+  } >>"$ENVRC_FILE"
+}
+
+allow_direnv() {
+  if [[ "$ENVRC_FILE" == ".envrc" ]] && command -v direnv >/dev/null 2>&1; then
+    direnv allow
+    echo "$SCRIPT_NAME: changes take effect at the next prompt (run 'direnv reload' to apply them now)" >&2
+  fi
+}
+
+# Case-insensitive membership test: list_contains NEEDLE ITEM...
+list_contains() {
+  local needle item
+  needle=$(lc "$1")
+  shift
+  for item in "$@"; do
+    if [[ "$(lc "$item")" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Print ITEM... with TOKEN dropped (case-insensitive): drop_token TOKEN ITEM...
+drop_token() {
+  local target item out=""
+  target=$(lc "$1")
+  shift
+  for item in "$@"; do
+    if [[ "$(lc "$item")" != "$target" ]]; then
+      out="${out:+$out }$item"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Print the skills block's items, one per line. Understands the canonical
+# 'skills NAME...' line as well as the legacy raw-export form (which gets
+# rewritten canonically on the next mutation). Returns 1 on any line it does
+# not understand, so hand-crafted blocks are never silently clobbered.
+read_skills_items() {
+  local content line trimmed rest item
+  # shellcheck disable=SC2016 # single quotes intended: match a literal '$AGENT_REQUIRED_SKILLS'
+  local legacy_re='^export[[:space:]]+AGENT_REQUIRED_SKILLS="\$AGENT_REQUIRED_SKILLS([^"]*)"$'
+  content=$(get_block_content skills)
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" || "$trimmed" == "#"* ]]; then
+      continue
+    fi
+    rest=""
+    if [[ "$trimmed" == "skills" ]]; then
+      :
+    elif [[ "$trimmed" == skills\ * ]]; then
+      rest="${trimmed#skills }"
+    elif [[ "$trimmed" =~ $legacy_re ]]; then
+      rest="${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
+    # shellcheck disable=SC2086 # word splitting of the item list is intended
+    for item in $rest; do
+      printf '%s\n' "$item"
+    done
+  done <<<"$content"
+  return 0
+}
+
+# Load the skills block items into $ITEMS (space-separated), or exit with an
+# error if the block content is not machine-editable.
+load_skills_items() {
+  local caller="$1" raw
+  ITEMS=""
+  if ! raw=$(read_skills_items); then
+    echo "$SCRIPT_NAME $caller: skills block in $ENVRC_FILE has unrecognized content;" \
+      "edit it manually or run '$SCRIPT_NAME delete skills' and recreate it" >&2
+    exit 1
+  fi
+  local item
+  # shellcheck disable=SC2086 # word splitting of the item list is intended
+  for item in $raw; do
+    ITEMS="${ITEMS:+$ITEMS }$item"
+  done
+}
+
+# Replace a block's content (creating the block if it does not exist)
+write_block() {
+  remove_block "$1"
+  append_block "$1" "$2"
+}
+
+write_skills_block() {
+  local items="$1" content="skills"
+  if [[ -n "$items" ]]; then
+    content="skills $items"
+  fi
+  write_block skills "$content"
+}
+
+# Quote a string in single quotes for literal inclusion in shell source
+sq() {
+  local s="$1"
+  s="${s//\'/\'\\\'\'}"
+  printf "'%s'" "$s"
+}
+
+# Strip simple single or double quotes from a value read from the file
+unquote_value() {
+  local v="$1"
+  if [[ ${#v} -ge 2 && "$v" == \'*\' ]]; then
+    v="${v:1:${#v}-2}"
+    v="${v//\'\\\'\'/\'}"
+  elif [[ ${#v} -ge 2 && "$v" == \"*\" ]]; then
+    v="${v:1:${#v}-2}"
+  fi
+  printf '%s' "$v"
+}
+
+valid_var_name() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
+
+# Print the name of the first managed block whose content exports VAR, if any
+block_exporting_var() {
+  [[ -f "$ENVRC_FILE" ]] || return 0
+  awk -v var="$1" '
+    /^# >>> envrc managed block: .* >>>$/ {
+      name = $0
+      sub(/^# >>> envrc managed block: /, "", name)
+      sub(/ >>>$/, "", name)
+      b = 1
+      next
+    }
+    /^# <<< envrc managed block: .* <<<$/ { b = 0; next }
+    b && $0 ~ ("^[[:space:]]*export[[:space:]]+" var "=") { print name; exit }
+  ' "$ENVRC_FILE"
+}
+
+# Succeed if VAR is exported somewhere outside any managed block
+var_exported_outside_blocks() {
+  [[ -f "$ENVRC_FILE" ]] || return 1
+  awk -v var="$1" '
+    /^# >>> envrc managed block: .* >>>$/ { b = 1; next }
+    /^# <<< envrc managed block: .* <<<$/ { b = 0; next }
+    !b && $0 ~ ("^[[:space:]]*export[[:space:]]+" var "=") { found = 1; exit }
+    END { exit !found }
+  ' "$ENVRC_FILE"
+}
+
+# Print the effective required-skills list from the inherited environment,
+# applying the '-name'/'!name' negation mini-language (mirrors 'skill').
+env_required_skills() {
+  local tok name item out="" newout
+  # shellcheck disable=SC2086 # word splitting of the env list is intended
+  for tok in ${AGENT_REQUIRED_SKILLS:-}; do
+    case "$tok" in
+      -* | !*)
+        name="${tok#?}"
+        newout=""
+        # shellcheck disable=SC2086
+        for item in $out; do
+          if [[ "$(lc "$item")" != "$(lc "$name")" ]]; then
+            newout="${newout:+$newout }$item"
+          fi
+        done
+        out="$newout"
+        ;;
+      *)
+        # shellcheck disable=SC2086
+        if ! list_contains "$tok" $out; then
+          out="${out:+$out }$tok"
+        fi
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+cmd_list() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -ge 1 ]]; then
+    local type="$1"
+    if ! is_list_type "$type"; then
+      echo "$SCRIPT_NAME list: '$type' is not a list-valued block" >&2
+      exit 1
+    fi
+    if ! block_exists skills; then
+      echo "No skills block in $ENVRC_FILE" >&2
+      return
+    fi
+    load_skills_items list
+    local item
+    # shellcheck disable=SC2086 # word splitting of the item list is intended
+    for item in $ITEMS; do
+      printf '%s\n' "$item"
+    done
+    return
+  fi
+
+  if [[ ! -f "$ENVRC_FILE" ]]; then
+    echo "No active configurations (no $ENVRC_FILE found)"
+    return
+  fi
+
+  local active_types
+  active_types=$(sed -n 's/^# >>> envrc managed block: \(.*\) >>>/\1/p' "$ENVRC_FILE")
+
+  if [[ -z "$active_types" ]]; then
+    echo "No active configurations in $ENVRC_FILE"
+  else
+    echo "Active configurations in $ENVRC_FILE:"
+    echo "  ${active_types//$'\\n'/$'\\n'  }"
+  fi
+}
+
+cmd_catalog() {
+  echo "Available types:"
+  echo "  git-identity-beebo       Git author identity variables"
+  echo "  node [VERSION]           Node.js direnv layout"
+  echo "  ruby [VERSION]           Ruby direnv layout"
+  echo "  uv                       Python uv direnv layout"
+  echo "  firebase PROJECT_ID      Firebase project variables"
+  echo "  appengine APP_ID [URL]   Google App Engine variables"
+  echo "  skills [NAME...]         Agent skills list (supports add/remove/list)"
+  echo "  block NAME               Raw block; content is read from stdin"
+}
+
+cmd_show() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME show: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  if ! block_exists "$type"; then
+    echo "$SCRIPT_NAME show: no '$type' block in $ENVRC_FILE" >&2
+    exit 1
+  fi
+  get_block_content "$type"
+}
+
+cmd_set() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 2 ]]; then
+    echo "$SCRIPT_NAME set: usage: $SCRIPT_NAME set VAR VALUE" >&2
+    exit 1
+  fi
+
+  local var="$1" value="$2"
+  if ! valid_var_name "$var"; then
+    echo "$SCRIPT_NAME set: invalid variable name: $var" >&2
+    exit 1
+  fi
+
+  local owner
+  owner=$(block_exporting_var "$var")
+  if [[ -n "$owner" && "$owner" != "env" ]]; then
+    echo "$SCRIPT_NAME set: $var is managed by the '$owner' block in $ENVRC_FILE" >&2
+    exit 1
+  fi
+  if var_exported_outside_blocks "$var"; then
+    echo "$SCRIPT_NAME: warning: $ENVRC_FILE already exports $var outside a managed block" >&2
+  fi
+
+  local content line kept=""
+  if block_exists env; then
+    content=$(get_block_content env)
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+$var= ]]; then
+        continue
+      fi
+      kept="${kept:+$kept$'\n'}$line"
+    done <<<"$content"
+  fi
+  kept="${kept:+$kept$'\n'}export $var=$(sq "$value")"
+
+  write_block env "$kept"
+  echo "$SCRIPT_NAME: set $var in $ENVRC_FILE" >&2
+  allow_direnv
+}
+
+cmd_unset() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME unset: variable name required" >&2
+    exit 1
+  fi
+
+  local var="$1"
+  if ! valid_var_name "$var"; then
+    echo "$SCRIPT_NAME unset: invalid variable name: $var" >&2
+    exit 1
+  fi
+
+  local owner
+  owner=$(block_exporting_var "$var")
+  if [[ "$owner" != "env" ]]; then
+    if [[ -n "$owner" ]]; then
+      echo "$SCRIPT_NAME unset: $var is managed by the '$owner' block in $ENVRC_FILE" \
+        "(use '$SCRIPT_NAME delete $owner' to remove that block)" >&2
+    else
+      echo "$SCRIPT_NAME unset: $var not set in the env block of $ENVRC_FILE" >&2
+    fi
+    exit 1
+  fi
+
+  local content line kept=""
+  content=$(get_block_content env)
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+$var= ]]; then
+      continue
+    fi
+    kept="${kept:+$kept$'\n'}$line"
+  done <<<"$content"
+
+  if [[ -z "${kept//[[:space:]]/}" ]]; then
+    remove_block env
+    echo "$SCRIPT_NAME: unset $var and removed the empty env block from $ENVRC_FILE" >&2
+  else
+    write_block env "$kept"
+    echo "$SCRIPT_NAME: unset $var in $ENVRC_FILE" >&2
+  fi
+  allow_direnv
+}
+
+cmd_get() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME get: variable name required" >&2
+    exit 1
+  fi
+
+  local var="$1"
+  if ! valid_var_name "$var"; then
+    echo "$SCRIPT_NAME get: invalid variable name: $var" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$ENVRC_FILE" ]]; then
+    echo "$SCRIPT_NAME get: no $ENVRC_FILE found" >&2
+    exit 1
+  fi
+
+  local line
+  line=$(awk -v var="$var" '
+    /^# >>> envrc managed block: .* >>>$/ { b = 1; next }
+    /^# <<< envrc managed block: .* <<<$/ { b = 0; next }
+    b && $0 ~ ("^[[:space:]]*export[[:space:]]+" var "=") { print; exit }
+  ' "$ENVRC_FILE")
+  if [[ -z "$line" ]]; then
+    echo "$SCRIPT_NAME get: $var not found in any managed block of $ENVRC_FILE" >&2
+    exit 1
+  fi
+
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line#export}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line#"$var"=}"
+  printf '%s\n' "$(unquote_value "$line")"
+}
+
+cmd_delete() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME delete: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  if ! block_exists "$type"; then
+    echo "$SCRIPT_NAME delete: no '$type' block in $ENVRC_FILE" >&2
+    return
+  fi
+  remove_block "$type"
+
+  echo "$SCRIPT_NAME: deleted '$type' configuration block from $ENVRC_FILE" >&2
+  allow_direnv
+}
+
+cmd_add() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME add: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  shift
+  if ! is_list_type "$type"; then
+    echo "$SCRIPT_NAME add: '$type' is not a list-valued block; use '$SCRIPT_NAME create $type'" >&2
+    exit 1
+  fi
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME add: skill name required (to create an empty block, use '$SCRIPT_NAME create skills')" >&2
+    exit 1
+  fi
+
+  ITEMS=""
+  if block_exists skills; then
+    load_skills_items add
+  fi
+
+  local changed=0 name bare
+  for name in "$@"; do
+    case "$name" in
+      -* | !*)
+        # Explicit negation request: exclude the named skill
+        bare="${name#?}"
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "-$bare" $ITEMS || list_contains "!$bare" $ITEMS; then
+          echo "$SCRIPT_NAME add: '$bare' is already excluded" >&2
+        else
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "$bare" $ITEMS)
+          ITEMS="${ITEMS:+$ITEMS }-$bare"
+          changed=1
+          echo "$SCRIPT_NAME: excluded '$bare'" >&2
+        fi
+        ;;
+      *)
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "-$name" $ITEMS || list_contains "!$name" $ITEMS; then
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "-$name" $ITEMS)
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "!$name" $ITEMS)
+          changed=1
+          echo "$SCRIPT_NAME: re-enabled '$name' (removed negation)" >&2
+        elif list_contains "$name" $ITEMS; then
+          echo "$SCRIPT_NAME add: '$name' already present" >&2
+        else
+          ITEMS="${ITEMS:+$ITEMS }$name"
+          changed=1
+          echo "$SCRIPT_NAME: added '$name'" >&2
+        fi
+        ;;
+    esac
+  done
+
+  if [[ $changed -eq 1 ]]; then
+    write_skills_block "$ITEMS"
+    echo "$SCRIPT_NAME: updated skills block in $ENVRC_FILE" >&2
+    allow_direnv
+  fi
+}
+
+cmd_remove() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME remove: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  shift
+  if ! is_list_type "$type"; then
+    echo "$SCRIPT_NAME remove: '$type' is not a list-valued block; to delete the block, use '$SCRIPT_NAME delete $type'" >&2
+    exit 1
+  fi
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME remove: skill name required (to delete the whole block, use '$SCRIPT_NAME delete skills')" >&2
+    exit 1
+  fi
+
+  ITEMS=""
+  if block_exists skills; then
+    load_skills_items remove
+  fi
+
+  local env_base changed=0 name bare
+  env_base=$(env_required_skills)
+  for name in "$@"; do
+    case "$name" in
+      -* | !*)
+        # Remove an existing negation token (re-enable the default)
+        bare="${name#?}"
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "-$bare" $ITEMS || list_contains "!$bare" $ITEMS; then
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "-$bare" $ITEMS)
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "!$bare" $ITEMS)
+          changed=1
+          echo "$SCRIPT_NAME: removed negation of '$bare'" >&2
+        else
+          echo "$SCRIPT_NAME remove: '$name' not present; nothing to do" >&2
+        fi
+        ;;
+      *)
+        # shellcheck disable=SC2086 # word splitting of the item list is intended
+        if list_contains "$name" $ITEMS; then
+          # shellcheck disable=SC2086
+          ITEMS=$(drop_token "$name" $ITEMS)
+          changed=1
+          echo "$SCRIPT_NAME: removed '$name'" >&2
+        elif list_contains "-$name" $ITEMS || list_contains "!$name" $ITEMS; then
+          echo "$SCRIPT_NAME remove: '$name' is already excluded" >&2
+        elif list_contains "$name" $env_base; then
+          ITEMS="${ITEMS:+$ITEMS }-$name"
+          changed=1
+          echo "$SCRIPT_NAME: excluded default skill '$name' (added '-$name')" >&2
+        else
+          echo "$SCRIPT_NAME remove: '$name' not present; nothing to do" >&2
+        fi
+        ;;
+    esac
+  done
+
+  if [[ $changed -eq 1 ]]; then
+    write_skills_block "$ITEMS"
+    echo "$SCRIPT_NAME: updated skills block in $ENVRC_FILE" >&2
+    allow_direnv
+  fi
+}
+
+cmd_create() {
+  if [[ "${1:-}" == "--help" ]]; then
+    usage
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    echo "$SCRIPT_NAME create: missing configuration type" >&2
+    exit 1
+  fi
+
+  local type="$1"
+  shift
+  local content=""
+  local block_name="$type"
+
+  case "$type" in
+    git-identity-beebo)
+      content=$(
+        cat <<EOF
+export GIT_AUTHOR_NAME="Michael Stillwell"
+export GIT_AUTHOR_EMAIL="mjs@beebo.org"
+EOF
+      )
+      ;;
+
+    node)
+      if [[ -z "${NODE_VERSIONS:-}" || ! -d "$NODE_VERSIONS" ]]; then
+        echo "$SCRIPT_NAME: error: NODE_VERSIONS not set, or not a directory" >&2
+        exit 1
+      fi
+      local version="${1:-24}"
+      content=$(
+        cat <<EOF
+use node $version
+layout node
+EOF
+      )
+      ;;
+
+    ruby)
+      if [[ -z "${RUBY_VERSIONS:-}" || ! -d "$RUBY_VERSIONS" ]]; then
+        echo "$SCRIPT_NAME: error: RUBY_VERSIONS not set, or not a directory" >&2
+        exit 1
+      fi
+      local version="${1:-3.4}"
+      content=$(
+        cat <<EOF
+use ruby $version
+layout ruby
+EOF
+      )
+      ;;
+
+    uv)
+      content="layout uv"
+      ;;
+
+    block)
+      if [[ $# -lt 1 ]]; then
+        echo "$SCRIPT_NAME create block: missing block NAME" >&2
+        exit 1
+      fi
+      block_name="$1"
+      case "$block_name" in
+        git-identity-beebo | node | ruby | uv | firebase | appengine | skills | env | block)
+          echo "$SCRIPT_NAME create block: '$block_name' is a reserved block name" >&2
+          exit 1
+          ;;
+      esac
+      if [[ ! "$block_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "$SCRIPT_NAME create block: invalid block name: $block_name" >&2
+        exit 1
+      fi
+      if [[ -t 0 ]]; then
+        echo "$SCRIPT_NAME create block: content must be provided on stdin" >&2
+        exit 1
+      fi
+      content=$(cat)
+      if [[ -z "${content//[[:space:]]/}" ]]; then
+        echo "$SCRIPT_NAME create block: empty content on stdin" >&2
+        exit 1
+      fi
+      ;;
+
+    firebase)
+      if [[ $# -lt 1 ]]; then
+        echo "$SCRIPT_NAME create firebase: missing PROJECT_ID" >&2
+        exit 1
+      fi
+      require firebase
+      local project_id="$1"
+      local project_url="${2:-https://${project_id}.firebaseapp.com}/"
+
+      if ! firebase projects:list | grep -q "$project_id"; then
+        echo "$SCRIPT_NAME: error: $project_id not a configured project (see firebase projects:list)" >&2
+        exit 1
+      fi
+
+      content=$(
+        cat <<EOF
+export FIREBASE_PROJECT_ID="$project_id"
+export FIREBASE_PROJECT_URL="$project_url"
+EOF
+      )
+      ;;
+
+    appengine)
+      if [[ $# -lt 1 ]]; then
+        echo "$SCRIPT_NAME create appengine: missing APP_ID" >&2
+        exit 1
+      fi
+      local app_id="$1"
+      local url="${2:-}"
+      content=$(
+        cat <<EOF
+export GAE_APP_ID="$app_id"
+export GAE_URL="$url"
+EOF
+      )
+      ;;
+
+    skills)
+      if block_exists skills; then
+        echo "$SCRIPT_NAME create: skills block already exists in $ENVRC_FILE (use '$SCRIPT_NAME add skills NAME...' to modify it)" >&2
+        exit 1
+      fi
+      if [[ -f "$ENVRC_FILE" ]] && grep -q "AGENT_REQUIRED_SKILLS" "$ENVRC_FILE"; then
+        echo "$SCRIPT_NAME: warning: $ENVRC_FILE already references AGENT_REQUIRED_SKILLS outside a managed block" >&2
+      fi
+      content="skills"
+      if [[ $# -gt 0 ]]; then
+        content="skills $*"
+      fi
+      ;;
+
+    *)
+      echo "$SCRIPT_NAME: unknown configuration type: $type" >&2
+      exit 1
+      ;;
+  esac
+
+  write_block "$block_name" "$content"
+
+  echo "$SCRIPT_NAME: created '$block_name' configuration block in $ENVRC_FILE" >&2
+  allow_direnv
+}
+
+case "$COMMAND" in
+  help)
+    usage
+    ;;
+  create)
+    cmd_create "$@"
+    ;;
+  delete)
+    cmd_delete "$@"
+    ;;
+  add)
+    cmd_add "$@"
+    ;;
+  remove | rm)
+    cmd_remove "$@"
+    ;;
+  list)
+    cmd_list "$@"
+    ;;
+  show)
+    cmd_show "$@"
+    ;;
+  set)
+    cmd_set "$@"
+    ;;
+  unset)
+    cmd_unset "$@"
+    ;;
+  get)
+    cmd_get "$@"
+    ;;
+  catalog | types)
+    cmd_catalog
+    ;;
+  *)
+    echo "$SCRIPT_NAME: unknown command: $COMMAND" >&2
+    echo "Try '$SCRIPT_NAME --help' for more information." >&2
+    exit 1
+    ;;
+esac

@@ -6,6 +6,7 @@
 
 - [skill](#skill)
 - [permission](#permission)
+- [envrc](#envrc)
 
 ## skill
 
@@ -78,6 +79,77 @@ Options:
 Agents:
   agy                Antigravity/jetski project config (under ~/.gemini)
   claude             Claude Code (.claude/settings.local.json, untracked)
+```
+
+<!-- /generated -->
+
+## envrc
+
+The block below is `scripts/envrc --help`, kept in sync by
+`command-index-sync`.
+
+<!-- generated: ../scripts/envrc --help -->
+
+```text
+Usage: envrc [options] <command> [args...]
+
+Manage configuration blocks within a .envrc file. Blocks are delimited by
+managed marker comments so multiple configurations can co-exist safely. The
+'skills' block holds a list that can be edited item-by-item; the 'env' block
+holds environment variables managed with set/unset/get.
+
+Options:
+  --output FILE  Path to the output file (default: .envrc)
+  --help         Display this help message and exit
+
+Commands:
+  create <type> [args...]  Create a configuration block
+  delete <type>            Delete an entire configuration block
+  show <type>              Print a block's content
+  add skills NAME...       Add skills to the skills block (creates it if needed)
+  remove skills NAME...    Remove skills from the skills block (alias: rm);
+                           names provided by the environment default are
+                           excluded with a '-NAME' negation instead
+  list [skills]            List active blocks, or the skills in the skills block
+  set VAR VALUE            Set an environment variable in the env block
+                           (creates the block if needed)
+  unset VAR                Remove an environment variable from the env block
+  get VAR                  Print a variable's value from any managed block
+  catalog                  List available configuration types
+
+Types:
+  git-identity-beebo       Adds Git author identity variables
+  node [VERSION]           Adds Node.js direnv layout (default version: 24)
+  ruby [VERSION]           Adds Ruby direnv layout (default version: 3.4)
+  uv                       Adds Python uv direnv layout
+  firebase <PROJECT_ID>    Adds Firebase project variables
+  appengine <APP_ID> [URL] Adds Google App Engine variables
+  skills [NAME...]         Adds the agent skills list (AGENT_REQUIRED_SKILLS)
+  block <NAME>             Adds a raw block named NAME; content is read from
+                           stdin
+
+Examples:
+  envrc create git-identity-beebo
+  envrc create node 22
+  envrc create uv
+  envrc add skills adb jetpack
+  envrc remove skills stillers
+  envrc list skills
+  envrc set API_ORIGIN https://api.example.com
+  envrc get API_ORIGIN
+  envrc create block corp <corp-fragment.sh
+  envrc delete node
+
+The skills block contains a 'skills NAME...' line (a direnv function defined
+in ~/.direnvrc) that appends to the AGENT_REQUIRED_SKILLS environment
+variable. Prefix a name with '-' or '!' to exclude a globally required skill;
+'remove' writes the negation automatically when the name comes from the
+environment default rather than from the block itself.
+
+'set' writes single-quoted values, so values are always literal data: shell
+syntax like $(...) is never evaluated when direnv loads the file. 'get' reads
+the file statically (no shell is executed) and unquotes simple single- or
+double-quoted values.
 ```
 
 <!-- /generated -->

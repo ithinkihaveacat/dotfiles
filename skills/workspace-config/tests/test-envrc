@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-BIN="$(cd "$(dirname "$0")/../.." && pwd)/bin/envrc"
+BIN="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/envrc"
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 
@@ -18,7 +18,7 @@ fail() {
   echo "not ok $n - $1"
 }
 
-echo "1..19"
+echo "1..34"
 export AGENT_REQUIRED_SKILLS=""
 
 f="$TMP/a.envrc"
@@ -203,4 +203,132 @@ if printf '%s\n' "$out" | grep -q "direnv reload" && grep -qx 'skills foo' "$liv
   ok "mutating a live .envrc prints the reload hint"
 else
   fail "mutating a live .envrc prints the reload hint: $out"
+fi
+
+# 20: set creates the env block with a single-quoted value
+f6="$TMP/f.envrc"
+"$BIN" --output "$f6" set FOO simple >/dev/null 2>&1
+if grep -qx "export FOO='simple'" "$f6" && grep -qF '# >>> envrc managed block: env >>>' "$f6"; then
+  ok "set creates the env block with a single-quoted value"
+else
+  fail "set creates the env block with a single-quoted value: $(cat "$f6")"
+fi
+
+# 21: set replaces an existing variable and keeps the others
+"$BIN" --output "$f6" set BAR other >/dev/null 2>&1
+"$BIN" --output "$f6" set FOO replaced >/dev/null 2>&1
+if grep -qx "export FOO='replaced'" "$f6" && grep -qx "export BAR='other'" "$f6" &&
+  [ "$(grep -c '^export FOO=' "$f6")" -eq 1 ]; then
+  ok "set replaces an existing variable and keeps the others"
+else
+  fail "set replaces an existing variable and keeps the others: $(cat "$f6")"
+fi
+
+# 22: hostile values round-trip literally through set and get
+# shellcheck disable=SC2016 # non-expansion of $(...) is the point of the test
+hostile='a $(rm -rf /) b'\''c  d'
+"$BIN" --output "$f6" set EVIL "$hostile" >/dev/null 2>&1
+out=$("$BIN" --output "$f6" get EVIL 2>/dev/null)
+if [ "$out" = "$hostile" ]; then
+  ok "hostile values round-trip literally through set and get"
+else
+  fail "hostile values round-trip literally through set and get: $out"
+fi
+
+# 23: get reads a variable from a typed block
+f7="$TMP/g.envrc"
+"$BIN" --output "$f7" create appengine myapp >/dev/null 2>&1
+out=$("$BIN" --output "$f7" get GAE_APP_ID 2>/dev/null)
+if [ "$out" = "myapp" ]; then
+  ok "get reads a variable from a typed block"
+else
+  fail "get reads a variable from a typed block: $out"
+fi
+
+# 24: set refuses a variable managed by another block
+if "$BIN" --output "$f7" set GAE_APP_ID other >/dev/null 2>&1; then
+  fail "set refuses a variable managed by another block"
+elif "$BIN" --output "$f7" set GAE_APP_ID other 2>&1 | grep -q "'appengine' block"; then
+  ok "set refuses a variable managed by another block"
+else
+  fail "set refuses a variable managed by another block (wrong message)"
+fi
+
+# 25: unset removes one variable and keeps the others
+"$BIN" --output "$f6" unset EVIL >/dev/null 2>&1
+if ! grep -q '^export EVIL=' "$f6" && grep -qx "export FOO='replaced'" "$f6"; then
+  ok "unset removes one variable and keeps the others"
+else
+  fail "unset removes one variable and keeps the others: $(cat "$f6")"
+fi
+
+# 26: unsetting the last variable removes the env block entirely
+"$BIN" --output "$f6" unset FOO >/dev/null 2>&1
+"$BIN" --output "$f6" unset BAR >/dev/null 2>&1
+if ! grep -qF '# >>> envrc managed block: env >>>' "$f6"; then
+  ok "unsetting the last variable removes the env block"
+else
+  fail "unsetting the last variable removes the env block: $(cat "$f6")"
+fi
+
+# 27: unset of a missing variable errors
+if "$BIN" --output "$f6" unset NOPE >/dev/null 2>&1; then
+  fail "unset of a missing variable errors"
+else
+  ok "unset of a missing variable errors"
+fi
+
+# 28: get of a missing variable errors
+if "$BIN" --output "$f6" get NOPE >/dev/null 2>&1; then
+  fail "get of a missing variable errors"
+else
+  ok "get of a missing variable errors"
+fi
+
+# 29: show prints a block's content verbatim
+out=$("$BIN" --output "$f7" show appengine 2>/dev/null)
+if printf '%s\n' "$out" | grep -qx 'export GAE_APP_ID="myapp"'; then
+  ok "show prints a block's content"
+else
+  fail "show prints a block's content: $out"
+fi
+
+# 30: show of a missing block errors
+if "$BIN" --output "$f7" show no-such-block >/dev/null 2>&1; then
+  fail "show of a missing block errors"
+else
+  ok "show of a missing block errors"
+fi
+
+# 31: create uv writes the uv layout block
+f8="$TMP/h.envrc"
+"$BIN" --output "$f8" create uv >/dev/null 2>&1
+if grep -qx 'layout uv' "$f8" && grep -qF '# >>> envrc managed block: uv >>>' "$f8"; then
+  ok "create uv writes the uv layout block"
+else
+  fail "create uv writes the uv layout block: $(cat "$f8")"
+fi
+
+# 32: create block reads raw content from stdin into a named block
+printf 'export CORP=1\nexport MORE=2\n' | "$BIN" --output "$f8" create block corp-extra >/dev/null 2>&1
+out=$("$BIN" --output "$f8" show corp-extra 2>/dev/null)
+if [ "$out" = 'export CORP=1
+export MORE=2' ]; then
+  ok "create block reads raw content from stdin"
+else
+  fail "create block reads raw content from stdin: $out"
+fi
+
+# 33: create block refuses reserved block names
+if printf 'x\n' | "$BIN" --output "$f8" create block skills >/dev/null 2>&1; then
+  fail "create block refuses reserved block names"
+else
+  ok "create block refuses reserved block names"
+fi
+
+# 34: set refuses invalid variable names
+if "$BIN" --output "$f8" set 'BAD-NAME' x >/dev/null 2>&1; then
+  fail "set refuses invalid variable names"
+else
+  ok "set refuses invalid variable names"
 fi

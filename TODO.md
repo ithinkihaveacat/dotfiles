@@ -1,30 +1,26 @@
 # TODO
 
-## Centralize and extend .envrc management (2026-06-26) — partially done
+## Centralize and extend .envrc management (2026-06-26) — done
 
-**Goal:** Consolidate and improve `.envrc` management across `envrc`, `skill`,
-and `permission` commands. Currently, workspace configurations write to or
-interact with `.envrc` in an ad-hoc or manual fashion.
+Consolidated `.envrc` management in the `envrc` tool. Earlier work added
+list-based skills editing (`envrc add|remove|list skills`) and ready-to-run
+hints in `skill` (commit `729ed4f`). Completed the remainder:
 
-**Criteria:**
-
-- Generic block modification, section parsing, and updating of environment
-  variables are transitioned into `envrc` (`bin/envrc`).
-- All other commands (such as `permission` or setup scripts) route their
-  configuration edits through the unified `envrc` utility rather than doing
-  direct, ad-hoc edits.
-
-**Status:** Partially completed (2026-07-03) — Supported list-based environment
-variables (e.g. `envrc add|remove|list skills` to operate on space-separated
-list items) and updated the `skill` command to print ready-to-run
-`envrc add skills ...` commands rather than manual instructions (commit
-`729ed4f`). Moving general block/section/envvar functionality to `envrc` and
-auditing/standardizing other command write paths remain open.
-
-**Sketch:** Transitioning block modification and section parsing into `envrc`
-simplifies standardizing configurations. Commands like `permission` or setup
-scripts can run `envrc` subcommand helpers rather than calling `sed` or
-modifying `.envrc` directly.
+- Added generic env-var commands (`envrc set|unset|get VAR`, backed by a
+  managed `env` block with injection-safe single-quoted values) and generic
+  block commands (`envrc show TYPE`, `envrc create block NAME` from stdin),
+  plus a `uv` type for Python workspaces.
+- Audited other write paths: nothing besides `envrc` writes `.envrc`;
+  `bin/python-install`'s printed tip (a destructive `echo ... > .envrc`) now
+  suggests `envrc create uv` instead.
+- Moved `envrc` to `skills/workspace-config/scripts/` with a `bin/` symlink
+  (matching `skill`/`permission`), documented it in the skill's SKILL.md and
+  command-index.md, declared `envrc create block` unsafe in
+  `permissions/unsafe`, and relocated its tests to
+  `skills/workspace-config/tests/test-envrc` (they now run in CI).
+- Resolved the `skill`/`envrc add skills` UX seam by keeping the two commands
+  separate (deliberate) but aggregating `skill`'s per-skill hints into a
+  single multi-skill `envrc add skills foo bar baz` suggestion.
 
 ## Detect and resolve duplicate skills (2026-06-12)
 
