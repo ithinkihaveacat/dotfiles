@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+
+# git-hooks-multiplexer: Manage multiplexed git hooks.
+# Targets Bash version 3.2.57(1)-release
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") COMMAND [ARGUMENTS]
+
+Manage multiplexed git hooks by installing a multiplexer at .git/hooks/<hook-name>
+and placing individual hooks in .git/hooks/<hook-name>.d/<key>.
+
+Commands:
+  install <hook-name> <key> <source-file>
+              Install a sub-hook into the multiplexer.
+  doctor <hook-name> <key>
+              Verify the installation of a multiplexed hook.
+
+Arguments:
+  <hook-name> The git hook to target (e.g., commit-msg, pre-push)
+  <key>       Unique identifier for the sub-hook (use a numbered prefix, e.g., 50-agent)
+  <source-file> The executable script to install as the sub-hook
+
+Options:
+  --help      Display this help message and exit
+
+Examples:
+  $(basename "$0") install commit-msg 10-agent /path/to/agent-hook
+  $(basename "$0") install commit-msg 50-gerrit /path/to/gerrit-hook
+  $(basename "$0") doctor commit-msg 10-agent
+EOF
+  exit 0
+}
+
+if [[ "$#" -eq 0 || "$1" == "help" || "$1" == "--help" ]]; then
+  usage
+fi
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$(basename "$0"): $1 not found" >&2
+    exit 127
+  }
+}
+
+cmd="$1"
+shift
+
+if [[ "$#" -lt 2 ]]; then
+  echo "$(basename "$0") $cmd: missing required arguments" >&2
+  echo "Try '$(basename "$0") --help' for more information." >&2
+  exit 1
+fi
+
+hook_name="$1"
+key="$2"
+
+require git
+
+git_dir=$(git rev-parse --git-dir 2>/dev/null) || {
+  echo "$(basename "$0") $cmd: error: not a git repository" >&2
+  exit 1
+}
+
+hooks_dir="$git_dir/hooks"
+multiplexer_dst="$hooks_dir/$hook_name"
+subhooks_dir="$multiplexer_dst.d"
+subhook_dst="$subhooks_dir/$key"
+
+MULTIPLEXER_MARKER="git-hooks-multiplexer"
+
+multiplexer_content() {
+  cat <<EOF
+#!/bin/sh
+# $MULTIPLEXER_MARKER: $hook_name
+# This file is managed by git-hooks-multiplexer. Do not edit directly.
+
+HOOKS_DIR="\$(dirname "\$0")/$hook_name.d"
+
+# Buffer stdin so multiple hooks can read the same stream
+STDIN_TMP=\$(mktemp)
+trap 'rm -f "\$STDIN_TMP"' EXIT
+cat > "\$STDIN_TMP"
+
+if [ -d "\$HOOKS_DIR" ]; then
+  for hook in "\$HOOKS_DIR"/*; do
+    [ -e "\$hook" ] || continue
+    if [ -x "\$hook" ]; then
+      "\$hook" "\$@" < "\$STDIN_TMP" || exit \$?
+    fi
+  done
+fi
+EOF
+}
+
+install_multiplexer() {
+  mkdir -p "$hooks_dir"
+
+  if [ -f "$multiplexer_dst" ]; then
+    if ! grep -q "$MULTIPLEXER_MARKER" "$multiplexer_dst"; then
+      mkdir -p "$subhooks_dir"
+      echo "$(basename "$0") install: moving existing unmanaged hook to $subhooks_dir/00-legacy" >&2
+      mv "$multiplexer_dst" "$subhooks_dir/00-legacy"
+    fi
+  fi
+
+  multiplexer_content >"$multiplexer_dst"
+  chmod +x "$multiplexer_dst"
+}
+
+case "$cmd" in
+  install)
+    if [ "$#" -lt 3 ]; then
+      echo "$(basename "$0") install: missing source file operand" >&2
+      exit 1
+    fi
+    src="$3"
+    if [ ! -f "$src" ]; then
+      echo "$(basename "$0") install: source file not found: $src" >&2
+      exit 1
+    fi
+    install_multiplexer
+    mkdir -p "$subhooks_dir"
+    cp "$src" "$subhook_dst"
+    chmod +x "$subhook_dst"
+    echo "$(basename "$0") install: installed $key hook to $subhook_dst" >&2
+    ;;
+  doctor)
+    if [ ! -f "$multiplexer_dst" ]; then
+      echo "missing_multiplexer"
+      exit 1
+    fi
+    if ! grep -q "$MULTIPLEXER_MARKER" "$multiplexer_dst"; then
+      echo "unmanaged_multiplexer"
+      exit 1
+    fi
+    if [ ! -x "$subhook_dst" ]; then
+      echo "missing_subhook"
+      exit 1
+    fi
+    echo "ok"
+    ;;
+  *)
+    echo "$(basename "$0"): unknown command: $cmd" >&2
+    echo "Try '$(basename "$0") --help' for more information." >&2
+    exit 1
+    ;;
+esac
