@@ -1,84 +1,89 @@
 # TODO
 
-## Align shellcheck Versions Between CI Jobs
+## Centralize and extend .envrc management (2026-06-26) — partially done
 
-- `[x]` Install the same pinned shellcheck (v0.11.0, from GitHub releases) in
-  the `test` job of `.github/workflows/lint.yml` as in the `shellcheck-shfmt`
-  job, instead of apt's older version.
+**Goal:** Consolidate and improve `.envrc` management across `envrc`, `skill`,
+and `permission` commands. Currently, workspace configurations write to or
+interact with `.envrc` in an ad-hoc or manual fashion.
 
-The lint job pins v0.11.0 while the test job (and typical local apt installs)
-gets 0.9.x. The versions disagree on findings (e.g. apt's 0.9.x flags
-SC2120/SC2119 in `jetpack` and `video-find-hd` that v0.11 does not), so "passes
-locally" and "passes in CI" can diverge. A shared install step (or composite
-action) removes the ambiguity.
+**Criteria:**
 
-## Surface Plugin Load Failures in `doctor`
+- Generic block modification, section parsing, and updating of environment
+  variables are transitioned into `envrc` (`bin/envrc`).
+- All other commands (such as `permission` or setup scripts) route their
+  configuration edits through the unified `envrc` utility rather than doing
+  direct, ad-hoc edits.
 
-- `[ ]` Make `skill doctor` (and the other plugin-loading tools' doctor
-  commands) report plugins that failed to load.
+**Status:** Partially completed (2026-07-03) — Supported list-based environment
+variables (e.g. `envrc add|remove|list skills` to operate on space-separated
+list items) and updated the `skill` command to print ready-to-run
+`envrc add skills ...` commands rather than manual instructions (commit
+`729ed4f`). Moving general block/section/envvar functionality to `envrc` and
+auditing/standardizing other command write paths remain open.
 
-A plugin that fails to load currently produces only a one-line stderr warning
-that scrolls past; `doctor` then reports a healthy catalog that is silently
-missing that plugin's skills. The loader should record load failures and
-`doctor` should list them (e.g. "plugin 20_corp.py failed to load"), fitting the
-doctor-as-drift-detection pattern.
+**Sketch:** Transitioning block modification and section parsing into `envrc`
+simplifies standardizing configurations. Commands like `permission` or setup
+scripts can run `envrc` subcommand helpers rather than calling `sed` or
+modifying `.envrc` directly.
 
-## skill Cleanups and Legacy Shim Retirement
+## Detect and resolve duplicate skills (2026-06-12)
 
-- `[x]` Fix the misleading dedup comment in `cmd_catalog` ("Remove it from
+**Goal:** Provide better visibility and tools to handle duplicate skills in
+different search paths (preventing silent configuration issues like stale
+symlinks pointing to old checkouts), collapse duplicate listings resolving to
+identical paths, and keep namespace categorization clean.
+
+**Criteria:**
+
+- `skill catalog` lists skills in all groups they are found in (instead of
+  silently deduplicating different sources), highlights conflicting duplicates
+  (same name, different targets) with a `(! CONFLICT)` marker, and collapses
+  duplicate entries that point to the exact same path.
+- Cached remote catalog stubs (e.g., in `get_catalog_dir()`) are not incorrectly
+  scanned and listed as `local:` skills.
+- `skill doctor` detects and reports duplicate conflicts as environmental drift.
+- A pruning tool (e.g., `skill prune` or automatic cleanup in `apply` if the
+  target client is gone) is provided to easily prune stale active symlinks.
+
+**Sketch:**
+
+- Robustness: We collapse duplicates by name, keeping the first one encountered
+  (based on search path precedence) so `suggest` always works and doesn't drop
+  recommendations.
+- Visibility: Currently we print a warning to `stderr` showing kept and ignored
+  paths. Future work involves integrating with `catalog`, `doctor`, and adding a
+  pruning tool.
+- Namespace Pollution: `cmd_catalog()` scans `get_catalog_dir()` as part of
+  `source_dirs`, converting remote stubs to the `local:` namespace because the
+  frontmatter metadata is parsed. This directory should be treated differently
+  or excluded from the filesystem local skill scan.
+
+## Align shellcheck versions between CI jobs (2026-06-11) — done
+
+Aligned `shellcheck` versions used across CI jobs by installing pinned
+`shellcheck` v0.11.0 (from GitHub releases) in the `test` job of
+`.github/workflows/lint.yml` (commit `cd76d9f`), eliminating differences in
+static analysis warnings (e.g., SC2120/SC2119 in `jetpack` and `video-find-hd`
+which occurred on apt's older v0.9.x).
+
+## Surface plugin load failures in doctor (2026-06-11)
+
+**Goal:** Make `skill doctor` (and other plugin-loading tools' doctor commands)
+report plugins that failed to load, rather than silently omitting them from a
+"healthy" catalog. A plugin that fails to load currently produces only a
+one-line stderr warning that scrolls past; `doctor` then reports a healthy
+catalog that is silently missing that plugin's skills.
+
+**Criteria:** The loader records load failures and `doctor` lists them (e.g.,
+"plugin 20_corp.py failed to load"), fitting the doctor-as-drift-detection
+pattern.
+
+## Retire legacy skill shims and perform code cleanups (2026-06-11) — done
+
+Completed several cleanups on the `skill` tool (commit `352e1aa`):
+
+- Fixed the misleading deduplication comment in `cmd_catalog` ("Remove it from
   plugin_catalog" — it actually edits the grouped output).
-- `[x]` Collapse the `load_plugins`/`load_plugins_catalog` pair into one
-  function.
-- `[x]` After a deprecation window, delete the `LEGACY_FLAGS` migration shim and
-  the hidden `list` alias for `catalog` in `skill`.
-
-## Duplicate Skill Detection and Resolution
-
-We recently introduced duplicate collapsing in `gather_skills` to prevent
-warnings in `resolve_selection` when a skill is found in multiple search paths
-(e.g., both active and in the catalog cache, or across different local
-checkouts).
-
-### Current Tradeoffs
-
-- **Robustness:** We collapse duplicates by name, keeping the first one
-  encountered (based on search path precedence). This ensures `suggest` always
-  works and doesn't drop recommendations.
-- **Visibility:** To prevent silently hiding configuration issues (like stale
-  symlinks pointing to old local checkouts), we print a warning to `stderr`
-  showing both the kept and ignored paths with their sources.
-
-### Future Work
-
-- `[ ]` **Report Duplicates in Catalog:** Update `skill catalog` to list skills
-  in all groups they are found in (instead of silently deduplicating them), and
-  highlight conflicting duplicates (same name, different targets) with a
-  `(! CONFLICT)` marker.
-- `[ ]` **Integrate with `doctor`:** Make `skill doctor` detect and report these
-  duplicate conflicts as environmental drift.
-- `[ ]` **Pruning Tooling:** Provide a way to easily prune stale active symlinks
-  (e.g., `skill prune` or automatic cleanup in `apply` if the target client is
-  gone).
-
-## Centralize and Extend `.envrc` Management
-
-Currently, workspace configurations write to or interact with `.envrc` in an
-ad-hoc or manual fashion across the `envrc` command, `skill` command, and
-`permission` command. We should consolidate and improve this:
-
-- `[ ]` **Move general functionality into `envrc` command:** Transition generic
-  block modification, section parsing, and updating of environment variables
-  into [envrc](bin/envrc).
-- `[x]` **Support list-based environment variables:** Allow `envrc` to push,
-  pop, or modify values within space-separated environment variables (e.g., list
-  manipulation) in `.envrc`. *(Done for the skills block: `envrc add|remove|list
-  skills` operate on items; `envrc create|delete` manage whole blocks.)*
-- `[x]` **Automate `AGENT_REQUIRED_SKILLS` updates:** Provide a way to
-  automatically add/remove/negate items in the `AGENT_REQUIRED_SKILLS` variable
-  when using `skill add` / `skill remove` rather than printing manual
-  directions. *(Resolved: `skill` now prints ready-to-run `envrc add skills ...`
-  commands; deliberately does not invoke `envrc` automatically.)*
-- `[ ]` **Standardize write paths:** Audit where other commands (such as
-  `permission` or setup scripts) prompt or modify environment configuration, and
-  ensure they route their operations through the unified `envrc` utility to
-  prevent direct, ad-hoc edits.
+- Collapsed the `load_plugins`/`load_plugins_catalog` pair into one function.
+- Deleted the `LEGACY_FLAGS` migration shim and the hidden `list` alias for
+  `catalog` in `skill`.
