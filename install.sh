@@ -601,7 +601,7 @@ if [ "$PLATFORM" = "linux" ]; then
     x sudo apt-get update # refresh package lists
 
     # Core packages: always installed, on every run.
-    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep nodejs npm shfmt chafa"
+    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep shfmt chafa"
     # Optional packages: installed only with --install-optional or --install-all.
     # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
     # ruby-build binary itself is bootstrapped from git below, as the apt package
