@@ -69,3 +69,50 @@ Test how complications and watch faces render across different system states
   ```bash
   adb shell dumpsys package | grep -A 10 "complication"
   ```
+
+______________________________________________________________________
+
+## 3. Headless Emulator Bootstrapping & Setup Bypass
+
+When running automated UI or visual tests on a headless Wear OS emulator, the
+system may boot into a locked or setup state with tutorial overlays, and GMS
+Core capability sync issues can prevent widget tiles from loading.
+
+### 1. Waking up and Unlocking the Device
+
+```bash
+adb shell input keyevent KEYCODE_WAKEUP
+adb shell wm dismiss-keyguard
+```
+
+### 2. Dismissing Charging Overlay
+
+If the emulator is simulating a charging state (locking the screen with a
+charging animation), unplug the battery to dismiss it:
+
+```bash
+adb shell dumpsys battery unplug
+```
+
+### 3. Wear OS OOBE and Tutorial Bypass
+
+Send debug broadcasts to bypass the Wear OS setup tutorial overlays and start in
+active test mode:
+
+```bash
+adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE
+adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
+```
+
+### 4. GMS Core Capability Sync Workaround (for Tiles/Widgets)
+
+If the System UI fails to sync capabilities with GMS Core, it may assume
+widgets/tiles are unsupported and render a default watch face instead of binding
+your service. Force a sync by restarting GMS Core, WearServices, and System UI:
+
+```bash
+adb shell am force-stop com.google.android.gms
+adb shell am force-stop com.google.android.wearable.app
+adb shell am force-stop com.google.android.wearable.sysui
+# Allow 15-20 seconds for the System UI to reboot and re-query capabilities.
+```

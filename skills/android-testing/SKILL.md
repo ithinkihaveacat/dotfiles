@@ -30,16 +30,23 @@ spoofing limits).
 - **UI Automation Guidelines**: `references/ui-automation-guidelines.md`
   (Generalized "Behave Like a Real User" and "Visual Timeline" policies for
   robust, non-flaky UI testing).
+
 - **System States & Connectivity**:
   `references/system-states-and-connectivity.md` (Bluetooth proxy bottlenecks,
   Wi-Fi failovers, Doze mode, and battery simulation).
+
 - **Location & Sensors**: `references/location-and-sensors.md` (Fused Location
   Provider security, Mock Location App requirements, Wear OS Health Services
   synthetic data, and One-Handed Gestures (Double-Pinch) simulation/overrides).
+
 - **Permissions & OS Behavior**: `references/permissions-and-os-behavior.md`
   (Foreground Service types, API 30-36 changes, and Wear OS granular health
   permissions).
+
 - **Wear Surfaces**: `references/wear-surfaces.md` (Interacting with Tiles,
-  Watchfaces, and Complications using `DEBUG_SURFACE` and `DEBUG_SYSUI`).
+  Watchfaces, and Complications using `DEBUG_SURFACE` and `DEBUG_SYSUI`;
+  includes headless emulator setup, tutorial bypass, and GMS capability sync
+  workarounds).
+
 - **Testability Patterns**: `references/testability-patterns.md` (App-side debug
   receivers, data seeding, OOBE race conditions, and standby buckets).
