@@ -20,4 +20,3 @@ complete -f -c git -n __fish_git_setup_needs_command -a doctor -d 'Diagnose this
 
 # Complete flags
 complete -c git -f -n __fish_git_setup_using_command -l help -d 'Display help message and exit'
-complete -c git -f -n __fish_git_setup_using_command -l force -d 'Overwrite a foreign commit-msg hook'

@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-hooks-multiplexer
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../bin/git-hooks-multiplexer"
+
+# Isolate from the user's/system git config (signing, hooks, templates).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+
+echo "1..9"
+
+# Test 1: --help exits zero and documents both commands
+if out=$("$BIN" --help 2>&1) &&
+  printf '%s' "$out" | grep -q 'install' &&
+  printf '%s' "$out" | grep -q 'doctor'; then
+  echo "ok 1 - --help documents install and doctor"
+else
+  echo "not ok 1 - --help missing or incomplete"
+fi
+
+# Test 2: bare invocation is an explicit help request (exit 0)
+if "$BIN" >/dev/null 2>&1; then
+  echo "ok 2 - bare invocation prints help and exits zero"
+else
+  echo "not ok 2 - bare invocation should exit zero"
+fi
+
+REPO=$(mktemp -d "/tmp/hooks-multiplexer-test.XXXXXX")
+trap 'rm -rf "$REPO"' EXIT
+git -C "$REPO" init -q
+
+SUB_A="$REPO/sub-a"
+# shellcheck disable=SC2016 # $1 is expanded by the sub-hook at run time, not here
+printf '#!/bin/sh\necho "a:$1" >> "%s/log.txt"\ncat >> "%s/log.txt"\n' "$REPO" "$REPO" >"$SUB_A"
+chmod +x "$SUB_A"
+
+# Test 3: doctor reports a missing multiplexer before install
+if ! status=$(cd "$REPO" && "$BIN" doctor commit-msg 10-a) &&
+  [ "$status" = "missing_multiplexer" ]; then
+  echo "ok 3 - doctor reports missing_multiplexer before install"
+else
+  echo "not ok 3 - unexpected doctor output: $status"
+fi
+
+# Test 4: install writes a managed multiplexer and executable sub-hook
+if (cd "$REPO" && "$BIN" install commit-msg 10-a "$SUB_A") >/dev/null 2>&1 &&
+  [ -x "$REPO/.git/hooks/commit-msg" ] &&
+  grep -q 'git-hooks-multiplexer' "$REPO/.git/hooks/commit-msg" &&
+  [ -x "$REPO/.git/hooks/commit-msg.d/10-a" ] &&
+  status=$(cd "$REPO" && "$BIN" doctor commit-msg 10-a) &&
+  [ "$status" = "ok" ]; then
+  echo "ok 4 - install writes multiplexer and sub-hook; doctor ok"
+else
+  echo "not ok 4 - install did not produce expected layout"
+fi
+
+# Test 5: a pre-existing foreign hook is preserved as 00-legacy and runs first
+LEGACY_REPO=$(mktemp -d "/tmp/hooks-multiplexer-test-legacy.XXXXXX")
+trap 'rm -rf "$REPO" "$LEGACY_REPO"' EXIT
+git -C "$LEGACY_REPO" init -q
+printf '#!/bin/sh\necho legacy >> "%s/log.txt"\n' "$LEGACY_REPO" >"$LEGACY_REPO/.git/hooks/commit-msg"
+chmod +x "$LEGACY_REPO/.git/hooks/commit-msg"
+printf '#!/bin/sh\necho agent >> "%s/log.txt"\n' "$LEGACY_REPO" >"$LEGACY_REPO/sub"
+chmod +x "$LEGACY_REPO/sub"
+(cd "$LEGACY_REPO" && "$BIN" install commit-msg 10-a "$LEGACY_REPO/sub") >/dev/null 2>&1
+"$LEGACY_REPO/.git/hooks/commit-msg" msgfile </dev/null
+if [ -x "$LEGACY_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
+  [ "$(cat "$LEGACY_REPO/log.txt")" = "legacy
+agent" ]; then
+  echo "ok 5 - foreign hook preserved as 00-legacy and runs first"
+else
+  echo "not ok 5 - legacy hook not preserved or wrong order"
+fi
+
+# Test 6: a failing sub-hook aborts the chain with its exit code
+printf '#!/bin/sh\nexit 42\n' >"$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
+chmod +x "$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
+rm -f "$LEGACY_REPO/log.txt"
+"$LEGACY_REPO/.git/hooks/commit-msg" msgfile </dev/null 2>/dev/null
+rc=$?
+if [ "$rc" -eq 42 ] && grep -q 'legacy' "$LEGACY_REPO/log.txt" &&
+  ! grep -q 'agent' "$LEGACY_REPO/log.txt"; then
+  echo "ok 6 - failing sub-hook propagates exit code and stops the chain"
+else
+  echo "not ok 6 - expected exit 42 and no later hooks (got rc=$rc)"
+fi
+rm -f "$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
+
+# Test 7: reinstall is idempotent (managed multiplexer is not demoted to legacy)
+(cd "$REPO" && "$BIN" install commit-msg 10-a "$SUB_A") >/dev/null 2>&1
+if [ ! -e "$REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
+  status=$(cd "$REPO" && "$BIN" doctor commit-msg 10-a) &&
+  [ "$status" = "ok" ]; then
+  echo "ok 7 - reinstall is idempotent"
+else
+  echo "not ok 7 - reinstall created 00-legacy or broke doctor"
+fi
+
+# Test 8: every sub-hook sees the full stdin (buffered, not consumed)
+printf '#!/bin/sh\ncat >> "%s/stdin.txt"\n' "$REPO" >"$REPO/sub-b"
+chmod +x "$REPO/sub-b"
+(cd "$REPO" && "$BIN" install commit-msg 20-b "$REPO/sub-b") >/dev/null 2>&1
+rm -f "$REPO/log.txt" "$REPO/stdin.txt"
+printf 'refs\n' | "$REPO/.git/hooks/commit-msg" msgfile
+if grep -q 'refs' "$REPO/log.txt" && grep -q 'refs' "$REPO/stdin.txt"; then
+  echo "ok 8 - stdin is buffered and replayed to every sub-hook"
+else
+  echo "not ok 8 - sub-hooks did not each receive stdin"
+fi
+
+# Test 9: doctor reports an unmanaged multiplexer
+printf '#!/bin/sh\n' >"$REPO/.git/hooks/commit-msg"
+if ! status=$(cd "$REPO" && "$BIN" doctor commit-msg 10-a) &&
+  [ "$status" = "unmanaged_multiplexer" ]; then
+  echo "ok 9 - doctor reports unmanaged_multiplexer"
+else
+  echo "not ok 9 - unexpected doctor output: $status"
+fi

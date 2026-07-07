@@ -2,7 +2,7 @@
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [doctor] [--force]
+Usage: $(basename "$0") [doctor]
 
 Install git hooks for AI agent workflows into the current repository.
 
@@ -12,18 +12,20 @@ Hooks installed:
 The commit-msg hook edits the message in place before the commit is
 written. Use git-commit-clean to clean up any existing commits.
 
+Hooks are installed via git-hooks-multiplexer, so they coexist with hooks
+from other tools. A pre-existing hook not managed by the multiplexer is
+preserved as .git/hooks/<name>.d/00-legacy and continues to run first.
+
 Commands:
   doctor    Report whether the managed hooks are installed (read-only); does
             not modify the repository. Exits non-zero if anything is missing
             or unmanaged.
 
 Options:
-  --force   Overwrite an existing hook not managed by this tool
   --help    Display this help message and exit
 
 Examples:
   cd ~/project && $(basename "$0")
-  $(basename "$0") --force
   $(basename "$0") doctor
 EOF
   exit 0
@@ -36,18 +38,15 @@ require() {
   }
 }
 
-# MARKER removed, managed by git-hooks-multiplexer
 # Hook source lives alongside the dotfiles tree, two levels up from this script:
 # bin/git-hooks-agent -> etc/git/templates/agent/hooks/.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)
 TEMPLATE_DIR="$SCRIPT_DIR/../etc/git/templates/agent/hooks"
 
-force=0
 mode=install
 for arg in "$@"; do
   case "$arg" in
     --help) usage ;;
-    --force) force=1 ;;
     doctor) mode=doctor ;;
     -*)
       echo "$(basename "$0"): unknown option: $arg" >&2
@@ -62,17 +61,13 @@ for arg in "$@"; do
   esac
 done
 
-# Keep force variable for backward compatibility with callers (e.g. git-setup)
-: "$force"
-
 require git
+require git-hooks-multiplexer
 
-git_dir=$(git rev-parse --git-dir 2>/dev/null) || {
+git rev-parse --git-dir >/dev/null 2>&1 || {
   echo "$(basename "$0"): not a git repository" >&2
   exit 1
 }
-
-hooks_dir="$git_dir/hooks"
 
 MANAGED_HOOKS=(
   "commit-msg"
@@ -83,17 +78,22 @@ if [ "$mode" = "doctor" ]; then
   rc=0
   echo "Hooks:"
   for name in "${MANAGED_HOOKS[@]}"; do
-    if ! status=$(git-hooks-multiplexer doctor "$name" "10-agent" 2>&1); then
-      printf '  %-12s %s (%s)\n' "missing" "$name" "$status"
-      rc=1
-    else
+    if status=$(git-hooks-multiplexer doctor "$name" "10-agent" 2>/dev/null); then
       printf '  %-12s %s\n' "ok" "$name"
+    else
+      case "$status" in
+        unmanaged_multiplexer)
+          printf '  %-12s %s present but unmanaged (run '\''%s'\'')\n' "drift" "$name" "$(basename "$0")"
+          ;;
+        *)
+          printf '  %-12s %s (run '\''%s'\'')\n' "missing" "$name" "$(basename "$0")"
+          ;;
+      esac
+      rc=1
     fi
   done
   exit "$rc"
 fi
-
-mkdir -p "$hooks_dir"
 
 install_hook() {
   local name="$1"
