@@ -1622,7 +1622,6 @@ def cmd_catalog(as_json=False):
             Path("~/.dotfiles/skills").expanduser(),
             Path("~/.private/skills").expanduser(),
             Path("~/.corp/skills").expanduser(),
-            get_catalog_dir(),
         ]
 
     skills_info = []
@@ -1676,6 +1675,25 @@ def cmd_catalog(as_json=False):
                     "type": "remote",
                 }
             )
+
+    # Deduplicate identical target paths within the same group/type
+    deduped_info = []
+    seen_group_sources = set()
+    for s in skills_info:
+        key = (s["type"], s["source"])
+        if key in seen_group_sources:
+            continue
+        seen_group_sources.add(key)
+        deduped_info.append(s)
+    skills_info = deduped_info
+
+    # Detect naming conflicts (same name across distinct targets)
+    name_counts = {}
+    for s in skills_info:
+        name_counts[s["name"]] = name_counts.get(s["name"], 0) + 1
+    for s in skills_info:
+        if name_counts[s["name"]] > 1 and "(! CONFLICT)" not in s["name"]:
+            s["name"] = f"{s['name']} (! CONFLICT)"
 
     if as_json:
         for s in sorted(skills_info, key=lambda x: x["name"]):
@@ -2095,6 +2113,62 @@ def cmd_doctor(
                 "name": "Required Skills",
                 "status": "OK",
                 "summary": f"All {len(expected_skills)} expected skills are correctly installed and symlinked",
+                "details": [],
+            }
+        )
+
+    # Check 3c: Skill Conflicts (advisory)
+    api = get_api()
+    source_dirs = []
+    if "SKILL_SOURCE_DIRS" in os.environ:
+        source_dirs = [
+            Path(p).expanduser()
+            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
+            if p
+        ]
+    else:
+        source_dirs = [
+            Path("~/.dotfiles/skills").expanduser(),
+            Path("~/.private/skills").expanduser(),
+            Path("~/.corp/skills").expanduser(),
+        ]
+    local_name_paths = {}
+    for d in source_dirs:
+        if not d.is_dir():
+            continue
+        for item in d.iterdir():
+            if item.name.startswith(".") or not item.is_dir():
+                continue
+            if (item / "SKILL.md").is_file():
+                meta = get_skill_metadata(item, item.name)
+                sname = meta["name"]
+                realpath = Path(os.path.realpath(item))
+                local_name_paths.setdefault(sname, set()).add(realpath)
+
+    conflict_details = []
+    for sname, paths in sorted(local_name_paths.items()):
+        if len(paths) > 1:
+            path_strs = ", ".join(clean_p(p) for p in sorted(paths))
+            conflict_details.append(
+                f"  - '{sname}' found in multiple distinct paths: {path_strs}"
+            )
+
+    if conflict_details:
+        checks.append(
+            {
+                "name": "Skill Conflicts",
+                "status": "WARNING",
+                "summary": f"Found {len(conflict_details)} local skill name conflict(s)",
+                "details": ["Conflicting skill names across SKILL_SOURCE_DIRS:"]
+                + conflict_details,
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Skill Conflicts",
+                "status": "OK",
+                "summary": "No conflicting skill names across SKILL_SOURCE_DIRS",
                 "details": [],
             }
         )

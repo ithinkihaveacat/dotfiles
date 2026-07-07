@@ -189,7 +189,7 @@ set -x UV_EXCLUDE_NEWER "7 days"
 set -x UV_PYTHON_PREFERENCE managed
 
 # Search paths for agent skills
-set -gx SKILL_SOURCE_DIRS (string join : $HOME/.dotfiles/skills $HOME/.private/skills $HOME/.corp/skills $HOME/.gemini/config/skills $HOME/.gemini/jetski/skills)
+set -gx SKILL_SOURCE_DIRS (string join : $HOME/.dotfiles/skills $HOME/.private/skills $HOME/.corp/skills $HOME/.gemini/jetski/skills)
 
 # Default required skills for agent CLI preflight checks
 if not set -q AGENT_REQUIRED_SKILLS
