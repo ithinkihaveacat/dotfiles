@@ -766,6 +766,8 @@ class SkillAPI:
                 f"Skill '{name}': spec must contain either 'path' or both 'repo' and 'ref'."
             )
 
+        if getattr(self, "current_plugin_file", None):
+            spec["plugin_file"] = self.current_plugin_file
         self.plugin_catalog[name] = spec
         self.all_registrations.append((name, spec))
 
@@ -801,7 +803,9 @@ def load_plugins() -> SkillAPI:
                 sys.modules[module_name] = module
                 spec.loader.exec_module(module)
                 if hasattr(module, "register"):
+                    api.current_plugin_file = filepath.name
                     module.register(api)
+                    api.current_plugin_file = None
         except Exception as e:
             print(
                 f"skill: warning: failed to load plugin {filepath}: {e}",
@@ -1579,41 +1583,41 @@ def get_common_dir_prefix(sources: list[str]) -> str | None:
     return prefix if prefix else None
 
 
-def print_catalog_section(
-    title: str, section_skills: list[dict], term_width: int
-) -> None:
-    if not section_skills:
+def print_catalog(skills_info: list[dict], term_width: int) -> None:
+    if not skills_info:
         return
-    print(f"{title}:")
 
     namespaces: dict[str, list[dict]] = {}
-    for s in sorted(section_skills, key=lambda x: x["name"]):
-        ns = s["name"].split(":")[0] if ":" in s["name"] else ""
+    for s in sorted(skills_info, key=lambda x: x["name"]):
+        ns = s.get("namespace") or (
+            s["name"].split(":")[0] if ":" in s["name"] else "default"
+        )
         namespaces.setdefault(ns, []).append(s)
 
-    ns_prefixes = {
-        ns: get_common_dir_prefix([s["source"] for s in skills])
-        for ns, skills in namespaces.items()
-    }
-    use_subgroups = len(namespaces) > 1 or (
-        title != "Local Skills" and any(p is not None for p in ns_prefixes.values())
-    )
+    def ns_order(ns: str) -> tuple[int, str]:
+        if ns == "local":
+            return (0, ns)
+        elif ns == "remote":
+            return (2, ns)
+        else:
+            return (1, ns)
 
-    sorted_ns = sorted(namespaces.keys())
+    sorted_ns = sorted(namespaces.keys(), key=ns_order)
+
     for idx, ns in enumerate(sorted_ns):
         skills = namespaces[ns]
-        prefix = ns_prefixes[ns] if use_subgroups else None
+        prefix = get_common_dir_prefix([s["source"] for s in skills])
 
-        if use_subgroups:
-            if idx > 0:
-                print("")
-            if prefix:
-                print(f"  {ns} ({prefix}):" if ns else f"  ({prefix}):")
-            else:
-                print(f"  {ns}:" if ns else "  (default):")
-            indent = "    "
-        else:
-            indent = "  "
+        plugin_files = sorted({s["plugin"] for s in skills if s.get("plugin")})
+        plugin_str = f"via {', '.join(plugin_files)}" if plugin_files else ""
+
+        info_parts = [p for p in (prefix, plugin_str) if p]
+        info_str = f" ({', '.join(info_parts)})" if info_parts else ""
+
+        if idx > 0:
+            print("")
+        print(f"{ns}{info_str}:" if ns else f"default{info_str}:")
+        indent = "  "
 
         rows = []
         for s in skills:
@@ -1656,17 +1660,18 @@ def cmd_catalog(as_json=False):
 
     # Scan all registered plugin skills
     for name, entry in api.all_registrations:
+        ns = name.split(":")[0] if ":" in name else "default"
         if "path" in entry:
             meta = get_skill_metadata(Path(entry["path"]), name)
-            stype = "local" if name.startswith("local:") else "plugin"
-            skills_info.append(
-                {
-                    "name": name,
-                    "description": meta["description"],
-                    "source": clean_p(entry["path"]),
-                    "type": stype,
-                }
-            )
+            obj = {
+                "name": name,
+                "description": meta["description"],
+                "source": clean_p(entry["path"]),
+                "namespace": ns,
+            }
+            if entry.get("plugin_file"):
+                obj["plugin"] = entry["plugin_file"]
+            skills_info.append(obj)
         elif "repo" in entry:
             stub_dir = get_catalog_dir() / name
             meta = get_skill_metadata(stub_dir, name)
@@ -1676,20 +1681,21 @@ def cmd_catalog(as_json=False):
                 if subpath
                 else f"github.com/{entry['repo']}@{entry['ref']}"
             )
-            skills_info.append(
-                {
-                    "name": name,
-                    "description": meta["description"],
-                    "source": src_str,
-                    "type": "remote",
-                }
-            )
+            obj = {
+                "name": name,
+                "description": meta["description"],
+                "source": src_str,
+                "namespace": ns,
+            }
+            if entry.get("plugin_file"):
+                obj["plugin"] = entry["plugin_file"]
+            skills_info.append(obj)
 
     # Deduplicate identical target paths within the same group/type
     deduped_info = []
     seen_group_sources = set()
     for s in skills_info:
-        key = (s["type"], s["source"])
+        key = (s["namespace"], s["source"])
         if key in seen_group_sources:
             continue
         seen_group_sources.add(key)
@@ -1708,20 +1714,8 @@ def cmd_catalog(as_json=False):
         for s in sorted(skills_info, key=lambda x: x["name"]):
             print(json.dumps(s))
     else:
-        print("Workspace Catalog:\n")
-        if skills_info:
-            term_width = shutil.get_terminal_size((80, 24)).columns
-
-            sections = [
-                ("Local Skills", [s for s in skills_info if s["type"] == "local"]),
-                ("Plugin Skills", [s for s in skills_info if s["type"] == "plugin"]),
-                ("Remote Skills", [s for s in skills_info if s["type"] == "remote"]),
-            ]
-            active_sections = [(title, skills) for title, skills in sections if skills]
-            for idx, (title, skills) in enumerate(active_sections):
-                if idx > 0:
-                    print("")
-                print_catalog_section(title, skills, term_width)
+        term_width = shutil.get_terminal_size((80, 24)).columns
+        print_catalog(skills_info, term_width)
 
 
 def cmd_suggest(args):
