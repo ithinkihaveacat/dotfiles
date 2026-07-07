@@ -79,9 +79,10 @@ human sets (what agents should do in this workspace); `SKILL_*` variables are
 - `AGENT_PREFLIGHT_SKIP`: When set, `skill preflight` passes without checking —
   bypass the agent launch gate once with `AGENT_PREFLIGHT_SKIP=1 claude`. (The
   legacy spelling `_agent_preflight_skip` is still honored.)
-- `SKILL_SOURCE_DIRS`: Colon-separated directories searched for skills by name
-  (default: `~/.dotfiles/skills:~/.private/skills:~/.corp/skills` plus the
-  catalog cache).
+- `SKILL_SOURCE_DIRS`: Optional colon-separated environment variable override
+  searched for skills by name (by default, local skills are discovered
+  automatically from `~/.dotfiles/skills`, `~/.private/skills`,
+  `~/.corp/skills`, and `~/.gemini/jetski/skills` via the `05_local.py` plugin).
 - `SKILL_DEST_DIRS`: Colon-separated link destinations relative to the workspace
   root (default: `.claude/skills:.agents/skills`).
 

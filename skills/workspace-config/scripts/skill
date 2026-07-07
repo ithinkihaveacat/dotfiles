@@ -689,6 +689,8 @@ def get_skill_metadata(skill_dir: Path, default_name: str) -> dict:
 def ensure_catalog_index(plugin_catalog, force: bool = False) -> None:
     """Ensures all plugin catalog stubs are downloaded and cached."""
     for name, entry in plugin_catalog.items():
+        if name.startswith("local:"):
+            continue
         if "repo" in entry and "ref" in entry:
             fetch_skill_md(
                 name, entry["repo"], entry["ref"], entry["subpath"], force=force
@@ -726,6 +728,7 @@ class SkillAPI:
     def __init__(self):
         self.workspace_classes = []
         self.plugin_catalog = {}
+        self.all_registrations = []
 
     def register_workspace(self, cls):
         self.workspace_classes.append(cls)
@@ -763,6 +766,7 @@ class SkillAPI:
             )
 
         self.plugin_catalog[name] = spec
+        self.all_registrations.append((name, spec))
 
 
 _LOADED_API = None
@@ -843,58 +847,7 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     # We will gather all candidates as dicts: {"path": Path, "namespace": str, "name": str, "full_spec": str}
     candidates = []
 
-    # A. Scan local search directories (SKILL_SOURCE_DIRS)
-    source_dirs = []
-    if "SKILL_SOURCE_DIRS" in os.environ:
-        source_dirs = [
-            Path(p).expanduser()
-            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
-            if p
-        ]
-    else:
-        source_dirs = [
-            Path("~/.dotfiles/skills").expanduser(),
-            Path("~/.private/skills").expanduser(),
-            Path("~/.corp/skills").expanduser(),
-        ]
-
-    # For local search directories, the namespace is implicitly "local"
-    # Direct match in local search dirs
-    for d in source_dirs:
-        candidate_path = d / req_name
-        if candidate_path.is_dir() and (candidate_path / "SKILL.md").is_file():
-            candidates.append(
-                {
-                    "path": Path(os.path.realpath(candidate_path)),
-                    "namespace": "local",
-                    "name": req_name,
-                    "full_spec": f"local:{req_name}",
-                }
-            )
-
-    # Fallback/frontmatter match in local search dirs
-    for d in source_dirs:
-        if not d.is_dir():
-            continue
-        for item in d.iterdir():
-            if item.name.startswith("."):
-                continue
-            if item.is_dir() and (item / "SKILL.md").is_file():
-                meta = get_skill_metadata(item, item.name)
-                canonical_name = meta["name"]
-                if canonical_name.lower() == req_name.lower():
-                    resolved_path = Path(os.path.realpath(item))
-                    if not any(c["path"] == resolved_path for c in candidates):
-                        candidates.append(
-                            {
-                                "path": resolved_path,
-                                "namespace": "local",
-                                "name": canonical_name,
-                                "full_spec": f"local:{canonical_name}",
-                            }
-                        )
-
-    # B. Scan registered plugins (api.plugin_catalog)
+    # Scan registered plugins (api.plugin_catalog)
     for key, entry in api.plugin_catalog.items():
         # Parse registered key
         ns = "local"
@@ -1610,52 +1563,19 @@ def cmd_catalog(as_json=False):
     api = get_api()
     ensure_catalog_index(api.plugin_catalog)
 
-    source_dirs = []
-    if "SKILL_SOURCE_DIRS" in os.environ:
-        source_dirs = [
-            Path(p).expanduser()
-            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
-            if p
-        ]
-    else:
-        source_dirs = [
-            Path("~/.dotfiles/skills").expanduser(),
-            Path("~/.private/skills").expanduser(),
-            Path("~/.corp/skills").expanduser(),
-        ]
-
     skills_info = []
 
-    # Scan filesystem skills
-    for d in source_dirs:
-        if not d.is_dir():
-            continue
-        for item in d.iterdir():
-            if item.name.startswith("."):
-                continue
-            if item.is_dir() and (item / "SKILL.md").is_file():
-                meta = get_skill_metadata(item, item.name)
-                skills_info.append(
-                    {
-                        "name": f"local:{meta['name']}",
-                        "description": meta["description"],
-                        "source": str(item.resolve()),
-                        "type": "local",
-                    }
-                )
-
-    # Scan registered plugin skills
-    for name, entry in api.plugin_catalog.items():
-        if any(s["name"] == name for s in skills_info):
-            continue
+    # Scan all registered plugin skills
+    for name, entry in api.all_registrations:
         if "path" in entry:
             meta = get_skill_metadata(Path(entry["path"]), name)
+            stype = "local" if name.startswith("local:") else "plugin"
             skills_info.append(
                 {
                     "name": name,
                     "description": meta["description"],
                     "source": clean_p(entry["path"]),
-                    "type": "plugin",
+                    "type": stype,
                 }
             )
         elif "repo" in entry:
@@ -1788,33 +1708,7 @@ def cmd_suggest(args):
     api = get_api()
     ensure_catalog_index(api.plugin_catalog)
 
-    source_dirs = []
-    if "SKILL_SOURCE_DIRS" in os.environ:
-        source_dirs = [
-            Path(p).expanduser()
-            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
-            if p
-        ]
-    else:
-        source_dirs = [
-            Path("~/.dotfiles/skills").expanduser(),
-            Path("~/.private/skills").expanduser(),
-            Path("~/.corp/skills").expanduser(),
-            get_catalog_dir(),
-        ]
-
     available_skills = []
-    for d in source_dirs:
-        if not d.is_dir():
-            continue
-        for item in d.iterdir():
-            if item.name.startswith("."):
-                continue
-            if item.is_dir() and (item / "SKILL.md").is_file():
-                meta = get_skill_metadata(item, item.name)
-                available_skills.append(
-                    {"name": meta["name"], "description": meta["description"]}
-                )
     for name, entry in api.plugin_catalog.items():
         if any(s["name"] == name for s in available_skills):
             continue
@@ -2119,31 +2013,12 @@ def cmd_doctor(
 
     # Check 3c: Skill Conflicts (advisory)
     api = get_api()
-    source_dirs = []
-    if "SKILL_SOURCE_DIRS" in os.environ:
-        source_dirs = [
-            Path(p).expanduser()
-            for p in os.environ["SKILL_SOURCE_DIRS"].split(":")
-            if p
-        ]
-    else:
-        source_dirs = [
-            Path("~/.dotfiles/skills").expanduser(),
-            Path("~/.private/skills").expanduser(),
-            Path("~/.corp/skills").expanduser(),
-        ]
     local_name_paths = {}
-    for d in source_dirs:
-        if not d.is_dir():
-            continue
-        for item in d.iterdir():
-            if item.name.startswith(".") or not item.is_dir():
-                continue
-            if (item / "SKILL.md").is_file():
-                meta = get_skill_metadata(item, item.name)
-                sname = meta["name"]
-                realpath = Path(os.path.realpath(item))
-                local_name_paths.setdefault(sname, set()).add(realpath)
+    for name, spec in api.all_registrations:
+        if name.startswith("local:") and "path" in spec:
+            sname = name.split(":", 1)[1]
+            realpath = Path(os.path.realpath(spec["path"]))
+            local_name_paths.setdefault(sname, set()).add(realpath)
 
     conflict_details = []
     for sname, paths in sorted(local_name_paths.items()):
@@ -2338,6 +2213,8 @@ def cmd_doctor(
         meta_dir = catalog_dir / ".meta"
 
         for name, entry in api.plugin_catalog.items():
+            if name.startswith("local:"):
+                continue
             stub_md = catalog_dir / name / "SKILL.md"
             meta = meta_dir / name
 
