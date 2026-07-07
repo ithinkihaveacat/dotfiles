@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import tarfile
@@ -1559,6 +1560,94 @@ def cmd_info(name):
             print(f"    {d_label:<15} : {count:>2} files ({format_size(size)})")
 
 
+def get_common_dir_prefix(sources: list[str]) -> str | None:
+    if not sources:
+        return None
+    split_sources = [s.split("/") for s in sources]
+    if len(split_sources) == 1:
+        common = split_sources[0][:-1]
+    else:
+        common = []
+        for parts in zip(*split_sources):
+            if len(set(parts)) == 1:
+                common.append(parts[0])
+            else:
+                break
+    if len(common) <= 1:
+        return None
+    prefix = "/".join(common)
+    return prefix if prefix else None
+
+
+def print_catalog_section(
+    title: str, section_skills: list[dict], term_width: int
+) -> None:
+    if not section_skills:
+        return
+    print(f"{title}:")
+
+    namespaces: dict[str, list[dict]] = {}
+    for s in sorted(section_skills, key=lambda x: x["name"]):
+        ns = s["name"].split(":")[0] if ":" in s["name"] else ""
+        namespaces.setdefault(ns, []).append(s)
+
+    ns_prefixes = {
+        ns: get_common_dir_prefix([s["source"] for s in skills])
+        for ns, skills in namespaces.items()
+    }
+    use_subgroups = len(namespaces) > 1 or (
+        title != "Local Skills" and any(p is not None for p in ns_prefixes.values())
+    )
+
+    sorted_ns = sorted(namespaces.keys())
+    for idx, ns in enumerate(sorted_ns):
+        skills = namespaces[ns]
+        prefix = ns_prefixes[ns] if use_subgroups else None
+
+        if use_subgroups:
+            if idx > 0:
+                print("")
+            if prefix:
+                print(f"  {ns} ({prefix}):" if ns else f"  ({prefix}):")
+            else:
+                print(f"  {ns}:" if ns else "  (default):")
+            indent = "    "
+        else:
+            indent = "  "
+
+        rows = []
+        for s in skills:
+            src = s["source"]
+            if prefix and src.startswith(prefix + "/"):
+                disp_src = src[len(prefix) + 1 :]
+            else:
+                disp_src = src
+            rows.append((s["name"], disp_src))
+
+        fit_names = [
+            name
+            for name, disp_src in rows
+            if len(indent) + len(name) + 4 + len(disp_src) <= term_width
+            and len(name) <= 45
+        ]
+        if fit_names:
+            max_len = max(len(name) for name in fit_names)
+        else:
+            max_len = max(len(name) for name, _ in rows)
+
+        for name, disp_src in rows:
+            total_w = len(indent) + max_len + 4 + len(disp_src)
+            if len(name) <= max_len and total_w <= term_width:
+                print(f"{indent}{name.ljust(max_len)} -> {disp_src}")
+            else:
+                print(f"{indent}{name}")
+                if len(indent) + max_len + 4 + len(disp_src) <= term_width:
+                    arrow_indent = max_len
+                else:
+                    arrow_indent = 2
+                print(f"{indent}{''.ljust(arrow_indent)} -> {disp_src}")
+
+
 def cmd_catalog(as_json=False):
     api = get_api()
     ensure_catalog_index(api.plugin_catalog)
@@ -1621,30 +1710,18 @@ def cmd_catalog(as_json=False):
     else:
         print("Workspace Catalog:\n")
         if skills_info:
-            max_len = max(len(s["name"]) for s in skills_info)
+            term_width = shutil.get_terminal_size((80, 24)).columns
 
-            # Group 1: Local Skills
-            local_skills = [s for s in skills_info if s["type"] == "local"]
-            if local_skills:
-                print("Local Skills:")
-                for s in sorted(local_skills, key=lambda x: x["name"]):
-                    print(f"  {s['name'].ljust(max_len)} -> {s['source']}")
-                print("")
-
-            # Group 2: Plugin Skills
-            plugin_skills = [s for s in skills_info if s["type"] == "plugin"]
-            if plugin_skills:
-                print("Plugin Skills:")
-                for s in sorted(plugin_skills, key=lambda x: x["name"]):
-                    print(f"  {s['name'].ljust(max_len)} -> {s['source']}")
-                print("")
-
-            # Group 3: Remote Skills
-            remote_skills = [s for s in skills_info if s["type"] == "remote"]
-            if remote_skills:
-                print("Remote Skills:")
-                for s in sorted(remote_skills, key=lambda x: x["name"]):
-                    print(f"  {s['name'].ljust(max_len)} -> {s['source']}")
+            sections = [
+                ("Local Skills", [s for s in skills_info if s["type"] == "local"]),
+                ("Plugin Skills", [s for s in skills_info if s["type"] == "plugin"]),
+                ("Remote Skills", [s for s in skills_info if s["type"] == "remote"]),
+            ]
+            active_sections = [(title, skills) for title, skills in sections if skills]
+            for idx, (title, skills) in enumerate(active_sections):
+                if idx > 0:
+                    print("")
+                print_catalog_section(title, skills, term_width)
 
 
 def cmd_suggest(args):
