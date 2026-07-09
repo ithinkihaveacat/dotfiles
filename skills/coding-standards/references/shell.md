@@ -1,45 +1,40 @@
 # Shell Script Quality
 
-All shell scripts, whether new or updated, should be passed through `shellcheck`
-for linting and `shfmt` for formatting.
+This is the bash/POSIX implementation guide for the CLI design standard in
+`cli-tools.md`. Interface rules — command structure, help text content, error
+message style, exit codes — are defined there; this file covers how to meet them
+in shell, plus shell-specific quality requirements.
 
-## Linting
+## Formatting and Linting
 
-Any errors or warnings from `shellcheck` should be eliminated, or explicitly
-ignored if absolutely necessary.
+All shell scripts (POSIX/Bash), whether new or updated, _must_ be linted and
+formatted. Use the `scripts/shell-format` script to apply both tools
+automatically. You can also pass the `--check` option to verify formatting
+without modifying files (e.g. for lint checks).
 
-Before committing any changes to a script, run `shellcheck` on it. All reported
-lint errors must be fixed.
-
-If an error cannot be fixed, it can be ignored using a `shellcheck disable`
-comment. See the
-[ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore) for more
-information.
-
-### Example
+To format and lint a file in place:
 
 ```bash
-# Good
-shellcheck my-script.sh
+scripts/shell-format bin/emumanager
+```
 
-# Good (with ignored error)
+All reported `shellcheck` errors and warnings must be eliminated before
+committing. If an error genuinely cannot be fixed, ignore it explicitly with a
+`shellcheck disable` comment (see the
+[ShellCheck wiki](https://github.com/koalaman/shellcheck/wiki/Ignore)):
+
+```bash
 # shellcheck disable=SC2086
 echo $VAR
 ```
 
-## Formatting
+### Implementation Details
 
-All non-Fish shell scripts must be processed by `shfmt`.
-
-Example command:
-
-```bash
-shfmt -w -i 2 -ci bin/emumanager
-```
-
-- `-w` edits files in-place.
-- `-i 2` sets the indent to 2 spaces.
-- `-ci` vertically aligns case statements.
+Under the hood, `shell-format` runs `shfmt -w -i 2 -ci` (in-place, 2-space
+indent, vertically aligned case statements) followed by `shellcheck`. If you
+need to run the tools manually or configure editor integration, use those
+invocations — but prefer `scripts/shell-format` so the same settings apply
+across the repository.
 
 ## Fish Script Formatting
 
@@ -54,25 +49,70 @@ fish_indent -w fish/completions/emumanager.fish
 
 - `-w` edits files in-place.
 
+## Compatibility and Bash Versions
+
+Scripts must be compatible with standard utilities (e.g., `grep`, `awk`, `tr`)
+found in any macOS or Debian stable release that was current within the last two
+years.
+
+Scripts should target Bash version 3.2.57(1)-release (the default on recent
+macOS versions as of Nov 2025) for maximum compatibility. This is especially
+important for short scripts and general-purpose utilities.
+
+For longer, more complex scripts where modern Bash features significantly
+improve reliability and robustness, Bash 4.x features are acceptable. However,
+scripts using Bash 4.x features must include a version guard at the top to fail
+gracefully on older systems:
+
+```bash
+#!/usr/bin/env bash
+
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
+  exit 1
+fi
+```
+
+Guidelines for using Bash 4.x features:
+
+- Use only when it provides clear benefits to reliability, robustness, or
+  maintainability
+- Prefer simple, well-established features (e.g., associative arrays,
+  `readarray`) over exotic ones
+- Avoid features that are conceptually or syntactically "odd", even if
+  technically superior
+- Never use Bash 5.x-specific features
+
+Examples of acceptable Bash 4.x features for complex scripts:
+
+- Associative arrays (`declare -A`) for lookups and mappings
+- `readarray`/`mapfile` for safer array population
+- `${var,,}` and `${var^^}` for case conversion (sparingly)
+
+Examples of features to avoid:
+
+- Bash 5.x features (e.g., `${var@U}`, `${var@u}`)
+- Obscure parameter expansions that harm readability
+- Any feature that would confuse maintainers familiar with basic Bash
+
 ## Script Documentation Guidelines
 
-Scripts should provide comprehensive help documentation following GNU coreutils
-conventions.
+The content and layout of help text — the usage line, section order, examples
+policy, and what to leave out — are defined in `cli-tools.md` ("Help Text House
+Style"). This section covers implementing that layout in bash.
 
 ### Basic Structure
 
 For any shell script intended to be used interactively, its interface must fully
 comply with the rules defined in `cli-tools.md` (e.g., handling of help flags,
-exit codes, output streams). The following patterns demonstrate how to achieve
-this compliance in bash.
+exit codes, output streams, help text content). The following patterns
+demonstrate how to achieve this compliance in bash.
 
 Each script should include:
 
 1. A `usage()` function that displays help text
-1. Support for both the `--help` and `-h` flags, per the CLI design delta in
-   `cli-tools.md`
-1. Clear error messages following GNU coreutils patterns
-1. Practical examples demonstrating common use cases
+1. Support for both the `--help` and `-h` flags, checked before any other
+   validation
 
 ### Function Naming
 
@@ -117,41 +157,9 @@ fi
 # Rest of script...
 ```
 
-### Key Requirements
-
-#### 1. Help Output Structure
-
-Follow GNU coreutils style (see `ls --help`, `cp --help`, `grep --help` for
-comprehensive examples):
-
-- **Usage line**: Show command syntax with argument placeholders in CAPS
-- **Description**: One-line summary of what the script does
-- **Arguments section**: Document positional arguments (not "Options" for
-  positional args)
-- **Options section**: Document flags like `--help`/`-h`
-- **Examples section**: Provide 2-3 practical examples
-- **Additional notes**: Explain important behavior or caveats (optional)
-
-#### 2. Examples Section
-
-Always include practical examples:
-
-- Show 2-3 common use cases
-- Where appropriate, include one or two less obvious or more advanced examples
-  to inspire creative uses of the script.
-- Use realistic file names or package names
-- Demonstrate different argument patterns
-- Use `$(basename "$0")` for portability
-
-#### 3. What NOT to Include
-
-- **Dependencies**: Don't list required commands in the help text (they'll fail
-  early anyway)
-- **Implementation details**: Focus on usage, not how it works internally
-- **Version information**: Not applicable to personal utility scripts (see
-  `cli-tools.md`)
-- **Excessive options**: Only document `--help`/`-h` unless the script has
-  other flags
+In the heredoc, use `$(basename "$0")` rather than a hard-coded script name so
+the usage line and examples stay correct if the script is renamed or invoked via
+a symlink.
 
 ### Top-of-File Comments
 
@@ -167,29 +175,14 @@ users.
 "Inline" comments that explain specific lines of code are acceptable.
 Commented-out code for debugging purposes is also fine.
 
-### Reference Examples
-
-Good examples of comprehensive help output from GNU coreutils:
-
-```bash
-ls --help      # Comprehensive, well-organized options
-cp --help      # Clear argument documentation
-grep --help    # Good examples section
-tar --help     # Detailed but readable
-```
-
-Study these for formatting conventions, terminology, and structure.
-
 ### Checklist for New Scripts
 
 - [ ] `usage()` function defined (not `help()`)
 - [ ] Checks for `--help` and `-h` before other validation
-- [ ] Usage line with argument syntax
-- [ ] Brief description of script purpose
-- [ ] Arguments section (for positional args)
-- [ ] Options section (for flags)
-- [ ] Examples section with 2-3 practical examples
-- [ ] No dependency lists in help text
+- [ ] Help text follows the house style in `cli-tools.md` (usage line,
+  Arguments/Options/Examples sections, no dependency lists)
+- [ ] Errors reported per the error message style in `cli-tools.md`
+- [ ] Formatted and linted with `scripts/shell-format`
 
 ## Error Handling in Shell Scripts
 
@@ -230,66 +223,27 @@ error handling:
 
 ### Error Messages
 
-Error messages should follow GNU coreutils conventions:
-
-- Format: `program: description of error`
-- Write to stderr (`>&2`)
-- Be specific and actionable
-
-```bash
-# Good (GNU coreutils style)
-echo "$(basename "$0"): missing file operand" >&2
-echo "Try '$(basename "$0") --help' for more information." >&2
-
-# Avoid
-echo "Error: something went wrong"
-```
-
-For scripts with subcommands, follow git-style error messages that include the
-subcommand name:
+The message format — GNU coreutils `program: description` style written to
+stderr, git-style subcommand prefixes, and transparency about internal details —
+is defined in `cli-tools.md` ("Error Message Style"). In bash, prefix messages
+with `$(basename "$0")` and write them to stderr:
 
 ```bash
-# Good (git-style for subcommands):
-echo "$(basename "$0") create: AVD name required" >&2
-
-# Avoid (too generic):
-echo "$(basename "$0"): missing operand" >&2
-```
-
-It is acceptable (and often helpful) to expose internal implementation details
-such as:
-
-- Exact commands that failed
-- URLs that were not found
-- Missing dependencies or environment variables
-- File paths that were accessed
-
-This transparency improves clarity and enables users to diagnose and manually
-work around issues.
-
-```bash
-# Good - Specific and actionable
-if ! command -v jq >/dev/null 2>&1; then
-  echo "$(basename "$0"): jq not found" >&2
-  exit 1
-fi
-
-# Good - Exposes implementation details
+# Simple tool — exposes the failing URL, per cli-tools.md
 if ! curl -sf "$API_URL" >/dev/null; then
   echo "$(basename "$0"): failed to fetch $API_URL" >&2
   exit 1
 fi
+
+# Subcommand tool — includes the subcommand name
+echo "$(basename "$0") create: AVD name required" >&2
 ```
 
 ### Exit Codes
 
-Shell scripts must respect the standard UI/UX exit codes defined in
-`cli-tools.md` (e.g., `0` for explicit help, `>0` for usage errors).
-
-Additionally, follow these shell-specific conventions:
-
-- `exit 1` for general errors (missing arguments, invalid input)
-- `exit 127` for missing required commands (convention for "command not found")
+Use the exit codes defined in `cli-tools.md` ("Exit Codes: Local Extensions").
+In shell scripts that most often means `exit 1` for usage and general errors,
+and `exit 127` — via `require()` below — for a missing dependency.
 
 ### Dependency Checking
 

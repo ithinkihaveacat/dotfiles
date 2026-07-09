@@ -77,6 +77,11 @@ errors.
   ```bash
   UV_OFFLINE=1 prove tests/test-* skills/*/tests/test-*
   ```
+- **Warming the cache**: Offline resolution only works if the packages have been
+  downloaded at least once, so run the tool (or its tests) outside the isolated
+  environment first. Test suites that override `HOME` or `XDG_CONFIG_HOME` for
+  hermeticity hide the host cache; share it by also exporting
+  `UV_CACHE_DIR=~/.cache/uv`.
 
 ### 2. Skipping External API Tests (`GEMINI_API_KEY=""`)
 
@@ -86,7 +91,9 @@ and be non-deterministic.
 
 - **Solution**: Set `GEMINI_API_KEY=""` (empty string) in the environment. These
   tests are written to detect the empty key and will gracefully skip their
-  API-dependent assertions while passing the rest of the local suite.
+  API-dependent assertions while passing the rest of the local suite. Run the
+  API-dependent tests manually when making substantive changes to the tested
+  script.
 - **Usage**:
   ```bash
   GEMINI_API_KEY="" prove tests/test-* skills/*/tests/test-*
@@ -117,6 +124,10 @@ When writing new tests or modifying existing ones, follow these guidelines:
    tests) rather than relying on the user's global `PATH`. This ensures tests
    are completely self-contained.
 1. **Be executable**: Run `chmod +x` on test scripts.
+1. **Link back from the script**: Add a `# Tests:` comment near the top of the
+   script under test pointing at its test file (e.g.,
+   `# Tests: tests/test-foo`), so tests are discoverable via
+   `grep '# Tests:' bin/my-script`.
 1. **Graceful skips**: If a test requires external dependencies or credentials
    (like `GEMINI_API_KEY`), detect their absence and skip gracefully using TAP
    skip syntax:

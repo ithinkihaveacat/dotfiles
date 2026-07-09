@@ -21,8 +21,6 @@ repository, as well as documentation for notations that agents may encounter.
 ### Markdown Quality
 
 All Markdown files must be formatted and linted with `scripts/markdown-format`.
-Use standard heading styles without additional formatting or ALL CAPS. Do not
-add numbers to headings.
 
 @references/markdown.md
 
@@ -54,8 +52,7 @@ consistent formatting rules are applied across the repository.
 
 ### Python Development
 
-All Python files must be linted and formatted with `ruff`. Use `uvx` to run
-tools. Target Python 3.11+.
+All Python files must be linted and formatted with `scripts/python-format`.
 
 @references/python.md
 
@@ -70,23 +67,9 @@ output streams, and exit code philosophy.
 ### Shell Script Quality
 
 The language-specific implementation guide for shell scripts. All shell scripts
-must be linted with `shellcheck` and formatted with `shfmt`.
-
-To ensure consistent formatting and linting, you **MUST** use the
-`scripts/shell-format` helper script, which automatically runs `shfmt` with the
-correct options (2 spaces, indented switch cases) and executes `shellcheck` for
-static analysis:
-
-```bash
-scripts/shell-format FILENAME
-```
-
-If `shell-format` reports lint errors that cannot be automatically resolved, it
-will print them and exit with a non-zero status. You must resolve these static
-analysis issues before submitting.
-
-Fish scripts use `fish_indent`. Scripts must have robust error handling and
-comply with the UX standards in `cli-tools.md`.
+must be formatted and linted with `scripts/shell-format`; Fish scripts use
+`fish_indent`. Scripts must have robust error handling and comply with the UX
+standards in `cli-tools.md`.
 
 @references/shell.md
 
