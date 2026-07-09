@@ -19,4 +19,4 @@ complete -f -c git -n __fish_git_needs_command -a setup -d "Configure the curren
 complete -f -c git -n __fish_git_setup_needs_command -a doctor -d 'Diagnose this repository setup (read-only)'
 
 # Complete flags
-complete -c git -f -n __fish_git_setup_using_command -l help -d 'Display help message and exit'
+complete -c git -f -n __fish_git_setup_using_command -s h -l help -d 'Display help message and exit'

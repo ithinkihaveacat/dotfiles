@@ -173,8 +173,8 @@ different variable for the input path, you must adapt the code accordingly.
 
 ### CLI Design and Documentation
 
-Scripts must follow the predictable standard for command-line interfaces and
-comprehensive documentation guidelines.
+Scripts must follow [clig.dev](https://clig.dev/) plus this repo's local
+delta on top of it, and comprehensive documentation guidelines.
 
 @skills/coding-standards/references/cli-tools.md
 @skills/coding-standards/references/shell.md

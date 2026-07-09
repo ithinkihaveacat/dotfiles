@@ -121,5 +121,5 @@ complete -c envrc -n __fish_envrc_needs_node_version -a '(__fish_envrc_node_vers
 complete -c envrc -n __fish_envrc_needs_ruby_version -a '(__fish_envrc_ruby_versions)'
 
 # Complete global flags
-complete -c envrc -l help -d 'Display help message and exit'
+complete -c envrc -s h -l help -d 'Display help message and exit'
 complete -c envrc -r -l output -d 'Path to the output file'

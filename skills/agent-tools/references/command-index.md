@@ -234,7 +234,7 @@ repeated queries against the same images skip all redundant work.
 <!-- generated: ../scripts/photo-query --help -->
 
 ```text
-usage: photo-query [--help] [--max-size N] [--model MODEL] [--no-cache]
+usage: photo-query [-h] [--max-size N] [--model MODEL] [--no-cache]
                    [--recursive] [--schema SCHEMA] [--filter FILTER_FIELD]
                    [-v]
                    QUERY FILE_OR_DIR [FILE_OR_DIR ...]
@@ -246,7 +246,7 @@ positional arguments:
   FILE_OR_DIR
 
 options:
-  --help                Show this help message and exit
+  -h, --help            Show this help message and exit
   --max-size N          Longest-edge resize cap, in px (default: 768; built-
                         ins may use a smaller default)
   --model MODEL         Gemini model id (default: $GEMINI_MODEL if set, else
@@ -728,12 +728,12 @@ object, so a driver can fan it out across a mailbox in parallel.
 <!-- generated: ../scripts/pacioli --help -->
 
 ```text
-usage: pacioli [--help] [--model MODEL] [--max-chars N] [--text-only]
+usage: pacioli [-h] [--model MODEL] [--max-chars N] [--text-only]
 
 Extract a structured purchase record from a receipt email (stdin -> JSON).
 
 options:
-  --help         Show this help message and exit
+  -h, --help     Show this help message and exit
   --model MODEL  Gemini model id (default: $GEMINI_MODEL if set, else
                  gemini-3.1-flash-lite)
   --max-chars N  Truncate email text to N chars before the model call
@@ -817,7 +817,7 @@ usage: popper [--launch PACKAGE] [--stay-in-app] [--timeout SECONDS]
               [--agent-screenshots | --no-agent-screenshots]
               [--local-screenshots | --no-local-screenshots]
               [--local-screenshot-dir DIR] [--output-dir DIR] [--dump-layout]
-              [--model MODEL] [--help]
+              [--model MODEL] [-h]
               [goal]
 
 Interact with Android UIs using an AI agent.
@@ -850,7 +850,7 @@ options:
   --dump-layout         Dump the UI layout as JSON and exit
   --model MODEL         Gemini model to use (default: $GEMINI_MODEL if set,
                         else gemini-3.5-flash)
-  --help                show this help message and exit
+  -h, --help            show this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
@@ -941,7 +941,7 @@ stderr.
 <!-- generated: ../scripts/gemini-api-doctor --help -->
 
 ```text
-usage: gemini-api-doctor [--help] [--model MODEL] [models ...]
+usage: gemini-api-doctor [-h] [--model MODEL] [models ...]
 
 Ping Gemini models to test API key validity. Takes API key from GEMINI_API_KEY
 environment variable or stdin.
@@ -951,7 +951,7 @@ positional arguments:
                  defaults.
 
 options:
-  --help         Show this help message and exit
+  -h, --help     Show this help message and exit
   --model MODEL  Ping a single model (equivalent to passing it as a positional
                  argument)
 ```

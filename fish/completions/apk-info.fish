@@ -22,11 +22,11 @@ complete -c apk-info -n "__fish_seen_subcommand_from $subcommands" -F -a '(__fis
 # Subcommand-specific: version
 complete -c apk-info -n "__fish_seen_subcommand_from version" -l code -d "Print only the version code string"
 complete -c apk-info -n "__fish_seen_subcommand_from version" -l name -d "Print only the version name string"
-complete -c apk-info -n "__fish_seen_subcommand_from version" -l help -d "Display help"
+complete -c apk-info -n "__fish_seen_subcommand_from version" -s h -l help -d "Display help"
 
 # Subcommand-specific: libraries
 complete -c apk-info -n "__fish_seen_subcommand_from libraries" -l json -d "Output all libraries as a JSON map"
-complete -c apk-info -n "__fish_seen_subcommand_from libraries" -l help -d "Display help"
+complete -c apk-info -n "__fish_seen_subcommand_from libraries" -s h -l help -d "Display help"
 
 # Common libraries for autocompleting the argument of --only / --library
 set -l common_libs \

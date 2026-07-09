@@ -15,7 +15,7 @@ complete -f -c permission -n __fish_use_subcommand -a clean -d 'Clear all worksp
 complete -f -c permission -n __fish_use_subcommand -a doctor -d 'Report missing or drifted rules'
 
 # Options
-complete -f -c permission -l help -d 'Display help and exit'
+complete -f -c permission -s h -l help -d 'Display help and exit'
 complete -f -c permission -l plugin-template -d 'Output a template for creating a Permission plugin'
 complete -x -c permission -l agent -a 'agy claude' -d 'Operate on a single agent backend'
 complete -f -c permission -n '__fish_seen_subcommand_from add' -l deny -d 'Add to the denylist'
