@@ -69,7 +69,8 @@ this compliance in bash.
 Each script should include:
 
 1. A `usage()` function that displays help text
-1. Support for the `--help` flag (do **not** use `-h` for help)
+1. Support for both the `--help` and `-h` flags, per the CLI design delta in
+   `cli-tools.md`
 1. Clear error messages following GNU coreutils patterns
 1. Practical examples demonstrating common use cases
 
@@ -97,7 +98,7 @@ Arguments:
   ARG2        Description of second argument (optional if optional)
 
 Options:
-  --help      Display this help message and exit
+  --help, -h  Display this help message and exit
 
 Examples:
   $(basename "$0") example1
@@ -109,7 +110,7 @@ EOF
   exit 0
 }
 
-if [[ "$1" == "--help" ]]; then
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
   usage
 fi
 
@@ -127,7 +128,7 @@ comprehensive examples):
 - **Description**: One-line summary of what the script does
 - **Arguments section**: Document positional arguments (not "Options" for
   positional args)
-- **Options section**: Document flags like `--help`
+- **Options section**: Document flags like `--help`/`-h`
 - **Examples section**: Provide 2-3 practical examples
 - **Additional notes**: Explain important behavior or caveats (optional)
 
@@ -147,9 +148,10 @@ Always include practical examples:
 - **Dependencies**: Don't list required commands in the help text (they'll fail
   early anyway)
 - **Implementation details**: Focus on usage, not how it works internally
-- **Version information**: Not needed for personal utility scripts
-- **Excessive options**: Only document `--help` unless the script has other
-  flags
+- **Version information**: Not applicable to personal utility scripts (see
+  `cli-tools.md`)
+- **Excessive options**: Only document `--help`/`-h` unless the script has
+  other flags
 
 ### Top-of-File Comments
 
@@ -181,7 +183,7 @@ Study these for formatting conventions, terminology, and structure.
 ### Checklist for New Scripts
 
 - [ ] `usage()` function defined (not `help()`)
-- [ ] Checks for `--help` before other validation
+- [ ] Checks for `--help` and `-h` before other validation
 - [ ] Usage line with argument syntax
 - [ ] Brief description of script purpose
 - [ ] Arguments section (for positional args)

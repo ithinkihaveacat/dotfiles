@@ -1,215 +1,64 @@
-# CLI Design Specification: "The Predictable Standard"
+# CLI Design Standard
 
-## 1. Core Command Structure: The "Verb-Noun" Pattern
+The baseline for every CLI tool in this repo is
+[clig.dev](https://clig.dev/) (see also <https://clig.dev/llms.txt>). Read
+that document first — it already covers argument parsing, help text content,
+output streams, color/`NO_COLOR`, progress indication, prompting, signals,
+configuration precedence, environment variables, and naming. This file does
+not restate any of it.
 
-To ensure predictability and discoverability, the primary standard for new tools
-is the hierarchical **Verb-Noun** syntax found in Kubernetes (`kubectl`).
+What follows is the **local delta**: amendments that clig.dev does not cover,
+plus the few places this repo deliberately diverges from clig.dev's
+recommendation. Where this delta is silent, follow clig.dev.
 
-### 1.1 The Rule
+## Command Structure: Fixed Verb-Noun Order
 
-Every standard command must follow the format: `tool [verb] [noun] [flags]`
+clig.dev permits either `noun verb` (`docker container create`) or
+`verb noun`, as long as a tool is internally consistent. This repo fixes one
+order for its `kubectl`-style tools: **`tool [verb] [noun] [flags]`**.
 
 - **Verbs** describe the action (e.g., `list`, `create`, `delete`, `update`).
 - **Nouns** describe the resource being acted upon (e.g., `user`, `config`,
   `database`).
-
-### 1.2 Rationale
-
-This structure reduces the cognitive load on the user. Once a user learns how to
-`list` one type of resource, they intuitively know how to `list` any other
-resource.
-
-### 1.3 Examples
-
-<!-- markdownlint-disable MD013 -->
-
-| ✅ **Do This (Kubectl Style)**    | ❌ **Avoid This (Legacy Style)**                           |
-| --------------------------------- | ---------------------------------------------------------- |
-| `tool create user --name="alice"` | `tool create-user --name="alice"` (Hyphenated commands)    |
-| `tool list databases`             | `tool show-dbs` (Inconsistent verb/abbreviation)           |
-| `tool delete config --id=5`       | `tool remove config -i 5` (Synonyms like remove vs delete) |
-
-<!-- markdownlint-restore MD013 -->
-
-### 1.4 Contextual Consistency
-
-- **Global Flags:** Flags that apply to the binary itself (e.g., `--verbose`,
-  `--config`) must be parsed _before_ the verb or accepted globally.
 - **Verb Consistency:** Do not switch verbs for similar actions. If `list` is
-  used for users, do not use `get` for databases. Pick one (e.g., `list` for
-  summaries, `get` for single items) and stick to it.
+  used for users, do not use `get` for databases.
 
-______________________________________________________________________
+| ✅ **Do This**                    | ❌ **Avoid This**                                           |
+| --------------------------------- | ------------------------------------------------------------ |
+| `tool create user --name="alice"` | `tool create-user --name="alice"` (hyphenated commands)      |
+| `tool list databases`             | `tool show-dbs` (inconsistent verb/abbreviation)              |
+| `tool delete config --id=5`       | `tool remove config -i 5` (synonyms like remove vs. delete)   |
 
-## 2. The Help System
+For simpler, focused tools that don't warrant the full `kubectl` structure,
+use one of the two specialized patterns in Appendix A instead.
 
-The help system allows users to learn the tool without leaving the terminal. It
-prioritizes immediate utility over exhaustive documentation.
+## Vocabulary Standard
 
-### 2.1 The "Dual Mode" Standard
+clig.dev doesn't prescribe domain vocabulary. This repo does, so that once a
+user learns one tool's verbs they transfer to every other tool:
 
-We follow the modern consensus (seen in `docker` and `cargo`) where `help` is a
-first-class command, but we **reject** the `git` distinction between summary and
-manual.
+### Listing: Local vs. Available State
 
-**Behavior:**
-
-1. **Interchangeable Invocation:**
-
-   - `tool help` and `tool --help` must produce **identical output**.
-   - `tool help [command]` and `tool [command] --help` must produce **identical
-     output**.
-   - **Complex Command Exception (The `git` exception):** For larger,
-     sophisticated tools that use subcommands (like `git` or `docker`), running
-     the bare command (`tool`) with no arguments should be treated as an
-     explicit request for help. It should be synonymous with `tool --help` and
-     `tool help`. (Simple utility tools should still fail when required
-     arguments are missing).
-
-1. **No Pagers:**
-
-   - **Negative Example:** Unlike `git`, the tool generally **must not** launch
-     a pager (`less`) or open a browser (`man` page).
-   - **Rationale:** Help output should be printed to `stdout` so it can be
-     grepped (e.g., `tool help list | grep -- --json`).
-
-1. **Context Aware:**
-
-   - `tool --help`: Shows available **verbs**.
-   - `tool [verb] --help`: Shows available **nouns** for that verb.
-   - `tool [verb] [noun] --help`: Shows specific flags for that operation.
-
-### 2.2 The `-h` Constraint (The GNU Convention)
-
-We strictly follow the GNU Coreutils philosophy regarding the short flag `-h`.
-
-- **Rule:** **`-h` DOES NOT trigger help.**
-- **Rationale:** In the Unix ecosystem (e.g., `ls`, `du`, `df`), `-h` stands for
-  "Human Readable" (converting bytes to KB/MB). Using `-h` for help creates
-  dangerous ambiguity.
-- **Implementation:**
-  - If the command involves sizes or data, reserve `-h` for `--human-readable`.
-  - If the command does not involve sizes, leave `-h` **undefined** or return an
-    error suggesting `--help`.
-  - **Negative Example:** Do not behave like `git commit -h` (which prints a
-    summary).
-
-______________________________________________________________________
-
-## 3. Exit Codes: The "Explicit vs. Implicit" Rule
-
-The tool must communicate success or failure clearly via exit codes to support
-scripting and CI/CD pipelines.
-
-### 3.1 Scenario A: Explicit Request (Success)
-
-If the user _asks_ for help, the tool has successfully fulfilled the request.
-For complex tools with subcommands, running the command with no arguments is
-also considered an explicit request for help.
-
-- **Input:** `tool --help`, `tool help`, OR `tool` (for tools with subcommands)
-- **Output:** Help text to `stdout`.
-- **Exit Code:** `0` (Success)
-- **Why:** This allows users to pipe help text (e.g.,
-  `tool help | grep "version"`).
-
-### 3.2 Scenario B: Implicit Failure (User Error)
-
-If the tool displays help because the user typed a command incorrectly, the tool
-has failed.
-
-- **Input:** `tool --invalid-flag` OR `tool` (for simple tools missing required
-  arguments)
-- **Output:**
-  1. Short error message to `stderr` ("Unknown flag: --invalid-flag").
-  1. Brief usage summary (or "Try 'tool --help' for details").
-- **Exit Code:** `> 0` (e.g., `1` or `127`).
-- **Why:** This ensures scripts stop executing if a command is malformed.
-
-*Note: For language-specific exit code extensions (e.g., shell script dependency
-failures returning `127`), consult the relevant language standard (like
-`shell.md`).*
-
-### 3.3 Scenario C: Interruption (SIGINT / SIGTERM / Ctrl+C)
-
-If the tool is interrupted by the user via `Ctrl+C` (SIGINT) or terminated by
-the system via `SIGTERM` (e.g., CI cancellation, container stop, or timeout), it
-must exit cleanly without dumping raw interpreter tracebacks or internal error
-messages.
-
-- **Output:**
-  1. A single newline to **stderr** (guarded against write errors) to ensure the
-     TTY-echoed `^C` does not mangle the subsequent shell prompt, and to avoid
-     polluting redirected `stdout` data.
-  1. No stack trace or crash dump.
-- **Exit Code:** `130` for SIGINT (standard POSIX `128 + 2`), or `143` for
-  SIGTERM (standard POSIX `128 + 15`). *Note: If a unified handler is used,
-  exiting with `130` for both is acceptable as it indicates a graceful
-  user-initiated or system-requested stop.*
-- **Process Hygiene:** The tool must ensure that any spawned subprocesses or
-  external resources are gracefully terminated or released before exiting.
-- **Why:** Interruption is a normal user action, not a software crash. The tool
-  should respect the user's decision and exit gracefully.
-
-______________________________________________________________________
-
-## 4. Output, Logging & Progress
-
-The tool must respect the user's terminal space and distinguish between "data"
-and "information."
-
-### 4.1 Long-Running Operations (The `rsync` Standard)
-
-For operations taking longer than 2 seconds (e.g., `download`, `backup`,
-`sync`), do not flood the console with new lines for every percentage point.
-
-- **Behavior:** Use a **single updating line** (carriage return ` ` without
-  newline ` `) to show progress.
-- **Format:** `[Progress Bar] 45% | 12.5MB/s | ETA: 00:15`
-- **Completion:** When the task finishes, print a newline so the cursor moves to
-  the next line, preserving the final stats.
-- **Non-TTY Fallback:** If the tool detects it is being piped (not a TTY),
-  disable the progress bar and print periodic log lines instead (e.g., every
-  10%).
-
-### 4.2 Data vs. Logging
-
-- **Stdout:** Strictly for the _requested data_ (e.g., the JSON output of a
-  resource, the list of items).
-- **Stderr:** All logs, progress bars, status messages, and errors.
-- **Benefit:** This allows users to cleanly pipe data without cleaning up logs:
-  `tool list users > users.json` (Progress bars and "Fetching users..." logs
-  appear on screen but are not saved to the file).
-
-______________________________________________________________________
-
-## 5. Standard Command Patterns and Vocabulary
-
-To maintain consistency across different tools, follow these standardized
-patterns for common operations.
-
-### 5.1 Listing: Local vs. Available State
-
-When a tool manages resources that can be installed or configured locally from a
-larger set of obtainable resources, use distinct commands:
+When a tool manages resources that can be installed or configured locally from
+a larger set of obtainable resources, use distinct commands:
 
 - **`list`**: Shows resources currently active, installed, or managed locally
   (on-disk state).
 - **`catalog`**: Shows all resources available to be obtained or installed
   (remote/registry state).
-- **Vocabulary Rule**: Never use the word "available" to describe resources that
-  are already locally present or installed.
+- **Vocabulary Rule**: Never use the word "available" to describe resources
+  that are already locally present or installed.
 - **Single-List Exception**: If obtainable and installed resources are views of
   one underlying list, use a single list command with a state column (e.g.,
   `adb-tiles` marking carousel members with `C`) and a filter flag (e.g.,
   `--carousel-only`).
 
 This applies to tools exposing both an installed set and an obtainable set. A
-single-set utility that only enumerates the obtainable set should still call it
-`catalog` (as a subcommand or `--catalog` flag), not `list`/`--list`, to stay
-consistent with tools like `skill`.
+single-set utility that only enumerates the obtainable set should still call
+it `catalog` (as a subcommand or `--catalog` flag), not `list`/`--list`, to
+stay consistent with tools like `skill`.
 
-### 5.2 Diagnostics: `doctor` vs. `status`
+### Diagnostics: `doctor` vs. `status`
 
 Distinguish between environmental health and resource progress:
 
@@ -218,31 +67,116 @@ Distinguish between environmental health and resource progress:
   - `doctor` must be read-only and must exit non-zero if it finds problems.
   - If a legacy `status` command exists for diagnostics, keep it as a hidden
     alias to avoid breaking callers, but advertise `doctor` as canonical.
-- **`status`**: Reserve for reporting the state or progress of a specific named
-  resource (e.g., `socrates status <db>` showing progress of a run).
+- **`status`**: Reserve for reporting the state or progress of a specific
+  named resource (e.g., `socrates status <db>` showing progress of a run).
 - **Avoid** using `check`, `verify`, or `validate` as command names for these
   operations.
 
-### 5.3 Resource Management Verb Pairs
+#### Canonical `doctor` Output Style
+
+Every `doctor` command renders findings the same way: bracketed, uppercase,
+plain-ASCII tags — `[OK]`, `[INFO]`, `[WARN]`, `[ERROR]` — left-padded to a
+common width so lines align, e.g.:
+
+```text
+[OK]    Workspace: Git repository
+[WARN]  Low disk space: 3.2G available at ANDROID_HOME
+[ERROR] Required Skills: Mismatched skill configuration (1 missing)
+```
+
+- Tags are greppable and fully legible with color stripped (`... | grep
+  '^\[WARN\]'`), which satisfies clig.dev's `NO_COLOR`/non-TTY rule for free.
+  Never use glyph-only tags (`✓`/`!`/`✗`) as the sole carrier of status —
+  glyphs degrade to ambiguous punctuation once color is removed.
+- Color may still be layered onto the tags when stdout is a TTY, as an
+  enhancement, per clig.dev's color rules — never as the only signal.
+- **Remediation placement:** attach the fix directly under the finding it
+  belongs to (indented detail lines), not collected into a trailing summary
+  section — findings scroll off-screen away from a trailing "how to fix"
+  block otherwise. A one-line closing success/failure summary is fine.
+- Exit contract: read-only, non-zero exit on any `WARN`/`ERROR` finding.
+
+### Resource Management Verb Pairs
 
 Choose command verbs that accurately reflect the operation and domain:
 
 - **`create` / `delete`**: Use for resources the tool **authors or destroys**
   (e.g., AVD instances).
-- **`add` / `remove`**: Use for managing **membership in a set** (e.g., tiles in
-  a carousel, skills in a repo). Always support **`rm`** as an alias for
+- **`add` / `remove`**: Use for managing **membership in a set** (e.g., tiles
+  in a carousel, skills in a repo). Always support **`rm`** as an alias for
   `remove`.
 - **`install` / `uninstall`**: Use for **packages** or software installations.
 - **`set`**: Use for **single-slot replacement** of an active selection (e.g.,
   the active watch face). Do not use `add` if there is only one slot.
 
-______________________________________________________________________
+## Exit Codes: Local Extensions
+
+clig.dev only requires zero-on-success, non-zero-on-failure. This repo fixes
+specific non-zero values:
+
+- `0`: success, including an explicit help request (`--help`, `-h`, `help`, or
+  bare `tool` for complex subcommand tools).
+- `1`: general/usage errors.
+- `127`: a required command-line dependency is missing (see `require()` in
+  `shell.md`).
+- `130` / `143`: SIGINT / SIGTERM, with a single newline written to stderr
+  first (guarded against write errors) so the TTY-echoed `^C` doesn't mangle
+  the next shell prompt, and no stack trace or crash dump. A unified handler
+  that always exits `130` is acceptable.
+
+## Output Format Defaults
+
+clig.dev asks for human-readable-by-default output and a way to opt into
+machine-readable output, but doesn't prescribe a house style. This repo's
+interpretation:
+
+- **State changes:** report them git-style — brief, one line per
+  changed/created/deleted thing, to stderr unless it's the requested data.
+- **Long-running operations:** rsync-style single updating line (`\r`, no
+  trailing newline until completion), format `[Progress Bar] 45% | 12.5MB/s |
+  ETA: 00:15`; fall back to periodic log lines (e.g., every 10%) when stdout
+  is not a TTY.
+- **`doctor` output:** the canonical tag style above.
+
+## `--output`/`-o` Contract
+
+Any script that produces a new file or directory as output must support an
+`--output` switch (clig.dev's standard flag name is `-o`; support both) so
+callers can redirect it, e.g. to a temp directory:
+
+- If the specified path does not exist, the tool creates it.
+- If the output is a directory, the tool must not delete it on success —
+  cleanup is the caller's responsibility. Only delete a temp directory the
+  tool created itself, and only on failure.
+
+## Help Flags, Missing Arguments, and Pagers
+
+These follow clig.dev directly, with no local override:
+
+- **`-h` is a help alias.** Every script accepting `--help` also accepts `-h`
+  with identical output and exit code (unless `-h` is already claimed for
+  `--human-readable`, in which case clig.dev's rule wins and the
+  human-readable flag gets a different letter — no script in this repo
+  currently has that collision).
+- **Concise help on missing required arguments.** A tool invoked without
+  required arguments prints a brief description, one or two examples, and a
+  pointer to `--help` — not full help text, and not only "Try --help".
+- **Pagers are permitted**, guarded per clig.dev (`less -FIRX`, only when
+  stdout is a TTY), though rarely warranted for these tools' output sizes.
+
+## Not Applicable
+
+Treated as not applicable to this repo's personal utility scripts, per
+clig.dev's own guidance to adapt to context: `--version` and support/docs
+links in help text (no versioned releases or public support channel), and the
+distribution/analytics sections (single-machine dotfiles, not installed
+packages).
 
 ## Appendix A: Specialized Patterns for Focused Tools
 
 While the **Standard Pattern** (`tool [verb] [noun]`) is ideal for complex
-platforms (like `kubectl` or `aws`), it is often too verbose for focused tools.
-For these, we recognize two valid simplified patterns.
+platforms (like `kubectl` or `aws`), it is often too verbose for focused
+tools. For these, we recognize two valid simplified patterns.
 
 ### Type 1: The Domain-Centric Tool (The "Manager" Pattern)
 
@@ -307,23 +241,3 @@ Arguments:
 Options:
   --help  Display this help message and exit
 ```
-
-______________________________________________________________________
-
-## Summary Checklist for Developers
-
-<!-- markdownlint-disable MD013 -->
-
-| Feature        | Implementation Requirement                    | Reference     |
-| -------------- | --------------------------------------------- | ------------- |
-| **Structure**  | `tool [verb] [noun]` (Unless specialized).    | `kubectl`     |
-| **Short Help** | `-h` is **FORBIDDEN** for help.               | GNU Coreutils |
-| **Long Help**  | `--help` prints to `stdout`.                  | `docker`      |
-| **Help Cmd**   | `help` is an alias for `--help`.              | `cargo`       |
-| **Bare Cmd**   | `tool` (no args) is help for complex tools.   | `git`         |
-| **Pager**      | Never launch `less` or `man`.                 | Anti-`git`    |
-| **Exit Code**  | `0` for requested help, `1` for syntax error. | POSIX         |
-| **Progress**   | Single updating line (CR), no scrolling logs. | `rsync`       |
-| **Streams**    | Data to `stdout`, Logs/Progress to `stderr`.  | Standard Unix |
-
-<!-- markdownlint-restore MD013 -->

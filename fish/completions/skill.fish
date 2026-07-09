@@ -69,5 +69,5 @@ complete -c skill -f -n '__fish_seen_subcommand_from update' -l all -d 'Update e
 complete -c skill -f -n '__fish_seen_subcommand_from update' -l catalog -d 'Refresh the whole metadata index'
 
 # Complete flags
-complete -c skill -f -l help -d 'Display help message and exit'
+complete -c skill -f -s h -l help -d 'Display help message and exit'
 complete -c skill -f -l plugin-template -d 'Output a template for creating a Workspace plugin'

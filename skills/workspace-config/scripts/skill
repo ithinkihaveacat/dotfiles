@@ -730,6 +730,7 @@ class SkillAPI:
         self.workspace_classes = []
         self.plugin_catalog = {}
         self.all_registrations = []
+        self.load_failures = []
 
     def register_workspace(self, cls):
         self.workspace_classes.append(cls)
@@ -807,6 +808,7 @@ def load_plugins() -> SkillAPI:
                     module.register(api)
                     api.current_plugin_file = None
         except Exception as e:
+            api.load_failures.append((filepath.name, str(e)))
             print(
                 f"skill: warning: failed to load plugin {filepath}: {e}",
                 file=sys.stderr,
@@ -1965,6 +1967,32 @@ def cmd_doctor(
         }
     )
 
+    # Check 1b: Plugin Load Failures
+    # A plugin that raises during import/register() currently drops out
+    # silently: get_api() only prints a one-line stderr warning, so a
+    # "healthy" catalog can be silently missing that plugin's skills. Surface
+    # the failures here so they show up as drift instead of scrolling past.
+    load_failures = get_api().load_failures
+    if load_failures:
+        checks.append(
+            {
+                "name": "Plugin Loading",
+                "status": "ERROR",
+                "summary": f"Found {len(load_failures)} plugin(s) that failed to load",
+                "details": ["Failed to load:"]
+                + [f"  - {name}: {error}" for name, error in load_failures],
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Plugin Loading",
+                "status": "OK",
+                "summary": "All plugins loaded successfully",
+                "details": [],
+            }
+        )
+
     # Check 2: Agent Configuration
     if dest_err:
         checks.append(
@@ -2380,15 +2408,74 @@ def cmd_doctor(
 
     def format_status(status):
         if status == "OK":
-            icon = "✓"
-            color_name = "green"
+            tag, color_name = "[OK]   ", "green"
         elif status == "WARNING":
-            icon = "!"
-            color_name = "yellow"
+            tag, color_name = "[WARN] ", "yellow"
         else:
-            icon = "✗"
-            color_name = "red"
-        return colorize(f"[{icon}]", color_name, use_color)
+            tag, color_name = "[ERROR]", "red"
+        return colorize(tag, color_name, use_color)
+
+    # Per-finding remediation, attached to the check it belongs to so fixes
+    # never scroll away from the finding that prompted them (emumanager style).
+    generic_sync = "To resolve: run 'git-setup' or 'skill apply' to synchronize and repair your configuration."
+    for check in checks:
+        if check["status"] == "OK":
+            continue
+        name = check["name"]
+        if name == "Environment Freshness":
+            check["details"].append(
+                "To resolve: reload this workspace's environment so AGENT_REQUIRED_SKILLS picks up .envrc:"
+            )
+            check["details"].append(
+                "  direnv reload   # or start a new prompt, then re-run 'skill apply'"
+            )
+        elif name == "Required Skills":
+            check["details"].append(generic_sync)
+            if extra:
+                if is_using_envrc(ws):
+                    check["details"].append(
+                        "Add the extra skill(s) to your required skills (updates .envrc):"
+                    )
+                    check["details"].append(f"  envrc add skills {' '.join(extra)}")
+                else:
+                    check["details"].append(
+                        "Add the extra skill(s) to the AGENT_REQUIRED_SKILLS environment variable:"
+                    )
+                    check["details"].append(
+                        f'  export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"'
+                    )
+                check["details"].append("Or remove the local symlink(s):")
+                check["details"].append(f"  skill remove {' '.join(extra)}")
+            if negated_extra:
+                check["details"].append("Remove the excluded symlink(s) manually:")
+                check["details"].append(f"  skill remove {' '.join(negated_extra)}")
+        elif name == "Symlink Health":
+            check["details"].append(generic_sync)
+        elif name == "Workspace Exclusions":
+            check["details"].append(generic_sync)
+        elif name == "Directory Cleanliness":
+            check["details"].append(
+                "To resolve: manually delete or move the unmanaged files/directories out of the skill folders."
+            )
+        elif name == "Orphaned Directories":
+            rm_cmds = " && ".join(f"rm -rf {path}" for path, _ in orphaned)
+            check["details"].append(
+                "To resolve: delete the orphaned directory/directories if you no longer use those agents:"
+            )
+            check["details"].append(f"  {rm_cmds}")
+        elif name == "Plugin Loading":
+            check["details"].append(
+                "To resolve: fix or remove the failing plugin file(s) listed above "
+                "(rerun with SKILL_DEBUG=1 for a full traceback)."
+            )
+        elif name == "Plugin Local Paths":
+            check["details"].append(
+                "To resolve: fix the missing local paths for your plugins in your configuration."
+            )
+        elif name == "Catalog Cache" and not unresolvable_local:
+            check["details"].append(
+                "To resolve: run 'skill update --catalog' to repair the catalog cache."
+            )
 
     for check in checks:
         if is_visible(check):
@@ -2400,67 +2487,7 @@ def cmd_doctor(
                 for line in check["details"]:
                     print(f"    {line}", file=stream)
 
-    # Collect resolution steps
-    resolutions = []
-    if fresh_missing or fresh_negated:
-        resolutions.append(
-            "Reload this workspace's environment so AGENT_REQUIRED_SKILLS picks up .envrc:\n"
-            "      direnv reload   # or start a new prompt, then re-run 'skill apply'"
-        )
-    if missing or dangling or backend_issues or extra or negated_extra:
-        resolutions.append(
-            "To synchronize and repair your configuration, run 'git-setup' or 'skill apply'."
-        )
-    if extra:
-        if is_using_envrc(ws):
-            resolutions.append(
-                "Add the extra skill(s) to your required skills (updates .envrc):\n"
-                f"      envrc add skills {' '.join(extra)}\n"
-                "  - Or remove the local symlink(s):\n"
-                f"      skill remove {' '.join(extra)}"
-            )
-        else:
-            resolutions.append(
-                "Add the extra skill(s) to the AGENT_REQUIRED_SKILLS environment variable:\n"
-                f'      export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"\n'
-                "  - Or remove the local symlink(s):\n"
-                f"      skill remove {' '.join(extra)}"
-            )
-    if negated_extra:
-        resolutions.append(
-            "Remove the excluded symlink(s) manually:\n"
-            f"      skill remove {' '.join(negated_extra)}"
-        )
-    if unmanaged:
-        resolutions.append(
-            "Manually delete or move the unmanaged files/directories out of the skill folders."
-        )
-    if orphaned and not errors_only:
-        rm_cmds = " && ".join(f"rm -rf {path}" for path, _ in orphaned)
-        resolutions.append(
-            f"Delete the orphaned directory/directories if you no longer use those agents:\n"
-            f"      {rm_cmds}"
-        )
-    if plugin_path_issues:
-        resolutions.append(
-            "Fix the missing local paths for your plugins in your configuration."
-        )
-    if catalog_index_issues or (catalog_stale_issues and not errors_only):
-        if not unresolvable_local:
-            resolutions.append(
-                "To repair the catalog cache, run 'skill update --catalog'."
-            )
-
     if fail:
-        if resolutions:
-            print(
-                colorize("\nTo resolve these issues:", "bold", use_color), file=stream
-            )
-            for r in resolutions:
-                lines = r.split("\n")
-                print(f"  • {lines[0]}", file=stream)
-                for line in lines[1:]:
-                    print(f"    {line}", file=stream)
         return False
 
     if verbose:
@@ -2554,13 +2581,13 @@ def register(api):
 ''')
         sys.exit(0)
 
-    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "help"):
+    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
         usage()
 
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
-    if "--help" in args:
+    if "--help" in args or "-h" in args:
         usage()
 
     if cmd == "doctor":

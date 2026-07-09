@@ -1,7 +1,7 @@
 # Fish completion for adb-tiles
 
 complete -c adb-tiles -f
-complete -c adb-tiles -l help -d "Display help message"
+complete -c adb-tiles -s h -l help -d "Display help message"
 complete -c adb-tiles -l tiles-only -d "List only tile services"
 complete -c adb-tiles -l widgets-only -d "List only widget services"
 complete -c adb-tiles -l user-only -d "List only services from user-installed apps"

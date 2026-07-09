@@ -17,4 +17,4 @@ complete -c popper -l local-screenshot-dir -r -d "Directory for step-by-step deb
 complete -c popper -l output-dir -r -d "Directory for screenshots requested by the agent"
 complete -c popper -l model -x -d "Gemini model to use"
 complete -c popper -l dump-layout -d "Print the current simplified UI layout as JSON and exit"
-complete -c popper -l help -d "Display help message and exit"
+complete -c popper -s h -l help -d "Display help message and exit"
