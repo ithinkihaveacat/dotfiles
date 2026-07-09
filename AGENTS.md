@@ -53,92 +53,32 @@ script sources in `skills/*/scripts/`, as well as the `./install.sh` script.
 #### Dependency Checking
 
 All scripts must declare their command-line dependencies using the `require()`
-function. This function checks for the existence of the specified commands and
-exits with an error if any are missing.
-
-```bash
-# Good
-require adb
-require apkanalyzer
-```
+helper, which exits `127` when a command is missing. The implementation and
+usage rules are defined in `skills/coding-standards/references/shell.md`
+("Dependency Checking").
 
 #### Safe-Command Declarations
 
 `permission apply` pre-approves every executable in a skill's `scripts/`
-directory for local agents by default. If a script (or one of its subcommands)
-is destructive, irreversible, or otherwise should always prompt, it must be
-listed in that skill's `permissions/unsafe` file (one pattern per line; a bare
-script name suppresses pre-approval entirely, a `script subcommand` line guards
-just that subcommand). When adding or modifying a script with destructive
-behavior, update this file. See `skills/workspace-config/SKILL.md` for details.
+directory for local agents by default. When adding or modifying a script (or
+subcommand) with destructive, irreversible, or otherwise prompt-worthy behavior,
+list it in that skill's `permissions/unsafe` file. The file format and semantics
+are documented in `skills/workspace-config/SKILL.md` ("Safe-Command
+Declarations").
 
 #### File Output
 
-If a script produces a new file or directory as output, it must support an
-optional `--output` switch to allow callers to specify the output path. This is
-crucial for allowing scripts to work with temporary directories.
-
-The `--output` path can be a file or a directory, depending on the tool's
-purpose.
-
-- If the specified path does not exist, the tool should create it.
-- If the output is a directory, the tool must not delete it on successful
-  completion. The calling process is responsible for any cleanup. The tool
-  should only delete a temporary directory if the tool itself fails.
-
-```bash
-# Good: Output to a file
-my-script --output /tmp/my-output.txt
-
-# Good: Output to a directory
-another-script --output /tmp/my-output-dir
-```
+If a script produces a new file or directory as output, it must support the
+`--output`/`-o` switch defined in
+`skills/coding-standards/references/cli-tools.md` ("The `--output`/`-o`
+Contract") so callers can redirect output, e.g. to a temporary directory.
 
 #### Compatibility
 
-Scripts must be compatible with standard utilities (e.g., `grep`, `awk`, `tr`)
-found in any macOS or Debian stable release that was current within the last two
-years.
-
-Scripts should target Bash version 3.2.57(1)-release (the default on recent
-macOS versions as of Nov 2025) for maximum compatibility. This is especially
-important for short scripts and general-purpose utilities.
-
-For longer, more complex scripts where modern Bash features significantly
-improve reliability and robustness, Bash 4.x features are acceptable. However,
-scripts using Bash 4.x features must include a version guard at the top to fail
-gracefully on older systems:
-
-```bash
-#!/usr/bin/env bash
-
-if ((BASH_VERSINFO[0] < 4)); then
-  echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
-  exit 1
-fi
-```
-
-Guidelines for using Bash 4.x features:
-
-- Use only when it provides clear benefits to reliability, robustness, or
-  maintainability
-- Prefer simple, well-established features (e.g., associative arrays,
-  `readarray`) over exotic ones
-- Avoid features that are conceptually or syntactically "odd", even if
-  technically superior
-- Never use Bash 5.x-specific features
-
-Examples of acceptable Bash 4.x features for complex scripts:
-
-- Associative arrays (`declare -A`) for lookups and mappings
-- `readarray`/`mapfile` for safer array population
-- `${var,,}` and `${var^^}` for case conversion (sparingly)
-
-Examples of features to avoid:
-
-- Bash 5.x features (e.g., `${var@U}`, `${var@u}`)
-- Obscure parameter expansions that harm readability
-- Any feature that would confuse maintainers familiar with basic Bash
+Compatibility requirements — the supported macOS/Debian utilities, the default
+Bash 3.2 target, and when Bash 4.x features are acceptable (with the required
+version guard) — are defined in `skills/coding-standards/references/shell.md`
+("Compatibility and Bash Versions").
 
 #### Handling APK Archives
 
@@ -173,8 +113,8 @@ different variable for the input path, you must adapt the code accordingly.
 
 ### CLI Design and Documentation
 
-Scripts must follow [clig.dev](https://clig.dev/) plus this repo's local
-delta on top of it, and comprehensive documentation guidelines.
+Scripts must follow [clig.dev](https://clig.dev/) plus this repo's local delta
+on top of it, and comprehensive documentation guidelines.
 
 @skills/coding-standards/references/cli-tools.md
 @skills/coding-standards/references/shell.md
@@ -212,7 +152,8 @@ functionality.
 
 ### Generated Command Index Blocks
 
-Some `references/command-index.md` files contain blocks generated from a
+Some Markdown files (most `references/command-index.md` files, plus the
+reference implementations in `cli-tools.md`) contain blocks generated from a
 script's `--help` output, delimited by marker comments:
 
 ```markdown
@@ -239,83 +180,21 @@ directory set to the directory containing the Markdown file (hence the
 
 ### Tests
 
-Some scripts have associated tests in the `tests/` directory. Tests use the TAP
-(Test Anything Protocol) format and can be run with `prove` or executed
-directly.
+Some scripts have associated tests (TAP format, run with `prove`). Test layout,
+running instructions (including offline and isolated environments), and
+authoring guidelines are documented in `tests/README.md`. Scripts with tests
+carry a `# Tests:` comment pointing at their test file.
 
-#### Directory Structure
-
-```text
-tests/
-└── <script-name>/
-    ├── test-basic           # TAP test file (executable)
-    └── fixtures/            # Test data (images, sample files, etc.)
-```
-
-#### Test Requirements
-
-- Test files should be executable and output TAP format
-- Tests must be safe to run in parallel (avoid shared temporary files or state)
-- Tests can be run in parallel for speed (e.g., `prove -j 9 tests/*/test-*`)
-- Scripts with tests include a `# Tests:` comment pointing to their test
-  directory
-- When modifying a script with tests, review whether the tests need updating
-- Tests that call external APIs (e.g., Gemini) are expensive and slow; run them
-  manually when making substantive changes to the tested script
-
-#### Finding Tests
-
-Check if a script has associated tests:
-
-```bash
-# Look for a Tests comment in the script
-grep '# Tests:' bin/my-script
-
-# Or check the tests directory
-ls tests/my-script/
-```
-
-#### Isolated Environments & Dependency Caching
-
-Some test suites in this repository (such as
-`tests/workspace-config/test-skill`) run scripts in an isolated, hermetic
-environment by overriding `HOME` or `XDG_CONFIG_HOME` (e.g., to
-`/tmp/.../mock_home`).
-
-This isolation is crucial for testing clean environments, but it prevents
-package managers (like `uv` or `pip`) from accessing your corporate or personal
-credentials (like `gpkg` or `gcloud` tokens stored in your real `HOME`
-directory), resulting in `401 Unauthorized` errors when they attempt to download
-dependencies.
-
-To run these tests successfully:
-
-1. **Warm the Cache**: Run a command that uses the dependency outside the
-   isolated test environment first (or run the tool itself) to ensure the
-   packages are downloaded and cached in your host's package manager cache
-   (e.g., `~/.cache/uv`).
-1. **Share the Cache**: Execute the test runner while passing/exporting your
-   host's cache directory environment variable. The isolated package manager
-   will then resolve dependencies offline from the local cache without hitting
-   the network or requiring authentication.
-
-For `uv`-based tests, you can execute the test suite by exporting
-`UV_CACHE_DIR`:
-
-```bash
-UV_CACHE_DIR=~/.cache/uv ./skills/workspace-config/tests/test-skill
-```
-
-This is a robust and fast way to run hermetic tests that rely on external
-packages.
+When modifying a script with tests, review whether the tests need updating.
 
 ### Examples from This Repository
 
 See these scripts for reference implementations:
 
 - `bin/jetpack` - Multiple arguments, optional version and repo URL
-- `bin/apk-cat-file` - Two required arguments, simple and clean
-- `bin/packagename` - Single argument, Android-specific
+- `bin/apk-unzip` - Single argument with an optional `--output`, simple and
+  clean
+- `bin/packagename` - Subcommand-style manager, Android-specific
 - `bin/macos-finder-reveal` - Multiple files, macOS-specific
 
 Each demonstrates proper GNU coreutils style documentation.

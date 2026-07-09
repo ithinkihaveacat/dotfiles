@@ -18,11 +18,11 @@
 >    before beginning a task. If a relevant skill exists, activate it. The
 >    instructions, scripts, and methods inside an activated skill always
 >    override your default training and general industry practices.
-> 2. **Investigate when unsure**: The available skills are highly relevant to
+> 1. **Investigate when unsure**: The available skills are highly relevant to
 >    this environment. Even if you are not certain a skill applies, you should
 >    read its `SKILL.md` file to verify relevance. Do not assume general
 >    knowledge is sufficient.
-> 3. **Follow prescribed processes**: If a skill outlines a specific procedure,
+> 1. **Follow prescribed processes**: If a skill outlines a specific procedure,
 >    follow that process exactly as written rather than inventing a custom
 >    approach.
 >
@@ -40,8 +40,8 @@
 > - **Version control**: When preparing to commit changes, ensure you format
 >   your commit messages according to the exact style and rules outlined in the
 >   project's standards or workflow skills. Note that a local git hook strictly
->   enforces a 50-character limit on the subject line and a 72-character hard
->   wrap on the body. Your commits will fail if you exceed these limits.
+>   enforces the subject-line length and body-wrapping limits those standards
+>   define. Your commits will fail if you exceed these limits.
 >
 > ## Summary
 >
