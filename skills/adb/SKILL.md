@@ -67,8 +67,8 @@ See `references/command-index.md` for detailed usage.
 - `scripts/adb-log`: Write a message to the system log.
 
 For simple one-shot operations (listing device serials, waking or sleeping the
-device, filtering logcat by tag, sending VIEW intents, toggling "Show
-touches"), use raw `adb` commands. See
+device, filtering logcat by tag, sending VIEW intents, toggling "Show touches"),
+use raw `adb` commands. See
 [references/command-index.md](references/command-index.md#raw-adb-commands) for
 the exact invocations, including non-obvious flags.
 
@@ -78,8 +78,9 @@ the exact invocations, including non-obvious flags.
   `adb shell screencap`.** Features: auto-detects square Wear OS displays and
   applies circular mask, wakes device before capture, copies to macOS clipboard,
   generates timestamped filenames by default.
-- `scripts/adb-screenrecord`: Record the screen to a file.
-- `scripts/adb-screenrecord-raw`: Record the screen using raw frames and ffmpeg.
+- `scripts/adb-screenrecord`: Record the screen to a file. Automatically detects
+  devices that require raw frame streaming (e.g., Samsung Wear OS watches) and
+  uses ffmpeg for capture, while defaulting to scrcpy for standard devices.
 
 ### Tile Management (Wear OS)
 

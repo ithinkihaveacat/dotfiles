@@ -5,7 +5,9 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [FILE]
 
-Records the screen of an adb-connected device using scrcpy.
+Records the screen of an adb-connected device. Automatically detects devices
+that require raw frame streaming (e.g. Samsung Wear OS watches) and uses ffmpeg
+for capture, while defaulting to scrcpy for standard devices.
 
 The screen recording is saved to the specified file, or to a timestamped file
 in the current directory if no file is specified. Touches are displayed during
@@ -17,7 +19,9 @@ Arguments:
 
 Options:
   -o, --output FILE The path to save the screen recording to.
-  --help            Display this help message and exit
+  --raw             Force raw frame capture using ffmpeg.
+  --no-raw          Disable raw frame capture (force scrcpy).
+  -h, --help        Display this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
@@ -31,13 +35,18 @@ Examples:
   # Save screen recording to a specific file
   $(basename "$0") /tmp/my-screen-recording.mp4
 
-  # Save screen recording to a specific file using the --output flag
-  $(basename "$0") --output /tmp/my-screen-recording.mp4
+  # Force raw frame capture on any device
+  $(basename "$0") --raw /tmp/my-screen-recording.mp4
 EOF
   exit 0
 }
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+fi
+
 OUTPUT_FILE=""
+FORCE_RAW=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -51,6 +60,14 @@ while [[ $# -gt 0 ]]; do
       fi
       OUTPUT_FILE="$2"
       shift 2
+      ;;
+    --raw)
+      FORCE_RAW="1"
+      shift
+      ;;
+    --no-raw)
+      FORCE_RAW="0"
+      shift
       ;;
     *)
       break
@@ -66,12 +83,24 @@ require() {
 }
 
 require adb
-require scrcpy
 
 # Check if device is available
 if [ "$(adb get-state 2>/dev/null)" != "device" ]; then
-  echo "error: no device connected" >&2
+  echo "$(basename "$0"): no device connected" >&2
   exit 1
+fi
+
+MANUFACTURER=$(adb exec-out getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+BRAND=$(adb exec-out getprop ro.product.brand 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+MODEL=$(adb exec-out getprop ro.product.model 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+
+USE_RAW=0
+if [[ "$FORCE_RAW" == "1" ]]; then
+  USE_RAW=1
+elif [[ "$FORCE_RAW" == "0" ]]; then
+  USE_RAW=0
+elif [[ "$MANUFACTURER" == *"samsung"* || "$BRAND" == *"samsung"* || "$MODEL" == *"sm-"* || "$MODEL" == *"samsung"* ]]; then
+  USE_RAW=1
 fi
 
 if [ -n "${1:-}" ]; then
@@ -82,7 +111,7 @@ if [ -z "$OUTPUT_FILE" ]; then
   OUTPUT_FILE=$(date -u +'adb-screenrecord-%Y%m%d%H%M%S.mp4')
 fi
 
-adb exec-out log -p f -t scrcpy "screen recording to $OUTPUT_FILE"
+adb exec-out log -p f -t screenrecord "screen recording to $OUTPUT_FILE"
 
 SHOW_TOUCHES="adb exec-out settings get system show_touches"
 # shellcheck disable=SC2064
@@ -90,14 +119,22 @@ trap "$(printf 'adb exec-out settings put system show_touches %s' "$($SHOW_TOUCH
 
 adb exec-out settings put system show_touches 1
 
-# Trying to mux audio seems to lead scrcpy to create a broken MP4 on Ctrl-C, so
-# disable via --no-audio
-#
-# May also need to disable -t (show touches) and -w (stay awake) on
-# some devices.
-
-#scrcpy --no-audio -N -t -w -r "$OUTPUT_FILE"
-scrcpy --no-audio --no-window -r "$OUTPUT_FILE"
-
-# On some devices, may need to force a particular video codec:
-# --video-codec=h264 --video-encoder='OMX.google.h264.encoder'
+if [ "$USE_RAW" -eq 1 ]; then
+  require ffmpeg
+  echo "$(basename "$0"): note: using raw frame capture (ffmpeg) for device $MODEL ($BRAND/$MANUFACTURER)" >&2
+  SIZE=$(adb exec-out wm size 2>/dev/null | awk -F': ' 'END{print $2}' | tr -d '\r')
+  if [[ ! "$SIZE" =~ ^[0-9]+x[0-9]+$ ]]; then
+    SIZE="454x454"
+  fi
+  BITRATE=70M
+  adb exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - |
+    ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -vsync 0 -i - -an -c:v libx264 -pix_fmt yuv420p -y "$OUTPUT_FILE"
+else
+  require scrcpy
+  # Trying to mux audio seems to lead scrcpy to create a broken MP4 on Ctrl-C, so
+  # disable via --no-audio
+  #
+  # May also need to disable -t (show touches) and -w (stay awake) on
+  # some devices.
+  scrcpy --no-audio --no-window -r "$OUTPUT_FILE"
+fi

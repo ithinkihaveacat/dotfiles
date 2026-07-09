@@ -59,22 +59,19 @@ adb exec-out "screencap -p" | magick - \
 
 ### `scripts/adb-screenrecord`
 
-**Purpose**: Record screen to video file. **Dependencies**: `adb` **Usage**:
-`scripts/adb-screenrecord [OUTPUT_FILE]` **Raw Command**:
+**Purpose**: Record screen to video file. Automatically detects devices that
+require raw frame streaming (e.g., Samsung Wear OS watches) and uses ffmpeg for
+capture, while defaulting to scrcpy for standard devices. Use `--raw` or
+`--no-raw` to manually override. **Dependencies**: `adb`, `scrcpy` (for standard
+devices), `ffmpeg` (for raw capture) **Usage**:
+`scripts/adb-screenrecord [OPTIONS] [FILE]` **Raw Command**:
 
 ```bash
-adb shell screenrecord /sdcard/screen.mp4
-# (Then pull the file)
-```
+# Standard devices (scrcpy)
+scrcpy --no-audio --no-window -r output.mp4
 
-### `scripts/adb-screenrecord-raw`
-
-**Purpose**: Record the screen using raw frames and ffmpeg. **Dependencies**:
-`adb`, `ffmpeg` **Usage**: `scripts/adb-screenrecord-raw [FILE]` **Raw
-Command**:
-
-```bash
-adb exec-out screenrecord --output-format=raw-frames --size SIZE --bit-rate BITRATE - | ffmpeg -f rawvideo -vcodec rawvideo -s SIZE -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -vsync 0 -i - -an -c:v libx264 -pix_fmt yuv420p -y OUTPUT
+# Raw frame streaming (Samsung Wear OS watches / fallback)
+adb exec-out screenrecord --output-format=raw-frames --size SIZE --bit-rate BITRATE - | ffmpeg -f rawvideo -vcodec rawvideo -s SIZE -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -vsync 0 -i - -an -c:v libx264 -pix_fmt yuv420p -y output.mp4
 ```
 
 ## Tile Management (Wear OS)
@@ -290,8 +287,7 @@ parsing; there are deliberately no wrapper scripts for them.
   adb exec-out am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d "https://example.com/deeplink"
   ```
 
-- **Mirror the screen** (interactive; requires scrcpy):
-  `scrcpy --always-on-top`
+- **Mirror the screen** (interactive; requires scrcpy): `scrcpy --always-on-top`
 
 ### Logging
 
@@ -304,12 +300,18 @@ parsing; there are deliberately no wrapper scripts for them.
 ### Common System Dumpsys
 
 - **Account information:** `adb exec-out dumpsys account`
+
 - **Battery stats:** `adb exec-out dumpsys batterystats`
+
 - **Power information:** `adb exec-out dumpsys power`
+
 - **Process exit info:** `adb exec-out dumpsys activity exit-info`
+
 - **Battery state simulation:**
+
   - Unplug charger: `adb exec-out dumpsys battery unplug`
   - Reset charging state: `adb exec-out dumpsys battery reset`
+
 - **Health Tracking GmsModule version (Wear OS):**
 
   ```bash
@@ -361,8 +363,8 @@ adb exec-out am broadcast -a com.android.systemui.demo -e command exit
 
 ### `scripts/adb-fontscale`
 
-**Purpose**: Get or set the system font scale (presets: `default` = 1.0,
-`large` = 1.24, or any numeric value). **Dependencies**: `adb` **Usage**:
+**Purpose**: Get or set the system font scale (presets: `default` = 1.0, `large`
+= 1.24, or any numeric value). **Dependencies**: `adb` **Usage**:
 `scripts/adb-fontscale get`, `scripts/adb-fontscale set default|large|NUMBER`
 **Raw Command**:
 
