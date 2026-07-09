@@ -149,10 +149,9 @@ callers can redirect it, e.g. to a temp directory:
   cleanup is the caller's responsibility. Only delete a temp directory the
   tool created itself, and only on failure.
 
-## Where This Repo Follows clig.dev (previously did not)
+## Help Flags, Missing Arguments, and Pagers
 
-The following clig.dev rules are now this repo's rule, superseding the prior
-local standard:
+These follow clig.dev directly, with no local override:
 
 - **`-h` is a help alias.** Every script accepting `--help` also accepts `-h`
   with identical output and exit code (unless `-h` is already claimed for
