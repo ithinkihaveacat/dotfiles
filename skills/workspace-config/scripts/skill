@@ -879,26 +879,19 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                             "namespace": ns,
                             "name": short_name,
                             "full_spec": key,
+                            "is_remote": False,
                         }
                     )
             elif "repo" in entry and "ref" in entry:
-                # Resolve/Provision remote plugin
-                try:
-                    target_dir_str = fetch_github(
-                        key, entry["repo"], entry["ref"], entry["subpath"]
-                    )
-                    target_path = Path(target_dir_str)
-                    if target_path.is_dir():
-                        candidates.append(
-                            {
-                                "path": Path(os.path.realpath(target_path)),
-                                "namespace": ns,
-                                "name": short_name,
-                                "full_spec": key,
-                            }
-                        )
-                except Exception:
-                    pass
+                candidates.append(
+                    {
+                        "entry": entry,
+                        "namespace": ns,
+                        "name": short_name,
+                        "full_spec": key,
+                        "is_remote": True,
+                    }
+                )
 
     # Filter candidates by namespace if one was requested
     if req_ns:
@@ -907,19 +900,43 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
             raise ValueError(
                 f"cannot resolve skill '{spec}': no match in namespace '{req_ns}'"
             )
-        return filtered[0]["path"], filtered[0]["name"]
+        candidates = filtered
 
     # No namespace requested
     if not candidates:
         raise ValueError(f"cannot resolve skill '{spec}'")
 
-    # Deduplicate candidates by path to prevent false ambiguities
+    if len(candidates) > 1:
+        non_remote = [c for c in candidates if not c.get("is_remote", False)]
+        if non_remote:
+            candidates = non_remote
+
+    # Now resolve paths for remaining candidates
     unique_candidates = []
     seen_paths = set()
     for c in candidates:
-        if c["path"] not in seen_paths:
-            seen_paths.add(c["path"])
-            unique_candidates.append(c)
+        if c.get("is_remote", False):
+            entry = c["entry"]
+            try:
+                target_dir_str = fetch_github(
+                    c["full_spec"], entry["repo"], entry["ref"], entry.get("subpath")
+                )
+                target_path = Path(target_dir_str)
+                if target_path.is_dir():
+                    path_obj = Path(os.path.realpath(target_path))
+                    if path_obj not in seen_paths:
+                        seen_paths.add(path_obj)
+                        c["path"] = path_obj
+                        unique_candidates.append(c)
+            except Exception:
+                pass
+        else:
+            if c["path"] not in seen_paths:
+                seen_paths.add(c["path"])
+                unique_candidates.append(c)
+
+    if not unique_candidates:
+        raise ValueError(f"cannot resolve skill '{spec}'")
 
     if len(unique_candidates) == 1:
         return unique_candidates[0]["path"], unique_candidates[0]["name"]
@@ -2016,6 +2033,7 @@ def cmd_doctor(
 
     # Check 3: Required Skills (Alignment)
     missing = []
+    mismatched_target = []
     extra = []
     expected_targets = {}
 
@@ -2041,12 +2059,12 @@ def cmd_doctor(
                         target_abs = Path(os.path.abspath(p.parent / target))
                         if target_abs != abs_src:
                             label = (
-                                f"{spec} (missing in {rel(d)})"
+                                f"{spec} (linked to {clean_p(target_abs)}, expected {clean_p(abs_src)})"
                                 if len(dest_dirs) > 1
-                                else spec
+                                else f"{spec} in {rel(d)} (linked to {clean_p(target_abs)}, expected {clean_p(abs_src)})"
                             )
-                            if label not in missing:
-                                missing.append(label)
+                            if label not in mismatched_target:
+                                mismatched_target.append(label)
             else:
                 missing.append(spec)
         except Exception:
@@ -2056,6 +2074,7 @@ def cmd_doctor(
     negated_extra = []
 
     if dest_dirs:
+        expected_names = {s.split(":", 1)[-1].lower() for s in expected_skills}
         for s in actual_skills:
             for d in dest_dirs:
                 p = d / s
@@ -2067,7 +2086,7 @@ def cmd_doctor(
                             if s.lower() in {ns.lower() for ns in negated_skills}:
                                 if s not in negated_extra:
                                     negated_extra.append(s)
-                            else:
+                            elif s.lower() not in expected_names:
                                 if s not in extra:
                                     extra.append(s)
                     except Exception:
@@ -2077,6 +2096,12 @@ def cmd_doctor(
     if missing:
         skill_details.append("Missing skills (declared but not linked on disk):")
         for s in missing:
+            skill_details.append(f"  - {s}")
+    if mismatched_target:
+        skill_details.append(
+            "Mismatched symlink targets (linked on disk but pointing to unexpected source):"
+        )
+        for s in mismatched_target:
             skill_details.append(f"  - {s}")
     if negated_extra:
         skill_details.append(
@@ -2089,14 +2114,21 @@ def cmd_doctor(
         for s in extra:
             skill_details.append(f"  - {s}")
 
-    if missing or extra or negated_extra:
-        num_missing = len(missing)
+    if missing or mismatched_target or extra or negated_extra:
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)} missing")
+        if mismatched_target:
+            parts.append(f"{len(mismatched_target)} mismatched target")
         num_extra = len(extra) + len(negated_extra)
+        if num_extra:
+            parts.append(f"{num_extra} extra/stale")
+        summary_str = ", ".join(parts)
         checks.append(
             {
                 "name": "Required Skills",
                 "status": "ERROR",
-                "summary": f"Mismatched skill configuration ({num_missing} missing, {num_extra} extra/stale)",
+                "summary": f"Mismatched skill configuration ({summary_str})",
                 "details": skill_details,
             }
         )

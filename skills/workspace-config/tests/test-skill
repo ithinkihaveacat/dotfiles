@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..59"
+echo "1..62"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -1233,5 +1233,65 @@ if printf '%s\n' "$cat_out" | grep -q "conf-skill (! CONFLICT)" &&
   echo "ok 59 - [Conflict] catalog and doctor flag conflicting skill names across distinct targets"
 else
   echo "not ok 59 - [Conflict] failed to flag conflict in catalog ($cat_out) or doctor ($doc_out)"
+fi
+cd "$TMPDIR"
+
+# ==============================================================================
+# PART 12: Resolution Shadowing, Local Discovery Paths, and Mismatch Reporting
+# ==============================================================================
+
+# Test 60: local skill shadows remote fallback during non-namespaced resolution
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_shadow.py"
+def register(api):
+    api.register_skill("local:shadow-test", {"path": "${TMPDIR}/local-shadow"})
+    api.register_skill("remote:shadow-test", {"repo": "dummy/repo", "ref": "main", "subpath": "dummy"})
+EOF
+mkdir -p "${TMPDIR}/local-shadow"
+echo -e "---\nname: shadow-test\n---" >"${TMPDIR}/local-shadow/SKILL.md"
+if out=$("${SCRIPT}" resolve shadow-test 2>/dev/null); then
+  if [ "$out" = "${TMPDIR}/local-shadow" ]; then
+    echo "ok 60 - [Resolution] local skill shadows remote fallback during non-namespaced resolution"
+  else
+    echo "not ok 60 - [Resolution] resolved to unexpected path: $out"
+  fi
+else
+  echo "not ok 60 - [Resolution] resolve failed when local should shadow remote"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_shadow.py"
+
+# Test 61: 05_local plugin discovers skills in ~/.agents/skills and ~/.gemini/config/skills without duplicate warnings
+MOCK_HOME="${TMPDIR}/mock_home"
+mkdir -p "${MOCK_HOME}/.agents/skills/my-agent-skill" "${MOCK_HOME}/.gemini/config"
+echo -e "---\nname: my-agent-skill\n---" >"${MOCK_HOME}/.agents/skills/my-agent-skill/SKILL.md"
+ln -s "${MOCK_HOME}/.agents/skills" "${MOCK_HOME}/.gemini/config/skills"
+if out=$(env -u SKILL_SOURCE_DIRS HOME="$MOCK_HOME" "${SCRIPT}" resolve my-agent-skill 2>&1); then
+  if [ "$out" = "${MOCK_HOME}/.agents/skills/my-agent-skill" ] && ! printf '%s\n' "$out" | grep -q "overwriting existing entry"; then
+    echo "ok 61 - [Local discovery] discovers skills in ~/.agents/skills and deduplicates symlinked ~/.gemini/config/skills"
+  else
+    echo "not ok 61 - [Local discovery] unexpected output or duplicate warning: $out"
+  fi
+else
+  echo "not ok 61 - [Local discovery] failed to resolve skill in ~/.agents/skills: $out"
+fi
+
+# Test 62: doctor and preflight clearly report mismatched symlink targets without misflagging as missing or extra
+MOCK_MISMATCH_DIR="${TMPDIR}/mock-mismatch"
+mkdir -p "${MOCK_MISMATCH_DIR}/src1/my-skill" "${MOCK_MISMATCH_DIR}/src2/my-skill"
+echo -e "---\nname: my-skill\n---" >"${MOCK_MISMATCH_DIR}/src1/my-skill/SKILL.md"
+echo -e "---\nname: my-skill\n---" >"${MOCK_MISMATCH_DIR}/src2/my-skill/SKILL.md"
+cd "$MOCK_MISMATCH_DIR"
+git init -q
+SKILL_SOURCE_DIRS="${MOCK_MISMATCH_DIR}/src1" AGENT_REQUIRED_SKILLS="my-skill" "${SCRIPT}" apply >/dev/null 2>&1 || true
+if doc_out=$(SKILL_SOURCE_DIRS="${MOCK_MISMATCH_DIR}/src2" AGENT_REQUIRED_SKILLS="my-skill" "${SCRIPT}" doctor 2>&1); then
+  echo "not ok 62 - [Mismatch reporting] doctor should have failed on mismatched symlink target"
+else
+  if printf '%s\n' "$doc_out" | grep -q "1 mismatched target" &&
+    printf '%s\n' "$doc_out" | grep -q "Mismatched symlink targets (linked on disk but pointing to unexpected source):" &&
+    ! printf '%s\n' "$doc_out" | grep -q "Missing skills (declared but not linked on disk)" &&
+    ! printf '%s\n' "$doc_out" | grep -q "Extra skills (linked on disk but not declared)"; then
+    echo "ok 62 - [Mismatch reporting] doctor reports mismatched symlink target clearly and accurately"
+  else
+    echo "not ok 62 - [Mismatch reporting] unexpected doctor output: $doc_out"
+  fi
 fi
 cd "$TMPDIR"
