@@ -882,8 +882,9 @@ fi
 
 heading "skill plugins"
 
-# Clean up legacy skill-select configuration and registry
+# Clean up legacy skill-select configuration and cache
 x rm -rf "$HOME/.config/skill-select"
+x rm -rf "$HOME/.cache/skill-select"
 
 # Plugins for 'skill' and 'permission'
 # (overlay repos provide these under config/<tool>/plugins).
