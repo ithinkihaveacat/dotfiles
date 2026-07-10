@@ -1,5 +1,35 @@
 # TODO
 
+## Migrate remote (repo) cached skills from ~/.cache/skill-select to ~/.cache/skill (2026-07-10)
+
+**Problem:** Remote (repo) cached skills are currently downloaded and stored in
+`~/.cache/skill-select/` and `~/.cache/skill-select/catalog/`
+(`skills/workspace-config/scripts/skill:490`). By contrast, other skill
+utilities and metadata reside under `~/.cache/skill/`. Having remote cache
+storage split across `~/.cache/skill-select` and `~/.cache/skill` creates
+inconsistent paths for developers and automation scripts.
+
+**Goal:** Remote GitHub skill caches and catalog indexes live under
+`~/.cache/skill/` (e.g., `~/.cache/skill/remotes/` or `~/.cache/skill/catalog/`)
+rather than `~/.cache/skill-select/`, establishing a single consistent cache
+root for all `skill` operations.
+
+**Criteria:** Zero occurrences of `skill-select` across
+`skills/workspace-config/` scripts and tests, and running
+`skill update --catalog` populates `~/.cache/skill/` without creating a
+`~/.cache/skill-select/` directory.
+
+**Sketch:** Update `get_cache_base()` and `get_catalog_dir()` in
+`skills/workspace-config/scripts/skill`
+(`skills/workspace-config/scripts/skill:490`) to target `~/.cache/skill/`.
+Update corresponding test assertions in `test-skill` and `test-envrc` that
+assert `~/.cache/skill-select`. A one-time migration or cleanup for existing
+`~/.cache/skill-select/` directories may be helpful to avoid leaving orphaned
+caches on developer workstations.
+
+**Constraints:** No behavior changes to skill resolution or caching logic; path
+relocation only.
+
 ## Fix stale `# Tests:` pointers in scripts and tests (2026-07-09)
 
 **Problem:** `# Tests:` comments predate the flat, co-located test layout now
