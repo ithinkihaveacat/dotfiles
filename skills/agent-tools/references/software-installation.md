@@ -5,6 +5,9 @@ entries in the dotfiles `install.sh` script. These tools are installed manually
 and self-update via their own update commands; the `install.sh` script calls
 those commands automatically when the tool is present in PATH.
 
+For using the agent CLIs below (`agy`, `claude`, `codex`) as reviewers of plans,
+branches, PRs, or documents, see [agent-review.md](agent-review.md).
+
 ## Antigravity (agy)
 
 Google's terminal coding agent.

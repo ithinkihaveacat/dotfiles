@@ -5,15 +5,19 @@ description: >
   up-to-date context for agents. Includes image description, screenshot
   comparison, smart cropping, token counting, technical essay generation,
   boolean condition evaluation, live context gathering, Android UI interaction
-  via popper, GitHub PR/Issue/Workflow Run formatting via gh-markdown, and deep reasoning
-  research via Oracle. Use this skill when the user needs to analyze images,
-  count tokens, evaluate conditions, gather the latest authoritative documentation,
-  format GitHub data, automate Android apps, generate technical essays, or
-  perform complex architectural reasoning requiring recursive directory traversal
-  and external search. Triggers: ai analysis, describe image, visual diff, token
-  count, generate essay, boolean evaluation, gather context, latest docs, research
-  topic, github, pull request, gh-markdown, automate app, oracle, deep research,
-  architecture.
+  via popper, GitHub PR/Issue/Workflow Run formatting via gh-markdown, deep
+  reasoning research via Oracle, and recipes for consulting other agents
+  (codex, claude, oracle) for a second-opinion review of plans, branches, PRs,
+  and documents. Use this skill when the user needs to analyze images, count
+  tokens, evaluate conditions, gather the latest authoritative documentation,
+  format GitHub data, automate Android apps, generate technical essays,
+  perform complex architectural reasoning requiring recursive directory
+  traversal and external search, or get an independent agent review of work
+  before or after it lands. Triggers: ai analysis, describe image, visual
+  diff, token count, generate essay, boolean evaluation, gather context,
+  latest docs, research topic, github, pull request, gh-markdown, automate
+  app, oracle, deep research, architecture, code review, second opinion,
+  double check, review branch, review PR, codex.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs a Gemini API key (`GEMINI_API_KEY`) and network access to
@@ -551,6 +555,27 @@ scripts/popper --launch com.example.fitness --stay-in-app "start a running exerc
 env ANDROID_SERIAL=12345 scripts/popper "open settings"
 ```
 
+## Second Opinions: Consulting Other Agents
+
+For a review of work you have produced or are about to produce — a plan, a
+branch, a PR, a document — consult another agent, ideally from a different model
+family than the one that did the work. Pick the mechanism by task and input
+type:
+
+| Task               | Input                      | Tool                                                     |
+| ------------------ | -------------------------- | -------------------------------------------------------- |
+| Code review        | local branch/diff          | `codex exec` (or `claude -p`) run in the repo            |
+| Code review        | GitHub PR URL              | `scripts/gh-markdown URL` piped to `claude -p`           |
+| Plan/design review | files/dirs + session brief | `scripts/oracle`                                         |
+| Prose review       | document on stdin          | `scripts/emerson`; `scripts/oracle` if it needs research |
+
+Full recipes — prompt templates, per-tool flags, and how to handle findings
+(verify each one against the code before acting; reviewers are confidently wrong
+at predictable rates) — are in
+[references/agent-review.md](references/agent-review.md). `codex`, `claude`, and
+`agy` are external CLIs; install steps are in
+[references/software-installation.md](references/software-installation.md).
+
 ## Image Encoding Notes
 
 - Screenshot tools encode to lossless WebP; `photo-query` uses lossy WebP and
@@ -575,6 +600,9 @@ env ANDROID_SERIAL=12345 scripts/popper "open settings"
 
 - **Command Reference**: Detailed documentation for each script. See
   [references/command-index.md](references/command-index.md).
+- **Agent Review**: Recipes for getting a second opinion from another agent
+  (codex, claude, oracle, emerson) on plans, branches, PRs, and documents. See
+  [references/agent-review.md](references/agent-review.md).
 - **Troubleshooting**: Common issues and solutions. See
   [references/troubleshooting.md](references/troubleshooting.md).
 - **Agent Function Notation (AFN)**: A notation for describing agent behaviour
