@@ -1,5 +1,72 @@
 # TODO
 
+## Make the agent-review documentation world class (2026-07-13)
+
+**Problem:** `skills/agent-tools/references/agent-review.md` (plus the "Second
+Opinions" section in `SKILL.md`) was written in one pass immediately after the
+first two successful uses of the workflow — an Oracle plan review and a codex
+code review during the ptracker backfill work. It documents what worked that
+day, verified only against that day's `--help` output. Three structural
+weaknesses are already visible, and the external CLIs it documents (`codex`,
+`claude`, `agy`) ship frequently, so the flag-level details will drift.
+
+**Goal:** The review-related documentation is trustworthy (documented
+invocations verifiably work), coherent (one conceptual frame instead of a
+tool-by-tool list), and complete (no TODO stubs), so that any agent picking a
+reviewer gets the right mechanism and an optimal invocation on the first try.
+
+**Criteria:** Every command line in the docs either runs successfully as written
+or is covered by a drift-detection test under `skills/agent-tools/tests/`; the
+`agy` recipe is written (or the heading is removed with a rationale); the docs
+distinguish the code-review path from the general-review path as first-class
+sections; an agent reading only the docs can produce a correct review invocation
+for each row of the decision table without consulting `--help`.
+
+**Sketch:** Known work items, roughly ordered:
+
+- **Validate switches and arguments.** The recipes were checked against
+  `codex-cli 0.144.1` and one `claude --help` grep. Confirm each documented flag
+  exists and is the *optimal* choice — e.g. whether `codex exec review` should
+  pin a model or reasoning effort, whether `claude -p` needs
+  permission-mode/read-only or model flags for review use, whether
+  `--output-format` improves findings capture. Since these CLIs change quickly,
+  prefer a small drift test (run `<tool> --help`, grep for the documented flags,
+  fail on mismatch) in `skills/agent-tools/tests/` over periodic manual
+  re-audits; `references/command-index.md` already has a `command-index-sync`
+  marker convention that may be reusable here.
+- **Normalize invocation shapes.** The three working recipes are invoked three
+  different ways (codex: heredoc into `codex exec -`; claude: prompt argument or
+  stdin pipe; oracle: prompt + positional files). Decide whether to paper over
+  this with a thin `scripts/review` wrapper (one interface:
+  `review --with codex|claude|oracle [--base main | --pr URL | FILES...]`,
+  emitting the house findings format) or to keep raw invocations but normalize
+  the prompt template and findings taxonomy (critical/major/minor/nit) into one
+  canonical block that every recipe references instead of restating.
+- **Reframe around two review kinds, not five tools.** The Oracle is not a
+  code-review tool that happens to take files — it is a general
+  deep-consultation mechanism (used for plan review, architecture decisions,
+  research synthesis). Restructure into (a) **code review** — specific,
+  diff-anchored, where purpose-built tools exist (codex, `claude -p`, and
+  harness-native mechanisms like `/code-review` where available), and (b)
+  **general review** — plans, designs, documents, decisions — where the Oracle's
+  session-brief pattern is the ideal fit and emerson is the closed-book variant.
+  The decision table then keys on review kind first, tool second.
+- **Write the `agy` recipe** (currently a TODO stub), or drop the heading if
+  Antigravity has no sensible non-interactive review mode.
+- **Candidates worth evaluating while in there:** cost/latency guidance per
+  mechanism (oracle consultations are heavyweight; codex/claude one-shots are
+  not); when to run two reviewers vs. one (cross-vendor diversity argument is
+  stated but not operationalized); whether the "Handling the Findings"
+  disposition record should get a canonical format the commit/PR templates in
+  `technical-writing` can reference; whether `gh-markdown`-piped PR review
+  deserves a worked example with real output shape; and whether SKILL.md's copy
+  of the decision table should be generated from `agent-review.md` to avoid the
+  two drifting apart.
+
+**Constraints:** Keep `agent-review.md` as the single detailed source with
+`SKILL.md` carrying only a pointer-plus-table summary; no new heavyweight
+dependencies for the drift tests (shell + grep in the existing test layout).
+
 ## Migrate remote (repo) cached skills from ~/.cache/skill-select to ~/.cache/skill (2026-07-10)
 
 **Problem:** Remote (repo) cached skills are currently downloaded and stored in
