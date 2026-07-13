@@ -1,5 +1,51 @@
 # TODO
 
+## Support downloading canary/preview emulator images in emumanager (2026-07-13)
+
+**Goal:** `emumanager` should support downloading and installing system images
+from the preview/canary tracks (SDK manager channel 3). Currently, downloading a
+preview system image (e.g. Wear OS API 37) requires running
+`sdkmanager --channel=3` manually before creating or starting the emulator, as
+`emumanager`'s internal `download_image` logic does not expose or pass the
+`--channel` parameter to `sdkmanager`.
+
+**Criteria:** Running
+`emumanager download package "system-images;android-37.0;android-wear-signed;arm64-v8a"`
+successfully downloads and installs the preview image without manual
+pre-downloading.
+
+**Sketch:** Update `download_image()` and `create_avd()` in
+`skills/emumanager/scripts/emumanager` to accept a `--channel` option or
+automatically pass a default channel if the package target is identified as
+canary/preview.
+
+## Add debug/test-mode switch to emumanager start (2026-07-13)
+
+**Goal:** Add a `--test-mode` / `--debug` switch to `emumanager start avd` that
+automatically prepares the emulator for automated testing once booted,
+contingent on verifying that OOBE/tutorial overlays are actually present and
+blocking. If verified to be necessary, this switch will remove the need for
+developers/agents to manually run ADB commands to wake the device, dismiss the
+keyguard, and bypass Wear OS OOBE setup and tutorial overlays.
+
+**Criteria:** Starting a Wear OS emulator with
+`emumanager start avd <name> --test-mode` automatically places the device in an
+unlocked, tutorial-bypassed state ready for UI automation.
+
+**Sketch:** First, investigate and confirm whether standard Wear OS emulator
+images (such as API 37 signed/unsigned) actually display tutorial overlays or
+remain locked on clean boot. If they boot straight into the home state without
+overlays, this bypass logic may be unnecessary. If they do block, integrate the
+following commands into the boot completion monitoring loop of `start_avd()` in
+`skills/emumanager/scripts/emumanager`:
+
+```bash
+adb shell input keyevent KEYCODE_WAKEUP
+adb shell wm dismiss-keyguard
+adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE
+adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
+```
+
 ## Make the agent-review documentation world class (2026-07-13)
 
 **Problem:** `skills/agent-tools/references/agent-review.md` (plus the "Second
