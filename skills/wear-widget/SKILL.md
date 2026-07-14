@@ -177,6 +177,11 @@ surfaces, depending on the device's capabilities and OS version:
    metadata provides the preview for that translated Tile. See the official
    [Migrate from Tiles to Widgets](https://developer.android.com/training/wearables/widgets/migration)
    guide for service configuration details.
+1. **Standalone Renderer (Widget Tray Viewer)**: A developer-preview helper app
+   enabled on internal builds of the protolayout renderer package
+   (`com.google.android.wearable.protolayout.renderer`). It allows
+   developer-preview devices to test `SMALL` and `LARGE` widget layouts inside a
+   scrolling tray list.
 
 ______________________________________________________________________
 
@@ -267,7 +272,61 @@ to capture the UI.
 
 ______________________________________________________________________
 
-### 3. Key Gotchas & Best Practices
+### 3. Previewing in Standalone Renderer (Widget Tray)
+
+For Wear OS devices without native OS-level tile carousel support, you can
+preview and test your widgets in the developer-preview Standalone Renderer
+(Widget Tray Viewer) app.
+
+#### Determining Capability (Standalone vs Carousel-only):
+
+The standalone "Widget Tray Viewer" tool is only available on specific
+developer-preview/experimental builds of the Protolayout Renderer. To verify if
+your connected device supports it:
+
+1. **Verify Activity Presence (Definitive):**
+
+   ```bash
+   adb shell pm resolve-activity -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+   ```
+
+   If it returns `No activity found`, the standalone Widget Tray is not enabled
+   or available on this device.
+
+1. **Check the Version Name Suffix (Optional):**
+
+   ```bash
+   adb shell dumpsys package com.google.android.wearable.protolayout.renderer | grep -m 1 versionName
+   ```
+
+   - **Capable**: Version names ending in `.exp` (e.g., `1.6.4.2.944934794.exp`)
+     contain the Widget Tray.
+   - **Not Capable**: Version names ending in `.dogfood` (e.g.,
+     `1.6.3.14.918260856.dogfood`) or public release builds do not contain the
+     experimental activity.
+
+#### Manual Launch Command:
+
+```bash
+adb shell am start -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+```
+
+#### Automated Interaction (UI Automation):
+
+Instead of manually navigating the watch interface, you can leverage natural
+language UI automation tools to interact with the renderer's menus.
+
+For example, using the `popper` tool:
+
+```bash
+# Example: Launch, clear previous widgets, and add Hello Widget (LARGE)
+popper --launch com.google.android.wearable.protolayout.renderer \
+  "First clear all active widgets if there are any. Then click + Add, scroll the list of available widgets, find 'Hello Widget (LARGE)' and click it to add it."
+```
+
+______________________________________________________________________
+
+### 4. Key Gotchas & Best Practices
 
 - **The `nodpi` Requirement & Memory Limits**: Always place static raster
   previews (both widget picker and tile previews) in `nodpi` directories. Images
