@@ -929,7 +929,16 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
                         seen_paths.add(path_obj)
                         c["path"] = path_obj
                         unique_candidates.append(c)
-            except Exception:
+            except (Exception, SystemExit):
+                # fetch_github() reports fatal errors (network failure, repo
+                # not found) via die(), which raises SystemExit rather than a
+                # normal exception. Catching only Exception would let that
+                # propagate out of resolve_skill_spec() and kill the whole
+                # process (including 'skill doctor', which must keep
+                # rendering the rest of its checks). die() already printed
+                # the underlying error to stderr; treat this candidate as
+                # simply unavailable and let resolution fall through to the
+                # ordinary "cannot resolve skill" error below.
                 pass
         else:
             if c["path"] not in seen_paths:
@@ -1341,6 +1350,31 @@ def cmd_apply(args):
     print_workspace_root(ws)
     expected_skills = ws.get_expected_skills()
 
+    try:
+        dest_dirs = ws.get_dest_dirs()
+    except RuntimeError:
+        dest_dirs = None
+
+    # Prune dangling symlinks (their target no longer exists) unconditionally,
+    # even when AGENT_REQUIRED_SKILLS is empty: a broken link is never a
+    # legitimate desired state regardless of what (if anything) is declared,
+    # so this must not be gated behind having something to reconcile against.
+    # It also needs no freshness interlock like the extra-symlink prune below:
+    # resolve_skill_spec only ever returns paths that exist (see
+    # resolve_skill_spec's is_dir()/fetch_github checks), so a broken link can
+    # never coincide with a legitimately expected-but-not-yet-declared target.
+    if dest_dirs is not None:
+        _, _, dangling = ws.get_actual_skills()
+        for item in dangling:
+            if ws.is_tracked(item):
+                continue
+            try:
+                item_rel = item.relative_to(ws.root)
+            except ValueError:
+                item_rel = item
+            print(f"skill: pruning dangling symlink: '{item_rel}'", file=sys.stderr)
+            item.unlink(missing_ok=True)
+
     if not expected_skills:
         print(
             "skill: AGENT_REQUIRED_SKILLS is empty. No skills to apply.",
@@ -1362,21 +1396,20 @@ def cmd_apply(args):
     add_ok = cmd_add(expected_skills, is_apply=True)
 
     # 2. Prune any actual symlinks on disk that are NOT expected target paths
-    try:
-        dest_dirs = ws.get_dest_dirs()
-    except RuntimeError:
+    if dest_dirs is None:
         sys.exit(0 if add_ok else 1)
 
     actual_skills, _, _ = ws.get_actual_skills()
 
     # Resolve all expected skills to their physical target paths
     expected_targets = set()
+    unresolved_specs = []
     for spec in expected_skills:
         try:
             src_path, _ = resolve_skill_spec(spec)
             expected_targets.add(Path(os.path.abspath(src_path)))
         except Exception:
-            pass
+            unresolved_specs.append(spec)
 
     # Find any symlink whose target is not in the expected targets
     extra_skills = []
@@ -1400,27 +1433,47 @@ def cmd_apply(args):
         # tell the human how to refresh. (Adding symlinks above is harmless
         # and proceeds regardless.)
         freshness = check_env_freshness(ws)
-        if freshness is not None and (freshness[0] or freshness[1]):
-            fresh_missing, fresh_negated = freshness
-            reasons = []
-            if fresh_missing:
-                reasons.append(
-                    f".envrc declares {', '.join(repr(s) for s in fresh_missing)} "
-                    "not reflected in AGENT_REQUIRED_SKILLS"
+        stale = freshness is not None and (freshness[0] or freshness[1])
+
+        if stale or unresolved_specs:
+            if stale:
+                fresh_missing, fresh_negated = freshness
+                reasons = []
+                if fresh_missing:
+                    reasons.append(
+                        f".envrc declares {', '.join(repr(s) for s in fresh_missing)} "
+                        "not reflected in AGENT_REQUIRED_SKILLS"
+                    )
+                if fresh_negated:
+                    reasons.append(
+                        f".envrc negates {', '.join(repr(s) for s in fresh_negated)} "
+                        "still present in AGENT_REQUIRED_SKILLS"
+                    )
+                print(
+                    f"skill: environment looks stale for this workspace: {'; '.join(reasons)}",
+                    file=sys.stderr,
                 )
-            if fresh_negated:
-                reasons.append(
-                    f".envrc negates {', '.join(repr(s) for s in fresh_negated)} "
-                    "still present in AGENT_REQUIRED_SKILLS"
+            if unresolved_specs:
+                # A spec that fails to resolve is missing from expected_targets
+                # entirely, so any existing live link that happens to share its
+                # name would otherwise look indistinguishable from a genuinely
+                # extra symlink and get deleted. The desired set is incomplete,
+                # not wrong, so treat pruning as unsafe until it resolves.
+                print(
+                    "skill: cannot fully resolve the desired skill set: "
+                    f"{', '.join(repr(s) for s in unresolved_specs)} failed to "
+                    "resolve against the catalog",
+                    file=sys.stderr,
                 )
-            print(
-                f"skill: environment looks stale for this workspace: {'; '.join(reasons)}",
-                file=sys.stderr,
-            )
             print(
                 f"skill: not pruning {len(extra_skills)} extra symlink(s) while the "
-                "environment is stale; run 'direnv reload' (or start a new prompt), "
-                "then re-run 'skill apply'",
+                + (
+                    "environment is stale; run 'direnv reload' (or start a new "
+                    "prompt), then re-run 'skill apply'"
+                    if stale
+                    else "desired set is incomplete; fix the unresolvable "
+                    "declaration(s) above, then re-run 'skill apply'"
+                ),
                 file=sys.stderr,
             )
         else:
@@ -2034,6 +2087,8 @@ def cmd_doctor(
 
     # Check 3: Required Skills (Alignment)
     missing = []
+    unresolvable = []
+    unresolvable_errors = {}
     mismatched_target = []
     extra = []
     expected_targets = {}
@@ -2068,8 +2123,13 @@ def cmd_doctor(
                                 mismatched_target.append(label)
             else:
                 missing.append(spec)
-        except Exception:
-            missing.append(spec)
+        except Exception as e:
+            # Unlike a spec that resolves but isn't linked yet, 'skill apply'
+            # cannot fix this: it fails the identical resolve_skill_spec()
+            # call. Keep it out of 'missing' so the report doesn't send the
+            # user in a fixing loop that can never converge.
+            unresolvable.append(spec)
+            unresolvable_errors[spec] = str(e)
 
     _, negated_skills = get_parsed_skills()
     negated_extra = []
@@ -2098,6 +2158,14 @@ def cmd_doctor(
         skill_details.append("Missing skills (declared but not linked on disk):")
         for s in missing:
             skill_details.append(f"  - {s}")
+    if unresolvable:
+        # This bucket also catches ambiguous specs (multiple catalog matches,
+        # fixed by qualifying the namespace) and remote-fetch failures, not
+        # only "no match at all" -- unresolvable_errors carries the specific
+        # reason for each, so the header stays deliberately generic.
+        skill_details.append("Unresolvable skills (declared but cannot be resolved):")
+        for s in unresolvable:
+            skill_details.append(f"  - {s} ({unresolvable_errors[s]})")
     if mismatched_target:
         skill_details.append(
             "Mismatched symlink targets (linked on disk but pointing to unexpected source):"
@@ -2115,10 +2183,12 @@ def cmd_doctor(
         for s in extra:
             skill_details.append(f"  - {s}")
 
-    if missing or mismatched_target or extra or negated_extra:
+    if missing or unresolvable or mismatched_target or extra or negated_extra:
         parts = []
         if missing:
             parts.append(f"{len(missing)} missing")
+        if unresolvable:
+            parts.append(f"{len(unresolvable)} unresolvable")
         if mismatched_target:
             parts.append(f"{len(mismatched_target)} mismatched target")
         num_extra = len(extra) + len(negated_extra)
@@ -2221,14 +2291,30 @@ def cmd_doctor(
             )
 
     # Check 4: Symlink Health
-    if dangling:
+    # 'apply' intentionally never touches a VCS-tracked dangling symlink (it
+    # is checked-in content, not a stray install artifact), so recommending
+    # 'skill apply' for one would send the user in a loop that never
+    # converges -- split it out with its own remediation, same as the
+    # Required Skills check does for unresolvable specs above.
+    tracked_dangling = [item for item in dangling if ws.is_tracked(item)]
+    stray_dangling = [item for item in dangling if item not in tracked_dangling]
+    if stray_dangling or tracked_dangling:
+        dangling_details = []
+        if stray_dangling:
+            dangling_details.append("Dangling symlinks:")
+            dangling_details += [f"  - {rel(item)}" for item in stray_dangling]
+        if tracked_dangling:
+            dangling_details.append(
+                "VCS-tracked dangling symlinks (not touched by 'skill apply'; "
+                "fix or remove the checked-in symlink itself):"
+            )
+            dangling_details += [f"  - {rel(item)}" for item in tracked_dangling]
         checks.append(
             {
                 "name": "Symlink Health",
                 "status": "ERROR",
                 "summary": f"Found {len(dangling)} broken or dangling symlink(s)",
-                "details": ["Dangling symlinks:"]
-                + [f"  - {rel(item)}" for item in dangling],
+                "details": dangling_details,
             }
         )
     else:
@@ -2463,7 +2549,25 @@ def cmd_doctor(
                 "  direnv reload   # or start a new prompt, then re-run 'skill apply'"
             )
         elif name == "Required Skills":
-            check["details"].append(generic_sync)
+            if missing or mismatched_target or extra or negated_extra:
+                check["details"].append(generic_sync)
+            if unresolvable:
+                check["details"].append(
+                    "To resolve: 'skill apply' cannot fix this -- these "
+                    "spec(s) fail the same catalog lookup doctor just "
+                    "performed (see the reason next to each above: fix the "
+                    "catalog registration, qualify an ambiguous name with "
+                    "its namespace, or remove the unresolvable "
+                    "declaration(s)):"
+                )
+                if is_using_envrc(ws):
+                    check["details"].append(
+                        f"  envrc remove skills {' '.join(unresolvable)}"
+                    )
+                else:
+                    check["details"].append(
+                        "  # remove them from the AGENT_REQUIRED_SKILLS environment variable"
+                    )
             if extra:
                 if is_using_envrc(ws):
                     check["details"].append(
@@ -2483,7 +2587,18 @@ def cmd_doctor(
                 check["details"].append("Remove the excluded symlink(s) manually:")
                 check["details"].append(f"  skill remove {' '.join(negated_extra)}")
         elif name == "Symlink Health":
-            check["details"].append(generic_sync)
+            if stray_dangling:
+                check["details"].append(generic_sync)
+            if tracked_dangling:
+                check["details"].append(
+                    "To resolve: 'skill apply' will not remove a VCS-tracked "
+                    "symlink -- fix its target or delete it from the repository:"
+                )
+                check["details"].append(
+                    "  rm "
+                    + " ".join(str(rel(item)) for item in tracked_dangling)
+                    + "   # then 'git rm --cached' if already staged/committed"
+                )
         elif name == "Workspace Exclusions":
             check["details"].append(generic_sync)
         elif name == "Directory Cleanliness":

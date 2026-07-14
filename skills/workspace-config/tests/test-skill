@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..62"
+echo "1..69"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -1303,3 +1303,227 @@ else
   fi
 fi
 cd "$TMPDIR"
+
+# ==============================================================================
+# PART 13: Dangling Symlink Pruning & Unresolvable Spec Reporting
+# ==============================================================================
+
+# Test 63: 'apply' prunes dangling symlinks unconditionally. Regression:
+# doctor's Symlink Health finding tells the user to run 'skill apply' to fix
+# it, but the prune loop in apply only ever inspected live, resolvable
+# actual_skills -- dangling links were invisible to it and never got cleaned
+# up, so doctor kept failing after 'apply' claimed to fix it.
+DANGLING_APPLY_DIR="${TMPDIR}/dangling-apply"
+mkdir -p "$DANGLING_APPLY_DIR"
+cd "$DANGLING_APPLY_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/stale-target .claude/skills/stale-broken
+ln -s /nonexistent/stale-target .agents/skills/stale-broken
+export AGENT_REQUIRED_SKILLS="coding-standards"
+apply_out=$("${SCRIPT}" apply 2>&1)
+if [ ! -L .claude/skills/stale-broken ] && [ ! -L .agents/skills/stale-broken ] &&
+  printf '%s\n' "$apply_out" | grep -q "pruning dangling symlink" &&
+  "${SCRIPT}" doctor >/dev/null 2>&1; then
+  echo "ok 63 - [Symlink Health] apply prunes dangling symlinks unconditionally"
+else
+  echo "not ok 63 - [Symlink Health] apply did not prune dangling symlink: $apply_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 64: 'apply' leaves a VCS-tracked dangling symlink alone -- it is
+# checked-in content, not a stray artifact from a stale skill install, so it
+# must not be swept up by the unconditional prune added for Test 63.
+TRACKED_DANGLING_DIR="${TMPDIR}/tracked-dangling"
+mkdir -p "$TRACKED_DANGLING_DIR"
+cd "$TRACKED_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/committed-target .claude/skills/committed-broken
+git add .claude/skills/committed-broken
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+if [ -L .claude/skills/committed-broken ]; then
+  echo "ok 64 - [Symlink Health] apply does not prune a VCS-tracked dangling symlink"
+else
+  echo "not ok 64 - [Symlink Health] apply pruned a tracked dangling symlink"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 65: doctor distinguishes an unresolvable declared spec (no matching
+# catalog entry) from a resolvable-but-not-yet-linked one, and 'apply' only
+# fixes the latter. Regression: previously any resolve_skill_spec() failure
+# was folded into 'missing', and doctor told the user to run 'skill apply' --
+# but apply hits the identical resolution failure and can never converge, so
+# the two symptoms need separate remediation.
+UNRESOLVABLE_DIR="${TMPDIR}/unresolvable-test"
+mkdir -p "$UNRESOLVABLE_DIR"
+cd "$UNRESOLVABLE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards totally-bogus-unresolvable-skill"
+doctor_rc=0
+doctor_out=$("${SCRIPT}" doctor 2>&1) || doctor_rc=$?
+apply_out=$("${SCRIPT}" apply 2>&1) || true
+doctor2_rc=0
+doctor2_out=$("${SCRIPT}" doctor 2>&1) || doctor2_rc=$?
+# Before 'apply' runs, coding-standards is legitimately missing (not yet
+# linked, reported once per destination dir) alongside the unresolvable
+# bogus spec -- both are reported, each under its own bucket.
+if [ "$doctor_rc" -ne 0 ] &&
+  printf '%s\n' "$doctor_out" | grep -q "2 missing, 1 unresolvable" &&
+  printf '%s\n' "$doctor_out" | grep -q "Missing skills (declared but not linked on disk):" &&
+  printf '%s\n' "$doctor_out" | grep -q "  - coding-standards" &&
+  printf '%s\n' "$doctor_out" | grep -q "Unresolvable skills (declared but cannot be resolved):" &&
+  printf '%s\n' "$doctor_out" | grep -q "  - totally-bogus-unresolvable-skill" &&
+  printf '%s\n' "$doctor_out" | grep -q "'skill apply' cannot fix this" &&
+  printf '%s\n' "$apply_out" | grep -q "failed to resolve 'totally-bogus-unresolvable-skill'" &&
+  [ -L .claude/skills/coding-standards ] &&
+  [ "$doctor2_rc" -ne 0 ] &&
+  printf '%s\n' "$doctor2_out" | grep -q "Unresolvable skills" &&
+  ! printf '%s\n' "$doctor2_out" | grep -q "Missing skills (declared but not linked on disk):" &&
+  ! printf '%s\n' "$doctor2_out" | grep -q "run 'git-setup' or 'skill apply' to synchronize"; then
+  echo "ok 65 - [Doctor] unresolvable declared spec reported separately from missing, with different remediation"
+else
+  echo "not ok 65 - [Doctor] unresolvable spec not distinguished correctly: $doctor_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# ==============================================================================
+# PART 14: Codex Review Follow-ups
+# ==============================================================================
+
+# Test 66: 'apply' prunes dangling symlinks even when AGENT_REQUIRED_SKILLS is
+# empty -- a broken link is never a legitimate desired state regardless of
+# what (if anything) is declared, so pruning it must not be gated behind
+# having something to reconcile against.
+EMPTY_DANGLING_DIR="${TMPDIR}/empty-dangling"
+mkdir -p "$EMPTY_DANGLING_DIR"
+cd "$EMPTY_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/stale-empty .claude/skills/stale-empty
+ln -s /nonexistent/stale-empty .agents/skills/stale-empty
+export AGENT_REQUIRED_SKILLS=""
+apply_out=$("${SCRIPT}" apply 2>&1)
+if [ ! -L .claude/skills/stale-empty ] && [ ! -L .agents/skills/stale-empty ] &&
+  printf '%s\n' "$apply_out" | grep -q "pruning dangling symlink" &&
+  printf '%s\n' "$apply_out" | grep -q "AGENT_REQUIRED_SKILLS is empty"; then
+  echo "ok 66 - [Symlink Health] apply prunes dangling symlinks even with an empty desired set"
+else
+  echo "not ok 66 - [Symlink Health] apply skipped dangling prune with empty desired set: $apply_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 67: an unresolvable declared spec must not cause 'apply' to delete an
+# existing *live* symlink that happens to share its name. Before this fix, a
+# spec that failed to resolve was silently dropped from expected_targets, so
+# any live link for it looked indistinguishable from a genuinely extra
+# symlink and got pruned -- deleting content the user still wants, on the
+# same run that told them their declaration was broken.
+UNRESOLVABLE_LIVE_DIR="${TMPDIR}/unresolvable-live"
+mkdir -p "${UNRESOLVABLE_LIVE_DIR}/real-target"
+echo -e "---\nname: real-target\n---" >"${UNRESOLVABLE_LIVE_DIR}/real-target/SKILL.md"
+cd "$UNRESOLVABLE_LIVE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${UNRESOLVABLE_LIVE_DIR}/real-target" .claude/skills/bogus-live
+ln -s "${UNRESOLVABLE_LIVE_DIR}/real-target" .agents/skills/bogus-live
+export AGENT_REQUIRED_SKILLS="bogus-live"
+apply_rc=0
+apply_out=$("${SCRIPT}" apply 2>&1) || apply_rc=$?
+if [ "$apply_rc" -ne 0 ] &&
+  [ -L .claude/skills/bogus-live ] && [ -L .agents/skills/bogus-live ] &&
+  printf '%s\n' "$apply_out" | grep -q "cannot fully resolve the desired skill set" &&
+  printf '%s\n' "$apply_out" | grep -q "not pruning" &&
+  ! printf '%s\n' "$apply_out" | grep -q "pruning extra symlink not in AGENT_REQUIRED_SKILLS"; then
+  echo "ok 67 - [Safety] apply does not delete a live symlink for an unresolvable spec"
+else
+  echo "not ok 67 - [Safety] apply pruned or mishandled a live symlink for an unresolvable spec (rc=$apply_rc): $apply_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 68: doctor distinguishes a VCS-tracked dangling symlink (which
+# 'apply' intentionally never touches) from a stray one, with separate
+# remediation for each -- otherwise doctor keeps recommending 'skill apply'
+# for something apply can never fix, the same non-convergence bug as the
+# unresolvable-spec case in Test 65.
+MIXED_DANGLING_DIR="${TMPDIR}/mixed-dangling"
+mkdir -p "$MIXED_DANGLING_DIR"
+cd "$MIXED_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/stray-target .claude/skills/stray-broken
+ln -s /nonexistent/tracked-target .claude/skills/tracked-broken
+git add .claude/skills/tracked-broken
+doctor_rc=0
+doctor_out=$("${SCRIPT}" doctor 2>&1) || doctor_rc=$?
+if [ "$doctor_rc" -ne 0 ] &&
+  printf '%s\n' "$doctor_out" | grep -q "Found 2 broken or dangling symlink(s)" &&
+  printf '%s\n' "$doctor_out" | grep -q "Dangling symlinks:" &&
+  printf '%s\n' "$doctor_out" | grep -q "  - .claude/skills/stray-broken" &&
+  printf '%s\n' "$doctor_out" | grep -q "VCS-tracked dangling symlinks (not touched by 'skill apply'" &&
+  printf '%s\n' "$doctor_out" | grep -q "  - .claude/skills/tracked-broken"; then
+  # Confirm apply removes only the stray one, and the tracked-only remainder
+  # no longer suggests the generic 'skill apply' fix that can't touch it.
+  export AGENT_REQUIRED_SKILLS="coding-standards"
+  "${SCRIPT}" apply >/dev/null 2>&1
+  doctor2_rc=0
+  doctor2_out=$("${SCRIPT}" doctor 2>&1) || doctor2_rc=$?
+  if [ ! -L .claude/skills/stray-broken ] && [ -L .claude/skills/tracked-broken ] &&
+    [ "$doctor2_rc" -ne 0 ] &&
+    printf '%s\n' "$doctor2_out" | grep -q "VCS-tracked dangling symlinks" &&
+    ! printf '%s\n' "$doctor2_out" | grep -q "Dangling symlinks:" &&
+    printf '%s\n' "$doctor2_out" | grep -q "will not remove a VCS-tracked symlink"; then
+    echo "ok 68 - [Symlink Health] doctor separates tracked from stray dangling symlinks"
+  else
+    echo "not ok 68 - [Symlink Health] tracked/stray split wrong after apply: $doctor2_out"
+  fi
+else
+  echo "not ok 68 - [Symlink Health] doctor did not separate tracked from stray dangling symlinks: $doctor_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 69: resolve_skill_spec() converts a fetch_github() failure (which
+# reports fatal errors via die(), raising SystemExit rather than a normal
+# exception) into an ordinary ValueError, so a remote skill that fails to
+# download does not crash the whole 'skill doctor'/'skill apply' process
+# before it can render or act on the rest of its checks. Exercised at the
+# Python level (like the get_parsed_skills() parser tests above) since a
+# real failure requires either live network access or mocking fetch_github,
+# neither of which the rest of this suite depends on.
+if out=$(python3 -c "
+import importlib.machinery, importlib.util
+
+loader = importlib.machinery.SourceFileLoader('m', '${TEST_DIR}/../scripts/skill')
+spec = importlib.util.spec_from_loader('m', loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+
+
+def fake_fetch_github(*args, **kwargs):
+    m.die('simulated network failure')
+
+
+m.fetch_github = fake_fetch_github
+api = m.get_api()
+api.plugin_catalog['remote:bogus-remote'] = {'repo': 'nobody/nowhere', 'ref': 'main'}
+
+try:
+    m.resolve_skill_spec('bogus-remote')
+    print('FAIL: no exception raised')
+except ValueError as e:
+    print('OK: ' + str(e))
+except SystemExit:
+    print('FAIL: SystemExit propagated out of resolve_skill_spec')
+" 2>/dev/null) && printf '%s\n' "$out" | grep -q "^OK: cannot resolve skill 'bogus-remote'"; then
+  echo "ok 69 - [Robustness] resolve_skill_spec converts a fetch_github() SystemExit into ValueError"
+else
+  echo "not ok 69 - [Robustness] resolve_skill_spec let SystemExit escape or behaved unexpectedly: $out"
+fi
