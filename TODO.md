@@ -1,5 +1,66 @@
 # TODO
 
+## Unify skill doctor/apply behind a shared reconciliation planner (2026-07-14)
+
+**Problem:** `skills/workspace-config/scripts/skill`'s `cmd_doctor` and
+`cmd_apply` each independently reconstruct skill identity, catalog resolution,
+target matching, dangling-symlink state, extra-symlink state, VCS-tracking
+ownership, and remediation text. A single work session (2026-07-14) fixing a
+doctor/apply non-convergence bug (doctor told the user "run `skill apply`" to
+fix a dangling symlink; apply's separate prune logic never looked at dangling
+links at all) turned up five more instances of the same shape once reviewed by
+an independent agent: apply skipping dangling pruning when
+`AGENT_REQUIRED_SKILLS` is empty, an unresolvable declared spec silently
+dropping out of `expected_targets` so apply deleted an existing live symlink for
+it, doctor recommending `skill apply` for a VCS-tracked dangling link that apply
+intentionally never touches, a `fetch_github()` failure (`die()`/`SystemExit`)
+escaping the `except Exception` in `resolve_skill_spec()` and crashing `doctor`
+outright, and imprecise "unresolvable" wording that didn't fit ambiguity errors.
+All six were patched individually in that session (see commit history around
+2026-07-14), but per an independent architectural review of the fix: this bug
+shape is a predictable consequence of maintaining two definitions of
+convergence, not bad luck, and will keep recurring until the state comparison is
+shared.
+
+**Goal:** `doctor` and `apply` compute "what should be true" from one shared
+function instead of two parallel implementations, so this class of bug (doctor
+detects a condition apply's separate logic doesn't handle, or vice versa) is
+eliminated by construction rather than caught one instance at a time by review.
+
+**Criteria:** For every non-OK doctor finding that is apply-fixable, executing
+`skill apply` and then re-running `skill doctor` clears that finding — checkable
+as a property across the existing scenario matrix (empty desired set, unresolved
+specs, tracked dangling links, stale `.envrc`, namespace collisions, multiple
+destinations) rather than one-off regression tests per bug. The existing
+`tests/test-skill` suite (69 cases as of 2026-07-14) continues to pass.
+
+**Sketch:** Per the review: introduce a `ResolvedSkill` type (declared spec,
+canonical catalog key, source path, link name, optional typed resolution error)
+and a `DiskEntry` type (destination, path, kind — live/dangling/real —, target,
+tracked). Add one `build_reconcile_plan(workspace)` returning a `ReconcilePlan`
+of findings, proposed actions (create, replace, unlink, rewrite exclusions), and
+destructive-action blockers. `doctor` renders the plan read-only; `apply`
+executes permitted actions from the same plan, then recomputes it and fails if
+non-advisory findings remain. Encode the freshness interlock and "any unresolved
+desired spec blocks destructive actions" (the safety fix for the
+live-symlink-deletion bug above) as plan policies rather than special-cased
+branches inside the extra-link prune loop. Separately, catalog lookup
+(`resolve_skill_spec` / `fetch_github`) should stop downloading, mutating
+caches, printing, and calling `sys.exit()` inline — resolve to a deterministic
+source/cache location and return a typed status, so `doctor`'s "read-only"
+contract is actually true. Also worth folding in: choose an explicit canonical
+`link_name` at resolution time instead of linking by `src.name` (physical
+basename), which today creates three overlapping identities (declared spec,
+catalog name, physical basename) that force target-based matching everywhere.
+
+**Constraints:** Not a rewrite — per the review, most of the script's ~2,700
+lines reflect real requirements (namespacing, freshness interlock,
+multi-destination support) and should stay as-is. Scope this to extracting the
+shared planner and the resolution/execution split. Keep the Bash end-to-end
+suite for integration coverage, but consider moving the planner itself into an
+importable, directly unit-testable shape rather than only exercising it through
+1,400+ lines of subprocess-driven Bash.
+
 ## Run permissions and git setup tests offline with pre-warmed cache (2026-07-14)
 
 **Problem:** Like `test-skill` before its refactor, `test-permission` and
