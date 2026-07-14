@@ -2,13 +2,24 @@
 
 ## Run permissions and git setup tests offline with pre-warmed cache (2026-07-14)
 
-**Problem:** Like `test-skill` before its refactor, `test-permission` and `test-git-setup` isolate their test environments by overriding `HOME` to a mock directory. This isolates the test from the host user's environment, but also hides the `~/.netrc` credentials needed by `uv` to authenticate with the corporate Airlock registry. This causes 401 Unauthorized errors in corporate environments when executing `skill` (which requires `google-genai`).
+**Problem:** Like `test-skill` before its refactor, `test-permission` and
+`test-git-setup` isolate their test environments by overriding `HOME` to a mock
+directory. This isolates the test from the host user's environment, but also
+hides the `~/.netrc` credentials needed by `uv` to authenticate with the
+corporate Airlock registry. This causes 401 Unauthorized errors in corporate
+environments when executing `skill` (which requires `google-genai`).
 
-**Goal:** Ensure all tests that invoke `skill` or `permission` scripts (which use `uv` and may require packages) run reliably offline without authentication or network requirements, maintaining strict test hermeticity.
+**Goal:** Ensure all tests that invoke `skill` or `permission` scripts (which
+use `uv` and may require packages) run reliably offline without authentication
+or network requirements, maintaining strict test hermeticity.
 
-**Criteria:** `test-permission` and `test-git-setup` pass successfully in an offline sandbox (e.g. using standard sandbox mode or with `UV_OFFLINE=1`).
+**Criteria:** `test-permission` and `test-git-setup` pass successfully in an
+offline sandbox (e.g. using standard sandbox mode or with `UV_OFFLINE=1`).
 
-**Sketch:** Apply the same "Pre-Warmed Cache" pattern implemented in `test-skill`: warm the `uv` cache using the host's credentials and network (if `UV_CACHE_DIR` is not already set) before overriding `HOME`, and then run the tests with `UV_OFFLINE=1` enabled.
+**Sketch:** Apply the same "Pre-Warmed Cache" pattern implemented in
+`test-skill`: warm the `uv` cache using the host's credentials and network (if
+`UV_CACHE_DIR` is not already set) before overriding `HOME`, and then run the
+tests with `UV_OFFLINE=1` enabled.
 
 ## Support downloading canary/preview emulator images in emumanager (2026-07-13)
 
