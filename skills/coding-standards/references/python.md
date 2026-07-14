@@ -348,9 +348,9 @@ The pattern consists of:
 1. **A `--plugin-template` Switch**: The tool must support a `--plugin-template`
    CLI switch that prints a clean, documented template of a plugin to stdout.
 1. **Traceback Debugging**: The tool must support a `<TOOL_NAME>_DEBUG`
-   environment variable (e.g., `SKILL_SELECT_DEBUG=1`). When set, any exceptions
-   during plugin loading (like syntax errors) must print a full Python traceback
-   to `stderr` instead of a silent warning.
+   environment variable (e.g., `SKILL_DEBUG=1`). When set, any exceptions during
+   plugin loading (like syntax errors) must print a full Python traceback to
+   `stderr` instead of a silent warning.
 1. **Fast, Side-Effect-Free Registration**: `register(api)` runs on every tool
    invocation, so it must be fast and side-effect-free: no network calls,
    subprocesses, or filesystem writes. The `--plugin-template` output must state
@@ -372,7 +372,7 @@ def load_plugins(api_instance, plugins_dir: Path, prefix: str):
     """Loads plugins from plugins_dir and registers them with api_instance.
     
     prefix is used for naming the imported modules and for the debug env var
-    (e.g., prefix='skill_select' checks SKILL_SELECT_DEBUG).
+    (e.g., prefix='skill' checks SKILL_DEBUG).
     """
     if not plugins_dir.is_dir():
         return

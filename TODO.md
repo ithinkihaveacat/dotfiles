@@ -1,5 +1,15 @@
 # TODO
 
+## Run permissions and git setup tests offline with pre-warmed cache (2026-07-14)
+
+**Problem:** Like `test-skill` before its refactor, `test-permission` and `test-git-setup` isolate their test environments by overriding `HOME` to a mock directory. This isolates the test from the host user's environment, but also hides the `~/.netrc` credentials needed by `uv` to authenticate with the corporate Airlock registry. This causes 401 Unauthorized errors in corporate environments when executing `skill` (which requires `google-genai`).
+
+**Goal:** Ensure all tests that invoke `skill` or `permission` scripts (which use `uv` and may require packages) run reliably offline without authentication or network requirements, maintaining strict test hermeticity.
+
+**Criteria:** `test-permission` and `test-git-setup` pass successfully in an offline sandbox (e.g. using standard sandbox mode or with `UV_OFFLINE=1`).
+
+**Sketch:** Apply the same "Pre-Warmed Cache" pattern implemented in `test-skill`: warm the `uv` cache using the host's credentials and network (if `UV_CACHE_DIR` is not already set) before overriding `HOME`, and then run the tests with `UV_OFFLINE=1` enabled.
+
 ## Support downloading canary/preview emulator images in emumanager (2026-07-13)
 
 **Goal:** `emumanager` should support downloading and installing system images
@@ -113,35 +123,17 @@ for each row of the decision table without consulting `--help`.
 `SKILL.md` carrying only a pointer-plus-table summary; no new heavyweight
 dependencies for the drift tests (shell + grep in the existing test layout).
 
-## Migrate remote (repo) cached skills from ~/.cache/skill-select to ~/.cache/skill (2026-07-10)
+## Migrate remote (repo) cached skills from ~/.cache/skill-select to ~/.cache/skill (2026-07-10) — done
 
-**Problem:** Remote (repo) cached skills are currently downloaded and stored in
-`~/.cache/skill-select/` and `~/.cache/skill-select/catalog/`
-(`skills/workspace-config/scripts/skill:490`). By contrast, other skill
-utilities and metadata reside under `~/.cache/skill/`. Having remote cache
-storage split across `~/.cache/skill-select` and `~/.cache/skill` creates
-inconsistent paths for developers and automation scripts.
-
-**Goal:** Remote GitHub skill caches and catalog indexes live under
-`~/.cache/skill/` (e.g., `~/.cache/skill/remotes/` or `~/.cache/skill/catalog/`)
-rather than `~/.cache/skill-select/`, establishing a single consistent cache
-root for all `skill` operations.
-
-**Criteria:** Zero occurrences of `skill-select` across
-`skills/workspace-config/` scripts and tests, and running
-`skill update --catalog` populates `~/.cache/skill/` without creating a
-`~/.cache/skill-select/` directory.
-
-**Sketch:** Update `get_cache_base()` and `get_catalog_dir()` in
-`skills/workspace-config/scripts/skill`
-(`skills/workspace-config/scripts/skill:490`) to target `~/.cache/skill/`.
-Update corresponding test assertions in `test-skill` and `test-envrc` that
-assert `~/.cache/skill-select`. A one-time migration or cleanup for existing
-`~/.cache/skill-select/` directories may be helpful to avoid leaving orphaned
-caches on developer workstations.
-
-**Constraints:** No behavior changes to skill resolution or caching logic; path
-relocation only.
+Updated `get_cache_base()` and `get_catalog_dir()` in
+`skills/workspace-config/scripts/skill` to store remote GitHub skill caches
+under `~/.cache/skill/remotes` and catalog indexes under
+`~/.cache/skill/catalog`, using the `SKILL_CACHE_DIR` environment variable.
+Updated corresponding test assertions in
+`skills/workspace-config/tests/test-skill`, added cleanup for legacy
+`~/.cache/skill-select` directories in `install.sh`, and updated
+`SKILL_SELECT_DEBUG` references in
+`skills/coding-standards/references/python.md`.
 
 ## Fix stale `# Tests:` pointers in scripts and tests (2026-07-09)
 
