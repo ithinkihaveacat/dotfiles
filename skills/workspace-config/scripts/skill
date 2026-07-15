@@ -1123,13 +1123,34 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
         if r.resolved:
             expected_targets[r.source_path] = r.spec
     # Link basenames a resolved spec will (re)create via cmd_add. A wrong-target
-    # link whose basename is one of these is a mismatch that the add step
-    # corrects in place, not an extra link to prune -- excluding it here is what
-    # lets doctor report it under "mismatched" while apply re-links it, instead
-    # of the two disagreeing about whether to delete it. Only *resolved* specs
-    # count: a link named after an unresolvable spec is still genuinely extra
-    # (nothing will recreate it), which is the Test 67 safety case.
-    resolved_link_names = {r.link_name.lower() for r in resolved if r.resolved}
+    # link that cmd_add overwrites in place is a mismatch it re-links, not an
+    # extra to prune -- excluding it here is what lets doctor report it under
+    # "mismatched" while apply re-links it, instead of the two disagreeing about
+    # whether to delete it. Only *resolved* specs count: a link named after an
+    # unresolvable spec is still genuinely extra (nothing will recreate it),
+    # which is the Test 67 safety case.
+    resolved_links = [r.link_name for r in resolved if r.resolved]
+
+    def overwritten_by_add(link_path: Path, dest: Path) -> bool:
+        """True when cmd_add's canonical write (dest/<resolved link_name>) hits
+        the same on-disk entry as link_path. Compared structurally so the
+        filesystem's own case rules decide: a lowercased-name comparison would
+        treat a case-variant link ('Good' vs canonical 'good') as the same entry
+        on a case-sensitive filesystem, leaving the undeclared link in place
+        while the recomputed plan wrongly reports convergence. lstat (not stat)
+        avoids following the symlink, so two distinct links to one target are
+        not conflated."""
+        for ln in resolved_links:
+            canonical = dest / ln
+            try:
+                if os.path.samestat(link_path.lstat(), canonical.lstat()):
+                    return True
+            except OSError:
+                # canonical does not exist yet (cmd_add has not run): only an
+                # exact-name write would land on this entry.
+                if link_path.name == ln:
+                    return True
+        return False
 
     actual_skills, unmanaged, dangling_paths = ws.get_actual_skills()
 
@@ -1146,9 +1167,14 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
                 target_abs = Path(os.path.abspath(p.parent / target))
             except OSError:
                 target_abs = None
-            disk_entries.append(
-                DiskEntry(d, name, p, "live", target_abs, ws.is_tracked(p))
-            )
+            # 'tracked' is only consulted for dangling entries (to keep
+            # checked-in broken links out of the prune set). A live link's
+            # tracked state is never read, so skip the per-link 'git ls-files'
+            # subprocess that ws.is_tracked() would spawn -- otherwise a
+            # workspace with N links across M destinations pays N*M git
+            # processes on every plan build (twice per apply, once per
+            # preflight), all of it discarded.
+            disk_entries.append(DiskEntry(d, name, p, "live", target_abs, False))
     for item in dangling_paths:
         disk_entries.append(
             DiskEntry(
@@ -1173,7 +1199,7 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
         if s.lower() in negated_lower:
             if s not in negated_extra:
                 negated_extra.append(s)
-        elif s.lower() not in resolved_link_names:
+        elif not overwritten_by_add(e.path, e.dest):
             if s not in extra:
                 extra.append(s)
 
@@ -1676,8 +1702,15 @@ def cmd_apply(args):
     extra_skills = plan.prune_names
     unresolved_specs = [r.spec for r in plan.unresolved]
 
+    # cmd_add() re-resolves every spec, so add_ok is a fresher signal than the
+    # plan built before it: if a source vanished or a resolver changed between
+    # plan-build and the add, add_ok is False even though the plan's
+    # destructive_blocked (computed from the earlier resolution) is not. The
+    # "any unresolved desired spec blocks destructive actions" policy must honor
+    # that fresher signal -- otherwise pruning would delete links using a stale
+    # desired set on the same run that add is about to fail on.
     if extra_skills:
-        if plan.destructive_blocked:
+        if plan.destructive_blocked or not add_ok:
             # Freshness interlock: when .envrc declares changes the environment
             # does not reflect yet, or a declared spec cannot be resolved, the
             # desired set we are about to enforce is untrustworthy. Do less, not
