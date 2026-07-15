@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..74"
+echo "1..78"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -1723,3 +1723,104 @@ if printf '%s\n' "$out" | grep -q '^OK$'; then
 else
   echo "not ok 74 - [Planner] case-variant classification wrong: $out"
 fi
+
+# ==============================================================================
+# PART 15: Target Name Mismatch, Clean Dangling, Exclude Healing, Offline Remove
+# ==============================================================================
+
+# Test 75: 'apply' prunes an extra symlink whose link name on disk ('wear-jetpack-compose-m3')
+# differs from its resolved physical target folder basename ('jetpack-compose-m3')
+MISMATCH_NAME_DIR="${TMPDIR}/mismatch-name-test"
+mkdir -p "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3"
+echo -e "---\nname: wear-jetpack-compose-m3\n---" >"${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3/SKILL.md"
+
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_androidcli.py"
+def register(api):
+    api.register_skill("android:wear-jetpack-compose-m3", {"path": "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3"})
+EOF
+"${SCRIPT}" update --catalog >/dev/null 2>&1 || true
+
+APPLY_MISMATCH_NAME_DIR="${TMPDIR}/apply-mismatch-name"
+mkdir -p "$APPLY_MISMATCH_NAME_DIR"
+cd "$APPLY_MISMATCH_NAME_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+
+# Seed an extra symlink named 'wear-jetpack-compose-m3' pointing to the target
+ln -s "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3" .claude/skills/wear-jetpack-compose-m3
+ln -s "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3" .agents/skills/wear-jetpack-compose-m3
+
+export AGENT_REQUIRED_SKILLS="coding-standards"
+if out=$("${SCRIPT}" apply 2>&1); then
+  if [ ! -L .claude/skills/wear-jetpack-compose-m3 ] && [ ! -L .agents/skills/wear-jetpack-compose-m3 ] &&
+    "${SCRIPT}" doctor >/dev/null 2>&1 && "${SCRIPT}" preflight claude >/dev/null 2>&1; then
+    echo "ok 75 - [Apply] prunes extra symlink whose on-disk name differs from target folder name"
+  else
+    echo "not ok 75 - [Apply] symlink wear-jetpack-compose-m3 still exists or doctor failed: $out"
+  fi
+else
+  echo "not ok 75 - [Apply] apply failed for extra symlink with distinct folder name: $out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_androidcli.py"
+cd "$TMPDIR"
+
+# Test 76: 'clean' removes broken dangling symlinks
+CLEAN_DANGLING_DIR="${TMPDIR}/clean-dangling"
+mkdir -p "$CLEAN_DANGLING_DIR"
+cd "$CLEAN_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/clean-broken .claude/skills/clean-broken
+ln -s /nonexistent/clean-broken .agents/skills/clean-broken
+if "${SCRIPT}" clean >/dev/null 2>&1; then
+  if [ ! -e .claude/skills/clean-broken ] && [ ! -e .agents/skills/clean-broken ]; then
+    echo "ok 76 - [Clean] clean removes broken dangling symlinks"
+  else
+    echo "not ok 76 - [Clean] dangling symlink left behind after clean"
+  fi
+else
+  echo "not ok 76 - [Clean] clean failed on dangling symlinks"
+fi
+cd "$TMPDIR"
+
+# Test 77: 'remove' heals exclude block drift even if symlink was deleted out-of-band
+HEAL_EXCLUDE_DIR="${TMPDIR}/heal-exclude"
+mkdir -p "$HEAL_EXCLUDE_DIR"
+cd "$HEAL_EXCLUDE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+mkdir -p .git/info
+cat >.git/info/exclude <<'EOF'
+# >>> skills >>>
+# managed by 'skill'
+/.claude/skills/orphaned-spec
+/.agents/skills/orphaned-spec
+# <<< skills <<<
+EOF
+if "${SCRIPT}" remove orphaned-spec >/dev/null 2>&1; then
+  if ! grep -q "orphaned-spec" .git/info/exclude; then
+    echo "ok 77 - [Remove] remove heals exclude block when symlink is deleted out-of-band"
+  else
+    echo "not ok 77 - [Remove] exclude block still contains orphaned entry"
+  fi
+else
+  echo "not ok 77 - [Remove] remove failed"
+fi
+cd "$TMPDIR"
+
+# Test 78: 'remove' handles unresolvable remote spec without throwing SystemExit or crashing
+OFFLINE_REMOVE_DIR="${TMPDIR}/offline-remove"
+mkdir -p "$OFFLINE_REMOVE_DIR"
+cd "$OFFLINE_REMOVE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${TMPDIR}/sources/coding-standards" .claude/skills/unresolvable-remote
+remove_rc=0
+remove_out=$("${SCRIPT}" remove remote:unresolvable/repo 2>&1) || remove_rc=$?
+if [ -L .claude/skills/unresolvable-remote ]; then
+  echo "ok 78 - [Remove] offline unresolvable spec remove handles gracefully without crash"
+else
+  echo "not ok 78 - [Remove] unresolvable remote spec remove failed unexpectedly"
+fi
+cd "$TMPDIR"

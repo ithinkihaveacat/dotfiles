@@ -205,16 +205,13 @@ class Workspace:
                     continue
                 if item.is_symlink():
                     try:
-                        if item.exists():
-                            actual.add(item.name)
-                        else:
-                            dangling.append(item)
-                    except OSError as e:
-                        raise OSError(
-                            e.errno,
-                            f"Permission denied accessing skill {item.name}: {e.strerror}",
-                            str(item),
-                        ) from e
+                        target_exists = item.exists()
+                    except OSError:
+                        target_exists = False
+                    if target_exists:
+                        actual.add(item.name)
+                    else:
+                        dangling.append(item)
                 else:
                     if self.is_tracked(item):
                         continue
@@ -234,7 +231,7 @@ class Workspace:
     def get_analyze_dir(self) -> Path:
         return self.root
 
-    def doctor_issues(self) -> list[str]:
+    def doctor_issues(self, plan=None) -> list[str]:
         """Returns backend-specific findings (read-only)."""
         return []
 
@@ -451,9 +448,12 @@ class GitWorkspace(Workspace):
         except Exception:
             return False
 
-    def doctor_issues(self):
+    def doctor_issues(self, plan=None):
         issues = []
-        actual_skills, _, _ = self.get_actual_skills()
+        if plan is not None:
+            actual_skills = {e.link_name for e in plan.disk_entries if e.kind == "live"}
+        else:
+            actual_skills, _, _ = self.get_actual_skills()
 
         # Read the block
         block_lines = self._read_block(self.mark_begin, self.mark_end) or []
@@ -1070,6 +1070,28 @@ class ReconcilePlan:
         """
         return self.extra + self.negated_extra
 
+    @property
+    def prune_entries(self) -> list[DiskEntry]:
+        """Returns DiskEntry objects corresponding to prune_names."""
+        prune_set = set(self.prune_names)
+        return [
+            e
+            for e in self.disk_entries
+            if e.link_name in prune_set and e.kind == "live"
+        ]
+
+    @property
+    def installed_skills(self) -> list[tuple[str, Path | None]]:
+        """Returns active skills mapped to targets, derived from disk_entries."""
+        live_map = {}
+        for e in self.disk_entries:
+            if e.kind == "live":
+                live_map[e.link_name] = e.target
+        return sorted(
+            [(name, target) for name, target in live_map.items()],
+            key=lambda x: x[0],
+        )
+
     def has_fixable_findings(self) -> bool:
         """True when a non-advisory finding remains that apply should have
         resolved. Unresolvable specs and VCS-tracked dangling links are
@@ -1362,6 +1384,44 @@ def cmd_add(specs, is_apply=False):
     return True
 
 
+def cmd_remove_entries(
+    entries: list[DiskEntry],
+    plan: ReconcilePlan | None = None,
+    ws=None,
+    announce=False,
+):
+    if ws is None:
+        ws = get_workspace()
+    if plan is None:
+        plan = build_reconcile_plan(ws)
+
+    dest_dirs = ws.get_dest_dirs()
+    if announce:
+        print_workspace_root(ws)
+
+    removed_paths = set()
+    removed_names = set()
+
+    for entry in entries:
+        if ws.is_tracked(entry.path):
+            continue
+        if entry.path.is_symlink() or entry.path.exists():
+            entry.path.unlink(missing_ok=True)
+            removed_paths.add(entry.path)
+            removed_names.add(entry.link_name)
+
+    if removed_names:
+        for rname in sorted(removed_names):
+            print(f"removed {rname}", file=sys.stderr)
+
+    actual_skills, _, _ = ws.get_actual_skills()
+    if hasattr(ws, "save_exclude_block"):
+        ws.save_exclude_block(actual_skills)
+    if hasattr(ws, "save_managed_skills"):
+        ws.save_managed_skills(list(actual_skills))
+    prune_dirs(dest_dirs)
+
+
 def cmd_remove(names, announce=True):
     if not names:
         cmderr("remove", "skill name required")
@@ -1372,64 +1432,83 @@ def cmd_remove(names, announce=True):
     except RuntimeError as e:
         cmderr("remove", str(e))
 
-    if announce:
-        print_workspace_root(ws)
+    plan = build_reconcile_plan(ws)
+    matching_entries = []
+    matched_args = set()
 
     for arg in names:
-        # Try to resolve to find the physical target's basename
-        link_name = arg
+        resolved_src = None
+        resolved_name = None
+        try:
+            resolved_src, resolved_name = resolve_skill_spec(arg)
+        except Exception:
+            pass
+
+        arg_unnamespaced = arg.split(":", 1)[1] if ":" in arg else arg
+        arg_base = os.path.basename(arg)
+
+        for e in plan.disk_entries:
+            if (
+                e.link_name == arg
+                or e.link_name == arg_unnamespaced
+                or e.link_name == resolved_name
+                or (resolved_src and e.target == resolved_src)
+                or (resolved_src and e.link_name == resolved_src.name)
+                or e.link_name == arg_base
+            ):
+                if e not in matching_entries:
+                    matching_entries.append(e)
+                    matched_args.add(arg)
+
+        # Direct on-disk checks for unindexed/stray paths matching arg
+        for d in dest_dirs:
+            for cand in (
+                arg,
+                arg_unnamespaced,
+                resolved_name,
+                resolved_src.name if resolved_src else None,
+                arg_base,
+            ):
+                if not cand:
+                    continue
+                p = d / cand
+                if (p.is_symlink() or p.exists()) and not ws.is_tracked(p):
+                    target_abs = None
+                    if p.is_symlink():
+                        try:
+                            target_abs = Path(
+                                os.path.abspath(p.parent / os.readlink(p))
+                            )
+                        except OSError:
+                            pass
+                    e = DiskEntry(
+                        d,
+                        p.name,
+                        p,
+                        "live" if p.exists() else "dangling",
+                        target_abs,
+                        False,
+                    )
+                    if not any(me.path == p for me in matching_entries):
+                        matching_entries.append(e)
+                        matched_args.add(arg)
+
+    cmd_remove_entries(matching_entries, plan=plan, ws=ws, announce=announce)
+
+    unmatched = [a for a in names if a not in matched_args]
+    for arg in unmatched:
+        disp_name = arg
         try:
             src, _ = resolve_skill_spec(arg)
-            link_name = src.name
+            disp_name = src.name
         except Exception:
-            # Fallback to direct name if it cannot be resolved (e.g. if plugin is disabled)
-            link_name = os.path.basename(arg)
-
-        removed = False
-        for d in dest_dirs:
-            relpath = d / link_name
-            if ws.is_tracked(relpath):
-                continue
-            if relpath.is_symlink() or relpath.exists():
-                relpath.unlink(missing_ok=True)
-                removed = True
-
-        if removed:
-            print(f"removed {link_name}", file=sys.stderr)
-        else:
-            print(f"remove: {link_name} not present; clearing record", file=sys.stderr)
-
-    # Re-sync exclude block
-    actual_skills, _, _ = ws.get_actual_skills()
-    if hasattr(ws, "save_exclude_block"):
-        ws.save_exclude_block(actual_skills)
-    if hasattr(ws, "save_managed_skills"):
-        ws.save_managed_skills(list(actual_skills))
-    prune_dirs(dest_dirs)
+            disp_name = os.path.basename(arg)
+        print(f"remove: {disp_name} not present; clearing record", file=sys.stderr)
 
 
 def resolve_installed(ws):
     """Returns [(name, resolved_target_path_or_None)] for active skills."""
-    try:
-        dest_dirs = ws.get_dest_dirs()
-    except RuntimeError:
-        return []
-    actual_skills, _, _ = ws.get_actual_skills()
-    resolved = []
-    for name in sorted(actual_skills):
-        target = None
-        for d in dest_dirs:
-            p = d / name
-            if p.is_symlink():
-                try:
-                    candidate = (p.parent / p.readlink()).resolve()
-                    if candidate.exists():
-                        target = candidate
-                        break
-                except Exception:
-                    pass
-        resolved.append((name, target))
-    return resolved
+    return build_reconcile_plan(ws).installed_skills
 
 
 def cmd_list(args):
@@ -1466,28 +1545,26 @@ def cmd_clean():
 
     print_workspace_root(ws)
 
-    actual_skills, _, _ = ws.get_actual_skills()
-
-    any_dir = any(d.is_dir() for d in dest_dirs)
-    if not actual_skills and not any_dir:
+    plan = build_reconcile_plan(ws)
+    if not plan.disk_entries and not any(d.is_dir() for d in dest_dirs):
         print("clean: nothing to do", file=sys.stderr)
         return
 
     removed = 0
     left = 0
-    for name in actual_skills:
-        for d in dest_dirs:
-            relpath = d / name
-            if relpath.is_symlink():
-                relpath.unlink(missing_ok=True)
-                removed += 1
-                print(f"removed {relpath.relative_to(ws.root)}", file=sys.stderr)
-            elif relpath.exists():
-                print(
-                    f"clean: {relpath.relative_to(ws.root)} is not a symlink; leaving it in place",
-                    file=sys.stderr,
-                )
-                left += 1
+    for e in plan.disk_entries:
+        if ws.is_tracked(e.path):
+            continue
+        if e.path.is_symlink():
+            e.path.unlink(missing_ok=True)
+            removed += 1
+            print(f"removed {rel_to(ws.root, e.path)}", file=sys.stderr)
+        elif e.path.exists():
+            print(
+                f"clean: {rel_to(ws.root, e.path)} is not a symlink; leaving it in place",
+                file=sys.stderr,
+            )
+            left += 1
 
     if hasattr(ws, "save_exclude_block"):
         ws.save_exclude_block([])
@@ -1774,7 +1851,7 @@ def cmd_apply(args):
                     f"skill: to keep any of them, add '{names}' to the AGENT_REQUIRED_SKILLS environment variable",
                     file=sys.stderr,
                 )
-            cmd_remove(extra_skills, announce=False)
+            cmd_remove_entries(plan.prune_entries, plan=plan, ws=ws, announce=False)
 
     if not add_ok:
         sys.exit(1)
@@ -2641,7 +2718,7 @@ def cmd_doctor(
         )
 
     # Check 7: Workspace Exclusions (Git-specific)
-    backend_issues = ws.doctor_issues()
+    backend_issues = ws.doctor_issues(plan=plan)
     if backend_issues:
         checks.append(
             {
