@@ -39,3 +39,9 @@ def register(api):
         "remote:playwright-cli",
         "https://github.com/microsoft/playwright-cli/tree/main/skills/playwright-cli",
     )
+
+    api.register_skill(
+        "remote:skill-cleaner",
+        "https://github.com/steipete/agent-scripts/tree/main/skills/skill-cleaner",
+    )
+
