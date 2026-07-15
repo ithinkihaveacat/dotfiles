@@ -66,13 +66,39 @@ Health is the conjunction of these (plus the agent, plugin-path, and catalog
 checks). `apply` is the idempotent fixpoint: running it makes a workspace
 healthy, and running it again changes nothing.
 
+## The shared reconciliation planner (`build_reconcile_plan`)
+
+To guarantee that `skill doctor` and `skill apply` never drift in their
+definition of convergence, both commands derive desired-vs-actual state from a
+single shared planner function, `build_reconcile_plan(ws) -> ReconcilePlan`:
+
+- **`skill doctor`** renders the `ReconcilePlan` read-only to report workspace
+  health.
+- **`skill apply`** executes permitted actions derived from the exact same plan
+  (creating missing links, re-linking target mismatches, pruning stray dangling
+  or extra symlinks), then recomputes the plan to verify convergence
+  (`has_fixable_findings()`).
+
+Because both commands consume a unified `ReconcilePlan`:
+
+- **Unresolvable declared specs** (`ResolvedSkill.error`) are kept distinct from
+  missing skills (reported under *Unresolvable skills*) and set
+  `destructive_blocked = True`, preventing `apply` from misclassifying and
+  deleting live symlinks for unresolvable specs.
+- **Tracked dangling links** (`DiskEntry.tracked`) are separated from stray
+  dangling links so `apply` prunes only untracked broken links, avoiding loops
+  where `doctor` recommends `skill apply` for checked-in symlinks it cannot
+  remove.
+- **Target mismatches** (`overwritten_by_add`) are recognized as re-link targets
+  rather than extra links to delete.
+
 ## The freshness check (advisory)
 
-`AGENT_REQUIRED_SKILLS` is the source of truth `skill` acts on — but in a
-direnv workspace it is a *cache*: the `.envrc` managed skills block (written by
+`AGENT_REQUIRED_SKILLS` is the source of truth `skill` acts on — but in a direnv
+workspace it is a *cache*: the `.envrc` managed skills block (written by
 `envrc`, evaluated via the `skills` function in `~/.direnvrc`) records changes
-that only reach the environment at the next prompt. Between an `.envrc` edit
-and the next direnv reload, the cache is stale.
+that only reach the environment at the next prompt. Between an `.envrc` edit and
+the next direnv reload, the cache is stale.
 
 `check_env_freshness()` detects this by statically parsing the managed block
 (never executing shell) and asserting that every name the block adds appears in
@@ -84,15 +110,15 @@ detectable direction (block declares, env lacks) is the one where acting on the
 stale cache would *destroy* state, while the undetectable direction merely
 delays convergence by one reload.
 
-The result is strictly advisory: it may cause `skill` to **say more or do
-less, never to do something different**:
+The result is strictly advisory: it may cause `skill` to **say more or do less,
+never to do something different**:
 
 - **`doctor`** renders it as the *Environment Freshness* check (WARNING) with a
   `direnv reload` resolution step.
 - **`apply`** declines to run its pruning phase while stale (additions still
   proceed; they are harmless), telling the user to reload and re-run.
-- Nothing ever merges block contents into the expected-skills set. If that
-  ever seems desirable, the correct design is to recompute the environment via
+- Nothing ever merges block contents into the expected-skills set. If that ever
+  seems desirable, the correct design is to recompute the environment via
   `direnv export` — not a partial merge here.
 
 A block whose content the parser does not recognize yields *no* freshness data

@@ -62,8 +62,10 @@ skill <command> [arguments]
   all, `--catalog` for the catalog index).
 - **`clean`**: Remove all managed skills and clear tracking records.
 - **`doctor`**: Diagnose mismatch between desired and on-disk skills
-  (read-only). Also warns when `AGENT_REQUIRED_SKILLS` looks stale relative to
-  the workspace's `.envrc` skills declaration (fix: `direnv reload`).
+  (read-only). Shares a unified reconciliation planner with `apply` to audit
+  symlinks, exclusions, and catalog specs, and warns when
+  `AGENT_REQUIRED_SKILLS` looks stale relative to `.envrc` (fix:
+  `direnv reload`).
 - **`catalog`**: List all plugin-provided skills and their sources.
 - **`resolve NAME`**: Print the source path a skill name would resolve to.
 
