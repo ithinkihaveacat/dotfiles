@@ -1,31 +1,5 @@
 # TODO
 
-## Verify that the Debian and apt flow satisfies package management invariants (2026-07-15)
-
-**Goal:** Ensure the Debian/Ubuntu (`apt-get`) package management path in
-`install.sh` adheres to the same package management invariants established for
-Homebrew: automatically keep installed packages updated non-interactively,
-accurately diff target packages against installed states to avoid redundant
-installation attempts, scrub package caches from disk, and handle unmanaged
-package pruning.
-
-**Criteria:** Running `install.sh` on a Debian/Linux system with `apt-get`
-non-interactively updates index caches, upgrades installed packages without
-prompts, skips already-installed packages cleanly via `dpkg` checks, purges
-stored `.deb` archives via `apt-get clean`, and emits zero redundant
-installation warnings or interactive prompts.
-
-**Sketch:** Inspect the Linux section in `install.sh` (`lines 595-650`). Verify
-that package existence checks use `dpkg-query -W -f='${Status}' <pkg>` or
-`dpkg -l` rather than package leaves, pass `DEBIAN_FRONTEND=noninteractive`
-during `apt-get update` / `apt-get upgrade -y`, run `apt-get autoremove -y` and
-`apt-get clean` to purge `/var/cache/apt/archives`, and evaluate whether an
-unmanaged package pruning function (equivalent to `prune_brew_extras`) should be
-added for `apt`.
-
-**Constraints:** Maintain bash 3.2 compatibility. Honor the `$HAS_SUDO` check
-before executing any privileged `apt-get` operations.
-
 ## Unify skill doctor/apply behind a shared reconciliation planner (2026-07-14) — done
 
 Introduced a single `build_reconcile_plan(workspace)` in

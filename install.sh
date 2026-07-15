@@ -305,8 +305,8 @@ git_up() {
   x git -C "$dir" merge --ff-only '@{upstream}'
 }
 
-heading "git pull"
 for src in "${SRCDIRS[@]}"; do
+  heading "git pull ($(basename "$src"))"
   git_up "$src"
 done
 
@@ -524,7 +524,20 @@ if exists ghostty; then
 
 fi
 
-# Scripts for $LOCAL/bin
+# Package Management Invariants (Homebrew and apt-get):
+# Both Homebrew (macOS) and apt-get (Linux) package management paths enforce four invariants:
+# 1. Non-Interactive Freshness: Index lists are updated and installed packages are
+#    upgraded non-interactively without user prompts on every run.
+# 2. Accurate State Diffing: Target package sets (core/optional/full) are diffed
+#    against installed states (via `brew list` or `dpkg-query` filtered by
+#    'install ok installed') to prevent redundant installation steps.
+# 3. Cache Purging: Downloaded package archives and build caches are purged from
+#    disk (`brew cleanup`, `apt-get clean`).
+# 4. Unmanaged Package Pruning:
+#    - Homebrew: As a userland manager, packages outside tier allowlists are
+#      reported and pruned when requested (`--prune`).
+#    - apt-get: Allowlist-based pruning is unsafe because `apt` manages OS base and
+#      system infrastructure; orphaned dependencies are purged via `autoremove --purge`.
 
 if exists brew; then
 
@@ -622,9 +635,10 @@ if [ "$PLATFORM" = "linux" ]; then
 
     install_set=$(install_set_for_tier "$core" "$optional" "$full")
 
-    comm -13 <(dpkg-query -f '${binary:Package}\n' -W | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
-    # Can't remove any packages because not possible to determine which were
-    # user-installed. Use `apt-get remove` to remove manually.
+    comm -13 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
+    # Full unmanaged package removal is unsafe on Debian/apt because apt manages
+    # base system and infrastructure packages beyond dotfiles. Orphaned dependency
+    # packages are purged via apt-get autoremove --purge below.
 
     # sysstat was removed from this script (it recommends pcp, which installs 6
     # heavyweight daemon services). Warn so it can be purged on existing machines.
@@ -651,16 +665,16 @@ if [ "$PLATFORM" = "linux" ]; then
       fi
     fi
 
+    # Upgrade installed packages non-interactively
+    x sudo apt-get -y upgrade || echo "warning: apt-get upgrade failed, skipping"
+    x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
+
     # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
     x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"
 
-    # Autoclean is typically restricted, so ignore failures gracefully
+    # Autoclean and clean package archives
     x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping"
-    # x sudo apt-get -y clean # remove current .deb files
-    # x sudo apt-get -y upgrade # update packages, if no new dependencies needed
-
-    # Ignore upgrade failures if they are restricted
-    x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
+    x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping"
 
     if [ -f /var/run/reboot-required ]; then
       REBOOT_REQUIRED=1
