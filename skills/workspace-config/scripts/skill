@@ -959,6 +959,285 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
     )
 
 
+def rel_to(root: Path, p: Path):
+    """Best-effort path relative to root, falling back to the absolute path."""
+    try:
+        return p.relative_to(root)
+    except ValueError:
+        return p
+
+
+# =============================================================================
+# Shared reconciliation planner
+#
+# 'doctor' and 'apply' used to reconstruct "what should be true" independently
+# -- each re-derived skill identity, catalog resolution, target matching,
+# dangling/extra-symlink state, and the destructive-action safety policy. That
+# produced a recurring class of bug: doctor would detect a condition apply's
+# separate logic did not handle (or vice versa), so 'skill apply' followed by
+# 'skill doctor' would not converge. build_reconcile_plan() is now the single
+# definition of the desired-vs-actual comparison: 'doctor' renders it read-only
+# and 'apply' executes the permitted actions from the same plan, so the two can
+# no longer disagree by construction.
+# =============================================================================
+
+
+class ResolvedSkill:
+    """A declared skill spec resolved (or not) against the catalog.
+
+    A read-facing view over resolve_skill_spec(): resolution failures are
+    captured as a typed 'error' instead of raising, so doctor and apply share
+    one resolution path and neither can crash on a spec the other tolerates.
+
+    (Deliberately a plain class, not a @dataclass: this module is loaded by the
+    test suite via SourceFileLoader without registering it in sys.modules, and
+    dataclasses' string-annotation handling -- forced by 'from __future__ import
+    annotations' -- crashes when it cannot look the module up there.)
+    """
+
+    def __init__(self, spec, source_path=None, link_name=None, error=None):
+        self.spec = spec  # the declared token, e.g. "coding-standards", "foo:bar"
+        self.source_path = source_path  # absolute resolved source directory
+        self.link_name = link_name  # canonical symlink basename (source's name)
+        self.error = error  # resolution error, None when resolved
+
+    @property
+    def resolved(self) -> bool:
+        return self.source_path is not None
+
+
+class DiskEntry:
+    """A symlink found in a destination directory."""
+
+    def __init__(self, dest, link_name, path, kind, target, tracked):
+        self.dest = dest  # the destination directory containing the link
+        self.link_name = link_name  # the symlink's basename
+        self.path = path  # dest / link_name
+        self.kind = kind  # "live" (target exists) or "dangling" (target missing)
+        self.target = target  # absolute symlink target, when readable
+        self.tracked = tracked  # whether the link is VCS-tracked
+
+
+class ReconcilePlan:
+    """The desired-vs-actual comparison shared by doctor and apply."""
+
+    def __init__(
+        self,
+        ws,
+        dest_dirs,
+        expected_skills,
+        resolved,
+        expected_targets,
+        disk_entries,
+        unmanaged,
+        missing,
+        mismatched,
+        extra,
+        negated_extra,
+        stray_dangling,
+        tracked_dangling,
+        freshness,
+        stale,
+        destructive_blocked,
+    ):
+        self.ws = ws
+        self.dest_dirs = dest_dirs  # [] when no agent destination is configured
+        self.expected_skills = expected_skills  # declared specs
+        self.resolved = resolved  # list[ResolvedSkill], one per declared spec
+        self.expected_targets = expected_targets  # abs source Path -> spec
+        self.disk_entries = disk_entries  # list[DiskEntry] for every symlink
+        self.unmanaged = unmanaged  # non-symlink artifacts in skill dirs
+        self.missing = missing  # doctor labels: declared, resolvable, not linked
+        self.mismatched = mismatched  # doctor labels: linked to the wrong source
+        self.extra = extra  # link basenames present but not declared
+        self.negated_extra = negated_extra  # link basenames negated in the env
+        self.stray_dangling = stray_dangling  # broken links apply may prune
+        self.tracked_dangling = tracked_dangling  # broken links apply won't touch
+        self.freshness = freshness  # check_env_freshness() result or None
+        self.stale = stale  # environment is a stale cache of .envrc
+        self.destructive_blocked = destructive_blocked  # unlink is unsafe now
+
+    @property
+    def unresolved(self) -> list:
+        return [r for r in self.resolved if not r.resolved]
+
+    @property
+    def prune_names(self) -> list:
+        """Link basenames apply removes when destructive actions are permitted.
+
+        Both genuinely-extra links and stale negated links are pruned; they are
+        reported under different doctor headings but share one remediation.
+        """
+        return self.extra + self.negated_extra
+
+    def has_fixable_findings(self) -> bool:
+        """True when a non-advisory finding remains that apply should have
+        resolved. Unresolvable specs and VCS-tracked dangling links are
+        advisory (apply cannot fix them), and extra links held back by the
+        destructive-action policy are intentionally left in place, so none of
+        those count here."""
+        if self.missing or self.mismatched or self.stray_dangling:
+            return True
+        if not self.destructive_blocked and (self.extra or self.negated_extra):
+            return True
+        return False
+
+
+def resolve_reconcile_skill(spec: str) -> ResolvedSkill:
+    """Resolve one declared spec into a ResolvedSkill, capturing any failure as
+    a typed error rather than raising. This is the single resolution entry point
+    the planner uses so doctor and apply classify specs identically."""
+    try:
+        src_path, _name = resolve_skill_spec(spec)
+        return ResolvedSkill(
+            spec=spec,
+            source_path=Path(os.path.abspath(src_path)),
+            link_name=src_path.name,
+        )
+    except Exception as e:
+        return ResolvedSkill(spec=spec, error=str(e))
+
+
+def build_reconcile_plan(ws) -> ReconcilePlan:
+    """Compute the single desired-vs-actual comparison for a workspace.
+
+    This is the shared definition of convergence: every fact doctor renders and
+    every action apply performs about skill symlinks is derived here, so the two
+    commands cannot drift apart.
+    """
+    expected_skills = ws.get_expected_skills()
+    _, negated_skills = get_parsed_skills()
+    negated_lower = {n.lower() for n in negated_skills}
+
+    try:
+        dest_dirs = ws.get_dest_dirs()
+    except RuntimeError:
+        dest_dirs = []
+
+    # Resolve declared specs once. link_name is chosen here (the source's
+    # basename) so identity is fixed at resolution time rather than rederived
+    # from physical basenames at every comparison site.
+    resolved = [resolve_reconcile_skill(spec) for spec in expected_skills]
+    expected_targets: dict = {}
+    for r in resolved:
+        if r.resolved:
+            expected_targets[r.source_path] = r.spec
+    # Link basenames a resolved spec will (re)create via cmd_add. A wrong-target
+    # link whose basename is one of these is a mismatch that the add step
+    # corrects in place, not an extra link to prune -- excluding it here is what
+    # lets doctor report it under "mismatched" while apply re-links it, instead
+    # of the two disagreeing about whether to delete it. Only *resolved* specs
+    # count: a link named after an unresolvable spec is still genuinely extra
+    # (nothing will recreate it), which is the Test 67 safety case.
+    resolved_link_names = {r.link_name.lower() for r in resolved if r.resolved}
+
+    actual_skills, unmanaged, dangling_paths = ws.get_actual_skills()
+
+    # One DiskEntry per symlink on disk -- the single scan both the extra and
+    # dangling findings are derived from.
+    disk_entries: list = []
+    for name in sorted(actual_skills):
+        for d in dest_dirs:
+            p = d / name
+            if not p.is_symlink():
+                continue
+            try:
+                target = os.readlink(p)
+                target_abs = Path(os.path.abspath(p.parent / target))
+            except OSError:
+                target_abs = None
+            disk_entries.append(
+                DiskEntry(d, name, p, "live", target_abs, ws.is_tracked(p))
+            )
+    for item in dangling_paths:
+        disk_entries.append(
+            DiskEntry(
+                item.parent, item.name, item, "dangling", None, ws.is_tracked(item)
+            )
+        )
+
+    stray_dangling = [
+        e.path for e in disk_entries if e.kind == "dangling" and not e.tracked
+    ]
+    tracked_dangling = [
+        e.path for e in disk_entries if e.kind == "dangling" and e.tracked
+    ]
+
+    # Extra vs. negated classification, from the same disk scan.
+    extra: list = []
+    negated_extra: list = []
+    for e in disk_entries:
+        if e.kind != "live" or e.target is None or e.target in expected_targets:
+            continue
+        s = e.link_name
+        if s.lower() in negated_lower:
+            if s not in negated_extra:
+                negated_extra.append(s)
+        elif s.lower() not in resolved_link_names:
+            if s not in extra:
+                extra.append(s)
+
+    # Missing / mismatched alignment for resolvable specs. Labels are formatted
+    # here so doctor and apply's post-apply verification agree on the finding.
+    missing: list = []
+    mismatched: list = []
+    for r in resolved:
+        if not r.resolved:
+            continue
+        if not dest_dirs:
+            missing.append(r.spec)
+            continue
+        for d in dest_dirs:
+            p = d / r.link_name
+            if not p.is_symlink():
+                label = (
+                    f"{r.spec} (missing in {rel_to(ws.root, d)})"
+                    if len(dest_dirs) > 1
+                    else r.spec
+                )
+                if label not in missing:
+                    missing.append(label)
+            else:
+                target = os.readlink(p)
+                target_abs = Path(os.path.abspath(p.parent / target))
+                if target_abs != r.source_path:
+                    label = (
+                        f"{r.spec} (linked to {clean_p(target_abs)}, expected {clean_p(r.source_path)})"
+                        if len(dest_dirs) > 1
+                        else f"{r.spec} in {rel_to(ws.root, d)} (linked to {clean_p(target_abs)}, expected {clean_p(r.source_path)})"
+                    )
+                    if label not in mismatched:
+                        mismatched.append(label)
+
+    # Destructive-action policy. Pruning extra links is unsafe when the desired
+    # set is untrustworthy: either the environment is a stale cache of .envrc,
+    # or a declared spec failed to resolve (so an existing live link for it
+    # would look indistinguishable from a genuinely extra one). Neither gates
+    # the dangling prune, which is always safe.
+    freshness = check_env_freshness(ws)
+    stale = freshness is not None and bool(freshness[0] or freshness[1])
+    destructive_blocked = stale or any(not r.resolved for r in resolved)
+
+    return ReconcilePlan(
+        ws=ws,
+        dest_dirs=dest_dirs,
+        expected_skills=expected_skills,
+        resolved=resolved,
+        expected_targets=expected_targets,
+        disk_entries=disk_entries,
+        unmanaged=unmanaged,
+        missing=missing,
+        mismatched=mismatched,
+        extra=extra,
+        negated_extra=negated_extra,
+        stray_dangling=stray_dangling,
+        tracked_dangling=tracked_dangling,
+        freshness=freshness,
+        stale=stale,
+        destructive_blocked=destructive_blocked,
+    )
+
+
 def is_using_envrc(ws) -> bool:
     """Checks if the workspace is using direnv or has a local .envrc file."""
     return "DIRENV_DIR" in os.environ or (ws.root / ".envrc").is_file()
@@ -1348,32 +1627,27 @@ def check_env_freshness(ws):
 def cmd_apply(args):
     ws = get_workspace()
     print_workspace_root(ws)
-    expected_skills = ws.get_expected_skills()
 
-    try:
-        dest_dirs = ws.get_dest_dirs()
-    except RuntimeError:
-        dest_dirs = None
+    # One shared comparison drives the whole command: doctor renders this same
+    # plan read-only, so any condition doctor reports is one apply acts on here.
+    plan = build_reconcile_plan(ws)
+    expected_skills = plan.expected_skills
 
     # Prune dangling symlinks (their target no longer exists) unconditionally,
     # even when AGENT_REQUIRED_SKILLS is empty: a broken link is never a
-    # legitimate desired state regardless of what (if anything) is declared,
-    # so this must not be gated behind having something to reconcile against.
-    # It also needs no freshness interlock like the extra-symlink prune below:
-    # resolve_skill_spec only ever returns paths that exist (see
-    # resolve_skill_spec's is_dir()/fetch_github checks), so a broken link can
-    # never coincide with a legitimately expected-but-not-yet-declared target.
-    if dest_dirs is not None:
-        _, _, dangling = ws.get_actual_skills()
-        for item in dangling:
-            if ws.is_tracked(item):
-                continue
-            try:
-                item_rel = item.relative_to(ws.root)
-            except ValueError:
-                item_rel = item
-            print(f"skill: pruning dangling symlink: '{item_rel}'", file=sys.stderr)
-            item.unlink(missing_ok=True)
+    # legitimate desired state regardless of what (if anything) is declared, so
+    # this must not be gated behind having something to reconcile against. It
+    # also needs no freshness interlock like the extra-symlink prune below:
+    # resolve_skill_spec only ever returns paths that exist, so a broken link
+    # can never coincide with a legitimately expected-but-not-yet-declared
+    # target. VCS-tracked broken links are checked-in content, not stray install
+    # artifacts, so the plan keeps them out of stray_dangling.
+    for item in plan.stray_dangling:
+        print(
+            f"skill: pruning dangling symlink: '{rel_to(ws.root, item)}'",
+            file=sys.stderr,
+        )
+        item.unlink(missing_ok=True)
 
     if not expected_skills:
         print(
@@ -1395,49 +1669,23 @@ def cmd_apply(args):
     # 1. Resolve and add/symlink all expected skills
     add_ok = cmd_add(expected_skills, is_apply=True)
 
-    # 2. Prune any actual symlinks on disk that are NOT expected target paths
-    if dest_dirs is None:
+    # 2. Prune any actual symlinks on disk that are NOT expected target paths.
+    if not plan.dest_dirs:
         sys.exit(0 if add_ok else 1)
 
-    actual_skills, _, _ = ws.get_actual_skills()
-
-    # Resolve all expected skills to their physical target paths
-    expected_targets = set()
-    unresolved_specs = []
-    for spec in expected_skills:
-        try:
-            src_path, _ = resolve_skill_spec(spec)
-            expected_targets.add(Path(os.path.abspath(src_path)))
-        except Exception:
-            unresolved_specs.append(spec)
-
-    # Find any symlink whose target is not in the expected targets
-    extra_skills = []
-    for s in actual_skills:
-        for d in dest_dirs:
-            p = d / s
-            if p.is_symlink():
-                try:
-                    target = os.readlink(p)
-                    target_abs = Path(os.path.abspath(p.parent / target))
-                    if target_abs not in expected_targets:
-                        if s not in extra_skills:
-                            extra_skills.append(s)
-                except Exception:
-                    pass
+    extra_skills = plan.prune_names
+    unresolved_specs = [r.spec for r in plan.unresolved]
 
     if extra_skills:
-        # Freshness interlock: when .envrc declares changes the environment
-        # does not reflect yet, the desired set we are about to enforce is a
-        # stale cache. Do less, not different: skip the destructive prune and
-        # tell the human how to refresh. (Adding symlinks above is harmless
-        # and proceeds regardless.)
-        freshness = check_env_freshness(ws)
-        stale = freshness is not None and (freshness[0] or freshness[1])
-
-        if stale or unresolved_specs:
-            if stale:
-                fresh_missing, fresh_negated = freshness
+        if plan.destructive_blocked:
+            # Freshness interlock: when .envrc declares changes the environment
+            # does not reflect yet, or a declared spec cannot be resolved, the
+            # desired set we are about to enforce is untrustworthy. Do less, not
+            # different: skip the destructive prune and tell the human how to
+            # recover. (Adding symlinks above is harmless and proceeds
+            # regardless.)
+            if plan.stale:
+                fresh_missing, fresh_negated = plan.freshness
                 reasons = []
                 if fresh_missing:
                     reasons.append(
@@ -1470,7 +1718,7 @@ def cmd_apply(args):
                 + (
                     "environment is stale; run 'direnv reload' (or start a new "
                     "prompt), then re-run 'skill apply'"
-                    if stale
+                    if plan.stale
                     else "desired set is incomplete; fix the unresolvable "
                     "declaration(s) above, then re-run 'skill apply'"
                 ),
@@ -1496,6 +1744,16 @@ def cmd_apply(args):
             cmd_remove(extra_skills, announce=False)
 
     if not add_ok:
+        sys.exit(1)
+
+    # Convergence interlock: recompute the plan from the now-mutated disk state
+    # and fail if any apply-fixable finding survives. Because doctor renders
+    # this same plan, a clean recomputation here is what guarantees the property
+    # "apply, then doctor, clears every fixable finding" -- rather than trusting
+    # each finding was handled by a matching branch above. Advisory findings
+    # (unresolvable specs, tracked dangling links) and extra links intentionally
+    # held back by the destructive-action policy do not count.
+    if build_reconcile_plan(ws).has_fixable_findings():
         sys.exit(1)
 
 
@@ -2002,8 +2260,13 @@ def cmd_doctor(
     ws = get_workspace()
     use_color = stream.isatty() if hasattr(stream, "isatty") else False
 
-    expected_skills = ws.get_expected_skills()
-    actual_skills, unmanaged, dangling = ws.get_actual_skills()
+    # The single desired-vs-actual comparison. 'apply' executes this same plan;
+    # 'doctor' only renders it, so the two cannot disagree about what should be
+    # true (missing/extra/mismatched/dangling and the destructive-action policy
+    # are all defined once, in build_reconcile_plan).
+    plan = build_reconcile_plan(ws)
+    expected_skills = plan.expected_skills
+    unmanaged = plan.unmanaged
 
     def rel(p):
         try:
@@ -2085,73 +2348,20 @@ def cmd_doctor(
             }
         )
 
-    # Check 3: Required Skills (Alignment)
-    missing = []
-    unresolvable = []
-    unresolvable_errors = {}
-    mismatched_target = []
-    extra = []
-    expected_targets = {}
-
-    for spec in expected_skills:
-        try:
-            src_path, _ = resolve_skill_spec(spec)
-            abs_src = Path(os.path.abspath(src_path))
-            expected_targets[abs_src] = spec
-
-            if dest_dirs:
-                for d in dest_dirs:
-                    p = d / src_path.name
-                    if not p.is_symlink():
-                        label = (
-                            f"{spec} (missing in {rel(d)})"
-                            if len(dest_dirs) > 1
-                            else spec
-                        )
-                        if label not in missing:
-                            missing.append(label)
-                    else:
-                        target = os.readlink(p)
-                        target_abs = Path(os.path.abspath(p.parent / target))
-                        if target_abs != abs_src:
-                            label = (
-                                f"{spec} (linked to {clean_p(target_abs)}, expected {clean_p(abs_src)})"
-                                if len(dest_dirs) > 1
-                                else f"{spec} in {rel(d)} (linked to {clean_p(target_abs)}, expected {clean_p(abs_src)})"
-                            )
-                            if label not in mismatched_target:
-                                mismatched_target.append(label)
-            else:
-                missing.append(spec)
-        except Exception as e:
-            # Unlike a spec that resolves but isn't linked yet, 'skill apply'
-            # cannot fix this: it fails the identical resolve_skill_spec()
-            # call. Keep it out of 'missing' so the report doesn't send the
-            # user in a fixing loop that can never converge.
-            unresolvable.append(spec)
-            unresolvable_errors[spec] = str(e)
-
-    _, negated_skills = get_parsed_skills()
-    negated_extra = []
-
-    if dest_dirs:
-        expected_names = {s.split(":", 1)[-1].lower() for s in expected_skills}
-        for s in actual_skills:
-            for d in dest_dirs:
-                p = d / s
-                if p.is_symlink():
-                    try:
-                        target = os.readlink(p)
-                        target_abs = Path(os.path.abspath(p.parent / target))
-                        if target_abs not in expected_targets:
-                            if s.lower() in {ns.lower() for ns in negated_skills}:
-                                if s not in negated_extra:
-                                    negated_extra.append(s)
-                            elif s.lower() not in expected_names:
-                                if s not in extra:
-                                    extra.append(s)
-                    except Exception:
-                        pass
+    # Check 3: Required Skills (Alignment).
+    # All alignment facts come from the shared plan. 'apply' fixes exactly the
+    # conditions surfaced here: 'missing' (link creation), 'mismatched_target'
+    # (re-link), and 'extra'/'negated_extra' (prune, subject to the plan's
+    # destructive-action policy). 'unresolvable' specs fail the same catalog
+    # lookup apply performs, so they are kept out of 'missing' -- apply cannot
+    # fix them, and reporting them as missing would send the user into a loop
+    # that never converges.
+    missing = plan.missing
+    unresolvable = [r.spec for r in plan.unresolved]
+    unresolvable_errors = {r.spec: r.error for r in plan.unresolved}
+    mismatched_target = plan.mismatched
+    extra = plan.extra
+    negated_extra = plan.negated_extra
 
     skill_details = []
     if missing:
@@ -2255,7 +2465,7 @@ def cmd_doctor(
     # AGENT_REQUIRED_SKILLS (the truth skill acts on). Only rendered when the
     # workspace has a readable block; WARNING severity so it fails 'doctor'
     # (a full audit) but never blocks 'preflight' (the launch gate).
-    freshness = check_env_freshness(ws)
+    freshness = plan.freshness
     fresh_missing = []
     fresh_negated = []
     if freshness is not None:
@@ -2294,10 +2504,10 @@ def cmd_doctor(
     # 'apply' intentionally never touches a VCS-tracked dangling symlink (it
     # is checked-in content, not a stray install artifact), so recommending
     # 'skill apply' for one would send the user in a loop that never
-    # converges -- split it out with its own remediation, same as the
-    # Required Skills check does for unresolvable specs above.
-    tracked_dangling = [item for item in dangling if ws.is_tracked(item)]
-    stray_dangling = [item for item in dangling if item not in tracked_dangling]
+    # converges -- the plan splits stray from tracked so this check and apply's
+    # prune agree on which links apply may remove.
+    tracked_dangling = plan.tracked_dangling
+    stray_dangling = plan.stray_dangling
     if stray_dangling or tracked_dangling:
         dangling_details = []
         if stray_dangling:
@@ -2313,7 +2523,7 @@ def cmd_doctor(
             {
                 "name": "Symlink Health",
                 "status": "ERROR",
-                "summary": f"Found {len(dangling)} broken or dangling symlink(s)",
+                "summary": f"Found {len(stray_dangling) + len(tracked_dangling)} broken or dangling symlink(s)",
                 "details": dangling_details,
             }
         )
