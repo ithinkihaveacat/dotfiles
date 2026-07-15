@@ -1,5 +1,37 @@
 # TODO
 
+## Clarify remediation choices in skill preflight and doctor error messages (2026-07-15)
+
+**Problem:** In `skill preflight` and `skill doctor` error reports (such as
+mismatched or extra skill warnings), remediation hints list multiple commands
+(e.g., `export AGENT_REQUIRED_SKILLS=...`, `skill remove ...`, `skill apply`)
+without explaining which source of truth each command honors or what state it
+overwrites. For example, when extra skills exist on disk, `skill apply` will
+prune the disk symlinks (treating `AGENT_REQUIRED_SKILLS` as authoritative),
+whereas adding to `AGENT_REQUIRED_SKILLS` preserves the disk symlinks. The
+current output does not distinguish between these choices based on user intent.
+
+**Goal:** Restructure remediation hints in `skill doctor` and `skill preflight`
+failure reports to explicitly distinguish between resolution paths based on
+which source of truth (disk vs. environment) the user considers correct.
+
+**Criteria:** When reporting extra, missing, or mismatched skills, preflight and
+doctor hints clearly group commands under intent-based headers (e.g., "If the
+skills on disk are correct: ...", "If your environment variable is correct (will
+prune extra symlinks): ..."), and test assertions in `test-skill` verify the new
+hint output shape.
+
+**Sketch:** Update the finding formatting functions in
+`skills/workspace-config/scripts/skill` (such as `cmd_doctor` finding
+formatters) to categorize remediation actions by user intent and source
+authority:
+
+- *Disk is authoritative:* Recommend `envrc add skills <names>` or
+  `export AGENT_REQUIRED_SKILLS=...`.
+- *Environment is authoritative:* Recommend `skill apply`, explicitly noting
+  that extra symlinks will be unlinked.
+- *Manual removal:* Recommend `skill remove <names>`.
+
 ## Unify skill doctor/apply behind a shared reconciliation planner (2026-07-14) — done
 
 Introduced a single `build_reconcile_plan(workspace)` in
