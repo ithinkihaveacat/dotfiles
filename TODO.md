@@ -17,7 +17,10 @@ zero orphaned `screenrecord` background processes on-device, and passes
 (`e01fb6c`) in `skills/adb/scripts/adb-screenrecord`. Test signal handling
 (`timeout --foreground -s INT`), on-device cleanup
 (`adb shell killall -2 screenrecord`), `ensure_faststart()` remux bypass for raw
-capture, and macOS `gtimeout` fallback detection.
+capture, and macOS `gtimeout` fallback detection. Double-check whether Pixel
+Watches (e.g. Pixel Watch 3 `selene`) actually require the raw frame capture
+mechanism (`USE_RAW=1`) or if their hardware video encoder supports native
+`adb shell screenrecord` without raw mode.
 
 ## Clarify remediation choices in skill preflight and doctor error messages (2026-07-15)
 
