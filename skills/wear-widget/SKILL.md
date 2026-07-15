@@ -250,15 +250,56 @@ to capture the UI.
 
 #### Recommended Workflow:
 
+1. **Check ProtoLayout Renderer Version**: Verify that the connected emulator
+   image runs a compatible renderer package (`versionCode >= 100051969`):
+
+   ```bash
+   adb shell dumpsys package com.google.android.wearable.protolayout.renderer | grep -E "versionCode|versionName"
+   ```
+
+   > [!WARNING] Emulators with `versionCode < 100051969` (such as stock API 36
+   > image `1.5.0.1.730435378` / `versionCode 100017872`) encounter an internal
+   > IPC timeout deadlock in `ProtoTilesConnManager`, causing `Tile was null`
+   > rendering errors. Use images with updated renderers
+   > (`versionCode >= 100051969`).
+
 1. **Deploy the Widget/Tile**: Add the widget to the device's carousel using
-   your tool's tile-addition command (specifying the container type if
-   necessary).
-1. **Switch the Active Display**: Switch the watch screen to display the newly
-   added tile.
-1. **Capture the Screenshot**: Execute a raw screen capture. Prefer tools that
-   automatically handle device wake states and apply a circular mask with a
-   transparent background for round watches.
+   `DEBUG_SURFACE add-tile` (enforcing FULLSCREEN mode `--type FULLSCREEN` /
+   `--ei type 0` for reliable translation rendering):
+
+   ```bash
+   adb shell am broadcast \
+     -a com.google.android.wearable.app.DEBUG_SURFACE \
+     --es operation add-tile \
+     --ecn component <package>/<WidgetService> \
+     --ei type 0
+   ```
+
+1. **Switch Active Display & Wake Screen**: Switch the watch screen to display
+   the newly added tile, and tap the screen center (`227 227`) to clear System
+   UI Ambient Lite mode (`SysUiAmbientLiteService`):
+
+   ```bash
+   adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation show-tile --ei index 0
+   sleep 1
+   adb shell input tap 227 227
+   sleep 1
+   ```
+
+1. **Capture the Screenshot**: Execute a raw screen capture using standard ADB
+   commands now that the display is active and fully rendered:
+
+   ```bash
+   adb shell screencap -p /sdcard/my_widget_tile_preview.png
+   adb pull /sdcard/my_widget_tile_preview.png my_widget_tile_preview.png
+   ```
+
+   *(Optional: If helper tools like `adb-screenshot` are available in your
+   environment, you can use `adb-screenshot my_widget_tile_preview.png` as a
+   convenient shortcut).*
+
 1. **Resize and Register the Asset**:
+
    - **Resize to 400x400 pixels**: The official recommended size for the Tile
      preview asset is **400x400px** to ensure the best display quality in the
      carousel editor on both watches and phones.
@@ -326,8 +367,86 @@ popper --launch com.google.android.wearable.protolayout.renderer \
 
 ______________________________________________________________________
 
-### 4. Key Gotchas & Best Practices
+### 4. Wear OS Emulator Testing & Compatibility Rules
 
+When deploying and validating Glance Wear Widgets and Remote Compose surfaces on
+headless or desktop emulators:
+
+- **ProtoLayout Renderer Version Inspection**: Before attempting to bind or
+  render widgets via `DEBUG_SURFACE add-tile`, inspect the renderer package
+  version:
+
+  ```bash
+  adb shell dumpsys package com.google.android.wearable.protolayout.renderer | grep -E "versionCode|versionName"
+  ```
+
+  If `versionCode < 100051969` (e.g., stock API 36 image `1.5.0.1.730435378` /
+  `versionCode 100017872`), tile binding will deadlock asynchronously in
+  `ProtoTilesConnManager` with the following logcat error traces:
+
+  ```text
+  ProtoTilesConnManager: java.util.concurrent.ExecutionException: bqc: Timed out: bqa@...[status=PENDING]
+  ProtoTilesTileRenderer: Tile was null in onTileContentsUpdated
+  ```
+
+  Always target an emulator image running `versionCode >= 100051969`.
+
+  **Verified Renderer Version Compatibility Reference**:
+
+  - ❌ **Stock Wear OS 6.0 (API 36)**: Renderer `1.5.0.1.730435378` /
+    `versionCode 100017872` (Fails - renderer version < 100051969)
+  - ✅ **Stock Wear OS 7.0 Preview (API 37)**: Renderer `1.6.1.87.907578152` /
+    `versionCode 100051982` (Succeeds - `versionCode >= 100051969`)
+  - ✅ **Standalone Dev Renderer Builds**: Renderer `1.6.4.2.944934794.exp` /
+    `versionCode 100060639` (Succeeds - `versionCode >= 100051969`)
+
+- **Package De-isolation Best Practices (API 36 & Below)**: On API 36 and lower,
+  installing an APK via `adb install -r` leaves the package in `FLAG_STOPPED`
+  state, which can block Binder IPC serialization. Explicitly launching a main
+  activity clears this state:
+
+  ```bash
+  adb shell am start -n <package>/<LauncherActivity>
+  sleep 2
+  adb shell input keyevent KEYCODE_HOME
+  ```
+
+  *(Note: On Wear OS API 37+, the System UI `add-tile` intent bypasses
+  `FLAG_STOPPED` limitations and automatically spawns the bound service even if
+  `stopped=true`, making activity launch optional on API 37+).*
+
+- **Fullscreen Type Override (`--type FULLSCREEN`)**: Enforce
+  `--type FULLSCREEN` (`--ei type 0`) when adding widget debug tiles to
+  guarantee reliable translated layout rendering mode on Wear OS emulators.
+
+- **Ambient Lite Screen Waking Tap**: Broadcasting `show-tile` invokes
+  `SysUiAmbientLiteService` which dims the display for screen captures. Always
+  wait 2 seconds after `show-tile` and send `adb shell input tap 227 227` to
+  restore active rendering before taking a screen capture via standard ADB
+  commands:
+
+  ```bash
+  adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation show-tile --ei index 0
+  sleep 2
+  adb shell input tap 227 227
+  sleep 1
+  adb shell screencap -p /sdcard/tile_preview.png
+  adb pull /sdcard/tile_preview.png tile_preview.png
+  ```
+
+  *(Optional: Helper tools like `adb-screenshot tile_preview.png` can also be
+  used if installed in your environment).*
+
+______________________________________________________________________
+
+### 5. Key Gotchas & Best Practices
+
+- **Anti-Pattern: Force-Stopping System Services**: You do NOT need to
+  force-stop `com.google.android.gms`, `com.google.android.wearable.app`, or
+  `com.google.android.wearable.sysui` after installing a new widget APK. Testing
+  confirms capability indices and tile bindings resolve identically with or
+  without restarting these processes. Rely on standard broadcast intents
+  (`add-tile` / `show-tile`) to trigger updates.
 - **The `nodpi` Requirement & Memory Limits**: Always place static raster
   previews (both widget picker and tile previews) in `nodpi` directories. Images
   placed in standard density folders (like `drawable/` or `drawable-xxhdpi/`)
