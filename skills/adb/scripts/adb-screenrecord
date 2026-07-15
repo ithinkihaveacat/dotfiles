@@ -14,14 +14,16 @@ in the current directory if no file is specified. Touches are displayed during
 the recording.
 
 Arguments:
-  FILE              The path to save the screen recording to.
-                    (defaults to 'adb-screenrecord-YYYYMMDDHHMMSS.mp4')
+  FILE                    The path to save the screen recording to.
+                          (defaults to 'adb-screenrecord-YYYYMMDDHHMMSS.mp4')
 
 Options:
-  -o, --output FILE The path to save the screen recording to.
-  --raw             Force raw frame capture using ffmpeg.
-  --no-raw          Disable raw frame capture (force scrcpy).
-  -h, --help        Display this help message and exit
+  -o, --output FILE       The path to save the screen recording to.
+  -t, --duration SECONDS  Max recording duration in seconds.
+  --time-limit SECONDS    Alias for --duration.
+  --raw                   Force raw frame capture using ffmpeg.
+  --no-raw                Disable raw frame capture (force scrcpy).
+  -h, --help              Display this help message and exit
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
@@ -32,11 +34,11 @@ Examples:
   # Save screen recording to a timestamped file in the current directory
   $(basename "$0")
 
-  # Save screen recording to a specific file
-  $(basename "$0") /tmp/my-screen-recording.mp4
+  # Save screen recording for 10 seconds
+  $(basename "$0") --duration 10 /tmp/my-screen-recording.mp4
 
   # Force raw frame capture on any device
-  $(basename "$0") --raw /tmp/my-screen-recording.mp4
+  $(basename "$0") --raw --duration 10 /tmp/my-screen-recording.mp4
 EOF
   exit 0
 }
@@ -47,6 +49,7 @@ fi
 
 OUTPUT_FILE=""
 FORCE_RAW=""
+DURATION=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,11 +57,19 @@ while [[ $# -gt 0 ]]; do
       usage
       ;;
     -o | --output)
-      if [ -z "$2" ]; then
+      if [ -z "${2:-}" ]; then
         echo "$(basename "$0"): --output option requires an argument" >&2
         exit 1
       fi
       OUTPUT_FILE="$2"
+      shift 2
+      ;;
+    -t | --duration | --time-limit)
+      if [ -z "${2:-}" ]; then
+        echo "$(basename "$0"): --duration option requires an argument" >&2
+        exit 1
+      fi
+      DURATION="$2"
       shift 2
       ;;
     --raw)
@@ -70,7 +81,10 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      break
+      if [ -z "$OUTPUT_FILE" ]; then
+        OUTPUT_FILE="$1"
+      fi
+      shift
       ;;
   esac
 done
@@ -84,27 +98,24 @@ require() {
 
 require adb
 
-# Check if device is available
-if [ "$(adb get-state 2>/dev/null)" != "device" ]; then
-  echo "$(basename "$0"): no device connected" >&2
+# Check if device is available and targetable
+if ! adb shell true >/dev/null 2>&1; then
+  echo "$(basename "$0"): error: no device connected, unauthorized, or multiple devices connected without ANDROID_SERIAL." >&2
   exit 1
 fi
 
 MANUFACTURER=$(adb exec-out getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
 BRAND=$(adb exec-out getprop ro.product.brand 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
 MODEL=$(adb exec-out getprop ro.product.model 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+CHARACTERISTICS=$(adb exec-out getprop ro.build.characteristics 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
 
 USE_RAW=0
 if [[ "$FORCE_RAW" == "1" ]]; then
   USE_RAW=1
 elif [[ "$FORCE_RAW" == "0" ]]; then
   USE_RAW=0
-elif [[ "$MANUFACTURER" == *"samsung"* || "$BRAND" == *"samsung"* || "$MODEL" == *"sm-"* || "$MODEL" == *"samsung"* ]]; then
+elif [[ "$MANUFACTURER" == *"samsung"* || "$BRAND" == *"samsung"* || "$MODEL" == *"sm-"* || "$MODEL" == *"samsung"* || "$CHARACTERISTICS" == *"watch"* || "$CHARACTERISTICS" == *"wear"* ]]; then
   USE_RAW=1
-fi
-
-if [ -n "${1:-}" ]; then
-  OUTPUT_FILE="$1"
 fi
 
 if [ -z "$OUTPUT_FILE" ]; then
@@ -114,18 +125,86 @@ fi
 adb exec-out log -p f -t screenrecord "screen recording to $OUTPUT_FILE"
 
 SHOW_TOUCHES="adb exec-out settings get system show_touches"
-# shellcheck disable=SC2064
-trap "$(printf 'adb exec-out settings put system show_touches %s' "$($SHOW_TOUCHES)")" EXIT
+TOUCH_ORIGINAL="$($SHOW_TOUCHES 2>/dev/null || echo 0)"
+adb exec-out settings put system show_touches 1 >/dev/null 2>&1 || true
 
-adb exec-out settings put system show_touches 1
+RECORD_PID=""
+REMOTE_TMP=""
 
-# Why a hybrid architecture?
-# Wear OS watches (e.g. Samsung Galaxy Watch) often lack hardware MP4
-# muxing support for standard scrcpy capture. Raw RGB streaming via
-# ffmpeg bypasses on-device encoder bugs and is 100% reliable on watches
-# where small screens keep USB bandwidth low (~120 Mbps). For phones and
-# tablets, standard scrcpy is used to prevent USB bandwidth saturation
-# (~3 GB/s for 1080p60) and reduce host CPU load.
+ensure_faststart() {
+  # Skip remux if raw capture already generated faststart headers directly
+  if [ "$USE_RAW" -eq 1 ]; then
+    return 0
+  fi
+
+  if command -v ffmpeg >/dev/null 2>&1 && [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
+    local tmp_fast="${OUTPUT_FILE}.fast.mp4"
+    if ffmpeg -y -i "$OUTPUT_FILE" -c:v copy -movflags +faststart "$tmp_fast" >/dev/null 2>&1; then
+      mv -f "$tmp_fast" "$OUTPUT_FILE"
+    else
+      rm -f "$tmp_fast"
+    fi
+  fi
+}
+
+cleanup() {
+  trap - EXIT INT TERM
+
+  # Explicitly terminate on-device streaming to force EOF on host pipeline
+  if [ "$USE_RAW" -eq 1 ]; then
+    adb shell killall -2 screenrecord >/dev/null 2>&1 || true
+  fi
+
+  if [ -n "$RECORD_PID" ] && kill -0 "$RECORD_PID" 2>/dev/null; then
+    kill -INT "$RECORD_PID" 2>/dev/null || true
+    wait "$RECORD_PID" 2>/dev/null || true
+  fi
+
+  if [ -n "$REMOTE_TMP" ]; then
+    local local_tmp
+    local_tmp="/tmp/adb_screenrecord_$(date +%s).mp4"
+    adb pull "$REMOTE_TMP" "$local_tmp" >/dev/null 2>&1 || true
+    adb shell rm -f "$REMOTE_TMP" >/dev/null 2>&1 || true
+    if [ -f "$local_tmp" ] && [ -s "$local_tmp" ]; then
+      mv -f "$local_tmp" "$OUTPUT_FILE"
+    fi
+  fi
+
+  adb exec-out settings put system show_touches "$TOUCH_ORIGINAL" >/dev/null 2>&1 || true
+  ensure_faststart
+}
+
+trap cleanup EXIT INT TERM
+
+# Note on Wear OS / Raw mode duration handling:
+# In raw frames mode (--output-format=raw-frames), Android's native screenrecord
+# binary ignores the --time-limit flag and streams frames indefinitely until SIGINT.
+# Furthermore, passing -t DURATION to ffmpeg stops ffmpeg from reading stdin after
+# DURATION seconds, but leaves the on-device adb exec-out screenrecord binary running
+# infinitely in the background holding the pipeline open.
+#
+# Wrapping raw capture with `timeout --foreground -s INT "${DURATION}s"` sends a SIGINT
+# signal directly to adb exec-out upon expiration, cleanly terminating the on-device
+# screenrecord binary. This causes ffmpeg to receive EOF on stdin, flush its H.264 video
+# encoder, relocate the moov atom for faststart web streaming, and exit cleanly with status 0.
+TIMEOUT_WRAPPER=()
+TIMEOUT_CMD=""
+
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="gtimeout"
+fi
+
+if [ -n "$DURATION" ] && [[ "$DURATION" =~ ^[0-9]+$ ]]; then
+  if [ -n "$TIMEOUT_CMD" ]; then
+    TIMEOUT_WRAPPER=("$TIMEOUT_CMD" "--foreground" "-s" "INT" "${DURATION}s")
+  elif [ "$USE_RAW" -eq 1 ]; then
+    echo "$(basename "$0"): error: 'timeout' command not found (install coreutils/gtimeout for macOS). Duration limits in raw mode are unsupported without it." >&2
+    exit 1
+  fi
+fi
+
 if [ "$USE_RAW" -eq 1 ]; then
   require ffmpeg
   echo "$(basename "$0"): note: using raw frame capture (ffmpeg) for device $MODEL ($BRAND/$MANUFACTURER)" >&2
@@ -134,14 +213,42 @@ if [ "$USE_RAW" -eq 1 ]; then
     SIZE="454x454"
   fi
   BITRATE=70M
-  adb exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - |
-    ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -vsync 0 -i - -an -c:v libx264 -pix_fmt yuv420p -y "$OUTPUT_FILE"
+
+  if [ ${#TIMEOUT_WRAPPER[@]} -gt 0 ]; then
+    "${TIMEOUT_WRAPPER[@]}" adb exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - |
+      ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -vsync 0 -i - -an -c:v libx264 -pix_fmt yuv420p -movflags +faststart -y "$OUTPUT_FILE" &
+  else
+    adb exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - |
+      ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -vsync 0 -i - -an -c:v libx264 -pix_fmt yuv420p -movflags +faststart -y "$OUTPUT_FILE" &
+  fi
+  RECORD_PID=$!
+  wait $RECORD_PID 2>/dev/null || true
+elif command -v scrcpy >/dev/null 2>&1; then
+  SCRCPY_FLAGS=("--no-audio" "--no-window" "-r" "$OUTPUT_FILE")
+  if [ -n "$DURATION" ]; then
+    SCRCPY_FLAGS+=("--time-limit=$DURATION")
+  fi
+  if [ ${#TIMEOUT_WRAPPER[@]} -gt 0 ]; then
+    "${TIMEOUT_WRAPPER[@]}" scrcpy "${SCRCPY_FLAGS[@]}" &
+  else
+    scrcpy "${SCRCPY_FLAGS[@]}" &
+  fi
+  RECORD_PID=$!
+  wait $RECORD_PID 2>/dev/null || true
 else
-  require scrcpy
-  # Trying to mux audio seems to lead scrcpy to create a broken MP4 on Ctrl-C, so
-  # disable via --no-audio
-  #
-  # May also need to disable -t (show touches) and -w (stay awake) on
-  # some devices.
-  scrcpy --no-audio --no-window -r "$OUTPUT_FILE"
+  echo "$(basename "$0"): note: scrcpy not found, falling back to native adb shell screenrecord" >&2
+  REMOTE_TMP="/sdcard/adb_screenrecord_$(date +%s).mp4"
+  REC_ARGS=()
+  if [ -n "$DURATION" ]; then
+    REC_ARGS+=("--time-limit" "$DURATION")
+  fi
+  if [ ${#TIMEOUT_WRAPPER[@]} -gt 0 ]; then
+    "${TIMEOUT_WRAPPER[@]}" adb shell screenrecord "${REC_ARGS[@]}" "$REMOTE_TMP" &
+  else
+    adb shell screenrecord "${REC_ARGS[@]}" "$REMOTE_TMP" &
+  fi
+  RECORD_PID=$!
+  wait $RECORD_PID 2>/dev/null || true
 fi
+
+cleanup
