@@ -252,8 +252,9 @@ function prune_brew_extras {
   fi
 
   if [ "$NON_INTERACTIVE" = 1 ]; then
-    echo "warning: --prune requested but running non-interactively; not removing:" >&2
+    echo "Removing unmanaged brew packages (--prune specified):" >&2
     echo "$indented" >&2
+    echo "$extras" | xargs -n 1 brew remove
     return 0
   fi
 
@@ -529,6 +530,9 @@ if exists brew; then
 
   heading "brew"
 
+  export HOMEBREW_NO_OUTDATED_FORMULAE_NOTIFIER=1
+  export HOMEBREW_NO_ENV_HINTS=1
+
   brew analytics off
 
   echo "Updating brew (this may prompt for Xcode license agreement)..."
@@ -539,7 +543,7 @@ if exists brew; then
   fi
 
   # The non-HEAD version is years old...
-  if ! brew leaves | grep -q jed; then
+  if ! brew list jed >/dev/null 2>&1; then
     x brew install jed --HEAD
   fi
 
@@ -562,7 +566,10 @@ if exists brew; then
 
   install_set=$(install_set_for_tier "$core" "$optional" "$full")
 
-  comm -13 <(brew leaves | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -n 1 brew install
+  to_install=$(comm -13 <(brew list --formula | sort) <(echo "$install_set" | tr ' ' '\n' | sort))
+  if [ -n "$to_install" ]; then
+    echo "$to_install" | xargs -n 1 brew install
+  fi
 
   # Special handling for imagemagick-full (needs manual linking due to conflicts)
   if brew list imagemagick-full >/dev/null 2>&1; then
@@ -571,14 +578,14 @@ if exists brew; then
     fi
   fi
 
-  # Upgrade all packages
-  brew upgrade --yes
+  # Upgrade all installed packages non-interactively
+  brew upgrade
 
   prune_brew_extras "$allowlist"
 
-  # Final cleanup of unused dependencies and cache
+  # Final cleanup of unused dependencies and installer caches from disk
   brew autoremove
-  brew cleanup
+  brew cleanup -s --prune=all
 
   # JDK: Temurin casks are installed below. They land in:
   #   /Library/Java/JavaVirtualMachines/temurin-*.jdk/Contents/Home
