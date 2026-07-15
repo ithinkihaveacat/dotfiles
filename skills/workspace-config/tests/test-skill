@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..69"
+echo "1..74"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -1526,4 +1526,200 @@ except SystemExit:
   echo "ok 69 - [Robustness] resolve_skill_spec converts a fetch_github() SystemExit into ValueError"
 else
   echo "not ok 69 - [Robustness] resolve_skill_spec let SystemExit escape or behaved unexpectedly: $out"
+fi
+
+# ==============================================================================
+# PART 14: Shared reconciliation planner (direct, in-process unit tests)
+#
+# doctor and apply now both consume build_reconcile_plan(). These tests
+# exercise the planner directly -- asserting on the returned ReconcilePlan
+# object rather than parsing CLI stderr -- so the desired-vs-actual comparison
+# and its destructive-action policy are covered without 1,400 lines of
+# subprocess-driven Bash. A tiny fake Workspace supplies the disk/VCS facts.
+# ==============================================================================
+
+# Runs a Python snippet ($1) with a common preamble: the skill module loaded as
+# 'm', a FakeWorkspace class, and a resolver mapping any name under
+# ${PLAN_SRC}/<name> to that directory (missing dirs raise, i.e. unresolvable).
+PLAN_SRC="${TMPDIR}/plan-sources"
+mkdir -p "${PLAN_SRC}/good/emumanager"
+run_plan() {
+  AGENT_REQUIRED_SKILLS="${2:-}" python3 -c "
+import importlib.machinery, importlib.util, os
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader('m', '${TEST_DIR}/../scripts/skill')
+spec = importlib.util.spec_from_loader('m', loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+
+PLAN_SRC = Path('${PLAN_SRC}')
+
+
+def fake_resolve(spec):
+    name = spec.split(':', 1)[-1]
+    p = PLAN_SRC / name
+    if not p.is_dir():
+        raise ValueError(f\"cannot resolve skill '{spec}'\")
+    return p, name
+
+
+m.resolve_skill_spec = fake_resolve
+m.check_env_freshness = lambda ws: None
+
+
+class FakeWorkspace:
+    def __init__(self, root, dests, expected, actual, tracked=()):
+        self.root = Path(root)
+        self._dests = [Path(d) for d in dests]
+        self._expected = list(expected)
+        self._actual = actual  # (set, unmanaged_list, dangling_list)
+        self._tracked = set(str(t) for t in tracked)
+
+    def get_expected_skills(self):
+        return self._expected
+
+    def get_dest_dirs(self):
+        return self._dests
+
+    def get_actual_skills(self):
+        s, u, d = self._actual
+        return set(s), list(u), list(d)
+
+    def is_tracked(self, path):
+        return str(path) in self._tracked
+
+$1
+"
+}
+
+# Test 70: a resolvable-but-not-linked spec is 'missing' (fixable); an
+# unresolvable one is kept out of 'missing', lands in 'unresolved', and blocks
+# destructive actions -- the exact split that made doctor/apply diverge.
+DEST70="${TMPDIR}/plan70"
+mkdir -p "$DEST70"
+out=$(run_plan "
+ws = FakeWorkspace('${DEST70}', ['${DEST70}'], ['good', 'nope'], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.missing == ['good']
+    and [r.spec for r in plan.unresolved] == ['nope']
+    and plan.destructive_blocked is True
+    and plan.has_fixable_findings() is True
+)
+print('OK' if ok else f'FAIL missing={plan.missing} unresolved={[r.spec for r in plan.unresolved]} blocked={plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 70 - [Planner] unresolvable spec is separated from missing and blocks pruning"
+else
+  echo "not ok 70 - [Planner] missing/unresolved split wrong: $out"
+fi
+
+# Test 71: an empty desired set produces no findings and does not block
+# destructive actions (the empty-AGENT_REQUIRED_SKILLS scenario).
+DEST71="${TMPDIR}/plan71"
+mkdir -p "$DEST71"
+out=$(run_plan "
+ws = FakeWorkspace('${DEST71}', ['${DEST71}'], [], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.missing == []
+    and plan.extra == []
+    and plan.destructive_blocked is False
+    and plan.has_fixable_findings() is False
+)
+print('OK' if ok else f'FAIL {plan.missing} {plan.extra} {plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 71 - [Planner] empty desired set is clean and unblocked"
+else
+  echo "not ok 71 - [Planner] empty desired set mishandled: $out"
+fi
+
+# Test 72: on-disk classification -- a live link to an undeclared target is
+# 'extra' (prunable), while broken links split into stray (prunable) vs
+# VCS-tracked (never touched). All three come from one disk scan.
+DEST72="${TMPDIR}/plan72"
+mkdir -p "$DEST72"
+ln -s "${PLAN_SRC}/good" "${DEST72}/extra-link"
+ln -s /nonexistent/x "${DEST72}/stray-broken"
+ln -s /nonexistent/y "${DEST72}/tracked-broken"
+out=$(run_plan "
+dest = Path('${DEST72}')
+actual = ({'extra-link'}, [], [dest / 'stray-broken', dest / 'tracked-broken'])
+ws = FakeWorkspace('${DEST72}', ['${DEST72}'], [], actual, tracked=[dest / 'tracked-broken'])
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.extra == ['extra-link']
+    and [p.name for p in plan.stray_dangling] == ['stray-broken']
+    and [p.name for p in plan.tracked_dangling] == ['tracked-broken']
+    and plan.prune_names == ['extra-link']
+)
+print('OK' if ok else f'FAIL extra={plan.extra} stray={[p.name for p in plan.stray_dangling]} tracked={[p.name for p in plan.tracked_dangling]}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 72 - [Planner] disk scan classifies extra, stray-dangling, and tracked-dangling"
+else
+  echo "not ok 72 - [Planner] disk classification wrong: $out"
+fi
+
+# Test 73: a live link whose basename matches a *resolved* spec but points at
+# the wrong target is a 'mismatched' finding, not 'extra' -- so apply re-links
+# it (via cmd_add) instead of the two disagreeing about deleting it.
+DEST73="${TMPDIR}/plan73"
+mkdir -p "$DEST73"
+mkdir -p "${TMPDIR}/plan73-wrong/good"
+ln -s "${TMPDIR}/plan73-wrong/good" "${DEST73}/good"
+out=$(run_plan "
+dest = Path('${DEST73}')
+actual = ({'good'}, [], [])
+ws = FakeWorkspace('${DEST73}', ['${DEST73}'], ['good'], actual)
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.extra == []
+    and len(plan.mismatched) == 1
+    and 'good' in plan.mismatched[0]
+    and plan.has_fixable_findings() is True
+)
+print('OK' if ok else f'FAIL extra={plan.extra} mismatched={plan.mismatched}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 73 - [Planner] wrong-target link matching a resolved spec is mismatched, not extra"
+else
+  echo "not ok 73 - [Planner] mismatch vs extra classification wrong: $out"
+fi
+
+# Test 74: a link that differs only in case from a resolved spec's canonical
+# basename must be classified per the destination filesystem's own case rules,
+# not by lowercasing. On a case-sensitive filesystem 'Good' and canonical
+# 'good' are distinct entries, so 'Good' is a genuine extra apply prunes; on a
+# case-insensitive one they are the same entry (a mismatch cmd_add re-links).
+# Lowercasing collapsed both to "not extra", leaking the undeclared link on
+# case-sensitive filesystems while the recomputed plan reported convergence.
+DEST74="${TMPDIR}/plan74"
+mkdir -p "$DEST74"
+ln -s "${TMPDIR}/plan74-wrong/good" "${DEST74}/Good"
+out=$(run_plan "
+import os
+dest = Path('${DEST74}')
+actual = ({'Good'}, [], [])
+ws = FakeWorkspace('${DEST74}', ['${DEST74}'], ['good'], actual)
+plan = m.build_reconcile_plan(ws)
+# Probe this filesystem's case semantics via the flipped-case sibling of the
+# existing 'Good' link, so the assertion is correct on Linux and macOS alike.
+try:
+    os.lstat(dest / 'good')
+    insensitive = True
+except OSError:
+    insensitive = False
+if insensitive:
+    ok = plan.extra == []  # same entry as canonical 'good' -> a mismatch
+else:
+    ok = plan.extra == ['Good']  # distinct undeclared entry -> extra
+print('OK' if ok else f'FAIL insensitive={insensitive} extra={plan.extra} mismatched={plan.mismatched}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 74 - [Planner] case-variant link classified by filesystem case rules, not lowercase"
+else
+  echo "not ok 74 - [Planner] case-variant classification wrong: $out"
 fi
