@@ -592,7 +592,7 @@ if exists brew; then
   fi
 
   # Upgrade all installed packages non-interactively
-  brew upgrade
+  brew upgrade --no-ask
 
   prune_brew_extras "$allowlist"
 
