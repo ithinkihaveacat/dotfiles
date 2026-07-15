@@ -1,5 +1,24 @@
 # TODO
 
+## Verify adb-screenrecord duration fix and web streaming (2026-07-15)
+
+**Goal:** Verify and regression-test the `adb-screenrecord` reliability and
+faststart streaming improvements committed in `e01fb6c` across Wear OS watches
+(Pixel Watch 3) and mobile devices.
+
+**Criteria:** Executing `adb-screenrecord --duration N` on Wear OS
+auto-terminates within N seconds, outputs a valid MP4 with faststart `moov`
+header placed at the beginning of the container (verified via `ffprobe`), leaves
+zero orphaned `screenrecord` background processes on-device, and passes
+`scripts/shell-format` cleanly.
+
+**Sketch:** Reference commit
+[`e01fb6ce2cfdf091aac6c4d5a2507202c73b7c03`](https://github.com/stillers/dotfiles/commit/e01fb6ce2cfdf091aac6c4d5a2507202c73b7c03)
+(`e01fb6c`) in `skills/adb/scripts/adb-screenrecord`. Test signal handling
+(`timeout --foreground -s INT`), on-device cleanup
+(`adb shell killall -2 screenrecord`), `ensure_faststart()` remux bypass for raw
+capture, and macOS `gtimeout` fallback detection.
+
 ## Clarify remediation choices in skill preflight and doctor error messages (2026-07-15)
 
 **Problem:** In `skill preflight` and `skill doctor` error reports (such as
