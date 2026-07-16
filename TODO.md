@@ -1,6 +1,6 @@
 # TODO
 
-## Verify adb-screenrecord duration fix and scrcpy fallback prompting (2026-07-15)
+## Verify adb-screenrecord duration fix and scrcpy fallback prompting (2026-07-15) — done
 
 **Goal:** Re-evaluate device mode selection in `adb-screenrecord` to prefer
 `scrcpy` for non-Samsung Wear OS devices (like Pixel Watch 3) rather than

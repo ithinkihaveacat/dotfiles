@@ -107,14 +107,12 @@ fi
 MANUFACTURER=$(adb exec-out getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
 BRAND=$(adb exec-out getprop ro.product.brand 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
 MODEL=$(adb exec-out getprop ro.product.model 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
-CHARACTERISTICS=$(adb exec-out getprop ro.build.characteristics 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
-
 USE_RAW=0
 if [[ "$FORCE_RAW" == "1" ]]; then
   USE_RAW=1
 elif [[ "$FORCE_RAW" == "0" ]]; then
   USE_RAW=0
-elif [[ "$MANUFACTURER" == *"samsung"* || "$BRAND" == *"samsung"* || "$MODEL" == *"sm-"* || "$MODEL" == *"samsung"* || "$CHARACTERISTICS" == *"watch"* || "$CHARACTERISTICS" == *"wear"* ]]; then
+elif [[ "$MANUFACTURER" == *"samsung"* || "$BRAND" == *"samsung"* || "$MODEL" == *"sm-"* || "$MODEL" == *"samsung"* ]]; then
   USE_RAW=1
 fi
 
@@ -124,12 +122,16 @@ fi
 
 adb exec-out log -p f -t screenrecord "screen recording to $OUTPUT_FILE"
 
+# Wake display and pause briefly to allow SurfaceFlinger to transition from doze/off
+# to active, preventing UNASSIGNED_LAYER_STACK errors on sleeping Wear OS displays.
+adb exec-out input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+sleep 0.5
+
 SHOW_TOUCHES="adb exec-out settings get system show_touches"
 TOUCH_ORIGINAL="$($SHOW_TOUCHES 2>/dev/null || echo 0)"
 adb exec-out settings put system show_touches 1 >/dev/null 2>&1 || true
 
 RECORD_PID=""
-REMOTE_TMP=""
 
 ensure_faststart() {
   # Skip remux if raw capture already generated faststart headers directly
@@ -150,27 +152,48 @@ ensure_faststart() {
 cleanup() {
   trap - EXIT INT TERM
 
-  # Explicitly terminate on-device streaming to force EOF on host pipeline
+  local adb_timeout=()
+  if [ -n "$TIMEOUT_CMD" ]; then
+    adb_timeout=("$TIMEOUT_CMD" "--foreground" "2s")
+  fi
+
+  # Terminate on-device capture/server processes to unblock host ADB sockets;
+  # scrcpy blocks in waitpid() for its on-device server, so killing the server
+  # allows scrcpy to exit waitpid() and finalize the MP4 header/moov atom.
   if [ "$USE_RAW" -eq 1 ]; then
-    adb shell killall -2 screenrecord >/dev/null 2>&1 || true
+    "${adb_timeout[@]}" adb shell killall -2 screenrecord >/dev/null 2>&1 || true
+  else
+    "${adb_timeout[@]}" adb shell pkill -f scrcpy >/dev/null 2>&1 || true
   fi
 
+  # Gracefully terminate host recording process (scrcpy or ffmpeg pipeline) and wait for clean exit
   if [ -n "$RECORD_PID" ] && kill -0 "$RECORD_PID" 2>/dev/null; then
-    kill -INT "$RECORD_PID" 2>/dev/null || true
-    wait "$RECORD_PID" 2>/dev/null || true
-  fi
+    # In scrcpy mode, send SIGINT to trigger scrcpy_recorder_close().
+    # In raw mode, closing on-device screenrecord propagates EOF to ffmpeg naturally;
+    # sending SIGINT to ffmpeg concurrently can disrupt its clean EOF trailer flush.
+    if [ "$USE_RAW" -eq 0 ]; then
+      kill -INT "$RECORD_PID" 2>/dev/null || true
+    fi
 
-  if [ -n "$REMOTE_TMP" ]; then
-    local local_tmp
-    local_tmp="/tmp/adb_screenrecord_$(date +%s).mp4"
-    adb pull "$REMOTE_TMP" "$local_tmp" >/dev/null 2>&1 || true
-    adb shell rm -f "$REMOTE_TMP" >/dev/null 2>&1 || true
-    if [ -f "$local_tmp" ] && [ -s "$local_tmp" ]; then
-      mv -f "$local_tmp" "$OUTPUT_FILE"
+    local count=0
+    while kill -0 "$RECORD_PID" 2>/dev/null && [ $count -lt 30 ]; do
+      sleep 0.1
+      count=$((count + 1))
+    done
+
+    # Allow up to 3 seconds for the recording process to flush MP4 headers before
+    # escalating to SIGTERM/SIGKILL, preventing truncated/corrupted MP4 files.
+    if kill -0 "$RECORD_PID" 2>/dev/null; then
+      kill -TERM "$RECORD_PID" 2>/dev/null || true
+      sleep 0.5
+      if kill -0 "$RECORD_PID" 2>/dev/null; then
+        kill -KILL "$RECORD_PID" 2>/dev/null || true
+        wait "$RECORD_PID" 2>/dev/null || true
+      fi
     fi
   fi
 
-  adb exec-out settings put system show_touches "$TOUCH_ORIGINAL" >/dev/null 2>&1 || true
+  "${adb_timeout[@]}" adb exec-out settings put system show_touches "$TOUCH_ORIGINAL" >/dev/null 2>&1 || true
   ensure_faststart
 }
 
@@ -236,19 +259,8 @@ elif command -v scrcpy >/dev/null 2>&1; then
   RECORD_PID=$!
   wait $RECORD_PID 2>/dev/null || true
 else
-  echo "$(basename "$0"): note: scrcpy not found, falling back to native adb shell screenrecord" >&2
-  REMOTE_TMP="/sdcard/adb_screenrecord_$(date +%s).mp4"
-  REC_ARGS=()
-  if [ -n "$DURATION" ]; then
-    REC_ARGS+=("--time-limit" "$DURATION")
-  fi
-  if [ ${#TIMEOUT_WRAPPER[@]} -gt 0 ]; then
-    "${TIMEOUT_WRAPPER[@]}" adb shell screenrecord "${REC_ARGS[@]}" "$REMOTE_TMP" &
-  else
-    adb shell screenrecord "${REC_ARGS[@]}" "$REMOTE_TMP" &
-  fi
-  RECORD_PID=$!
-  wait $RECORD_PID 2>/dev/null || true
+  echo "$(basename "$0"): error: scrcpy not found. Please install scrcpy (e.g. 'brew install scrcpy') for optimal screen recording on non-Samsung devices ($MODEL)." >&2
+  exit 1
 fi
 
 cleanup
