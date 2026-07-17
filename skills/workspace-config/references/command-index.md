@@ -118,7 +118,6 @@ Commands:
   catalog                  List available configuration types
 
 Types:
-  git-identity-beebo       Adds Git author identity variables
   node [VERSION]           Adds Node.js direnv layout (default version: 24)
   ruby [VERSION]           Adds Ruby direnv layout (default version: 3.4)
   uv                       Adds Python uv direnv layout
@@ -129,7 +128,6 @@ Types:
                            stdin
 
 Examples:
-  envrc create git-identity-beebo
   envrc create node 22
   envrc create uv
   envrc add skills adb jetpack
