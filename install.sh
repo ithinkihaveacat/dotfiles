@@ -568,7 +568,7 @@ if exists brew; then
   # Known packages, so they are kept (not flagged) when present on a core run.
   # ruby-build compiles Ruby for ruby-install/direnv; brew pulls its build deps
   # (openssl, libyaml, readline) automatically.
-  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf pwgen ruby-build"
+  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf pwgen ruby-build rust rustup wasm-bindgen"
   # Full packages: installed only with --install-all. Heaviest or least-used
   # extras; add to this list as needed.
   full=""
