@@ -10,9 +10,14 @@ function fish_right_prompt --description 'Write out the right prompt'
             set -l toplevel (git rev-parse --show-toplevel 2>/dev/null)
             if test -n "$toplevel"
                 set -l prefix ""
-                # Sparkle when skills are managed.
-                if _skill_is_managed "$toplevel"
-                    set prefix "✨ "
+                # Fast path: Check env variables first
+                set -l resolved_email $GIT_AUTHOR_EMAIL
+                if test -z "$resolved_email"
+                    # Fallback to git config
+                    set resolved_email (command git config user.email 2>/dev/null)
+                end
+                if test -n "$resolved_email"; and test "$resolved_email" != "mjs@beebo.org"
+                    set prefix "💼 "
                 end
 
                 set_color yellow

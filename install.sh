@@ -626,7 +626,7 @@ if [ "$PLATFORM" = "linux" ]; then
     # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
     # ruby-build binary itself is bootstrapped from git below, as the apt package
     # is too old to build current Ruby). rustc (YJIT) is omitted to stay lean.
-    optional="pv entr fzf pwgen build-essential autoconf libssl-dev libyaml-dev libreadline-dev zlib1g-dev libffi-dev libgmp-dev libncurses-dev libgdbm-dev"
+    optional="pv entr fzf pwgen build-essential autoconf libssl-dev libyaml-dev libreadline-dev zlib1g-dev libffi-dev libgmp-dev libncurses-dev libgdbm-dev gh"
     # Full packages: installed only with --install-all.
     full=""
 
