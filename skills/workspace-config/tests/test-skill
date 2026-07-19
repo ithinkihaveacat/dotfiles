@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..78"
+echo "1..81"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -723,7 +723,9 @@ if doctor_fail_out=$("${SCRIPT}" doctor 2>&1); then
   echo "not ok 41 - [Doctor UI] doctor succeeded unexpectedly in unhealthy workspace"
 else
   if printf '%s\n' "$doctor_fail_out" | grep -q "\[ERROR\] Required Skills:" &&
-    printf '%s\n' "$doctor_fail_out" | grep -q "To resolve:"; then
+    printf '%s\n' "$doctor_fail_out" | grep -q "To resolve:" &&
+    printf '%s\n' "$doctor_fail_out" | grep -q "If the declared skill set (AGENT_REQUIRED_SKILLS) is correct" &&
+    printf '%s\n' "$doctor_fail_out" | grep -q "skill apply"; then
     echo "ok 41 - [Doctor UI] failure outputs failing checks and resolution steps"
   else
     echo "not ok 41 - [Doctor UI] failure report missing checks or resolution header: $doctor_fail_out"
@@ -839,7 +841,10 @@ else
   if printf '%s\n' "$doctor_out" | grep -q "Stale excluded skills (linked on disk but explicitly negated in env):" &&
     printf '%s\n' "$doctor_out" | grep -q "  - emumanager" &&
     ! printf '%s\n' "$doctor_out" | grep -q "export AGENT_REQUIRED_SKILLS.*emumanager" &&
-    printf '%s\n' "$doctor_out" | grep -q "run 'git-setup' or 'skill apply'"; then
+    ! printf '%s\n' "$doctor_out" | grep -q "If the skills on disk are correct" &&
+    printf '%s\n' "$doctor_out" | grep -q "deletes the 1 extra/stale symlink(s) from disk" &&
+    printf '%s\n' "$doctor_out" | grep -q "skill apply" &&
+    printf '%s\n' "$doctor_out" | grep -q "skill remove emumanager"; then
 
     # Run apply to prune the stale symlink
     if "${SCRIPT}" apply >/dev/null 2>&1; then
@@ -1384,7 +1389,7 @@ if [ "$doctor_rc" -ne 0 ] &&
   [ "$doctor2_rc" -ne 0 ] &&
   printf '%s\n' "$doctor2_out" | grep -q "Unresolvable skills" &&
   ! printf '%s\n' "$doctor2_out" | grep -q "Missing skills (declared but not linked on disk):" &&
-  ! printf '%s\n' "$doctor2_out" | grep -q "run 'git-setup' or 'skill apply' to synchronize"; then
+  ! printf '%s\n' "$doctor2_out" | grep -q "If the declared skill set"; then
   echo "ok 65 - [Doctor] unresolvable declared spec reported separately from missing, with different remediation"
 else
   echo "not ok 65 - [Doctor] unresolvable spec not distinguished correctly: $doctor_out"
@@ -1823,4 +1828,91 @@ if [ -L .claude/skills/unresolvable-remote ]; then
 else
   echo "not ok 78 - [Remove] unresolvable remote spec remove failed unexpectedly"
 fi
+cd "$TMPDIR"
+
+# ==============================================================================
+# PART 16: Intent-Grouped Remediation Hints
+# ==============================================================================
+# The remediation hints for extra/missing/mismatched skills honor different
+# sources of truth: 'skill apply' treats AGENT_REQUIRED_SKILLS as
+# authoritative and deletes extra symlinks, while declaring the extras keeps
+# them. Doctor must group the commands under intent-based headers so the user
+# picks by which state they consider correct.
+
+# Test 79: extra skill hints are grouped by intent (plain environment variable)
+EXTRA_HINT_DIR="${TMPDIR}/extra-hint"
+mkdir -p "$EXTRA_HINT_DIR"
+cd "$EXTRA_HINT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+ln -s "${TMPDIR}/sources/emumanager" .claude/skills/emumanager
+ln -s "${TMPDIR}/sources/emumanager" .agents/skills/emumanager
+if doctor_out=$(env -u DIRENV_DIR "${SCRIPT}" doctor 2>&1); then
+  echo "not ok 79 - [Hints] doctor should have failed with an extra skill"
+else
+  # shellcheck disable=SC2016  # the literal '$AGENT_REQUIRED_SKILLS' text is the expected hint
+  if printf '%s\n' "$doctor_out" | grep -q "Extra skills (linked on disk but not declared):" &&
+    printf '%s\n' "$doctor_out" | grep -q "To resolve: pick the fix for whichever side -- declared or on-disk -- you consider correct." &&
+    printf '%s\n' "$doctor_out" | grep -q "If the declared skill set (AGENT_REQUIRED_SKILLS) is correct" &&
+    printf '%s\n' "$doctor_out" | grep -q "deletes the 1 extra/stale symlink(s) from disk" &&
+    printf '%s\n' "$doctor_out" | grep -q "skill apply" &&
+    printf '%s\n' "$doctor_out" | grep -q "If the skills on disk are correct" &&
+    printf '%s\n' "$doctor_out" | grep -q "keeps the symlinks" &&
+    printf '%s\n' "$doctor_out" | grep -qF 'export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS emumanager"' &&
+    printf '%s\n' "$doctor_out" | grep -q "skill remove emumanager"; then
+    echo "ok 79 - [Hints] extra-skill remediation is grouped by source-of-truth intent"
+  else
+    echo "not ok 79 - [Hints] extra-skill remediation missing intent grouping: $doctor_out"
+  fi
+fi
+
+# Test 80: with an .envrc present, the disk-is-correct path suggests
+# 'envrc add skills' (not a raw export) and still warns apply deletes extras
+touch .envrc
+if doctor_out=$(env -u DIRENV_DIR "${SCRIPT}" doctor 2>&1); then
+  echo "not ok 80 - [Hints] doctor should have failed with an extra skill (.envrc)"
+else
+  # shellcheck disable=SC2016  # the literal '$AGENT_REQUIRED_SKILLS' text is the expected hint
+  if printf '%s\n' "$doctor_out" | grep -q "If the skills on disk are correct" &&
+    printf '%s\n' "$doctor_out" | grep -q "updates .envrc" &&
+    printf '%s\n' "$doctor_out" | grep -q "envrc add skills emumanager" &&
+    ! printf '%s\n' "$doctor_out" | grep -qF 'export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS emumanager"' &&
+    printf '%s\n' "$doctor_out" | grep -q "deletes the 1 extra/stale symlink(s) from disk"; then
+    echo "ok 80 - [Hints] envrc workspace suggests 'envrc add skills' for the disk-is-correct path"
+  else
+    echo "not ok 80 - [Hints] envrc variant hint wrong: $doctor_out"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 81: when the destructive-action policy blocks pruning (a declared spec
+# is unresolvable), the environment-is-correct hint must not promise that
+# 'skill apply' deletes the extras -- it won't. Doctor notes the hold instead.
+BLOCKED_HINT_DIR="${TMPDIR}/blocked-hint"
+mkdir -p "$BLOCKED_HINT_DIR"
+cd "$BLOCKED_HINT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${TMPDIR}/sources/coding-standards" .claude/skills/coding-standards
+ln -s "${TMPDIR}/sources/coding-standards" .agents/skills/coding-standards
+ln -s "${TMPDIR}/sources/emumanager" .claude/skills/emumanager
+ln -s "${TMPDIR}/sources/emumanager" .agents/skills/emumanager
+export AGENT_REQUIRED_SKILLS="coding-standards totally-bogus-unresolvable-skill"
+if doctor_out=$(env -u DIRENV_DIR "${SCRIPT}" doctor 2>&1); then
+  echo "not ok 81 - [Hints] doctor should have failed with extra + unresolvable"
+else
+  if ! printf '%s\n' "$doctor_out" | grep -q "If the declared skill set" &&
+    ! printf '%s\n' "$doctor_out" | grep -q "deletes the 1 extra/stale symlink(s)" &&
+    printf '%s\n' "$doctor_out" | grep -q "If the skills on disk are correct" &&
+    printf '%s\n' "$doctor_out" | grep -q "skill remove emumanager" &&
+    printf '%s\n' "$doctor_out" | grep -q "Note: 'skill apply' will not delete the extra/stale symlink(s) while a declared spec is unresolvable."; then
+    echo "ok 81 - [Hints] blocked prune is not promised as an apply effect and is noted"
+  else
+    echo "not ok 81 - [Hints] blocked-prune hint wrong: $doctor_out"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
 cd "$TMPDIR"

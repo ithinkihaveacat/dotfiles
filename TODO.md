@@ -19,37 +19,28 @@ Duration limit signal handling and faststart headers remain verified.
 is missing on a non-Samsung device, print a clear error/prompt advising the user
 to install `scrcpy` for optimal performance.
 
-## Clarify remediation choices in skill preflight and doctor error messages (2026-07-15)
+## Clarify remediation choices in skill preflight and doctor error messages (2026-07-15) — done
 
-**Problem:** In `skill preflight` and `skill doctor` error reports (such as
-mismatched or extra skill warnings), remediation hints list multiple commands
-(e.g., `export AGENT_REQUIRED_SKILLS=...`, `skill remove ...`, `skill apply`)
-without explaining which source of truth each command honors or what state it
-overwrites. For example, when extra skills exist on disk, `skill apply` will
-prune the disk symlinks (treating `AGENT_REQUIRED_SKILLS` as authoritative),
-whereas adding to `AGENT_REQUIRED_SKILLS` preserves the disk symlinks. The
-current output does not distinguish between these choices based on user intent.
-
-**Goal:** Restructure remediation hints in `skill doctor` and `skill preflight`
-failure reports to explicitly distinguish between resolution paths based on
-which source of truth (disk vs. environment) the user considers correct.
-
-**Criteria:** When reporting extra, missing, or mismatched skills, preflight and
-doctor hints clearly group commands under intent-based headers (e.g., "If the
-skills on disk are correct: ...", "If your environment variable is correct (will
-prune extra symlinks): ..."), and test assertions in `test-skill` verify the new
-hint output shape.
-
-**Sketch:** Update the finding formatting functions in
-`skills/workspace-config/scripts/skill` (such as `cmd_doctor` finding
-formatters) to categorize remediation actions by user intent and source
-authority:
-
-- *Disk is authoritative:* Recommend `envrc add skills <names>` or
-  `export AGENT_REQUIRED_SKILLS=...`.
-- *Environment is authoritative:* Recommend `skill apply`, explicitly noting
-  that extra symlinks will be unlinked.
-- *Manual removal:* Recommend `skill remove <names>`.
+Restructured the "Required Skills" remediation hints in `cmd_doctor` (shared by
+`skill doctor` and `skill preflight`) in
+`skills/workspace-config/scripts/skill` to group commands by which source of
+truth the user considers correct, instead of listing commands without
+explaining what state each overwrites. The hints now open with "To resolve:
+pick the fix for whichever side -- declared or on-disk -- you consider
+correct." followed by intent-based paths: *environment is authoritative* —
+`skill apply`, with its concrete effects spelled out per finding (creates
+missing symlinks, re-links mismatched ones, and explicitly "deletes the N
+extra/stale symlink(s) from disk"); *disk is authoritative* —
+`envrc add skills <names>` (or the raw `export AGENT_REQUIRED_SKILLS=...`
+variant when not using `.envrc`), noted as keeping the symlinks; *manual
+removal* — `skill remove <names>`. When the plan's destructive-action policy
+blocks pruning (stale environment or an unresolvable declared spec), the
+apply hint no longer promises deletion; a note explains why apply will hold
+off. Negated (excluded) skills are never suggested for re-declaration. Tests
+41/42/45/65 updated and new tests 79–81 in
+`skills/workspace-config/tests/test-skill` assert the intent-grouped hint
+shape, the `.envrc` vs. export variants, and the blocked-prune wording
+(suite now 81 cases, all passing).
 
 ## Unify skill doctor/apply behind a shared reconciliation planner (2026-07-14) — done
 
