@@ -163,8 +163,8 @@ configurations co-exist safely and other tools never edit `.envrc` directly.
 
 - **`create <type> [args...]`** / **`delete <type>`** / **`show <type>`**:
   Create, delete, or print a typed block (`node`, `ruby`, `uv`, `firebase`,
-  `appengine`, `git-identity-beebo`, `skills`, or a raw `block NAME` whose
-  content is read from stdin).
+  `appengine`, `skills`, or a raw `block NAME` whose content is read from
+  stdin).
 - **`add skills NAME...`** / **`remove skills NAME...`** / **`list [skills]`**:
   Edit the workspace's required-skills declaration item-by-item (see section 1).
 - **`set VAR VALUE`** / **`unset VAR`** / **`get VAR`**: Manage individual

@@ -64,7 +64,7 @@ end
 
 # Helper function: list available types
 function __fish_envrc_types
-    echo -e "git-identity-beebo\nnode\nruby\nuv\nfirebase\nappengine\nskills\nblock"
+    echo -e "node\nruby\nuv\nfirebase\nappengine\nskills\nblock"
 end
 
 # Helper function: list local Node.js versions
