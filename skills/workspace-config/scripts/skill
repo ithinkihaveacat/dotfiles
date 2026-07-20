@@ -1039,6 +1039,7 @@ class ReconcilePlan:
         freshness,
         stale,
         destructive_blocked,
+        collisions=None,
     ):
         self.ws = ws
         self.dest_dirs = dest_dirs  # [] when no agent destination is configured
@@ -1056,6 +1057,7 @@ class ReconcilePlan:
         self.freshness = freshness  # check_env_freshness() result or None
         self.stale = stale  # environment is a stale cache of .envrc
         self.destructive_blocked = destructive_blocked  # unlink is unsafe now
+        self.collisions = collisions or []  # conflicting declared skill specs
 
     @property
     def unresolved(self) -> list:
@@ -1144,6 +1146,21 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
     for r in resolved:
         if r.resolved:
             expected_targets[r.source_path] = r.spec
+
+    # Detect destination basename collisions among declared resolved specs
+    link_name_map: dict = {}
+    collisions: list = []
+    for r in resolved:
+        if not r.resolved:
+            continue
+        if r.link_name in link_name_map:
+            prev = link_name_map[r.link_name]
+            if prev.source_path != r.source_path:
+                label = f"'{r.spec}' and '{prev.spec}' both target symlink basename '{r.link_name}'"
+                if label not in collisions:
+                    collisions.append(label)
+        else:
+            link_name_map[r.link_name] = r
     # Link basenames a resolved spec will (re)create via cmd_add. A wrong-target
     # link that cmd_add overwrites in place is a mismatch it re-links, not an
     # extra to prune -- excluding it here is what lets doctor report it under
@@ -1264,7 +1281,9 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
     # the dangling prune, which is always safe.
     freshness = check_env_freshness(ws)
     stale = freshness is not None and bool(freshness[0] or freshness[1])
-    destructive_blocked = stale or any(not r.resolved for r in resolved)
+    destructive_blocked = (
+        stale or any(not r.resolved for r in resolved) or bool(collisions)
+    )
 
     return ReconcilePlan(
         ws=ws,
@@ -1283,6 +1302,7 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
         freshness=freshness,
         stale=stale,
         destructive_blocked=destructive_blocked,
+        collisions=collisions,
     )
 
 
@@ -1313,11 +1333,28 @@ def cmd_add(specs, is_apply=False):
     for spec in specs:
         try:
             src_path, name = resolve_skill_spec(spec)
-            resolved_skills.append((src_path, name))
+            resolved_skills.append((src_path, name, spec))
         except Exception as e:
             print(f"skill: error: failed to resolve '{spec}': {e}", file=sys.stderr)
             has_errors = True
             continue
+
+    # Atomicity: Detect basename collisions and deduplicate identical targets BEFORE mutating disk
+    link_map: dict = {}
+    deduped_skills = []
+    for src, name, spec in resolved_skills:
+        link_name = src.name
+        if link_name in link_map:
+            prev_src, prev_spec = link_map[link_name]
+            if prev_src != src:
+                cmderr(
+                    "add",
+                    f"conflict: '{spec}' and '{prev_spec}' both target symlink basename '{link_name}' but resolve to different source paths",
+                )
+            continue
+        link_map[link_name] = (src, spec)
+        deduped_skills.append((src, name))
+    resolved_skills = deduped_skills
 
     # Check for conflicts across all destinations first
     for src, name in resolved_skills:
@@ -1735,6 +1772,15 @@ def cmd_apply(args):
     # plan read-only, so any condition doctor reports is one apply acts on here.
     plan = build_reconcile_plan(ws)
     expected_skills = plan.expected_skills
+
+    if plan.collisions:
+        print(
+            "skill: error: conflicting skill declarations in AGENT_REQUIRED_SKILLS:",
+            file=sys.stderr,
+        )
+        for c in plan.collisions:
+            print(f"  - {c}", file=sys.stderr)
+        sys.exit(1)
 
     # Prune dangling symlinks (their target no longer exists) unconditionally,
     # even when AGENT_REQUIRED_SKILLS is empty: a broken link is never a
@@ -2472,8 +2518,15 @@ def cmd_doctor(
     mismatched_target = plan.mismatched
     extra = plan.extra
     negated_extra = plan.negated_extra
+    collisions = plan.collisions
 
     skill_details = []
+    if collisions:
+        skill_details.append(
+            "Conflicting skills (multiple declarations target the same symlink basename):"
+        )
+        for s in collisions:
+            skill_details.append(f"  - {s}")
     if missing:
         skill_details.append("Missing skills (declared but not linked on disk):")
         for s in missing:
@@ -2503,8 +2556,17 @@ def cmd_doctor(
         for s in extra:
             skill_details.append(f"  - {s}")
 
-    if missing or unresolvable or mismatched_target or extra or negated_extra:
+    if (
+        missing
+        or unresolvable
+        or mismatched_target
+        or extra
+        or negated_extra
+        or collisions
+    ):
         parts = []
+        if collisions:
+            parts.append(f"{len(collisions)} conflicting")
         if missing:
             parts.append(f"{len(missing)} missing")
         if unresolvable:
@@ -2931,6 +2993,20 @@ def cmd_doctor(
                 else:
                     check["details"].append(
                         "  # remove them from the AGENT_REQUIRED_SKILLS environment variable"
+                    )
+            if collisions:
+                check["details"].append(
+                    "To resolve: 'skill apply' cannot fix this -- multiple declared "
+                    "skills map to the same symlink basename but different targets. "
+                    "You must remove the conflicting declaration(s) from .envrc:"
+                )
+                if is_using_envrc(ws):
+                    check["details"].append(
+                        "  # run 'envrc remove skills <spec>' for the unwanted declaration"
+                    )
+                else:
+                    check["details"].append(
+                        "  # remove the unwanted declaration from the AGENT_REQUIRED_SKILLS environment variable"
                     )
             if prune_names and plan.destructive_blocked:
                 check["details"].append(

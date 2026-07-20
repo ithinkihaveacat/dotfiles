@@ -6,7 +6,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..81"
+echo "1..85"
 
 # Need a temporary directory for workspace simulations
 TMPDIR=$(mktemp -d)
@@ -1915,4 +1915,110 @@ else
   fi
 fi
 export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# ==============================================================================
+# PART 17: Destination Symlink Basename Collision & Atomicity
+# ==============================================================================
+
+# Test 82: Planner detects declared skill spec collisions targeting different source paths
+PLAN_SRC_ALT="${TMPDIR}/plan-sources-alt"
+mkdir -p "${PLAN_SRC_ALT}/good"
+out=$(run_plan "
+def fake_resolve_alt(spec):
+    if spec.startswith('alt:'):
+        name = spec.split(':', 1)[-1]
+        return Path('${PLAN_SRC_ALT}') / name, name
+    name = spec.split(':', 1)[-1]
+    return PLAN_SRC / 'good', name
+
+m.resolve_skill_spec = fake_resolve_alt
+dest = Path('${TMPDIR}/plan82')
+dest.mkdir(exist_ok=True)
+ws = FakeWorkspace(dest, [dest], ['good', 'alt:good'], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    len(plan.collisions) == 1
+    and plan.destructive_blocked is True
+    and plan.has_fixable_findings() is True
+)
+print('OK' if ok else f'FAIL collisions={plan.collisions} blocked={plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 82 - [Planner] detects declared skill spec collisions targeting different paths"
+else
+  echo "not ok 82 - [Planner] collision detection failed: $out"
+fi
+
+# Test 83: Planner silently deduplicates specs resolving to the exact same source path
+out=$(run_plan "
+def fake_resolve_same(spec):
+    name = spec.split(':', 1)[-1]
+    return PLAN_SRC / 'good', name
+
+m.resolve_skill_spec = fake_resolve_same
+dest = Path('${TMPDIR}/plan83')
+dest.mkdir(exist_ok=True)
+ws = FakeWorkspace(dest, [dest], ['good', 'local:good'], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    len(plan.collisions) == 0
+    and plan.destructive_blocked is False
+)
+print('OK' if ok else f'FAIL collisions={plan.collisions} blocked={plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 83 - [Planner] deduplicates specs resolving to the exact same source path"
+else
+  echo "not ok 83 - [Planner] identical target deduplication failed: $out"
+fi
+
+# Test 84: 'add' aborts atomically without mutating disk on conflicting specs
+mkdir -p "${PLAN_SRC_ALT}/emumanager"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_alt_emumanager.py"
+def register(api):
+    api.register_skill("alt:emumanager", {"path": "${PLAN_SRC_ALT}/emumanager"})
+EOF
+"${SCRIPT}" update --catalog >/dev/null 2>&1 || true
+
+ADD_CONFLICT_DIR="${TMPDIR}/add-conflict"
+mkdir -p "$ADD_CONFLICT_DIR"
+cd "$ADD_CONFLICT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+
+if add_out=$("${SCRIPT}" add local:emumanager alt:emumanager 2>&1); then
+  echo "not ok 84 - [Add] add should have failed on conflicting specs"
+else
+  if printf '%s\n' "$add_out" | grep -q "conflict:" && [ ! -e .agents/skills/emumanager ]; then
+    echo "ok 84 - [Add] add aborts atomically without mutating disk on conflicting specs"
+  else
+    echo "not ok 84 - [Add] conflict error message or disk state wrong: $add_out"
+  fi
+fi
+cd "$TMPDIR"
+
+# Test 85: End-to-end 'doctor' and 'apply' handle conflicting specs cleanly without looping
+APPLY_CONFLICT_DIR="${TMPDIR}/apply-conflict"
+mkdir -p "$APPLY_CONFLICT_DIR"
+cd "$APPLY_CONFLICT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="local:emumanager alt:emumanager"
+
+doctor_conflict_out=$("${SCRIPT}" doctor 2>&1) || true
+apply_conflict_rc=0
+apply_conflict_out=$("${SCRIPT}" apply 2>&1) || apply_conflict_rc=$?
+
+if printf '%s\n' "$doctor_conflict_out" | grep -q "Conflicting skills" &&
+  printf '%s\n' "$doctor_conflict_out" | grep -q "1 conflicting" &&
+  [ "$apply_conflict_rc" -ne 0 ] &&
+  printf '%s\n' "$apply_conflict_out" | grep -q "conflicting skill declarations"; then
+  echo "ok 85 - [CLI] doctor and apply handle conflicting specs cleanly without infinite loop"
+else
+  echo "not ok 85 - [CLI] doctor or apply handling of conflicting specs failed: doc=$doctor_conflict_out app=$apply_conflict_out"
+fi
+
+export AGENT_REQUIRED_SKILLS=""
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_alt_emumanager.py"
 cd "$TMPDIR"
