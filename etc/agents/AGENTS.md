@@ -63,7 +63,7 @@ find /google -name "zipline"
 
 # GOOD (scoped, depth-limited, or wrapped with a timeout)
 timeout 30s find ./skills -name "zipline"
-rg --files | grep zipline
+rg --files ./skills | grep zipline
 ```
 
 ## Summary
