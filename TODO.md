@@ -1,5 +1,118 @@
 # TODO
 
+## Investigate adding deterministic image difference tool or integrating with screenshot-compare (2026-07-21)
+
+**Problem:** `screenshot-compare` in `agent-tools` provides AI-powered textual visual comparison between images, but lacks a fast, deterministic pixel/perceptual difference metric (such as Pillow-based RMSE/MSE similarity). Creating a standalone image diff tool would overlap with `screenshot-compare`'s domain unless their roles are unified. Additionally, `screenshot-compare` is not invoked by agents as frequently as expected during visual verification tasks (agents often fall back to writing custom comparison scripts).
+
+**Goal:** Evaluate whether to introduce a dedicated CLI tool under `agent-tools` for deterministic image similarity/diffing or integrate deterministic exact-match and numerical difference calculation (RMSE/MSE/similarity %) directly into `screenshot-compare`.
+
+**Criteria:** Clear guidance or tooling is established for fast, deterministic 1-to-1 visual difference calculations, with `screenshot-compare` either handling the deterministic check natively or delegating to a clear companion tool.
+
+**Sketch:** Consider extending `screenshot-compare` to run an optional deterministic exact-match / RMSE difference pre-check before or alongside AI-powered textual analysis.
+
+For reference, the inline source code of `audit_image_pairs.py` used for deterministic Pillow-based similarity auditing:
+
+```python
+import sys
+import json
+import math
+from pathlib import Path
+from PIL import Image, ImageChops, ImageStat
+
+REPO_ROOT = Path("/Users/stillers/workspace/wear-os-samples/WearWidget")
+COMPOSED_DIR = REPO_ROOT / "app" / "screenshots"
+EMULATOR_DIR = REPO_ROOT / "emulator_report_v3" / "emulator"
+
+def crop_content(img):
+    # Convert to RGB and find bounding box of non-black pixels to compare core content
+    gray = img.convert("L")
+    bbox = gray.getbbox()
+    return img.crop(bbox) if bbox else img
+
+def calculate_similarity(img1_path, img2_path):
+    try:
+        im1 = Image.open(img1_path).convert("RGB")
+        im2 = Image.open(img2_path).convert("RGB")
+
+        # Resize im1 to match im2 dimensions
+        im1 = im1.resize(im2.size, Image.Resampling.LANCZOS)
+
+        # Compute Difference
+        diff = ImageChops.difference(im1, im2)
+        stat = ImageStat.Stat(diff)
+        
+        # Mean squared error per channel
+        mse = sum(stat.sum2) / (float(im1.size[0] * im1.size[1]) * 3.0)
+        rmse = math.sqrt(mse)
+        
+        # Convert RMSE (0..255) to 0..100% similarity
+        similarity = max(0.0, 100.0 - (rmse / 2.55))
+        return round(similarity, 2), round(rmse, 2)
+    except Exception as e:
+        return 0.0, 255.0
+
+def main():
+    if not COMPOSED_DIR.exists():
+        print(f"Error: {COMPOSED_DIR} does not exist.")
+        sys.exit(1)
+
+    preview_files = sorted(list(COMPOSED_DIR.glob("*.png")))
+    print(f"Auditing {len(preview_files)} widget preview pairs...\n")
+
+    passed = []
+    failed = []
+
+    for preview_path in preview_files:
+        name = preview_path.stem
+        emu_path = EMULATOR_DIR / f"{name}.png"
+
+        if not emu_path.exists():
+            failed.append((name, "MISSING_EMULATOR_CAPTURE", 0.0, 255.0))
+            continue
+
+        sim, rmse = calculate_similarity(preview_path, emu_path)
+        
+        # Consider similarity >= 60.0% as visual match (accounting for OS theme/font rendering differences)
+        if sim >= 60.0:
+            passed.append((name, sim, rmse))
+        else:
+            failed.append((name, "VISUAL_MISMATCH", sim, rmse))
+
+    print("=" * 70)
+    print(f"AUDIT SUMMARY: {len(passed)} MATCHED | {len(failed)} MISMATCHED / MISSING")
+    print("=" * 70)
+
+    if failed:
+        print("\nMISMATCHED / MISSING PAIRS:")
+        for item in failed:
+            if item[1] == "MISSING_EMULATOR_CAPTURE":
+                print(f"  ❌ {item[0]:45s} -> Missing emulator capture")
+            else:
+                print(f"  ❌ {item[0]:45s} -> Sim: {item[2]:5.2f}% (RMSE: {item[3]:5.2f})")
+
+    if passed:
+        print("\nVERIFIED MATCHING PAIRS (Sample):")
+        for item in passed[:10]:
+            print(f"  ✅ {item[0]:45s} -> Sim: {item[1]:5.2f}% (RMSE: {item[2]:5.2f})")
+
+    # Save full audit json
+    audit_data = {
+        "total": len(preview_files),
+        "passed_count": len(passed),
+        "failed_count": len(failed),
+        "passed": [{"name": p[0], "similarity": p[1], "rmse": p[2]} for p in passed],
+        "failed": [{"name": f[0], "reason": f[1], "similarity": f[2], "rmse": f[3]} for f in failed],
+    }
+    
+    out_json = REPO_ROOT / "audit_results.json"
+    with open(out_json, "w") as f:
+        json.dump(audit_data, f, indent=2)
+    print(f"\nSaved full audit report to {out_json}")
+
+if __name__ == "__main__":
+    main()
+```
+
 ## Verify adb-screenrecord duration fix and scrcpy fallback prompting (2026-07-15) — done
 
 **Goal:** Re-evaluate device mode selection in `adb-screenrecord` to prefer
