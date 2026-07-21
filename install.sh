@@ -492,6 +492,12 @@ if exists gog; then
   x gog completion fish >"$XDG_COMPLETIONS_DIR/gog.fish"
 fi
 
+if exists bat; then
+  x bat --completion fish >"$XDG_COMPLETIONS_DIR/bat.fish"
+elif exists batcat; then
+  x batcat --completion fish >"$XDG_COMPLETIONS_DIR/bat.fish"
+fi
+
 # shpool
 
 if exists shpool; then
@@ -521,6 +527,21 @@ if exists ghostty; then
 
   xmkdir "$HOME/.config/ghostty"
   link_overlay_path "etc/ghostty/config" "$HOME/.config/ghostty/config"
+
+fi
+
+# bat
+
+if exists bat || exists batcat; then
+
+  heading "bat"
+
+  xmkdir "$HOME/.config/bat"
+  link_overlay_path "etc/bat/config" "$HOME/.config/bat/config"
+
+  if ! exists bat && exists batcat; then
+    x ln -sf "$(which batcat)" "$BINDIR/bat"
+  fi
 
 fi
 
@@ -561,7 +582,7 @@ if exists brew; then
   fi
 
   # Core packages: always installed, on every run.
-  core="fish coreutils wget direnv jq mtr htop shellcheck shfmt sevenzip ripgrep chafa node"
+  core="fish coreutils wget direnv jq mtr htop shellcheck shfmt sevenzip ripgrep chafa node bat"
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
@@ -621,7 +642,7 @@ if [ "$PLATFORM" = "linux" ]; then
     x sudo apt-get update # refresh package lists
 
     # Core packages: always installed, on every run.
-    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep shfmt shellcheck chafa"
+    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep shfmt shellcheck chafa bat"
     # Optional packages: installed only with --install-optional or --install-all.
     # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
     # ruby-build binary itself is bootstrapped from git below, as the apt package

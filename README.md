@@ -48,9 +48,9 @@ of the public repository. This repository works fine without them.
 
 ### Precedence
 
-`install.sh` processes overlays in this order: `.dotfiles` → `.private` → `.corp`.
-Later layers win on conflict. A file in `~/.corp` always beats the same path in
-`~/.private` or `~/.dotfiles`.
+`install.sh` processes overlays in this order: `.dotfiles` → `.private` →
+`.corp`. Later layers win on conflict. A file in `~/.corp` always beats the same
+path in `~/.private` or `~/.dotfiles`.
 
 ### How files are applied
 
@@ -77,6 +77,7 @@ the last overlay to provide a given filename wins.
 | `etc/shpool/config.toml`     | `link_overlay_path`                 |                                                                                                       |
 | `etc/starship/starship.toml` | `link_overlay_path`                 |                                                                                                       |
 | `etc/ghostty/config`         | `link_overlay_path`                 |                                                                                                       |
+| `etc/bat/config`             | `link_overlay_path`                 |                                                                                                       |
 | `etc/code/`                  | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                                     |
 | `etc/macos/KeyBindings`      | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                              |
 | `etc/macos/Solarized.clr`    | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                         |
@@ -84,9 +85,10 @@ the last overlay to provide a given filename wins.
 
 ### Per-overlay `update` hooks
 
-After the main install, `install.sh` runs `~/.private/update` and `~/.corp/update`
-if they exist and are executable. These hooks handle overlay-specific setup that
-cannot be expressed as file overlays (package installs, auth setup, etc.).
+After the main install, `install.sh` runs `~/.private/update` and
+`~/.corp/update` if they exist and are executable. These hooks handle
+overlay-specific setup that cannot be expressed as file overlays (package
+installs, auth setup, etc.).
 
 ### Expected layout
 
@@ -156,10 +158,11 @@ layout node            # adds node_modules/.bin to PATH
 
 ### Ruby
 
-Ruby versions are managed by `bin/ruby-install` and direnv. Versions are compiled
-from source via [ruby-build](https://github.com/rbenv/ruby-build) (the toolchain
-and its build dependencies install with `install.sh --install-optional`), so the
-first install of a version takes a few minutes.
+Ruby versions are managed by `bin/ruby-install` and direnv. Versions are
+compiled from source via [ruby-build](https://github.com/rbenv/ruby-build) (the
+toolchain and its build dependencies install with
+`install.sh --install-optional`), so the first install of a version takes a few
+minutes.
 
 ```sh
 ruby-install 3.4       # compiles latest 3.4.x into ~/.local/share/ruby/versions
@@ -172,8 +175,8 @@ use ruby 3.4
 layout ruby            # project-local gems in .direnv/ruby
 ```
 
-`layout ruby` keeps gems inside the project, so `gem install kamal` makes `kamal`
-available on `PATH` without touching the system Ruby.
+`layout ruby` keeps gems inside the project, so `gem install kamal` makes
+`kamal` available on `PATH` without touching the system Ruby.
 
 Because each version is compiled against the system libraries present at build
 time, an installed Ruby can later fail to start with a library load error (for
@@ -204,9 +207,9 @@ curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/ins
 ```
 
 It must be piped to `bash`, not `sh` — the script is bash and refuses to run
-under other shells. Pass flags after `-s --`, e.g.
-`… | bash -s -- --force`. To download the whole script before running anything
-(rather than streaming it into the interpreter), use the equivalent:
+under other shells. Pass flags after `-s --`, e.g. `… | bash -s -- --force`. To
+download the whole script before running anything (rather than streaming it into
+the interpreter), use the equivalent:
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh)"
