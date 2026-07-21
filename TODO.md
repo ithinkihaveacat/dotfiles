@@ -2,15 +2,29 @@
 
 ## Investigate adding deterministic image difference tool or integrating with screenshot-compare (2026-07-21)
 
-**Problem:** `screenshot-compare` in `agent-tools` provides AI-powered textual visual comparison between images, but lacks a fast, deterministic pixel/perceptual difference metric (such as Pillow-based RMSE/MSE similarity). Creating a standalone image diff tool would overlap with `screenshot-compare`'s domain unless their roles are unified. Additionally, `screenshot-compare` is not invoked by agents as frequently as expected during visual verification tasks (agents often fall back to writing custom comparison scripts).
+**Problem:** `screenshot-compare` in `agent-tools` provides AI-powered textual
+visual comparison between images, but lacks a fast, deterministic
+pixel/perceptual difference metric (such as Pillow-based RMSE/MSE similarity).
+Creating a standalone image diff tool would overlap with `screenshot-compare`'s
+domain unless their roles are unified. Additionally, `screenshot-compare` is not
+invoked by agents as frequently as expected during visual verification tasks
+(agents often fall back to writing custom comparison scripts).
 
-**Goal:** Evaluate whether to introduce a dedicated CLI tool under `agent-tools` for deterministic image similarity/diffing or integrate deterministic exact-match and numerical difference calculation (RMSE/MSE/similarity %) directly into `screenshot-compare`.
+**Goal:** Evaluate whether to introduce a dedicated CLI tool under `agent-tools`
+for deterministic image similarity/diffing or integrate deterministic
+exact-match and numerical difference calculation (RMSE/MSE/similarity %)
+directly into `screenshot-compare`.
 
-**Criteria:** Clear guidance or tooling is established for fast, deterministic 1-to-1 visual difference calculations, with `screenshot-compare` either handling the deterministic check natively or delegating to a clear companion tool.
+**Criteria:** Clear guidance or tooling is established for fast, deterministic
+1-to-1 visual difference calculations, with `screenshot-compare` either handling
+the deterministic check natively or delegating to a clear companion tool.
 
-**Sketch:** Consider extending `screenshot-compare` to run an optional deterministic exact-match / RMSE difference pre-check before or alongside AI-powered textual analysis.
+**Sketch:** Consider extending `screenshot-compare` to run an optional
+deterministic exact-match / RMSE difference pre-check before or alongside
+AI-powered textual analysis.
 
-For reference, the inline source code of `audit_image_pairs.py` used for deterministic Pillow-based similarity auditing:
+For reference, the inline source code of `audit_image_pairs.py` used for
+deterministic Pillow-based similarity auditing:
 
 ```python
 import sys
@@ -135,25 +149,24 @@ to install `scrcpy` for optimal performance.
 ## Clarify remediation choices in skill preflight and doctor error messages (2026-07-15) — done
 
 Restructured the "Required Skills" remediation hints in `cmd_doctor` (shared by
-`skill doctor` and `skill preflight`) in
-`skills/workspace-config/scripts/skill` to group commands by which source of
-truth the user considers correct, instead of listing commands without
-explaining what state each overwrites. The hints now open with "To resolve:
-pick the fix for whichever side -- declared or on-disk -- you consider
-correct." followed by intent-based paths: *environment is authoritative* —
-`skill apply`, with its concrete effects spelled out per finding (creates
-missing symlinks, re-links mismatched ones, and explicitly "deletes the N
-extra/stale symlink(s) from disk"); *disk is authoritative* —
+`skill doctor` and `skill preflight`) in `skills/workspace-config/scripts/skill`
+to group commands by which source of truth the user considers correct, instead
+of listing commands without explaining what state each overwrites. The hints now
+open with "To resolve: pick the fix for whichever side -- declared or on-disk --
+you consider correct." followed by intent-based paths: *environment is
+authoritative* — `skill apply`, with its concrete effects spelled out per
+finding (creates missing symlinks, re-links mismatched ones, and explicitly
+"deletes the N extra/stale symlink(s) from disk"); *disk is authoritative* —
 `envrc add skills <names>` (or the raw `export AGENT_REQUIRED_SKILLS=...`
 variant when not using `.envrc`), noted as keeping the symlinks; *manual
 removal* — `skill remove <names>`. When the plan's destructive-action policy
-blocks pruning (stale environment or an unresolvable declared spec), the
-apply hint no longer promises deletion; a note explains why apply will hold
-off. Negated (excluded) skills are never suggested for re-declaration. Tests
+blocks pruning (stale environment or an unresolvable declared spec), the apply
+hint no longer promises deletion; a note explains why apply will hold off.
+Negated (excluded) skills are never suggested for re-declaration. Tests
 41/42/45/65 updated and new tests 79–81 in
-`skills/workspace-config/tests/test-skill` assert the intent-grouped hint
-shape, the `.envrc` vs. export variants, and the blocked-prune wording
-(suite now 81 cases, all passing).
+`skills/workspace-config/tests/test-skill` assert the intent-grouped hint shape,
+the `.envrc` vs. export variants, and the blocked-prune wording (suite now 81
+cases, all passing).
 
 ## Unify skill doctor/apply behind a shared reconciliation planner (2026-07-14) — done
 
