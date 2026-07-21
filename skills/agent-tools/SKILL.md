@@ -346,7 +346,7 @@ an `@`-prefixed built-in or a free-form prompt:
 Multiple files (or non-boolean queries) emit per-file lines on stdout; exit code
 only reflects success/failure.
 
-Default model is `gemini-3.1-flash-lite` — the cheapest/fastest Gemini 3 tier,
+Default model is `gemini-3.5-flash-lite` — the cheapest/fastest Gemini 3 tier,
 appropriate for high-volume classification and lightweight visual Q&A. Override
 with `--model` for harder questions.
 
@@ -515,7 +515,7 @@ stdin)
 **Examples:**
 
 - `echo "YOUR_API_KEY" | scripts/gemini-api-doctor`
-- `scripts/gemini-api-doctor gemini-3.1-flash-lite`
+- `scripts/gemini-api-doctor gemini-3.5-flash-lite`
 
 **Exit codes:** 0 success, 1 error
 

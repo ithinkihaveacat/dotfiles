@@ -54,7 +54,7 @@ Arguments:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
@@ -75,13 +75,13 @@ Examples:
 
 ### Raw API Command
 
-Model: `gemini-3.5-flash`
+Model: `gemini-3.6-flash`
 
 ```bash
 IMAGE_BASE64=$(magick image.png -alpha off -define webp:lossless=true webp:- | base64 -w 0)
 
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -118,7 +118,7 @@ Arguments:
 Options:
   --help         Display this help message and exit
   --version      Display version number and exit
-  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
@@ -138,14 +138,14 @@ Exit Codes:
 
 ### Raw API Command
 
-Model: `gemini-3.5-flash`
+Model: `gemini-3.6-flash`
 
 ```bash
 IMG1_B64=$(magick before.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0)
 IMG2_B64=$(magick after.png -background magenta -flatten -define webp:lossless=true webp:- | base64 -w 0)
 
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -181,7 +181,7 @@ Arguments:
 
 Options:
   --ratio W:H    Aspect ratio for crop (default: 5:3)
-  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
   --help         Display this help message and exit
 
 Processing:
@@ -250,7 +250,7 @@ options:
   --max-size N          Longest-edge resize cap, in px (default: 768; built-
                         ins may use a smaller default)
   --model MODEL         Gemini model id (default: $GEMINI_MODEL if set, else
-                        gemini-3.1-flash-lite)
+                        gemini-3.5-flash-lite)
   --no-cache            Bypass the resize cache
   --recursive           Recurse into directory arguments
   --schema SCHEMA       llm-style schema_dsl, e.g. 'has_bed bool, count int'.
@@ -516,7 +516,7 @@ Arguments:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-3.5-flash)
+  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
@@ -537,7 +537,7 @@ Examples:
 
 ### Raw API Command
 
-Model: `gemini-3.5-flash`
+Model: `gemini-3.6-flash`
 
 ```bash
 PROMPT="What is the capital of Peru?"
@@ -546,7 +546,7 @@ SYSTEM_INSTRUCTION="You are a helpful assistant. Provide a short, direct answer 
 lists, or markdown formatting (like bold or headers). Just plain text."
 
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
@@ -735,7 +735,7 @@ Extract a structured purchase record from a receipt email (stdin -> JSON).
 options:
   -h, --help     Show this help message and exit
   --model MODEL  Gemini model id (default: $GEMINI_MODEL if set, else
-                 gemini-3.1-flash-lite)
+                 gemini-3.5-flash-lite)
   --max-chars N  Truncate email text to N chars before the model call
                  (default: 12000)
   --text-only    Print the stripped email text instead of calling the model
@@ -849,7 +849,7 @@ options:
                         the agent (default: current directory)
   --dump-layout         Dump the UI layout as JSON and exit
   --model MODEL         Gemini model to use (default: $GEMINI_MODEL if set,
-                        else gemini-3.5-flash)
+                        else gemini-3.6-flash)
   -h, --help            show this help message and exit
 
 Environment:
