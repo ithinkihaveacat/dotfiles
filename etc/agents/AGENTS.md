@@ -48,3 +48,23 @@
 > Treat available skills as your primary source of truth. If a skill exists for
 > your current goal, activate it and let its specific instructions guide your
 > implementation.
+>
+> ## Command Safety & Search Rules
+>
+> - **Avoid Unbounded Searches**: Never run broad, unconstrained `find`, `grep`,
+>   or recursive file listings on monorepos (`/google`), system roots (`/`,
+>   `/usr`, `/var`), or home roots (`~`).
+> - **Required Controls**:
+>   - Prefer indexed or targeted search tools (`rg`, `fd`, `CodeSearch`) scoped
+>     to a specific project subfolder.
+>   - When using `find`, always bound search depth (`-maxdepth N`) or wrap with
+>     a timeout (`timeout 30s find ...`).
+>
+> ```bash
+> # BAD (runs indefinitely on monorepos/root directories)
+> find /google -name "zipline"
+>
+> # GOOD (scoped, depth-limited, or wrapped with a timeout)
+> timeout 30s find ./skills -name "zipline"
+> rg --files | grep zipline
+> ```
