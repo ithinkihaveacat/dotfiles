@@ -36,7 +36,7 @@
 > - **Code validation**: When writing or modifying code, activate any skills
 >   related to local coding conventions. Apply their formatting rules (like
 >   specific Markdown styles) and use the required validation tools (like
->   `shellcheck` for Bash) exactly as instructed.
+>   `shell-format` for Bash) exactly as instructed.
 > - **Version control**: When preparing to commit changes, ensure you format
 >   your commit messages according to the exact style and rules outlined in the
 >   project's standards or workflow skills. Note that a local git hook strictly
