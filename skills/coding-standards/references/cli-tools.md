@@ -80,7 +80,7 @@ common width so lines align, e.g.:
 ```text
 [OK]    Workspace: Git repository
 [WARN]  Low disk space: 3.2G available at ANDROID_HOME
-[ERROR] Required Skills: Mismatched skill configuration (1 missing)
+[ERROR] Required Skills: environment and disk disagree (1 missing)
 ```
 
 - Tags are greppable and fully legible with color stripped

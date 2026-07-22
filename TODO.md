@@ -148,25 +148,29 @@ to install `scrcpy` for optimal performance.
 
 ## Clarify remediation choices in skill preflight and doctor error messages (2026-07-15) — done
 
-Restructured the "Required Skills" remediation hints in `cmd_doctor` (shared by
-`skill doctor` and `skill preflight`) in `skills/workspace-config/scripts/skill`
-to group commands by which source of truth the user considers correct, instead
-of listing commands without explaining what state each overwrites. The hints now
-open with "To resolve: pick the fix for whichever side -- declared or on-disk --
-you consider correct." followed by intent-based paths: *environment is
-authoritative* — `skill apply`, with its concrete effects spelled out per
-finding (creates missing symlinks, re-links mismatched ones, and explicitly
-"deletes the N extra/stale symlink(s) from disk"); *disk is authoritative* —
-`envrc add skills <names>` (or the raw `export AGENT_REQUIRED_SKILLS=...`
-variant when not using `.envrc`), noted as keeping the symlinks; *manual
-removal* — `skill remove <names>`. When the plan's destructive-action policy
-blocks pruning (stale environment or an unresolvable declared spec), the apply
-hint no longer promises deletion; a note explains why apply will hold off.
-Negated (excluded) skills are never suggested for re-declaration. Tests
-41/42/45/65 updated and new tests 79–81 in
-`skills/workspace-config/tests/test-skill` assert the intent-grouped hint shape,
-the `.envrc` vs. export variants, and the blocked-prune wording (suite now 81
-cases, all passing).
+Reworked (second pass — the first "authoritative side" wording proved unclear)
+the "Required Skills" reporting in `cmd_doctor` (shared by `skill doctor` and
+`skill preflight`) in `skills/workspace-config/scripts/skill` around two short
+side labels, defined where they are used instead of in a standing preamble:
+*env* (the declared set, `AGENT_REQUIRED_SKILLS`) and *disk* (the symlinks in
+the destination dirs). The summary line reads "environment and disk disagree
+(…)" (or "cannot resolve the declared skill set (…)" when only
+declaration-side defects exist), findings render as one aligned per-item list
+(`emumanager   disk only (linked in .claude/skills, not in
+AGENT_REQUIRED_SKILLS)`), and remediation is phrased as sync directions with
+concrete effects: "Make disk match env (link X; delete the Y symlink): skill
+apply" versus "Make env match disk (declare Y; keep the symlink): envrc add
+skills Y && direnv reload" (raw `export` variant without `.envrc`). Every
+suggested `envrc` command carries the `direnv reload` step, since the
+environment stays stale until then. A per-skill mixing hint prints only when
+there are two or more differences. The blocked-prune note is self-contained
+(preflight suppresses the freshness WARNING it used to reference) and names
+the by-hand `skill remove` fallback; when stale, `envrc add` is not suggested
+for names `.envrc` already declares. Negated (excluded) skills are still never
+suggested for re-declaration, and the verbose success banner lost its `✔`
+glyph per the doctor output style. Tests 41/42/45/62/65 and 79–81 updated in
+`skills/workspace-config/tests/test-skill`; the doctor example in
+`skills/coding-standards/references/cli-tools.md` follows the new summary.
 
 ## Unify skill doctor/apply behind a shared reconciliation planner (2026-07-14) — done
 
