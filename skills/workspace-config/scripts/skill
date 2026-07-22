@@ -1889,7 +1889,7 @@ def cmd_apply(args):
             names = " ".join(extra_skills)
             if is_using_envrc(ws):
                 print(
-                    f"skill: to keep any of them, run: envrc add skills {names}",
+                    f"skill: to keep any of them, run: envrc add skills {names} && direnv reload",
                     file=sys.stderr,
                 )
             else:
@@ -2520,41 +2520,54 @@ def cmd_doctor(
     negated_extra = plan.negated_extra
     collisions = plan.collisions
 
-    skill_details = []
-    if collisions:
-        skill_details.append(
-            "Conflicting skills (multiple declarations target the same symlink basename):"
-        )
-        for s in collisions:
-            skill_details.append(f"  - {s}")
-    if missing:
-        skill_details.append("Missing skills (declared but not linked on disk):")
-        for s in missing:
-            skill_details.append(f"  - {s}")
-    if unresolvable:
+    # Render the divergence as one aligned item list. The two sides get short
+    # stable labels -- 'env' is the declared set (AGENT_REQUIRED_SKILLS),
+    # 'disk' the symlinks in the destination dirs -- and the first item of
+    # each kind carries the full gloss, so the labels are defined where they
+    # are used instead of in a standing preamble that repeats on every run.
+    disk_label = ", ".join(str(rel(d)) for d in dest_dirs) if dest_dirs else "disk"
+
+    # The plan reports some conditions once per destination dir (e.g. a skill
+    # missing from both .claude/skills and .agents/skills counts twice), but
+    # the report and the command hints below are per-name.
+    def uniq(names):
+        seen = set()
+        return [n for n in names if not (n in seen or seen.add(n))]
+
+    # 'missing' and 'mismatched' carry per-destination labels from the planner
+    # ("spec (missing in .claude/skills)"); specs themselves are env-var tokens
+    # and can never contain whitespace, so the first word is always the spec.
+    skill_items = []
+    for i, lbl in enumerate(uniq(missing)):
+        spec, _, det = lbl.partition(" ")
+        inner = det[1:-1] if det.startswith("(") else det
+        if i == 0:
+            inner = "in AGENT_REQUIRED_SKILLS, " + (
+                inner or f"not linked in {disk_label}"
+            )
+        skill_items.append((spec, f"env only ({inner})" if inner else "env only"))
+    for s in unresolvable:
         # This bucket also catches ambiguous specs (multiple catalog matches,
         # fixed by qualifying the namespace) and remote-fetch failures, not
         # only "no match at all" -- unresolvable_errors carries the specific
-        # reason for each, so the header stays deliberately generic.
-        skill_details.append("Unresolvable skills (declared but cannot be resolved):")
-        for s in unresolvable:
-            skill_details.append(f"  - {s} ({unresolvable_errors[s]})")
-    if mismatched_target:
-        skill_details.append(
-            "Mismatched symlink targets (linked on disk but pointing to unexpected source):"
+        # reason for each, so the label stays deliberately generic.
+        skill_items.append((s, f"unresolvable ({unresolvable_errors[s]})"))
+    for lbl in uniq(mismatched_target):
+        spec, _, det = lbl.partition(" ")
+        skill_items.append((spec, f"wrong target {det}".rstrip()))
+    for i, s in enumerate(uniq(negated_extra)):
+        gloss = " (negated in AGENT_REQUIRED_SKILLS but still linked)" if i == 0 else ""
+        skill_items.append((s, f"disk only, negated{gloss}"))
+    for i, s in enumerate(uniq(extra)):
+        gloss = (
+            f" (linked in {disk_label}, not in AGENT_REQUIRED_SKILLS)" if i == 0 else ""
         )
-        for s in mismatched_target:
-            skill_details.append(f"  - {s}")
-    if negated_extra:
-        skill_details.append(
-            "Stale excluded skills (linked on disk but explicitly negated in env):"
-        )
-        for s in negated_extra:
-            skill_details.append(f"  - {s}")
-    if extra:
-        skill_details.append("Extra skills (linked on disk but not declared):")
-        for s in extra:
-            skill_details.append(f"  - {s}")
+        skill_items.append((s, f"disk only{gloss}"))
+    name_width = max((len(n) for n, _ in skill_items), default=0)
+    # Collision "names" are whole sentences from the planner, so they get
+    # full-width lines instead of a slot in the aligned name column.
+    skill_details = [f"conflicting: {c}" for c in collisions]
+    skill_details += [f"{n.ljust(name_width)}   {a}" for n, a in skill_items]
 
     if (
         missing
@@ -2577,11 +2590,18 @@ def cmd_doctor(
         if num_extra:
             parts.append(f"{num_extra} extra/stale")
         summary_str = ", ".join(parts)
+        # Collisions and unresolvable specs are declaration-side defects, not
+        # an env-vs-disk divergence; only call the sides out when at least one
+        # item actually differs between them.
+        if missing or mismatched_target or extra or negated_extra:
+            summary = f"environment and disk disagree ({summary_str})"
+        else:
+            summary = f"cannot resolve the declared skill set ({summary_str})"
         checks.append(
             {
                 "name": "Required Skills",
                 "status": "ERROR",
-                "summary": f"Mismatched skill configuration ({summary_str})",
+                "summary": summary,
                 "details": skill_details,
             }
         )
@@ -2931,64 +2951,92 @@ def cmd_doctor(
                 "  direnv reload   # or start a new prompt, then re-run 'skill apply'"
             )
         elif name == "Required Skills":
-            # Several commands can clear these findings, but they honor
-            # different sources of truth and overwrite different state --
-            # notably, 'skill apply' treats the environment as authoritative
-            # and deletes extra symlinks, while declaring the extras keeps
-            # them. Group the hints by which side the user considers correct
-            # so picking one is a decision, not a guess.
-            prune_names = extra + negated_extra
+            # Several commands can clear these findings, but they push state
+            # in opposite directions: 'skill apply' makes disk match env (and
+            # deletes undeclared symlinks), while 'envrc' edits make env match
+            # disk (and keep them). Phrase each option as a direction with its
+            # concrete effects so choosing one is a decision, not a guess.
+            missing_names = uniq(lbl.partition(" ")[0] for lbl in missing)
+            mismatched_names = uniq(lbl.partition(" ")[0] for lbl in mismatched_target)
+            prune_names = uniq(extra + negated_extra)
             apply_effects = []
-            if missing:
-                apply_effects.append("creates the missing symlink(s)")
-            if mismatched_target:
-                apply_effects.append("re-links the mismatched symlink(s)")
+            if missing_names:
+                apply_effects.append(f"link {', '.join(missing_names)}")
+            if mismatched_names:
+                apply_effects.append(f"re-link {', '.join(mismatched_names)}")
             if prune_names and not plan.destructive_blocked:
+                plural = "s" if len(prune_names) > 1 else ""
                 apply_effects.append(
-                    f"deletes the {len(prune_names)} extra/stale symlink(s) from disk"
+                    f"delete the {', '.join(prune_names)} symlink{plural}"
                 )
-            if apply_effects or prune_names:
+            # 'skill apply' refuses to run at all while declarations collide,
+            # so don't advertise it as a fix then.
+            if apply_effects and not collisions:
                 check["details"].append(
-                    "To resolve: pick the fix for whichever side -- declared or on-disk -- you consider correct."
+                    f"Make disk match env ({'; '.join(apply_effects)}):"
                 )
-            if apply_effects:
+                check["details"].append("  skill apply")
+            # The env-side path never re-declares negated skills, and when the
+            # environment is stale it skips names .envrc already declares --
+            # suggesting 'envrc add' for those would re-add what only needs a
+            # reload.
+            fresh_declared = (
+                {f.lower() for f in plan.freshness[0]} if plan.stale else set()
+            )
+            declare_names = [s for s in uniq(extra) if s.lower() not in fresh_declared]
+            env_effects = []
+            if missing_names:
+                env_effects.append(f"undeclare {', '.join(missing_names)}")
+            if declare_names:
+                plural = "s" if len(declare_names) > 1 else ""
+                env_effects.append(f"declare {', '.join(declare_names)}")
+                env_effects.append(f"keep the symlink{plural}")
+            if env_effects:
                 check["details"].append(
-                    "If the declared skill set (AGENT_REQUIRED_SKILLS) is "
-                    f"correct, make the disk match it ({'; '.join(apply_effects)}):"
+                    f"Make env match disk ({'; '.join(env_effects)}):"
                 )
-                check["details"].append("  skill apply   # 'git-setup' also runs this")
-            if extra:
                 if is_using_envrc(ws):
-                    check["details"].append(
-                        "If the skills on disk are correct, declare the extra "
-                        "skill(s) instead (keeps the symlinks; updates .envrc):"
-                    )
-                    check["details"].append(f"  envrc add skills {' '.join(extra)}")
+                    cmd_parts = []
+                    if missing_names:
+                        cmd_parts.append(
+                            f"envrc remove skills {' '.join(missing_names)}"
+                        )
+                    if declare_names:
+                        cmd_parts.append(f"envrc add skills {' '.join(declare_names)}")
+                    cmd_parts.append("direnv reload")
+                    check["details"].append("  " + " && ".join(cmd_parts))
                 else:
-                    check["details"].append(
-                        "If the skills on disk are correct, declare the extra "
-                        "skill(s) instead (keeps the symlinks):"
-                    )
-                    check["details"].append(
-                        f'  export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(extra)}"'
-                    )
-            if prune_names:
-                check["details"].append(
-                    "To delete individual symlink(s) by hand instead:"
+                    if declare_names:
+                        check["details"].append(
+                            f'  export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS {" ".join(declare_names)}"'
+                        )
+                    if missing_names:
+                        conj = "and " if declare_names else ""
+                        check["details"].append(
+                            f"  # {conj}remove {', '.join(missing_names)} from AGENT_REQUIRED_SKILLS in your shell config"
+                        )
+            # With a single difference, whole-side resolution IS per-item
+            # resolution, so the mixing hint would be noise.
+            n_diffs = len(missing_names) + len(mismatched_names) + len(prune_names)
+            if n_diffs >= 2 and (apply_effects or env_effects):
+                env_edit = (
+                    "'envrc add/remove skills NAME' edits env"
+                    if is_using_envrc(ws)
+                    else "editing AGENT_REQUIRED_SKILLS changes env"
                 )
-                check["details"].append(f"  skill remove {' '.join(prune_names)}")
+                check["details"].append(
+                    f"Or mix per skill: 'skill remove NAME' edits disk; {env_edit}."
+                )
             if unresolvable:
                 check["details"].append(
-                    "To resolve: 'skill apply' cannot fix this -- these "
-                    "spec(s) fail the same catalog lookup doctor just "
-                    "performed (see the reason next to each above: fix the "
+                    "Unresolvable declarations: 'skill apply' cannot fix "
+                    "these (the reason is shown per skill above). Fix the "
                     "catalog registration, qualify an ambiguous name with "
-                    "its namespace, or remove the unresolvable "
-                    "declaration(s)):"
+                    "its namespace, or undeclare:"
                 )
                 if is_using_envrc(ws):
                     check["details"].append(
-                        f"  envrc remove skills {' '.join(unresolvable)}"
+                        f"  envrc remove skills {' '.join(uniq(unresolvable))} && direnv reload"
                     )
                 else:
                     check["details"].append(
@@ -2996,28 +3044,43 @@ def cmd_doctor(
                     )
             if collisions:
                 check["details"].append(
-                    "To resolve: 'skill apply' cannot fix this -- multiple declared "
-                    "skills map to the same symlink basename but different targets. "
-                    "You must remove the conflicting declaration(s) from .envrc:"
+                    "Conflicting declarations: 'skill apply' cannot fix "
+                    "these -- undeclare the unwanted spec(s):"
                 )
                 if is_using_envrc(ws):
                     check["details"].append(
-                        "  # run 'envrc remove skills <spec>' for the unwanted declaration"
+                        "  # envrc remove skills <spec> for the unwanted declaration, then 'direnv reload'"
                     )
                 else:
                     check["details"].append(
                         "  # remove the unwanted declaration from the AGENT_REQUIRED_SKILLS environment variable"
                     )
             if prune_names and plan.destructive_blocked:
-                check["details"].append(
-                    "Note: 'skill apply' will not delete the extra/stale "
-                    "symlink(s) while "
-                    + (
-                        "the environment is stale (see Environment Freshness)"
-                        if plan.stale
-                        else "a declared spec is unresolvable"
+                # Self-contained on purpose: preflight suppresses WARNING
+                # checks, so referring the reader to Environment Freshness
+                # would point at a check that is not rendered there.
+                plural = "s" if len(prune_names) > 1 else ""
+                if plan.stale:
+                    fresh_missing, fresh_negated = plan.freshness
+                    reasons = []
+                    if fresh_missing:
+                        reasons.append(
+                            f".envrc declares {', '.join(fresh_missing)} not yet in AGENT_REQUIRED_SKILLS"
+                        )
+                    if fresh_negated:
+                        reasons.append(
+                            f".envrc negates {', '.join(fresh_negated)} still in AGENT_REQUIRED_SKILLS"
+                        )
+                    why = (
+                        f"the environment is stale ({'; '.join(reasons)} "
+                        "-- run 'direnv reload' first)"
                     )
-                    + "."
+                else:
+                    why = "a declared spec is unresolvable (fix or undeclare it first)"
+                check["details"].append(
+                    f"Note: 'skill apply' will not delete the "
+                    f"{', '.join(prune_names)} symlink{plural} while {why}. "
+                    f"'skill remove {' '.join(prune_names)}' deletes by hand."
                 )
         elif name == "Symlink Health":
             if stray_dangling:
@@ -3074,7 +3137,7 @@ def cmd_doctor(
     if verbose:
         print(
             colorize(
-                "\n✔ Workspace is healthy and skills are fully synchronized!",
+                "\nWorkspace is healthy and skills are fully synchronized.",
                 "green",
                 use_color,
             ),
