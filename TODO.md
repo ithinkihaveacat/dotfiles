@@ -1,5 +1,37 @@
 # TODO
 
+## Refactor test-skill suite to assert structured plans and split monolithic test file (2026-07-22)
+
+**Problem:** `test-skill` (`skills/workspace-config/tests/test-skill`) has grown
+into a 2,000+ line monolithic test file containing 85 test cases. A significant
+portion of the suite relies on matching exact human-readable output strings and
+error banners, which causes brittle test failures and heavy file churn whenever
+CLI text formatting or phrasing is updated.
+
+**Goal:** Shift `skill` test verification from full string matching to asserting
+against structured plan representations, and modularize `test-skill` into
+smaller, focused test files. Part of reducing test churn and improving
+maintainability when updating `skill`.
+
+**Criteria:**
+
+- `skills/workspace-config/tests/test-skill` is broken down into smaller,
+  domain-specific test files under `skills/workspace-config/tests/`.
+- Test assertions primarily inspect structured output (e.g. via a `--json`
+  output flag or structured plan inspection) rather than exact human-readable
+  CLI strings, reserving string checks only for user-facing formatting
+  contracts.
+- The full test suite continues to pass hermetically.
+
+**Sketch:**
+
+- Investigate adding a `--json` output mode to
+  `skills/workspace-config/scripts/skill` (or leveraging `build_reconcile_plan`)
+  to output structured data suitable for test parsing (e.g., using `jq` or
+  Python helpers).
+- Group test cases into logical modules (such as `test-skill-reconcile`,
+  `test-skill-doctor`, `test-skill-apply`, `test-skill-plugins`).
+
 ## Investigate adding deterministic image difference tool or integrating with screenshot-compare (2026-07-21)
 
 **Problem:** `screenshot-compare` in `agent-tools` provides AI-powered textual
@@ -154,23 +186,23 @@ the "Required Skills" reporting in `cmd_doctor` (shared by `skill doctor` and
 side labels, defined where they are used instead of in a standing preamble:
 *env* (the declared set, `AGENT_REQUIRED_SKILLS`) and *disk* (the symlinks in
 the destination dirs). The summary line reads "environment and disk disagree
-(…)" (or "cannot resolve the declared skill set (…)" when only
-declaration-side defects exist), findings render as one aligned per-item list
-(`emumanager   disk only (linked in .claude/skills, not in
-AGENT_REQUIRED_SKILLS)`), and remediation is phrased as sync directions with
-concrete effects: "Make disk match env (link X; delete the Y symlink): skill
-apply" versus "Make env match disk (declare Y; keep the symlink): envrc add
-skills Y && direnv reload" (raw `export` variant without `.envrc`). Every
-suggested `envrc` command carries the `direnv reload` step, since the
-environment stays stale until then. A per-skill mixing hint prints only when
-there are two or more differences. The blocked-prune note is self-contained
-(preflight suppresses the freshness WARNING it used to reference) and names
-the by-hand `skill remove` fallback; when stale, `envrc add` is not suggested
-for names `.envrc` already declares. Negated (excluded) skills are still never
-suggested for re-declaration, and the verbose success banner lost its `✔`
-glyph per the doctor output style. Tests 41/42/45/62/65 and 79–81 updated in
-`skills/workspace-config/tests/test-skill`; the doctor example in
-`skills/coding-standards/references/cli-tools.md` follows the new summary.
+(…)" (or "cannot resolve the declared skill set (…)" when only declaration-side
+defects exist), findings render as one aligned per-item list
+(`emumanager   disk only (linked in .claude/skills, not in AGENT_REQUIRED_SKILLS)`),
+and remediation is phrased as sync directions with concrete effects: "Make disk
+match env (link X; delete the Y symlink): skill apply" versus "Make env match
+disk (declare Y; keep the symlink): envrc add skills Y && direnv reload" (raw
+`export` variant without `.envrc`). Every suggested `envrc` command carries the
+`direnv reload` step, since the environment stays stale until then. A per-skill
+mixing hint prints only when there are two or more differences. The
+blocked-prune note is self-contained (preflight suppresses the freshness WARNING
+it used to reference) and names the by-hand `skill remove` fallback; when stale,
+`envrc add` is not suggested for names `.envrc` already declares. Negated
+(excluded) skills are still never suggested for re-declaration, and the verbose
+success banner lost its `✔` glyph per the doctor output style. Tests
+41/42/45/62/65 and 79–81 updated in `skills/workspace-config/tests/test-skill`;
+the doctor example in `skills/coding-standards/references/cli-tools.md` follows
+the new summary.
 
 ## Unify skill doctor/apply behind a shared reconciliation planner (2026-07-14) — done
 
