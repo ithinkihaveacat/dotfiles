@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+#
+# Reconciliation planner and spec parser for `skill`.
+#
+# doctor and apply both consume build_reconcile_plan(); these tests exercise the
+# planner and the AGENT_REQUIRED_SKILLS parser directly -- asserting on the
+# returned ReconcilePlan object rather than parsing CLI output -- so the
+# desired-vs-actual comparison and its destructive-action policy are covered
+# in-process. A tiny fake Workspace supplies the disk/VCS facts (see run_plan in
+# common.sh).
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-config/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+skill_test_init
+
+echo "1..12"
+
+# ==============================================================================
+# Skill-spec parser (get_parsed_skills)
+# ==============================================================================
+
+# Test 1: parses simple required skills
+if out=$(run_parser "skill-a skill-b" 2>/dev/null) && [ "$out" = "skill-a,skill-b|" ]; then
+  echo "ok 1 - [Parser] parses simple required skills"
+else
+  echo "not ok 1 - [Parser] unexpected output: $out"
+fi
+
+# Test 2: subtraction is case-insensitive
+if out=$(run_parser "SkillA skill-b -skilla" 2>/dev/null) && [ "$out" = "skill-b|skilla" ]; then
+  echo "ok 2 - [Parser] subtraction is case-insensitive"
+else
+  echo "not ok 2 - [Parser] unexpected output: $out"
+fi
+
+# Test 3: additions are case-sensitive and deduplicated
+if out=$(run_parser "SkillA skill-b -skilla SkillA" 2>/dev/null) && [ "$out" = "skill-b,SkillA|skilla" ]; then
+  echo "ok 3 - [Parser] additions are case-sensitive and deduplicated"
+else
+  echo "not ok 3 - [Parser] unexpected output: $out"
+fi
+
+# Test 4: redundant whitespace and exclamation prefix
+if out=$(run_parser "  skill-a   skill-b   !skill-a  " 2>/dev/null) && [ "$out" = "skill-b|skill-a" ]; then
+  echo "ok 4 - [Parser] redundant whitespace and exclamation marks parsed"
+else
+  echo "not ok 4 - [Parser] unexpected output: $out"
+fi
+
+# ==============================================================================
+# resolve_skill_spec robustness
+# ==============================================================================
+
+# Test 5: resolve_skill_spec() converts a fetch_github() failure (which reports
+# fatal errors via die(), raising SystemExit) into an ordinary ValueError, so a
+# remote skill that fails to download does not crash the whole doctor/apply
+# process before it can render or act on its other checks.
+if out=$(run_module "
+def fake_fetch_github(*args, **kwargs):
+    m.die('simulated network failure')
+
+
+m.fetch_github = fake_fetch_github
+api = m.get_api()
+api.plugin_catalog['remote:bogus-remote'] = {'repo': 'nobody/nowhere', 'ref': 'main'}
+
+try:
+    m.resolve_skill_spec('bogus-remote')
+    print('FAIL: no exception raised')
+except ValueError as e:
+    print('OK: ' + str(e))
+except SystemExit:
+    print('FAIL: SystemExit propagated out of resolve_skill_spec')
+" 2>/dev/null) && printf '%s\n' "$out" | grep -q "^OK: cannot resolve skill 'bogus-remote'"; then
+  echo "ok 5 - [Robustness] resolve_skill_spec converts a fetch_github() SystemExit into ValueError"
+else
+  echo "not ok 5 - [Robustness] resolve_skill_spec let SystemExit escape or behaved unexpectedly: $out"
+fi
+
+# ==============================================================================
+# build_reconcile_plan (direct, in-process unit tests)
+# ==============================================================================
+
+PLAN_SRC="${TMPDIR}/plan-sources"
+mkdir -p "${PLAN_SRC}/good/emumanager"
+
+# Test 6: a resolvable-but-not-linked spec is 'missing' (fixable); an
+# unresolvable one is kept out of 'missing', lands in 'unresolved', and blocks
+# destructive actions -- the exact split that made doctor/apply diverge.
+DEST6="${TMPDIR}/plan6"
+mkdir -p "$DEST6"
+out=$(run_plan "
+ws = FakeWorkspace('${DEST6}', ['${DEST6}'], ['good', 'nope'], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.missing == ['good']
+    and [r.spec for r in plan.unresolved] == ['nope']
+    and plan.destructive_blocked is True
+    and plan.has_fixable_findings() is True
+)
+print('OK' if ok else f'FAIL missing={plan.missing} unresolved={[r.spec for r in plan.unresolved]} blocked={plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 6 - [Planner] unresolvable spec is separated from missing and blocks pruning"
+else
+  echo "not ok 6 - [Planner] missing/unresolved split wrong: $out"
+fi
+
+# Test 7: an empty desired set produces no findings and does not block
+# destructive actions (the empty-AGENT_REQUIRED_SKILLS scenario).
+DEST7="${TMPDIR}/plan7"
+mkdir -p "$DEST7"
+out=$(run_plan "
+ws = FakeWorkspace('${DEST7}', ['${DEST7}'], [], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.missing == []
+    and plan.extra == []
+    and plan.destructive_blocked is False
+    and plan.has_fixable_findings() is False
+)
+print('OK' if ok else f'FAIL {plan.missing} {plan.extra} {plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 7 - [Planner] empty desired set is clean and unblocked"
+else
+  echo "not ok 7 - [Planner] empty desired set mishandled: $out"
+fi
+
+# Test 8: on-disk classification -- a live link to an undeclared target is
+# 'extra' (prunable), while broken links split into stray (prunable) vs
+# VCS-tracked (never touched). All three come from one disk scan.
+DEST8="${TMPDIR}/plan8"
+mkdir -p "$DEST8"
+ln -s "${PLAN_SRC}/good" "${DEST8}/extra-link"
+ln -s /nonexistent/x "${DEST8}/stray-broken"
+ln -s /nonexistent/y "${DEST8}/tracked-broken"
+out=$(run_plan "
+dest = Path('${DEST8}')
+actual = ({'extra-link'}, [], [dest / 'stray-broken', dest / 'tracked-broken'])
+ws = FakeWorkspace('${DEST8}', ['${DEST8}'], [], actual, tracked=[dest / 'tracked-broken'])
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.extra == ['extra-link']
+    and [p.name for p in plan.stray_dangling] == ['stray-broken']
+    and [p.name for p in plan.tracked_dangling] == ['tracked-broken']
+    and plan.prune_names == ['extra-link']
+)
+print('OK' if ok else f'FAIL extra={plan.extra} stray={[p.name for p in plan.stray_dangling]} tracked={[p.name for p in plan.tracked_dangling]}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 8 - [Planner] disk scan classifies extra, stray-dangling, and tracked-dangling"
+else
+  echo "not ok 8 - [Planner] disk classification wrong: $out"
+fi
+
+# Test 9: a live link whose basename matches a *resolved* spec but points at the
+# wrong target is a 'mismatched' finding, not 'extra' -- so apply re-links it
+# (via cmd_add) instead of the two disagreeing about deleting it.
+DEST9="${TMPDIR}/plan9"
+mkdir -p "$DEST9"
+mkdir -p "${TMPDIR}/plan9-wrong/good"
+ln -s "${TMPDIR}/plan9-wrong/good" "${DEST9}/good"
+out=$(run_plan "
+dest = Path('${DEST9}')
+actual = ({'good'}, [], [])
+ws = FakeWorkspace('${DEST9}', ['${DEST9}'], ['good'], actual)
+plan = m.build_reconcile_plan(ws)
+ok = (
+    plan.extra == []
+    and len(plan.mismatched) == 1
+    and 'good' in plan.mismatched[0]
+    and plan.has_fixable_findings() is True
+)
+print('OK' if ok else f'FAIL extra={plan.extra} mismatched={plan.mismatched}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 9 - [Planner] wrong-target link matching a resolved spec is mismatched, not extra"
+else
+  echo "not ok 9 - [Planner] mismatch vs extra classification wrong: $out"
+fi
+
+# Test 10: a link that differs only in case from a resolved spec's canonical
+# basename must be classified per the destination filesystem's own case rules,
+# not by lowercasing. On a case-sensitive filesystem 'Good' and canonical 'good'
+# are distinct entries, so 'Good' is a genuine extra apply prunes; on a
+# case-insensitive one they are the same entry (a mismatch cmd_add re-links).
+DEST10="${TMPDIR}/plan10"
+mkdir -p "$DEST10"
+ln -s "${TMPDIR}/plan10-wrong/good" "${DEST10}/Good"
+out=$(run_plan "
+import os
+dest = Path('${DEST10}')
+actual = ({'Good'}, [], [])
+ws = FakeWorkspace('${DEST10}', ['${DEST10}'], ['good'], actual)
+plan = m.build_reconcile_plan(ws)
+# Probe this filesystem's case semantics via the flipped-case sibling of the
+# existing 'Good' link, so the assertion is correct on Linux and macOS alike.
+try:
+    os.lstat(dest / 'good')
+    insensitive = True
+except OSError:
+    insensitive = False
+if insensitive:
+    ok = plan.extra == []  # same entry as canonical 'good' -> a mismatch
+else:
+    ok = plan.extra == ['Good']  # distinct undeclared entry -> extra
+print('OK' if ok else f'FAIL insensitive={insensitive} extra={plan.extra} mismatched={plan.mismatched}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 10 - [Planner] case-variant link classified by filesystem case rules, not lowercase"
+else
+  echo "not ok 10 - [Planner] case-variant classification wrong: $out"
+fi
+
+# Test 11: the planner detects declared skill spec collisions targeting
+# different source paths (two specs whose link basenames collide), and blocks
+# destructive actions until the user undeclares one.
+PLAN_SRC_ALT="${TMPDIR}/plan-sources-alt"
+mkdir -p "${PLAN_SRC_ALT}/good"
+out=$(run_plan "
+def fake_resolve_alt(spec):
+    if spec.startswith('alt:'):
+        name = spec.split(':', 1)[-1]
+        return Path('${PLAN_SRC_ALT}') / name, name
+    name = spec.split(':', 1)[-1]
+    return PLAN_SRC / 'good', name
+
+m.resolve_skill_spec = fake_resolve_alt
+dest = Path('${TMPDIR}/plan11')
+dest.mkdir(exist_ok=True)
+ws = FakeWorkspace(dest, [dest], ['good', 'alt:good'], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    len(plan.collisions) == 1
+    and plan.destructive_blocked is True
+    and plan.has_fixable_findings() is True
+)
+print('OK' if ok else f'FAIL collisions={plan.collisions} blocked={plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 11 - [Planner] detects declared skill spec collisions targeting different paths"
+else
+  echo "not ok 11 - [Planner] collision detection failed: $out"
+fi
+
+# Test 12: the planner silently deduplicates specs resolving to the exact same
+# source path (no collision, no block).
+out=$(run_plan "
+def fake_resolve_same(spec):
+    name = spec.split(':', 1)[-1]
+    return PLAN_SRC / 'good', name
+
+m.resolve_skill_spec = fake_resolve_same
+dest = Path('${TMPDIR}/plan12')
+dest.mkdir(exist_ok=True)
+ws = FakeWorkspace(dest, [dest], ['good', 'local:good'], (set(), [], []))
+plan = m.build_reconcile_plan(ws)
+ok = (
+    len(plan.collisions) == 0
+    and plan.destructive_blocked is False
+)
+print('OK' if ok else f'FAIL collisions={plan.collisions} blocked={plan.destructive_blocked}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 12 - [Planner] deduplicates specs resolving to the exact same source path"
+else
+  echo "not ok 12 - [Planner] identical target deduplication failed: $out"
+fi

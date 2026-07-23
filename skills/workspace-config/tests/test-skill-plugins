@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+#
+# Plugin loading, namespaced resolution, the catalog, and local discovery.
+#
+# Covers the plugin loader's error handling (broken plugins, fatal corporate
+# mount errors), namespaced/ambiguous resolution, generated path-backed skills,
+# the resolve: False flag, catalog dedup/conflict reporting, and ~/.agents
+# discovery via the bundled 05_local plugin. Resolution results are compared to
+# concrete paths; the catalog conflict marker and doctor's conflict check are
+# the user-facing surfaces.
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-config/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+skill_test_init
+
+echo "1..15"
+
+# Test 1: add bogus-skill-name reports unknown skill (non-zero exit).
+cd "$TMPDIR"
+if ! "${SCRIPT}" add bogus-skill-name >/dev/null 2>&1; then
+  echo "ok 1 - add bogus-skill-name reports unknown skill"
+else
+  echo "not ok 1 - add bogus-skill-name succeeded unexpectedly"
+fi
+
+# Test 2: resolves names against SKILL_SOURCE_DIRS.
+mkdir -p "${TMPDIR}/custom-skills/test-skill"
+printf -- '---\nname: test-skill\n---\nbody\n' >"${TMPDIR}/custom-skills/test-skill/SKILL.md"
+if SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills" "${SCRIPT}" resolve test-skill | grep -q 'custom-skills/test-skill'; then
+  echo "ok 2 - resolves names against SKILL_SOURCE_DIRS"
+else
+  echo "not ok 2 - failed to resolve custom skill"
+fi
+
+# Test 3: update --catalog with an empty registry preserves the catalog (GC
+# guard -- must not wipe unrelated indexed entries).
+mkdir -p "${XDG_CACHE_HOME}/skill/catalog/dummy"
+touch "${XDG_CACHE_HOME}/skill/catalog/dummy/SKILL.md"
+if "${SCRIPT}" update --catalog >/dev/null 2>&1 &&
+  [ -d "${XDG_CACHE_HOME}/skill/catalog/dummy" ]; then
+  echo "ok 3 - update --catalog with empty registry preserves catalog (GC guard)"
+else
+  echo "not ok 3 - update --catalog destroyed unrelated catalog or failed"
+fi
+
+# Test 4: a broken plugin is skipped with a warning; built-ins still work.
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/broken.py"
+raise RuntimeError("boom")
+EOF
+NOPLUGIN_DIR="${TMPDIR}/noplugin"
+mkdir -p "$NOPLUGIN_DIR"
+cd "$NOPLUGIN_DIR"
+if out=$("${SCRIPT}" add coding-standards 2>&1) &&
+  printf '%s' "$out" | grep -q 'failed to load plugin' && [ ! -f .skills-managed ]; then
+  echo "ok 4 - [Plugin] broken plugin warns and is skipped"
+else
+  echo "not ok 4 - [Plugin] missing warning or fallback: $out"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/broken.py"
+cd "$TMPDIR"
+
+# Test 5: show displays skill info; info is an alias.
+if out=$("${SCRIPT}" show coding-standards 2>/dev/null) &&
+  info_out=$("${SCRIPT}" info coding-standards 2>/dev/null) &&
+  printf '%s' "$out" | grep -q 'Skill: coding-standards' &&
+  printf '%s' "$out" | grep -q 'Rules for coding standards' &&
+  printf '%s' "$out" | grep -q 'Metadata:' &&
+  printf '%s' "$info_out" | grep -q 'Skill: coding-standards'; then
+  echo "ok 5 - show displays skill info; info alias works"
+else
+  echo "not ok 5 - show or info output missing expected fields"
+fi
+
+# Test 6: a plugin with a fatal corporate mount error causes a hard exit and a
+# clear error (the plugin loader must not swallow sys.exit(1)).
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/corpmount.py"
+import sys
+print("skill: error: Corporate mount path '/mnt/corp/src' is not accessible.\nPlease run 'corp-auth' to renew your credentials.", file=sys.stderr)
+sys.exit(1)
+EOF
+if out=$("${SCRIPT}" list 2>&1); then
+  echo "not ok 6 - [Plugin] corporate mount error should cause failure"
+else
+  if printf '%s' "$out" | grep -q "Corporate mount path '/mnt/corp/src' is not accessible"; then
+    echo "ok 6 - [Plugin] corporate mount error exits non-zero and prints helpful error"
+  else
+    echo "not ok 6 - [Plugin] missing or incorrect error message: $out"
+  fi
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/corpmount.py"
+
+# ---------------------------------------------------------------------------
+# Namespaced resolution (foo:bar / baz:bar registered by a plugin)
+# ---------------------------------------------------------------------------
+mkdir -p "${TMPDIR}/bar1" "${TMPDIR}/bar2"
+printf -- '---\nname: bar\n---\n' >"${TMPDIR}/bar1/SKILL.md"
+printf -- '---\nname: bar\n---\n' >"${TMPDIR}/bar2/SKILL.md"
+mkdir -p "${XDG_CACHE_HOME}/skill/catalog/foo:bar" "${XDG_CACHE_HOME}/skill/catalog/baz:bar"
+printf -- '---\nname: bar\n---\n' >"${XDG_CACHE_HOME}/skill/catalog/foo:bar/SKILL.md"
+printf -- '---\nname: bar\n---\n' >"${XDG_CACHE_HOME}/skill/catalog/baz:bar/SKILL.md"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
+def register(api):
+    api.register_skill("foo:bar", {"path": "${TMPDIR}/bar1"})
+    api.register_skill("baz:bar", {"path": "${TMPDIR}/bar2"})
+EOF
+
+# Test 7: strict namespaced resolution succeeds and returns the exact path.
+if out=$("${SCRIPT}" resolve foo:bar 2>/dev/null) && [ "$out" = "${TMPDIR}/bar1" ]; then
+  echo "ok 7 - [Namespacing] strict foo:bar resolves uniquely"
+else
+  echo "not ok 7 - [Namespacing] strict resolved to incorrect path: ${out:-}"
+fi
+
+# Test 8: an ambiguity error is raised when resolving an optional namespace with
+# a collision, naming both candidates.
+if out=$("${SCRIPT}" resolve bar 2>&1); then
+  echo "not ok 8 - [Namespacing] resolving ambiguous 'bar' should have failed"
+else
+  if printf '%s' "$out" | grep -q "Ambiguous skill spec 'bar'" &&
+    printf '%s' "$out" | grep -q "foo:bar" &&
+    printf '%s' "$out" | grep -q "baz:bar"; then
+    echo "ok 8 - [Namespacing] optional 'bar' fails with clear ambiguity error"
+  else
+    echo "not ok 8 - [Namespacing] incorrect ambiguity error: $out"
+  fi
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_namespacing.py"
+
+# Test 9: generated path-backed plugin skills refresh during update.
+GENERATED_DIR="${TMPDIR}/generated-skill"
+mkdir -p "$GENERATED_DIR"
+printf '%s\n' 'stale generated skill' >"${GENERATED_DIR}/SKILL.md"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_generated.py"
+from pathlib import Path
+
+CONTENT = "---\\nname: generated-skill\\ndescription: Fresh generated skill\\n---\\nbody\\n"
+
+def register(api):
+    skill_dir = Path("${GENERATED_DIR}")
+    skill_md = skill_dir / "SKILL.md"
+    if skill_md.read_text() != CONTENT:
+        skill_md.write_text(CONTENT)
+    api.register_skill("test:generated-skill", {"path": str(skill_dir), "generated": True})
+EOF
+if out=$("${SCRIPT}" update test:generated-skill 2>&1) &&
+  printf '%s' "$out" | grep -q "generated; refreshed by plugin loader" &&
+  grep -q "Fresh generated skill" "${GENERATED_DIR}/SKILL.md"; then
+  echo "ok 9 - [Generated plugins] update refreshes generated path-backed skill"
+else
+  echo "not ok 9 - [Generated plugins] update did not refresh generated skill: ${out:-}"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_generated.py"
+
+# Test 10: a plugin skill registered with resolve: False is not realpath'd --
+# resolve returns the symlink path and apply keeps the symlink target stable.
+RESOLVE_DIR="${TMPDIR}/resolve-test"
+mkdir -p "${RESOLVE_DIR}/real-target"
+printf -- '---\nname: noresolve-skill\n---\n' >"${RESOLVE_DIR}/real-target/SKILL.md"
+ln -s "real-target" "${RESOLVE_DIR}/sym-link"
+mkdir -p "${XDG_CACHE_HOME}/skill/catalog/test:noresolve-skill"
+printf -- '---\nname: noresolve-skill\n---\n' >"${XDG_CACHE_HOME}/skill/catalog/test:noresolve-skill/SKILL.md"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_noresolve.py"
+def register(api):
+    api.register_skill("test:noresolve-skill", {"path": "${RESOLVE_DIR}/sym-link", "resolve": False})
+EOF
+resolved_out=$("${SCRIPT}" resolve test:noresolve-skill 2>/dev/null)
+noresolve_ok=0
+if [ "$resolved_out" = "${RESOLVE_DIR}/sym-link" ]; then
+  APPLY_RESOLVE_DIR="${TMPDIR}/apply-resolve-test"
+  mkdir -p "$APPLY_RESOLVE_DIR"
+  cd "$APPLY_RESOLVE_DIR"
+  git init -q
+  mkdir -p .claude/skills .agents/skills
+  export AGENT_REQUIRED_SKILLS="test:noresolve-skill"
+  if "${SCRIPT}" apply >/dev/null 2>&1 &&
+    [ "$(readlink .agents/skills/sym-link)" = "${RESOLVE_DIR}/sym-link" ] &&
+    [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
+    noresolve_ok=1
+  fi
+  export AGENT_REQUIRED_SKILLS=""
+  cd "$TMPDIR"
+fi
+if [ "$noresolve_ok" -eq 1 ]; then
+  echo "ok 10 - [Resolve flag] respects resolve: False and keeps symlinks stable"
+else
+  echo "not ok 10 - [Resolve flag] resolve: False not respected (resolved=$resolved_out)"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_noresolve.py"
+cd "$TMPDIR"
+
+# Test 11: catalog deduplicates identical target paths within one source group.
+CAT_DEDUP_DIR="${TMPDIR}/cat-dedup"
+mkdir -p "${CAT_DEDUP_DIR}/dir1" "${CAT_DEDUP_DIR}/dir2" "${CAT_DEDUP_DIR}/target"
+printf -- '---\nname: shared-skill\n---\n' >"${CAT_DEDUP_DIR}/target/SKILL.md"
+ln -s "${CAT_DEDUP_DIR}/target" "${CAT_DEDUP_DIR}/dir1/shared-skill"
+ln -s "${CAT_DEDUP_DIR}/target" "${CAT_DEDUP_DIR}/dir2/shared-skill"
+if out=$(SKILL_SOURCE_DIRS="${CAT_DEDUP_DIR}/dir1:${CAT_DEDUP_DIR}/dir2" "${SCRIPT}" catalog 2>/dev/null); then
+  count=$(printf '%s\n' "$out" | grep -c "local:shared-skill" || true)
+  if [ "$count" -eq 1 ]; then
+    echo "ok 11 - [Catalog] deduplicates identical target paths in the same group"
+  else
+    echo "not ok 11 - [Catalog] expected 1 entry for local:shared-skill, got $count"
+  fi
+else
+  echo "not ok 11 - [Catalog] command failed"
+fi
+
+# Test 12: catalog and doctor flag conflicting skill names across distinct
+# targets. Catalog marks it "(! CONFLICT)" (a formatting contract); doctor
+# reports a Skill Conflicts WARNING (structured).
+CAT_CONF_DIR="${TMPDIR}/cat-conf"
+mkdir -p "${CAT_CONF_DIR}/dir1/conf-skill" "${CAT_CONF_DIR}/dir2/conf-skill"
+printf -- '---\nname: conf-skill\n---\n' >"${CAT_CONF_DIR}/dir1/conf-skill/SKILL.md"
+printf -- '---\nname: conf-skill\n---\n' >"${CAT_CONF_DIR}/dir2/conf-skill/SKILL.md"
+cd "$CAT_CONF_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+cat_out=$(SKILL_SOURCE_DIRS="${CAT_CONF_DIR}/dir1:${CAT_CONF_DIR}/dir2" "${SCRIPT}" catalog 2>/dev/null) || true
+doc_json=$(SKILL_SOURCE_DIRS="${CAT_CONF_DIR}/dir1:${CAT_CONF_DIR}/dir2" "${SCRIPT}" doctor --json 2>/dev/null || true)
+if printf '%s\n' "$cat_out" | grep -q "conf-skill (! CONFLICT)" &&
+  [ "$(check_status "$doc_json" "Skill Conflicts")" = "WARNING" ]; then
+  echo "ok 12 - [Conflict] catalog and doctor flag conflicting skill names across distinct targets"
+else
+  echo "not ok 12 - [Conflict] failed to flag conflict in catalog or doctor"
+fi
+cd "$TMPDIR"
+
+# Test 13: a local skill shadows a remote fallback during non-namespaced
+# resolution.
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_shadow.py"
+def register(api):
+    api.register_skill("local:shadow-test", {"path": "${TMPDIR}/local-shadow"})
+    api.register_skill("remote:shadow-test", {"repo": "dummy/repo", "ref": "main", "subpath": "dummy"})
+EOF
+mkdir -p "${TMPDIR}/local-shadow"
+printf -- '---\nname: shadow-test\n---\n' >"${TMPDIR}/local-shadow/SKILL.md"
+if out=$("${SCRIPT}" resolve shadow-test 2>/dev/null) && [ "$out" = "${TMPDIR}/local-shadow" ]; then
+  echo "ok 13 - [Resolution] local skill shadows remote fallback"
+else
+  echo "not ok 13 - [Resolution] resolved to unexpected path: ${out:-}"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_shadow.py"
+
+# Test 14: the bundled 05_local plugin discovers skills in ~/.agents/skills and
+# deduplicates a symlinked ~/.gemini/config/skills without a duplicate warning.
+DISC_HOME="${TMPDIR}/disc_home"
+mkdir -p "${DISC_HOME}/.agents/skills/my-agent-skill" "${DISC_HOME}/.gemini/config"
+printf -- '---\nname: my-agent-skill\n---\n' >"${DISC_HOME}/.agents/skills/my-agent-skill/SKILL.md"
+ln -s "${DISC_HOME}/.agents/skills" "${DISC_HOME}/.gemini/config/skills"
+if out=$(env -u SKILL_SOURCE_DIRS HOME="$DISC_HOME" "${SCRIPT}" resolve my-agent-skill 2>&1) &&
+  [ "$out" = "${DISC_HOME}/.agents/skills/my-agent-skill" ] &&
+  ! printf '%s\n' "$out" | grep -q "overwriting existing entry"; then
+  echo "ok 14 - [Local discovery] discovers ~/.agents/skills and dedups symlinked ~/.gemini/config/skills"
+else
+  echo "not ok 14 - [Local discovery] unexpected output: ${out:-}"
+fi
+
+# Test 15: 'remove' handles an unresolvable remote spec without throwing
+# SystemExit or crashing, leaving unrelated live symlinks intact.
+OFFLINE_REMOVE_DIR="${TMPDIR}/offline-remove"
+mkdir -p "$OFFLINE_REMOVE_DIR"
+cd "$OFFLINE_REMOVE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${TMPDIR}/sources/coding-standards" .claude/skills/unresolvable-remote
+"${SCRIPT}" remove remote:unresolvable/repo >/dev/null 2>&1 || true
+if [ -L .claude/skills/unresolvable-remote ]; then
+  echo "ok 15 - [Remove] offline unresolvable spec remove handles gracefully without crash"
+else
+  echo "not ok 15 - [Remove] unresolvable remote spec remove failed unexpectedly"
+fi
+cd "$TMPDIR"

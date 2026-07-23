@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+#
+# `skill apply` reconciliation behavior and conflict handling.
+#
+# apply executes the same ReconcilePlan doctor renders. These tests assert on
+# the resulting disk state and re-run doctor (via --json) to confirm
+# convergence, reserving string checks for the few user-facing status lines
+# apply emits (the freshness "not pruning" guard, the conflict abort).
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-config/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+skill_test_init
+
+echo "1..11"
+
+# Test 1: apply synchronizes required skills and prunes extras.
+APPLY_DIR="${TMPDIR}/apply-test"
+mkdir -p "$APPLY_DIR"
+cd "$APPLY_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export SKILL_SOURCE_DIRS="${TMPDIR}/custom-skills"
+mkdir -p "${SKILL_SOURCE_DIRS}/required-skill" "${SKILL_SOURCE_DIRS}/extra-skill"
+printf -- '---\nname: required-skill\n---\n' >"${SKILL_SOURCE_DIRS}/required-skill/SKILL.md"
+printf -- '---\nname: extra-skill\n---\n' >"${SKILL_SOURCE_DIRS}/extra-skill/SKILL.md"
+ln -s "${SKILL_SOURCE_DIRS}/extra-skill" .claude/skills/extra-skill
+ln -s "${SKILL_SOURCE_DIRS}/extra-skill" .agents/skills/extra-skill
+export AGENT_REQUIRED_SKILLS="required-skill"
+if "${SCRIPT}" apply >/dev/null 2>&1 &&
+  [ -L .claude/skills/required-skill ] && [ -L .agents/skills/required-skill ] &&
+  [ ! -e .claude/skills/extra-skill ] && [ ! -e .agents/skills/extra-skill ] &&
+  grep -q '/.claude/skills/required-skill' .git/info/exclude &&
+  ! grep -q 'extra-skill' .git/info/exclude; then
+  echo "ok 1 - [Apply] synchronizes required skills and prunes extras"
+else
+  echo "not ok 1 - [Apply] unexpected files or excludes after sync"
+fi
+export AGENT_REQUIRED_SKILLS=""
+export SKILL_SOURCE_DIRS="${TMPDIR}/sources"
+cd "$TMPDIR"
+
+# Test 2: apply is an idempotent fixpoint -- a second run is a no-op that leaves
+# the exclude block and symlink targets byte-for-byte identical.
+IDEMPOTENT_DIR="${TMPDIR}/idempotent"
+mkdir -p "$IDEMPOTENT_DIR"
+cd "$IDEMPOTENT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+cp .git/info/exclude "${IDEMPOTENT_DIR}/exclude.before"
+before_targets=$(readlink .claude/skills/coding-standards .agents/skills/coding-standards)
+apply2_rc=0
+"${SCRIPT}" apply >/dev/null 2>&1 || apply2_rc=$?
+after_targets=$(readlink .claude/skills/coding-standards .agents/skills/coding-standards)
+if [ "$apply2_rc" -eq 0 ] &&
+  cmp -s "${IDEMPOTENT_DIR}/exclude.before" .git/info/exclude &&
+  [ "$before_targets" = "$after_targets" ]; then
+  echo "ok 2 - [Idempotency] second apply is a no-op (exclude + symlinks unchanged)"
+else
+  echo "not ok 2 - [Idempotency] second apply changed state (rc=$apply2_rc)"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 3: target-based apply and doctor handle a namespaced spec: apply links
+# the target's basename and the recomputed plan converges (doctor --json OK).
+NS_DIR="${TMPDIR}/ns-test"
+mkdir -p "${TMPDIR}/bar1"
+printf -- '---\nname: bar\n---\n' >"${TMPDIR}/bar1/SKILL.md"
+mkdir -p "${XDG_CACHE_HOME}/skill/catalog/foo:bar"
+printf -- '---\nname: bar\n---\n' >"${XDG_CACHE_HOME}/skill/catalog/foo:bar/SKILL.md"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_ns.py"
+def register(api):
+    api.register_skill("foo:bar", {"path": "${TMPDIR}/bar1"})
+EOF
+mkdir -p "$NS_DIR"
+cd "$NS_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="foo:bar"
+if "${SCRIPT}" apply >/dev/null 2>&1 &&
+  [ -L .claude/skills/bar1 ] && [ -L .agents/skills/bar1 ] &&
+  [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
+  echo "ok 3 - [Namespacing] target-based apply links basename; doctor converges"
+else
+  echo "not ok 3 - [Namespacing] apply did not link target basename or doctor failed"
+fi
+export AGENT_REQUIRED_SKILLS=""
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_ns.py"
+cd "$TMPDIR"
+
+# Test 4: apply declines to prune while the environment is stale (.envrc
+# declares a skill the environment does not reflect), then prunes normally once
+# the environment is fresh. The "not pruning"/"direnv reload" status lines are a
+# user-facing contract.
+FRESH_DIR="${TMPDIR}/freshness-apply"
+mkdir -p "$FRESH_DIR"
+cd "$FRESH_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+cat >.envrc <<'EOF'
+# >>> envrc managed block: skills >>>
+skills emumanager
+# <<< envrc managed block: skills <<<
+EOF
+ln -s "${TMPDIR}/sources/emumanager" .claude/skills/emumanager
+ln -s "${TMPDIR}/sources/emumanager" .agents/skills/emumanager
+export AGENT_REQUIRED_SKILLS="coding-standards"
+stale_out=$("${SCRIPT}" apply 2>&1) || true
+phase1_ok=0
+if [ -L .claude/skills/emumanager ] &&
+  printf '%s\n' "$stale_out" | grep -q "not pruning" &&
+  printf '%s\n' "$stale_out" | grep -q "direnv reload"; then
+  phase1_ok=1
+fi
+export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
+"${SCRIPT}" apply >/dev/null 2>&1
+phase2_ok=0
+if [ -L .claude/skills/emumanager ] &&
+  [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
+  phase2_ok=1
+fi
+ln -s "${TMPDIR}/sources/test-skill" .claude/skills/test-skill
+ln -s "${TMPDIR}/sources/test-skill" .agents/skills/test-skill
+"${SCRIPT}" apply >/dev/null 2>&1
+phase3_ok=0
+if [ ! -L .claude/skills/test-skill ] && [ ! -L .agents/skills/test-skill ]; then
+  phase3_ok=1
+fi
+if [ "$phase1_ok" -eq 1 ] && [ "$phase2_ok" -eq 1 ] && [ "$phase3_ok" -eq 1 ]; then
+  echo "ok 4 - [Freshness] apply skips pruning while stale, prunes when fresh"
+else
+  echo "not ok 4 - [Freshness] apply guard failed (p1=$phase1_ok p2=$phase2_ok p3=$phase3_ok): $stale_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 5: apply prunes dangling symlinks unconditionally, and the recomputed
+# plan converges. (doctor's Symlink Health told the user to run apply; apply's
+# prune loop must actually reach dangling links.)
+DANGLING_APPLY_DIR="${TMPDIR}/dangling-apply"
+mkdir -p "$DANGLING_APPLY_DIR"
+cd "$DANGLING_APPLY_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/stale-target .claude/skills/stale-broken
+ln -s /nonexistent/stale-target .agents/skills/stale-broken
+export AGENT_REQUIRED_SKILLS="coding-standards"
+apply_out=$("${SCRIPT}" apply 2>&1)
+if [ ! -L .claude/skills/stale-broken ] && [ ! -L .agents/skills/stale-broken ] &&
+  printf '%s\n' "$apply_out" | grep -q "pruning dangling symlink" &&
+  [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
+  echo "ok 5 - [Symlink Health] apply prunes dangling symlinks unconditionally"
+else
+  echo "not ok 5 - [Symlink Health] apply did not prune dangling symlink: $apply_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 6: apply leaves a VCS-tracked dangling symlink alone -- checked-in
+# content, not a stray install artifact.
+TRACKED_DANGLING_DIR="${TMPDIR}/tracked-dangling"
+mkdir -p "$TRACKED_DANGLING_DIR"
+cd "$TRACKED_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/committed-target .claude/skills/committed-broken
+git add .claude/skills/committed-broken
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+if [ -L .claude/skills/committed-broken ]; then
+  echo "ok 6 - [Symlink Health] apply does not prune a VCS-tracked dangling symlink"
+else
+  echo "not ok 6 - [Symlink Health] apply pruned a tracked dangling symlink"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 7: apply prunes dangling symlinks even when AGENT_REQUIRED_SKILLS is
+# empty -- a broken link is never a legitimate desired state.
+EMPTY_DANGLING_DIR="${TMPDIR}/empty-dangling"
+mkdir -p "$EMPTY_DANGLING_DIR"
+cd "$EMPTY_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/stale-empty .claude/skills/stale-empty
+ln -s /nonexistent/stale-empty .agents/skills/stale-empty
+export AGENT_REQUIRED_SKILLS=""
+apply_out=$("${SCRIPT}" apply 2>&1)
+if [ ! -L .claude/skills/stale-empty ] && [ ! -L .agents/skills/stale-empty ] &&
+  printf '%s\n' "$apply_out" | grep -q "pruning dangling symlink" &&
+  printf '%s\n' "$apply_out" | grep -q "AGENT_REQUIRED_SKILLS is empty"; then
+  echo "ok 7 - [Symlink Health] apply prunes dangling symlinks even with an empty desired set"
+else
+  echo "not ok 7 - [Symlink Health] apply skipped dangling prune with empty desired set: $apply_out"
+fi
+cd "$TMPDIR"
+
+# Test 8: an unresolvable declared spec must not cause apply to delete an
+# existing live symlink that shares its name -- apply blocks and preserves it.
+UNRESOLVABLE_LIVE_DIR="${TMPDIR}/unresolvable-live"
+mkdir -p "${UNRESOLVABLE_LIVE_DIR}/real-target"
+printf -- '---\nname: real-target\n---\n' >"${UNRESOLVABLE_LIVE_DIR}/real-target/SKILL.md"
+cd "$UNRESOLVABLE_LIVE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${UNRESOLVABLE_LIVE_DIR}/real-target" .claude/skills/bogus-live
+ln -s "${UNRESOLVABLE_LIVE_DIR}/real-target" .agents/skills/bogus-live
+export AGENT_REQUIRED_SKILLS="bogus-live"
+apply_rc=0
+apply_out=$("${SCRIPT}" apply 2>&1) || apply_rc=$?
+if [ "$apply_rc" -ne 0 ] &&
+  [ -L .claude/skills/bogus-live ] && [ -L .agents/skills/bogus-live ] &&
+  printf '%s\n' "$apply_out" | grep -q "cannot fully resolve the desired skill set" &&
+  printf '%s\n' "$apply_out" | grep -q "not pruning" &&
+  ! printf '%s\n' "$apply_out" | grep -q "pruning extra symlink not in AGENT_REQUIRED_SKILLS"; then
+  echo "ok 8 - [Safety] apply does not delete a live symlink for an unresolvable spec"
+else
+  echo "not ok 8 - [Safety] apply mishandled a live symlink for an unresolvable spec (rc=$apply_rc): $apply_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 9: apply prunes an extra symlink whose on-disk link name
+# ('wear-jetpack-compose-m3') differs from its resolved target folder basename
+# ('jetpack-compose-m3'), and the recomputed plan converges.
+MISMATCH_NAME_DIR="${TMPDIR}/mismatch-name"
+mkdir -p "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3"
+printf -- '---\nname: wear-jetpack-compose-m3\n---\n' >"${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3/SKILL.md"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_androidcli.py"
+def register(api):
+    api.register_skill("android:wear-jetpack-compose-m3", {"path": "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3"})
+EOF
+"${SCRIPT}" update --catalog >/dev/null 2>&1 || true
+APPLY_MISMATCH_DIR="${TMPDIR}/apply-mismatch-name"
+mkdir -p "$APPLY_MISMATCH_DIR"
+cd "$APPLY_MISMATCH_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3" .claude/skills/wear-jetpack-compose-m3
+ln -s "${MISMATCH_NAME_DIR}/wear/jetpack-compose-m3" .agents/skills/wear-jetpack-compose-m3
+export AGENT_REQUIRED_SKILLS="coding-standards"
+if "${SCRIPT}" apply >/dev/null 2>&1 &&
+  [ ! -L .claude/skills/wear-jetpack-compose-m3 ] && [ ! -L .agents/skills/wear-jetpack-compose-m3 ] &&
+  [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
+  echo "ok 9 - [Apply] prunes extra symlink whose on-disk name differs from target folder name"
+else
+  echo "not ok 9 - [Apply] symlink still exists or doctor failed"
+fi
+export AGENT_REQUIRED_SKILLS=""
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_androidcli.py"
+cd "$TMPDIR"
+
+# Test 10: 'add' aborts atomically without mutating disk on conflicting specs
+# (two specs whose link basenames collide but resolve to different sources).
+PLAN_SRC_ALT="${TMPDIR}/plan-sources-alt"
+mkdir -p "${PLAN_SRC_ALT}/emumanager"
+printf -- '---\nname: emumanager\n---\n' >"${PLAN_SRC_ALT}/emumanager/SKILL.md"
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_alt_emumanager.py"
+def register(api):
+    api.register_skill("alt:emumanager", {"path": "${PLAN_SRC_ALT}/emumanager"})
+EOF
+"${SCRIPT}" update --catalog >/dev/null 2>&1 || true
+ADD_CONFLICT_DIR="${TMPDIR}/add-conflict"
+mkdir -p "$ADD_CONFLICT_DIR"
+cd "$ADD_CONFLICT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+if add_out=$("${SCRIPT}" add local:emumanager alt:emumanager 2>&1); then
+  echo "not ok 10 - [Add] add should have failed on conflicting specs"
+else
+  if printf '%s\n' "$add_out" | grep -q "conflict:" && [ ! -e .agents/skills/emumanager ]; then
+    echo "ok 10 - [Add] add aborts atomically without mutating disk on conflicting specs"
+  else
+    echo "not ok 10 - [Add] conflict error message or disk state wrong: $add_out"
+  fi
+fi
+cd "$TMPDIR"
+
+# Test 11: end-to-end doctor and apply handle conflicting specs cleanly without
+# looping -- doctor reports the collision (plan.collisions), does not offer the
+# disk-match-env fix, and apply refuses with a clear message.
+APPLY_CONFLICT_DIR="${TMPDIR}/apply-conflict"
+mkdir -p "$APPLY_CONFLICT_DIR"
+cd "$APPLY_CONFLICT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="local:emumanager alt:emumanager"
+cj=$(doctor_json)
+ch=$("${SCRIPT}" doctor 2>&1) || true
+apply_conflict_rc=0
+apply_conflict_out=$("${SCRIPT}" apply 2>&1) || apply_conflict_rc=$?
+if [ -n "$(json_get "$cj" 'd["plan"]["collisions"]')" ] &&
+  [ "$(check_status "$cj" "Required Skills")" = "ERROR" ] &&
+  ! printf '%s\n' "$ch" | grep -q "Make disk match env" &&
+  [ "$apply_conflict_rc" -ne 0 ] &&
+  printf '%s\n' "$apply_conflict_out" | grep -q "conflicting skill declarations"; then
+  echo "ok 11 - [CLI] doctor and apply handle conflicting specs cleanly without infinite loop"
+else
+  echo "not ok 11 - [CLI] conflicting-spec handling failed: $cj / $apply_conflict_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_alt_emumanager.py"
+cd "$TMPDIR"

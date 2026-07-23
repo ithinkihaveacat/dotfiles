@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+#
+# The preflight launch gate, its fish wrapper, and severity handling.
+#
+# preflight is the launch gate: only ERROR-severity findings block an agent,
+# WARNING-only workspaces pass silently. These tests cover the fish
+# _agent_preflight wrapper, the empty-on-success / stderr-on-failure output
+# contract, the WARNING-vs-ERROR severity split (checked with doctor --json),
+# and the AGENT_PREFLIGHT_SKIP escape hatch. The help-text and failure-report
+# strings are user-facing formatting contracts.
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-config/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+skill_test_init
+
+echo "1..10"
+
+# Test 1: help documents the key commands and structured-output flags.
+cd "$TMPDIR"
+if out=$("${SCRIPT}" --help 2>&1) &&
+  printf '%s' "$out" | grep -q '\-\-catalog' &&
+  printf '%s' "$out" | grep -q 'apply' &&
+  printf '%s' "$out" | grep -q 'list \[--json\]' &&
+  printf '%s' "$out" | grep -q 'doctor \[--json\]'; then
+  echo "ok 1 - help documents --catalog, apply, list --json, and doctor --json"
+else
+  echo "not ok 1 - help missing key commands or --json flags"
+fi
+
+# ==============================================================================
+# Preflight wrapper (fish)
+# ==============================================================================
+if ! command -v fish >/dev/null 2>&1; then
+  echo "ok 2 - [Preflight] non-managed dir with no required skills succeeds # skip fish not available"
+  echo "ok 3 - [Preflight] non-managed dir with required skills fails # skip fish not available"
+  echo "ok 4 - [Preflight] managed dir with required skill present succeeds # skip fish not available"
+  echo "ok 5 - [Preflight] managed dir with missing required skill fails # skip fish not available"
+  echo "ok 6 - [Preflight] subtraction operator works # skip fish not available"
+else
+  # _agent_preflight calls the bare 'skill' command; make sure that resolves to
+  # the script under test. (procps ships /usr/bin/skill, which would otherwise
+  # shadow it when the dotfiles bin/ is not on PATH.)
+  cat >"$MOCK_BIN_DIR/skill" <<EOF
+#!/usr/bin/env bash
+exec "${SCRIPT}" "\$@"
+EOF
+  chmod +x "$MOCK_BIN_DIR/skill"
+  fish -c "
+source '${REPO_ROOT}/fish/functions/_agent_preflight.fish'
+source '${REPO_ROOT}/fish/functions/_skill_is_managed.fish'
+
+# Case A: Non-managed directory
+cd (mktemp -d)
+
+# Test 2: No required skills -> should succeed
+set -gx AGENT_REQUIRED_SKILLS ''
+if _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 2 - [Preflight] non-managed dir with no required skills succeeds'
+else
+  echo 'not ok 2 - [Preflight] non-managed dir with no required skills failed'
+end
+
+# Test 3: With required skills -> should fail
+set -gx AGENT_REQUIRED_SKILLS 'some-skill'
+if not _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 3 - [Preflight] non-managed dir with required skills fails'
+else
+  echo 'not ok 3 - [Preflight] non-managed dir with required skills succeeded unexpectedly'
+end
+
+# Case B: Managed directory
+set -l test_repo (mktemp -d)
+cd \$test_repo
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s \"${TMPDIR}/sources/test-skill\" .claude/skills/test-skill
+ln -s \"${TMPDIR}/sources/test-skill\" .agents/skills/test-skill
+mkdir -p .git/info
+echo 'test-skill' > .git/info/skills
+echo '# >>> skills >>>' > .git/info/exclude
+echo '/.claude/skills/test-skill' >> .git/info/exclude
+echo '/.agents/skills/test-skill' >> .git/info/exclude
+echo '# <<< skills <<<' >> .git/info/exclude
+
+# Test 4: Required skill present -> should succeed
+set -gx AGENT_REQUIRED_SKILLS 'test-skill'
+if _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 4 - [Preflight] managed dir with required skill present succeeds'
+else
+  echo 'not ok 4 - [Preflight] managed dir with required skill present failed'
+end
+
+# Test 5: Required skill missing -> should fail
+set -gx AGENT_REQUIRED_SKILLS 'test-skill missing-skill'
+if not _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 5 - [Preflight] managed dir with missing required skill fails'
+else
+  echo 'not ok 5 - [Preflight] managed dir with missing required skill succeeded'
+end
+
+# Test 6: Subtraction operator -> should succeed
+set -gx AGENT_REQUIRED_SKILLS 'test-skill missing-skill -missing-skill'
+if _agent_preflight test-agent >/dev/null 2>&1
+  echo 'ok 6 - [Preflight] subtraction operator works'
+else
+  echo 'not ok 6 - [Preflight] subtraction operator failed'
+end
+"
+fi
+
+# ==============================================================================
+# Preflight output contract and severity
+# ==============================================================================
+UI_DIR="${TMPDIR}/ui-test"
+mkdir -p "$UI_DIR"
+cd "$UI_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+
+# Test 7: preflight on success emits absolutely nothing.
+preflight_out=$("${SCRIPT}" preflight 2>&1)
+if [ -z "$preflight_out" ]; then
+  echo "ok 7 - [Preflight UI] success emits absolutely nothing"
+else
+  echo "not ok 7 - [Preflight UI] success emitted output: $preflight_out"
+fi
+
+# Test 8: preflight on failure emits its report to stderr, names the failing
+# check and the resolution and the workspace root, and prints no success line.
+rm .claude/skills/coding-standards
+if pf=$("${SCRIPT}" preflight 2>&1); then
+  echo "not ok 8 - [Preflight UI] preflight succeeded unexpectedly in unhealthy workspace"
+else
+  if printf '%s\n' "$pf" | grep -q "\[ERROR\] Required Skills:" &&
+    ! printf '%s\n' "$pf" | grep -q "Workspace is healthy" &&
+    printf '%s\n' "$pf" | grep -q "Make disk match env (link " &&
+    printf '%s\n' "$pf" | grep -q "preflight check failed in workspace:"; then
+    echo "ok 8 - [Preflight UI] failure emits report to stderr"
+  else
+    echo "not ok 8 - [Preflight UI] failure report missing errors, resolutions, or workspace root: $pf"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 9: a WARNING-only workspace must pass preflight (the launch gate) while
+# doctor (the full audit) still flags it. An orphaned skill directory -- which
+# apply itself produces via the local-dir fallback when no global agent config
+# is present -- is advisory and must not block agent launch.
+WARN_DIR="${TMPDIR}/preflight-warn"
+mkdir -p "$WARN_DIR"
+cd "$WARN_DIR"
+git init -q
+mkdir -p .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards"
+# Orphan .agents/skills: remove every global agent config so the directory is a
+# managed destination only via the local-dir fallback (a WARNING, not an ERROR).
+mv "$MOCK_HOME/.claude" "$MOCK_HOME/.claude-bak"
+mv "$MOCK_HOME/.gemini/antigravity-cli" "$MOCK_HOME/.gemini/antigravity-cli-bak"
+apply_rc=0
+"${SCRIPT}" apply >/dev/null 2>&1 || apply_rc=$?
+preflight_rc=0
+preflight_out=$("${SCRIPT}" preflight claude 2>&1) || preflight_rc=$?
+orphan_json=$(doctor_json)
+# Not orphaned once a Jetski config is present.
+mkdir -p "$MOCK_HOME/.gemini/jetski/cli"
+jetski_json=$(doctor_json)
+rm -rf "$MOCK_HOME/.gemini/jetski/cli"
+mv "$MOCK_HOME/.claude-bak" "$MOCK_HOME/.claude"
+mv "$MOCK_HOME/.gemini/antigravity-cli-bak" "$MOCK_HOME/.gemini/antigravity-cli"
+if [ "$apply_rc" -eq 0 ] &&
+  [ "$preflight_rc" -eq 0 ] && [ -z "$preflight_out" ] &&
+  [ "$(check_status "$orphan_json" "Orphaned Directories")" = "WARNING" ] &&
+  [ "$(check_status "$jetski_json" "Orphaned Directories")" = "OK" ]; then
+  echo "ok 9 - [Preflight] warning-only orphan passes preflight but fails doctor"
+else
+  echo "not ok 9 - [Preflight] orphan severity split wrong (apply=$apply_rc preflight=$preflight_rc)"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 10: AGENT_PREFLIGHT_SKIP bypasses the launch gate (legacy spelling
+# '_agent_preflight_skip' still honored), and the failure message advertises the
+# escape hatch so it never has to be remembered.
+SKIP_DIR="${TMPDIR}/preflight-skip"
+mkdir -p "$SKIP_DIR"
+cd "$SKIP_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="missing-skill"
+fail_rc=0
+fail_out=$("${SCRIPT}" preflight claude 2>&1) || fail_rc=$?
+skip_rc=0
+AGENT_PREFLIGHT_SKIP=1 "${SCRIPT}" preflight claude >/dev/null 2>&1 || skip_rc=$?
+legacy_rc=0
+_agent_preflight_skip=1 "${SCRIPT}" preflight claude >/dev/null 2>&1 || legacy_rc=$?
+if [ "$fail_rc" -ne 0 ] &&
+  printf '%s\n' "$fail_out" | grep -q "to launch anyway: AGENT_PREFLIGHT_SKIP=1 claude" &&
+  [ "$skip_rc" -eq 0 ] && [ "$legacy_rc" -eq 0 ]; then
+  echo "ok 10 - [Preflight] skip variable bypasses the gate; failure advertises it"
+else
+  echo "not ok 10 - [Preflight] skip handling wrong (fail=$fail_rc skip=$skip_rc legacy=$legacy_rc): $fail_out"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"

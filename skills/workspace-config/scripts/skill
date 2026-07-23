@@ -5,7 +5,7 @@
 #   "google-genai",
 # ]
 # ///
-# Tests: skills/workspace-config/tests/test-skill
+# Tests: skills/workspace-config/tests/
 
 from __future__ import annotations
 
@@ -1105,6 +1105,66 @@ class ReconcilePlan:
         if not self.destructive_blocked and (self.extra or self.negated_extra):
             return True
         return False
+
+    def to_dict(self) -> dict:
+        """Serialize the plan's facts into JSON-friendly primitives.
+
+        This is the machine-readable surface tests assert against instead of
+        parsing doctor's human-readable report. Specs are reduced to their
+        leading token (the env-var name), and Paths are stringified relative to
+        the workspace root where possible so assertions stay stable across
+        temp-dir prefixes.
+        """
+
+        def spec_name(label):
+            # 'missing'/'mismatched' labels carry a per-destination gloss
+            # ("spec (missing in .claude/skills)"); the spec is the first token.
+            return label.partition(" ")[0]
+
+        def rel(p):
+            try:
+                return str(Path(p).relative_to(self.ws.root))
+            except (ValueError, TypeError):
+                return str(p)
+
+        freshness = None
+        if self.freshness is not None:
+            fresh_missing, fresh_negated = self.freshness
+            freshness = {
+                "declared_missing": list(fresh_missing),
+                "negated_present": list(fresh_negated),
+            }
+
+        seen = set()
+        missing_names = [
+            spec_name(m)
+            for m in self.missing
+            if not (spec_name(m) in seen or seen.add(spec_name(m)))
+        ]
+        seen = set()
+        mismatched_names = [
+            spec_name(m)
+            for m in self.mismatched
+            if not (spec_name(m) in seen or seen.add(spec_name(m)))
+        ]
+
+        return {
+            "expected_skills": list(self.expected_skills),
+            "missing": missing_names,
+            "unresolvable": [r.spec for r in self.unresolved],
+            "mismatched": mismatched_names,
+            "extra": list(self.extra),
+            "negated_extra": list(self.negated_extra),
+            "prune_names": list(self.prune_names),
+            "stray_dangling": [rel(p) for p in self.stray_dangling],
+            "tracked_dangling": [rel(p) for p in self.tracked_dangling],
+            "unmanaged": [rel(p) for p in self.unmanaged],
+            "collisions": list(self.collisions),
+            "destructive_blocked": self.destructive_blocked,
+            "stale": self.stale,
+            "has_fixable_findings": self.has_fixable_findings(),
+            "freshness": freshness,
+        }
 
 
 def resolve_reconcile_skill(spec: str) -> ResolvedSkill:
@@ -2405,6 +2465,7 @@ def cmd_doctor(
     check_catalog: bool = False,
     stream=sys.stderr,
     errors_only: bool = False,
+    as_json: bool = False,
 ) -> bool:
     """Diagnoses the health of the workspace, skill configuration, and catalog.
 
@@ -3121,6 +3182,22 @@ def cmd_doctor(
                 "To resolve: run 'skill update --catalog' to repair the catalog cache."
             )
 
+    # Machine-readable surface: emit the full check list (status/summary/details
+    # complete, including remediation) plus the underlying plan facts, so tests
+    # and tools assert against structured data instead of parsing the report.
+    # The exit status is unchanged; only the rendering differs.
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "healthy": not fail,
+                    "checks": checks,
+                    "plan": plan.to_dict(),
+                }
+            )
+        )
+        return not fail
+
     for check in checks:
         if is_visible(check):
             print(
@@ -3146,12 +3223,14 @@ def cmd_doctor(
     return True
 
 
-def cmd_doctor_all():
+def cmd_doctor_all(as_json: bool = False):
     """Canonical entrypoint for the 'skill doctor' command.
 
     Runs both local and catalog diagnostics, printing to stdout with verbose reporting.
     """
-    healthy = cmd_doctor(verbose=True, check_catalog=True, stream=sys.stdout)
+    healthy = cmd_doctor(
+        verbose=True, check_catalog=True, stream=sys.stdout, as_json=as_json
+    )
     sys.exit(0 if healthy else 1)
 
 
@@ -3176,7 +3255,7 @@ Commands:
   update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every active
                   skill, --catalog to refresh the whole metadata index
   clean           Remove all skills and clear git excludes
-  doctor          Diagnose mismatch between desired and on-disk skills (read-only)
+  doctor [--json] Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
   catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
@@ -3235,7 +3314,7 @@ def register(api):
         usage()
 
     if cmd == "doctor":
-        cmd_doctor_all()
+        cmd_doctor_all(as_json="--json" in args)
     elif cmd == "catalog":
         as_json = "--json" in args
         cmd_catalog(as_json=as_json)
