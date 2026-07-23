@@ -503,3 +503,14 @@ ______________________________________________________________________
   environment. When generating local previews, ensure your layout is explicitly
   rendering against a dark background, and utilize high-contrast text colors
   (e.g., `Color.White.rc`) to match the live watch environment.
+
+______________________________________________________________________
+
+## Wear Widget Integration Brief Report Template
+
+When generating integration briefs or reports for Wear OS tiles or widgets,
+refer to the following template as a layout guide. It details how to organize
+setup specifications, Jetpack library dependencies, manifest declarations,
+metadata analysis, live verification screenshots, and identified bugs.
+
+@references/integration-report.md
