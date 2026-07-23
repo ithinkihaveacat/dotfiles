@@ -1,26 +1,29 @@
 # shellcheck shell=bash
 #
-# Shared setup and helpers for the `skill` test suite.
+# Shared setup and helpers for the workspace-config tests.
 #
 # The `skill` tests were split from one 2,000-line monolith into focused files
 # (test-skill-workspace, test-skill-reconcile, ...). Each of those files sources
-# this library, which builds one hermetic, offline sandbox (isolated HOME,
-# XDG dirs, SKILL_SOURCE_DIRS, a mock PATH) and defines the shared helpers.
+# this file, which builds one hermetic, offline sandbox (isolated HOME, XDG
+# dirs, SKILL_SOURCE_DIRS, a mock PATH) and defines the shared helpers.
+#
+# It is named `common.sh` rather than after the skill script so it can grow to
+# serve the other scripts' tests here (envrc, permission) as their shared setup
+# converges; today only the `skill` tests use it. It is not a `test-*` file, so
+# `prove` never runs it directly.
 #
 # Every sourcing test gets its own `mktemp -d` sandbox, so the files are
-# independent and parallel-safe. This is not a `test-*` file, so `prove` never
-# runs it directly.
-#
-# Assertions prefer structured output (`skill doctor --json`, the in-process
-# ReconcilePlan) over matching human-readable report strings; string checks are
-# reserved for the user-facing formatting contracts (remediation hints).
+# independent and parallel-safe. Assertions prefer structured output (`skill
+# doctor --json`, the in-process ReconcilePlan) over matching human-readable
+# report strings; string checks are reserved for the user-facing formatting
+# contracts (remediation hints).
 
-# Resolve the tests/ directory from this library's own path, so a sourcing test
+# Resolve the tests/ directory from this file's own path, so a sourcing test
 # need not compute it. SCRIPT is the skill under test; REPO_ROOT reaches the
 # repository top for fish functions and the local plugin fixture.
-SKILL_TEST_LIB_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="${SKILL_TEST_LIB_DIR}/../scripts/skill"
-REPO_ROOT="$(cd -P "${SKILL_TEST_LIB_DIR}/../../.." && pwd)"
+COMMON_SH_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${COMMON_SH_DIR}/../scripts/skill"
+REPO_ROOT="$(cd -P "${COMMON_SH_DIR}/../../.." && pwd)"
 
 # Build the hermetic sandbox and export the isolated environment. Call once,
 # near the top of each test file, before the first assertion.
