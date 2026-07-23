@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+#
+# `skill doctor` diagnostics and remediation output.
+#
+# Detection assertions read the structured `skill doctor --json` surface (check
+# statuses and the ReconcilePlan facts) rather than grepping the report. The
+# remediation-hint tests deliberately keep string checks: the phrasing of the
+# fix directions is a user-facing formatting contract, so it is verified against
+# the human-readable stderr report on purpose.
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-config/tests/skill-test-lib.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skill-test-lib.sh"
+skill_test_init
+
+echo "1..17"
+
+# ==============================================================================
+# Detection (structured JSON assertions)
+# ==============================================================================
+
+# Test 1: doctor on a healthy workspace reports healthy JSON and renders the
+# canonical [OK] tag style (the tag format is a user-facing contract).
+UI_DIR="${TMPDIR}/ui"
+mkdir -p "$UI_DIR"
+cd "$UI_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+healthy_json=$(doctor_json)
+if [ "$(json_get "$healthy_json" 'd["healthy"]')" = "true" ] &&
+  [ "$(check_status "$healthy_json" "Required Skills")" = "OK" ] &&
+  human=$("${SCRIPT}" doctor 2>&1) &&
+  printf '%s\n' "$human" | grep -q "\[OK\] *Workspace:" &&
+  printf '%s\n' "$human" | grep -q "\[OK\] *Required Skills:"; then
+  echo "ok 1 - [Doctor] healthy workspace is healthy in JSON and renders [OK] tags"
+else
+  echo "not ok 1 - [Doctor] healthy report wrong: $healthy_json"
+fi
+
+# Test 2: doctor flags a managed-but-missing symlink (declared, resolvable, not
+# linked) as a Required Skills ERROR with the spec in plan.missing.
+rm .claude/skills/coding-standards
+miss_json=$(doctor_json)
+if [ "$(json_get "$miss_json" 'd["healthy"]')" = "false" ] &&
+  [ "$(check_status "$miss_json" "Required Skills")" = "ERROR" ] &&
+  [ "$(json_get "$miss_json" 'd["plan"]["missing"]')" = "coding-standards" ]; then
+  echo "ok 2 - [Doctor] flags managed-but-missing symlink"
+else
+  echo "not ok 2 - [Doctor] missing symlink not flagged: $miss_json"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 3: doctor flags a dangling symlink (stray, target does not exist).
+DANGLING_DIR="${TMPDIR}/dangling"
+mkdir -p "$DANGLING_DIR"
+cd "$DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/target .claude/skills/broken
+dj=$(doctor_json)
+if [ "$(check_status "$dj" "Symlink Health")" = "ERROR" ] &&
+  [ "$(json_get "$dj" 'd["plan"]["stray_dangling"]')" = ".claude/skills/broken" ]; then
+  echo "ok 3 - [Symlink Health] doctor flags a dangling symlink"
+else
+  echo "not ok 3 - [Symlink Health] doctor missed dangling symlink: $dj"
+fi
+cd "$TMPDIR"
+
+# Test 4: doctor flags an unmanaged real file in a skills directory.
+UNMANAGED_DIR="${TMPDIR}/unmanaged-file"
+mkdir -p "$UNMANAGED_DIR"
+cd "$UNMANAGED_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+printf 'x' >.claude/skills/stray.txt
+uj=$(doctor_json)
+if [ "$(check_status "$uj" "Directory Cleanliness")" = "ERROR" ] &&
+  [ "$(json_get "$uj" 'd["plan"]["unmanaged"]')" = ".claude/skills/stray.txt" ]; then
+  echo "ok 4 - [Directory Cleanliness] doctor flags an unmanaged file"
+else
+  echo "not ok 4 - [Directory Cleanliness] doctor missed unmanaged file: $uj"
+fi
+cd "$TMPDIR"
+
+# Test 5: doctor ignores a tracked real directory (a committed local skill): it
+# is healthy and reports nothing unmanaged.
+TRACKED_DIR="${TMPDIR}/tracked-skill"
+mkdir -p "$TRACKED_DIR"
+cd "$TRACKED_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills .claude/skills/local-skill
+printf 'local' >.claude/skills/local-skill/SKILL.md
+git add .claude/skills/local-skill/SKILL.md
+tj=$(doctor_json)
+if [ "$(json_get "$tj" 'd["healthy"]')" = "true" ] &&
+  [ -z "$(json_get "$tj" 'd["plan"]["unmanaged"]')" ]; then
+  echo "ok 5 - [Directory Cleanliness] doctor ignores tracked skill directory"
+else
+  echo "not ok 5 - [Directory Cleanliness] doctor failed on tracked skill: $tj"
+fi
+
+# Test 6: doctor lists VCS-managed skills in its report.
+lj=$(doctor_json)
+if [ "$(check_status "$lj" "VCS-Managed Skills")" = "OK" ] &&
+  [ "$(json_get "$lj" 'next((c["summary"] for c in d["checks"] if c["name"]=="VCS-Managed Skills"), "").startswith("Found 1 skill")')" = "true" ] &&
+  printf '%s' "$lj" | grep -q "local-skill"; then
+  echo "ok 6 - [Diagnostics] doctor lists VCS-managed skills"
+else
+  echo "not ok 6 - [Diagnostics] doctor failed to list VCS-managed skills: $lj"
+fi
+cd "$TMPDIR"
+
+# Test 7: doctor flags orphaned skill directories (a local skills folder whose
+# agent config directory does not exist). The count and reason wording is a
+# formatting contract, checked against the human report.
+ORPHANED_DIR="${TMPDIR}/orphaned-test"
+mkdir -p "$ORPHANED_DIR"
+cd "$ORPHANED_DIR"
+git init -q
+mkdir -p .claude/skills
+mv "$MOCK_HOME/.claude" "$MOCK_HOME/.claude-backup"
+oj=$(doctor_json)
+oh=$("${SCRIPT}" doctor 2>&1) || true
+mv "$MOCK_HOME/.claude-backup" "$MOCK_HOME/.claude"
+if [ "$(check_status "$oj" "Orphaned Directories")" = "WARNING" ] &&
+  printf '%s\n' "$oh" | grep -q "Orphaned Directories" &&
+  printf '%s\n' "$oh" | grep -q ".claude/skills (local folder exists, but ~/.claude config directory does not exist)"; then
+  echo "ok 7 - [Orphaned] doctor flags orphaned local directories"
+else
+  echo "not ok 7 - [Orphaned] doctor did not report orphaned directories: $oh"
+fi
+cd "$TMPDIR"
+
+# Test 8: doctor reports a mismatched symlink target clearly -- as plan
+# 'mismatched', not as missing or extra. The count phrasing is a contract.
+MISMATCH_DIR="${TMPDIR}/mock-mismatch"
+mkdir -p "${MISMATCH_DIR}/src1/my-skill" "${MISMATCH_DIR}/src2/my-skill"
+printf -- '---\nname: my-skill\n---\n' >"${MISMATCH_DIR}/src1/my-skill/SKILL.md"
+printf -- '---\nname: my-skill\n---\n' >"${MISMATCH_DIR}/src2/my-skill/SKILL.md"
+cd "$MISMATCH_DIR"
+git init -q
+SKILL_SOURCE_DIRS="${MISMATCH_DIR}/src1" AGENT_REQUIRED_SKILLS="my-skill" "${SCRIPT}" apply >/dev/null 2>&1 || true
+mj=$(SKILL_SOURCE_DIRS="${MISMATCH_DIR}/src2" AGENT_REQUIRED_SKILLS="my-skill" "${SCRIPT}" doctor --json 2>/dev/null || true)
+mh=$(SKILL_SOURCE_DIRS="${MISMATCH_DIR}/src2" AGENT_REQUIRED_SKILLS="my-skill" "${SCRIPT}" doctor 2>&1 || true)
+if [ "$(json_get "$mj" 'd["plan"]["mismatched"]')" = "my-skill" ] &&
+  [ -z "$(json_get "$mj" 'd["plan"]["missing"]')" ] &&
+  [ -z "$(json_get "$mj" 'd["plan"]["extra"]')" ] &&
+  printf '%s\n' "$mh" | grep -q "1 mismatched target"; then
+  echo "ok 8 - [Mismatch] doctor reports mismatched symlink target accurately"
+else
+  echo "not ok 8 - [Mismatch] unexpected mismatch reporting: $mj"
+fi
+cd "$TMPDIR"
+
+# Test 9: doctor distinguishes an unresolvable declared spec from a
+# resolvable-but-not-yet-linked one. Structured: 'missing' vs 'unresolvable';
+# formatting: the "cannot fix these" remediation is a contract.
+UNRESOLVABLE_DIR="${TMPDIR}/unresolvable-test"
+mkdir -p "$UNRESOLVABLE_DIR"
+cd "$UNRESOLVABLE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards totally-bogus-unresolvable-skill"
+uj=$(doctor_json)
+uh=$("${SCRIPT}" doctor 2>&1) || true
+if [ "$(json_get "$uj" 'd["plan"]["missing"]')" = "coding-standards" ] &&
+  [ "$(json_get "$uj" 'd["plan"]["unresolvable"]')" = "totally-bogus-unresolvable-skill" ] &&
+  printf '%s\n' "$uh" | grep -q "Unresolvable declarations: 'skill apply' cannot fix these"; then
+  echo "ok 9 - [Doctor] unresolvable declared spec reported separately from missing"
+else
+  echo "not ok 9 - [Doctor] unresolvable spec not distinguished: $uj"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 10: doctor distinguishes a VCS-tracked dangling symlink (which apply
+# never touches) from a stray one. Structured: the stray/tracked plan split;
+# formatting: the tracked-heading remediation is a contract.
+MIXED_DANGLING_DIR="${TMPDIR}/mixed-dangling"
+mkdir -p "$MIXED_DANGLING_DIR"
+cd "$MIXED_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/stray-target .claude/skills/stray-broken
+ln -s /nonexistent/tracked-target .claude/skills/tracked-broken
+git add .claude/skills/tracked-broken
+xj=$(doctor_json)
+xh=$("${SCRIPT}" doctor 2>&1) || true
+if [ "$(json_get "$xj" 'd["plan"]["stray_dangling"]')" = ".claude/skills/stray-broken" ] &&
+  [ "$(json_get "$xj" 'd["plan"]["tracked_dangling"]')" = ".claude/skills/tracked-broken" ] &&
+  printf '%s\n' "$xh" | grep -q "VCS-tracked dangling symlinks (not touched by 'skill apply'"; then
+  echo "ok 10 - [Symlink Health] doctor separates tracked from stray dangling symlinks"
+else
+  echo "not ok 10 - [Symlink Health] tracked/stray split wrong: $xj"
+fi
+cd "$TMPDIR"
+
+# ==============================================================================
+# Environment freshness (.envrc managed block vs AGENT_REQUIRED_SKILLS)
+# ==============================================================================
+
+# Test 11: doctor reports Environment Freshness as a WARNING (fails doctor,
+# passes preflight) in both directions -- a declared-but-missing skill and a
+# negated-but-still-present skill -- then goes green when the env is fresh.
+FRESH_DIR="${TMPDIR}/freshness-doctor"
+mkdir -p "$FRESH_DIR"
+cd "$FRESH_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+cat >.envrc <<'EOF'
+# >>> envrc managed block: skills >>>
+skills test-skill -emumanager
+# <<< envrc managed block: skills <<<
+EOF
+export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
+"${SCRIPT}" apply >/dev/null 2>&1
+fj=$(doctor_json)
+preflight_rc=0
+preflight_out=$("${SCRIPT}" preflight 2>&1) || preflight_rc=$?
+export AGENT_REQUIRED_SKILLS="coding-standards test-skill"
+"${SCRIPT}" apply >/dev/null 2>&1
+fj_ok=$(doctor_json)
+if [ "$(check_status "$fj" "Environment Freshness")" = "WARNING" ] &&
+  [ "$(json_get "$fj" 'd["plan"]["freshness"]["declared_missing"]')" = "test-skill" ] &&
+  [ "$(json_get "$fj" 'd["plan"]["freshness"]["negated_present"]')" = "emumanager" ] &&
+  [ "$preflight_rc" -eq 0 ] && [ -z "$preflight_out" ] &&
+  [ "$(check_status "$fj_ok" "Environment Freshness")" = "OK" ]; then
+  echo "ok 11 - [Freshness] doctor warns on stale env; preflight passes; fresh env is green"
+else
+  echo "not ok 11 - [Freshness] doctor/preflight severity wrong: $fj"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 12: an unrecognized skills block yields no freshness data -- the check is
+# advisory and must not guess, so doctor omits it entirely.
+FRESH_BAD_DIR="${TMPDIR}/freshness-bad"
+mkdir -p "$FRESH_BAD_DIR"
+cd "$FRESH_BAD_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+cat >.envrc <<'EOF'
+# >>> envrc managed block: skills >>>
+if [ -n "$SOMETHING" ]; then skills extra; fi
+# <<< envrc managed block: skills <<<
+EOF
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+bj=$(doctor_json)
+if [ "$(json_get "$bj" 'd["healthy"]')" = "true" ] &&
+  [ "$(check_status "$bj" "Environment Freshness")" = "MISSING" ] &&
+  [ "$(json_get "$bj" 'd["plan"]["freshness"]')" = "" ]; then
+  echo "ok 12 - [Freshness] unrecognized block content disables the check"
+else
+  echo "not ok 12 - [Freshness] unrecognized block mishandled: $bj"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# ==============================================================================
+# Remediation hints (user-facing formatting contracts -- string checks)
+# ==============================================================================
+# These verify the exact phrasing of doctor's fix directions, which is a
+# deliberate contract: the hints for extra/missing skills push state in opposite
+# directions ('skill apply' makes disk match env; declaring makes env match
+# disk), and doctor must phrase each as a direction with its concrete effects.
+
+# Test 13: doctor failure names the failing check and the disk-match-env
+# resolution (link the missing skill via 'skill apply').
+FAIL_DIR="${TMPDIR}/doctor-fail"
+mkdir -p "$FAIL_DIR"
+cd "$FAIL_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+rm .claude/skills/coding-standards
+if fout=$("${SCRIPT}" doctor 2>&1); then
+  echo "not ok 13 - [Doctor UI] doctor succeeded unexpectedly in unhealthy workspace"
+else
+  if printf '%s\n' "$fout" | grep -q "\[ERROR\] Required Skills:" &&
+    printf '%s\n' "$fout" | grep -q "env only" &&
+    printf '%s\n' "$fout" | grep -q "Make disk match env (link " &&
+    printf '%s\n' "$fout" | grep -q "skill apply"; then
+    echo "ok 13 - [Doctor UI] failure outputs failing checks and resolution steps"
+  else
+    echo "not ok 13 - [Doctor UI] failure report missing checks or resolution: $fout"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 14: a negated-but-still-linked skill is flagged as stale, with the
+# delete-the-symlink direction and no re-declaration suggestion.
+NEGATE_DIR="${TMPDIR}/negate-test"
+mkdir -p "$NEGATE_DIR"
+cd "$NEGATE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${SKILL_SOURCE_DIRS}/emumanager" .claude/skills/emumanager
+ln -s "${SKILL_SOURCE_DIRS}/emumanager" .agents/skills/emumanager
+export AGENT_REQUIRED_SKILLS="coding-standards !emumanager"
+if nout=$("${SCRIPT}" doctor 2>&1); then
+  echo "not ok 14 - [Negated skills] doctor should have failed but succeeded"
+else
+  if printf '%s\n' "$nout" | grep -q "emumanager .*disk only, negated (negated in AGENT_REQUIRED_SKILLS but still linked)" &&
+    ! printf '%s\n' "$nout" | grep -q "export AGENT_REQUIRED_SKILLS.*emumanager" &&
+    ! printf '%s\n' "$nout" | grep -q "declare emumanager" &&
+    printf '%s\n' "$nout" | grep -q "delete the emumanager symlink" &&
+    printf '%s\n' "$nout" | grep -q "skill apply"; then
+    echo "ok 14 - [Negated skills] doctor flags stale exclusions with the right hints"
+  else
+    echo "not ok 14 - [Negated skills] wrong suggestions: $nout"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 15: extra-skill hints are grouped by direction (plain env variable case).
+EXTRA_HINT_DIR="${TMPDIR}/extra-hint"
+mkdir -p "$EXTRA_HINT_DIR"
+cd "$EXTRA_HINT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+export AGENT_REQUIRED_SKILLS="coding-standards"
+"${SCRIPT}" apply >/dev/null 2>&1
+ln -s "${TMPDIR}/sources/emumanager" .claude/skills/emumanager
+ln -s "${TMPDIR}/sources/emumanager" .agents/skills/emumanager
+if eout=$(env -u DIRENV_DIR "${SCRIPT}" doctor 2>&1); then
+  echo "not ok 15 - [Hints] doctor should have failed with an extra skill"
+else
+  # shellcheck disable=SC2016  # the literal '$AGENT_REQUIRED_SKILLS' text is expected
+  if printf '%s\n' "$eout" | grep -q "environment and disk disagree" &&
+    printf '%s\n' "$eout" | grep -q "emumanager .*disk only (linked in .*, not in AGENT_REQUIRED_SKILLS)" &&
+    printf '%s\n' "$eout" | grep -q "Make disk match env (delete the emumanager symlink):" &&
+    printf '%s\n' "$eout" | grep -q "skill apply" &&
+    printf '%s\n' "$eout" | grep -q "Make env match disk (declare emumanager; keep the symlink):" &&
+    printf '%s\n' "$eout" | grep -qF 'export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS emumanager"'; then
+    echo "ok 15 - [Hints] extra-skill remediation is grouped by sync direction"
+  else
+    echo "not ok 15 - [Hints] extra-skill remediation missing direction grouping: $eout"
+  fi
+fi
+
+# Test 16: with an .envrc present, the env-side path suggests 'envrc add skills'
+# plus a direnv reload (not a raw export) and still states that 'skill apply'
+# deletes the extra symlink.
+touch .envrc
+if e2=$(env -u DIRENV_DIR "${SCRIPT}" doctor 2>&1); then
+  echo "not ok 16 - [Hints] doctor should have failed with an extra skill (.envrc)"
+else
+  # shellcheck disable=SC2016  # the literal '$AGENT_REQUIRED_SKILLS' text is expected
+  if printf '%s\n' "$e2" | grep -q "Make env match disk (declare emumanager; keep the symlink):" &&
+    printf '%s\n' "$e2" | grep -q "envrc add skills emumanager && direnv reload" &&
+    ! printf '%s\n' "$e2" | grep -qF 'export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS emumanager"' &&
+    printf '%s\n' "$e2" | grep -q "Make disk match env (delete the emumanager symlink):"; then
+    echo "ok 16 - [Hints] envrc workspace suggests 'envrc add skills && direnv reload'"
+  else
+    echo "not ok 16 - [Hints] envrc variant hint wrong: $e2"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 17: when the destructive-action policy blocks pruning (a declared spec is
+# unresolvable), the disk-match-env hint must not promise that 'skill apply'
+# deletes the extras. Doctor notes the hold instead, self-contained, with a
+# by-hand deletion command.
+BLOCKED_HINT_DIR="${TMPDIR}/blocked-hint"
+mkdir -p "$BLOCKED_HINT_DIR"
+cd "$BLOCKED_HINT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s "${TMPDIR}/sources/coding-standards" .claude/skills/coding-standards
+ln -s "${TMPDIR}/sources/coding-standards" .agents/skills/coding-standards
+ln -s "${TMPDIR}/sources/emumanager" .claude/skills/emumanager
+ln -s "${TMPDIR}/sources/emumanager" .agents/skills/emumanager
+export AGENT_REQUIRED_SKILLS="coding-standards totally-bogus-unresolvable-skill"
+if bout=$(env -u DIRENV_DIR "${SCRIPT}" doctor 2>&1); then
+  echo "not ok 17 - [Hints] doctor should have failed with extra + unresolvable"
+else
+  if ! printf '%s\n' "$bout" | grep -q "Make disk match env" &&
+    ! printf '%s\n' "$bout" | grep -q "delete the emumanager symlink)" &&
+    printf '%s\n' "$bout" | grep -q "Make env match disk (declare emumanager; keep the symlink):" &&
+    printf '%s\n' "$bout" | grep -q "Note: 'skill apply' will not delete the emumanager symlink while a declared spec is unresolvable (fix or undeclare it first). 'skill remove emumanager' deletes by hand."; then
+    echo "ok 17 - [Hints] blocked prune is not promised as an apply effect and is noted"
+  else
+    echo "not ok 17 - [Hints] blocked-prune hint wrong: $bout"
+  fi
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"

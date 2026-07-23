@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+#
+# Workspace detection and the core add/list/remove/clean lifecycle for `skill`.
+#
+# Covers the three workspace backends (unmanaged directory, git repository,
+# plugin-registered detector), the git info/exclude managed block, the
+# repo-root anchor walk from a subdirectory, and conflict-safe add/remove/clean.
+# State-change assertions inspect the filesystem and `list --json`; the
+# subdirectory announcement is checked as a user-facing formatting contract.
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-config/tests/skill-test-lib.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skill-test-lib.sh"
+skill_test_init
+
+echo "1..20"
+
+# ==============================================================================
+# Unmanaged (default) workspace mode
+# ==============================================================================
+UNMANAGED_DIR="${TMPDIR}/unmanaged"
+mkdir -p "$UNMANAGED_DIR"
+cd "$UNMANAGED_DIR"
+
+# Test 1: catalog runs
+if "${SCRIPT}" catalog >/dev/null 2>&1; then
+  echo "ok 1 - [Unmanaged] catalog runs"
+else
+  echo "not ok 1 - [Unmanaged] catalog failed"
+fi
+
+# Test 2: add multiple skills
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1 &&
+  [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/emumanager ]; then
+  echo "ok 2 - [Unmanaged] add multiple skills"
+else
+  echo "not ok 2 - [Unmanaged] add did not create symlinks"
+fi
+
+# Test 3: list --json returns members with resolved paths
+if out=$("${SCRIPT}" list --json 2>/dev/null) &&
+  [ "$(json_get "$out" '[s["name"] for s in d if s["name"]=="coding-standards"]')" = "coding-standards" ] &&
+  [ -n "$(json_get "$out" 'next(s["path"] for s in d if s["name"]=="coding-standards")')" ]; then
+  echo "ok 3 - [Unmanaged] list --json returns members and paths"
+else
+  echo "not ok 3 - [Unmanaged] list --json failed: ${out:-}"
+fi
+
+# Test 4: state file .skills-managed NOT created (stateless model)
+if [ ! -f .skills-managed ]; then
+  echo "ok 4 - [Unmanaged] state file not created (stateless model)"
+else
+  echo "not ok 4 - [Unmanaged] state file was created unexpectedly"
+fi
+
+# Test 5: clean removes links and does not leave state file
+if "${SCRIPT}" clean >/dev/null 2>&1 &&
+  [ ! -d .claude ] && [ ! -d .agents ] && [ ! -f .skills-managed ]; then
+  echo "ok 5 - [Unmanaged] clean removes links successfully"
+else
+  echo "not ok 5 - [Unmanaged] clean left files"
+fi
+
+# ==============================================================================
+# Git workspace mode
+# ==============================================================================
+GIT_DIR="${TMPDIR}/git_repo"
+mkdir -p "$GIT_DIR"
+cd "$GIT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+
+# Test 6: add multiple skills
+if "${SCRIPT}" add coding-standards emumanager >/dev/null 2>&1 &&
+  [ -L .claude/skills/coding-standards ] && [ -L .agents/skills/emumanager ]; then
+  echo "ok 6 - [Git] add multiple skills"
+else
+  echo "not ok 6 - [Git] add did not create symlinks"
+fi
+
+# Test 7: authoritative state file .git/info/skills NOT created (stateless model)
+if [ ! -f .git/info/skills ]; then
+  echo "ok 7 - [Git] state file .git/info/skills not created"
+else
+  echo "not ok 7 - [Git] state file .git/info/skills was created unexpectedly"
+fi
+
+# Test 8: info/exclude contains regenerated managed block
+if [ -f .git/info/exclude ] && grep -q "managed by 'skill'" .git/info/exclude &&
+  grep -q '/.claude/skills/coding-standards' .git/info/exclude; then
+  echo "ok 8 - [Git] info/exclude contains managed block"
+else
+  echo "not ok 8 - [Git] info/exclude missing managed entries"
+fi
+
+# Test 9: list --json emits names and resolved paths
+if out=$("${SCRIPT}" list --json 2>/dev/null) &&
+  [ "$(json_get "$out" '[s["name"] for s in d if s["name"]=="coding-standards"]')" = "coding-standards" ] &&
+  [ -n "$(json_get "$out" 'next(s["path"] for s in d if s["name"]=="coding-standards")')" ]; then
+  echo "ok 9 - [Git] list --json emits names and paths"
+else
+  echo "not ok 9 - [Git] list --json failed: ${out:-}"
+fi
+
+# Test 10: exclude block is regenerable: corrupt it, doctor flags the drift as a
+# Workspace Exclusions ERROR, and apply regenerates it back to green.
+export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
+sed '/skills/d' .git/info/exclude >.git/info/exclude.tmp && mv .git/info/exclude.tmp .git/info/exclude
+before=$(doctor_json)
+if [ "$(check_status "$before" "Workspace Exclusions")" = "ERROR" ] &&
+  "${SCRIPT}" apply >/dev/null 2>&1 &&
+  grep -q '/.claude/skills/coding-standards' .git/info/exclude; then
+  after=$(doctor_json)
+  if [ "$(check_status "$after" "Workspace Exclusions")" = "OK" ]; then
+    echo "ok 10 - [Git] doctor flags exclude drift; apply regenerates it"
+  else
+    echo "not ok 10 - [Git] apply did not restore exclude block"
+  fi
+else
+  echo "not ok 10 - [Git] doctor should flag exclude drift and apply should fix it"
+fi
+export AGENT_REQUIRED_SKILLS=""
+
+# Test 11: remove deletes symlink and exclude entry
+if "${SCRIPT}" remove emumanager >/dev/null 2>&1 &&
+  [ ! -L .agents/skills/emumanager ] && ! grep -q "emumanager" .git/info/exclude &&
+  [ ! -f .git/info/skills ]; then
+  echo "ok 11 - [Git] remove deletes symlink and exclude entry"
+else
+  echo "not ok 11 - [Git] remove left symlink or exclude entry"
+fi
+
+# Test 12: clean removes links and exclude block
+if "${SCRIPT}" clean >/dev/null 2>&1 &&
+  [ ! -L .claude/skills/coding-standards ] && [ ! -f .git/info/skills ] &&
+  ! grep -q "coding-standards" .git/info/exclude; then
+  echo "ok 12 - [Git] clean removes links and exclude block"
+else
+  echo "not ok 12 - [Git] clean left links or exclude block"
+fi
+
+# Test 13: from a subdirectory with no local skills dir, 'add' binds to the
+# anchor an agent would discover (the repo root), installs there rather than
+# scattering a skills dir into the subdirectory, and a 'preflight' run from the
+# subdirectory agrees with that install.
+mkdir -p sub
+cd sub
+export AGENT_REQUIRED_SKILLS="coding-standards"
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1 &&
+  [ -L ../.claude/skills/coding-standards ] && [ -L ../.agents/skills/coding-standards ] &&
+  [ ! -e .claude/skills/coding-standards ] && [ ! -e .agents/skills/coding-standards ] &&
+  grep -q "/.claude/skills/coding-standards" ../.git/info/exclude &&
+  grep -q "/.agents/skills/coding-standards" ../.git/info/exclude &&
+  "${SCRIPT}" preflight claude >/dev/null 2>&1 &&
+  [ ! -f ../.git/info/skills ]; then
+  echo "ok 13 - [Git] subdirectory add binds to repo-root anchor; preflight agrees"
+else
+  echo "not ok 13 - [Git] subdirectory anchor/exclude/preflight mismatch"
+fi
+export AGENT_REQUIRED_SKILLS=""
+cd ..
+"${SCRIPT}" clean >/dev/null 2>&1 || true
+
+# ==============================================================================
+# Workspace detector plugins
+# ==============================================================================
+cat <<'EOF' >"${XDG_CONFIG_HOME}/skill/plugins/testws.py"
+from pathlib import Path
+
+
+def register(api):
+    class MarkerWorkspace(api.FileStateMixin, api.Workspace):
+        def __init__(self, root):
+            super().__init__(root)
+            self.state_file = self.root / ".marker-skills"
+
+        @classmethod
+        def detect(cls):
+            curr = Path.cwd().resolve()
+            for parent in [curr] + list(curr.parents):
+                if (parent / ".marker-ws").is_dir():
+                    return cls(parent)
+            return None
+
+    api.register_workspace(MarkerWorkspace)
+EOF
+
+PLUGIN_DIR="${TMPDIR}/plugin_ws"
+mkdir -p "${PLUGIN_DIR}/.marker-ws" "${PLUGIN_DIR}/sub"
+
+# Test 14: plugin workspace detected from a subdirectory, links at plugin root
+cd "${PLUGIN_DIR}/sub"
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1 &&
+  [ -L "${PLUGIN_DIR}/.claude/skills/coding-standards" ] &&
+  [ -f "${PLUGIN_DIR}/.marker-skills" ] && [ ! -d .claude ]; then
+  echo "ok 14 - [Plugin] custom workspace detected, links at plugin root"
+else
+  echo "not ok 14 - [Plugin] links or state in wrong location"
+fi
+
+# Test 15: plugin detector takes precedence over git
+GIT_IN_PLUGIN="${TMPDIR}/plugin_git"
+mkdir -p "${GIT_IN_PLUGIN}/.marker-ws"
+git -C "${GIT_IN_PLUGIN}" init -q
+cd "${GIT_IN_PLUGIN}"
+if "${SCRIPT}" add coding-standards >/dev/null 2>&1 &&
+  [ -f .marker-skills ] && [ ! -f .git/info/skills ]; then
+  echo "ok 15 - [Plugin] plugin detector takes precedence over git"
+else
+  echo "not ok 15 - [Plugin] git detector ran despite plugin match"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/testws.py"
+cd "$TMPDIR"
+
+# ==============================================================================
+# Conflict-safe lifecycle
+# ==============================================================================
+
+# Test 16: 'add' refuses to overwrite a real (non-symlink) file at the link
+# path, leaves it intact, and creates no symlink in the other destination.
+CONFLICT_DIR="${TMPDIR}/conflict"
+mkdir -p "$CONFLICT_DIR"
+cd "$CONFLICT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+printf 'real' >.claude/skills/coding-standards
+conflict_rc=0
+conflict_out=$("${SCRIPT}" add coding-standards 2>&1) || conflict_rc=$?
+if [ "$conflict_rc" -ne 0 ] &&
+  printf '%s\n' "$conflict_out" | grep -q "refusing to overwrite" &&
+  [ ! -L .claude/skills/coding-standards ] &&
+  [ "$(cat .claude/skills/coding-standards)" = "real" ] &&
+  [ ! -e .agents/skills/coding-standards ]; then
+  echo "ok 16 - [Conflict] add refuses to overwrite a real file"
+else
+  echo "not ok 16 - [Conflict] add did not refuse cleanly (rc=$conflict_rc): $conflict_out"
+fi
+cd "$TMPDIR"
+
+# Test 17: 'remove' refuses to delete a tracked skill directory (checked-in
+# content, not a managed symlink).
+TRACKED_DIR="${TMPDIR}/tracked-skill"
+mkdir -p "$TRACKED_DIR"
+cd "$TRACKED_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills .claude/skills/local-skill
+printf 'local' >.claude/skills/local-skill/SKILL.md
+git add .claude/skills/local-skill/SKILL.md
+"${SCRIPT}" remove local-skill >/dev/null 2>&1 || true
+if [ -d .claude/skills/local-skill ] && [ -f .claude/skills/local-skill/SKILL.md ]; then
+  echo "ok 17 - [Conflict] remove ignores tracked skill directory"
+else
+  echo "not ok 17 - [Conflict] remove deleted tracked skill directory"
+fi
+cd "$TMPDIR"
+
+# Test 18: 'clean' removes broken dangling symlinks
+CLEAN_DANGLING_DIR="${TMPDIR}/clean-dangling"
+mkdir -p "$CLEAN_DANGLING_DIR"
+cd "$CLEAN_DANGLING_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+ln -s /nonexistent/clean-broken .claude/skills/clean-broken
+ln -s /nonexistent/clean-broken .agents/skills/clean-broken
+if "${SCRIPT}" clean >/dev/null 2>&1 &&
+  [ ! -e .claude/skills/clean-broken ] && [ ! -e .agents/skills/clean-broken ]; then
+  echo "ok 18 - [Clean] clean removes broken dangling symlinks"
+else
+  echo "not ok 18 - [Clean] dangling symlink left behind after clean"
+fi
+cd "$TMPDIR"
+
+# Test 19: 'remove' heals exclude block drift even if the symlink was deleted
+# out-of-band, leaving a stale exclude entry behind.
+HEAL_EXCLUDE_DIR="${TMPDIR}/heal-exclude"
+mkdir -p "$HEAL_EXCLUDE_DIR"
+cd "$HEAL_EXCLUDE_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills .git/info
+cat >.git/info/exclude <<'EOF'
+# >>> skills >>>
+# managed by 'skill'
+/.claude/skills/orphaned-spec
+/.agents/skills/orphaned-spec
+# <<< skills <<<
+EOF
+if "${SCRIPT}" remove orphaned-spec >/dev/null 2>&1 &&
+  ! grep -q "orphaned-spec" .git/info/exclude; then
+  echo "ok 19 - [Remove] remove heals exclude block when symlink is deleted out-of-band"
+else
+  echo "not ok 19 - [Remove] exclude block still contains orphaned entry"
+fi
+cd "$TMPDIR"
+
+# Test 20: a mutating command run from a subdirectory announces the resolved
+# workspace root and flags that the anchor sits above the current directory, so
+# the user can see skills land at the repo root rather than where they ran it.
+# (User-facing output formatting contract -- checked as strings.)
+ROOT_NOTE_DIR="${TMPDIR}/root-note"
+mkdir -p "${ROOT_NOTE_DIR}/nested"
+git -C "${ROOT_NOTE_DIR}" init -q
+cd "${ROOT_NOTE_DIR}/nested"
+if root_note_out=$("${SCRIPT}" add coding-standards 2>&1) &&
+  printf '%s\n' "$root_note_out" | grep -q "workspace root: ${ROOT_NOTE_DIR}" &&
+  printf '%s\n' "$root_note_out" | grep -q "anchor above current directory ${ROOT_NOTE_DIR}/nested"; then
+  echo "ok 20 - [Output] subdirectory mutation announces resolved root anchor"
+else
+  echo "not ok 20 - [Output] missing or wrong workspace-root announcement: ${root_note_out:-}"
+fi
+"${SCRIPT}" clean >/dev/null 2>&1 || true
+cd "$TMPDIR"

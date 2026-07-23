@@ -34,7 +34,7 @@ Commands:
   update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every active
                   skill, --catalog to refresh the whole metadata index
   clean           Remove all skills and clear git excludes
-  doctor          Diagnose mismatch between desired and on-disk skills (read-only)
+  doctor [--json] Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
   catalog         List plugin-provided skills and sources
   resolve NAME    Print the source path 'add NAME' would symlink to
