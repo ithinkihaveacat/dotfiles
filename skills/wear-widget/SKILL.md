@@ -196,34 +196,52 @@ Depending on your framework and supported sizes, define the preview state:
 
 - **Glance (Compose)**: Use standard `@Preview` and `@Composable` annotations.
   - If your widget supports both small and large sizes, use
-    **`SquircleAllWidgetPreviewParams`** as your `@PreviewParameter` to generate
-    renders for both sizes across multiple screen configurations.
-  - If it only supports a single size, use `SquircleSmallWidgetPreviewParams` or
-    `SquircleLargeWidgetPreviewParams`.
+    **`RectangularAllWidgetPreviewParams`** as your `@PreviewParameter` to
+    generate renders for both sizes.
+  - If it only supports a single size, use `RectangularSmallWidgetPreviewParams`
+    or `RectangularLargeWidgetPreviewParams`.
 - **ProtoLayout (Tiles API)**: Use `@Preview` alongside `TilePreviewData` to
   construct layout snapshots.
 
 #### Step B: Render and Export the Previews
 
 Extract the rendered layouts using your IDE's built-in snapshot tools or custom
-command-line preview extractors. Export these assets as **WebP** files to
-minimize APK bloat.
+command-line preview extractors.
+
+##### Workaround when using `compose-preview`
+
+When using the `compose-preview` Gradle plugin to render assets, the tool
+automatically overrides device-less previews in Wear modules to a default watch
+face canvas (`227x227` dp), which prevents intrinsic cropping.
+
+Until this is resolved (see
+[yschimke/compose-ai-tools#2670](https://github.com/yschimke/compose-ai-tools/issues/2670)),
+use the following workaround to generate cropped assets at their exact intrinsic
+sizes:
+
+1. **Remove Watch Feature:** Temporarily remove
+   `<uses-feature android:name="android.hardware.type.watch" />` from your
+   `AndroidManifest.xml`. *Note: commenting out the element is insufficient as
+   the tool matches commented text.*
+1. **Render Previews:** Force re-execution of discovery and rendering:
+   ```bash
+   COMPOSE_AI_TOOLS=true ./gradlew :app:composePreviewDiscover
+   COMPOSE_AI_TOOLS=true ./gradlew :app:composePreviewRender --rerun-tasks
+   ```
+1. **Copy Assets:** The generated cropped files (`*_PARAM_0.png` for small,
+   `*_PARAM_1.png` for large) will be written to
+   `build/compose-previews/renders/`. Copy these files to your resource
+   directory (e.g. `res/drawable-nodpi/`).
+1. **Restore Manifest:** Restore the uses-feature watch line in
+   `AndroidManifest.xml`.
+
+Export these assets as **PNG** or **WebP** files.
 
 #### Step C: Register in Widget Info
 
-To provide the best visual experience across different watch sizes, leverage
-Android's resource resolution algorithm to provide display-specific previews:
-
-1. **Default/Small Screens (< 225dp)**: Copy the small-screen renders (e.g.,
-   `PARAM_0` for small, `PARAM_2` for large) to your default `nodpi` directory:
-   `res/drawable-nodpi/my_widget_preview_small.webp`
-   `res/drawable-nodpi/my_widget_preview_large.webp`
-1. **Large Screens (>= 225dp)**: Copy the large-screen renders (e.g., `PARAM_1`
-   for small, `PARAM_3` for large) to your large-screen `nodpi` directory using
-   the **exact same filenames**:
-   `res/drawable-w225dp-nodpi/my_widget_preview_small.webp`
-   `res/drawable-w225dp-nodpi/my_widget_preview_large.webp` *(Note: See the
-   qualifier ordering rule in the Gotchas section below).*
+1. Copy the rendered assets to the default `nodpi` drawable directory:
+   `res/drawable-nodpi/my_widget_preview_small.png`
+   `res/drawable-nodpi/my_widget_preview_large.png`
 1. Reference them in your widget provider XML (e.g.,
    `res/xml/my_widget_info.xml`):
    ```xml
