@@ -457,7 +457,94 @@ headless or desktop emulators:
 
 ______________________________________________________________________
 
-### 5. Key Gotchas & Best Practices
+### 5. Samsung Galaxy Watch (One UI Watch) Compatibility & Layout Rules
+
+When deploying, testing, and validating Glance Wear Widgets and Tiles on
+physical Samsung Galaxy Watches:
+
+- **Automatic Wake and Switch**: `adb-tile-switch` automatically wakes the
+  screen and displays the tile.
+- **Vertically Scrollable Widget Pages**:
+  - On One UI Watch (Samsung), a single carousel slot (page) can host multiple
+    vertically stacked widgets instead of a single fullscreen tile (for example,
+    the "Basic" page grouping Weather, Calendar, and Battery widgets).
+  - Swiping horizontally navigates between these multi-widget pages, while
+    scrolling vertically navigates between the stacked widgets within a page.
+  - **Dumpsys Metadata Schema**: You can audit these groupings using
+    `adb shell dumpsys wear_service` under the `DB Visible Tiles` section.
+    Grouped widgets share the same Page ID and Title inside `vendorMetadata`:
+    - `pId` (int): Page ID (groups multiple widgets into a single carousel
+      slot).
+    - `pT` (string): Page Title (shown at the top of the scrolling widget list,
+      e.g. `"Basic"`).
+    - `pR` (int): Row Index (the vertical order of the widget on the page,
+      starting from `0`).
+    - `pC` (int): Page Column (typically `0`).
+  - **Example Dumpsys Output**:
+    ```text
+    id=11 packageName=com.samsung.android.watch.weather ... vendorMetadata={"pId":2,"pR":0,"pT":"Basic"}
+    id=12 packageName=com.samsung.android.calendar ... vendorMetadata={"pId":2,"pR":1,"pT":"Basic"}
+    id=13 packageName=com.samsung.android.watch.batterytile ... vendorMetadata={"pId":2,"pR":2,"pT":"Basic"}
+    ```
+- **Doze / Timeout Warning**: Samsung Galaxy Watches transition to
+  ambient/locked state very quickly (often within 5–10 seconds of inactivity).
+  Ensure you capture screenshots or verify behavior immediately after running
+  `adb-tile-switch` to prevent the device from entering doze or locking again.
+- **UI Automation for Grouped Widgets (Popper)**:
+  - Because the Samsung "Add Tile/Widget Picker" activity
+    (`SecTileComposeAddableActivity`) is private and not exported, it cannot be
+    launched directly via `adb shell am start`.
+  - To automate adding or editing grouped widgets, you must use UI automation
+    tools like `popper` to navigate the on-screen editing interface.
+  - **Widget Picker Menu Flow**:
+    - The "Add tiles" picker list contains three main sections in order:
+      **"Featured"**, **"Samsung Health"**, and **"Optimized apps"**.
+    - Non-system/third-party apps are listed under **"Optimized apps"**. Tapping
+      the app name opens an accordion dropdown displaying its available widgets
+      and their previews.
+    - *Note: The app label (e.g., `"WearWidget"`), widget category name (e.g.,
+      `"Hello Widget"`), and preview widget text (e.g., `"Hello, World!"`) used
+      below are example values and must be replaced with the actual text shown
+      for the specific app you are testing.*
+    - Tapping the desired preview widget directly adds it to the page.
+  - **Popper Add Recipe**:
+    1. Show the target page (e.g. index 3 for the "Basic" page):
+       ```bash
+       adb-tile-switch 3
+       ```
+    1. Invoke `popper` with semantic instructions matching this picker hierarchy
+       (substituting the placeholder values `<App Name>` and
+       `<Widget Preview Text>` as needed):
+       ```bash
+       # Example adding 'Hello, World!' widget under 'WearWidget'
+       popper "Long press the center of the screen, tap the Edit button, scroll down to the bottom of the widget list, tap the '+' Add button. In the Add tiles list, scroll down past 'Featured' and 'Samsung Health' to 'Optimized apps', tap '<App Name>' to expand the accordion, and click the '<Widget Preview Text>' preview widget to add it."
+       ```
+    1. Send Home keyevents to save the layout changes and return to the watch
+       face:
+       ```bash
+       adb shell input keyevent KEYCODE_HOME
+       adb shell input keyevent KEYCODE_HOME
+       ```
+  - **Popper Remove Recipe**:
+    1. Show the target page (e.g. index 3 for the "Basic" page):
+       ```bash
+       adb-tile-switch 3
+       ```
+    1. Invoke `popper` with semantic instructions to click the delete badge
+       (substituting the placeholder `<Widget Preview Text>` value as needed):
+       ```bash
+       popper "Long press the center of the screen, tap the Edit button, scroll to the '<Widget Preview Text>' widget, and tap the red minus icon on its right side to delete it."
+       ```
+    1. Send Home keyevents to save the layout changes and return to the watch
+       face:
+       ```bash
+       adb shell input keyevent KEYCODE_HOME
+       adb shell input keyevent KEYCODE_HOME
+       ```
+
+______________________________________________________________________
+
+### 6. Key Gotchas & Best Practices
 
 - **Anti-Pattern: Force-Stopping System Services**: You do NOT need to
   force-stop `com.google.android.gms`, `com.google.android.wearable.app`, or

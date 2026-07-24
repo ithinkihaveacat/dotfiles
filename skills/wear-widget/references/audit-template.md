@@ -78,19 +78,26 @@ resources:
 
 ### 4. Live Device Screen Captures
 
-Present actual live screenshots and recordings of the tiles/widgets running on
-the watch face. Label each capture with the service name that rendered it. To
-provide a comprehensive verification of layout states and interactive flows,
-strive to include:
+Present actual live screenshots and recordings of the tiles/widgets running on the watch face. Label each capture with the service name that rendered it.
 
-- **Multiple Layout States:** Capture the widget/tile across different runtime
-  contexts, including unauthenticated/logged-out states, empty/loading states,
-  custom configuration panels, and successful synced states.
-- **Dynamic Interaction Walkthroughs:** Include trimmed MP4 videos demonstrating
-  active interaction flows. Highlight specific actions, such as:
+To ensure robust layout validation, **it is highly recommended to collect and compare media from multiple device environments** (e.g., standard emulators vs. physical hardware, varying Wear OS API levels, or different OEM system renderers). If certain environments are unavailable during the initial pass, structure the report's layout to make space for these additions to be appended later.
+
+#### Recommended Structure for Multi-Device Layouts:
+
+Group captures under sub-sections corresponding to each test environment, for example:
+
+*   **4.1 Environment A (e.g., Physical Samsung Galaxy Watch SM-L340)**
+    *   Specify the device model, Wear OS API level, and system renderer.
+    *   Include successful synced states, logged-out states, and video walkthroughs.
+*   **4.2 Environment B (e.g., Wear OS API 37 Emulator)**
+    *   Include corresponding states and interaction loops to highlight any visual layout/rendering differences compared to physical hardware.
+
+#### Required Verification Media:
+
+- **Multiple Layout States:** Capture the widget/tile across different runtime contexts, including unauthenticated/logged-out states, empty/loading states, custom configuration panels, and successful synced states.
+- **Dynamic Interaction Walkthroughs:** Include trimmed MP4 videos demonstrating active interaction flows. Highlight specific actions, such as:
   - Tapping a button to launch the main watch application activity.
-  - Tapping a button/icon to trigger in-place state mutation (e.g. refreshing
-    weather sync data).
+  - Tapping a button/icon to trigger in-place state mutation (e.g. refreshing weather sync data).
   - Transitioning between different page counts or carousel panels.
 
 ### 5. Platform & Application Bugs (Optional)
