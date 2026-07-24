@@ -506,11 +506,11 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## Wear Widget Integration Brief Report Template
+## Wear Widget Audit Template
 
 When generating integration briefs or reports for Wear OS tiles or widgets,
 refer to the following template as a layout guide. It details how to organize
 setup specifications, Jetpack library dependencies, manifest declarations,
 metadata analysis, live verification screenshots, and identified bugs.
 
-@references/integration-report.md
+@references/audit-template.md

@@ -1,10 +1,18 @@
-# Wear Widget Integration Report Template & Sample
+# Wear Widget Audit Template
 
 When generating integration reports for Wear OS tiles or widgets, use this
 template as a guide. The structure is loose and should be modified as
 appropriate for the specific application's features, but you should strive to
 capture the core platform specifications, configuration metadata, live device
 outputs, and bugs.
+
+### General Presentation Guidelines
+
+- **No Image Masking or Clipping**: All images embedded in the report—both the
+  extracted static preview drawables from the APK and the live watch screen
+  captures—must be displayed exactly as they are. Do not apply circular viewport
+  clipping, `border-radius: 50%`, overlay frames, or black background masks.
+  They must appear in their raw aspect ratios and formats as they exist on disk.
 
 ### 1. Title & Executive Summary
 
