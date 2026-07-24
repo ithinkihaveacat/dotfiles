@@ -1,22 +1,5 @@
 # TODO
 
-## Upgrade Python linter to Ruff 0.16.x (2026-07-24)
-
-**Problem:** The Python lint CI job is currently pinned to `0.15.x` to avoid
-breaking changes introduced in Ruff `0.16.x` (which flags 50+ pre-existing
-errors in `skills/workspace-config/scripts/skill` like `BLE001` and `S110`).
-
-**Goal:** Clean up the pre-existing lint violations in the repository's Python
-scripts to conform with Ruff `0.16.x`'s rules, and unpin Ruff in the CI
-workflow.
-
-**Criteria:**
-
-- All Python scripts (including `skills/workspace-config/scripts/skill`) are
-  linted and formatted cleanly using Ruff `0.16.x` with no warnings.
-- The CI configuration in `.github/workflows/lint.yml` is updated to run the
-  latest Ruff or pinned to `0.16.x`+.
-
 ## Refactor test-skill suite to assert structured plans and split monolithic test file (2026-07-22)
 
 **Problem:** `test-skill` (`skills/workspace-config/tests/test-skill`) has grown
