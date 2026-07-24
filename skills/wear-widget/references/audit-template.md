@@ -8,6 +8,12 @@ outputs, and bugs.
 
 ### General Presentation Guidelines
 
+- **Folder and Asset Structure**: Each integration audit must be self-contained within its own dedicated directory (e.g. `[app_name]/` or `sample/`) organized as follows:
+  - `index.html`: The HTML version of the report.
+  - `index.md`: The Markdown equivalent of the report.
+  - `images/`: Subdirectory containing all screenshot and visual assets.
+  - `videos/`: Subdirectory containing all video captures and recordings.
+  All links inside the HTML and Markdown documents must be relative to ensure portability.
 - **No Image Masking or Clipping**: All images embedded in the report—both the
   extracted static preview drawables from the APK and the live watch screen
   captures—must be displayed exactly as they are. Do not apply circular viewport
