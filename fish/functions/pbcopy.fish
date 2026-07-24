@@ -22,25 +22,58 @@
 
 function pbcopy
     set -l cmdline
-    set -l is_tty_stdin 0
-    if isatty stdin
-        set is_tty_stdin 1
-    end
+    set -l exit_status 0
 
-    if test $is_tty_stdin -eq 1
-        set cmdline (commandline --current-selection | fish_indent --only-indent | string collect)
-        test -n "$cmdline"; or set cmdline (commandline | fish_indent --only-indent | string collect)
+    # Branch A: Execute arguments as a command and capture command + output
+    if set -q argv[1]
+        # Prevent intercepting basic helper flags intended for pbcopy itself
+        if contains -- $argv[1] -h --help
+            echo "Usage: pbcopy [command...]"
+            return 0
+        end
+
+        set -l command_str
+        if test (count $argv) -eq 1
+            set command_str $argv[1]
+        else
+            set command_str "$argv[1] "(string join ' ' (string escape -- $argv[2..-1]))
+        end
+
+        set -l output
+        # Execute silently and capture stdout and stderr mixed
+        fish -c $argv 2>&1 | read -z output
+        set exit_status $pipestatus[1]
+
+        # Format clipboard content, preventing an extraneous newline if output is empty
+        set cmdline "\$ $command_str"
+        if test -n "$output"
+            set cmdline "\$ $command_str
+$output"
+        end
+
+        # Branch B: Standard pbcopy input (interactive selection or piped input)
     else
-        # Slurp the entire input (-0777).
-        # If the string contains no internal newlines (m/\n./s would mean a newline followed by something),
-        # strip the trailing newline.
-        # We use -pe to auto-print.
-        perl -0777 -pe 's/\n$// if !/\n./' | read -z cmdline
+        set -l is_tty_stdin 0
+        if isatty stdin
+            set is_tty_stdin 1
+        end
+
+        if test $is_tty_stdin -eq 1
+            set cmdline (commandline --current-selection | fish_indent --only-indent | string collect)
+            test -n "$cmdline"; or set cmdline (commandline | fish_indent --only-indent | string collect)
+        else
+            # Slurp the entire input (-0777).
+            # Strips trailing newline for single-line strings.
+            perl -0777 -pe 's/\n$// if !/\n./' | read -z cmdline
+        end
     end
 
+    # -----------------------------------------------------------------
+    # Clipboard Backend Logic (Common to both branches)
+    # -----------------------------------------------------------------
     if not is_remote; and type -q pbcopy
         printf '%s' "$cmdline" | command pbcopy
-        return
+        return $exit_status
     end
 
     if not type -q base64; or test "$TERM" = dumb
@@ -48,8 +81,8 @@ function pbcopy
         return 1
     end
 
-    # OSC 52 needs to be sent to the terminal
-    # Write to /dev/tty to work even if stdout is redirected
     set -l encoded (printf '%s' "$cmdline" | base64 | string join '')
     printf '\e]52;c;%s\a' "$encoded" >/dev/tty
+
+    return $exit_status
 end
