@@ -1,5 +1,53 @@
 # TODO
 
+## Enable more of ruff's default rule set (2026-07-26)
+
+**Problem:** 8e554c6 unpinned ruff by pinning the rule *selection* instead:
+`RUFF_SELECT="E4,E7,E9,F,B,PLE,ISC,FLY,C4,ASYNC"` in
+`skills/coding-standards/scripts/python-format:14`. That stopped the
+release-to-release churn, but the selection was chosen to be cheap to adopt —
+only 8 violations needed fixing. Ruff 0.16 enables 413 rules by default (up from
+59); most of that set is still unselected here, and the 200+ violations that
+originally motivated the pin were never triaged rule by rule.
+
+**Goal:** Enable as much of ruff's default set as this repo's Python scripts can
+hold without noise, rather than leaving the selection at the level that happened
+to be free. The families ruff 0.16 newly defaults to (`UP`, `RUF`, and more of
+`PL`) are the obvious candidates. Explicit selection stays — the point is to opt
+into more rules deliberately, not to inherit whatever ruff turns on next
+release.
+
+**Criteria:** `RUFF_SELECT` covers meaningfully more of the 0.16 default set,
+`python-format --check` passes on all 15 Python entrypoints, and the comment
+above `RUFF_SELECT` records a one-line reason for each family deliberately left
+out.
+
+**Sketch:** Most of this is likely mechanical. Simon Willison reports
+`--unsafe-fixes` clearing 1,538 of 1,618 violations in `sqlite-utils`:
+<https://simonwillison.net/2026/Jul/25/ruff/>. The 0.16 release notes and the
+"Default Rules" doc page list the new set:
+<https://astral.sh/blog/ruff-v0.16.0>.
+
+Two gotchas found while writing this item:
+
+- The blog's `uvx ruff@latest check . --fix --unsafe-fixes` finds **nothing**
+  here: every Python entrypoint is an extensionless shebang script, so ruff's
+  file discovery skips them all. Pass the files explicitly, the way
+  `.github/workflows/lint.yml` does (`grep -rlE '^#!.*python' ... | xargs`).
+- The `PLR` complexity rules look like the noisy tail rather than the signal —
+  `PLR0912` (30), `PLR2004` (30), `PLR0915` (16) dominate a `PL`-wide count and
+  would mostly want per-file `noqa` or a threshold bump. Worth deciding on
+  before enabling `PL` wholesale.
+
+Rough sizing, measured 2026-07-26 with ruff 0.15.22 against the family names
+rather than 0.16's actual default list (so treat as indicative, not exact):
+`--select UP,RUF` gives 31 violations, 17 fixable with `--fix` and 12 more with
+`--unsafe-fixes`.
+
+**Constraints:** `python-format` stays the single source of truth — no
+`ruff.toml`/`pyproject.toml`, and `--isolated` stays. Every `--unsafe-fixes`
+diff gets reviewed rather than committed wholesale.
+
 ## Refactor test-skill suite to assert structured plans and split monolithic test file (2026-07-22)
 
 **Problem:** `test-skill` (`skills/workspace-config/tests/test-skill`) has grown
