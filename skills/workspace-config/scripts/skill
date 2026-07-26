@@ -13,14 +13,14 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
-import time
 import tarfile
 import tempfile
-import subprocess
+import time
 import urllib.request
-from urllib.parse import urlparse
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def die(msg):
@@ -242,7 +242,7 @@ class FileStateMixin:
     def get_managed_skills(self):
         if not self.state_file.is_file():
             return []
-        with open(self.state_file, "r", encoding="utf-8", errors="replace") as f:
+        with open(self.state_file, encoding="utf-8", errors="replace") as f:
             return sorted({line.strip() for line in f if line.strip()})
 
     def save_managed_skills(self, skills):
@@ -253,8 +253,7 @@ class FileStateMixin:
             return
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.state_file, "w", encoding="utf-8") as f:
-            for item in skills:
-                f.write(item + "\n")
+            f.writelines(item + "\n" for item in skills)
 
     def is_managed(self) -> bool:
         return self.state_file.is_file()
@@ -310,7 +309,7 @@ class GitWorkspace(Workspace):
             return None
         managed = []
         in_block = False
-        with open(self.exclude_file, "r", encoding="utf-8", errors="replace") as f:
+        with open(self.exclude_file, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line_stripped = line.strip()
                 if line_stripped == begin_mark:
@@ -319,9 +318,8 @@ class GitWorkspace(Workspace):
                 if line_stripped == end_mark:
                     in_block = False
                     continue
-                if in_block and line_stripped:
-                    if not line_stripped.startswith("#"):
-                        managed.append(line_stripped)
+                if in_block and line_stripped and not line_stripped.startswith("#"):
+                    managed.append(line_stripped)
         return managed if (in_block or managed) else None
 
     def _names_from_exclude_lines(self, lines):
@@ -357,7 +355,7 @@ class GitWorkspace(Workspace):
         existing_block_lines = []
         if self.exclude_file.is_file():
             in_block = False
-            with open(self.exclude_file, "r", encoding="utf-8", errors="replace") as f:
+            with open(self.exclude_file, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line_stripped = line.strip()
                     if line_stripped == self.mark_begin:
@@ -427,6 +425,7 @@ class GitWorkspace(Workspace):
                 cwd=self.root,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if res.returncode == 0:
                 return f"repo already tracks {rel_to_root}; refusing to shadow it"
@@ -443,6 +442,7 @@ class GitWorkspace(Workspace):
                 cwd=self.root,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             return res.returncode == 0
         except Exception:
@@ -485,8 +485,6 @@ class GitWorkspace(Workspace):
 
 class DefaultWorkspace(Workspace):
     """Fallback for non-VCS directories."""
-
-    pass
 
 
 # ==============================================================================
@@ -537,9 +535,13 @@ def fetch_github(
     target_dir = dest_base / subpath if subpath else dest_base
     meta_file = get_catalog_dir() / ".meta" / name
 
-    if not force and target_dir.is_dir() and meta_file.is_file():
-        if (time.time() - meta_file.stat().st_mtime) < PROVISION_TTL:
-            return str(target_dir)
+    if (
+        not force
+        and target_dir.is_dir()
+        and meta_file.is_file()
+        and (time.time() - meta_file.stat().st_mtime) < PROVISION_TTL
+    ):
+        return str(target_dir)
 
     url = f"https://github.com/{repo}/archive/{ref}.tar.gz"
     print(f"skill: downloading remote skill '{name}' from GitHub...", file=sys.stderr)
@@ -602,9 +604,13 @@ def fetch_skill_md(
     stub_md = catalog_skill_dir / "SKILL.md"
     meta_file = get_catalog_dir() / ".meta" / name
 
-    if not force and stub_md.is_file() and meta_file.is_file():
-        if (time.time() - meta_file.stat().st_mtime) < CATALOG_TTL:
-            return
+    if (
+        not force
+        and stub_md.is_file()
+        and meta_file.is_file()
+        and (time.time() - meta_file.stat().st_mtime) < CATALOG_TTL
+    ):
+        return
 
     sub_part = f"/{subpath}" if subpath else ""
     url = f"https://raw.githubusercontent.com/{repo}/{ref}{sub_part}/SKILL.md"
@@ -677,7 +683,7 @@ def get_skill_metadata(skill_dir: Path, default_name: str) -> dict:
     if not skill_md.is_file():
         return {"name": default_name, "description": ""}
     try:
-        with open(skill_md, "r", encoding="utf-8", errors="replace") as f:
+        with open(skill_md, encoding="utf-8", errors="replace") as f:
             content = f.read()
         meta = load_skill_md_frontmatter(content)
         return {
@@ -738,9 +744,7 @@ class SkillAPI:
 
     def register_skill(self, name, spec):
         if isinstance(spec, str):
-            if spec.startswith("https://github.com/") or spec.startswith(
-                "http://github.com/"
-            ):
+            if spec.startswith(("https://github.com/", "http://github.com/")):
                 repo, ref, subpath = parse_github_url(spec)
                 spec = {"repo": repo, "ref": ref, "subpath": subpath}
             else:
@@ -749,7 +753,7 @@ class SkillAPI:
                 )
 
         if not isinstance(spec, dict):
-            raise ValueError(
+            raise TypeError(
                 f"Skill '{name}': spec must be a dictionary or a GitHub URL string, got {type(spec).__name__}"
             )
 
@@ -823,7 +827,7 @@ def load_plugins() -> SkillAPI:
 
 def get_workspace() -> Workspace:
     api = get_api()
-    for cls in api.workspace_classes + [GitWorkspace]:
+    for cls in [*api.workspace_classes, GitWorkspace]:
         try:
             ws = cls.detect()
         except Exception as e:
@@ -1102,9 +1106,7 @@ class ReconcilePlan:
         those count here."""
         if self.missing or self.mismatched or self.stray_dangling:
             return True
-        if not self.destructive_blocked and (self.extra or self.negated_extra):
-            return True
-        return False
+        return bool(not self.destructive_blocked and (self.extra or self.negated_extra))
 
     def to_dict(self) -> dict:
         """Serialize the plan's facts into JSON-friendly primitives.
@@ -1298,9 +1300,8 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
         if s.lower() in negated_lower:
             if s not in negated_extra:
                 negated_extra.append(s)
-        elif not overwritten_by_add(e.path, e.dest):
-            if s not in extra:
-                extra.append(s)
+        elif not overwritten_by_add(e.path, e.dest) and s not in extra:
+            extra.append(s)
 
     # Missing / mismatched alignment for resolvable specs. Labels are formatted
     # here so doctor and apply's post-apply verification agree on the finding.
@@ -1552,10 +1553,9 @@ def cmd_remove(names, announce=True):
                 or (resolved_src and e.target == resolved_src)
                 or (resolved_src and e.link_name == resolved_src.name)
                 or e.link_name == arg_base
-            ):
-                if e not in matching_entries:
-                    matching_entries.append(e)
-                    matched_args.add(arg)
+            ) and e not in matching_entries:
+                matching_entries.append(e)
+                matched_args.add(arg)
 
         # Direct on-disk checks for unindexed/stray paths matching arg
         for d in dest_dirs:
@@ -1724,7 +1724,7 @@ def parse_skill_tokens(tokens):
     required_set = []
     negated_set = []
     for spec in tokens:
-        if spec.startswith("-") or spec.startswith("!"):
+        if spec.startswith(("-", "!")):
             clean_name = spec[1:]
             negated_set.append(clean_name.lower())
             required_set = [
@@ -2102,7 +2102,7 @@ def cmd_info(name):
     print(f"  Total Size:  {format_size(total_size)} ({total_files} files)")
     if dir_stats:
         print("  Structure:")
-        sorted_dirs = sorted([d for d in dir_stats.keys() if d != "(root)"])
+        sorted_dirs = sorted([d for d in dir_stats if d != "(root)"])
         if "(root)" in dir_stats:
             sorted_dirs.insert(0, "(root)")
         for d in sorted_dirs:
@@ -2127,7 +2127,7 @@ def get_common_dir_prefix(sources: list[str]) -> str | None:
     if len(common) <= 1:
         return None
     prefix = "/".join(common)
-    return prefix if prefix else None
+    return prefix or None
 
 
 def print_catalog(skills_info: list[dict], term_width: int) -> None:
@@ -2162,7 +2162,7 @@ def print_catalog(skills_info: list[dict], term_width: int) -> None:
         info_str = f" ({', '.join(info_parts)})" if info_parts else ""
 
         if idx > 0:
-            print("")
+            print()
         print(f"{ns}{info_str}:" if ns else f"default{info_str}:")
         indent = "  "
 
@@ -2366,7 +2366,7 @@ def cmd_suggest(args):
         readme_path = target_dir / readme_name
         if readme_path.is_file():
             try:
-                with open(readme_path, "r", encoding="utf-8", errors="replace") as f:
+                with open(readme_path, encoding="utf-8", errors="replace") as f:
                     readme_content = f.read(1500)
                 break
             except Exception:
@@ -2699,8 +2699,10 @@ def cmd_doctor(
                 "name": "Skill Conflicts",
                 "status": "WARNING",
                 "summary": f"Found {len(conflict_details)} local skill name conflict(s)",
-                "details": ["Conflicting skill names across SKILL_SOURCE_DIRS:"]
-                + conflict_details,
+                "details": [
+                    "Conflicting skill names across SKILL_SOURCE_DIRS:",
+                    *conflict_details,
+                ],
             }
         )
     else:
@@ -2910,11 +2912,10 @@ def cmd_doctor(
 
             if not stub_md.is_file():
                 catalog_index_issues.append(f"  - {name} (missing {clean_p(stub_md)})")
-            elif meta.is_file():
-                if (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
-                    catalog_stale_issues.append(
-                        f"  - {name} (stale metadata {clean_p(meta)})"
-                    )
+            elif meta.is_file() and (time.time() - meta.stat().st_mtime) > CATALOG_TTL:
+                catalog_stale_issues.append(
+                    f"  - {name} (stale metadata {clean_p(meta)})"
+                )
 
         # Check 8: Plugin Local Paths
         if plugin_path_issues:
@@ -2923,7 +2924,7 @@ def cmd_doctor(
                     "name": "Plugin Local Paths",
                     "status": "ERROR",
                     "summary": f"Found {len(plugin_path_issues)} missing plugin-defined local path(s)",
-                    "details": ["Missing plugin paths:"] + plugin_path_issues,
+                    "details": ["Missing plugin paths:", *plugin_path_issues],
                 }
             )
         else:
