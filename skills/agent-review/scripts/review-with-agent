@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-review-with-agent
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") --agent AGENT (--base BRANCH [--head REV] | --commit REV | --uncommitted) [OPTIONS]
+
+Runs a code review through a CLI agent without starting an interactive session.
+
+Options:
+  --agent AGENT    Reviewer to run: codex, claude, or agy
+  --base BRANCH    Review a branch or revision against this base
+  --head REV       Head revision for --base (default: HEAD)
+  --commit REV     Review the changes introduced by one commit
+  --uncommitted    Review staged, unstaged, and untracked changes
+  --synthesized    Bypass a native reviewer and invoke the portable skill
+  --dry-run        Print the selected command without running it
+  --help, -h       Display this help message and exit
+
+Examples:
+  $(basename "$0") --agent codex --base main
+  $(basename "$0") --agent claude --commit HEAD
+  $(basename "$0") --agent agy --uncommitted
+
+Native review entry points are preferred when they support the target. The
+synthesized fallback explicitly asks the reviewer to use the installed
+agent-review skill and to perform the review itself without delegating again.
+EOF
+  exit 0
+}
+
+fail() {
+  echo "$(basename "$0"): $*" >&2
+  exit 1
+}
+
+fail_usage() {
+  echo "$(basename "$0"): $*" >&2
+  cat >&2 <<EOF
+Runs a code review through a CLI agent without starting an interactive session.
+
+Example:
+  $(basename "$0") --agent codex --base main
+
+Try '$(basename "$0") --help' for more information.
+EOF
+  exit 1
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$(basename "$0"): $1 not found" >&2
+    exit 127
+  }
+}
+
+print_command() {
+  local argument
+  for argument in "$@"; do
+    printf "%q " "$argument"
+  done
+  printf "\n"
+}
+
+agent=""
+base=""
+head="HEAD"
+commit=""
+uncommitted=false
+synthesized=false
+dry_run=false
+
+for argument in "$@"; do
+  case "$argument" in
+    --help | -h) usage ;;
+  esac
+done
+
+while (($#)); do
+  case "$1" in
+    --agent)
+      (($# >= 2)) || fail "--agent requires a value"
+      agent="$2"
+      shift 2
+      ;;
+    --base)
+      (($# >= 2)) || fail "--base requires a value"
+      base="$2"
+      shift 2
+      ;;
+    --head)
+      (($# >= 2)) || fail "--head requires a value"
+      head="$2"
+      shift 2
+      ;;
+    --commit)
+      (($# >= 2)) || fail "--commit requires a value"
+      commit="$2"
+      shift 2
+      ;;
+    --uncommitted)
+      uncommitted=true
+      shift
+      ;;
+    --synthesized)
+      synthesized=true
+      shift
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$agent" ]] || fail_usage "--agent is required"
+case "$agent" in
+  codex | claude | agy) ;;
+  *) fail "unsupported agent: $agent" ;;
+esac
+
+target_count=0
+[[ -n "$base" ]] && ((target_count += 1))
+[[ -n "$commit" ]] && ((target_count += 1))
+[[ "$uncommitted" == true ]] && ((target_count += 1))
+((target_count == 1)) ||
+  fail_usage "specify exactly one of --base, --commit, or --uncommitted"
+[[ "$head" == "HEAD" || -n "$base" ]] ||
+  fail_usage "--head requires --base"
+
+require git
+require "$agent"
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) ||
+  fail "current directory is not inside a Git repository"
+
+target_description=""
+if [[ -n "$base" ]]; then
+  git -C "$repo_root" rev-parse --verify "$base^{commit}" >/dev/null 2>&1 ||
+    fail "base revision not found: $base"
+  git -C "$repo_root" rev-parse --verify "$head^{commit}" >/dev/null 2>&1 ||
+    fail "head revision not found: $head"
+  if [[ "$head" == "HEAD" ]]; then
+    target_description="Review the current branch and tracked working-tree changes against the merge base with '$base'."
+  else
+    target_description="Review committed changes from the merge base of '$base' and '$head' through '$head'."
+  fi
+elif [[ -n "$commit" ]]; then
+  git -C "$repo_root" rev-parse --verify "$commit^{commit}" >/dev/null 2>&1 ||
+    fail "commit not found: $commit"
+  target_description="Review the changes introduced by commit '$commit'."
+else
+  target_description="Review staged, unstaged, and untracked changes."
+fi
+
+native_route=false
+claude_target=""
+if [[ "$synthesized" == false ]]; then
+  case "$agent" in
+    codex)
+      if [[ "$head" == "HEAD" ]] &&
+        codex exec review --help >/dev/null 2>&1; then
+        native_route=true
+      fi
+      ;;
+    claude)
+      if [[ -n "$base" ]]; then
+        native_route=true
+        claude_target="$base...$head"
+      elif [[ -n "$commit" ]] &&
+        git -C "$repo_root" rev-parse --verify "$commit^" >/dev/null 2>&1; then
+        native_route=true
+        claude_target="$commit^...$commit"
+      fi
+      ;;
+    agy) ;;
+  esac
+fi
+
+command_args=()
+if [[ "$native_route" == true && "$agent" == "codex" ]]; then
+  command_args=(codex exec --ephemeral review)
+  if [[ -n "$base" ]]; then
+    command_args+=(--base "$base")
+  elif [[ -n "$commit" ]]; then
+    command_args+=(--commit "$commit")
+  else
+    command_args+=(--uncommitted)
+  fi
+elif [[ "$native_route" == true && "$agent" == "claude" ]]; then
+  command_args=(
+    claude -p "/code-review $claude_target"
+    --permission-mode dontAsk
+    --no-session-persistence
+  )
+else
+  prompt="Use the installed agent-review skill. You are the reviewer session: perform the synthesized review yourself and do not launch or delegate to another agent. $target_description Do not modify source files. Return only the review findings and overall verdict."
+  case "$agent" in
+    codex)
+      command_args=(
+        codex exec --ephemeral --sandbox read-only
+        "Use \$agent-review. $prompt"
+      )
+      ;;
+    claude)
+      command_args=(
+        claude -p "/agent-review $prompt"
+        --permission-mode dontAsk
+        --no-session-persistence
+        --tools "Bash,Read,Grep,Glob,Skill"
+      )
+      ;;
+    agy)
+      command_args=(
+        agy --print "$prompt"
+        --mode plan
+        --sandbox
+        --print-timeout 30m
+      )
+      ;;
+  esac
+fi
+
+if [[ "$dry_run" == true ]]; then
+  print_command "${command_args[@]}"
+  exit 0
+fi
+
+cd "$repo_root"
+exec "${command_args[@]}"

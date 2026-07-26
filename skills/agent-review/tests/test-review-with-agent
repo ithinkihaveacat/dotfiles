@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+test_plan=19
+test_index=0
+echo "1..$test_plan"
+
+assert_contains() {
+  local label="$1"
+  local output="$2"
+  local expected="$3"
+  ((test_index += 1))
+  output=${output//\\/}
+  if [[ "$output" == *"$expected"* ]]; then
+    printf "ok %d - %s\n" "$test_index" "$label"
+  else
+    printf "not ok %d - %s\n" "$test_index" "$label"
+    printf "# expected output to contain: %s\n" "$expected"
+    printf "# actual output: %q\n" "$output"
+    exit 1
+  fi
+}
+
+assert_not_contains() {
+  local label="$1"
+  local output="$2"
+  local unexpected="$3"
+  ((test_index += 1))
+  if [[ "$output" != *"$unexpected"* ]]; then
+    printf "ok %d - %s\n" "$test_index" "$label"
+  else
+    printf "not ok %d - %s\n" "$test_index" "$label"
+    printf "# expected output not to contain: %s\n" "$unexpected"
+    printf "# actual output: %q\n" "$output"
+    exit 1
+  fi
+}
+
+assert_equals() {
+  local label="$1"
+  local actual="$2"
+  local expected="$3"
+  ((test_index += 1))
+  if [[ "$actual" == "$expected" ]]; then
+    printf "ok %d - %s\n" "$test_index" "$label"
+  else
+    printf "not ok %d - %s\n" "$test_index" "$label"
+    printf "# expected: %q\n" "$expected"
+    printf "# actual: %q\n" "$actual"
+    exit 1
+  fi
+}
+
+test_dir=$(mktemp -d "${TMPDIR:-/tmp}/agent-review.XXXXXX")
+trap 'rm -rf -- "$test_dir"' EXIT
+
+mock_bin="$test_dir/bin"
+repo="$test_dir/repo"
+mkdir -p "$mock_bin" "$repo"
+
+for agent in codex claude agy; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$mock_bin/$agent"
+  chmod +x "$mock_bin/$agent"
+done
+
+git -C "$repo" init --quiet --initial-branch=main
+git -C "$repo" -c user.name=Test -c user.email=test@example.com \
+  commit --quiet --allow-empty -m initial
+git -C "$repo" -c user.name=Test -c user.email=test@example.com \
+  commit --quiet --allow-empty -m second
+
+script_dir=$(cd "$(dirname "$0")/../scripts" && pwd)
+review="$script_dir/review-with-agent"
+
+output=$(
+  cd "$repo"
+  PATH="$mock_bin:$PATH" "$review" \
+    --agent codex --base main --dry-run
+)
+assert_contains "Codex uses native base review" \
+  "$output" "codex exec --ephemeral review --base main"
+
+output=$(
+  cd "$repo"
+  PATH="$mock_bin:$PATH" "$review" \
+    --agent claude --base main --dry-run
+)
+assert_contains "Claude base review is non-interactive" "$output" "claude -p"
+assert_contains "Claude base review uses local code-review" \
+  "$output" "/code-review main...HEAD"
+
+output=$(
+  cd "$repo"
+  PATH="$mock_bin:$PATH" "$review" \
+    --agent claude --commit HEAD --dry-run
+)
+assert_contains "Claude commit review is non-interactive" "$output" "claude -p"
+assert_contains "Claude commit review uses a ref range" \
+  "$output" "/code-review HEAD^...HEAD"
+
+output=$(
+  cd "$repo"
+  PATH="$mock_bin:$PATH" "$review" \
+    --agent claude --uncommitted --dry-run
+)
+assert_contains "Claude uncommitted review is non-interactive" \
+  "$output" "claude -p"
+assert_contains "Claude uncommitted review uses agent-review" \
+  "$output" "/agent-review"
+assert_contains "Claude synthesized review does not delegate" \
+  "$output" "perform the synthesized review yourself"
+
+output=$(
+  cd "$repo"
+  PATH="$mock_bin:$PATH" "$review" \
+    --agent agy --uncommitted --dry-run
+)
+assert_contains "agy review is non-interactive" "$output" "agy --print"
+assert_contains "agy review names agent-review" \
+  "$output" "Use the installed agent-review skill"
+assert_contains "agy review uses plan mode" "$output" "--mode plan"
+
+output=$(
+  cd "$repo"
+  PATH="$mock_bin:$PATH" "$review" \
+    --agent codex --base main --synthesized --dry-run
+)
+assert_contains "Synthesized Codex review uses a read-only sandbox" \
+  "$output" "codex exec --ephemeral --sandbox read-only"
+expected_skill_prompt="Use \$agent-review"
+assert_contains "Synthesized Codex review invokes agent-review" \
+  "$output" "$expected_skill_prompt"
+
+output=$(PATH="$mock_bin:$PATH" "$review" --wat --help)
+assert_contains "Help bypasses other argument validation" "$output" "Usage:"
+assert_contains "Help lists flags under Options" "$output" "Options:"
+assert_not_contains "Help does not classify flags as arguments" \
+  "$output" "Arguments:"
+
+status=0
+output=$(PATH="$mock_bin:$PATH" "$review" 2>&1) || status=$?
+assert_equals "Missing arguments exit with a usage error" "$status" "1"
+assert_contains "Missing arguments include a description" \
+  "$output" "Runs a code review through a CLI agent"
+assert_contains "Missing arguments point to full help" \
+  "$output" "Try 'review-with-agent --help'"
+
+((test_index == test_plan))
