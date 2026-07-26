@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+#
+# Tests for bin/jetpack version subcommand: fetch_maven_metadata must
+# distinguish a genuine "artifact not found" (HTTP 404, reached the server)
+# from a network failure (never reached the server), and must not label the
+# latter as a 404.
+
+set -u
+
+# Setup paths
+SCRIPT_DIR=$(dirname "$0")
+ROOT_DIR="$SCRIPT_DIR/.."
+BIN_JETPACK="$ROOT_DIR/scripts/jetpack"
+TEST_CACHE_DIR=$(mktemp -d)
+
+# Mock XDG_CACHE_HOME to use our temp dir
+export XDG_CACHE_HOME="$TEST_CACHE_DIR"
+export TMPDIR="$TEST_CACHE_DIR"
+
+# Total number of tests
+TOTAL_TESTS=5
+TEST_NUM=0
+
+echo "1..$TOTAL_TESTS"
+
+cleanup() {
+  rm -rf "$TEST_CACHE_DIR"
+}
+trap cleanup EXIT
+
+# Fresh, minimal local index so the genuine-404 case's "did you mean"
+# fallback does not try to download the (large) GMaven class index over the
+# network; is_index_fresh() only checks the file's mtime, so an empty index
+# written just now counts as fresh.
+mkdir -p "$TEST_CACHE_DIR/jetpack"
+echo '{"Index": []}' >"$TEST_CACHE_DIR/jetpack/androidx-index.json"
+
+assert_status_nonzero() {
+  local description="$1"
+  local status="$2"
+
+  TEST_NUM=$((TEST_NUM + 1))
+  if [[ "$status" -ne 0 ]]; then
+    echo "ok $TEST_NUM - $description"
+  else
+    echo "not ok $TEST_NUM - $description"
+    echo "# Expected non-zero exit, got $status"
+  fi
+}
+
+assert_stderr_contains() {
+  local description="$1"
+  local stderr="$2"
+  local needle="$3"
+
+  TEST_NUM=$((TEST_NUM + 1))
+  if [[ "$stderr" == *"$needle"* ]]; then
+    echo "ok $TEST_NUM - $description"
+  else
+    echo "not ok $TEST_NUM - $description"
+    echo "# Expected stderr to contain: $needle"
+    echo "# Stderr: $stderr"
+  fi
+}
+
+assert_stderr_not_contains() {
+  local description="$1"
+  local stderr="$2"
+  local needle="$3"
+
+  TEST_NUM=$((TEST_NUM + 1))
+  if [[ "$stderr" != *"$needle"* ]]; then
+    echo "ok $TEST_NUM - $description"
+  else
+    echo "not ok $TEST_NUM - $description"
+    echo "# Expected stderr NOT to contain: $needle"
+    echo "# Stderr: $stderr"
+  fi
+}
+
+# --- Case 1: the request never reaches a server (unroutable port). Port 1 is
+# privileged and never has a listener, so the OS refuses the connection
+# immediately (no external network or --connect-timeout needed to bound it).
+ERR_FILE=$(mktemp)
+"$BIN_JETPACK" version androidx.foo:bar STABLE "http://127.0.0.1:1/repo" \
+  >/dev/null 2>"$ERR_FILE"
+STATUS=$?
+STDERR=$(cat "$ERR_FILE")
+rm -f "$ERR_FILE"
+
+assert_status_nonzero "unreachable repo exits non-zero" "$STATUS"
+assert_stderr_not_contains "unreachable repo is not reported as a 404" "$STDERR" "(404)"
+assert_stderr_contains "unreachable repo names the network failure" "$STDERR" "could not reach"
+
+# --- Case 2: a genuine 404 against the real Google Maven repo (same live
+# network dependency already used by test-jetpack-dependencies).
+ERR_FILE=$(mktemp)
+"$BIN_JETPACK" version "androidx.doesnotexist12345.faketest:doesnotexist12345" STABLE \
+  >/dev/null 2>"$ERR_FILE"
+STATUS=$?
+STDERR=$(cat "$ERR_FILE")
+rm -f "$ERR_FILE"
+
+assert_status_nonzero "genuine 404 exits non-zero" "$STATUS"
+assert_stderr_contains "genuine 404 is reported as not found (404)" "$STDERR" "(404)"

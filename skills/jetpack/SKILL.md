@@ -33,6 +33,14 @@ need, or fails due to missing dependencies, read the script source. It encodes
 Maven repository URL patterns, version filtering logic, and package naming
 heuristics—use it as reference when building similar functionality.
 
+**If the script fails, say so.** A nonzero exit means the answer has not been
+verified against live Maven data. Do not silently fall back to a remembered
+version number or coordinate and present it as current — Jetpack versions change
+often enough that a memorized answer can be confidently wrong. Report the
+failure (missing dependency, network error, unresolved package) to the user,
+including the script's own error message, and consult
+[references/troubleshooting.md](references/troubleshooting.md) before retrying.
+
 ## Quick Start
 
 **Requirements:** `curl`, `xmllint` (libxml2-utils), `jar` (JDK), `jq`, `perl`.

@@ -25,16 +25,27 @@ script relies on system tools. **Solution**:
 
 ## Network Errors
 
-**Symptom**: `failed to fetch .../maven-metadata.xml`. **Cause**:
+`version`, `list versions`, and `list dependencies` report two distinct
+failures, and the message tells you which one happened:
 
-- No internet connection.
-- Firewall blocking `dl.google.com` or `androidx.dev`.
-- Package does not exist in the specified repository.
-- Invalid or expired Build ID (artifacts are not kept forever). **Solution**:
-- Check internet.
+**Symptom**: `could not reach .../maven-metadata.xml (curl exit N: ...)`.
+**Cause**: The request never reached a server — no internet connection, a
+firewall or sandbox blocking `dl.google.com`/`androidx.dev`, DNS failure, or a
+timeout. This is **not** evidence the package is missing; treat the lookup as
+unverified rather than as a "not found." **Solution**:
+
+- Check internet/egress from wherever the script is running (some sandboxed
+  agent environments block outbound network by default).
+- Retry once connectivity is confirmed.
+
+**Symptom**: `artifact '...' not found at .../maven-metadata.xml (404)`.
+**Cause**: The server was reached and returned a genuine 404 — the package does
+not exist in the specified repository, or the name is wrong. **Solution**:
+
 - Verify package name is correct (e.g., `androidx.wear.tiles:tiles` vs
   `androidx.wear.tiles:wear-tiles`).
-- Verify Build ID exists at `https://androidx.dev/snapshots/builds`.
+- Verify Build ID exists at `https://androidx.dev/snapshots/builds` (invalid or
+  expired Build IDs 404 the same way).
 
 ## Search Failures
 
@@ -54,9 +65,9 @@ script relies on system tools. **Solution**:
 in the exceptions table. **Solution**:
 
 1. Find the correct coordinate manually (e.g., search Google Maven).
-2. Use `scripts/jetpack resolve-exceptions CORRECT_COORDINATE` to identify the
+1. Use `scripts/jetpack resolve-exceptions CORRECT_COORDINATE` to identify the
    missing mapping.
-3. Use the coordinate directly: `scripts/jetpack source GROUP:ARTIFACT`.
+1. Use the coordinate directly: `scripts/jetpack source GROUP:ARTIFACT`.
 
 ## Version Not Found
 

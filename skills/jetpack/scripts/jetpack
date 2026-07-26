@@ -66,8 +66,29 @@ fetch_maven_metadata() {
 
   local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
 
-  if ! curl -sSLf "$metadata_url"; then
-    echo "$SCRIPT_NAME: artifact '$group_id:$artifact_id' not found at $metadata_url (404)" >&2
+  # Use -w '%{http_code}' rather than curl -f's exit code to tell "reached the
+  # server, got an error" apart from "never got an HTTP response at all":
+  # curl's own exit code for HTTP-level failures is not reliably 22 (some
+  # servers close the connection in a way curl reports as exit 56 "failure in
+  # receiving network data" even though the response body was a plain 404).
+  # http_code is authoritatively "000" only when no response was received.
+  local tmp_body http_code curl_status
+  tmp_body=$(mktemp)
+  curl_status=0
+  http_code=$(curl -sSL --connect-timeout 10 --max-time 30 -o "$tmp_body" -w '%{http_code}' "$metadata_url") || curl_status=$?
+
+  if [[ $curl_status -ne 0 || "$http_code" == "000" ]]; then
+    # This is NOT evidence the artifact is missing, so don't call it "not
+    # found" and don't offer "did you mean" suggestions that imply a live
+    # index lookup was possible.
+    rm -f "$tmp_body"
+    echo "$SCRIPT_NAME: could not reach $metadata_url (curl exit $curl_status, http $http_code: network unreachable, DNS failure, or blocked egress); cannot determine whether '$group_id:$artifact_id' exists" >&2
+    return 1
+  fi
+
+  if [[ "$http_code" != 2?? ]]; then
+    rm -f "$tmp_body"
+    echo "$SCRIPT_NAME: artifact '$group_id:$artifact_id' not found at $metadata_url ($http_code)" >&2
 
     # Suggest alternatives from the local index
     if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
@@ -87,6 +108,9 @@ fetch_maven_metadata() {
     fi
     return 1
   fi
+
+  cat "$tmp_body"
+  rm -f "$tmp_body"
 }
 
 extract_versions_from_xml() {
