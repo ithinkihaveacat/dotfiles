@@ -464,6 +464,20 @@ EOF
   exit "${1:-0}"
 }
 
+# Announce how old the class index is when it is being served offline. Without
+# this, 'search' and 'resolve' are the one pair of subcommands that can hand
+# back a months-old coordinate with nothing to distinguish it from a live
+# lookup. Printed once per run, however many index reads a command does.
+INDEX_AGE_NOTED=0
+
+note_index_age() {
+  if ! is_offline || [[ $INDEX_AGE_NOTED -eq 1 || ! -f "$INDEX_FILE" ]]; then
+    return 0
+  fi
+  INDEX_AGE_NOTED=1
+  echo "$SCRIPT_NAME: offline: using GMaven index cached $(file_age_human "$INDEX_FILE")" >&2
+}
+
 is_index_fresh() {
   if [[ ! -f "$INDEX_FILE" ]]; then
     return 1
@@ -543,6 +557,8 @@ search_index() {
     echo "$SCRIPT_NAME search: index file not found and update failed" >&2
     return 1
   fi
+
+  note_index_age
 
   # Auto-detect format: array (old) vs object (new with .Index)
   #
@@ -977,6 +993,8 @@ cmd_resolve() {
     return 1
   fi
 
+  note_index_age
+
   # 3. Pre-compute all fallback query variations to avoid reading the large index file multiple times.
   local temp_query="$input"
   local -a query_targets=()
@@ -1292,7 +1310,7 @@ cmd_source() {
   # Download and extract each package
   local version="" jar_version snapshot_jar_version
   local source_jar_url source_jar_filename
-  local pom_url pom_content platform_artifacts
+  local pom_url pom_content pom_file pom_status platform_artifacts
 
   for artifact in "${artifacts[@]}"; do
     group_id=$(echo "$artifact" | cut -d: -f1)
@@ -1349,12 +1367,32 @@ cmd_source() {
       rm "${source_jar_filename}"
     )
 
-    # Check for Kotlin Multiplatform platform-specific sources
+    # Check for Kotlin Multiplatform platform-specific sources. Online, a
+    # missing POM stays tolerable (it costs only KMP detection). Offline it
+    # means the cache was never warmed for this version, and carrying on would
+    # hand back sources silently missing every platform target — the failure
+    # this whole mode exists to prevent — so it is fatal and says how to fix it.
     pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
-    pom_content=$(http_get_body "${pom_url}" || true)
+    pom_status=0
+    pom_file=$(mktemp)
+    http_get "${pom_url}" "$pom_file" || pom_status=$?
+    pom_content=""
+    if [[ $pom_status -eq 0 ]]; then
+      pom_content=$(cat "$pom_file")
+    elif [[ $pom_status -eq 2 ]] && is_offline; then
+      rm -f "$pom_file"
+      echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
+      echo "$SCRIPT_NAME source: without it, whether $artifact has Kotlin Multiplatform sources cannot be determined, and the extracted sources may be incomplete" >&2
+      warm_hint "--with-source $artifact"
+      exit 1
+    fi
+    rm -f "$pom_file"
 
     if [[ -n "$pom_content" ]]; then
-      platform_artifacts=$(echo "$pom_content" | xmllint --xpath "//*[local-name()='dependency']/*[local-name()='groupId' and text()='${group_id}']/../*[local-name()='artifactId']/text()" - 2>/dev/null | grep "^${artifact_id}-" || true)
+      # sort -u because a platform artifact listed both as a compile and a
+      # runtime dependency would otherwise be downloaded (and, offline, warned
+      # about) once per listing.
+      platform_artifacts=$(echo "$pom_content" | xmllint --xpath "//*[local-name()='dependency']/*[local-name()='groupId' and text()='${group_id}']/../*[local-name()='artifactId']/text()" - 2>/dev/null | grep "^${artifact_id}-" | sort -u || true)
 
       if [[ -n "$platform_artifacts" ]]; then
         echo "info: Detected Kotlin Multiplatform library, downloading platform-specific sources..." >&2
@@ -1382,6 +1420,12 @@ cmd_source() {
               jar xf "${platform_source_jar_filename}"
               rm "${platform_source_jar_filename}"
             )
+          elif is_offline; then
+            # Warn rather than fail: not every KMP target publishes a sources
+            # JAR, so a warmed cache can be legitimately missing this one and a
+            # hard error would be unfixable. Silence is what is not acceptable.
+            echo "$SCRIPT_NAME source: warning: no cached sources for platform artifact ${platform_artifact}; the extracted sources are missing its classes" >&2
+            echo "$SCRIPT_NAME source: warm them where there is network: $SCRIPT_NAME warm cache --with-source $artifact" >&2
           fi
         done
       fi

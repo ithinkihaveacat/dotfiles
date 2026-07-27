@@ -24,7 +24,7 @@ REPO_URL="http://127.0.0.1:1/repo"
 ARTIFACT="androidx.wear.tiles:tiles"
 CACHED_DIR="$JETPACK_CACHE_DIR/http/127.0.0.1:1/repo/androidx/wear/tiles/tiles"
 
-TOTAL_TESTS=21
+TOTAL_TESTS=29
 TEST_NUM=0
 
 echo "1..$TOTAL_TESTS"
@@ -121,6 +121,13 @@ warm_metadata() {
 EOF
 }
 
+warm_sources_jar() {
+  mkdir -p "$CACHED_DIR/1.4.0" "$TEST_TMP/jarsrc/androidx/wear/tiles"
+  echo 'public class TileService {}' \
+    >"$TEST_TMP/jarsrc/androidx/wear/tiles/TileService.java"
+  (cd "$TEST_TMP/jarsrc" && jar cf "$CACHED_DIR/1.4.0/tiles-1.4.0-sources.jar" .)
+}
+
 warm_pom() {
   mkdir -p "$CACHED_DIR/1.4.0"
   cat >"$CACHED_DIR/1.4.0/tiles-1.4.0.pom" <<'EOF'
@@ -204,4 +211,39 @@ if [[ -f "$JETPACK_CACHE_DIR/androidx-index.json" ]]; then
 else
   not_ok "search --force leaves the index it cannot rebuild in place" \
     "The index was deleted with no way to download a replacement"
+fi
+
+# --- The index that search/resolve read must date itself too --------------
+
+AGENT_OFFLINE=1 run_jetpack search wear
+assert_status "search succeeds offline from the cached index" "$STATUS" 0
+assert_contains "the cached index reports its own age" "$STDERR" \
+  "using GMaven index cached"
+
+# --- A partially warmed cache must not yield incomplete sources -----------
+#
+# With the sources JAR cached but the POM missing, whether this artifact has
+# Kotlin Multiplatform platform sources cannot be determined. Returning the
+# base sources alone would look like success while quietly omitting every
+# platform target's classes, so it fails instead.
+
+rm -f "$CACHED_DIR/1.4.0/tiles-1.4.0.pom"
+warm_sources_jar
+
+AGENT_OFFLINE=1 run_jetpack source "$ARTIFACT" 1.4.0 "$REPO_URL"
+assert_status "source fails when the POM is missing from the cache" "$STATUS" 1
+assert_contains "the missing POM is named" "$STDERR" "tiles-1.4.0.pom"
+assert_contains "the consequence is spelled out" "$STDERR" "may be incomplete"
+assert_contains "the fix names --with-source" "$STDERR" \
+  "warm cache --with-source $ARTIFACT"
+
+warm_pom
+
+AGENT_OFFLINE=1 run_jetpack source "$ARTIFACT" 1.4.0 "$REPO_URL"
+assert_status "source succeeds offline once the POM is cached too" "$STATUS" 0
+if [[ -f "$STDOUT/androidx/wear/tiles/TileService.java" ]]; then
+  ok "the extracted sources come from the cached JAR"
+else
+  not_ok "the extracted sources come from the cached JAR" \
+    "Expected TileService.java under $STDOUT"
 fi

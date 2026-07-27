@@ -64,11 +64,20 @@ them at once. A flag is fine as an addition, never as the only switch.
 - **State the age of what it served, on stderr, every time.**
   `(cached 3 days ago)` is the difference between an agent reporting a version
   confidently and an agent reporting it with the caveat that makes it useful.
-  Age goes to stderr so stdout stays parseable.
+  Age goes to stderr so stdout stays parseable. *Every time* includes the paths
+  a freshness TTL would have short-circuited: check offline mode **before** any
+  "cache is younger than the TTL, return early" branch, or the common
+  warm-then-freeze workflow — where the cache is usually fresh — is exactly the
+  case that answers silently.
 - **Fail loudly and actionably on a cache miss.** Name the resource that is
   missing and the command that would have warmed it, and exit non-zero. Never
   fall back to a guess — for an agent, an unsourced answer from training data is
   indistinguishable from a real one.
+- **Gate on "could this need the network", not on the obvious remote case.** A
+  handler that is cached is cached because it was expensive, which usually means
+  remote; a plugin-provided or third-party one may do anything at all. If the
+  tool cannot prove a code path is local, route it through the offline check
+  rather than letting it fall through and dial out.
 
 ```text
 jetpack version: offline (AGENT_OFFLINE=1) and no cached copy of
@@ -76,6 +85,23 @@ jetpack version: offline (AGENT_OFFLINE=1) and no cached copy of
 jetpack version: warm the cache from a network-enabled environment first:
   jetpack warm cache androidx.wear.tiles:tiles
 ```
+
+#### Optional Resources
+
+Some fetches are best-effort online: their absence is normal and the command
+still produces a correct result. Two rules keep them from becoming a hole in the
+guarantee above:
+
+- A resource whose absence *changes the answer* is not optional, whatever the
+  online path does with it. `jetpack source` fetches a POM only to detect Kotlin
+  Multiplatform targets, and tolerates a missing one online — but offline, a
+  missing POM means the answer silently omits every platform target's sources,
+  so it is fatal there.
+- Where the miss really is tolerable — the resource may legitimately not exist,
+  so a warmed cache can be correctly missing it and a hard error would be
+  unfixable — warn on stderr naming what is absent and how to warm it, and carry
+  on. What is never acceptable is passing over it in silence: the caller cannot
+  see the gap in a result that looks complete.
 
 ### What the Online Path Must Do
 
