@@ -263,6 +263,29 @@ require jq
 require curl
 ```
 
+### Caching and Offline Mode
+
+Scripts that cache network responses must follow the cache-location and
+offline-mode convention in `caching.md` (`<TOOL>_CACHE_DIR` / `<TOOL>_OFFLINE` /
+`AGENT_OFFLINE`). Two bash-specific points from it are worth restating here,
+because both are easy to get wrong under `set -euo pipefail`:
+
+- **Storing a response must never fail the run.** The cache directory can be
+  unwritable (a read-only sandbox), so guard every write and carry on:
+
+  ```bash
+  if mkdir -p "$(dirname "$dest")" 2>/dev/null; then
+    cp "$src" "$dest.tmp.$$" 2>/dev/null && mv "$dest.tmp.$$" "$dest" 2>/dev/null
+    rm -f "$dest.tmp.$$" 2>/dev/null
+  fi
+  return 0
+  ```
+
+- **Distinguish "no response" from "an error response"** so offline and
+  network-failure paths can be reported differently. Read `curl`'s
+  `-w '%{http_code}'` (which is `000` only when nothing was received) rather
+  than relying on `curl -f`'s exit code; see the error-message guidance above.
+
 ## Handling Large Inputs with jq
 
 When using `jq` to process data, you must account for the system's `ARG_MAX`
