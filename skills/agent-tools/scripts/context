@@ -15,6 +15,7 @@ import re
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime
 
 import requests
@@ -1057,8 +1058,42 @@ def register(api):
 ''')
 
 
+def is_offline() -> bool:
+    """Whether network fetches are forbidden in this environment.
+
+    Per skills/coding-standards/references/caching.md: the per-tool variable
+    wins when set (including when set to 0, to opt one tool out of a
+    workspace-wide policy), otherwise the AGENT_OFFLINE policy applies.
+    """
+    value = os.environ.get("CONTEXT_OFFLINE")
+    if value is None:
+        value = os.environ.get("AGENT_OFFLINE", "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def offline_desc() -> str:
+    var = "CONTEXT_OFFLINE" if "CONTEXT_OFFLINE" in os.environ else "AGENT_OFFLINE"
+    return f"{var}={os.environ.get(var, '')}"
+
+
+def cache_age_human(path) -> str:
+    """How long ago PATH was written, for qualifying a cached answer."""
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return "unknown age"
+    if age < 60:
+        return "just now"
+    for limit, unit, size in ((3600, "minute", 60), (86400, "hour", 3600)):
+        if age < limit:
+            n = int(age // size)
+            return f"{n} {unit}" if n == 1 else f"{n} {unit}s"
+    n = int(age // 86400)
+    return f"{n} day" if n == 1 else f"{n} days"
+
+
 def cmd_show(target, force, catalog):
-    cache_dir = os.path.join(
+    cache_dir = os.environ.get("CONTEXT_CACHE_DIR") or os.path.join(
         os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "context"
     )
 
@@ -1123,13 +1158,35 @@ def cmd_show(target, force, catalog):
     # Check cache
     use_cache = False
     if cache_file and not force and os.path.exists(cache_file):
-        import time
-
         mtime = os.path.getmtime(cache_file)
         script_mtime = os.path.getmtime(os.path.realpath(__file__))
 
         if (time.time() - mtime) < 24 * 3600 and mtime > script_mtime:
             use_cache = True
+
+    # Offline, a cached copy is served whatever its age (the 24h TTL above is a
+    # freshness preference, not a reason to fail), with that age reported. Only
+    # URL targets need the network; local directories and entries are built
+    # from the machine itself and are left alone.
+    if is_offline() and is_url_target:
+        if cache_file and os.path.exists(cache_file):
+            print(
+                f"context: offline ({offline_desc()}): using cached {target} "
+                f"(cached {cache_age_human(cache_file)} ago)",
+                file=sys.stderr,
+            )
+            use_cache = True
+        else:
+            print(
+                f"context: offline ({offline_desc()}) and no cached copy of {target}",
+                file=sys.stderr,
+            )
+            print(
+                f"context: fetch it from a network-enabled environment first: "
+                f"context show {target}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     if use_cache and cache_file:
         with open(cache_file) as f:

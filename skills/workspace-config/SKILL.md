@@ -88,6 +88,14 @@ human sets (what agents should do in this workspace); `SKILL_*` variables are
   `~/.gemini/jetski/skills` via the `05_local.py` plugin).
 - `SKILL_DEST_DIRS`: Colon-separated link destinations relative to the workspace
   root (default: `.claude/skills:.agents/skills`).
+- `SKILL_CACHE_DIR`: This tool's cache directory for remote skills and catalog
+  metadata (default: `${XDG_CACHE_HOME:-$HOME/.cache}/skill`).
+- `SKILL_OFFLINE` / `AGENT_OFFLINE`: Set to `1` to serve remote skills from that
+  cache instead of fetching them — what a CI job or a network-denied agent
+  sandbox needs, so `preflight` does not gate an agent launch on GitHub being
+  reachable. A skill that has never been fetched is a clear error rather than a
+  silent omission. Per-tool variable wins; see
+  [caching and offline mode](../coding-standards/references/caching.md).
 
 For the underlying model — what `apply` touches, the invariants `doctor` audits,
 and the one place `doctor` and `preflight` deliberately differ — see

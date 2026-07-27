@@ -83,7 +83,34 @@ errors.
   hermeticity hide the host cache; share it by also exporting
   `UV_CACHE_DIR=~/.cache/uv`.
 
-### 2. Skipping External API Tests (`GEMINI_API_KEY=""`)
+### 2. Repository Tools' Offline Mode (`AGENT_OFFLINE=1`)
+
+`UV_OFFLINE` covers Python dependency resolution; it says nothing about the
+network calls the scripts themselves make. Scripts in this repository that cache
+what they fetch (`jetpack`, `skill`, `context`) honour a second switch:
+
+- **Solution**: Set `AGENT_OFFLINE=1` to make every such script answer from its
+  cache instead of the network, or `<TOOL>_OFFLINE` (`JETPACK_OFFLINE`,
+  `SKILL_OFFLINE`, `CONTEXT_OFFLINE`) to change one tool's behaviour — the
+  per-tool variable wins, including when set to `0` to opt back in.
+- **Usage**:
+  ```bash
+  UV_OFFLINE=1 AGENT_OFFLINE=1 prove tests/test-* skills/*/tests/test-*
+  ```
+- **Warming the cache**: same pattern as `uv` — run the tool once with real
+  network (e.g. `jetpack warm cache <artifact>`), then freeze. A cache miss
+  while offline is a clear error naming the warm command, never a silent stale
+  answer.
+- Tests that need a *specific* cache state should seed their own fixture rather
+  than depend on the host's, as `skills/jetpack/tests/test-jetpack-offline`
+  does: it points `JETPACK_CACHE_DIR` at a temp directory, writes the cached
+  responses by hand, and aims every request at an unroutable address so no case
+  can silently succeed over the network.
+
+The convention itself is documented in
+`skills/coding-standards/references/caching.md`.
+
+### 3. Skipping External API Tests (`GEMINI_API_KEY=""`)
 
 Some tests (like `test-pacioli` and `test-git-setup`) include integration tests
 that make actual network calls to the Gemini API. These can be slow, cost quota,
@@ -105,7 +132,7 @@ To run the entire test suite in a completely fast, local-only, offline, and
 deterministic mode:
 
 ```bash
-UV_OFFLINE=1 GEMINI_API_KEY="" prove tests/test-* skills/*/tests/test-*
+UV_OFFLINE=1 AGENT_OFFLINE=1 GEMINI_API_KEY="" prove tests/test-* skills/*/tests/test-*
 ```
 
 ## Writing Tests

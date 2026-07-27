@@ -41,6 +41,25 @@ def clean_p(p):
     return s
 
 
+def age_human(path: Path) -> str:
+    """How long ago PATH was last written, for qualifying a cached answer."""
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return "unknown age"
+    for limit, unit, size in (
+        (3600, "minute", 60),
+        (86400, "hour", 3600),
+        (None, "day", 86400),
+    ):
+        if limit is None or age < limit:
+            n = int(age // size)
+            if n < 1 and unit == "minute":
+                return "just now"
+            return f"{n} {unit} ago" if n == 1 else f"{n} {unit}s ago"
+    return "unknown age"
+
+
 def prune_dirs(dest_dirs):
     for d in dest_dirs:
         try:
@@ -497,20 +516,39 @@ CATALOG_TTL = 7 * 24 * 3600  # 7 days
 PROVISION_TTL = 8 * 3600  # 8 hours
 
 
+def is_offline() -> bool:
+    """Whether remote fetches are forbidden in this environment.
+
+    Per skills/coding-standards/references/caching.md: the per-tool variable
+    wins when set (including when set to 0, to opt one tool out of a
+    workspace-wide policy), otherwise the AGENT_OFFLINE policy applies.
+    """
+    value = os.environ.get("SKILL_OFFLINE")
+    if value is None:
+        value = os.environ.get("AGENT_OFFLINE", "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def offline_desc() -> str:
+    var = "SKILL_OFFLINE" if "SKILL_OFFLINE" in os.environ else "AGENT_OFFLINE"
+    return f"{var}={os.environ.get(var, '')}"
+
+
+def get_cache_dir() -> Path:
+    """This tool's cache directory (SKILL_CACHE_DIR names it outright)."""
+    override = os.environ.get("SKILL_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+    base = Path(os.environ.get("XDG_CACHE_HOME") or "~/.cache").expanduser()
+    return base / "skill"
+
+
 def get_cache_base() -> Path:
-    return (
-        Path(
-            os.environ.get("SKILL_CACHE_DIR")
-            or os.environ.get("XDG_CACHE_HOME")
-            or "~/.cache"
-        ).expanduser()
-        / "skill"
-        / "remotes"
-    )
+    return get_cache_dir() / "remotes"
 
 
 def get_catalog_dir() -> Path:
-    return get_cache_base().parent / "catalog"
+    return get_cache_dir() / "catalog"
 
 
 def parse_github_url(url: str) -> tuple[str, str, str | None]:
@@ -542,6 +580,24 @@ def fetch_github(
         and (time.time() - meta_file.stat().st_mtime) < PROVISION_TTL
     ):
         return str(target_dir)
+
+    # Offline, a previously downloaded copy is the only copy obtainable: serve
+    # it at any age (and regardless of --force, which cannot be honoured
+    # without network), but say how old it is.
+    if is_offline():
+        if target_dir.is_dir():
+            stamp = meta_file if meta_file.is_file() else target_dir
+            print(
+                f"skill: offline ({offline_desc()}): using cached '{name}' "
+                f"(downloaded {age_human(stamp)})",
+                file=sys.stderr,
+            )
+            return str(target_dir)
+        die(
+            f"offline ({offline_desc()}) and remote skill '{name}' has never been "
+            f"downloaded to {clean_p(target_dir)}; fetch it from a "
+            f"network-enabled environment first with 'skill add {name}'"
+        )
 
     url = f"https://github.com/{repo}/archive/{ref}.tar.gz"
     print(f"skill: downloading remote skill '{name}' from GitHub...", file=sys.stderr)
@@ -610,6 +666,16 @@ def fetch_skill_md(
         and meta_file.is_file()
         and (time.time() - meta_file.stat().st_mtime) < CATALOG_TTL
     ):
+        return
+
+    # Catalog metadata is a nicety (descriptions in listings), so offline this
+    # degrades to whatever is on disk rather than failing the command.
+    if is_offline():
+        if not stub_md.is_file():
+            print(
+                f"skill: offline ({offline_desc()}): no cached metadata for '{name}'",
+                file=sys.stderr,
+            )
         return
 
     sub_part = f"/{subpath}" if subpath else ""
@@ -3264,7 +3330,17 @@ Commands:
 
 Options:
   --help             Display this help message and exit
-  --plugin-template  Output a template/documentation for creating a Workspace plugin"""
+  --plugin-template  Output a template/documentation for creating a Workspace plugin
+
+Environment:
+  SKILL_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
+                     has already been downloaded (at any age) instead. A skill
+                     that has never been fetched is an error, not a guess.
+  AGENT_OFFLINE      Workspace-wide offline policy, used when SKILL_OFFLINE is
+                     unset. Set this in a CI job or agent sandbox with no
+                     egress.
+  SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
+                     (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)"""
     )
     sys.exit(0)
 
