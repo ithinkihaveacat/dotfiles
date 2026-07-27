@@ -1,15 +1,24 @@
 # Caching and Offline Mode
 
-This is the cross-cutting convention for any script in this repository that
-fetches something over the network and can usefully reuse the response. It
-covers two questions every such script would otherwise answer ad hoc:
+The convention for any script here that fetches over the network and can reuse
+the response: where its cache lives, and how a caller forces it to run offline
+against that cache. Interface rules (flags, help text, errors) come from
+`cli-tools.md`; the bash idioms from `shell.md`.
 
-1. Where does the cache live, and how does a caller move it?
-1. How does a caller force the script to run **offline**, against that cache?
+## The Goal
 
-Interface rules (flag and command naming, help text, errors) come from
-`cli-tools.md`; the bash idioms come from `shell.md`. This file adds only what
-is specific to caching and offline operation.
+**A caller with no network gets an answer it can trust, or a clear reason it has
+none.**
+
+Three principles follow, and every rule below is one of them applied:
+
+1. **Trust needs provenance.** Stale data is useful; undated stale data is not,
+   because the caller cannot tell March's answer from today's.
+1. **A gap must look like a gap.** Inventing an answer and quietly returning
+   less than was asked for are the same failure — both read as success.
+1. **The fix travels with the failure.** Whoever hits a cold cache is by
+   definition in the environment that cannot fix it, so the error has to name
+   the command that can.
 
 ## Where the Cache Lives
 
@@ -17,67 +26,50 @@ is specific to caching and offline operation.
 ${<TOOL>_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/<tool>}
 ```
 
-- `<TOOL>_CACHE_DIR` names **the tool's own cache directory**, not the base
-  directory it sits in. `JETPACK_CACHE_DIR=/tmp/jp` puts the cache in `/tmp/jp`,
-  not `/tmp/jp/jetpack`. (`XDG_CACHE_HOME`, by contrast, is the base — that is
-  what the XDG spec says it is.)
-- One cache root per tool. Subdivide *inside* it (`<cache>/http/`,
-  `<cache>/catalog/`) rather than adding a second top-level location. A tool
-  whose cache is spread over two roots cannot be warmed, inspected, pruned, or
-  restored by a CI cache step as one unit.
-- The directory is disposable by definition: deleting it must only cost time,
-  never correctness. Nothing that is not re-derivable belongs in it.
-- Never cache credentialed or user-specific responses in it. The cache is
-  assumed to be safe to share between CI jobs and to hand to a sandboxed agent.
+- `<TOOL>_CACHE_DIR` names the tool's own directory, not the base it sits in:
+  `JETPACK_CACHE_DIR=/tmp/jp` caches in `/tmp/jp`. (`XDG_CACHE_HOME` is the base
+  — that is what the XDG spec makes it.)
+- One root per tool, subdivided inside (`<cache>/http/`, `<cache>/catalog/`). A
+  cache split across two roots cannot be warmed, inspected, pruned, or restored
+  by a CI cache step as one unit.
+- Disposable: deleting it costs time, never correctness.
+- Nothing credentialed or user-specific. The cache is assumed safe to share
+  between CI jobs and to hand to a sandboxed agent.
 
-## Forcing Offline Operation
+## The Offline Switch
 
 ```text
-<TOOL>_OFFLINE    per-tool switch (checked first; wins when set, including
-                  when set to 0 to opt one tool out)
-AGENT_OFFLINE     workspace-wide policy (used when <TOOL>_OFFLINE is unset)
+<TOOL>_OFFLINE   per-tool; wins whenever set, including =0 to opt one tool out
+AGENT_OFFLINE    workspace-wide policy; used when <TOOL>_OFFLINE is unset
 ```
 
 Truthy values are `1`, `true`, `yes`, `on` (case-insensitive); anything else,
-including empty, is false.
+empty included, is false.
 
-This mirrors the two-tier naming rule already documented in `workspace-config`:
-`AGENT_*` variables are **policy** a human (or a CI job, or a sandbox harness)
-sets once for an environment, while `<TOOL>_*` variables are **plumbing** for a
-single tool. It also matches the `<TOOL>_OFFLINE` precedent set by `uv`
-(`UV_OFFLINE`), which this repo's test suites already rely on, so an environment
-that sets `UV_OFFLINE=1` and `AGENT_OFFLINE=1` reads consistently.
+Two tiers because `workspace-config` already fixes that split: `AGENT_*` is
+policy an environment sets once, `<TOOL>_*` is plumbing for one tool. `uv`'s
+`UV_OFFLINE` sets the same precedent, and this repo's suites already run under
+it.
 
-Do not add an `--offline` flag as the primary interface. The point of the
-convention is that a caller who cannot enumerate every command that a build,
-test run, or agent session will invoke can still turn off the network for all of
-them at once. A flag is fine as an addition, never as the only switch.
+An `--offline` flag may be added, but never as the only switch: a caller who
+cannot enumerate every command a build, test run, or agent session will invoke
+still has to turn the network off for all of them at once.
 
-### What Offline Mode Must Do
+### Offline
 
-- **Make no network calls at all.** Not "try and fall back" — in a sandbox every
-  attempt costs a DNS or connect timeout, and the resulting error usually looks
-  like a missing resource rather than a missing network.
-- **Serve stale data rather than erroring.** Offline is a promise that the tool
-  will answer from what it has; a TTL that is meaningful online is not a reason
-  to fail offline.
-- **State the age of what it served, on stderr, every time.**
-  `(cached 3 days ago)` is the difference between an agent reporting a version
-  confidently and an agent reporting it with the caveat that makes it useful.
-  Age goes to stderr so stdout stays parseable. *Every time* includes the paths
-  a freshness TTL would have short-circuited: check offline mode **before** any
-  "cache is younger than the TTL, return early" branch, or the common
-  warm-then-freeze workflow — where the cache is usually fresh — is exactly the
-  case that answers silently.
-- **Fail loudly and actionably on a cache miss.** Name the resource that is
-  missing and the command that would have warmed it, and exit non-zero. Never
-  fall back to a guess — for an agent, an unsourced answer from training data is
-  indistinguishable from a real one.
-- **Gate on "could this need the network", not on the obvious remote case.** A
-  handler that is cached is cached because it was expensive, which usually means
-  remote; a plugin-provided or third-party one may do anything at all. If the
-  tool cannot prove a code path is local, route it through the offline check
-  rather than letting it fall through and dial out.
+- **Make no network calls.** Not "try, then fall back" — in a sandbox each
+  attempt buys a connect timeout and an error that reads like a missing resource
+  rather than a missing network.
+- **Serve stale rather than fail.** A TTL is a freshness preference online, not
+  a reason to refuse offline.
+- **Date every answer, on stderr** (`(cached 3 days ago)`), so stdout stays
+  parseable. Check offline mode *before* any "younger than the TTL, return
+  early" branch: under warm-then-freeze the cache is nearly always fresh, so
+  testing it second skips the signal in exactly the common case.
+- **On a miss, name the resource and the fix, and exit non-zero.**
+- **Gate every path you cannot prove is local.** A path is cached because it was
+  expensive, which usually means remote, and a plugin or third-party handler may
+  do anything at all. Route it through the check rather than let it dial out.
 
 ```text
 jetpack version: offline (AGENT_OFFLINE=1) and no cached copy of
@@ -86,75 +78,77 @@ jetpack version: warm the cache from a network-enabled environment first:
   jetpack warm cache androidx.wear.tiles:tiles
 ```
 
-#### Optional Resources
+#### Incomplete Answers
 
-Some fetches are best-effort online: their absence is normal and the command
-still produces a correct result. Two rules keep them from becoming a hole in the
-guarantee above:
+Answering one question often takes several fetches, and online a tool may let
+some of them fail without complaint: it carries on and the result is still
+right. Offline, that same shrug turns a cache miss into a wrong answer wearing a
+right answer's clothes.
 
-- A resource whose absence *changes the answer* is not optional, whatever the
-  online path does with it. `jetpack source` fetches a POM only to detect Kotlin
-  Multiplatform targets, and tolerates a missing one online — but offline, a
-  missing POM means the answer silently omits every platform target's sources,
-  so it is fatal there.
-- Where the miss really is tolerable — the resource may legitimately not exist,
-  so a warmed cache can be correctly missing it and a hard error would be
-  unfixable — warn on stderr naming what is absent and how to warm it, and carry
-  on. What is never acceptable is passing over it in silence: the caller cannot
-  see the gap in a result that looks complete.
+So for each fetch the online path lets slide, ask: **if this one is missing, is
+the result still complete?**
 
-### What the Online Path Must Do
+- **No — then it is not optional offline, whatever the online path does.**
+  `jetpack source` fetches a POM only to learn whether a library has Kotlin
+  Multiplatform targets. Online, missing it costs nothing. Offline it means
+  nobody can tell whether platform sources belonged in the output, so the
+  extracted source omits them and says nothing. Fatal.
+- **Yes, and it may genuinely not exist — then warn, don't fail.** Some KMP
+  targets never publish a sources JAR, so a correctly warmed cache can be
+  missing one and a hard error would be unfixable. Name what is absent and how
+  to warm it, then carry on.
 
-- **Write through on every successful fetch.** Normal online use is what makes a
-  later offline run possible; a cache that only fills when explicitly warmed
-  will be empty exactly when it is needed.
-- **Do not start serving stale answers online.** Adding a cache must not change
-  what an online run returns. Reserve read-side TTLs for resources that are
-  expensive and slow-moving (a whole-index download), document the TTL in the
-  help text, and leave everything else fetching fresh.
-- **On a network failure, name the cache instead of using it.** A run that was
-  not told to go offline should not quietly answer from a week-old copy. Report
-  the failure, and if a cached copy exists, say so and name the switch:
-  `a cached copy from 3 days ago exists; re-run with AGENT_OFFLINE=1 to use it`.
-  That keeps "report a failure, don't guess" intact while still giving an agent
-  a next step it can take without human help.
-- **Never let cache maintenance fail the run.** In a read-only sandbox the cache
-  directory may not be writable. Failing to store a response is not an error;
-  skip it and continue.
+What is never allowed is dropping it in silence: a result that looks complete
+and isn't breaks *a gap must look like a gap* as surely as an invented answer
+does.
+
+### Online
+
+- **Write through on every success.** Ordinary online use is what makes a later
+  offline run possible; a cache that fills only when explicitly warmed is empty
+  exactly when it is needed.
+- **Don't start answering stale.** Adding a cache must not change what an online
+  run returns. Reserve read-side TTLs for the expensive and slow-moving (a
+  whole-index download) and document them in the help text.
+- **On a network failure, name the cache instead of using it:**
+  `a copy cached 3 days ago is on disk; re-run with AGENT_OFFLINE=1 to use it`.
+  A run that was not told to go offline should not answer from a week-old file
+  behind the caller's back — but it can still hand over the next step.
+- **Never let cache maintenance fail the run.** A read-only sandbox may make the
+  directory unwritable; skip the write and carry on.
 
 ## Cache Layout
 
-When the cached resources are URLs with path-shaped identity, mirror the URL
-under the cache root instead of hashing it:
+Where cached resources are URLs with path-shaped identity, mirror the URL under
+the cache root instead of hashing it:
 
 ```text
 <cache>/http/dl.google.com/android/maven2/androidx/wear/tiles/tiles/maven-metadata.xml
 ```
 
-A hash is opaque: it cannot be listed for review, seeded by a test fixture,
-pruned selectively, or diffed between CI runs. A mirrored path can. Reject or
-sanitize path components that would escape the cache root (`..`, empty segments)
-and fall back to not caching if the URL cannot be mapped safely.
+A hash cannot be listed for review, seeded by a test fixture, pruned
+selectively, or diffed between CI runs; a mirrored path can. Reject components
+that would escape the cache root (`..`, empty segments), and simply don't cache
+a URL that cannot be mapped safely.
 
-## Warming the Cache
+## Warming
 
-Every tool with an offline mode needs an answer to "how does a cold environment
-with no network get a warm cache?" — a fresh CI runner and a from-scratch
-sandboxed agent both start with nothing.
+Every offline mode needs an answer to "how does a cold environment with no
+network get a warm cache?" — a fresh CI runner and a from-scratch agent both
+start with nothing.
 
 - Provide a **`warm cache` subcommand** (verb-noun, per `cli-tools.md`) that
   populates the cache for named targets in one network-enabled step, so warming
   is declarative rather than "remember to run the six commands the job will
   later need".
-- Because the online path writes through, `warm cache` is a convenience, not the
+- Because the online path writes through, it is a convenience rather than the
   only route: running the real commands once with network is equivalent.
-- Cold **and** offline **and** unwarmed is an unsupported state, and must fail
-  with the actionable error above rather than being papered over.
+- Cold **and** offline **and** unwarmed is unsupported, and fails with the error
+  above rather than being papered over.
 
-## Documenting It
+## Help Text
 
-The tool's help text lists both variables under `Environment`, with the cache
-default spelled out:
+Both variables belong under `Environment`, with the cache default spelled out:
 
 ```text
 Environment:
@@ -165,22 +159,19 @@ Environment:
                       (default: ${XDG_CACHE_HOME:-$HOME/.cache}/jetpack)
 ```
 
-If the tool has a `doctor` command, it reports the cache location, the age of
-what is in it, and whether offline mode is active — that is the pre-flight check
-a CI job or an agent runs before trusting an offline answer.
+A `doctor` command reports the cache location, the age of what is in it, and
+whether offline mode is active — the pre-flight check a CI job or an agent runs
+before trusting an offline answer.
 
-## Two Environments This Is For
+## Where This Pays Off
 
 ### CI
 
 CI usually *has* network, which is why the constraint is easy to miss. The
-constraints are different ones: shared egress that is rate-limited or
-occasionally blocked, third-party endpoints that go down independently of your
-change, and a hard requirement that two runs of the same commit behave the same.
-A network call in the middle of a job is a flake source and a reproducibility
-hole even when it succeeds.
-
-The shape that solves all three:
+problems are elsewhere: shared egress that gets rate-limited or blocked,
+third-party endpoints that fail independently of your change, and two runs of
+one commit that have to behave the same. A mid-job network call is a flake and a
+reproducibility hole even when it succeeds.
 
 ```yaml
 - name: Restore tool cache
@@ -199,29 +190,29 @@ The shape that solves all three:
 ```
 
 One step owns the network, the cache restore makes it a no-op on most runs, and
-everything after it is pinned to data that was fetched once and can be
-inspected. `AGENT_OFFLINE` is set on the job rather than per-command precisely
-because the job does not know which tools `make build` will reach for.
+everything after is pinned to data fetched once and open to inspection.
+`AGENT_OFFLINE` goes on the job rather than each command precisely because the
+job cannot know what `make build` will reach for.
 
 ### Sandboxed Agents
 
 Agent sandboxes increasingly deny network access outright — Codex's `read-only`
-sandbox and `workspace-write` without
-`sandbox_workspace_write.network_access=true` both do — and the denial is a
-safety feature, not a misconfiguration to work around. Two consequences:
+sandbox, and `workspace-write` without
+`sandbox_workspace_write.network_access=true`, both do — and that denial is a
+safety feature, not a misconfiguration to route around.
 
-- **Set `AGENT_OFFLINE=1` in the sandbox environment.** Then the tools skip
-  calls they cannot make, instead of spending the sandbox's time on connect
-  timeouts and reporting failures that read like "this library does not exist".
-- **Behave sanely when it is *not* set**, because often it will not be. The
+- **Set `AGENT_OFFLINE=1` in the sandbox environment**, so tools skip calls they
+  cannot make instead of spending the session's time on connect timeouts and
+  reporting failures that read like "this library does not exist".
+- **Behave sanely when it is not set**, because often it will not be: the
   network is simply gone and the tool finds out by failing. Distinguish "the
-  server said no" from "no server was reached" (an HTTP status vs. no response
-  at all), report which one happened, and point at offline mode when a cached
+  server said no" from "no server was reached" (an HTTP status versus no
+  response at all), say which happened, and point at offline mode when a cached
   copy exists. Never present a remembered answer as a fetched one.
-- A read-only sandbox may also make the cache unwritable — see "Never let cache
-  maintenance fail the run" above.
+- A read-only sandbox may also make the cache unwritable — see **never let cache
+  maintenance fail the run** above.
 
-The same reasoning applies to the repo's own test suites, which run under
-`UV_OFFLINE=1` with a pre-warmed `uv` cache for exactly these reasons; see
-`skills/workspace-config/tests/common.sh` for the "warm with real network, then
-freeze" pattern, and `tests/README.md` for how to run the suite offline.
+The repo's own suites run this way, under `UV_OFFLINE=1` against a pre-warmed
+`uv` cache. See `skills/workspace-config/tests/common.sh` for the "warm with
+real network, then freeze" pattern, and `tests/README.md` for running the suite
+offline.
