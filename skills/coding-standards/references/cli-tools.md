@@ -143,7 +143,7 @@ Tools that fetch over the network and cache the result follow one repo-wide
 convention for where the cache lives (`<TOOL>_CACHE_DIR`, else
 `${XDG_CACHE_HOME:-$HOME/.cache}/<tool>`) and how a caller forces them offline
 against it (`<TOOL>_OFFLINE`, else the workspace-wide `AGENT_OFFLINE`),
-including the `warm cache` subcommand, the required age reporting, and the
+including how a cold cache gets warmed, the required age reporting, and the
 cache-miss error. It is defined in `caching.md`, which also covers what CI jobs
 and sandboxed agents need from it.
 

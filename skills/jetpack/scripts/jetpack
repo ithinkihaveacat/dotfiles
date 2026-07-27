@@ -234,15 +234,15 @@ http_print_hint() {
   fi
 }
 
-# The remediation line appended to every offline cache miss: an agent or CI job
-# that hits one needs to know which network-enabled command fixes it.
+# The remediation line appended to every offline cache miss. Because the online
+# path writes through, the command that fixes a miss is the one that just hit
+# it, so quote that back verbatim rather than naming some other command the
+# caller would then have to translate into their own case.
+INVOCATION=("$@")
+
 warm_hint() {
-  local target="${1:-}"
-  if [[ -n "$target" ]]; then
-    echo "$SCRIPT_NAME: warm the cache from a network-enabled environment first: $SCRIPT_NAME warm cache $target" >&2
-  else
-    echo "$SCRIPT_NAME: warm the cache from a network-enabled environment first: $SCRIPT_NAME warm cache" >&2
-  fi
+  echo "$SCRIPT_NAME: run this where there is network to populate the cache:" >&2
+  echo "  $SCRIPT_NAME ${INVOCATION[*]:-}" >&2
 }
 
 # Verify external dependencies. Deferred until a real command runs so that
@@ -286,7 +286,7 @@ fetch_maven_metadata() {
     echo "$SCRIPT_NAME: $HTTP_ERROR; cannot determine whether '$group_id:$artifact_id' exists" >&2
     http_print_hint
     if is_offline; then
-      warm_hint "$group_id:$artifact_id"
+      warm_hint
     fi
     return 1
   fi
@@ -381,10 +381,6 @@ Commands:
   inspect <name> [version]
                       Convenience wrapper that resolves a class name to an artifact
                       and then downloads its source.
-  warm cache [artifact]...
-                      Download what later runs need, so they can work with no
-                      network. Options: --index-only, --with-source,
-                      --version <type>.
   doctor              Report dependencies, offline mode, and cache state.
                       Exits non-zero if anything needs attention.
 
@@ -394,8 +390,8 @@ Options:
 Environment Variables:
   JETPACK_OFFLINE     Set to 1 to answer only from the local cache and never
                       use the network. Cached answers are served whatever their
-                      age, with that age noted on stderr; a cache miss is an
-                      error naming the artifact to warm, never a guess.
+                      age, with that age noted on stderr; a cache miss names
+                      the command to re-run with network, never a guess.
   AGENT_OFFLINE       Workspace-wide offline policy, used when JETPACK_OFFLINE
                       is unset. Set this in a CI job or an agent sandbox that
                       has no egress.
@@ -432,8 +428,9 @@ Examples:
   # Download specific snapshot build by ID
   $SCRIPT_NAME source androidx.wear.tiles:tiles 14765146
 
-  # Warm the cache where there is network, then answer without any
-  $SCRIPT_NAME warm cache androidx.wear.tiles:tiles
+  # Run once where there is network (which caches what it fetched), then
+  # answer the same question with none
+  $SCRIPT_NAME version androidx.wear.tiles:tiles
   AGENT_OFFLINE=1 $SCRIPT_NAME version androidx.wear.tiles:tiles
 EOF
   exit "${1:-0}"
@@ -507,7 +504,7 @@ update_index() {
   # that was never going to be attempted.
   if is_offline; then
     echo "$SCRIPT_NAME: offline ($(offline_desc)) and the GMaven index has never been downloaded to $INDEX_FILE" >&2
-    warm_hint "--index-only"
+    warm_hint
     return 1
   fi
 
@@ -1291,7 +1288,7 @@ cmd_source() {
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       http_print_hint
       if is_offline; then
-        warm_hint "--with-source $artifact"
+        warm_hint
       fi
       exit 1
     fi
@@ -1356,7 +1353,7 @@ cmd_source() {
       echo "$SCRIPT_NAME source: failed to download $source_jar_url: $HTTP_ERROR" >&2
       http_print_hint
       if is_offline; then
-        warm_hint "--with-source $artifact"
+        warm_hint
       fi
       exit 1
     fi
@@ -1383,7 +1380,7 @@ cmd_source() {
       rm -f "$pom_file"
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       echo "$SCRIPT_NAME source: without it, whether $artifact has Kotlin Multiplatform sources cannot be determined, and the extracted sources may be incomplete" >&2
-      warm_hint "--with-source $artifact"
+      warm_hint
       exit 1
     fi
     rm -f "$pom_file"
@@ -1425,7 +1422,7 @@ cmd_source() {
             # JAR, so a warmed cache can be legitimately missing this one and a
             # hard error would be unfixable. Silence is what is not acceptable.
             echo "$SCRIPT_NAME source: warning: no cached sources for platform artifact ${platform_artifact}; the extracted sources are missing its classes" >&2
-            echo "$SCRIPT_NAME source: warm them where there is network: $SCRIPT_NAME warm cache --with-source $artifact" >&2
+            echo "$SCRIPT_NAME source: re-run this where there is network to cache them" >&2
           fi
         done
       fi
@@ -1703,7 +1700,7 @@ cmd_dependencies() {
     echo "$SCRIPT_NAME dependencies: failed to download $pom_url: $HTTP_ERROR" >&2
     http_print_hint
     if is_offline; then
-      warm_hint "$artifact"
+      warm_hint
     fi
     exit 1
   fi
@@ -1731,150 +1728,6 @@ cmd_dependencies() {
 }
 
 # =============================================================================
-# WARM SUBCOMMAND
-# =============================================================================
-
-usage_warm() {
-  cat <<EOF
-Usage: $SCRIPT_NAME warm cache [OPTIONS] [ARTIFACT]...
-
-Download everything later runs will need, so they can work with no network.
-
-Normal online runs already write what they fetch into the cache, so warming is
-only needed where the offline run happens somewhere the online one never did:
-a CI job whose build step has no egress, or an agent sandbox that denies it.
-Run this in a network-enabled setup step, then set AGENT_OFFLINE=1 for the
-work itself.
-
-Arguments:
-  ARTIFACT        Maven artifact (GROUP_ID:ARTIFACT_ID) to warm. Fetches its
-                  version metadata and the POM of the resolved version.
-
-Options:
-  --version TYPE  Version to warm for each artifact (default: STABLE)
-  --index-only    Only refresh the GMaven class index
-  --with-source   Also download each artifact's source JAR (large, but this is
-                  what 'source' and 'inspect' need offline)
-  --help, -h      Display this help message and exit
-
-Examples:
-  # Refresh the class index that 'search' and 'resolve' read
-  $SCRIPT_NAME warm cache --index-only
-
-  # Warm the index plus two artifacts, then answer from the cache alone
-  $SCRIPT_NAME warm cache androidx.wear.tiles:tiles androidx.core:core
-  AGENT_OFFLINE=1 $SCRIPT_NAME version androidx.wear.tiles:tiles
-
-  # Warm sources too, for offline 'inspect'
-  $SCRIPT_NAME warm cache --with-source androidx.wear.tiles:tiles
-
-The cache lives in \$JETPACK_CACHE_DIR (default:
-\${XDG_CACHE_HOME:-\$HOME/.cache}/jetpack) and is safe to copy between machines
-or restore from a CI cache: it holds nothing but fetched public artifacts.
-EOF
-  exit "${1:-0}"
-}
-
-cmd_warm_cache() {
-  local version_string="STABLE"
-  local index_only=0 with_source=0
-  local -a artifacts=()
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --help | -h)
-        usage_warm
-        ;;
-      --version)
-        if [[ -z "${2:-}" ]]; then
-          echo "$SCRIPT_NAME warm cache: option '--version' requires an argument" >&2
-          exit 1
-        fi
-        version_string=$(echo "$2" | tr '[:lower:]' '[:upper:]')
-        shift 2
-        ;;
-      --index-only)
-        index_only=1
-        shift
-        ;;
-      --with-source)
-        with_source=1
-        shift
-        ;;
-      -*)
-        echo "$SCRIPT_NAME warm cache: unknown option: $1" >&2
-        exit 1
-        ;;
-      *)
-        artifacts+=("$1")
-        shift
-        ;;
-    esac
-  done
-
-  if is_offline; then
-    echo "$SCRIPT_NAME warm cache: needs network access, but $(offline_desc) is set" >&2
-    echo "$SCRIPT_NAME warm cache: run this in a network-enabled setup step, not in the offline job itself" >&2
-    exit 1
-  fi
-
-  local failures=0
-
-  # The class index backs search/resolve and is the one download every offline
-  # run needs, artifacts or not.
-  if ! update_index; then
-    failures=$((failures + 1))
-  fi
-
-  if [[ $index_only -eq 1 ]]; then
-    if [[ ${#artifacts[@]} -gt 0 ]]; then
-      echo "$SCRIPT_NAME warm cache: --index-only given, ignoring ${#artifacts[@]} artifact(s)" >&2
-    fi
-    [[ $failures -eq 0 ]] || exit 1
-    return 0
-  fi
-
-  local artifact version tmp_dir
-  for artifact in "${artifacts[@]}"; do
-    validate_artifact_format "$artifact"
-
-    # Each helper runs in a subshell so that one artifact's failure (they exit
-    # rather than return) does not abandon the rest of the warm.
-    if ! version=$(cmd_version "$artifact" "$version_string"); then
-      echo "$SCRIPT_NAME warm cache: $artifact: could not resolve $version_string version" >&2
-      failures=$((failures + 1))
-      continue
-    fi
-
-    if (cmd_dependencies "$artifact" "$version" >/dev/null); then
-      echo "warmed $artifact $version (metadata, pom)" >&2
-    else
-      echo "$SCRIPT_NAME warm cache: $artifact $version: could not fetch pom" >&2
-      failures=$((failures + 1))
-      continue
-    fi
-
-    if [[ $with_source -eq 1 ]]; then
-      tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/jetpack-warm.XXXXXXXXXX")
-      if (cmd_source --output "$tmp_dir" "$artifact" "$version" >/dev/null); then
-        echo "warmed $artifact $version (sources)" >&2
-      else
-        echo "$SCRIPT_NAME warm cache: $artifact $version: could not fetch sources" >&2
-        failures=$((failures + 1))
-      fi
-      rm -rf "$tmp_dir"
-    fi
-  done
-
-  if [[ $failures -gt 0 ]]; then
-    echo "$SCRIPT_NAME warm cache: $failures target(s) failed; the cache is incomplete" >&2
-    exit 1
-  fi
-
-  echo "$SCRIPT_NAME warm cache: cache ready at $CACHE_DIR" >&2
-}
-
-# =============================================================================
 # DOCTOR SUBCOMMAND
 # =============================================================================
 
@@ -1893,7 +1746,7 @@ Options:
 
 Examples:
   $SCRIPT_NAME doctor
-  AGENT_OFFLINE=1 $SCRIPT_NAME doctor || $SCRIPT_NAME warm cache
+  AGENT_OFFLINE=1 $SCRIPT_NAME doctor
 EOF
   exit "${1:-0}"
 }
@@ -1954,8 +1807,8 @@ cmd_doctor() {
     fi
   elif [[ $offline -eq 1 ]]; then
     doctor_report ERROR "Cache: $CACHE_DIR does not exist" \
-      "Nothing can be answered offline. Warm it where there is network:" \
-      "  $SCRIPT_NAME warm cache <artifact>..."
+      "Nothing can be answered offline. Run the commands this workspace needs" \
+      "once where there is network, which caches what they fetch."
   else
     doctor_report INFO "Cache: $CACHE_DIR does not exist yet (created on first fetch)"
   fi
@@ -1968,11 +1821,11 @@ cmd_doctor() {
       doctor_report OK "GMaven index: cached $index_age"
     else
       doctor_report WARN "GMaven index: cached $index_age (older than 24h)" \
-        "Refresh it with: $SCRIPT_NAME warm cache --index-only"
+        "Refresh it with: $SCRIPT_NAME search --force <query>"
     fi
   elif [[ $offline -eq 1 ]]; then
     doctor_report ERROR "GMaven index: missing, so search and resolve cannot answer" \
-      "Download it where there is network: $SCRIPT_NAME warm cache --index-only"
+      "Download it by running 'search' or 'resolve' once where there is network"
   else
     doctor_report INFO "GMaven index: not downloaded yet (fetched on first search or resolve)"
   fi
@@ -1986,8 +1839,8 @@ cmd_doctor() {
     doctor_report OK "Cached responses: $responses under $HTTP_CACHE_DIR"
   elif [[ $offline -eq 1 ]]; then
     doctor_report WARN "Cached responses: none, so only search and resolve can answer offline" \
-      "Warm the artifacts this workspace asks about, where there is network:" \
-      "  $SCRIPT_NAME warm cache <artifact>..."
+      "Ask about the artifacts this workspace needs once where there is" \
+      "network; every answer fetched is cached for a later offline run."
   else
     doctor_report INFO "Cached responses: none yet (recorded as commands run)"
   fi
@@ -2024,7 +1877,6 @@ case "$1" in
         source) usage_source ;;
         inspect) usage_inspect ;;
         dependencies) usage_dependencies ;;
-        warm) usage_warm ;;
         doctor) usage_doctor ;;
         *)
           echo "$SCRIPT_NAME: unknown command '$2'" >&2
@@ -2076,27 +1928,6 @@ case "$1" in
   inspect)
     shift
     cmd_inspect "$@"
-    ;;
-  warm)
-    shift
-    if [[ $# -eq 0 ]]; then
-      echo "$SCRIPT_NAME: warm requires a sub-command (cache)" >&2
-      echo "Run '$SCRIPT_NAME warm cache --help' for usage" >&2
-      exit 1
-    fi
-    if [[ "$1" == "--help" || "$1" == "-h" || "$1" == "help" ]]; then
-      usage_warm 0
-    fi
-    subcmd="$1"
-    shift
-    case "$subcmd" in
-      cache) cmd_warm_cache "$@" ;;
-      *)
-        echo "$SCRIPT_NAME: unknown warm command '$subcmd'" >&2
-        echo "Run '$SCRIPT_NAME warm cache --help' for usage" >&2
-        exit 1
-        ;;
-    esac
     ;;
   doctor)
     shift

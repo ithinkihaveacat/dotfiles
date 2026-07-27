@@ -98,9 +98,9 @@ what they fetch (`jetpack`, `skill`, `context`) honour a second switch:
   UV_OFFLINE=1 AGENT_OFFLINE=1 prove tests/test-* skills/*/tests/test-*
   ```
 - **Warming the cache**: same pattern as `uv` — run the tool once with real
-  network (e.g. `jetpack warm cache <artifact>`), then freeze. A cache miss
-  while offline is a clear error naming the warm command, never a silent stale
-  answer.
+  network, then freeze. These tools cache what they fetch, so the warm-up is
+  just the same command run online; a cache miss while offline is a clear error
+  quoting that command, never a silent stale answer.
 - Tests that need a *specific* cache state should seed their own fixture rather
   than depend on the host's, as `skills/jetpack/tests/test-jetpack-offline`
   does: it points `JETPACK_CACHE_DIR` at a temp directory, writes the cached

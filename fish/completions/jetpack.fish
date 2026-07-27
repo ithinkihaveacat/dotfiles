@@ -14,7 +14,6 @@ complete -c jetpack -n __fish_use_subcommand -a source -d 'Download and extract 
 complete -c jetpack -n __fish_use_subcommand -a inspect -d 'Resolve class name and download source'
 complete -c jetpack -n __fish_use_subcommand -a resolve-exceptions -d 'Find missing exceptions for resolve'
 complete -c jetpack -n __fish_use_subcommand -a search -d 'Search for artifacts by package or class name'
-complete -c jetpack -n __fish_use_subcommand -a warm -d 'Populate the cache for offline use'
 complete -c jetpack -n __fish_use_subcommand -a doctor -d 'Report dependencies, offline mode, and cache state'
 
 # version subcommand
@@ -52,15 +51,6 @@ complete -c jetpack -n '__fish_seen_subcommand_from list; and __fish_seen_subcom
 # search subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from search' -s h -l help -d 'Display help'
 complete -c jetpack -n '__fish_seen_subcommand_from search' -l force -d 'Force cache rebuild'
-
-# warm subcommands
-complete -c jetpack -n '__fish_seen_subcommand_from warm; and not __fish_seen_subcommand_from cache' -a cache -d 'Download what later offline runs need'
-
-# warm cache
-complete -c jetpack -n '__fish_seen_subcommand_from warm; and __fish_seen_subcommand_from cache' -s h -l help -d 'Display help'
-complete -c jetpack -n '__fish_seen_subcommand_from warm; and __fish_seen_subcommand_from cache' -l index-only -d 'Only refresh the GMaven class index'
-complete -c jetpack -n '__fish_seen_subcommand_from warm; and __fish_seen_subcommand_from cache' -l with-source -d 'Also download source JARs'
-complete -c jetpack -n '__fish_seen_subcommand_from warm; and __fish_seen_subcommand_from cache' -l version -r -a 'ALPHA BETA RC STABLE LATEST SNAPSHOT' -d 'Version to warm'
 
 # doctor subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from doctor' -s h -l help -d 'Display help'

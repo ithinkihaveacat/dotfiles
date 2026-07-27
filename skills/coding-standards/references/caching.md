@@ -66,7 +66,8 @@ still has to turn the network off for all of them at once.
   parseable. Check offline mode *before* any "younger than the TTL, return
   early" branch: under warm-then-freeze the cache is nearly always fresh, so
   testing it second skips the signal in exactly the common case.
-- **On a miss, name the resource and the fix, and exit non-zero.**
+- **On a miss, name the resource and the fix, and exit non-zero.** The fix is
+  normally this same command run where there is network — see *Warming*.
 - **Gate every path you cannot prove is local.** A path is cached because it was
   expensive, which usually means remote, and a plugin or third-party handler may
   do anything at all. Route it through the check rather than let it dial out.
@@ -74,8 +75,8 @@ still has to turn the network off for all of them at once.
 ```text
 jetpack version: offline (AGENT_OFFLINE=1) and no cached copy of
   https://dl.google.com/android/maven2/androidx/wear/tiles/tiles/maven-metadata.xml
-jetpack version: warm the cache from a network-enabled environment first:
-  jetpack warm cache androidx.wear.tiles:tiles
+jetpack version: run this where there is network to populate the cache:
+  jetpack version androidx.wear.tiles:tiles ALPHA
 ```
 
 #### Incomplete Answers
@@ -96,7 +97,7 @@ the result still complete?**
 - **Yes, and it may genuinely not exist — then warn, don't fail.** Some KMP
   targets never publish a sources JAR, so a correctly warmed cache can be
   missing one and a hard error would be unfixable. Name what is absent and how
-  to warm it, then carry on.
+  to cache it, then carry on.
 
 What is never allowed is dropping it in silence: a result that looks complete
 and isn't breaks *a gap must look like a gap* as surely as an invented answer
@@ -137,14 +138,20 @@ Every offline mode needs an answer to "how does a cold environment with no
 network get a warm cache?" — a fresh CI runner and a from-scratch agent both
 start with nothing.
 
-- Provide a **`warm cache` subcommand** (verb-noun, per `cli-tools.md`) that
-  populates the cache for named targets in one network-enabled step, so warming
-  is declarative rather than "remember to run the six commands the job will
-  later need".
-- Because the online path writes through, it is a convenience rather than the
-  only route: running the real commands once with network is equivalent.
-- Cold **and** offline **and** unwarmed is unsupported, and fails with the error
-  above rather than being papered over.
+Write-through is that answer. **Running the command once with network is the
+warm-up**, which is why the miss above quotes the failing invocation back: the
+command that fixes a miss is the one that hit it.
+
+Resist adding a `warm`/`prefetch` subcommand on top of that. It cannot be more
+reliable than re-running the real command, only less: it has to *guess* what a
+later run will ask for — which version, with sources or without — and every
+guess it gets wrong is a miss the caller still hits offline. It also duplicates
+the fetching logic it is warming. Reach for one only when a caller genuinely
+cannot know the commands in advance but does know the inputs (a dependency
+manifest), and then say plainly in its help that it approximates.
+
+Cold **and** offline **and** unwarmed stays unsupported, and fails with the
+error above rather than being papered over.
 
 ## Help Text
 
@@ -180,8 +187,8 @@ reproducibility hole even when it succeeds.
     path: ~/.cache/jetpack
     key: jetpack-${{ hashFiles('deps.txt') }}
 
-- name: Warm cache            # the only step allowed to touch the network
-  run: jetpack warm cache $(cat deps.txt)
+- name: Prime the cache       # the only step allowed to touch the network
+  run: for a in $(cat deps.txt); do jetpack list dependencies "$a"; done
 
 - name: Build                 # deterministic; a network blip cannot reach it
   run: make build

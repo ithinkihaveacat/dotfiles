@@ -86,31 +86,35 @@ and the network fails, the behaviour is unchanged (still an error) except that
 the message now names the cached copy and the switch that would use it, which is
 the one thing an agent that just lost its network can act on alone.
 
-The cold-environment question the original sketch left open is answered by (a):
-`jetpack warm cache [ARTIFACT]...` fetches the index plus each artifact's
-metadata and POM (`--index-only`, `--with-source`, `--version TYPE`), and
-refuses to run while offline, since it is the step that needs the network. (b),
-a snapshot checked into the repo, was rejected: the GMaven class index is ~10MB
-compressed and changes daily, so a checked-in copy would be both large and
-misleading. `jetpack doctor` is the other half of the CI/sandbox story —
-read-only, reports dependencies, offline mode, cache location and index age, and
-exits non-zero on any WARN/ERROR so a job can gate on it before trusting an
-offline answer. It reports missing dependencies rather than exiting 127 on the
-first one, and treats a missing index as INFO online (self-healing) but ERROR
-offline.
+The cold-environment question the original sketch left open is answered by none
+of (a), (b) or (c) as written: write-through already covers it. Running a
+command with network caches every resource that same command needs offline, so
+the warm-up *is* the command, and a miss quotes the failing invocation back
+(`run this where there is network to populate the cache: jetpack version androidx.wear.tiles:tiles ALPHA`)
+— a more precise remedy than any generic warm command, because it cannot be
+wrong about what was wanted. A `warm cache` subcommand was built first and then
+removed: it could only ever guess which version, and with or without sources, a
+later run would ask for, and each wrong guess is a miss the caller still hits.
+(b), a snapshot checked into the repo, was rejected outright: the GMaven class
+index is ~10MB compressed and changes daily. `jetpack doctor` is the other half
+of the CI/sandbox story — read-only, reports dependencies, offline mode, cache
+location and index age, and exits non-zero on any WARN/ERROR so a job can gate
+on it before trusting an offline answer. It reports missing dependencies rather
+than exiting 127 on the first one, and treats a missing index as INFO online
+(self-healing) but ERROR offline.
 
 Two guards exist because they destroy the only copy otherwise: `search --force`
 refuses while offline (it deletes the index before rebuilding), and cache writes
 are best-effort so an unwritable cache directory — a read-only sandbox — never
 fails the command the user actually asked for.
 
-`skills/jetpack/tests/test-jetpack-offline` covers all of this hermetically: 21
+`skills/jetpack/tests/test-jetpack-offline` covers all of this hermetically: 28
 cases against a hand-seeded fixture cache with every request aimed at
 `http://127.0.0.1:1/`, so a cached answer proves the cache was read and a "could
 not reach" proves it was not, with no dependence on the machine's network. Fixed
-along the way, found by `warm cache` exercising it: `list dependencies` routed
-every version through `cmd_version`, which only accepts symbolic types, so a
-pinned version (`list dependencies foo 1.6.1`) failed with "invalid version
+along the way, found while exercising a pinned version: `list dependencies`
+routed every version through `cmd_version`, which only accepts symbolic types,
+so a pinned version (`list dependencies foo 1.6.1`) failed with "invalid version
 type" and then built a POM URL out of an empty string.
 
 ## Normalize cache-directory and offline-mode conventions across skill scripts (2026-07-27) — done
@@ -134,8 +138,8 @@ them; a `--offline` flag alone cannot do that, so the variable is primary.
 
 Audit of the five scripts that cache something:
 
-- `jetpack` — `JETPACK_CACHE_DIR` + offline mode + `warm cache` + `doctor` (see
-  the item above).
+- `jetpack` — `JETPACK_CACHE_DIR` + offline mode + `doctor` (see the item
+  above).
 - `skill` — `SKILL_CACHE_DIR` meant the *base*
   (`$SKILL_CACHE_DIR/skill/remotes`); now it names the cache directory itself,
   via a new `get_cache_dir()` that both `get_cache_base()` and

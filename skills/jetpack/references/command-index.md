@@ -12,7 +12,6 @@
 - [search](#search)
 - [source](#source)
 - [inspect](#inspect)
-- [warm cache](#warm-cache)
 - [doctor](#doctor)
 - [resolve-exceptions](#resolve-exceptions)
 - [Exceptions Table](#exceptions-table)
@@ -56,10 +55,6 @@ Commands:
   inspect <name> [version]
                       Convenience wrapper that resolves a class name to an artifact
                       and then downloads its source.
-  warm cache [artifact]...
-                      Download what later runs need, so they can work with no
-                      network. Options: --index-only, --with-source,
-                      --version <type>.
   doctor              Report dependencies, offline mode, and cache state.
                       Exits non-zero if anything needs attention.
 
@@ -69,8 +64,8 @@ Options:
 Environment Variables:
   JETPACK_OFFLINE     Set to 1 to answer only from the local cache and never
                       use the network. Cached answers are served whatever their
-                      age, with that age noted on stderr; a cache miss is an
-                      error naming the artifact to warm, never a guess.
+                      age, with that age noted on stderr; a cache miss names
+                      the command to re-run with network, never a guess.
   AGENT_OFFLINE       Workspace-wide offline policy, used when JETPACK_OFFLINE
                       is unset. Set this in a CI job or an agent sandbox that
                       has no egress.
@@ -107,8 +102,9 @@ Examples:
   # Download specific snapshot build by ID
   jetpack source androidx.wear.tiles:tiles 14765146
 
-  # Warm the cache where there is network, then answer without any
-  jetpack warm cache androidx.wear.tiles:tiles
+  # Run once where there is network (which caches what it fetched), then
+  # answer the same question with none
+  jetpack version androidx.wear.tiles:tiles
   AGENT_OFFLINE=1 jetpack version androidx.wear.tiles:tiles
 ```
 
@@ -232,37 +228,33 @@ jar xf sources.jar
 
 **Raw Commands**: Combines logic from `resolve`, `search`, and `source`.
 
-## warm cache
-
-**Purpose**: Download what later offline runs need. **Synopsis**:
-`scripts/jetpack warm cache [OPTIONS] [ARTIFACT]...` **Arguments**:
-
-- `ARTIFACT`: Maven coordinate(s) to warm (version metadata + POM of the
-  resolved version). **Options**:
-- `--version TYPE`: Version to warm for each artifact (default: `STABLE`).
-- `--index-only`: Only refresh the GMaven class index.
-- `--with-source`: Also download source JARs (what `source`/`inspect` need
-  offline). **Examples**:
-- `scripts/jetpack warm cache --index-only`
-- `scripts/jetpack warm cache androidx.wear.tiles:tiles androidx.core:core`
-- `scripts/jetpack warm cache --with-source androidx.wear.tiles:tiles`
-
-**Notes**: Refuses to run when `JETPACK_OFFLINE`/`AGENT_OFFLINE` is set — it is
-the step that needs the network, not the one that avoids it. Online runs write
-what they fetch into the cache anyway, so this is a convenience for environments
-where the offline run happens somewhere the online one never did.
-
 ## doctor
 
 **Purpose**: Report whether this environment can answer, and from what.
 **Synopsis**: `scripts/jetpack doctor` **Examples**:
 
 - `scripts/jetpack doctor`
-- `AGENT_OFFLINE=1 scripts/jetpack doctor || scripts/jetpack warm cache`
+- `AGENT_OFFLINE=1 scripts/jetpack doctor`
 
 **Notes**: Read-only. Exits non-zero on any `WARN`/`ERROR`, so an offline CI job
 or agent session can gate on it. Reports missing dependencies rather than
 exiting `127` on the first one.
+
+## Offline Use
+
+There is no warm-cache command: every online run writes what it fetched into
+`${JETPACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/jetpack}/http/`, mirroring
+the URL. Preparing for an offline run therefore means running the same command
+once where there is network, and a cache miss quotes that command back:
+
+```bash
+scripts/jetpack inspect androidx.wear.tiles.TileService              # caches
+AGENT_OFFLINE=1 scripts/jetpack inspect androidx.wear.tiles.TileService
+```
+
+The GMaven class index behind `search`/`resolve` is refreshed by
+`scripts/jetpack search --force QUERY` (which refuses to run offline, since it
+deletes the index it cannot then rebuild).
 
 ## resolve-exceptions
 
