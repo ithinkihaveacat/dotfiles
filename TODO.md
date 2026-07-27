@@ -1,5 +1,66 @@
 # TODO
 
+## Continue evaluating jetpack with skill-eval-harness (2026-07-27)
+
+**Problem:** `skills/jetpack/evals/shared-benchmark.json` (12 cases: 6
+`library-lookup`, 6 `trigger`) exists but has barely been exercised. This
+session ran exactly one case (`pos-version-stable`) through
+`skill-benchmark prepare`/`run-codex`/`benchmark`, repeatedly, to shake out
+tooling problems rather than to actually evaluate the skill — and it still
+found two real, distinct issues on the way: `scripts/jetpack` required bash
+4.0 for one `mapfile` call (fixed, commit `050b3eb`), and `run-codex`
+hardcodes `--sandbox read-only`, which blocks `mktemp`/network entirely and
+made an already-correct script look broken (worked around per-invocation
+with `--codex-cmd "codex exec --json --sandbox workspace-write -c
+sandbox_workspace_write.network_access=true"`, not yet a permanent fix). Only
+after both were understood did `pos-version-stable` show a clean lift
+(`with_skill` 1.0 vs `without_skill` 0.5, `case_flags` empty). The other 5
+`library-lookup` cases and all 6 `trigger` cases (which need
+`skill-trigger-matrix`, not `benchmark`) haven't been run at all.
+
+**Goal:** Reach one of two explicit end states, not just "ran it a few more
+times": either (a) `jetpack` has been iterated on, using whatever the harness
+surfaces, until there's confidence the skill is solid across its case set —
+or (b) a written verdict that `skill-eval-harness` isn't worth continuing to
+invest in for this skill. This is a continuation of the smoke-testing already
+underway, not a restart; it depends on known jetpack bugs being fixed as
+they're found (as `050b3eb` already was), not on some separate fixed-up
+prerequisite state.
+
+**Criteria:**
+
+- All 6 `library-lookup` tune cases have been run (`with_skill`/`without_skill`,
+  Codex, workspace-write + network) and graded; each case's `case_flags` is
+  either clean or has a recorded, justified reason (e.g. base-saturated —
+  not a real regression).
+- The 6 `trigger` cases have been run through `skill-trigger-matrix`, or their
+  deferral is explicitly noted with why.
+- Either one or more jetpack fixes have landed as a direct result (each its
+  own commit, as with `050b3eb`), or this item (or a follow-up) records a
+  one-paragraph verdict on whether the harness earned its keep here — citing
+  what it did and didn't catch, not just a feeling.
+
+**Sketch:**
+
+- Pick up where this session left off:
+  `skill-benchmark prepare skills/jetpack/evals/shared-benchmark.json --split
+  tune --runs-per-variant 1 --out tasks.jsonl` emits only the 6 `pos-*` rows
+  (the `trig-*` cases are for `skill-trigger-matrix`, a separate tool, not
+  `prepare`/`benchmark`).
+- Keep using the `--codex-cmd` override above until sandbox permissions are
+  addressed some other way — `run-codex`'s own default makes a correct
+  script fail, which is easy to misdiagnose as a jetpack bug (it already was,
+  once, this session).
+- Once single-run signal looks stable per case, raise `--runs-per-variant` to
+  catch flakiness — the harness's pass@k/pass^k reliability plumbing exists
+  for exactly this and hasn't been exercised yet.
+- No case declares `files`, so no fixture directory work is needed alongside
+  this.
+- Related but not a hard blocker: "Make jetpack work offline with a
+  pre-warmed cache" below — once jetpack has a cache/offline mode, it may be
+  possible to eval it under the harness's safer default sandbox instead of
+  the workspace-write override, worth revisiting then.
+
 ## Make jetpack work offline with a pre-warmed cache (2026-07-27)
 
 **Problem:** `scripts/jetpack` hits the network on nearly every subcommand —
