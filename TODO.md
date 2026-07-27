@@ -1,5 +1,98 @@
 # TODO
 
+## Make jetpack work offline with a pre-warmed cache (2026-07-27)
+
+**Problem:** `scripts/jetpack` hits the network on nearly every subcommand —
+`version`, `list dependencies`, and `source`/`inspect` all shell out to `curl`
+against Maven metadata / `dl.google.com` with zero caching, and even
+`search`/`resolve`'s GMaven index cache (`~/.cache/jetpack/androidx-index.json`,
+24h TTL) has no way to force offline reuse: `is_index_fresh` only skips a
+rebuild attempt when the cache is younger than 24h, so a run with no network
+still pays for (and fails) a rebuild attempt before falling back to a stale
+cache. Surfaced via a `skill-eval-harness` smoke run: in Codex's default
+`read-only` sandbox (no writes, no network), `version` failed outright; even
+after relaxing to `--sandbox workspace-write -c
+sandbox_workspace_write.network_access=true`, the run only succeeded because
+that specific sandbox happened to allow live network egress — nothing here
+works with network genuinely unavailable (CI without egress, an agent
+sandboxed for safety).
+
+**Goal:** `jetpack` can answer version/resolve/dependency/source-lookup
+questions entirely from a local cache when told to run offline, with an
+explicit signal rather than silently guessing or hard-failing on the first
+missing network call.
+
+**Criteria:**
+
+- A single environment variable (e.g. `JETPACK_OFFLINE=1` — see the companion
+  item below on naming this consistently across skills) makes every subcommand
+  skip network calls entirely and serve from cache, using stale data rather
+  than erroring, but always noting the cache's age in its output so an
+  agent/user isn't left thinking the answer is current.
+- `version`, `list dependencies`, and `source`/`inspect` gain a cache layer
+  (they currently have none) — extend the existing `CACHE_DIR`/`INDEX_FILE`
+  convention rather than inventing a second cache location.
+- Cache-miss-while-offline is a clear, actionable error (per the existing
+  `3a410bf` "report a failure, don't guess" behavior), not a silent fallback to
+  training-data knowledge.
+- `tests/test-jetpack*` cover the offline path with a pre-warmed fixture cache,
+  mirroring `test-jetpack-search`'s existing `TEST_CACHE_DIR` mocking.
+
+**Sketch:**
+
+- Reuse `CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jetpack"`, already used by
+  `search`/`resolve`; extend it to `version`/`list dependencies`/`source`
+  rather than a second cache location.
+- Model the offline toggle and the "warm then freeze" workflow directly on
+  `skills/workspace-config/tests/common.sh`'s existing pre-warmed-cache
+  pattern: run once with real network to populate `CACHE_DIR`, then set the
+  offline env var for everything after.
+- Open question, not yet resolved: how does a *fresh* environment with no
+  prior local cache and no network (a clean CI runner, a from-scratch
+  sandboxed agent) get a warm cache in the first place? Candidates to weigh:
+  (a) a `jetpack cache warm` subcommand run once in a network-enabled setup
+  step before the offline job runs; (b) checking a periodically-refreshed
+  snapshot of the GMaven index (and/or common coordinates' metadata) into the
+  repo or a release artifact for CI to seed from; (c) documenting cold+offline
+  as unsupported rather than solving it. Needs a decision before
+  implementation, not just a mechanism.
+- Depends on deciding the naming/semantics question in the companion item
+  below before committing to `JETPACK_OFFLINE` specifically.
+
+## Normalize cache-directory and offline-mode conventions across skill scripts (2026-07-27)
+
+**Problem:** Cache-directory handling is already inconsistent across scripts
+that cache network responses: `context`, `oracle`, and `photo-query` (all in
+`agent-tools`) use a plain `${XDG_CACHE_HOME:-~/.cache}/<tool>` path with no
+per-tool override; `skill` (`workspace-config`) supports a dedicated
+`SKILL_CACHE_DIR` override ahead of `XDG_CACHE_HOME`; `jetpack` uses the plain
+form again, but only for its `search`/`resolve` GMaven index. None of these
+share a documented offline-mode convention; each would otherwise reinvent one
+ad hoc, which is exactly what the companion "Make jetpack work offline" item
+above was about to do in isolation.
+
+**Goal:** One documented convention, discoverable from `coding-standards`, that
+any network-calling script in this repo follows for (a) where its cache lives
+and (b) how a caller forces it to run offline against that cache.
+
+**Criteria:**
+
+- A written convention exists and is referenced from `cli-tools.md`/`shell.md`
+  (per this repo's existing pattern of centralizing cross-skill guidance in
+  `coding-standards`, not per-skill).
+- `jetpack`, `oracle`, `context`, `photo-query`, and `skill` are audited
+  against it; deviations are either fixed or have a recorded reason.
+- The offline-mode env var name and semantics are decided once — candidate:
+  mirror `uv`'s `--offline`/`UV_OFFLINE` (a per-tool `<TOOL>_OFFLINE=1`, or one
+  repo-wide var; this needs an explicit decision, not just a default) — and
+  documented alongside the "warm cache with real network, then freeze" pattern
+  already proven in `skills/workspace-config/tests/common.sh`.
+
+**Sketch:** Start from an audit (`rg` for `XDG_CACHE_HOME`, `CACHE_DIR`,
+`_CACHE_DIR` across `skills/`) to enumerate every script that already caches
+something, then decide the convention before jetpack's offline-mode work above
+implements a one-off.
+
 ## Enable more of ruff's default rule set (2026-07-26) — done
 
 Confirmed real access to ruff 0.16.0 (`uvx ruff@0.16.0`; PyPI's actual latest,
