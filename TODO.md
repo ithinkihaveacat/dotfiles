@@ -1,65 +1,91 @@
 # TODO
 
+## Evaluate error-trapped feature probing for fish completions in install.sh (2026-07-28)
+
+**Problem:** `install.sh` generates fish completions for tools like `hcloud`,
+`gog`, and `bat`/`batcat`. Recently, `bat`/`batcat` completion was updated to
+feature-probe `--completion fish` and trap errors
+(`if "$bat_cmd" --completion fish >"$tmp_comp" 2>/dev/null; ...`) so that older
+tool versions or unexpected CLI flag changes do not halt `install.sh` under
+`set -e`. Other tool completions in `install.sh` (e.g. `hcloud`, `gog`) still
+execute `x <cmd> completion fish >...` directly without trapping errors, which
+could cause `install.sh` to fail if a tool lacks completion support.
+
+**Goal:** Review all fish completion generation logic in `install.sh` to ensure
+consistency and guard against `install.sh` aborts on unsupported CLI completion
+flags.
+
+**Criteria:**
+
+- Review completion generation for `hcloud`, `gog`, and any other tools in
+  `install.sh`.
+- Ensure completion generation is safe and non-fatal across different tool
+  versions while maintaining `x` trace logging where appropriate.
+
+**Sketch:**
+
+- Audit `hcloud`, `gog`, and `bat` completion blocks in `install.sh`.
+- Determine whether a common helper or consistent error-trapped probing pattern
+  should be applied across all completion entries.
+
 ## Continue evaluating jetpack with skill-eval-harness (2026-07-27)
 
 **Problem:** `skills/jetpack/evals/shared-benchmark.json` (12 cases: 6
 `library-lookup`, 6 `trigger`) exists but has barely been exercised. This
 session ran exactly one case (`pos-version-stable`) through
 `skill-benchmark prepare`/`run-codex`/`benchmark`, repeatedly, to shake out
-tooling problems rather than to actually evaluate the skill — and it still
-found two real, distinct issues on the way: `scripts/jetpack` required bash
-4.0 for one `mapfile` call (fixed, commit `050b3eb`), and `run-codex`
-hardcodes `--sandbox read-only`, which blocks `mktemp`/network entirely and
-made an already-correct script look broken (worked around per-invocation
-with `--codex-cmd "codex exec --json --sandbox workspace-write -c
-sandbox_workspace_write.network_access=true"`, not yet a permanent fix). Only
-after both were understood did `pos-version-stable` show a clean lift
-(`with_skill` 1.0 vs `without_skill` 0.5, `case_flags` empty). The other 5
-`library-lookup` cases and all 6 `trigger` cases (which need
-`skill-trigger-matrix`, not `benchmark`) haven't been run at all.
+tooling problems rather than to actually evaluate the skill — and it still found
+two real, distinct issues on the way: `scripts/jetpack` required bash 4.0 for
+one `mapfile` call (fixed, commit `050b3eb`), and `run-codex` hardcodes
+`--sandbox read-only`, which blocks `mktemp`/network entirely and made an
+already-correct script look broken (worked around per-invocation with
+`--codex-cmd "codex exec --json --sandbox workspace-write -c sandbox_workspace_write.network_access=true"`,
+not yet a permanent fix). Only after both were understood did
+`pos-version-stable` show a clean lift (`with_skill` 1.0 vs `without_skill` 0.5,
+`case_flags` empty). The other 5 `library-lookup` cases and all 6 `trigger`
+cases (which need `skill-trigger-matrix`, not `benchmark`) haven't been run at
+all.
 
 **Goal:** Reach one of two explicit end states, not just "ran it a few more
 times": either (a) `jetpack` has been iterated on, using whatever the harness
-surfaces, until there's confidence the skill is solid across its case set —
-or (b) a written verdict that `skill-eval-harness` isn't worth continuing to
-invest in for this skill. This is a continuation of the smoke-testing already
-underway, not a restart; it depends on known jetpack bugs being fixed as
-they're found (as `050b3eb` already was), not on some separate fixed-up
-prerequisite state.
+surfaces, until there's confidence the skill is solid across its case set — or
+(b) a written verdict that `skill-eval-harness` isn't worth continuing to invest
+in for this skill. This is a continuation of the smoke-testing already underway,
+not a restart; it depends on known jetpack bugs being fixed as they're found (as
+`050b3eb` already was), not on some separate fixed-up prerequisite state.
 
 **Criteria:**
 
 - All 6 `library-lookup` tune cases have been run (`with_skill`/`without_skill`,
   Codex, workspace-write + network) and graded; each case's `case_flags` is
-  either clean or has a recorded, justified reason (e.g. base-saturated —
-  not a real regression).
+  either clean or has a recorded, justified reason (e.g. base-saturated — not a
+  real regression).
 - The 6 `trigger` cases have been run through `skill-trigger-matrix`, or their
   deferral is explicitly noted with why.
-- Either one or more jetpack fixes have landed as a direct result (each its
-  own commit, as with `050b3eb`), or this item (or a follow-up) records a
+- Either one or more jetpack fixes have landed as a direct result (each its own
+  commit, as with `050b3eb`), or this item (or a follow-up) records a
   one-paragraph verdict on whether the harness earned its keep here — citing
   what it did and didn't catch, not just a feeling.
 
 **Sketch:**
 
 - Pick up where this session left off:
-  `skill-benchmark prepare skills/jetpack/evals/shared-benchmark.json --split
-  tune --runs-per-variant 1 --out tasks.jsonl` emits only the 6 `pos-*` rows
-  (the `trig-*` cases are for `skill-trigger-matrix`, a separate tool, not
-  `prepare`/`benchmark`).
+  `skill-benchmark prepare skills/jetpack/evals/shared-benchmark.json --split tune --runs-per-variant 1 --out tasks.jsonl`
+  emits only the 6 `pos-*` rows (the `trig-*` cases are for
+  `skill-trigger-matrix`, a separate tool, not `prepare`/`benchmark`).
 - Keep using the `--codex-cmd` override above until sandbox permissions are
-  addressed some other way — `run-codex`'s own default makes a correct
-  script fail, which is easy to misdiagnose as a jetpack bug (it already was,
-  once, this session).
+  addressed some other way — `run-codex`'s own default makes a correct script
+  fail, which is easy to misdiagnose as a jetpack bug (it already was, once,
+  this session).
 - Once single-run signal looks stable per case, raise `--runs-per-variant` to
-  catch flakiness — the harness's pass@k/pass^k reliability plumbing exists
-  for exactly this and hasn't been exercised yet.
+  catch flakiness — the harness's pass@k/pass^k reliability plumbing exists for
+  exactly this and hasn't been exercised yet.
 - No case declares `files`, so no fixture directory work is needed alongside
   this.
-- Related but not a hard blocker: "Make jetpack work offline with a
-  pre-warmed cache" below — once jetpack has a cache/offline mode, it may be
-  possible to eval it under the harness's safer default sandbox instead of
-  the workspace-write override, worth revisiting then.
+- Related but not a hard blocker: "Make jetpack work offline with a pre-warmed
+  cache" below — once jetpack has a cache/offline mode, it may be possible to
+  eval it under the harness's safer default sandbox instead of the
+  workspace-write override, worth revisiting then.
 
 ## Make jetpack work offline with a pre-warmed cache (2026-07-27)
 
@@ -72,24 +98,24 @@ rebuild attempt when the cache is younger than 24h, so a run with no network
 still pays for (and fails) a rebuild attempt before falling back to a stale
 cache. Surfaced via a `skill-eval-harness` smoke run: in Codex's default
 `read-only` sandbox (no writes, no network), `version` failed outright; even
-after relaxing to `--sandbox workspace-write -c
-sandbox_workspace_write.network_access=true`, the run only succeeded because
-that specific sandbox happened to allow live network egress — nothing here
-works with network genuinely unavailable (CI without egress, an agent
-sandboxed for safety).
+after relaxing to
+`--sandbox workspace-write -c sandbox_workspace_write.network_access=true`, the
+run only succeeded because that specific sandbox happened to allow live network
+egress — nothing here works with network genuinely unavailable (CI without
+egress, an agent sandboxed for safety).
 
 **Goal:** `jetpack` can answer version/resolve/dependency/source-lookup
-questions entirely from a local cache when told to run offline, with an
-explicit signal rather than silently guessing or hard-failing on the first
-missing network call.
+questions entirely from a local cache when told to run offline, with an explicit
+signal rather than silently guessing or hard-failing on the first missing
+network call.
 
 **Criteria:**
 
 - A single environment variable (e.g. `JETPACK_OFFLINE=1` — see the companion
   item below on naming this consistently across skills) makes every subcommand
-  skip network calls entirely and serve from cache, using stale data rather
-  than erroring, but always noting the cache's age in its output so an
-  agent/user isn't left thinking the answer is current.
+  skip network calls entirely and serve from cache, using stale data rather than
+  erroring, but always noting the cache's age in its output so an agent/user
+  isn't left thinking the answer is current.
 - `version`, `list dependencies`, and `source`/`inspect` gain a cache layer
   (they currently have none) — extend the existing `CACHE_DIR`/`INDEX_FILE`
   convention rather than inventing a second cache location.
@@ -102,23 +128,23 @@ missing network call.
 **Sketch:**
 
 - Reuse `CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jetpack"`, already used by
-  `search`/`resolve`; extend it to `version`/`list dependencies`/`source`
-  rather than a second cache location.
+  `search`/`resolve`; extend it to `version`/`list dependencies`/`source` rather
+  than a second cache location.
 - Model the offline toggle and the "warm then freeze" workflow directly on
-  `skills/workspace-config/tests/common.sh`'s existing pre-warmed-cache
-  pattern: run once with real network to populate `CACHE_DIR`, then set the
-  offline env var for everything after.
-- Open question, not yet resolved: how does a *fresh* environment with no
-  prior local cache and no network (a clean CI runner, a from-scratch
-  sandboxed agent) get a warm cache in the first place? Candidates to weigh:
-  (a) a `jetpack cache warm` subcommand run once in a network-enabled setup
-  step before the offline job runs; (b) checking a periodically-refreshed
-  snapshot of the GMaven index (and/or common coordinates' metadata) into the
-  repo or a release artifact for CI to seed from; (c) documenting cold+offline
-  as unsupported rather than solving it. Needs a decision before
-  implementation, not just a mechanism.
-- Depends on deciding the naming/semantics question in the companion item
-  below before committing to `JETPACK_OFFLINE` specifically.
+  `skills/workspace-config/tests/common.sh`'s existing pre-warmed-cache pattern:
+  run once with real network to populate `CACHE_DIR`, then set the offline env
+  var for everything after.
+- Open question, not yet resolved: how does a *fresh* environment with no prior
+  local cache and no network (a clean CI runner, a from-scratch sandboxed agent)
+  get a warm cache in the first place? Candidates to weigh: (a) a
+  `jetpack cache warm` subcommand run once in a network-enabled setup step
+  before the offline job runs; (b) checking a periodically-refreshed snapshot of
+  the GMaven index (and/or common coordinates' metadata) into the repo or a
+  release artifact for CI to seed from; (c) documenting cold+offline as
+  unsupported rather than solving it. Needs a decision before implementation,
+  not just a mechanism.
+- Depends on deciding the naming/semantics question in the companion item below
+  before committing to `JETPACK_OFFLINE` specifically.
 
 ## Normalize cache-directory and offline-mode conventions across skill scripts (2026-07-27)
 
@@ -128,9 +154,9 @@ that cache network responses: `context`, `oracle`, and `photo-query` (all in
 per-tool override; `skill` (`workspace-config`) supports a dedicated
 `SKILL_CACHE_DIR` override ahead of `XDG_CACHE_HOME`; `jetpack` uses the plain
 form again, but only for its `search`/`resolve` GMaven index. None of these
-share a documented offline-mode convention; each would otherwise reinvent one
-ad hoc, which is exactly what the companion "Make jetpack work offline" item
-above was about to do in isolation.
+share a documented offline-mode convention; each would otherwise reinvent one ad
+hoc, which is exactly what the companion "Make jetpack work offline" item above
+was about to do in isolation.
 
 **Goal:** One documented convention, discoverable from `coding-standards`, that
 any network-calling script in this repo follows for (a) where its cache lives
@@ -141,8 +167,8 @@ and (b) how a caller forces it to run offline against that cache.
 - A written convention exists and is referenced from `cli-tools.md`/`shell.md`
   (per this repo's existing pattern of centralizing cross-skill guidance in
   `coding-standards`, not per-skill).
-- `jetpack`, `oracle`, `context`, `photo-query`, and `skill` are audited
-  against it; deviations are either fixed or have a recorded reason.
+- `jetpack`, `oracle`, `context`, `photo-query`, and `skill` are audited against
+  it; deviations are either fixed or have a recorded reason.
 - The offline-mode env var name and semantics are decided once — candidate:
   mirror `uv`'s `--offline`/`UV_OFFLINE` (a per-tool `<TOOL>_OFFLINE=1`, or one
   repo-wide var; this needs an explicit decision, not just a default) — and
