@@ -10,7 +10,8 @@ description: >
   jetpack source, library version, snapshot, alpha, beta.
 compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
-  access to dl.google.com, androidx.dev, and cs.android.com.
+  access to dl.google.com, androidx.dev, and cs.android.com, or a pre-warmed
+  cache plus JETPACK_OFFLINE/AGENT_OFFLINE where there is no egress.
 ---
 
 # Jetpack Library Utilities
@@ -40,6 +41,14 @@ often enough that a memorized answer can be confidently wrong. Report the
 failure (missing dependency, network error, unresolved package) to the user,
 including the script's own error message, and consult
 [references/troubleshooting.md](references/troubleshooting.md) before retrying.
+
+**If you have no network, say that too.** In a sandbox that denies egress, run
+`scripts/jetpack doctor` first: it reports whether the cache can answer at all.
+Then set `AGENT_OFFLINE=1` so the script serves cached answers instead of
+spending timeouts on calls it cannot make. Every cached answer arrives with its
+age on stderr (`(cached 3 days ago)`) — pass that age on rather than presenting
+a stale version as current. A cache miss is an error naming the artifact to
+warm; it is never a reason to answer from memory.
 
 ## Quick Start
 
@@ -101,6 +110,19 @@ fails.
 
 **Purpose**: List direct Maven dependencies for an artifact. **Usage**:
 `scripts/jetpack list dependencies ARTIFACT [VERSION]`
+
+### `warm cache`
+
+**Purpose**: Download what later runs need so they can work with no network.
+**Usage**: `scripts/jetpack warm cache [ARTIFACT]...` **Options**:
+`--index-only`, `--with-source`, `--version TYPE`. **Note**: Run it where there
+*is* network; it refuses to run in offline mode.
+
+### `doctor`
+
+**Purpose**: Report dependencies, offline mode, and cache state. **Usage**:
+`scripts/jetpack doctor` **Note**: Read-only; exits non-zero if anything needs
+attention.
 
 ### `resolve-exceptions`
 
@@ -180,10 +202,30 @@ scripts/jetpack resolve androidx.core.splashscreen.SplashScreen
 # Output: androidx.core:core-splashscreen
 ```
 
+### Working Without Network (CI, Sandboxed Agents)
+
+```bash
+# Where there is network: warm the cache once
+scripts/jetpack warm cache --with-source androidx.wear.tiles:tiles
+
+# Where there is not: answer from it, and check first if unsure
+AGENT_OFFLINE=1 scripts/jetpack doctor
+AGENT_OFFLINE=1 scripts/jetpack version androidx.wear.tiles:tiles
+AGENT_OFFLINE=1 scripts/jetpack inspect androidx.wear.tiles.TileService
+```
+
+Normal online runs already write what they fetch into
+`${JETPACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/jetpack}`, so warming is
+only needed when the offline run happens somewhere the online one never did. See
+[caching and offline mode](../coding-standards/references/caching.md) for the
+repo-wide convention.
+
 ## Safety Notes
 
 - **Network Access**: Requires access to `dl.google.com`, `androidx.dev`, and
-  `cs.android.com`.
+  `cs.android.com` — or a pre-warmed cache and `AGENT_OFFLINE=1`.
+- **Cached answers are dated, not current**: offline answers carry their age on
+  stderr. Report that age; do not present a stale version as the latest.
 - **SNAPSHOTs**: Change frequently; use pinned versions or Build IDs for
   reproducibility.
 - **Kotlin Multiplatform**: `source` and `inspect` automatically download

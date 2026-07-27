@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+#
+# Tests for jetpack's offline mode (JETPACK_OFFLINE / AGENT_OFFLINE) and its
+# HTTP cache, per skills/coding-standards/references/caching.md.
+#
+# Hermetic and network-free by construction: every request is aimed at
+# http://127.0.0.1:1/, a privileged port with no listener, so the OS refuses
+# the connection immediately. A cached answer therefore proves the cache was
+# read, and a "could not reach" failure proves it was not — neither outcome
+# depends on the machine having (or lacking) internet access.
+
+set -u
+
+SCRIPT_DIR=$(dirname "$0")
+ROOT_DIR="$SCRIPT_DIR/.."
+BIN_JETPACK="$ROOT_DIR/scripts/jetpack"
+
+TEST_TMP=$(mktemp -d)
+export TMPDIR="$TEST_TMP"
+export JETPACK_CACHE_DIR="$TEST_TMP/cache"
+
+# The repo every case talks to, and where its cached responses live.
+REPO_URL="http://127.0.0.1:1/repo"
+ARTIFACT="androidx.wear.tiles:tiles"
+CACHED_DIR="$JETPACK_CACHE_DIR/http/127.0.0.1:1/repo/androidx/wear/tiles/tiles"
+
+TOTAL_TESTS=21
+TEST_NUM=0
+
+echo "1..$TOTAL_TESTS"
+
+cleanup() {
+  rm -rf "$TEST_TMP"
+}
+trap cleanup EXIT
+
+ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+not_ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  shift
+  local line
+  for line in "$@"; do
+    echo "# $line"
+  done
+}
+
+assert_equals() {
+  local description="$1" actual="$2" expected="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected: $expected" "Actual:   $actual"
+  fi
+}
+
+assert_status() {
+  local description="$1" status="$2" expected="$3"
+  if [[ "$status" -eq "$expected" ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected exit $expected, got $status"
+  fi
+}
+
+assert_contains() {
+  local description="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected to contain: $needle" "Got: $haystack"
+  fi
+}
+
+assert_not_contains() {
+  local description="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected NOT to contain: $needle" "Got: $haystack"
+  fi
+}
+
+# Run jetpack, capturing stdout in $STDOUT, stderr in $STDERR, status in $STATUS.
+run_jetpack() {
+  local err_file
+  err_file=$(mktemp)
+  STDOUT=$("$BIN_JETPACK" "$@" 2>"$err_file")
+  STATUS=$?
+  STDERR=$(cat "$err_file")
+  rm -f "$err_file"
+}
+
+# --- Fixtures -----------------------------------------------------------
+#
+# Seed the cache the way a network-enabled `jetpack warm cache` run would have
+# left it. The layout mirrors the URL (host + path) precisely so that seeding
+# by hand is possible at all; that is the property being pinned here.
+
+warm_metadata() {
+  mkdir -p "$CACHED_DIR"
+  cat >"$CACHED_DIR/maven-metadata.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>androidx.wear.tiles</groupId>
+  <artifactId>tiles</artifactId>
+  <versioning>
+    <latest>1.5.0-alpha01</latest>
+    <release>1.4.0</release>
+    <versions>
+      <version>1.3.0</version>
+      <version>1.4.0</version>
+      <version>1.5.0-alpha01</version>
+    </versions>
+  </versioning>
+</metadata>
+EOF
+}
+
+warm_pom() {
+  mkdir -p "$CACHED_DIR/1.4.0"
+  cat >"$CACHED_DIR/1.4.0/tiles-1.4.0.pom" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <groupId>androidx.wear.tiles</groupId>
+  <artifactId>tiles</artifactId>
+  <version>1.4.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>androidx.annotation</groupId>
+      <artifactId>annotation</artifactId>
+      <version>1.8.0</version>
+      <scope>compile</scope>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+}
+
+# A fresh, empty class index keeps the genuine-404 "did you mean" fallback from
+# reaching for the (large) GMaven index, exactly as the other jetpack tests do.
+mkdir -p "$JETPACK_CACHE_DIR"
+echo '{"Index": []}' >"$JETPACK_CACHE_DIR/androidx-index.json"
+
+# --- Cold cache, offline ------------------------------------------------
+
+AGENT_OFFLINE=1 run_jetpack version "$ARTIFACT" STABLE "$REPO_URL"
+assert_status "cold cache while offline exits non-zero" "$STATUS" 1
+assert_contains "cold-cache error names the missing URL" "$STDERR" \
+  "no cached copy of $REPO_URL/androidx/wear/tiles/tiles/maven-metadata.xml"
+assert_contains "cold-cache error names the variable in force" "$STDERR" "AGENT_OFFLINE=1"
+assert_contains "cold-cache error names the command that warms it" "$STDERR" \
+  "jetpack warm cache $ARTIFACT"
+assert_not_contains "a cold cache is never reported as a missing artifact" "$STDERR" "not found"
+
+# --- Warm cache, offline ------------------------------------------------
+
+warm_metadata
+
+AGENT_OFFLINE=1 run_jetpack version "$ARTIFACT" STABLE "$REPO_URL"
+assert_status "version succeeds offline from the cache" "$STATUS" 0
+assert_equals "version answers with the cached stable release" "$STDOUT" "1.4.0"
+assert_contains "the cache's age is reported on stderr" "$STDERR" "(cached just now)"
+assert_not_contains "the answer itself stays clean on stdout" "$STDOUT" "cached"
+
+AGENT_OFFLINE=1 run_jetpack list versions "$ARTIFACT" "$REPO_URL"
+assert_status "list versions succeeds offline" "$STATUS" 0
+assert_contains "list versions answers from the cached metadata" "$STDOUT" "1.5.0-alpha01"
+
+# Dependencies needs a second resource (the POM); the metadata being cached is
+# not enough, and the error must say which one is missing.
+AGENT_OFFLINE=1 run_jetpack list dependencies "$ARTIFACT" 1.4.0 "$REPO_URL"
+assert_status "a partially warmed cache fails rather than guessing" "$STATUS" 1
+assert_contains "the missing POM is named" "$STDERR" "tiles-1.4.0.pom"
+
+warm_pom
+
+AGENT_OFFLINE=1 run_jetpack list dependencies "$ARTIFACT" 1.4.0 "$REPO_URL"
+assert_status "list dependencies succeeds offline once the POM is cached" "$STATUS" 0
+assert_contains "dependencies come from the cached POM" "$STDOUT" \
+  "androidx.annotation:annotation:1.8.0 (compile)"
+
+# --- Precedence: per-tool variable wins over the workspace policy --------
+
+AGENT_OFFLINE=1 JETPACK_OFFLINE=0 run_jetpack version "$ARTIFACT" STABLE "$REPO_URL"
+assert_status "JETPACK_OFFLINE=0 opts back into the network" "$STATUS" 1
+assert_contains "opting out really does attempt the request" "$STDERR" "could not reach"
+assert_contains "the failure points at the cached copy it declined to use" "$STDERR" \
+  "re-run with JETPACK_OFFLINE=1 to use it"
+
+# --- Commands that need network refuse rather than half-run -------------
+
+AGENT_OFFLINE=1 run_jetpack warm cache "$ARTIFACT"
+assert_status "warm cache refuses to run offline" "$STATUS" 1
+
+AGENT_OFFLINE=1 run_jetpack search --force wear
+assert_status "search --force refuses to run offline" "$STATUS" 1
+if [[ -f "$JETPACK_CACHE_DIR/androidx-index.json" ]]; then
+  ok "search --force leaves the index it cannot rebuild in place"
+else
+  not_ok "search --force leaves the index it cannot rebuild in place" \
+    "The index was deleted with no way to download a replacement"
+fi

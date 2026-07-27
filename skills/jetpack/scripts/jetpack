@@ -22,6 +22,13 @@ GOOGLE_MAVEN_URL="https://dl.google.com/android/maven2"
 SNAPSHOT_REPO_URL="https://androidx.dev/snapshots/latest/artifacts/repository"
 SNAPSHOT_BUILD_URL_PREFIX="https://androidx.dev/snapshots/builds"
 
+# Cache layout and offline switch follow the repo-wide convention in
+# skills/coding-standards/references/caching.md.
+CACHE_DIR="${JETPACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/jetpack}"
+INDEX_FILE="$CACHE_DIR/androidx-index.json"
+HTTP_CACHE_DIR="$CACHE_DIR/http"
+MAX_AGE_SECONDS=$((24 * 3600)) # 24 hours
+
 # =============================================================================
 # SHARED HELPERS
 # =============================================================================
@@ -31,6 +38,211 @@ require() {
     echo >&2 "$(basename "$0"): $1 not found"
     exit 127
   }
+}
+
+# =============================================================================
+# OFFLINE MODE AND HTTP CACHE
+# =============================================================================
+#
+# Online runs always fetch fresh and write the response through to the cache;
+# the cache is only *read* when offline. Adding it therefore cannot change what
+# an online run answers, and normal use warms the cache for a later offline one.
+# See skills/coding-standards/references/caching.md.
+
+# Name of the variable that put us in offline mode, for error messages.
+offline_var() {
+  if [[ -n "${JETPACK_OFFLINE+x}" ]]; then
+    echo "JETPACK_OFFLINE"
+  else
+    echo "AGENT_OFFLINE"
+  fi
+}
+
+# "JETPACK_OFFLINE=1" / "AGENT_OFFLINE=yes" -- the exact setting in force, so a
+# caller who did not set it themselves can find where it came from.
+offline_desc() {
+  local var
+  var=$(offline_var)
+  echo "$var=${!var:-}"
+}
+
+is_offline() {
+  local value
+  if [[ -n "${JETPACK_OFFLINE+x}" ]]; then
+    value="$JETPACK_OFFLINE"
+  else
+    value="${AGENT_OFFLINE:-}"
+  fi
+
+  case "$(echo "$value" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+file_mtime() {
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    stat -f "%m" "$1"
+  else
+    stat -c "%Y" "$1"
+  fi
+}
+
+# Human-readable age of a file, e.g. "3 days ago". Used to qualify every
+# cache-served answer so a stale one is never mistaken for a current one.
+file_age_human() {
+  local mtime now age
+  mtime=$(file_mtime "$1")
+  now=$(date +%s)
+  age=$((now - mtime))
+
+  if [[ $age -lt 60 ]]; then
+    echo "just now"
+  elif [[ $age -lt 3600 ]]; then
+    ago $((age / 60)) minute
+  elif [[ $age -lt 86400 ]]; then
+    ago $((age / 3600)) hour
+  else
+    ago $((age / 86400)) day
+  fi
+}
+
+ago() {
+  if [[ "$1" -eq 1 ]]; then
+    echo "$1 $2 ago"
+  else
+    echo "$1 ${2}s ago"
+  fi
+}
+
+# Map a URL to its path under the cache, mirroring host and path rather than
+# hashing so the cache can be listed, seeded by a test fixture, and pruned by
+# hand. Returns non-zero (and no path) for URLs that cannot be mapped safely,
+# in which case the caller simply does not cache.
+cache_path_for_url() {
+  local url="$1" rest
+  rest="${url#*://}"
+  rest="${rest//\?/_}"
+  rest="${rest//#/_}"
+
+  case "/$rest/" in
+    */../* | *//*) return 1 ;;
+  esac
+  if [[ "$rest" != */* ]]; then
+    return 1
+  fi
+
+  echo "$HTTP_CACHE_DIR/$rest"
+}
+
+# Store a fetched body in the cache. Best-effort by design: the cache directory
+# is often unwritable in a read-only sandbox, and failing to record a response
+# is never a reason to fail the command the user actually asked for.
+cache_store() {
+  local url="$1" src="$2" dest tmp
+  dest=$(cache_path_for_url "$url") || return 0
+
+  if mkdir -p "$(dirname "$dest")" 2>/dev/null; then
+    tmp="$dest.tmp.$$"
+    if cp "$src" "$tmp" 2>/dev/null; then
+      mv "$tmp" "$dest" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
+  fi
+  return 0
+}
+
+# http_get URL OUTFILE
+#
+# Writes the response body to OUTFILE and sets, for the caller's error message:
+#   HTTP_STATUS  the HTTP status ("000" when no response was received at all)
+#   HTTP_ERROR   a description of the failure, without the program prefix
+#   HTTP_HINT    remediation to print on its own line after the failure, if any
+#
+# Exit codes:
+#   0  body available (fetched, or served from cache when offline)
+#   1  the server was reached and answered non-2xx (a genuine "not found")
+#   2  no response at all (network failure), or a cache miss while offline
+http_get() {
+  local url="$1" outfile="$2"
+  local cache_file curl_status=0
+  HTTP_STATUS=""
+  HTTP_ERROR=""
+  HTTP_HINT=""
+
+  cache_file=$(cache_path_for_url "$url" 2>/dev/null) || cache_file=""
+
+  if is_offline; then
+    if [[ -n "$cache_file" && -f "$cache_file" ]]; then
+      cp "$cache_file" "$outfile"
+      echo "$SCRIPT_NAME: offline: using cached $url (cached $(file_age_human "$cache_file"))" >&2
+      HTTP_STATUS="200"
+      return 0
+    fi
+    HTTP_ERROR="offline ($(offline_desc)) and no cached copy of $url"
+    return 2
+  fi
+
+  # Use -w '%{http_code}' rather than curl -f's exit code to tell "reached the
+  # server, got an error" apart from "never got an HTTP response at all":
+  # curl's own exit code for HTTP-level failures is not reliably 22 (some
+  # servers close the connection in a way curl reports as exit 56 "failure in
+  # receiving network data" even though the response body was a plain 404).
+  # http_code is authoritatively "000" only when no response was received.
+  HTTP_STATUS=$(curl -sSL --connect-timeout 10 --max-time 300 -o "$outfile" \
+    -w '%{http_code}' "$url" 2>/dev/null) || curl_status=$?
+
+  if [[ $curl_status -ne 0 || "$HTTP_STATUS" == "000" ]]; then
+    HTTP_ERROR="could not reach $url (curl exit $curl_status, http $HTTP_STATUS: network unreachable, DNS failure, or blocked egress)"
+    # Name the cached copy rather than silently serving it: a run that was not
+    # told to go offline must not answer from a week-old file behind the
+    # caller's back, but an agent that just lost its network needs to be told
+    # the next step exists.
+    if [[ -n "$cache_file" && -f "$cache_file" ]]; then
+      HTTP_HINT="a copy cached $(file_age_human "$cache_file") is on disk; re-run with $(offline_var)=1 to use it"
+    fi
+    return 2
+  fi
+
+  if [[ "$HTTP_STATUS" != 2?? ]]; then
+    HTTP_ERROR="$url returned HTTP $HTTP_STATUS"
+    return 1
+  fi
+
+  cache_store "$url" "$outfile"
+  return 0
+}
+
+# http_get_body URL -- print the response body on stdout. Same exit codes and
+# HTTP_STATUS/HTTP_ERROR contract as http_get, for callers that want a string.
+http_get_body() {
+  local url="$1" tmp status=0
+  tmp=$(mktemp)
+  http_get "$url" "$tmp" || status=$?
+  if [[ $status -eq 0 ]]; then
+    cat "$tmp"
+  fi
+  rm -f "$tmp"
+  return $status
+}
+
+# Print http_get's remediation line, if it left one, after the caller's error.
+http_print_hint() {
+  if [[ -n "${HTTP_HINT:-}" ]]; then
+    echo "$SCRIPT_NAME: $HTTP_HINT" >&2
+  fi
+}
+
+# The remediation line appended to every offline cache miss: an agent or CI job
+# that hits one needs to know which network-enabled command fixes it.
+warm_hint() {
+  local target="${1:-}"
+  if [[ -n "$target" ]]; then
+    echo "$SCRIPT_NAME: warm the cache from a network-enabled environment first: $SCRIPT_NAME warm cache $target" >&2
+  else
+    echo "$SCRIPT_NAME: warm the cache from a network-enabled environment first: $SCRIPT_NAME warm cache" >&2
+  fi
 }
 
 # Verify external dependencies. Deferred until a real command runs so that
@@ -61,29 +273,27 @@ fetch_maven_metadata() {
 
   local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
 
-  # Use -w '%{http_code}' rather than curl -f's exit code to tell "reached the
-  # server, got an error" apart from "never got an HTTP response at all":
-  # curl's own exit code for HTTP-level failures is not reliably 22 (some
-  # servers close the connection in a way curl reports as exit 56 "failure in
-  # receiving network data" even though the response body was a plain 404).
-  # http_code is authoritatively "000" only when no response was received.
-  local tmp_body http_code curl_status
+  local tmp_body status
   tmp_body=$(mktemp)
-  curl_status=0
-  http_code=$(curl -sSL --connect-timeout 10 --max-time 30 -o "$tmp_body" -w '%{http_code}' "$metadata_url") || curl_status=$?
+  status=0
+  http_get "$metadata_url" "$tmp_body" || status=$?
 
-  if [[ $curl_status -ne 0 || "$http_code" == "000" ]]; then
-    # This is NOT evidence the artifact is missing, so don't call it "not
-    # found" and don't offer "did you mean" suggestions that imply a live
-    # index lookup was possible.
+  if [[ $status -eq 2 ]]; then
+    # Neither a missing network nor an unwarmed cache is evidence the artifact
+    # is missing, so don't call it "not found" and don't offer "did you mean"
+    # suggestions that imply a live index lookup was possible.
     rm -f "$tmp_body"
-    echo "$SCRIPT_NAME: could not reach $metadata_url (curl exit $curl_status, http $http_code: network unreachable, DNS failure, or blocked egress); cannot determine whether '$group_id:$artifact_id' exists" >&2
+    echo "$SCRIPT_NAME: $HTTP_ERROR; cannot determine whether '$group_id:$artifact_id' exists" >&2
+    http_print_hint
+    if is_offline; then
+      warm_hint "$group_id:$artifact_id"
+    fi
     return 1
   fi
 
-  if [[ "$http_code" != 2?? ]]; then
+  if [[ $status -ne 0 ]]; then
     rm -f "$tmp_body"
-    echo "$SCRIPT_NAME: artifact '$group_id:$artifact_id' not found at $metadata_url ($http_code)" >&2
+    echo "$SCRIPT_NAME: artifact '$group_id:$artifact_id' not found at $metadata_url ($HTTP_STATUS)" >&2
 
     # Suggest alternatives from the local index
     if [[ "$repo_url" == "$GOOGLE_MAVEN_URL" ]]; then
@@ -171,10 +381,26 @@ Commands:
   inspect <name> [version]
                       Convenience wrapper that resolves a class name to an artifact
                       and then downloads its source.
+  warm cache [artifact]...
+                      Download what later runs need, so they can work with no
+                      network. Options: --index-only, --with-source,
+                      --version <type>.
+  doctor              Report dependencies, offline mode, and cache state.
+                      Exits non-zero if anything needs attention.
+
 Options:
   --help              Display this help message and exit
 
 Environment Variables:
+  JETPACK_OFFLINE     Set to 1 to answer only from the local cache and never
+                      use the network. Cached answers are served whatever their
+                      age, with that age noted on stderr; a cache miss is an
+                      error naming the artifact to warm, never a guess.
+  AGENT_OFFLINE       Workspace-wide offline policy, used when JETPACK_OFFLINE
+                      is unset. Set this in a CI job or an agent sandbox that
+                      has no egress.
+  JETPACK_CACHE_DIR   Cache directory
+                      (default: \${XDG_CACHE_HOME:-\$HOME/.cache}/jetpack)
   XDG_CACHE_HOME      Base directory for cache (default: \$HOME/.cache)
 
 Examples:
@@ -205,6 +431,10 @@ Examples:
 
   # Download specific snapshot build by ID
   $SCRIPT_NAME source androidx.wear.tiles:tiles 14765146
+
+  # Warm the cache where there is network, then answer without any
+  $SCRIPT_NAME warm cache androidx.wear.tiles:tiles
+  AGENT_OFFLINE=1 $SCRIPT_NAME version androidx.wear.tiles:tiles
 EOF
   exit "${1:-0}"
 }
@@ -212,10 +442,6 @@ EOF
 # =============================================================================
 # SEARCH SUBCOMMAND
 # =============================================================================
-
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jetpack"
-INDEX_FILE="$CACHE_DIR/androidx-index.json"
-MAX_AGE_SECONDS=$((24 * 3600)) # 24 hours
 
 usage_search() {
   cat <<EOF
@@ -243,14 +469,14 @@ is_index_fresh() {
     return 1
   fi
 
-  local file_age
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    file_age=$(stat -f "%m" "$INDEX_FILE")
-  else
-    file_age=$(stat -c "%Y" "$INDEX_FILE")
+  # Offline, any index is the freshest one obtainable: attempting a rebuild
+  # would only spend a connect timeout to arrive back at this same file.
+  if is_offline; then
+    return 0
   fi
 
-  local current_time
+  local file_age current_time
+  file_age=$(file_mtime "$INDEX_FILE")
   current_time=$(date +%s)
 
   local age=$((current_time - file_age))
@@ -262,6 +488,15 @@ is_index_fresh() {
 }
 
 update_index() {
+  # Offline callers reach this only with no index at all: is_index_fresh()
+  # accepts any existing one. Say so plainly rather than failing on a download
+  # that was never going to be attempted.
+  if is_offline; then
+    echo "$SCRIPT_NAME: offline ($(offline_desc)) and the GMaven index has never been downloaded to $INDEX_FILE" >&2
+    warm_hint "--index-only"
+    return 1
+  fi
+
   echo "info: Updating GMaven index..." >&2
   mkdir -p "$CACHE_DIR"
   local index_url="https://dl.google.com/android/studio/gmaven/index/release/v0.1/classes-v0.1.json.gz"
@@ -301,11 +536,11 @@ search_index() {
   local query="$1"
 
   if ! is_index_fresh; then
-    update_index
+    update_index || return 1
   fi
 
   if [[ ! -f "$INDEX_FILE" ]]; then
-    echo "error: Index file not found and update failed." >&2
+    echo "$SCRIPT_NAME search: index file not found and update failed" >&2
     return 1
   fi
 
@@ -421,6 +656,13 @@ cmd_search() {
         exit 1
         ;;
       --force)
+        # Refuse rather than delete the only copy we have: offline, the rebuild
+        # this asks for cannot happen, so honouring it would leave the cache
+        # emptier than it started.
+        if is_offline; then
+          echo "$SCRIPT_NAME search: --force needs network access but $(offline_desc) is set" >&2
+          exit 1
+        fi
         rm -f "$INDEX_FILE"
         shift
         ;;
@@ -727,7 +969,7 @@ cmd_resolve() {
 
   # 2. Ensure index is fresh
   if ! is_index_fresh; then
-    update_index >&2
+    update_index >&2 || return 1
   fi
 
   if [[ ! -f "$INDEX_FILE" ]]; then
@@ -1016,7 +1258,8 @@ cmd_source() {
   fi
 
   # Validate all artifacts before creating directories
-  local group_id artifact_id group_id_path metadata_url
+  local group_id artifact_id group_id_path metadata_url tmp_metadata
+  tmp_metadata=$(mktemp)
   for artifact in "${artifacts[@]}"; do
     validate_artifact_format "$artifact"
 
@@ -1025,11 +1268,17 @@ cmd_source() {
     group_id_path=$(echo "$group_id" | sed 's/\./\//g')
     metadata_url="${repo_url}/${group_id_path}/${artifact_id}/maven-metadata.xml"
 
-    if ! curl -sSLf "$metadata_url" >/dev/null 2>&1; then
-      echo "$SCRIPT_NAME source: failed to fetch $metadata_url" >&2
+    if ! http_get "$metadata_url" "$tmp_metadata"; then
+      rm -f "$tmp_metadata"
+      echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
+      http_print_hint
+      if is_offline; then
+        warm_hint "--with-source $artifact"
+      fi
       exit 1
     fi
   done
+  rm -f "$tmp_metadata"
 
   # Create output directory
   local build_dir
@@ -1070,7 +1319,7 @@ cmd_source() {
     jar_version="$version"
     if [[ "$version" =~ -SNAPSHOT$ ]]; then
       local version_metadata_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
-      snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
+      snapshot_jar_version=$(http_get_body "$version_metadata_url" |
         xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
 
       if [[ -n "$snapshot_jar_version" ]]; then
@@ -1085,8 +1334,12 @@ cmd_source() {
     source_jar_filename="${artifact_id}-${jar_version}-sources.jar"
 
     echo "info: Downloading ${artifact} version ${version}" >&2
-    if ! curl -sSLf -o "${build_dir}/${source_jar_filename}" "${source_jar_url}"; then
-      echo "$SCRIPT_NAME source: failed to download $source_jar_url" >&2
+    if ! http_get "${source_jar_url}" "${build_dir}/${source_jar_filename}"; then
+      echo "$SCRIPT_NAME source: failed to download $source_jar_url: $HTTP_ERROR" >&2
+      http_print_hint
+      if is_offline; then
+        warm_hint "--with-source $artifact"
+      fi
       exit 1
     fi
 
@@ -1098,7 +1351,7 @@ cmd_source() {
 
     # Check for Kotlin Multiplatform platform-specific sources
     pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
-    pom_content=$(curl -sSLf "${pom_url}" 2>/dev/null || true)
+    pom_content=$(http_get_body "${pom_url}" || true)
 
     if [[ -n "$pom_content" ]]; then
       platform_artifacts=$(echo "$pom_content" | xmllint --xpath "//*[local-name()='dependency']/*[local-name()='groupId' and text()='${group_id}']/../*[local-name()='artifactId']/text()" - 2>/dev/null | grep "^${artifact_id}-" || true)
@@ -1112,7 +1365,7 @@ cmd_source() {
           platform_jar_version="$version"
           if [[ "$version" =~ -SNAPSHOT$ ]]; then
             local platform_version_metadata_url="${repo_url}/${group_id_path}/${platform_artifact}/${version}/maven-metadata.xml"
-            platform_snapshot_jar_version=$(curl -sSLf "$platform_version_metadata_url" 2>/dev/null |
+            platform_snapshot_jar_version=$(http_get_body "$platform_version_metadata_url" |
               xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
             if [[ -n "$platform_snapshot_jar_version" ]]; then
               platform_jar_version="$platform_snapshot_jar_version"
@@ -1122,7 +1375,7 @@ cmd_source() {
           platform_source_jar_url="${repo_url}/${group_id_path}/${platform_artifact}/${version}/${platform_artifact}-${platform_jar_version}-sources.jar"
           platform_source_jar_filename="${platform_artifact}-${platform_jar_version}-sources.jar"
 
-          if curl -sSLf -o "${build_dir}/${platform_source_jar_filename}" "${platform_source_jar_url}" 2>/dev/null; then
+          if http_get "${platform_source_jar_url}" "${build_dir}/${platform_source_jar_filename}" 2>/dev/null; then
             echo "info: Downloaded ${platform_artifact} platform sources" >&2
             (
               cd "${build_dir}"
@@ -1363,8 +1616,23 @@ cmd_dependencies() {
   artifact_id=$(echo "$artifact" | cut -d: -f2)
   group_id_path=$(echo "$group_id" | sed 's/\./\//g')
 
-  local version
-  version=$(cmd_version "$artifact" "$version_string" "$repo_url")
+  # Classify first: cmd_version only accepts symbolic types, so routing a
+  # pinned version (1.6.1) or a build ID through it fails with "invalid version
+  # type" even though the POM for that exact version is what was asked for.
+  local version version_class
+  version_class=$(classify_version "$version_string")
+  case "$version_class" in
+    symbolic)
+      version=$(cmd_version "$artifact" "$version_string" "$repo_url") || exit 1
+      ;;
+    build_id)
+      repo_url="$SNAPSHOT_BUILD_URL_PREFIX/$version_string/artifacts/repository"
+      version=$(cmd_version "$artifact" "SNAPSHOT" "$repo_url") || exit 1
+      ;;
+    *)
+      version="$version_string"
+      ;;
+  esac
 
   local jar_version="$version"
   if [[ "$version" =~ -SNAPSHOT$ ]]; then
@@ -1373,7 +1641,7 @@ cmd_dependencies() {
     fi
     local version_metadata_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/maven-metadata.xml"
     local snapshot_jar_version
-    snapshot_jar_version=$(curl -sSLf "$version_metadata_url" 2>/dev/null |
+    snapshot_jar_version=$(http_get_body "$version_metadata_url" |
       xmllint --xpath "//snapshotVersion[classifier='sources' and extension='jar']/value/text()" - 2>/dev/null || true)
     if [[ -n "$snapshot_jar_version" ]]; then
       jar_version="$snapshot_jar_version"
@@ -1381,11 +1649,22 @@ cmd_dependencies() {
   fi
 
   local pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
-  local pom_content
-  if ! pom_content=$(curl -sSLf "${pom_url}"); then
-    echo "$SCRIPT_NAME dependencies: failed to download $pom_url" >&2
+  # Fetch into a file rather than a command substitution: HTTP_ERROR is set by
+  # http_get in the shell that runs it, and a $(...) subshell would take it
+  # (and the reason this failed) with it.
+  local pom_content pom_file
+  pom_file=$(mktemp)
+  if ! http_get "${pom_url}" "$pom_file"; then
+    rm -f "$pom_file"
+    echo "$SCRIPT_NAME dependencies: failed to download $pom_url: $HTTP_ERROR" >&2
+    http_print_hint
+    if is_offline; then
+      warm_hint "$artifact"
+    fi
     exit 1
   fi
+  pom_content=$(cat "$pom_file")
+  rm -f "$pom_file"
 
   local deps
   deps=$(echo "$pom_content" | perl -0777 -ne '
@@ -1408,6 +1687,276 @@ cmd_dependencies() {
 }
 
 # =============================================================================
+# WARM SUBCOMMAND
+# =============================================================================
+
+usage_warm() {
+  cat <<EOF
+Usage: $SCRIPT_NAME warm cache [OPTIONS] [ARTIFACT]...
+
+Download everything later runs will need, so they can work with no network.
+
+Normal online runs already write what they fetch into the cache, so warming is
+only needed where the offline run happens somewhere the online one never did:
+a CI job whose build step has no egress, or an agent sandbox that denies it.
+Run this in a network-enabled setup step, then set AGENT_OFFLINE=1 for the
+work itself.
+
+Arguments:
+  ARTIFACT        Maven artifact (GROUP_ID:ARTIFACT_ID) to warm. Fetches its
+                  version metadata and the POM of the resolved version.
+
+Options:
+  --version TYPE  Version to warm for each artifact (default: STABLE)
+  --index-only    Only refresh the GMaven class index
+  --with-source   Also download each artifact's source JAR (large, but this is
+                  what 'source' and 'inspect' need offline)
+  --help, -h      Display this help message and exit
+
+Examples:
+  # Refresh the class index that 'search' and 'resolve' read
+  $SCRIPT_NAME warm cache --index-only
+
+  # Warm the index plus two artifacts, then answer from the cache alone
+  $SCRIPT_NAME warm cache androidx.wear.tiles:tiles androidx.core:core
+  AGENT_OFFLINE=1 $SCRIPT_NAME version androidx.wear.tiles:tiles
+
+  # Warm sources too, for offline 'inspect'
+  $SCRIPT_NAME warm cache --with-source androidx.wear.tiles:tiles
+
+The cache lives in \$JETPACK_CACHE_DIR (default:
+\${XDG_CACHE_HOME:-\$HOME/.cache}/jetpack) and is safe to copy between machines
+or restore from a CI cache: it holds nothing but fetched public artifacts.
+EOF
+  exit "${1:-0}"
+}
+
+cmd_warm_cache() {
+  local version_string="STABLE"
+  local index_only=0 with_source=0
+  local -a artifacts=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help | -h)
+        usage_warm
+        ;;
+      --version)
+        if [[ -z "${2:-}" ]]; then
+          echo "$SCRIPT_NAME warm cache: option '--version' requires an argument" >&2
+          exit 1
+        fi
+        version_string=$(echo "$2" | tr '[:lower:]' '[:upper:]')
+        shift 2
+        ;;
+      --index-only)
+        index_only=1
+        shift
+        ;;
+      --with-source)
+        with_source=1
+        shift
+        ;;
+      -*)
+        echo "$SCRIPT_NAME warm cache: unknown option: $1" >&2
+        exit 1
+        ;;
+      *)
+        artifacts+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if is_offline; then
+    echo "$SCRIPT_NAME warm cache: needs network access, but $(offline_desc) is set" >&2
+    echo "$SCRIPT_NAME warm cache: run this in a network-enabled setup step, not in the offline job itself" >&2
+    exit 1
+  fi
+
+  local failures=0
+
+  # The class index backs search/resolve and is the one download every offline
+  # run needs, artifacts or not.
+  if ! update_index; then
+    failures=$((failures + 1))
+  fi
+
+  if [[ $index_only -eq 1 ]]; then
+    if [[ ${#artifacts[@]} -gt 0 ]]; then
+      echo "$SCRIPT_NAME warm cache: --index-only given, ignoring ${#artifacts[@]} artifact(s)" >&2
+    fi
+    [[ $failures -eq 0 ]] || exit 1
+    return 0
+  fi
+
+  local artifact version tmp_dir
+  for artifact in "${artifacts[@]}"; do
+    validate_artifact_format "$artifact"
+
+    # Each helper runs in a subshell so that one artifact's failure (they exit
+    # rather than return) does not abandon the rest of the warm.
+    if ! version=$(cmd_version "$artifact" "$version_string"); then
+      echo "$SCRIPT_NAME warm cache: $artifact: could not resolve $version_string version" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+
+    if (cmd_dependencies "$artifact" "$version" >/dev/null); then
+      echo "warmed $artifact $version (metadata, pom)" >&2
+    else
+      echo "$SCRIPT_NAME warm cache: $artifact $version: could not fetch pom" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+
+    if [[ $with_source -eq 1 ]]; then
+      tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/jetpack-warm.XXXXXXXXXX")
+      if (cmd_source --output "$tmp_dir" "$artifact" "$version" >/dev/null); then
+        echo "warmed $artifact $version (sources)" >&2
+      else
+        echo "$SCRIPT_NAME warm cache: $artifact $version: could not fetch sources" >&2
+        failures=$((failures + 1))
+      fi
+      rm -rf "$tmp_dir"
+    fi
+  done
+
+  if [[ $failures -gt 0 ]]; then
+    echo "$SCRIPT_NAME warm cache: $failures target(s) failed; the cache is incomplete" >&2
+    exit 1
+  fi
+
+  echo "$SCRIPT_NAME warm cache: cache ready at $CACHE_DIR" >&2
+}
+
+# =============================================================================
+# DOCTOR SUBCOMMAND
+# =============================================================================
+
+usage_doctor() {
+  cat <<EOF
+Usage: $SCRIPT_NAME doctor
+
+Report whether this environment can answer Jetpack questions, and from what:
+dependencies, offline mode, and the state and age of the local cache.
+
+Read-only. Exits non-zero if any check reports WARN or ERROR, so an offline CI
+job or agent session can gate on it before trusting an answer.
+
+Options:
+  --help, -h  Display this help message and exit
+
+Examples:
+  $SCRIPT_NAME doctor
+  AGENT_OFFLINE=1 $SCRIPT_NAME doctor || $SCRIPT_NAME warm cache
+EOF
+  exit "${1:-0}"
+}
+
+DOCTOR_STATUS=0
+
+doctor_report() {
+  local tag="$1"
+  shift
+  printf '%-7s %s\n' "[$tag]" "$1"
+  shift
+  # Remediation belongs under the finding it fixes, not in a trailing block.
+  local detail
+  for detail in "$@"; do
+    printf '        %s\n' "$detail"
+  done
+  case "$tag" in
+    WARN | ERROR) DOCTOR_STATUS=1 ;;
+  esac
+}
+
+cmd_doctor() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage_doctor
+  fi
+
+  local offline=0
+  is_offline && offline=1
+
+  # --- Dependencies (reported, not fatal: doctor's job is to say what is
+  # wrong, and exiting 127 on the first missing tool would hide the rest).
+  local dep missing=""
+  for dep in curl xmllint jq perl jar gunzip; do
+    command -v "$dep" >/dev/null 2>&1 || missing="$missing $dep"
+  done
+  if [[ -z "$missing" ]]; then
+    doctor_report OK "Dependencies: curl, xmllint, jq, perl, jar, gunzip"
+  else
+    doctor_report ERROR "Dependencies: not found:${missing}"
+  fi
+
+  # --- Mode
+  if [[ $offline -eq 1 ]]; then
+    doctor_report INFO "Mode: offline ($(offline_desc)); answers come from the cache only"
+  else
+    doctor_report INFO "Mode: online; answers are fetched fresh and written to the cache"
+  fi
+
+  # --- Cache directory
+  if [[ -d "$CACHE_DIR" ]]; then
+    if [[ -w "$CACHE_DIR" ]]; then
+      doctor_report OK "Cache: $CACHE_DIR"
+    elif [[ $offline -eq 1 ]]; then
+      doctor_report OK "Cache: $CACHE_DIR (read-only, which is all offline mode needs)"
+    else
+      doctor_report WARN "Cache: $CACHE_DIR is not writable" \
+        "Fetched responses cannot be recorded, so a later offline run will find nothing."
+    fi
+  elif [[ $offline -eq 1 ]]; then
+    doctor_report ERROR "Cache: $CACHE_DIR does not exist" \
+      "Nothing can be answered offline. Warm it where there is network:" \
+      "  $SCRIPT_NAME warm cache <artifact>..."
+  else
+    doctor_report INFO "Cache: $CACHE_DIR does not exist yet (created on first fetch)"
+  fi
+
+  # --- GMaven class index (search, resolve)
+  if [[ -f "$INDEX_FILE" ]]; then
+    local index_age
+    index_age=$(file_age_human "$INDEX_FILE")
+    if is_index_fresh; then
+      doctor_report OK "GMaven index: cached $index_age"
+    else
+      doctor_report WARN "GMaven index: cached $index_age (older than 24h)" \
+        "Refresh it with: $SCRIPT_NAME warm cache --index-only"
+    fi
+  elif [[ $offline -eq 1 ]]; then
+    doctor_report ERROR "GMaven index: missing, so search and resolve cannot answer" \
+      "Download it where there is network: $SCRIPT_NAME warm cache --index-only"
+  else
+    doctor_report INFO "GMaven index: not downloaded yet (fetched on first search or resolve)"
+  fi
+
+  # --- Cached HTTP responses (version, list dependencies, source, inspect)
+  local responses=0
+  if [[ -d "$HTTP_CACHE_DIR" ]]; then
+    responses=$(find "$HTTP_CACHE_DIR" -type f | wc -l | tr -d ' ')
+  fi
+  if [[ "$responses" -gt 0 ]]; then
+    doctor_report OK "Cached responses: $responses under $HTTP_CACHE_DIR"
+  elif [[ $offline -eq 1 ]]; then
+    doctor_report WARN "Cached responses: none, so only search and resolve can answer offline" \
+      "Warm the artifacts this workspace asks about, where there is network:" \
+      "  $SCRIPT_NAME warm cache <artifact>..."
+  else
+    doctor_report INFO "Cached responses: none yet (recorded as commands run)"
+  fi
+
+  if [[ $DOCTOR_STATUS -eq 0 ]]; then
+    echo "$SCRIPT_NAME doctor: no problems found"
+  else
+    echo "$SCRIPT_NAME doctor: problems found (see above)"
+  fi
+  return "$DOCTOR_STATUS"
+}
+
+# =============================================================================
 # MAIN DISPATCH
 # =============================================================================
 
@@ -1415,9 +1964,10 @@ if [[ $# -lt 1 ]]; then
   usage 1 >&2
 fi
 
-# Help is dependency-free; everything else needs the external tools.
+# Help is dependency-free, and doctor reports missing dependencies rather than
+# dying on them; everything else needs the external tools up front.
 case "$1" in
-  help | --help) ;;
+  help | --help | doctor) ;;
   *) check_deps ;;
 esac
 
@@ -1430,6 +1980,8 @@ case "$1" in
         source) usage_source ;;
         inspect) usage_inspect ;;
         dependencies) usage_dependencies ;;
+        warm) usage_warm ;;
+        doctor) usage_doctor ;;
         *)
           echo "$SCRIPT_NAME: unknown command '$2'" >&2
           usage 1 >&2
@@ -1480,6 +2032,31 @@ case "$1" in
   inspect)
     shift
     cmd_inspect "$@"
+    ;;
+  warm)
+    shift
+    if [[ $# -eq 0 ]]; then
+      echo "$SCRIPT_NAME: warm requires a sub-command (cache)" >&2
+      echo "Run '$SCRIPT_NAME warm cache --help' for usage" >&2
+      exit 1
+    fi
+    if [[ "$1" == "--help" || "$1" == "-h" || "$1" == "help" ]]; then
+      usage_warm 0
+    fi
+    subcmd="$1"
+    shift
+    case "$subcmd" in
+      cache) cmd_warm_cache "$@" ;;
+      *)
+        echo "$SCRIPT_NAME: unknown warm command '$subcmd'" >&2
+        echo "Run '$SCRIPT_NAME warm cache --help' for usage" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  doctor)
+    shift
+    cmd_doctor "$@"
     ;;
   -*)
     echo "$SCRIPT_NAME: unknown option: $1" >&2
