@@ -40,18 +40,36 @@ require() {
   }
 }
 
+# make_temp [-d] [DIR] -- create a temporary file (or directory, with -d) under
+# DIR, defaulting to $TMPDIR.
+#
 # mktemp that reports its own failure. A bare `tmp=$(mktemp)` yields an empty
 # path when no temp directory is writable, and BSD cp resolves an empty
 # destination to ./<basename> -- so the body lands as a stray file in the
 # caller's working directory and the parse of the (absent) temp file fails with
 # an xmllint error that names nothing useful. Every call site pairs this with
 # `|| return`/`|| exit` so the failure stops there instead.
+#
+# The template is always explicit: BSD mktemp given no template writes to
+# Darwin's per-user temp directory and ignores TMPDIR entirely, so a caller who
+# pointed TMPDIR at a writable fallback would still fail -- and be told the
+# fallback was unwritable, naming a directory mktemp never tried. Both BSD and
+# GNU mktemp honour an explicit template.
 make_temp() {
-  local path
-  path=$(mktemp "$@" 2>/dev/null) && [[ -n "$path" ]] || {
-    echo "$SCRIPT_NAME: could not create a temporary file in ${TMPDIR:-/tmp} (not writable?)" >&2
+  local dir path
+  if [[ "${1:-}" == "-d" ]]; then
+    shift
+    dir="${1:-${TMPDIR:-/tmp}}"
+    path=$(mktemp -d "$dir/jetpack.XXXXXXXXXX" 2>/dev/null) || path=""
+  else
+    dir="${1:-${TMPDIR:-/tmp}}"
+    path=$(mktemp "$dir/jetpack.XXXXXXXXXX" 2>/dev/null) || path=""
+  fi
+
+  if [[ -z "$path" ]]; then
+    echo "$SCRIPT_NAME: could not create a temporary file in $dir (not writable?)" >&2
     return 1
-  }
+  fi
   printf '%s\n' "$path"
 }
 
@@ -186,6 +204,20 @@ offline_body_file() {
   printf '%s\n' "$cache_file"
 }
 
+# offline_miss URL -- set the http_get result variables for a cache miss that
+# offline mode has already decided.
+#
+# Once offline_body_file has come up empty there is nothing left to find: no
+# network to ask and no cached copy to read. Callers use this instead of running
+# http_get against a temporary file, so the cold-cache diagnostic (and the
+# command that would warm it) still reaches the user where there is nowhere to
+# write a body that was never going to arrive.
+offline_miss() {
+  HTTP_STATUS=""
+  HTTP_ERROR="offline ($(offline_desc)) and no cached copy of $1"
+  HTTP_HINT=""
+}
+
 # http_get URL OUTFILE
 #
 # Writes the response body to OUTFILE and sets, for the caller's error message:
@@ -213,7 +245,7 @@ http_get() {
       HTTP_STATUS="200"
       return 0
     fi
-    HTTP_ERROR="offline ($(offline_desc)) and no cached copy of $url"
+    offline_miss "$url"
     return 2
   fi
 
@@ -275,6 +307,10 @@ http_get_body() {
     cat "$cached"
     return 0
   fi
+  if is_offline; then
+    offline_miss "$url"
+    return 2
+  fi
   tmp=$(make_temp) || {
     HTTP_STATUS=""
     HTTP_ERROR="no writable temporary directory for the body of $url"
@@ -335,8 +371,8 @@ fetch_maven_metadata() {
 
   local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
 
-  # Offline, the cached metadata is readable where it already lies; only the
-  # online path needs somewhere to put the response.
+  # Offline, the cached metadata is readable where it already lies and a miss is
+  # already decided; only the online path needs somewhere to put a response.
   local tmp_body status body_file
   status=0
   if body_file=$(offline_body_file "$metadata_url"); then
@@ -344,6 +380,10 @@ fetch_maven_metadata() {
     HTTP_STATUS="200"
     HTTP_ERROR=""
     HTTP_HINT=""
+  elif is_offline; then
+    tmp_body=""
+    offline_miss "$metadata_url"
+    status=2
   else
     tmp_body=$(make_temp) || {
       HTTP_ERROR="no writable temporary directory for $metadata_url"
@@ -1352,50 +1392,64 @@ cmd_source() {
     echo "info: Using AndroidX snapshot repository (latest)" >&2
   fi
 
-  # Validate all artifacts before creating directories
-  local group_id artifact_id group_id_path metadata_url tmp_metadata=""
+  # Validate every artifact before touching the filesystem or the network, so a
+  # typo cannot leave a half-built output directory behind.
+  local group_id artifact_id group_id_path metadata_url
   for artifact in "${artifacts[@]}"; do
     validate_artifact_format "$artifact"
+  done
 
+  # Create the output directory next, before anything needs a temporary file:
+  # --output is the documented recovery when the default temp directory is not
+  # writable, so it has to be the place the bodies fetched along the way land
+  # too. Otherwise an online `source --output /writable` would still die on the
+  # first metadata allocation, having been told to pass the flag it just passed.
+  local build_dir temp_dir="${TMPDIR:-/tmp}"
+  if [[ -n "$output_dir" ]]; then
+    build_dir="$output_dir"
+    mkdir -p "$build_dir"
+    temp_dir="$build_dir"
+  else
+    # Extracted sources have to land somewhere writable; --output names that
+    # directory when the default temp location is not one.
+    build_dir=$(make_temp -d) || {
+      echo "$SCRIPT_NAME source: pass --output DIR to extract somewhere writable" >&2
+      exit 1
+    }
+    temp_dir="$build_dir"
+  fi
+
+  local tmp_metadata=""
+  for artifact in "${artifacts[@]}"; do
     group_id=$(echo "$artifact" | cut -d: -f1)
     artifact_id=$(echo "$artifact" | cut -d: -f2)
     group_id_path=$(echo "$group_id" | sed 's/\./\//g')
     metadata_url="${repo_url}/${group_id_path}/${artifact_id}/maven-metadata.xml"
 
-    # This body is only ever tested for existence, so a cache hit needs no copy.
+    # This body is only ever tested for existence, so a cache hit needs no copy
+    # and, offline, a miss needs no temporary file to report itself.
     if offline_body_file "$metadata_url" >/dev/null; then
       continue
     fi
+    if is_offline; then
+      offline_miss "$metadata_url"
+      echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
+      warm_hint
+      exit 1
+    fi
 
     if [[ -z "$tmp_metadata" ]]; then
-      tmp_metadata=$(make_temp) || exit 1
+      tmp_metadata=$(make_temp "$temp_dir") || exit 1
     fi
     if ! http_get "$metadata_url" "$tmp_metadata"; then
       rm -f "$tmp_metadata"
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       http_print_hint
-      if is_offline; then
-        warm_hint
-      fi
       exit 1
     fi
   done
   if [[ -n "$tmp_metadata" ]]; then
     rm -f "$tmp_metadata"
-  fi
-
-  # Create output directory
-  local build_dir
-  if [[ -n "$output_dir" ]]; then
-    build_dir="$output_dir"
-    mkdir -p "$build_dir"
-  else
-    # Extracted sources have to land somewhere writable; --output names that
-    # directory when the default temp location is not one.
-    build_dir=$(make_temp -d "${TMPDIR:-/tmp}/jetpack.XXXXXXXXXX") || {
-      echo "$SCRIPT_NAME source: pass --output DIR to extract somewhere writable" >&2
-      exit 1
-    }
   fi
 
   # Download and extract each package
@@ -1468,8 +1522,11 @@ cmd_source() {
     pom_content=""
     if pom_file=$(offline_body_file "$pom_url"); then
       pom_content=$(cat "$pom_file")
+    elif is_offline; then
+      offline_miss "$pom_url"
+      pom_status=2
     else
-      pom_file=$(make_temp) || exit 1
+      pom_file=$(make_temp "$temp_dir") || exit 1
       http_get "${pom_url}" "$pom_file" || pom_status=$?
       if [[ $pom_status -eq 0 ]]; then
         pom_content=$(cat "$pom_file")
@@ -1792,22 +1849,31 @@ cmd_dependencies() {
   # Fetch into a file rather than a command substitution: HTTP_ERROR is set by
   # http_get in the shell that runs it, and a $(...) subshell would take it
   # (and the reason this failed) with it.
-  local pom_content pom_file cached_pom
+  local pom_content pom_file cached_pom fetch_failed=0
   if cached_pom=$(offline_body_file "$pom_url"); then
     pom_content=$(cat "$cached_pom")
+  elif is_offline; then
+    # A cold cache with no network is decided already, and reporting that must
+    # not depend on having somewhere to write the body that will never arrive.
+    offline_miss "$pom_url"
+    fetch_failed=1
   else
     pom_file=$(make_temp) || exit 1
-    if ! http_get "${pom_url}" "$pom_file"; then
-      rm -f "$pom_file"
-      echo "$SCRIPT_NAME dependencies: failed to download $pom_url: $HTTP_ERROR" >&2
-      http_print_hint
-      if is_offline; then
-        warm_hint
-      fi
-      exit 1
+    if http_get "${pom_url}" "$pom_file"; then
+      pom_content=$(cat "$pom_file")
+    else
+      fetch_failed=1
     fi
-    pom_content=$(cat "$pom_file")
     rm -f "$pom_file"
+  fi
+
+  if [[ $fetch_failed -eq 1 ]]; then
+    echo "$SCRIPT_NAME dependencies: failed to download $pom_url: $HTTP_ERROR" >&2
+    http_print_hint
+    if is_offline; then
+      warm_hint
+    fi
+    exit 1
   fi
 
   local deps

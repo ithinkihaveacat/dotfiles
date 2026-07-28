@@ -24,7 +24,7 @@ REPO_URL="http://127.0.0.1:1/repo"
 ARTIFACT="androidx.wear.tiles:tiles"
 CACHED_DIR="$JETPACK_CACHE_DIR/http/127.0.0.1:1/repo/androidx/wear/tiles/tiles"
 
-TOTAL_TESTS=41
+TOTAL_TESTS=49
 TEST_NUM=0
 
 echo "1..$TOTAL_TESTS"
@@ -301,20 +301,22 @@ fi
 # maven-metadata.xml in the caller's working directory and the run ended in an
 # xmllint parser error naming nothing useful.
 
-NOMKTEMP_DIR="$TEST_TMP/nomktemp"
-mkdir -p "$NOMKTEMP_DIR"
-cat >"$NOMKTEMP_DIR/mktemp" <<'SHIM'
-#!/bin/sh
-echo "mktemp: mkstemp failed: Operation not permitted" >&2
-exit 1
-SHIM
-chmod +x "$NOMKTEMP_DIR/mktemp"
+# A real unwritable directory rather than a stubbed mktemp: the stub would fail
+# every allocation alike, and could not tell "the default temp directory is
+# unwritable" (which --output is supposed to rescue) from "no temporary is
+# obtainable anywhere". It also pins the reason make_temp passes an explicit
+# template -- BSD mktemp given none ignores TMPDIR and would quietly succeed in
+# Darwin's per-user temp directory, testing nothing.
+RO_TMPDIR="$TEST_TMP/readonly"
+mkdir -p "$RO_TMPDIR"
+chmod 500 "$RO_TMPDIR"
 
-# The test's own bookkeeping still needs a real mktemp, so shim only the child.
+# The test's own bookkeeping still needs a writable TMPDIR, so redirect only the
+# child's.
 run_jetpack_no_mktemp() {
   local err_file
   err_file=$(mktemp)
-  STDOUT=$(cd "$WORKDIR" && PATH="$NOMKTEMP_DIR:$PATH" "$ABS_JETPACK" "$@" 2>"$err_file")
+  STDOUT=$(cd "$WORKDIR" && TMPDIR="$RO_TMPDIR" "$ABS_JETPACK" "$@" 2>"$err_file")
   STATUS=$?
   STDERR=$(cat "$err_file")
   rm -f "$err_file"
@@ -341,10 +343,23 @@ assert_status "list dependencies succeeds offline with no writable temp dir" "$S
 assert_contains "dependencies still come from the cached POM" "$STDOUT" \
   "androidx.annotation:annotation:1.8.0 (compile)"
 
-# Without the cache to fall back on there is nowhere to put a response, and the
-# failure must name that rather than surfacing as a parse error further down.
+# An offline miss is decided before any body could arrive, so it must still
+# produce the cold-cache diagnostic and the command that warms it. Reporting a
+# missing temp directory instead would send the reader to fix the wrong thing.
 AGENT_OFFLINE=1 run_jetpack_no_mktemp version "$ARTIFACT" STABLE "$REPO_URL/missing"
 assert_status "an uncached URL with no temp dir fails" "$STATUS" 1
+assert_contains "the cold-cache error survives having nowhere to write" "$STDERR" \
+  "no cached copy of $REPO_URL/missing/androidx/wear/tiles/tiles/maven-metadata.xml"
+assert_contains "it still quotes the invocation to re-run online" "$STDERR" \
+  "jetpack version $ARTIFACT STABLE $REPO_URL/missing"
+assert_not_contains "the temp directory is not blamed for a decided miss" "$STDERR" \
+  "could not create a temporary file"
+assert_not_contains "no parser error leaks out instead" "$STDERR" "parser error"
+
+# Online, there really is nowhere to put the response, and that is what the
+# failure must name -- rather than surfacing as a parse error further down.
+run_jetpack_no_mktemp version "$ARTIFACT" STABLE "$REPO_URL"
+assert_status "an online fetch with no temp dir fails" "$STATUS" 1
 assert_contains "the failure names the temporary directory" "$STDERR" \
   "could not create a temporary file"
 assert_not_contains "no parser error leaks out instead" "$STDERR" "parser error"
@@ -354,3 +369,13 @@ assert_not_contains "no parser error leaks out instead" "$STDERR" "parser error"
 AGENT_OFFLINE=1 run_jetpack_no_mktemp source "$ARTIFACT" 1.4.0 "$REPO_URL"
 assert_status "source fails with no writable temp dir" "$STATUS" 1
 assert_contains "source names --output as the way out" "$STDERR" "--output"
+
+# ...and taking that advice has to work. --output is a writable directory even
+# when the default temp location is not, so the metadata fetched on the way
+# there must land in it rather than dying on the flag the caller just passed.
+run_jetpack_no_mktemp source "$ARTIFACT" 1.4.0 "$REPO_URL" --output "$TEST_TMP/out"
+assert_status "source with --output gets past temp allocation" "$STATUS" 1
+assert_not_contains "--output is honoured before any temporary is needed" "$STDERR" \
+  "could not create a temporary file"
+assert_contains "it fails on the network instead, having got that far" "$STDERR" \
+  "could not reach"
