@@ -21,16 +21,28 @@ compatibility: >-
 
 ## Important: Use Script First
 
-**ALWAYS use `scripts/jetpack` over raw `curl` and `xmllint` commands.** The
-script is located in the `scripts/` subdirectory of this skill's folder.
-References to `scripts/...` in this skill are relative to this skill directory.
-It provides features that raw commands do not:
+**ALWAYS use `scripts/jetpack` to answer these questions — never a raw command
+against a Maven URL or against the cache.** The script is located in the
+`scripts/` subdirectory of this skill's folder. References to `scripts/...` in
+this skill are relative to this skill directory. It provides features that raw
+commands do not:
 
 - Package-to-coordinate resolution with exceptions table
 - Code search integration for finding artifacts by class name
 - Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
 - Build ID resolution for pinned snapshots
+
+**The cache is the script's storage, not an interface.** `curl` and `xmllint`
+against `dl.google.com` are the obvious way to bypass the script, but reaching
+into `$JETPACK_CACHE_DIR` with `jq`, `unzip`, `jar`, `find`, or `grep` bypasses
+it just as completely — and offline, where the script is answering from that
+same cache, it looks like the shortest path. It is not: the index and the cached
+responses are raw upstream data, so reading them by hand skips the version-type
+filtering, the exceptions table, and the platform-source detection listed above,
+and returns something plausible with no sign that those steps were missed. Ask
+the script the question, offline or not; browse the cache only to diagnose the
+script itself.
 
 **When to read the script source:** If the script doesn't do exactly what you
 need, or fails due to missing dependencies, read the script source. It encodes
