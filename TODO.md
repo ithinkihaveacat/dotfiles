@@ -1,5 +1,33 @@
 # TODO
 
+## Evaluate error-trapped feature probing for fish completions in install.sh (2026-07-28)
+
+**Problem:** `install.sh` generates fish completions for tools like `hcloud`,
+`gog`, and `bat`/`batcat`. Recently, `bat`/`batcat` completion was updated to
+feature-probe `--completion fish` and trap errors
+(`if "$bat_cmd" --completion fish >"$tmp_comp" 2>/dev/null; ...`) so that older
+tool versions or unexpected CLI flag changes do not halt `install.sh` under
+`set -e`. Other tool completions in `install.sh` (e.g. `hcloud`, `gog`) still
+execute `x <cmd> completion fish >...` directly without trapping errors, which
+could cause `install.sh` to fail if a tool lacks completion support.
+
+**Goal:** Review all fish completion generation logic in `install.sh` to ensure
+consistency and guard against `install.sh` aborts on unsupported CLI completion
+flags.
+
+**Criteria:**
+
+- Review completion generation for `hcloud`, `gog`, and any other tools in
+  `install.sh`.
+- Ensure completion generation is safe and non-fatal across different tool
+  versions while maintaining `x` trace logging where appropriate.
+
+**Sketch:**
+
+- Audit `hcloud`, `gog`, and `bat` completion blocks in `install.sh`.
+- Determine whether a common helper or consistent error-trapped probing pattern
+  should be applied across all completion entries.
+
 ## Continue evaluating jetpack with skill-eval-harness (2026-07-27)
 
 **Problem:** `skills/jetpack/evals/shared-benchmark.json` (12 cases: 6

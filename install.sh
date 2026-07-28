@@ -492,10 +492,20 @@ if exists gog; then
   x gog completion fish >"$XDG_COMPLETIONS_DIR/gog.fish"
 fi
 
+bat_cmd=""
 if exists bat; then
-  x bat --completion fish >"$XDG_COMPLETIONS_DIR/bat.fish"
+  bat_cmd="bat"
 elif exists batcat; then
-  x batcat --completion fish >"$XDG_COMPLETIONS_DIR/bat.fish"
+  bat_cmd="batcat"
+fi
+
+if [ -n "$bat_cmd" ]; then
+  # bat / batcat --completion was added in 0.25.0; attempt completion generation without halting install.sh on error
+  tmp_comp=$(mktemp)
+  if "$bat_cmd" --completion fish >"$tmp_comp" 2>/dev/null; then
+    x cp "$tmp_comp" "$XDG_COMPLETIONS_DIR/bat.fish"
+  fi
+  rm -f "$tmp_comp"
 fi
 
 # shpool
