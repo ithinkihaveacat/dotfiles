@@ -137,6 +137,16 @@ interpretation:
   (e.g., every 10%) when stdout is not a TTY.
 - **`doctor` output:** the canonical tag style above.
 
+## Caching and Offline Mode
+
+Tools that fetch over the network and cache the result follow one repo-wide
+convention for where the cache lives (`<TOOL>_CACHE_DIR`, else
+`${XDG_CACHE_HOME:-$HOME/.cache}/<tool>`) and how a caller forces them offline
+against it (`<TOOL>_OFFLINE`, else the workspace-wide `AGENT_OFFLINE`),
+including how a cold cache gets warmed, the required age reporting, and the
+cache-miss error. It is defined in `caching.md`, which also covers what CI jobs
+and sandboxed agents need from it.
+
 ## `--output`/`-o` Contract
 
 Any script that produces a new file or directory as output must support an

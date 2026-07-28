@@ -82,103 +82,120 @@ not a restart; it depends on known jetpack bugs being fixed as they're found (as
   exactly this and hasn't been exercised yet.
 - No case declares `files`, so no fixture directory work is needed alongside
   this.
-- Related but not a hard blocker: "Make jetpack work offline with a pre-warmed
-  cache" below — once jetpack has a cache/offline mode, it may be possible to
-  eval it under the harness's safer default sandbox instead of the
-  workspace-write override, worth revisiting then.
+- Worth revisiting now: "Make jetpack work offline with a pre-warmed cache"
+  below is done, so `version`/`resolve`/`list dependencies`/`source` all answer
+  from `$JETPACK_CACHE_DIR` under `AGENT_OFFLINE=1`. A run that warms the cache
+  first (network-enabled, outside the sandbox) should be evaluable under
+  `run-codex`'s default `read-only` sandbox — except that sandbox also blocks
+  `mktemp`, which several jetpack paths still need, so check that before
+  assuming the `--codex-cmd` override can be dropped.
 
-## Make jetpack work offline with a pre-warmed cache (2026-07-27)
+## Make jetpack work offline with a pre-warmed cache (2026-07-27) — done
 
-**Problem:** `scripts/jetpack` hits the network on nearly every subcommand —
-`version`, `list dependencies`, and `source`/`inspect` all shell out to `curl`
-against Maven metadata / `dl.google.com` with zero caching, and even
-`search`/`resolve`'s GMaven index cache (`~/.cache/jetpack/androidx-index.json`,
-24h TTL) has no way to force offline reuse: `is_index_fresh` only skips a
-rebuild attempt when the cache is younger than 24h, so a run with no network
-still pays for (and fails) a rebuild attempt before falling back to a stale
-cache. Surfaced via a `skill-eval-harness` smoke run: in Codex's default
-`read-only` sandbox (no writes, no network), `version` failed outright; even
-after relaxing to
-`--sandbox workspace-write -c sandbox_workspace_write.network_access=true`, the
-run only succeeded because that specific sandbox happened to allow live network
-egress — nothing here works with network genuinely unavailable (CI without
-egress, an agent sandboxed for safety).
+`scripts/jetpack` now has a single HTTP primitive (`http_get`) that every
+network call goes through — `fetch_maven_metadata`, the source JAR and POM
+downloads in `source`/`inspect` (including the KMP platform artifacts), and the
+snapshot version metadata in `list dependencies`. It writes every successful
+response through to `$CACHE_DIR/http/<host>/<path>`, mirroring the URL rather
+than hashing it so the cache can be listed, seeded by a test fixture, and pruned
+by hand. The cache is only *read* when offline, so adding it cannot change what
+an online run answers: warming is a side effect of normal use rather than a new
+staleness window. The GMaven index keeps its existing 24h TTL and its
+`CACHE_DIR`/`INDEX_FILE` location, which the HTTP cache sits beside rather than
+replacing.
 
-**Goal:** `jetpack` can answer version/resolve/dependency/source-lookup
-questions entirely from a local cache when told to run offline, with an explicit
-signal rather than silently guessing or hard-failing on the first missing
-network call.
+`JETPACK_OFFLINE` (falling back to `AGENT_OFFLINE`) makes every subcommand skip
+the network entirely. Cached answers are served at any age with that age on
+stderr (`offline: using cached <url> (cached 3 days ago)`), so stdout stays
+parseable and an agent has the caveat it needs. A miss names the exact URL and
+the command that would have warmed it, and exits 1 — the `3a410bf` "report a
+failure, don't guess" contract, extended to the offline case. When *not* offline
+and the network fails, the behaviour is unchanged (still an error) except that
+the message now names the cached copy and the switch that would use it, which is
+the one thing an agent that just lost its network can act on alone.
 
-**Criteria:**
+The cold-environment question the original sketch left open is answered by none
+of (a), (b) or (c) as written: write-through already covers it. Running a
+command with network caches every resource that same command needs offline, so
+the warm-up *is* the command, and a miss quotes the failing invocation back
+(`run this where there is network to populate the cache: jetpack version androidx.wear.tiles:tiles ALPHA`)
+— a more precise remedy than any generic warm command, because it cannot be
+wrong about what was wanted. A `warm cache` subcommand was built first and then
+removed: it could only ever guess which version, and with or without sources, a
+later run would ask for, and each wrong guess is a miss the caller still hits.
+(b), a snapshot checked into the repo, was rejected outright: the GMaven class
+index is ~10MB compressed and changes daily. `jetpack doctor` is the other half
+of the CI/sandbox story — read-only, reports dependencies, offline mode, cache
+location and index age, and exits non-zero on any WARN/ERROR so a job can gate
+on it before trusting an offline answer. It reports missing dependencies rather
+than exiting 127 on the first one, and treats a missing index as INFO online
+(self-healing) but ERROR offline.
 
-- A single environment variable (e.g. `JETPACK_OFFLINE=1` — see the companion
-  item below on naming this consistently across skills) makes every subcommand
-  skip network calls entirely and serve from cache, using stale data rather than
-  erroring, but always noting the cache's age in its output so an agent/user
-  isn't left thinking the answer is current.
-- `version`, `list dependencies`, and `source`/`inspect` gain a cache layer
-  (they currently have none) — extend the existing `CACHE_DIR`/`INDEX_FILE`
-  convention rather than inventing a second cache location.
-- Cache-miss-while-offline is a clear, actionable error (per the existing
-  `3a410bf` "report a failure, don't guess" behavior), not a silent fallback to
-  training-data knowledge.
-- `tests/test-jetpack*` cover the offline path with a pre-warmed fixture cache,
-  mirroring `test-jetpack-search`'s existing `TEST_CACHE_DIR` mocking.
+Two guards exist because they destroy the only copy otherwise: `search --force`
+refuses while offline (it deletes the index before rebuilding), and cache writes
+are best-effort so an unwritable cache directory — a read-only sandbox — never
+fails the command the user actually asked for.
 
-**Sketch:**
+`skills/jetpack/tests/test-jetpack-offline` covers all of this hermetically: 28
+cases against a hand-seeded fixture cache with every request aimed at
+`http://127.0.0.1:1/`, so a cached answer proves the cache was read and a "could
+not reach" proves it was not, with no dependence on the machine's network. Fixed
+along the way, found while exercising a pinned version: `list dependencies`
+routed every version through `cmd_version`, which only accepts symbolic types,
+so a pinned version (`list dependencies foo 1.6.1`) failed with "invalid version
+type" and then built a POM URL out of an empty string.
 
-- Reuse `CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jetpack"`, already used by
-  `search`/`resolve`; extend it to `version`/`list dependencies`/`source` rather
-  than a second cache location.
-- Model the offline toggle and the "warm then freeze" workflow directly on
-  `skills/workspace-config/tests/common.sh`'s existing pre-warmed-cache pattern:
-  run once with real network to populate `CACHE_DIR`, then set the offline env
-  var for everything after.
-- Open question, not yet resolved: how does a *fresh* environment with no prior
-  local cache and no network (a clean CI runner, a from-scratch sandboxed agent)
-  get a warm cache in the first place? Candidates to weigh: (a) a
-  `jetpack cache warm` subcommand run once in a network-enabled setup step
-  before the offline job runs; (b) checking a periodically-refreshed snapshot of
-  the GMaven index (and/or common coordinates' metadata) into the repo or a
-  release artifact for CI to seed from; (c) documenting cold+offline as
-  unsupported rather than solving it. Needs a decision before implementation,
-  not just a mechanism.
-- Depends on deciding the naming/semantics question in the companion item below
-  before committing to `JETPACK_OFFLINE` specifically.
+## Normalize cache-directory and offline-mode conventions across skill scripts (2026-07-27) — done
 
-## Normalize cache-directory and offline-mode conventions across skill scripts (2026-07-27)
+The convention is written up in `skills/coding-standards/references/caching.md`,
+referenced from `cli-tools.md` (interface), `shell.md` (the two bash traps:
+guarding cache writes under `set -euo pipefail`, and distinguishing "no
+response" from "an error response"), and the `coding-standards` SKILL.md. Cache
+location is `${<TOOL>_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/<tool>}`, where
+`<TOOL>_CACHE_DIR` names the tool's own directory rather than the base it sits
+in, one root per tool.
 
-**Problem:** Cache-directory handling is already inconsistent across scripts
-that cache network responses: `context`, `oracle`, and `photo-query` (all in
-`agent-tools`) use a plain `${XDG_CACHE_HOME:-~/.cache}/<tool>` path with no
-per-tool override; `skill` (`workspace-config`) supports a dedicated
-`SKILL_CACHE_DIR` override ahead of `XDG_CACHE_HOME`; `jetpack` uses the plain
-form again, but only for its `search`/`resolve` GMaven index. None of these
-share a documented offline-mode convention; each would otherwise reinvent one ad
-hoc, which is exactly what the companion "Make jetpack work offline" item above
-was about to do in isolation.
+The naming question is decided as both, not either: `<TOOL>_OFFLINE` wins when
+set (including when set to `0`, to opt one tool out), otherwise the
+workspace-wide `AGENT_OFFLINE` applies. That is not a compromise but the
+existing two-tier rule in `workspace-config`'s SKILL.md — `AGENT_*` is policy a
+human sets for an environment, `<TOOL>_*` is per-tool plumbing — and it matches
+`UV_OFFLINE`, which the test suites already set. A caller who cannot enumerate
+every command a build or agent session will invoke needs one switch for all of
+them; a `--offline` flag alone cannot do that, so the variable is primary.
 
-**Goal:** One documented convention, discoverable from `coding-standards`, that
-any network-calling script in this repo follows for (a) where its cache lives
-and (b) how a caller forces it to run offline against that cache.
+Audit of the five scripts that cache something:
 
-**Criteria:**
+- `jetpack` — `JETPACK_CACHE_DIR` + offline mode + `doctor` (see the item
+  above).
+- `skill` — `SKILL_CACHE_DIR` meant the *base*
+  (`$SKILL_CACHE_DIR/skill/remotes`); now it names the cache directory itself,
+  via a new `get_cache_dir()` that both `get_cache_base()` and
+  `get_catalog_dir()` derive from. Gained `SKILL_OFFLINE` /`AGENT_OFFLINE`:
+  `fetch_github` serves a previously downloaded remote skill at any age
+  (ignoring `--force`, which cannot be honoured without network) and reports how
+  old it is, or dies naming `skill add <name>` if it was never fetched; catalog
+  metadata degrades quietly since it is only descriptions. This matters most for
+  `preflight`, which gates agent launch and should not depend on GitHub being
+  reachable.
+- `context` — gained `CONTEXT_CACHE_DIR` and `CONTEXT_OFFLINE`/`AGENT_OFFLINE`.
+  Only URL targets are gated; local directories and entries are built from the
+  machine itself and are left alone. Two cases added to `test-context`.
+- `photo-query` — cached under `agent-tools/photo-query`, the only script
+  grouping by skill rather than by tool; moved to `photo-query` with a
+  `PHOTO_QUERY_CACHE_DIR` override. No offline mode, recorded in its docstring:
+  the cache holds locally derived thumbnails, not fetched data, and the Gemini
+  call the tool exists to make cannot be served from it. The old directory's
+  contents are regenerated on demand.
+- `oracle` — `ORACLE_CACHE_DIR` added for symmetry, no offline mode, reason
+  recorded inline: `~/.cache/oracle` is a transcript of past consultations, not
+  a response cache. Every run is a fresh model call against a new prompt, so
+  there is nothing there to serve a later run from.
 
-- A written convention exists and is referenced from `cli-tools.md`/`shell.md`
-  (per this repo's existing pattern of centralizing cross-skill guidance in
-  `coding-standards`, not per-skill).
-- `jetpack`, `oracle`, `context`, `photo-query`, and `skill` are audited against
-  it; deviations are either fixed or have a recorded reason.
-- The offline-mode env var name and semantics are decided once — candidate:
-  mirror `uv`'s `--offline`/`UV_OFFLINE` (a per-tool `<TOOL>_OFFLINE=1`, or one
-  repo-wide var; this needs an explicit decision, not just a default) — and
-  documented alongside the "warm cache with real network, then freeze" pattern
-  already proven in `skills/workspace-config/tests/common.sh`.
-
-**Sketch:** Start from an audit (`rg` for `XDG_CACHE_HOME`, `CACHE_DIR`,
-`_CACHE_DIR` across `skills/`) to enumerate every script that already caches
-something, then decide the convention before jetpack's offline-mode work above
-implements a one-off.
+`tests/README.md` documents `AGENT_OFFLINE=1` alongside `UV_OFFLINE=1` (the two
+cover different layers: dependency resolution vs. the scripts' own calls) and
+points at `test-jetpack-offline` as the pattern for tests that need a specific
+cache state.
 
 ## Enable more of ruff's default rule set (2026-07-26) — done
 

@@ -14,6 +14,7 @@ complete -c jetpack -n __fish_use_subcommand -a source -d 'Download and extract 
 complete -c jetpack -n __fish_use_subcommand -a inspect -d 'Resolve class name and download source'
 complete -c jetpack -n __fish_use_subcommand -a resolve-exceptions -d 'Find missing exceptions for resolve'
 complete -c jetpack -n __fish_use_subcommand -a search -d 'Search for artifacts by package or class name'
+complete -c jetpack -n __fish_use_subcommand -a doctor -d 'Report dependencies, offline mode, and cache state'
 
 # version subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from version' -s h -l help -d 'Display help'
@@ -50,3 +51,6 @@ complete -c jetpack -n '__fish_seen_subcommand_from list; and __fish_seen_subcom
 # search subcommand
 complete -c jetpack -n '__fish_seen_subcommand_from search' -s h -l help -d 'Display help'
 complete -c jetpack -n '__fish_seen_subcommand_from search' -l force -d 'Force cache rebuild'
+
+# doctor subcommand
+complete -c jetpack -n '__fish_seen_subcommand_from doctor' -s h -l help -d 'Display help'

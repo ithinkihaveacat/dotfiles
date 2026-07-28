@@ -43,6 +43,16 @@ Commands:
 Options:
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Workspace plugin
+
+Environment:
+  SKILL_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
+                     has already been downloaded (at any age) instead. A skill
+                     that has never been fetched is an error, not a guess.
+  AGENT_OFFLINE      Workspace-wide offline policy, used when SKILL_OFFLINE is
+                     unset. Set this in a CI job or agent sandbox with no
+                     egress.
+  SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
+                     (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)
 ```
 
 <!-- /generated -->
@@ -85,8 +95,7 @@ Agents:
 
 ## envrc
 
-The block below is `scripts/envrc --help`, kept in sync by
-`command-index-sync`.
+The block below is `scripts/envrc --help`, kept in sync by `command-index-sync`.
 
 <!-- generated: ../scripts/envrc --help -->
 

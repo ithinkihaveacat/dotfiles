@@ -73,6 +73,14 @@ standards in `cli-tools.md`.
 
 @references/shell.md
 
+### Caching and Offline Mode
+
+The cross-cutting convention for scripts that fetch over the network: where the
+cache lives, how a caller forces the tool offline against it, and what CI jobs
+and sandboxed agents need from both.
+
+@references/caching.md
+
 ### Android Development
 
 Tools for working with Android Jetpack libraries, ADB operations, APK analysis,
