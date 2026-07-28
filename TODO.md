@@ -183,67 +183,60 @@ flags.
 - Determine whether a common helper or consistent error-trapped probing pattern
   should be applied across all completion entries.
 
-## Continue evaluating jetpack with skill-eval-harness (2026-07-27)
+## Continue evaluating jetpack with skill-eval-harness (2026-07-27) — done
 
-**Problem:** `skills/jetpack/evals/shared-benchmark.json` (12 cases: 6
-`library-lookup`, 6 `trigger`) exists but has barely been exercised. This
-session ran exactly one case (`pos-version-stable`) through
-`skill-benchmark prepare`/`run-codex`/`benchmark`, repeatedly, to shake out
-tooling problems rather than to actually evaluate the skill — and it still found
-two real, distinct issues on the way: `scripts/jetpack` required bash 4.0 for
-one `mapfile` call (fixed, commit `050b3eb`), and `run-codex` hardcodes
-`--sandbox read-only`, which blocks `mktemp`/network entirely and made an
-already-correct script look broken (worked around per-invocation with
-`--codex-cmd "codex exec --json --sandbox workspace-write -c sandbox_workspace_write.network_access=true"`,
-not yet a permanent fix). Only after both were understood did
-`pos-version-stable` show a clean lift (`with_skill` 1.0 vs `without_skill` 0.5,
-`case_flags` empty). The other 5 `library-lookup` cases and all 6 `trigger`
-cases (which need `skill-trigger-matrix`, not `benchmark`) haven't been run at
-all.
+All 6 `library-lookup` tune cases and all 6 `trigger` cases have been run, and
+the harness earned its keep: three fixes landed as a direct result.
 
-**Goal:** Reach one of two explicit end states, not just "ran it a few more
-times": either (a) `jetpack` has been iterated on, using whatever the harness
-surfaces, until there's confidence the skill is solid across its case set — or
-(b) a written verdict that `skill-eval-harness` isn't worth continuing to invest
-in for this skill. This is a continuation of the smoke-testing already underway,
-not a restart; it depends on known jetpack bugs being fixed as they're found (as
-`050b3eb` already was), not on some separate fixed-up prerequisite state.
+`skill-benchmark` over the 6 `pos-*` cases (Codex, workspace-write + network,
+one run per variant) gives `with_skill` 1.0 against `without_skill` 0.42,
+`case_flags` empty, sign-flip p=0.031. The lift is entirely *process*: with the
+network open, the baseline arm answers most of these correctly by curling
+`developer.android.com` or `android.googlesource.com` by hand, so the outcome
+assertions are base-saturated and only the `command_ran` assertions
+discriminate. That is worth knowing before reading any future outcome delta on
+this manifest as a capability claim.
 
-**Criteria:**
+What the harness caught, in the order it caught it:
 
-- All 6 `library-lookup` tune cases have been run (`with_skill`/`without_skill`,
-  Codex, workspace-write + network) and graded; each case's `case_flags` is
-  either clean or has a recorded, justified reason (e.g. base-saturated — not a
-  real regression).
-- The 6 `trigger` cases have been run through `skill-trigger-matrix`, or their
-  deferral is explicitly noted with why.
-- Either one or more jetpack fixes have landed as a direct result (each its own
-  commit, as with `050b3eb`), or this item (or a follow-up) records a
-  one-paragraph verdict on whether the harness earned its keep here — citing
-  what it did and didn't catch, not just a feeling.
+- **A real jetpack bug** (`c5b6d0b3`). Running under `run-codex`'s default
+  sandbox — read-only, which is what a warmed cache is supposed to make
+  survivable — `jetpack version` exited 1 with an xmllint parser error while the
+  answer sat in the cache. `mktemp` had failed, `tmp=$(mktemp)` swallowed it,
+  and the empty path reached `cp "$cache_file" ""`, which BSD cp resolves to
+  `./<basename>`: a stray `maven-metadata.xml` in the caller's working
+  directory. `version`, `list versions`, `list dependencies`, `resolve`, and
+  `search` now read the cache where it lies and need no writable filesystem;
+  `source`/`inspect` still need somewhere to extract a JAR and now say so,
+  naming `--output`.
+- **A leaky assertion in this repo's own manifest** (`bf7c4f9f`).
+  `pos-inspect-implementation` asserted /`TileService\.(kt|java)`/ meaning "read
+  the real source". The arm that downloaded and read the published source failed
+  it (a good answer quotes signatures, not filenames) while the arm that did not
+  passed on a citation URL ending in `TileService.java` — the oracle scored the
+  two arms backwards.
+- **A trigger false positive** (`997d6efc`). `skill-trigger-matrix` (claude,
+  sonnet+opus, 3 runs per query) fired the skill on "teach me the basics of
+  composables and state hoisting" in 5 of 6 runs, because the description ended
+  in a bare keyword list and "jetpack" matches any mention of Jetpack Compose.
+  Rewriting it around the class of question cut that to 2 of 6 and moved the
+  matrix 27/36 → 29/36.
 
-**Sketch:**
+Two things the harness did *not* catch, both oracle-side.
+`pos-resolve-coordinate` scored `without_skill` 0.0 on an answer that was
+correct: the model emitted a zero-width space inside the coordinate and the
+regex missed it, so that case's outcome delta is spurious. And a `--workers 3`
+trigger run had 29 of 36 invocations fail outright (exit 1,
+`observation_complete: false`); the summary table scored those as trigger
+failures rather than excluding them, reporting a catastrophic 0/18 regression
+that was nothing but a failed run. Check `observation_complete` before believing
+any trigger number.
 
-- Pick up where this session left off:
-  `skill-benchmark prepare skills/jetpack/evals/shared-benchmark.json --split tune --runs-per-variant 1 --out tasks.jsonl`
-  emits only the 6 `pos-*` rows (the `trig-*` cases are for
-  `skill-trigger-matrix`, a separate tool, not `prepare`/`benchmark`).
-- Keep using the `--codex-cmd` override above until sandbox permissions are
-  addressed some other way — `run-codex`'s own default makes a correct script
-  fail, which is easy to misdiagnose as a jetpack bug (it already was, once,
-  this session).
-- Once single-run signal looks stable per case, raise `--runs-per-variant` to
-  catch flakiness — the harness's pass@k/pass^k reliability plumbing exists for
-  exactly this and hasn't been exercised yet.
-- No case declares `files`, so no fixture directory work is needed alongside
-  this.
-- Worth revisiting now: "Make jetpack work offline with a pre-warmed cache"
-  below is done, so `version`/`resolve`/`list dependencies`/`source` all answer
-  from `$JETPACK_CACHE_DIR` under `AGENT_OFFLINE=1`. A run that warms the cache
-  first (network-enabled, outside the sandbox) should be evaluable under
-  `run-codex`'s default `read-only` sandbox — except that sandbox also blocks
-  `mktemp`, which several jetpack paths still need, so check that before
-  assuming the `--codex-cmd` override can be dropped.
+Left deliberately undone: `--runs-per-variant` stayed at 1 for the benchmark
+side, so the pass@k/pass^k reliability plumbing is still unexercised; the
+holdout and holdback splits are still empty; and Sonnet's recall on
+`trig-pos-coordinate-request` (1/3 before the description change, 0/3 after) is
+a real gap that three runs cannot resolve either way.
 
 ## Make jetpack work offline with a pre-warmed cache (2026-07-27) — done
 
