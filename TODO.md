@@ -1,5 +1,32 @@
 # TODO
 
+## Re-evaluate the need for per-tool offline overrides (2026-07-28)
+
+**Problem:** The caching convention currently supports both a global
+`AGENT_OFFLINE` policy and a per-tool `<TOOL>_OFFLINE` override (e.g.,
+`JETPACK_OFFLINE`, `CONTEXT_OFFLINE`). This dual-tier approach requires every
+script that fetches network data to implement variable precedence, document both
+variables in its help text, and test the overriding logic. It also clutters the
+caching standards documentation. It is not clear if there is a genuine,
+compelling use case for running one tool offline while allowing others network
+access in the same environment.
+
+**Goal:** Decide whether to drop the per-tool `<TOOL>_OFFLINE` overrides and
+simplify the convention to rely solely on the workspace-wide `AGENT_OFFLINE`
+variable, and implement the simplification if justified.
+
+**Criteria:** A decision is made and recorded. If the overrides are dropped, all
+relevant scripts (`jetpack`, `context`, `skill`, etc.) are updated to read only
+`AGENT_OFFLINE`, their help text and tests are simplified, and `caching.md` is
+updated to reflect the single-variable policy.
+
+**Sketch:** Audit the current usage of per-tool overrides in CI and local
+setups. If there's no scenario where a caller deliberately mixes offline and
+online tools in the same session, remove the `<TOOL>_OFFLINE` check from
+`is_offline()` implementations across the repository. This would significantly
+reduce boilerplate in bash scripts and simplify the `Environment:` block in CLI
+help text.
+
 ## Continue evaluating jetpack with skill-eval-harness (2026-07-27)
 
 **Problem:** `skills/jetpack/evals/shared-benchmark.json` (12 cases: 6

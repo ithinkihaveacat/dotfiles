@@ -34,14 +34,28 @@ ${<TOOL>_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/<tool>}
 - **No sensitive data:** The cache must be safe to share across CI jobs and
   sandboxed agents. Never cache credentials or user-specific data.
 
+## Cache Layout
+
+For URLs with path-like structures, mirror the URL directly under the cache root
+rather than hashing it:
+
+```text
+<cache>/http/dl.google.com/android/maven2/.../maven-metadata.xml
+```
+
+A mirrored path is human-readable, easy to diff between CI runs, and simple to
+prune. Hashes are opaque. Reject components that would escape the cache root
+(e.g., `..`, empty segments), and do not cache URLs that cannot be safely
+mapped.
+
 ## The Offline Switch
 
 Control offline behavior via environment variables:
 
-```text
-<TOOL>_OFFLINE   Per-tool override; takes precedence (e.g., set to 0 to opt out).
-AGENT_OFFLINE    Workspace-wide policy; used when <TOOL>_OFFLINE is unset.
-```
+- **`<TOOL>_OFFLINE`**: Per-tool override; takes precedence (e.g., set to 0 to
+  opt out).
+- **`AGENT_OFFLINE`**: Workspace-wide policy; used when `<TOOL>_OFFLINE` is
+  unset.
 
 Treat `1`, `true`, `yes`, and `on` (case-insensitive) as true. Anything else is
 false.
@@ -51,6 +65,10 @@ Callers running multiple commands (e.g., CI jobs, agent sessions) need a way to
 disable network access globally without appending flags to every command.
 
 ### Offline Behavior
+
+Offline mode does not simulate a clean, no-network environment. Instead, **it
+explicitly dictates that a cached copy obtained from the network will absolutely
+be used if present (by design).**
 
 - **Make no network calls:** Never attempt network requests in offline mode. Do
   not "try, then fall back"—network timeouts slow down execution and produce
@@ -74,7 +92,7 @@ jetpack version: run this where there is network to populate the cache:
   jetpack version androidx.wear.tiles:tiles ALPHA
 ```
 
-#### Handling Incomplete Answers
+### Handling Incomplete Answers
 
 Some operations require multiple network requests. Online, a tool might silently
 ignore a failed network request if it's considered optional, returning a partial
@@ -109,20 +127,6 @@ to the user.
   directory may be unwritable. Silently skip the cache write and continue
   execution.
 
-## Cache Layout
-
-For URLs with path-like structures, mirror the URL directly under the cache root
-rather than hashing it:
-
-```text
-<cache>/http/dl.google.com/android/maven2/.../maven-metadata.xml
-```
-
-A mirrored path is human-readable, easy to diff between CI runs, and simple to
-prune. Hashes are opaque. Reject components that would escape the cache root
-(e.g., `..`, empty segments), and do not cache URLs that cannot be safely
-mapped.
-
 ## Warming the Cache
 
 The standard way to warm a cache is **write-through**: running a command online
@@ -153,54 +157,24 @@ whether offline mode is currently active.
 
 ## Where This Pays Off
 
-### CI
+**CI Environments**: CI jobs usually have network access, but problems arise
+from shared egress getting rate-limited, third-party endpoints failing
+independently, and the need for two runs of one commit to behave identically. A
+mid-job network call is a flake and a reproducibility hole even when it
+succeeds.
 
-CI usually *has* network, which is why the constraint is easy to miss. The
-problems are elsewhere: shared egress that gets rate-limited or blocked,
-third-party endpoints that fail independently of your change, and two runs of
-one commit that have to behave the same. A mid-job network call is a flake and a
-reproducibility hole even when it succeeds.
+Using `AGENT_OFFLINE=1` on the job (after a dedicated cache priming step)
+ensures that steps like `make build` are pinned to data fetched once and open to
+inspection.
 
-```yaml
-- name: Restore tool cache
-  uses: actions/cache@v4
-  with:
-    path: ~/.cache/jetpack
-    key: jetpack-${{ hashFiles('deps.txt') }}
-
-- name: Prime the cache       # the only step allowed to touch the network
-  run: for a in $(cat deps.txt); do jetpack list dependencies "$a"; done
-
-- name: Build                 # deterministic; a network blip cannot reach it
-  run: make build
-  env:
-    AGENT_OFFLINE: 1
-```
-
-One step owns the network, the cache restore makes it a no-op on most runs, and
-everything after is pinned to data fetched once and open to inspection.
-`AGENT_OFFLINE` goes on the job rather than each command precisely because the
-job cannot know what `make build` will reach for.
-
-### Sandboxed Agents
-
-Agent sandboxes increasingly deny network access outright — Codex's `read-only`
-sandbox, and `workspace-write` without
-`sandbox_workspace_write.network_access=true`, both do — and that denial is a
-safety feature, not a misconfiguration to route around.
+**Sandboxed Agents**: Agent sandboxes increasingly deny network access outright
+as a safety feature (e.g., Codex's `read-only` sandbox).
 
 - **Set `AGENT_OFFLINE=1` in the sandbox environment**, so tools skip calls they
-  cannot make instead of spending the session's time on connect timeouts and
-  reporting failures that read like "this library does not exist".
+  cannot make instead of spending the session's time on connect timeouts.
 - **Behave sanely when it is not set**, because often it will not be: the
   network is simply gone and the tool finds out by failing. Distinguish "the
-  server said no" from "no server was reached" (an HTTP status versus no
-  response at all), say which happened, and point at offline mode when a cached
-  copy exists. Never present a remembered answer as a fetched one.
-- A read-only sandbox may also make the cache unwritable — see **Never let cache
-  writes fail the run** above.
-
-The repo's own suites run this way, under `UV_OFFLINE=1` against a pre-warmed
-`uv` cache. See `skills/workspace-config/tests/common.sh` for the "warm with
-real network, then freeze" pattern, and `tests/README.md` for running the suite
-offline.
+  server said no" from "no server was reached", say which happened, and point at
+  offline mode when a cached copy exists.
+- A read-only sandbox may also make the cache unwritable — this is handled
+  gracefully by silently skipping cache writes.
