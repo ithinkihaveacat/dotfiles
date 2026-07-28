@@ -464,7 +464,9 @@ physical Samsung Galaxy Watches:
 
 - **Automatic Wake and Switch**: `adb-tile-switch` automatically wakes the
   screen and displays the tile.
+
 - **Vertically Scrollable Widget Pages**:
+
   - On One UI Watch (Samsung), a single carousel slot (page) can host multiple
     vertically stacked widgets instead of a single fullscreen tile (for example,
     the "Basic" page grouping Weather, Calendar, and Battery widgets).
@@ -486,11 +488,14 @@ physical Samsung Galaxy Watches:
     id=12 packageName=com.samsung.android.calendar ... vendorMetadata={"pId":2,"pR":1,"pT":"Basic"}
     id=13 packageName=com.samsung.android.watch.batterytile ... vendorMetadata={"pId":2,"pR":2,"pT":"Basic"}
     ```
+
 - **Doze / Timeout Warning**: Samsung Galaxy Watches transition to
   ambient/locked state very quickly (often within 5–10 seconds of inactivity).
   Ensure you capture screenshots or verify behavior immediately after running
   `adb-tile-switch` to prevent the device from entering doze or locking again.
+
 - **UI Automation for Grouped Widgets (Popper)**:
+
   - Because the Samsung "Add Tile/Widget Picker" activity
     (`SecTileComposeAddableActivity`) is private and not exported, it cannot be
     launched directly via `adb shell am start`.
@@ -541,6 +546,27 @@ physical Samsung Galaxy Watches:
        adb shell input keyevent KEYCODE_HOME
        adb shell input keyevent KEYCODE_HOME
        ```
+
+- **Capturing End-to-End User Interaction Videos**:
+
+  - **UI-Driven Recording over Background Broadcasts**: When capturing video
+    recordings for widget audits or deliverables, always record the visual UI
+    journey on-screen rather than relying solely on silent background broadcast
+    commands (`add-tile`) that bypass the user interface.
+  - **Automating the Picker Journey**: Use UI automation tools (like `popper` or
+    scriptable input touch gestures) with `adb-screenrecord` to perform natural
+    gestures through the watch interface:
+    1. Enable visual touch feedback
+       (`adb shell settings put system show_touches 1`).
+    1. Wake screen and establish initial carousel context.
+    1. Navigate to the `+ Add` tiles button (by scrolling to the end of the
+       carousel or entering page edit mode).
+    1. Scroll down the *Add tiles* list to *Optimized apps*, expand the
+       application's accordion item, and tap the widget preview to add it.
+    1. Show the widget active and rendered in its carousel slot, and swipe
+       through adjacent tiles.
+    1. *(Optional)* Long press to enter Edit mode and demonstrate reordering
+       stacked widgets.
 
 ______________________________________________________________________
 

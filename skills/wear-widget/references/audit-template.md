@@ -8,12 +8,15 @@ outputs, and bugs.
 
 ### General Presentation Guidelines
 
-- **Folder and Asset Structure**: Each integration audit must be self-contained within its own dedicated directory (e.g. `[app_name]/` or `sample/`) organized as follows:
+- **Folder and Asset Structure**: Each integration audit must be self-contained
+  within its own dedicated directory (e.g. `[app_name]/` or `sample/`) organized
+  as follows:
   - `index.html`: The HTML version of the report.
   - `index.md`: The Markdown equivalent of the report.
   - `images/`: Subdirectory containing all screenshot and visual assets.
-  - `videos/`: Subdirectory containing all video captures and recordings.
-  All links inside the HTML and Markdown documents must be relative to ensure portability.
+  - `videos/`: Subdirectory containing all video captures and recordings. All
+    links inside the HTML and Markdown documents must be relative to ensure
+    portability.
 - **No Image Masking or Clipping**: All images embedded in the report—both the
   extracted static preview drawables from the APK and the live watch screen
   captures—must be displayed exactly as they are. Do not apply circular viewport
@@ -84,26 +87,58 @@ resources:
 
 ### 4. Live Device Screen Captures
 
-Present actual live screenshots and recordings of the tiles/widgets running on the watch face. Label each capture with the service name that rendered it.
+Present actual live screenshots and recordings of the tiles/widgets running on
+the watch face. Label each capture with the service name that rendered it.
 
-To ensure robust layout validation, **it is highly recommended to collect and compare media from multiple device environments** (e.g., standard emulators vs. physical hardware, varying Wear OS API levels, or different OEM system renderers). If certain environments are unavailable during the initial pass, structure the report's layout to make space for these additions to be appended later.
+To ensure robust layout validation, **it is highly recommended to collect and
+compare media from multiple device environments** (e.g., standard emulators vs.
+physical hardware, varying Wear OS API levels, or different OEM system
+renderers). If certain environments are unavailable during the initial pass,
+structure the report's layout to make space for these additions to be appended
+later.
 
 #### Recommended Structure for Multi-Device Layouts:
 
-Group captures under sub-sections corresponding to each test environment, for example:
+Group captures under sub-sections corresponding to each test environment, for
+example:
 
-*   **4.1 Environment A (e.g., Physical Samsung Galaxy Watch SM-L340)**
-    *   Specify the device model, Wear OS API level, and system renderer.
-    *   Include successful synced states, logged-out states, and video walkthroughs.
-*   **4.2 Environment B (e.g., Wear OS API 37 Emulator)**
-    *   Include corresponding states and interaction loops to highlight any visual layout/rendering differences compared to physical hardware.
+- **4.1 Environment A (e.g., Physical Samsung Galaxy Watch SM-L340)**
+  - Specify the device model, Wear OS API level, and system renderer.
+  - Include successful synced states, logged-out states, and video walkthroughs.
+- **4.2 Environment B (e.g., Wear OS API 37 Emulator)**
+  - Include corresponding states and interaction loops to highlight any visual
+    layout/rendering differences compared to physical hardware.
 
 #### Required Verification Media:
 
-- **Multiple Layout States:** Capture the widget/tile across different runtime contexts, including unauthenticated/logged-out states, empty/loading states, custom configuration panels, and successful synced states.
-- **Dynamic Interaction Walkthroughs:** Include trimmed MP4 videos demonstrating active interaction flows. Highlight specific actions, such as:
+- **Multiple Layout States:** Capture the widget/tile across different runtime
+  contexts, including unauthenticated/logged-out states, empty/loading states,
+  custom configuration panels, and successful synced states.
+- **End-to-End Carousel & Addition Walkthrough Video:** Include a clean MP4
+  video (20–60s) capturing the complete user journey of adding and using widgets
+  on the watch. To ensure the recording clearly communicates the user experience
+  to stakeholders:
+  - **Visual Touch Feedback:** Ensure system touch indicators are enabled
+    (`settings put system show_touches 1`) so all on-screen taps, long-presses,
+    and swipes produce visible touch ripples.
+  - **Initial Carousel Context:** Start the recording on the watch face or an
+    existing tile page to establish initial context.
+  - **On-Screen Picker Navigation:** Record navigating the native device UI to
+    add the widget (e.g. tapping `+ Add tiles`, scrolling through the picker
+    categories, expanding the app entry under *Optimized apps*, and selecting
+    the target widget preview).
+  - **Live Render & Carousel Fit:** Show the newly added widget rendered live
+    within its slot in the carousel or stacked page layout.
+  - **Interactive Navigation:** Perform swipe interactions demonstrating how the
+    widget functions and fits among surrounding tiles.
+  - **(Optional) Layout Customization:** Demonstrate entering Edit mode
+    (long-pressing the page) to reorder or rearrange stacked widgets within a
+    multi-widget page layout.
+- **Dynamic Interaction Walkthroughs:** Include trimmed MP4 videos demonstrating
+  active interaction flows. Highlight specific actions, such as:
   - Tapping a button to launch the main watch application activity.
-  - Tapping a button/icon to trigger in-place state mutation (e.g. refreshing weather sync data).
+  - Tapping a button/icon to trigger in-place state mutation (e.g. refreshing
+    weather sync data).
   - Transitioning between different page counts or carousel panels.
 
 ### 5. Platform & Application Bugs (Optional)
