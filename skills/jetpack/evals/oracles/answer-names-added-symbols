@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+#
+# Grade-time oracle for skill-eval-harness `script` assertions.
+#
+# Tests: ../../tests/test-jetpack-eval-oracles
+
+set -uo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") ANSWER ARTIFACT OLD_VERSION NEW_VERSION
+
+Check that an agent's answer names every public declaration a Maven artifact
+gained between two versions.
+
+Downloads both versions' source JARs, diffs them, and collects the public
+Kotlin/Java declarations that appear only in NEW_VERSION. The answer passes
+only if it names all of them, which an answer written from memory or from
+release notes cannot reliably do.
+
+Arguments:
+  ANSWER        Path to the file holding the agent's answer
+  ARTIFACT      Maven coordinate (GROUP_ID:ARTIFACT_ID)
+  OLD_VERSION   The earlier version
+  NEW_VERSION   The later version
+
+Options:
+  --help, -h    Display this help message and exit
+
+Exit status:
+  0  the answer names every added declaration
+  1  the answer misses at least one, or no declarations were added
+  2  the diff could not be computed (download failed)
+
+Examples:
+  $(basename "$0") run/output.md androidx.compose.remote:remote-tooling-preview \\
+    1.0.0-alpha08 1.0.0-alpha09
+
+  # As a manifest assertion, with {output_path} substituted by the harness:
+  #   {"type": "script", "command": ["oracles/$(basename "$0")",
+  #    "{output_path}", "androidx.compose.remote:remote-tooling-preview",
+  #    "1.0.0-alpha08", "1.0.0-alpha09"]}
+
+Honours JETPACK_OFFLINE/AGENT_OFFLINE, so a warmed cache grades without
+network. Published versions are immutable, so a pinned pair always yields the
+same expected set.
+EOF
+  exit 0
+}
+
+if [[ ${1:-} == "--help" || ${1:-} == "-h" ]]; then
+  usage
+fi
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$SCRIPT_NAME: $1 not found"
+    exit 127
+  }
+}
+
+if [[ $# -lt 4 ]]; then
+  echo "$SCRIPT_NAME: need an answer file, an artifact, and two versions" >&2
+  echo "  $SCRIPT_NAME run/output.md androidx.compose.remote:remote-tooling-preview 1.0.0-alpha08 1.0.0-alpha09" >&2
+  echo "Run '$SCRIPT_NAME --help' for usage" >&2
+  exit 1
+fi
+
+ANSWER=$1
+ARTIFACT=$2
+OLD=$3
+NEW=$4
+
+require diff
+require grep
+
+JETPACK=${JETPACK_BIN:-$(cd "$(dirname "$0")/../../scripts" && pwd)/jetpack}
+if [[ ! -x $JETPACK ]]; then
+  echo "$SCRIPT_NAME: jetpack not executable at $JETPACK" >&2
+  exit 2
+fi
+
+if [[ ! -f $ANSWER ]]; then
+  echo "$SCRIPT_NAME: no answer file at $ANSWER" >&2
+  exit 2
+fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/jetpack-oracle.XXXXXXXX") || {
+  echo "$SCRIPT_NAME: could not create a working directory in ${TMPDIR:-/tmp}" >&2
+  exit 2
+}
+trap 'rm -rf -- "$WORK"' EXIT
+
+for version in "$OLD" "$NEW"; do
+  if ! "$JETPACK" source "$ARTIFACT" "$version" --output "$WORK/$version" >/dev/null 2>"$WORK/err"; then
+    echo "$SCRIPT_NAME: could not download $ARTIFACT $version" >&2
+    sed 's/^/  /' "$WORK/err" >&2
+    exit 2
+  fi
+done
+
+# Declarations visible only in the newer tree. Public API is what an answer can
+# reasonably be held to; a private helper moving is not a "change" a caller sees.
+decls() {
+  find "$1" -type f \( -name '*.kt' -o -name '*.java' \) -print0 2>/dev/null |
+    xargs -0 grep -hoE '(public|internal)?[[:space:]]*(class|interface|object|enum class|annotation class)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' 2>/dev/null |
+    grep -oE '[A-Za-z_][A-Za-z0-9_]*$' |
+    sort -u
+}
+
+decls "$WORK/$OLD" >"$WORK/old.txt"
+decls "$WORK/$NEW" >"$WORK/new.txt"
+ADDED=$(comm -13 "$WORK/old.txt" "$WORK/new.txt")
+
+if [[ -z $ADDED ]]; then
+  echo "$SCRIPT_NAME: $ARTIFACT gained no public declarations between $OLD and $NEW" >&2
+  echo "$SCRIPT_NAME: this pair cannot discriminate; pin a pair that does" >&2
+  exit 1
+fi
+
+MISSING=""
+FOUND=""
+while IFS= read -r symbol; do
+  [[ -z $symbol ]] && continue
+  if grep -qF -- "$symbol" "$ANSWER"; then
+    FOUND="$FOUND $symbol"
+  else
+    MISSING="$MISSING $symbol"
+  fi
+done <<<"$ADDED"
+
+if [[ -n $MISSING ]]; then
+  echo "$SCRIPT_NAME: answer does not name:$MISSING" >&2
+  echo "$SCRIPT_NAME: added between $OLD and $NEW:$(echo " $ADDED" | tr '\n' ' ')" >&2
+  exit 1
+fi
+
+echo "answer names every declaration added between $OLD and $NEW:$FOUND"
+exit 0

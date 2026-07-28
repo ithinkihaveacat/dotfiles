@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# Tests for the grade-time oracles under evals/oracles/.
+#
+# The argument and usage surface is exercised without network. The verdict
+# paths need two source JARs, which the oracle downloads through jetpack; they
+# run offline against a warmed cache and are skipped when it is cold, so a
+# clean checkout does not fail here for want of a download.
+
+set -u
+
+SCRIPT_DIR=$(dirname "$0")
+ROOT_DIR="$SCRIPT_DIR/.."
+ORACLE="$ROOT_DIR/evals/oracles/answer-names-added-symbols"
+
+ARTIFACT="androidx.compose.remote:remote-tooling-preview"
+OLD="1.0.0-alpha08"
+NEW="1.0.0-alpha09"
+ADDED="RemotePreviewWrapper"
+
+TEST_TMP=$(mktemp -d)
+trap 'rm -rf "$TEST_TMP"' EXIT
+
+TOTAL_TESTS=9
+TEST_NUM=0
+echo "1..$TOTAL_TESTS"
+
+ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+not_ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  shift
+  local line
+  for line in "$@"; do
+    echo "# $line"
+  done
+}
+
+skip() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1 # SKIP $2"
+}
+
+assert_status() {
+  local description="$1" status="$2" expected="$3"
+  if [[ "$status" -eq "$expected" ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected exit $expected, got $status"
+  fi
+}
+
+assert_contains() {
+  local description="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    ok "$description"
+  else
+    not_ok "$description" "Expected to contain: $needle" "Got: $haystack"
+  fi
+}
+
+run_oracle() {
+  local err_file
+  err_file=$(mktemp)
+  STDOUT=$("$ORACLE" "$@" 2>"$err_file")
+  STATUS=$?
+  STDERR=$(cat "$err_file")
+  rm -f "$err_file"
+}
+
+# --- Usage surface (no network) -------------------------------------------
+
+run_oracle --help
+assert_status "--help exits 0" "$STATUS" 0
+assert_contains "help names the arguments" "$STDOUT" "ANSWER        Path to the file"
+
+run_oracle -h
+assert_status "-h is a help alias" "$STATUS" 0
+
+run_oracle
+assert_status "no arguments is a usage error" "$STATUS" 1
+assert_contains "the usage error points at --help" "$STDERR" "--help"
+
+printf 'irrelevant\n' >"$TEST_TMP/answer.md"
+
+run_oracle "$TEST_TMP/nonexistent.md" "$ARTIFACT" "$OLD" "$NEW"
+assert_status "a missing answer file exits 2, not 1" "$STATUS" 2
+assert_contains "the missing answer file is named" "$STDERR" "no answer file at"
+
+# --- Verdicts (offline, against a warmed cache) ---------------------------
+#
+# Exit 2 means the download failed, which here means the cache is cold rather
+# than that the oracle is wrong; report that as a skip.
+
+printf 'alpha09 adds %s, a PreviewWrapperProvider.\n' "$ADDED" >"$TEST_TMP/good.md"
+printf 'Various bug fixes and performance improvements.\n' >"$TEST_TMP/vague.md"
+
+AGENT_OFFLINE=1 run_oracle "$TEST_TMP/good.md" "$ARTIFACT" "$OLD" "$NEW"
+if [[ "$STATUS" -eq 2 ]]; then
+  skip "an answer naming the added class passes" "cache not warmed for $ARTIFACT"
+  skip "a vague answer fails and names what it missed" "cache not warmed for $ARTIFACT"
+else
+  assert_status "an answer naming the added class passes" "$STATUS" 0
+
+  AGENT_OFFLINE=1 run_oracle "$TEST_TMP/vague.md" "$ARTIFACT" "$OLD" "$NEW"
+  if [[ "$STATUS" -eq 1 && "$STDERR" == *"$ADDED"* ]]; then
+    ok "a vague answer fails and names what it missed"
+  else
+    not_ok "a vague answer fails and names what it missed" \
+      "Expected exit 1 mentioning $ADDED, got $STATUS: $STDERR"
+  fi
+fi
