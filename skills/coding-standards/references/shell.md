@@ -265,10 +265,22 @@ require curl
 
 ### Caching and Offline Mode
 
-Scripts that cache network responses must follow the cache-location and
-offline-mode convention in `caching.md` (`<TOOL>_CACHE_DIR` / `<TOOL>_OFFLINE` /
-`AGENT_OFFLINE`). Two bash-specific points from it are worth restating here,
-because both are easy to get wrong under `set -euo pipefail`:
+Every script that makes a network call must report failures legibly. Scripts an
+agent or CI job drives additionally honor `<TOOL>_OFFLINE` / `AGENT_OFFLINE`,
+and scripts that cache responses follow the cache-location rules on top of that.
+All three obligations, and which scripts each one binds, are defined in
+`caching.md`. Three bash-specific points from it are worth restating here,
+because all three are easy to get wrong under `set -euo pipefail`:
+
+- **A bare `curl` in a command substitution exits the script silently.**
+  `RESPONSE=$(curl -s "$URL")` under `set -e` aborts on curl's non-zero exit
+  before any error handler runs, printing nothing at all — the least actionable
+  failure a sandboxed caller can get. Capture the status instead:
+
+  ```bash
+  status=0
+  raw=$(curl -sS -o "$out" -w '%{http_code}' "$url" 2>/dev/null) || status=$?
+  ```
 
 - **Storing a response must never fail the run.** The cache directory can be
   unwritable (a read-only sandbox), so guard every write and carry on:

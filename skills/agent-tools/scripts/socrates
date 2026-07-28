@@ -377,10 +377,33 @@ def map_concurrent(items, limit, fn):
 # ---- GenAI ----
 
 
+def offline_switch() -> tuple[bool, str]:
+    """Whether network access is forbidden here, and which switch says so.
+
+    Per skills/coding-standards/references/caching.md the per-tool variable wins
+    when set (including when set to 0, to exempt this tool from a workspace-wide
+    policy), otherwise the AGENT_OFFLINE policy applies.
+    """
+    var = "SOCRATES_OFFLINE" if "SOCRATES_OFFLINE" in os.environ else "AGENT_OFFLINE"
+    value = os.environ.get(var, "")
+    return value.strip().lower() in ("1", "true", "yes", "on"), f"{var}={value}"
+
+
 def get_client():
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         error("GEMINI_API_KEY environment variable not set")
+    # Every run is a fresh model call against a new prompt, so there is nothing
+    # cached that could answer offline. Fail at the one place a client is built,
+    # rather than letting each generate_with_retry burn its backoff schedule on
+    # calls the environment has already forbidden.
+    offline, desc = offline_switch()
+    if offline:
+        error(
+            f"offline ({desc}) and no cached answer: this command calls the "
+            "Gemini API. Re-run where there is network, or set "
+            "SOCRATES_OFFLINE=0 to exempt this tool"
+        )
     return genai.Client()
 
 
@@ -745,6 +768,21 @@ def cmd_answer(args):
         error("answer requires a database path argument")
     if not mode:
         error("answer requires --mode <mode>")
+
+    # Gate API-backed modes here rather than relying on the check inside
+    # get_client(): by the time that runs, this command has opened the database
+    # and reserved a run index with a placeholder answer, so failing there
+    # leaves a zombie responder behind. Offline is a policy stated up front and
+    # must not change anything before it declines. 'shell' and 'interactive'
+    # modes make no API call and are unaffected.
+    if mode.split(":", 1)[0] == "model":
+        offline, desc = offline_switch()
+        if offline:
+            error(
+                f"offline ({desc}) and no cached answer: mode '{mode}' calls the "
+                "Gemini API. Re-run where there is network, or set "
+                "SOCRATES_OFFLINE=0 to exempt this tool"
+            )
 
     db_path = resolve_db_path(db_path_arg)
     db = init_db(db_path)

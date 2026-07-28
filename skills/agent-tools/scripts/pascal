@@ -162,16 +162,42 @@ else
 fi
 
 # Execute the request
-RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+# Read the status via -w '%{http_code}' rather than trusting curl's exit code:
+# it is "000" only when no HTTP response arrived at all, which is what separates
+# a blocked or absent network from an API that answered with an error. Capturing
+# the exit code also stops a failed curl from killing the script silently under
+# `set -e`, before any of the handling below can run.
+CURL_STATUS=0
+RAW=$(echo "${REQUEST_BODY}" | curl -sS -X POST \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
-  -d @- \
-  "${URL}")
+  -d @- -w '\n%{http_code}' \
+  "${URL}" 2>/dev/null) || CURL_STATUS=$?
 
-# Check for API errors
-if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
-  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
-  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+HTTP_STATUS="${RAW##*$'\n'}"
+RESPONSE="${RAW%$'\n'*}"
+
+# Classify by status first: -w emits a three-digit code whenever a response
+# arrived, and "000" when none did, which is the only reliable way to separate
+# a blocked or absent network from an API that answered. The exit code is
+# reported here for diagnosis only; it becomes meaningful on the 2xx path below.
+if [[ ! "$HTTP_STATUS" =~ ^[0-9]{3}$ || "$HTTP_STATUS" == "000" ]]; then
+  echo "$(basename "$0"): could not reach $URL (curl exit $CURL_STATUS, http ${HTTP_STATUS:-none}: network unreachable, DNS failure, or blocked egress)" >&2
+  exit 1
+fi
+
+# Only on a 2xx does the exit code say something the status cannot: whether the
+# body finished arriving. A response truncated mid-transfer still reads as HTTP
+# 200, and would otherwise reach the parser below and be reported as the model
+# returning nothing -- a refusal, rather than the transport failure it is.
+if [[ "$HTTP_STATUS" == 2?? && $CURL_STATUS -ne 0 ]]; then
+  echo "$(basename "$0"): $URL returned HTTP $HTTP_STATUS but the body did not finish transferring (curl exit $CURL_STATUS)" >&2
+  exit 1
+fi
+
+if [[ "$HTTP_STATUS" != 2?? ]]; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
+  echo "$(basename "$0"): API error (HTTP $HTTP_STATUS): ${ERROR_MSG:-no error message in response}" >&2
   exit 1
 fi
 

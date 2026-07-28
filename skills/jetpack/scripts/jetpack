@@ -193,8 +193,13 @@ http_get() {
   HTTP_STATUS=$(curl -sSL --connect-timeout 10 --max-time 300 -o "$outfile" \
     -w '%{http_code}' "$url" 2>/dev/null) || curl_status=$?
 
-  if [[ $curl_status -ne 0 || "$HTTP_STATUS" == "000" ]]; then
-    HTTP_ERROR="could not reach $url (curl exit $curl_status, http $HTTP_STATUS: network unreachable, DNS failure, or blocked egress)"
+  # Classify by status first, per the comment above: -w emits three digits
+  # whenever a response arrived and "000" when none did, while curl_status
+  # cannot tell those apart -- an exit 56 carrying a perfectly good 404 would be
+  # reported as an unreachable host. An empty status means curl produced no -w
+  # output at all, which is also "no response".
+  if [[ ! "$HTTP_STATUS" =~ ^[0-9]{3}$ || "$HTTP_STATUS" == "000" ]]; then
+    HTTP_ERROR="could not reach $url (curl exit $curl_status, http ${HTTP_STATUS:-none}: network unreachable, DNS failure, or blocked egress)"
     # Name the cached copy rather than silently serving it: a run that was not
     # told to go offline must not answer from a week-old file behind the
     # caller's back, but an agent that just lost its network needs to be told
@@ -208,6 +213,18 @@ http_get() {
   if [[ "$HTTP_STATUS" != 2?? ]]; then
     HTTP_ERROR="$url returned HTTP $HTTP_STATUS"
     return 1
+  fi
+
+  # Only once a 2xx is in hand does the exit code carry information the status
+  # cannot: whether the body finished arriving. curl reports a truncated
+  # response (exit 18) or a reset mid-transfer (exit 56) while %{http_code}
+  # still reads 200, so accepting on status alone would hand back a partial
+  # POM or JAR and -- worse -- write it through to the cache, where a later
+  # offline run has no way left to tell it is incomplete and every reason to
+  # trust it. Fail instead, and cache nothing.
+  if [[ $curl_status -ne 0 ]]; then
+    HTTP_ERROR="$url returned HTTP $HTTP_STATUS but the body did not finish transferring (curl exit $curl_status); nothing was cached"
+    return 2
   fi
 
   cache_store "$url" "$outfile"
