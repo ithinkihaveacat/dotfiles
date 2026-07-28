@@ -8,16 +8,30 @@ scripts that make network calls outside any rule, because `cli-tools.md` bound
 only tools that "fetch over the network **and** cache the result". Two of them
 were actively lying about failures.
 
-`caching.md` now opens with **Scope: Two Obligations**. Network honesty binds
-every script that makes a call; the cache rules bind only scripts that cache.
-The distinction that section turns on is that a declared offline mode and an
+`caching.md` now opens with **Scope: Three Obligations**, each binding a smaller
+set than the one before: legible failure for every script that makes a call, the
+offline switch for scripts an agent or CI job drives, the cache rules only for
+scripts that cache. A first draft made the switch universal too, which the repo
+violated the day it landed — `whatismyip` and friends were left ungated — and
+the fix was to narrow the standard rather than gate another ten scripts. The
+line for the switch is whether a tool *spends* something before failing: a retry
+budget, an agent loop, side effects on a device. A one-shot pipe that fails in a
+second gains nothing from it that a clear error does not already give.
+
+The distinction the section turns on is that a declared offline mode and an
 absent network are different conditions — `AGENT_OFFLINE` is a policy stated up
 front and means make no call at all, while a missing network is discovered by
 failing and so has to fail legibly. A tool with nothing worth caching is exempt
-from the cache rules and not from the switch: offline means fail immediately,
-and adding a cache that could never be usefully read would be complexity with no
-payoff. `cli-tools.md` and `shell.md` were re-scoped to match, the latter
-gaining the `set -e` trap that caused the worst of the bugs below.
+from the cache rules regardless: a cache that could never be usefully read is
+complexity with no payoff. `cli-tools.md` and `shell.md` were re-scoped to
+match, the latter gaining the `set -e` trap that caused the worst of the bugs
+below.
+
+Rejected on the way: "a script with tests supports the switch, otherwise not".
+Objective and checkable, but it tracks the wrong thing — it would keep
+`markdown-extract-body` (a one-shot stdin pipe) and drop `popper`, which drives
+a phone through an agent loop, and it makes adding a test incur new obligations,
+which argues against writing tests.
 
 Fixed, both cases of reporting a network failure as a result:
 
@@ -36,7 +50,9 @@ Fixed, both cases of reporting a network failure as a result:
   `RESPONSE=$(... | curl -s ...)`. Under `set -euo pipefail` a curl that could
   not resolve the host killed the script *before* its error handler, so the
   caller got exit 6 and not one byte of output. All nine now read
-  `-w '%{http_code}'` and capture curl's exit code.
+  `-w '%{http_code}'` and capture curl's exit code. None of the nine carries the
+  offline switch: each makes a single request and fails at once, so all nine
+  copies of the shared block stay identical.
 
 The status decides, not the exit code — found by the new test, in `token-count`,
 whose curl is the tail of a `jq | curl` pipeline: under `pipefail` `CURL_STATUS`
@@ -54,11 +70,15 @@ provoke a real server into the behaviour; both fail against the old condition.
 An empty status is now treated as "no response" too, which the old check missed
 because it only compared against the literal `000`.
 
-Python tools took the same split: `pacioli` and `photo-query` gained an offline
-gate and a `URLError`/`TimeoutError` arm distinct from the existing `HTTPError`
-one; `socrates` and `popper` gate at `get_client()` and before the agent loop,
-so a run fails at startup rather than burning each step's retry backoff. Both
-SDK tools keep `APIError.code` for the "server said no" side.
+Python tools took the same split: `pacioli` and `photo-query` both gained a
+`URLError`/`TimeoutError` arm distinct from the existing `HTTPError` one.
+`photo-query` also takes the switch, since one invocation makes a request per
+image across a glob; `pacioli` does not, being one email per run. `socrates`
+gates at `get_client()` and `popper` immediately after argument parsing — before
+it connects to the device, rewrites the screen timeout, unlocks, or launches an
+app, so an offline run cannot leave the phone in a changed state — with
+`--dump-layout` exempt, as it never calls the API. Both SDK tools keep
+`APIError.code` for the "server said no" side.
 
 Two `skill` nits from the same audit: `fetch_skill_md` checked its TTL before
 the offline branch, the exact inversion `c405f27` fixed in `fetch_github` two
@@ -66,17 +86,25 @@ functions up, so the warm-then-freeze workflow took the silent path in the
 common case; and `doctor` now reports mode, cache location and remote age, which
 `jetpack doctor` already did.
 
-Deliberately unchanged, and why: `whatismyip`, `url-cat-*`, `url-save-markdown`,
+Left alone, and why: `whatismyip`, `url-cat-*`, `url-save-markdown`,
 `gh-markdown` (live PR state), `node`/`python`/`ruby-install` and the `*-init`
-scripts. A cache would be wrong for these rather than merely absent.
-`emumanager` delegates downloads to `sdkmanager`, which owns its own cache, and
-its `catalog` error already names the network.
+scripts — one-shot tools that fail fast, now covered by the first obligation
+only. `emumanager` delegates downloads to `sdkmanager`, which owns its own
+cache, and its `catalog` error already names the network.
 
-Tests are hermetic in both new files: `test-gemini-offline` runs three cases
-against every script in the family rather than a representative, since drifting
-out of the shared pattern is what it exists to catch, and stubs `curl` on `PATH`
-to force a transport outcome without touching the network or needing a real
-`GEMINI_API_KEY`. `test-jetpack-samples` gains four in the same style.
+One more thing the switch cannot reach, now recorded in `caching.md`: the four
+PEP 723 tools run under `uv run --script`, which resolves and may download
+dependencies before the interpreter reaches any check the script makes. A cold
+`uv` cache still hits PyPI however `AGENT_OFFLINE` is set; it has to be paired
+with `UV_OFFLINE`, which `tests/README.md` already does for the suites.
+
+Tests are hermetic in both new files. `test-gemini-transport` runs three cases —
+no response, an API error, a truncated 200 — against all nine scripts rather
+than a representative, since drifting out of the shared block is what it exists
+to catch; stub `curl` and `magick` on `PATH` force each outcome without touching
+the network, needing ImageMagick, or needing a real `GEMINI_API_KEY`.
+`test-jetpack-samples` gains four in the same style, and `test-jetpack-offline`
+two for the truncated-transfer case.
 
 ## Evaluate error-trapped feature probing for fish completions in install.sh (2026-07-28)
 

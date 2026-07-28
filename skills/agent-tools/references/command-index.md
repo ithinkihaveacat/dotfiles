@@ -59,10 +59,6 @@ Options:
 Environment:
   GEMINI_API_KEY               Required. Your Gemini API key.
   GEMINI_MODEL                 Optional. Default model if --model is not given.
-  SCREENSHOT_DESCRIBE_OFFLINE  Refuse to use the network. This tool caches nothing,
-                               so offline mode fails immediately rather than serving
-                               a stale answer. Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE                Workspace-wide offline policy (see above).
 
 Exit Codes:
   0    Success
@@ -196,10 +192,6 @@ Processing:
 Environment:
   GEMINI_API_KEY            Required. Your Gemini API key.
   GEMINI_MODEL              Optional. Default model if --model is not given.
-  PHOTO_SMART_CROP_OFFLINE  Refuse to use the network. This tool caches nothing,
-                            so offline mode fails immediately rather than serving
-                            a stale answer. Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE             Workspace-wide offline policy (see above).
 
 Exit Codes:
   0    Success (cropped output written)
@@ -460,10 +452,6 @@ Options:
 Environment:
   GEMINI_API_KEY   Required. Your Gemini API key.
   GEMINI_MODEL     Optional. Default model if --model is not given.
-  EMERSON_OFFLINE  Refuse to use the network. This tool caches nothing,
-                   so offline mode fails immediately rather than serving
-                   a stale answer. Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE    Workspace-wide offline policy (see above).
 
 Exit Codes:
   0    Success
@@ -533,10 +521,6 @@ Options:
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
   GEMINI_MODEL    Optional. Default model if --model is not given.
-  PASCAL_OFFLINE  Refuse to use the network. This tool caches nothing,
-                  so offline mode fails immediately rather than serving
-                  a stale answer. Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE   Workspace-wide offline policy (see above).
 
 Exit Codes:
   0    Success
@@ -677,10 +661,6 @@ Options:
 Environment:
   GEMINI_API_KEY     Required. Your Gemini API key.
   GEMINI_MODEL       Optional. Default model if --model is not given.
-  SATISFIES_OFFLINE  Refuse to use the network. This tool caches nothing, so
-                     offline mode fails immediately rather than serving a
-                     stale answer. Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE      Workspace-wide offline policy (see above).
 
 Exit Codes:
   0  True (satisfies prompt)
@@ -805,10 +785,6 @@ Options:
 Environment:
   GEMINI_API_KEY       Required. Your Gemini API key.
   GEMINI_MODEL         Optional. Default model if --model is not given.
-  TOKEN_COUNT_OFFLINE  Refuse to use the network. This tool caches nothing,
-                       so offline mode fails immediately rather than serving
-                       a stale answer. Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE        Workspace-wide offline policy (see above).
 
 Exit Codes:
   0    Success (outputs token count)

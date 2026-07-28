@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# Tests how the scripts that call the Gemini API report a failed request. They
+# share one copy-pasted block, so every case below runs against all nine rather
+# than a representative: a script that drifts out of the pattern is exactly what
+# this is meant to catch.
+#
+# The distinction under test is the one in
+# skills/coding-standards/references/caching.md ("A Declared Offline Mode Is Not
+# an Absent Network"): a request that never reached a server, one the server
+# answered with an error, and one whose body did not finish arriving are three
+# different facts and must read differently. None of these tools caches, so none
+# carries an offline switch -- there would be nothing for it to serve.
+#
+# Hermetic by construction: a stub 'curl' ahead of the real one on PATH forces
+# each transport outcome, and stub 'magick'/'base64' stand in for the image
+# pipeline, so nothing here depends on the machine's network, on ImageMagick
+# being installed, or on GEMINI_API_KEY being real.
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+ROOT="$DIR/../../.."
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/shim"
+
+printf 'hello world\n' >"$WORK/in.txt"
+printf '<?xml version="1.0"?><hierarchy><node text="Button"/></hierarchy>\n' >"$WORK/ui.xml"
+printf 'not really an image\n' >"$WORK/img.png"
+
+# magick is only ever used to transcode the input before base64; the scripts
+# never inspect what comes back, so a stub that emits the dimensions they parse
+# and some bytes to encode is enough to reach the request.
+cat >"$WORK/shim/magick" <<'SHIM'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    info:) printf '800 600\n'; exit 0 ;;
+  esac
+done
+printf 'stub-image-bytes'
+SHIM
+chmod +x "$WORK/shim/magick"
+
+# script:argv... -- the arguments that get each one as far as its request block.
+TOOLS=(
+  "skills/agent-tools/scripts/emerson|summarise"
+  "skills/agent-tools/scripts/pascal|2+2"
+  "skills/agent-tools/scripts/satisfies|is a greeting"
+  "skills/agent-tools/scripts/token-count|"
+  "bin/markdown-extract-body|"
+  "skills/agent-tools/scripts/screenshot-describe|$WORK/img.png"
+  "skills/agent-tools/scripts/photo-smart-crop|$WORK/img.png|$WORK/out.jpg"
+  "bin/uihierarchy-describe|$WORK/ui.xml"
+  "bin/uihierarchy-compare|$WORK/ui.xml|$WORK/ui.xml"
+)
+
+echo "1..$((${#TOOLS[@]} * 3))"
+
+make_curl_shim() {
+  cat >"$WORK/shim/curl" <<EOF
+#!/bin/sh
+# Drain stdin so the request-building side of a pipeline never sees SIGPIPE.
+cat >/dev/null 2>&1
+$1
+EOF
+  chmod +x "$WORK/shim/curl"
+}
+
+TEST_NUM=0
+LOG="$WORK/log"
+
+run_tool() {
+  # shellcheck disable=SC2086
+  PATH="$WORK/shim:$PATH" GEMINI_API_KEY=unused "$@" <"$WORK/in.txt" >"$LOG" 2>&1
+}
+
+for entry in "${TOOLS[@]}"; do
+  IFS='|' read -r script arg1 arg2 <<<"$entry"
+  name=$(basename "$script")
+
+  set -- "$ROOT/$script"
+  [ -n "$arg1" ] && set -- "$@" "$arg1"
+  [ -n "${arg2:-}" ] && set -- "$@" "$arg2"
+
+  # 1. No response at all is the network, not the API. Without this the failed
+  #    curl took the script down under `set -e` before any handler ran, and the
+  #    caller saw exit 6 and no output whatsoever.
+  TEST_NUM=$((TEST_NUM + 1))
+  make_curl_shim "exit 6"
+  if run_tool "$@"; then
+    echo "not ok $TEST_NUM - $name succeeded against an unreachable host"
+    sed 's/^/# /' "$LOG"
+  elif grep -q "could not reach" "$LOG"; then
+    echo "ok $TEST_NUM - $name reports an unreachable host as a transport failure"
+  else
+    echo "not ok $TEST_NUM - $name did not report the transport failure"
+    sed 's/^/# /' "$LOG"
+  fi
+
+  # 2. A response carrying an API error keeps its status and the API's message.
+  TEST_NUM=$((TEST_NUM + 1))
+  make_curl_shim 'printf "{\"error\":{\"message\":\"quota exceeded\"}}\n429"'
+  if run_tool "$@"; then
+    echo "not ok $TEST_NUM - $name succeeded on an API error"
+    sed 's/^/# /' "$LOG"
+  elif grep -q "HTTP 429" "$LOG" && grep -q "quota exceeded" "$LOG"; then
+    echo "ok $TEST_NUM - $name reports an API error with its status and message"
+  else
+    echo "not ok $TEST_NUM - $name did not report the API error legibly"
+    sed 's/^/# /' "$LOG"
+  fi
+
+  # 3. A 200 whose body was cut short is a transport failure, not the model
+  #    declining to answer -- which is how it read before, since the truncated
+  #    body simply parsed to no text.
+  TEST_NUM=$((TEST_NUM + 1))
+  make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"par\n200"; exit 18'
+  if run_tool "$@"; then
+    echo "not ok $TEST_NUM - $name succeeded on a truncated body"
+    sed 's/^/# /' "$LOG"
+  elif grep -q "did not finish transferring" "$LOG"; then
+    echo "ok $TEST_NUM - $name reports a truncated 200 as a transport failure"
+  else
+    echo "not ok $TEST_NUM - $name misreported a truncated 200"
+    sed 's/^/# /' "$LOG"
+  fi
+done
