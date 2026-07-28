@@ -19,8 +19,10 @@ boolean classification).
 Pre-processed WebP bytes are cached at ~/.cache/photo-query/ (override with
 PHOTO_QUERY_CACHE_DIR) so repeated queries against the same images skip EXIF
 rotation, alpha flatten, resize, and re-encode. That cache holds locally
-derived thumbnails, not fetched data, so there is no offline mode: the Gemini
-call this tool exists to make cannot be served from it.
+derived thumbnails, not fetched data, so it can never answer a query offline:
+the Gemini call this tool exists to make cannot be served from it. Offline mode
+(PHOTO_QUERY_OFFLINE, else AGENT_OFFLINE) therefore fails immediately rather
+than serving anything stale.
 """
 
 import argparse
@@ -48,6 +50,22 @@ GEMINI_URL = (
 )
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_MAX_SIZE = 768
+
+
+def offline_switch() -> tuple[bool, str]:
+    """Whether network access is forbidden here, and which switch says so.
+
+    Per skills/coding-standards/references/caching.md the per-tool variable wins
+    when set (including when set to 0, to exempt this tool from a workspace-wide
+    policy), otherwise the AGENT_OFFLINE policy applies.
+    """
+    var = (
+        "PHOTO_QUERY_OFFLINE"
+        if "PHOTO_QUERY_OFFLINE" in os.environ
+        else "AGENT_OFFLINE"
+    )
+    value = os.environ.get(var, "")
+    return value.strip().lower() in ("1", "true", "yes", "on"), f"{var}={value}"
 
 
 def cache_dir() -> Path:
@@ -147,8 +165,18 @@ def gemini_request(
             "responseJsonSchema": schema,
         }
 
+    url = GEMINI_URL.format(model=model)
+
+    offline, desc = offline_switch()
+    if offline:
+        raise RuntimeError(
+            f"offline ({desc}) and no cached answer: this command calls the "
+            "Gemini API. Re-run where there is network, or set "
+            "PHOTO_QUERY_OFFLINE=0 to exempt this tool"
+        )
+
     req = urllib.request.Request(
-        GEMINI_URL.format(model=model),
+        url,
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
@@ -163,6 +191,15 @@ def gemini_request(
         except json.JSONDecodeError:
             msg = err
         raise RuntimeError(f"Gemini API error: {msg}") from None
+    except (urllib.error.URLError, TimeoutError) as e:
+        # No HTTP response at all, as opposed to the HTTPError above: the
+        # network, not the API. Reporting these the same way would leave a
+        # sandboxed caller unable to tell blocked egress from a real refusal.
+        reason = getattr(e, "reason", e)
+        raise RuntimeError(
+            f"could not reach {url} ({reason}): network unreachable, "
+            "DNS failure, or blocked egress"
+        ) from None
 
     if "error" in body:
         raise RuntimeError(f"Gemini API error: {body['error'].get('message', body)}")

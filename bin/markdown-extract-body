@@ -16,7 +16,12 @@ Options:
   --help      Display this help message and exit
 
 Environment:
-  GEMINI_API_KEY  Required. Your Gemini API key.
+  GEMINI_API_KEY                 Required. Your Gemini API key.
+  MARKDOWN_EXTRACT_BODY_OFFLINE  Refuse to use the network. This tool caches
+                                 nothing, so offline mode fails immediately
+                                 rather than serving a stale answer. Falls back
+                                 to AGENT_OFFLINE when unset.
+  AGENT_OFFLINE                  Workspace-wide offline policy (see above).
 
 Examples:
   cat article.md | $(basename "$0") > article-body.md
@@ -37,6 +42,26 @@ require() {
 
 require curl
 require jq
+
+# Refuse to run when the environment declares there is no network. Every run is
+# a fresh model call against a new prompt, so there is nothing cached to serve
+# and offline mode fails here rather than on a connect timeout. The per-tool
+# variable wins when set (including when set to 0, to exempt this tool from a
+# workspace-wide policy) -- see coding-standards/references/caching.md.
+require_network() {
+  local var="$1" value
+  [[ -n "${!var+x}" ]] || var="AGENT_OFFLINE"
+  value="${!var:-}"
+  case "$(echo "$value" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on)
+      echo "$(basename "$0"): offline ($var=$value) and no cached answer: this command calls the Gemini API" >&2
+      echo "$(basename "$0"): re-run where there is network, or set $1=0 to exempt this tool" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_network MARKDOWN_EXTRACT_BODY_OFFLINE
 
 # Read stdin into a variable
 if [ -t 0 ]; then
@@ -106,16 +131,34 @@ REQUEST_BODY=$(jq -Rs \
   }')
 
 # Execute the request
-RESPONSE=$(echo "${REQUEST_BODY}" | curl -s -X POST \
+# Read the status via -w '%{http_code}' rather than trusting curl's exit code:
+# it is "000" only when no HTTP response arrived at all, which is what separates
+# a blocked or absent network from an API that answered with an error. Capturing
+# the exit code also stops a failed curl from killing the script silently under
+# `set -e`, before any of the handling below can run.
+CURL_STATUS=0
+RAW=$(echo "${REQUEST_BODY}" | curl -sS -X POST \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
-  -d @- \
-  "${URL}")
+  -d @- -w '\n%{http_code}' \
+  "${URL}" 2>/dev/null) || CURL_STATUS=$?
 
-# Check for API errors
-if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
-  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
-  echo "$(basename "$0"): API error: $ERROR_MSG" >&2
+HTTP_STATUS="${RAW##*$'\n'}"
+RESPONSE="${RAW%$'\n'*}"
+
+# The status decides, not curl's exit code: -w always emits a three-digit code
+# when a response arrived, and "000" only when none did. The exit code cannot be
+# trusted for this -- in a `jq | curl` pipeline `pipefail` reports the pipeline's
+# status, so a curl that answered fine still surfaces as non-zero -- so it is
+# reported for diagnosis but does not drive the decision.
+if [[ ! "$HTTP_STATUS" =~ ^[0-9]{3}$ || "$HTTP_STATUS" == "000" ]]; then
+  echo "$(basename "$0"): could not reach $URL (curl exit $CURL_STATUS, http ${HTTP_STATUS:-none}: network unreachable, DNS failure, or blocked egress)" >&2
+  exit 1
+fi
+
+if [[ "$HTTP_STATUS" != 2?? ]]; then
+  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
+  echo "$(basename "$0"): API error (HTTP $HTTP_STATUS): ${ERROR_MSG:-no error message in response}" >&2
   exit 1
 fi
 

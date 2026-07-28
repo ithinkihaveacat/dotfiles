@@ -1,5 +1,75 @@
 # TODO
 
+## Extend the offline convention to scripts that do not cache (2026-07-28) — done
+
+`c405f27` audited "the five scripts that cache something", which was the right
+scope for the cache rules and the wrong scope for everything else: it left ~30
+scripts that make network calls outside any rule, because `cli-tools.md` bound
+only tools that "fetch over the network **and** cache the result". Two of them
+were actively lying about failures.
+
+`caching.md` now opens with **Scope: Two Obligations**. Network honesty binds
+every script that makes a call; the cache rules bind only scripts that cache.
+The distinction that section turns on is that a declared offline mode and an
+absent network are different conditions — `AGENT_OFFLINE` is a policy stated up
+front and means make no call at all, while a missing network is discovered by
+failing and so has to fail legibly. A tool with nothing worth caching is exempt
+from the cache rules and not from the switch: offline means fail immediately,
+and adding a cache that could never be usefully read would be complexity with no
+payoff. `cli-tools.md` and `shell.md` were re-scoped to match, the latter
+gaining the `set -e` trap that caused the worst of the bugs below.
+
+Fixed, both cases of reporting a network failure as a result:
+
+- `jetpack-samples` — a Gitiles fetch that failed for any reason printed
+  `no files found for path <p>`, so a sandboxed caller concluded the artifact
+  had no samples. It now has jetpack's `http_get` shape (no cache: it extracts a
+  fresh tree into a caller-named directory, so there is nothing to serve), and
+  separates a 404 from an unreachable host. `JETPACK_SAMPLES_OFFLINE` fails up
+  front rather than spending the `--retry 5 --retry-delay 4` budget on calls the
+  environment already forbade. Module archives now download to a file rather
+  than straight into `tar`, so a per-module 404 can warn and continue while a
+  lost network stops the run instead of under-reporting the module count.
+- The Gemini family (`emerson`, `pascal`, `satisfies`, `screenshot-describe`,
+  `token-count`, `photo-smart-crop`, `markdown-extract-body`,
+  `uihierarchy-describe`, `uihierarchy-compare`) shared a copy-pasted
+  `RESPONSE=$(... | curl -s ...)`. Under `set -euo pipefail` a curl that could
+  not resolve the host killed the script *before* its error handler, so the
+  caller got exit 6 and not one byte of output. All nine now read
+  `-w '%{http_code}'` and capture curl's exit code.
+
+The status decides, not the exit code — found by the new test, in `token-count`,
+whose curl is the tail of a `jq | curl` pipeline: under `pipefail` `CURL_STATUS`
+is the pipeline's status, so a curl that answered 429 fine surfaced as a network
+failure. `-w` emits three digits whenever a response arrived and `000` only when
+none did, which is the authoritative signal; the exit code is kept for the
+message. `jetpack`'s own `http_get` has the same latent inversion but is not in
+a pipeline, so it never bit.
+
+Python tools took the same split: `pacioli` and `photo-query` gained an offline
+gate and a `URLError`/`TimeoutError` arm distinct from the existing `HTTPError`
+one; `socrates` and `popper` gate at `get_client()` and before the agent loop,
+so a run fails at startup rather than burning each step's retry backoff. Both
+SDK tools keep `APIError.code` for the "server said no" side.
+
+Two `skill` nits from the same audit: `fetch_skill_md` checked its TTL before
+the offline branch, the exact inversion `c405f27` fixed in `fetch_github` two
+functions up, so the warm-then-freeze workflow took the silent path in the
+common case; and `doctor` now reports mode, cache location and remote age, which
+`jetpack doctor` already did.
+
+Deliberately unchanged, and why: `whatismyip`, `url-cat-*`, `url-save-markdown`,
+`gh-markdown` (live PR state), `node`/`python`/`ruby-install` and the `*-init`
+scripts. A cache would be wrong for these rather than merely absent.
+`emumanager` delegates downloads to `sdkmanager`, which owns its own cache, and
+its `catalog` error already names the network.
+
+Tests are hermetic in both new files: `test-gemini-offline` runs three cases
+against every script in the family rather than a representative, since drifting
+out of the shared pattern is what it exists to catch, and stubs `curl` on `PATH`
+to force a transport outcome without touching the network or needing a real
+`GEMINI_API_KEY`. `test-jetpack-samples` gains four in the same style.
+
 ## Evaluate error-trapped feature probing for fish completions in install.sh (2026-07-28)
 
 **Problem:** `install.sh` generates fish completions for tools like `hcloud`,

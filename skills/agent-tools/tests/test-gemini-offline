@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# Tests offline mode and network-failure reporting across the scripts that call
+# the Gemini API. They share one copy-pasted request block, so the cases below
+# run against every one of them rather than a representative: a script that
+# drifts out of the pattern is exactly what this is meant to catch.
+#
+# Hermetic by construction. The offline cases make no call at all; the rest put
+# a stub 'curl' ahead of the real one on PATH to force a transport outcome, so
+# nothing here depends on the machine's network or on GEMINI_API_KEY being real.
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+ROOT="$DIR/../../.."
+
+# script:offline-variable, and the arguments that get each one as far as its
+# request block.
+TOOLS=(
+  "skills/agent-tools/scripts/emerson:EMERSON_OFFLINE:summarise"
+  "skills/agent-tools/scripts/pascal:PASCAL_OFFLINE:2+2"
+  "skills/agent-tools/scripts/satisfies:SATISFIES_OFFLINE:is a greeting"
+  "skills/agent-tools/scripts/token-count:TOKEN_COUNT_OFFLINE:"
+  "bin/markdown-extract-body:MARKDOWN_EXTRACT_BODY_OFFLINE:"
+)
+
+echo "1..$((${#TOOLS[@]} * 3))"
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/shim"
+printf 'hello world\n' >"$WORK/in.txt"
+
+make_curl_shim() {
+  cat >"$WORK/shim/curl" <<EOF
+#!/bin/sh
+$1
+EOF
+  chmod +x "$WORK/shim/curl"
+}
+
+TEST_NUM=0
+LOG="$WORK/log"
+
+for entry in "${TOOLS[@]}"; do
+  script="${entry%%:*}"
+  rest="${entry#*:}"
+  var="${rest%%:*}"
+  arg="${rest#*:}"
+  bin="$ROOT/$script"
+  name=$(basename "$script")
+
+  set -- "$bin"
+  [ -n "$arg" ] && set -- "$@" "$arg"
+
+  # 1. Offline declared: fails without calling curl at all. No shim is
+  #    installed, so a call here would hit the real network.
+  TEST_NUM=$((TEST_NUM + 1))
+  if AGENT_OFFLINE=1 GEMINI_API_KEY=unused "$@" <"$WORK/in.txt" >"$LOG" 2>&1; then
+    echo "not ok $TEST_NUM - $name succeeded while offline"
+    sed 's/^/# /' "$LOG"
+  elif grep -q "offline (AGENT_OFFLINE=1)" "$LOG"; then
+    echo "ok $TEST_NUM - $name offline failure names the switch in force"
+  else
+    echo "not ok $TEST_NUM - $name offline failure did not name AGENT_OFFLINE"
+    sed 's/^/# /' "$LOG"
+  fi
+
+  # 2. The per-tool variable opts one tool out of a workspace-wide policy, so
+  #    the run proceeds to the request and fails on the stubbed transport.
+  TEST_NUM=$((TEST_NUM + 1))
+  make_curl_shim "exit 6"
+  if PATH="$WORK/shim:$PATH" AGENT_OFFLINE=1 GEMINI_API_KEY=unused \
+    env "$var=0" "$@" <"$WORK/in.txt" >"$LOG" 2>&1; then
+    echo "not ok $TEST_NUM - $name succeeded against a failing curl"
+    sed 's/^/# /' "$LOG"
+  elif grep -q "could not reach" "$LOG"; then
+    echo "ok $TEST_NUM - $name honours $var=0 over AGENT_OFFLINE=1"
+  else
+    echo "not ok $TEST_NUM - $name per-tool opt-out did not reach the request"
+    sed 's/^/# /' "$LOG"
+  fi
+
+  # 3. A response that never arrived and one carrying an API error are
+  #    different facts. Without this, a curl that dies under `set -e` takes the
+  #    script with it and the caller gets no output at all.
+  TEST_NUM=$((TEST_NUM + 1))
+  make_curl_shim 'printf "{\"error\":{\"message\":\"quota exceeded\"}}\n429"'
+  if PATH="$WORK/shim:$PATH" GEMINI_API_KEY=unused "$@" <"$WORK/in.txt" >"$LOG" 2>&1; then
+    echo "not ok $TEST_NUM - $name succeeded on an API error"
+    sed 's/^/# /' "$LOG"
+  elif grep -q "HTTP 429" "$LOG" && grep -q "quota exceeded" "$LOG"; then
+    echo "ok $TEST_NUM - $name reports an API error with its status and message"
+  else
+    echo "not ok $TEST_NUM - $name did not report the API error legibly"
+    sed 's/^/# /' "$LOG"
+  fi
+done

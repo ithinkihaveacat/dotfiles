@@ -139,13 +139,17 @@ interpretation:
 
 ## Caching and Offline Mode
 
-Tools that fetch over the network and cache the result follow one repo-wide
-convention for where the cache lives (`<TOOL>_CACHE_DIR`, else
-`${XDG_CACHE_HOME:-$HOME/.cache}/<tool>`) and how a caller forces them offline
-against it (`<TOOL>_OFFLINE`, else the workspace-wide `AGENT_OFFLINE`),
+Every tool that makes a network call owes its caller a legible failure: a
+request that never reached a server and one answered with an error are different
+facts, and a tool forced offline (`<TOOL>_OFFLINE`, else the workspace-wide
+`AGENT_OFFLINE`) fails on the spot rather than timing out.
+
+Tools that additionally cache what they fetch follow one repo-wide convention
+for where the cache lives (`<TOOL>_CACHE_DIR`, else
+`${XDG_CACHE_HOME:-$HOME/.cache}/<tool>`) and how a caller reads it offline,
 including how a cold cache gets warmed, the required age reporting, and the
-cache-miss error. It is defined in `caching.md`, which also covers what CI jobs
-and sandboxed agents need from it.
+cache-miss error. Both are defined in `caching.md`, which also covers what CI
+jobs and sandboxed agents need from them.
 
 ## `--output`/`-o` Contract
 

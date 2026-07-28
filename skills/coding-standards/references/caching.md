@@ -18,6 +18,33 @@ Three core principles apply:
    show the command required to fix it (which must be run in an online
    environment).
 
+## Scope: Two Obligations
+
+- **Network honesty — every script that makes a network call.** Say why a call
+  failed, and never let a failed fetch pass for a legitimate empty result.
+- **Caching — only scripts that cache a response.** Everything else in this
+  document: cache location, the offline read path, provenance, warming.
+
+A tool with nothing worth caching — an LLM call against a novel prompt, a live
+API query, a one-shot download — is exempt from the second obligation, not the
+first. Do not add a cache to make such a tool "compliant": a cache that can
+never be usefully read is complexity with no payoff. It still honors the offline
+switch, where offline mode means *fail immediately and say why* rather than
+serve something stale.
+
+A declared offline mode and an absent network are different conditions.
+`<TOOL>_OFFLINE`/`AGENT_OFFLINE` is a policy stated up front — make no call at
+all, and never spend the caller's time on a connect timeout for a request the
+environment already forbade. An absent network with no variable set is the
+common case, since sandboxes and CI runners often simply have no egress, and is
+discovered by failing — so the failure has to be legible. A request that never
+reached a server and a request answered with `404` are different facts and must
+produce different messages. Read the status explicitly (`curl -w '%{http_code}'`
+is `000` only when no response arrived) rather than inferring it from an exit
+code. Collapsing the two produces the failure this document exists to prevent: a
+tool reporting "no samples found" when the truth is "no network", and a caller
+believing it.
+
 ## Where the Cache Lives
 
 Store cached resources in a tool-specific directory:
@@ -61,7 +88,10 @@ disable network access globally without appending flags to every command.
   `(cached 3 days ago)`) so stdout remains parseable. Ensure you check for
   offline mode *before* returning early based on TTL.
 - **Exit non-zero on a miss:** If data is missing, fail clearly. State the
-  missing resource and provide the exact command needed to warm the cache.
+  missing resource and provide the exact command needed to warm the cache. In a
+  tool that caches nothing, every offline invocation is a miss: fail on the
+  spot, naming the switch in force and the fact that there is no cached answer
+  to serve.
 - **Gate unproven paths:** Assume all third-party handlers or plugins might
   attempt network calls. Route them through the offline check.
 
@@ -137,7 +167,8 @@ manifest) but cannot know the exact commands that will be run.
 ## Help Text
 
 Document both environment variables under an `Environment:` section in the
-tool's help output, including the default cache location:
+tool's help output, including the default cache location. A tool that caches
+nothing documents the two offline variables and omits the cache line:
 
 ```text
 Environment:
@@ -194,9 +225,9 @@ safety feature, not a misconfiguration to route around.
   reporting failures that read like "this library does not exist".
 - **Behave sanely when it is not set**, because often it will not be: the
   network is simply gone and the tool finds out by failing. Distinguish "the
-  server said no" from "no server was reached" (an HTTP status versus no
-  response at all), say which happened, and point at offline mode when a cached
-  copy exists. Never present a remembered answer as a fetched one.
+  server said no" from "no server was reached" (see **Scope: Two Obligations**
+  above), and point at offline mode when a cached copy exists. Never present a
+  remembered answer as a fetched one.
 - A read-only sandbox may also make the cache unwritable — see **Never let cache
   writes fail the run** above.
 

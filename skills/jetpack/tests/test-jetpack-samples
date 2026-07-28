@@ -8,7 +8,7 @@ SCRIPT_DIR=$(dirname "$0")
 ROOT_DIR="$SCRIPT_DIR/.."
 BIN_JETPACK_SAMPLES="$ROOT_DIR/scripts/jetpack-samples"
 
-TOTAL_TESTS=2
+TOTAL_TESTS=6
 TEST_NUM=0
 
 echo "1..$TOTAL_TESTS"
@@ -51,6 +51,91 @@ if ! "$BIN_JETPACK_SAMPLES" "invalid-artifact" >"$log_file" 2>&1; then
   echo "ok $TEST_NUM - failed on invalid artifact"
 else
   echo "not ok $TEST_NUM - accepted invalid artifact"
+  sed 's/^/# /' "$log_file"
+fi
+rm -f "$log_file"
+
+# ---- Offline mode and network-failure reporting -----------------------------
+#
+# These cases are hermetic: the offline one makes no call at all, and the rest
+# put a stub 'curl' ahead of the real one on PATH so a given transport outcome
+# can be forced without depending on the machine's network. What is under test
+# is the message, not the fetch: a request that never reached a server and one
+# answered with 404 must not be reported the same way (caching.md, "Scope: Two
+# Obligations").
+
+SHIM_DIR=$(mktemp -d)
+trap 'rm -rf "$SHIM_DIR"' EXIT
+
+make_curl_shim() {
+  # $1: shell body for the stub curl
+  cat >"$SHIM_DIR/curl" <<EOF
+#!/bin/sh
+$1
+EOF
+  chmod +x "$SHIM_DIR/curl"
+}
+
+# 1. Offline declared: fails naming the switch, without reaching for curl at all
+#    (no shim is installed here, so any call would use the real network).
+TEST_NUM=$((TEST_NUM + 1))
+log_file=$(mktemp)
+if AGENT_OFFLINE=1 "$BIN_JETPACK_SAMPLES" androidx.wear.tiles:tiles >"$log_file" 2>&1; then
+  echo "not ok $TEST_NUM - succeeded while offline"
+  sed 's/^/# /' "$log_file"
+elif grep -q "offline (AGENT_OFFLINE=1)" "$log_file"; then
+  echo "ok $TEST_NUM - offline mode names the switch in force"
+else
+  echo "not ok $TEST_NUM - offline failure did not name AGENT_OFFLINE"
+  sed 's/^/# /' "$log_file"
+fi
+rm -f "$log_file"
+
+# 2. The per-tool variable opts this tool out of a workspace-wide policy.
+TEST_NUM=$((TEST_NUM + 1))
+make_curl_shim "exit 6"
+log_file=$(mktemp)
+if AGENT_OFFLINE=1 JETPACK_SAMPLES_OFFLINE=0 PATH="$SHIM_DIR:$PATH" \
+  "$BIN_JETPACK_SAMPLES" androidx.wear.tiles:tiles >"$log_file" 2>&1; then
+  echo "not ok $TEST_NUM - unexpectedly succeeded against a failing curl"
+  sed 's/^/# /' "$log_file"
+elif grep -q "could not reach" "$log_file"; then
+  echo "ok $TEST_NUM - JETPACK_SAMPLES_OFFLINE=0 overrides AGENT_OFFLINE=1"
+else
+  echo "not ok $TEST_NUM - per-tool opt-out did not reach the network path"
+  sed 's/^/# /' "$log_file"
+fi
+rm -f "$log_file"
+
+# 3. No response at all is reported as a network failure, not an empty result.
+TEST_NUM=$((TEST_NUM + 1))
+make_curl_shim "exit 6"
+log_file=$(mktemp)
+PATH="$SHIM_DIR:$PATH" "$BIN_JETPACK_SAMPLES" androidx.wear.tiles:tiles \
+  >"$log_file" 2>&1
+if grep -q "could not reach" "$log_file" && ! grep -q "no files found" "$log_file"; then
+  echo "ok $TEST_NUM - unreachable network is not reported as 'no files found'"
+else
+  echo "not ok $TEST_NUM - network failure misreported"
+  sed 's/^/# /' "$log_file"
+fi
+rm -f "$log_file"
+
+# 4. A 404 is the resource being absent, and still reads that way.
+TEST_NUM=$((TEST_NUM + 1))
+# Single-quoted on purpose: this is the stub's source, to be expanded when the
+# stub runs, not when this test builds it.
+# shellcheck disable=SC2016
+make_curl_shim 'for a in "$@"; do case "$prev" in -o) out="$a";; esac; prev="$a"; done
+: > "$out"
+printf 404'
+log_file=$(mktemp)
+PATH="$SHIM_DIR:$PATH" "$BIN_JETPACK_SAMPLES" androidx.wear.tiles:tiles \
+  >"$log_file" 2>&1
+if grep -q "no files found" "$log_file" && grep -q "HTTP 404" "$log_file"; then
+  echo "ok $TEST_NUM - a 404 is reported as an absent path, naming the status"
+else
+  echo "not ok $TEST_NUM - 404 misreported"
   sed 's/^/# /' "$log_file"
 fi
 rm -f "$log_file"
