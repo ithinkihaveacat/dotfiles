@@ -265,9 +265,10 @@ require curl
 
 ### Caching and Offline Mode
 
-Every script that makes a network call must honor `<TOOL>_OFFLINE` /
-`AGENT_OFFLINE` and report failures legibly; scripts that also cache responses
-follow the cache-location rules on top of that. Both are defined in
+Every script that makes a network call must report failures legibly. Scripts an
+agent or CI job drives additionally honor `<TOOL>_OFFLINE` / `AGENT_OFFLINE`,
+and scripts that cache responses follow the cache-location rules on top of that.
+All three obligations, and which scripts each one binds, are defined in
 `caching.md`. Three bash-specific points from it are worth restating here,
 because all three are easy to get wrong under `set -euo pipefail`:
 

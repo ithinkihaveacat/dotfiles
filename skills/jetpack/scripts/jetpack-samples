@@ -170,8 +170,15 @@ CURL_RETRY_OPTS=(--retry 5 --retry-delay 4 --retry-all-errors --retry-connrefuse
 #
 # Exit codes:
 #   0  body available
-#   1  the server answered non-2xx (the resource is genuinely not there)
+#   1  the resource is genuinely absent (404/410)
 #   2  no response at all (network unreachable, DNS failure, blocked egress)
+#   3  the server answered, but with an error that says nothing about whether
+#      the resource exists (429, 5xx, 403...)
+#
+# 1 and 3 are separate because only the first is evidence of absence. Folding
+# them together lets a rate-limited or briefly-broken Gitiles read as "this
+# artifact has no samples", which is the confidently-wrong answer this whole
+# path exists to avoid.
 http_get() {
   local url="$1" outfile="$2" curl_status=0 status
   HTTP_ERROR=""
@@ -187,9 +194,14 @@ http_get() {
     return 2
   fi
 
-  if [[ "$status" != 2?? ]]; then
+  if [[ "$status" == "404" || "$status" == "410" ]]; then
     HTTP_ERROR="$url returned HTTP $status"
     return 1
+  fi
+
+  if [[ "$status" != 2?? ]]; then
+    HTTP_ERROR="$url returned HTTP $status (the server is reachable but did not serve the resource; this says nothing about whether it exists)"
+    return 3
   fi
 
   # Only on a 2xx does the exit code say something the status cannot: whether
@@ -216,15 +228,15 @@ RESPONSE_FILE="$OUTPUT_DIR/.gitiles.json"
 GITILES_STATUS=0
 http_get "$GITILES_URL" "$RESPONSE_FILE" || GITILES_STATUS=$?
 
-# A 404 means the artifact has no such path in the tree; anything else means we
-# never learned whether it does. Reporting both as "no files found" is the one
-# failure mode this must not have -- a caller cannot tell an empty result from
-# an unreachable server, and will believe the former.
-if [[ $GITILES_STATUS -eq 2 ]]; then
-  echo "$(basename "$0"): $HTTP_ERROR" >&2
+# Only a 404 is evidence the artifact has no such path in the tree. A transport
+# failure or a 5xx means we never learned whether it does, and reporting either
+# as "no files found" is the one failure mode this must not have -- a caller
+# cannot tell an empty result from a broken lookup, and will believe the former.
+if [[ $GITILES_STATUS -eq 1 ]]; then
+  echo "$(basename "$0"): no files found for path $DERIVED_PATH ($HTTP_ERROR)" >&2
   exit 1
 elif [[ $GITILES_STATUS -ne 0 ]]; then
-  echo "$(basename "$0"): no files found for path $DERIVED_PATH ($HTTP_ERROR)" >&2
+  echo "$(basename "$0"): $HTTP_ERROR" >&2
   exit 1
 fi
 
@@ -256,18 +268,20 @@ if [[ -n "$MODULE_DIRS" ]]; then
       TAR_URL="https://android.googlesource.com/platform/frameworks/support/+archive/refs/heads/androidx-main/${mod_dir}.tar.gz"
 
       # Fetch to a file rather than straight into tar so the HTTP status is
-      # readable: a module that 404s is a gap in this artifact's tree and the
-      # remaining modules are still worth having, but losing the network means
-      # the count below is meaningless and must not be reported as a result.
+      # readable: a module that 404s is a real gap in this artifact's tree and
+      # the remaining modules are still worth having, but a transport failure or
+      # a 5xx makes the count below meaningless -- some modules simply were not
+      # asked about successfully -- so those stop the run rather than shrinking
+      # the result silently.
       ARCHIVE="$TARGET_PATH/.archive.tar.gz"
       TAR_STATUS=0
       http_get "$TAR_URL" "$ARCHIVE" || TAR_STATUS=$?
 
-      if [[ $TAR_STATUS -eq 2 ]]; then
+      if [[ $TAR_STATUS -eq 1 ]]; then
+        echo "$(basename "$0"): warning: skipping $mod_dir ($HTTP_ERROR)" >&2
+      elif [[ $TAR_STATUS -ne 0 ]]; then
         echo "$(basename "$0"): $HTTP_ERROR" >&2
         exit 1
-      elif [[ $TAR_STATUS -ne 0 ]]; then
-        echo "$(basename "$0"): warning: skipping $mod_dir ($HTTP_ERROR)" >&2
       elif tar -xz -C "$TARGET_PATH" -f "$ARCHIVE"; then
         FOUND_SAMPLES=$((FOUND_SAMPLES + 1))
       else

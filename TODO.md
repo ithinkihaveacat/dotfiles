@@ -106,6 +106,32 @@ the network, needing ImageMagick, or needing a real `GEMINI_API_KEY`.
 `test-jetpack-samples` gains four in the same style, and `test-jetpack-offline`
 two for the truncated-transfer case.
 
+Second review round, five more:
+
+- `jetpack-samples` treated every non-2xx alike, so a 429 or 5xx from Gitiles
+  read as "no files found" and an archive 5xx was skipped while the run still
+  exited 0 with fewer modules. `http_get` now returns 1 only for 404/410 —
+  actual evidence of absence — and 3 for a server that answered but did not
+  serve, which is fatal at both call sites.
+- `emerson` did not parse under bash 3.2, the version `shell.md` targets and the
+  macOS default. Pre-existing (the merge-base fails too), but the new transport
+  test surfaced it: 3.2 tokenizes a here-document body while scanning for the
+  closing paren of a command substitution, so the apostrophe in "the user's
+  prompt" inside `SYSTEM_INSTRUCTION=$(cat <<'EOF' ...)` broke the whole file.
+  Rewritten as `IFS= read -r -d '' ... <<'EOF'`, which takes no such scan; the
+  prompt text is byte-identical. Verified against a real 3.2 build, which also
+  confirmed the other ten scripts and the two new tests are clean.
+- `photo-query` checked offline inside the per-image request, and `run_query`
+  catches per-image errors and continues — so a directory invocation
+  preprocessed and cached every image before printing the same refusal once per
+  file. One check in `main`, before path expansion.
+- `socrates answer --mode model:...` reserved a run index with a placeholder
+  answer before `get_client()` ran, so an offline run left a zombie responder in
+  the database. Gated before `init_db`, and only for `model` modes — `shell` and
+  `interactive` make no API call.
+- `shell.md` still required the switch of every networked script, contradicting
+  the narrowed scope in `caching.md`. Re-scoped to match.
+
 ## Evaluate error-trapped feature probing for fish completions in install.sh (2026-07-28)
 
 **Problem:** `install.sh` generates fish completions for tools like `hcloud`,
