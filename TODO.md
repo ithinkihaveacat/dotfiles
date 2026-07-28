@@ -43,8 +43,16 @@ whose curl is the tail of a `jq | curl` pipeline: under `pipefail` `CURL_STATUS`
 is the pipeline's status, so a curl that answered 429 fine surfaced as a network
 failure. `-w` emits three digits whenever a response arrived and `000` only when
 none did, which is the authoritative signal; the exit code is kept for the
-message. `jetpack`'s own `http_get` has the same latent inversion but is not in
-a pipeline, so it never bit.
+message.
+
+`jetpack`'s own `http_get` had the same inversion, and there it was not latent:
+the comment above the condition already cited curl exiting 56 on a complete 404
+as the reason for reading `-w` at all, and then the condition `OR`-ed in
+`curl_status -ne 0` and reported exactly that case as an unreachable host. Two
+cases in `test-jetpack-offline` pin it, stubbing curl rather than trying to
+provoke a real server into the behaviour; both fail against the old condition.
+An empty status is now treated as "no response" too, which the old check missed
+because it only compared against the literal `000`.
 
 Python tools took the same split: `pacioli` and `photo-query` gained an offline
 gate and a `URLError`/`TimeoutError` arm distinct from the existing `HTTPError`
