@@ -18,21 +18,33 @@ Three core principles apply:
    show the command required to fix it (which must be run in an online
    environment).
 
-## Scope: Two Obligations
+## Scope: Three Obligations
 
-- **Network honesty — every script that makes a network call.** Say why a call
+Each binds a smaller set of tools than the one before it:
+
+- **Legible failure — every script that makes a network call.** Say why a call
   failed, and never let a failed fetch pass for a legitimate empty result.
+- **The offline switch — scripts an agent or CI job drives.** Honor
+  `<TOOL>_OFFLINE`/`AGENT_OFFLINE`, where offline means *fail immediately and
+  say why*.
 - **Caching — only scripts that cache a response.** Everything else in this
   document: cache location, the offline read path, provenance, warming.
 
-A tool with nothing worth caching — an LLM call against a novel prompt, a live
-API query, a one-shot download — is exempt from the second obligation, not the
-first. Do not add a cache to make such a tool "compliant": a cache that can
-never be usefully read is complexity with no payoff. It still honors the offline
-switch, where offline mode means *fail immediately and say why* rather than
-serve something stale.
+The first obligation is universal because it costs almost nothing and its
+absence is a bug in any tool. A one-shot pipe like `whatismyip` or `url-cat-*`
+stops there: it does one thing, fails in under a second, and wiring the offline
+switch into it buys nothing a clear error does not already give. Reach for the
+switch when a tool would otherwise *spend* something before failing — a retry
+budget, a multi-step agent loop, side effects on a device — or when an agent
+invokes it often enough that a uniform policy matters.
 
-A declared offline mode and an absent network are different conditions.
+A tool with nothing worth caching — an LLM call against a novel prompt, a live
+API query, a one-shot download — is exempt from the third obligation regardless.
+Do not add a cache to make such a tool "compliant": a cache that can never be
+usefully read is complexity with no payoff.
+
+### A Declared Offline Mode Is Not an Absent Network
+
 `<TOOL>_OFFLINE`/`AGENT_OFFLINE` is a policy stated up front — make no call at
 all, and never spend the caller's time on a connect timeout for a request the
 environment already forbade. An absent network with no variable set is the
@@ -44,6 +56,23 @@ is `000` only when no response arrived) rather than inferring it from an exit
 code. Collapsing the two produces the failure this document exists to prevent: a
 tool reporting "no samples found" when the truth is "no network", and a caller
 believing it.
+
+Once a `2xx` is in hand the exit code matters again, and only there: it is the
+only signal that the body finished arriving. A response truncated mid-transfer
+(curl exit 18) or reset (exit 56) still reads as `200`, so a tool that accepts
+on status alone will hand back a partial answer — and if it caches, write that
+partial answer through for every later offline run to trust. Reject it, and
+cache nothing.
+
+### What the Switch Does Not Cover
+
+`AGENT_OFFLINE` reaches a script's own calls, not the machinery that starts it.
+PEP 723 tools run under `uv run --script`, which resolves and may download
+dependencies *before* the interpreter reaches any check the script makes, so a
+cold `uv` cache still hits PyPI however the switch is set. Pair it with
+`UV_OFFLINE` (see `tests/README.md`, which already runs the suites this way);
+the two cover different layers and neither implies the other. The same applies
+to any launcher that fetches before handing over.
 
 ## Where the Cache Lives
 
