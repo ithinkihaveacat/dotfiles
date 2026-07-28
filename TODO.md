@@ -1,5 +1,28 @@
 # TODO
 
+## Evaluate dropping per-tool offline overrides in favor of a universal AGENT_OFFLINE (2026-07-28)
+
+**Problem:** We currently support both `<TOOL>_OFFLINE` and `AGENT_OFFLINE` for
+every networked script. This requires extra plumbing in every tool and bloats
+the `Environment:` section of every script's help text. A workspace-wide
+`AGENT_OFFLINE` might be entirely sufficient since offline testing or sandbox
+constraints typically apply to the whole environment, not just one tool in
+isolation.
+
+**Goal:** Determine if per-tool overrides carry enough practical value to
+justify their complexity, or if they should be deprecated and removed in favor
+of a single `AGENT_OFFLINE` contract. This would simplify script logic and
+reduce documentation bulk.
+
+**Criteria:** A decision is made and recorded on whether to drop
+`<TOOL>_OFFLINE`. If dropped, all scripts and `caching.md` are updated to remove
+the per-tool environment variables, and the help text templates are simplified.
+
+**Sketch:** Review how often (if ever) `<TOOL>_OFFLINE` is genuinely used to
+selectively disable network for one tool while leaving others online. If it's
+only ever used as a fallback or never used in practice compared to
+`AGENT_OFFLINE`, remove the per-tool checks and strictly read `AGENT_OFFLINE`.
+
 ## Extend the offline convention to scripts that do not cache (2026-07-28) — done
 
 `c405f27` audited "the five scripts that cache something", which was the right
