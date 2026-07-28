@@ -214,9 +214,17 @@ AGENT_OFFLINE=1 scripts/jetpack inspect androidx.wear.tiles.TileService
 ```
 
 A miss quotes the command to re-run, so the fix is always the invocation that
-just failed. See
-[caching and offline mode](../coding-standards/references/caching.md) for the
-repo-wide convention.
+just failed.
+
+The sandbox that denies egress usually denies writes too, so the lookups read
+straight from the cache and need no writable filesystem at all: `version`,
+`list versions`, `list dependencies`, `resolve`, and `search` all answer with
+nowhere to write. `source` and `inspect` are the exception — they extract a JAR,
+so they need somewhere to put it; pass `--output DIR` naming a writable
+directory when the default temp location is not one.
+
+See [caching and offline mode](../coding-standards/references/caching.md) for
+the repo-wide convention.
 
 ## Safety Notes
 

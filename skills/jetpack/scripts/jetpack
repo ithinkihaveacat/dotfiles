@@ -40,6 +40,21 @@ require() {
   }
 }
 
+# mktemp that reports its own failure. A bare `tmp=$(mktemp)` yields an empty
+# path when no temp directory is writable, and BSD cp resolves an empty
+# destination to ./<basename> -- so the body lands as a stray file in the
+# caller's working directory and the parse of the (absent) temp file fails with
+# an xmllint error that names nothing useful. Every call site pairs this with
+# `|| return`/`|| exit` so the failure stops there instead.
+make_temp() {
+  local path
+  path=$(mktemp "$@" 2>/dev/null) && [[ -n "$path" ]] || {
+    echo "$SCRIPT_NAME: could not create a temporary file in ${TMPDIR:-/tmp} (not writable?)" >&2
+    return 1
+  }
+  printf '%s\n' "$path"
+}
+
 # =============================================================================
 # OFFLINE MODE AND HTTP CACHE
 # =============================================================================
@@ -153,6 +168,24 @@ cache_store() {
   return 0
 }
 
+# offline_body_file URL -- print the path of an already-cached body, if this is
+# an offline run and the cache has one, without writing anything at all.
+#
+# Callers that only need to *read* a body (metadata and POM XML, as opposed to
+# the source JARs that have to land in a build directory) use this before
+# reaching for http_get. Copying a cache hit into a temp file needs a writable
+# filesystem, and offline mode's whole reason to exist is the sandbox that
+# denies egress -- which is usually the same sandbox that denies writes. Note
+# the age exactly as http_get does; a cached answer is dated either way.
+offline_body_file() {
+  local url="$1" cache_file
+  is_offline || return 1
+  cache_file=$(cache_path_for_url "$url" 2>/dev/null) || return 1
+  [[ -f "$cache_file" ]] || return 1
+  echo "$SCRIPT_NAME: offline: using cached $url (cached $(file_age_human "$cache_file"))" >&2
+  printf '%s\n' "$cache_file"
+}
+
 # http_get URL OUTFILE
 #
 # Writes the response body to OUTFILE and sets, for the caller's error message:
@@ -234,8 +267,20 @@ http_get() {
 # http_get_body URL -- print the response body on stdout. Same exit codes and
 # HTTP_STATUS/HTTP_ERROR contract as http_get, for callers that want a string.
 http_get_body() {
-  local url="$1" tmp status=0
-  tmp=$(mktemp)
+  local url="$1" tmp status=0 cached
+  if cached=$(offline_body_file "$url"); then
+    HTTP_STATUS="200"
+    HTTP_ERROR=""
+    HTTP_HINT=""
+    cat "$cached"
+    return 0
+  fi
+  tmp=$(make_temp) || {
+    HTTP_STATUS=""
+    HTTP_ERROR="no writable temporary directory for the body of $url"
+    HTTP_HINT=""
+    return 2
+  }
   http_get "$url" "$tmp" || status=$?
   if [[ $status -eq 0 ]]; then
     cat "$tmp"
@@ -290,10 +335,25 @@ fetch_maven_metadata() {
 
   local metadata_url="$repo_url/$group_id_path/$artifact_id/maven-metadata.xml"
 
-  local tmp_body status
-  tmp_body=$(mktemp)
+  # Offline, the cached metadata is readable where it already lies; only the
+  # online path needs somewhere to put the response.
+  local tmp_body status body_file
   status=0
-  http_get "$metadata_url" "$tmp_body" || status=$?
+  if body_file=$(offline_body_file "$metadata_url"); then
+    tmp_body=""
+    HTTP_STATUS="200"
+    HTTP_ERROR=""
+    HTTP_HINT=""
+  else
+    tmp_body=$(make_temp) || {
+      HTTP_ERROR="no writable temporary directory for $metadata_url"
+      status=2
+    }
+    body_file="$tmp_body"
+    if [[ $status -eq 0 ]]; then
+      http_get "$metadata_url" "$tmp_body" || status=$?
+    fi
+  fi
 
   if [[ $status -eq 2 ]]; then
     # Neither a missing network nor an unwarmed cache is evidence the artifact
@@ -331,8 +391,11 @@ fetch_maven_metadata() {
     return 1
   fi
 
-  cat "$tmp_body"
-  rm -f "$tmp_body"
+  cat "$body_file"
+  if [[ -n "$tmp_body" ]]; then
+    rm -f "$tmp_body"
+  fi
+  return 0
 }
 
 extract_versions_from_xml() {
@@ -531,7 +594,7 @@ update_index() {
 
   (
     local tmp_gz tmp_json
-    tmp_gz=$(mktemp)
+    tmp_gz=$(make_temp) || exit 1
     tmp_json="${tmp_gz}.json"
     trap 'rm -f "$tmp_gz" "$tmp_json"' EXIT
 
@@ -1290,8 +1353,7 @@ cmd_source() {
   fi
 
   # Validate all artifacts before creating directories
-  local group_id artifact_id group_id_path metadata_url tmp_metadata
-  tmp_metadata=$(mktemp)
+  local group_id artifact_id group_id_path metadata_url tmp_metadata=""
   for artifact in "${artifacts[@]}"; do
     validate_artifact_format "$artifact"
 
@@ -1300,6 +1362,14 @@ cmd_source() {
     group_id_path=$(echo "$group_id" | sed 's/\./\//g')
     metadata_url="${repo_url}/${group_id_path}/${artifact_id}/maven-metadata.xml"
 
+    # This body is only ever tested for existence, so a cache hit needs no copy.
+    if offline_body_file "$metadata_url" >/dev/null; then
+      continue
+    fi
+
+    if [[ -z "$tmp_metadata" ]]; then
+      tmp_metadata=$(make_temp) || exit 1
+    fi
     if ! http_get "$metadata_url" "$tmp_metadata"; then
       rm -f "$tmp_metadata"
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
@@ -1310,7 +1380,9 @@ cmd_source() {
       exit 1
     fi
   done
-  rm -f "$tmp_metadata"
+  if [[ -n "$tmp_metadata" ]]; then
+    rm -f "$tmp_metadata"
+  fi
 
   # Create output directory
   local build_dir
@@ -1318,7 +1390,12 @@ cmd_source() {
     build_dir="$output_dir"
     mkdir -p "$build_dir"
   else
-    build_dir=$(mktemp -d "${TMPDIR:-/tmp}/jetpack.XXXXXXXXXX")
+    # Extracted sources have to land somewhere writable; --output names that
+    # directory when the default temp location is not one.
+    build_dir=$(make_temp -d "${TMPDIR:-/tmp}/jetpack.XXXXXXXXXX") || {
+      echo "$SCRIPT_NAME source: pass --output DIR to extract somewhere writable" >&2
+      exit 1
+    }
   fi
 
   # Download and extract each package
@@ -1388,19 +1465,24 @@ cmd_source() {
     # this whole mode exists to prevent — so it is fatal and says how to fix it.
     pom_url="${repo_url}/${group_id_path}/${artifact_id}/${version}/${artifact_id}-${jar_version}.pom"
     pom_status=0
-    pom_file=$(mktemp)
-    http_get "${pom_url}" "$pom_file" || pom_status=$?
     pom_content=""
-    if [[ $pom_status -eq 0 ]]; then
+    if pom_file=$(offline_body_file "$pom_url"); then
       pom_content=$(cat "$pom_file")
-    elif [[ $pom_status -eq 2 ]] && is_offline; then
+    else
+      pom_file=$(make_temp) || exit 1
+      http_get "${pom_url}" "$pom_file" || pom_status=$?
+      if [[ $pom_status -eq 0 ]]; then
+        pom_content=$(cat "$pom_file")
+      fi
       rm -f "$pom_file"
+    fi
+
+    if [[ $pom_status -eq 2 ]] && is_offline; then
       echo "$SCRIPT_NAME source: $HTTP_ERROR" >&2
       echo "$SCRIPT_NAME source: without it, whether $artifact has Kotlin Multiplatform sources cannot be determined, and the extracted sources may be incomplete" >&2
       warm_hint
       exit 1
     fi
-    rm -f "$pom_file"
 
     if [[ -n "$pom_content" ]]; then
       # sort -u because a platform artifact listed both as a compile and a
@@ -1710,19 +1792,23 @@ cmd_dependencies() {
   # Fetch into a file rather than a command substitution: HTTP_ERROR is set by
   # http_get in the shell that runs it, and a $(...) subshell would take it
   # (and the reason this failed) with it.
-  local pom_content pom_file
-  pom_file=$(mktemp)
-  if ! http_get "${pom_url}" "$pom_file"; then
-    rm -f "$pom_file"
-    echo "$SCRIPT_NAME dependencies: failed to download $pom_url: $HTTP_ERROR" >&2
-    http_print_hint
-    if is_offline; then
-      warm_hint
+  local pom_content pom_file cached_pom
+  if cached_pom=$(offline_body_file "$pom_url"); then
+    pom_content=$(cat "$cached_pom")
+  else
+    pom_file=$(make_temp) || exit 1
+    if ! http_get "${pom_url}" "$pom_file"; then
+      rm -f "$pom_file"
+      echo "$SCRIPT_NAME dependencies: failed to download $pom_url: $HTTP_ERROR" >&2
+      http_print_hint
+      if is_offline; then
+        warm_hint
+      fi
+      exit 1
     fi
-    exit 1
+    pom_content=$(cat "$pom_file")
+    rm -f "$pom_file"
   fi
-  pom_content=$(cat "$pom_file")
-  rm -f "$pom_file"
 
   local deps
   deps=$(echo "$pom_content" | perl -0777 -ne '

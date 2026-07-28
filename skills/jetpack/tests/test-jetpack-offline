@@ -24,7 +24,7 @@ REPO_URL="http://127.0.0.1:1/repo"
 ARTIFACT="androidx.wear.tiles:tiles"
 CACHED_DIR="$JETPACK_CACHE_DIR/http/127.0.0.1:1/repo/androidx/wear/tiles/tiles"
 
-TOTAL_TESTS=31
+TOTAL_TESTS=41
 TEST_NUM=0
 
 echo "1..$TOTAL_TESTS"
@@ -287,3 +287,70 @@ if [[ "$STDERR" == *"could not reach"* ]]; then
 else
   ok "a received 404 is not reported as an unreachable host"
 fi
+
+# --- No writable temporary directory --------------------------------------
+#
+# The sandbox that denies egress usually denies writes too, so offline mode is
+# worth little if reading a cached answer still needs somewhere to copy it.
+# Reading the cache file where it already lies keeps version and list
+# dependencies working; source, which has to extract a JAR, still needs
+# --output and must say so.
+#
+# Regression: a bare `tmp=$(mktemp)` left an empty path, and BSD cp resolves an
+# empty destination to ./<basename> -- so the body landed as a stray
+# maven-metadata.xml in the caller's working directory and the run ended in an
+# xmllint parser error naming nothing useful.
+
+NOMKTEMP_DIR="$TEST_TMP/nomktemp"
+mkdir -p "$NOMKTEMP_DIR"
+cat >"$NOMKTEMP_DIR/mktemp" <<'SHIM'
+#!/bin/sh
+echo "mktemp: mkstemp failed: Operation not permitted" >&2
+exit 1
+SHIM
+chmod +x "$NOMKTEMP_DIR/mktemp"
+
+# The test's own bookkeeping still needs a real mktemp, so shim only the child.
+run_jetpack_no_mktemp() {
+  local err_file
+  err_file=$(mktemp)
+  STDOUT=$(cd "$WORKDIR" && PATH="$NOMKTEMP_DIR:$PATH" "$ABS_JETPACK" "$@" 2>"$err_file")
+  STATUS=$?
+  STDERR=$(cat "$err_file")
+  rm -f "$err_file"
+}
+
+WORKDIR="$TEST_TMP/work"
+mkdir -p "$WORKDIR"
+# Absolute, because the runner above invokes jetpack from inside WORKDIR.
+ABS_JETPACK=$(cd "$(dirname "$BIN_JETPACK")" && pwd)/$(basename "$BIN_JETPACK")
+
+AGENT_OFFLINE=1 run_jetpack_no_mktemp version "$ARTIFACT" STABLE "$REPO_URL"
+assert_status "version succeeds offline with no writable temp dir" "$STATUS" 0
+assert_equals "it still answers from the cache" "$STDOUT" "1.4.0"
+
+if [[ -z "$(ls -A "$WORKDIR")" ]]; then
+  ok "nothing is written into the working directory"
+else
+  not_ok "nothing is written into the working directory" \
+    "Stray files: $(ls -A "$WORKDIR")"
+fi
+
+AGENT_OFFLINE=1 run_jetpack_no_mktemp list dependencies "$ARTIFACT" 1.4.0 "$REPO_URL"
+assert_status "list dependencies succeeds offline with no writable temp dir" "$STATUS" 0
+assert_contains "dependencies still come from the cached POM" "$STDOUT" \
+  "androidx.annotation:annotation:1.8.0 (compile)"
+
+# Without the cache to fall back on there is nowhere to put a response, and the
+# failure must name that rather than surfacing as a parse error further down.
+AGENT_OFFLINE=1 run_jetpack_no_mktemp version "$ARTIFACT" STABLE "$REPO_URL/missing"
+assert_status "an uncached URL with no temp dir fails" "$STATUS" 1
+assert_contains "the failure names the temporary directory" "$STDERR" \
+  "could not create a temporary file"
+assert_not_contains "no parser error leaks out instead" "$STDERR" "parser error"
+
+# source has to extract a JAR somewhere, so it cannot answer from the cache
+# alone -- but it must point at the switch that gives it a writable directory.
+AGENT_OFFLINE=1 run_jetpack_no_mktemp source "$ARTIFACT" 1.4.0 "$REPO_URL"
+assert_status "source fails with no writable temp dir" "$STATUS" 1
+assert_contains "source names --output as the way out" "$STDERR" "--output"
