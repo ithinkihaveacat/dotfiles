@@ -793,7 +793,7 @@ fi
 heading "uv"
 if ! exists uv; then
   echo "Installing uv..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  curl -LsSf https://astral.sh/uv/install.sh | sh || echo "warning: uv installation failed" >&2
 else
   echo "Updating uv..."
   # `uv self update` only works for the standalone installer; a uv provided by a
@@ -925,10 +925,10 @@ fi
 if exists android || exists compose-preview; then
   heading "android"
   if exists android; then
-    x android update
+    x android update || echo "warning: android update failed" >&2
   fi
   if exists compose-preview; then
-    x compose-preview update
+    x compose-preview update || echo "warning: compose-preview update failed" >&2
   fi
 fi
 
@@ -976,13 +976,13 @@ if exists agy || exists claude || is_codex_agent; then
   heading "agent CLIs"
 
   if exists agy; then
-    x agy update
+    x agy update || echo "warning: agy update failed" >&2
   fi
   if exists claude; then
-    x claude update
+    x claude update || echo "warning: claude update failed" >&2
   fi
   if is_codex_agent; then
-    x codex update
+    x codex update || echo "warning: codex update failed" >&2
   fi
 
 fi
