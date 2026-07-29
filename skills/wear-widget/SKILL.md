@@ -22,12 +22,13 @@ ______________________________________________________________________
 ## 📋 Widget Analysis & Extraction Checklist
 
 Follow this step-by-step methodology when analyzing an APK. Ensure you leverage
-the `apk` and `adb` skills where applicable.
+binary analysis and ADB device management tools where applicable.
 
 ### 1. Decompile the APK
 
 Decompile the APK to decode binary manifests, layouts, and resource values into
-readable plain-text formats using the `apk` skill tools or raw `apktool`:
+readable plain-text formats using binary decoding tools (such as `apktool` or
+workspace APK helpers):
 
 ```bash
 apktool d <app_name>.apk -o <output_dir>
@@ -178,20 +179,21 @@ without deploying to a device or emulator — for example,
 ### Method 2: Live Device Capture (Tile Carousel)
 
 Capture the active Tile UI directly from a live emulator or physical device.
-Prefer high-level scripts from the `adb` skill over raw commands because they
-automatically handle platform edge cases, wait for tile rendering visibility,
-manage screen waking, and apply circular display masking.
+Prefer high-level ADB helper scripts (such as `adb-tile-*` or `adb-screenshot`
+if available in your workspace) over raw commands because they automatically
+handle platform edge cases, wait for tile rendering visibility, manage screen
+waking, and apply circular display masking.
 
 **Primary Workflow (Helper Scripts)**: When tile helper scripts are available
 (these may be available as `adb-tile-*` or `adb-screenshot` scripts in your
 environment), use them as the primary workflow:
 
 ```bash
-# 1. Add tile to carousel and switch active display (adb skill)
+# 1. Add tile to carousel and switch active display
 scripts/adb-tile-add com.example/.MyTileService
 scripts/adb-tile-switch 0
 
-# 2. Capture screenshot directly with automatic device waking and circular masking (adb skill)
+# 2. Capture screenshot directly with automatic device waking and circular masking
 scripts/adb-screenshot my_widget_tile_preview.png
 ```
 
@@ -259,15 +261,19 @@ ______________________________________________________________________
   (`SecTileComposeAddableActivity`) is private. You can automate the on-screen
   editing interface using UI automation tools (e.g., `popper`):
   - **Add Recipe**:
-    1. Switch to target page: `scripts/adb-tile-switch 3`
-    1. Automate picker via `popper`:
+    1. Switch to target page (e.g., using ADB broadcast or a helper like
+       `adb-tile-switch 3`).
+    1. Automate the picker using a UI interaction tool (such as `popper` if
+       available):
        ```bash
        popper "Long press the center of the screen, tap the Edit button, scroll down to the bottom of the widget list, tap the '+' Add button. In the Add tiles list, scroll down past 'Featured' and 'Samsung Health' to 'Optimized apps', tap '<App Name>' to expand the accordion, and click the '<Widget Preview Text>' preview widget to add it."
        ```
     1. Return to home: `adb shell input keyevent KEYCODE_HOME`
   - **Remove Recipe**:
-    1. Switch to target page: `scripts/adb-tile-switch 3`
-    1. Automate removal via `popper`:
+    1. Switch to target page (e.g., using ADB broadcast or a helper like
+       `adb-tile-switch 3`).
+    1. Automate removal using a UI interaction tool (such as `popper` if
+       available):
        ```bash
        popper "Long press the center of the screen, tap the Edit button, scroll to the '<Widget Preview Text>' widget, and tap the red minus icon on its right side to delete it."
        ```

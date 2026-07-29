@@ -3,11 +3,11 @@ name: technical-writing
 description: >-
   Use this skill when authoring, reviewing, or editing technical documents,
   including bug reports, known issues, friction logs, PR descriptions, TODO
-  items, and the structural content and tone of commit messages. Use to ensure
-  engineering content maintains a clear, factual, and constructive tone.
-  Triggers: technical writing, bug report, known issue, friction log, PR
-  description, pull request, commit message tone, review document, TODO,
-  TODO.md, task list, backlog item.
+  items, Agent Skills (SKILL.md), and the structural content and tone of commit
+  messages. Use to ensure engineering content maintains a clear, factual, and
+  constructive tone. Triggers: technical writing, bug report, known issue,
+  friction log, PR description, pull request, commit message tone, review
+  document, TODO, TODO.md, task list, backlog item, skill authoring, agent skill.
 ---
 
 # Technical Writing Style Guidelines
@@ -89,3 +89,10 @@ Use when adding, updating, or completing items in a repository's `TODO.md` task
 list. Ensures each item states its goal, end condition, and the writer's
 solution sketch without hardening into a plan. **See:**
 [references/todos.md](references/todos.md)
+
+### Agent Skills
+
+Use when authoring, refactoring, or reviewing Agent Skills (`SKILL.md` files and
+reference guides). Ensures skills remain modular, decoupled, and self-contained
+while effectively guiding agents toward available workspace capabilities.
+**See:** [references/skills.md](references/skills.md)

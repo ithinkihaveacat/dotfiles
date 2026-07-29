@@ -214,9 +214,8 @@ AGENT_OFFLINE=1 scripts/jetpack inspect androidx.wear.tiles.TileService
 ```
 
 A miss quotes the command to re-run, so the fix is always the invocation that
-just failed. See
-[caching and offline mode](../coding-standards/references/caching.md) for the
-repo-wide convention.
+just failed. See local HTTP caching guidelines (storing response artifacts
+locally under `$XDG_CACHE_HOME`) for the repo-wide convention.
 
 ## Safety Notes
 

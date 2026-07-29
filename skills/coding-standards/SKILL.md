@@ -3,12 +3,14 @@ name: coding-standards
 description: >-
   Use this skill when writing, reviewing, or validating code (shell scripts,
   Python, Markdown, Web) or CLI tools to ensure they follow repository coding
-  standards and conventions. Also use when formatting git commit messages
-  (Conventional Commits syntax, line wrapping) or checking code for style
-  compliance. Triggers: coding standards, style guide, validate change,
-  review conventions, shellcheck, shfmt, markdown format, python, ruff,
-  uvx, lint, commit message format, CLI design, code review, formatting,
-  web development, state management, scroll position, frontend.
+  standards, HTTP caching guidelines, and conventions. Also use when formatting
+  git commit messages (Conventional Commits syntax, line wrapping) or checking
+  code for style compliance. Triggers: coding standards, style guide, validate change,
+  review conventions, caching guidelines, http caching, offline mode, shellcheck,
+  shfmt,
+  markdown format, python, ruff, uvx, lint, commit message format, CLI design, code
+  review,
+  formatting, web development, state management, scroll position, frontend.
 ---
 
 # Coding Standards

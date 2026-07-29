@@ -6,7 +6,7 @@ and self-update via their own update commands; the `install.sh` script calls
 those commands automatically when the tool is present in PATH.
 
 For non-interactive branch, commit, working-tree, and checked-out pull-request
-review, use the [agent-review skill](../../agent-review/SKILL.md).
+review, use an agent code review tool or rubric.
 
 ## Antigravity (agy)
 
