@@ -4,6 +4,17 @@ Measurements of whether the `jetpack` skill actually helps, and whether it loads
 when it should. Run with
 [skill-eval-harness](https://github.com/adewale/skill-eval-harness).
 
+> **Temporary:** install the harness from the
+> [`agy-adapter` branch of this fork](https://github.com/ithinkihaveacat/skill-eval-harness/tree/agy-adapter),
+> not from upstream. It carries the Google Antigravity backend these evals use,
+> which is not yet released upstream. Once it lands, use upstream and delete
+> this note.
+>
+> ```bash
+> git clone -b agy-adapter https://github.com/ithinkihaveacat/skill-eval-harness.git
+> cd skill-eval-harness && uv tool install --editable .
+> ```
+
 ## What is here
 
 | Path                                 | What it is                                                                                                 |
@@ -105,9 +116,8 @@ Every one of these cost real time to find.
   entry, so trigger runs mount to `.agents/skills/SKILL.md/`. Cosmetic —
   detection uses the frontmatter `name:` — but confusing in a trace.
 
-- **`--agent agy` needs an unreleased harness.** The Antigravity adapter was
-  written for this work and is not in 0.6.0. Until it lands upstream, install
-  the harness from a checkout that has it.
+- **`--agent agy` needs the forked harness** linked at the top. The other
+  backends (`claude`, `codex`, `vibe`) work against upstream 0.6.0.
 
 ## Versions this was last run against
 
