@@ -5,17 +5,20 @@ description: >
   up-to-date context for agents. Includes image description, screenshot
   comparison, smart cropping, token counting, technical essay generation,
   boolean condition evaluation, live context gathering, Android UI interaction
-  via popper, GitHub PR/Issue/Workflow Run formatting via gh-markdown, deep
-  reasoning research via Oracle, and recipes for consulting other agents
-  (oracle and emerson) for plans and documents. Use this skill when the user
-  needs to analyze images, count tokens, evaluate conditions, gather the latest
-  authoritative documentation, format GitHub data, automate Android apps,
-  generate technical essays, perform complex architectural reasoning requiring
-  recursive directory traversal and external search, or obtain an independent
-  plan or prose review. Triggers: ai analysis, describe image, visual diff,
-  token count, generate essay, boolean evaluation, gather context, latest docs,
-  research topic, github, pull request, gh-markdown, automate app, oracle, deep
-  research, architecture, plan review, prose review.
+  via popper, receipt extraction via pacioli, GitHub PR/Issue/Workflow Run
+  formatting via gh-markdown, deep reasoning research via Oracle, and recipes
+  for consulting advanced reasoning tools (oracle and emerson) for plans and documents.
+  Use
+  this skill when the user needs to analyze images, count tokens, evaluate conditions,
+  extract receipts, gather the latest authoritative documentation, format GitHub data,
+  automate Android apps, generate technical essays, perform complex architectural
+  reasoning requiring recursive directory traversal and external search, or obtain
+  an independent plan or prose review. Triggers: ai analysis, describe image, visual
+  diff,
+  token count, receipt extraction, pacioli, generate essay, boolean evaluation, gather
+  context, latest docs, research topic, github, pull request, gh-markdown, automate
+  app,
+  oracle, deep research, architecture, plan review, prose review.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs a Gemini API key (`GEMINI_API_KEY`) and network access to
@@ -473,7 +476,7 @@ text instead of calling the model — useful for debugging)
 # Extract from a saved email
 scripts/pacioli < order.eml
 
-# Pipe a Gmail message body through (see the gog skill)
+# Pipe an email message body through (e.g., using an email CLI client like gog)
 gog gmail get "$id" --json | jq -r '"From: \(.headers.from)\nSubject: \(.headers.subject)\n\n" + .body' | scripts/pacioli
 
 # Inspect what the model actually sees

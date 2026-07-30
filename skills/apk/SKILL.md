@@ -1,11 +1,12 @@
 ---
 name: apk
 description: >
-  Performs offline analysis, extraction, decoding, and inspection of Android
-  APKs and ZIP archives (split APKs). Provides utilities for reading manifests,
-  extracting launcher icons, listing Wear OS tiles/complications, and decoding
-  resources. Use when inspecting APK properties, extracting files from packages,
-  or installing local APKs. Triggers: apk, apkanalyzer, apktool, aapt, android manifest.
+  Performs offline binary analysis, extraction, decoding, decompilation, and
+  inspection of Android APKs and ZIP archives (split APKs). Provides utilities for
+  reading manifests, extracting launcher icons, listing Wear OS tiles/complications,
+  and decoding resources. Use when inspecting APK properties, performing binary
+  analysis, extracting files from packages, or installing local APKs. Triggers: apk,
+  binary analysis, binary decoding, apkanalyzer, apktool, aapt, android manifest.
 compatibility: >-
   Requires apkanalyzer, unzip, and xmllint. Some scripts require xpath, aapt, or apktool.
   Designed for filesystem-based agents with bash access.
@@ -46,8 +47,8 @@ See `references/command-index.md` for detailed usage.
 
 > [!TIP] If the application is already installed on the device and you want to
 > launch it without reinstalling (preserving state and cache), you can compose
-> the `scripts/apk-info` package query with the `packagename` utility from the
-> `adb` skill:
+> the `scripts/apk-info` package query with an ADB package management utility
+> (such as `packagename`, if available in your workspace):
 >
 > - **Fish:** `packagename launch (apk-info package app.apk)`
 > - **Bash/Zsh:** `packagename launch $(apk-info package app.apk)`

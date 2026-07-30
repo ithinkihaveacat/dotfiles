@@ -1,12 +1,12 @@
 ---
 name: adb
 description: >
-  Manipulates Android devices via ADB with emphasis on Wear OS. Provides scripts
-  for screenshots, screen recording, tile management, WearableService
+  Manipulates Android devices via ADB with emphasis on Wear OS and device automation.
+  Provides scripts for screenshots, screen recording, tile management, WearableService
   inspection, package operations, and device configuration. Use when working
-  with adb, Android devices, Wear OS watches, tiles, wearable data layer,
-  dumpsys, or device debugging. Triggers: adb, android device, wear os,
-  wearable, tile, screenshot, screen recording, dumpsys, logcat.
+  with adb, ADB device management, device automation, Android devices, Wear OS watches,
+  tiles, wearable data layer, dumpsys, or device debugging. Triggers: adb, adb device management,
+  device automation, android device, wear os, wearable, tile, screenshot, screen recording, dumpsys, logcat.
 compatibility: >-
   Requires adb. Some scripts require magick (ImageMagick), scrcpy, ffmpeg, or
   jq. Designed for filesystem-based agents with bash access.

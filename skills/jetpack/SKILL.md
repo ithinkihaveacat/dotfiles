@@ -238,8 +238,8 @@ nowhere to write. `source` and `inspect` are the exception — they extract a JA
 so they need somewhere to put it; pass `--output DIR` naming a writable
 directory when the default temp location is not one.
 
-See [caching and offline mode](../coding-standards/references/caching.md) for
-the repo-wide convention.
+See local HTTP caching guidelines (storing response artifacts locally under
+`$XDG_CACHE_HOME`) for the repo-wide convention.
 
 ## Safety Notes
 

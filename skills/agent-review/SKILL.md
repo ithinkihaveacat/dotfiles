@@ -1,6 +1,17 @@
 ---
 name: agent-review
-description: Use this skill whenever the user asks to review code changes, a branch against a base branch, a commit, a working tree, or a pull request, including requests for an independent or second-opinion review. Select a native non-interactive review entry point when the chosen external agent supports the requested target; otherwise perform the synthesized read-only workflow in this skill. Trigger on code review, review branch, review diff, review commit, review PR, second opinion, check my changes, and look for bugs. Do not use for implementing fixes or reviewing prose or design documents.
+description: >-
+  Use this skill whenever the user asks to review code changes, a branch against a
+  base branch,
+  a commit, a working tree, or a pull request, including requests for an independent
+  or second-opinion review.
+  Select a native non-interactive review entry point when the chosen external agent
+  supports the requested target;
+  otherwise perform the synthesized read-only workflow in this skill. Do not use for
+  implementing fixes or
+  reviewing prose or design documents. Triggers: code review, review branch, review
+  diff, review commit,
+  review PR, second opinion, check my changes, look for bugs.
 ---
 
 # Code Review

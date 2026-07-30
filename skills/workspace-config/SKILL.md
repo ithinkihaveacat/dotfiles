@@ -83,9 +83,8 @@ human sets (what agents should do in this workspace); `SKILL_*` variables are
   legacy spelling `_agent_preflight_skip` is still honored.)
 - `SKILL_SOURCE_DIRS`: Optional colon-separated environment variable override
   searched for skills by name (by default, local skills are discovered
-  automatically from `~/.dotfiles/skills`, `~/.private/skills`,
-  `~/.corp/skills`, `~/.agents/skills`, `~/.gemini/config/skills`, and
-  `~/.gemini/jetski/skills` via the `05_local.py` plugin).
+  automatically from standard workspace and configuration directories via the
+  `05_local.py` plugin).
 - `SKILL_DEST_DIRS`: Colon-separated link destinations relative to the workspace
   root (default: `.claude/skills:.agents/skills`).
 - `SKILL_CACHE_DIR`: This tool's cache directory for remote skills and catalog
@@ -94,8 +93,8 @@ human sets (what agents should do in this workspace); `SKILL_*` variables are
   cache instead of fetching them — what a CI job or a network-denied agent
   sandbox needs, so `preflight` does not gate an agent launch on GitHub being
   reachable. A skill that has never been fetched is a clear error rather than a
-  silent omission. Per-tool variable wins; see
-  [caching and offline mode](../coding-standards/references/caching.md).
+  silent omission. Per-tool variable wins; see local workspace caching
+  guidelines.
 
 For the underlying model — what `apply` touches, the invariants `doctor` audits,
 and the one place `doctor` and `preflight` deliberately differ — see

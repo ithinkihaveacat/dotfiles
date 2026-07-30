@@ -21,12 +21,14 @@ ______________________________________________________________________
 
 ## 📋 Widget Analysis & Extraction Checklist
 
-Follow this step-by-step methodology when analyzing an APK:
+Follow this step-by-step methodology when analyzing an APK. Ensure you leverage
+binary analysis and ADB device management tools where applicable.
 
 ### 1. Decompile the APK
 
 Decompile the APK to decode binary manifests, layouts, and resource values into
-readable plain-text formats:
+readable plain-text formats using binary decoding tools (such as `apktool` or
+workspace APK helpers):
 
 ```bash
 apktool d <app_name>.apk -o <output_dir>
@@ -37,18 +39,12 @@ apktool d <app_name>.apk -o <output_dir>
 Search the decompiled `AndroidManifest.xml` for services or receivers acting as
 widget or tile providers:
 
-- **Glance / Wear OS Widgets**: Search for the intent filter action:
-  ```xml
-  <action android:name="androidx.glance.wear.action.BIND_WIDGET_PROVIDER" />
-  ```
-- **Standard Android AppWidgets**: Search for the intent filter action:
-  ```xml
-  <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-  ```
-- **Wear OS Tiles**: Search for the intent filter action:
-  ```xml
-  <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
-  ```
+- **Glance / Wear OS Widgets**:
+  `<action android:name="androidx.glance.wear.action.BIND_WIDGET_PROVIDER" />`
+- **Standard Android AppWidgets**:
+  `<action android:name="android.appwidget.action.APPWIDGET_UPDATE" />`
+- **Wear OS Tiles**:
+  `<action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />`
 - **Locate Configuration XML**: Find the `<meta-data>` element pointing to the
   XML info file:
   - Glance: `name="androidx.glance.wear.widget.provider"`
@@ -65,565 +61,291 @@ Open the resolved XML file in `res/xml/` to extract metadata:
 - **Containers**: Note all supported container sizes/types and their
   corresponding `previewImage` drawables.
 
-### 4. Resolve Resource Strings
+### 4. Resolve Resource Strings & Extract Preview Images
 
-Search `res/values/strings.xml` for any `@string/...` identifiers found in the
-configuration XML to obtain user-visible text (e.g. widget labels,
-descriptions).
+- Search `res/values/strings.xml` for any `@string/...` identifiers.
+- For each referenced `previewImage` and `icon` drawable:
+  - **If Raster (PNG, WebP, JPEG)**: Copy the highest density version (usually
+    in `drawable-xxhdpi/` or `drawable-nodpi/`).
+  - **If Vector (XML)**: Translate the Android Vector Drawable (AVD) to SVG and
+    render it to PNG using the `avd-to-png` tool.
 
-### 5. Extract and Render Preview Images
+### 5. Install & Onboard the Corresponding Mobile App
 
-For each referenced `previewImage` and `icon` drawable:
+Depending on the task (e.g., if auditing a companion feature requiring active
+backend state), you may need the corresponding mobile app installed and
+configured in a clean, logged-in state.
 
-- **If Raster (PNG, WebP, JPEG)**: Search the `res/` directory for the file and
-  copy the highest density version (usually in `drawable-xxhdpi/` or
-  `drawable-nodpi/`).
-- **If Vector (XML)**: Translate the Android Vector Drawable (AVD) to SVG and
-  render it to PNG using the `avd-to-png` tool.
-
-### 6. Install the Corresponding Mobile App
-
-For features to function correctly in a companion environment (such as Wear OS),
-the corresponding mobile app must be installed and configured in a clean,
-logged-in state.
-
-1. **Install the Mobile App**:
-   - Install the application on the phone **exclusively using the Google Play
-     Store** (do not sideload the phone app unless specifically instructed):
-     ```bash
-     # Launch Play Store on the phone and search/install
-     popper --launch com.android.vending "search for '<App Name>', click on the app, click install, and wait for it to finish"
-     ```
-1. **Verify Wear OS Companion App**:
-   - Check if the companion app automatically appears/installs on the connected
-     watch:
-     ```bash
-     adb -s <watch_serial> shell pm list packages | grep <package_name>
-     ```
-   - **If not found on the watch**, manually sideload the Wear OS companion APK
-     (if available) to the watch:
-     ```bash
-     adb -s <watch_serial> install -g -t -r <wear_os_companion_apk>
-     ```
-1. **Onboard & Log In**:
-   - Launch the app on the phone and complete sign-in to reach the main home
-     screen (homepage) in a clean initial state:
-     ```bash
-     # Launch and automate onboarding/login
-     popper --launch <package_name> "use Google sign in or sign up, accept terms, skip onboarding, dismiss popups, and reach the homepage"
-     ```
-   - **Manual Intervention Guard**: If you encounter authentication barriers
-     (like 2FA, password entry, or CAPTCHAs), take a screenshot and prompt the
-     user for manual help.
+1. **Install the Mobile App**: Open the Play Store page directly on the phone
+   using
+   `adb shell am start -a android.intent.action.VIEW -d "market://details?id=<package_name>"`
+   (or `packagename playstore <package_name>`), or navigate the Play Store using
+   a UI automation tool like `popper`.
+1. **Verify Wear OS Companion App**: Check if installed on the watch via
+   `adb -s <watch_serial> shell pm list packages`. If missing, sideload the Wear
+   OS APK directly.
+1. **Onboard & Log In**: Launch the app and automate onboarding (e.g., using UI
+   automation tools like `popper`). Prompt the user for manual help if
+   2FA/CAPTCHAs block automation.
 
 ______________________________________________________________________
 
-## 🛠️ Tooling: `avd-to-png`
+## 📦 On-Device APK Preview Metadata & Linking
 
-The `avd-to-png` tool converts Android Vector Drawable (AVD) XML files to
-standard SVG and renders them as high-quality PNG images. It automatically
-parses `colors.xml` to resolve color resource references and handles 8-digit hex
-values.
+When deploying Wear Widgets, the OS requires strict metadata declarations and
+asset formatting inside the APK. Do not confuse these declaration requirements
+with the mechanisms used to generate the asset files (see
+[Developer Preview Generation Mechanisms](#-developer-preview-generation-mechanisms)).
 
-### Usage
+### 1. Asset Requirements & Rules
 
-```text
-Usage: avd-to-png [options] AVD_FILE RES_DIR
+- **The `nodpi` Folder Recommendation**: Static raster previews should be placed
+  in `nodpi` directories (e.g., `res/drawable-nodpi/`) to ensure the system does
+  not attempt density-based scaling at runtime.
+- **Strict Qualifier Ordering (Conditional)**: If providing different preview
+  resources for different display sizes, Android resource qualifier precedence
+  rules apply. The screen width qualifier (`w<N>dp`) takes precedence over pixel
+  density (`nodpi`), requiring directory names like
+  `res/drawable-w225dp-nodpi/`. The **225dp** threshold is the official
+  breakpoint between small and large watch displays.
+- **Aspect Ratio & Dimensions**: The Tile carousel preview image must have a
+  perfect **1:1 (square) aspect ratio** at exactly **400x400px**. The Android
+  build system enforces the `TilePreviewImageFormat` lint rule.
+- **Full-Bleed & Masking**: Provide perfectly square images. Let the Wear OS
+  system automatically clip the edges to the device's shape. Do not pre-mask
+  background assets into a circle.
 
-Converts an Android Vector Drawable (AVD) XML file to a standard SVG and renders it to a high-quality PNG.
+### 2. Widget Picker Previews (Glance/AppWidget)
 
-Arguments:
-  AVD_FILE            Path to the Android Vector Drawable (.xml).
-  RES_DIR             Path to the Android resource directory (used to resolve @color references).
+Shown in the native widget picker on devices supporting partial-height widgets
+(Wear OS 7+). Previews are linked inside the provider XML configuration file
+(`res/xml/my_widget_info.xml`):
 
-Options:
-  -o, --output PATH   Path to the output PNG file. If not specified, outputs to the current directory with the same basename.
-  --help              Display this help message and exit
+```xml
+<container
+    type="SMALL"
+    previewImage="@drawable/my_widget_preview_small" />
+<container
+    type="LARGE"
+    previewImage="@drawable/my_widget_preview_large" />
 ```
 
-### Examples
+### 3. Tile Carousel Previews
 
-1. **Render a vector preview to a specific path**:
+Shown in the tile carousel editor (on-watch) and mobile companion app
+(on-phone). On Wear OS 6 or lower, systems run in **compatibility mode** and
+translate widgets into full-screen Tiles. Previews are declared in
+`AndroidManifest.xml` under the service's `<meta-data>`:
 
-   ```bash
-   avd-to-png -o ./preview-small.png my_app_decompiled/res/drawable/ic_preview.xml my_app_decompiled/res
-   ```
-
-1. **Render a vector preview with default output path** (creates
-   `./ic_preview.png`):
-
-   ```bash
-   avd-to-png my_app_decompiled/res/drawable/ic_preview.xml my_app_decompiled/res
-   ```
+```xml
+<meta-data
+    android:name="androidx.wear.tiles.PREVIEW"
+    android:resource="@drawable/my_widget_tile_preview" />
+```
 
 ______________________________________________________________________
 
-## 🛠️ Developer Workflow: Previews & Screenshots
+## 🛠️ Developer Preview Generation Mechanisms
 
-When developing Wear Widgets, you must provide preview assets for two distinct
-surfaces, depending on the device's capabilities and OS version:
+Developers use several mechanisms to preview widgets during development and
+testing. Some of these mechanisms can also be used to generate the static
+preview image assets embedded in the APK metadata.
 
-1. **Widget Picker (`previewImage` in `widget_info.xml`)**: Shown in the native
-   widget picker on devices supporting partial-height widgets (Wear OS 7+).
-   Previews must be provided for each supported container size (typically
-   `SMALL` and `LARGE`). See the official
-   [Get Started with Widgets](https://developer.android.com/training/wearables/widgets/get_started)
-   guide for layout details.
-1. **Tile Carousel (`androidx.wear.tiles.PREVIEW` in `AndroidManifest.xml`)**:
-   Shown in the tile carousel editor (on-watch) and the mobile companion app
-   (on-phone). On devices running Wear OS 6 or lower (or Wear OS 7 devices
-   without partial-height support), the system runs in **compatibility mode**
-   and automatically translates your widget into a full-screen Tile. This
-   metadata provides the preview for that translated Tile. See the official
-   [Migrate from Tiles to Widgets](https://developer.android.com/training/wearables/widgets/migration)
-   guide for service configuration details.
-1. **Standalone Renderer (Widget Tray Viewer)**: A developer-preview helper app
-   enabled on internal builds of the protolayout renderer package
-   (`com.google.android.wearable.protolayout.renderer`). It allows
-   developer-preview devices to test `SMALL` and `LARGE` widget layouts inside a
-   scrolling tray list.
+### Method 1: Local Code-Based Rendering (Glance/Compose)
 
-______________________________________________________________________
+You may have a tool that can generate PNGs directly from `@Preview` annotations
+without deploying to a device or emulator — for example,
+[`compose-preview`](https://github.com/yschimke/compose-ai-tools).
 
-### 1. Generating Widget Picker Previews (Local)
-
-Use your project's preview rendering tools to generate static assets directly
-from your code layout.
-
-#### Step A: Define the Previews in Code
-
-Depending on your framework and supported sizes, define the preview state:
-
-- **Glance (Compose)**: Use standard `@Preview` and `@Composable` annotations.
-  - If your widget supports both small and large sizes, use
-    **`RectangularAllWidgetPreviewParams`** as your `@PreviewParameter` to
-    generate renders for both sizes.
-  - If it only supports a single size, use `RectangularSmallWidgetPreviewParams`
-    or `RectangularLargeWidgetPreviewParams`.
-- **ProtoLayout (Tiles API)**: Use `@Preview` alongside `TilePreviewData` to
-  construct layout snapshots.
-
-#### Step B: Render and Export the Previews
-
-Extract the rendered layouts using your IDE's built-in snapshot tools or custom
-command-line preview extractors.
-
-##### Workaround when using `compose-preview`
-
-When using the `compose-preview` Gradle plugin to render assets, the tool
-automatically overrides device-less previews in Wear modules to a default watch
-face canvas (`227x227` dp), which prevents intrinsic cropping.
-
-Until this is resolved (see
-[yschimke/compose-ai-tools#2670](https://github.com/yschimke/compose-ai-tools/issues/2670)),
-use the following workaround to generate cropped assets at their exact intrinsic
-sizes:
-
-1. **Remove Watch Feature:** Temporarily remove
-   `<uses-feature android:name="android.hardware.type.watch" />` from your
-   `AndroidManifest.xml`. *Note: commenting out the element is insufficient as
-   the tool matches commented text.*
-1. **Render Previews:** Force re-execution of discovery and rendering:
-   ```bash
-   COMPOSE_AI_TOOLS=true ./gradlew :app:composePreviewDiscover
-   COMPOSE_AI_TOOLS=true ./gradlew :app:composePreviewRender --rerun-tasks
-   ```
-1. **Copy Assets:** The generated cropped files (`*_PARAM_0.png` for small,
-   `*_PARAM_1.png` for large) will be written to
-   `build/compose-previews/renders/`. Copy these files to your resource
-   directory (e.g. `res/drawable-nodpi/`).
-1. **Restore Manifest:** Restore the uses-feature watch line in
-   `AndroidManifest.xml`.
-
-Export these assets as **PNG** or **WebP** files.
-
-#### Step C: Register in Widget Info
-
-1. Copy the rendered assets to the default `nodpi` drawable directory:
-   `res/drawable-nodpi/my_widget_preview_small.png`
-   `res/drawable-nodpi/my_widget_preview_large.png`
-1. Reference them in your widget provider XML (e.g.,
-   `res/xml/my_widget_info.xml`):
-   ```xml
-   <container
-       type="SMALL"
-       previewImage="@drawable/my_widget_preview_small" />
-   <container
-       type="LARGE"
-       previewImage="@drawable/my_widget_preview_large" />
-   ```
-
-______________________________________________________________________
-
-### 2. Capturing Tile Previews (Live Device)
-
-The tile preview shown in the carousel should represent the live rendering of
-the tile. Use device interaction tools (like ADB or screenshot helper scripts)
-to capture the UI.
-
-> [!NOTE] **Why Tile Commands?** Because Wear Widgets leverage the underlying
-> Tile infrastructure for compatibility and debugging, you use the system's Tile
-> debugging broadcasts (like `add-tile` and `show-tile`) to deploy and display
-> your widget on the device during development.
-
-#### Recommended Workflow:
-
-1. **Check ProtoLayout Renderer Version**: Verify that the connected emulator
-   image runs a compatible renderer package (`versionCode >= 100051969`):
-
-   ```bash
-   adb shell dumpsys package com.google.android.wearable.protolayout.renderer | grep -E "versionCode|versionName"
-   ```
-
-   > [!WARNING] Emulators with `versionCode < 100051969` (such as stock API 36
-   > image `1.5.0.1.730435378` / `versionCode 100017872`) encounter an internal
-   > IPC timeout deadlock in `ProtoTilesConnManager`, causing `Tile was null`
-   > rendering errors. Use images with updated renderers
-   > (`versionCode >= 100051969`).
-
-1. **Deploy the Widget/Tile**: Add the widget to the device's carousel using
-   `DEBUG_SURFACE add-tile` (enforcing FULLSCREEN mode `--type FULLSCREEN` /
-   `--ei type 0` for reliable translation rendering):
-
-   ```bash
-   adb shell am broadcast \
-     -a com.google.android.wearable.app.DEBUG_SURFACE \
-     --es operation add-tile \
-     --ecn component <package>/<WidgetService> \
-     --ei type 0
-   ```
-
-1. **Switch Active Display & Wake Screen**: Switch the watch screen to display
-   the newly added tile, and tap the screen center (`227 227`) to clear System
-   UI Ambient Lite mode (`SysUiAmbientLiteService`):
-
-   ```bash
-   adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation show-tile --ei index 0
-   sleep 1
-   adb shell input tap 227 227
-   sleep 1
-   ```
-
-1. **Capture the Screenshot**: Execute a raw screen capture using standard ADB
-   commands now that the display is active and fully rendered:
-
-   ```bash
-   adb shell screencap -p /sdcard/my_widget_tile_preview.png
-   adb pull /sdcard/my_widget_tile_preview.png my_widget_tile_preview.png
-   ```
-
-   *(Optional: If helper tools like `adb-screenshot` are available in your
-   environment, you can use `adb-screenshot my_widget_tile_preview.png` as a
-   convenient shortcut).*
-
-1. **Resize and Register the Asset**:
-
-   - **Resize to 400x400 pixels**: The official recommended size for the Tile
-     preview asset is **400x400px** to ensure the best display quality in the
-     carousel editor on both watches and phones.
-   - Save the screenshot to `res/drawable-nodpi/my_widget_tile_preview.webp`.
-   - Register it in `AndroidManifest.xml` under your service's `<meta-data>`:
-     ```xml
-     <meta-data
-         android:name="androidx.wear.tiles.PREVIEW"
-         android:resource="@drawable/my_widget_tile_preview" />
+1. **Define Previews**: Use `@Preview` annotations. For Glance, use
+   `RectangularAllWidgetPreviewParams` to generate renders for both sizes, or
+   `RectangularSmallWidgetPreviewParams` / `RectangularLargeWidgetPreviewParams`
+   for specific sizes.
+1. **Workaround for `compose-preview` Bug**: The Gradle plugin currently
+   overrides device-less previews in Wear modules to a default watch face canvas
+   (227x227 dp), preventing intrinsic cropping.
+   - Temporarily remove
+     `<uses-feature android:name="android.hardware.type.watch" />` from
+     `AndroidManifest.xml` (do not just comment it out).
+   - Force re-execution:
+     ```bash
+     COMPOSE_AI_TOOLS=true ./gradlew :app:composePreviewDiscover
+     COMPOSE_AI_TOOLS=true ./gradlew :app:composePreviewRender --rerun-tasks
      ```
+   - Copy the generated cropped files from `build/compose-previews/renders/` to
+     `res/drawable-nodpi/`.
+   - Restore the manifest declaration.
 
-______________________________________________________________________
+### Method 2: Live Device Capture (Tile Carousel)
 
-### 3. Previewing in Standalone Renderer (Widget Tray)
+Capture the active Tile UI directly from a live emulator or physical device.
+Prefer high-level ADB helper scripts (such as `adb-tile-*` or `adb-screenshot`
+if available in your workspace) over raw commands because they automatically
+handle platform edge cases, wait for tile rendering visibility, manage screen
+waking, and apply circular display masking.
 
-For Wear OS devices without native OS-level tile carousel support, you can
-preview and test your widgets in the developer-preview Standalone Renderer
-(Widget Tray Viewer) app.
-
-#### Determining Capability (Standalone vs Carousel-only):
-
-The standalone "Widget Tray Viewer" tool is only available on specific
-developer-preview/experimental builds of the Protolayout Renderer. To verify if
-your connected device supports it:
-
-1. **Verify Activity Presence (Definitive):**
-
-   ```bash
-   adb shell pm resolve-activity -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
-   ```
-
-   If it returns `No activity found`, the standalone Widget Tray is not enabled
-   or available on this device.
-
-1. **Check the Version Name Suffix (Optional):**
-
-   ```bash
-   adb shell dumpsys package com.google.android.wearable.protolayout.renderer | grep -m 1 versionName
-   ```
-
-   - **Capable**: Version names ending in `.exp` (e.g., `1.6.4.2.944934794.exp`)
-     contain the Widget Tray.
-   - **Not Capable**: Version names ending in `.dogfood` (e.g.,
-     `1.6.3.14.918260856.dogfood`) or public release builds do not contain the
-     experimental activity.
-
-#### Manual Launch Command:
+**Primary Workflow (Helper Scripts)**: When tile helper scripts are available
+(these may be available as `adb-tile-*` or `adb-screenshot` scripts in your
+environment), use them as the primary workflow:
 
 ```bash
-adb shell am start -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+# 1. Add tile to carousel and switch active display
+scripts/adb-tile-add com.example/.MyTileService
+scripts/adb-tile-switch 0
+
+# 2. Capture screenshot directly with automatic device waking and circular masking
+scripts/adb-screenshot my_widget_tile_preview.png
 ```
 
-#### Automated Interaction (UI Automation):
+**Alternative / Low-Level Workflow (Raw ADB Commands)**:
 
-Instead of manually navigating the watch interface, you can leverage natural
-language UI automation tools to interact with the renderer's menus.
+> [!WARNING] Avoid mixing raw ADB commands (such as manual input taps) with
+> high-level scripts. Manual input taps sent to an active display can interact
+> with widget click handlers and trigger unexpected UI state reloads or
+> transient loading spinners on the captured screenshot.
 
-For example, using the `popper` tool:
+If helper scripts are unavailable, execute the raw IPC commands manually:
 
 ```bash
-# Example: Launch, clear previous widgets, and add Hello Widget (LARGE)
-popper --launch com.google.android.wearable.protolayout.renderer \
-  "First clear all active widgets if there are any. Then click + Add, scroll the list of available widgets, find 'Hello Widget (LARGE)' and click it to add it."
+# 1. Deploy enforcing FULLSCREEN translation
+adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation add-tile --ecn component <package>/<WidgetService> --ei type 0
+
+# 2. Switch Active Display & Wake Screen (Only If in Ambient Mode)
+adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation show-tile --ei index 0
+sleep 1
+# ONLY execute input tap if display is currently in ambient/dim mode. DO NOT tap if already active!
+adb shell input tap 227 227
+sleep 1
+
+# 3. Capture screenshot
+adb shell screencap -p /sdcard/preview.png && adb pull /sdcard/preview.png preview.png
 ```
 
-______________________________________________________________________
+### Method 3: Standalone Developer Renderer (Widget Tray Viewer)
 
-### 4. Wear OS Emulator Testing & Compatibility Rules
+A preview helper app enabled exclusively on internal/developer builds of the
+`com.google.android.wearable.protolayout.renderer` package.
 
-When deploying and validating Glance Wear Widgets and Remote Compose surfaces on
-headless or desktop emulators:
-
-- **ProtoLayout Renderer Version Inspection**: Before attempting to bind or
-  render widgets via `DEBUG_SURFACE add-tile`, inspect the renderer package
-  version:
-
+- **Verify Capability**: Check if `versionName` ends in `.exp` (e.g.,
+  `1.6.4.2.944934794.exp`) or verify activity presence via
+  `adb shell pm resolve-activity -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity`.
+- **Launch Command**:
   ```bash
-  adb shell dumpsys package com.google.android.wearable.protolayout.renderer | grep -E "versionCode|versionName"
+  adb shell am start -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
   ```
-
-  If `versionCode < 100051969` (e.g., stock API 36 image `1.5.0.1.730435378` /
-  `versionCode 100017872`), tile binding will deadlock asynchronously in
-  `ProtoTilesConnManager` with the following logcat error traces:
-
-  ```text
-  ProtoTilesConnManager: java.util.concurrent.ExecutionException: bqc: Timed out: bqa@...[status=PENDING]
-  ProtoTilesTileRenderer: Tile was null in onTileContentsUpdated
-  ```
-
-  Always target an emulator image running `versionCode >= 100051969`.
-
-  **Verified Renderer Version Compatibility Reference**:
-
-  - ❌ **Stock Wear OS 6.0 (API 36)**: Renderer `1.5.0.1.730435378` /
-    `versionCode 100017872` (Fails - renderer version < 100051969)
-  - ✅ **Stock Wear OS 7.0 Preview (API 37)**: Renderer `1.6.1.87.907578152` /
-    `versionCode 100051982` (Succeeds - `versionCode >= 100051969`)
-  - ✅ **Standalone Dev Renderer Builds**: Renderer `1.6.4.2.944934794.exp` /
-    `versionCode 100060639` (Succeeds - `versionCode >= 100051969`)
-
-- **Package De-isolation Best Practices (API 36 & Below)**: On API 36 and lower,
-  installing an APK via `adb install -r` leaves the package in `FLAG_STOPPED`
-  state, which can block Binder IPC serialization. Explicitly launching a main
-  activity clears this state:
-
-  ```bash
-  adb shell am start -n <package>/<LauncherActivity>
-  sleep 2
-  adb shell input keyevent KEYCODE_HOME
-  ```
-
-  *(Note: On Wear OS API 37+, the System UI `add-tile` intent bypasses
-  `FLAG_STOPPED` limitations and automatically spawns the bound service even if
-  `stopped=true`, making activity launch optional on API 37+).*
-
-- **Fullscreen Type Override (`--type FULLSCREEN`)**: Enforce
-  `--type FULLSCREEN` (`--ei type 0`) when adding widget debug tiles to
-  guarantee reliable translated layout rendering mode on Wear OS emulators.
-
-- **Ambient Lite Screen Waking Tap**: Broadcasting `show-tile` invokes
-  `SysUiAmbientLiteService` which dims the display for screen captures. Always
-  wait 2 seconds after `show-tile` and send `adb shell input tap 227 227` to
-  restore active rendering before taking a screen capture via standard ADB
-  commands:
-
-  ```bash
-  adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation show-tile --ei index 0
-  sleep 2
-  adb shell input tap 227 227
-  sleep 1
-  adb shell screencap -p /sdcard/tile_preview.png
-  adb pull /sdcard/tile_preview.png tile_preview.png
-  ```
-
-  *(Optional: Helper tools like `adb-screenshot tile_preview.png` can also be
-  used if installed in your environment).*
+- Use UI automation tools (e.g., `popper`) for automated interaction inside the
+  renderer list.
 
 ______________________________________________________________________
 
-### 5. Samsung Galaxy Watch (One UI Watch) Compatibility & Layout Rules
+## ⚙️ Device & Emulator Guidelines
 
-When deploying, testing, and validating Glance Wear Widgets and Tiles on
-physical Samsung Galaxy Watches:
+### Wear OS Emulator Constraints
 
-- **Automatic Wake and Switch**: `adb-tile-switch` automatically wakes the
-  screen and displays the tile.
+- **ProtoLayout Renderer Deadlocks**: Emulators running
+  `versionCode < 100051969` (e.g., Stock API 36) encounter IPC deadlocks
+  resulting in `Tile was null`. Always target API 37+ or ensure the renderer is
+  updated.
+- **Package De-isolation**: On API 36 and lower, packages installed via
+  `adb install` remain in a `FLAG_STOPPED` state, blocking Binder IPC. Clear
+  this by explicitly launching a main activity before testing widgets.
 
-- **Vertically Scrollable Widget Pages**:
+### Samsung Galaxy Watch (One UI Watch) Rules
 
-  - On One UI Watch (Samsung), a single carousel slot (page) can host multiple
-    vertically stacked widgets instead of a single fullscreen tile (for example,
-    the "Basic" page grouping Weather, Calendar, and Battery widgets).
-  - Swiping horizontally navigates between these multi-widget pages, while
-    scrolling vertically navigates between the stacked widgets within a page.
-  - **Dumpsys Metadata Schema**: You can audit these groupings using
-    `adb shell dumpsys wear_service` under the `DB Visible Tiles` section.
-    Grouped widgets share the same Page ID and Title inside `vendorMetadata`:
-    - `pId` (int): Page ID (groups multiple widgets into a single carousel
-      slot).
-    - `pT` (string): Page Title (shown at the top of the scrolling widget list,
-      e.g. `"Basic"`).
-    - `pR` (int): Row Index (the vertical order of the widget on the page,
-      starting from `0`).
-    - `pC` (int): Page Column (typically `0`).
-  - **Example Dumpsys Output**:
-    ```text
-    id=11 packageName=com.samsung.android.watch.weather ... vendorMetadata={"pId":2,"pR":0,"pT":"Basic"}
-    id=12 packageName=com.samsung.android.calendar ... vendorMetadata={"pId":2,"pR":1,"pT":"Basic"}
-    id=13 packageName=com.samsung.android.watch.batterytile ... vendorMetadata={"pId":2,"pR":2,"pT":"Basic"}
-    ```
-
-- **Doze / Timeout Warning**: Samsung Galaxy Watches transition to
-  ambient/locked state very quickly (often within 5–10 seconds of inactivity).
-  Ensure you capture screenshots or verify behavior immediately after running
-  `adb-tile-switch` to prevent the device from entering doze or locking again.
-
-- **UI Automation for Grouped Widgets (Popper)**:
-
-  - Because the Samsung "Add Tile/Widget Picker" activity
-    (`SecTileComposeAddableActivity`) is private and not exported, it cannot be
-    launched directly via `adb shell am start`.
-  - To automate adding or editing grouped widgets, you must use UI automation
-    tools like `popper` to navigate the on-screen editing interface.
-  - **Widget Picker Menu Flow**:
-    - The "Add tiles" picker list contains three main sections in order:
-      **"Featured"**, **"Samsung Health"**, and **"Optimized apps"**.
-    - Non-system/third-party apps are listed under **"Optimized apps"**. Tapping
-      the app name opens an accordion dropdown displaying its available widgets
-      and their previews.
-    - *Note: The app label (e.g., `"WearWidget"`), widget category name (e.g.,
-      `"Hello Widget"`), and preview widget text (e.g., `"Hello, World!"`) used
-      below are example values and must be replaced with the actual text shown
-      for the specific app you are testing.*
-    - Tapping the desired preview widget directly adds it to the page.
-  - **Popper Add Recipe**:
-    1. Show the target page (e.g. index 3 for the "Basic" page):
+- **Vertically Scrollable Pages**: Galaxy Watches group multiple stacked widgets
+  into a single carousel slot (e.g., the "Basic" page). Audit these metadata
+  structures using `adb shell dumpsys wear_service`.
+- **Doze Timeout**: Samsung devices transition to ambient mode in 5-10 seconds.
+  Capture validation media immediately after rendering.
+- **UI Automation for Pickers**: The Samsung picker activity
+  (`SecTileComposeAddableActivity`) is private. You can automate the on-screen
+  editing interface using UI automation tools (e.g., `popper`):
+  - **Add Recipe**:
+    1. Switch to target page (e.g., using ADB broadcast or a helper like
+       `adb-tile-switch 3`).
+    1. Automate the picker using a UI interaction tool (such as `popper` if
+       available):
        ```bash
-       adb-tile-switch 3
-       ```
-    1. Invoke `popper` with semantic instructions matching this picker hierarchy
-       (substituting the placeholder values `<App Name>` and
-       `<Widget Preview Text>` as needed):
-       ```bash
-       # Example adding 'Hello, World!' widget under 'WearWidget'
        popper "Long press the center of the screen, tap the Edit button, scroll down to the bottom of the widget list, tap the '+' Add button. In the Add tiles list, scroll down past 'Featured' and 'Samsung Health' to 'Optimized apps', tap '<App Name>' to expand the accordion, and click the '<Widget Preview Text>' preview widget to add it."
        ```
-    1. Send Home keyevents to save the layout changes and return to the watch
-       face:
-       ```bash
-       adb shell input keyevent KEYCODE_HOME
-       adb shell input keyevent KEYCODE_HOME
-       ```
-  - **Popper Remove Recipe**:
-    1. Show the target page (e.g. index 3 for the "Basic" page):
-       ```bash
-       adb-tile-switch 3
-       ```
-    1. Invoke `popper` with semantic instructions to click the delete badge
-       (substituting the placeholder `<Widget Preview Text>` value as needed):
+    1. Return to home: `adb shell input keyevent KEYCODE_HOME`
+  - **Remove Recipe**:
+    1. Switch to target page (e.g., using ADB broadcast or a helper like
+       `adb-tile-switch 3`).
+    1. Automate removal using a UI interaction tool (such as `popper` if
+       available):
        ```bash
        popper "Long press the center of the screen, tap the Edit button, scroll to the '<Widget Preview Text>' widget, and tap the red minus icon on its right side to delete it."
        ```
-    1. Send Home keyevents to save the layout changes and return to the watch
-       face:
-       ```bash
-       adb shell input keyevent KEYCODE_HOME
-       adb shell input keyevent KEYCODE_HOME
-       ```
+    1. Return to home: `adb shell input keyevent KEYCODE_HOME`
 
-- **Capturing End-to-End User Interaction Videos**:
+### Capturing End-to-End User Interaction Videos
 
-  - **UI-Driven Recording over Background Broadcasts**: When capturing video
-    recordings for widget audits or deliverables, always record the visual UI
-    journey on-screen rather than relying solely on silent background broadcast
-    commands (`add-tile`) that bypass the user interface.
-  - **Automating the Picker Journey**: Use UI automation tools (like `popper` or
-    scriptable input touch gestures) with `adb-screenrecord` to perform natural
-    gestures through the watch interface:
-    1. Enable visual touch feedback
-       (`adb shell settings put system show_touches 1`).
-    1. Wake screen and establish initial carousel context.
-    1. Navigate to the `+ Add` tiles button (by scrolling to the end of the
-       carousel or entering page edit mode).
-    1. Scroll down the *Add tiles* list to *Optimized apps*, expand the
-       application's accordion item, and tap the widget preview to add it.
-    1. Show the widget active and rendered in its carousel slot, and swipe
-       through adjacent tiles.
-    1. *(Optional)* Long press to enter Edit mode and demonstrate reordering
-       stacked widgets.
+- **UI-Driven Recording over Background Broadcasts**: When capturing video
+  recordings for widget audits or deliverables, record the visual UI journey
+  on-screen rather than relying solely on silent background broadcast commands.
+- **Automating the Picker Journey**: Use UI automation tools (like `popper` or
+  scriptable input touch gestures) with `adb-screenrecord` to perform natural
+  gestures through the watch interface:
+  1. Enable visual touch feedback
+     (`adb shell settings put system show_touches 1`).
+  1. Wake screen and establish initial carousel context.
+  1. Navigate to the `+ Add` tiles button.
+  1. Scroll down the *Add tiles* list to *Optimized apps*, expand the accordion
+     item, and tap the widget preview to add it.
+  1. Show the widget active and rendered in its carousel slot, and swipe through
+     adjacent tiles.
 
 ______________________________________________________________________
 
-### 6. Key Gotchas & Best Practices
+## 💡 Key Gotchas & Best Practices
 
 - **Anti-Pattern: Force-Stopping System Services**: You do NOT need to
   force-stop `com.google.android.gms`, `com.google.android.wearable.app`, or
-  `com.google.android.wearable.sysui` after installing a new widget APK. Testing
-  confirms capability indices and tile bindings resolve identically with or
-  without restarting these processes. Rely on standard broadcast intents
-  (`add-tile` / `show-tile`) to trigger updates.
-- **The `nodpi` Requirement & Memory Limits**: Always place static raster
-  previews (both widget picker and tile previews) in `nodpi` directories. Images
-  placed in standard density folders (like `drawable/` or `drawable-xxhdpi/`)
-  will be scaled up by the system at runtime. For Wear OS displays, scaling a
-  `360x360` image up can instantly exceed RemoteViews and Binder IPC memory
-  limits, resulting in a rendering crash (often showing a blank background with
-  a warning icon).
-- **Strict Qualifier Ordering Rule**: Android resource directories must follow a
-  strict precedence order for qualifiers. The screen width qualifier (`w<N>dp`)
-  has higher precedence than the pixel density qualifier (`nodpi`) and **must**
-  come first:
-  - **Correct**: `res/drawable-w225dp-nodpi/`
-  - **Incorrect**: `res/drawable-nodpi-w225dp/` (this will fail the build with
-    `Invalid resource directory name`).
-- **The 225dp Breakpoint**: Use **`225dp`** as the official Wear OS threshold
-  for distinguishing small and large watch displays when creating
-  display-specific resources.
-- **Strict 1:1 Aspect Ratio**: The Android build system enforces the
-  `TilePreviewImageFormat` lint rule. Your registered Tile carousel preview
-  image must have a perfect 1:1 (square) aspect ratio, or your build will flag
-  an error.
-- **Official Tile Preview Checklist**: Follow the guidelines in the official
-  [Tile Preview Image Checklist](https://developer.android.com/training/wearables/tiles/get_started#preview-checklist):
+  `com.google.android.wearable.sysui` after installing a new widget APK. Tile
+  bindings resolve identically with or without restarting these processes. Rely
+  on standard broadcasts (`add-tile` / `show-tile`) to trigger updates.
+- **Official Tile Preview Checklist**:
   - **Dimensions**: Use exactly **400x400px** for the Tile carousel preview
     (`AndroidManifest.xml`).
   - **State**: Show a fully functional, "loaded" or "logged-in" state, avoiding
     empty or placeholder content.
-  - **Theme**: Use the tile's static color theme, not a dynamic one, to ensure
-    consistent rendering in the editor.
-- **Full-Bleed Backgrounds & Masking**: For full-bleed backgrounds, provide a
-  perfectly square image and let the Wear OS system automatically clip the edges
-  to the device's shape. Avoid pre-masking background assets into a circle in
-  the asset itself, as this introduces edge artifacts across different watch
-  shapes.
-- **Dark Theme Contrast**: Wear OS operates strictly in a dark theme
-  environment. When generating local previews, ensure your layout is explicitly
-  rendering against a dark background, and utilize high-contrast text colors
-  (e.g., `Color.White.rc`) to match the live watch environment.
+  - **Theme**: Use the tile's static color theme to ensure consistent rendering
+    in the editor.
 
 ______________________________________________________________________
 
-## Wear Widget Audit Template
+## 🧰 Tooling Reference
 
-When generating integration briefs or reports for Wear OS tiles or widgets,
-refer to the following template as a layout guide. It details how to organize
-setup specifications, Jetpack library dependencies, manifest declarations,
-metadata analysis, live verification screenshots, and identified bugs.
+### `avd-to-png`
 
-@references/audit-template.md
+Converts Android Vector Drawable (AVD) XML files to standard SVG and renders
+them as high-quality PNG images. Automatically parses `colors.xml` to resolve
+color resource references.
+
+**Usage**:
+
+```bash
+avd-to-png [options] AVD_FILE RES_DIR
+```
+
+**Examples**:
+
+```bash
+# Standard conversion saving to specific path
+avd-to-png -o ./preview-small.png decompiled_app/res/drawable/ic_preview.xml decompiled_app/res
+```
+
+______________________________________________________________________
+
+## 📝 Reporting & Audits
+
+When synthesizing findings or preparing integration reports based on the
+workflows in this skill, adhere to the strict presentation formatting defined in
+the audit template.
+
+See the canonical template here: `@references/audit-template.md`.
+
+All media output (images, layouts) must remain unmasked and in native aspect
+ratios, and all Markdown reports must be self-contained with relative asset
+linking.
