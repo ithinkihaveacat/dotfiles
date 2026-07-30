@@ -1,13 +1,16 @@
 ---
 name: jetpack
 description: >
-  Resolves AndroidX/Jetpack library information including version lookup,
-  package-to-Maven-coordinate conversion, and source code downloading. Provides
-  tools for inspecting Jetpack library implementations. Use when working with
-  androidx libraries, resolving Maven coordinates, downloading Jetpack source
-  code, checking library versions (alpha/beta/stable/snapshot), or inspecting
-  AndroidX class implementations. Triggers: androidx, jetpack, maven coordinate,
-  jetpack source, library version, snapshot, alpha, beta.
+  Looks up AndroidX/Jetpack library facts that change between releases and are
+  therefore wrong from memory: the current version of an artifact
+  (alpha/beta/rc/stable/snapshot, or a pinned build ID), the Maven coordinate a
+  package or class belongs to, an artifact's direct dependencies, and the real
+  published source of an AndroidX class. Use whenever the answer would
+  otherwise be a remembered version number, coordinate, or API signature —
+  including phrasings that name a library without saying "androidx", such as
+  "the latest release of Compose Material 3". Not for teaching Jetpack Compose
+  or Android APIs in general, where no lookup is needed, and not for the
+  literal rocket-pack sense of the word.
 compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
   access to dl.google.com, androidx.dev, and cs.android.com, or a cache left by
@@ -18,16 +21,28 @@ compatibility: >-
 
 ## Important: Use Script First
 
-**ALWAYS use `scripts/jetpack` over raw `curl` and `xmllint` commands.** The
-script is located in the `scripts/` subdirectory of this skill's folder.
-References to `scripts/...` in this skill are relative to this skill directory.
-It provides features that raw commands do not:
+**ALWAYS use `scripts/jetpack` to answer these questions — never a raw command
+against a Maven URL or against the cache.** The script is located in the
+`scripts/` subdirectory of this skill's folder. References to `scripts/...` in
+this skill are relative to this skill directory. It provides features that raw
+commands do not:
 
 - Package-to-coordinate resolution with exceptions table
 - Code search integration for finding artifacts by class name
 - Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
 - Build ID resolution for pinned snapshots
+
+**The cache is the script's storage, not an interface.** `curl` and `xmllint`
+against `dl.google.com` are the obvious way to bypass the script, but reaching
+into `$JETPACK_CACHE_DIR` with `jq`, `unzip`, `jar`, `find`, or `grep` bypasses
+it just as completely — and offline, where the script is answering from that
+same cache, it looks like the shortest path. It is not: the index and the cached
+responses are raw upstream data, so reading them by hand skips the version-type
+filtering, the exceptions table, and the platform-source detection listed above,
+and returns something plausible with no sign that those steps were missed. Ask
+the script the question, offline or not; browse the cache only to diagnose the
+script itself.
 
 **When to read the script source:** If the script doesn't do exactly what you
 need, or fails due to missing dependencies, read the script source. It encodes
@@ -214,8 +229,17 @@ AGENT_OFFLINE=1 scripts/jetpack inspect androidx.wear.tiles.TileService
 ```
 
 A miss quotes the command to re-run, so the fix is always the invocation that
-just failed. See local HTTP caching guidelines (storing response artifacts
-locally under `$XDG_CACHE_HOME`) for the repo-wide convention.
+just failed.
+
+The sandbox that denies egress usually denies writes too, so the lookups read
+straight from the cache and need no writable filesystem at all: `version`,
+`list versions`, `list dependencies`, `resolve`, and `search` all answer with
+nowhere to write. `source` and `inspect` are the exception — they extract a JAR,
+so they need somewhere to put it; pass `--output DIR` naming a writable
+directory when the default temp location is not one.
+
+See local HTTP caching guidelines (storing response artifacts locally under
+`$XDG_CACHE_HOME`) for the repo-wide convention.
 
 ## Safety Notes
 
