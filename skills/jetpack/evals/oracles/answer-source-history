@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+#
+# Grade-time oracle for skill-eval-harness `script` assertions.
+#
+# Tests: ../../tests/test-jetpack-eval-oracles
+
+set -uo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") ANSWER CASE_SPEC
+
+Check that an agent's answer identifies a source-history boundary.
+
+For a first-presence case, downloads each pinned version in CASE_SPEC through
+jetpack, finds the first source tree containing the configured text, and checks
+that the answer ends with the absent-to-present boundary.
+
+Arguments:
+  ANSWER      Path to the file holding the agent's answer
+  CASE_SPEC   JSON file defining the artifact, versions, source path, and match
+
+Options:
+  --help, -h  Display this help message and exit
+
+Exit status:
+  0  the answer names the computed boundary
+  1  the answer gives the wrong boundary
+  2  the boundary could not be computed
+
+Examples:
+  $(basename "$0") run/output.md \\
+    fixtures/history/remember-one-handed-gesture-configuration.json
+
+  # As a manifest assertion, with {output_path} substituted by the harness:
+  #   {"type": "script", "command": ["oracles/$(basename "$0")",
+  #    "{output_path}",
+  #    "fixtures/history/remember-one-handed-gesture-configuration.json"]}
+
+Honours JETPACK_OFFLINE/AGENT_OFFLINE, so a warmed cache grades without
+network. The case spec pins immutable published versions.
+EOF
+  exit 0
+}
+
+if [[ ${1:-} == "--help" || ${1:-} == "-h" ]]; then
+  usage
+fi
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$SCRIPT_NAME: $1 not found"
+    exit 127
+  }
+}
+
+if [[ $# -lt 2 ]]; then
+  echo "$SCRIPT_NAME: need an answer file and a case spec" >&2
+  echo "  $SCRIPT_NAME run/output.md fixtures/history/remember-one-handed-gesture-configuration.json" >&2
+  echo "Run '$SCRIPT_NAME --help' for usage" >&2
+  exit 1
+fi
+
+ANSWER=$1
+CASE_SPEC=$2
+
+require grep
+require jq
+require mktemp
+require sed
+require awk
+
+JETPACK=${JETPACK_BIN:-$(cd "$(dirname "$0")/../../scripts" && pwd)/jetpack}
+if [[ ! -x $JETPACK ]]; then
+  echo "$SCRIPT_NAME: jetpack not executable at $JETPACK" >&2
+  exit 2
+fi
+
+if [[ ! -f $ANSWER ]]; then
+  echo "$SCRIPT_NAME: no answer file at $ANSWER" >&2
+  exit 2
+fi
+
+if [[ ! -f $CASE_SPEC ]]; then
+  echo "$SCRIPT_NAME: no case spec at $CASE_SPEC" >&2
+  exit 2
+fi
+
+if ! jq -e '
+  type == "object"
+  and .mode == "first-presence"
+  and (.artifact | type == "string" and length > 0)
+  and (.versions | type == "array" and length >= 2)
+  and (.versions | all(.[]; type == "string" and length > 0))
+  and (.versions | length == (unique | length))
+  and (.source_path | type == "string" and length > 0)
+  and (.source_contains | type == "string" and length > 0)
+' "$CASE_SPEC" >/dev/null 2>&1; then
+  echo "$SCRIPT_NAME: invalid first-presence case spec at $CASE_SPEC" >&2
+  exit 2
+fi
+
+ARTIFACT=$(jq -r '.artifact' "$CASE_SPEC")
+SOURCE_PATH=$(jq -r '.source_path' "$CASE_SPEC")
+SOURCE_CONTAINS=$(jq -r '.source_contains' "$CASE_SPEC")
+
+case "$SOURCE_PATH" in
+  /* | ../* | */../* | */..)
+    echo "$SCRIPT_NAME: unsafe source_path in $CASE_SPEC: $SOURCE_PATH" >&2
+    exit 2
+    ;;
+esac
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/jetpack-history-oracle.XXXXXXXX") || {
+  echo "$SCRIPT_NAME: could not create a working directory in ${TMPDIR:-/tmp}" >&2
+  exit 2
+}
+trap 'rm -rf -- "$WORK"' EXIT
+
+FIRST_PRESENT=""
+PREVIOUS=""
+INDEX=0
+while IFS= read -r version; do
+  INDEX=$((INDEX + 1))
+  SOURCE_DIR="$WORK/source-$INDEX"
+  if ! "$JETPACK" source "$ARTIFACT" "$version" --output "$SOURCE_DIR" >/dev/null 2>"$WORK/err"; then
+    echo "$SCRIPT_NAME: could not download $ARTIFACT $version" >&2
+    sed 's/^/  /' "$WORK/err" >&2
+    exit 2
+  fi
+
+  if [[ -f $SOURCE_DIR/$SOURCE_PATH ]] &&
+    grep -qF -- "$SOURCE_CONTAINS" "$SOURCE_DIR/$SOURCE_PATH"; then
+    FIRST_PRESENT=$version
+    break
+  fi
+  PREVIOUS=$version
+done < <(jq -r '.versions[]' "$CASE_SPEC")
+
+if [[ -z $FIRST_PRESENT ]]; then
+  echo "$SCRIPT_NAME: configured source text was absent from every pinned version" >&2
+  exit 2
+fi
+
+if [[ -z $PREVIOUS ]]; then
+  echo "$SCRIPT_NAME: first pinned version already contains the source text; no boundary can be established" >&2
+  exit 2
+fi
+
+BOUNDARY="Boundary: $PREVIOUS -> $FIRST_PRESENT"
+LAST_NONEMPTY=$(awk 'NF { last = $0 } END { sub(/\r$/, "", last); print last }' "$ANSWER")
+if [[ $LAST_NONEMPTY != "$BOUNDARY" ]]; then
+  echo "$SCRIPT_NAME: answer does not state the computed boundary" >&2
+  echo "$SCRIPT_NAME: expected: $BOUNDARY" >&2
+  exit 1
+fi
+
+echo "answer states the first-presence boundary: $PREVIOUS -> $FIRST_PRESENT"
+exit 0

@@ -13,14 +13,15 @@ when it should. Run with
 
 ## What is here
 
-| Path                                 | What it is                                                                                                 |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `shared-benchmark.json`              | The manifest: 13 tune cases (7 `library-lookup`, 6 `trigger`) plus 2 declared ablations                    |
-| `oracles/answer-names-added-symbols` | A grade-time oracle that recomputes a real source diff and checks the answer names every added declaration |
+| Path                                 | What it is                                                                                                                 |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `shared-benchmark.json`              | The manifest: 14 tune cases (8 `library-lookup`, 6 `trigger`) plus 2 declared ablations                                    |
+| `oracles/answer-names-added-symbols` | A grade-time oracle that recomputes a real source diff and checks the answer names every added declaration                 |
+| `oracles/answer-source-history`      | A grade-time oracle that scans pinned source releases and checks the answer identifies the first-presence version boundary |
 
 Two different tools read this one manifest, and they do not overlap:
 
-- **`skill-benchmark`** runs the 7 `library-lookup` cases. Each is graded on two
+- **`skill-benchmark`** runs the 8 `library-lookup` cases. Each is graded on two
   channels — a *process* assertion (did the model run `scripts/jetpack`?) and an
   *outcome* assertion (is the answer right?). Every case runs twice, once
   `with_skill` and once `without_skill`, and the score is the paired lift.
@@ -29,8 +30,9 @@ Two different tools read this one manifest, and they do not overlap:
   own, asks a raw question, and measures whether the skill loaded. Three are
   positive (should fire), three negative (should not).
 
-`skill-benchmark prepare` silently emits only the `pos-*` rows. If you expect 13
-tasks and get 7, nothing is broken.
+`skill-benchmark prepare` silently omits the trigger cases. This manifest
+therefore produces 8 distinct answer cases, expanded to 16 prepared rows by the
+two variants.
 
 ## Running the answer cases
 
@@ -92,23 +94,31 @@ Every one of these cost real time to find.
   and the network, so `source`/`inspect` cases fail in a way that looks like a
   jetpack bug. (`CodexBackend` hardcodes `sandbox="read-only"` upstream.)
 
-- **`--allow-scripts` is required** or the `script` assertion on
-  `pos-version-diff` fails closed with "script assertion skipped". It is opt-in
-  because script assertions execute repo-owned commands.
+- **`--allow-scripts` is required** or the `script` assertions on
+  `pos-version-diff` and `pos-source-history-one-handed-gesture` fail closed
+  with "script assertion skipped". It is opt-in because script assertions
+  execute repo-owned commands.
 
-- **The oracle needs network or a warm cache.** It downloads two versions of an
-  artifact to recompute the diff. Warming beforehand makes grading fast and
-  offline-safe:
+- **The oracles need network or a warm cache.** The diff oracle downloads two
+  versions. The source-history oracle scans pinned `1.7.0` alphas until it finds
+  the first release containing the configured declaration. Warming beforehand
+  makes grading fast and offline-safe:
 
   ```bash
   skills/jetpack/scripts/jetpack source androidx.compose.remote:remote-tooling-preview 1.0.0-alpha08 --output /tmp/warm08
   skills/jetpack/scripts/jetpack source androidx.compose.remote:remote-tooling-preview 1.0.0-alpha09 --output /tmp/warm09
+
+  for version in 01 02 03 04 05 06; do
+    skills/jetpack/scripts/jetpack source androidx.wear.compose:compose-material3 \
+      "1.7.0-alpha$version" --output "/tmp/warm-compose-material3-$version"
+  done
   ```
 
 - **Assertions are shape checks unless stated otherwise.** `returns-a-version`
   is `\b\d+\.\d+\.\d+\b` — a confidently stale answer passes exactly as well as
-  a correct one. Only `pos-version-diff` holds an answer against live ground
-  truth. Do not read a high outcome score as "the answer was right".
+  a correct one. `pos-version-diff` and `pos-source-history-one-handed-gesture`
+  recompute ground truth from published source. Do not read a high score on the
+  other outcome assertions as "the answer was right".
 
 - **The mounted skill directory is named `SKILL.md`.** The manifest declares
   `skill_paths: ["SKILL.md"]` and the harness names the mounted root after that
@@ -137,7 +147,10 @@ it.
 
 One run per variant. `pos-version-diff` was added partway through, so Codex's
 aggregate covers the 6 cases that predate it and that case was run separately;
-Antigravity's covers all 7.
+Antigravity's covers all 7 cases present at the time.
+
+`pos-source-history-one-handed-gesture` was added after this run and is not
+included in the results below.
 
 | Runner                              | Cases | with_skill | without_skill | Notes                                       |
 | ----------------------------------- | ----: | ---------: | ------------: | ------------------------------------------- |
