@@ -4,16 +4,12 @@ Measurements of whether the `jetpack` skill actually helps, and whether it loads
 when it should. Run with
 [skill-eval-harness](https://github.com/adewale/skill-eval-harness).
 
-> **Temporary:** install the harness from the
+> **Temporary:** run the harness from the
 > [`agy-adapter` branch of this fork](https://github.com/ithinkihaveacat/skill-eval-harness/tree/agy-adapter),
 > not from upstream. It carries the Google Antigravity backend these evals use,
 > which is not yet released upstream. Once it lands, use upstream and delete
-> this note.
->
-> ```bash
-> git clone -b agy-adapter https://github.com/ithinkihaveacat/skill-eval-harness.git
-> cd skill-eval-harness && uv tool install --editable .
-> ```
+> this note. The commands below use `uvx` to create a cached, isolated
+> environment; they do not install executables into your `PATH`.
 
 ## What is here
 
@@ -41,18 +37,21 @@ tasks and get 7, nothing is broken.
 ```bash
 cd ~/.dotfiles
 
-skill-benchmark prepare skills/jetpack/evals/shared-benchmark.json \
+# Set this once in the shell that runs the evals.
+HARNESS='git+https://github.com/ithinkihaveacat/skill-eval-harness@agy-adapter'
+
+uvx --from "$HARNESS" skill-benchmark prepare skills/jetpack/evals/shared-benchmark.json \
   --split tune --runs-per-variant 1 --out /tmp/tasks.jsonl
 
 # Codex. The sandbox override is required — see Gotchas.
-skill-benchmark run-codex --tasks /tmp/tasks.jsonl --runs /tmp/runs --timeout 600 \
+uvx --from "$HARNESS" skill-benchmark run-codex --tasks /tmp/tasks.jsonl --runs /tmp/runs --timeout 600 \
   --codex-cmd "codex exec --json --sandbox workspace-write -c sandbox_workspace_write.network_access=true"
 
 # Or any registered native backend: claude, codex, vibe, agy
-skill-benchmark run-agent --agent agy --model gemini-3.1-pro-high \
+uvx --from "$HARNESS" skill-benchmark run-agent --agent agy --model gemini-3.1-pro-high \
   --tasks /tmp/tasks.jsonl --runs /tmp/runs --timeout 600
 
-skill-benchmark benchmark skills/jetpack/evals/shared-benchmark.json \
+uvx --from "$HARNESS" skill-benchmark benchmark skills/jetpack/evals/shared-benchmark.json \
   --runs /tmp/runs --split tune --allow-scripts --out /tmp/benchmark.json
 ```
 
@@ -66,7 +65,7 @@ jq '.summary.with_skill.mean_objective_pass_rate, .paired_summary' /tmp/benchmar
 ## Running the trigger cases
 
 ```bash
-skill-trigger-matrix skills/jetpack/evals/shared-benchmark.json --split tune \
+uvx --from "$HARNESS" skill-trigger-matrix skills/jetpack/evals/shared-benchmark.json --split tune \
   --agent claude --model sonnet --model opus \
   --runs-per-query 3 --workers 1 --out /tmp/trigger.json
 ```
@@ -123,7 +122,7 @@ Every one of these cost real time to find.
 
 | Tool               | Version                                     |
 | ------------------ | ------------------------------------------- |
-| skill-eval-harness | 0.6.0 (`uv tool install --editable .`)      |
+| skill-eval-harness | 0.6.0 (`uvx --from "$HARNESS" …`)           |
 | uv                 | 0.11.33                                     |
 | codex-cli          | 0.145.0                                     |
 | agy (Antigravity)  | 1.1.8 — `stream-json` output needs >= 1.1.8 |
