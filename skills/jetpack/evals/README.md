@@ -34,6 +34,22 @@ Two different tools read this one manifest, and they do not overlap:
 therefore produces 8 distinct answer cases, expanded to 16 prepared rows by the
 two variants.
 
+## Tune and holdout status
+
+Every case in this repository is a visible tune case. In particular,
+`pos-source-history-one-handed-gesture` was selected and developed alongside the
+skill, so it measures performance on a known problem rather than generalisation
+to an unseen one. Its pinned published releases make the historical answer
+stable, but public API documentation or better search support may eventually
+make the question easier and reduce its value as a hard case.
+
+A genuine holdout must remain unavailable while the skill is being tuned and be
+scored only after that revision is frozen. Changing a visible manifest entry to
+`"split": "holdout"` would change harness selection without hiding the case;
+hidden cases therefore need storage and ownership outside this public
+repository. Until that exists, results from this manifest should be described as
+tune performance only.
+
 ## Running the answer cases
 
 ```bash

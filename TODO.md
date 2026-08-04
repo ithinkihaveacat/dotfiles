@@ -1,5 +1,43 @@
 # TODO
 
+## Measure and extend the Jetpack source-history evals (2026-08-04)
+
+**Problem:** `pos-source-history-one-handed-gesture` is a source-derived tune
+case added after the last recorded benchmark run. Its oracle establishes the
+immutable `1.7.0-alpha05` to `1.7.0-alpha06` introduction boundary, but there is
+no model result showing whether the skill improves correctness or cost on the
+case. The repository also has no case for identifying an implementation change
+and no genuinely hidden holdout; every manifest entry is visible during tuning.
+
+**Goal:** Establish how much the Jetpack skill helps on source-history
+questions, and broaden the suite beyond one known API. Preserve the distinction
+between visible regression cases and unseen evidence of generalisation so later
+results are not stronger claims than the benchmark supports.
+
+**Criteria:**
+
+- The existing source-history case is run with and without the skill under
+  comparable sandbox and network conditions, with correctness, commands, tokens,
+  and elapsed time recorded in `skills/jetpack/evals/README.md`.
+- At least one pinned, source-derived case asks when an implementation changed,
+  uses a different AndroidX API, and has a deterministic oracle test.
+- A decision is recorded about where genuine holdout cases would be stored and
+  who can inspect them. If no external arrangement is practical, the
+  documentation continues to state that the suite has tune cases only.
+
+**Sketch:** Run the existing case before changing the skill so its current
+difficulty is measured rather than inferred. A follow-up case can compare
+published source across releases and grade the first changed boundary, extending
+the current first-presence oracle pattern without depending on floating alpha or
+snapshot versions. A visible case must not be relabelled as a holdout: an actual
+holdout belongs outside this public repository and is revealed only after the
+skill revision is frozen.
+
+**Constraints:** Keep the one-handed-gesture case as a regression test even if
+future documentation or `jetpack search` makes it easier; reduced difficulty
+does not invalidate its pinned historical answer. Do not tune the skill for this
+case before recording the baseline run.
+
 ## Evaluate dropping per-tool offline overrides in favor of a universal AGENT_OFFLINE (2026-07-28)
 
 **Problem:** We currently support both `<TOOL>_OFFLINE` and `AGENT_OFFLINE` for
