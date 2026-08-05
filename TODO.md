@@ -1,5 +1,77 @@
 # TODO
 
+## Fix the node pre-commit hook's staged-file handling (2026-08-05)
+
+**Problem:** `etc/git/templates/node/hooks/pre-commit` formats staged `.ts` and
+`.md` files with `prettier --write`, then runs `git add` on the same paths.
+`git add` re-stages each file from the working tree, so what lands in the index
+is whatever the working tree holds — not the staged content the hook just
+formatted. Those agree only when the file has no unstaged changes.
+
+Three reproductions, run 2026-08-05 against throwaway repositories with the hook
+installed:
+
+- A partially staged file commits its unstaged changes too. With
+  `export const a = 2;` staged and `export const SECRET = "unstaged work";` left
+  unstaged, the commit contained both lines, with nothing printed.
+- A staged edit becomes a deletion when the file is missing from the working
+  tree. Staging a change and then removing the file produced
+  `1 file changed, 1 deletion(-)` and `delete mode 100644 g.ts` rather than the
+  staged edit.
+- A path containing a space aborts the commit. `xargs` splits `my notes.md` into
+  two arguments, `git add` exits non-zero with
+  `fatal: pathspec 'my' did not match any files`, and the hook's non-zero status
+  stops the commit.
+
+The `git add` also runs whether or not prettier did. In the test repository
+`prettier` was not on `PATH`, `xargs` reported
+`prettier: No such file or directory`, and the commit still proceeded and still
+absorbed the unstaged line. The template invokes bare `prettier`, so on a
+machine with no global install it re-stages without ever formatting; the two
+installed copies invoke `npx --no-install prettier` and do format.
+
+**Goal:** A commit should contain what was staged. The hook may add formatting
+of that content, but it must not enrol changes the author did not stage, and it
+must not turn an edit into a deletion. `git add -p` is the workflow this breaks,
+and it breaks it silently, which is what makes the result easy to push before
+anyone notices.
+
+**Criteria:** With the hook installed: a repository with one hunk staged and
+another left unstaged commits only the staged hunk; a staged edit to a file
+deleted from the working tree commits the edit; a staged path containing a space
+commits without aborting. A formatter that is absent or fails leaves the index
+untouched and fails the commit rather than passing it through.
+
+**Sketch:** Four approaches, in rough order of cost:
+
+- Skip files that are partially staged — intersect
+  `git diff --cached --name-only` with `git diff --name-only` and warn instead
+  of formatting for files in both. For every other file the current re-add is
+  already safe, since index and working tree agree. About six lines and no new
+  machinery; pairing it with `prettier --check` on the skipped files keeps those
+  from being committed unformatted.
+- Check without fixing — run `prettier --check` over the staged content and
+  abort with instructions. Cannot corrupt the index at all, at the cost of a
+  manual format-and-restage round trip.
+- Format the index rather than the working tree — `git show :path` into the
+  formatter, `git hash-object -w`, `git update-index --cacheinfo`. Correct and
+  leaves the working tree alone, at the price of plumbing and a working tree
+  that still holds the unformatted text.
+- Stash the unstaged remainder around the format step, as lint-staged does. Also
+  correct, but a `stash pop` can conflict when formatting touches lines being
+  edited, and an interrupted hook strands work in a stash. This is most of why
+  lint-staged is as large as it is.
+
+Independent of that choice: pass the path list with `-z` and `xargs -0`, and
+make the hook fail when the formatter fails.
+
+**Constraints:** Hooks here are copied, not linked — `init.templatedir` points
+at `templates/global`, which carries only `post-checkout`, so this one was
+installed by hand. `~/workspace/ptracker` and `~/workspace/inkyframe` hold
+diverged copies (both the `npx --no-install` variant), and fixing the template
+updates neither. Prefer a fix small enough to stay readable inside a hook;
+adopting lint-staged is out of scope.
+
 ## Measure and extend the Jetpack source-history evals (2026-08-04)
 
 **Problem:** `pos-source-history-one-handed-gesture` is a source-derived tune
