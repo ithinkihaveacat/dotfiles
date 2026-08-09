@@ -1,10 +1,102 @@
 #!/bin/bash
 
-# Format staged files before commit
+# Tests: tests/test-git-hooks-node
 
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|md)$')
+# Format the staged content of .ts and .md files with prettier.
+#
+# The formatter reads each file's staged blob and the result is written back
+# into the index directly, so a commit contains exactly what was staged plus
+# formatting. Re-adding from the working tree (the obvious implementation)
+# would instead enrol unstaged edits, or turn a staged edit into a deletion
+# when the file is gone from the working tree.
 
-if [ -n "$STAGED_FILES" ]; then
-  echo "$STAGED_FILES" | xargs prettier --write --log-level warn
-  echo "$STAGED_FILES" | xargs git add
+set -euo pipefail
+
+hook=$(basename "$0")
+
+die() {
+  echo "$hook: $*" >&2
+  exit 1
+}
+
+# NUL-delimited: paths may contain spaces.
+paths=()
+while IFS= read -r -d '' path; do
+  case $path in
+    *.ts | *.md) paths+=("$path") ;;
+  esac
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [ ${#paths[@]} -eq 0 ]; then
+  exit 0
 fi
+
+# Prefer the project's own prettier over a global install.
+if npx --no-install prettier --version >/dev/null 2>&1; then
+  prettier=(npx --no-install prettier)
+elif command -v prettier >/dev/null 2>&1; then
+  prettier=(prettier)
+else
+  die "prettier not found (tried 'npx --no-install prettier' and 'prettier' on PATH)"
+fi
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf -- "$tmpdir"' EXIT
+
+# Pass 1: format every staged blob into $tmpdir. Nothing is written back until
+# all of them succeed, so a formatter that is missing or fails leaves the index
+# as the author staged it.
+formatted_paths=()
+modes=()
+blobs=()
+for path in "${paths[@]}"; do
+  # :(literal) so a path containing glob characters resolves to itself.
+  entry=$(git ls-files --stage -- ":(literal)$path")
+  read -r mode blob _ <<<"$entry"
+
+  # Symlinks (120000) and submodules (160000) hold no source to format.
+  case $mode in
+    100644 | 100755) ;;
+    *) continue ;;
+  esac
+
+  i=${#formatted_paths[@]}
+  if ! git cat-file blob "$blob" |
+    "${prettier[@]}" --stdin-filepath "$path" --log-level warn >"$tmpdir/$i"; then
+    die "prettier failed on $path; index left unchanged"
+  fi
+  # A .prettierignore'd path or an unknown parser must not blank the file.
+  if [ ! -s "$tmpdir/$i" ] && [ -n "$(git cat-file blob "$blob")" ]; then
+    die "prettier produced no output for $path; index left unchanged"
+  fi
+
+  formatted_paths[i]=$path
+  modes[i]=$mode
+  blobs[i]=$blob
+done
+
+if [ ${#formatted_paths[@]} -eq 0 ]; then
+  exit 0
+fi
+
+# Pass 2: stage the formatted content.
+i=0
+for path in "${formatted_paths[@]}"; do
+  formatted=$(git hash-object -w -- "$tmpdir/$i")
+  if [ "$formatted" != "${blobs[i]}" ]; then
+    # Mirror the formatting into the working tree only where it still holds
+    # exactly what was staged; anywhere else it carries edits of the author's.
+    sync_worktree=no
+    if git diff --quiet -- ":(literal)$path"; then
+      sync_worktree=yes
+    fi
+
+    git update-index --cacheinfo "${modes[i]},$formatted,$path"
+    if [ "$sync_worktree" = yes ]; then
+      git checkout-index -f -- "$path"
+    else
+      echo "$hook: formatted the staged content of $path (working tree left alone)" >&2
+    fi
+  fi
+  i=$((i + 1))
+done

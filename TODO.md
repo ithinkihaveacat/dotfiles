@@ -1,76 +1,266 @@
 # TODO
 
-## Fix the node pre-commit hook's staged-file handling (2026-08-05)
+## Make installed git hooks propagate fixes and uninstall cleanly (2026-08-09)
 
-**Problem:** `etc/git/templates/node/hooks/pre-commit` formats staged `.ts` and
-`.md` files with `prettier --write`, then runs `git add` on the same paths.
-`git add` re-stages each file from the working tree, so what lands in the index
-is whatever the working tree holds — not the staged content the hook just
-formatted. Those agree only when the file has no unstaged changes.
+**Problem:** Three unrelated mechanisms install hooks, all three copy the
+hook file, and nothing detects that a copy has gone stale.
 
-Three reproductions, run 2026-08-05 against throwaway repositories with the hook
-installed:
+- `init.templatedir` (`home/.gitconfig:123`) copies
+  `etc/git/templates/global/hooks/post-checkout` at clone time.
+- `bin/git-hooks-node` runs `git init --template=`, which only applies at
+  `git init`. An existing repository can never be updated by it, so the
+  pre-commit index fix (686f52d, PR #146) reaches no checkout that already
+  exists.
+- `bin/git-hooks-agent` installs through `git-hooks-multiplexer install`,
+  which does reach existing repositories but leaves a frozen `cp` of the
+  source.
 
-- A partially staged file commits its unstaged changes too. With
-  `export const a = 2;` staged and `export const SECRET = "unstaged work";` left
-  unstaged, the commit contained both lines, with nothing printed.
-- A staged edit becomes a deletion when the file is missing from the working
-  tree. Staging a change and then removing the file produced
-  `1 file changed, 1 deletion(-)` and `delete mode 100644 g.ts` rather than the
-  staged edit.
-- A path containing a space aborts the commit. `xargs` splits `my notes.md` into
-  two arguments, `git add` exits non-zero with
-  `fatal: pathspec 'my' did not match any files`, and the hook's non-zero status
-  stops the commit.
+`git-hooks-multiplexer doctor` then tests only `-x` on the sub-hook, so a
+copy that is years out of date reports `ok`. `~/workspace/ptracker` and
+`~/workspace/inkyframe` are the live instance: both carry a diverged
+pre-commit hook, and no command in this repository can say so.
 
-The `git add` also runs whether or not prettier did. In the test repository
-`prettier` was not on `PATH`, `xargs` reported
-`prettier: No such file or directory`, and the commit still proceeded and still
-absorbed the unstaged line. The template invokes bare `prettier`, so on a
-machine with no global install it re-stages without ever formatting; the two
-installed copies invoke `npx --no-install prettier` and do format.
+Removal is all-or-nothing in the other direction. `bin/git-hooks-none` is
+`rm -rf "$(git rev-parse --git-dir)/hooks"`, which also deletes third-party
+hooks (the Gerrit hook that `git-hooks-gerrit` installs, husky), every
+`<hook>.d/` directory, and the `00-legacy` hook the multiplexer carefully
+preserved on install — with no confirmation and no way to drop one hook.
 
-**Goal:** A commit should contain what was staged. The hook may add formatting
-of that content, but it must not enrol changes the author did not stage, and it
-must not turn an edit into a deletion. `git add -p` is the workflow this breaks,
-and it breaks it silently, which is what makes the result easy to push before
-anyone notices.
+Three mechanics were measured against git 2.43.0 on 2026-08-09, since the
+choice between copy and symlink turns on them:
 
-**Criteria:** With the hook installed: a repository with one hunk staged and
-another left unstaged commits only the staged hunk; a staged edit to a file
-deleted from the working tree commits the edit; a staged path containing a space
-commits without aborting. A formatter that is absent or fails leaves the index
-untouched and fails the commit rather than passing it through.
+- `git init --template=` preserves a symlink verbatim, so a symlink in a
+  template only survives if its target is absolute.
+- A dangling symlink at `.git/hooks/pre-commit` is *silently skipped*: the
+  commit succeeded and exited 0. Moving or renaming `~/.dotfiles` would
+  therefore disable every symlinked hook with no signal.
+- A stub whose `exec` target is missing fails loudly — `exec: not found`,
+  exit 1, commit aborted.
 
-**Sketch:** Four approaches, in rough order of cost:
+**Goal:** An installed hook should track its source in this repository, so
+that fixing a hook here fixes it everywhere it is installed without a
+manual re-copy; a hook whose source has gone away should fail loudly rather
+than quietly stop running; and removing one hook should leave every other
+hook alone. Part of making the hook system trustworthy enough to keep
+putting policy in it — the pre-commit fix showed that a bug in a hook is
+both easy to ship and, once copied, impossible to recall.
 
-- Skip files that are partially staged — intersect
-  `git diff --cached --name-only` with `git diff --name-only` and warn instead
-  of formatting for files in both. For every other file the current re-add is
-  already safe, since index and working tree agree. About six lines and no new
-  machinery; pairing it with `prettier --check` on the skipped files keeps those
-  from being committed unformatted.
-- Check without fixing — run `prettier --check` over the staged content and
-  abort with instructions. Cannot corrupt the index at all, at the cost of a
-  manual format-and-restage round trip.
-- Format the index rather than the working tree — `git show :path` into the
-  formatter, `git hash-object -w`, `git update-index --cacheinfo`. Correct and
-  leaves the working tree alone, at the price of plumbing and a working tree
-  that still holds the unformatted text.
-- Stash the unstaged remainder around the format step, as lint-staged does. Also
-  correct, but a `stash pop` can conflict when formatting touches lines being
-  edited, and an interrupted hook strands work in a stash. This is most of why
-  lint-staged is as large as it is.
+**Criteria:**
 
-Independent of that choice: pass the path list with `-z` and `xargs -0`, and
-make the hook fail when the formatter fails.
+- Editing a hook source under `etc/git/` changes the behaviour of an
+  already-set-up repository with no re-install step.
+- A drifted or orphaned installation is a `doctor` finding that exits
+  non-zero; today a stale copy reports `ok`.
+- The node pre-commit hook can be installed into an existing repository
+  without `git init`.
+- Removing one managed hook leaves other managed hooks, third-party
+  sub-hooks and `00-legacy` in place; when the last managed sub-hook goes,
+  `00-legacy` is restored as the plain hook.
+- `tests/test-git-hooks-multiplexer` and `tests/test-git-hooks-agent` cover
+  install → drift → remove → restore.
 
-**Constraints:** Hooks here are copied, not linked — `init.templatedir` points
-at `templates/global`, which carries only `post-checkout`, so this one was
-installed by hand. `~/workspace/ptracker` and `~/workspace/inkyframe` hold
-diverged copies (both the `npx --no-install` variant), and fixing the template
-updates neither. Prefer a fix small enough to stay readable inside a hook;
-adopting lint-staged is out of scope.
+**Sketch:** The decision the evidence above points to is a *trampoline*: the
+installed file is a generated stub whose body is
+`exec <absolute path into this repo> "$@"`. It keeps a symlink's
+propagation without a symlink's silent-skip failure, and unlike a real
+symlink it survives `git init --template=` without an absolute path baked
+into a tracked file. This is not a new pattern —
+`etc/git/templates/global/hooks/post-checkout` is already exactly this,
+execing `$HOME/.dotfiles/bin/git-setup` — so the work is mostly applying it
+consistently, resolving the absolute path at install time rather than
+hardcoding `~/.dotfiles`.
+
+The second-order benefit is what makes drift detectable at all: a stub's
+content is generated and never changes, so `doctor` can compare it
+byte-for-byte, where a copy of a hook can only be compared against a moving
+target.
+
+Other findings worth keeping:
+
+- `git-hooks-multiplexer` bakes `$hook_name` into the body it generates.
+  Deriving the name from `basename "$0"` instead would make one generic
+  file serve every hook name (git invokes the hook by its own path, so both
+  `dirname "$0"` and `basename "$0"` still resolve correctly through a
+  stub), and the multiplexer itself then becomes a trampoline too.
+- Removal wants the `add`/`remove` pair from `cli-tools.md`:
+  `remove <hook> <key>` with an `rm` alias, plus a `clean` that drops only
+  managed hooks the way `permission clean` does. `git-hooks-none` can stay
+  as the nuclear option if it enumerates what it will delete and requires
+  `--force`.
+- Moving the node pre-commit hook onto the multiplexer retires
+  `git init --template=` for content hooks, and is what would make
+  ptracker and inkyframe fixable in place. `init.templatedir` then keeps
+  exactly one job: the clone-time post-checkout trampoline.
+- Six commands cover this one domain today (`git-hooks-agent`,
+  `-node`, `-gerrit`, `-none`, `-multiplexer`, plus the deprecated
+  `git-updatehooks` stub, which prints "use 'git init' instead"). That is
+  the hyphenated-command shape `cli-tools.md` says to avoid; a single
+  `git-hooks <verb>` manager is the Appendix A shape, with the current
+  names kept as aliases since `bin/git-setup`, `home/.gitconfig` and the
+  docs all reference them. Whether that consolidation belongs inside this
+  item or after it is open.
+- A `--copy` escape hatch is worth keeping for a machine that has no
+  dotfiles tree to point at.
+
+**Constraints:** A hook must never silently stop running — where loud
+failure and silent skip trade off, take loud failure. `rm .git/hooks/<name>`
+by hand must keep working as the documented escape hatch, and the
+`00-legacy` preservation contract must survive. If this tooling ever moves
+under a skill, `clean` and the `git-hooks-none` equivalent need declaring
+in that skill's `permissions/unsafe`; as `bin/` scripts they are not
+pre-approved today. Out of scope: `core.hooksPath` as a delivery mechanism,
+adopting a hook framework (husky, lefthook, pre-commit), and the read-only
+`git-hooks list` surface — this item only owes `doctor` the ability to see
+drift.
+
+## Auto-fix mechanically fixable commit messages (2026-08-09)
+
+**Problem:** `etc/git/templates/agent/hooks/commit-msg` checks four things —
+a Conventional Commits subject, a subject of 50 characters or fewer, a blank
+second line, and body/footer lines of 72 characters or fewer (the 50 and 72
+come from `skills/coding-standards/references/git.md:70-78`). Every
+violation exits 1 with the full list of errors.
+
+Rejection is the right answer for two of those four and the wrong answer for
+the other two. An over-long or non-conventional *subject* cannot be fixed
+without changing what it says, and it is the kind of defect a writer can see
+by eye. Body wrapping at 72 is neither: it is a deterministic,
+meaning-preserving transform that a writer — an agent especially — cannot do
+reliably by eye, and getting it wrong costs a full round trip in which the
+whole message is re-emitted and can be re-broken somewhere else.
+
+The hook already rewrites the message in place: it strips `Co-Authored-By:`,
+`TAG=` and `CONV=` trailers before validating. So rewriting is established
+here; wrapping is the case it does not yet cover.
+
+**Goal:** A commit whose only defects are mechanically fixable should be
+fixed and committed rather than rejected, with rejection reserved for
+defects whose repair would change meaning. Part of cutting the deterministic
+back-and-forth between agents and this hook without loosening the standard
+the hook enforces.
+
+**Criteria:**
+
+- Body and footer lines over 72 characters are rewrapped and the commit
+  proceeds; a subject over 50 characters, or one that is not Conventional
+  Commits, still exits 1.
+- Wrapping is idempotent: `wrap(wrap(x)) == wrap(x)`.
+- Fenced code blocks, indented blocks, table rows and the trailer block come
+  through byte-identical; a single token longer than 72 (a URL) is left
+  over-length rather than broken; list items keep their marker and gain a
+  hanging indent.
+- No character the author typed is changed other than line breaks and the
+  whitespace around them.
+- The hook reports on stderr what it rewrote.
+- `tests/test-git-hooks-agent` has a case for each of the above.
+
+**Sketch:** Running the hook under `uv run --script` is fine — the startup
+objection does not survive measurement. On 2026-08-09, warm `uv` cache: a
+PEP 723 script with no dependencies took ~40 ms, one with an `mdformat`
+dependency ~30 ms, plain `python3 -c pass` ~18 ms, and the current `/bin/sh`
+hook (which already spawns awk, grep and sed) ~24 ms.
+
+`mdformat` was then evaluated as the wrapper and should not be used.
+`mdformat.text(..., options={"wrap": 72})` does handle paragraphs, bullet
+hanging indents and fenced code correctly, but it is a Markdown formatter
+and a commit message is not Markdown. On a fixture of realistic commit
+prose it escaped `5*3` to `5\*3` and `*.ts` to `\*.ts` — inserting
+backslashes that `git log` renders literally — rewrote an indented block as
+a fenced one, and joined a trailer block into a single paragraph.
+`mdformat --help` offers no escape-free mode; the escaping is part of its
+round-trip guarantee, so it cannot be configured away.
+
+The standard library covers it instead. A 57-line prototype that classifies
+each line (fence, verbatim, blank, trailer, bullet, prose), joins runs of
+prose, and calls `textwrap.wrap(..., break_long_words=False,
+break_on_hyphens=False)` with `initial_indent`/`subsequent_indent` for
+bullets produced correct output on both the commit-message and hazard
+fixtures, and was idempotent on both. Being dependency-free also shrinks the
+cold-start risk noted in Constraints.
+
+Whatever does the wrapping, the trailer block has to be excluded from it —
+that was mdformat's worst failure and a hand-rolled wrapper can make it just
+as easily. `git interpret-trailers --parse` is the authoritative splitter and
+the hook is already in the business of manipulating trailers.
+
+An opt-out belongs on `git config hooks.commitMsgWrap`, matching the
+`hooks.preCommitRegexp` precedent already sitting in `home/.gitconfig:117`.
+
+**Constraints:** Any rewrite must be announced on stderr; silently rewriting
+the author's text is precisely the failure PR #146 removed from the
+pre-commit hook, and it would be worse here because the author never sees
+the file again. Keep the dependency list empty: a commit hook that resolves
+dependencies cannot commit on a cold `uv` cache with no network, and
+`caching.md` already records that `uv run --script` resolves before the
+script can check `AGENT_OFFLINE` — even a stdlib-only script may make `uv`
+fetch an interpreter, so decide what the hook does when `uv` itself fails.
+Do not share library code with `bin/markdown-format`. The 50 and 72 numbers
+are `git.md`'s to change, not this item's.
+
+## Fix the node pre-commit hook's staged-file handling (2026-08-05) — done
+
+The third sketched approach won: `etc/git/templates/node/hooks/pre-commit` now
+formats the *index* and never re-adds from the working tree. For each staged
+`.ts`/`.md` path it reads the staged blob (`git ls-files --stage` for the mode
+and sha, `git cat-file blob` for the content), pipes it through
+`prettier --stdin-filepath "$path"`, and stages the result with
+`git hash-object -w` plus `git update-index --cacheinfo`. The working tree is
+never read to decide what to commit, which is what the three reproductions all
+came down to.
+
+The cheaper "skip partially staged files" option was rejected because it cannot
+meet the second criterion: a staged edit to a file deleted from the working tree
+*is* a partially staged file, and skipping it either commits it unformatted or
+refuses, where the criterion asks for the edit to be committed. It also answers
+`git add -p` — the workflow the bug targets — with a refusal rather than with a
+formatted commit, which is the whole point of having the hook.
+
+Formatting happens in two passes: pass one formats every blob into a temp
+directory, pass two stages the results. Nothing reaches the index unless every
+file formatted successfully, so a missing or failing formatter aborts the commit
+with the index exactly as the author staged it. `prettier` is resolved as
+`npx --no-install prettier` first and a global `prettier` second — the template
+now matches what the two installed copies actually do — and the commit fails
+outright when neither exists, rather than the old behaviour of silently
+re-staging without ever formatting.
+
+The working tree still gets the formatting, but only where it is safe to give
+it: when `git diff --quiet` says the file matches what was staged, the hook runs
+`git checkout-index -f` after updating the index, so smudge filters apply and
+the tree stays consistent. Where the tree carries unstaged work (or the file is
+gone), it is left untouched and the hook says so on stderr. That closes the
+"working tree still holds the unformatted text" cost the sketch attached to this
+approach for every case except the one where the alternative is destroying
+someone's edits.
+
+Four smaller things fell out along the way. Paths are read `-z` from
+`git diff --cached --name-only` into a bash array and never passed through
+`xargs`, so a space is just a character. Pathspecs are `:(literal)` (git 1.9+):
+without it, staging both `a1.ts` and `a[1].ts` makes the bracketed path's
+pathspec match its sibling, and the sibling's content gets staged under the
+wrong name — a corruption worse than the one being fixed, and now test 9.
+Symlinks (120000) and gitlinks (160000) are skipped, since running a symlink's
+target text through a markdown formatter is not formatting. And empty formatter
+output for non-empty input is treated as a failure, so a `.prettierignore`d path
+cannot blank a file. Unmerged paths never arrive: `--diff-filter=ACMR` excludes
+them.
+
+`tests/test-git-hooks-node` covers all of it in 10 hermetic cases — the three
+reproductions, the four failure modes, and the three edge cases above. The hook
+runs with `PATH` pointing at a directory holding symlinks to the handful of
+commands it needs plus a stub formatter (quotes normalised, trailing whitespace
+stripped, so "formatted" is observable), which means no case can reach a real
+prettier or the network, and the absent-formatter case is genuinely absent
+rather than stubbed to fail. Separately verified by hand against real prettier
+3.8.1: the partially staged commit contains only the staged hunk, the deleted
+file's staged edit commits as an edit, and `my notes.md` commits.
+
+Not done: `~/workspace/ptracker` and `~/workspace/inkyframe` still hold the old
+copies. Hooks here are copied rather than linked, so both need a manual re-copy;
+nothing in this repository can detect or fix that. Bash 3.2 was not verified
+against a real 3.2 build (none available in the sandbox this ran in) — the hook
+uses no 4.x feature, and the one 3.2 parser trap on record, a here-document
+inside a command substitution, does not appear in it.
 
 ## Measure and extend the Jetpack source-history evals (2026-08-04)
 
