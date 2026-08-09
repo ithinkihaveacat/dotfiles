@@ -7,22 +7,22 @@ hook file, and nothing detects that a copy has gone stale.
 
 - `init.templatedir` (`home/.gitconfig:123`) copies
   `etc/git/templates/global/hooks/post-checkout` at clone time.
-- `bin/git-hooks-node` runs `git init --template=`, which only applies at
+- `bin/git-hook-node` runs `git init --template=`, which only applies at
   `git init`. An existing repository can never be updated by it, so the
   pre-commit index fix (686f52d, PR #146) reaches no checkout that already
   exists.
-- `bin/git-hooks-agent` installs through `git-hooks-multiplexer install`,
+- `bin/git-hook-agent` installs through `git-hook-multiplexer install`,
   which does reach existing repositories but leaves a frozen `cp` of the
   source.
 
-`git-hooks-multiplexer doctor` then tests only `-x` on the sub-hook, so a
+`git-hook-multiplexer doctor` then tests only `-x` on the sub-hook, so a
 copy that is years out of date reports `ok`. `~/workspace/ptracker` and
 `~/workspace/inkyframe` are the live instance: both carry a diverged
 pre-commit hook, and no command in this repository can say so.
 
-Removal is all-or-nothing in the other direction. `bin/git-hooks-none` is
+Removal is all-or-nothing in the other direction. `bin/git-hook-none` is
 `rm -rf "$(git rev-parse --git-dir)/hooks"`, which also deletes third-party
-hooks (the Gerrit hook that `git-hooks-gerrit` installs, husky), every
+hooks (the Gerrit hook that `git-hook-gerrit` installs, husky), every
 `<hook>.d/` directory, and the `00-legacy` hook the multiplexer carefully
 preserved on install — with no confirmation and no way to drop one hook.
 
@@ -56,7 +56,7 @@ both easy to ship and, once copied, impossible to recall.
 - Removing one managed hook leaves other managed hooks, third-party
   sub-hooks and `00-legacy` in place; when the last managed sub-hook goes,
   `00-legacy` is restored as the plain hook.
-- `tests/test-git-hooks-multiplexer` and `tests/test-git-hooks-agent` cover
+- `tests/test-git-hook-multiplexer` and `tests/test-git-hook-agent` cover
   install → drift → remove → restore.
 
 **Sketch:** The decision the evidence above points to is a *trampoline*: the
@@ -77,25 +77,25 @@ target.
 
 Other findings worth keeping:
 
-- `git-hooks-multiplexer` bakes `$hook_name` into the body it generates.
+- `git-hook-multiplexer` bakes `$hook_name` into the body it generates.
   Deriving the name from `basename "$0"` instead would make one generic
   file serve every hook name (git invokes the hook by its own path, so both
   `dirname "$0"` and `basename "$0"` still resolve correctly through a
   stub), and the multiplexer itself then becomes a trampoline too.
 - Removal wants the `add`/`remove` pair from `cli-tools.md`:
   `remove <hook> <key>` with an `rm` alias, plus a `clean` that drops only
-  managed hooks the way `permission clean` does. `git-hooks-none` can stay
+  managed hooks the way `permission clean` does. `git-hook-none` can stay
   as the nuclear option if it enumerates what it will delete and requires
   `--force`.
 - Moving the node pre-commit hook onto the multiplexer retires
   `git init --template=` for content hooks, and is what would make
   ptracker and inkyframe fixable in place. `init.templatedir` then keeps
   exactly one job: the clone-time post-checkout trampoline.
-- Six commands cover this one domain today (`git-hooks-agent`,
+- Six commands cover this one domain today (`git-hook-agent`,
   `-node`, `-gerrit`, `-none`, `-multiplexer`, plus the deprecated
   `git-updatehooks` stub, which prints "use 'git init' instead"). That is
   the hyphenated-command shape `cli-tools.md` says to avoid; a single
-  `git-hooks <verb>` manager is the Appendix A shape, with the current
+  `git-hook <verb>` manager is the Appendix A shape, with the current
   names kept as aliases since `bin/git-setup`, `home/.gitconfig` and the
   docs all reference them. Whether that consolidation belongs inside this
   item or after it is open.
@@ -106,11 +106,11 @@ Other findings worth keeping:
 failure and silent skip trade off, take loud failure. `rm .git/hooks/<name>`
 by hand must keep working as the documented escape hatch, and the
 `00-legacy` preservation contract must survive. If this tooling ever moves
-under a skill, `clean` and the `git-hooks-none` equivalent need declaring
+under a skill, `clean` and the `git-hook-none` equivalent need declaring
 in that skill's `permissions/unsafe`; as `bin/` scripts they are not
 pre-approved today. Out of scope: `core.hooksPath` as a delivery mechanism,
 adopting a hook framework (husky, lefthook, pre-commit), and the read-only
-`git-hooks list` surface — this item only owes `doctor` the ability to see
+`git-hook list` surface — this item only owes `doctor` the ability to see
 drift.
 
 ## Auto-fix mechanically fixable commit messages (2026-08-09) — done
@@ -185,7 +185,7 @@ vs `>>`) so distinct depths never merge, with `>` as both
 `initial_indent`/`subsequent_indent` so every wrapped line keeps its
 marker.
 
-`tests/test-git-hooks-agent` grew from 8 to 19 cases: one per Criteria
+`tests/test-git-hook-agent` grew from 8 to 19 cases: one per Criteria
 bullet (rewrap-and-proceed, idempotence, fence/table/indented-block/trailer
 byte-fidelity, the unbroken-URL case, bullet hanging indent, the stderr
 announcement), the opt-out, and the three review fixes above. Test 5's old
@@ -243,7 +243,7 @@ output for non-empty input is treated as a failure, so a `.prettierignore`d path
 cannot blank a file. Unmerged paths never arrive: `--diff-filter=ACMR` excludes
 them.
 
-`tests/test-git-hooks-node` covers all of it in 10 hermetic cases — the three
+`tests/test-git-hook-node` covers all of it in 10 hermetic cases — the three
 reproductions, the four failure modes, and the three edge cases above. The hook
 runs with `PATH` pointing at a directory holding symlinks to the handful of
 commands it needs plus a stub formatter (quotes normalised, trailing whitespace
@@ -1088,7 +1088,7 @@ grep -rn '^# Tests:' bin skills/*/scripts skills/*/tests tests --no-messages \
 **Sketch:** A mechanical find/replace per pointer. One open call: test files
 carrying their own `# Tests:` comment (e.g. `tests/test-git-setup:3`) —
 `tests/README.md` only asks for the comment on the script under test, so either
-make these self-referential (as `tests/test-git-hooks-multiplexer` already is)
+make these self-referential (as `tests/test-git-hook-multiplexer` already is)
 or drop them.
 
 **Constraints:** Comment-only edits; no behavior changes.
@@ -1126,7 +1126,7 @@ and a pointer to `--help`/`-h` to stderr, then exit `1` — never the full help
 text, never a bare error with no example, never exit `0`. Complex subcommand
 tools (the `kubectl`-style and Manager-pattern tools covered by `cli-tools.md`'s
 Appendix A) are explicitly out of scope here: clig.dev's bare-command-shows-help
-allowance is for them, and `git-hooks-multiplexer`, `skill`, `jetpack`, etc.
+allowance is for them, and `git-hook-multiplexer`, `skill`, `jetpack`, etc.
 already implement it deliberately.
 
 **Criteria:** `shell.md` documents a short concise-usage pattern (e.g. a
