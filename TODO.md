@@ -113,89 +113,68 @@ adopting a hook framework (husky, lefthook, pre-commit), and the read-only
 `git-hooks list` surface — this item only owes `doctor` the ability to see
 drift.
 
-## Auto-fix mechanically fixable commit messages (2026-08-09)
+## Auto-fix mechanically fixable commit messages (2026-08-09) — done
 
-**Problem:** `etc/git/templates/agent/hooks/commit-msg` checks four things —
-a Conventional Commits subject, a subject of 50 characters or fewer, a blank
-second line, and body/footer lines of 72 characters or fewer (the 50 and 72
-come from `skills/coding-standards/references/git.md:70-78`). Every
-violation exits 1 with the full list of errors.
+`etc/git/templates/agent/hooks/commit-msg` now rewraps over-long body/footer
+lines in place instead of rejecting them; a non-Conventional-Commits or
+over-50-character *subject* still exits 1, since fixing either would change
+what the author said. The wrapper is a ~230-line PEP 723 script (stdlib
+only, `dependencies = []`) piped into `uv run --script -` via a heredoc and
+embedded directly in the hook file, since hooks here are copied rather than
+linked — a separate companion script would silently stop tracking its
+source. It runs after the existing `Co-Authored-By:`/`TAG=`/`CONV=` trailer
+strip and before validation, and is skipped (like validation) for
+`Merge`/`Revert`/`fixup!`/`squash!` subjects.
 
-Rejection is the right answer for two of those four and the wrong answer for
-the other two. An over-long or non-conventional *subject* cannot be fixed
-without changing what it says, and it is the kind of defect a writer can see
-by eye. Body wrapping at 72 is neither: it is a deterministic,
-meaning-preserving transform that a writer — an agent especially — cannot do
-reliably by eye, and getting it wrong costs a full round trip in which the
-whole message is re-emitted and can be re-broken somewhere else.
+`mdformat` was evaluated first and rejected: it escaped `5*3` to `5\*3` and
+`*.ts` to `\*.ts` on a realistic fixture (backslashes `git log` renders
+literally), turned an indented block into a fenced one, and joined a
+trailer block into a paragraph — with no escape-free mode, since the
+escaping is part of its round-trip guarantee. A hand-rolled classifier does
+better: each body line is fence, blank, table row (`|...|`), bullet
+(`-`/`*`/`+`/`N.`/`N)`), indented (≥4 spaces or a tab), or prose; runs of
+prose and bullet continuation lines are joined and re-flowed with
+`textwrap.wrap(..., break_long_words=False, break_on_hyphens=False)`,
+`initial_indent`/`subsequent_indent` giving bullets their hanging indent.
+Fences, tables, indented blocks and a trailing trailer block pass through
+byte-identical — the trailer block's boundary is found by asking
+`git interpret-trailers --only-trailers --only-input --no-divider` (not by
+hand-parsing trailer syntax) and checking whether its output equals the
+message's own tail, which also handles folded multi-line trailer values
+correctly. A single token longer than 72 (a URL) is left over-length rather
+than split, since `break_long_words=False` already refuses to split it.
+Idempotence (`wrap(wrap(x)) == wrap(x)`) falls out for free: wrapping
+rejoins words with single spaces before re-wrapping, so a second pass sees
+the same word sequence and produces the same breaks. A change is announced
+on stderr (`commit-msg: rewrapped body/footer text to fit 72 characters`);
+git's own comment lines (`^#`) are located and left untouched.
 
-The hook already rewrites the message in place: it strips `Co-Authored-By:`,
-`TAG=` and `CONV=` trailers before validating. So rewriting is established
-here; wrapping is the case it does not yet cover.
+Opt-out is `git config hooks.commitMsgWrap false`, matching the
+`hooks.preCommitRegexp` precedent in `home/.gitconfig`. The `uv`-failure
+question the constraints raised is answered by falling back to the old
+strict 72-character rejection (with an stderr note naming why) rather than
+either silently accepting an over-long line or hard-failing the commit
+outright — `command -v uv` missing and a non-zero `uv run` exit both take
+this path, verified by removing `uv` from `PATH` and confirming the strict
+check still fires. Verified working under both `bash` and `dash` (the
+hook's shebang is `#!/bin/sh`).
 
-**Goal:** A commit whose only defects are mechanically fixable should be
-fixed and committed rather than rejected, with rejection reserved for
-defects whose repair would change meaning. Part of cutting the deterministic
-back-and-forth between agents and this hook without loosening the standard
-the hook enforces.
+Left as a hard rejection, not auto-fixed: the blank-second-line check. The
+Criteria section only specified wrap-then-proceed behavior for body/footer
+length and continued rejection for subject defects; inserting a blank
+separator was not in the Criteria list (unlike wrapping, it also was not
+evaluated against real fixtures the way `mdformat` was), so it stayed out of
+scope rather than being added on an inference from the Problem section's
+looser phrasing.
 
-**Criteria:**
-
-- Body and footer lines over 72 characters are rewrapped and the commit
-  proceeds; a subject over 50 characters, or one that is not Conventional
-  Commits, still exits 1.
-- Wrapping is idempotent: `wrap(wrap(x)) == wrap(x)`.
-- Fenced code blocks, indented blocks, table rows and the trailer block come
-  through byte-identical; a single token longer than 72 (a URL) is left
-  over-length rather than broken; list items keep their marker and gain a
-  hanging indent.
-- No character the author typed is changed other than line breaks and the
-  whitespace around them.
-- The hook reports on stderr what it rewrote.
-- `tests/test-git-hooks-agent` has a case for each of the above.
-
-**Sketch:** Running the hook under `uv run --script` is fine — the startup
-objection does not survive measurement. On 2026-08-09, warm `uv` cache: a
-PEP 723 script with no dependencies took ~40 ms, one with an `mdformat`
-dependency ~30 ms, plain `python3 -c pass` ~18 ms, and the current `/bin/sh`
-hook (which already spawns awk, grep and sed) ~24 ms.
-
-`mdformat` was then evaluated as the wrapper and should not be used.
-`mdformat.text(..., options={"wrap": 72})` does handle paragraphs, bullet
-hanging indents and fenced code correctly, but it is a Markdown formatter
-and a commit message is not Markdown. On a fixture of realistic commit
-prose it escaped `5*3` to `5\*3` and `*.ts` to `\*.ts` — inserting
-backslashes that `git log` renders literally — rewrote an indented block as
-a fenced one, and joined a trailer block into a single paragraph.
-`mdformat --help` offers no escape-free mode; the escaping is part of its
-round-trip guarantee, so it cannot be configured away.
-
-The standard library covers it instead. A 57-line prototype that classifies
-each line (fence, verbatim, blank, trailer, bullet, prose), joins runs of
-prose, and calls `textwrap.wrap(..., break_long_words=False,
-break_on_hyphens=False)` with `initial_indent`/`subsequent_indent` for
-bullets produced correct output on both the commit-message and hazard
-fixtures, and was idempotent on both. Being dependency-free also shrinks the
-cold-start risk noted in Constraints.
-
-Whatever does the wrapping, the trailer block has to be excluded from it —
-that was mdformat's worst failure and a hand-rolled wrapper can make it just
-as easily. `git interpret-trailers --parse` is the authoritative splitter and
-the hook is already in the business of manipulating trailers.
-
-An opt-out belongs on `git config hooks.commitMsgWrap`, matching the
-`hooks.preCommitRegexp` precedent already sitting in `home/.gitconfig:117`.
-
-**Constraints:** Any rewrite must be announced on stderr; silently rewriting
-the author's text is precisely the failure PR #146 removed from the
-pre-commit hook, and it would be worse here because the author never sees
-the file again. Keep the dependency list empty: a commit hook that resolves
-dependencies cannot commit on a cold `uv` cache with no network, and
-`caching.md` already records that `uv run --script` resolves before the
-script can check `AGENT_OFFLINE` — even a stdlib-only script may make `uv`
-fetch an interpreter, so decide what the hook does when `uv` itself fails.
-Do not share library code with `bin/markdown-format`. The 50 and 72 numbers
-are `git.md`'s to change, not this item's.
+`tests/test-git-hooks-agent` grew from 8 to 16 cases: one per Criteria
+bullet (rewrap-and-proceed, idempotence, fence/table/indented-block/trailer
+byte-fidelity, the unbroken-URL case, bullet hanging indent, the stderr
+announcement) plus the opt-out. Test 5's old fixture — two 73-character
+lines of repeated `x` with no spaces — is exactly the unbreakable-token case
+now, so it no longer produces length errors; only the pre-existing subject
+and blank-line failures remain asserted. No code is shared with
+`bin/markdown-format`; the 50/72 numbers stayed in `git.md`, untouched.
 
 ## Fix the node pre-commit hook's staged-file handling (2026-08-05) — done
 

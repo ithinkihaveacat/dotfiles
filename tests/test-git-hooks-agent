@@ -11,7 +11,7 @@ export PATH="$DIR/../bin:$PATH"
 # Isolate from the user's/system git config (signing, hooks, templates).
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
-echo "1..8"
+echo "1..16"
 
 # Test 1: --help succeeds and documents doctor
 if out=$("$BIN" --help 2>&1) && printf '%s' "$out" | grep -q 'doctor'; then
@@ -48,7 +48,9 @@ else
   echo "not ok 4 - doctor failed after install"
 fi
 
-# Test 5: all independent commit message errors are reported at once
+# Test 5: subject errors are reported together and still fail the commit,
+# even though the (unwrappable, single-token) long lines are left alone
+# rather than rejected.
 INVALID_MSG="$REPO/invalid-message"
 subject=$(printf 'X%.0s' {1..51})
 long_line=$(printf 'x%.0s' {1..73})
@@ -60,9 +62,7 @@ if [ "$rc" -eq 0 ]; then
 elif
   printf '%s\n' "$output" | grep -Fqx "commit-msg: subject must follow 'type(scope): description' format" &&
     printf '%s\n' "$output" | grep -Fqx 'commit-msg: subject is 51 characters (limit: 50)' &&
-    printf '%s\n' "$output" | grep -Fqx 'commit-msg: line 2 must be blank (separates subject from body)' &&
-    printf '%s\n' "$output" | grep -Fqx 'commit-msg: line 3 is 73 characters (limit: 72)' &&
-    printf '%s\n' "$output" | grep -Fqx 'commit-msg: line 4 is 73 characters (limit: 72)'
+    printf '%s\n' "$output" | grep -Fqx 'commit-msg: line 2 must be blank (separates subject from body)'
 then
   echo "ok 5 - invalid message reports every formatting error"
 else
@@ -93,4 +93,111 @@ if (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
   echo "not ok 8 - doctor should flag an unmanaged hook"
 else
   echo "ok 8 - doctor flags an unmanaged hook"
+fi
+
+AGENT_HOOK="$REPO/.git/hooks/commit-msg.d/10-agent"
+
+# Test 9: an over-long body line is rewrapped in place and the commit
+# proceeds, with the rewrite announced on stderr.
+WRAP_MSG="$REPO/wrap-message"
+printf 'feat: rewrap long body lines\n\nThis paragraph is deliberately written to run well past the seventy-two character line limit so the hook has something to rewrap.\n' >"$WRAP_MSG"
+rc=0
+output=$(cd "$REPO" && "$AGENT_HOOK" "$WRAP_MSG" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] &&
+  printf '%s\n' "$output" | grep -q 'rewrapped' &&
+  ! awk 'NR>2 && length>72 { found=1 } END { exit !found }' "$WRAP_MSG"; then
+  echo "ok 9 - over-long body line is rewrapped and the commit proceeds"
+else
+  echo "not ok 9 - over-long body line was not rewrapped correctly"
+fi
+
+# Test 10: wrapping is idempotent: running the hook again on its own
+# output changes nothing and reports no further rewrite.
+cp "$WRAP_MSG" "$WRAP_MSG.once"
+rc=0
+output=$(cd "$REPO" && "$AGENT_HOOK" "$WRAP_MSG" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && [ -z "$output" ] && diff -q "$WRAP_MSG.once" "$WRAP_MSG" >/dev/null; then
+  echo "ok 10 - wrap(wrap(x)) == wrap(x)"
+else
+  echo "not ok 10 - rewrapping an already-wrapped message changed it"
+fi
+
+# Test 11: fenced code blocks pass through byte-identical even when a
+# line inside exceeds 72 characters, while surrounding prose still wraps.
+FENCE_MSG="$REPO/fence-message"
+CODE_LINE='    this_is_a_single_long_line_of_code_that_intentionally_exceeds_the_limit()'
+# shellcheck disable=SC2016 # backticks below are a markdown fence, not a substitution
+printf 'feat: preserve fenced code\n\nProse before the fence that is also long enough to need rewrapping onto more than one line.\n\n```\n%s\n```\n' "$CODE_LINE" >"$FENCE_MSG"
+rc=0
+output=$(cd "$REPO" && "$AGENT_HOOK" "$FENCE_MSG" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && grep -Fqx "$CODE_LINE" "$FENCE_MSG"; then
+  echo "ok 11 - fenced code block survives byte-identical"
+else
+  echo "not ok 11 - fenced code block was altered"
+fi
+
+# Test 12: an indented block and a table row both survive byte-identical.
+TABLE_MSG="$REPO/table-message"
+INDENTED_LINE='    an indented line that is not meant to be treated as prose at all'
+TABLE_LINE='| column one | column two | a column wide enough to push this row past seventy-two characters |'
+printf 'feat: preserve indented and table content\n\n%s\n\n%s\n' "$INDENTED_LINE" "$TABLE_LINE" >"$TABLE_MSG"
+rc=0
+output=$(cd "$REPO" && "$AGENT_HOOK" "$TABLE_MSG" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && grep -Fqx "$INDENTED_LINE" "$TABLE_MSG" && grep -Fqx "$TABLE_LINE" "$TABLE_MSG"; then
+  echo "ok 12 - indented block and table row survive byte-identical"
+else
+  echo "not ok 12 - indented block or table row was altered"
+fi
+
+# Test 13: a single token longer than 72 characters (e.g. a URL) is left
+# over-length rather than broken, and the commit still succeeds.
+URL_MSG="$REPO/url-message"
+URL_LINE="https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+printf 'feat: leave unbreakable tokens alone\n\nSee %s\n' "$URL_LINE" >"$URL_MSG"
+rc=0
+output=$(cd "$REPO" && "$AGENT_HOOK" "$URL_MSG" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && grep -Fq "$URL_LINE" "$URL_MSG"; then
+  echo "ok 13 - an over-long single token is left intact rather than rejected"
+else
+  echo "not ok 13 - an over-long single token was broken or the commit was rejected"
+fi
+
+# Test 14: a wrapped bullet keeps its marker and gains a hanging indent
+# on continuation lines.
+BULLET_MSG="$REPO/bullet-message"
+printf 'feat: wrap bullets with a hanging indent\n\n- this bullet item is deliberately long enough that it must wrap onto a second continuation line\n' >"$BULLET_MSG"
+rc=0
+output=$(cd "$REPO" && "$AGENT_HOOK" "$BULLET_MSG" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] &&
+  grep -Fqx -- '- this bullet item is deliberately long enough that it must wrap onto a' "$BULLET_MSG" &&
+  grep -Fqx '  second continuation line' "$BULLET_MSG"; then
+  echo "ok 14 - a wrapped bullet keeps its marker and hanging indent"
+else
+  echo "not ok 14 - a wrapped bullet lost its marker or hanging indent"
+fi
+
+# Test 15: a trailing trailer/footer block survives byte-identical rather
+# than being merged into the reflowed paragraph above it.
+TRAILER_MSG="$REPO/trailer-message"
+TRAILER_LINE='Reviewed-by: Alice Example <alice@example.com>'
+printf 'feat: preserve the trailer block\n\nA short paragraph above the trailers.\n\n%s\nRefs: #123\n' "$TRAILER_LINE" >"$TRAILER_MSG"
+rc=0
+output=$(cd "$REPO" && "$AGENT_HOOK" "$TRAILER_MSG" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && grep -Fqx "$TRAILER_LINE" "$TRAILER_MSG" && grep -Fqx 'Refs: #123' "$TRAILER_MSG"; then
+  echo "ok 15 - the trailer block survives byte-identical"
+else
+  echo "not ok 15 - the trailer block was merged or altered"
+fi
+
+# Test 16: opting out via git config restores the strict rejection of
+# over-72-character lines instead of rewrapping them.
+OPTOUT_MSG="$REPO/optout-message"
+printf 'feat: honor the wrap opt-out\n\nThis paragraph is deliberately written to run well past the seventy-two character line limit so the hook has something to reject.\n' >"$OPTOUT_MSG"
+rc=0
+output=$(cd "$REPO" && git config hooks.commitMsgWrap false && "$AGENT_HOOK" "$OPTOUT_MSG" 2>&1) || rc=$?
+(cd "$REPO" && git config --unset hooks.commitMsgWrap)
+if [ "$rc" -ne 0 ] && printf '%s\n' "$output" | grep -q 'limit: 72'; then
+  echo "ok 16 - hooks.commitMsgWrap false restores the strict 72-character check"
+else
+  echo "not ok 16 - the wrap opt-out did not restore strict rejection"
 fi
