@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-hook
+
+# The hook bodies written by write_src below are single-quoted on purpose:
+# "$LOG" is expanded by the generated hook when git runs it, not here.
+# shellcheck disable=SC2016
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REAL_BIN="$DIR/../bin/hook"
+
+# Isolate from the user's/system git config (signing, hooks, templates).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+
+echo "1..24"
+
+# Test 1: --help exits zero and documents every command
+if out=$("$REAL_BIN" --help 2>&1) &&
+  printf '%s' "$out" | grep -q 'apply' &&
+  printf '%s' "$out" | grep -q 'add' &&
+  printf '%s' "$out" | grep -q 'remove' &&
+  printf '%s' "$out" | grep -q 'list' &&
+  printf '%s' "$out" | grep -q 'catalog' &&
+  printf '%s' "$out" | grep -q 'doctor' &&
+  printf '%s' "$out" | grep -q 'clean'; then
+  echo "ok 1 - --help documents every command"
+else
+  echo "not ok 1 - --help missing or incomplete"
+fi
+
+# Test 2: bare invocation is an explicit help request (exit 0)
+if "$REAL_BIN" >/dev/null 2>&1; then
+  echo "ok 2 - bare invocation prints help and exits zero"
+else
+  echo "not ok 2 - bare invocation should exit zero"
+fi
+
+WORK=$(mktemp -d "/tmp/hook-test.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# A stand-in dotfiles tree, so the mechanics below can edit and delete hook
+# sources without touching the ones this repository actually ships. 'hook'
+# resolves its sources relative to its own location, so a copy of the script
+# in this tree serves sources from this tree.
+DF="$WORK/df"
+mkdir -p "$DF/bin" "$DF/etc/git/hooks/agent" "$DF/etc/git/hooks/node"
+cp "$REAL_BIN" "$DF/bin/hook"
+BIN="$DF/bin/hook"
+AGENT_SRC="$DF/etc/git/hooks/agent/commit-msg"
+NODE_SRC="$DF/etc/git/hooks/node/pre-commit"
+
+write_src() { # write_src PATH BODY...
+  local path="$1"
+  shift
+  printf '%s\n' '#!/bin/sh' "$@" >"$path"
+  chmod +x "$path"
+}
+
+write_src "$AGENT_SRC" 'echo agent >> "$LOG"'
+write_src "$NODE_SRC" 'echo node >> "$LOG"'
+
+new_repo() { # new_repo NAME -> prints repo path
+  local repo="$WORK/$1"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  printf '%s\n' "$repo"
+}
+
+REPO=$(new_repo main)
+export LOG="$REPO/log.txt"
+
+# Test 3: doctor is non-zero before anything is installed
+if ! (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
+  echo "ok 3 - doctor flags an unconfigured repository"
+else
+  echo "not ok 3 - doctor should exit non-zero with no hooks installed"
+fi
+
+# Test 4: add writes a managed multiplexer and executable sub-hook
+if (cd "$REPO" && "$BIN" add agent) >/dev/null 2>&1 &&
+  [ -x "$REPO/.git/hooks/commit-msg" ] &&
+  grep -q 'hook-multiplexer' "$REPO/.git/hooks/commit-msg" &&
+  [ -x "$REPO/.git/hooks/commit-msg.d/10-agent" ] &&
+  (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1 &&
+  (cd "$REPO" && "$BIN" list) 2>/dev/null | grep -q '10-agent'; then
+  echo "ok 4 - add writes a multiplexed hook that doctor and list both see"
+else
+  echo "not ok 4 - add did not produce the expected layout"
+fi
+
+# Test 5: the sub-hook is a trampoline naming its source, not a copy of it
+if grep -Fq "hook-trampoline -> $AGENT_SRC" "$REPO/.git/hooks/commit-msg.d/10-agent" &&
+  ! grep -q 'echo agent' "$REPO/.git/hooks/commit-msg.d/10-agent"; then
+  echo "ok 5 - the installed sub-hook is a trampoline to its source"
+else
+  echo "not ok 5 - the sub-hook is a copy rather than a trampoline"
+fi
+
+# Test 6: editing the source changes an already-installed hook with no
+# re-install step. This is the whole point of the trampoline.
+rm -f "$LOG"
+write_src "$AGENT_SRC" 'echo v1 >> "$LOG"'
+"$REPO/.git/hooks/commit-msg" msgfile </dev/null
+write_src "$AGENT_SRC" 'echo v2 >> "$LOG"'
+"$REPO/.git/hooks/commit-msg" msgfile </dev/null
+if [ "$(cat "$LOG")" = "v1
+v2" ]; then
+  echo "ok 6 - editing the source propagates with no re-install"
+else
+  echo "not ok 6 - the installed hook did not follow its source"
+fi
+
+# Test 7: a pre-existing foreign hook is preserved as 00-legacy and runs first
+LEGACY_REPO=$(new_repo legacy)
+printf '#!/bin/sh\necho legacy >> "%s/log.txt"\n' "$LEGACY_REPO" >"$LEGACY_REPO/.git/hooks/commit-msg"
+chmod +x "$LEGACY_REPO/.git/hooks/commit-msg"
+write_src "$AGENT_SRC" 'echo agent >> "$LOG"'
+(cd "$LEGACY_REPO" && LOG="$LEGACY_REPO/log.txt" "$BIN" add agent) >/dev/null 2>&1
+LOG="$LEGACY_REPO/log.txt" "$LEGACY_REPO/.git/hooks/commit-msg" msgfile </dev/null
+if [ -x "$LEGACY_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
+  [ "$(cat "$LEGACY_REPO/log.txt")" = "legacy
+agent" ]; then
+  echo "ok 7 - foreign hook preserved as 00-legacy and runs first"
+else
+  echo "not ok 7 - legacy hook not preserved or wrong order"
+fi
+
+# Test 8: a failing sub-hook aborts the chain with its exit code
+printf '#!/bin/sh\nexit 42\n' >"$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
+chmod +x "$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
+rm -f "$LEGACY_REPO/log.txt"
+LOG="$LEGACY_REPO/log.txt" "$LEGACY_REPO/.git/hooks/commit-msg" msgfile </dev/null 2>/dev/null
+rc=$?
+if [ "$rc" -eq 42 ] && grep -q 'legacy' "$LEGACY_REPO/log.txt" &&
+  ! grep -q 'agent' "$LEGACY_REPO/log.txt"; then
+  echo "ok 8 - failing sub-hook propagates exit code and stops the chain"
+else
+  echo "not ok 8 - expected exit 42 and no later hooks (got rc=$rc)"
+fi
+rm -f "$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
+
+# Test 9: re-adding is idempotent (a managed hook is not demoted to legacy)
+(cd "$REPO" && "$BIN" add agent) >/dev/null 2>&1
+if [ ! -e "$REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
+  (cd "$REPO" && "$BIN" doctor) >/dev/null 2>&1; then
+  echo "ok 9 - re-adding is idempotent"
+else
+  echo "not ok 9 - re-adding created 00-legacy or broke doctor"
+fi
+
+# Test 10: every sub-hook sees the full stdin (buffered, not consumed)
+printf '#!/bin/sh\ncat >> "%s/stdin.txt"\n' "$REPO" >"$REPO/.git/hooks/commit-msg.d/20-b"
+chmod +x "$REPO/.git/hooks/commit-msg.d/20-b"
+write_src "$AGENT_SRC" 'cat >> "$LOG"'
+rm -f "$LOG" "$REPO/stdin.txt"
+printf 'refs\n' | "$REPO/.git/hooks/commit-msg" msgfile
+if grep -q 'refs' "$LOG" && grep -q 'refs' "$REPO/stdin.txt"; then
+  echo "ok 10 - stdin is buffered and replayed to every sub-hook"
+else
+  echo "not ok 10 - sub-hooks did not each receive stdin"
+fi
+
+# Test 11: doctor reports a hook it did not install, and says how to adopt it
+UNMANAGED_REPO=$(new_repo unmanaged)
+printf '#!/bin/sh\n' >"$UNMANAGED_REPO/.git/hooks/commit-msg"
+out=$(cd "$UNMANAGED_REPO" && "$BIN" doctor 2>&1)
+if [ -n "$out" ] && printf '%s' "$out" | grep -q '^\[WARN\]' &&
+  printf '%s' "$out" | grep -q 'not installed by hook' &&
+  ! (cd "$UNMANAGED_REPO" && "$BIN" doctor) >/dev/null 2>&1; then
+  echo "ok 11 - doctor reports an unmanaged hook with a canonical WARN tag"
+else
+  echo "not ok 11 - unexpected doctor output for an unmanaged hook"
+fi
+
+# Test 12: an install from an older version of this tool (the plural
+# git-hooks-multiplexer marker, and a copied rather than trampolined
+# sub-hook) is reported as drift rather than ok, and re-adding refreshes it
+# in place instead of demoting the still-working multiplexer to 00-legacy.
+OLD_REPO=$(new_repo old)
+mkdir -p "$OLD_REPO/.git/hooks/commit-msg.d"
+printf '#!/bin/sh\n# git-hooks-multiplexer: commit-msg\n' >"$OLD_REPO/.git/hooks/commit-msg"
+chmod +x "$OLD_REPO/.git/hooks/commit-msg"
+printf '#!/bin/sh\n' >"$OLD_REPO/.git/hooks/commit-msg.d/10-agent"
+chmod +x "$OLD_REPO/.git/hooks/commit-msg.d/10-agent"
+out=$(cd "$OLD_REPO" && "$BIN" doctor 2>&1)
+if printf '%s' "$out" | grep -q 'older version' &&
+  (cd "$OLD_REPO" && "$BIN" add agent) >/dev/null 2>&1 &&
+  [ ! -e "$OLD_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
+  (cd "$OLD_REPO" && "$BIN" doctor) >/dev/null 2>&1; then
+  echo "ok 12 - a pre-rename install reports drift and is refreshed in place"
+else
+  echo "not ok 12 - unexpected handling of a pre-rename install"
+fi
+
+# Test 13: a source that has gone away is a doctor finding and makes the hook
+# fail loudly, rather than being silently skipped
+ORPHAN_REPO=$(new_repo orphan)
+write_src "$NODE_SRC" 'exit 0'
+(cd "$ORPHAN_REPO" && "$BIN" add node) >/dev/null 2>&1
+rm -f "$NODE_SRC"
+rc=0
+"$ORPHAN_REPO/.git/hooks/pre-commit" </dev/null >/dev/null 2>&1 || rc=$?
+out=$(cd "$ORPHAN_REPO" && AGENT_REQUIRED_HOOKS=node "$BIN" doctor 2>&1)
+if printf '%s' "$out" | grep -q '^\[ERROR\]' &&
+  printf '%s' "$out" | grep -q 'no longer exists' && [ "$rc" -ne 0 ]; then
+  echo "ok 13 - a missing source is reported and fails the hook loudly"
+else
+  echo "not ok 13 - a missing source was not caught (rc=$rc)"
+fi
+write_src "$NODE_SRC" 'echo node >> "$LOG"'
+
+# Test 14: --copy installs a snapshot that does not track its source
+COPY_REPO=$(new_repo copy)
+write_src "$NODE_SRC" 'echo copied >> "$LOG"'
+(cd "$COPY_REPO" && "$BIN" add --copy node) >/dev/null 2>&1
+rm -f "$NODE_SRC"
+LOG="$COPY_REPO/log.txt" "$COPY_REPO/.git/hooks/pre-commit" </dev/null
+if (cd "$COPY_REPO" && AGENT_REQUIRED_HOOKS=node "$BIN" doctor) >/dev/null 2>&1 &&
+  grep -q 'copied' "$COPY_REPO/log.txt"; then
+  echo "ok 14 - --copy installs a snapshot that survives its source"
+else
+  echo "not ok 14 - --copy did not install a self-contained hook"
+fi
+write_src "$NODE_SRC" 'echo node >> "$LOG"'
+
+# Test 15: removing one sub-hook leaves the others in place
+if (cd "$REPO" && "$BIN" remove agent) >/dev/null 2>&1 &&
+  [ ! -e "$REPO/.git/hooks/commit-msg.d/10-agent" ] &&
+  [ -x "$REPO/.git/hooks/commit-msg.d/20-b" ] &&
+  [ -x "$REPO/.git/hooks/commit-msg" ]; then
+  echo "ok 15 - remove drops one sub-hook and leaves the rest"
+else
+  echo "not ok 15 - remove disturbed the other sub-hooks"
+fi
+
+# Test 16: removing the last managed sub-hook restores 00-legacy as the plain
+# hook and takes the multiplexer down with it
+rm -f "$LEGACY_REPO/log.txt"
+if (cd "$LEGACY_REPO" && "$BIN" remove agent) >/dev/null 2>&1 &&
+  [ ! -d "$LEGACY_REPO/.git/hooks/commit-msg.d" ] &&
+  [ -x "$LEGACY_REPO/.git/hooks/commit-msg" ] &&
+  ! grep -q 'hook-multiplexer' "$LEGACY_REPO/.git/hooks/commit-msg"; then
+  LOG="$LEGACY_REPO/log.txt" "$LEGACY_REPO/.git/hooks/commit-msg" msgfile </dev/null
+  if [ "$(cat "$LEGACY_REPO/log.txt")" = "legacy" ]; then
+    echo "ok 16 - the pre-existing hook is restored when the last one goes"
+  else
+    echo "not ok 16 - the restored hook does not run"
+  fi
+else
+  echo "not ok 16 - 00-legacy was not restored as the plain hook"
+fi
+
+# Test 17: removing the last sub-hook where there was no pre-existing hook
+# removes the multiplexer and its directory entirely
+rm -f "$REPO/.git/hooks/commit-msg.d/20-b"
+EMPTY_REPO=$(new_repo empty)
+(cd "$EMPTY_REPO" && "$BIN" add agent) >/dev/null 2>&1
+if (cd "$EMPTY_REPO" && "$BIN" remove agent) >/dev/null 2>&1 &&
+  [ ! -e "$EMPTY_REPO/.git/hooks/commit-msg" ] &&
+  [ ! -d "$EMPTY_REPO/.git/hooks/commit-msg.d" ]; then
+  echo "ok 17 - an emptied multiplexer removes itself"
+else
+  echo "not ok 17 - the multiplexer outlived its last sub-hook"
+fi
+
+# Test 18: a foreign hook that merely mentions this tool in its text is still
+# recognized as foreign, preserved as 00-legacy, and not silently overwritten
+MENTION_REPO=$(new_repo mention)
+printf '#!/bin/sh\n# installed by hand; see hook-multiplexer for the managed variant\necho mention >> "%s/log.txt"\n' "$MENTION_REPO" >"$MENTION_REPO/.git/hooks/commit-msg"
+chmod +x "$MENTION_REPO/.git/hooks/commit-msg"
+(cd "$MENTION_REPO" && "$BIN" add agent) >/dev/null 2>&1
+rm -f "$MENTION_REPO/log.txt"
+LOG="$MENTION_REPO/log.txt" "$MENTION_REPO/.git/hooks/commit-msg" msgfile </dev/null
+if [ -x "$MENTION_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
+  grep -q 'mention' "$MENTION_REPO/log.txt"; then
+  echo "ok 18 - a foreign hook naming this tool is preserved, not clobbered"
+else
+  echo "not ok 18 - a foreign hook naming this tool was overwritten"
+fi
+
+# Test 19: apply synchronizes to AGENT_REQUIRED_HOOKS, installing what it
+# names and removing the managed profiles it does not
+SYNC_REPO=$(new_repo sync)
+(cd "$SYNC_REPO" && AGENT_REQUIRED_HOOKS='agent node' "$BIN" apply) >/dev/null 2>&1
+before=0
+[ -e "$SYNC_REPO/.git/hooks/commit-msg.d/10-agent" ] &&
+  [ -e "$SYNC_REPO/.git/hooks/pre-commit.d/10-node" ] && before=1
+(cd "$SYNC_REPO" && AGENT_REQUIRED_HOOKS='node' "$BIN" apply) >/dev/null 2>&1
+if [ "$before" -eq 1 ] &&
+  [ ! -e "$SYNC_REPO/.git/hooks/commit-msg" ] &&
+  [ -e "$SYNC_REPO/.git/hooks/pre-commit.d/10-node" ]; then
+  echo "ok 19 - apply installs what is declared and removes what is not"
+else
+  echo "not ok 19 - apply did not synchronize to AGENT_REQUIRED_HOOKS"
+fi
+
+# Test 20: catalog lists the profiles available to add
+if out=$(cd "$REPO" && "$BIN" catalog 2>&1) &&
+  printf '%s' "$out" | grep -q '^agent' &&
+  printf '%s' "$out" | grep -q '^node' &&
+  printf '%s' "$out" | grep -q '^gerrit'; then
+  echo "ok 20 - catalog lists every profile"
+else
+  echo "not ok 20 - catalog is missing profiles"
+fi
+
+# Test 21: clean removes the profiles this tool manages and leaves a hook it
+# did not install alone
+CLEAN_REPO=$(new_repo clean)
+(cd "$CLEAN_REPO" && AGENT_REQUIRED_HOOKS='agent node' "$BIN" apply) >/dev/null 2>&1
+printf '#!/bin/sh\nexit 0\n' >"$CLEAN_REPO/.git/hooks/pre-push"
+chmod +x "$CLEAN_REPO/.git/hooks/pre-push"
+if (cd "$CLEAN_REPO" && "$BIN" clean) >/dev/null 2>&1 &&
+  [ ! -e "$CLEAN_REPO/.git/hooks/commit-msg" ] &&
+  [ ! -e "$CLEAN_REPO/.git/hooks/pre-commit" ] &&
+  [ -x "$CLEAN_REPO/.git/hooks/pre-push" ]; then
+  echo "ok 21 - clean removes managed profiles and spares foreign hooks"
+else
+  echo "not ok 21 - clean removed too much or too little"
+fi
+
+# Test 22: clean --all refuses without --force, then deletes everything
+if ! (cd "$CLEAN_REPO" && "$BIN" clean --all) >/dev/null 2>&1 &&
+  [ -x "$CLEAN_REPO/.git/hooks/pre-push" ] &&
+  (cd "$CLEAN_REPO" && "$BIN" clean --all --force) >/dev/null 2>&1 &&
+  [ ! -d "$CLEAN_REPO/.git/hooks" ]; then
+  echo "ok 22 - clean --all requires --force before deleting foreign hooks"
+else
+  echo "not ok 22 - clean --all did not honour the --force guard"
+fi
+
+# Test 23: a fetched profile is downloaded into a scratch directory that
+# outlives the fetch, and installed as a copy rather than a trampoline. curl
+# is stubbed so this needs no network; HOOK_OFFLINE=0 opts back in when the
+# suite is run under AGENT_OFFLINE=1, which also pins that the per-tool
+# variable wins over the workspace-wide one.
+FETCH_REPO=$(new_repo fetch)
+STUB="$WORK/stub"
+mkdir -p "$STUB"
+cat >"$STUB/curl" <<'STUBEOF'
+#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o | -sSLo) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$out" ] || exit 1
+printf '#!/bin/sh\necho gerrit-stub\n' > "$out"
+STUBEOF
+chmod +x "$STUB/curl"
+if (cd "$FETCH_REPO" && PATH="$STUB:$PATH" HOOK_OFFLINE=0 "$BIN" add gerrit) >/dev/null 2>&1 &&
+  [ -x "$FETCH_REPO/.git/hooks/commit-msg.d/50-gerrit" ] &&
+  grep -q 'gerrit-stub' "$FETCH_REPO/.git/hooks/commit-msg.d/50-gerrit" &&
+  ! grep -q 'hook-trampoline' "$FETCH_REPO/.git/hooks/commit-msg.d/50-gerrit"; then
+  echo "ok 23 - a fetched profile is installed as a copy of the download"
+else
+  echo "not ok 23 - the fetched hook did not survive into the installed copy"
+fi
+
+# Test 24: offline mode refuses to fetch rather than hanging or half-installing
+OFFLINE_REPO=$(new_repo offline)
+out=$(cd "$OFFLINE_REPO" && HOOK_OFFLINE=1 "$BIN" add gerrit 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'offline mode' &&
+  [ ! -e "$OFFLINE_REPO/.git/hooks/commit-msg" ]; then
+  echo "ok 24 - offline mode refuses to fetch and installs nothing"
+else
+  echo "not ok 24 - offline mode did not fail cleanly (rc=$rc)"
+fi

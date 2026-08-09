@@ -1,139 +1,108 @@
 # TODO
 
-## Make installed git hooks propagate fixes and uninstall cleanly (2026-08-09)
+## Make installed git hooks propagate fixes and uninstall cleanly (2026-08-09) — done
 
-**Problem:** Three unrelated mechanisms install hooks, all three copy the
-hook file, and nothing detects that a copy has gone stale.
+Installed hooks were frozen copies: fixing a hook here reached no repository
+that already had it, and `doctor` tested only that the sub-hook was executable,
+so a copy years out of date reported `ok`. Removal was all-or-nothing in the
+other direction — `git-hook-none` was
+`rm -rf "$(git rev-parse --git-dir)/hooks"`, taking third-party hooks and the
+carefully preserved `00-legacy` with it.
 
-- `init.templatedir` (`home/.gitconfig:123`) copies
-  `etc/git/templates/global/hooks/post-checkout` at clone time.
-- `bin/git-hook-node` runs `git init --template=`, which only applies at
-  `git init`. An existing repository can never be updated by it, so the
-  pre-commit index fix (686f52d, PR #146) reaches no checkout that already
-  exists.
-- `bin/git-hook-agent` installs through `git-hook-multiplexer install`,
-  which does reach existing repositories but leaves a frozen `cp` of the
-  source.
+A sub-hook is now a **trampoline**: a generated stub whose body is
+`exec <absolute path into this repo> "$@"`. Editing a source under
+`etc/git/hooks/` changes every repository the hook is installed into with no
+re-install step, and a source that has gone away fails the hook loudly (`exec`
+of a missing file) instead of being silently skipped the way a dangling symlink
+is. `--copy` keeps the old snapshot behaviour for a source with no stable home
+to point at; the downloaded Gerrit hook is the only profile that uses it.
 
-`git-hook-multiplexer doctor` then tests only `-x` on the sub-hook, so a
-copy that is years out of date reports `ok`. `~/workspace/ptracker` and
-`~/workspace/inkyframe` are the live instance: both carry a diverged
-pre-commit hook, and no command in this repository can say so.
+The multiplexer body no longer bakes in the hook name — it derives its sub-hook
+directory from `"$0"` — so one constant body serves every hook name, which is
+what lets `doctor` compare it byte-for-byte and call the difference drift.
+`doctor` gained `drifted_multiplexer`, `drifted_subhook` and `orphaned_subhook`,
+all exiting non-zero.
 
-Removal is all-or-nothing in the other direction. `bin/git-hook-none` is
-`rm -rf "$(git rev-parse --git-dir)/hooks"`, which also deletes third-party
-hooks (the Gerrit hook that `git-hook-gerrit` installs, husky), every
-`<hook>.d/` directory, and the `00-legacy` hook the multiplexer carefully
-preserved on install — with no confirmation and no way to drop one hook.
+`remove` drops one profile and leaves other profiles, third-party sub-hooks and
+`00-legacy` alone; when the last managed sub-hook goes, `00-legacy` is restored
+as the plain hook and the multiplexer removes itself. `clean` drops only what
+this tool manages; `clean --all --force` is the old nuclear option, and it
+enumerates what it will delete first.
 
-Three mechanics were measured against git 2.43.0 on 2026-08-09, since the
-choice between copy and symlink turns on them:
+The node pre-commit hook installs through the multiplexer instead of
+`git init --template=`, so an existing checkout can finally be fixed in place.
+Hook sources moved out of `etc/git/templates/` to `etc/git/hooks/{agent,node}/`,
+leaving `init.templatedir` with exactly one job: the clone-time post-checkout
+trampoline.
 
-- `git init --template=` preserves a symlink verbatim, so a symlink in a
-  template only survives if its target is absolute.
-- A dangling symlink at `.git/hooks/pre-commit` is *silently skipped*: the
-  commit succeeded and exited 0. Moving or renaming `~/.dotfiles` would
-  therefore disable every symlinked hook with no signal.
-- A stub whose `exec` target is missing fails loudly — `exec: not found`,
-  exit 1, commit aborted.
+Two decisions worth recording:
 
-**Goal:** An installed hook should track its source in this repository, so
-that fixing a hook here fixes it everywhere it is installed without a
-manual re-copy; a hook whose source has gone away should fail loudly rather
-than quietly stop running; and removing one hook should leave every other
-hook alone. Part of making the hook system trustworthy enough to keep
-putting policy in it — the pre-commit fix showed that a bug in a hook is
-both easy to ship and, once copied, impossible to recall.
+- **The multiplexer is not itself a trampoline**, though the sketch suggested it
+  could be. Making it one would mean a missing dotfiles tree breaks *every* hook
+  in *every* repository rather than just the hooks that point into it. A
+  constant, self-contained body already gets the byte-for-byte drift detection
+  that was the real prize, so the extra blast radius buys nothing.
+- **A latent bug surfaced while testing**: the managed-hook marker was matched
+  anywhere in the file, so a foreign hook that merely *mentioned* this tool — in
+  a path, a comment, an error message — was treated as ours and overwritten
+  instead of being preserved as `00-legacy`. The check is now anchored to a
+  header comment line, with a regression test.
 
-**Criteria:**
+## Consolidate the git hook commands into one manager (2026-08-09) — done
 
-- Editing a hook source under `etc/git/` changes the behaviour of an
-  already-set-up repository with no re-install step.
-- A drifted or orphaned installation is a `doctor` finding that exits
-  non-zero; today a stale copy reports `ok`.
-- The node pre-commit hook can be installed into an existing repository
-  without `git init`.
-- Removing one managed hook leaves other managed hooks, third-party
-  sub-hooks and `00-legacy` in place; when the last managed sub-hook goes,
-  `00-legacy` is restored as the plain hook.
-- `tests/test-git-hook-multiplexer` and `tests/test-git-hook-agent` cover
-  install → drift → remove → restore.
+Six commands covered one domain (`git-hook-agent`, `-node`, `-gerrit`, `-none`,
+`-multiplexer`, plus the deprecated `git-updatehooks` stub) — the
+hyphenated-command shape `cli-tools.md` says to avoid. They are now a single
+`hook` manager in the Appendix A Type 1 shape, with
+`apply`/`add`/`remove`/`list`/`catalog`/`doctor`/`clean` and the profiles
+`agent`, `node` and `gerrit` as its nouns. The multiplexer is no longer a
+user-facing command; it is plumbing inside `hook`.
 
-**Sketch:** The decision the evidence above points to is a *trampoline*: the
-installed file is a generated stub whose body is
-`exec <absolute path into this repo> "$@"`. It keeps a symlink's
-propagation without a symlink's silent-skip failure, and unlike a real
-symlink it survives `git init --template=` without an absolute path baked
-into a tracked file. This is not a new pattern —
-`etc/git/templates/global/hooks/post-checkout` is already exactly this,
-execing `$HOME/.dotfiles/bin/git-setup` — so the work is mostly applying it
-consistently, resolving the absolute path at install time rather than
-hardcoding `~/.dotfiles`.
+`apply` synchronizes to `AGENT_REQUIRED_HOOKS` (default `agent`), installing
+what it names and removing the managed profiles it does not, exactly as
+`skill apply` does for `AGENT_REQUIRED_SKILLS`. That makes `git-setup` three
+calls of one shape — `hook apply`, `skill apply`, `permission apply` — and its
+`doctor` an aggregate of the matching three.
 
-The second-order benefit is what makes drift detectable at all: a stub's
-content is generated and never changes, so `doctor` can compare it
-byte-for-byte, where a copy of a hook can only be compared against a moving
-target.
+**The name is bare `hook`, not `git-hook`**, because `git hook` has been a git
+builtin since 2.36: git prefers builtins over `git-*` on `PATH`, so
+`git hook add agent` would silently reach `git hook run` instead of this tool.
+Verified against git 2.43.0 — `git hooks …` (plural) *does* dispatch to a `PATH`
+script, but the bare name matches `skill` and `permission` and sidesteps the
+namespace entirely. Nothing else claims `hook`: no binary on `PATH`, no man
+page, no fish function or abbreviation.
 
-Other findings worth keeping:
+Migration is silent for hooks already installed elsewhere. The marker regex
+still recognizes every historical spelling, so an existing install is reported
+as managed-but-drifted and refreshed in place by the next `hook apply` — never
+demoted to `00-legacy`.
 
-- `git-hook-multiplexer` bakes `$hook_name` into the body it generates.
-  Deriving the name from `basename "$0"` instead would make one generic
-  file serve every hook name (git invokes the hook by its own path, so both
-  `dirname "$0"` and `basename "$0"` still resolve correctly through a
-  stub), and the multiplexer itself then becomes a trampoline too.
-- Removal wants the `add`/`remove` pair from `cli-tools.md`:
-  `remove <hook> <key>` with an `rm` alias, plus a `clean` that drops only
-  managed hooks the way `permission clean` does. `git-hook-none` can stay
-  as the nuclear option if it enumerates what it will delete and requires
-  `--force`.
-- Moving the node pre-commit hook onto the multiplexer retires
-  `git init --template=` for content hooks, and is what would make
-  ptracker and inkyframe fixable in place. `init.templatedir` then keeps
-  exactly one job: the clone-time post-checkout trampoline.
-- Six commands cover this one domain today (`git-hook-agent`,
-  `-node`, `-gerrit`, `-none`, `-multiplexer`, plus the deprecated
-  `git-updatehooks` stub, which prints "use 'git init' instead"). That is
-  the hyphenated-command shape `cli-tools.md` says to avoid; a single
-  `git-hook <verb>` manager is the Appendix A shape, with the current
-  names kept as aliases since `bin/git-setup`, `home/.gitconfig` and the
-  docs all reference them. Whether that consolidation belongs inside this
-  item or after it is open.
-- A `--copy` escape hatch is worth keeping for a machine that has no
-  dotfiles tree to point at.
-
-**Constraints:** A hook must never silently stop running — where loud
-failure and silent skip trade off, take loud failure. `rm .git/hooks/<name>`
-by hand must keep working as the documented escape hatch, and the
-`00-legacy` preservation contract must survive. If this tooling ever moves
-under a skill, `clean` and the `git-hook-none` equivalent need declaring
-in that skill's `permissions/unsafe`; as `bin/` scripts they are not
-pre-approved today. Out of scope: `core.hooksPath` as a delivery mechanism,
-adopting a hook framework (husky, lefthook, pre-commit), and the read-only
-`git-hook list` surface — this item only owes `doctor` the ability to see
-drift.
+Follow-ups deliberately left out of scope: `core.hooksPath` as a delivery
+mechanism, adopting a hook framework (husky, lefthook, pre-commit), and
+`etc/git/templates/sample/`, which is now the only template besides `global/`
+and is unreferenced.
 
 ## Auto-fix mechanically fixable commit messages (2026-08-09) — done
 
 `etc/git/templates/agent/hooks/commit-msg` now rewraps over-long body/footer
 lines in place instead of rejecting them; a non-Conventional-Commits or
-over-50-character *subject* still exits 1, since fixing either would change
-what the author said. The wrapper is a ~230-line PEP 723 script (stdlib
-only, `dependencies = []`) piped into `uv run --script -` via a heredoc and
-embedded directly in the hook file, since hooks here are copied rather than
-linked — a separate companion script would silently stop tracking its
-source. It runs after the existing `Co-Authored-By:`/`TAG=`/`CONV=` trailer
-strip and before validation, and is skipped (like validation) for
+over-50-character *subject* still exits 1, since fixing either would change what
+the author said. The wrapper is a ~230-line PEP 723 script (stdlib only,
+`dependencies = []`) piped into `uv run --script -` via a heredoc and embedded
+directly in the hook file, since hooks here are copied rather than linked — a
+separate companion script would silently stop tracking its source. It runs after
+the existing `Co-Authored-By:`/`TAG=`/`CONV=` trailer strip and before
+validation, and is skipped (like validation) for
 `Merge`/`Revert`/`fixup!`/`squash!` subjects.
 
 `mdformat` was evaluated first and rejected: it escaped `5*3` to `5\*3` and
 `*.ts` to `\*.ts` on a realistic fixture (backslashes `git log` renders
-literally), turned an indented block into a fenced one, and joined a
-trailer block into a paragraph — with no escape-free mode, since the
-escaping is part of its round-trip guarantee. A hand-rolled classifier does
-better: each body line is fence, blank, table row (`|...|`), bullet
-(`-`/`*`/`+`/`N.`/`N)`), indented (≥4 spaces or a tab), or prose; runs of
-prose and bullet continuation lines are joined and re-flowed with
+literally), turned an indented block into a fenced one, and joined a trailer
+block into a paragraph — with no escape-free mode, since the escaping is part of
+its round-trip guarantee. A hand-rolled classifier does better: each body line
+is fence, blank, table row (`|...|`), bullet (`-`/`*`/`+`/`N.`/`N)`), indented
+(≥4 spaces or a tab), or prose; runs of prose and bullet continuation lines are
+joined and re-flowed with
 `textwrap.wrap(..., break_long_words=False, break_on_hyphens=False)`,
 `initial_indent`/`subsequent_indent` giving bullets their hanging indent.
 Fences, tables, indented blocks and a trailing trailer block pass through
@@ -141,59 +110,55 @@ byte-identical — the trailer block's boundary is found by asking
 `git interpret-trailers --only-trailers --only-input --no-divider` (not by
 hand-parsing trailer syntax) and checking whether its output equals the
 message's own tail, which also handles folded multi-line trailer values
-correctly. A single token longer than 72 (a URL) is left over-length rather
-than split, since `break_long_words=False` already refuses to split it.
-Idempotence (`wrap(wrap(x)) == wrap(x)`) falls out for free: wrapping
-rejoins words with single spaces before re-wrapping, so a second pass sees
-the same word sequence and produces the same breaks. A change is announced
-on stderr (`commit-msg: rewrapped body/footer text to fit 72 characters`);
-git's own comment lines (`^#`) are located and left untouched.
+correctly. A single token longer than 72 (a URL) is left over-length rather than
+split, since `break_long_words=False` already refuses to split it. Idempotence
+(`wrap(wrap(x)) == wrap(x)`) falls out for free: wrapping rejoins words with
+single spaces before re-wrapping, so a second pass sees the same word sequence
+and produces the same breaks. A change is announced on stderr
+(`commit-msg: rewrapped body/footer text to fit 72 characters`); git's own
+comment lines (`^#`) are located and left untouched.
 
 Opt-out is `git config hooks.commitMsgWrap false`, matching the
 `hooks.preCommitRegexp` precedent in `home/.gitconfig`. The `uv`-failure
-question the constraints raised is answered by falling back to the old
-strict 72-character rejection (with an stderr note naming why) rather than
-either silently accepting an over-long line or hard-failing the commit
-outright — `command -v uv` missing and a non-zero `uv run` exit both take
-this path, verified by removing `uv` from `PATH` and confirming the strict
-check still fires. Verified working under both `bash` and `dash` (the
-hook's shebang is `#!/bin/sh`).
+question the constraints raised is answered by falling back to the old strict
+72-character rejection (with an stderr note naming why) rather than either
+silently accepting an over-long line or hard-failing the commit outright —
+`command -v uv` missing and a non-zero `uv run` exit both take this path,
+verified by removing `uv` from `PATH` and confirming the strict check still
+fires. Verified working under both `bash` and `dash` (the hook's shebang is
+`#!/bin/sh`).
 
 Left as a hard rejection, not auto-fixed: the blank-second-line check. The
 Criteria section only specified wrap-then-proceed behavior for body/footer
-length and continued rejection for subject defects; inserting a blank
-separator was not in the Criteria list (unlike wrapping, it also was not
-evaluated against real fixtures the way `mdformat` was), so it stayed out of
-scope rather than being added on an inference from the Problem section's
-looser phrasing.
+length and continued rejection for subject defects; inserting a blank separator
+was not in the Criteria list (unlike wrapping, it also was not evaluated against
+real fixtures the way `mdformat` was), so it stayed out of scope rather than
+being added on an inference from the Problem section's looser phrasing.
 
-Review on PR #147 found three more real bugs, all fixed: a compliant
-multi-line prose run (every line already ≤72) was still being rejoined and
-re-flowed, changing the author's deliberate line breaks for no reason; a
-nested bullet's own marker (`  - child` under `- parent`) satisfied the
-parent's continuation-line check and got swallowed into the parent's
-reflowed text, destroying the nested list; and blockquote lines (`> ...`)
-had no dedicated handling at all, so wrapping a multi-line quote kept the
-`>` only on the first output line. Fixed by: skipping the rejoin-and-wrap
-step whenever every raw line in a run already fits WIDTH (prose, bullets
-and blockquotes all check this before doing anything); checking for a
-bullet marker before checking for plain continuation, so any line that
-opens its own bullet — nested or not — always starts a fresh run instead of
-being folded into whichever bullet is currently open; and giving
-blockquotes their own run type, keyed on the exact quote-depth prefix (`>`
-vs `>>`) so distinct depths never merge, with `>` as both
-`initial_indent`/`subsequent_indent` so every wrapped line keeps its
-marker.
+Review on PR #147 found three more real bugs, all fixed: a compliant multi-line
+prose run (every line already ≤72) was still being rejoined and re-flowed,
+changing the author's deliberate line breaks for no reason; a nested bullet's
+own marker (`  - child` under `- parent`) satisfied the parent's
+continuation-line check and got swallowed into the parent's reflowed text,
+destroying the nested list; and blockquote lines (`> ...`) had no dedicated
+handling at all, so wrapping a multi-line quote kept the `>` only on the first
+output line. Fixed by: skipping the rejoin-and-wrap step whenever every raw line
+in a run already fits WIDTH (prose, bullets and blockquotes all check this
+before doing anything); checking for a bullet marker before checking for plain
+continuation, so any line that opens its own bullet — nested or not — always
+starts a fresh run instead of being folded into whichever bullet is currently
+open; and giving blockquotes their own run type, keyed on the exact quote-depth
+prefix (`>` vs `>>`) so distinct depths never merge, with `>` as both
+`initial_indent`/`subsequent_indent` so every wrapped line keeps its marker.
 
-`tests/test-git-hook-agent` grew from 8 to 19 cases: one per Criteria
-bullet (rewrap-and-proceed, idempotence, fence/table/indented-block/trailer
+`tests/test-git-hook-agent` grew from 8 to 19 cases: one per Criteria bullet
+(rewrap-and-proceed, idempotence, fence/table/indented-block/trailer
 byte-fidelity, the unbroken-URL case, bullet hanging indent, the stderr
 announcement), the opt-out, and the three review fixes above. Test 5's old
-fixture — two 73-character lines of repeated `x` with no spaces — is
-exactly the unbreakable-token case now, so it no longer produces length
-errors; only the pre-existing subject
-and blank-line failures remain asserted. No code is shared with
-`bin/markdown-format`; the 50/72 numbers stayed in `git.md`, untouched.
+fixture — two 73-character lines of repeated `x` with no spaces — is exactly the
+unbreakable-token case now, so it no longer produces length errors; only the
+pre-existing subject and blank-line failures remain asserted. No code is shared
+with `bin/markdown-format`; the 50/72 numbers stayed in `git.md`, untouched.
 
 ## Fix the node pre-commit hook's staged-file handling (2026-08-05) — done
 
@@ -1088,8 +1053,8 @@ grep -rn '^# Tests:' bin skills/*/scripts skills/*/tests tests --no-messages \
 **Sketch:** A mechanical find/replace per pointer. One open call: test files
 carrying their own `# Tests:` comment (e.g. `tests/test-git-setup:3`) —
 `tests/README.md` only asks for the comment on the script under test, so either
-make these self-referential (as `tests/test-git-hook-multiplexer` already is)
-or drop them.
+make these self-referential (as `tests/test-git-hook-multiplexer` already is) or
+drop them.
 
 **Constraints:** Comment-only edits; no behavior changes.
 
