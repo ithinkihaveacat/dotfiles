@@ -167,12 +167,31 @@ evaluated against real fixtures the way `mdformat` was), so it stayed out of
 scope rather than being added on an inference from the Problem section's
 looser phrasing.
 
-`tests/test-git-hooks-agent` grew from 8 to 16 cases: one per Criteria
+Review on PR #147 found three more real bugs, all fixed: a compliant
+multi-line prose run (every line already ≤72) was still being rejoined and
+re-flowed, changing the author's deliberate line breaks for no reason; a
+nested bullet's own marker (`  - child` under `- parent`) satisfied the
+parent's continuation-line check and got swallowed into the parent's
+reflowed text, destroying the nested list; and blockquote lines (`> ...`)
+had no dedicated handling at all, so wrapping a multi-line quote kept the
+`>` only on the first output line. Fixed by: skipping the rejoin-and-wrap
+step whenever every raw line in a run already fits WIDTH (prose, bullets
+and blockquotes all check this before doing anything); checking for a
+bullet marker before checking for plain continuation, so any line that
+opens its own bullet — nested or not — always starts a fresh run instead of
+being folded into whichever bullet is currently open; and giving
+blockquotes their own run type, keyed on the exact quote-depth prefix (`>`
+vs `>>`) so distinct depths never merge, with `>` as both
+`initial_indent`/`subsequent_indent` so every wrapped line keeps its
+marker.
+
+`tests/test-git-hooks-agent` grew from 8 to 19 cases: one per Criteria
 bullet (rewrap-and-proceed, idempotence, fence/table/indented-block/trailer
 byte-fidelity, the unbroken-URL case, bullet hanging indent, the stderr
-announcement) plus the opt-out. Test 5's old fixture — two 73-character
-lines of repeated `x` with no spaces — is exactly the unbreakable-token case
-now, so it no longer produces length errors; only the pre-existing subject
+announcement), the opt-out, and the three review fixes above. Test 5's old
+fixture — two 73-character lines of repeated `x` with no spaces — is
+exactly the unbreakable-token case now, so it no longer produces length
+errors; only the pre-existing subject
 and blank-line failures remain asserted. No code is shared with
 `bin/markdown-format`; the 50/72 numbers stayed in `git.md`, untouched.
 

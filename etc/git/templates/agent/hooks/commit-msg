@@ -66,6 +66,7 @@ WIDTH = 72
 
 FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])(\s+)(.*)$")
+BLOCKQUOTE_RE = re.compile(r"^(\s*)(>+)(\s*)(.*)$")
 LEADING_WS_RE = re.compile(r"^[ \t]*")
 
 
@@ -94,42 +95,71 @@ def find_trailer_start(lines):
 
 
 def wrap_block(lines):
-    """Reflow prose/bullets to WIDTH; pass fences, tables and indented
-    blocks through untouched."""
+    """Reflow prose/bullets/blockquotes to WIDTH; pass fences, tables and
+    indented blocks through untouched. A run that already fits WIDTH on
+    every line is left byte-identical rather than being rejoined."""
     out = []
     i = 0
     n = len(lines)
 
-    prose_buffer = []
-    bullet_marker = None
-    bullet_indent = None
-    bullet_buffer = []
+    prose_buffer, prose_raw = [], []
+    bullet_marker, bullet_indent = None, None
+    bullet_buffer, bullet_raw = [], []
+    quote_marker = None
+    quote_buffer, quote_raw = [], []
+
+    def all_within_width(raws):
+        return all(len(r) <= WIDTH for r in raws)
 
     def flush_prose():
-        nonlocal prose_buffer
+        nonlocal prose_buffer, prose_raw
         if prose_buffer:
-            text = " ".join(prose_buffer)
-            wrapped = textwrap.wrap(text, width=WIDTH, break_long_words=False, break_on_hyphens=False)
-            out.extend(wrapped or [""])
-            prose_buffer = []
+            if all_within_width(prose_raw):
+                out.extend(prose_raw)
+            else:
+                text = " ".join(prose_buffer)
+                wrapped = textwrap.wrap(text, width=WIDTH, break_long_words=False, break_on_hyphens=False)
+                out.extend(wrapped or [""])
+            prose_buffer, prose_raw = [], []
 
     def flush_bullet():
-        nonlocal bullet_marker, bullet_indent, bullet_buffer
+        nonlocal bullet_marker, bullet_indent, bullet_buffer, bullet_raw
         if bullet_marker is not None:
-            text = " ".join(bullet_buffer)
-            indent = " " * len(bullet_marker)
-            wrapped = textwrap.wrap(
-                text,
-                width=WIDTH,
-                initial_indent=bullet_marker,
-                subsequent_indent=indent,
-                break_long_words=False,
-                break_on_hyphens=False,
-            )
-            out.extend(wrapped or [bullet_marker.rstrip()])
-            bullet_marker = None
-            bullet_indent = None
-            bullet_buffer = []
+            if all_within_width(bullet_raw):
+                out.extend(bullet_raw)
+            else:
+                text = " ".join(bullet_buffer)
+                indent = " " * len(bullet_marker)
+                wrapped = textwrap.wrap(
+                    text,
+                    width=WIDTH,
+                    initial_indent=bullet_marker,
+                    subsequent_indent=indent,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                out.extend(wrapped or [bullet_marker.rstrip()])
+            bullet_marker, bullet_indent = None, None
+            bullet_buffer, bullet_raw = [], []
+
+    def flush_quote():
+        nonlocal quote_marker, quote_buffer, quote_raw
+        if quote_marker is not None:
+            if all_within_width(quote_raw):
+                out.extend(quote_raw)
+            else:
+                text = " ".join(quote_buffer)
+                wrapped = textwrap.wrap(
+                    text,
+                    width=WIDTH,
+                    initial_indent=quote_marker,
+                    subsequent_indent=quote_marker,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                out.extend(wrapped or [quote_marker.rstrip()])
+            quote_marker = None
+            quote_buffer, quote_raw = [], []
 
     while i < n:
         line = lines[i]
@@ -138,6 +168,7 @@ def wrap_block(lines):
         if fence_match:
             flush_prose()
             flush_bullet()
+            flush_quote()
             token = fence_match.group(2)
             out.append(line)
             i += 1
@@ -153,6 +184,7 @@ def wrap_block(lines):
         if line.strip() == "":
             flush_prose()
             flush_bullet()
+            flush_quote()
             out.append(line)
             i += 1
             continue
@@ -160,18 +192,47 @@ def wrap_block(lines):
         if line.lstrip().startswith("|") or line.count("|") >= 2:
             flush_prose()
             flush_bullet()
+            flush_quote()
             out.append(line)
             i += 1
             continue
 
-        bullet_match = BULLET_RE.match(line)
-        if bullet_match and bullet_indent is None:
+        # Blockquote lines (">", possibly nested as ">>") get their own
+        # run, keyed on the exact quote-depth prefix so distinct depths
+        # never get merged into one reflow.
+        quote_match = BLOCKQUOTE_RE.match(line)
+        if quote_match:
             flush_prose()
+            flush_bullet()
+            lead, marks, spaces, text = quote_match.groups()
+            marker = lead + marks + (spaces if spaces else " ")
+            if quote_marker is not None and marker == quote_marker:
+                quote_buffer.append(text.strip())
+                quote_raw.append(line)
+            else:
+                flush_quote()
+                quote_marker = marker
+                quote_buffer = [text.strip()] if text.strip() else []
+                quote_raw = [line]
+            i += 1
+            continue
+        else:
+            flush_quote()
+
+        # A line that itself opens a bullet (at any indent, e.g. a nested
+        # child) always starts a new bullet run rather than being folded
+        # into whatever bullet is currently active — otherwise a nested
+        # item's marker gets swallowed into the parent's reflowed text.
+        bullet_match = BULLET_RE.match(line)
+        if bullet_match:
+            flush_prose()
+            flush_bullet()
             lead, marker_char, spaces, text = bullet_match.groups()
             marker = lead + marker_char + spaces
             bullet_marker = marker
             bullet_indent = len(marker)
             bullet_buffer = [text] if text.strip() else []
+            bullet_raw = [line]
             i += 1
             continue
 
@@ -179,6 +240,7 @@ def wrap_block(lines):
             leading = LEADING_WS_RE.match(line).group(0)
             if len(leading.expandtabs()) >= bullet_indent and line.strip() != "":
                 bullet_buffer.append(line.strip())
+                bullet_raw.append(line)
                 i += 1
                 continue
             flush_bullet()
@@ -192,10 +254,12 @@ def wrap_block(lines):
             continue
 
         prose_buffer.append(line.strip())
+        prose_raw.append(line)
         i += 1
 
     flush_prose()
     flush_bullet()
+    flush_quote()
     return out
 
 
