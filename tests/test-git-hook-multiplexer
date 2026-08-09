@@ -10,13 +10,14 @@ BIN="$DIR/../bin/git-hook-multiplexer"
 # Isolate from the user's/system git config (signing, hooks, templates).
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
-echo "1..10"
+echo "1..18"
 
-# Test 1: --help exits zero and documents both commands
+# Test 1: --help exits zero and documents every command
 if out=$("$BIN" --help 2>&1) &&
   printf '%s' "$out" | grep -q 'install' &&
+  printf '%s' "$out" | grep -q 'remove' &&
   printf '%s' "$out" | grep -q 'doctor'; then
-  echo "ok 1 - --help documents install and doctor"
+  echo "ok 1 - --help documents install, remove and doctor"
 else
   echo "not ok 1 - --help missing or incomplete"
 fi
@@ -28,9 +29,17 @@ else
   echo "not ok 2 - bare invocation should exit zero"
 fi
 
-REPO=$(mktemp -d "/tmp/hooks-multiplexer-test.XXXXXX")
-trap 'rm -rf "$REPO"' EXIT
-git -C "$REPO" init -q
+WORK=$(mktemp -d "/tmp/githook-mux-test.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+new_repo() { # new_repo NAME -> prints repo path
+  local repo="$WORK/$1"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  printf '%s\n' "$repo"
+}
+
+REPO=$(new_repo main)
 
 SUB_A="$REPO/sub-a"
 # shellcheck disable=SC2016 # $1 is expanded by the sub-hook at run time, not here
@@ -57,10 +66,30 @@ else
   echo "not ok 4 - install did not produce expected layout"
 fi
 
-# Test 5: a pre-existing foreign hook is preserved as 00-legacy and runs first
-LEGACY_REPO=$(mktemp -d "/tmp/hooks-multiplexer-test-legacy.XXXXXX")
-trap 'rm -rf "$REPO" "$LEGACY_REPO"' EXIT
-git -C "$LEGACY_REPO" init -q
+# Test 5: the sub-hook is a trampoline naming its source, not a copy of it
+if grep -q "git-hook-trampoline -> $SUB_A" "$REPO/.git/hooks/commit-msg.d/10-a" &&
+  ! grep -q 'log.txt' "$REPO/.git/hooks/commit-msg.d/10-a"; then
+  echo "ok 5 - the installed sub-hook is a trampoline to its source"
+else
+  echo "not ok 5 - the sub-hook is a copy rather than a trampoline"
+fi
+
+# Test 6: editing the source changes an already-installed hook with no
+# re-install step. This is the whole point of the trampoline.
+rm -f "$REPO/log.txt"
+printf '#!/bin/sh\necho v1 >> "%s/log.txt"\n' "$REPO" >"$SUB_A"
+"$REPO/.git/hooks/commit-msg" msgfile </dev/null
+printf '#!/bin/sh\necho v2 >> "%s/log.txt"\n' "$REPO" >"$SUB_A"
+"$REPO/.git/hooks/commit-msg" msgfile </dev/null
+if [ "$(cat "$REPO/log.txt")" = "v1
+v2" ]; then
+  echo "ok 6 - editing the source propagates with no re-install"
+else
+  echo "not ok 6 - the installed hook did not follow its source"
+fi
+
+# Test 7: a pre-existing foreign hook is preserved as 00-legacy and runs first
+LEGACY_REPO=$(new_repo legacy)
 printf '#!/bin/sh\necho legacy >> "%s/log.txt"\n' "$LEGACY_REPO" >"$LEGACY_REPO/.git/hooks/commit-msg"
 chmod +x "$LEGACY_REPO/.git/hooks/commit-msg"
 printf '#!/bin/sh\necho agent >> "%s/log.txt"\n' "$LEGACY_REPO" >"$LEGACY_REPO/sub"
@@ -70,12 +99,12 @@ chmod +x "$LEGACY_REPO/sub"
 if [ -x "$LEGACY_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
   [ "$(cat "$LEGACY_REPO/log.txt")" = "legacy
 agent" ]; then
-  echo "ok 5 - foreign hook preserved as 00-legacy and runs first"
+  echo "ok 7 - foreign hook preserved as 00-legacy and runs first"
 else
-  echo "not ok 5 - legacy hook not preserved or wrong order"
+  echo "not ok 7 - legacy hook not preserved or wrong order"
 fi
 
-# Test 6: a failing sub-hook aborts the chain with its exit code
+# Test 8: a failing sub-hook aborts the chain with its exit code
 printf '#!/bin/sh\nexit 42\n' >"$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
 chmod +x "$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
 rm -f "$LEGACY_REPO/log.txt"
@@ -83,60 +112,148 @@ rm -f "$LEGACY_REPO/log.txt"
 rc=$?
 if [ "$rc" -eq 42 ] && grep -q 'legacy' "$LEGACY_REPO/log.txt" &&
   ! grep -q 'agent' "$LEGACY_REPO/log.txt"; then
-  echo "ok 6 - failing sub-hook propagates exit code and stops the chain"
+  echo "ok 8 - failing sub-hook propagates exit code and stops the chain"
 else
-  echo "not ok 6 - expected exit 42 and no later hooks (got rc=$rc)"
+  echo "not ok 8 - expected exit 42 and no later hooks (got rc=$rc)"
 fi
 rm -f "$LEGACY_REPO/.git/hooks/commit-msg.d/05-fail"
 
-# Test 7: reinstall is idempotent (managed multiplexer is not demoted to legacy)
+# Test 9: reinstall is idempotent (managed multiplexer is not demoted to legacy)
 (cd "$REPO" && "$BIN" install commit-msg 10-a "$SUB_A") >/dev/null 2>&1
 if [ ! -e "$REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
   status=$(cd "$REPO" && "$BIN" doctor commit-msg 10-a) &&
   [ "$status" = "ok" ]; then
-  echo "ok 7 - reinstall is idempotent"
+  echo "ok 9 - reinstall is idempotent"
 else
-  echo "not ok 7 - reinstall created 00-legacy or broke doctor"
+  echo "not ok 9 - reinstall created 00-legacy or broke doctor"
 fi
 
-# Test 8: every sub-hook sees the full stdin (buffered, not consumed)
+# Test 10: every sub-hook sees the full stdin (buffered, not consumed)
 printf '#!/bin/sh\ncat >> "%s/stdin.txt"\n' "$REPO" >"$REPO/sub-b"
 chmod +x "$REPO/sub-b"
+printf '#!/bin/sh\ncat >> "%s/log.txt"\n' "$REPO" >"$SUB_A"
 (cd "$REPO" && "$BIN" install commit-msg 20-b "$REPO/sub-b") >/dev/null 2>&1
 rm -f "$REPO/log.txt" "$REPO/stdin.txt"
 printf 'refs\n' | "$REPO/.git/hooks/commit-msg" msgfile
 if grep -q 'refs' "$REPO/log.txt" && grep -q 'refs' "$REPO/stdin.txt"; then
-  echo "ok 8 - stdin is buffered and replayed to every sub-hook"
+  echo "ok 10 - stdin is buffered and replayed to every sub-hook"
 else
-  echo "not ok 8 - sub-hooks did not each receive stdin"
+  echo "not ok 10 - sub-hooks did not each receive stdin"
 fi
 
-# Test 9: doctor reports an unmanaged multiplexer
-printf '#!/bin/sh\n' >"$REPO/.git/hooks/commit-msg"
-if ! status=$(cd "$REPO" && "$BIN" doctor commit-msg 10-a) &&
+# Test 11: doctor reports an unmanaged multiplexer
+UNMANAGED_REPO=$(new_repo unmanaged)
+printf '#!/bin/sh\n' >"$UNMANAGED_REPO/.git/hooks/commit-msg"
+if ! status=$(cd "$UNMANAGED_REPO" && "$BIN" doctor commit-msg 10-a) &&
   [ "$status" = "unmanaged_multiplexer" ]; then
-  echo "ok 9 - doctor reports unmanaged_multiplexer"
+  echo "ok 11 - doctor reports unmanaged_multiplexer"
 else
-  echo "not ok 9 - unexpected doctor output: $status"
+  echo "not ok 11 - unexpected doctor output: $status"
 fi
 
-# Test 10: a hook installed by the pre-rename git-hooks-multiplexer (the
-# plural marker) is recognized as already managed, so doctor reports ok
-# and a reinstall refreshes it in place instead of demoting it to
-# 00-legacy.
-OLD_REPO=$(mktemp -d "/tmp/hooks-multiplexer-test-old.XXXXXX")
-trap 'rm -rf "$REPO" "$LEGACY_REPO" "$OLD_REPO"' EXIT
-git -C "$OLD_REPO" init -q
+# Test 12: a hook installed by an older version of this tool (the plural
+# git-hooks-multiplexer marker, and a copied rather than trampolined
+# sub-hook) is reported as drift rather than ok, and reinstalling refreshes
+# it in place instead of demoting the still-working multiplexer to 00-legacy.
+OLD_REPO=$(new_repo old)
 mkdir -p "$OLD_REPO/.git/hooks/commit-msg.d"
 printf '#!/bin/sh\n# git-hooks-multiplexer: commit-msg\n' >"$OLD_REPO/.git/hooks/commit-msg"
 chmod +x "$OLD_REPO/.git/hooks/commit-msg"
 printf '#!/bin/sh\n' >"$OLD_REPO/.git/hooks/commit-msg.d/10-a"
 chmod +x "$OLD_REPO/.git/hooks/commit-msg.d/10-a"
-if status=$(cd "$OLD_REPO" && "$BIN" doctor commit-msg 10-a) && [ "$status" = "ok" ] &&
+if ! status=$(cd "$OLD_REPO" && "$BIN" doctor commit-msg 10-a) &&
+  [ "$status" = "drifted_multiplexer" ] &&
   (cd "$OLD_REPO" && "$BIN" install commit-msg 10-a "$SUB_A") >/dev/null 2>&1 &&
   [ ! -e "$OLD_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
-  grep -q 'git-hook-multiplexer' "$OLD_REPO/.git/hooks/commit-msg"; then
-  echo "ok 10 - a pre-rename (plural-marker) install is recognized and refreshed in place"
+  refreshed=$(cd "$OLD_REPO" && "$BIN" doctor commit-msg 10-a) &&
+  [ "$refreshed" = "ok" ]; then
+  echo "ok 12 - a pre-rename install reports drift and is refreshed in place"
 else
-  echo "not ok 10 - a pre-rename install was misdetected as unmanaged"
+  echo "not ok 12 - unexpected handling of a pre-rename install: $status"
+fi
+
+# Test 13: a source that has gone away is a doctor finding and makes the
+# hook fail loudly, rather than being silently skipped.
+ORPHAN_REPO=$(new_repo orphan)
+printf '#!/bin/sh\nexit 0\n' >"$ORPHAN_REPO/sub"
+chmod +x "$ORPHAN_REPO/sub"
+(cd "$ORPHAN_REPO" && "$BIN" install commit-msg 10-a "$ORPHAN_REPO/sub") >/dev/null 2>&1
+rm -f "$ORPHAN_REPO/sub"
+rc=0
+"$ORPHAN_REPO/.git/hooks/commit-msg" msgfile </dev/null >/dev/null 2>&1 || rc=$?
+if ! status=$(cd "$ORPHAN_REPO" && "$BIN" doctor commit-msg 10-a) &&
+  [ "$status" = "orphaned_subhook" ] && [ "$rc" -ne 0 ]; then
+  echo "ok 13 - a missing source is reported and fails the hook loudly"
+else
+  echo "not ok 13 - a missing source was not caught (doctor=$status rc=$rc)"
+fi
+
+# Test 14: --copy installs a snapshot that does not track its source, and
+# doctor accepts it (there is nothing to compare a copy against)
+COPY_REPO=$(new_repo copy)
+printf '#!/bin/sh\necho copied >> "%s/log.txt"\n' "$COPY_REPO" >"$COPY_REPO/sub"
+chmod +x "$COPY_REPO/sub"
+(cd "$COPY_REPO" && "$BIN" install --copy commit-msg 50-c "$COPY_REPO/sub") >/dev/null 2>&1
+rm -f "$COPY_REPO/sub"
+"$COPY_REPO/.git/hooks/commit-msg" msgfile </dev/null
+if status=$(cd "$COPY_REPO" && "$BIN" doctor commit-msg 50-c) && [ "$status" = "ok" ] &&
+  grep -q 'copied' "$COPY_REPO/log.txt"; then
+  echo "ok 14 - --copy installs a snapshot that survives its source"
+else
+  echo "not ok 14 - --copy did not install a self-contained hook"
+fi
+
+# Test 15: removing one sub-hook leaves the others in place
+if (cd "$REPO" && "$BIN" remove commit-msg 20-b) >/dev/null 2>&1 &&
+  [ ! -e "$REPO/.git/hooks/commit-msg.d/20-b" ] &&
+  [ -x "$REPO/.git/hooks/commit-msg.d/10-a" ] &&
+  [ -x "$REPO/.git/hooks/commit-msg" ]; then
+  echo "ok 15 - remove drops one sub-hook and leaves the rest"
+else
+  echo "not ok 15 - remove disturbed the other sub-hooks"
+fi
+
+# Test 16: removing the last managed sub-hook restores 00-legacy as the
+# plain hook and takes the multiplexer down with it
+rm -f "$LEGACY_REPO/log.txt"
+if (cd "$LEGACY_REPO" && "$BIN" remove commit-msg 10-a) >/dev/null 2>&1 &&
+  [ ! -d "$LEGACY_REPO/.git/hooks/commit-msg.d" ] &&
+  [ -x "$LEGACY_REPO/.git/hooks/commit-msg" ] &&
+  ! grep -q 'git-hook-multiplexer' "$LEGACY_REPO/.git/hooks/commit-msg"; then
+  "$LEGACY_REPO/.git/hooks/commit-msg" msgfile </dev/null
+  if [ "$(cat "$LEGACY_REPO/log.txt")" = "legacy" ]; then
+    echo "ok 16 - the pre-existing hook is restored when the last one goes"
+  else
+    echo "not ok 16 - the restored hook does not run"
+  fi
+else
+  echo "not ok 16 - 00-legacy was not restored as the plain hook"
+fi
+
+# Test 17: removing the last sub-hook where there was no pre-existing hook
+# removes the multiplexer and its directory entirely
+if (cd "$REPO" && "$BIN" remove commit-msg 10-a) >/dev/null 2>&1 &&
+  [ ! -e "$REPO/.git/hooks/commit-msg" ] &&
+  [ ! -d "$REPO/.git/hooks/commit-msg.d" ]; then
+  echo "ok 17 - an emptied multiplexer removes itself"
+else
+  echo "not ok 17 - the multiplexer outlived its last sub-hook"
+fi
+
+# Test 18: a foreign hook that merely mentions this tool in its text is
+# still recognized as foreign, preserved as 00-legacy, and not silently
+# overwritten as though we had written it.
+MENTION_REPO=$(new_repo mention)
+printf '#!/bin/sh\n# installed by hand; see git-hook-multiplexer for the managed variant\necho mention >> "%s/log.txt"\n' "$MENTION_REPO" >"$MENTION_REPO/.git/hooks/commit-msg"
+chmod +x "$MENTION_REPO/.git/hooks/commit-msg"
+printf '#!/bin/sh\nexit 0\n' >"$MENTION_REPO/sub"
+chmod +x "$MENTION_REPO/sub"
+(cd "$MENTION_REPO" && "$BIN" install commit-msg 10-a "$MENTION_REPO/sub") >/dev/null 2>&1
+rm -f "$MENTION_REPO/log.txt"
+"$MENTION_REPO/.git/hooks/commit-msg" msgfile </dev/null
+if [ -x "$MENTION_REPO/.git/hooks/commit-msg.d/00-legacy" ] &&
+  [ "$(cat "$MENTION_REPO/log.txt" 2>/dev/null)" = "mention" ]; then
+  echo "ok 18 - a foreign hook naming this tool is preserved, not clobbered"
+else
+  echo "not ok 18 - a foreign hook naming this tool was overwritten"
 fi

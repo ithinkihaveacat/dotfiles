@@ -7,35 +7,50 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") COMMAND [ARGUMENTS]
+Usage: $(basename "$0") COMMAND [OPTIONS] ARGUMENTS
 
 Manage multiplexed git hooks by installing a multiplexer at .git/hooks/<hook-name>
 and placing individual hooks in .git/hooks/<hook-name>.d/<key>. Sub-hooks run in
 lexical key order; the first failure aborts the hook with that exit code.
 
+A sub-hook is installed as a trampoline: a generated stub whose body execs the
+source file where it already lives. Editing that source changes the behaviour of
+every repository the hook is installed into, with no re-install step, and a
+source that has gone away fails the hook loudly rather than being silently
+skipped. Use --copy for a source with no stable home to point at, such as a
+downloaded hook or a machine with no dotfiles tree.
+
 A pre-existing hook not managed by this tool is preserved as
-.git/hooks/<hook-name>.d/00-legacy and continues to run first.
+.git/hooks/<hook-name>.d/00-legacy and continues to run first. Removing the last
+managed sub-hook restores it as the plain hook.
 
 Commands:
-  install <hook-name> <key> <source-file>
+  install [--copy] <hook-name> <key> <source-file>
               Install a sub-hook into the multiplexer.
+  remove <hook-name> <key>
+              Remove one sub-hook, leaving every other sub-hook in place
+              (alias: rm).
   doctor <hook-name> <key>
               Verify the installation of a multiplexed hook (read-only).
               Prints one of: ok, missing_multiplexer, unmanaged_multiplexer,
-              missing_subhook. Exits non-zero unless ok.
+              drifted_multiplexer, missing_subhook, drifted_subhook,
+              orphaned_subhook. Exits non-zero unless ok.
 
 Arguments:
-  <hook-name> The git hook to target (e.g., commit-msg, pre-push)
-  <key>       Unique identifier for the sub-hook (use a numbered prefix, e.g., 50-agent)
-  <source-file> The executable script to install as the sub-hook
+  <hook-name>   The git hook to target (e.g., commit-msg, pre-push)
+  <key>         Unique identifier for the sub-hook (use a numbered prefix,
+                e.g., 50-agent)
+  <source-file> The executable script the sub-hook runs
 
 Options:
-  --help      Display this help message and exit
+  --copy      Copy the source file instead of installing a trampoline to it
+  --help, -h  Display this help message and exit
 
 Examples:
-  $(basename "$0") install commit-msg 10-agent /path/to/agent-hook
-  $(basename "$0") install commit-msg 50-gerrit /path/to/gerrit-hook
+  $(basename "$0") install commit-msg 10-agent ~/.dotfiles/etc/git/hooks/agent/commit-msg
+  $(basename "$0") install --copy commit-msg 50-gerrit /tmp/downloaded-commit-msg
   $(basename "$0") doctor commit-msg 10-agent
+  $(basename "$0") remove commit-msg 10-agent
 EOF
   exit 0
 }
@@ -54,14 +69,29 @@ require() {
 cmd="$1"
 shift
 
-if [[ "$#" -lt 2 ]]; then
+copy_mode=no
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --help | -h) usage ;;
+    --copy) copy_mode=yes ;;
+    -*)
+      echo "$(basename "$0") $cmd: unknown option: $arg" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *) args+=("$arg") ;;
+  esac
+done
+
+if [[ "${#args[@]}" -lt 2 ]]; then
   echo "$(basename "$0") $cmd: missing required arguments" >&2
   echo "Try '$(basename "$0") --help' for more information." >&2
   exit 1
 fi
 
-hook_name="$1"
-key="$2"
+hook_name="${args[0]}"
+key="${args[1]}"
 
 require git
 
@@ -75,20 +105,34 @@ multiplexer_dst="$hooks_dir/$hook_name"
 subhooks_dir="$multiplexer_dst.d"
 subhook_dst="$subhooks_dir/$key"
 
-MULTIPLEXER_MARKER="git-hook-multiplexer"
-# Recognize the pre-rename marker too, so a hook installed by the old
-# git-hooks-multiplexer is treated as already-managed (and simply
-# refreshed with the new marker) instead of being misdetected as a
-# foreign hook and demoted to 00-legacy on the next install/doctor.
-MULTIPLEXER_MARKER_RE="git-hooks?-multiplexer"
+LEGACY_KEY="00-legacy"
 
+MULTIPLEXER_MARKER="git-hook-multiplexer"
+# Recognize every spelling this marker has had, so a hook installed by an
+# older version of this tool is treated as managed-but-stale (refreshed in
+# place) rather than as a foreign hook to be demoted to 00-legacy.
+#
+# Anchored to a comment line in the header, not matched anywhere in the file:
+# a foreign hook that merely mentions this tool (in a path, a comment or an
+# error message) must still be recognized as foreign and preserved, not
+# silently overwritten as if we had written it.
+MULTIPLEXER_MARKER_RE='^# (git-)?hooks?-multiplexer([: ]|$)'
+MARKER_SCAN_LINES=5
+
+TRAMPOLINE_MARKER="git-hook-trampoline"
+
+# The multiplexer body is deliberately free of per-hook substitutions: it
+# derives its sub-hook directory from "$0", which git sets to the path it
+# invoked the hook by. One constant body therefore serves every hook name,
+# which is also what lets doctor compare it byte-for-byte against this
+# function's output and call the difference drift.
 multiplexer_content() {
   cat <<EOF
 #!/bin/sh
-# $MULTIPLEXER_MARKER: $hook_name
-# This file is managed by git-hook-multiplexer. Do not edit directly.
+# $MULTIPLEXER_MARKER
+# This file is managed by $(basename "$0"). Do not edit directly.
 
-HOOKS_DIR="\$(dirname "\$0")/$hook_name.d"
+HOOKS_DIR="\$0.d"
 
 # Buffer stdin so multiple hooks can read the same stream. Skip a terminal
 # so running the hook by hand does not block waiting for EOF.
@@ -109,15 +153,81 @@ fi
 EOF
 }
 
+# A trampoline names its source on the marker line so doctor can find the
+# target again without a side-car record, and so anyone reading the installed
+# hook can see where the real code lives.
+trampoline_content() {
+  cat <<EOF
+#!/bin/sh
+# $TRAMPOLINE_MARKER -> $1
+# Generated by $(basename "$0"). Do not edit; edit the source above.
+
+exec "$1" "\$@"
+EOF
+}
+
+# The source a trampoline execs, or empty if the file is not a trampoline
+# (a --copy install, or a third-party sub-hook we did not write).
+trampoline_target() {
+  local n=0 line
+  [ -f "$1" ] || return 0
+  while [ "$n" -lt "$MARKER_SCAN_LINES" ] && IFS= read -r line; do
+    n=$((n + 1))
+    case "$line" in
+      "# $TRAMPOLINE_MARKER -> "*)
+        printf '%s\n' "${line#"# $TRAMPOLINE_MARKER -> "}"
+        return 0
+        ;;
+    esac
+  done <"$1"
+  return 0
+}
+
+is_managed_multiplexer() {
+  local n=0 line
+  [ -f "$multiplexer_dst" ] || return 1
+  while [ "$n" -lt "$MARKER_SCAN_LINES" ] && IFS= read -r line; do
+    n=$((n + 1))
+    if [[ "$line" =~ $MULTIPLEXER_MARKER_RE ]]; then
+      return 0
+    fi
+  done <"$multiplexer_dst"
+  return 1
+}
+
+abs_path() {
+  local dir base
+  dir=$(dirname "$1")
+  base=$(basename "$1")
+  if ! dir=$(cd "$dir" 2>/dev/null && pwd); then
+    echo "$(basename "$0") $cmd: cannot resolve directory of $1" >&2
+    exit 1
+  fi
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+# Number of entries in the sub-hook directory, and whether 00-legacy is the
+# only one left. Used to decide what remove leaves behind.
+count_subhooks() {
+  local n=0 f
+  for f in "$subhooks_dir"/*; do
+    [ -e "$f" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
 install_multiplexer() {
   mkdir -p "$hooks_dir"
 
-  if [ -f "$multiplexer_dst" ]; then
-    if ! grep -Eq "$MULTIPLEXER_MARKER_RE" "$multiplexer_dst"; then
-      mkdir -p "$subhooks_dir"
-      echo "$(basename "$0") install: moving existing unmanaged hook to $subhooks_dir/00-legacy" >&2
-      mv "$multiplexer_dst" "$subhooks_dir/00-legacy"
+  if [ -f "$multiplexer_dst" ] && ! is_managed_multiplexer; then
+    mkdir -p "$subhooks_dir"
+    if [ -e "$subhooks_dir/$LEGACY_KEY" ]; then
+      echo "$(basename "$0") install: refusing to overwrite $subhooks_dir/$LEGACY_KEY with the unmanaged hook at $multiplexer_dst" >&2
+      exit 1
     fi
+    echo "$(basename "$0") install: moving existing unmanaged hook to $subhooks_dir/$LEGACY_KEY" >&2
+    mv "$multiplexer_dst" "$subhooks_dir/$LEGACY_KEY"
   fi
 
   multiplexer_content >"$multiplexer_dst"
@@ -126,33 +236,79 @@ install_multiplexer() {
 
 case "$cmd" in
   install)
-    if [ "$#" -lt 3 ]; then
+    if [ "${#args[@]}" -lt 3 ]; then
       echo "$(basename "$0") install: missing source file operand" >&2
       exit 1
     fi
-    src="$3"
+    src="${args[2]}"
     if [ ! -f "$src" ]; then
       echo "$(basename "$0") install: source file not found: $src" >&2
       exit 1
     fi
     install_multiplexer
     mkdir -p "$subhooks_dir"
-    cp "$src" "$subhook_dst"
+    if [ "$copy_mode" = yes ]; then
+      cp "$src" "$subhook_dst"
+    else
+      trampoline_content "$(abs_path "$src")" >"$subhook_dst"
+    fi
     chmod +x "$subhook_dst"
     echo "$(basename "$0") install: installed $key hook to $subhook_dst" >&2
+    ;;
+  remove | rm)
+    if [ ! -e "$subhook_dst" ]; then
+      echo "$(basename "$0") $cmd: no $key hook installed at $subhook_dst" >&2
+      exit 0
+    fi
+    rm -f "$subhook_dst"
+    echo "$(basename "$0") $cmd: removed $subhook_dst" >&2
+
+    # Tear the multiplexer down only once nothing of ours is left under it,
+    # and only if it is ours to tear down. A 00-legacy hook we displaced on
+    # install is put back exactly where it was found.
+    if [ -d "$subhooks_dir" ] && is_managed_multiplexer; then
+      remaining=$(count_subhooks)
+      if [ "$remaining" -eq 0 ]; then
+        rmdir "$subhooks_dir"
+        rm -f "$multiplexer_dst"
+        echo "$(basename "$0") $cmd: removed the now-empty multiplexer at $multiplexer_dst" >&2
+      elif [ "$remaining" -eq 1 ] && [ -e "$subhooks_dir/$LEGACY_KEY" ]; then
+        mv "$subhooks_dir/$LEGACY_KEY" "$multiplexer_dst"
+        rmdir "$subhooks_dir"
+        echo "$(basename "$0") $cmd: restored the pre-existing hook at $multiplexer_dst" >&2
+      fi
+    fi
     ;;
   doctor)
     if [ ! -f "$multiplexer_dst" ]; then
       echo "missing_multiplexer"
       exit 1
     fi
-    if ! grep -Eq "$MULTIPLEXER_MARKER_RE" "$multiplexer_dst"; then
+    if ! is_managed_multiplexer; then
       echo "unmanaged_multiplexer"
+      exit 1
+    fi
+    if ! cmp -s <(multiplexer_content) "$multiplexer_dst"; then
+      echo "drifted_multiplexer"
       exit 1
     fi
     if [ ! -x "$subhook_dst" ]; then
       echo "missing_subhook"
       exit 1
+    fi
+    target=$(trampoline_target "$subhook_dst")
+    if [ -n "$target" ]; then
+      # A trampoline cannot carry stale hook *content* — it execs the source
+      # every time — so the only failures left are a target that has gone
+      # away and a stub this version would no longer generate.
+      if [ ! -x "$target" ]; then
+        echo "orphaned_subhook"
+        exit 1
+      fi
+      if ! cmp -s <(trampoline_content "$target") "$subhook_dst"; then
+        echo "drifted_subhook"
+        exit 1
+      fi
     fi
     echo "ok"
     ;;

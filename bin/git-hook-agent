@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
+# Tests: tests/test-git-hook-agent
+
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [doctor]
+Usage: $(basename "$0") [COMMAND]
 
 Install git hooks for AI agent workflows into the current repository.
 
@@ -16,10 +18,16 @@ Hooks are installed via git-hook-multiplexer, so they coexist with hooks
 from other tools. A pre-existing hook not managed by the multiplexer is
 preserved as .git/hooks/<name>.d/00-legacy and continues to run first.
 
+Each hook is installed as a trampoline into etc/git/hooks/agent/ in this
+dotfiles tree, so fixing a hook there fixes it in every repository it is
+installed into, with no re-install step.
+
 Commands:
-  doctor    Report whether the managed hooks are installed (read-only); does
-            not modify the repository. Exits non-zero if anything is missing
-            or unmanaged.
+  doctor    Report whether the managed hooks are installed and current
+            (read-only); does not modify the repository. Exits non-zero if
+            anything is missing, drifted or unmanaged.
+  remove    Remove the managed hooks, leaving every other hook in place
+            (alias: rm).
 
 Options:
   --help    Display this help message and exit
@@ -27,6 +35,7 @@ Options:
 Examples:
   cd ~/project && $(basename "$0")
   $(basename "$0") doctor
+  $(basename "$0") remove
 EOF
   exit 0
 }
@@ -38,16 +47,17 @@ require() {
   }
 }
 
-# Hook source lives alongside the dotfiles tree, two levels up from this script:
-# bin/git-hook-agent -> etc/git/templates/agent/hooks/.
+# Hook sources live alongside the dotfiles tree, two levels up from this
+# script: bin/git-hook-agent -> etc/git/hooks/agent/.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)
-TEMPLATE_DIR="$SCRIPT_DIR/../etc/git/templates/agent/hooks"
+SOURCE_DIR="$SCRIPT_DIR/../etc/git/hooks/agent"
 
 mode=install
 for arg in "$@"; do
   case "$arg" in
     --help | -h) usage ;;
     doctor) mode=doctor ;;
+    remove | rm) mode=remove ;;
     -*)
       echo "$(basename "$0"): unknown option: $arg" >&2
       echo "Try '$(basename "$0") --help' for more information." >&2
@@ -72,18 +82,25 @@ git rev-parse --git-dir >/dev/null 2>&1 || {
 MANAGED_HOOKS=(
   "commit-msg"
 )
+KEY="10-agent"
 
 # doctor: read-only health check, no installation.
 if [ "$mode" = "doctor" ]; then
   rc=0
   echo "Hooks:"
   for name in "${MANAGED_HOOKS[@]}"; do
-    if status=$(git-hook-multiplexer doctor "$name" "10-agent" 2>/dev/null); then
+    if status=$(git-hook-multiplexer doctor "$name" "$KEY" 2>/dev/null); then
       printf '  %-12s %s\n' "ok" "$name"
     else
       case "$status" in
         unmanaged_multiplexer)
           printf '  %-12s %s present but unmanaged (run '\''%s'\'')\n' "drift" "$name" "$(basename "$0")"
+          ;;
+        drifted_multiplexer | drifted_subhook)
+          printf '  %-12s %s installed by an older version (run '\''%s'\'')\n' "drift" "$name" "$(basename "$0")"
+          ;;
+        orphaned_subhook)
+          printf '  %-12s %s points at a source that no longer exists (run '\''%s'\'')\n' "orphan" "$name" "$(basename "$0")"
           ;;
         *)
           printf '  %-12s %s (run '\''%s'\'')\n' "missing" "$name" "$(basename "$0")"
@@ -95,16 +112,23 @@ if [ "$mode" = "doctor" ]; then
   exit "$rc"
 fi
 
+if [ "$mode" = "remove" ]; then
+  for name in "${MANAGED_HOOKS[@]}"; do
+    git-hook-multiplexer remove "$name" "$KEY" || exit 1
+  done
+  exit 0
+fi
+
 install_hook() {
   local name="$1"
-  local src="$TEMPLATE_DIR/$name"
+  local src="$SOURCE_DIR/$name"
 
   if [ ! -f "$src" ]; then
     echo "$(basename "$0"): hook source not found: $src" >&2
     return 1
   fi
 
-  git-hook-multiplexer install "$name" "10-agent" "$src"
+  git-hook-multiplexer install "$name" "$KEY" "$src"
 }
 
 for name in "${MANAGED_HOOKS[@]}"; do

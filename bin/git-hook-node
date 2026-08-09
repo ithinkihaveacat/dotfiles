@@ -1,27 +1,136 @@
 #!/usr/bin/env bash
 
+# Tests: tests/test-git-hook-node
+
 usage() {
   cat <<EOF
-Usage: $(basename "$0")
+Usage: $(basename "$0") [COMMAND]
 
-Initializes a new Git repository in the current directory using a template
-specifically configured for Node.js projects.
+Install git hooks for Node.js projects into the current repository.
 
-This script sets up a repository with predefined hooks and configurations
-from the specified template directory.
+Hooks installed:
+  pre-commit   Formats the staged content of .ts and .md files with prettier
+
+Hooks are installed via git-hook-multiplexer, so they coexist with hooks
+from other tools. A pre-existing hook not managed by the multiplexer is
+preserved as .git/hooks/<name>.d/00-legacy and continues to run first.
+
+Each hook is installed as a trampoline into etc/git/hooks/node/ in this
+dotfiles tree, so fixing a hook there fixes it in every repository it is
+installed into, with no re-install step. This replaces the previous
+'git init --template=' delivery, which could only ever reach a repository
+at the moment it was created.
+
+Commands:
+  doctor    Report whether the managed hooks are installed and current
+            (read-only); does not modify the repository. Exits non-zero if
+            anything is missing, drifted or unmanaged.
+  remove    Remove the managed hooks, leaving every other hook in place
+            (alias: rm).
+
+Options:
+  --help    Display this help message and exit
 
 Examples:
-  # Initialize a Git repository for a Node.js project.
-  $(basename "$0")
+  cd ~/project && $(basename "$0")
+  $(basename "$0") doctor
+  $(basename "$0") remove
 EOF
   exit 0
 }
 
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
-  usage
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$(basename "$0"): $1 not found" >&2
+    exit 127
+  }
+}
+
+# Hook sources live alongside the dotfiles tree, two levels up from this
+# script: bin/git-hook-node -> etc/git/hooks/node/.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)
+SOURCE_DIR="$SCRIPT_DIR/../etc/git/hooks/node"
+
+mode=install
+for arg in "$@"; do
+  case "$arg" in
+    --help | -h) usage ;;
+    doctor) mode=doctor ;;
+    remove | rm) mode=remove ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $arg" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      echo "$(basename "$0"): unexpected argument: $arg" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+done
+
+require git
+require git-hook-multiplexer
+
+git rev-parse --git-dir >/dev/null 2>&1 || {
+  echo "$(basename "$0"): not a git repository" >&2
+  exit 1
+}
+
+MANAGED_HOOKS=(
+  "pre-commit"
+)
+KEY="10-node"
+
+# doctor: read-only health check, no installation.
+if [ "$mode" = "doctor" ]; then
+  rc=0
+  echo "Hooks:"
+  for name in "${MANAGED_HOOKS[@]}"; do
+    if status=$(git-hook-multiplexer doctor "$name" "$KEY" 2>/dev/null); then
+      printf '  %-12s %s\n' "ok" "$name"
+    else
+      case "$status" in
+        unmanaged_multiplexer)
+          printf '  %-12s %s present but unmanaged (run '\''%s'\'')\n' "drift" "$name" "$(basename "$0")"
+          ;;
+        drifted_multiplexer | drifted_subhook)
+          printf '  %-12s %s installed by an older version (run '\''%s'\'')\n' "drift" "$name" "$(basename "$0")"
+          ;;
+        orphaned_subhook)
+          printf '  %-12s %s points at a source that no longer exists (run '\''%s'\'')\n' "orphan" "$name" "$(basename "$0")"
+          ;;
+        *)
+          printf '  %-12s %s (run '\''%s'\'')\n' "missing" "$name" "$(basename "$0")"
+          ;;
+      esac
+      rc=1
+    fi
+  done
+  exit "$rc"
 fi
 
-# Template lives alongside the dotfiles tree, two levels up from this script:
-# bin/git-hook-node -> etc/git/templates/node/.
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)
-git init --template="$SCRIPT_DIR/../etc/git/templates/node"
+if [ "$mode" = "remove" ]; then
+  for name in "${MANAGED_HOOKS[@]}"; do
+    git-hook-multiplexer remove "$name" "$KEY" || exit 1
+  done
+  exit 0
+fi
+
+install_hook() {
+  local name="$1"
+  local src="$SOURCE_DIR/$name"
+
+  if [ ! -f "$src" ]; then
+    echo "$(basename "$0"): hook source not found: $src" >&2
+    return 1
+  fi
+
+  git-hook-multiplexer install "$name" "$KEY" "$src"
+}
+
+for name in "${MANAGED_HOOKS[@]}"; do
+  install_hook "$name" || exit 1
+done
+echo "$(basename "$0"): hooks installed in $(git rev-parse --show-toplevel)"
