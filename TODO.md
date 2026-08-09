@@ -1,76 +1,69 @@
 # TODO
 
-## Fix the node pre-commit hook's staged-file handling (2026-08-05)
+## Fix the node pre-commit hook's staged-file handling (2026-08-05) — done
 
-**Problem:** `etc/git/templates/node/hooks/pre-commit` formats staged `.ts` and
-`.md` files with `prettier --write`, then runs `git add` on the same paths.
-`git add` re-stages each file from the working tree, so what lands in the index
-is whatever the working tree holds — not the staged content the hook just
-formatted. Those agree only when the file has no unstaged changes.
+The third sketched approach won: `etc/git/templates/node/hooks/pre-commit` now
+formats the *index* and never re-adds from the working tree. For each staged
+`.ts`/`.md` path it reads the staged blob (`git ls-files --stage` for the mode
+and sha, `git cat-file blob` for the content), pipes it through
+`prettier --stdin-filepath "$path"`, and stages the result with
+`git hash-object -w` plus `git update-index --cacheinfo`. The working tree is
+never read to decide what to commit, which is what the three reproductions all
+came down to.
 
-Three reproductions, run 2026-08-05 against throwaway repositories with the hook
-installed:
+The cheaper "skip partially staged files" option was rejected because it cannot
+meet the second criterion: a staged edit to a file deleted from the working tree
+*is* a partially staged file, and skipping it either commits it unformatted or
+refuses, where the criterion asks for the edit to be committed. It also answers
+`git add -p` — the workflow the bug targets — with a refusal rather than with a
+formatted commit, which is the whole point of having the hook.
 
-- A partially staged file commits its unstaged changes too. With
-  `export const a = 2;` staged and `export const SECRET = "unstaged work";` left
-  unstaged, the commit contained both lines, with nothing printed.
-- A staged edit becomes a deletion when the file is missing from the working
-  tree. Staging a change and then removing the file produced
-  `1 file changed, 1 deletion(-)` and `delete mode 100644 g.ts` rather than the
-  staged edit.
-- A path containing a space aborts the commit. `xargs` splits `my notes.md` into
-  two arguments, `git add` exits non-zero with
-  `fatal: pathspec 'my' did not match any files`, and the hook's non-zero status
-  stops the commit.
+Formatting happens in two passes: pass one formats every blob into a temp
+directory, pass two stages the results. Nothing reaches the index unless every
+file formatted successfully, so a missing or failing formatter aborts the commit
+with the index exactly as the author staged it. `prettier` is resolved as
+`npx --no-install prettier` first and a global `prettier` second — the template
+now matches what the two installed copies actually do — and the commit fails
+outright when neither exists, rather than the old behaviour of silently
+re-staging without ever formatting.
 
-The `git add` also runs whether or not prettier did. In the test repository
-`prettier` was not on `PATH`, `xargs` reported
-`prettier: No such file or directory`, and the commit still proceeded and still
-absorbed the unstaged line. The template invokes bare `prettier`, so on a
-machine with no global install it re-stages without ever formatting; the two
-installed copies invoke `npx --no-install prettier` and do format.
+The working tree still gets the formatting, but only where it is safe to give
+it: when `git diff --quiet` says the file matches what was staged, the hook runs
+`git checkout-index -f` after updating the index, so smudge filters apply and
+the tree stays consistent. Where the tree carries unstaged work (or the file is
+gone), it is left untouched and the hook says so on stderr. That closes the
+"working tree still holds the unformatted text" cost the sketch attached to this
+approach for every case except the one where the alternative is destroying
+someone's edits.
 
-**Goal:** A commit should contain what was staged. The hook may add formatting
-of that content, but it must not enrol changes the author did not stage, and it
-must not turn an edit into a deletion. `git add -p` is the workflow this breaks,
-and it breaks it silently, which is what makes the result easy to push before
-anyone notices.
+Four smaller things fell out along the way. Paths are read `-z` from
+`git diff --cached --name-only` into a bash array and never passed through
+`xargs`, so a space is just a character. Pathspecs are `:(literal)` (git 1.9+):
+without it, staging both `a1.ts` and `a[1].ts` makes the bracketed path's
+pathspec match its sibling, and the sibling's content gets staged under the
+wrong name — a corruption worse than the one being fixed, and now test 9.
+Symlinks (120000) and gitlinks (160000) are skipped, since running a symlink's
+target text through a markdown formatter is not formatting. And empty formatter
+output for non-empty input is treated as a failure, so a `.prettierignore`d path
+cannot blank a file. Unmerged paths never arrive: `--diff-filter=ACMR` excludes
+them.
 
-**Criteria:** With the hook installed: a repository with one hunk staged and
-another left unstaged commits only the staged hunk; a staged edit to a file
-deleted from the working tree commits the edit; a staged path containing a space
-commits without aborting. A formatter that is absent or fails leaves the index
-untouched and fails the commit rather than passing it through.
+`tests/test-git-hooks-node` covers all of it in 10 hermetic cases — the three
+reproductions, the four failure modes, and the three edge cases above. The hook
+runs with `PATH` pointing at a directory holding symlinks to the handful of
+commands it needs plus a stub formatter (quotes normalised, trailing whitespace
+stripped, so "formatted" is observable), which means no case can reach a real
+prettier or the network, and the absent-formatter case is genuinely absent
+rather than stubbed to fail. Separately verified by hand against real prettier
+3.8.1: the partially staged commit contains only the staged hunk, the deleted
+file's staged edit commits as an edit, and `my notes.md` commits.
 
-**Sketch:** Four approaches, in rough order of cost:
-
-- Skip files that are partially staged — intersect
-  `git diff --cached --name-only` with `git diff --name-only` and warn instead
-  of formatting for files in both. For every other file the current re-add is
-  already safe, since index and working tree agree. About six lines and no new
-  machinery; pairing it with `prettier --check` on the skipped files keeps those
-  from being committed unformatted.
-- Check without fixing — run `prettier --check` over the staged content and
-  abort with instructions. Cannot corrupt the index at all, at the cost of a
-  manual format-and-restage round trip.
-- Format the index rather than the working tree — `git show :path` into the
-  formatter, `git hash-object -w`, `git update-index --cacheinfo`. Correct and
-  leaves the working tree alone, at the price of plumbing and a working tree
-  that still holds the unformatted text.
-- Stash the unstaged remainder around the format step, as lint-staged does. Also
-  correct, but a `stash pop` can conflict when formatting touches lines being
-  edited, and an interrupted hook strands work in a stash. This is most of why
-  lint-staged is as large as it is.
-
-Independent of that choice: pass the path list with `-z` and `xargs -0`, and
-make the hook fail when the formatter fails.
-
-**Constraints:** Hooks here are copied, not linked — `init.templatedir` points
-at `templates/global`, which carries only `post-checkout`, so this one was
-installed by hand. `~/workspace/ptracker` and `~/workspace/inkyframe` hold
-diverged copies (both the `npx --no-install` variant), and fixing the template
-updates neither. Prefer a fix small enough to stay readable inside a hook;
-adopting lint-staged is out of scope.
+Not done: `~/workspace/ptracker` and `~/workspace/inkyframe` still hold the old
+copies. Hooks here are copied rather than linked, so both need a manual re-copy;
+nothing in this repository can detect or fix that. Bash 3.2 was not verified
+against a real 3.2 build (none available in the sandbox this ran in) — the hook
+uses no 4.x feature, and the one 3.2 parser trap on record, a here-document
+inside a command substitution, does not appear in it.
 
 ## Measure and extend the Jetpack source-history evals (2026-08-04)
 

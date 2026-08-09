@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-hooks-node
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+HOOK="$DIR/../etc/git/templates/node/hooks/pre-commit"
+
+# Isolate from the user's/system git config (signing, hooks, templates).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+
+WORK=$(mktemp -d "/tmp/git-hooks-node-test.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# The hook runs with PATH pointing at this directory alone, so it can only ever
+# reach the prettier stub a test installs — never a real prettier on the host.
+BIN="$WORK/bin"
+mkdir -p "$BIN"
+for cmd in git bash sh sed cat rm mktemp basename dirname grep; do
+  ln -s "$(command -v "$cmd")" "$BIN/$cmd"
+done
+
+# Stand-in for prettier: normalises quotes and strips trailing whitespace, so
+# "formatted" is observable without depending on a real prettier being present.
+stub_prettier() {
+  printf '%s\n' '#!/bin/sh' "$@" >"$BIN/prettier"
+  chmod +x "$BIN/prettier"
+}
+
+formatter_ok() { stub_prettier 'exec sed -e "s/'\''/\"/g" -e "s/[[:space:]]*\$//"'; }
+formatter_fails() { stub_prettier 'cat >/dev/null' 'exit 2'; }
+formatter_silent() { stub_prettier 'exec cat >/dev/null'; }
+formatter_absent() { rm -f "$BIN/prettier"; }
+
+new_repo() {
+  local repo="$WORK/$1"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name "Test"
+  git -C "$repo" config commit.gpgsign false
+  cp "$HOOK" "$repo/.git/hooks/pre-commit"
+  chmod +x "$repo/.git/hooks/pre-commit"
+  printf '%s\n' "$repo"
+}
+
+commit() { # commit REPO MESSAGE -- runs with the restricted PATH
+  local repo=$1 msg=$2
+  PATH="$BIN" git -C "$repo" commit -q -m "$msg"
+}
+
+echo "1..10"
+
+# Test 1: a fully staged file is formatted in both the commit and the tree
+formatter_ok
+REPO=$(new_repo format)
+printf "export const a = 'x';   \n" >"$REPO/a.ts"
+git -C "$REPO" add a.ts
+if commit "$REPO" add >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show HEAD:a.ts)" = 'export const a = "x";' ] &&
+  [ "$(cat "$REPO/a.ts")" = 'export const a = "x";' ]; then
+  echo "ok 1 - staged file is formatted in the commit and the working tree"
+else
+  echo "not ok 1 - formatting did not reach the commit or the working tree"
+fi
+
+# Test 2: a partially staged file commits only the staged hunk
+formatter_ok
+REPO=$(new_repo partial)
+printf 'export const a = 1;\n' >"$REPO/f.ts"
+git -C "$REPO" add f.ts
+commit "$REPO" initial >/dev/null 2>&1
+printf "export const a = 2;   \n" >"$REPO/f.ts"
+git -C "$REPO" add f.ts
+printf "export const a = 2;\nexport const SECRET = 'unstaged work';\n" >"$REPO/f.ts"
+if commit "$REPO" staged-only >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show HEAD:f.ts)" = 'export const a = 2;' ] &&
+  grep -q 'SECRET' "$REPO/f.ts"; then
+  echo "ok 2 - only the staged hunk is committed, unstaged work stays in the tree"
+else
+  echo "not ok 2 - unstaged work leaked into the commit or was destroyed"
+fi
+
+# Test 3: a staged edit survives the file being deleted from the working tree
+formatter_ok
+REPO=$(new_repo deleted)
+printf 'export const g = 1;\n' >"$REPO/g.ts"
+git -C "$REPO" add g.ts
+commit "$REPO" initial >/dev/null 2>&1
+printf "export const g = 2;   \n" >"$REPO/g.ts"
+git -C "$REPO" add g.ts
+rm "$REPO/g.ts"
+if commit "$REPO" edit >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show HEAD:g.ts)" = 'export const g = 2;' ]; then
+  echo "ok 3 - staged edit is committed even when the file is gone from the tree"
+else
+  echo "not ok 3 - staged edit was turned into a deletion or lost"
+fi
+
+# Test 4: a path containing a space does not abort the commit
+formatter_ok
+REPO=$(new_repo spaces)
+printf '# Title   \n' >"$REPO/my notes.md"
+git -C "$REPO" add "my notes.md"
+if commit "$REPO" spaced >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show "HEAD:my notes.md")" = '# Title' ]; then
+  echo "ok 4 - a staged path containing a space is formatted and committed"
+else
+  echo "not ok 4 - a path containing a space aborted the commit"
+fi
+
+# Test 5: a missing formatter fails the commit and leaves the index alone
+formatter_ok
+REPO=$(new_repo missing)
+printf 'export const a = 1;\n' >"$REPO/a.ts"
+git -C "$REPO" add a.ts
+commit "$REPO" initial >/dev/null 2>&1
+formatter_absent
+HEAD_BEFORE=$(git -C "$REPO" rev-parse HEAD)
+printf "export const a = 'x';   \n" >"$REPO/a.ts"
+git -C "$REPO" add a.ts
+if ! commit "$REPO" nope >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$HEAD_BEFORE" ] &&
+  [ "$(git -C "$REPO" show :a.ts)" = "export const a = 'x';   " ]; then
+  echo "ok 5 - a missing formatter fails the commit with the index untouched"
+else
+  echo "not ok 5 - a missing formatter did not stop the commit cleanly"
+fi
+
+# Test 6: a failing formatter fails the commit and leaves the index alone
+formatter_fails
+REPO=$(new_repo failing)
+printf 'export const a = 1;\n' >"$REPO/a.ts"
+git -C "$REPO" add a.ts
+formatter_ok
+commit "$REPO" initial >/dev/null 2>&1
+formatter_fails
+HEAD_BEFORE=$(git -C "$REPO" rev-parse HEAD)
+printf "export const a = 'x';   \n" >"$REPO/a.ts"
+git -C "$REPO" add a.ts
+if ! commit "$REPO" nope >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$HEAD_BEFORE" ] &&
+  [ "$(git -C "$REPO" show :a.ts)" = "export const a = 'x';   " ]; then
+  echo "ok 6 - a failing formatter fails the commit with the index untouched"
+else
+  echo "not ok 6 - a failing formatter did not stop the commit cleanly"
+fi
+
+# Test 7: a formatter that emits nothing must not blank the staged file
+formatter_silent
+REPO=$(new_repo silent)
+printf "export const a = 'x';\n" >"$REPO/a.ts"
+git -C "$REPO" add a.ts
+if ! commit "$REPO" empty >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show :a.ts)" = "export const a = 'x';" ]; then
+  echo "ok 7 - empty formatter output fails the commit instead of blanking the file"
+else
+  echo "not ok 7 - empty formatter output reached the index"
+fi
+
+# Test 8: files the hook does not format are committed untouched
+formatter_ok
+REPO=$(new_repo other)
+printf "notes = 'x';   \n" >"$REPO/a.txt"
+git -C "$REPO" add a.txt
+if commit "$REPO" other >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show HEAD:a.txt)" = "notes = 'x';   " ]; then
+  echo "ok 8 - non-ts/md files are committed without formatting"
+else
+  echo "not ok 8 - a file outside the hook's scope was altered"
+fi
+
+# Test 9: a path containing glob characters resolves to itself, not to the
+# sibling its wildcards would match
+formatter_ok
+REPO=$(new_repo globby)
+printf "export const bracketed = 'x';   \n" >"$REPO/a[1].ts"
+printf "export const plain = 'y';   \n" >"$REPO/a1.ts"
+git -C "$REPO" add "a[1].ts" a1.ts
+if commit "$REPO" globby >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show "HEAD:a[1].ts")" = 'export const bracketed = "x";' ] &&
+  [ "$(git -C "$REPO" show HEAD:a1.ts)" = 'export const plain = "y";' ]; then
+  echo "ok 9 - a staged path containing glob characters keeps its own content"
+else
+  echo "not ok 9 - a glob-matching sibling's content was staged under the wrong path"
+fi
+
+# Test 10: a staged symlink keeps its target instead of being formatted
+formatter_ok
+REPO=$(new_repo symlink)
+printf '# Real   \n' >"$REPO/real.md"
+ln -s "real.md" "$REPO/link.md"
+git -C "$REPO" add real.md link.md
+if commit "$REPO" symlink >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO" show HEAD:link.md)" = 'real.md' ] &&
+  [ "$(git -C "$REPO" ls-tree HEAD link.md | cut -d' ' -f1)" = '120000' ] &&
+  [ "$(git -C "$REPO" show HEAD:real.md)" = '# Real' ]; then
+  echo "ok 10 - a staged symlink is left alone while its neighbour is formatted"
+else
+  echo "not ok 10 - a symlink's target text was run through the formatter"
+fi
