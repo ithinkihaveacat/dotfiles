@@ -6,8 +6,11 @@ description: Discover and select relevant agent skills, and manage workspace too
 # Workspace Configuration
 
 This skill configures a workspace for agent-assisted development without version
-control ever seeing the configuration. It consists of two tools:
+control ever seeing the configuration. It consists of three tools:
 
+1. **`hook`**: The git hook manager. Synchronizes git hooks to match
+   `AGENT_REQUIRED_HOOKS` (profiles `agent`, `node`, `gerrit`), managing them
+   via trampoline stubs in `.git/hooks/`.
 1. **`skill`**: The workspace manager. Installs and tracks skills as untracked
    symlinks, automatically adapting to the environment (Git, Perforce, or
    unmanaged directories; more via plugins). Also provides advisory LLM-based
@@ -16,7 +19,7 @@ control ever seeing the configuration. It consists of two tools:
    allow/deny/ask rules for every detected local agent, including pre-approving
    the safe commands declared by installed skills.
 
-`git-setup` ties these together for git repositories: it installs hooks, runs
+`git-setup` ties these together for git repositories: it runs `hook apply`,
 `skill apply`, then `permission apply` (and `git-setup doctor` aggregates all
 three doctors). It runs automatically on `git clone` via the global template's
 post-checkout hook.
@@ -102,7 +105,49 @@ and the one place `doctor` and `preflight` deliberately differ — see
 
 ______________________________________________________________________
 
-## 2. Managing Workspace Permissions (`permission`)
+## 2. Managing Git Hooks (`hook`)
+
+The `hook` tool (symlinked in `bin/`) manages Git hooks in your repository as
+lightweight trampolines pointing into source scripts under `etc/git/hooks/`,
+allowing hook updates in the dotfiles repository to propagate instantly to all
+configured workspaces.
+
+```bash
+hook <command> [arguments]
+```
+
+### Profiles
+
+- **`agent`**: Re-wraps commit message body text, bullet lists, and blockquotes
+  to fit 72 characters, strips dropped trailers (`Co-Authored-By:`, `TAG=`,
+  `CONV=`), and enforces Conventional Commits formatting rules (`commit-msg`).
+- **`node`**: Formats staged TypeScript and Markdown files via Prettier prior to
+  committing (`pre-commit`).
+- **`gerrit`**: Downloads and installs the Gerrit `Change-Id` commit-msg hook
+  (`commit-msg`).
+
+### Commands
+
+- **`apply`**: Synchronize `.git/hooks/` to match `AGENT_REQUIRED_HOOKS`
+  (default: `agent`).
+- **`add PROFILE...`**: Install one or more hook profiles in the current
+  repository.
+- **`remove PROFILE...`** (alias: **`rm`**): Remove managed hook profiles.
+- **`list`** (alias: **`ls`**): List currently installed hook profiles in this
+  repository.
+- **`catalog`**: List all available hook profiles and their descriptions.
+- **`doctor`**: Audit `.git/hooks/` for missing, drifted, or unmanaged hooks
+  (read-only).
+- **`clean`**: Remove all managed hooks and restore legacy/original hooks.
+
+### Environment Variables
+
+- `AGENT_REQUIRED_HOOKS`: Space-separated hook profile names required by this
+  workspace (default: `agent`).
+
+______________________________________________________________________
+
+## 3. Managing Workspace Permissions (`permission`)
 
 The `permission` tool (symlinked in `bin/`) manages workspace-specific agent
 tool permissions. Rules are written as clean command patterns (e.g.
@@ -162,7 +207,7 @@ See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 
-## 3. Managing `.envrc` (`envrc`)
+## 4. Managing `.envrc` (`envrc`)
 
 The `envrc` tool (symlinked in `bin/`) is the single write path for `.envrc`
 files: it manages marker-delimited configuration blocks so multiple

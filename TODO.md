@@ -1,48 +1,67 @@
 # TODO
 
-## Preserve parent-bullet context after a nested commit-msg bullet (2026-08-10)
+## Fix Markdown structure preservation and state tracking in commit-msg wrap_block() (2026-08-10)
 
-**Problem:** `wrap_block()` in `etc/git/hooks/agent/commit-msg` tracks the
-active bullet run in scalar variables (`bullet_marker`, `bullet_indent`,
-`bullet_buffer`, `bullet_raw`). When a nested bullet (e.g. `  - child`) opens
-while a parent bullet is active, `flush_bullet()` discards the parent's state
-before the child's own values overwrite those scalars — there is no parent
-left to return to. A continuation line of the parent that follows the child
-(indented to the parent's level, not the child's) then falls through to
-ordinary prose, since `bullet_indent` no longer matches it; if that line is
-over 72 characters, `flush_prose()` wraps it flush-left with no indentation,
-losing the parent item's structure. Found via code review on PR #147
-(branch `claude/auto-fix-commit-messages-namenc`).
+**Problem:** `wrap_block()` in `etc/git/hooks/agent/commit-msg` has several
+state-tracking and classification edge cases:
 
-**Goal:** A continuation line of a parent bullet that follows a nested child
-bullet stays attached to the parent, with the parent's indentation, rather
-than becoming a new, unindented prose paragraph.
+1. **Nested bullet context loss:** Scalar state variables (`bullet_marker`,
+   `bullet_indent`, etc.) discard parent bullet context when a nested child
+   bullet (e.g. `  - child`) opens. A subsequent parent continuation line falls
+   through to prose and gets wrapped flush-left without indentation.
+1. **Quoted code fences:** A fenced code block inside a blockquote
+   (```` > ```text ````) is not recognized as a code fence because `FENCE_RE`
+   expects leading whitespace, not blockquote markers. The blockquote reflow
+   buffers the fence and code into a single prose run and rewrites it into \`>
+   \`\`\`text preserve ... \`\`\`\`, destroying fences and code layout.
+1. **ATX headings in body:** Overlong ATX headings (`## ...`) fall through to
+   prose reflow, splitting the heading so only the first line retains the `#`
+   marker and altering the document structure.
+1. **Over-broad table detection:** `line.count("|") >= 2` classifies any line
+   with two pipes (such as shell pipelines `cmd1 | cmd2 | cmd3`) as a table row
+   and passes it through unwrapped. Because length validation is disabled when
+   rewrapping runs, overlong shell pipelines silently bypass both rewrapping and
+   length checks.
 
-**Criteria:** A commit message body shaped like
+Found via code review on PR #147 (branch
+`claude/auto-fix-commit-messages-namenc`).
 
-```
-- parent item
-  - nested child item
-  continuation of the parent, over seventy two characters so it needs to wrap
-```
+**Goal:** Provide pragmatic preservation of common commit message structures
+within `wrap_block()`. Full Markdown spec parsing is explicitly **not** required
+or expected for commit messages; the hook only needs to handle structures
+typically found in commit messages (bullet lists, code fences, blockquotes, git
+trailers, and table rows). Heading weirdness in the body is simply preserved
+verbatim.
 
-rewraps with the continuation still indented under the parent's `- ` marker
-rather than flush against the left margin, with a regression test added to
-`tests/test-hook-agent`.
+**Criteria:**
 
-**Sketch:** Replace the scalar `bullet_marker`/`bullet_indent`/
-`bullet_buffer`/`bullet_raw` with a stack of bullet contexts: push on a
-deeper nested bullet, and pop back to the parent when a line's indentation
-returns to the parent's level instead of always falling through to prose.
-The blockquote branch has an analogous but smaller gap for quoted bullets —
-already partially addressed by splitting adjacent quoted bullet lines into
-distinct runs, without giving the wrapped result correct nested indentation.
+- Parent bullet continuation lines following nested child bullets remain
+  attached to the parent with proper indentation.
+- Fenced code blocks inside blockquotes (```` > ```text ```` or `> ~~~text`) are
+  preserved verbatim with blockquote markers retained on each line.
+- ATX headings in the body are preserved verbatim rather than being split into
+  prose.
+- Table detection is restricted to actual table row syntax (e.g. pipe-delimited
+  columns) rather than arbitrary lines containing two pipe characters, ensuring
+  overlong shell pipelines are validated/wrapped appropriately.
+- The `commit-msg` hook's module docstring and `--help`/usage output explicitly
+  document the exact formatting structures it supports.
+- All existing and new cases pass in `tests/test-hook-agent`.
 
-**Constraints:** `wrap_block()` has had three fix commits on one branch
-already (`16c88e19`, `c8bbd339`, `3dba2961`); change it carefully and re-run
-`tests/test-hook-agent` in full, not just the new case. Prefer the simplest
-stack representation that keeps `flush_bullet()`'s existing wrap/pass-through
-logic reusable per frame rather than duplicating it.
+**Sketch:**
+
+- Replace scalar bullet state in `wrap_block()` with a stack of bullet contexts
+  to handle nested indents.
+- Detect quoted fence markers (```` > ```... ```` / `> ~~~...`) and pass quoted
+  code blocks through verbatim.
+- Add an ATX heading check (`^(\s*#{1,6}\s+.*)`) to pass body headings through
+  verbatim.
+- Tighten table row detection to require pipe column boundaries.
+- Update `commit-msg` docstring to document supported structures.
+
+**Constraints:** `wrap_block()` has had three fix commits on one branch already
+(`16c88e19`, `c8bbd339`, `3dba2961`); change it carefully and re-run
+`tests/test-hook-agent` in full.
 
 ## Make installed git hooks propagate fixes and uninstall cleanly (2026-08-09) — done
 
@@ -129,15 +148,15 @@ and is unreferenced.
 ## Auto-fix mechanically fixable commit messages (2026-08-09) — done
 
 `etc/git/hooks/agent/commit-msg` now rewraps over-long body/footer lines in
-place instead of rejecting them; a non-Conventional-Commits or
-over-50-character *subject* still exits 1, since fixing either would change what
-the author said. The wrapper is a PEP 723 script (stdlib only,
-`dependencies = []`) run directly via its `uv run --script` shebang, installed
-into repositories as a trampoline by the `hook` manager rather than copied, so
-editing the source here reaches every repository it is installed into with no
-re-install step. It runs after the existing `Co-Authored-By:`/`TAG=`/`CONV=`
-trailer strip and before validation, and is skipped (like validation) for
-`Merge`/`Revert`/`fixup!`/`squash!` subjects.
+place instead of rejecting them; a non-Conventional-Commits or over-50-character
+*subject* still exits 1, since fixing either would change what the author said.
+The wrapper is a PEP 723 script (stdlib only, `dependencies = []`) run directly
+via its `uv run --script` shebang, installed into repositories as a trampoline
+by the `hook` manager rather than copied, so editing the source here reaches
+every repository it is installed into with no re-install step. It runs after the
+existing `Co-Authored-By:`/`TAG=`/`CONV=` trailer strip and before validation,
+and is skipped (like validation) for `Merge`/`Revert`/`fixup!`/`squash!`
+subjects.
 
 `mdformat` was evaluated first and rejected: it escaped `5*3` to `5\*3` and
 `*.ts` to `\*.ts` on a realistic fixture (backslashes `git log` renders

@@ -4,9 +4,83 @@
 
 ## Contents
 
+- [hook](#hook)
 - [skill](#skill)
 - [permission](#permission)
 - [envrc](#envrc)
+
+## hook
+
+The block below is `../../../bin/hook --help`, kept in sync by `command-index-sync`.
+
+<!-- generated: ../../../bin/hook --help -->
+
+```text
+Usage: hook <command> [arguments]
+
+Manage this repository's git hooks. Hooks are grouped into profiles; each
+profile installs one or more sub-hooks through a multiplexer at
+.git/hooks/<hook-name>, so profiles coexist with each other and with hooks
+from other tools.
+
+A sub-hook is installed as a trampoline: a generated stub whose body execs
+the hook source where it lives in this dotfiles tree. Editing that source
+changes the behaviour of every repository the profile is installed into,
+with no re-install step, and a source that has gone away fails the hook
+loudly rather than being silently skipped.
+
+A pre-existing hook not managed by this tool is preserved as
+.git/hooks/<hook-name>.d/00-legacy and continues to run first. Removing the
+last managed sub-hook restores it as the plain hook.
+
+Commands:
+  apply             Synchronize this repository's hooks to match
+                    AGENT_REQUIRED_HOOKS (idempotent)
+  add PROFILE...    Add a hook profile
+  remove PROFILE... Remove a hook profile, leaving other hooks in place
+                    (alias: rm)
+  list              List the hooks installed in this repository (alias: ls)
+  catalog           List the hook profiles available to add
+  doctor            Report missing, drifted or unmanaged hooks (read-only)
+  clean             Remove every profile this tool manages, leaving
+                    third-party hooks and 00-legacy in place
+
+Options:
+  --copy            add/apply: copy the hook source instead of installing a
+                    trampoline to it, for a machine with no dotfiles tree
+  --all             clean: delete the entire hooks directory, including
+                    third-party hooks; requires --force
+  --force           clean --all: confirm the deletion
+  --help, -h        Display this help message and exit
+
+Environment:
+  AGENT_REQUIRED_HOOKS  Whitespace-separated profiles 'apply' installs
+                        (default: agent). Profiles it does not name are
+                        removed, the way 'skill apply' synchronizes skills.
+  HOOK_OFFLINE          Set to 1 to fail rather than fetch a profile whose
+                        hook is downloaded (gerrit).
+  AGENT_OFFLINE         Workspace-wide offline policy, used when
+                        HOOK_OFFLINE is unset.
+
+Examples:
+  hook apply
+  hook add node
+  hook list
+  hook doctor
+  hook remove gerrit
+  env AGENT_REQUIRED_HOOKS='agent node' hook apply
+
+'add'/'apply' abort immediately, installing nothing for that profile, if a
+required profile names a dependency that is missing or not actually usable
+(no 'uv' for agent, no 'curl' for gerrit, no prettier reachable via 'npx' or
+on PATH for node) — deliberately, so a broken promise fails loudly at
+install/checkout time rather than silently at the next commit. 'apply' does
+not partially recover: a dependency failure on any named profile stops the
+whole sync, leaving profiles processed so far installed. Run 'doctor' to see
+which profile is at fault.
+```
+
+<!-- /generated -->
 
 ## skill
 
