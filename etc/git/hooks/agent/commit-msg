@@ -1,74 +1,48 @@
-#!/bin/sh
-# Installed by the "agent" profile of the 'hook' command as commit-msg.
-# Tests: tests/test-hook-agent
-# Strips Co-Authored-By trailers, rewraps over-long body/footer lines, and
-# enforces commit message formatting.
-
-msg_file="$1"
-
-# Strip Co-Authored-By lines and any trailing blank lines they leave behind,
-# preserving git's comment lines (lines beginning with #).
-tmpfile=$(mktemp "${msg_file}.XXXXXX") || {
-  echo "commit-msg: mktemp failed" >&2
-  exit 1
-}
-if ! awk '
-  /^#/               { comments[++nc] = $0; next }
-                     { lines[++nl] = $0 }
-  END {
-    while (nl > 0 && lines[nl] ~ /^[[:space:]]*$/) nl--
-    while (nl > 0 && (lines[nl] ~ /^Co-Authored-By:/ || lines[nl] ~ /^TAG=/ || lines[nl] ~ /^CONV=/)) {
-      nl--
-    }
-    while (nl > 0 && lines[nl] ~ /^[[:space:]]*$/) nl--
-    for (i = 1; i <= nl; i++) print lines[i]
-    for (i = 1; i <= nc; i++) print comments[i]
-  }
-' "$msg_file" >"$tmpfile"; then
-  rm -f "$tmpfile"
-  echo "commit-msg: failed to rewrite message file" >&2
-  exit 1
-fi
-mv "$tmpfile" "$msg_file"
-
-# Skip format checks (and the rewrap below) for auto-generated messages.
-cleaned=$(grep -v "^#" "$msg_file")
-subject=$(printf '%s\n' "$cleaned" | head -1)
-case "$subject" in
-  Merge\ * | Revert\ * | fixup!\ * | squash!\ *) exit 0 ;;
-esac
-
-# Rewrap body/footer lines over 72 characters in place: a deterministic,
-# meaning-preserving transform an author (or agent) can't reliably do by
-# eye, so there is no reason to reject it and force a round trip. Opt out
-# with: git config hooks.commitMsgWrap false
-wrap_enabled=1
-case "$(git config hooks.commitMsgWrap 2>/dev/null)" in
-  false | 0 | no) wrap_enabled=0 ;;
-esac
-
-if [ "$wrap_enabled" -eq 1 ]; then
-  if command -v uv >/dev/null 2>&1; then
-    # A cold uv cache, a missing interpreter, or no network can all make
-    # this fail; when it does, fall back to the strict check below rather
-    # than silently letting an over-long line through.
-    if ! cat <<'PYEOF' | uv run --script - "$msg_file"; then
+#!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.9"
+# requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Rewrap a commit message's body/footer to 72 characters in place."""
+# Installed by the "agent" profile of the 'hook' command as commit-msg.
+# Tests: tests/test-hook-agent
+"""Strip Co-Authored-By trailers, rewrap over-long body/footer lines, and
+enforce commit message formatting."""
+
 import re
 import subprocess
 import sys
 import textwrap
 
-WIDTH = 72
+WRAP_WIDTH = 72
+SUBJECT_LIMIT = 50
 
 FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])(\s+)(.*)$")
 BLOCKQUOTE_RE = re.compile(r"^(\s*)(>+)(\s*)(.*)$")
 LEADING_WS_RE = re.compile(r"^[ \t]*")
+SUBJECT_RE = re.compile(r"^[a-z][a-z0-9-]*(\([^)]+\))?!?: .+")
+GENERATED_SUBJECT_RE = re.compile(r"^(Merge |Revert |fixup! |squash! )")
+DROPPED_TRAILER_RE = re.compile(r"^(Co-Authored-By:|TAG=|CONV=)")
+
+
+def strip_generated_trailers(lines):
+    """Drop Co-Authored-By/TAG=/CONV= trailers and the blank lines they leave
+    behind, preserving git's own comment lines (lines starting with '#') by
+    moving them after the real content regardless of where they appeared."""
+    comments = [line for line in lines if line.startswith("#")]
+    content = [line for line in lines if not line.startswith("#")]
+
+    def is_blank(line):
+        return line.strip() == ""
+
+    while content and is_blank(content[-1]):
+        content.pop()
+    while content and DROPPED_TRAILER_RE.match(content[-1]):
+        content.pop()
+    while content and is_blank(content[-1]):
+        content.pop()
+
+    return content + comments
 
 
 def find_trailer_start(lines):
@@ -78,7 +52,13 @@ def find_trailer_start(lines):
     text = "\n".join(lines) + "\n"
     try:
         result = subprocess.run(
-            ["git", "interpret-trailers", "--only-trailers", "--only-input", "--no-divider"],
+            [
+                "git",
+                "interpret-trailers",
+                "--only-trailers",
+                "--only-input",
+                "--no-divider",
+            ],
             input=text,
             capture_output=True,
             text=True,
@@ -93,7 +73,13 @@ def find_trailer_start(lines):
     candidate_text = "\n" + "\n".join(lines[start:]) + "\n"
     try:
         check_result = subprocess.run(
-            ["git", "interpret-trailers", "--only-trailers", "--only-input", "--no-divider"],
+            [
+                "git",
+                "interpret-trailers",
+                "--only-trailers",
+                "--only-input",
+                "--no-divider",
+            ],
             input=candidate_text,
             capture_output=True,
             text=True,
@@ -107,8 +93,8 @@ def find_trailer_start(lines):
 
 
 def wrap_block(lines):
-    """Reflow prose/bullets/blockquotes to WIDTH; pass fences, tables and
-    indented blocks through untouched. A run that already fits WIDTH on
+    """Reflow prose/bullets/blockquotes to WRAP_WIDTH; pass fences, tables and
+    indented blocks through untouched. A run that already fits WRAP_WIDTH on
     every line is left byte-identical rather than being rejoined."""
     out = []
     i = 0
@@ -121,7 +107,7 @@ def wrap_block(lines):
     quote_buffer, quote_raw = [], []
 
     def all_within_width(raws):
-        return all(len(r) <= WIDTH for r in raws)
+        return all(len(r) <= WRAP_WIDTH for r in raws)
 
     def get_hard_suffix(raws):
         if not raws:
@@ -143,8 +129,13 @@ def wrap_block(lines):
                 text = " ".join(prose_buffer)
                 if hard_suffix == "\\" and text.endswith("\\"):
                     text = text[:-1].rstrip()
-                eff_width = max(1, WIDTH - len(hard_suffix))
-                wrapped = textwrap.wrap(text, width=eff_width, break_long_words=False, break_on_hyphens=False)
+                eff_width = max(1, WRAP_WIDTH - len(hard_suffix))
+                wrapped = textwrap.wrap(
+                    text,
+                    width=eff_width,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
                 if wrapped and hard_suffix:
                     wrapped[-1] += hard_suffix
                 out.extend(wrapped or [""])
@@ -160,7 +151,7 @@ def wrap_block(lines):
                 text = " ".join(bullet_buffer)
                 if hard_suffix == "\\" and text.endswith("\\"):
                     text = text[:-1].rstrip()
-                eff_width = max(1, WIDTH - len(hard_suffix))
+                eff_width = max(1, WRAP_WIDTH - len(hard_suffix))
                 indent = " " * len(bullet_marker)
                 wrapped = textwrap.wrap(
                     text,
@@ -186,7 +177,7 @@ def wrap_block(lines):
                 text = " ".join(quote_buffer)
                 if hard_suffix == "\\" and text.endswith("\\"):
                     text = text[:-1].rstrip()
-                eff_width = max(1, WIDTH - len(hard_suffix))
+                eff_width = max(1, WRAP_WIDTH - len(hard_suffix))
                 wrapped = textwrap.wrap(
                     text,
                     width=eff_width,
@@ -214,7 +205,9 @@ def wrap_block(lines):
             i += 1
             char = token[0]
             count = len(token)
-            close_re = re.compile(r"^\s*" + re.escape(char) + r"{" + str(count) + r",}\s*$")
+            close_re = re.compile(
+                r"^\s*" + re.escape(char) + r"{" + str(count) + r",}\s*$"
+            )
             while i < n:
                 out.append(lines[i])
                 closed = bool(close_re.match(lines[i]))
@@ -247,8 +240,10 @@ def wrap_block(lines):
             flush_prose()
             flush_bullet()
             lead, marks, spaces, text = quote_match.groups()
-            marker = lead + marks + (spaces if spaces else " ")
-            is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip("\r\n").endswith("\\")
+            marker = lead + marks + (spaces or " ")
+            is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
+                "\r\n"
+            ).endswith("\\")
             if not text.strip():
                 flush_quote()
                 out.append(line)
@@ -283,7 +278,9 @@ def wrap_block(lines):
             bullet_indent = len(marker)
             bullet_buffer = [text] if text.strip() else []
             bullet_raw = [line]
-            is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip("\r\n").endswith("\\")
+            is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
+                "\r\n"
+            ).endswith("\\")
             i += 1
             if is_hard_break:
                 flush_bullet()
@@ -292,7 +289,9 @@ def wrap_block(lines):
         if bullet_indent is not None:
             leading = LEADING_WS_RE.match(line).group(0)
             if len(leading.expandtabs()) >= bullet_indent and line.strip() != "":
-                is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip("\r\n").endswith("\\")
+                is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
+                    "\r\n"
+                ).endswith("\\")
                 bullet_buffer.append(line.strip())
                 bullet_raw.append(line)
                 i += 1
@@ -309,7 +308,9 @@ def wrap_block(lines):
             i += 1
             continue
 
-        is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip("\r\n").endswith("\\")
+        is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
+            "\r\n"
+        ).endswith("\\")
         prose_buffer.append(line.strip())
         prose_raw.append(line)
         i += 1
@@ -335,86 +336,110 @@ def wrap_lines(lines):
     else:
         body, trailer = rest[:trailer_start], rest[trailer_start:]
 
-    return [subject] + wrap_block(body) + trailer
+    return [subject, *wrap_block(body), *trailer]
+
+
+def rewrap_message(message_lines):
+    """Rewrap a message's body/footer to WRAP_WIDTH; returns (new_lines,
+    changed)."""
+    new_lines = wrap_lines(message_lines)
+    return new_lines, new_lines != message_lines
+
+
+def wrap_enabled():
+    result = subprocess.run(
+        ["git", "config", "hooks.commitMsgWrap"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() not in ("false", "0", "no")
+
+
+def split_comments(lines):
+    """git appends comment lines (diff summary, status hints) below the
+    message; split them off so checks and wrapping never touch them."""
+    comment_start = next(
+        (i for i, line in enumerate(lines) if line.startswith("#")), len(lines)
+    )
+    return lines[:comment_start], lines[comment_start:]
+
+
+def check_format(cleaned, checked_length):
+    """Collect every formatting violation so callers can fix the message in
+    one pass."""
+    errors = []
+    subject = cleaned[0] if cleaned else ""
+
+    if not SUBJECT_RE.match(subject):
+        errors.append(
+            "commit-msg: subject must follow 'type(scope): description' format"
+        )
+
+    if len(subject) > SUBJECT_LIMIT:
+        errors.append(
+            f"commit-msg: subject is {len(subject)} characters (limit: {SUBJECT_LIMIT})"
+        )
+
+    if len(cleaned) > 1 and cleaned[1] != "":
+        errors.append("commit-msg: line 2 must be blank (separates subject from body)")
+
+    # Body and footer lines must not exceed WRAP_WIDTH characters. The rewrap
+    # step already enforces this when it ran, so only check here otherwise.
+    if checked_length:
+        for lineno, line in enumerate(cleaned[2:], start=3):
+            if len(line) > WRAP_WIDTH:
+                errors.append(
+                    f"commit-msg: line {lineno} is {len(line)} characters (limit: {WRAP_WIDTH})"
+                )
+
+    return errors
 
 
 def main():
     path = sys.argv[1]
     with open(path, encoding="utf-8") as f:
-        text = f.read()
-    lines = text.splitlines()
+        lines = f.read().splitlines()
 
-    # git appends comment lines (diff summary, status hints) below the
-    # message; split them off so wrapping never touches them.
-    comment_start = next((i for i, line in enumerate(lines) if line.startswith("#")), len(lines))
-    message_lines = lines[:comment_start]
-    comment_lines = lines[comment_start:]
+    lines = strip_generated_trailers(lines)
 
-    new_message_lines = wrap_lines(message_lines)
-    if new_message_lines == message_lines:
+    message_lines, comment_lines = split_comments(lines)
+    subject = message_lines[0] if message_lines else ""
+    if GENERATED_SUBJECT_RE.match(subject):
+        write_lines(path, message_lines + comment_lines)
         return
 
-    new_text = "\n".join(new_message_lines + comment_lines)
-    if text.endswith("\n"):
-        new_text += "\n"
+    wrap_did_run = wrap_enabled()
+    if wrap_did_run:
+        try:
+            message_lines, changed = rewrap_message(message_lines)
+            if changed:
+                print(
+                    "commit-msg: rewrapped body/footer text to fit 72 characters",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(
+                f"commit-msg: rewrap failed ({e}); falling back to strict 72-character check",
+                file=sys.stderr,
+            )
+            wrap_did_run = False
+
+    write_lines(path, message_lines + comment_lines)
+
+    errors = check_format(message_lines, checked_length=not wrap_did_run)
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        sys.exit(1)
+
+
+def write_lines(path, lines):
+    # Every line gets a trailing newline, matching git's own commit message
+    # file convention regardless of what the file looked like on disk before.
+    text = "".join(line + "\n" for line in lines)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(new_text)
-    print("commit-msg: rewrapped body/footer text to fit 72 characters", file=sys.stderr)
+        f.write(text)
 
 
 if __name__ == "__main__":
     main()
-PYEOF
-      echo "commit-msg: uv run failed; falling back to strict 72-character check" >&2
-      wrap_enabled=0
-    fi
-  else
-    echo "commit-msg: uv not found; falling back to strict 72-character check" >&2
-    wrap_enabled=0
-  fi
-fi
-
-# Re-extract message content: the rewrap step above may have changed it.
-cleaned=$(grep -v "^#" "$msg_file")
-subject=$(printf '%s\n' "$cleaned" | head -1)
-
-# Collect every formatting violation so callers can fix the message in one pass.
-errors=$(
-  # Subject must follow conventional commits: type(scope)!: description
-  if ! printf '%s\n' "$subject" | grep -qE '^[a-z][a-z0-9-]*(\([^)]+\))?!?: .+'; then
-    echo "commit-msg: subject must follow 'type(scope): description' format"
-  fi
-
-  # Subject line must not exceed 50 characters.
-  subj_len=${#subject}
-  if [ "$subj_len" -gt 50 ]; then
-    echo "commit-msg: subject is $subj_len characters (limit: 50)"
-  fi
-
-  # If the message has a body, line 2 must be blank.
-  line_count=$(printf '%s\n' "$cleaned" | wc -l | tr -d ' ')
-  if [ "$line_count" -gt 1 ]; then
-    line2=$(printf '%s\n' "$cleaned" | sed -n '2p')
-    if [ -n "$line2" ]; then
-      echo "commit-msg: line 2 must be blank (separates subject from body)"
-    fi
-  fi
-
-  # Body and footer lines must not exceed 72 characters. The rewrap step
-  # above already enforces this when it ran, so only check here when it
-  # didn't (opted out, or uv was unavailable/failed).
-  if [ "$wrap_enabled" -eq 0 ]; then
-    printf '%s\n' "$cleaned" | awk '
-    NR > 2 && length > 72 {
-      printf "commit-msg: line %d is %d characters (limit: 72)\n", NR, length
-    }
-  '
-  fi
-)
-
-if [ -n "$errors" ]; then
-  printf '%s\n' "$errors" >&2
-  exit 1
-fi
-
-exit 0
