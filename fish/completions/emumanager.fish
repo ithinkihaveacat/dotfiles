@@ -37,7 +37,7 @@ end
 
 # Helper function: get list of system images
 function __fish_emumanager_list_images
-    emumanager catalog package | string trim | string replace -r '\* ' ''
+    emumanager catalog package | string trim | string replace -r '^\*[[:space:]]*' '' | string replace -r '^[[:space:]]*' '' | awk -F'(' '{print $1}' | string trim
 end
 
 # Complete subcommands (when no subcommand given)
@@ -87,6 +87,11 @@ complete -c emumanager -f -n '__fish_seen_subcommand_from list; and __fish_seen_
 
 complete -c emumanager -f -n '__fish_seen_subcommand_from start; and __fish_seen_subcommand_from avd' -l cold-boot -d 'Perform a cold boot (bypass Quick Boot snapshots)'
 complete -c emumanager -f -n '__fish_seen_subcommand_from start; and __fish_seen_subcommand_from avd' -l wipe-data -d 'Factory reset (wipe all data and perform cold boot)'
+
+complete -c emumanager -f -n '__fish_seen_subcommand_from create; and __fish_seen_subcommand_from avd' -l channel -x -a '0 1 2 3' -d 'SDK manager channel (0=Stable, 1=Beta, 2=Dev, 3=Canary)'
+complete -c emumanager -f -n '__fish_seen_subcommand_from download; and __fish_seen_subcommand_from package' -l channel -x -a '0 1 2 3' -d 'SDK manager channel (0=Stable, 1=Beta, 2=Dev, 3=Canary)'
+complete -c emumanager -f -n '__fish_seen_subcommand_from catalog; and __fish_seen_subcommand_from package' -l channel -x -a '0 1 2 3' -d 'SDK manager channel (0=Stable, 1=Beta, 2=Dev, 3=Canary)'
+complete -c emumanager -f -n '__fish_seen_subcommand_from update; and __fish_seen_subcommand_from package' -l channel -x -a '0 1 2 3' -d 'SDK manager channel (0=Stable, 1=Beta, 2=Dev, 3=Canary)'
 
 # Global flags
 complete -c emumanager -f -s h -l help -d 'Display help message and exit'

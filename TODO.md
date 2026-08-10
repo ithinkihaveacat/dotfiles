@@ -332,25 +332,6 @@ offline sandbox (e.g. using standard sandbox mode or with `UV_OFFLINE=1`).
 `UV_CACHE_DIR` is not already set) before overriding `HOME`, and then run the
 tests with `UV_OFFLINE=1` enabled.
 
-## Support downloading canary/preview emulator images in emumanager (2026-07-13)
-
-**Goal:** `emumanager` should support downloading and installing system images
-from the preview/canary tracks (SDK manager channel 3). Currently, downloading a
-preview system image (e.g. Wear OS API 37) requires running
-`sdkmanager --channel=3` manually before creating or starting the emulator, as
-`emumanager`'s internal `download_image` logic does not expose or pass the
-`--channel` parameter to `sdkmanager`.
-
-**Criteria:** Running
-`emumanager download package "system-images;android-37.0;android-wear-signed;arm64-v8a"`
-successfully downloads and installs the preview image without manual
-pre-downloading.
-
-**Sketch:** Update `download_image()` and `create_avd()` in
-`skills/emumanager/scripts/emumanager` to accept a `--channel` option or
-automatically pass a default channel if the package target is identified as
-canary/preview.
-
 ## Add debug/test-mode switch to emumanager start (2026-07-13)
 
 **Goal:** Add a `--test-mode` / `--debug` switch to `emumanager start avd` that
@@ -444,4 +425,3 @@ for each row of the decision table without consulting `--help`.
 **Constraints:** Keep `agent-review.md` as the single detailed source with
 `SKILL.md` carrying only a pointer-plus-table summary; no new heavyweight
 dependencies for the drift tests (shell + grep in the existing test layout).
-

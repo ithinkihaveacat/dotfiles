@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# Tests: skills/emumanager/tests/test-emumanager
+
 if ((BASH_VERSINFO[0] < 4)); then
   echo "$(basename "$0"): requires bash 4.0 or higher (found ${BASH_VERSION})" >&2
   exit 1
@@ -56,20 +58,22 @@ get_host_arch() {
 # Returns 0 (success) if valid, 1 (failure) if invalid
 is_numeric_version() {
   local version_string="$1"
-  # Allow optional -ext suffix for extension SDKs (e.g. 35-ext15)
-  [[ "$version_string" =~ ^[0-9]+(\.[0-9]+)?(-ext[0-9]+)?$ ]]
+  # Allow optional decimal point and optional suffix like -ext15, -beta1, -canary1, -dev1, -rc1
+  [[ "$version_string" =~ ^[0-9]+(\.[0-9]+)?(-(ext|beta|canary|preview|rc)[0-9]+)?$ ]]
 }
 
 get_default_image_package() {
+  local channel="${1:-}"
   # Default to mobile/phone device type
-  get_latest_image_for_type "mobile"
+  get_latest_image_for_type "mobile" "$channel"
 }
 
 # Get the latest available image for a specific device type
-# Usage: get_latest_image_for_type <device_type>
+# Usage: get_latest_image_for_type <device_type> [channel]
 # Device types: mobile, wear, tv, auto
 get_latest_image_for_type() {
   local device_type="$1"
+  local channel="${2:-}"
   local arch
   arch=$(get_host_arch)
 
@@ -81,7 +85,7 @@ get_latest_image_for_type() {
 
   # Get all available packages
   local all_packages
-  if ! all_packages=$(timeout 120 "$sdkmanager" --list 2>&1); then
+  if ! all_packages=$(timeout 120 "$sdkmanager" --channel="${channel:-3}" --list 2>&1); then
     echo "$(basename "$0"): Failed to list available packages" >&2
     exit 1
   fi
@@ -181,8 +185,8 @@ get_latest_image_for_type() {
       continue
     fi
 
-    # Remove -ext suffix for parsing (e.g. 35-ext15 -> 35)
-    local clean_version="${version_string%%-ext*}"
+    # Remove suffix for parsing (e.g. 35-ext15 -> 35, 37.2-beta1 -> 37.2)
+    local clean_version="${version_string%%-*}"
 
     # Parse major and minor version
     # Use IFS and read to reliably split on dot
@@ -320,6 +324,7 @@ Options:
   --wear, --watch     Create Wear OS device (latest API)
   --tv                Create Android/Google TV device (latest API)
   --auto              Create Android Automotive device (latest API)
+  --channel=<0-3>     SDK manager channel ID (0=Stable, 1=Beta, 2=Dev, 3=Canary; default: 3)
   --help              Display this help message and exit
 EOF
   exit "${1:-0}"
@@ -389,7 +394,7 @@ EOF
 
 usage_download() {
   cat <<EOF
-Usage: $(basename "$0") download package <image>
+Usage: $(basename "$0") download package <image> [options]
 
 Download a specific system image or package.
 
@@ -398,6 +403,7 @@ Arguments:
                       Note: Must be quoted as it contains semicolons.
 
 Options:
+  --channel=<0-3>     SDK manager channel ID (0=Stable, 1=Beta, 2=Dev, 3=Canary; default: 3)
   --help              Display this help message and exit
 EOF
   exit "${1:-0}"
@@ -405,11 +411,12 @@ EOF
 
 usage_catalog() {
   cat <<EOF
-Usage: $(basename "$0") catalog package
+Usage: $(basename "$0") catalog package [options]
 
 List obtainable packages from the remote registry.
 
 Options:
+  --channel=<0-3>     SDK manager channel ID (0=Stable, 1=Beta, 2=Dev, 3=Canary; default: 3)
   --help              Display this help message and exit
 EOF
   exit "${1:-0}"
@@ -417,11 +424,12 @@ EOF
 
 usage_update() {
   cat <<EOF
-Usage: $(basename "$0") update package
+Usage: $(basename "$0") update package [options]
 
 Update all installed SDK packages to latest versions.
 
 Options:
+  --channel=<0-3>     SDK manager channel ID (0=Stable, 1=Beta, 2=Dev, 3=Canary; default: 3)
   --help              Display this help message and exit
 EOF
   exit "${1:-0}"
@@ -698,15 +706,22 @@ install_platforms() {
 
 download_image() {
   local image_package="$1"
-  local sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  local channel="${2:-}"
+
+  local sdkmanager
+  sdkmanager=$(require_sdk sdkmanager)
+
+  if [[ -z "$channel" ]]; then
+    channel=3
+  fi
 
   # Check if the image is installed, and install it if it's not
   local installed_packages
-  installed_packages=$(env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --list_installed)
+  installed_packages=$(env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --channel="${channel}" --list_installed 2>&1)
   if ! echo "${installed_packages}" | grep -q "${image_package}"; then
     echo "System image '${image_package}' not found. Installing..."
-    yes | env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --licenses >/dev/null || true
-    if ! env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --install "${image_package}"; then
+    yes | env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --channel="${channel}" --licenses >/dev/null || true
+    if ! env SKIP_JDK_VERSION_CHECK=1 "${sdkmanager}" --channel="${channel}" --install "${image_package}"; then
       echo "Failed to install system image '${image_package}'. Please check if the package name is valid." >&2
       exit 1
     fi
@@ -756,6 +771,7 @@ create_avd() {
   local avd_name="$1"
   local device_type="$2"
   local image_package="$3"
+  local channel="${4:-}"
 
   local sdkmanager avdmanager
   sdkmanager=$(require_sdk sdkmanager)
@@ -771,24 +787,15 @@ create_avd() {
     echo "Using specified image: ${image_package}"
   elif [[ -n "$device_type" ]]; then
     echo "Finding latest ${device_type} image..."
-    image_package=$(get_latest_image_for_type "$device_type")
+    image_package=$(get_latest_image_for_type "$device_type" "$channel")
     echo "Selected image: ${image_package}"
   else
-    image_package=$(get_default_image_package)
+    image_package=$(get_default_image_package "$channel")
     echo "No device type or image specified, using default: ${image_package}"
   fi
 
-  # Check if the image is installed, and install it if it's not
-  local installed_packages
-  installed_packages=$("${sdkmanager}" --list_installed)
-  if ! echo "${installed_packages}" | grep -q "${image_package}"; then
-    echo "System image '${image_package}' not found. Installing..."
-    yes | "${sdkmanager}" --licenses >/dev/null || true
-    if ! "${sdkmanager}" --install "${image_package}"; then
-      echo "Failed to install system image '${image_package}'. Please check if the package name is valid." >&2
-      exit 1
-    fi
-  fi
+  # Download and install system image if needed
+  download_image "${image_package}" "${channel}"
 
   echo "Creating AVD '${avd_name}' with image '${image_package}'..."
 
@@ -1166,6 +1173,7 @@ list_avd() {
 }
 
 catalog_package() {
+  local channel="${1:-3}"
   bootstrap --no-emulator
 
   local sdkmanager
@@ -1177,27 +1185,32 @@ catalog_package() {
 
   # Get all obtainable system images and installed packages
   local all_packages_raw
-  if ! all_packages_raw=$(timeout 120 "$sdkmanager" --list 2>&1); then
+  if ! all_packages_raw=$(timeout 120 "$sdkmanager" --channel="${channel}" --list 2>&1); then
     echo "$(basename "$0"): Failed to list obtainable packages (timeout or error)" >&2
-    echo "This may be due to network issues. Try running manually: ${sdkmanager} --list" >&2
+    echo "This may be due to network issues. Try running manually: ${sdkmanager} --channel=${channel} --list" >&2
     exit 1
   fi
   local installed_packages
-  if ! installed_packages=$(timeout 120 "$sdkmanager" --list_installed 2>&1 | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); then
+  if ! installed_packages=$(timeout 120 "$sdkmanager" --channel="${channel}" --list_installed 2>&1 | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); then
     echo "$(basename "$0"): Failed to list installed packages (timeout or error)" >&2
     exit 1
   fi
 
-  (echo "$all_packages_raw" | { grep "system-images;android-" | grep "$arch_filter" || true; } | while IFS= read -r line; do
-    # Extract package path and trim whitespace
-    local package_path
-    package_path=$(echo "$line" | awk -F'|' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  (echo "$all_packages_raw" | { grep "system-images;android-" | grep "$arch_filter" || true; } | while IFS='|' read -r pkg _rev desc _loc; do
+    # Extract package path and description, trimming whitespace
+    local package_path description
+    package_path=$(echo "$pkg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    description=$(echo "$desc" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-    # Extract API level/version (second field in package path)
-    local api_part
+    if [[ -z "$package_path" ]]; then
+      continue
+    fi
+
+    # Extract API level/version (second field) and tag (third field)
+    local api_part tag_part
     api_part=$(echo "$package_path" | awk -F';' '{print $2}')
-    local version_string
-    version_string="${api_part#android-}"
+    tag_part=$(echo "$package_path" | awk -F';' '{print $3}')
+    local version_string="${api_part#android-}"
 
     # Only accept numeric versions (with optional decimal point)
     # Skip CANARY, letter codenames (Baklava), and versions with suffixes (36.0-Baklava)
@@ -1205,8 +1218,8 @@ catalog_package() {
       continue
     fi
 
-    # Remove -ext suffix for parsing
-    local clean_version="${version_string%%-ext*}"
+    # Remove suffix for parsing (e.g. 35-ext15 -> 35, 37.2-beta1 -> 37.2)
+    local clean_version="${version_string%%-*}"
 
     # Extract major version for filtering
     local major_version
@@ -1214,14 +1227,40 @@ catalog_package() {
 
     # Check if major version is greater than or equal to 33
     if [[ "$major_version" -ge 33 ]]; then
-      # Check if the package is installed
-      if echo "$installed_packages" | grep -q -x "$package_path"; then
-        echo "* $package_path"
-      else
-        echo "  $package_path"
+      # Simplify tag name for compact summary
+      local tag_clean="$tag_part"
+      case "$tag_part" in
+        android-wear*) tag_clean="wear" ;;
+        google_apis_playstore*) tag_clean="playstore" ;;
+        google_apis*) tag_clean="google_apis" ;;
+        android-tv* | google-tv*) tag_clean="tv" ;;
+        android-automotive*) tag_clean="auto" ;;
+        android-desktop) tag_clean="desktop" ;;
+      esac
+
+      # Determine release status (preview/beta/canary)
+      local status=""
+      if [[ "$description" =~ [Pp]review || "$version_string" =~ \.0$ || "$version_string" =~ preview ]]; then
+        status="preview"
+      elif [[ "$description" =~ [Bb]eta || "$version_string" =~ beta ]]; then
+        status="beta"
+      elif [[ "$description" =~ [Cc]anary || "$version_string" =~ canary ]]; then
+        status="canary"
       fi
+
+      local meta="api${version_string}, ${tag_clean}"
+      if [[ -n "$status" ]]; then
+        meta="${meta}, ${status}"
+      fi
+
+      # Check if the package is installed
+      local prefix=" "
+      if echo "$installed_packages" | grep -q -x "$package_path"; then
+        prefix="*"
+      fi
+      printf "%s %-62s (%s)\n" "$prefix" "$package_path" "$meta"
     fi
-  done) | sort -t';' -k2 -V | uniq
+  done) | sort -t';' -k2 -V | awk -F'(' '!seen[$1]++'
 }
 
 list_package() {
@@ -1407,6 +1446,7 @@ get_avd_image_package() {
 }
 
 check_outdated() {
+  local channel="${1:-3}"
   bootstrap --no-emulator
 
   local sdkmanager
@@ -1414,21 +1454,22 @@ check_outdated() {
 
   echo "Checking for outdated packages..."
   echo ""
-  "${sdkmanager}" --list | grep -A 1000 "Updates" || echo "All packages are up to date."
+  "${sdkmanager}" --channel="${channel}" --list | grep -A 1000 "Updates" || echo "All packages are up to date."
 }
 
 update_package() {
+  local channel="${1:-3}"
   bootstrap --no-emulator
 
   local sdkmanager
   sdkmanager=$(require_sdk sdkmanager)
 
   echo "Updating all installed packages..."
-  yes | "${sdkmanager}" --licenses >/dev/null || true
+  yes | "${sdkmanager}" --channel="${channel}" --licenses >/dev/null || true
 
-  if ! "${sdkmanager}" --update; then
+  if ! "${sdkmanager}" --channel="${channel}" --update; then
     echo "$(basename "$0"): Failed to update packages" >&2
-    echo "Try running manually: ${sdkmanager} --update" >&2
+    echo "Try running manually: ${sdkmanager} --channel=${channel} --update" >&2
     exit 1
   fi
 
@@ -1812,7 +1853,36 @@ case "$1" in
       echo "Usage: $(basename "$0") catalog package" >&2
       exit 1
     fi
-    catalog_package
+    shift 2 # skip "catalog" and "package"
+    channel=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --channel)
+          if [[ $# -lt 2 ]]; then
+            echo "$(basename "$0") catalog package: --channel requires an argument" >&2
+            exit 1
+          fi
+          channel="$2"
+          shift 2
+          ;;
+        --channel=*)
+          channel="${1#*=}"
+          shift
+          ;;
+        --help | -h)
+          usage_catalog 0
+          ;;
+        --*)
+          echo "$(basename "$0") catalog package: unknown option '$1'" >&2
+          exit 1
+          ;;
+        *)
+          echo "$(basename "$0") catalog package: too many arguments" >&2
+          exit 1
+          ;;
+      esac
+    done
+    catalog_package "$channel"
     ;;
   update)
     if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
@@ -1823,7 +1893,36 @@ case "$1" in
       echo "Usage: $(basename "$0") update package" >&2
       exit 1
     fi
-    update_package
+    shift 2 # skip "update" and "package"
+    channel=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --channel)
+          if [[ $# -lt 2 ]]; then
+            echo "$(basename "$0") update package: --channel requires an argument" >&2
+            exit 1
+          fi
+          channel="$2"
+          shift 2
+          ;;
+        --channel=*)
+          channel="${1#*=}"
+          shift
+          ;;
+        --help | -h)
+          usage_update 0
+          ;;
+        --*)
+          echo "$(basename "$0") update package: unknown option '$1'" >&2
+          exit 1
+          ;;
+        *)
+          echo "$(basename "$0") update package: too many arguments" >&2
+          exit 1
+          ;;
+      esac
+    done
+    update_package "$channel"
     ;;
   create)
     if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
@@ -1836,10 +1935,11 @@ case "$1" in
     fi
 
     # Parse create command arguments
-    # Supports: create avd <name> [--mobile|--phone|--wear|--watch] [image]
+    # Supports: create avd <name> [--mobile|--phone|--wear|--watch|--tv|--auto] [--channel=<0-3>] [image]
     avd_name=""
     device_type=""
     image_package=""
+    channel=""
     shift 2 # skip "create" and "avd"
 
     while [[ $# -gt 0 ]]; do
@@ -1876,12 +1976,24 @@ case "$1" in
           device_type="auto"
           shift
           ;;
+        --channel)
+          if [[ $# -lt 2 ]]; then
+            echo "$(basename "$0") create avd: --channel requires an argument" >&2
+            exit 1
+          fi
+          channel="$2"
+          shift 2
+          ;;
+        --channel=*)
+          channel="${1#*=}"
+          shift
+          ;;
         --help)
           usage_create 0
           ;;
         --*)
           echo "$(basename "$0") create avd: unknown option '$1'" >&2
-          echo "Valid options: --mobile, --phone, --wear, --watch, --tv, --auto" >&2
+          echo "Valid options: --mobile, --phone, --wear, --watch, --tv, --auto, --channel" >&2
           exit 1
           ;;
         *)
@@ -1904,7 +2016,7 @@ case "$1" in
       exit 1
     fi
 
-    create_avd "$avd_name" "$device_type" "$image_package"
+    create_avd "$avd_name" "$device_type" "$image_package" "$channel"
     ;;
   start)
     if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
@@ -1957,11 +2069,49 @@ case "$1" in
       echo "Usage: $(basename "$0") download package <image>" >&2
       exit 1
     fi
-    if [[ -z "${3:-}" ]]; then
+    shift 2 # skip "download" and "package"
+    image_package=""
+    channel=""
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --channel)
+          if [[ $# -lt 2 ]]; then
+            echo "$(basename "$0") download package: --channel requires an argument" >&2
+            exit 1
+          fi
+          channel="$2"
+          shift 2
+          ;;
+        --channel=*)
+          channel="${1#*=}"
+          shift
+          ;;
+        --help | -h)
+          usage_download 0
+          ;;
+        --*)
+          echo "$(basename "$0") download package: unknown option '$1'" >&2
+          exit 1
+          ;;
+        *)
+          if [[ -z "$image_package" ]]; then
+            image_package="$1"
+          else
+            echo "$(basename "$0") download package: too many arguments" >&2
+            exit 1
+          fi
+          shift
+          ;;
+      esac
+    done
+
+    if [[ -z "$image_package" ]]; then
       echo "$(basename "$0") download package: package name required" >&2
       exit 1
     fi
-    download_image "$3"
+
+    download_image "$image_package" "$channel"
     ;;
   *)
     echo "$(basename "$0"): unknown command '$1'" >&2
