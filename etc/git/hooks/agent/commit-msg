@@ -5,6 +5,8 @@
 # ///
 # Installed by the "agent" profile of the 'hook' command as commit-msg.
 # Tests: tests/test-hook-agent
+# Design decision: Hard dependency on 'uv'. Required 'uv' runtime is checked and
+# diagnosed by 'hook add' and 'hook doctor' before hook execution.
 """Strip Co-Authored-By trailers, rewrap over-long body/footer lines, and
 enforce commit message formatting."""
 
@@ -20,6 +22,7 @@ FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])(\s+)(.*)$")
 BLOCKQUOTE_RE = re.compile(r"^(\s*)(>+)(\s*)(.*)$")
 LEADING_WS_RE = re.compile(r"^[ \t]*")
+SETEXT_OR_HR_RE = re.compile(r"^\s*([-=*_])(\s*\1){2,}\s*$")
 SUBJECT_RE = re.compile(r"^[a-z][a-z0-9-]*(\([^)]+\))?!?: .+")
 GENERATED_SUBJECT_RE = re.compile(r"^(Merge |Revert |fixup! |squash! )")
 DROPPED_TRAILER_RE = re.compile(r"^(Co-Authored-By:|TAG=|CONV=)")
@@ -232,6 +235,15 @@ def wrap_block(lines):
             i += 1
             continue
 
+        setext_or_hr_match = SETEXT_OR_HR_RE.match(line)
+        if setext_or_hr_match:
+            flush_prose()
+            flush_bullet()
+            flush_quote()
+            out.append(line)
+            i += 1
+            continue
+
         # Blockquote lines (">", possibly nested as ">>") get their own
         # run, keyed on the exact quote-depth prefix so distinct depths
         # never get merged into one reflow.
@@ -286,9 +298,20 @@ def wrap_block(lines):
                 flush_bullet()
             continue
 
+        leading = LEADING_WS_RE.match(line).group(0)
+        leading_len = len(leading.expandtabs())
+        code_threshold = (
+            bullet_indent + 4 if bullet_indent and bullet_indent >= 4 else 4
+        )
+        if "\t" in leading or leading_len >= code_threshold:
+            flush_prose()
+            flush_bullet()
+            out.append(line)
+            i += 1
+            continue
+
         if bullet_indent is not None:
-            leading = LEADING_WS_RE.match(line).group(0)
-            if len(leading.expandtabs()) >= bullet_indent and line.strip() != "":
+            if leading_len >= bullet_indent and line.strip() != "":
                 is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
                     "\r\n"
                 ).endswith("\\")
@@ -299,13 +322,6 @@ def wrap_block(lines):
                     flush_bullet()
                 continue
             flush_bullet()
-            continue
-
-        leading = LEADING_WS_RE.match(line).group(0)
-        if "\t" in leading or len(leading) >= 4:
-            flush_prose()
-            out.append(line)
-            i += 1
             continue
 
         is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
