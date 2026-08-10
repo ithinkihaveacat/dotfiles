@@ -74,13 +74,14 @@ Distinguish between environmental health and resource progress:
 #### Canonical `doctor` Output Style
 
 Every `doctor` command renders findings the same way: bracketed, uppercase,
-plain-ASCII tags — `[OK]`, `[INFO]`, `[WARN]`, `[ERROR]` — left-padded to a
-common width so lines align, e.g.:
+4-letter plain-ASCII tag words — `[PASS]`, `[INFO]`, `[WARN]`, `[FAIL]`. Using
+uniform 4-letter tag words ensures every status tag `[XXXX]` is exactly 6
+characters long so findings align cleanly with a single trailing space, e.g.:
 
 ```text
-[OK]    Workspace: Git repository
+[PASS]  Workspace: Git repository
 [WARN]  Low disk space: 3.2G available at ANDROID_HOME
-[ERROR] Required Skills: environment and disk disagree (1 missing)
+[FAIL]  Required Skills: environment and disk disagree (1 missing)
 ```
 
 - Tags are greppable and fully legible with color stripped
@@ -93,7 +94,7 @@ common width so lines align, e.g.:
   belongs to (indented detail lines), not collected into a trailing summary
   section — findings scroll off-screen away from a trailing "how to fix" block
   otherwise. A one-line closing success/failure summary is fine.
-- Exit contract: read-only, non-zero exit on any `WARN`/`ERROR` finding.
+- Exit contract: read-only, non-zero exit on any `WARN`/`FAIL` finding.
 
 ### Resource Management Verb Pairs
 
