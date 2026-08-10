@@ -1,5 +1,37 @@
 # TODO
 
+## Investigate test failures when running full test suite locally (2026-08-10)
+
+**Problem:** Running the full test suite locally via
+`prove -j 9 tests/test-* skills/*/tests/test-*` results in multiple test
+failures across several modules (`test-pacioli`, `test-pascal`,
+`test-python-format`, `test-permission`, `test-skill-*`, `test-hook`). In
+contrast, the test suite passes on CI. This may be due to differences in network
+access, missing cached dependencies, unauthenticated API calls (such as
+`google-genai` registry access or `GEMINI_API_KEY`), or missing offline flag
+guards (`UV_OFFLINE=1`, `AGENT_OFFLINE=1`, `GEMINI_API_KEY=""`).
+
+**Goal:** Determine why full local `prove` runs produce failures while CI
+passes, and make local test execution hermetic, reliable, and consistent with
+documented offline/sandbox flags.
+
+**Criteria:**
+
+- Audit failure modes for `test-pacioli`, `test-python-format`,
+  `test-permission`, `test-skill-*`, and `test-hook` when executed with standard
+  `prove`.
+- Verify whether CI sets environment variables (e.g. `UV_OFFLINE=1`,
+  `AGENT_OFFLINE=1`, `GEMINI_API_KEY=""`) or if individual tests require
+  graceful skip handling for missing network/API credentials.
+- Update test runners or documentation in `tests/README.md` to ensure
+  `prove -j 9 tests/test-* skills/*/tests/test-*` behaves predictably locally.
+
+**Sketch:** Compare local test environment and flags against CI runner
+configuration. Check `test-skill-*` failures for `uv` cache requirements and
+corporate registry auth fallback, check LLM/Gemini API dependency handling in
+`test-pacioli`/`test-pascal`, and check Python 3.14 / tool version assumptions
+in `test-python-format`.
+
 ## Fix Markdown structure preservation and state tracking in commit-msg wrap_block() (2026-08-10)
 
 **Problem:** `wrap_block()` in `etc/git/hooks/agent/commit-msg` has several
