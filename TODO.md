@@ -1,5 +1,49 @@
 # TODO
 
+## Preserve parent-bullet context after a nested commit-msg bullet (2026-08-10)
+
+**Problem:** `wrap_block()` in `etc/git/hooks/agent/commit-msg` tracks the
+active bullet run in scalar variables (`bullet_marker`, `bullet_indent`,
+`bullet_buffer`, `bullet_raw`). When a nested bullet (e.g. `  - child`) opens
+while a parent bullet is active, `flush_bullet()` discards the parent's state
+before the child's own values overwrite those scalars — there is no parent
+left to return to. A continuation line of the parent that follows the child
+(indented to the parent's level, not the child's) then falls through to
+ordinary prose, since `bullet_indent` no longer matches it; if that line is
+over 72 characters, `flush_prose()` wraps it flush-left with no indentation,
+losing the parent item's structure. Found via code review on PR #147
+(branch `claude/auto-fix-commit-messages-namenc`).
+
+**Goal:** A continuation line of a parent bullet that follows a nested child
+bullet stays attached to the parent, with the parent's indentation, rather
+than becoming a new, unindented prose paragraph.
+
+**Criteria:** A commit message body shaped like
+
+```
+- parent item
+  - nested child item
+  continuation of the parent, over seventy two characters so it needs to wrap
+```
+
+rewraps with the continuation still indented under the parent's `- ` marker
+rather than flush against the left margin, with a regression test added to
+`tests/test-hook-agent`.
+
+**Sketch:** Replace the scalar `bullet_marker`/`bullet_indent`/
+`bullet_buffer`/`bullet_raw` with a stack of bullet contexts: push on a
+deeper nested bullet, and pop back to the parent when a line's indentation
+returns to the parent's level instead of always falling through to prose.
+The blockquote branch has an analogous but smaller gap for quoted bullets —
+already partially addressed by splitting adjacent quoted bullet lines into
+distinct runs, without giving the wrapped result correct nested indentation.
+
+**Constraints:** `wrap_block()` has had three fix commits on one branch
+already (`16c88e19`, `c8bbd339`, `3dba2961`); change it carefully and re-run
+`tests/test-hook-agent` in full, not just the new case. Prefer the simplest
+stack representation that keeps `flush_bullet()`'s existing wrap/pass-through
+logic reusable per frame rather than duplicating it.
+
 ## Make installed git hooks propagate fixes and uninstall cleanly (2026-08-09) — done
 
 Installed hooks were frozen copies: fixing a hook here reached no repository
@@ -84,15 +128,15 @@ and is unreferenced.
 
 ## Auto-fix mechanically fixable commit messages (2026-08-09) — done
 
-`etc/git/templates/agent/hooks/commit-msg` now rewraps over-long body/footer
-lines in place instead of rejecting them; a non-Conventional-Commits or
+`etc/git/hooks/agent/commit-msg` now rewraps over-long body/footer lines in
+place instead of rejecting them; a non-Conventional-Commits or
 over-50-character *subject* still exits 1, since fixing either would change what
-the author said. The wrapper is a ~230-line PEP 723 script (stdlib only,
-`dependencies = []`) piped into `uv run --script -` via a heredoc and embedded
-directly in the hook file, since hooks here are copied rather than linked — a
-separate companion script would silently stop tracking its source. It runs after
-the existing `Co-Authored-By:`/`TAG=`/`CONV=` trailer strip and before
-validation, and is skipped (like validation) for
+the author said. The wrapper is a PEP 723 script (stdlib only,
+`dependencies = []`) run directly via its `uv run --script` shebang, installed
+into repositories as a trampoline by the `hook` manager rather than copied, so
+editing the source here reaches every repository it is installed into with no
+re-install step. It runs after the existing `Co-Authored-By:`/`TAG=`/`CONV=`
+trailer strip and before validation, and is skipped (like validation) for
 `Merge`/`Revert`/`fixup!`/`squash!` subjects.
 
 `mdformat` was evaluated first and rejected: it escaped `5*3` to `5\*3` and

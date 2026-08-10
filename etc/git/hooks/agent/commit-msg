@@ -10,9 +10,11 @@
 """Strip Co-Authored-By trailers, rewrap over-long body/footer lines, and
 enforce commit message formatting."""
 
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import textwrap
 
 WRAP_WIDTH = 72
@@ -23,6 +25,10 @@ BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])(\s+)(.*)$")
 BLOCKQUOTE_RE = re.compile(r"^(\s*)(>+)(\s*)(.*)$")
 LEADING_WS_RE = re.compile(r"^[ \t]*")
 SETEXT_OR_HR_RE = re.compile(r"^\s*([-=*_])(\s*\1){2,}\s*$")
+# Narrower than SETEXT_OR_HR_RE on purpose: only '-'/'=' runs are setext
+# underlines. '*'/'_' runs are thematic breaks and must still be wrappable
+# paragraph-adjacent content, not treated as a heading delimiter.
+SETEXT_DELIM_RE = re.compile(r"^\s{0,3}(-+|=+)\s*$")
 SUBJECT_RE = re.compile(r"^[a-z][a-z0-9-]*(\([^)]+\))?!?: .+")
 GENERATED_SUBJECT_RE = re.compile(r"^(Merge |Revert |fixup! |squash! )")
 DROPPED_TRAILER_RE = re.compile(r"^(Co-Authored-By:|TAG=|CONV=)")
@@ -256,10 +262,19 @@ def wrap_block(lines):
             is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
                 "\r\n"
             ).endswith("\\")
+            # A quoted line that itself opens a bullet always starts its own
+            # run, the same way a bare bullet does — otherwise it gets
+            # folded into the prior quoted item's reflowed text, and its
+            # marker becomes literal text mid-paragraph.
+            starts_bullet = bool(BULLET_RE.match(text))
             if not text.strip():
                 flush_quote()
                 out.append(line)
-            elif quote_marker is not None and marker == quote_marker:
+            elif (
+                quote_marker is not None
+                and marker == quote_marker
+                and not starts_bullet
+            ):
                 quote_buffer.append(text.strip())
                 quote_raw.append(line)
                 if is_hard_break:
@@ -327,6 +342,25 @@ def wrap_block(lines):
         is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
             "\r\n"
         ).endswith("\\")
+
+        next_line = lines[i + 1] if i + 1 < n else None
+        if (
+            not is_hard_break
+            and line.strip()
+            and next_line is not None
+            and SETEXT_DELIM_RE.match(next_line)
+        ):
+            # A setext heading: the title (this line, plus whatever is
+            # already buffered from earlier lines of the same paragraph)
+            # and its underline must stay verbatim, or wrapping the title
+            # leaves the underline applying only to the last wrapped line.
+            out.extend(prose_raw)
+            out.append(line)
+            out.append(next_line)
+            prose_buffer, prose_raw = [], []
+            i += 2
+            continue
+
         prose_buffer.append(line.strip())
         prose_raw.append(line)
         i += 1
@@ -452,9 +486,21 @@ def main():
 def write_lines(path, lines):
     # Every line gets a trailing newline, matching git's own commit message
     # file convention regardless of what the file looked like on disk before.
+    # Written via a same-directory temp file + rename so a write failure
+    # (disk full, interrupted process) cannot truncate the author's draft.
     text = "".join(line + "\n" for line in lines)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 if __name__ == "__main__":

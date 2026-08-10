@@ -62,6 +62,15 @@ Examples:
   $SCRIPT_NAME doctor
   $SCRIPT_NAME remove gerrit
   env AGENT_REQUIRED_HOOKS='agent node' $SCRIPT_NAME apply
+
+'add'/'apply' abort immediately, installing nothing for that profile, if a
+required profile names a dependency that is missing or not actually usable
+(no 'uv' for agent, no 'curl' for gerrit, no prettier reachable via 'npx' or
+on PATH for node) — deliberately, so a broken promise fails loudly at
+install/checkout time rather than silently at the next commit. 'apply' does
+not partially recover: a dependency failure on any named profile stops the
+whole sync, leaving profiles processed so far installed. Run 'doctor' to see
+which profile is at fault.
 EOF
   exit 0
 }
@@ -125,11 +134,11 @@ profile_check_deps() {
       command -v uv >/dev/null 2>&1
       ;;
     node)
-      if command -v npx >/dev/null 2>&1 || command -v prettier >/dev/null 2>&1; then
-        return 0
-      else
-        return 1
-      fi
+      # Mirrors the exact probe etc/git/hooks/node/pre-commit uses at commit
+      # time: 'npx' existing is not enough if there is no local or global
+      # prettier for it to run, and the hook would then reject every commit.
+      npx --no-install prettier --version >/dev/null 2>&1 ||
+        command -v prettier >/dev/null 2>&1
       ;;
     gerrit)
       command -v curl >/dev/null 2>&1
@@ -141,7 +150,7 @@ profile_check_deps() {
 profile_dep_error() {
   case "$1" in
     agent) echo "required dependency missing ('uv')" ;;
-    node) echo "required dependency missing ('npx' or 'prettier')" ;;
+    node) echo "required dependency missing (no local or global 'prettier' runnable via 'npx' or on PATH)" ;;
     gerrit) echo "required dependency missing ('curl')" ;;
     *) echo "required dependency missing" ;;
   esac
@@ -397,7 +406,11 @@ remove_subhook() { # remove_subhook HOOK_NAME KEY
   local remaining
 
   [ -e "$subdir/$key" ] || return 0
-  is_managed_multiplexer "$dst" || return 0
+  # Ownership of the sub-hook is checked on its own content, independent of
+  # the multiplexer's state, so a sub-hook we installed still gets removed
+  # even if the multiplexer above it was since deleted or replaced by hand;
+  # otherwise cleanup never converges. Tearing the multiplexer itself down
+  # stays gated on it being ours below.
   is_managed_subhook "$subdir/$key" || return 0
 
   rm -f "$subdir/$key"
@@ -410,9 +423,11 @@ remove_subhook() { # remove_subhook HOOK_NAME KEY
   remaining=$(count_entries "$subdir")
   if [ "$remaining" -eq 0 ]; then
     rmdir "$subdir"
-    rm -f "$dst"
-    echo "$SCRIPT_NAME $cmd: removed the now-empty multiplexer at $dst" >&2
-  elif [ "$remaining" -eq 1 ] && [ -e "$subdir/$LEGACY_KEY" ]; then
+    if is_managed_multiplexer "$dst"; then
+      rm -f "$dst"
+      echo "$SCRIPT_NAME $cmd: removed the now-empty multiplexer at $dst" >&2
+    fi
+  elif [ "$remaining" -eq 1 ] && [ -e "$subdir/$LEGACY_KEY" ] && is_managed_multiplexer "$dst"; then
     mv "$subdir/$LEGACY_KEY" "$dst"
     rmdir "$subdir"
     echo "$SCRIPT_NAME $cmd: restored the pre-existing hook at $dst" >&2
@@ -513,7 +528,15 @@ add_profile() {
     if src=$(profile_source "$profile" "$name"); then
       install_subhook "$name" "$key" "$src"
     else
-      # A downloaded hook has no source here to track, so it is copied.
+      # A downloaded hook has no source here to track, so it is copied. Skip
+      # the download when the installed copy is already current (the same
+      # snapshot doctor treats as self-contained via subhook_state): 'apply'
+      # runs from the post-checkout hook, so re-fetching on every checkout
+      # would add a network round-trip and break offline checkouts for no
+      # reason.
+      if [ "$(subhook_state "$name" "$key")" = ok ]; then
+        continue
+      fi
       ensure_scratch
       src=$(fetch_profile_source "$profile" "$SCRATCH")
       install_subhook "$name" "$key" "$src" yes
@@ -728,6 +751,21 @@ for arg in "$@"; do
     *) args+=("$arg") ;;
   esac
 done
+
+# Options apply only to the subcommands documented for them; a combination
+# like 'list --force' or 'doctor --all' would otherwise succeed while
+# silently ignoring the option.
+case "$cmd" in
+  add | apply) ;;
+  *) [ "$copy_mode" = no ] || die "does not accept --copy" ;;
+esac
+case "$cmd" in
+  clean) ;;
+  *)
+    [ "$all_mode" = no ] || die "does not accept --all"
+    [ "$force_mode" = no ] || die "does not accept --force"
+    ;;
+esac
 
 require git
 

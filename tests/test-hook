@@ -14,7 +14,7 @@ REAL_BIN="$DIR/../bin/hook"
 # Isolate from the user's/system git config (signing, hooks, templates).
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
-echo "1..31"
+echo "1..35"
 
 # Test 1: --help exits zero and documents every command
 if out=$("$REAL_BIN" --help 2>&1) &&
@@ -39,6 +39,23 @@ fi
 
 WORK=$(mktemp -d "/tmp/hook-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
+
+# A stub 'prettier' on PATH, so 'add node'/'apply' pass their dependency
+# check on a machine with no real prettier install: these tests exercise the
+# multiplexer/doctor/copy plumbing around the node profile, via a fake
+# pre-commit source below, not prettier itself. 'npx' is stubbed to fail too,
+# so the check falls through to this 'prettier' the same way it would on a
+# machine with npx installed but no prettier resolvable through it, instead
+# of depending on whatever a real npx happens to find on the host running
+# this suite.
+PRETTIER_STUB="$WORK/prettier-stub"
+mkdir -p "$PRETTIER_STUB"
+printf '%s\n' '#!/bin/sh' 'echo 3.0.0-stub' >"$PRETTIER_STUB/prettier"
+chmod +x "$PRETTIER_STUB/prettier"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$PRETTIER_STUB/npx"
+chmod +x "$PRETTIER_STUB/npx"
+PATH="$PRETTIER_STUB:$PATH"
+export PATH
 
 # A stand-in dotfiles tree, so the mechanics below can edit and delete hook
 # sources without touching the ones this repository actually ships. 'hook'
@@ -452,4 +469,74 @@ if printf '%s' "$out" | grep -q 'offline mode'; then
   echo "not ok 31 - HOOK_OFFLINE=false did not override AGENT_OFFLINE=1"
 else
   echo "ok 31 - HOOK_OFFLINE=false correctly overrides AGENT_OFFLINE=1"
+fi
+
+# Test 32: 'add node' refuses when npx exists but no prettier is actually
+# runnable through it or on PATH -- mirrors the exact probe the installed
+# pre-commit hook uses at commit time, rather than just checking npx exists.
+NPX_ONLY_STUB="$WORK/npx-only"
+mkdir -p "$NPX_ONLY_STUB"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$NPX_ONLY_STUB/npx"
+chmod +x "$NPX_ONLY_STUB/npx"
+GIT_DIR_ON_PATH=$(dirname "$(command -v git)")
+NPX_ONLY_REPO=$(new_repo npxonly)
+if ! (cd "$NPX_ONLY_REPO" && PATH="$NPX_ONLY_STUB:$GIT_DIR_ON_PATH:/usr/bin:/bin" "$BIN" add node) >/dev/null 2>&1; then
+  echo "ok 32 - add node refuses when npx exists but no prettier is runnable"
+else
+  echo "not ok 32 - add node accepted an npx with no runnable prettier"
+fi
+
+# Test 33: remove drops an owned sub-hook even if its multiplexer was since
+# deleted or replaced by hand -- ownership of the sub-hook is checked on its
+# own content, not gated on the multiplexer above it, so cleanup converges.
+ORPHANED_MULTIPLEXER_REPO=$(new_repo orphanedmult)
+(cd "$ORPHANED_MULTIPLEXER_REPO" && "$BIN" add agent) >/dev/null 2>&1
+printf '#!/bin/sh\necho replaced\n' >"$ORPHANED_MULTIPLEXER_REPO/.git/hooks/commit-msg"
+chmod +x "$ORPHANED_MULTIPLEXER_REPO/.git/hooks/commit-msg"
+if (cd "$ORPHANED_MULTIPLEXER_REPO" && "$BIN" remove agent) >/dev/null 2>&1 &&
+  [ ! -e "$ORPHANED_MULTIPLEXER_REPO/.git/hooks/commit-msg.d/10-agent" ] &&
+  grep -q replaced "$ORPHANED_MULTIPLEXER_REPO/.git/hooks/commit-msg"; then
+  echo "ok 33 - remove drops an owned sub-hook even under a replaced multiplexer"
+else
+  echo "not ok 33 - remove left an owned sub-hook behind under a replaced multiplexer"
+fi
+
+# Test 34: 'apply' does not re-fetch an already-current gerrit profile, so
+# running it from the post-checkout hook on every checkout doesn't hit the
+# network (and doesn't fail offline) once the profile is installed.
+REFETCH_REPO=$(new_repo refetch)
+REFETCH_STUB="$WORK/refetch-stub"
+mkdir -p "$REFETCH_STUB"
+COUNT_FILE="$WORK/curl-count"
+: >"$COUNT_FILE"
+cat >"$REFETCH_STUB/curl" <<STUBEOF
+#!/bin/sh
+echo x >> "$COUNT_FILE"
+out=""
+while [ \$# -gt 0 ]; do
+  case \$1 in
+    -o | -sSLo) out=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "\$out" ] || exit 1
+printf '#!/bin/sh\necho gerrit-stub\n' > "\$out"
+STUBEOF
+chmod +x "$REFETCH_STUB/curl"
+(cd "$REFETCH_REPO" && PATH="$REFETCH_STUB:$PATH" HOOK_OFFLINE=0 AGENT_REQUIRED_HOOKS=gerrit "$BIN" apply) >/dev/null 2>&1
+(cd "$REFETCH_REPO" && PATH="$REFETCH_STUB:$PATH" HOOK_OFFLINE=0 AGENT_REQUIRED_HOOKS=gerrit "$BIN" apply) >/dev/null 2>&1
+if [ "$(wc -l <"$COUNT_FILE")" -eq 1 ]; then
+  echo "ok 34 - apply does not re-fetch an already-current gerrit profile"
+else
+  echo "not ok 34 - apply re-fetched a gerrit profile that was already current"
+fi
+
+# Test 35: options are rejected on subcommands they don't apply to, instead
+# of being silently ignored (e.g. 'list --force' succeeding as a no-op).
+if ! (cd "$REPO" && "$BIN" list --force) >/dev/null 2>&1 &&
+  ! (cd "$REPO" && "$BIN" doctor --all) >/dev/null 2>&1 &&
+  ! (cd "$REPO" && "$BIN" clean --copy) >/dev/null 2>&1; then
+  echo "ok 35 - options outside their documented subcommands are rejected"
+else
+  echo "not ok 35 - an option outside its subcommand was silently accepted"
 fi
