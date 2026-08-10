@@ -445,34 +445,3 @@ for each row of the decision table without consulting `--help`.
 `SKILL.md` carrying only a pointer-plus-table summary; no new heavyweight
 dependencies for the drift tests (shell + grep in the existing test layout).
 
-## Fix stale `# Tests:` pointers in scripts and tests (2026-07-09)
-
-**Problem:** `# Tests:` comments predate the flat, co-located test layout now
-documented in `tests/README.md` and were never migrated. An audit (2026-07-09)
-found 22 of 26 pointers stale: they name old directory-style paths that no
-longer exist — root-level `tests/video-index/` where the test now lives at
-`tests/test-video-index` (`bin/video-index:6`), or `tests/pacioli/` where it
-moved to `skills/agent-tools/tests/test-pacioli`
-(`skills/agent-tools/scripts/pacioli:6`). Both the scripts under test and the
-test files themselves carry stale pointers.
-
-**Goal:** Every `# Tests:` comment points at a path that exists, matching the
-convention in `tests/README.md` ("Link back from the script"). The comment
-exists so tests are discoverable via `grep '# Tests:'`; a pointer to a missing
-path defeats that.
-
-**Criteria:** This audit reports zero stale entries:
-
-```bash
-grep -rn '^# Tests:' bin skills/*/scripts skills/*/tests tests --no-messages \
-  | sed 's/:[0-9]*:# Tests: */\t/' \
-  | awk -F'\t' '{ if (system("test -e \"" $2 "\"")) print "STALE", $1, "->", $2 }'
-```
-
-**Sketch:** A mechanical find/replace per pointer. One open call: test files
-carrying their own `# Tests:` comment (e.g. `tests/test-git-setup:3`) —
-`tests/README.md` only asks for the comment on the script under test, so either
-make these self-referential (as `tests/test-git-hook-multiplexer` already is) or
-drop them.
-
-**Constraints:** Comment-only edits; no behavior changes.
