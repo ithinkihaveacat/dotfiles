@@ -239,6 +239,36 @@ fi
 echo "$(basename "$0") create: AVD name required" >&2
 ```
 
+### Missing Required Arguments
+
+Simple (non-subcommand) tools invoked without a required positional argument must print a concise usage summary, one example, and a pointer to `--help` to `stderr`, then exit `1`. They must **not** dump the full help text, print a bare error without an example or `--help` pointer, or exit `0`.
+
+> [!NOTE]
+> Complex subcommand tools (Manager-pattern tools like `skill`, `hook`, `jetpack`, `emumanager`) that show subcommand listings or help on bare invocation are exempt. Simple tools whose zero-argument invocation is a valid default action (e.g. reading from standard input or operating on the current directory/connected device) are also exempt.
+
+To implement this pattern, define a `usage_short()` helper function that prints to `stderr` and exits `1`:
+
+```bash
+usage_short() {
+  cat <<EOF >&2
+Usage: $(basename "$0") INPUT_FILE [OPTIONS]
+
+Brief 1-line summary of what the script does.
+
+Examples:
+  $(basename "$0") sample.txt
+
+Try '$(basename "$0") --help' for more information.
+EOF
+  exit 1
+}
+
+# In argument validation preamble:
+if [[ $# -lt 1 ]]; then
+  usage_short
+fi
+```
+
 ### Exit Codes
 
 Use the exit codes defined in `cli-tools.md` ("Exit Codes: Local Extensions").

@@ -7,7 +7,7 @@ respective scopes to keep them together in the directory structure.
   skill's `tests/` folder as a flat executable file (e.g.,
   `skills/bar/tests/test-foo`).
 - Tests for global utilities (scripts in `bin/`) live directly under the global
-  `tests/` folder as a flat executable file (e.g., `tests/test-git-setup`).
+  `tests/` folder as a flat executable file (e.g., `tests/test-hook`).
 - Test data and resources are stored in a `fixtures/` subdirectory under the
   corresponding `tests/` folder (e.g.,
   `skills/agent-tools/tests/fixtures/pacioli/`).
@@ -112,7 +112,7 @@ The convention itself is documented in
 
 ### 3. Skipping External API Tests (`GEMINI_API_KEY=""`)
 
-Some tests (like `test-pacioli` and `test-git-setup`) include integration tests
+Some tests (like `test-pacioli`) include integration tests
 that make actual network calls to the Gemini API. These can be slow, cost quota,
 and be non-deterministic.
 
