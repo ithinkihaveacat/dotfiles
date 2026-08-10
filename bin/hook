@@ -223,6 +223,15 @@ exec $target_quoted "\$@"
 EOF
 }
 
+is_legacy_node_hook() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  local name
+  name=$(basename "$file")
+  [[ "$name" == "pre-commit" || "$name" == "00-legacy" ]] || return 1
+  grep -qE 'prettier|git-hooks-node|git-hook-node|Format staged files before commit|Format the staged content of \.ts and \.md' "$file" 2>/dev/null
+}
+
 copy_content() {
   local src="$1" first_line
   IFS= read -r first_line <"$src" || true
@@ -312,13 +321,25 @@ install_multiplexer() {
   local dst="$1" subdir="$1.d"
   mkdir -p "$(dirname "$dst")"
 
+  if [ -d "$subdir" ] && [ -e "$subdir/$LEGACY_KEY" ]; then
+    if is_legacy_node_hook "$subdir/$LEGACY_KEY"; then
+      echo "$SCRIPT_NAME $cmd: removing legacy node hook at $subdir/$LEGACY_KEY" >&2
+      rm -f "$subdir/$LEGACY_KEY"
+    fi
+  fi
+
   if [ -f "$dst" ] && ! is_managed_multiplexer "$dst"; then
     mkdir -p "$subdir"
-    if [ -e "$subdir/$LEGACY_KEY" ]; then
-      die "refusing to overwrite $subdir/$LEGACY_KEY with the unmanaged hook at $dst"
+    if is_legacy_node_hook "$dst"; then
+      echo "$SCRIPT_NAME $cmd: replacing legacy node hook at $dst" >&2
+      rm -f "$dst"
+    else
+      if [ -e "$subdir/$LEGACY_KEY" ]; then
+        die "refusing to overwrite $subdir/$LEGACY_KEY with the unmanaged hook at $dst"
+      fi
+      echo "$SCRIPT_NAME $cmd: moving existing unmanaged hook to $subdir/$LEGACY_KEY" >&2
+      mv "$dst" "$subdir/$LEGACY_KEY"
     fi
-    echo "$SCRIPT_NAME $cmd: moving existing unmanaged hook to $subdir/$LEGACY_KEY" >&2
-    mv "$dst" "$subdir/$LEGACY_KEY"
   fi
 
   multiplexer_content >"$dst"
@@ -362,9 +383,16 @@ remove_subhook() { # remove_subhook HOOK_NAME KEY
     rm -f "$dst"
     echo "$SCRIPT_NAME $cmd: removed the now-empty multiplexer at $dst" >&2
   elif [ "$remaining" -eq 1 ] && [ -e "$subdir/$LEGACY_KEY" ]; then
-    mv "$subdir/$LEGACY_KEY" "$dst"
-    rmdir "$subdir"
-    echo "$SCRIPT_NAME $cmd: restored the pre-existing hook at $dst" >&2
+    if is_legacy_node_hook "$subdir/$LEGACY_KEY"; then
+      rm -f "$subdir/$LEGACY_KEY"
+      rmdir "$subdir"
+      rm -f "$dst"
+      echo "$SCRIPT_NAME $cmd: removed the now-empty multiplexer at $dst" >&2
+    else
+      mv "$subdir/$LEGACY_KEY" "$dst"
+      rmdir "$subdir"
+      echo "$SCRIPT_NAME $cmd: restored the pre-existing hook at $dst" >&2
+    fi
   fi
 }
 
@@ -409,6 +437,10 @@ subhook_state() { # subhook_state HOOK_NAME KEY
 
   c_src=$(copy_target "$sub")
   if [ -n "$c_src" ]; then
+    # For a --copy subhook, if the source file still exists on disk, check
+    # for content drift. If the source has gone away (e.g. a downloaded profile
+    # like gerrit installed from an ephemeral SCRATCH directory), treat the
+    # copy as a self-contained snapshot and report ok.
     if [ -f "$c_src" ]; then
       if ! cmp -s <(copy_content "$c_src") "$sub"; then
         echo "drifted_subhook"
