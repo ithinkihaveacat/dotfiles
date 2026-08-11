@@ -68,22 +68,66 @@ details):
   `android.appwidget.action.APPWIDGET_UPDATE`)
 - **Associated XML resource metadata configuration** (e.g. `@xml/widget_info`)
 
-### 3. Metadata & Resource Analysis
+### 3. Component Metadata & Resource Analysis
 
-For each widget/tile component, perform a deep analysis of its configuration and
-resources:
+Organize this section **component-by-component**, creating a dedicated
+sub-section for each declared component service (e.g. `3.1 ComponentServiceA`,
+`3.2 ComponentServiceB`). Do not split previews, XML, or strings out into
+separate global sections.
 
-- **XML Configuration Content:** Display the preformatted code block of the
-  configuration XML (e.g. content of `res/xml/widget_info.xml` or manifest
-  `<service>` block).
-- **String Dereferencing:** Resolve all referenced string resource identifiers
-  (e.g. `@string/widget_label` and `@string/widget_description`) back to their
-  actual string values defined in `res/values/strings.xml` and document them.
-- **Static Preview Extraction:** Locate and copy the static preview images
-  (e.g., container-specific layouts or tile fullscreen preview files) from the
-  APK layout resource folders (such as `drawable-nodpi/` or
-  `drawable-w225dp-nodpi/`). Present these previews side-by-side or alongside
-  the configuration code blocks.
+For each component service sub-section, include:
+
+1. **Declared Configuration XML**: Display the preformatted code block of the
+   component's manifest `<service>` block and any associated Glance provider XML
+   (e.g., `res/xml/widget_info.xml`).
+1. **Dereferenced String Resources**: Include a table resolving all referenced
+   string resource identifiers (`@string/...`) back to their literal string
+   values.
+1. **Explicit 3-Slot Static Previews**: Audit and document each of the **3
+   potential preview slots** for the component:
+   - **Tile Carousel Preview** (`androidx.wear.tiles.PREVIEW`): Declared in
+     `AndroidManifest.xml`.
+   - **Widget Container Preview (SMALL)**: Declared in provider XML
+     (`<container type="SMALL" previewImage="..." />`).
+   - **Widget Container Preview (LARGE)**: Declared in provider XML
+     (`<container type="LARGE" previewImage="..." />`).
+
+> [!NOTE] If a preview slot is not applicable or not declared (e.g. widget
+> containers for standard tiles, or carousel preview omitted for Glance
+> widgets), explicitly state `N/A` or `Not Declared`. If an image file is reused
+> across multiple slots (e.g. pointing both `SMALL` and `LARGE` container slots
+> to the same preview bitmap), explicitly note the asset duplication.
+
+#### Sample Component Sub-Section Layout Structure:
+
+```markdown
+#### 3.1 `com.example.service.MyWidgetService` (Glance Wear OS Widget)
+
+##### Component Configuration XML
+<pre>
+&lt;service android:name="com.example.service.MyWidgetService" ...&gt;
+    &lt;intent-filter&gt;
+        &lt;action android:name="androidx.glance.wear.action.BIND_WIDGET_PROVIDER"/&gt;
+    &lt;/intent-filter&gt;
+    &lt;meta-data android:name="androidx.glance.wear.widget.provider" android:resource="@xml/my_widget_info"/&gt;
+&lt;/service&gt;
+</pre>
+
+##### Dereferenced String Resources
+
+| String Resource Identifier | Resolved Value | Surface Context |
+| :--- | :--- | :--- |
+| `@string/widget_title` | `"My Widget"` | Widget Title / Header |
+| `@string/widget_description` | `"Shows quick summary."` | Widget Description |
+
+##### Declared Static Previews
+
+| Preview Slot | Status | Asset Resource / Details |
+| :--- | :--- | :--- |
+| **Tile Carousel Preview** (`androidx.wear.tiles.PREVIEW`) | **Not Declared** | None (Omitted from Manifest) |
+| **Widget Container (SMALL)** | **Declared & Present** | `@drawable/widget_preview_small` (`400x400 px`) |
+| **Widget Container (LARGE)** | **Declared & Present** | `@drawable/widget_preview_small` *(Duplicated Asset)* |
+```
 
 ### 4. Live Device Screen Captures
 
