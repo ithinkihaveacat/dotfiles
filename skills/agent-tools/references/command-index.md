@@ -780,7 +780,7 @@ Input:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-2.0-flash)
+  --model MODEL  Gemini model to use (default: gemini-3.5-flash-lite)
 
 Environment:
   GEMINI_API_KEY       Required. Your Gemini API key.
