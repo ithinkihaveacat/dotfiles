@@ -1,195 +1,237 @@
-# Wear Widget Audit Template
+# <App Name> Wear OS Widget & Tile Audit
 
-When generating integration reports for Wear OS tiles or widgets, use this
-template as a guide. The structure is loose and should be modified as
-appropriate for the specific application's features, but you should strive to
-capture the core platform specifications, configuration metadata, live device
-outputs, and bugs.
+> [!IMPORTANT] **Raw Source File Required for Complete Instructions**: This
+> template embeds extensive authoring guidelines, platform lint rules, and
+> section directives formatted as inline HTML comments
+> (`<!-- GUIDANCE: ... -->`). Markdown preview renderers (such as GitHub
+> preview, IDE viewer tabs, or document exporters) automatically strip these
+> comments out. **Be sure to inspect and edit this template in raw source mode**
+> so you do not miss critical audit guidance.
 
-### General Presentation Guidelines
+<!-- GUIDANCE: 
+  This template is a structured guide and adaptable baseline for Wear OS tile and widget integration audits. 
+  It is NOT a rigid straitjacket—feel free to adapt, expand, rearrange, or modify sections where appropriate to accurately capture the specific features, architecture, and bugs of the app under audit.
+  
+  Report Scope:
+  - Focus strictly on glanceable surfaces: Glance Wear Widgets, ProtoLayout Tiles, and AppWidgets.
+  - Omit background Watch Face Complication services unless specifically requested.
+  - Section headers for component services use a simple descriptive format: {SECTION_NUM}: {SERVICE_NAME} ({SURFACE_TYPE}).
+  
+  Outcome Terms:
+  - For service audit tables, use clear standard status codes such as PASS, FAIL, WARN, or INFO.
+-->
 
-- **Folder and Asset Structure**: Each integration audit must be self-contained
-  within its own dedicated directory (e.g. `[app_name]/` or `sample/`) organized
-  as follows:
-  - `index.html`: The HTML version of the report.
-  - `index.md`: The Markdown equivalent of the report.
-  - `images/`: Subdirectory containing all screenshot and visual assets.
-  - `videos/`: Subdirectory containing all video captures and recordings. All
-    links inside the HTML and Markdown documents must be relative to ensure
-    portability.
-- **No Image Masking or Clipping**: All images embedded in the report—both the
-  extracted static preview drawables from the APK and the live watch screen
-  captures—must be displayed exactly as they are. Do not apply circular viewport
-  clipping, `border-radius: 50%`, overlay frames, or black background masks.
-  They must appear in their raw aspect ratios and formats as they exist on disk.
+**Date:** \<Exact Date, e.g., 12 August 2026>
 
-### 1. Title & Executive Summary
+\<Brief paragraph introducing the app being audited (`<package.name>` version
+`<version_string>`), the scope of surfaces analyzed, and what the report
+covers.>
 
-Start with a descriptive title and a setup summary card containing the
-environment specifications.
+______________________________________________________________________
 
-#### Sample Setup Specifications Table
+## 1. Executive Summary & Build Metadata
 
-| Parameter           | Value / Details                                                                                            |
-| ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Package Name**    | `com.example.watch_companion`                                                                              |
-| **Phone**           | Google Pixel 7 (panther) / Android 16 (API 36)                                                             |
-| **Watch**           | Samsung Galaxy Watch (SM-L340) / Android 17 (API 37)                                                       |
-| **Renderer**        | `1.6.4.1.944661784.dogfood` (via watch `dumpsys package com.google.android.wearable.protolayout.renderer`) |
-| **Deployment Type** | Play Store install (Phone) / Sideloaded debug build (Watch)                                                |
+### Executive Summary
 
-#### Sample Jetpack Library Dependencies Table
+<!-- GUIDANCE: 
+  Provide a concise summary of the outcome of the audit. Address overall quality, primary issues or spec failures, test environment constraints, and recommended developer action items.
+  Pair technical findings directly with their corresponding remediation steps where applicable.
+-->
 
-Group relevant Jetpack libraries compiled in the APK under a separate sub-table
-(only list libraries that are present in the APK, extracting their versions from
-`.version` files under `META-INF/`):
+- **Overall Implementation Rating:** **Functional Implementation (Grade
+  \<Rating, e.g. B+>)** — Summary of dynamic rendering quality, theme
+  consistency, and multi-surface compliance.
+- **Key Findings & Developer Action Items:**
+  1. **<Issue Title> (\<FAIL|WARN|INFO>):** Description of the issue or
+     specification gap identified during analysis.
+     - *Action Required:* Recommended fix or developer remediation step.
+  1. **\<Test Environment / Architecture Note> (\<FAIL|WARN|INFO>):**
+     Description of device or build limitations (e.g. ABI architecture
+     dependencies blocking automated testing).
+     - *Action Required:* Recommended engineering or build fix.
 
-| Jetpack Library Coordinate                   | Bundled Version | Latest Version  |
-| -------------------------------------------- | --------------- | --------------- |
-| `androidx.glance:glance-wear-tiles`          | `1.0.0-alpha14` | `1.0.0-alpha14` |
-| `androidx.wear.tiles:tiles`                  | `1.6.0`         | `1.6.1`         |
-| `androidx.wear.protolayout:protolayout`      | `1.4.0`         | `1.4.1`         |
-| `androidx.compose.remote:remote-creation`    | `1.0.0-alpha02` | `1.0.0-alpha15` |
-| `androidx.compose.remote:remote-player-core` | `1.0.0-alpha02` | `1.0.0-alpha15` |
-| `androidx.wear.compose:compose-material3`    | `1.0.0-alpha24` | `1.7.0-alpha06` |
-| `androidx.wear.compose:compose-foundation`   | `1.4.0`         | `1.7.0-alpha06` |
+______________________________________________________________________
 
-### 2. Decompiled Manifest Declarations
+### Setup Specifications & Build Metadata
 
-Inspect the watch's decompiled `AndroidManifest.xml` and list the registered
-widget/tile providers (see Section 2 of the main `SKILL.md` for complete search
-details):
+<!-- GUIDANCE: Fill in environment details and package metadata extracted from the APK. -->
 
-- **Component service/receiver name**
-- **Layout container type** (Glance Widget, Wear OS Tile, or AppWidget)
-- **Intent filter action** (e.g.
-  `androidx.glance.wear.action.BIND_WIDGET_PROVIDER`,
-  `androidx.wear.tiles.action.BIND_TILE_PROVIDER`, or
-  `android.appwidget.action.APPWIDGET_UPDATE`)
-- **Associated XML resource metadata configuration** (e.g. `@xml/widget_info`)
+- **Package Name:** `<package.name>`
+- **Application Version:** `<version_name>` (Version Code: `<version_code>`)
+- **SDK Target & Range:**
+  - **`minSdkVersion`:** `<api_level>`
+  - **`targetSdkVersion`:** `<api_level>`
+  - **`compileSdkVersion`:** `<api_level>`
+- **Watch Operating Mode:** Standalone Wear OS Companion
+  (`com.google.android.wearable.standalone = true|false`)
+- **Target APK Path:** `apks/<filename>.apk`
+- **Verified Hardware Device:** `<Device Model>` (Android `<OS_Ver>` / API
+  `<API_Ver>`, serial `<serial>`)
+- **Main Launch Activity:** `<main.activity.ClassName>`
+- **Media & Sync Services:**
+  <List companion playback or synchronization services if relevant>
 
-### 3. Component Metadata & Resource Analysis
+### Resource Dimensions & Localization Overview
 
-Organize this section **component-by-component**, creating a dedicated
-sub-section for each declared component service (e.g. `3.1 ComponentServiceA`,
-`3.2 ComponentServiceB`). Do not split previews, XML, or strings out into
-separate global sections.
+<!-- GUIDANCE: 
+  Provide an overview comparing the language/locale distribution of strings against localized static preview images.
+  This allows readers to immediately see whether localized preview assets match string localization coverage or rely on base English fallback resources across non-English locales.
+  Sample data is shown below—adjust columns and sample output appropriately for the package under audit.
+-->
 
-For each component service sub-section, include:
+| Resource Type              | Locales / Directories Supported                                                                                     | Coverage & Asset Distribution Summary                                                                    |
+| :------------------------- | :------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------- |
+| **String Localization**    | Base English (`res/values/strings.xml`) + 12 Locales (`values-es/`, `values-de/`, `values-fr/`, `values-ja/`, etc.) | Full string translation coverage across 13 total locale trees.                                           |
+| **Glance Widget Previews** | Base Default (`res/drawable/shortcut_preview.png`)                                                                  | Single default graphic asset; no language-specific preview drawables provided across translated locales. |
+| **Tile Static Previews**   | Shape Qualifiers Only (`drawable-round-v23/`, `drawable-notround-v23/`)                                             | Circular vs square display geometry branching only; previews do not vary by language/locale.             |
 
-1. **Declared Configuration XML**: Display the preformatted code block of the
-   component's manifest `<service>` block and any associated Glance provider XML
-   (e.g., `res/xml/widget_info.xml`).
-1. **Dereferenced String Resources**: Include a table resolving all referenced
-   string resource identifiers (`@string/...`) back to their literal string
-   values.
-1. **Explicit 3-Slot Static Previews**: Audit and document each of the **3
-   potential preview slots** for the component:
-   - **Tile Carousel Preview** (`androidx.wear.tiles.PREVIEW`): Declared in
-     `AndroidManifest.xml`.
-   - **Widget Container Preview (SMALL)**: Declared in provider XML
-     (`<container type="SMALL" previewImage="..." />`).
-   - **Widget Container Preview (LARGE)**: Declared in provider XML
-     (`<container type="LARGE" previewImage="..." />`).
+### Bundled Jetpack Library Stack
 
-> [!NOTE] If a preview slot is not applicable or not declared (e.g. widget
-> containers for standard tiles, or carousel preview omitted for Glance
-> widgets), explicitly state `N/A` or `Not Declared`. If an image file is reused
-> across multiple slots (e.g. pointing both `SMALL` and `LARGE` container slots
-> to the same preview bitmap), explicitly note the asset duplication.
+<!-- GUIDANCE: Group relevant Jetpack libraries present in the APK, extracting exact version markers from META-INF/ directories. -->
 
-#### Sample Component Sub-Section Layout Structure:
+| Jetpack Library Coordinate                | Bundled Version | Functional Pipeline Role                       |
+| :---------------------------------------- | :-------------- | :--------------------------------------------- |
+| `androidx.glance.wear:wear`               | `<version>`     | Glance Wear widget framework core              |
+| `androidx.wear.tiles:tiles`               | `<version>`     | Full-screen Wear OS Tile service integration   |
+| `androidx.wear.protolayout:protolayout`   | `<version>`     | ProtoLayout layout and expression engine       |
+| `androidx.wear.compose:compose-material3` | `<version>`     | Native Wear Compose Material design components |
 
-```markdown
-#### 3.1 `com.example.service.MyWidgetService` (Glance Wear OS Widget)
+### Surface Catalog
 
-##### Component Configuration XML
-<pre>
-&lt;service android:name="com.example.service.MyWidgetService" ...&gt;
-    &lt;intent-filter&gt;
-        &lt;action android:name="androidx.glance.wear.action.BIND_WIDGET_PROVIDER"/&gt;
-    &lt;/intent-filter&gt;
-    &lt;meta-data android:name="androidx.glance.wear.widget.provider" android:resource="@xml/my_widget_info"/&gt;
-&lt;/service&gt;
-</pre>
+<!-- GUIDANCE: List each distinct glanceable service cataloged from AndroidManifest.xml -->
 
-##### Dereferenced String Resources
+1. **Glance Wear Widget:** `<ServiceClassName>` (`@xml/<info_xml>`)
+1. **ProtoLayout Tile:** `<ServiceClassName>` (`@drawable/<preview_resource>`)
 
-| String Resource Identifier | Resolved Value | Surface Context |
-| :--- | :--- | :--- |
-| `@string/widget_title` | `"My Widget"` | Widget Title / Header |
-| `@string/widget_description` | `"Shows quick summary."` | Widget Description |
+______________________________________________________________________
 
-##### Declared Static Previews
+## 2. Tile & Widget Services
 
-| Preview Slot | Status | Asset Resource / Details |
-| :--- | :--- | :--- |
-| **Tile Carousel Preview** (`androidx.wear.tiles.PREVIEW`) | **Not Declared** | None (Omitted from Manifest) |
-| **Widget Container (SMALL)** | **Declared & Present** | `@drawable/widget_preview_small` (`400x400 px`) |
-| **Widget Container (LARGE)** | **Declared & Present** | `@drawable/widget_preview_small` *(Duplicated Asset)* |
+<!-- GUIDANCE: 
+  Create a self-contained section per declared service component. 
+  Adapt the sub-sections below as appropriate for the component type (Glance Widget vs Tile vs AppWidget).
+-->
+
+______________________________________________________________________
+
+### 2.1: `<Service Simple Name>` (\<Glance Widget | Tile | AppWidget>)
+
+#### Component Identity & Service Purpose
+
+- **Service Class Name:** `com.package.path.<ServiceClassName>`
+- **Surface Classification:** \<Glance Wear Widget / Full-Screen Wear OS Tile /
+  AppWidget>
+- **User Functional Purpose:**
+  <Brief explanation of what the surface presents to the user on the watch.>
+
+#### 1. APK Extraction & Manifest Declarations
+
+<!-- GUIDANCE: 
+  Display the exact code block as decompiled from AndroidManifest.xml. 
+  Do not simplify or generalize the XML—show the actual manifest attributes present in the APK.
+-->
+
+##### AndroidManifest.xml Service Declaration:
+
+```xml
+<service 
+    android:enabled="true" 
+    android:exported="true" 
+    android:label="@string/widget_label" 
+    android:name="com.package.path.MyWidgetService" 
+    android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+    <intent-filter>
+        <action android:name="androidx.glance.wear.action.BIND_WIDGET_PROVIDER" />
+    </intent-filter>
+    <meta-data 
+        android:name="androidx.glance.wear.widget.provider" 
+        android:resource="@xml/my_widget_info" />
+    <!-- OPTIONAL: Special Clockwork metadata attribute linking multi-instance stacked page support -->
+    <meta-data 
+        android:name="com.google.android.clockwork.tiles.MULTI_INSTANCES_SUPPORTED" 
+        android:value="true" />
+</service>
 ```
 
-### 4. Live Device Screen Captures
+<!-- GUIDANCE: 
+  For Glance widgets or AppWidgets, show the exact decompiled XML configuration file from res/xml/. 
+  Note the `group="..."` XML attribute if present—this links the Glance capsule widget to its companion full-screen ProtoLayout tile so system pickers group them under the same app accordion item.
+  For ProtoLayout Tiles (which declare preview metadata inline in AndroidManifest.xml and do not have a separate res/xml file), note that preview declarations live directly on <meta-data android:name="androidx.wear.tiles.PREVIEW" ... />.
+-->
 
-Present actual live screenshots and recordings of the tiles/widgets running on
-the watch face. Label each capture with the service name that rendered it.
+##### Provider XML Configuration (`res/xml/<info_file>.xml`):
 
-To ensure robust layout validation, **it is highly recommended to collect and
-compare media from multiple device environments** (e.g., standard emulators vs.
-physical hardware, varying Wear OS API levels, or different OEM system
-renderers). If certain environments are unavailable during the initial pass,
-structure the report's layout to make space for these additions to be appended
-later.
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<wearwidget-provider 
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    description="@string/widget_description" 
+    group="com.package.path.CompanionTileService"
+    icon="@drawable/ic_widget_icon" 
+    label="@string/widget_label" 
+    preferredType="SMALL">
+    <container previewImage="@drawable/widget_preview" type="SMALL" />
+</wearwidget-provider>
+```
 
-#### Recommended Structure for Multi-Device Layouts:
+##### String & Resource Registry:
 
-Group captures under sub-sections corresponding to each test environment, for
-example:
+<!-- GUIDANCE: Dereference referenced string identifiers (@string/...) to their literal values extracted from strings.xml, and include special Clockwork service metadata flags extracted from manifest tags. -->
 
-- **4.1 Environment A (e.g., Physical Samsung Galaxy Watch SM-L340)**
-  - Specify the device model, Wear OS API level, and system renderer.
-  - Include successful synced states, logged-out states, and video walkthroughs.
-- **4.2 Environment B (e.g., Wear OS API 37 Emulator)**
-  - Include corresponding states and interaction loops to highlight any visual
-    layout/rendering differences compared to physical hardware.
+| Resource / Attribute Identifier                                | Extracted Value / Attribute Metadata |
+| :------------------------------------------------------------- | :----------------------------------- |
+| `@string/<label_res>`                                          | `"Literal String Value"`             |
+| `@string/<description_res>`                                    | `"Literal Description String Value"` |
+| `preferredType` / Tile Metadata                                | \`\[SMALL                            |
+| `com.google.android.clockwork.tiles.MULTI_INSTANCES_SUPPORTED` | \`true                               |
 
-#### Required Verification Media:
+#### 2. Static Preview Assets
 
-- **Multiple Layout States:** Capture the widget/tile across different runtime
-  contexts, including unauthenticated/logged-out states, empty/loading states,
-  custom configuration panels, and successful synced states.
-- **End-to-End Carousel & Addition Walkthrough Video:** Include a clean MP4
-  video (20–60s) capturing the complete user journey of adding and using widgets
-  on the watch. To ensure the recording clearly communicates the user experience
-  to stakeholders:
-  - **Visual Touch Feedback:** Ensure system touch indicators are enabled
-    (`settings put system show_touches 1`) so all on-screen taps, long-presses,
-    and swipes produce visible touch ripples.
-  - **Initial Carousel Context:** Start the recording on the watch face or an
-    existing tile page to establish initial context.
-  - **On-Screen Picker Navigation:** Record navigating the native device UI to
-    add the widget (e.g. tapping `+ Add tiles`, scrolling through the picker
-    categories, expanding the app entry under *Optimized apps*, and selecting
-    the target widget preview).
-  - **Live Render & Carousel Fit:** Show the newly added widget rendered live
-    within its slot in the carousel or stacked page layout.
-  - **Interactive Navigation:** Perform swipe interactions demonstrating how the
-    widget functions and fits among surrounding tiles.
-  - **(Optional) Layout Customization:** Demonstrate entering Edit mode
-    (long-pressing the page) to reorder or rearrange stacked widgets within a
-    multi-widget page layout.
-- **Dynamic Interaction Walkthroughs:** Include trimmed MP4 videos demonstrating
-  active interaction flows. Highlight specific actions, such as:
-  - Tapping a button to launch the main watch application activity.
-  - Tapping a button/icon to trigger in-place state mutation (e.g. refreshing
-    weather sync data).
-  - Transitioning between different page counts or carousel panels.
+<!-- GUIDANCE: 
+  Present the raw extracted static preview drawable assets from the APK. 
+  State the exact directory qualifier path (e.g. res/drawable/ or res/drawable-round-v23/), dimensions, and asset format.
+  Do not clip or mask static previews artificially.
+-->
 
-### 5. Platform & Application Bugs (Optional)
+- **APK Qualifier Directory:** `res/<drawable_directory>/<preview_file>`
+- **Resolution & Asset Format:** `<width>×<height>` px (\<PNG|WebP>)
+- **Extracted Static Asset:**
 
-Log any bugs discovered. For each bug:
+![ Static Preview](resources/%3Cpreview_filename%3E.png) *Static preview image
+(`<preview_filename>.png`) extracted from `res/<directory>/`.*
 
-- Describe the defect and steps to reproduce.
-- Embed comparison media (e.g. side-by-side screenshots, trimmed video clips).
-- Detail the recommended resolution and assign responsibility (e.g., "Wear
-  Widget product team", "App developer engineering").
+#### 3. Live Hardware Screen Captures
+
+<!-- GUIDANCE: 
+  Embed physical device or emulator screen captures of the service active on watch displays.
+  Where applicable, attempt to capture BOTH multi-state representations:
+  1. Active Dynamic / Synced State (showing dynamic artwork, playlist title, or rich media metadata).
+  2. Unauthenticated / Zero-Feed Fallback State (e.g. logged-out text or zero-item feed with search/login CTA button).
+-->
+
+- **Verified Device:** `<Device Name & API Level>`
+- **Screenshot:**
+
+![ Hardware Capture](resources/%3Clive_screenshot%3E.png) *Live device capture
+on <Device Model>.*
+
+#### 4. Service Review & Observations
+
+<!-- GUIDANCE: 
+  Evaluate the service against relevant platform guidelines, preview formats, container dimensions, visual themes, fallback states, and device behavior. 
+  Investigate platform lint requirements (e.g. preview aspect ratios, shape qualifiers, container variants) independently and document findings here.
+-->
+
+| Review Dimension                    | Status   | Specification Audit & Dynamic Hardware Observations |
+| :---------------------------------- | :------- | :-------------------------------------------------- |
+| **Container & Size Support**        | \*\*PASS | FAIL                                                |
+| **Static Preview Compliance**       | \*\*PASS | FAIL                                                |
+| **UI Contrast & Visual Hierarchy**  | \*\*PASS | FAIL                                                |
+| **Multi-Instance & Stack Behavior** | \*\*PASS | FAIL                                                |
+
+______________________________________________________________________
+
+<!-- GUIDANCE: Duplicate Section 2.x block above for each additional glanceable service provided by the application. -->
+
+*Audit report generated as part of Wear OS Widget Audit Deliverables
+(`<app_name>/index.md`).*
