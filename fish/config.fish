@@ -134,13 +134,6 @@ if type -q go
     add_path $GOPATH/bin
 end
 
-# adb
-
-#set -l LOGCAT_IGNORED_TAGS eglCodecCommon EGL_emulation OpenGLRenderer GnssHAL_GnssInterface Wear_NetworkService
-#set -x ANDROID_LOG_TAGS (string join " " (string replace -r '$' ':s' $LOGCAT_IGNORED_TAGS))
-#set -x PIDCAT_IGNORED_TAGS (string join ";" $LOGCAT_IGNORED_TAGS)
-set -x ADB_VENDOR_KEYS $XDG_DATA_HOME/adb-security/adb # go/wear-productivity-adb#adb-vendor-keys
-
 # mosh
 
 set -x MOSH_TITLE_NOPREFIX 1
