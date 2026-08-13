@@ -1,5 +1,12 @@
 # -*- sh -*-
 
+# xdg config
+
+set -q XDG_CONFIG_HOME; or set -gx XDG_CONFIG_HOME $HOME/.config
+set -q XDG_DATA_HOME; or set -gx XDG_DATA_HOME $HOME/.local/share
+set -q XDG_CACHE_HOME; or set -gx XDG_CACHE_HOME $HOME/.cache
+set -q XDG_STATE_HOME; or set -gx XDG_STATE_HOME $HOME/.local/state
+
 # tool config
 
 set -x LESS -XMcifR
@@ -63,7 +70,7 @@ end
 
 # Android Tools
 
-test -d ~/.local/share/android-sdk; and set -x ANDROID_HOME ~/.local/share/android-sdk
+test -d $XDG_DATA_HOME/android-sdk; and set -x ANDROID_HOME $XDG_DATA_HOME/android-sdk
 #test -d ~/Library/Android/sdk ; and set -x ANDROID_HOME ~/Library/Android/sdk
 #test -d ~/Android/Sdk         ; and set -x ANDROID_HOME ~/Android/Sdk
 
@@ -90,20 +97,20 @@ add_path $HOME/local/homebrew/bin
 add_path $HOME/local/homebrew/sbin
 
 add_path $HOME/.local/bin
-add_path $HOME/.local/share/npm/bin
+add_path $XDG_DATA_HOME/npm/bin
 
 # Google Cloud SDK (gcloud)
 #
 # https://cloud.google.com/sdk/
 
-add_path $HOME/.local/share/google-cloud-sdk/bin
+add_path $XDG_DATA_HOME/google-cloud-sdk/bin
 
 # Ruby
 #
 # direnv looks in RUBY_VERSIONS for different versions of ruby; ruby-install has
 # been configured to install them there. See ~/.direnvrc for usage instructions.
 
-set -x RUBY_VERSIONS $HOME/.local/share/ruby/versions
+set -x RUBY_VERSIONS $XDG_DATA_HOME/ruby/versions
 mkdir -p $RUBY_VERSIONS
 
 # Node
@@ -111,7 +118,7 @@ mkdir -p $RUBY_VERSIONS
 # direnv looks in NODE_VERSIONS for different versions of node; node-install has been configured
 # install them there. See ~/.direnv for usage instructions.
 
-set -x NODE_VERSIONS $HOME/.local/share/node/versions
+set -x NODE_VERSIONS $XDG_DATA_HOME/node/versions
 mkdir -p $NODE_VERSIONS
 
 # golang
@@ -132,7 +139,7 @@ end
 #set -l LOGCAT_IGNORED_TAGS eglCodecCommon EGL_emulation OpenGLRenderer GnssHAL_GnssInterface Wear_NetworkService
 #set -x ANDROID_LOG_TAGS (string join " " (string replace -r '$' ':s' $LOGCAT_IGNORED_TAGS))
 #set -x PIDCAT_IGNORED_TAGS (string join ";" $LOGCAT_IGNORED_TAGS)
-set -x ADB_VENDOR_KEYS $HOME/.local/share/adb-security/adb # go/wear-productivity-adb#adb-vendor-keys
+set -x ADB_VENDOR_KEYS $XDG_DATA_HOME/adb-security/adb # go/wear-productivity-adb#adb-vendor-keys
 
 # mosh
 
