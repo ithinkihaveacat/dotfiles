@@ -106,6 +106,12 @@ NON_INTERACTIVE=0
 INSTALL_TIER=core
 PRUNE=0
 
+# XDG Base Directory specification defaults
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -454,13 +460,13 @@ heading "fish"
 
 # Fish configuration needs to be in ~/.config/fish
 
-if [ ! -L "$HOME/.config/fish" ] || [ "$(readlink "$HOME/.config/fish")" != "$SRCDIR/fish" ]; then
+if [ ! -L "$XDG_CONFIG_HOME/fish" ] || [ "$(readlink "$XDG_CONFIG_HOME/fish")" != "$SRCDIR/fish" ]; then
 
-  if [ -d "$HOME/.config/fish" ] || [ -L "$HOME/.config/fish" ]; then
-    x rm -rf "$HOME/.config/fish"
+  if [ -d "$XDG_CONFIG_HOME/fish" ] || [ -L "$XDG_CONFIG_HOME/fish" ]; then
+    x rm -rf "$XDG_CONFIG_HOME/fish"
   fi
-  xmkdir "$HOME/.config"
-  x ln -s "$SRCDIR/fish" "$HOME/.config/fish"
+  xmkdir "$XDG_CONFIG_HOME"
+  x ln -s "$SRCDIR/fish" "$XDG_CONFIG_HOME/fish"
 
 fi
 
@@ -481,7 +487,7 @@ fi
 
 heading "fish completions"
 
-XDG_COMPLETIONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/fish/completions"
+XDG_COMPLETIONS_DIR="$XDG_DATA_HOME/fish/completions"
 xmkdir "$XDG_COMPLETIONS_DIR"
 
 if exists hcloud; then
@@ -514,8 +520,8 @@ if exists shpool; then
 
   heading "shpool"
 
-  xmkdir "$HOME/.config/shpool"
-  link_overlay_path "etc/shpool/config.toml" "$HOME/.config/shpool/config.toml"
+  xmkdir "$XDG_CONFIG_HOME/shpool"
+  link_overlay_path "etc/shpool/config.toml" "$XDG_CONFIG_HOME/shpool/config.toml"
 
 fi
 
@@ -525,7 +531,7 @@ if exists starship; then
 
   heading "starship"
 
-  link_overlay_path "etc/starship/starship.toml" "$HOME/.config/starship.toml"
+  link_overlay_path "etc/starship/starship.toml" "$XDG_CONFIG_HOME/starship.toml"
 
 fi
 
@@ -535,8 +541,8 @@ if exists ghostty; then
 
   heading "ghostty"
 
-  xmkdir "$HOME/.config/ghostty"
-  link_overlay_path "etc/ghostty/config" "$HOME/.config/ghostty/config"
+  xmkdir "$XDG_CONFIG_HOME/ghostty"
+  link_overlay_path "etc/ghostty/config" "$XDG_CONFIG_HOME/ghostty/config"
 
 fi
 
@@ -546,8 +552,8 @@ if exists bat || exists batcat; then
 
   heading "bat"
 
-  xmkdir "$HOME/.config/bat"
-  link_overlay_path "etc/bat/config" "$HOME/.config/bat/config"
+  xmkdir "$XDG_CONFIG_HOME/bat"
+  link_overlay_path "etc/bat/config" "$XDG_CONFIG_HOME/bat/config"
 
   if ! exists bat && exists batcat; then
     x ln -sf "$(which batcat)" "$BINDIR/bat"
@@ -922,28 +928,32 @@ EOF
   fi
 fi
 
-if exists android || exists compose-preview; then
+if exists android || exists compose-preview || [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; then
   heading "android"
   if exists android; then
     x android update || echo "warning: android update failed" >&2
   fi
   if exists compose-preview; then
-    x compose-preview update || echo "warning: compose-preview update failed" >&2
+    x env CLI_ONLY=1 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
+      compose-preview update || echo "warning: compose-preview update failed" >&2
+  elif [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; then
+    x env SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
+      bash <(curl -fsSL https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh) --cli-only || echo "warning: compose-preview install failed" >&2
   fi
 fi
 
 heading "skill plugins"
 
 # Clean up legacy skill-select configuration and cache
-x rm -rf "$HOME/.config/skill-select"
-x rm -rf "$HOME/.cache/skill-select"
+x rm -rf "$XDG_CONFIG_HOME/skill-select"
+x rm -rf "$XDG_CACHE_HOME/skill-select"
 
 # Plugins for 'skill' and 'permission'
 # (overlay repos provide these under config/<tool>/plugins).
-xmkdir "$HOME/.config/skill/plugins"
-link_overlay_files "config/skill/plugins" "$HOME/.config/skill/plugins"
-xmkdir "$HOME/.config/permission/plugins"
-link_overlay_files "config/permission/plugins" "$HOME/.config/permission/plugins"
+xmkdir "$XDG_CONFIG_HOME/skill/plugins"
+link_overlay_files "config/skill/plugins" "$XDG_CONFIG_HOME/skill/plugins"
+xmkdir "$XDG_CONFIG_HOME/permission/plugins"
+link_overlay_files "config/permission/plugins" "$XDG_CONFIG_HOME/permission/plugins"
 
 heading "agents"
 
