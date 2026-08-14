@@ -1,13 +1,19 @@
 # Bug Report Guidelines
 
 This document outlines the standard operating procedure for documenting bugs.
-The goal is to capture actionable information that allows engineers to isolate
-the specific timeframe of a defect and identify the root cause. The report
-structure is platform-neutral; for the procedure to capture supporting artifacts
-on Android devices (logs, markers, recordings), see
-[Capturing Android Bug Reports](bug-report-capture-android.md).
 
-## Bug Report Structure
+## Intent and Audience
+
+A bug report captures actionable information that allows engineers to isolate
+the specific timeframe of a defect and identify the root cause.
+
+- **Goal:** Request a fix or investigation from library/tool maintainers with
+  complete, factual reproduction evidence.
+- **Audience:** Library and tool maintainers.
+- **Tone:** Objective, factual, and assertive. Omit speculation from the primary
+  description (reserve hypotheses for the optional Analysis section).
+
+## Required Structure
 
 To ensure clarity and reproducibility, bug reports (e.g., `BUG.md`) should
 generally adhere to the following structure. While this is the ideal format,
@@ -62,7 +68,7 @@ out of 10 times"). Note any patterns (e.g., alternating success/failure).
 
 Detailed, step-by-step instructions to reproduce the bug.
 
-- Include specific `adb` commands or scripts where applicable.
+- Include specific shell commands or scripts where applicable.
 - Mention any necessary conditions (e.g., specific device state, timing).
 
 #### Expected Behavior
@@ -78,12 +84,10 @@ specific about the immediate outcome of the reproduction steps.
 
 Include the specific exception or error message identified in the logs.
 
-If a full bug report is available (see
-[Capturing Android Bug Reports](bug-report-capture-android.md)), provide:
+If a full bug report archive is available, provide:
 
 - **The Extraction Command:** The exact shell command required to extract the
-  relevant log section from the ZIP (see "Verifying the Captured Report" in that
-  guide).
+  relevant log section from the ZIP.
 - **Relevant Log Extracts:** Key lines from the output that demonstrate the
   defect, including full timestamps and error messages.
 
@@ -130,10 +134,8 @@ as the bug report document.
 
 ### Required Files
 
-- `bugreport.zip` (or similar): The captured Android bug report containing
-  system logs. Use `adb bugreport` to capture this even if you have analyzed
-  logs via `logcat`, as it contains critical system state (properties, thread
-  dumps, etc.).
+- `bugreport.zip` (or similar): The captured system bug report containing logs,
+  thread dumps, and system properties.
 
 ### Recommended Files
 
@@ -162,3 +164,18 @@ as the bug report document.
   multiple screenshots), ensure their filenames clearly distinguish them (e.g.,
   `repro_step1.png`, `repro_step2.png`). Only add a brief description (max 40
   chars) in the bug report if strictly necessary to clarify the difference.
+
+## Summary Checklist
+
+Before finalizing a bug report, verify that:
+
+- [ ] All claims in Description, Actual Behavior, and Error Log are strictly
+  factual and grounded in logs.
+- [ ] Environment specifications list exact versions, commit SHAs, or APK names
+  (no "latest").
+- [ ] Triggering code includes persistent links (pinned commits) or
+  copy-pasteable snippets.
+- [ ] Reproduction steps are step-by-step and include any required device states
+  or timing conditions.
+- [ ] Hypotheses and root-cause speculations are strictly isolated to the
+  optional `## Analysis` section.

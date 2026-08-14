@@ -1,13 +1,18 @@
 # Friction Log Guidelines
 
-A **Friction Log** documents your initial experience and walkthrough when
-attempting to adopt or evaluate a new tool, API, or CLI. It captures the raw,
-chronological reality of setup, usage, and any resulting points of friction or
-missing capabilities.
+This document outlines the standard for writing friction logs.
 
-The goal is to provide product and engineering teams with actionable,
-constructive feedback from a user's perspective, without sounding like a
-detached software review or an overly subjective critique.
+## Intent and Audience
+
+A **Friction Log** documents an engineer's initial walkthrough when adopting or
+evaluating a new tool, API, or CLI, capturing the chronological reality of
+setup, usage, and friction points.
+
+- **Goal:** Provide product and engineering teams with actionable, constructive
+  feedback from a user's perspective.
+- **Audience:** Tool authors, library maintainers, and team peers.
+- **Tone:** Constructive, collegial, and factual. Frame friction as
+  opportunities for clarity rather than tool failures.
 
 ## Required Structure
 
@@ -72,3 +77,14 @@ Conclude the document with any systemic feature requests or observations that
 fall outside a specific chronological step. Explain _why_ these features matter
 to your specific workflows. Link to examples of prior art (e.g., your own
 dotfiles or scripts) to demonstrate the utility.
+
+## Summary Checklist
+
+Before finalizing a friction log, verify that:
+
+- [ ] Tone is collegial, supportive, and objective, avoiding authoritative or
+  hyperbolic critique.
+- [ ] Steps follow a strict chronological walkthrough with exact commands and
+  literal outputs.
+- [ ] Friction points are paired with concrete suggestions or feature requests.
+- [ ] Context metadata (date, environment, perspective) is clearly defined.

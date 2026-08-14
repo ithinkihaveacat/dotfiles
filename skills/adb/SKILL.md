@@ -5,8 +5,10 @@ description: >
   Provides scripts for screenshots, screen recording, tile management, WearableService
   inspection, package operations, and device configuration. Use when working
   with adb, ADB device management, device automation, Android devices, Wear OS watches,
-  tiles, wearable data layer, dumpsys, or device debugging. Triggers: adb, adb device management,
-  device automation, android device, wear os, wearable, tile, screenshot, screen recording, dumpsys, logcat.
+  tiles, wearable data layer, dumpsys, or device debugging. Triggers: adb, adb device
+  management,
+  device automation, android device, wear os, wearable, tile, screenshot, screen recording,
+  dumpsys, logcat.
 compatibility: >-
   Requires adb. Some scripts require magick (ImageMagick), scrcpy, ffmpeg, or
   jq. Designed for filesystem-based agents with bash access.
@@ -142,6 +144,9 @@ the exact invocations, including non-obvious flags.
 
 - **Command Reference**: Detailed usage and arguments for all scripts. See
   [references/command-index.md](references/command-index.md).
+- **Bug Report Capture**: How to record markers, logcat, and screen captures for
+  bug reports. See
+  [references/bug-report-capture.md](references/bug-report-capture.md).
 - **Troubleshooting**: Solutions for connection issues, missing dependencies,
   and Wear OS quirks. See
   [references/troubleshooting.md](references/troubleshooting.md).

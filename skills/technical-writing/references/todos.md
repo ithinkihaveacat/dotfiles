@@ -35,10 +35,10 @@ absolute date the item was written (not a relative phrase, and not updated
 later): `## Filter floor plans out of the index (2026-07-04)`. This is what
 makes recency-ordering (below) checkable without relying on git history.
 
-New items are inserted **immediately below the `# TODO` heading**, not
-appended at the end of the file: the file is kept sorted with the
-most-recently-created item first. Do not reorder existing items when their
-status changes — the sort key is creation date, not last-touched date.
+New items are inserted **immediately below the `# TODO` heading**, not appended
+at the end of the file: the file is kept sorted with the most-recently-created
+item first. Do not reorder existing items when their status changes — the sort
+key is creation date, not last-touched date.
 
 The body is a sequence of **bold run-in labels**, each starting a paragraph. A
 field may grow supporting material beneath it (lists, tables, code blocks,
@@ -183,8 +183,8 @@ The default is to **update the item in place** rather than delete it:
    (commit, module, README section), and any deliberate leftovers. Trim the
    Sketch and Constraints that no longer matter.
 
-Leave the item in its existing position rather than moving it — the file's
-sort order is creation date, and completion does not change that.
+Leave the item in its existing position rather than moving it — the file's sort
+order is creation date, and completion does not change that.
 
 Keep the record brief — a paragraph or two. The commit message and PR
 description are the home for the full verification story; the TODO entry just
@@ -232,3 +232,18 @@ The general principles of this skill apply with full force:
   actionable than one justified by adjectives.
 - Mark speculation as speculation. Unverified analysis or back-of-envelope
   numbers must say so explicitly ("untested — measure before acting").
+
+## Summary Checklist
+
+Before finalizing a TODO item, verify that:
+
+- [ ] The title uses an imperative verb phrase and includes an absolute creation
+  date: `## Verb Phrase (YYYY-MM-DD)`.
+- [ ] New items are placed immediately below the `# TODO` heading (recency
+  sorted).
+- [ ] The item defines a clear Goal and End Condition without prescribing rigid
+  step-by-step plans.
+- [ ] Solutions in the Sketch are framed as suggestions for a future
+  implementer.
+- [ ] Factual grounding (files, metrics) is cited and speculation is explicitly
+  labelled.

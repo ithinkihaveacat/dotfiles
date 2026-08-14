@@ -1,9 +1,16 @@
 # Comment Guidelines
 
-Guidelines for writing effective, concise, and factual comments across different
-contexts. The skill's core principles apply with particular force here: be
-direct, state the conclusion first, and ground every claim in the specific
-behavior or tool being discussed.
+This document outlines the standard for writing effective, concise, and factual
+comments in technical discussions (e.g., code reviews, bug trackers).
+
+## Intent and Audience
+
+Comments explain technical decisions, answer reviewer questions, or provide
+clarifying context on specific diffs.
+
+- **Goal:** Resolve reviewer questions with minimum cognitive overhead.
+- **Audience:** Code reviewers and engineering collaborators.
+- **Tone:** Direct, concise, and factual.
 
 ## Code Review Comments
 
@@ -12,10 +19,7 @@ and keep the discussion focused.
 
 ### Example: Refining a Response
 
-Here is an example of refining a response to a reviewer's question about a
-change in behavior.
-
-#### Original Response (Too long and detailed)
+**DON'T (Too verbose and detailed):**
 
 > Hi @username, yes, this is expected. In Wear Compose Material 3,
 > ScreenScaffold is designed to coordinate with AppScaffold to handle
@@ -30,7 +34,7 @@ change in behavior.
 > ListScreenTest performs a scroll before capturing the second screenshot
 > (\_end), the TimeText disappears as intended.
 
-#### Refined Version (Tightest and most effective)
+**DO (Tight and effective):**
 
 > @username I believe this is expected. In Wear Compose Material 3,
 > ScreenScaffold automatically hides the TimeText during scrolling to maximize
@@ -43,3 +47,11 @@ change in behavior.
 - **State the conclusion first** ("I believe this is expected").
 - **Merge sentences** to remove transitions and filler.
 - **State the contrast directly** ("Horologist didn't... but Material 3 does").
+
+## Summary Checklist
+
+Before submitting a review comment, verify that:
+
+- [ ] The conclusion or direct answer is stated in the very first sentence.
+- [ ] Filler transitions and narrative histories are edited out.
+- [ ] Technical claims are factually grounded in component behavior.

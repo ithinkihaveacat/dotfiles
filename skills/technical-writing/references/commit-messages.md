@@ -4,6 +4,8 @@ This document outlines the standard for writing comprehensive commit messages.
 The goal is to provide future maintainers with the context necessary to
 understand _why_ a change was made via `git blame` or `git log`.
 
+## Intent and Audience
+
 A commit message is a permanent, historical record attached to the code itself.
 
 - **Goal:** Provide a factual, concise record of _what_ was changed and the
@@ -88,3 +90,15 @@ on assumptions, explicitly state why you believe it is safe.
 
 If you are skipping standard practices (like adding automated tests for a new
 feature), you _must_ explain why.
+
+## Summary Checklist
+
+Before finalizing a commit message, verify that:
+
+- [ ] The message explains the immediate technical *why* behind the change, not
+  just what was edited.
+- [ ] Detail scales proportionally with complexity, omitting PR-style user
+  stories.
+- [ ] Tone is factual, concise, and free of colloquialisms or cheerleading.
+- [ ] Controversial trade-offs, risky assumptions, or omitted tests are
+  explicitly defended.

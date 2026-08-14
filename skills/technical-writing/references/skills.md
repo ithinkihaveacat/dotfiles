@@ -1,17 +1,25 @@
 # Agent Skill Guidelines
 
-Agent Skills (`SKILL.md` files and their accompanying reference guides) provide
-instructions, workflows, and tools for AI agents operating in specific domains
-or codebases.
+This guide covers authoring, refactoring, and reviewing Agent Skills (`SKILL.md`
+files and their accompanying reference guides).
+
+## Intent and Audience
+
+Agent skills provide instructions, workflows, and tools for AI agents operating
+in specific domains or codebases.
+
+- **Goal:** Equip AI agents with self-contained, modular capabilities while
+  keeping instructions portable across workspaces.
+- **Audience:** AI agents (as primary executors) and engineers (as authors and
+  maintainers).
+- **Tone:** Direct, imperative, and capability-focused.
+
+## Core Principles & Decoupling Rule
 
 To ensure skills remain modular, portable, and maintainable across diverse
 environments (local Git repositories, CitC workspaces, cloud runtimes, Skill Hub
 marketplace), **every skill must be designed as an independent, self-contained
 unit of capability**.
-
-______________________________________________________________________
-
-## Core Principles & Decoupling Rule
 
 ### 1. Skill Independence & Self-Containment
 
@@ -29,8 +37,6 @@ ______________________________________________________________________
   overlay structures (e.g., `~/.dotfiles/skills/...`, `~/.corp/skills/...`, or
   `~/.private/skills/...`). Always resolve skill resources dynamically relative
   to `SKILL.md` or the script's own location.
-
-______________________________________________________________________
 
 ## Capability-First Authoring & Exemplar Mentions
 
@@ -51,13 +57,11 @@ CLI primitives, and functional requirements**.
    flexible/conditional language so the agent recognizes them if available in
    its loaded workspace context.
 
-______________________________________________________________________
-
 ## Anti-Patterns & Corrected Examples
 
 ### Example 1: Direct Skill Mandate vs. Capability-First with Exemplar
 
-❌ **Incorrect (Direct Coupling & Hard Dependency):**
+**DON'T (Direct Coupling & Hard Dependency):**
 
 ```markdown
 Follow this step-by-step methodology when analyzing an APK. Ensure you leverage
@@ -65,7 +69,7 @@ the `apk` and `adb` skills where applicable. Use the `adb` skill tools to
 capture screenshots.
 ```
 
-✅ **Correct (Capability-First with Exemplar Suggestion):**
+**DO (Capability-First with Exemplar Suggestion):**
 
 ```markdown
 Follow this step-by-step methodology when analyzing an APK. Leverage binary
@@ -76,11 +80,9 @@ utility (such as `adb-screenshot` if available in your workspace environment, or
 standard `adb shell screencap`).
 ```
 
-______________________________________________________________________
-
 ### Example 2: Implicit Script Execution vs. Standalone Instructions
 
-❌ **Incorrect (Assuming Script Directory Alignment):**
+**DON'T (Assuming Script Directory Alignment):**
 
 ```markdown
 # 1. Add tile to carousel and switch active display (adb skill)
@@ -88,7 +90,7 @@ scripts/adb-tile-add com.example/.MyTileService
 scripts/adb-tile-switch 0
 ```
 
-✅ **Correct (Self-Contained Primaries with Optional Helper Hints):**
+**DO (Self-Contained Primaries with Optional Helper Hints):**
 
 ```markdown
 ### 1. Carousel Setup
@@ -103,17 +105,15 @@ adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es ope
 # (Or run workspace tile helpers like `adb-tile-add com.example/.MyTileService` if present)
 ```
 
-______________________________________________________________________
-
 ### Example 3: Cross-Skill Relative Hyperlinks vs. Functional Topic References
 
-❌ **Incorrect (Broken Relative Link):**
+**DON'T (Broken Relative Link):**
 
 ```markdown
 For details on caching and offline operation, see [caching](../coding-standards/references/caching.md).
 ```
 
-✅ **Correct (Self-Contained Reference or Generic Standards Reference):**
+**DO (Self-Contained Reference or Generic Standards Reference):**
 
 ```markdown
 For details on HTTP caching and offline fallback policies, ensure response
@@ -121,11 +121,9 @@ artifacts are saved locally under `$XDG_CACHE_HOME` or consult the project's
 coding standards documentation on caching.
 ```
 
-______________________________________________________________________
-
 ### Example 4: Monolithic Umbrella Skill vs. Clean Boundary
 
-❌ **Incorrect (Scope Duplication):**
+**DON'T (Scope Duplication):**
 
 ```markdown
 # My Umbrella Skill
@@ -133,7 +131,7 @@ This skill includes instructions for deploying HTML reports using Zipline:
 [50 lines copying Zipline CLI upload arguments and web flags]
 ```
 
-✅ **Correct (Clean Functional Boundary):**
+**DO (Clean Functional Boundary):**
 
 ```markdown
 # My Skill
@@ -145,9 +143,7 @@ workspace's preferred web hosting utility or static file server (such as
 `zipline upload` or local HTTP preview).
 ```
 
-______________________________________________________________________
-
-## Summary Checklist for Skill Authors
+## Summary Checklist
 
 Before publishing or committing a skill, verify that:
 

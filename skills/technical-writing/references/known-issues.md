@@ -1,17 +1,12 @@
-# Converting Bug Reports to Known Issues
+# Known Issue Guidelines
 
 This guide explains how to translate a **Bug Report** (a request for a fix) into
 a **Known Issue** (documentation of a limitation).
 
-Use this workflow when a reported bug:
-
-- Is "working as intended" but confusing.
-- Is a known platform limitation that cannot be fixed.
-- Is too risky or low-priority to fix immediately.
-
 ## Intent and Audience
 
-Understanding the shift in perspective is key to writing effective Known Issues.
+A **Known Issue** helps developers successfully navigate and work around
+existing platform limitations or "working as intended" design choices.
 
 <!-- markdownlint-disable MD013 -->
 
@@ -24,6 +19,15 @@ Understanding the shift in perspective is key to writing effective Known Issues.
 | **Tone**        | Assertive, identifying a defect    | Helpful, facilitating success                      |
 
 <!-- markdownlint-enable MD013 -->
+
+## Core Principles
+
+1. **Lead with the Solution:** While bug reports lead with the defect, known
+   issues lead with the workaround to immediately unblock the reader.
+1. **Acceptance Over Eradication:** Treat the limitation as a reality to be
+   navigated rather than a defect to be debated.
+1. **Action-Oriented Framing:** Provide explicit replacement APIs or patterns
+   ("Use X instead of Y") rather than open-ended problem descriptions.
 
 ## The Conversion Lifecycle
 
@@ -78,7 +82,7 @@ _Note: Known issues lead with the solution; bug reports lead with the problem._
 
 ### Example 1: API Consistency (`RemoteBox`)
 
-**As a Bug Report:**
+**DON'T (Bug Report Framing):**
 
 > **Title:** `RemoteBox` incorrectly uses Arrangement instead of Alignment
 > **Defect:** `RemoteBox` uses `verticalArrangement` for positioning. This is
@@ -86,7 +90,7 @@ _Note: Known issues lead with the solution; bug reports lead with the problem._
 > should use `RemoteAlignment` to match standard semantics. **Suggested fix:**
 > Change the parameter type in `RemoteBox.kt`.
 
-**As a Known Issue:**
+**DO (Known Issue Framing):**
 
 > **Title:** `RemoteBox` Vertical Axis Requires `Arrangement`. **Symptom:** You
 > cannot use `RemoteAlignment` constants when configuring a `RemoteBox`.
@@ -96,14 +100,14 @@ _Note: Known issues lead with the solution; bug reports lead with the problem._
 
 ### Example 2: Functional Limitation (Video Uploads)
 
-**As a Bug Report:**
+**DON'T (Bug Report Framing):**
 
 > **Title:** App crashes with `OutOfMemoryError` on 4k Video Uploads **Defect:**
 > The upload buffer attempts to load the entire file into RAM before sending.
 > **Expected:** The client should stream the file in chunks to avoid memory
 > spikes. **Fix:** Implement `InputStream` handling in the network layer.
 
-**As a Known Issue:**
+**DO (Known Issue Framing):**
 
 > **Title:** Video Upload Size Limits **Symptom:** Uploading videos larger than
 > 500MB may cause the application to terminate unexpectedly. **Workaround:**
@@ -127,11 +131,15 @@ _Note: Known issues lead with the solution; bug reports lead with the problem._
 - The library behavior is unlikely to change soon (or is a design trade-off).
 - You want to reduce confusion for your team.
 
-## Key Principle
+## Summary Checklist
 
-The raw technical content is often identical, but the framing determines the
-action required.
+Before finalizing a Known Issue entry, verify that:
 
-1. **Action:** Who needs to do the work? (Maintainer vs. User)
-1. **Acceptance:** Is this a problem to be eradicated (Bug) or a reality to be
-   navigated (Known Issue)?
+- [ ] The entry leads with the observable symptom and immediately presents the
+  workaround.
+- [ ] Language is neutral and helpful, avoiding bug-oriented phrasing ("broken",
+  "incorrect", "needs fix").
+- [ ] Context is concise and explains why the behavior occurs without deep
+  internal speculation.
+- [ ] Replacement APIs or workaround code snippets are tested and
+  copy-pasteable.

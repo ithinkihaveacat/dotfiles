@@ -5,6 +5,8 @@ descriptions. The goal is to provide reviewers with the context necessary to
 understand the rationale behind technical decisions and how the change was
 validated.
 
+## Intent and Audience
+
 A PR description is your opportunity to advocate for the change. It is an
 ephemeral document aimed at the maintainer or reviewer _right now_.
 
@@ -106,3 +108,17 @@ behavior in their own environment.
 > 1. Run previews in the sample app: `./gradlew renderPreviews`
 > 1. Verify screenshots are generated in `app/build/compose-previews/renders/`
 >    and are not blank.
+
+## Summary Checklist
+
+Before finalizing a Pull Request description, verify that:
+
+- [ ] The underlying goal is clearly separated from specific implementation
+  details.
+- [ ] Motivation explains why the change is necessary and valuable to the
+  project.
+- [ ] Description is completely self-contained, omitting references to agent
+  sessions or local paths.
+- [ ] Verification steps provide reproducible instructions for reviewers to
+  validate the change.
+- [ ] Omissions, assumptions, or safety risks are explicitly addressed.

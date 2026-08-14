@@ -1,15 +1,19 @@
 # Getting Started Guide Guidelines
 
-A **Getting Started Guide** is a high-velocity, action-oriented document
-designed to take a developer (or an automated AI agent) from a clean environment
-to a tangible, successful outcome (e.g., a passing test, a deployed artifact, or
-a running service) with minimum friction.
+This guide covers authoring, refactoring, and reviewing Getting Started guides
+and onboarding documentation.
 
-Unlike comprehensive reference manuals, a getting started guide is **not** an
-exhaustive encyclopedia or architecture specification. Its primary purpose is to
-provide the exact sequence of commands needed to achieve the goal.
+## Intent and Audience
 
-______________________________________________________________________
+A Getting Started Guide is a high-velocity, action-oriented document designed to
+take a developer (or an automated AI agent) from a clean environment to a
+tangible, successful outcome with minimum friction.
+
+- **Goal:** Provide the exact sequence of commands needed to achieve a concrete
+  milestone (the "Golden Path").
+- **Audience:** Developers and AI agents seeking immediate setup instructions
+  without extraneous background reading.
+- **Tone:** Direct, action-first, and imperative.
 
 ## Core Principles
 
@@ -83,8 +87,6 @@ ______________________________________________________________________
   artifact catalogs, and advanced workflows) outside the primary
   walkthrough—either in a distinct reference section or split into dedicated
   companion reference documents.
-
-______________________________________________________________________
 
 ## Authoring Patterns & Examples
 
@@ -179,8 +181,6 @@ When aggregating multiple exit codes or failure conditions across the flow:
 | **Exit `1`** (Config) | `Toolchain version mismatch`         | `export FOO_HOME="/opt/toolchain/v2"`  |
 | **Exit `1`** (Disk)   | `Output directory permission denied` | `chmod -R 755 /tmp/foo-results`        |
 
-______________________________________________________________________
-
 ## What Belongs vs. What Does Not
 
 | Belongs in "Getting Started"            | Belongs in "Reference" / Upstream Docs    |
@@ -190,3 +190,18 @@ ______________________________________________________________________
 | Immediate command to run a sample task  | Exhaustive CLI flags & advanced options   |
 | Direct URLs / paths to view outputs     | Experimental / edge-case configurations   |
 | 1-line fixes for common failure modes   | Comprehensive schema specifications       |
+
+## Summary Checklist
+
+Before finalizing a Getting Started guide, verify that:
+
+- [ ] The walkthrough follows a single, proven golden path from zero to a
+  tangible milestone.
+- [ ] Prerequisite checks are proportional (discrete checks for simple setups,
+  consolidated script only if complex).
+- [ ] Commands are non-interactive by default (`--headless`, `-y`, etc.) and
+  directory context is explicit.
+- [ ] Common failure modes have immediate, 1-line actionable recovery
+  instructions.
+- [ ] Deep technical context, architectural diagrams, and exhaustive flag
+  references are decoupled into reference sections or companion docs.
