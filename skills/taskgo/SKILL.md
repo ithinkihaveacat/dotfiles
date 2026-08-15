@@ -18,7 +18,7 @@ journals just to retain history.
 ```text
 AGENTS.md
 INBOX.md                  # zero-ceremony capture; no schema
-projects/<id>/
+<id>/
   PROJECT.md              # identity, scope, constraints, artifacts
   STATUS.md               # current human view + generated task block
   PLAN.md                 # intended route forward
