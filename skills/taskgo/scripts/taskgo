@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+P=taskgo; BEGIN='<!-- taskgo:begin -->'; END='<!-- taskgo:end -->'
+IDRE='^TASK-[0-9A-F]{5}$'; STATES='todo|in-progress|blocked|done|cancelled'
+
+die(){ echo "$P: $*" >&2; exit 2; }; warn(){ echo "WARN $*" >&2; }
+root(){ git rev-parse --show-toplevel 2>/dev/null || die 'not in a Git repo'; }
+proj(){ local p="$(root)/projects/$1"; [[ -d "$p" ]]||die "unknown project: $1"; echo "$p"; }
+usage(){ cat <<'TXT'
+taskgo commands:
+  id
+  new-task PROJECT TITLE [--status STATE]
+  tasks [PROJECT] [--state STATE]
+  status [PROJECT]
+  sync-status PROJECT
+  doctor [PROJECT]
+  history PATH_OR_TASK_ID [FIELD]
+  commit SUBJECT [--body TEXT] [--ref REF]...
+TXT
+}
+
+# Small tolerant frontmatter reader: structure is helpful, never mandatory.
+fm(){ awk -v k="$2" 'NR==1&&$0=="---"{f=1;next} f&&$0=="---"{exit} f&&$0~("^"k":[[:space:]]*"){sub("^"k":[[:space:]]*","");gsub(/^["'\'' ]+|["'\'' ]+$/,"");print;exit}' "$1" 2>/dev/null||true; }
+blobfm(){ awk -v k="$1" 'NR==1&&$0=="---"{f=1;next} f&&$0=="---"{exit} f&&$0~("^"k":[[:space:]]*"){sub("^"k":[[:space:]]*","");gsub(/^["'\'' ]+|["'\'' ]+$/,"");print;exit}'; }
+title(){ sed -n 's/^# //p' "$1"|head -1; }
+slug(){ printf %s "$1"|tr '[:upper:]' '[:lower:]'|sed -E 's/[^a-z0-9]+/-/g;s/^-|-$//g;s/-+/-/g'|cut -c1-48; }
+
+files(){
+  local r="$(root)" d f
+  if [[ -n "${1:-}" ]]; then d="$r/projects/$1/tasks"; [[ -d "$r/projects/$1" ]]||die "unknown project: $1"; [[ -d "$d" ]]&&find "$d" -maxdepth 1 -type f -name '*.md' -print|sort
+  else for d in "$r"/projects/*/tasks; do [[ -d "$d" ]]||continue; for f in "$d"/*.md; do [[ -e "$f" ]]&&echo "$f"; done; done|sort; fi
+}
+
+# PROJECT, ID, STATE, TITLE, RELPATH
+taskrows(){
+  local f id st ti rel pr r="$(root)"
+  while IFS= read -r f; do [[ -n "$f" ]]||continue; id="$(fm "$f" id)"; st="$(fm "$f" status)"; ti="$(title "$f")"; rel="${f#$r/}"; pr="${rel#projects/}"; pr="${pr%%/*}"; printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$id" "$st" "$ti" "$rel"; done < <(files "${1:-}")
+}
+
+newid(){
+  local r="$(root)" x i
+  for i in $(seq 1 256); do x="TASK-$(printf '%s:%s:%s:%s' "$(date +%s%N 2>/dev/null||date +%s)" "$RANDOM" $$ "$i"|git hash-object --stdin|cut -c1-5|tr a-f A-F)"; if ! taskrows|cut -f2|grep -qx "$x"; then echo "$x"; return; fi; done
+  die 'could not allocate unique task ID'
+}
+
+block(){
+  local n="$(basename "$1")" rows u; rows="$(taskrows "$n")"
+  echo "$BEGIN"; echo '## Task snapshot'; echo; echo '### In progress'
+  awk -F '\t' '$3=="in-progress"{printf "- `%s` — %s\n",$2,$4;n++}END{if(!n)print "- None"}'<<<"$rows"
+  echo; echo '### Blocked'; awk -F '\t' '$3=="blocked"{printf "- `%s` — %s\n",$2,$4;n++}END{if(!n)print "- None"}'<<<"$rows"
+  printf '\nTodo: %s\nDone: %s\n' "$(awk -F '\t' '$3=="todo"{n++}END{print n+0}'<<<"$rows")" "$(awk -F '\t' '$3=="done"{n++}END{print n+0}'<<<"$rows")"
+  u="$(awk -F '\t' '$3==""||($3!="todo"&&$3!="in-progress"&&$3!="blocked"&&$3!="done"&&$3!="cancelled"){n++}END{print n+0}'<<<"$rows")"; ((u==0))||echo "Unclassified: $u"; echo "$END"
+}
+
+render(){
+  local p="$1" s="$1/STATUS.md" b="$(block "$1")"
+  if [[ ! -f "$s" ]]; then printf '# Status\n\n## Summary\n\n%s\n\n## Next\n\n' "$b"
+  elif grep -qF "$BEGIN" "$s"&&grep -qF "$END" "$s"; then awk -v b="$BEGIN" -v e="$END" -v x="$b" '$0==b{print x;skip=1;next}$0==e{skip=0;next}!skip' "$s"
+  else cat "$s"; printf '\n%s\n' "$b"; fi
+}
+sync(){ local p="$1" s="$1/STATUS.md" t="$(mktemp)"; render "$p">"$t"; if [[ -f "$s" ]]&&cmp -s "$s" "$t";then rm "$t";return 1;fi; mv "$t" "$s"; }
+
+cmd_new(){
+  [[ $# -ge 2 ]]||die 'new-task PROJECT TITLE [--status STATE]'; local pn="$1" ti="$2" st=todo p id sl f; shift 2
+  while (($#));do case "$1" in --status) st="$2";shift 2;;*)die "unknown option: $1";;esac;done
+  p="$(proj "$pn")";mkdir -p "$p/tasks";id="$(newid)";sl="$(slug "$ti")";[[ -n "$sl" ]]||sl=task;f="$p/tasks/$id-$sl.md"
+  printf '%s\n' '---' "id: $id" "status: $st" '---' '' "# $ti" '' '## Outcome' '' '## Findings' '' '## Next' '' >"$f"; printf '%s\t%s\n' "$id" "${f#$(root)/}"
+}
+
+cmd_tasks(){
+  local pn='' st=''; [[ $# -gt 0&&"$1" != --* ]]&&{ pn="$1";shift; }; while (($#));do case "$1" in --state)st="$2";shift 2;;*)die "unknown option: $1";;esac;done
+  echo -e 'PROJECT\tTASK\tSTATE\tTITLE\tPATH'; if [[ -n "$st" ]];then taskrows "$pn"|awk -F '\t' -v s="$st" '$3==s';else taskrows "$pn";fi
+}
+
+cmd_status(){
+  local p n rows r="$(root)"; if [[ $# -eq 1 ]];then p="$(proj "$1")";[[ -f "$p/STATUS.md" ]]||die 'missing STATUS.md';cat "$p/STATUS.md";return;fi
+  echo -e 'PROJECT\tIN-PROGRESS\tBLOCKED\tTODO'; for p in "$r"/projects/*;do [[ -d "$p" ]]||continue;n="$(basename "$p")";rows="$(taskrows "$n")";printf '%s\t%s\t%s\t%s\n' "$n" "$(awk -F '\t' '$3=="in-progress"{n++}END{print n+0}'<<<"$rows")" "$(awk -F '\t' '$3=="blocked"{n++}END{print n+0}'<<<"$rows")" "$(awk -F '\t' '$3=="todo"{n++}END{print n+0}'<<<"$rows")";done
+}
+
+cmd_doctor(){
+  local want="${1:-}" r="$(root)" p n rows f id st rel fid x bad=0 all dup t
+  [[ "$(git rev-parse --is-shallow-repository 2>/dev/null||echo false)" != true ]]||warn 'shallow clone: history may be incomplete'; [[ -f "$r/AGENTS.md" ]]||warn 'missing AGENTS.md'; [[ -f "$r/INBOX.md" ]]||warn 'missing INBOX.md'
+  all="$(taskrows)";dup="$(awk -F '\t' '$2!=""{print $2}'<<<"$all"|sort|uniq -d)";[[ -z "$dup" ]]||{ warn "duplicate global task ID(s): $(tr '\n' ' '<<<"$dup")";bad=1; }
+  [[ -z "$want" ]]||proj "$want">/dev/null
+  for p in "$r"/projects/*;do [[ -d "$p" ]]||continue;n="$(basename "$p")";[[ -z "$want"||"$n" == "$want" ]]||continue
+    for x in PROJECT.md STATUS.md PLAN.md;do [[ -f "$p/$x" ]]||warn "$n: missing $x";done;rows="$(taskrows "$n")"
+    while IFS=$'\t' read -r _ id st _ rel;do [[ -n "$rel" ]]||continue;[[ "$id" =~ $IDRE ]]||{ warn "$rel: invalid/missing id '$id'";bad=1; };[[ -z "$st"||"$st" =~ ^($STATES)$ ]]||warn "$rel: non-standard status '$st'";fid="$(basename "$rel"|grep -oE 'TASK-[0-9A-F]{5}'|head -1||true)";[[ -z "$fid"||"$fid" == "$id" ]]||warn "$rel: filename/frontmatter IDs disagree";done<<<"$rows"
+    if [[ -f "$p/STATUS.md" ]];then t="$(mktemp)";render "$p">"$t";cmp -s "$p/STATUS.md" "$t"||{ warn "$n: stale STATUS task snapshot (run sync-status)";bad=1; };rm "$t";fi
+    for f in "$p"/decisions/*.md;do [[ -e "$f" ]]||continue;for x in Status Context Decision Consequences;do grep -qiE "^##[[:space:]]+$x[[:space:]]*$" "$f"||warn "$n/$(basename "$f"): ADR missing ## $x";done;done
+  done
+  cat <<'TXT'
+Agent semantic review:
+- Compare STATUS Summary/Next with active tasks and recent work.
+- Check PLAN is current direction, not accumulated history.
+- Check ADR status/rationale and artifact references remain meaningful.
+- Check private tracker material has not leaked to public/shared artifacts.
+- After merges, check reconciled files express one coherent current state.
+TXT
+  return "$bad"
+}
+
+resolve(){
+  local r="$(root)" q="$1" f hit='';[[ -f "$q" ]]&&{ realpath "$q";return;};[[ -f "$r/$q" ]]&&{ realpath "$r/$q";return;};[[ "$q" =~ $IDRE ]]||die "cannot resolve: $q"
+  while IFS= read -r f;do [[ "$(fm "$f" id)" == "$q" ]]||continue;[[ -z "$hit" ]]||die "ambiguous id: $q";hit="$f";done < <(files);[[ -n "$hit" ]]||die "cannot resolve: $q";echo "$hit"
+}
+
+cmd_history(){
+  [[ $# -ge 1&&$# -le 2 ]]||die 'history PATH_OR_TASK_ID [FIELD]';local r="$(root)" f rel key="${2:-status}" sha v prev='__x' d s;f="$(resolve "$1")";rel="${f#$r/}";echo -e 'RECORDED_AT\tTRANSITION\tCOMMIT\tSUBJECT'
+  while read -r sha;do v="$(git show "$sha:$rel" 2>/dev/null|blobfm "$key"||true)";[[ "$v" == "$prev" ]]&&continue;d="$(git show -s --format=%cI "$sha")";s="$(git show -s --format=%s "$sha")";[[ "$prev" == __x ]]&&prev='(none)';[[ -n "$v" ]]||v='(missing)';printf '%s\t%s -> %s\t%s\t%s\n' "$d" "$prev" "$v" "${sha:0:10}" "$s";prev="$v";done < <(git log --reverse --format=%H -- "$rel")
+}
+
+cmd_commit(){
+  [[ $# -ge 1 ]]||die 'commit SUBJECT [--body TEXT] [--ref REF]...';local sub="$1" body='' refs=() ref ps p t;shift
+  while (($#));do case "$1" in --body)body="$2";shift 2;;--ref)refs+=("$2");shift 2;;*)die "unknown option: $1";;esac;done;git diff --cached --quiet&&die 'nothing staged'
+  ps="$(git diff --cached --name-only|sed -n 's#^projects/\([^/]*\)/.*#\1#p'|sort -u)";[[ "$(grep -c .<<<"$ps"||true)" -le 1 ]]||die 'staged changes touch multiple projects'
+  if [[ -n "$ps" ]];then p="$(proj "$ps")";sync "$p"&&git add "$p/STATUS.md"||true;cmd_doctor "$ps"||die 'doctor found errors';fi
+  t="$(mktemp)";printf '%s\n' "$sub">"$t";[[ -z "$body" ]]||printf '\n%s\n' "$body">>"$t";for ref in "${refs[@]}";do printf '\nRef: %s\n' "$ref">>"$t";done;git commit -F "$t";rm -f "$t"
+}
+
+case "${1:-help}" in
+ help|-h|--help)usage;; id)shift;newid;; new-task)shift;cmd_new "$@";; tasks)shift;cmd_tasks "$@";; status)shift;[[ $# -le 1 ]]||die 'status [PROJECT]';cmd_status "$@";; sync-status)shift;[[ $# == 1 ]]||die 'sync-status PROJECT';p="$(proj "$1")";sync "$p"&&echo updated||echo current;; doctor)shift;[[ $# -le 1 ]]||die 'doctor [PROJECT]';cmd_doctor "${1:-}";; history)shift;cmd_history "$@";; commit)shift;cmd_commit "$@";; *)usage >&2;die "unknown command: $1";; esac
