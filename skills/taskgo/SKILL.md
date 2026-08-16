@@ -16,7 +16,7 @@ be.** Rewritten current state keeps routine agent context bounded; do not append
 journals just to retain history.
 
 ```text
-AGENTS.md
+AGENTS.md                  # taskgo declaration + repository instructions
 INBOX.md                  # zero-ceremony capture; no schema
 <id>/
   PROJECT.md              # identity, scope, constraints, artifacts
@@ -25,6 +25,12 @@ INBOX.md                  # zero-ceremony capture; no schema
   tasks/*.md              # stable task records
   decisions/*.md          # ADRs
 ```
+
+The root `AGENTS.md` must state that the repository follows taskgo and include
+the canonical specification URL:
+<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>. This
+ensures agents can discover the governing process from the repository itself.
+`doctor` reports a missing declaration or URL.
 
 ### Invariants
 
@@ -97,8 +103,10 @@ owns only:
 
 ```markdown
 <!-- taskgo:begin -->
+
 ## Task snapshot
 ...
+
 <!-- taskgo:end -->
 ```
 
