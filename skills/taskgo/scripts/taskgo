@@ -49,24 +49,45 @@ STATE_ALIASES = {
 _active_subprocesses: set[subprocess.Popen] = set()
 
 
+def reap_subprocesses(signaled_by_parent: bool) -> None:
+    """Gracefully tear down active subprocesses in compliance with POSIX standards.
+
+    :param signaled_by_parent: True if the parent received a targeted signal (SIGTERM).
+                               False if a broadcast signal (SIGINT) was sent to the process group.
+    """
+    for proc in list(_active_subprocesses):
+        if proc.poll() is not None:
+            _active_subprocesses.discard(proc)
+            continue
+
+        if signaled_by_parent:
+            # Forward the signal, as the child process was not targeted natively by the OS.
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+
+        # Wait patiently for Git's internal sigchain handlers to release index.lock.
+        # 3.0 seconds provides ample margin for Git to finish writing packfiles or unlinking locks.
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except ProcessLookupError:
+                pass
+
+        _active_subprocesses.discard(proc)
+
+
 def sigterm_handler(signum, frame):
-    raise KeyboardInterrupt
+    """Handle targeted termination (kill <pid>)."""
+    reap_subprocesses(signaled_by_parent=True)
+    sys.exit(128 + signal.SIGTERM)
 
 
 signal.signal(signal.SIGTERM, sigterm_handler)
-
-
-def reap_subprocesses():
-    for proc in list(_active_subprocesses):
-        try:
-            proc.terminate()
-            proc.wait(timeout=1.0)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        _active_subprocesses.discard(proc)
 
 
 def die(msg: str, exit_code: int = 1) -> None:
@@ -1219,16 +1240,18 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        reap_subprocesses()
+        # TTY broadcasts SIGINT to the entire process group.
+        # Git is already tearing down natively; do not double-signal.
+        reap_subprocesses(signaled_by_parent=False)
         try:
             sys.stderr.write("\n")
             sys.stderr.flush()
-        except Exception:
+        except OSError:
             pass
-        sys.exit(130)
+        sys.exit(128 + signal.SIGINT)
     except BrokenPipeError:
         import os
 
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
-        sys.exit(141)
+        sys.exit(128 + signal.SIGPIPE)
