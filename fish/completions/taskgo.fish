@@ -48,7 +48,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l status -x -a 't
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -l state -x -a 'todo in-progress blocked done cancelled' -d 'Filter by state'
 
 # fix options
-complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l no-commit -d 'Apply repairs without committing'
+complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l dry-run -d 'Preview repairs without modifying files'
 
 # checkpoint options
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l path -r -d 'Include additional modified project file'

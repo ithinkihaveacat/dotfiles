@@ -442,13 +442,20 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
             def remediate_agents() -> list[Path]:
                 cur = agents_file.read_text(encoding="utf-8")
-                if needs_decl:
+                has_decl = bool(
+                    re.search(
+                        r"(follows|structured|maintained|according to).*taskgo",
+                        cur,
+                        re.IGNORECASE,
+                    )
+                )
+                if not has_decl:
                     cur = (
                         f"This repository follows taskgo: <{CANONICAL_URL}>.\n\n" + cur
                     )
-                elif needs_url:
+                elif CANONICAL_URL not in cur:
                     cur += f"\nCanonical URL: <{CANONICAL_URL}>\n"
-                if needs_auth:
+                if COMMIT_AUTH not in cur:
                     cur = cur.rstrip() + f"\n\n{COMMIT_AUTH}\n"
                 agents_file.write_text(cur, encoding="utf-8")
                 return [agents_file]
@@ -866,13 +873,13 @@ def cmd_doctor(args: list[str]) -> None:
 
 def cmd_fix(args: list[str]) -> None:
     """Auto-healing engine: repairs findings from audit_workspace and commits by default."""
-    no_commit = False
+    dry_run = False
     want_project = None
 
     idx = 0
     while idx < len(args):
-        if args[idx] == "--no-commit":
-            no_commit = True
+        if args[idx] == "--dry-run":
+            dry_run = True
             idx += 1
         elif not args[idx].startswith("--") and want_project is None:
             want_project = args[idx]
@@ -883,11 +890,6 @@ def cmd_fix(args: list[str]) -> None:
     root = get_repo_root()
     if want_project:
         get_proj_dir(want_project, root)
-
-    # Invariant: assert clean Git index before mutating
-    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
-    if diff_cached.returncode != 0:
-        die("fix: git index contains staged changes; unstage or commit them first")
 
     findings = audit_workspace(root, want_project)
     fixable = [f for f in findings if f.remediation is not None]
@@ -903,9 +905,37 @@ def cmd_fix(args: list[str]) -> None:
             print("[INFO]  Workspace is clean, no fixes needed.", file=sys.stderr)
         sys.exit(0)
 
-    # Execute all remediations and collect explicitly touched paths
+    if dry_run:
+        print(
+            f"[INFO]  Dry run: {len(fixable)} repair(s) would be applied:",
+            file=sys.stderr,
+        )
+        dry_run_files: set[str] = set()
+        for f in fixable:
+            print(f"[INFO]    - {f.message}", file=sys.stderr)
+            if f.file_path:
+                try:
+                    dry_run_files.add(
+                        str(f.file_path.resolve().relative_to(root.resolve()))
+                    )
+                except ValueError:
+                    pass
+        if dry_run_files:
+            print("\n".join(sorted(dry_run_files)))
+        return
+
+    # Invariant: assert clean Git index before mutating
+    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+    if diff_cached.returncode != 0:
+        die("fix: git index contains staged changes; unstage or commit them first")
+
+    # Execute all remediations and collect explicitly touched paths (deduplicated)
     touched_paths: set[Path] = set()
+    executed_remediations = set()
     for f in fixable:
+        if f.remediation in executed_remediations:
+            continue
+        executed_remediations.add(f.remediation)
         res = f.remediation()
         if res:
             for p in res:
@@ -934,14 +964,6 @@ def cmd_fix(args: list[str]) -> None:
     if not modified_files:
         print("[INFO]  Workspace is clean, no files changed.", file=sys.stderr)
         sys.exit(0)
-
-    if no_commit:
-        print(
-            f"[INFO]  Fixed {len(modified_files)} file(s) (no-commit mode).",
-            file=sys.stderr,
-        )
-        print("\n".join(modified_files))
-        return
 
     # Check for authorization marker
     agents_file = root / "AGENTS.md"
@@ -1104,15 +1126,9 @@ def cmd_checkpoint(args: list[str]) -> None:
         if changed and changed not in requested:
             die(f"checkpoint: unlisted project change: {changed}")
 
-    # Run doctor
-    doctor_res = subprocess.run(
-        [sys.argv[0], "doctor", project_name],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if doctor_res.returncode != 0:
+    # Run doctor in-process
+    findings = audit_workspace(root, project_name)
+    if any(f.severity in ("WARN", "FAIL") for f in findings):
         die("checkpoint: doctor found errors")
 
     # Stage requested files
@@ -1169,7 +1185,11 @@ def cmd_commit(args: list[str]) -> None:
         die("nothing staged")
 
     staged_files = run_git(["diff", "--cached", "--name-only"]).stdout.splitlines()
-    projects = {f.split("/")[0] for f in staged_files if "/" in f}
+    projects = {
+        f.split("/")[0]
+        for f in staged_files
+        if "/" in f and is_project_dir(root / f.split("/")[0])
+    }
     if len(projects) > 1:
         die("staged changes touch multiple projects")
 
@@ -1178,14 +1198,8 @@ def cmd_commit(args: list[str]) -> None:
         get_proj_dir(project_name, root)
         if sync_status(root, project_name):
             run_git(["add", f"{project_name}/STATUS.md"])
-        doctor_res = subprocess.run(
-            [sys.argv[0], "doctor", project_name],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if doctor_res.returncode != 0:
+        findings = audit_workspace(root, project_name)
+        if any(f.severity in ("WARN", "FAIL") for f in findings):
             die("doctor found errors")
 
     msg_lines = [subject]
@@ -1209,9 +1223,9 @@ Commands:
   create PROJECT TITLE [OPTIONS]   Create a new task
   list [PROJECT] [OPTIONS]         List tasks
   status [PROJECT]                 Show project status
-  sync PROJECT                     Update STATUS.md snapshot
+  sync [PROJECT]                   Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks (read-only)
-  fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
+  fix [PROJECT] [--dry-run]        Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint
   commit SUBJECT [OPTIONS]         Commit a logical transition

@@ -34,8 +34,7 @@ project scale:
 Completed tasks remain as permanent, stable records in `tasks/TASK-XXXXX-*.md`
 with `status: done` (including `## Outcome` and `## Findings`).
 
-Context boundedness is achieved through
-\[`STATUS.md`\](file:///Users/stillers/projects/rcweb/STATUS.md):
+Context boundedness is achieved through `STATUS.md`:
 
 - `STATUS.md` projects active `In progress` and `Blocked` tasks alongside counts
   (`Todo: N Done: M`).
@@ -52,13 +51,13 @@ To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
 
 - **`doctor` (Strictly Read-Only):** Runs the audit engine, renders findings
   with canonical 4-letter plain-ASCII tags (`[PASS]`, `[INFO]`, `[WARN]`,
-  `[FAIL]`), and exits non-zero on errors per the repository's \[CLI Design
-  Standard\](file:///Users/stillers/projects/.agents/skills/coding-standards/references/cli-tools.md).
+  `[FAIL]`), and exits non-zero on errors per CLI design standards.
 - **`fix` (Auto-Healing Engine):** Runs the exact same audit engine, executes
   structured remediation callbacks for auto-fixable findings (assigning missing
   task IDs, normalizing status aliases, synchronizing `STATUS.md` snapshots),
   verifies convergence, and auto-commits repairs by default with deterministic
-  `COMMIT_SHA` output on `stdout`.
+  `COMMIT_SHA` output on `stdout`. Use `--dry-run` to preview changes without
+  modifying files or committing.
 
 ## Command Vocabulary
 
@@ -72,11 +71,13 @@ unhyphenated verbs:
   summary.
 - `taskgo sync [PROJECT]`: Synchronize `STATUS.md` snapshot block.
 - `taskgo doctor [PROJECT]`: Diagnostic health check (read-only).
-- `taskgo fix [PROJECT]`: Auto-heal task metadata, status, and scaffolding.
+- `taskgo fix [PROJECT] [--dry-run]`: Auto-heal task metadata, status, and
+  scaffolding.
 - `taskgo history PATH_OR_TASK_ID [FIELD]`: Derive state transitions from Git
   ancestry.
 - `taskgo checkpoint TASK_ID SUBJECT [...]`: Guarded checkpoint transition
   commit.
+- `taskgo commit SUBJECT [...]`: Commit logical transition.
 
 ## Root Landing Page (`README.md`)
 
@@ -116,9 +117,8 @@ taskgo fix
 
 # Verify repository health
 taskgo doctor
-````
-
 ```
+````
 
 ## References
 
@@ -126,5 +126,3 @@ taskgo doctor
 - <https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions>
 - <https://git-scm.com/docs/git-log>
 - <https://git-scm.com/docs/git-interpret-trailers>
-
-```

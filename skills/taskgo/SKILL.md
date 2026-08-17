@@ -209,7 +209,7 @@ taskgo list [PROJECT] [--state STATE]
 taskgo status [PROJECT]
 taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
-taskgo fix [PROJECT] [--no-commit]
+taskgo fix [PROJECT] [--dry-run]
 taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--body TEXT] [--ref REF]...
@@ -223,7 +223,8 @@ semantic checklist.
 aliases, creates missing scaffolding, and regenerates `STATUS.md`. When the
 `taskgo:allow-local-commits` marker is present, `fix` commits the repairs by
 default and outputs machine-readable commit metadata (`COMMIT_SHA: <hash>`) on
-stdout. Use `--no-commit` for dry-run application.
+stdout. Use `--dry-run` to preview changes without modifying files or
+committing.
 
 `checkpoint` is the safe automatic-commit path. It requires the authorization
 marker in the committed root `AGENTS.md`, an initially empty index, and a
