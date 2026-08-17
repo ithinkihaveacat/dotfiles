@@ -3,30 +3,57 @@
 function __fish_taskgo_projects
     set -l r (git rev-parse --show-toplevel 2>/dev/null)
     if test -n "$r"
-        for p in $r/*/PROJECT.md
-            basename (dirname $p)
+        for p in $r/*/README.md $r/*/PROJECT.md
+            if test -f "$p"
+                basename (dirname $p)
+            end
+        end
+    end
+end
+
+function __fish_taskgo_tasks
+    set -l r (git rev-parse --show-toplevel 2>/dev/null)
+    if test -n "$r"
+        for t in $r/*/tasks/TASK-*.md
+            if test -f "$t"
+                set -l fname (basename $t .md)
+                string match -r '^TASK-[0-9A-F]{5}' -- $fname
+            end
         end
     end
 end
 
 # Complete subcommands
 complete -f -c taskgo -n __fish_use_subcommand -a id -d 'Allocate a unique task ID'
-complete -f -c taskgo -n __fish_use_subcommand -a new-task -d 'Create a new task'
-complete -f -c taskgo -n __fish_use_subcommand -a tasks -d 'List tasks'
+complete -f -c taskgo -n __fish_use_subcommand -a create -d 'Create a new task'
+complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
 complete -f -c taskgo -n __fish_use_subcommand -a status -d 'Show project status'
-complete -f -c taskgo -n __fish_use_subcommand -a sync-status -d 'Update STATUS.md snapshot'
-complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks'
+complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
+complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks (read-only)'
+complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadata and snapshots'
 complete -f -c taskgo -n __fish_use_subcommand -a history -d 'Show frontmatter history'
+complete -f -c taskgo -n __fish_use_subcommand -a checkpoint -d 'Commit an authorized tracker checkpoint'
 complete -f -c taskgo -n __fish_use_subcommand -a commit -d 'Commit a logical transition'
 
 # Subcommand arguments (Projects)
-complete -f -c taskgo -n '__fish_seen_subcommand_from new-task tasks status sync-status doctor' -a '(__fish_taskgo_projects)' -d Project
+complete -f -c taskgo -n '__fish_seen_subcommand_from create list status sync doctor fix' -a '(__fish_taskgo_projects)' -d Project
 
-# new-task options
-complete -f -c taskgo -n '__fish_seen_subcommand_from new-task' -l status -x -a 'todo in-progress blocked done cancelled' -d 'Initial state'
+# Subcommand arguments (Task IDs for history / checkpoint)
+complete -f -c taskgo -n '__fish_seen_subcommand_from history checkpoint' -a '(__fish_taskgo_tasks)' -d 'Task ID'
 
-# tasks options
-complete -f -c taskgo -n '__fish_seen_subcommand_from tasks' -l state -x -a 'todo in-progress blocked done cancelled' -d 'Filter by state'
+# create options
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l status -x -a 'todo in-progress blocked done cancelled' -d 'Initial state'
+
+# list options
+complete -f -c taskgo -n '__fish_seen_subcommand_from list' -l state -x -a 'todo in-progress blocked done cancelled' -d 'Filter by state'
+
+# fix options
+complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l no-commit -d 'Apply repairs without committing'
+
+# checkpoint options
+complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l path -r -d 'Include additional modified project file'
+complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l body -x -d 'Commit body'
+complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l ref -x -d 'External reference URL/ID'
 
 # commit options
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -l body -x -d 'Commit body'
