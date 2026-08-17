@@ -61,7 +61,9 @@ rebases, or other history rewriting.
 1. Canonical history is append-oriented. Rewrite unpublished work if useful;
    normally correct integrated history with new commits.
 1. Private tracker information must not implicitly flow into linked
-   public/shared artifacts.
+   public/shared artifacts. Artifact path references prefer `$HOME`-relative
+   form (`~/...`) to remain portable across machines (list multiple checkout
+   paths when locations vary per environment).
 1. `STATUS.md` is the self-contained projection of current operational state:
    reading `STATUS.md` directly answers status, recent progress, and immediate
    next steps without traversing individual task files. Generated task state
