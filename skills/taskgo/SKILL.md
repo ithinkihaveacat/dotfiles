@@ -137,15 +137,18 @@ Before work: read root `AGENTS.md`, then project `PROJECT.md`, `STATUS.md`,
 relevant tasks/ADRs, and `PLAN.md` when direction matters. Inspect linked
 artifact repos under their own instructions.
 
-Establish commit authority before starting when reconstructible lifecycle
-history matters. The committed `taskgo:allow-local-commits` marker grants
-standing authority for the guarded checkpoint command. If authorized, commit a
-meaningful `in-progress` transition before artifact work that may span sessions,
-then commit completion with `Ref:` trailers for linked artifact commits. A small
-task completed atomically may transition directly from `todo` to `done`. Without
-commit authority, keep changes uncommitted and state clearly that intermediate
-transitions will not be retained; never create retrospective state commits that
-did not reflect reality at the time.
+Commit authority, before starting (when reconstructible lifecycle history
+matters):
+
+1. Committed `taskgo:allow-local-commits` marker present -> authorized for
+   guarded `checkpoint` commits in this control repo only.
+1. Authorized: commit a meaningful `in-progress` transition before artifact
+   work that may span sessions; commit completion with `Ref:` trailers for
+   linked artifact commits. A small task completed atomically may go directly
+   `todo` -> `done`.
+1. Not authorized: keep changes uncommitted; state clearly that intermediate
+   transitions will not be retained. Never create retrospective state commits
+   that did not reflect reality at the time.
 
 After meaningful work:
 
@@ -157,6 +160,13 @@ After meaningful work:
 1. Run `scripts/taskgo doctor PROJECT` and perform its semantic review.
 1. Commit a coherent transition when practical. Use `checkpoint` when standing
    authority is present. Subject = what became true, not what file changed.
+
+Before leaving or completing a task, double-check:
+
+1. Handoff: state, findings, and decisions needed to resume are written into
+   the task/STATUS/PLAN, not left only in conversation.
+1. Consistency: tracker claims match actual artifact-repo state (e.g. a task
+   is not `done` while its artifact-repo commit remains uncommitted).
 
 Examples:
 
