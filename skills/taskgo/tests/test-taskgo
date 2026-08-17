@@ -29,7 +29,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..5'
+echo '1..14'
 
 if (cd "$REPO" && "$BIN" sync-status example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -72,10 +72,167 @@ printf '%s\n' \
   'This repository follows taskgo:' \
   '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
   >"$REPO/AGENTS.md"
-sed -i.bak 's/status: todo/status: done/' \
+sed -i.bak 's/status: todo/status: in-progress/' \
+  "$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
+(cd "$REPO" && "$BIN" sync-status example) >/dev/null
+awk '
+  { print }
+  $0 == "## Summary" {
+    print ""
+    print "There is no task currently in progress."
+  }
+' "$REPO/example/STATUS.md" >"$REPO/example/STATUS.md.tmp"
+mv "$REPO/example/STATUS.md.tmp" "$REPO/example/STATUS.md"
+if ! contradiction_out=$(cd "$REPO" && "$BIN" doctor example 2>&1) &&
+  printf '%s\n' "$contradiction_out" |
+  grep -q '^\[WARN\]  example: STATUS prose says no task is in progress'; then
+  echo 'ok 5 - doctor detects contradictory STATUS prose'
+else
+  echo 'not ok 5 - doctor accepts contradictory STATUS prose'
+fi
+
+sed -i.bak '/There is no task currently in progress\./d' \
+  "$REPO/example/STATUS.md"
+sed -i.bak 's/status: in-progress/status: done/' \
   "$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 if ! (cd "$REPO" && "$BIN" doctor example) >/dev/null 2>&1; then
-  echo 'ok 5 - doctor still detects task snapshot drift'
+  echo 'ok 6 - doctor still detects task snapshot drift'
 else
-  echo 'not ok 5 - doctor missed task snapshot drift'
+  echo 'not ok 6 - doctor missed task snapshot drift'
+fi
+
+CHECKPOINT_REPO="$TEST_ROOT/checkpoint-repo"
+mkdir -p "$CHECKPOINT_REPO/example/tasks"
+git -C "$CHECKPOINT_REPO" init -q
+git -C "$CHECKPOINT_REPO" config user.name 'Taskgo Test'
+git -C "$CHECKPOINT_REPO" config user.email 'taskgo@example.invalid'
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$CHECKPOINT_REPO/AGENTS.md"
+printf '# Inbox\n' >"$CHECKPOINT_REPO/INBOX.md"
+printf '# Example project\n' >"$CHECKPOINT_REPO/example/PROJECT.md"
+printf '# Plan\n' >"$CHECKPOINT_REPO/example/PLAN.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-B2C3D' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Exercise guarded checkpoints' \
+  >"$CHECKPOINT_REPO/example/tasks/TASK-B2C3D-checkpoints.md"
+(cd "$CHECKPOINT_REPO" && "$BIN" sync-status example) >/dev/null
+git -C "$CHECKPOINT_REPO" add .
+git -C "$CHECKPOINT_REPO" commit -qm 'test: initialize tracker'
+
+CHECKPOINT_TASK="$CHECKPOINT_REPO/example/tasks/TASK-B2C3D-checkpoints.md"
+start_checkpoint() {
+  sed 's/status: todo/status: in-progress/' "$CHECKPOINT_TASK" \
+    >"$CHECKPOINT_TASK.tmp"
+  mv "$CHECKPOINT_TASK.tmp" "$CHECKPOINT_TASK"
+}
+
+start_checkpoint
+if ! (cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint TASK-B2C3D 'example: start checkpoint test') >/dev/null 2>&1; then
+  echo 'ok 7 - checkpoint requires committed authorization'
+else
+  echo 'not ok 7 - checkpoint accepts missing authorization'
+fi
+git -C "$CHECKPOINT_REPO" restore example/tasks/TASK-B2C3D-checkpoints.md
+
+printf '\n%s\n' '<!-- taskgo:allow-local-commits -->' \
+  >>"$CHECKPOINT_REPO/AGENTS.md"
+git -C "$CHECKPOINT_REPO" add AGENTS.md
+git -C "$CHECKPOINT_REPO" commit -qm 'test: authorize checkpoints'
+
+start_checkpoint
+git -C "$CHECKPOINT_REPO" add example/tasks/TASK-B2C3D-checkpoints.md
+if ! (cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint TASK-B2C3D 'example: start checkpoint test') >/dev/null 2>&1; then
+  echo 'ok 8 - checkpoint refuses a non-empty index'
+else
+  echo 'not ok 8 - checkpoint accepts a non-empty index'
+fi
+git -C "$CHECKPOINT_REPO" restore --staged example/tasks/TASK-B2C3D-checkpoints.md
+git -C "$CHECKPOINT_REPO" restore example/tasks/TASK-B2C3D-checkpoints.md
+
+start_checkpoint
+if ! (cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint TASK-B2C3D 'example: start checkpoint test' \
+    --path INBOX.md) >/dev/null 2>&1; then
+  echo 'ok 9 - checkpoint rejects paths outside the task project'
+else
+  echo 'not ok 9 - checkpoint accepts a path outside the task project'
+fi
+git -C "$CHECKPOINT_REPO" restore example/tasks/TASK-B2C3D-checkpoints.md
+
+start_checkpoint
+printf '\nStart with a guarded checkpoint.\n' \
+  >>"$CHECKPOINT_REPO/example/PLAN.md"
+if ! (cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint TASK-B2C3D 'example: start checkpoint test') >/dev/null 2>&1; then
+  echo 'ok 10 - checkpoint refuses unlisted project changes'
+else
+  echo 'not ok 10 - checkpoint accepts unlisted project changes'
+fi
+git -C "$CHECKPOINT_REPO" restore example/tasks/TASK-B2C3D-checkpoints.md
+git -C "$CHECKPOINT_REPO" restore example/PLAN.md
+
+start_checkpoint
+printf '\nStart with a guarded checkpoint.\n' \
+  >>"$CHECKPOINT_REPO/example/PLAN.md"
+printf '\nUnrelated root note.\n' >>"$CHECKPOINT_REPO/INBOX.md"
+if (cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint TASK-B2C3D 'example: start checkpoint test' \
+    --path example/PLAN.md --ref artifact@abc123) >/dev/null 2>&1 &&
+  git -C "$CHECKPOINT_REPO" diff --quiet -- example &&
+  ! git -C "$CHECKPOINT_REPO" diff --quiet -- INBOX.md &&
+  [[ "$(git -C "$CHECKPOINT_REPO" log -1 --format=%s)" == 'example: start checkpoint test' ]] &&
+  git -C "$CHECKPOINT_REPO" log -1 --format=%B | grep -q '^Ref: artifact@abc123$' &&
+  grep -q 'TASK-B2C3D.*Exercise guarded checkpoints' \
+    "$CHECKPOINT_REPO/example/STATUS.md" &&
+  (cd "$CHECKPOINT_REPO" && "$BIN" history TASK-B2C3D) |
+  grep -q 'todo -> in-progress'; then
+  echo 'ok 11 - checkpoint commits only the validated project transition'
+else
+  echo 'not ok 11 - checkpoint did not preserve its safety boundary'
+fi
+
+sed 's/status: in-progress/status: done/' "$CHECKPOINT_TASK" \
+  >"$CHECKPOINT_TASK.tmp"
+mv "$CHECKPOINT_TASK.tmp" "$CHECKPOINT_TASK"
+if checkpoint_out=$(cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint TASK-B2C3D 'example: finish checkpoint test' 2>&1) &&
+  [[ "$(git -C "$CHECKPOINT_REPO" log -1 --format=%s)" == 'example: finish checkpoint test' ]] &&
+  (cd "$CHECKPOINT_REPO" && "$BIN" history TASK-B2C3D) |
+  grep -q 'in-progress -> done'; then
+  echo 'ok 12 - checkpoint accepts an empty optional reference list'
+else
+  echo 'not ok 12 - checkpoint fails without an optional reference'
+  printf '# %s\n' "$checkpoint_out"
+fi
+
+if ! (cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint example/tasks/TASK-B2C3D-checkpoints.md \
+    'example: reject path target') >/dev/null 2>&1; then
+  echo 'ok 13 - checkpoint requires a task ID target'
+else
+  echo 'not ok 13 - checkpoint accepts a path target'
+fi
+
+sed '/taskgo:allow-local-commits/d' "$CHECKPOINT_REPO/AGENTS.md" \
+  >"$CHECKPOINT_REPO/AGENTS.md.tmp"
+mv "$CHECKPOINT_REPO/AGENTS.md.tmp" "$CHECKPOINT_REPO/AGENTS.md"
+sed 's/status: done/status: todo/' "$CHECKPOINT_TASK" \
+  >"$CHECKPOINT_TASK.tmp"
+mv "$CHECKPOINT_TASK.tmp" "$CHECKPOINT_TASK"
+if ! (cd "$CHECKPOINT_REPO" &&
+  "$BIN" checkpoint TASK-B2C3D 'example: revoked checkpoint') >/dev/null 2>&1; then
+  echo 'ok 14 - an uncommitted marker removal revokes authorization'
+else
+  echo 'not ok 14 - checkpoint ignores a working-tree revocation'
 fi

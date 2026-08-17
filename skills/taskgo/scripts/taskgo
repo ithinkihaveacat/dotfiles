@@ -16,6 +16,7 @@ Commands:
   sync-status PROJECT              Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
+  checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint
   commit SUBJECT [OPTIONS]         Commit a logical transition
 
 Options:
@@ -25,6 +26,7 @@ Examples:
   $(basename "$0") id
   $(basename "$0") new-task my-project "Diagnose intermittent disconnects"
   $(basename "$0") sync-status my-project
+  $(basename "$0") checkpoint TASK-3A91F "project: start diagnosis"
 TXT
   exit 0
 }
@@ -52,6 +54,7 @@ require cmp
 BEGIN='<!-- taskgo:begin -->'
 END='<!-- taskgo:end -->'
 CANONICAL_URL='https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo'
+COMMIT_AUTH='<!-- taskgo:allow-local-commits -->'
 IDRE='^TASK-[0-9A-F]{5}$'
 STATES='todo|in-progress|blocked|done|cancelled'
 
@@ -213,7 +216,7 @@ cmd_status() {
 }
 
 cmd_doctor() {
-  local want="${1:-}" r p n rows f id st rel fid x bad=0 all dup t
+  local want="${1:-}" r p n rows f id st rel fid x bad=0 all dup t active prose
   r="$(root)"
   if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" == true ]]; then
     warn 'shallow clone: history may be incomplete'
@@ -278,6 +281,12 @@ cmd_doctor() {
         bad=1
       }
       rm "$t"
+      active="$(awk -F '\t' '$3=="in-progress"{n++}END{print n+0}' <<<"$rows")"
+      prose="$(awk -v b="$BEGIN" -v e="$END" '$0==b{skip=1;next}$0==e{skip=0;next}!skip{printf "%s ",$0}' "$p/STATUS.md")"
+      if ((active > 0)) && grep -qiE '(no[[:space:]]+tasks?|nothing)([[:space:]]+(is|are))?([[:space:]]+currently)?[[:space:]]+in[ -]progress' <<<"$prose"; then
+        warn "$n: STATUS prose says no task is in progress, but $active task(s) are in-progress"
+        bad=1
+      fi
     fi
     for f in "$p"/decisions/*.md; do
       [[ -e "$f" ]] || continue
@@ -291,7 +300,7 @@ cmd_doctor() {
   done
   cat <<'TXT'
 [INFO]  Agent semantic review
-        Compare STATUS Summary/Next with active tasks and recent work.
+        Check STATUS Summary/Next for contradictions with tasks and recent work.
         Check PLAN is current direction, not accumulated history.
         Check ADR status/rationale and artifact references remain meaningful.
         Check private tracker material has not leaked to public/shared artifacts.
@@ -340,6 +349,102 @@ cmd_history() {
   done < <(git log --reverse --format=%H -- "$rel")
 }
 
+cmd_checkpoint() {
+  [[ $# -ge 2 ]] || die 'checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...'
+  local q="$1" sub="$2" body='' r f rel pn p status_rel path changed allowed ok ref t
+  local paths=() refs=()
+  shift 2
+  while (($#)); do case "$1" in --path)
+    [[ $# -ge 2 ]] || die 'checkpoint: --path requires a value'
+    paths+=("$2")
+    shift 2
+    ;;
+  --body)
+    [[ $# -ge 2 ]] || die 'checkpoint: --body requires a value'
+    body="$2"
+    shift 2
+    ;;
+  --ref)
+    [[ $# -ge 2 ]] || die 'checkpoint: --ref requires a value'
+    refs+=("$2")
+    shift 2
+    ;;
+  *) die "unknown option: $1" ;; esac done
+
+  r="$(root)"
+  [[ "$q" =~ $IDRE ]] || die "checkpoint: invalid task ID: $q"
+  if ! git show HEAD:AGENTS.md 2>/dev/null | grep -qF "$COMMIT_AUTH"; then
+    die "checkpoint: committed AGENTS.md must contain $COMMIT_AUTH"
+  fi
+  if [[ ! -f "$r/AGENTS.md" ]] || ! grep -qF "$COMMIT_AUTH" "$r/AGENTS.md"; then
+    die "checkpoint: AGENTS.md must contain $COMMIT_AUTH"
+  fi
+  git diff --cached --quiet || die 'checkpoint: index is not empty'
+
+  f="$(resolve "$q")"
+  rel="${f#"$r"/}"
+  pn="${rel%%/*}"
+  p="$(proj "$pn")"
+  status_rel="$pn/STATUS.md"
+
+  local requested=("$rel" "$status_rel")
+  if [[ -n "${paths[*]-}" ]]; then
+    for path in "${paths[@]}"; do
+      path="${path#./}"
+      case "$path" in
+        /* | .. | ../* | */.. | */../*) die "checkpoint: unsafe path: $path" ;;
+      esac
+      [[ "$path" == "$pn/"* ]] || die "checkpoint: path is outside project $pn: $path"
+      [[ -f "$r/$path" ]] || die "checkpoint: path is not a file: $path"
+      requested+=("$path")
+    done
+  fi
+
+  [[ -n "$(git status --porcelain -- "$rel")" ]] || die 'checkpoint: task file has no changes'
+  sync "$p" || true
+
+  while IFS= read -r changed; do
+    [[ -n "$changed" ]] || continue
+    ok=1
+    for allowed in "${requested[@]}"; do
+      if [[ "$changed" == "$allowed" ]]; then
+        ok=0
+        break
+      fi
+    done
+    ((ok == 0)) || die "checkpoint: unlisted project change: $changed"
+  done < <({
+    git diff --name-only -- "$pn"
+    git ls-files --others --exclude-standard -- "$pn"
+  } | sort -u)
+
+  cmd_doctor "$pn" || die 'checkpoint: doctor found errors'
+  t="$(mktemp)"
+  trap 'rm -f "$t"; git restore --staged -- "${requested[@]}" >/dev/null 2>&1 || true' EXIT
+  git add -- "${requested[@]}"
+  git diff --cached --quiet && die 'checkpoint: nothing to commit'
+  while IFS= read -r changed; do
+    [[ -n "$changed" ]] || continue
+    ok=1
+    for allowed in "${requested[@]}"; do
+      if [[ "$changed" == "$allowed" ]]; then
+        ok=0
+        break
+      fi
+    done
+    ((ok == 0)) || die "checkpoint: refused staged path: $changed"
+  done < <(git diff --cached --name-only)
+
+  printf '%s\n' "$sub" >"$t"
+  [[ -z "$body" ]] || printf '\n%s\n' "$body" >>"$t"
+  if [[ -n "${refs[*]-}" ]]; then
+    for ref in "${refs[@]}"; do printf '\nRef: %s\n' "$ref" >>"$t"; done
+  fi
+  git commit -F "$t"
+  trap - EXIT
+  rm -f "$t"
+}
+
 cmd_commit() {
   [[ $# -ge 1 ]] || die 'commit SUBJECT [--body TEXT] [--ref REF]...'
   local sub="$1" body='' refs=() ref ps p t
@@ -364,7 +469,9 @@ cmd_commit() {
   t="$(mktemp)"
   printf '%s\n' "$sub" >"$t"
   [[ -z "$body" ]] || printf '\n%s\n' "$body" >>"$t"
-  for ref in "${refs[@]}"; do printf '\nRef: %s\n' "$ref" >>"$t"; done
+  if [[ -n "${refs[*]-}" ]]; then
+    for ref in "${refs[@]}"; do printf '\nRef: %s\n' "$ref" >>"$t"; done
+  fi
   git commit -F "$t"
   rm -f "$t"
 }
@@ -401,6 +508,10 @@ case "${1:-}" in
   history)
     shift
     cmd_history "$@"
+    ;;
+  checkpoint)
+    shift
+    cmd_checkpoint "$@"
     ;;
   commit)
     shift

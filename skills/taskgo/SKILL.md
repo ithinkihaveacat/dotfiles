@@ -32,6 +32,17 @@ the canonical specification URL:
 ensures agents can discover the governing process from the repository itself.
 `doctor` reports a missing declaration or URL.
 
+A control repo may grant standing authority for guarded local checkpoint commits
+by adding this marker to its committed root `AGENTS.md`:
+
+```markdown
+<!-- taskgo:allow-local-commits -->
+```
+
+This authority applies only to `taskgo checkpoint` commits in that control repo.
+It never authorizes commits in linked artifact repos, pushes, amendments,
+rebases, or other history rewriting.
+
 ### Invariants
 
 1. `HEAD` describes current belief; currently applicable knowledge belongs in
@@ -110,6 +121,12 @@ owns only:
 <!-- taskgo:end -->
 ```
 
+Keep prose complementary to the generated snapshot: do not repeat task counts or
+generic lifecycle facts such as "no task is in progress." When changing a task
+status, update its frontmatter and any affected Summary, Next, or PLAN prose as
+one logical transition before running `sync-status`; never leave a new snapshot
+beside prose that describes the previous state.
+
 Run `scripts/taskgo sync-status PROJECT`; the commit helper also synchronizes
 the affected project. `doctor` catches mechanical drift, but the invoking agent
 must compare Summary/Next with current tasks, plan, decisions, and recent work.
@@ -120,14 +137,26 @@ Before work: read root `AGENTS.md`, then project `PROJECT.md`, `STATUS.md`,
 relevant tasks/ADRs, and `PLAN.md` when direction matters. Inspect linked
 artifact repos under their own instructions.
 
+Establish commit authority before starting when reconstructible lifecycle
+history matters. The committed `taskgo:allow-local-commits` marker grants
+standing authority for the guarded checkpoint command. If authorized, commit a
+meaningful `in-progress` transition before artifact work that may span sessions,
+then commit completion with `Ref:` trailers for linked artifact commits. A small
+task completed atomically may transition directly from `todo` to `done`. Without
+commit authority, keep changes uncommitted and state clearly that intermediate
+transitions will not be retained; never create retrospective state commits that
+did not reflect reality at the time.
+
 After meaningful work:
 
 1. Rewrite specific files to the new current truth.
 1. Update STATUS prose if the human-facing situation changed; PLAN only if
    intended direction changed.
+1. Run `scripts/taskgo sync-status PROJECT` after the semantic edits are
+   coherent.
 1. Run `scripts/taskgo doctor PROJECT` and perform its semantic review.
-1. Commit a coherent transition when practical. Subject = what became true, not
-   what file changed.
+1. Commit a coherent transition when practical. Use `checkpoint` when standing
+   authority is present. Subject = what became true, not what file changed.
 
 Examples:
 
@@ -152,12 +181,22 @@ taskgo status [PROJECT]
 taskgo sync-status PROJECT
 taskgo doctor [PROJECT]
 taskgo history PATH_OR_TASK_ID [FIELD]
+taskgo checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--body TEXT] [--ref REF]...
 ```
 
 `history` compares a frontmatter field (default `status`) across historical
 blobs. `doctor` performs mechanical checks and prints a semantic checklist;
 **the agent invoking the skill is the semantic part of doctor**.
+
+`checkpoint` is the safe automatic-commit path. It requires the authorization
+marker in the committed root `AGENTS.md`, an initially empty index, and a
+changed task named by ID. It always includes that task and its synchronized
+`STATUS.md`; use repeatable `--path` options for other changed files in the same
+project, such as `PLAN.md`. It refuses unlisted changes in that project and
+never stages files outside it. Unrelated changes elsewhere in the control repo
+remain unstaged. The command validates the project before making one local
+commit and does not contact a remote.
 
 ## Concurrency
 
