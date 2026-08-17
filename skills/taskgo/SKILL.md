@@ -62,8 +62,13 @@ rebases, or other history rewriting.
    normally correct integrated history with new commits.
 1. Private tracker information must not implicitly flow into linked
    public/shared artifacts.
-1. `STATUS.md` is a projection: generated task state must match tasks; prose
-   requires agent semantic review.
+1. `STATUS.md` is the self-contained projection of current operational state:
+   reading `STATUS.md` directly answers status, recent progress, and immediate
+   next steps without traversing individual task files. Generated task state
+   must match tasks; prose requires agent semantic review.
+1. `taskgo` tracks work forward from adoption. Historical context predating
+   tracker setup remains in external artifact repositories and is not
+   retroactively backfilled.
 1. Graceful degradation beats ceremony. Humans may edit useful Markdown
    imperfectly.
 
@@ -109,17 +114,19 @@ corrections and merge reconciliation are allowed.
 
 ## STATUS.md
 
-Human/agent prose such as `## Summary` and `## Next` stays concise. `taskgo`
-owns only:
+`STATUS.md` is the self-contained operational projection for humans and agents.
+Reading it directly (or running `scripts/taskgo status PROJECT`) answers project
+status, recent outcomes, and immediate direction without inspecting individual
+task records.
 
-```markdown
-<!-- taskgo:begin -->
+Structure:
 
-## Task snapshot
-...
-
-<!-- taskgo:end -->
-```
+- `## Summary`: Human/agent prose describing the current situation and the key
+  outcome/findings of the most recently completed task(s). Replace older
+  transition notes rather than accumulating a journal.
+- `<!-- taskgo:begin -->` to `<!-- taskgo:end -->`: Mechanically maintained
+  snapshot (`In progress`, `Blocked`, task counts).
+- `## Next`: Immediate next actions (the active horizon of `PLAN.md`).
 
 Keep prose complementary to the generated snapshot: do not repeat task counts or
 generic lifecycle facts such as "no task is in progress." When changing a task
@@ -133,6 +140,11 @@ must compare Summary/Next with current tasks, plan, decisions, and recent work.
 
 ## Agent workflow
 
+Querying status: to answer questions about project status, recent
+accomplishments, or next steps, read `STATUS.md` (or run
+`scripts/taskgo status PROJECT`). Inspect `PLAN.md`, individual `tasks/`, or Git
+history only if deeper detail or historical transitions are requested.
+
 Before work: read root `AGENTS.md`, then project `PROJECT.md`, `STATUS.md`,
 relevant tasks/ADRs, and `PLAN.md` when direction matters. Inspect linked
 artifact repos under their own instructions.
@@ -142,10 +154,10 @@ matters):
 
 1. Committed `taskgo:allow-local-commits` marker present -> authorized for
    guarded `checkpoint` commits in this control repo only.
-1. Authorized: commit a meaningful `in-progress` transition before artifact
-   work that may span sessions; commit completion with `Ref:` trailers for
-   linked artifact commits. A small task completed atomically may go directly
-   `todo` -> `done`.
+1. Authorized: commit a meaningful `in-progress` transition before artifact work
+   that may span sessions; commit completion with `Ref:` trailers for linked
+   artifact commits. A small task completed atomically may go directly `todo` ->
+   `done`.
 1. Not authorized: keep changes uncommitted; state clearly that intermediate
    transitions will not be retained. Never create retrospective state commits
    that did not reflect reality at the time.
@@ -153,7 +165,10 @@ matters):
 After meaningful work:
 
 1. Rewrite specific files to the new current truth.
-1. Update STATUS prose if the human-facing situation changed; PLAN only if
+1. Update affected task record(s) (e.g. mark `done` with `## Outcome` and
+   `## Findings`).
+1. Update `STATUS.md` prose (`## Summary` captures the new baseline and recent
+   outcome; `## Next` reflects immediate next actions); `PLAN.md` only if
    intended direction changed.
 1. Run `scripts/taskgo sync-status PROJECT` after the semantic edits are
    coherent.
@@ -163,10 +178,10 @@ After meaningful work:
 
 Before leaving or completing a task, double-check:
 
-1. Handoff: state, findings, and decisions needed to resume are written into
-   the task/STATUS/PLAN, not left only in conversation.
-1. Consistency: tracker claims match actual artifact-repo state (e.g. a task
-   is not `done` while its artifact-repo commit remains uncommitted).
+1. Handoff: state, findings, and decisions needed to resume are written into the
+   task/STATUS/PLAN, not left only in conversation.
+1. Consistency: tracker claims match actual artifact-repo state (e.g. a task is
+   not `done` while its artifact-repo commit remains uncommitted).
 
 Examples:
 
