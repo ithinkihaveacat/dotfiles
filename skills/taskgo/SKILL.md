@@ -206,8 +206,8 @@ files/history:
 ```text
 taskgo id
 taskgo create PROJECT TITLE [--status STATE] [--no-commit]
-taskgo list [PROJECT] [--state STATE]
-taskgo status [PROJECT]
+taskgo list [PROJECT] [--state STATE] [--json]
+taskgo status [PROJECT] [--json]
 taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run]
@@ -234,13 +234,14 @@ stdout. Use `--dry-run` to preview changes without modifying files or
 committing.
 
 `checkpoint` is the safe automatic-commit path. It requires the authorization
-marker in the committed root `AGENTS.md`, an initially empty index, and a
-changed task named by ID. It always includes that task and its synchronized
-`STATUS.md`; use repeatable `--path` options for other changed files in the same
-project, such as `PLAN.md`. It refuses unlisted changes in that project and
-never stages files outside it. Unrelated changes elsewhere in the control repo
-remain unstaged. The command validates the project before making one local
-commit and does not contact a remote.
+marker in the committed root `AGENTS.md`, an initially empty index, a target
+task ID, and at least one modified file in the project. It always includes that
+task and its synchronized `STATUS.md`; use repeatable `--path` options for other
+changed files in the same project, such as `PLAN.md`. It refuses unlisted
+changes in that project with actionable `--path` hints, and never stages files
+outside it. Unrelated changes elsewhere in the control repo remain unstaged. The
+command validates the project before making one local commit and does not
+contact a remote.
 
 ## Concurrency
 

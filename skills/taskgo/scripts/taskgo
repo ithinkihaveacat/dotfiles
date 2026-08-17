@@ -4,6 +4,7 @@
 # ///
 
 import hashlib
+import json
 import os
 import re
 import signal
@@ -846,6 +847,7 @@ status: {status}
 def cmd_list(args: list[str]) -> None:
     project_name = None
     filter_state = None
+    as_json = False
 
     idx = 0
     if idx < len(args) and not args[idx].startswith("--"):
@@ -858,6 +860,9 @@ def cmd_list(args: list[str]) -> None:
                 die("--state requires a value")
             filter_state = args[idx + 1]
             idx += 2
+        elif args[idx] == "--json":
+            as_json = True
+            idx += 1
         else:
             die(f"unknown option: {args[idx]}")
 
@@ -866,26 +871,76 @@ def cmd_list(args: list[str]) -> None:
     if filter_state:
         rows = [r for r in rows if r.status == filter_state]
 
+    if as_json:
+        data = [
+            {
+                "project": r.project,
+                "task_id": r.task_id,
+                "status": r.status,
+                "title": r.title,
+                "path": r.rel_path,
+            }
+            for r in rows
+        ]
+        print(json.dumps(data, indent=2))
+        return
+
     print("PROJECT\tTASK\tSTATE\tTITLE\tPATH")
     for r in rows:
         print(f"{r.project}\t{r.task_id}\t{r.status}\t{r.title}\t{r.rel_path}")
 
 
 def cmd_status(args: list[str]) -> None:
-    if len(args) > 1:
-        die("status [PROJECT]")
+    project_name = None
+    as_json = False
+
+    idx = 0
+    if idx < len(args) and not args[idx].startswith("--"):
+        project_name = args[idx]
+        idx += 1
+
+    while idx < len(args):
+        if args[idx] == "--json":
+            as_json = True
+            idx += 1
+        else:
+            die(f"unknown option: {args[idx]}")
+
     root = get_repo_root()
 
-    if len(args) == 1:
-        project_name = args[0]
+    if project_name:
         proj_dir = get_proj_dir(project_name, root)
         status_file = proj_dir / "STATUS.md"
         if not status_file.is_file():
             die("missing STATUS.md")
+        if as_json:
+            rows = get_task_rows(root, project_name)
+            in_prog = sum(1 for r in rows if r.status == "in-progress")
+            blocked = sum(1 for r in rows if r.status == "blocked")
+            todo = sum(1 for r in rows if r.status == "todo")
+            done = sum(1 for r in rows if r.status == "done")
+            data = {
+                "project": project_name,
+                "in_progress": in_prog,
+                "blocked": blocked,
+                "todo": todo,
+                "done": done,
+                "tasks": [
+                    {
+                        "task_id": r.task_id,
+                        "status": r.status,
+                        "title": r.title,
+                        "path": r.rel_path,
+                    }
+                    for r in rows
+                ],
+            }
+            print(json.dumps(data, indent=2))
+            return
         print(status_file.read_text(encoding="utf-8"), end="")
         return
 
-    print("PROJECT\tIN-PROGRESS\tBLOCKED\tTODO")
+    projects_data = []
     for p in sorted(root.iterdir()):
         if is_project_dir(p):
             name = p.name
@@ -893,7 +948,26 @@ def cmd_status(args: list[str]) -> None:
             in_prog = sum(1 for r in rows if r.status == "in-progress")
             blocked = sum(1 for r in rows if r.status == "blocked")
             todo = sum(1 for r in rows if r.status == "todo")
-            print(f"{name}\t{in_prog}\t{blocked}\t{todo}")
+            done = sum(1 for r in rows if r.status == "done")
+            projects_data.append(
+                {
+                    "project": name,
+                    "in_progress": in_prog,
+                    "blocked": blocked,
+                    "todo": todo,
+                    "done": done,
+                }
+            )
+
+    if as_json:
+        print(json.dumps(projects_data, indent=2))
+        return
+
+    print("PROJECT\tIN-PROGRESS\tBLOCKED\tTODO")
+    for item in projects_data:
+        print(
+            f"{item['project']}\t{item['in_progress']}\t{item['blocked']}\t{item['todo']}"
+        )
 
 
 def cmd_sync(args: list[str]) -> None:
@@ -1186,12 +1260,16 @@ def cmd_checkpoint(args: list[str]) -> None:
             die(f"checkpoint: path is not a file: {p_arg}")
         requested.append(p_clean)
 
-    # Check task file has changes
-    status_proc = run_git(["status", "--porcelain", "--", rel_path])
-    if not status_proc.stdout.strip():
-        die("checkpoint: task file has no changes")
-
+    # Synchronize status for project
     sync_status(root, project_name)
+
+    # Check that at least one project file has changes
+    has_changes = any(
+        bool(run_git(["status", "--porcelain", "--", req]).stdout.strip())
+        for req in requested
+    )
+    if not has_changes:
+        die("checkpoint: no project changes detected to commit")
 
     # Check for unlisted project changes
     diff_proj = run_git(["diff", "--name-only", "--", project_name]).stdout.splitlines()
@@ -1200,9 +1278,14 @@ def cmd_checkpoint(args: list[str]) -> None:
     ).stdout.splitlines()
     all_changed = sorted(set(diff_proj + untracked_proj))
 
-    for changed in all_changed:
-        if changed and changed not in requested:
-            die(f"checkpoint: unlisted project change: {changed}")
+    unlisted = [c for c in all_changed if c and c not in requested]
+    if unlisted:
+        suggested = " ".join(f"--path {p}" for p in unlisted)
+        print(
+            f"[HINT] To include unlisted project file(s), add: {suggested}",
+            file=sys.stderr,
+        )
+        die(f"checkpoint: unlisted project change: {unlisted[0]}")
 
     # Run doctor in-process
     findings = audit_workspace(root, project_name)
@@ -1299,8 +1382,8 @@ Maintain a private Git-backed personal project/task control repo.
 Commands:
   id                               Allocate a unique task ID
   create PROJECT TITLE [OPTIONS]   Create a new task
-  list [PROJECT] [OPTIONS]         List tasks
-  status [PROJECT]                 Show project status
+  list [PROJECT] [--json]          List tasks
+  status [PROJECT] [--json]        Show project status
   sync [PROJECT]                   Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [--dry-run]        Auto-heal IDs, statuses, and snapshots

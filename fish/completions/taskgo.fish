@@ -47,6 +47,10 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l no-commit -d 'C
 
 # list options
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -l state -x -a 'todo in-progress blocked done cancelled' -d 'Filter by state'
+complete -f -c taskgo -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON output'
+
+# status options
+complete -f -c taskgo -n '__fish_seen_subcommand_from status' -l json -d 'Emit JSON output'
 
 # fix options
 complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l dry-run -d 'Preview repairs without modifying files'
