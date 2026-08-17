@@ -1,9 +1,16 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
+# dependencies = [
+#     "mdformat",
+#     "mdformat-gfm",
+#     "mdformat-frontmatter",
+#     "ruamel.yaml",
+# ]
 # ///
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -16,12 +23,56 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import mdformat
+from ruamel.yaml import YAML
+
 BEGIN = "<!-- taskgo:begin -->"
 END = "<!-- taskgo:end -->"
 CANONICAL_URL = "https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo"
 COMMIT_AUTH = "<!-- taskgo:allow-local-commits -->"
 ID_PATTERN = re.compile(r"^TASK-[0-9A-F]{5}$")
 STANDARD_STATES = {"todo", "in-progress", "blocked", "done", "cancelled"}
+WRAP_WIDTH = 80
+
+
+def reformat_frontmatter(text: str) -> str:
+    """Reflows YAML frontmatter scalars to WRAP_WIDTH using ruamel.yaml."""
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return text
+
+    frontmatter_str = text[4 : end + 1]
+    body = text[end + 5 :]
+
+    yaml = YAML()
+    yaml.width = WRAP_WIDTH
+    yaml.preserve_quotes = True
+    yaml.default_flow_style = False
+
+    try:
+        data = yaml.load(frontmatter_str)
+    except Exception:
+        return text
+
+    if not data:
+        return text
+
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    return f"---\n{buf.getvalue()}---\n{body}"
+
+
+def format_markdown(text: str) -> str:
+    """Formats Markdown text using mdformat (with gfm, frontmatter, and 80-char wrap)."""
+    text = reformat_frontmatter(text)
+    return mdformat.text(
+        text,
+        options={"wrap": WRAP_WIDTH},
+        extensions={"gfm", "frontmatter"},
+    )
+
 
 STATE_ALIASES = {
     "todo": "todo",
@@ -339,12 +390,17 @@ def sync_status(root: Path, project_name: str) -> bool:
     proj_dir = root / project_name
     status_file = proj_dir / "STATUS.md"
     rendered = render_status_file(root, project_name)
+    try:
+        rendered = format_markdown(rendered)
+    except Exception:
+        pass
     if status_file.is_file():
         current = status_file.read_text(encoding="utf-8")
         if current == rendered:
             return False
     status_file.write_text(rendered, encoding="utf-8")
     return True
+
 
 
 def resolve_target(root: Path, query: str) -> Path:
@@ -741,6 +797,90 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                                 )
                             )
 
+        # Check Markdown formatting for all markdown files in project
+        for mf in sorted(p.rglob("*.md")):
+            if (
+                not mf.is_file()
+                or any(part.startswith(".") for part in mf.parts)
+                or "node_modules" in mf.parts
+            ):
+                continue
+            try:
+                mcontent = mf.read_text(encoding="utf-8")
+                mformatted = format_markdown(mcontent)
+                if mformatted != mcontent:
+                    rel_path = str(mf.relative_to(root))
+
+                    def make_remediate_proj_md(
+                        target_file=mf, formatted_text=mformatted
+                    ):
+                        def remediate() -> list[Path]:
+                            target_file.write_text(formatted_text, encoding="utf-8")
+                            return [target_file]
+
+                        return remediate
+
+                    findings.append(
+                        Finding(
+                            category="markdown",
+                            severity="WARN",
+                            message=f"{rel_path}: markdown formatting needed",
+                            file_path=mf,
+                            remediation=make_remediate_proj_md(mf, mformatted),
+                        )
+                    )
+            except Exception as e:
+                rel_path = str(mf.relative_to(root))
+                findings.append(
+                    Finding(
+                        category="markdown",
+                        severity="WARN",
+                        message=f"{rel_path}: failed to format markdown: {e}",
+                        file_path=mf,
+                        remediation=None,
+                    )
+                )
+
+    if not target_project:
+        for rmf in sorted(root.glob("*.md")):
+            if not rmf.is_file() or rmf.name.startswith("."):
+                continue
+            try:
+                rcontent = rmf.read_text(encoding="utf-8")
+                rformatted = format_markdown(rcontent)
+                if rformatted != rcontent:
+                    rel_path = rmf.name
+
+                    def make_remediate_root_md(
+                        target_file=rmf, formatted_text=rformatted
+                    ):
+                        def remediate() -> list[Path]:
+                            target_file.write_text(formatted_text, encoding="utf-8")
+                            return [target_file]
+
+                        return remediate
+
+                    findings.append(
+                        Finding(
+                            category="markdown",
+                            severity="WARN",
+                            message=f"{rel_path}: markdown formatting needed",
+                            file_path=rmf,
+                            remediation=make_remediate_root_md(rmf, rformatted),
+                        )
+                    )
+            except Exception as e:
+                rel_path = rmf.name
+                findings.append(
+                    Finding(
+                        category="markdown",
+                        severity="WARN",
+                        message=f"{rel_path}: failed to format markdown: {e}",
+                        file_path=rmf,
+                        remediation=None,
+                    )
+                )
+
     return findings
 
 
@@ -858,6 +998,10 @@ status: {status}
 
 ## Next
 """
+    try:
+        content = format_markdown(content)
+    except Exception:
+        pass
     task_path.write_text(content, encoding="utf-8")
 
     # Synchronize STATUS.md
