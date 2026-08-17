@@ -10,7 +10,10 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 BEGIN = "<!-- taskgo:begin -->"
 END = "<!-- taskgo:end -->"
@@ -71,18 +74,6 @@ def die(msg: str, exit_code: int = 1) -> None:
     sys.exit(exit_code)
 
 
-def warn(msg: str) -> None:
-    print(f"[WARN]  {msg}", file=sys.stderr)
-
-
-def info(msg: str) -> None:
-    print(f"[INFO]  {msg}", file=sys.stderr)
-
-
-def pass_tag(msg: str) -> None:
-    print(f"[PASS]  {msg}", file=sys.stderr)
-
-
 def run_git(
     args: list[str],
     cwd: Path | None = None,
@@ -124,16 +115,6 @@ def is_project_dir(p: Path) -> bool:
     if not p.is_dir() or p.name.startswith("."):
         return False
     return (p / "README.md").is_file() or (p / "PROJECT.md").is_file()
-
-
-def get_project_manifest(p: Path) -> Path | None:
-    readme = p / "README.md"
-    if readme.is_file():
-        return readme
-    project_md = p / "PROJECT.md"
-    if project_md.is_file():
-        return project_md
-    return None
 
 
 def get_proj_dir(project_name: str, root: Path) -> Path:
@@ -366,10 +347,323 @@ def resolve_target(root: Path, query: str) -> Path:
                 seen_paths.add(line)
         if len(seen_paths) == 1:
             return (root / next(iter(seen_paths))).resolve()
-        elif len(seen_paths) > 1:
+        if len(seen_paths) > 1:
             die(f"ambiguous id in history: {query}")
 
     die(f"cannot resolve: {query}")
+
+
+# ===========================================================================
+# Audit & Reconciliation Engine (Shared by doctor and fix)
+# ===========================================================================
+
+
+@dataclass
+class Finding:
+    category: str
+    severity: Literal["PASS", "INFO", "WARN", "FAIL"]
+    message: str
+    file_path: Path | None = None
+    remediation: Callable[[], None] | None = None  # None if requires human review
+
+
+def audit_workspace(root: Path, target_project: str | None = None) -> list[Finding]:
+    """Single shared diagnostic engine for doctor and fix."""
+    findings: list[Finding] = []
+
+    # 1. Shallow clone check
+    try:
+        shallow = run_git(["rev-parse", "--is-shallow-repository"]).stdout.strip()
+        if shallow == "true":
+            findings.append(
+                Finding(
+                    category="git",
+                    severity="WARN",
+                    message="shallow clone: history may be incomplete",
+                )
+            )
+    except Exception:
+        pass
+
+    # 2. AGENTS.md check & remediation
+    agents_file = root / "AGENTS.md"
+    if not agents_file.is_file():
+
+        def remediate_missing_agents():
+            agents_file.write_text(
+                f"# Agent instructions\n\nThis repository follows taskgo: <{CANONICAL_URL}>.\n\n{COMMIT_AUTH}\n",
+                encoding="utf-8",
+            )
+
+        findings.append(
+            Finding(
+                category="root",
+                severity="WARN",
+                message="missing AGENTS.md",
+                file_path=agents_file,
+                remediation=remediate_missing_agents,
+            )
+        )
+    else:
+        agents_txt = agents_file.read_text(encoding="utf-8")
+        needs_decl = not re.search(
+            r"(follows|structured|maintained|according to).*taskgo",
+            agents_txt,
+            re.IGNORECASE,
+        )
+        needs_url = CANONICAL_URL not in agents_txt
+        needs_auth = COMMIT_AUTH not in agents_txt
+
+        if needs_decl or needs_url or needs_auth:
+
+            def remediate_agents():
+                cur = agents_file.read_text(encoding="utf-8")
+                if needs_decl:
+                    cur = (
+                        f"This repository follows taskgo: <{CANONICAL_URL}>.\n\n" + cur
+                    )
+                elif needs_url:
+                    cur += f"\nCanonical URL: <{CANONICAL_URL}>\n"
+                if needs_auth:
+                    cur = cur.rstrip() + f"\n\n{COMMIT_AUTH}\n"
+                agents_file.write_text(cur, encoding="utf-8")
+
+            if needs_decl:
+                findings.append(
+                    Finding(
+                        category="root",
+                        severity="WARN",
+                        message="AGENTS.md: must state that the repository follows taskgo",
+                        file_path=agents_file,
+                        remediation=remediate_agents,
+                    )
+                )
+            if needs_url:
+                findings.append(
+                    Finding(
+                        category="root",
+                        severity="WARN",
+                        message=f"AGENTS.md: missing canonical taskgo URL: {CANONICAL_URL}",
+                        file_path=agents_file,
+                        remediation=remediate_agents,
+                    )
+                )
+
+    # 3. INBOX.md check & remediation
+    inbox_file = root / "INBOX.md"
+    if not inbox_file.is_file():
+
+        def remediate_missing_inbox():
+            inbox_file.write_text("# Inbox\n", encoding="utf-8")
+
+        findings.append(
+            Finding(
+                category="root",
+                severity="WARN",
+                message="missing INBOX.md",
+                file_path=inbox_file,
+                remediation=remediate_missing_inbox,
+            )
+        )
+
+    # 4. Duplicate global task IDs
+    all_rows = get_task_rows(root)
+    seen_ids: dict[str, int] = {}
+    for r in all_rows:
+        if r.task_id:
+            seen_ids[r.task_id] = seen_ids.get(r.task_id, 0) + 1
+    dups = [k for k, v in seen_ids.items() if v > 1]
+    if dups:
+        findings.append(
+            Finding(
+                category="tasks",
+                severity="WARN",
+                message=f"duplicate global task ID(s): {' '.join(sorted(dups))}",
+                remediation=None,  # Ambiguous duplicate resolution requires human review
+            )
+        )
+
+    # 5. Project-level checks
+    projects: list[Path] = []
+    if target_project:
+        projects.append(get_proj_dir(target_project, root))
+    else:
+        for p in sorted(root.iterdir()):
+            if is_project_dir(p):
+                projects.append(p)
+
+    for p in projects:
+        name = p.name
+        tasks_dir = p / "tasks"
+        status_file = p / "STATUS.md"
+
+        # Check STATUS.md
+        if not status_file.is_file():
+
+            def make_remediate_status(p_name=name):
+                return lambda: sync_status(root, p_name)
+
+            findings.append(
+                Finding(
+                    category="project",
+                    severity="WARN",
+                    message=f"{name}: missing STATUS.md",
+                    file_path=status_file,
+                    remediation=make_remediate_status(name),
+                )
+            )
+
+        # Check tasks
+        if tasks_dir.is_dir():
+            for tf in sorted(tasks_dir.glob("*.md")):
+                if not tf.is_file():
+                    continue
+                content = tf.read_text(encoding="utf-8")
+                fm, _ = parse_frontmatter(content)
+                rel_path = str(tf.relative_to(root))
+
+                task_id = fm.get("id", "")
+                raw_status = fm.get("status", "")
+
+                m = re.search(r"TASK-[0-9A-F]{5}", tf.name)
+                filename_id = m.group(0) if m else ""
+
+                needs_id_fix = not ID_PATTERN.match(task_id)
+                needs_status_fix = (
+                    bool(raw_status and raw_status not in STANDARD_STATES)
+                    or not raw_status
+                )
+                needs_filename_fix = (
+                    bool(filename_id and filename_id != task_id) or not filename_id
+                )
+
+                if needs_id_fix or needs_status_fix or needs_filename_fix:
+
+                    def make_remediate_task(
+                        target_tf=tf, p_root=root, p_tasks=tasks_dir
+                    ):
+                        def remediate():
+                            t_content = target_tf.read_text(encoding="utf-8")
+                            t_fm, t_body = parse_frontmatter(t_content)
+                            t_id = t_fm.get("id", "")
+                            if not ID_PATTERN.match(t_id):
+                                t_id = generate_task_id(p_root)
+                            t_status = normalize_status(t_fm.get("status", "todo"))
+                            t_title = extract_title(t_content) or target_tf.stem
+                            if not t_body.strip():
+                                t_body = f"\n# {t_title}\n\n## Outcome\n\n## Findings\n\n## Next\n"
+                            new_content = f"""---
+id: {t_id}
+status: {t_status}
+---
+{t_body.lstrip()}"""
+                            target_tf.write_text(new_content, encoding="utf-8")
+                            slug = slugify(t_title) or "task"
+                            new_name = f"{t_id}-{slug}.md"
+                            if target_tf.name != new_name:
+                                target_tf.rename(p_tasks / new_name)
+
+                        return remediate
+
+                    if needs_id_fix:
+                        findings.append(
+                            Finding(
+                                category="task",
+                                severity="WARN",
+                                message=f"{rel_path}: invalid/missing id '{task_id}'",
+                                file_path=tf,
+                                remediation=make_remediate_task(tf, root, tasks_dir),
+                            )
+                        )
+                    if needs_status_fix and not needs_id_fix:
+                        findings.append(
+                            Finding(
+                                category="task",
+                                severity="WARN",
+                                message=f"{rel_path}: non-standard status '{raw_status}'",
+                                file_path=tf,
+                                remediation=make_remediate_task(tf, root, tasks_dir),
+                            )
+                        )
+                    if needs_filename_fix and not needs_id_fix:
+                        findings.append(
+                            Finding(
+                                category="task",
+                                severity="WARN",
+                                message=f"{rel_path}: filename/frontmatter IDs disagree",
+                                file_path=tf,
+                                remediation=make_remediate_task(tf, root, tasks_dir),
+                            )
+                        )
+
+        # Check STATUS.md snapshot drift
+        if status_file.is_file():
+            current_status = status_file.read_text(encoding="utf-8")
+            rendered = render_status_file(root, name)
+            if current_status != rendered:
+
+                def make_remediate_snapshot(p_name=name):
+                    return lambda: sync_status(root, p_name)
+
+                findings.append(
+                    Finding(
+                        category="status",
+                        severity="WARN",
+                        message=f"{name}: stale STATUS task snapshot (run sync)",
+                        file_path=status_file,
+                        remediation=make_remediate_snapshot(name),
+                    )
+                )
+
+            rows = get_task_rows(root, name)
+            active = sum(1 for r in rows if r.status == "in-progress")
+            prose = re.sub(
+                re.escape(BEGIN) + r".*?" + re.escape(END),
+                "",
+                current_status,
+                flags=re.DOTALL,
+            )
+            if active > 0 and re.search(
+                r"(no\s+tasks?|nothing)(\s+(is|are))?(\s+currently)?\s+in[ -]progress",
+                prose,
+                re.IGNORECASE,
+            ):
+                findings.append(
+                    Finding(
+                        category="status",
+                        severity="WARN",
+                        message=f"{name}: STATUS prose says no task is in progress, but {active} task(s) are in-progress",
+                        file_path=status_file,
+                        remediation=None,  # Human semantic editing required
+                    )
+                )
+
+        # Check decisions ADRs
+        decisions_dir = p / "decisions"
+        if decisions_dir.is_dir():
+            for df in sorted(decisions_dir.glob("*.md")):
+                if df.is_file():
+                    dcontent = df.read_text(encoding="utf-8")
+                    for sec in [
+                        "Status",
+                        "Context",
+                        "Decision",
+                        "Consequences",
+                    ]:
+                        if not re.search(
+                            rf"^##\s+{sec}\s*$", dcontent, re.MULTILINE | re.IGNORECASE
+                        ):
+                            findings.append(
+                                Finding(
+                                    category="adr",
+                                    severity="WARN",
+                                    message=f"{name}/{df.name}: ADR missing ## {sec}",
+                                    file_path=df,
+                                    remediation=None,  # Manual ADR structure repair
+                                )
+                            )
+
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -382,9 +676,9 @@ def cmd_id(args: list[str]) -> None:
     print(generate_task_id(root))
 
 
-def cmd_new(args: list[str]) -> None:
+def cmd_create(args: list[str]) -> None:
     if len(args) < 2:
-        die("new-task PROJECT TITLE [--status STATE]")
+        die("create PROJECT TITLE [--status STATE]")
     project_name = args[0]
     title = args[1]
     status = "todo"
@@ -427,7 +721,7 @@ status: {status}
     print(f"{task_id}\t{rel_path}")
 
 
-def cmd_tasks(args: list[str]) -> None:
+def cmd_list(args: list[str]) -> None:
     project_name = None
     filter_state = None
 
@@ -480,9 +774,9 @@ def cmd_status(args: list[str]) -> None:
             print(f"{name}\t{in_prog}\t{blocked}\t{todo}")
 
 
-def cmd_sync_status(args: list[str]) -> None:
+def cmd_sync(args: list[str]) -> None:
     if len(args) != 1:
-        die("sync-status PROJECT")
+        die("sync PROJECT")
     project_name = args[0]
     root = get_repo_root()
     get_proj_dir(project_name, root)
@@ -499,128 +793,15 @@ def cmd_doctor(args: list[str]) -> None:
     want_project = args[0] if len(args) == 1 else None
 
     root = get_repo_root()
-    bad = False
+    findings = audit_workspace(root, want_project)
 
-    # Check shallow clone
-    try:
-        shallow = run_git(["rev-parse", "--is-shallow-repository"]).stdout.strip()
-        if shallow == "true":
-            warn("shallow clone: history may be incomplete")
-            bad = True
-    except Exception:
-        pass
-
-    # Check AGENTS.md
-    agents_file = root / "AGENTS.md"
-    if not agents_file.is_file():
-        warn("missing AGENTS.md")
-        bad = True
-    else:
-        agents_txt = agents_file.read_text(encoding="utf-8")
-        if not re.search(
-            r"(follows|structured|maintained|according to).*taskgo",
-            agents_txt,
-            re.IGNORECASE,
-        ):
-            warn("AGENTS.md: must state that the repository follows taskgo")
-            bad = True
-        if CANONICAL_URL not in agents_txt:
-            warn(f"AGENTS.md: missing canonical taskgo URL: {CANONICAL_URL}")
-            bad = True
-
-    # Check INBOX.md
-    inbox_file = root / "INBOX.md"
-    if not inbox_file.is_file():
-        warn("missing INBOX.md")
-        bad = True
-
-    # Check duplicate global task IDs
-    all_rows = get_task_rows(root)
-    seen_ids: dict[str, int] = {}
-    for r in all_rows:
-        if r.task_id:
-            seen_ids[r.task_id] = seen_ids.get(r.task_id, 0) + 1
-    dups = [k for k, v in seen_ids.items() if v > 1]
-    if dups:
-        warn(f"duplicate global task ID(s): {' '.join(sorted(dups))}")
-        bad = True
-
-    if want_project:
-        get_proj_dir(want_project, root)
-
-    checked_projects = 0
-    for p in sorted(root.iterdir()):
-        if not is_project_dir(p):
-            continue
-        name = p.name
-        if want_project and name != want_project:
-            continue
-        checked_projects += 1
-
-        # Check STATUS.md (required)
-        if not (p / "STATUS.md").is_file():
-            warn(f"{name}: missing STATUS.md")
-            bad = True
-
-        # Check PLAN.md (optional, report info only)
-        if not (p / "PLAN.md").is_file():
-            pass
-
-        rows = get_task_rows(root, name)
-        for r in rows:
-            if not ID_PATTERN.match(r.task_id):
-                warn(f"{r.rel_path}: invalid/missing id '{r.task_id}'")
-                bad = True
-            if r.status and r.status not in STANDARD_STATES:
-                warn(f"{r.rel_path}: non-standard status '{r.status}'")
-                bad = True
-            m = re.search(r"TASK-[0-9A-F]{5}", Path(r.rel_path).name)
-            filename_id = m.group(0) if m else ""
-            if filename_id and filename_id != r.task_id:
-                warn(f"{r.rel_path}: filename/frontmatter IDs disagree")
-                bad = True
-
-        status_file = p / "STATUS.md"
-        if status_file.is_file():
-            current_status = status_file.read_text(encoding="utf-8")
-            rendered = render_status_file(root, name)
-            if current_status != rendered:
-                warn(f"{name}: stale STATUS task snapshot (run sync-status)")
-                bad = True
-
-            active = sum(1 for r in rows if r.status == "in-progress")
-            prose = re.sub(
-                re.escape(BEGIN) + r".*?" + re.escape(END),
-                "",
-                current_status,
-                flags=re.DOTALL,
-            )
-            if active > 0 and re.search(
-                r"(no\s+tasks?|nothing)(\s+(is|are))?(\s+currently)?\s+in[ -]progress",
-                prose,
-                re.IGNORECASE,
-            ):
-                warn(
-                    f"{name}: STATUS prose says no task is in progress, but {active} task(s) are in-progress"
-                )
-                bad = True
-
-        decisions_dir = p / "decisions"
-        if decisions_dir.is_dir():
-            for df in sorted(decisions_dir.glob("*.md")):
-                if df.is_file():
-                    dcontent = df.read_text(encoding="utf-8")
-                    for sec in [
-                        "Status",
-                        "Context",
-                        "Decision",
-                        "Consequences",
-                    ]:
-                        if not re.search(
-                            rf"^##\s+{sec}\s*$", dcontent, re.MULTILINE | re.IGNORECASE
-                        ):
-                            warn(f"{name}/{df.name}: ADR missing ## {sec}")
-                            bad = True
+    has_errors = False
+    for f in findings:
+        if f.severity in ("WARN", "FAIL"):
+            has_errors = True
+            print(f"[{f.severity}]  {f.message}", file=sys.stderr)
+        elif f.severity in ("INFO", "PASS"):
+            print(f"[{f.severity}]  {f.message}", file=sys.stderr)
 
     print(
         """[INFO]  Agent semantic review
@@ -631,12 +812,12 @@ def cmd_doctor(args: list[str]) -> None:
         After merges, check reconciled files express one coherent current state."""
     )
 
-    if bad:
+    if has_errors:
         sys.exit(1)
 
 
 def cmd_fix(args: list[str]) -> None:
-    """Auto-healing engine: repairs IDs, statuses, snapshots, and commits by default."""
+    """Auto-healing engine: repairs findings from audit_workspace and commits by default."""
     no_commit = False
     want_project = None
 
@@ -660,132 +841,70 @@ def cmd_fix(args: list[str]) -> None:
     if diff_cached.returncode != 0:
         die("fix: git index contains staged changes; unstage or commit them first")
 
-    modified_files: list[str] = []
+    # Snapshot working tree state before fixes to identify modified files
+    status_before = set(run_git(["status", "--porcelain"]).stdout.splitlines())
 
-    # 1. Fix root files
-    agents_file = root / "AGENTS.md"
-    if not agents_file.is_file():
-        agents_content = f"""# Agent instructions
+    findings = audit_workspace(root, want_project)
+    fixable = [f for f in findings if f.remediation is not None]
 
-This repository follows taskgo: <{CANONICAL_URL}>.
-
-{COMMIT_AUTH}
-"""
-        agents_file.write_text(agents_content, encoding="utf-8")
-        modified_files.append("AGENTS.md")
-        info("Created missing AGENTS.md")
-    else:
-        txt = agents_file.read_text(encoding="utf-8")
-        updated_txt = txt
-        if not re.search(
-            r"(follows|structured|maintained|according to).*taskgo",
-            txt,
-            re.IGNORECASE,
-        ):
-            updated_txt = (
-                f"This repository follows taskgo: <{CANONICAL_URL}>.\n\n" + updated_txt
-            )
-        elif CANONICAL_URL not in updated_txt:
-            updated_txt += f"\nCanonical URL: <{CANONICAL_URL}>\n"
-        if COMMIT_AUTH not in updated_txt:
-            updated_txt = updated_txt.rstrip() + f"\n\n{COMMIT_AUTH}\n"
-        if updated_txt != txt:
-            agents_file.write_text(updated_txt, encoding="utf-8")
-            modified_files.append("AGENTS.md")
-            info("Repaired AGENTS.md declaration and marker")
-
-    inbox_file = root / "INBOX.md"
-    if not inbox_file.is_file():
-        inbox_file.write_text("# Inbox\n", encoding="utf-8")
-        modified_files.append("INBOX.md")
-        info("Created missing INBOX.md")
-
-    # 2. Fix projects
-    projects_to_fix: list[Path] = []
-    if want_project:
-        projects_to_fix.append(root / want_project)
-    else:
-        for p in sorted(root.iterdir()):
-            if is_project_dir(p):
-                projects_to_fix.append(p)
-
-    for p in projects_to_fix:
-        pname = p.name
-        tasks_dir = p / "tasks"
-        tasks_dir.mkdir(parents=True, exist_ok=True)
-
-        # Fix tasks
-        for tf in sorted(tasks_dir.glob("*.md")):
-            if not tf.is_file():
-                continue
-            content = tf.read_text(encoding="utf-8")
-            fm, body = parse_frontmatter(content)
-
-            task_id = fm.get("id", "")
-            raw_status = fm.get("status", "todo")
-            norm_status = normalize_status(raw_status)
-            title = extract_title(content) or tf.stem
-
-            needs_rewrite = False
-            if not ID_PATTERN.match(task_id):
-                task_id = generate_task_id(root)
-                info(f"{pname}: assigned {task_id} to '{title}'")
-                needs_rewrite = True
-
-            if norm_status != raw_status:
-                info(
-                    f"{pname}/{task_id}: normalized status '{raw_status}' -> '{norm_status}'"
+    if not fixable:
+        unfixable = [f for f in findings if f.severity in ("WARN", "FAIL")]
+        if unfixable:
+            for f in unfixable:
+                print(
+                    f"[{f.severity}]  Manual fix required: {f.message}", file=sys.stderr
                 )
-                needs_rewrite = True
-
-            if not body.strip():
-                body = f"\n# {title}\n\n## Outcome\n\n## Findings\n\n## Next\n"
-                needs_rewrite = True
-
-            if needs_rewrite:
-                new_content = f"""---
-id: {task_id}
-status: {norm_status}
----
-{body.lstrip()}"""
-                tf.write_text(new_content, encoding="utf-8")
-                rel = str(tf.relative_to(root))
-                if rel not in modified_files:
-                    modified_files.append(rel)
-
-            # Check filename alignment
-            m = re.search(r"TASK-[0-9A-F]{5}", tf.name)
-            filename_id = m.group(0) if m else ""
-            if filename_id != task_id:
-                slug = slugify(title) or "task"
-                new_tf = tasks_dir / f"{task_id}-{slug}.md"
-                tf.rename(new_tf)
-                rel_old = str(tf.relative_to(root))
-                rel_new = str(new_tf.relative_to(root))
-                if rel_old in modified_files:
-                    modified_files.remove(rel_old)
-                if rel_new not in modified_files:
-                    modified_files.append(rel_new)
-                info(f"{pname}: renamed {tf.name} -> {new_tf.name}")
-
-        # Fix STATUS.md
-        if sync_status(root, pname):
-            status_rel = f"{pname}/STATUS.md"
-            if status_rel not in modified_files:
-                modified_files.append(status_rel)
-            info(f"{pname}: synchronized STATUS.md snapshot")
-
-    if not modified_files:
-        info("Workspace is clean, no fixes needed.")
+        else:
+            print("[INFO]  Workspace is clean, no fixes needed.", file=sys.stderr)
         sys.exit(0)
 
-    # 3. Commit or report
+    # Execute all remediations
+    for f in fixable:
+        f.remediation()
+
+    # Re-run audit to verify convergence
+    post_findings = audit_workspace(root, want_project)
+    remaining_errors = [f for f in post_findings if f.severity in ("WARN", "FAIL")]
+    if remaining_errors:
+        for f in remaining_errors:
+            print(f"[{f.severity}]  Still open after fix: {f.message}", file=sys.stderr)
+
+    # Determine modified files
+    status_after = set(run_git(["status", "--porcelain"]).stdout.splitlines())
+    changed_lines = status_after - status_before
+    modified_files = []
+    for line in changed_lines:
+        if line.strip():
+            # Line format: " M path" or "?? path" or "R  old -> new"
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) > 1:
+                target = parts[1]
+                if " -> " in target:
+                    target = target.split(" -> ")[1]
+                modified_files.append(target)
+
+    # Also check git diff and untracked files
+    diff_files = run_git(["diff", "--name-only"]).stdout.splitlines()
+    untracked_files = run_git(
+        ["ls-files", "--others", "--exclude-standard"]
+    ).stdout.splitlines()
+    all_current_modified = sorted(set(diff_files + untracked_files))
+    modified_files = sorted(set(modified_files + all_current_modified))
+
+    if not modified_files:
+        print("[INFO]  Workspace is clean, no files changed.", file=sys.stderr)
+        sys.exit(0)
+
     if no_commit:
-        info(f"Fixed {len(modified_files)} file(s) (no-commit mode).")
+        print(
+            f"[INFO]  Fixed {len(modified_files)} file(s) (no-commit mode).",
+            file=sys.stderr,
+        )
         print("\n".join(modified_files))
         return
 
     # Check for authorization marker
+    agents_file = root / "AGENTS.md"
     show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
     agents_has_auth = (
         show_agents.returncode == 0 and COMMIT_AUTH in show_agents.stdout
@@ -794,7 +913,10 @@ status: {norm_status}
     )
 
     if not agents_has_auth:
-        info("Authorization marker missing; skipping auto-commit.")
+        print(
+            "[INFO]  Authorization marker missing; skipping auto-commit.",
+            file=sys.stderr,
+        )
         print("\n".join(modified_files))
         return
 
@@ -808,7 +930,10 @@ status: {norm_status}
     run_git(["commit", "-m", commit_msg])
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
 
-    info(f"Committed {len(modified_files)} fixed file(s): {commit_sha[:10]}")
+    print(
+        f"[INFO]  Committed {len(modified_files)} fixed file(s): {commit_sha[:10]}",
+        file=sys.stderr,
+    )
 
     # Machine-readable output contract on stdout
     print(f"COMMIT_SHA: {commit_sha}")
@@ -1041,10 +1166,10 @@ Maintain a private Git-backed personal project/task control repo.
 
 Commands:
   id                               Allocate a unique task ID
-  new-task PROJECT TITLE [OPTIONS] Create a new task
-  tasks [PROJECT] [OPTIONS]        List tasks
+  create PROJECT TITLE [OPTIONS]   Create a new task
+  list [PROJECT] [OPTIONS]         List tasks
   status [PROJECT]                 Show project status
-  sync-status PROJECT              Update STATUS.md snapshot
+  sync PROJECT                     Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
@@ -1056,8 +1181,8 @@ Options:
 
 Examples:
   taskgo id
-  taskgo new-task my-project "Diagnose intermittent disconnects"
-  taskgo sync-status my-project
+  taskgo create my-project "Diagnose intermittent disconnects"
+  taskgo sync my-project
   taskgo fix my-project
   taskgo checkpoint TASK-3A91F "project: start diagnosis\""""
     )
@@ -1073,10 +1198,10 @@ def main():
 
     commands = {
         "id": cmd_id,
-        "new-task": cmd_new,
-        "tasks": cmd_tasks,
+        "create": cmd_create,
+        "list": cmd_list,
         "status": cmd_status,
-        "sync-status": cmd_sync_status,
+        "sync": cmd_sync,
         "doctor": cmd_doctor,
         "fix": cmd_fix,
         "history": cmd_history,

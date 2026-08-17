@@ -82,7 +82,7 @@ repo. Use random IDs, not a counter:
 
 ```bash
 scripts/taskgo id
-scripts/taskgo new-task PROJECT "Diagnose intermittent disconnects"
+scripts/taskgo create PROJECT "Diagnose intermittent disconnects"
 ```
 
 Preferred task form:
@@ -135,12 +135,12 @@ Structure:
 Keep prose complementary to the generated snapshot: do not repeat task counts or
 generic lifecycle facts such as "no task is in progress." When changing a task
 status, update its frontmatter and any affected Summary, Next, or PLAN prose as
-one logical transition before running `sync-status`; never leave a new snapshot
-beside prose that describes the previous state.
+one logical transition before running `sync`; never leave a new snapshot beside
+prose that describes the previous state.
 
-Run `scripts/taskgo sync-status PROJECT`; the commit helper also synchronizes
-the affected project. `doctor` catches mechanical drift, but the invoking agent
-must compare Summary/Next with current tasks, plan, decisions, and recent work.
+Run `scripts/taskgo sync PROJECT`; the commit helper also synchronizes the
+affected project. `doctor` catches mechanical drift, but the invoking agent must
+compare Summary/Next with current tasks, plan, decisions, and recent work.
 
 ## Agent workflow
 
@@ -149,9 +149,9 @@ accomplishments, or next steps, read `STATUS.md` (or run
 `scripts/taskgo status PROJECT`). Inspect `PLAN.md`, individual `tasks/`, or Git
 history only if deeper detail or historical transitions are requested.
 
-Before work: read root `AGENTS.md`, then project `PROJECT.md`, `STATUS.md`,
-relevant tasks/ADRs, and `PLAN.md` when direction matters. Inspect linked
-artifact repos under their own instructions.
+Before work: read root `AGENTS.md`, then project `README.md` (or `PROJECT.md`),
+`STATUS.md`, relevant tasks/ADRs, and `PLAN.md` when direction matters. Inspect
+linked artifact repos under their own instructions.
 
 Commit authority, before starting (when reconstructible lifecycle history
 matters):
@@ -174,8 +174,7 @@ After meaningful work:
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline and recent
    outcome; `## Next` reflects immediate next actions); `PLAN.md` only if
    intended direction changed.
-1. Run `scripts/taskgo sync-status PROJECT` after the semantic edits are
-   coherent.
+1. Run `scripts/taskgo sync PROJECT` after the semantic edits are coherent.
 1. Run `scripts/taskgo doctor PROJECT` and perform its semantic review.
 1. Commit a coherent transition when practical. Use `checkpoint` when standing
    authority is present. Subject = what became true, not what file changed.
@@ -200,14 +199,15 @@ repeatable `Ref:` trailers for non-derivable external relationships.
 
 ## CLI
 
-Requires Bash + Git; it remains a thin layer over ordinary files/history:
+Requires Python 3.11+ (via `uv`) and Git; it remains a thin layer over ordinary
+files/history:
 
 ```text
 taskgo id
-taskgo new-task PROJECT TITLE [--status STATE]
-taskgo tasks [PROJECT] [--state STATE]
+taskgo create PROJECT TITLE [--status STATE]
+taskgo list [PROJECT] [--state STATE]
 taskgo status [PROJECT]
-taskgo sync-status PROJECT
+taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
