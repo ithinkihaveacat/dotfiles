@@ -385,7 +385,9 @@ class Finding:
     severity: Literal["PASS", "INFO", "WARN", "FAIL"]
     message: str
     file_path: Path | None = None
-    remediation: Callable[[], None] | None = None  # None if requires human review
+    remediation: Callable[[], list[Path] | None] | None = (
+        None  # None if requires human review
+    )
 
 
 def audit_workspace(root: Path, target_project: str | None = None) -> list[Finding]:
@@ -410,11 +412,12 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
     agents_file = root / "AGENTS.md"
     if not agents_file.is_file():
 
-        def remediate_missing_agents():
+        def remediate_missing_agents() -> list[Path]:
             agents_file.write_text(
                 f"# Agent instructions\n\nThis repository follows taskgo: <{CANONICAL_URL}>.\n\n{COMMIT_AUTH}\n",
                 encoding="utf-8",
             )
+            return [agents_file]
 
         findings.append(
             Finding(
@@ -437,7 +440,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
         if needs_decl or needs_url or needs_auth:
 
-            def remediate_agents():
+            def remediate_agents() -> list[Path]:
                 cur = agents_file.read_text(encoding="utf-8")
                 if needs_decl:
                     cur = (
@@ -448,6 +451,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 if needs_auth:
                     cur = cur.rstrip() + f"\n\n{COMMIT_AUTH}\n"
                 agents_file.write_text(cur, encoding="utf-8")
+                return [agents_file]
 
             if needs_decl:
                 findings.append(
@@ -474,8 +478,9 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
     inbox_file = root / "INBOX.md"
     if not inbox_file.is_file():
 
-        def remediate_missing_inbox():
+        def remediate_missing_inbox() -> list[Path]:
             inbox_file.write_text("# Inbox\n", encoding="utf-8")
+            return [inbox_file]
 
         findings.append(
             Finding(
@@ -521,8 +526,12 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
         # Check STATUS.md
         if not status_file.is_file():
 
-            def make_remediate_status(p_name=name):
-                return lambda: sync_status(root, p_name)
+            def make_remediate_status(p_name=name, p_status=status_file):
+                def remediate() -> list[Path]:
+                    sync_status(root, p_name)
+                    return [p_status]
+
+                return remediate
 
             findings.append(
                 Finding(
@@ -530,7 +539,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     severity="WARN",
                     message=f"{name}: missing STATUS.md",
                     file_path=status_file,
-                    remediation=make_remediate_status(name),
+                    remediation=make_remediate_status(name, status_file),
                 )
             )
 
@@ -563,7 +572,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     def make_remediate_task(
                         target_tf=tf, p_root=root, p_tasks=tasks_dir
                     ):
-                        def remediate():
+                        def remediate() -> list[Path]:
                             t_content = target_tf.read_text(encoding="utf-8")
                             t_fm, t_body = parse_frontmatter(t_content)
                             t_id = t_fm.get("id", "")
@@ -581,8 +590,11 @@ status: {t_status}
                             target_tf.write_text(new_content, encoding="utf-8")
                             slug = slugify(t_title) or "task"
                             new_name = f"{t_id}-{slug}.md"
+                            new_path = p_tasks / new_name
                             if target_tf.name != new_name:
-                                target_tf.rename(p_tasks / new_name)
+                                target_tf.rename(new_path)
+                                return [target_tf, new_path]
+                            return [target_tf]
 
                         return remediate
 
@@ -623,8 +635,12 @@ status: {t_status}
             rendered = render_status_file(root, name)
             if current_status != rendered:
 
-                def make_remediate_snapshot(p_name=name):
-                    return lambda: sync_status(root, p_name)
+                def make_remediate_snapshot(p_name=name, p_status=status_file):
+                    def remediate() -> list[Path]:
+                        sync_status(root, p_name)
+                        return [p_status]
+
+                    return remediate
 
                 findings.append(
                     Finding(
@@ -632,7 +648,7 @@ status: {t_status}
                         severity="WARN",
                         message=f"{name}: stale STATUS task snapshot (run sync)",
                         file_path=status_file,
-                        remediation=make_remediate_snapshot(name),
+                        remediation=make_remediate_snapshot(name, status_file),
                     )
                 )
 
@@ -709,7 +725,7 @@ def cmd_create(args: list[str]) -> None:
         if args[idx] == "--status":
             if idx + 1 >= len(args):
                 die("--status requires a value")
-            status = args[idx + 1]
+            status = normalize_status(args[idx + 1])
             idx += 2
         else:
             die(f"unknown option: {args[idx]}")
@@ -796,15 +812,25 @@ def cmd_status(args: list[str]) -> None:
 
 
 def cmd_sync(args: list[str]) -> None:
-    if len(args) != 1:
-        die("sync PROJECT")
-    project_name = args[0]
+    if len(args) > 1:
+        die("sync [PROJECT]")
     root = get_repo_root()
-    get_proj_dir(project_name, root)
-    if sync_status(root, project_name):
-        print("updated")
-    else:
-        print("current")
+
+    if len(args) == 1:
+        project_name = args[0]
+        get_proj_dir(project_name, root)
+        if sync_status(root, project_name):
+            print("updated")
+        else:
+            print("current")
+        return
+
+    for p in sorted(root.iterdir()):
+        if is_project_dir(p):
+            if sync_status(root, p.name):
+                print(f"{p.name}: updated")
+            else:
+                print(f"{p.name}: current")
 
 
 def cmd_doctor(args: list[str]) -> None:
@@ -830,7 +856,8 @@ def cmd_doctor(args: list[str]) -> None:
         Check PLAN is current direction, not accumulated history.
         Check ADR status/rationale and artifact references remain meaningful.
         Check private tracker material has not leaked to public/shared artifacts.
-        After merges, check reconciled files express one coherent current state."""
+        After merges, check reconciled files express one coherent current state.""",
+        file=sys.stderr,
     )
 
     if has_errors:
@@ -862,9 +889,6 @@ def cmd_fix(args: list[str]) -> None:
     if diff_cached.returncode != 0:
         die("fix: git index contains staged changes; unstage or commit them first")
 
-    # Snapshot working tree state before fixes to identify modified files
-    status_before = set(run_git(["status", "--porcelain"]).stdout.splitlines())
-
     findings = audit_workspace(root, want_project)
     fixable = [f for f in findings if f.remediation is not None]
 
@@ -879,9 +903,15 @@ def cmd_fix(args: list[str]) -> None:
             print("[INFO]  Workspace is clean, no fixes needed.", file=sys.stderr)
         sys.exit(0)
 
-    # Execute all remediations
+    # Execute all remediations and collect explicitly touched paths
+    touched_paths: set[Path] = set()
     for f in fixable:
-        f.remediation()
+        res = f.remediation()
+        if res:
+            for p in res:
+                touched_paths.add(p)
+        elif f.file_path:
+            touched_paths.add(f.file_path)
 
     # Re-run audit to verify convergence
     post_findings = audit_workspace(root, want_project)
@@ -890,27 +920,16 @@ def cmd_fix(args: list[str]) -> None:
         for f in remaining_errors:
             print(f"[{f.severity}]  Still open after fix: {f.message}", file=sys.stderr)
 
-    # Determine modified files
-    status_after = set(run_git(["status", "--porcelain"]).stdout.splitlines())
-    changed_lines = status_after - status_before
-    modified_files = []
-    for line in changed_lines:
-        if line.strip():
-            # Line format: " M path" or "?? path" or "R  old -> new"
-            parts = line.strip().split(maxsplit=1)
-            if len(parts) > 1:
-                target = parts[1]
-                if " -> " in target:
-                    target = target.split(" -> ")[1]
-                modified_files.append(target)
-
-    # Also check git diff and untracked files
-    diff_files = run_git(["diff", "--name-only"]).stdout.splitlines()
-    untracked_files = run_git(
-        ["ls-files", "--others", "--exclude-standard"]
-    ).stdout.splitlines()
-    all_current_modified = sorted(set(diff_files + untracked_files))
-    modified_files = sorted(set(modified_files + all_current_modified))
+    # Convert touched paths to repo-relative files that have modifications or were created/deleted
+    modified_files: list[str] = []
+    for tp in sorted(touched_paths):
+        try:
+            rel = str(tp.resolve().relative_to(root.resolve()))
+        except ValueError:
+            continue
+        st = run_git(["status", "--porcelain", "--", rel], check=False).stdout.strip()
+        if st and rel not in modified_files:
+            modified_files.append(rel)
 
     if not modified_files:
         print("[INFO]  Workspace is clean, no files changed.", file=sys.stderr)
@@ -941,7 +960,7 @@ def cmd_fix(args: list[str]) -> None:
         print("\n".join(modified_files))
         return
 
-    # Stage modified files and commit
+    # Stage ONLY the modified files and commit
     run_git(["add", "--", *modified_files])
     commit_msg = (
         f"chore({want_project}): auto-fix task metadata and status\n"

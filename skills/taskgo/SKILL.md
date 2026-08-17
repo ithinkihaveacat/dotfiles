@@ -39,9 +39,9 @@ by adding this marker to its committed root `AGENTS.md`:
 <!-- taskgo:allow-local-commits -->
 ```
 
-This authority applies only to `taskgo checkpoint` commits in that control repo.
-It never authorizes commits in linked artifact repos, pushes, amendments,
-rebases, or other history rewriting.
+This authority applies only to `taskgo checkpoint` commits and `taskgo fix`
+auto-heals in that control repo. It never authorizes commits in linked artifact
+repos, pushes, amendments, rebases, or other history rewriting.
 
 ### Invariants
 
@@ -157,7 +157,7 @@ Commit authority, before starting (when reconstructible lifecycle history
 matters):
 
 1. Committed `taskgo:allow-local-commits` marker present -> authorized for
-   guarded `checkpoint` commits in this control repo only.
+   guarded `checkpoint` commits and `fix` auto-heals in this control repo only.
 1. Authorized: commit a meaningful `in-progress` transition before artifact work
    that may span sessions; commit completion with `Ref:` trailers for linked
    artifact commits. A small task completed atomically may go directly `todo` ->
