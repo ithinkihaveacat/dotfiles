@@ -210,12 +210,6 @@ it is off-body (`mIsOffBody=true`). The system automatically disables gesture
 detection to save power. When this happens, all gestures become inactive, and
 ADB injection will fail.
 
-> [!NOTE] **`sensorservice` vs. `IWearGestureService`**:
-> Android's core native sensor service does **not** expose a `set-off-body-state`
-> subcommand. Instead, `IWearGestureService override-constraints offbody-state` is
-> the authoritative framework-level mechanism that instructs the gesture manager
-> to disregard off-body gating without needing root or low-level sensor HAL mocking.
-
 #### Bypassing Constraints via ADB
 
 You can temporarily override these constraints for development, manual testing,
@@ -388,30 +382,3 @@ adb shell dumpsys IWearGestureService | grep -A 5 "GestureHintConfigurationProvi
 
 This confirms the maximum session hints (e.g., `first=3`) before the system
 silences the visual cues.
-
-### F. Visual Verification & Screen Recording
-
-When automating or validating gesture behaviors and Compose indicators:
-
-- **Keep screen awake during automated test runs**:
-  ```bash
-  # Wake up device
-  adb shell input keyevent KEYCODE_WAKEUP
-
-  # Prevent screen timeout/dimming
-  adb shell svc power stayon true
-  ```
-  *(To restore default screen timeout after testing: `adb shell svc power stayon false`)*
-
-- **Capture on-device screenshot**:
-  ```bash
-  adb shell screencap -p /sdcard/gesture_screen.png
-  adb pull /sdcard/gesture_screen.png
-  ```
-
-- **Record video of gesture interactions & animations**:
-  ```bash
-  # Record screen (up to 180 seconds or press Ctrl+C)
-  adb shell screenrecord --time-limit 15 /sdcard/gesture_demo.mp4
-  adb pull /sdcard/gesture_demo.mp4
-  ```
