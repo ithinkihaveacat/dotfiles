@@ -77,7 +77,48 @@ unhyphenated verbs:
   ancestry.
 - `taskgo checkpoint TASK_ID SUBJECT [...]`: Guarded checkpoint transition
   commit.
-- `taskgo commit SUBJECT [...]`: Commit logical transition.
+
+## Root Landing Page (`README.md`)
+
+`AGENTS.md` is strictly machine- and agent-directed. For human developers
+browsing the control repository via web interfaces (GitHub, GitLab), a root
+`README.md` is optionally useful as an evergreen, zero-maintenance landing page.
+
+To prevent ceremony and drift, a root `README.md` should **not** attempt to
+maintain manual project tables or task summaries. Instead, it provides a stable
+structural overview and CLI quick reference:
+
+````markdown
+# Control Repository
+
+A private project and task control repository maintained with [**`taskgo`**](https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo).
+
+## Structure
+
+- [`AGENTS.md`](AGENTS.md) — Agent operating instructions, environment rules, and repository authority.
+- [`INBOX.md`](INBOX.md) — Unclassified scratchpad and zero-ceremony task capture.
+- **Projects (`<project>/`)** — Discrete initiatives containing identity, operational status, and granular task records.
+
+## CLI Quick Reference
+
+```bash
+# Check status across all projects
+taskgo status
+
+# Create a new task
+taskgo create <project> "<task-title>"
+
+# Synchronize status snapshots
+taskgo sync <project>
+
+# Auto-heal metadata and synchronize snapshots
+taskgo fix
+
+# Verify repository health
+taskgo doctor
+````
+
+```
 
 ## References
 
@@ -85,3 +126,5 @@ unhyphenated verbs:
 - <https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions>
 - <https://git-scm.com/docs/git-log>
 - <https://git-scm.com/docs/git-interpret-trailers>
+
+```
