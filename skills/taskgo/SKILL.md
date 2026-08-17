@@ -205,12 +205,12 @@ files/history:
 
 ```text
 taskgo id
-taskgo create PROJECT TITLE [--status STATE] [--no-commit]
+taskgo create PROJECT TITLE [--status STATE] [--no-commit] [--dry-run]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo status [PROJECT] [--json]
 taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
-taskgo fix [PROJECT] [--dry-run]
+taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--body TEXT] [--ref REF]...
@@ -220,18 +220,18 @@ taskgo commit SUBJECT [--body TEXT] [--ref REF]...
 the initial task record, synchronizes `STATUS.md`, and when the
 `taskgo:allow-local-commits` marker is present, commits the transition
 automatically. Use `--no-commit` to keep the created task uncommitted in the
-working tree.
+working tree, or `--dry-run` to preview the task path without creating files.
 
 `history` compares a frontmatter field (default `status`) across historical
 blobs. `doctor` performs strictly read-only mechanical checks and prints a
 semantic checklist.
 
 `fix` is the auto-healing command: it assigns missing IDs, normalizes status
-aliases, creates missing scaffolding, and regenerates `STATUS.md`. When the
-`taskgo:allow-local-commits` marker is present, `fix` commits the repairs by
-default and outputs machine-readable commit metadata (`COMMIT_SHA: <hash>`) on
-stdout. Use `--dry-run` to preview changes without modifying files or
-committing.
+aliases, creates missing scaffolding, and regenerates `STATUS.md`. By default,
+`fix` commits the repairs to maintain tracker integrity and outputs
+machine-readable commit metadata (`COMMIT_SHA: <hash>`) on stdout. Use
+`--dry-run` to preview changes without modifying files or committing, or
+`--no-commit` to apply repairs on disk without committing.
 
 `checkpoint` is the safe automatic-commit path. It requires the authorization
 marker in the committed root `AGENTS.md`, an initially empty index, a target

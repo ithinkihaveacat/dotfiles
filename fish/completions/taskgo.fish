@@ -44,6 +44,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from history checkpoint' -a '(_
 # create options
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l status -x -a 'todo in-progress blocked done cancelled' -d 'Initial state'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l no-commit -d 'Create task and sync without committing'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l dry-run -d 'Preview task path without creating files'
 
 # list options
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -l state -x -a 'todo in-progress blocked done cancelled' -d 'Filter by state'
@@ -54,6 +55,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from status' -l json -d 'Emit J
 
 # fix options
 complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l dry-run -d 'Preview repairs without modifying files'
+complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l no-commit -d 'Apply repairs without committing'
 
 # checkpoint options
 complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -l path -r -d 'Include additional modified project file'

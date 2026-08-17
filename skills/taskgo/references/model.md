@@ -57,7 +57,8 @@ To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
   task IDs, normalizing status aliases, synchronizing `STATUS.md` snapshots),
   verifies convergence, and auto-commits repairs by default with deterministic
   `COMMIT_SHA` output on `stdout`. Use `--dry-run` to preview changes without
-  modifying files or committing.
+  modifying files or committing, or `--no-commit` to apply repairs on disk
+  without committing.
 
 ## Command Vocabulary
 
@@ -65,14 +66,16 @@ Commands follow the fixed `tool [verb] [noun]` structure with clean,
 unhyphenated verbs:
 
 - `taskgo id`: Allocate unique `TASK-XXXXX` identifier.
-- `taskgo create PROJECT TITLE`: Create a structured task record.
-- `taskgo list [PROJECT]`: List tasks in tabular format.
-- `taskgo status [PROJECT]`: Display operational status or multi-project
-  summary.
+- `taskgo create PROJECT TITLE [--status STATE] [--no-commit] [--dry-run]`:
+  Create a structured task record.
+- `taskgo list [PROJECT] [--state STATE] [--json]`: List tasks in tabular or
+  JSON format.
+- `taskgo status [PROJECT] [--json]`: Display operational status or
+  multi-project summary.
 - `taskgo sync [PROJECT]`: Synchronize `STATUS.md` snapshot block.
 - `taskgo doctor [PROJECT]`: Diagnostic health check (read-only).
-- `taskgo fix [PROJECT] [--dry-run]`: Auto-heal task metadata, status, and
-  scaffolding.
+- `taskgo fix [PROJECT] [--dry-run] [--no-commit]`: Auto-heal task metadata,
+  status, and scaffolding.
 - `taskgo history PATH_OR_TASK_ID [FIELD]`: Derive state transitions from Git
   ancestry.
 - `taskgo checkpoint TASK_ID SUBJECT [...]`: Guarded checkpoint transition
