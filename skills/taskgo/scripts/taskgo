@@ -308,6 +308,17 @@ def build_status_block(root: Path, project_name: str) -> str:
     return "\n".join(lines)
 
 
+def has_commit_auth(root: Path) -> bool:
+    """Check if the repository grants local commit authority in both HEAD and working tree."""
+    show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
+    if show_agents.returncode != 0 or COMMIT_AUTH not in show_agents.stdout:
+        return False
+    agents_path = root / "AGENTS.md"
+    return agents_path.is_file() and COMMIT_AUTH in agents_path.read_text(
+        encoding="utf-8"
+    )
+
+
 def render_status_file(root: Path, project_name: str) -> str:
     proj_dir = root / project_name
     status_file = proj_dir / "STATUS.md"
@@ -319,7 +330,7 @@ def render_status_file(root: Path, project_name: str) -> str:
     content = status_file.read_text(encoding="utf-8")
     if BEGIN in content and END in content:
         pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.DOTALL)
-        return pattern.sub(new_block, content)
+        return pattern.sub(lambda _: new_block, content)
     return content.rstrip() + f"\n\n{new_block}\n"
 
 
@@ -417,7 +428,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
         def remediate_missing_agents() -> list[Path]:
             agents_file.write_text(
-                f"# Agent instructions\n\nThis repository follows taskgo: <{CANONICAL_URL}>.\n\n{COMMIT_AUTH}\n",
+                f"# Agent instructions\n\nThis repository follows taskgo: <{CANONICAL_URL}>.\n",
                 encoding="utf-8",
             )
             return [agents_file]
@@ -439,9 +450,8 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
             re.IGNORECASE,
         )
         needs_url = CANONICAL_URL not in agents_txt
-        needs_auth = COMMIT_AUTH not in agents_txt
 
-        if needs_decl or needs_url or needs_auth:
+        if needs_decl or needs_url:
 
             def remediate_agents() -> list[Path]:
                 cur = agents_file.read_text(encoding="utf-8")
@@ -458,8 +468,6 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     )
                 elif CANONICAL_URL not in cur:
                     cur += f"\nCanonical URL: <{CANONICAL_URL}>\n"
-                if COMMIT_AUTH not in cur:
-                    cur = cur.rstrip() + f"\n\n{COMMIT_AUTH}\n"
                 agents_file.write_text(cur, encoding="utf-8")
                 return [agents_file]
 
@@ -796,16 +804,7 @@ status: {status}
     if no_commit:
         return
 
-    # Check for authorization marker
-    agents_file = root / "AGENTS.md"
-    show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
-    agents_has_auth = (
-        show_agents.returncode == 0 and COMMIT_AUTH in show_agents.stdout
-    ) or (
-        agents_file.is_file() and COMMIT_AUTH in agents_file.read_text(encoding="utf-8")
-    )
-
-    if not agents_has_auth:
+    if not has_commit_auth(root):
         return
 
     # Index must be empty before staging new task
@@ -850,21 +849,21 @@ def cmd_list(args: list[str]) -> None:
     as_json = False
 
     idx = 0
-    if idx < len(args) and not args[idx].startswith("--"):
-        project_name = args[idx]
-        idx += 1
-
     while idx < len(args):
-        if args[idx] == "--state":
+        arg = args[idx]
+        if arg == "--state":
             if idx + 1 >= len(args):
                 die("--state requires a value")
-            filter_state = args[idx + 1]
+            filter_state = normalize_status(args[idx + 1])
             idx += 2
-        elif args[idx] == "--json":
+        elif arg == "--json":
             as_json = True
             idx += 1
+        elif not arg.startswith("--") and project_name is None:
+            project_name = arg
+            idx += 1
         else:
-            die(f"unknown option: {args[idx]}")
+            die(f"unknown option: {arg}")
 
     root = get_repo_root()
     rows = get_task_rows(root, project_name)
@@ -895,16 +894,16 @@ def cmd_status(args: list[str]) -> None:
     as_json = False
 
     idx = 0
-    if idx < len(args) and not args[idx].startswith("--"):
-        project_name = args[idx]
-        idx += 1
-
     while idx < len(args):
-        if args[idx] == "--json":
+        arg = args[idx]
+        if arg == "--json":
             as_json = True
             idx += 1
+        elif not arg.startswith("--") and project_name is None:
+            project_name = arg
+            idx += 1
         else:
-            die(f"unknown option: {args[idx]}")
+            die(f"unknown option: {arg}")
 
     root = get_repo_root()
 
@@ -1117,16 +1116,7 @@ def cmd_fix(args: list[str]) -> None:
         print("[INFO]  Workspace is clean, no files changed.", file=sys.stderr)
         sys.exit(0)
 
-    # Check for authorization marker
-    agents_file = root / "AGENTS.md"
-    show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
-    agents_has_auth = (
-        show_agents.returncode == 0 and COMMIT_AUTH in show_agents.stdout
-    ) or (
-        agents_file.is_file() and COMMIT_AUTH in agents_file.read_text(encoding="utf-8")
-    )
-
-    if not agents_has_auth:
+    if not has_commit_auth(root):
         print(
             "[INFO]  Authorization marker missing; skipping auto-commit.",
             file=sys.stderr,
@@ -1136,11 +1126,12 @@ def cmd_fix(args: list[str]) -> None:
 
     # Stage ONLY the modified files and commit
     run_git(["add", "--", *modified_files])
-    commit_msg = (
-        f"chore({want_project}): auto-fix task metadata and status\n"
-        if want_project
-        else "chore(taskgo): auto-fix task metadata and status\n"
-    )
+    if want_project:
+        commit_msg = f"chore({want_project}): fix metadata and status\n"
+        if len(commit_msg.strip()) > 50:
+            commit_msg = f"{want_project}: fix metadata and status\n"
+    else:
+        commit_msg = "chore: fix task metadata and status\n"
     run_git(["commit", "-m", commit_msg])
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
 
@@ -1226,17 +1217,8 @@ def cmd_checkpoint(args: list[str]) -> None:
     if not ID_PATTERN.match(query):
         die(f"checkpoint: invalid task ID: {query}")
 
-    # Check authorization in committed AGENTS.md
-    show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
-    if show_agents.returncode != 0 or COMMIT_AUTH not in show_agents.stdout:
+    if not has_commit_auth(root):
         die(f"checkpoint: committed AGENTS.md must contain {COMMIT_AUTH}")
-
-    # Check authorization in working-tree AGENTS.md
-    agents_path = root / "AGENTS.md"
-    if not agents_path.is_file() or COMMIT_AUTH not in agents_path.read_text(
-        encoding="utf-8"
-    ):
-        die(f"checkpoint: AGENTS.md must contain {COMMIT_AUTH}")
 
     # Index must be empty
     diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
@@ -1256,8 +1238,12 @@ def cmd_checkpoint(args: list[str]) -> None:
             die(f"checkpoint: unsafe path: {p_arg}")
         if not p_clean.startswith(f"{project_name}/"):
             die(f"checkpoint: path is outside project {project_name}: {p_arg}")
-        if not (root / p_clean).is_file():
-            die(f"checkpoint: path is not a file: {p_arg}")
+        is_existing_file = (root / p_clean).is_file()
+        is_git_deleted = bool(
+            run_git(["status", "--porcelain", "--", p_clean]).stdout.strip()
+        )
+        if not is_existing_file and not is_git_deleted:
+            die(f"checkpoint: path not found: {p_arg}")
         requested.append(p_clean)
 
     # Synchronize status for project
@@ -1382,7 +1368,7 @@ Maintain a private Git-backed personal project/task control repo.
 Commands:
   id                               Allocate a unique task ID
   create PROJECT TITLE [OPTIONS]   Create a new task
-  list [PROJECT] [--json]          List tasks
+  list [PROJECT] [OPTIONS]         List tasks
   status [PROJECT] [--json]        Show project status
   sync [PROJECT]                   Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks (read-only)
