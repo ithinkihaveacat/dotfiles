@@ -1,10 +1,783 @@
-#!/usr/bin/env bash
-set -euo pipefail
-# Tests: tests/test-taskgo
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
 
-usage() {
-  cat <<TXT
-Usage: $(basename "$0") COMMAND [OPTIONS]
+import hashlib
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+BEGIN = "<!-- taskgo:begin -->"
+END = "<!-- taskgo:end -->"
+CANONICAL_URL = "https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo"
+COMMIT_AUTH = "<!-- taskgo:allow-local-commits -->"
+ID_PATTERN = re.compile(r"^TASK-[0-9A-F]{5}$")
+STANDARD_STATES = {"todo", "in-progress", "blocked", "done", "cancelled"}
+
+# Keep track of active child processes for clean teardown on signal
+_active_subprocesses: set[subprocess.Popen] = set()
+
+
+def sigterm_handler(signum, frame):
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, sigterm_handler)
+
+
+def reap_subprocesses():
+    for proc in list(_active_subprocesses):
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        _active_subprocesses.discard(proc)
+
+
+def die(msg: str, exit_code: int = 1) -> None:
+    print(f"taskgo: {msg}", file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def warn(msg: str) -> None:
+    print(f"[WARN]  {msg}", file=sys.stderr)
+
+
+def run_git(
+    args: list[str],
+    cwd: Path | None = None,
+    check: bool = True,
+    capture_output: bool = True,
+    text: bool = True,
+    input_data: str | None = None,
+) -> subprocess.CompletedProcess:
+    cmd = ["git", *args]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.PIPE if input_data is not None else None,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=text,
+    )
+    _active_subprocesses.add(proc)
+    try:
+        stdout, stderr = proc.communicate(input=input_data)
+    finally:
+        _active_subprocesses.discard(proc)
+
+    ret = subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
+    if check and ret.returncode != 0:
+        raise subprocess.CalledProcessError(ret.returncode, cmd, ret.stdout, ret.stderr)
+    return ret
+
+
+def get_repo_root() -> Path:
+    try:
+        res = run_git(["rev-parse", "--show-toplevel"], check=True)
+        return Path(res.stdout.strip())
+    except Exception:
+        die("not in a Git repo")
+
+
+def get_proj_dir(project_name: str, root: Path) -> Path:
+    p = root / project_name
+    if not p.is_dir():
+        die(f"unknown project: {project_name}")
+    return p
+
+
+def parse_frontmatter(content: str) -> dict[str, str]:
+    """Tolerant frontmatter parser for key-value pairs between --- lines."""
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fm: dict[str, str] = {}
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if ":" in line:
+            key, val = line.split(":", 1)
+            val = val.strip().strip("'\"")
+            fm[key.strip()] = val
+    return fm
+
+
+def extract_frontmatter_field(content: str, key: str) -> str:
+    fm = parse_frontmatter(content)
+    return fm.get(key, "")
+
+
+def extract_title(content: str) -> str:
+    for line in content.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def slugify(title: str) -> str:
+    s = title.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    s = re.sub(r"-+", "-", s)
+    return s[:48]
+
+
+def get_task_files(root: Path, project_name: str | None = None) -> list[Path]:
+    files: list[Path] = []
+    if project_name:
+        tasks_dir = root / project_name / "tasks"
+        if not (root / project_name).is_dir():
+            die(f"unknown project: {project_name}")
+        if tasks_dir.is_dir():
+            for f in sorted(tasks_dir.glob("*.md")):
+                if f.is_file():
+                    files.append(f)
+    else:
+        for p in sorted(root.iterdir()):
+            if p.is_dir() and not p.name.startswith("."):
+                tasks_dir = p / "tasks"
+                if tasks_dir.is_dir():
+                    for f in sorted(tasks_dir.glob("*.md")):
+                        if f.is_file():
+                            files.append(f)
+    return sorted(files)
+
+
+class TaskRow:
+    def __init__(
+        self,
+        project: str,
+        task_id: str,
+        status: str,
+        title: str,
+        rel_path: str,
+        abs_path: Path,
+    ):
+        self.project = project
+        self.task_id = task_id
+        self.status = status
+        self.title = title
+        self.rel_path = rel_path
+        self.abs_path = abs_path
+
+
+def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
+    files = get_task_files(root, project_name)
+    rows: list[TaskRow] = []
+    for f in files:
+        try:
+            content = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        task_id = extract_frontmatter_field(content, "id")
+        status = extract_frontmatter_field(content, "status")
+        title = extract_title(content)
+        rel_path = str(f.relative_to(root))
+        project = rel_path.split(os.sep, maxsplit=1)[0]
+        rows.append(TaskRow(project, task_id, status, title, rel_path, f.resolve()))
+    return rows
+
+
+def generate_task_id(root: Path) -> str:
+    existing_ids = {r.task_id for r in get_task_rows(root) if r.task_id}
+    for i in range(1, 257):
+        entropy = f"{time.time_ns()}:{os.getpid()}:{os.urandom(8).hex()}:{i}"
+        h = hashlib.sha1(entropy.encode("utf-8")).hexdigest()[:5].upper()
+        candidate = f"TASK-{h}"
+        if candidate not in existing_ids:
+            return candidate
+    die("could not allocate unique task ID")
+
+
+def build_status_block(root: Path, project_name: str) -> str:
+    rows = get_task_rows(root, project_name)
+    in_progress = [r for r in rows if r.status == "in-progress"]
+    blocked = [r for r in rows if r.status == "blocked"]
+    todo_count = sum(1 for r in rows if r.status == "todo")
+    done_count = sum(1 for r in rows if r.status == "done")
+    unclassified_count = sum(
+        1 for r in rows if not r.status or r.status not in STANDARD_STATES
+    )
+
+    lines: list[str] = [
+        BEGIN,
+        "",
+        "## Task snapshot",
+        "",
+        "### In progress",
+        "",
+    ]
+    if in_progress:
+        for r in in_progress:
+            lines.append(f"- `{r.task_id}` — {r.title}")
+    else:
+        lines.append("- None")
+
+    lines.extend(
+        [
+            "",
+            "### Blocked",
+            "",
+        ]
+    )
+    if blocked:
+        for r in blocked:
+            lines.append(f"- `{r.task_id}` — {r.title}")
+    else:
+        lines.append("- None")
+
+    counts = f"\nTodo: {todo_count} Done: {done_count}"
+    if unclassified_count > 0:
+        counts += f" Unclassified: {unclassified_count}"
+    lines.append(counts)
+    lines.append("")
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def render_status_file(root: Path, project_name: str) -> str:
+    proj_dir = root / project_name
+    status_file = proj_dir / "STATUS.md"
+    new_block = build_status_block(root, project_name)
+
+    if not status_file.is_file():
+        return f"# Status\n\n## Summary\n\n{new_block}\n\n## Next\n"
+
+    content = status_file.read_text(encoding="utf-8")
+    if BEGIN in content and END in content:
+        # Replace between BEGIN and END
+        pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.DOTALL)
+        return pattern.sub(new_block, content)
+    return content.rstrip() + f"\n\n{new_block}\n"
+
+
+def sync_status(root: Path, project_name: str) -> bool:
+    """Returns True if file was updated/created, False if already identical."""
+    proj_dir = root / project_name
+    status_file = proj_dir / "STATUS.md"
+    rendered = render_status_file(root, project_name)
+    if status_file.is_file():
+        current = status_file.read_text(encoding="utf-8")
+        if current == rendered:
+            return False
+    status_file.write_text(rendered, encoding="utf-8")
+    return True
+
+
+def resolve_target(root: Path, query: str) -> Path:
+    # Direct file path
+    p = Path(query)
+    if p.is_file():
+        return p.resolve()
+    p_rel = root / query
+    if p_rel.is_file():
+        return p_rel.resolve()
+
+    if not ID_PATTERN.match(query):
+        die(f"cannot resolve: {query}")
+
+    hits: list[Path] = []
+    for row in get_task_rows(root):
+        if row.task_id == query:
+            hits.append(row.abs_path)
+
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        die(f"ambiguous id: {query}")
+    die(f"cannot resolve: {query}")
+
+
+# ---------------------------------------------------------------------------
+# CLI Commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_id(args: list[str]) -> None:
+    root = get_repo_root()
+    print(generate_task_id(root))
+
+
+def cmd_new(args: list[str]) -> None:
+    if len(args) < 2:
+        die("new-task PROJECT TITLE [--status STATE]")
+    project_name = args[0]
+    title = args[1]
+    status = "todo"
+
+    idx = 2
+    while idx < len(args):
+        if args[idx] == "--status":
+            if idx + 1 >= len(args):
+                die("--status requires a value")
+            status = args[idx + 1]
+            idx += 2
+        else:
+            die(f"unknown option: {args[idx]}")
+
+    root = get_repo_root()
+    proj_dir = get_proj_dir(project_name, root)
+    tasks_dir = proj_dir / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    task_id = generate_task_id(root)
+    slug = slugify(title) or "task"
+    filename = f"{task_id}-{slug}.md"
+    task_path = tasks_dir / filename
+
+    content = f"""---
+id: {task_id}
+status: {status}
+---
+
+# {title}
+
+## Outcome
+
+## Findings
+
+## Next
+"""
+    task_path.write_text(content, encoding="utf-8")
+    rel_path = str(task_path.relative_to(root))
+    print(f"{task_id}\t{rel_path}")
+
+
+def cmd_tasks(args: list[str]) -> None:
+    project_name = None
+    filter_state = None
+
+    idx = 0
+    if idx < len(args) and not args[idx].startswith("--"):
+        project_name = args[idx]
+        idx += 1
+
+    while idx < len(args):
+        if args[idx] == "--state":
+            if idx + 1 >= len(args):
+                die("--state requires a value")
+            filter_state = args[idx + 1]
+            idx += 2
+        else:
+            die(f"unknown option: {args[idx]}")
+
+    root = get_repo_root()
+    rows = get_task_rows(root, project_name)
+    if filter_state:
+        rows = [r for r in rows if r.status == filter_state]
+
+    print("PROJECT\tTASK\tSTATE\tTITLE\tPATH")
+    for r in rows:
+        print(f"{r.project}\t{r.task_id}\t{r.status}\t{r.title}\t{r.rel_path}")
+
+
+def cmd_status(args: list[str]) -> None:
+    if len(args) > 1:
+        die("status [PROJECT]")
+    root = get_repo_root()
+
+    if len(args) == 1:
+        project_name = args[0]
+        proj_dir = get_proj_dir(project_name, root)
+        status_file = proj_dir / "STATUS.md"
+        if not status_file.is_file():
+            die("missing STATUS.md")
+        print(status_file.read_text(encoding="utf-8"), end="")
+        return
+
+    print("PROJECT\tIN-PROGRESS\tBLOCKED\tTODO")
+    for p in sorted(root.iterdir()):
+        if p.is_dir() and (p / "PROJECT.md").is_file():
+            name = p.name
+            rows = get_task_rows(root, name)
+            in_prog = sum(1 for r in rows if r.status == "in-progress")
+            blocked = sum(1 for r in rows if r.status == "blocked")
+            todo = sum(1 for r in rows if r.status == "todo")
+            print(f"{name}\t{in_prog}\t{blocked}\t{todo}")
+
+
+def cmd_sync_status(args: list[str]) -> None:
+    if len(args) != 1:
+        die("sync-status PROJECT")
+    project_name = args[0]
+    root = get_repo_root()
+    get_proj_dir(project_name, root)
+    if sync_status(root, project_name):
+        print("updated")
+    else:
+        print("current")
+
+
+def cmd_doctor(args: list[str]) -> None:
+    if len(args) > 1:
+        die("doctor [PROJECT]")
+    want_project = args[0] if len(args) == 1 else None
+
+    root = get_repo_root()
+    bad = False
+
+    # Check shallow clone
+    try:
+        shallow = run_git(["rev-parse", "--is-shallow-repository"]).stdout.strip()
+        if shallow == "true":
+            warn("shallow clone: history may be incomplete")
+            bad = True
+    except Exception:
+        pass
+
+    # Check AGENTS.md
+    agents_file = root / "AGENTS.md"
+    if not agents_file.is_file():
+        warn("missing AGENTS.md")
+        bad = True
+    else:
+        agents_txt = agents_file.read_text(encoding="utf-8")
+        if not re.search(
+            r"(follows|structured|maintained|according to).*taskgo",
+            agents_txt,
+            re.IGNORECASE,
+        ):
+            warn("AGENTS.md: must state that the repository follows taskgo")
+            bad = True
+        if CANONICAL_URL not in agents_txt:
+            warn(f"AGENTS.md: missing canonical taskgo URL: {CANONICAL_URL}")
+            bad = True
+
+    # Check INBOX.md
+    inbox_file = root / "INBOX.md"
+    if not inbox_file.is_file():
+        warn("missing INBOX.md")
+        bad = True
+
+    # Check duplicate global task IDs
+    all_rows = get_task_rows(root)
+    seen_ids: dict[str, int] = {}
+    for r in all_rows:
+        if r.task_id:
+            seen_ids[r.task_id] = seen_ids.get(r.task_id, 0) + 1
+    dups = [k for k, v in seen_ids.items() if v > 1]
+    if dups:
+        warn(f"duplicate global task ID(s): {' '.join(sorted(dups))}")
+        bad = True
+
+    if want_project:
+        get_proj_dir(want_project, root)
+
+    for p in sorted(root.iterdir()):
+        if not p.is_dir():
+            continue
+        if not (p / "PROJECT.md").is_file():
+            continue
+        name = p.name
+        if want_project and name != want_project:
+            continue
+
+        for req in ["PROJECT.md", "STATUS.md", "PLAN.md"]:
+            if not (p / req).is_file():
+                warn(f"{name}: missing {req}")
+                bad = True
+
+        rows = get_task_rows(root, name)
+        for r in rows:
+            if not ID_PATTERN.match(r.task_id):
+                warn(f"{r.rel_path}: invalid/missing id '{r.task_id}'")
+                bad = True
+            if r.status and r.status not in STANDARD_STATES:
+                warn(f"{r.rel_path}: non-standard status '{r.status}'")
+                bad = True
+            m = re.search(r"TASK-[0-9A-F]{5}", Path(r.rel_path).name)
+            filename_id = m.group(0) if m else ""
+            if filename_id and filename_id != r.task_id:
+                warn(f"{r.rel_path}: filename/frontmatter IDs disagree")
+                bad = True
+
+        status_file = p / "STATUS.md"
+        if status_file.is_file():
+            current_status = status_file.read_text(encoding="utf-8")
+            rendered = render_status_file(root, name)
+            if current_status != rendered:
+                warn(f"{name}: stale STATUS task snapshot (run sync-status)")
+                bad = True
+
+            active = sum(1 for r in rows if r.status == "in-progress")
+            # Extract prose outside of snapshot block
+            prose = re.sub(
+                re.escape(BEGIN) + r".*?" + re.escape(END),
+                "",
+                current_status,
+                flags=re.DOTALL,
+            )
+            if active > 0 and re.search(
+                r"(no\s+tasks?|nothing)(\s+(is|are))?(\s+currently)?\s+in[ -]progress",
+                prose,
+                re.IGNORECASE,
+            ):
+                warn(
+                    f"{name}: STATUS prose says no task is in progress, but {active} task(s) are in-progress"
+                )
+                bad = True
+
+        decisions_dir = p / "decisions"
+        if decisions_dir.is_dir():
+            for df in sorted(decisions_dir.glob("*.md")):
+                if df.is_file():
+                    dcontent = df.read_text(encoding="utf-8")
+                    for sec in [
+                        "Status",
+                        "Context",
+                        "Decision",
+                        "Consequences",
+                    ]:
+                        if not re.search(
+                            rf"^##\s+{sec}\s*$", dcontent, re.MULTILINE | re.IGNORECASE
+                        ):
+                            warn(f"{name}/{df.name}: ADR missing ## {sec}")
+                            bad = True
+
+    print(
+        """[INFO]  Agent semantic review
+        Check STATUS Summary/Next for contradictions with tasks and recent work.
+        Check PLAN is current direction, not accumulated history.
+        Check ADR status/rationale and artifact references remain meaningful.
+        Check private tracker material has not leaked to public/shared artifacts.
+        After merges, check reconciled files express one coherent current state."""
+    )
+
+    if bad:
+        sys.exit(1)
+
+
+def cmd_history(args: list[str]) -> None:
+    if len(args) < 1 or len(args) > 2:
+        die("history PATH_OR_TASK_ID [FIELD]")
+    query = args[0]
+    key = args[1] if len(args) == 2 else "status"
+
+    root = get_repo_root()
+    target_path = resolve_target(root, query)
+    rel_path = str(target_path.relative_to(root))
+
+    # Single pass git log
+    res = run_git(["log", "--reverse", "--format=%H", "--", rel_path])
+    shas = [s.strip() for s in res.stdout.splitlines() if s.strip()]
+
+    print("RECORDED_AT\tTRANSITION\tCOMMIT\tSUBJECT")
+    prev = "__x"
+
+    for sha in shas:
+        show_res = run_git(["show", f"{sha}:{rel_path}"], check=False)
+        v = ""
+        if show_res.returncode == 0:
+            v = extract_frontmatter_field(show_res.stdout, key)
+
+        if v == prev:
+            continue
+
+        meta_res = run_git(["show", "-s", "--format=%cI%x09%s", sha])
+        parts = meta_res.stdout.strip().split("\t", 1)
+        d = parts[0]
+        s = parts[1] if len(parts) > 1 else ""
+
+        prev_label = "(none)" if prev == "__x" else prev
+        v_label = v or "(missing)"
+        print(f"{d}\t{prev_label} -> {v_label}\t{sha[:10]}\t{s}")
+        prev = v
+
+
+def cmd_checkpoint(args: list[str]) -> None:
+    if len(args) < 2:
+        die("checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...")
+    query = args[0]
+    subject = args[1]
+    body = ""
+    paths: list[str] = []
+    refs: list[str] = []
+
+    idx = 2
+    while idx < len(args):
+        opt = args[idx]
+        if opt == "--path":
+            if idx + 1 >= len(args):
+                die("checkpoint: --path requires a value")
+            paths.append(args[idx + 1])
+            idx += 2
+        elif opt == "--body":
+            if idx + 1 >= len(args):
+                die("checkpoint: --body requires a value")
+            body = args[idx + 1]
+            idx += 2
+        elif opt == "--ref":
+            if idx + 1 >= len(args):
+                die("checkpoint: --ref requires a value")
+            refs.append(args[idx + 1])
+            idx += 2
+        else:
+            die(f"unknown option: {opt}")
+
+    root = get_repo_root()
+    if not ID_PATTERN.match(query):
+        die(f"checkpoint: invalid task ID: {query}")
+
+    # Check authorization in committed AGENTS.md
+    show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
+    if show_agents.returncode != 0 or COMMIT_AUTH not in show_agents.stdout:
+        die(f"checkpoint: committed AGENTS.md must contain {COMMIT_AUTH}")
+
+    # Check authorization in working-tree AGENTS.md
+    agents_path = root / "AGENTS.md"
+    if not agents_path.is_file() or COMMIT_AUTH not in agents_path.read_text(
+        encoding="utf-8"
+    ):
+        die(f"checkpoint: AGENTS.md must contain {COMMIT_AUTH}")
+
+    # Index must be empty
+    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+    if diff_cached.returncode != 0:
+        die("checkpoint: index is not empty")
+
+    target_path = resolve_target(root, query)
+    rel_path = str(target_path.relative_to(root))
+    project_name = rel_path.split(os.sep, maxsplit=1)[0]
+    get_proj_dir(project_name, root)
+    status_rel = f"{project_name}/STATUS.md"
+
+    requested = [rel_path, status_rel]
+    for p_arg in paths:
+        p_clean = p_arg.removeprefix("./")
+        if p_clean.startswith("/") or ".." in p_clean.split("/"):
+            die(f"checkpoint: unsafe path: {p_arg}")
+        if not p_clean.startswith(f"{project_name}/"):
+            die(f"checkpoint: path is outside project {project_name}: {p_arg}")
+        if not (root / p_clean).is_file():
+            die(f"checkpoint: path is not a file: {p_arg}")
+        requested.append(p_clean)
+
+    # Check task file has changes
+    status_proc = run_git(["status", "--porcelain", "--", rel_path])
+    if not status_proc.stdout.strip():
+        die("checkpoint: task file has no changes")
+
+    sync_status(root, project_name)
+
+    # Check for unlisted project changes
+    diff_proj = run_git(["diff", "--name-only", "--", project_name]).stdout.splitlines()
+    untracked_proj = run_git(
+        ["ls-files", "--others", "--exclude-standard", "--", project_name]
+    ).stdout.splitlines()
+    all_changed = sorted(set(diff_proj + untracked_proj))
+
+    for changed in all_changed:
+        if changed and changed not in requested:
+            die(f"checkpoint: unlisted project change: {changed}")
+
+    # Run doctor
+    doctor_res = subprocess.run(
+        [sys.argv[0], "doctor", project_name],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if doctor_res.returncode != 0:
+        die("checkpoint: doctor found errors")
+
+    # Stage requested files
+    try:
+        run_git(["add", "--", *requested])
+        cached_check = run_git(["diff", "--cached", "--quiet"], check=False)
+        if cached_check.returncode == 0:
+            die("checkpoint: nothing to commit")
+
+        staged_files = run_git(["diff", "--cached", "--name-only"]).stdout.splitlines()
+        for sf in staged_files:
+            if sf and sf not in requested:
+                die(f"checkpoint: refused staged path: {sf}")
+
+        msg_lines = [subject]
+        if body:
+            msg_lines.extend(["", body])
+        for r in refs:
+            msg_lines.extend(["", f"Ref: {r}"])
+        msg = "\n".join(msg_lines) + "\n"
+
+        run_git(["commit", "-F", "-"], input_data=msg)
+    except Exception:
+        run_git(["restore", "--staged", "--", *requested], check=False)
+        raise
+
+
+def cmd_commit(args: list[str]) -> None:
+    if len(args) < 1:
+        die("commit SUBJECT [--body TEXT] [--ref REF]...")
+    subject = args[0]
+    body = ""
+    refs: list[str] = []
+
+    idx = 1
+    while idx < len(args):
+        opt = args[idx]
+        if opt == "--body":
+            if idx + 1 >= len(args):
+                die("commit: --body requires a value")
+            body = args[idx + 1]
+            idx += 2
+        elif opt == "--ref":
+            if idx + 1 >= len(args):
+                die("commit: --ref requires a value")
+            refs.append(args[idx + 1])
+            idx += 2
+        else:
+            die(f"unknown option: {opt}")
+
+    root = get_repo_root()
+    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+    if diff_cached.returncode == 0:
+        die("nothing staged")
+
+    staged_files = run_git(["diff", "--cached", "--name-only"]).stdout.splitlines()
+    projects = {f.split("/")[0] for f in staged_files if "/" in f}
+    if len(projects) > 1:
+        die("staged changes touch multiple projects")
+
+    if projects:
+        project_name = next(iter(projects))
+        get_proj_dir(project_name, root)
+        if sync_status(root, project_name):
+            run_git(["add", f"{project_name}/STATUS.md"])
+        doctor_res = subprocess.run(
+            [sys.argv[0], "doctor", project_name],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if doctor_res.returncode != 0:
+            die("doctor found errors")
+
+    msg_lines = [subject]
+    if body:
+        msg_lines.extend(["", body])
+    for r in refs:
+        msg_lines.extend(["", f"Ref: {r}"])
+    msg = "\n".join(msg_lines) + "\n"
+
+    run_git(["commit", "-F", "-"], input_data=msg)
+
+
+def usage():
+    print(
+        """Usage: taskgo COMMAND [OPTIONS]
 
 Maintain a private Git-backed personal project/task control repo.
 
@@ -23,501 +796,53 @@ Options:
   --help, -h  Display this help message and exit
 
 Examples:
-  $(basename "$0") id
-  $(basename "$0") new-task my-project "Diagnose intermittent disconnects"
-  $(basename "$0") sync-status my-project
-  $(basename "$0") checkpoint TASK-3A91F "project: start diagnosis"
-TXT
-  exit 0
-}
+  taskgo id
+  taskgo new-task my-project "Diagnose intermittent disconnects"
+  taskgo sync-status my-project
+  taskgo checkpoint TASK-3A91F "project: start diagnosis\""""
+    )
+    sys.exit(0)
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" || "${1:-}" == "" ]]; then
-  usage
-fi
 
-require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo >&2 "$(basename "$0"): $1 not found"
-    exit 127
-  }
-}
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
+        usage()
 
-require awk
-require git
-require grep
-require sed
-require find
-require sort
-require uniq
-require cmp
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
 
-BEGIN='<!-- taskgo:begin -->'
-END='<!-- taskgo:end -->'
-CANONICAL_URL='https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo'
-COMMIT_AUTH='<!-- taskgo:allow-local-commits -->'
-IDRE='^TASK-[0-9A-F]{5}$'
-STATES='todo|in-progress|blocked|done|cancelled'
+    commands = {
+        "id": cmd_id,
+        "new-task": cmd_new,
+        "tasks": cmd_tasks,
+        "status": cmd_status,
+        "sync-status": cmd_sync_status,
+        "doctor": cmd_doctor,
+        "history": cmd_history,
+        "checkpoint": cmd_checkpoint,
+        "commit": cmd_commit,
+    }
 
-die() {
-  echo "$(basename "$0"): $*" >&2
-  exit 1
-}
-warn() { echo "[WARN]  $*" >&2; }
-root() { git rev-parse --show-toplevel 2>/dev/null || die 'not in a Git repo'; }
-proj() {
-  local p
-  p="$(root)/$1"
-  [[ -d "$p" ]] || die "unknown project: $1"
-  echo "$p"
-}
+    if cmd not in commands:
+        die(f"unknown command: {cmd}. Try 'taskgo --help' for more information.")
 
-# Small tolerant frontmatter reader: structure is helpful, never mandatory.
-fm() { awk -v k="$2" 'NR==1&&$0=="---"{f=1;next} f&&$0=="---"{exit} f&&$0~("^"k":[[:space:]]*"){sub("^"k":[[:space:]]*","");gsub(/^["'\'' ]+|["'\'' ]+$/,"");print;exit}' "$1" 2>/dev/null || true; }
-blobfm() { awk -v k="$1" 'NR==1&&$0=="---"{f=1;next} f&&$0=="---"{exit} f&&$0~("^"k":[[:space:]]*"){sub("^"k":[[:space:]]*","");gsub(/^["'\'' ]+|["'\'' ]+$/,"");print;exit}'; }
-title() { sed -n 's/^# //p' "$1" | head -1; }
-slug() { printf %s "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g;s/^-|-$//g;s/-+/-/g' | cut -c1-48; }
+    commands[cmd](args)
 
-files() {
-  local r d f
-  r="$(root)"
-  if [[ -n "${1:-}" ]]; then
-    d="$r/$1/tasks"
-    [[ -d "$r/$1" ]] || die "unknown project: $1"
-    [[ -d "$d" ]] && find "$d" -maxdepth 1 -type f -name '*.md' -print | sort
-  else for d in "$r"/*/tasks; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*.md; do [[ -e "$f" ]] && echo "$f"; done
-  done | sort; fi
-}
 
-# PROJECT, ID, STATE, TITLE, RELPATH
-taskrows() {
-  local f id st ti rel pr r
-  r="$(root)"
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    id="$(fm "$f" id)"
-    st="$(fm "$f" status)"
-    ti="$(title "$f")"
-    rel="${f#"$r"/}"
-    pr="${rel%%/*}"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$id" "$st" "$ti" "$rel"
-  done < <(files "${1:-}")
-}
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        reap_subprocesses()
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        import os
 
-newid() {
-  local r x i
-  r="$(root)"
-  for i in $(seq 1 256); do
-    x="TASK-$(printf '%s:%s:%s:%s' "$(date +%s%N 2>/dev/null || date +%s)" "$RANDOM" $$ "$i" | git hash-object --stdin | cut -c1-5 | tr a-f A-F)"
-    if ! taskrows | cut -f2 | grep -qx "$x"; then
-      echo "$x"
-      return
-    fi
-  done
-  die 'could not allocate unique task ID'
-}
-
-block() {
-  local n rows u
-  n="$(basename "$1")"
-  rows="$(taskrows "$n")"
-  echo "$BEGIN"
-  echo
-  echo '## Task snapshot'
-  echo
-  echo '### In progress'
-  echo
-  awk -F '\t' '$3=="in-progress"{printf "- `%s` — %s\n",$2,$4;n++}END{if(!n)print "- None"}' <<<"$rows"
-  echo
-  echo '### Blocked'
-  echo
-  awk -F '\t' '$3=="blocked"{printf "- `%s` — %s\n",$2,$4;n++}END{if(!n)print "- None"}' <<<"$rows"
-  printf '\nTodo: %s Done: %s' "$(awk -F '\t' '$3=="todo"{n++}END{print n+0}' <<<"$rows")" "$(awk -F '\t' '$3=="done"{n++}END{print n+0}' <<<"$rows")"
-  u="$(awk -F '\t' '$3==""||($3!="todo"&&$3!="in-progress"&&$3!="blocked"&&$3!="done"&&$3!="cancelled"){n++}END{print n+0}' <<<"$rows")"
-  ((u == 0)) || printf ' Unclassified: %s' "$u"
-  printf '\n\n%s\n' "$END"
-}
-
-render() {
-  local p="$1" s="$1/STATUS.md" b
-  b="$(block "$1")"
-  if [[ ! -f "$s" ]]; then
-    printf '# Status\n\n## Summary\n\n%s\n\n## Next\n' "$b"
-  elif grep -qF "$BEGIN" "$s" && grep -qF "$END" "$s"; then
-    export TASKGO_BLOCK="$b"
-    awk -v b="$BEGIN" -v e="$END" '$0==b{print ENVIRON["TASKGO_BLOCK"];skip=1;next}$0==e{skip=0;next}!skip' "$s"
-  else
-    cat "$s"
-    printf '\n%s\n' "$b"
-  fi
-}
-sync() {
-  local p="$1" s="$1/STATUS.md" t
-  t="$(mktemp)"
-  render "$p" >"$t"
-  if [[ -f "$s" ]] && cmp -s "$s" "$t"; then
-    rm "$t"
-    return 1
-  fi
-  mv "$t" "$s"
-}
-
-cmd_new() {
-  [[ $# -ge 2 ]] || die 'new-task PROJECT TITLE [--status STATE]'
-  local pn="$1" ti="$2" st=todo p id sl f
-  shift 2
-  while (($#)); do case "$1" in --status)
-    st="$2"
-    shift 2
-    ;;
-  *) die "unknown option: $1" ;; esac done
-  p="$(proj "$pn")"
-  mkdir -p "$p/tasks"
-  id="$(newid)"
-  sl="$(slug "$ti")"
-  [[ -n "$sl" ]] || sl=task
-  f="$p/tasks/$id-$sl.md"
-  printf '%s\n' '---' "id: $id" "status: $st" '---' '' "# $ti" '' '## Outcome' '' '## Findings' '' '## Next' '' >"$f"
-  printf '%s\t%s\n' "$id" "${f#"$(root)"/}"
-}
-
-cmd_tasks() {
-  local pn='' st=''
-  [[ $# -gt 0 && "$1" != --* ]] && {
-    pn="$1"
-    shift
-  }
-  while (($#)); do case "$1" in --state)
-    st="$2"
-    shift 2
-    ;;
-  *) die "unknown option: $1" ;; esac done
-  echo -e 'PROJECT\tTASK\tSTATE\tTITLE\tPATH'
-  if [[ -n "$st" ]]; then taskrows "$pn" | awk -F '\t' -v s="$st" '$3==s'; else taskrows "$pn"; fi
-}
-
-cmd_status() {
-  local p n rows r
-  r="$(root)"
-  if [[ $# -eq 1 ]]; then
-    p="$(proj "$1")"
-    [[ -f "$p/STATUS.md" ]] || die 'missing STATUS.md'
-    cat "$p/STATUS.md"
-    return
-  fi
-  echo -e 'PROJECT\tIN-PROGRESS\tBLOCKED\tTODO'
-  for p in "$r"/*; do
-    [[ -d "$p" && -f "$p/PROJECT.md" ]] || continue
-    n="$(basename "$p")"
-    rows="$(taskrows "$n")"
-    printf '%s\t%s\t%s\t%s\n' "$n" "$(awk -F '\t' '$3=="in-progress"{n++}END{print n+0}' <<<"$rows")" "$(awk -F '\t' '$3=="blocked"{n++}END{print n+0}' <<<"$rows")" "$(awk -F '\t' '$3=="todo"{n++}END{print n+0}' <<<"$rows")"
-  done
-}
-
-cmd_doctor() {
-  local want="${1:-}" r p n rows f id st rel fid x bad=0 all dup t active prose
-  r="$(root)"
-  if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" == true ]]; then
-    warn 'shallow clone: history may be incomplete'
-    bad=1
-  fi
-  if [[ ! -f "$r/AGENTS.md" ]]; then
-    warn 'missing AGENTS.md'
-    bad=1
-  else
-    if ! grep -qiE '(follows|structured|maintained|according to).*taskgo' "$r/AGENTS.md"; then
-      warn 'AGENTS.md: must state that the repository follows taskgo'
-      bad=1
-    fi
-    if ! grep -qF "$CANONICAL_URL" "$r/AGENTS.md"; then
-      warn "AGENTS.md: missing canonical taskgo URL: $CANONICAL_URL"
-      bad=1
-    fi
-  fi
-  if [[ ! -f "$r/INBOX.md" ]]; then
-    warn 'missing INBOX.md'
-    bad=1
-  fi
-  all="$(taskrows)"
-  dup="$(awk -F '\t' '$2!=""{print $2}' <<<"$all" | sort | uniq -d)"
-  [[ -z "$dup" ]] || {
-    warn "duplicate global task ID(s): $(tr '\n' ' ' <<<"$dup")"
-    bad=1
-  }
-  [[ -z "$want" ]] || proj "$want" >/dev/null
-  for p in "$r"/*; do
-    [[ -d "$p" && -f "$p/PROJECT.md" ]] || continue
-    n="$(basename "$p")"
-    [[ -z "$want" || "$n" == "$want" ]] || continue
-    for x in PROJECT.md STATUS.md PLAN.md; do
-      if [[ ! -f "$p/$x" ]]; then
-        warn "$n: missing $x"
-        bad=1
-      fi
-    done
-    rows="$(taskrows "$n")"
-    while IFS=$'\t' read -r _ id st _ rel; do
-      [[ -n "$rel" ]] || continue
-      [[ "$id" =~ $IDRE ]] || {
-        warn "$rel: invalid/missing id '$id'"
-        bad=1
-      }
-      if [[ -n "$st" && ! "$st" =~ ^($STATES)$ ]]; then
-        warn "$rel: non-standard status '$st'"
-        bad=1
-      fi
-      fid="$(basename "$rel" | grep -oE 'TASK-[0-9A-F]{5}' | head -1 || true)"
-      if [[ -n "$fid" && "$fid" != "$id" ]]; then
-        warn "$rel: filename/frontmatter IDs disagree"
-        bad=1
-      fi
-    done <<<"$rows"
-    if [[ -f "$p/STATUS.md" ]]; then
-      t="$(mktemp)"
-      render "$p" >"$t"
-      cmp -s "$p/STATUS.md" "$t" || {
-        warn "$n: stale STATUS task snapshot (run sync-status)"
-        bad=1
-      }
-      rm "$t"
-      active="$(awk -F '\t' '$3=="in-progress"{n++}END{print n+0}' <<<"$rows")"
-      prose="$(awk -v b="$BEGIN" -v e="$END" '$0==b{skip=1;next}$0==e{skip=0;next}!skip{printf "%s ",$0}' "$p/STATUS.md")"
-      if ((active > 0)) && grep -qiE '(no[[:space:]]+tasks?|nothing)([[:space:]]+(is|are))?([[:space:]]+currently)?[[:space:]]+in[ -]progress' <<<"$prose"; then
-        warn "$n: STATUS prose says no task is in progress, but $active task(s) are in-progress"
-        bad=1
-      fi
-    fi
-    for f in "$p"/decisions/*.md; do
-      [[ -e "$f" ]] || continue
-      for x in Status Context Decision Consequences; do
-        if ! grep -qiE "^##[[:space:]]+${x}[[:space:]]*$" "$f"; then
-          warn "$n/$(basename "$f"): ADR missing ## ${x}"
-          bad=1
-        fi
-      done
-    done
-  done
-  cat <<'TXT'
-[INFO]  Agent semantic review
-        Check STATUS Summary/Next for contradictions with tasks and recent work.
-        Check PLAN is current direction, not accumulated history.
-        Check ADR status/rationale and artifact references remain meaningful.
-        Check private tracker material has not leaked to public/shared artifacts.
-        After merges, check reconciled files express one coherent current state.
-TXT
-  return "$bad"
-}
-
-resolve() {
-  local r q="$1" f hit=''
-  r="$(root)"
-  [[ -f "$q" ]] && {
-    realpath "$q"
-    return
-  }
-  [[ -f "$r/$q" ]] && {
-    realpath "$r/$q"
-    return
-  }
-  [[ "$q" =~ $IDRE ]] || die "cannot resolve: $q"
-  while IFS= read -r f; do
-    [[ "$(fm "$f" id)" == "$q" ]] || continue
-    [[ -z "$hit" ]] || die "ambiguous id: $q"
-    hit="$f"
-  done < <(files)
-  [[ -n "$hit" ]] || die "cannot resolve: $q"
-  echo "$hit"
-}
-
-cmd_history() {
-  [[ $# -ge 1 && $# -le 2 ]] || die 'history PATH_OR_TASK_ID [FIELD]'
-  local r f rel key="${2:-status}" sha v prev='__x' d s
-  r="$(root)"
-  f="$(resolve "$1")"
-  rel="${f#"$r"/}"
-  echo -e 'RECORDED_AT\tTRANSITION\tCOMMIT\tSUBJECT'
-  while read -r sha; do
-    v="$(git show "$sha:$rel" 2>/dev/null | blobfm "$key" || true)"
-    [[ "$v" == "$prev" ]] && continue
-    d="$(git show -s --format=%cI "$sha")"
-    s="$(git show -s --format=%s "$sha")"
-    [[ "$prev" == __x ]] && prev='(none)'
-    [[ -n "$v" ]] || v='(missing)'
-    printf '%s\t%s -> %s\t%s\t%s\n' "$d" "$prev" "$v" "${sha:0:10}" "$s"
-    prev="$v"
-  done < <(git log --reverse --format=%H -- "$rel")
-}
-
-cmd_checkpoint() {
-  [[ $# -ge 2 ]] || die 'checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...'
-  local q="$1" sub="$2" body='' r f rel pn p status_rel path changed allowed ok ref t
-  local paths=() refs=()
-  shift 2
-  while (($#)); do case "$1" in --path)
-    [[ $# -ge 2 ]] || die 'checkpoint: --path requires a value'
-    paths+=("$2")
-    shift 2
-    ;;
-  --body)
-    [[ $# -ge 2 ]] || die 'checkpoint: --body requires a value'
-    body="$2"
-    shift 2
-    ;;
-  --ref)
-    [[ $# -ge 2 ]] || die 'checkpoint: --ref requires a value'
-    refs+=("$2")
-    shift 2
-    ;;
-  *) die "unknown option: $1" ;; esac done
-
-  r="$(root)"
-  [[ "$q" =~ $IDRE ]] || die "checkpoint: invalid task ID: $q"
-  if ! git show HEAD:AGENTS.md 2>/dev/null | grep -qF "$COMMIT_AUTH"; then
-    die "checkpoint: committed AGENTS.md must contain $COMMIT_AUTH"
-  fi
-  if [[ ! -f "$r/AGENTS.md" ]] || ! grep -qF "$COMMIT_AUTH" "$r/AGENTS.md"; then
-    die "checkpoint: AGENTS.md must contain $COMMIT_AUTH"
-  fi
-  git diff --cached --quiet || die 'checkpoint: index is not empty'
-
-  f="$(resolve "$q")"
-  rel="${f#"$r"/}"
-  pn="${rel%%/*}"
-  p="$(proj "$pn")"
-  status_rel="$pn/STATUS.md"
-
-  local requested=("$rel" "$status_rel")
-  if [[ -n "${paths[*]-}" ]]; then
-    for path in "${paths[@]}"; do
-      path="${path#./}"
-      case "$path" in
-        /* | .. | ../* | */.. | */../*) die "checkpoint: unsafe path: $path" ;;
-      esac
-      [[ "$path" == "$pn/"* ]] || die "checkpoint: path is outside project $pn: $path"
-      [[ -f "$r/$path" ]] || die "checkpoint: path is not a file: $path"
-      requested+=("$path")
-    done
-  fi
-
-  [[ -n "$(git status --porcelain -- "$rel")" ]] || die 'checkpoint: task file has no changes'
-  sync "$p" || true
-
-  while IFS= read -r changed; do
-    [[ -n "$changed" ]] || continue
-    ok=1
-    for allowed in "${requested[@]}"; do
-      if [[ "$changed" == "$allowed" ]]; then
-        ok=0
-        break
-      fi
-    done
-    ((ok == 0)) || die "checkpoint: unlisted project change: $changed"
-  done < <({
-    git diff --name-only -- "$pn"
-    git ls-files --others --exclude-standard -- "$pn"
-  } | sort -u)
-
-  cmd_doctor "$pn" || die 'checkpoint: doctor found errors'
-  t="$(mktemp)"
-  trap 'rm -f "$t"; git restore --staged -- "${requested[@]}" >/dev/null 2>&1 || true' EXIT
-  git add -- "${requested[@]}"
-  git diff --cached --quiet && die 'checkpoint: nothing to commit'
-  while IFS= read -r changed; do
-    [[ -n "$changed" ]] || continue
-    ok=1
-    for allowed in "${requested[@]}"; do
-      if [[ "$changed" == "$allowed" ]]; then
-        ok=0
-        break
-      fi
-    done
-    ((ok == 0)) || die "checkpoint: refused staged path: $changed"
-  done < <(git diff --cached --name-only)
-
-  printf '%s\n' "$sub" >"$t"
-  [[ -z "$body" ]] || printf '\n%s\n' "$body" >>"$t"
-  if [[ -n "${refs[*]-}" ]]; then
-    for ref in "${refs[@]}"; do printf '\nRef: %s\n' "$ref" >>"$t"; done
-  fi
-  git commit -F "$t"
-  trap - EXIT
-  rm -f "$t"
-}
-
-cmd_commit() {
-  [[ $# -ge 1 ]] || die 'commit SUBJECT [--body TEXT] [--ref REF]...'
-  local sub="$1" body='' refs=() ref ps p t
-  shift
-  while (($#)); do case "$1" in --body)
-    body="$2"
-    shift 2
-    ;;
-  --ref)
-    refs+=("$2")
-    shift 2
-    ;;
-  *) die "unknown option: $1" ;; esac done
-  git diff --cached --quiet && die 'nothing staged'
-  ps="$(git diff --cached --name-only | sed -n 's#^\([^/]*\)/.*#\1#p' | sort -u)"
-  [[ "$(grep -c . <<<"$ps" || true)" -le 1 ]] || die 'staged changes touch multiple projects'
-  if [[ -n "$ps" ]]; then
-    p="$(proj "$ps")"
-    sync "$p" && git add "$p/STATUS.md" || true
-    cmd_doctor "$ps" || die 'doctor found errors'
-  fi
-  t="$(mktemp)"
-  printf '%s\n' "$sub" >"$t"
-  [[ -z "$body" ]] || printf '\n%s\n' "$body" >>"$t"
-  if [[ -n "${refs[*]-}" ]]; then
-    for ref in "${refs[@]}"; do printf '\nRef: %s\n' "$ref" >>"$t"; done
-  fi
-  git commit -F "$t"
-  rm -f "$t"
-}
-
-case "${1:-}" in
-  id)
-    shift
-    newid
-    ;;
-  new-task)
-    shift
-    cmd_new "$@"
-    ;;
-  tasks)
-    shift
-    cmd_tasks "$@"
-    ;;
-  status)
-    shift
-    [[ $# -le 1 ]] || die 'status [PROJECT]'
-    cmd_status "$@"
-    ;;
-  sync-status)
-    shift
-    [[ $# == 1 ]] || die 'sync-status PROJECT'
-    p="$(proj "$1")"
-    sync "$p" && echo updated || echo current
-    ;;
-  doctor)
-    shift
-    [[ $# -le 1 ]] || die 'doctor [PROJECT]'
-    cmd_doctor "${1:-}"
-    ;;
-  history)
-    shift
-    cmd_history "$@"
-    ;;
-  checkpoint)
-    shift
-    cmd_checkpoint "$@"
-    ;;
-  commit)
-    shift
-    cmd_commit "$@"
-    ;;
-  *)
-    die "unknown command: $1. Try '$(basename "$0") --help' for more information."
-    ;;
-esac
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
