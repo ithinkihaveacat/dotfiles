@@ -11,7 +11,8 @@
 
 ## hook
 
-The block below is `../../../bin/hook --help`, kept in sync by `command-index-sync`.
+The block below is `../../../bin/hook --help`, kept in sync by
+`command-index-sync`.
 
 <!-- generated: ../../../bin/hook --help -->
 
@@ -72,8 +73,8 @@ Examples:
 
 'add'/'apply' abort immediately, installing nothing for that profile, if a
 required profile names a dependency that is missing or not actually usable
-(no 'uv' for agent, no 'curl' for gerrit, no prettier reachable via 'npx' or
-on PATH for node) — deliberately, so a broken promise fails loudly at
+(no 'uv' for agent or markdown, no 'curl' for gerrit, no prettier reachable via
+'npx' or on PATH for node) — deliberately, so a broken promise fails loudly at
 install/checkout time rather than silently at the next commit. 'apply' does
 not partially recover: a dependency failure on any named profile stops the
 whole sync, leaving profiles processed so far installed. Run 'doctor' to see

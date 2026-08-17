@@ -1,0 +1,175 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "mdformat",
+#     "mdformat-gfm",
+#     "mdformat-frontmatter",
+#     "ruamel.yaml",
+# ]
+# ///
+# Installed by the "markdown" profile of the 'hook' command as pre-commit.
+# Tests: tests/test-hook-markdown
+# Design decision: Hard dependency on 'uv'. Required 'uv' runtime is checked and
+# diagnosed by 'hook add' and 'hook doctor' before hook execution.
+"""Verify that staged .md files are formatted according to markdown-format.
+
+Rejects the commit if any staged Markdown file needs formatting.
+"""
+
+from __future__ import annotations
+
+import io
+import subprocess
+import sys
+
+import mdformat
+from ruamel.yaml import YAML
+
+SCRIPT_NAME = "markdown-format"
+WRAP_WIDTH = 80
+
+
+def reformat_frontmatter(text: str) -> str:
+    # mdformat-frontmatter passes YAML through verbatim; ruamel.yaml is needed
+    # to reflow long folded scalars to WRAP_WIDTH (see tests/markdown-format).
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return text
+
+    frontmatter_str = text[4 : end + 1]
+    body = text[end + 5 :]
+
+    yaml = YAML()
+    yaml.width = WRAP_WIDTH
+    yaml.preserve_quotes = True
+    yaml.default_flow_style = False
+
+    try:
+        data = yaml.load(frontmatter_str)
+    except Exception as e:
+        print(
+            f"{SCRIPT_NAME}: warning: failed to parse front matter: {e}",
+            file=sys.stderr,
+        )
+        return text
+
+    if not data:
+        return text
+
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    return f"---\n{buf.getvalue()}---\n{body}"
+
+
+def format_text(text: str) -> str:
+    text = reformat_frontmatter(text)
+    return mdformat.text(
+        text,
+        options={"wrap": WRAP_WIDTH},
+        extensions={"gfm", "frontmatter"},
+    )
+
+
+def get_staged_md_files() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+
+    raw_paths = result.stdout.split(b"\0")
+    md_files = []
+    for raw in raw_paths:
+        if not raw:
+            continue
+        try:
+            path_str = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if path_str.endswith(".md"):
+            md_files.append(path_str)
+    return md_files
+
+
+def get_staged_blob(path: str) -> tuple[str, bytes] | None:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--stage", "--", f":(literal){path}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    line = result.stdout.strip()
+    if not line:
+        return None
+
+    parts = line.split()
+    if len(parts) < 3:
+        return None
+
+    mode = parts[0]
+    blob = parts[1]
+
+    # Symlinks (120000) and submodules (160000) hold no source to format.
+    if mode not in ("100644", "100755"):
+        return None
+
+    try:
+        cat_result = subprocess.run(
+            ["git", "cat-file", "blob", blob],
+            capture_output=True,
+            check=True,
+        )
+        return mode, cat_result.stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def main() -> int:
+    md_paths = get_staged_md_files()
+    if not md_paths:
+        return 0
+
+    failed = 0
+    for path in md_paths:
+        blob_entry = get_staged_blob(path)
+        if blob_entry is None:
+            continue
+        _mode, content_bytes = blob_entry
+        try:
+            original = content_bytes.decode("utf-8")
+            formatted = format_text(original)
+        except Exception as e:
+            print(
+                f"{SCRIPT_NAME}: error: mdformat failed on {path}: {e}",
+                file=sys.stderr,
+            )
+            failed = 1
+            continue
+
+        if formatted != original:
+            print(f"{SCRIPT_NAME}: {path}: needs formatting", file=sys.stderr)
+            failed = 1
+
+    return failed
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)

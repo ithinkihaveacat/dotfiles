@@ -12,6 +12,7 @@ complete -c hook -n __fish_use_subcommand -a clean -d 'Remove every profile this
 
 # Profile names, completed for the commands that take one.
 complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a agent -d 'Commit message format and trailer hygiene'
+complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a markdown -d 'markdown-format verification of staged .md files'
 complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a node -d 'prettier formatting of staged .ts and .md files'
 complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a gerrit -d 'Gerrit Change-Id trailer'
 

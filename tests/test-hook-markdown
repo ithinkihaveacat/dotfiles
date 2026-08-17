@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-hook-markdown
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../bin/hook"
+HOOK="$(cd "$DIR/../etc/git/hooks/markdown" >/dev/null 2>&1 && pwd)/pre-commit"
+export PATH="$DIR/../bin:$PATH"
+
+# Isolate from the user's/system git config (signing, hooks, templates).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+
+echo "1..20"
+
+# Test 1: --help succeeds and documents markdown profile
+if out=$("$BIN" --help 2>&1) && printf '%s' "$out" | grep -q 'markdown'; then
+  echo "ok 1 - --help documents markdown profile"
+else
+  echo "not ok 1 - --help missing or doesn't mention markdown"
+fi
+
+WORK=$(mktemp -d "/tmp/hooks-markdown-test.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+new_repo() {
+  local repo="$WORK/$1"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name "Test"
+  git -C "$repo" config commit.gpgsign false
+  printf '%s\n' "$repo"
+}
+
+# Test 2: doctor reports the hook missing and exits non-zero before install
+REPO=$(new_repo unconfigured)
+if (cd "$REPO" && AGENT_REQUIRED_HOOKS=markdown "$BIN" doctor) >/dev/null 2>&1; then
+  echo "not ok 2 - doctor should exit non-zero with no hook installed"
+else
+  echo "ok 2 - doctor flags a missing markdown hook"
+fi
+
+# Test 3: install creates an executable, managed multiplexed hook and trampoline
+if (cd "$REPO" && "$BIN" add markdown) >/dev/null 2>&1 &&
+  [ -x "$REPO/.git/hooks/pre-commit" ] &&
+  grep -q "hook-multiplexer" "$REPO/.git/hooks/pre-commit" &&
+  [ -x "$REPO/.git/hooks/pre-commit.d/10-markdown" ] &&
+  grep -Fq "hook-trampoline -> $HOOK" "$REPO/.git/hooks/pre-commit.d/10-markdown"; then
+  echo "ok 3 - install writes a multiplexed markdown hook as a trampoline"
+else
+  echo "not ok 3 - install did not write the expected hook"
+fi
+
+# Test 4: doctor now reports ok and exits zero
+if (cd "$REPO" && AGENT_REQUIRED_HOOKS=markdown "$BIN" doctor) >/dev/null 2>&1; then
+  echo "ok 4 - doctor passes after install"
+else
+  echo "not ok 4 - doctor failed after install"
+fi
+
+# Test 5: a valid, formatted markdown file passes and commits cleanly
+REPO_FORMATTED=$(new_repo formatted)
+(cd "$REPO_FORMATTED" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Title\n\nProperly formatted markdown body.\n' >"$REPO_FORMATTED/doc.md"
+git -C "$REPO_FORMATTED" add doc.md
+if git -C "$REPO_FORMATTED" commit -q -m "feat: add doc" >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO_FORMATTED" show HEAD:doc.md)" = "$(cat "$REPO_FORMATTED/doc.md")" ]; then
+  echo "ok 5 - valid formatted markdown commits cleanly through pre-commit multiplexer"
+else
+  echo "not ok 5 - valid formatted markdown failed to commit"
+fi
+
+# Test 6: an unformatted markdown file fails commit and reports error diagnostic
+REPO_UNFORMATTED=$(new_repo unformatted)
+(cd "$REPO_UNFORMATTED" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Title   \n\nUnformatted trailing spaces.   \n' >"$REPO_UNFORMATTED/bad.md"
+git -C "$REPO_UNFORMATTED" add bad.md
+rc=0
+out=$(git -C "$REPO_UNFORMATTED" commit -q -m "feat: add bad doc" 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'markdown-format: bad.md: needs formatting'; then
+  echo "ok 6 - unformatted markdown is rejected with diagnostic"
+else
+  echo "not ok 6 - unformatted markdown was not rejected (rc=$rc, out=$out)"
+fi
+
+# Test 7: multiple staged files report all unformatted files before rejecting
+REPO_MULTI=$(new_repo multi)
+(cd "$REPO_MULTI" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Title 1   \n' >"$REPO_MULTI/bad1.md"
+printf '# Title 2\n\nFormatted.\n' >"$REPO_MULTI/good.md"
+printf '# Title 3   \n' >"$REPO_MULTI/bad2.md"
+git -C "$REPO_MULTI" add bad1.md good.md bad2.md
+rc=0
+out=$(git -C "$REPO_MULTI" commit -q -m "feat: add multi" 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] &&
+  printf '%s' "$out" | grep -q 'markdown-format: bad1.md: needs formatting' &&
+  printf '%s' "$out" | grep -q 'markdown-format: bad2.md: needs formatting' &&
+  ! printf '%s' "$out" | grep -q 'markdown-format: good.md: needs formatting'; then
+  echo "ok 7 - reports all unformatted files when multiple are staged"
+else
+  echo "not ok 7 - did not report all unformatted files (rc=$rc, out=$out)"
+fi
+
+# Test 8: non-markdown files are ignored and committed cleanly
+REPO_OTHER=$(new_repo other)
+(cd "$REPO_OTHER" && "$BIN" add markdown) >/dev/null 2>&1
+printf 'let x = 1;   \n' >"$REPO_OTHER/script.ts"
+printf 'some text with trailing spaces   \n' >"$REPO_OTHER/notes.txt"
+git -C "$REPO_OTHER" add script.ts notes.txt
+if git -C "$REPO_OTHER" commit -q -m "feat: add non-md" >/dev/null 2>&1; then
+  echo "ok 8 - non-markdown files bypass the markdown hook"
+else
+  echo "not ok 8 - non-markdown files failed to commit"
+fi
+
+# Test 9: unstaged edits in working tree do not fail a formatted staged hunk
+REPO_PARTIAL_OK=$(new_repo partial_ok)
+(cd "$REPO_PARTIAL_OK" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Formatted Header\n\nBody.\n' >"$REPO_PARTIAL_OK/doc.md"
+git -C "$REPO_PARTIAL_OK" add doc.md
+printf 'Unstaged unformatted content with trailing spaces   \n' >>"$REPO_PARTIAL_OK/doc.md"
+if git -C "$REPO_PARTIAL_OK" commit -q -m "feat: staged only" >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO_PARTIAL_OK" show HEAD:doc.md)" = "$(printf '# Formatted Header\n\nBody.\n')" ]; then
+  echo "ok 9 - unstaged edits in working tree do not fail formatted staged hunk"
+else
+  echo "not ok 9 - unstaged working tree edits interfered with staged commit"
+fi
+
+# Test 10: unstaged formatting fixes do not mask an unformatted staged hunk
+REPO_PARTIAL_BAD=$(new_repo partial_bad)
+(cd "$REPO_PARTIAL_BAD" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Header   \n' >"$REPO_PARTIAL_BAD/doc.md"
+git -C "$REPO_PARTIAL_BAD" add doc.md
+printf '# Header\n' >"$REPO_PARTIAL_BAD/doc.md"
+rc=0
+out=$(git -C "$REPO_PARTIAL_BAD" commit -q -m "feat: unformatted staged" 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'markdown-format: doc.md: needs formatting'; then
+  echo "ok 10 - working tree formatting does not mask unformatted staged hunk"
+else
+  echo "not ok 10 - unformatted staged hunk was erroneously allowed (rc=$rc)"
+fi
+
+# Test 11: deleted markdown file is ignored and commit passes
+REPO_DEL=$(new_repo deleted)
+(cd "$REPO_DEL" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Header\n\nBody.\n' >"$REPO_DEL/del.md"
+git -C "$REPO_DEL" add del.md
+git -C "$REPO_DEL" commit -q -m "feat: initial" >/dev/null 2>&1
+git -C "$REPO_DEL" rm del.md >/dev/null 2>&1
+if git -C "$REPO_DEL" commit -q -m "feat: delete md file" >/dev/null 2>&1; then
+  echo "ok 11 - deleted markdown file is ignored on commit"
+else
+  echo "not ok 11 - deleted markdown file failed on commit"
+fi
+
+# Test 12: staged file with spaces in path is checked properly
+REPO_SPACE=$(new_repo space)
+(cd "$REPO_SPACE" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Header   \n' >"$REPO_SPACE/my notes.md"
+git -C "$REPO_SPACE" add "my notes.md"
+rc=0
+out=$(git -C "$REPO_SPACE" commit -q -m "feat: space file" 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'markdown-format: my notes.md: needs formatting'; then
+  echo "ok 12 - staged file with space in path is checked and reported"
+else
+  echo "not ok 12 - staged file with space in path failed check handling"
+fi
+
+# Test 13: staged file with glob characters in path is checked accurately
+REPO_GLOB=$(new_repo glob)
+(cd "$REPO_GLOB" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Header\n' >"$REPO_GLOB/a1.md"
+printf '# Header   \n' >"$REPO_GLOB/a[1].md"
+git -C "$REPO_GLOB" add a1.md "a[1].md"
+rc=0
+out=$(git -C "$REPO_GLOB" commit -q -m "feat: glob file" 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] &&
+  printf '%s' "$out" | grep -q 'markdown-format: a\[1\].md: needs formatting' &&
+  ! printf '%s' "$out" | grep -q 'markdown-format: a1.md: needs formatting'; then
+  echo "ok 13 - staged file with glob characters in path is checked accurately"
+else
+  echo "not ok 13 - staged file with glob characters failed check handling"
+fi
+
+# Test 14: staged symlink to markdown file is ignored
+REPO_SYM=$(new_repo symlink)
+(cd "$REPO_SYM" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Header\n\nBody.\n' >"$REPO_SYM/real.md"
+ln -s "real.md" "$REPO_SYM/link.md"
+git -C "$REPO_SYM" add real.md link.md
+if git -C "$REPO_SYM" commit -q -m "feat: symlink" >/dev/null 2>&1 &&
+  [ "$(git -C "$REPO_SYM" ls-tree HEAD link.md | cut -d' ' -f1)" = '120000' ]; then
+  echo "ok 14 - staged symlink is ignored by markdown hook"
+else
+  echo "not ok 14 - staged symlink handling failed"
+fi
+
+# Multi-dispatch (*.d) integration tests
+
+# Test 15: multi-dispatch runs 10-markdown and then later sub-hooks when 10-markdown passes
+REPO_MULTI_D=$(new_repo multid)
+(cd "$REPO_MULTI_D" && "$BIN" add markdown) >/dev/null 2>&1
+LOG_D="$REPO_MULTI_D/multid.log"
+printf '#!/bin/sh\necho second-hook >> "%s"\n' "$LOG_D" >"$REPO_MULTI_D/.git/hooks/pre-commit.d/20-custom"
+chmod +x "$REPO_MULTI_D/.git/hooks/pre-commit.d/20-custom"
+printf '# Valid Doc\n\nClean markdown.\n' >"$REPO_MULTI_D/doc.md"
+git -C "$REPO_MULTI_D" add doc.md
+if git -C "$REPO_MULTI_D" commit -q -m "feat: multi-d pass" >/dev/null 2>&1 &&
+  [ -f "$LOG_D" ] && grep -q 'second-hook' "$LOG_D"; then
+  echo "ok 15 - multi-dispatch executes subsequent sub-hooks when markdown check passes"
+else
+  echo "not ok 15 - multi-dispatch chain did not proceed to subsequent sub-hook"
+fi
+
+# Test 16: multi-dispatch aborts and prevents later sub-hooks when 10-markdown fails
+rm -f "$LOG_D"
+printf '# Invalid Doc   \n' >"$REPO_MULTI_D/doc.md"
+git -C "$REPO_MULTI_D" add doc.md
+rc=0
+git -C "$REPO_MULTI_D" commit -q -m "feat: multi-d fail" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -ne 0 ] && [ ! -f "$LOG_D" ]; then
+  echo "ok 16 - multi-dispatch aborts and stops later hooks when markdown check fails"
+else
+  echo "not ok 16 - multi-dispatch did not abort the chain on failure"
+fi
+
+# Test 17: pre-existing legacy hook runs before 10-markdown in multi-dispatch mode
+REPO_LEGACY=$(new_repo legacy)
+LEGACY_LOG="$REPO_LEGACY/legacy.log"
+printf '#!/bin/sh\necho legacy-ran >> "%s"\n' "$LEGACY_LOG" >"$REPO_LEGACY/.git/hooks/pre-commit"
+chmod +x "$REPO_LEGACY/.git/hooks/pre-commit"
+(cd "$REPO_LEGACY" && "$BIN" add markdown) >/dev/null 2>&1
+printf '# Valid Doc\n' >"$REPO_LEGACY/doc.md"
+git -C "$REPO_LEGACY" add doc.md
+if git -C "$REPO_LEGACY" commit -q -m "feat: legacy test" >/dev/null 2>&1 &&
+  [ -x "$REPO_LEGACY/.git/hooks/pre-commit.d/00-legacy" ] &&
+  grep -q 'legacy-ran' "$LEGACY_LOG"; then
+  echo "ok 17 - 00-legacy hook runs before 10-markdown in multi-dispatch mode"
+else
+  echo "not ok 17 - 00-legacy hook was not preserved or did not execute"
+fi
+
+# Test 18: remove uninstalls the markdown sub-hook and leaves other sub-hooks
+if (cd "$REPO_MULTI_D" && "$BIN" remove markdown) >/dev/null 2>&1 &&
+  [ ! -e "$REPO_MULTI_D/.git/hooks/pre-commit.d/10-markdown" ] &&
+  [ -x "$REPO_MULTI_D/.git/hooks/pre-commit.d/20-custom" ] &&
+  ! (cd "$REPO_MULTI_D" && AGENT_REQUIRED_HOOKS=markdown "$BIN" doctor) >/dev/null 2>&1; then
+  echo "ok 18 - remove uninstalls 10-markdown while preserving custom sub-hooks"
+else
+  echo "not ok 18 - remove failed to cleanly uninstall 10-markdown"
+fi
+
+# Test 19: apply synchronizes markdown profile declared in AGENT_REQUIRED_HOOKS
+REPO_APPLY=$(new_repo apply)
+(cd "$REPO_APPLY" && AGENT_REQUIRED_HOOKS='markdown' "$BIN" apply) >/dev/null 2>&1
+if [ -x "$REPO_APPLY/.git/hooks/pre-commit.d/10-markdown" ] &&
+  (cd "$REPO_APPLY" && AGENT_REQUIRED_HOOKS='markdown' "$BIN" doctor) >/dev/null 2>&1; then
+  echo "ok 19 - apply installs markdown hook when declared in AGENT_REQUIRED_HOOKS"
+else
+  echo "not ok 19 - apply failed to synchronize markdown hook"
+fi
+
+# Test 20: front matter formatting is checked according to rules
+REPO_FM=$(new_repo fm)
+(cd "$REPO_FM" && "$BIN" add markdown) >/dev/null 2>&1
+printf -- '---\nname: my-skill\ndescription: A very long description line that should be reflowed and wrapped properly when formatted according to the project rules.\n---\n\n# Body\n' >"$REPO_FM/skill.md"
+# Run markdown-format over it to ensure it is properly formatted first
+bin/markdown-format "$REPO_FM/skill.md" >/dev/null 2>&1
+git -C "$REPO_FM" add skill.md
+if git -C "$REPO_FM" commit -q -m "feat: valid frontmatter" >/dev/null 2>&1; then
+  echo "ok 20 - front matter formatting conforms to markdown-format specification"
+else
+  echo "not ok 20 - formatted front matter failed validation"
+fi
