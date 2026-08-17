@@ -43,6 +43,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from history checkpoint' -a '(_
 
 # create options
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l status -x -a 'todo in-progress blocked done cancelled' -d 'Initial state'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l no-commit -d 'Create task and sync without committing'
 
 # list options
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -l state -x -a 'todo in-progress blocked done cancelled' -d 'Filter by state'

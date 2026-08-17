@@ -118,9 +118,7 @@ def run_git(
     finally:
         _active_subprocesses.discard(proc)
 
-    ret = subprocess.CompletedProcess(
-        cmd, proc.returncode, stdout or "", stderr or ""
-    )
+    ret = subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
     if check and ret.returncode != 0:
         if ret.stderr:
             sys.stderr.write(ret.stderr)
@@ -726,10 +724,11 @@ def cmd_id(args: list[str]) -> None:
 
 def cmd_create(args: list[str]) -> None:
     if len(args) < 2:
-        die("create PROJECT TITLE [--status STATE]")
+        die("create PROJECT TITLE [--status STATE] [--no-commit]")
     project_name = args[0]
     title = args[1]
     status = "todo"
+    no_commit = False
 
     idx = 2
     while idx < len(args):
@@ -738,11 +737,31 @@ def cmd_create(args: list[str]) -> None:
                 die("--status requires a value")
             status = normalize_status(args[idx + 1])
             idx += 2
+        elif args[idx] == "--no-commit":
+            no_commit = True
+            idx += 1
         else:
             die(f"unknown option: {args[idx]}")
 
     root = get_repo_root()
-    proj_dir = get_proj_dir(project_name, root)
+    proj_dir = root / project_name
+
+    # Auto-initialize project scaffolding if it's a new project
+    is_new_project = not is_project_dir(proj_dir)
+    if is_new_project:
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        readme = proj_dir / "README.md"
+        if not readme.is_file():
+            readme.write_text(
+                f"# {project_name}\n\nProject overview.\n", encoding="utf-8"
+            )
+        status_file = proj_dir / "STATUS.md"
+        if not status_file.is_file():
+            status_file.write_text(
+                f"# Status\n\n## Summary\n\nInitial setup for {project_name}.\n\n<!-- taskgo:begin -->\n<!-- taskgo:end -->\n\n## Next\n",
+                encoding="utf-8",
+            )
+
     tasks_dir = proj_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -765,8 +784,63 @@ status: {status}
 ## Next
 """
     task_path.write_text(content, encoding="utf-8")
-    rel_path = str(task_path.relative_to(root))
-    print(f"{task_id}\t{rel_path}")
+    rel_task_path = str(task_path.relative_to(root))
+
+    # Synchronize STATUS.md
+    sync_status(root, project_name)
+    rel_status_path = f"{project_name}/STATUS.md"
+
+    print(f"{task_id}\t{rel_task_path}")
+
+    if no_commit:
+        return
+
+    # Check for authorization marker
+    agents_file = root / "AGENTS.md"
+    show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
+    agents_has_auth = (
+        show_agents.returncode == 0 and COMMIT_AUTH in show_agents.stdout
+    ) or (
+        agents_file.is_file() and COMMIT_AUTH in agents_file.read_text(encoding="utf-8")
+    )
+
+    if not agents_has_auth:
+        return
+
+    # Index must be empty before staging new task
+    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+    if diff_cached.returncode != 0:
+        return
+
+    # Files to stage
+    to_stage = [rel_task_path, rel_status_path]
+    if is_new_project:
+        rel_readme = f"{project_name}/README.md"
+        if (root / rel_readme).is_file():
+            to_stage.append(rel_readme)
+
+    run_git(["add", "--", *to_stage])
+
+    # Craft commit subject <= 50 chars
+    prefix = f"{project_name}: create {task_id}"
+    remaining = 50 - len(prefix) - 3  # for " ()"
+    if remaining > 5 and len(title) > remaining:
+        short_title = title[: remaining - 3].rstrip() + "..."
+        subject = f"{prefix} ({short_title})"
+    elif remaining > 5:
+        subject = f"{prefix} ({title})"
+    else:
+        subject = prefix
+
+    commit_msg = (
+        f"{subject}\n\n{title}\n"
+        if subject != f"{prefix} ({title})"
+        else f"{subject}\n"
+    )
+
+    run_git(["commit", "-m", commit_msg])
+    commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
+    print(f"[INFO]  Committed new task: {commit_sha[:10]}", file=sys.stderr)
 
 
 def cmd_list(args: list[str]) -> None:

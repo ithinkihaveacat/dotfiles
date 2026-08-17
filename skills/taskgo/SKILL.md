@@ -39,9 +39,9 @@ by adding this marker to its committed root `AGENTS.md`:
 <!-- taskgo:allow-local-commits -->
 ```
 
-This authority applies only to `taskgo checkpoint` commits and `taskgo fix`
-auto-heals in that control repo. It never authorizes commits in linked artifact
-repos, pushes, amendments, rebases, or other history rewriting.
+This authority applies only to `taskgo create`, `taskgo checkpoint`, and
+`taskgo fix` operations in that control repo. It never authorizes commits in
+linked artifact repos, pushes, amendments, rebases, or other history rewriting.
 
 ### Invariants
 
@@ -157,7 +157,8 @@ Commit authority, before starting (when reconstructible lifecycle history
 matters):
 
 1. Committed `taskgo:allow-local-commits` marker present -> authorized for
-   guarded `checkpoint` commits and `fix` auto-heals in this control repo only.
+   guarded `create`, `checkpoint`, and `fix` operations in this control repo
+   only.
 1. Authorized: commit a meaningful `in-progress` transition before artifact work
    that may span sessions; commit completion with `Ref:` trailers for linked
    artifact commits. A small task completed atomically may go directly `todo` ->
@@ -204,7 +205,7 @@ files/history:
 
 ```text
 taskgo id
-taskgo create PROJECT TITLE [--status STATE]
+taskgo create PROJECT TITLE [--status STATE] [--no-commit]
 taskgo list [PROJECT] [--state STATE]
 taskgo status [PROJECT]
 taskgo sync [PROJECT]
@@ -214,6 +215,12 @@ taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--body TEXT] [--ref REF]...
 ```
+
+`create` is the atomic task creation command: it allocates a unique ID, writes
+the initial task record, synchronizes `STATUS.md`, and when the
+`taskgo:allow-local-commits` marker is present, commits the transition
+automatically. Use `--no-commit` to keep the created task uncommitted in the
+working tree.
 
 `history` compares a frontmatter field (default `status`) across historical
 blobs. `doctor` performs strictly read-only mechanical checks and prints a
