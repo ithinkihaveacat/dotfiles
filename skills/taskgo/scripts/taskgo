@@ -99,6 +99,7 @@ STATE_ALIASES = {
 
 # Keep track of active child processes for clean teardown on signal
 _active_subprocesses: set[subprocess.Popen] = set()
+_received_sigterm: bool = False
 
 
 def reap_subprocesses(signaled_by_parent: bool) -> None:
@@ -126,17 +127,21 @@ def reap_subprocesses(signaled_by_parent: bool) -> None:
         except subprocess.TimeoutExpired:
             try:
                 proc.kill()
-                proc.wait(timeout=1.0)
             except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except (subprocess.TimeoutExpired, ProcessLookupError):
                 pass
 
         _active_subprocesses.discard(proc)
 
 
 def sigterm_handler(signum, frame):
-    """Handle targeted termination (kill <pid>)."""
-    reap_subprocesses(signaled_by_parent=True)
-    sys.exit(128 + signal.SIGTERM)
+    """Handle targeted termination (kill <pid>) by translating to an interrupt."""
+    global _received_sigterm
+    _received_sigterm = True
+    raise KeyboardInterrupt
 
 
 signal.signal(signal.SIGTERM, sigterm_handler)
@@ -1655,15 +1660,20 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        # TTY broadcasts SIGINT to the entire process group.
-        # Git is already tearing down natively; do not double-signal.
-        reap_subprocesses(signaled_by_parent=False)
+        # Protect teardown logic from re-entrant signals
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+        # If SIGTERM was received, forward termination to children because they were not
+        # part of an OS broadcast process group. For SIGINT (TTY broadcast), children
+        # tear down natively, so we do not double-signal.
+        reap_subprocesses(signaled_by_parent=_received_sigterm)
         try:
             sys.stderr.write("\n")
             sys.stderr.flush()
         except OSError:
             pass
-        sys.exit(128 + signal.SIGINT)
+        sys.exit(128 + (signal.SIGTERM if _received_sigterm else signal.SIGINT))
     except BrokenPipeError:
         import os
 

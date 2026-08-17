@@ -29,7 +29,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..34'
+echo '1..36'
 
 if (cd "$REPO" && "$BIN" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -505,3 +505,50 @@ else
   echo 'not ok 34 - hook blocked taskgo commit'
 fi
 rm -f "$README_REPO/.git/hooks/commit-msg"
+
+# Test 35 & 36: SIGTERM and SIGINT signal teardown
+SIG_REPO="$TEST_ROOT/sig-repo"
+mkdir -p "$SIG_REPO/proj/tasks" "$TEST_ROOT/mock-bin"
+git -C "$SIG_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$SIG_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SIG_REPO/INBOX.md"
+printf '# Proj\n' >"$SIG_REPO/proj/README.md"
+printf '# Status\n' >"$SIG_REPO/proj/STATUS.md"
+
+cat <<'EOF' >"$TEST_ROOT/mock-bin/git"
+#!/bin/sh
+trap 'exit 143' TERM
+trap 'exit 130' INT
+sleep 30
+EOF
+chmod +x "$TEST_ROOT/mock-bin/git"
+
+python3 -c '
+import sys, os, signal, subprocess, time
+repo, bin_path, mock_bin = sys.argv[1:4]
+env = os.environ.copy()
+env["PATH"] = mock_bin + ":" + env.get("PATH", "")
+
+def run_test(sig, expected, test_num, desc):
+    p = subprocess.Popen([bin_path, "create", "proj", f"Slow task {test_num}"], cwd=repo, env=env, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.8)
+    p.send_signal(sig)
+    _, err = p.communicate(timeout=5)
+    if p.returncode == expected and "TimeoutExpired" not in err and "Traceback" not in err:
+        print(f"ok {test_num} - {desc}")
+    else:
+        print(f"not ok {test_num} - {desc} (exit code {p.returncode})")
+        if err:
+            for line in err.splitlines():
+                print(f"# {line}")
+
+run_test(signal.SIGTERM, 143, 35, "SIGTERM gracefully terminates subprocesses with exit code 143 and no traceback")
+run_test(signal.SIGINT, 130, 36, "SIGINT exits with code 130 and no traceback")
+' "$SIG_REPO" "$BIN" "$TEST_ROOT/mock-bin"
