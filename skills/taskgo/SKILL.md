@@ -19,11 +19,11 @@ journals just to retain history.
 AGENTS.md                  # taskgo declaration + repository instructions
 INBOX.md                  # zero-ceremony capture; no schema
 <id>/
-  PROJECT.md              # identity, scope, constraints, artifacts
+  README.md               # identity, scope, constraints, artifacts (or PROJECT.md)
   STATUS.md               # current human view + generated task block
-  PLAN.md                 # intended route forward
+  PLAN.md                 # intended route forward (optional)
   tasks/*.md              # stable task records
-  decisions/*.md          # ADRs
+  decisions/*.md          # ADRs (optional)
 ```
 
 The root `AGENTS.md` must state that the repository follows taskgo and include
@@ -209,14 +209,21 @@ taskgo tasks [PROJECT] [--state STATE]
 taskgo status [PROJECT]
 taskgo sync-status PROJECT
 taskgo doctor [PROJECT]
+taskgo fix [PROJECT] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--body TEXT] [--ref REF]...
 ```
 
 `history` compares a frontmatter field (default `status`) across historical
-blobs. `doctor` performs mechanical checks and prints a semantic checklist;
-**the agent invoking the skill is the semantic part of doctor**.
+blobs. `doctor` performs strictly read-only mechanical checks and prints a
+semantic checklist.
+
+`fix` is the auto-healing command: it assigns missing IDs, normalizes status
+aliases, creates missing scaffolding, and regenerates `STATUS.md`. When the
+`taskgo:allow-local-commits` marker is present, `fix` commits the repairs by
+default and outputs machine-readable commit metadata (`COMMIT_SHA: <hash>`) on
+stdout. Use `--no-commit` for dry-run application.
 
 `checkpoint` is the safe automatic-commit path. It requires the authorization
 marker in the committed root `AGENTS.md`, an initially empty index, and a
