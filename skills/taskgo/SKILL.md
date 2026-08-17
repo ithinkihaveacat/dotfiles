@@ -124,8 +124,10 @@ task records.
 Structure:
 
 - `## Summary`: Human/agent prose describing the current situation and the key
-  outcome/findings of the most recently completed task(s). Replace older
-  transition notes rather than accumulating a journal.
+  outcome/findings of the most recently completed task(s). Mentioning the active
+  agent session or conversation ID (e.g. `conversation://<id>` or session UUID)
+  helps easily locate and resume past context. Replace older transition notes
+  rather than accumulating a journal.
 - `<!-- taskgo:begin -->` to `<!-- taskgo:end -->`: Mechanically maintained
   snapshot (`In progress`, `Blocked`, task counts).
 - `## Next`: Immediate next actions (the active horizon of `PLAN.md`).
@@ -180,8 +182,8 @@ After meaningful work:
 
 Before leaving or completing a task, double-check:
 
-1. Handoff: state, findings, and decisions needed to resume are written into the
-   task/STATUS/PLAN, not left only in conversation.
+1. Handoff: state, findings, decisions, and session/conversation IDs needed to
+   resume are written into the task/STATUS/PLAN, not left only in conversation.
 1. Consistency: tracker claims match actual artifact-repo state (e.g. a task is
    not `done` while its artifact-repo commit remains uncommitted).
 
