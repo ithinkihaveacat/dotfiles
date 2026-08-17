@@ -134,7 +134,16 @@ ADB simulation), the following conditions must be met on the Wear OS device:
      device control" must be enabled.
    - On the watch: Go to **Settings** -> **Gestures** -> **Hand gestures** ->
      **External Control** -> Turn **ON** **"External device control"**.
-   - *Warning*: If this setting is OFF, any ADB gesture simulation will fail
+   - Or configure it programmatically via ADB:
+     ```bash
+     adb shell settings put secure gesture_external_control_user_preference 1
+     ```
+   - Verify the setting value:
+     ```bash
+     adb shell settings get secure gesture_external_control_user_preference
+     ```
+     *Expected Output*: `1`
+   - *Warning*: If this setting is OFF (`0`), any ADB gesture simulation will fail
      with:
      `Failed to complete gesture. injectGestureInternal: Gesture DoublePinch is not active.`
 
@@ -201,6 +210,12 @@ it is off-body (`mIsOffBody=true`). The system automatically disables gesture
 detection to save power. When this happens, all gestures become inactive, and
 ADB injection will fail.
 
+> [!NOTE] **`sensorservice` vs. `IWearGestureService`**:
+> Android's core native sensor service does **not** expose a `set-off-body-state`
+> subcommand. Instead, `IWearGestureService override-constraints offbody-state` is
+> the authoritative framework-level mechanism that instructs the gesture manager
+> to disregard off-body gating without needing root or low-level sensor HAL mocking.
+
 #### Bypassing Constraints via ADB
 
 You can temporarily override these constraints for development, manual testing,
@@ -240,6 +255,22 @@ adb shell cmd IWearGestureService get-active-gestures -readable
 
 If this returns an empty list (e.g., `activeGestures=[]`), the gesture is
 inactive, and injection will fail.
+
+#### Query Supported Actions
+
+To query the local and remote supported actions across paired surfaces:
+
+```bash
+adb shell cmd IWearGestureService get-supported-actions -readable
+```
+
+#### Inspect Recent Gesture Injections
+
+To view recent gesture event injections and their recipient packages:
+
+```bash
+adb shell cmd IWearGestureService get-latest-gesture-events
+```
 
 #### Inspecting Service State via Dumpsys
 
@@ -357,3 +388,30 @@ adb shell dumpsys IWearGestureService | grep -A 5 "GestureHintConfigurationProvi
 
 This confirms the maximum session hints (e.g., `first=3`) before the system
 silences the visual cues.
+
+### F. Visual Verification & Screen Recording
+
+When automating or validating gesture behaviors and Compose indicators:
+
+- **Keep screen awake during automated test runs**:
+  ```bash
+  # Wake up device
+  adb shell input keyevent KEYCODE_WAKEUP
+
+  # Prevent screen timeout/dimming
+  adb shell svc power stayon true
+  ```
+  *(To restore default screen timeout after testing: `adb shell svc power stayon false`)*
+
+- **Capture on-device screenshot**:
+  ```bash
+  adb shell screencap -p /sdcard/gesture_screen.png
+  adb pull /sdcard/gesture_screen.png
+  ```
+
+- **Record video of gesture interactions & animations**:
+  ```bash
+  # Record screen (up to 180 seconds or press Ctrl+C)
+  adb shell screenrecord --time-limit 15 /sdcard/gesture_demo.mp4
+  adb pull /sdcard/gesture_demo.mp4
+  ```
