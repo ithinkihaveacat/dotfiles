@@ -205,6 +205,13 @@ def is_project_dir(p: Path) -> bool:
 
 
 def get_proj_dir(project_name: str, root: Path) -> Path:
+    if (
+        "/" in project_name
+        or "\\" in project_name
+        or ".." in project_name
+        or not project_name
+    ):
+        die(f"invalid project name (must be a top-level directory): {project_name}")
     p = root / project_name
     if not p.is_dir():
         die(f"unknown project: {project_name}")
@@ -212,34 +219,35 @@ def get_proj_dir(project_name: str, root: Path) -> Path:
 
 
 def parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
-    """Tolerant frontmatter parser. Returns (dict_of_fields, body_without_fm)."""
-    lines = content.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
+    """Tolerant frontmatter parser using ruamel.yaml. Returns (dict_of_fields, body_without_fm)."""
+    if not content.startswith("---\n"):
         return {}, content
-    fm: dict[str, str] = {}
-    body_start_idx = -1
-    for i, line in enumerate(lines[1:], start=1):
-        stripped = line.strip()
-        if stripped == "---":
-            body_start_idx = i + 1
-            break
-        if ":" in line:
-            key, val = line.split(":", 1)
-            val = val.strip().strip("'\"")
-            fm[key.strip().lower()] = val
-    if body_start_idx != -1:
-        body = "".join(lines[body_start_idx:])
-        return fm, body
-    return fm, content
+    end = content.find("\n---\n", 4)
+    if end == -1:
+        return {}, content
+
+    frontmatter_str = content[4:end]
+    body = content[end + 5 :]
+
+    yaml = YAML()
+    try:
+        data = yaml.load(frontmatter_str)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+
+    return {str(k).lower(): v for k, v in data.items()}, body
 
 
 def extract_frontmatter_field(content: str, key: str) -> str:
     fm, _ = parse_frontmatter(content)
-    return fm.get(key.lower(), "")
+    return str(fm.get(key.lower(), ""))
 
 
 def extract_title(content: str) -> str:
-    for line in content.splitlines():
+    _, body = parse_frontmatter(content)
+    for line in body.splitlines():
         if line.startswith("# "):
             return line[2:].strip()
     return ""
@@ -373,9 +381,11 @@ def build_status_block(root: Path, project_name: str) -> str:
 
 def has_commit_auth(root: Path) -> bool:
     """Check if the repository grants local commit authority in both HEAD and working tree."""
-    show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
-    if show_agents.returncode != 0 or COMMIT_AUTH not in show_agents.stdout:
-        return False
+    has_head = run_git(["rev-parse", "HEAD"], check=False).returncode == 0
+    if has_head:
+        show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
+        if show_agents.returncode != 0 or COMMIT_AUTH not in show_agents.stdout:
+            return False
     agents_path = root / "AGENTS.md"
     return agents_path.is_file() and COMMIT_AUTH in agents_path.read_text(
         encoding="utf-8"
@@ -905,6 +915,68 @@ def cmd_id() -> None:
     print(generate_task_id(root))
 
 
+def render_task_file(
+    task_id: str,
+    title: str,
+    status: str,
+    problem: str | None = None,
+    goal: str | None = None,
+    criteria: str | None = None,
+    sketch: str | None = None,
+    constraints: str | None = None,
+    outcome: str | None = None,
+    findings: str | None = None,
+    next_steps: str | None = None,
+) -> str:
+    """Render and format a task Markdown document."""
+    body_blocks = []
+    if problem:
+        body_blocks.append(f"**Problem:** {problem}")
+    if goal:
+        body_blocks.append(f"**Goal:** {goal}")
+    if criteria:
+        body_blocks.append(f"**Criteria:** {criteria}")
+    if sketch:
+        body_blocks.append(
+            f"**Sketch:**\n\n{sketch}"
+            if ("\n" in sketch or sketch.strip().startswith("1."))
+            else f"**Sketch:** {sketch}"
+        )
+    if constraints:
+        body_blocks.append(f"**Constraints:** {constraints}")
+
+    if outcome:
+        body_blocks.append(f"## Outcome\n\n{outcome}")
+    elif not body_blocks:
+        body_blocks.append("## Outcome")
+
+    if findings:
+        body_blocks.append(f"## Findings\n\n{findings}")
+    elif not problem and not goal:
+        body_blocks.append("## Findings")
+
+    if next_steps:
+        body_blocks.append(f"## Next\n\n{next_steps}")
+    elif not problem and not goal:
+        body_blocks.append("## Next")
+
+    body = "\n\n".join(body_blocks)
+
+    raw = f"""---
+id: {task_id}
+status: {status}
+---
+
+# {title}
+
+{body}
+"""
+    try:
+        return format_markdown(raw)
+    except Exception:
+        return raw
+
+
 def cmd_create(
     project_name: str,
     title: str,
@@ -921,6 +993,14 @@ def cmd_create(
     dry_run: bool = False,
 ) -> None:
     """Create a new task in PROJECT."""
+    if (
+        "/" in project_name
+        or "\\" in project_name
+        or ".." in project_name
+        or not project_name
+    ):
+        die(f"invalid project name (must be a top-level directory): {project_name}")
+
     status = normalize_status(status)
     root = get_repo_root()
     proj_dir = root / project_name
@@ -976,75 +1056,41 @@ def cmd_create(
 
     tasks_dir = proj_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
-    task_path = tasks_dir / filename
+    task_file = tasks_dir / filename
 
-    body_blocks = []
-    if problem:
-        body_blocks.append(f"**Problem:** {problem}")
-    if goal:
-        body_blocks.append(f"**Goal:** {goal}")
-    if criteria:
-        body_blocks.append(f"**Criteria:** {criteria}")
-    if sketch:
-        body_blocks.append(
-            f"**Sketch:**\n\n{sketch}"
-            if ("\n" in sketch or sketch.strip().startswith("1."))
-            else f"**Sketch:** {sketch}"
-        )
-    if constraints:
-        body_blocks.append(f"**Constraints:** {constraints}")
+    content = render_task_file(
+        task_id=task_id,
+        title=title,
+        status=status,
+        problem=problem,
+        goal=goal,
+        criteria=criteria,
+        sketch=sketch,
+        constraints=constraints,
+        outcome=outcome,
+        findings=findings,
+        next_steps=next_steps,
+    )
+    task_file.write_text(content, encoding="utf-8")
 
-    if outcome:
-        body_blocks.append(f"## Outcome\n\n{outcome}")
-    elif not body_blocks:
-        body_blocks.append("## Outcome")
-
-    if findings:
-        body_blocks.append(f"## Findings\n\n{findings}")
-    elif not problem and not goal:
-        body_blocks.append("## Findings")
-
-    if next_steps:
-        body_blocks.append(f"## Next\n\n{next_steps}")
-    elif not problem and not goal:
-        body_blocks.append("## Next")
-
-    body = "\n\n".join(body_blocks)
-
-    content = f"""---
-id: {task_id}
-status: {status}
----
-
-# {title}
-
-{body}
-"""
-    try:
-        content = format_markdown(content)
-    except Exception:
-        pass
-    task_path.write_text(content, encoding="utf-8")
-
-    # Synchronize STATUS.md
+    # Sync project STATUS.md
     sync_status(root, project_name)
-    rel_status_path = f"{project_name}/STATUS.md"
 
+    # Machine-readable output contract on stdout
     print(f"{task_id}\t{rel_task_path}")
 
     if no_commit:
         return
 
     if not has_commit_auth(root):
+        print(
+            "[INFO]  Skipping commit: repository lacks authorized <!-- taskgo:allow-local-commits -->",
+            file=sys.stderr,
+        )
         return
 
-    # Index must be empty before staging new task
-    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
-    if diff_cached.returncode != 0:
-        return
-
-    # Files to stage
-    to_stage = [rel_task_path, rel_status_path]
+    # Stage task file, STATUS.md, and optionally new scaffolding files
+    to_stage = [rel_task_path, f"{project_name}/STATUS.md"]
     if is_new_project:
         rel_readme = f"{project_name}/README.md"
         if (root / rel_readme).is_file():
@@ -1114,7 +1160,7 @@ def cmd_update(
 
     def upsert_runin(body_str: str, label: str, val: str) -> str:
         pattern = re.compile(
-            rf"\*\*{re.escape(label)}:\*\*.*?(?=(\n\n\*\*|\n\n##|\Z))",
+            rf"\*\*{re.escape(label)}:\*\*.*?(?=(\n\n\*\*|\n\n#|\Z))",
             re.DOTALL,
         )
         replacement = (
@@ -1128,7 +1174,7 @@ def cmd_update(
 
     def upsert_section(body_str: str, heading: str, val: str) -> str:
         pattern = re.compile(
-            rf"^##\s+{re.escape(heading)}\b.*?(?=(\n##\s+|\Z))",
+            rf"^##\s+{re.escape(heading)}\b.*?(?=(\n#\s+|\n##\s+|\Z))",
             re.DOTALL | re.MULTILINE,
         )
         replacement = f"## {heading}\n\n{val}"
