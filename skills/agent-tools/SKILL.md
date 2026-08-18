@@ -221,13 +221,12 @@ scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
 
 **Options:**
 
+- `-i, --in-place`: Apply transformations in-place on `SRC_DIR`.
 - `-o, --output DIR`: Copy `SRC_DIR` to `DIR` first and apply all
   transformations on the copy, leaving `SRC_DIR` untouched.
-- `--inline`: Inline all text files into initial prompt (default: on).
-- `--no-inline`: Pass only the file tree listing in the initial prompt and let
-  the agent read files on demand.
+- `--inline` / `--no-inline`: Inline all text files into initial prompt context
+  (default: on).
 - `--force`: Bypass the 1MB text context threshold for inlining.
-- `--read-only`: Disable file modification tools (inspection/audit only).
 - `--model MODEL`: Gemini model to use (default: `gemini-3.1-pro-preview`).
 - `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
 - `--search` / `--no-search`: Google Search grounding for live external context
@@ -245,14 +244,14 @@ interrupted
 **Examples:**
 
 ```bash
+# Safe read-only architectural audit or repository Q&A (default)
+scripts/caxton "Count deprecated function usages and summarize" ./lib
+
 # In-place translation of documentation
-scripts/caxton "Translate all markdown files into French" ./docs
+scripts/caxton -i "Translate all markdown files into French" ./docs
 
 # Safe refactoring into a new destination directory
 scripts/caxton -o ./src-v2 "Rename user_id to account_id across all python files" ./src
-
-# Read-only architectural audit
-scripts/caxton --read-only "Count deprecated function usages and summarize" ./lib
 ```
 
 ### gh-markdown
