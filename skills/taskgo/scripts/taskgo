@@ -71,20 +71,21 @@ def get_active_conversation_id(cli_arg: str | None = None) -> str | None:
                 if norm:
                     return norm
             except SystemExit:
-                pass
+                print(
+                    f"[WARN]  Ignoring invalid conversation ID in ${var}: {val}",
+                    file=sys.stderr,
+                )
     return None
 
 
 def reformat_frontmatter(text: str) -> str:
     """Reflows YAML frontmatter scalars to WRAP_WIDTH using ruamel.yaml."""
-    if not text.startswith("---\n"):
-        return text
-    end = text.find("\n---\n", 4)
-    if end == -1:
+    m = re.search(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
+    if not m:
         return text
 
-    frontmatter_str = text[4 : end + 1]
-    body = text[end + 5 :]
+    frontmatter_str = m.group(1)
+    body = text[m.end() :]
 
     yaml = YAML()
     yaml.width = WRAP_WIDTH
@@ -101,7 +102,8 @@ def reformat_frontmatter(text: str) -> str:
 
     buf = io.StringIO()
     yaml.dump(data, buf)
-    return f"---\n{buf.getvalue()}---\n{body}"
+    body_sep = "\n" if body else ""
+    return f"---\n{buf.getvalue()}---\n{body_sep}{body}"
 
 
 def format_markdown(text: str) -> str:
@@ -509,7 +511,7 @@ def sync_status(root: Path, project_name: str) -> bool:
     return True
 
 
-def resolve_target(root: Path, query: str) -> Path:
+def resolve_target(root: Path, query: str, allow_deleted: bool = False) -> Path:
     # Direct file path
     p = Path(query)
     target = None
@@ -539,20 +541,21 @@ def resolve_target(root: Path, query: str) -> Path:
         die(f"ambiguous id: {query}")
 
     # Fallback to searching Git history for archived/deleted tasks
-    res = run_git(
-        ["log", "--all", "--name-only", "--format=", "--", f"*{query}*"],
-        check=False,
-    )
-    if res.returncode == 0:
-        seen_paths: set[str] = set()
-        for line in res.stdout.splitlines():
-            line = line.strip()
-            if line.endswith(".md") and query in line:
-                seen_paths.add(line)
-        if len(seen_paths) == 1:
-            return (root / next(iter(seen_paths))).resolve()
-        if len(seen_paths) > 1:
-            die(f"ambiguous id in history: {query}")
+    if allow_deleted:
+        res = run_git(
+            ["log", "--all", "--name-only", "--format=", "--", f"*{query}*"],
+            check=False,
+        )
+        if res.returncode == 0:
+            seen_paths: set[str] = set()
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if line.endswith(".md") and query in line:
+                    seen_paths.add(line)
+            if len(seen_paths) == 1:
+                return (root / next(iter(seen_paths))).resolve()
+            if len(seen_paths) > 1:
+                die(f"ambiguous id in history: {query}")
 
     die(f"cannot resolve: {query}")
 
@@ -1063,20 +1066,31 @@ def render_task_file(
     if constraints:
         body_blocks.append(f"**Constraints:** {constraints}")
 
-    if outcome:
-        body_blocks.append(f"## Outcome\n\n{outcome}")
-    elif not body_blocks:
-        body_blocks.append("## Outcome")
+    if status == "done":
+        if outcome:
+            body_blocks.append(f"## Outcome\n\n{outcome}")
+        else:
+            body_blocks.append("## Outcome")
 
-    if findings:
-        body_blocks.append(f"## Findings\n\n{findings}")
-    elif not problem and not goal:
-        body_blocks.append("## Findings")
+        if findings:
+            body_blocks.append(f"## Findings\n\n{findings}")
+        else:
+            body_blocks.append("## Findings")
 
-    if next_steps:
-        body_blocks.append(f"## Next\n\n{next_steps}")
-    elif not problem and not goal:
-        body_blocks.append("## Next")
+        if next_steps:
+            body_blocks.append(f"## Next\n\n{next_steps}")
+        else:
+            body_blocks.append("## Next")
+    else:
+        if outcome:
+            body_blocks.append(f"## Outcome\n\n{outcome}")
+        if findings:
+            body_blocks.append(f"## Findings\n\n{findings}")
+        if next_steps:
+            body_blocks.append(f"## Next\n\n{next_steps}")
+
+        if not body_blocks:
+            body_blocks.append("**Goal:**\n\n**Criteria:**")
 
     body = "\n\n".join(body_blocks)
 
@@ -1683,7 +1697,7 @@ def cmd_fix(
 def cmd_history(query: str, field: str = "status") -> None:
     """Show frontmatter field history across git revisions."""
     root = get_repo_root()
-    target_path = resolve_target(root, query)
+    target_path = resolve_target(root, query, allow_deleted=True)
     rel_path = str(target_path.relative_to(root))
 
     cmd = [
@@ -1785,14 +1799,21 @@ def cmd_checkpoint(
     diff_proj = [
         f
         for f in run_git(
-            ["diff", "-z", "--name-only", "--", project_name]
+            ["diff", "-z", "--name-only", "--", f"{project_name}/"]
         ).stdout.split("\0")
         if f
     ]
     untracked_proj = [
         f
         for f in run_git(
-            ["ls-files", "-z", "--others", "--exclude-standard", "--", project_name]
+            [
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+                "--",
+                f"{project_name}/",
+            ]
         ).stdout.split("\0")
         if f
     ]
@@ -1897,6 +1918,15 @@ def cmd_commit(
         findings = audit_workspace(root, project_name)
         if any(f.severity in ("WARN", "FAIL") for f in findings):
             die("doctor found errors")
+        status_porcelain = run_git(
+            ["status", "--porcelain", "--", f"{project_name}/STATUS.md"],
+            check=False,
+        ).stdout.strip()
+        if status_porcelain:
+            print(
+                f"[INFO]  Staging working-tree updates in {project_name}/STATUS.md",
+                file=sys.stderr,
+            )
         if sync_status(root, project_name):
             run_git(["add", f"{project_name}/STATUS.md"])
 
