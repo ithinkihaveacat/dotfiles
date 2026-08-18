@@ -1,0 +1,1014 @@
+#!/usr/bin/env -S PYTHONDONTWRITEBYTECODE=1 uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "google-genai",
+#     "google-api-core",
+# ]
+# [tool.uv.sources]
+# google-genai = { index = "pypi" }
+# google-api-core = { index = "pypi" }
+# [[tool.uv.index]]
+# name = "pypi"
+# url = "https://pypi.org/simple"
+# ///
+"""Caxton: Autonomous whole-directory transformation tool."""
+
+# Tests: skills/agent-tools/tests/test-caxton
+
+import argparse
+import dataclasses
+import difflib
+import fnmatch
+import mimetypes
+import os
+import shutil
+import signal
+import sys
+import time
+from pathlib import Path
+
+from google import genai
+from google.api_core import retry
+from google.genai import errors as genai_errors
+from google.genai import types
+
+MAX_INLINE_TEXT_SIZE = 1 * 1024 * 1024  # 1 MB
+MAX_READ_CHUNK_BYTES = 100 * 1024  # 100 KB
+
+TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".csv",
+    ".json",
+    ".xml",
+    ".html",
+    ".htm",
+    ".css",
+    ".scss",
+    ".sass",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".py",
+    ".pyi",
+    ".java",
+    ".kt",
+    ".kts",
+    ".c",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".hxx",
+    ".rs",
+    ".go",
+    ".rb",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".fish",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".gradle",
+    ".properties",
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".sql",
+    ".graphql",
+    ".gql",
+    ".proto",
+    ".rst",
+    ".asciidoc",
+    ".adoc",
+    ".tex",
+    ".bib",
+}
+
+IGNORED_DIRS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "env",
+    ".env",
+    ".idea",
+    ".vscode",
+    "build",
+    "dist",
+    "out",
+    "target",
+    ".next",
+    ".nuxt",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".mypy_cache",
+    "coverage",
+    ".turbo",
+}
+
+
+class CaxtonTimeoutError(Exception):
+    """Raised when execution exceeds the timeout limit."""
+
+
+def atomic_write_text(target_path: Path, content: str, encoding: str = "utf-8"):
+    """Atomically writes text to a file via a temporary file and replace."""
+    os.makedirs(target_path.parent, exist_ok=True)
+    tmp_target = target_path.with_name(
+        f".{target_path.name}.caxton.tmp.{os.getpid()}_{time.time_ns()}"
+    )
+    try:
+        tmp_target.write_text(content, encoding=encoding)
+        os.replace(tmp_target, target_path)
+    finally:
+        if tmp_target.exists():
+            try:
+                tmp_target.unlink()
+            except OSError:
+                pass
+
+
+def offline_switch() -> tuple[bool, str]:
+    """Whether network access is forbidden here, and which switch says so."""
+    var = "CAXTON_OFFLINE" if "CAXTON_OFFLINE" in os.environ else "AGENT_OFFLINE"
+    value = os.environ.get(var, "")
+    return value.strip().lower() in ("1", "true", "yes", "on"), f"{var}={value}"
+
+
+def is_text_file(path: Path) -> bool:
+    """Determine if a file is a text file."""
+    ext = path.suffix.lower()
+    if ext in TEXT_EXTENSIONS:
+        return True
+    mime, _ = mimetypes.guess_type(path)
+    if mime and mime.startswith("text/"):
+        return True
+    if mime in [
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/x-yaml",
+        "application/toml",
+    ]:
+        return True
+    # For unrecognized files, sniff for null bytes in the first 8 KB
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" not in f.read(8192)
+    except Exception:
+        return False
+
+
+def resolve_sandboxed_path(sandbox_root: Path, rel_or_abs_path: str) -> Path:
+    """Safely resolves a path and enforces that it resides within the sandbox root."""
+    abs_root = Path(os.path.realpath(str(sandbox_root.resolve())))
+    if os.path.isabs(rel_or_abs_path):
+        target = Path(os.path.realpath(rel_or_abs_path))
+    else:
+        target = Path(os.path.realpath(str((sandbox_root / rel_or_abs_path).resolve())))
+
+    if os.path.commonpath([str(abs_root), str(target)]) != str(abs_root):
+        raise PermissionError(
+            f"Path traversal blocked: '{rel_or_abs_path}' escapes sandbox"
+            f" '{sandbox_root}'"
+        )
+    return target
+
+
+def load_gitignore_patterns(root_dir: Path) -> list[str]:
+    """Loads ignore patterns from .gitignore if present in root_dir."""
+    gitignore_path = root_dir / ".gitignore"
+    patterns = []
+    if gitignore_path.is_file():
+        try:
+            with open(gitignore_path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        patterns.append(line)
+        except Exception:
+            pass
+    return patterns
+
+
+def is_path_ignored(path: Path, root_dir: Path, gitignore_patterns: list[str]) -> bool:
+    """Check if a path matches ignored directory names or gitignore patterns."""
+    rel = path.relative_to(root_dir)
+    parts = rel.parts
+    for part in parts:
+        if part in IGNORED_DIRS or (part.startswith(".") and part != "."):
+            return True
+
+    rel_str = str(rel).replace("\\", "/")
+    for pat in gitignore_patterns:
+        cleaned_pat = pat.rstrip("/")
+        if fnmatch.fnmatch(rel_str, cleaned_pat) or fnmatch.fnmatch(
+            path.name, cleaned_pat
+        ):
+            return True
+        if fnmatch.fnmatch(rel_str, f"*{cleaned_pat}*"):
+            return True
+    return False
+
+
+@dataclasses.dataclass
+class Telemetry:
+    steps: int = 0
+    modified_files: set = dataclasses.field(default_factory=set)
+    created_files: set = dataclasses.field(default_factory=set)
+    deleted_files: set = dataclasses.field(default_factory=set)
+    search_replace_attempts: int = 0
+    search_replace_successes: int = 0
+    search_replace_failures: int = 0
+    prompt_tokens: int = 0
+    candidate_tokens: int = 0
+    input_limit: int = 1048576
+
+
+def print_help(prog_name: str, file=sys.stdout):
+    print(
+        f"""\
+Usage: {prog_name} [OPTIONS] "PROMPT" [SRC_DIR]
+
+Autonomous whole-directory transformation and refactoring tool.
+
+Arguments:
+  PROMPT              Instruction or goal for the transformation.
+  SRC_DIR             Target source directory. (default: current directory '.')
+
+Options:
+  -o, --output DIR    Copy SRC_DIR to DIR first and apply transformations on
+                      the copy (leaving SRC_DIR untouched).
+  --inline            Inline all text files into initial prompt. (default: on)
+  --no-inline         Pass only the file tree listing in the initial prompt.
+  --force             Bypass the 1MB text context threshold for inlining.
+  --read-only         Disable file modification tools (inspection/audit only).
+  --model MODEL       Gemini model to use (default: gemini-3.1-pro-preview).
+  --max-steps N       Maximum tool steps before stopping (default: 30).
+  --timeout SECONDS   Execution timeout in seconds (default: 300).
+  -h, --help          Display this help message and exit.
+
+Environment:
+  GEMINI_API_KEY      Required. Your Gemini API key.
+  GEMINI_MODEL        Optional. Default model if --model is not given.
+  CAXTON_OFFLINE      Refuse network calls. Exits immediately if set.
+  AGENT_OFFLINE       Workspace-wide offline policy fallback.
+
+Examples:
+  # In-place translation of documentation
+  {prog_name} "Translate all markdown files into French" ./docs
+
+  # Safe refactoring into a new destination directory
+  {prog_name} -o ./src-v2 "Rename user_id to account_id across all python files" ./src
+
+  # Read-only architectural audit
+  {prog_name} --read-only "Count deprecated function usages and summarize" ./lib\
+""",
+        file=file,
+    )
+
+
+def print_short_usage(prog_name: str, file=sys.stderr):
+    print(f'Usage: {prog_name} [OPTIONS] "PROMPT" [SRC_DIR]', file=file)
+    print(f"Try '{prog_name} --help' for more information and examples.", file=file)
+
+
+def main():
+    prog_name = os.path.basename(sys.argv[0])
+
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print_help(prog_name)
+        sys.exit(0)
+
+    if len(sys.argv) == 1:
+        print_short_usage(prog_name)
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        prog=prog_name,
+        add_help=False,
+    )
+
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        help="Instruction or goal for the transformation.",
+    )
+    parser.add_argument(
+        "src_dir",
+        nargs="?",
+        default=".",
+        help="Target source directory. (default: '.')",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        dest="output_dir",
+        metavar="DIR",
+        help="Copy source to DIR first and operate on the copy.",
+    )
+    parser.add_argument(
+        "--inline",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Inline text files into initial context. (default: enabled)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the 1MB context inlining threshold.",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Disable file modification tools (read-only audit mode).",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview"),
+        metavar="MODEL",
+        help="Gemini model to use (default: $GEMINI_MODEL or gemini-3.1-pro-preview).",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Maximum agent execution steps (default: 30).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        metavar="SECONDS",
+        help="Maximum execution time in seconds (default: 300).",
+    )
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="Show this help message and exit.",
+    )
+
+    if len(sys.argv) == 1:
+        print_short_usage(prog_name)
+        sys.exit(1)
+
+    args = parser.parse_args()
+
+    if not args.prompt:
+        print(f"{prog_name}: error: PROMPT is required", file=sys.stderr)
+        print_short_usage(prog_name)
+        sys.exit(1)
+
+    # Offline check
+    offline, desc = offline_switch()
+    if offline:
+        print(
+            f"{prog_name}: offline ({desc}) and no cached answer: this command"
+            " calls the Gemini API. Re-run where there is network, or set"
+            " CAXTON_OFFLINE=0 to exempt this tool",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print(
+            f"{prog_name}: error: GEMINI_API_KEY environment variable not set",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        src_path = Path(args.src_dir).resolve()
+        if not src_path.exists():
+            print(
+                f"{prog_name}: error: source directory not found: {args.src_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not src_path.is_dir():
+            print(
+                f"{prog_name}: error: source path is not a directory: {args.src_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    except Exception as e:
+        print(
+            f"{prog_name}: error: cannot access source directory '{args.src_dir}': {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Setup target working root (copy if --output specified)
+    if args.output_dir:
+        dst_path = Path(args.output_dir).resolve()
+        if dst_path != src_path:
+            if src_path in dst_path.parents:
+                print(
+                    f"{prog_name}: error: output directory '{dst_path}' cannot be a subdirectory of source '{src_path}'",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(
+                f"[caxton] Copying '{src_path}' -> '{dst_path}'...",
+                file=sys.stderr,
+            )
+            os.makedirs(dst_path.parent, exist_ok=True)
+            # Copy tree ignoring standard ignored directories
+            shutil.copytree(
+                src_path,
+                dst_path,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(*IGNORED_DIRS),
+            )
+        target_root = dst_path
+    else:
+        target_root = src_path
+
+    # Timeout handler
+    def timeout_handler(signum, frame):
+        raise CaxtonTimeoutError()
+
+    if args.timeout and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(args.timeout)
+
+    telemetry = Telemetry()
+    task_result: dict | None = None
+    gitignore_patterns = load_gitignore_patterns(target_root)
+
+    # 1. Discover all files
+    all_files: list[Path] = []
+    text_files: list[Path] = []
+    total_text_bytes = 0
+
+    for root, dirs, files in os.walk(target_root):
+        root_path = Path(root)
+        dirs[:] = [
+            d
+            for d in dirs
+            if not is_path_ignored(root_path / d, target_root, gitignore_patterns)
+        ]
+        for f in sorted(files):
+            file_path = root_path / f
+            if not is_path_ignored(file_path, target_root, gitignore_patterns):
+                all_files.append(file_path)
+                if is_text_file(file_path):
+                    text_files.append(file_path)
+                    try:
+                        total_text_bytes += file_path.stat().st_size
+                    except Exception:
+                        pass
+
+    # 2. Context Inlining Threshold Check
+    if args.inline and total_text_bytes > MAX_INLINE_TEXT_SIZE and not args.force:
+        print(
+            f"{prog_name}: error: text context ({total_text_bytes / 1024 / 1024:.2f} MB)"
+            " exceeds 1MB threshold",
+            file=sys.stderr,
+        )
+        print(
+            "hint: use --force to inline anyway, or --no-inline to pass only the"
+            " file tree",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # 3. Build Directory Tree
+    tree_lines = []
+    for fp in all_files:
+        rel_str = str(fp.relative_to(target_root)).replace("\\", "/")
+        try:
+            size_kb = fp.stat().st_size / 1024
+            tree_lines.append(f"- {rel_str} ({size_kb:.1f} KB)")
+        except Exception:
+            tree_lines.append(f"- {rel_str}")
+    directory_tree_text = "\n".join(tree_lines)
+
+    # 4. Build Document Blocks (if inlining)
+    doc_blocks = []
+    if args.inline:
+        for tf in text_files:
+            rel_str = str(tf.relative_to(target_root)).replace("\\", "/")
+            try:
+                content = tf.read_text(encoding="utf-8", errors="replace")
+                doc_blocks.append(
+                    f'<document path="{rel_str}">\n<![CDATA[\n{content}\n]]>\n</document>'
+                )
+            except Exception as e:
+                print(
+                    f"[caxton] warning: failed to read {rel_str}: {e}",
+                    file=sys.stderr,
+                )
+
+    inlined_docs_text = "\n\n".join(doc_blocks)
+
+    # Define tool functions
+    def search_and_replace(
+        path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> dict:
+        """Performs an exact byte-for-byte replacement in a file.
+
+        Args:
+            path: Relative path to the target file.
+            old_string: Exact text to search for. Must match exactly.
+            new_string: Replacement text.
+            replace_all: If True, replaces all occurrences. If False, expects
+              exactly one occurrence.
+
+        Returns:
+            dict with status, occurrences_replaced, and updated file_lines.
+        """
+        telemetry.search_replace_attempts += 1
+        try:
+            target_file = resolve_sandboxed_path(target_root, path)
+            if not target_file.is_file():
+                telemetry.search_replace_failures += 1
+                return {
+                    "status": "error",
+                    "message": f"File not found: '{path}'",
+                }
+
+            raw_content = target_file.read_text(encoding="utf-8", errors="replace")
+            is_crlf = "\r\n" in raw_content
+            content = raw_content.replace("\r\n", "\n")
+            norm_old = old_string.replace("\r\n", "\n")
+            norm_new = new_string.replace("\r\n", "\n")
+
+            count = content.count(norm_old)
+
+            if count == 0:
+                telemetry.search_replace_failures += 1
+                lines = content.splitlines()
+                # Find close line match for debugging hint
+                search_first_line = (
+                    norm_old.splitlines()[0].strip() if norm_old.splitlines() else ""
+                )
+                matches = difflib.get_close_matches(
+                    search_first_line, [line_str.strip() for line_str in lines], n=1
+                )
+                hint = (
+                    f" (Near match: '{matches[0]}')"
+                    if matches
+                    else " (Verify exact whitespace/indentation)"
+                )
+                return {
+                    "status": "error",
+                    "message": (f"Exact old_string not found in '{path}'.{hint}"),
+                    "file_lines": len(lines),
+                }
+
+            if count > 1 and not replace_all:
+                telemetry.search_replace_failures += 1
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Found {count} occurrences in '{path}'. Provide more"
+                        " surrounding context or set replace_all=True."
+                    ),
+                    "file_lines": len(content.splitlines()),
+                }
+
+            new_content = content.replace(norm_old, norm_new, -1 if replace_all else 1)
+            if is_crlf:
+                new_content = new_content.replace("\n", "\r\n")
+
+            atomic_write_text(target_file, new_content)
+
+            telemetry.search_replace_successes += 1
+            telemetry.modified_files.add(path)
+            new_lines_count = len(new_content.splitlines())
+
+            return {
+                "status": "success",
+                "occurrences_replaced": count if replace_all else 1,
+                "file_lines": new_lines_count,
+            }
+        except Exception as e:
+            telemetry.search_replace_failures += 1
+            return {"status": "error", "message": str(e)}
+
+    def write_file(path: str, content: str, overwrite: bool = True) -> dict:
+        """Creates a new file or overwrites an existing file.
+
+        Automatically creates parent directories.
+
+        Args:
+            path: Relative path to the target file.
+            content: Content to write to the file.
+            overwrite: Whether to overwrite if file exists (default: True).
+        """
+        try:
+            target_file = resolve_sandboxed_path(target_root, path)
+            existed = target_file.exists()
+            if existed and not overwrite:
+                return {
+                    "status": "error",
+                    "message": f"File already exists: '{path}'",
+                }
+
+            atomic_write_text(target_file, content)
+
+            lines_count = len(content.splitlines())
+            if existed:
+                telemetry.modified_files.add(path)
+            else:
+                telemetry.created_files.add(path)
+
+            return {
+                "status": "success",
+                "message": f"Wrote {lines_count} lines to '{path}'",
+                "file_lines": lines_count,
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def delete_file(path: str) -> dict:
+        """Deletes a file within the target directory.
+
+        Args:
+            path: Relative path to the target file.
+        """
+        try:
+            target_file = resolve_sandboxed_path(target_root, path)
+            if not target_file.is_file():
+                return {
+                    "status": "error",
+                    "message": f"File not found: '{path}'",
+                }
+            target_file.unlink()
+            telemetry.deleted_files.add(path)
+            return {"status": "success", "message": f"Deleted file '{path}'"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def read_file(
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict:
+        """Reads the content of a file.
+
+        By default returns the full file (up to 100KB). Specify start_line and
+        end_line (1-indexed) to read a specific slice.
+
+        Args:
+            path: Relative path to the target file.
+            start_line: Starting line number (1-indexed, inclusive).
+            end_line: Ending line number (1-indexed, inclusive).
+        """
+        try:
+            target_file = resolve_sandboxed_path(target_root, path)
+            if not target_file.is_file():
+                return {
+                    "status": "error",
+                    "message": f"File not found: '{path}'",
+                }
+
+            file_size = target_file.stat().st_size
+            if (
+                file_size > MAX_READ_CHUNK_BYTES
+                and start_line is None
+                and end_line is None
+            ):
+                with open(target_file, encoding="utf-8", errors="replace") as f:
+                    chunk_lines = [f.readline() for _ in range(500)]
+                first_chunk = "".join(chunk_lines)
+                return {
+                    "status": "success",
+                    "path": path,
+                    "start_line": 1,
+                    "end_line": len(chunk_lines),
+                    "total_bytes": file_size,
+                    "content": first_chunk,
+                    "note": (
+                        f"File is large ({file_size / 1024:.1f} KB); returned first"
+                        f" {len(chunk_lines)} lines. Use start_line/end_line to read specific slices."
+                    ),
+                }
+
+            content = target_file.read_text(encoding="utf-8", errors="replace")
+            lines = content.splitlines(keepends=True)
+            total_lines = len(lines)
+
+            if start_line is not None or end_line is not None:
+                s = max(1, start_line if start_line is not None else 1)
+                e = (
+                    total_lines
+                    if end_line is None
+                    else min(total_lines, max(0, end_line))
+                )
+                sliced = "".join(lines[s - 1 : e]) if s <= e else ""
+                return {
+                    "status": "success",
+                    "path": path,
+                    "start_line": s,
+                    "end_line": e,
+                    "total_lines": total_lines,
+                    "content": sliced,
+                }
+
+            return {
+                "status": "success",
+                "path": path,
+                "start_line": 1,
+                "end_line": total_lines,
+                "total_lines": total_lines,
+                "content": content,
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_files(directory: str = ".", pattern: str | None = None) -> dict:
+        """Lists files and directories relative to the target root.
+
+        Args:
+            directory: Subdirectory to list (default: '.').
+            pattern: Optional glob filter pattern (e.g. '*.py').
+        """
+        try:
+            target_dir = resolve_sandboxed_path(target_root, directory)
+            if not target_dir.is_dir():
+                return {
+                    "status": "error",
+                    "message": f"Not a directory: '{directory}'",
+                }
+
+            res = []
+            for root, dirs, files in os.walk(target_dir):
+                r_path = Path(root)
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not is_path_ignored(r_path / d, target_root, gitignore_patterns)
+                ]
+                for f in sorted(files):
+                    f_path = r_path / f
+                    if not is_path_ignored(f_path, target_root, gitignore_patterns):
+                        rel = str(f_path.relative_to(target_root)).replace("\\", "/")
+                        if pattern and not fnmatch.fnmatch(f_path.name, pattern):
+                            continue
+                        res.append(rel)
+
+            return {"status": "success", "files": res}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def complete_task(
+        success: bool,
+        summary: str,
+        details: str | None = None,
+    ) -> dict:
+        """Finalizes the transformation task and emits the final report.
+
+        Args:
+            success: Whether the task completed successfully.
+            summary: Concise factual summary of what was accomplished.
+            details: Optional additional notes or details.
+        """
+        nonlocal task_result
+        task_result = {
+            "success": success,
+            "summary": summary,
+            "details": details,
+        }
+        return {"status": "success"}
+
+    # Assemble tool suite
+    if args.read_only:
+        tools = [read_file, list_files, complete_task]
+    else:
+        tools = [
+            search_and_replace,
+            write_file,
+            delete_file,
+            read_file,
+            list_files,
+            complete_task,
+        ]
+
+    tool_map = {fn.__name__: fn for fn in tools}
+
+    # System instruction
+    system_instruction = r"""You are Caxton, an expert autonomous software refactoring, translation, and document transformation engine.
+Your goal is to achieve the user's objective across the target directory.
+
+### Context & Mental Model
+1. The <directory_tree> and <document> blocks in your initial prompt represent a STATIC SNAPSHOT of the directory at Turn 1.
+2. As you execute file modification tools (search_and_replace, write_file, delete_file), this initial context becomes stale. The responses returned by your tools are the GROUND TRUTH of the current disk state.
+3. If you make complex modifications and need to inspect the live file contents, use read_file before making subsequent edits.
+
+### Execution Strategy
+1. Contextualize & Plan: Review the full initial context before taking action. Identify all files requiring changes and their cross-file dependencies.
+2. Order of Operations: Update definitions, imports, and references in a logical, dependency-aware order across files.
+3. Exact Matching: When calling search_and_replace, old_string must match the file content byte-for-byte. If a call fails, read the tool error response, inspect surrounding lines, and refine your search string.
+4. String Escaping: In quoted strings, the only allowed escape sequences are \\, \n, and \". Instead of \u escapes, use UTF-8.
+5. Verification: Review the status metadata returned by each mutation. Use read_file if you need to inspect updated lines.
+6. Completion: Once all modifications are verified and the goal is achieved, you MUST call complete_task(success=True, summary="...") with a factual summary of all changes made. Do not stop interacting until complete_task is called."""
+
+    client = genai.Client(api_key=api_key)
+
+    try:
+        model_info = client.models.get(model=args.model)
+        telemetry.input_limit = model_info.input_token_limit
+    except Exception:
+        pass
+
+    config = types.GenerateContentConfig(
+        tools=tools,
+        system_instruction=system_instruction,
+        temperature=1.0,
+        tool_config=types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(mode="ANY")
+        ),
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        thinking_config=types.ThinkingConfig(
+            thinking_level="high", include_thoughts=True
+        ),
+    )
+
+    chat = client.chats.create(model=args.model, config=config)
+
+    # Initial prompt construction
+    prompt_sections = [f"<directory_tree>\n{directory_tree_text}\n</directory_tree>"]
+    if inlined_docs_text:
+        prompt_sections.append(
+            f"<directory_context>\n{inlined_docs_text}\n</directory_context>"
+        )
+    prompt_sections.append(f"<task>\n{args.prompt}\n</task>")
+
+    initial_prompt = "\n\n".join(prompt_sections)
+
+    if args.inline:
+        print(
+            f"[caxton] Inlined {len(text_files)} text files"
+            f" ({total_text_bytes / 1024:.1f} KB total)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[caxton] Tree-only mode: {len(all_files)} files indexed",
+            file=sys.stderr,
+        )
+
+    def should_retry(exception: Exception) -> bool:
+        if isinstance(exception, genai_errors.APIError) and exception.code in (
+            429,
+            500,
+            503,
+        ):
+            print(
+                f"[caxton] Warning: API error {exception.code}"
+                f" ({exception.status}). Retrying with backoff...",
+                file=sys.stderr,
+            )
+            return True
+        return False
+
+    @retry.Retry(
+        predicate=should_retry,
+        initial=2.0,
+        maximum=60.0,
+        multiplier=2.0,
+        timeout=300.0,
+    )
+    def send_with_retry(message):
+        resp = chat.send_message(message)
+        if resp.usage_metadata:
+            telemetry.prompt_tokens = resp.usage_metadata.prompt_token_count
+            telemetry.candidate_tokens += resp.usage_metadata.candidates_token_count
+        return resp
+
+    session_start = time.perf_counter()
+    current_message = initial_prompt
+
+    try:
+        while task_result is None and telemetry.steps < args.max_steps:
+            response = send_with_retry(current_message)
+
+            function_calls = []
+            if response.candidates and response.candidates[0].content.parts:
+                function_calls = [
+                    part.function_call
+                    for part in response.candidates[0].content.parts
+                    if part.function_call
+                ]
+
+            if not function_calls:
+                print(
+                    "[caxton] Error: Model responded without tool call",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            tool_results = []
+            for fc in function_calls:
+                telemetry.steps += 1
+                fn = tool_map.get(fc.name)
+                if not fn:
+                    res = {
+                        "status": "error",
+                        "message": f"Unknown tool: '{fc.name}'",
+                    }
+                else:
+                    args_dict = dict(fc.args) if fc.args else {}
+                    res = fn(**args_dict)
+
+                # Format log snippet for stderr
+                status_label = (
+                    "OK"
+                    if res.get("status") == "success"
+                    else f"FAIL ({res.get('message', '')})"
+                )
+                first_arg = next(iter(args_dict.values()), "") if args_dict else ""
+                print(
+                    f"[caxton] Step {telemetry.steps}/{args.max_steps}:"
+                    f" {fc.name}({first_arg!r}) -> {status_label}",
+                    file=sys.stderr,
+                )
+
+                tool_results.append(
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response=res,
+                    )
+                )
+
+                if task_result is not None:
+                    break
+
+            if task_result is not None:
+                break
+
+            current_message = tool_results
+
+        total_elapsed = time.perf_counter() - session_start
+
+        if task_result is None:
+            print(
+                f"[caxton] Reached maximum step limit ({args.max_steps})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Output final result
+        if task_result.get("summary"):
+            print(task_result["summary"], file=sys.stdout)
+
+        # Output execution telemetry footer
+        status_str = "Succeeded" if task_result.get("success") else "Failed"
+        mod_c = len(telemetry.modified_files)
+        new_c = len(telemetry.created_files)
+        del_c = len(telemetry.deleted_files)
+        sr_stat = (
+            f"{telemetry.search_replace_successes}/{telemetry.search_replace_attempts}"
+        )
+
+        print(
+            f"[caxton] {status_str} in {telemetry.steps} steps"
+            f" ({total_elapsed:.1f}s) | {mod_c} modified, {new_c} created,"
+            f" {del_c} deleted | search/replace: {sr_stat} | tokens:"
+            f" {telemetry.prompt_tokens / 1000:.1f}k in /"
+            f" {telemetry.candidate_tokens / 1000:.1f}k out",
+            file=sys.stderr,
+        )
+
+        sys.exit(0 if task_result.get("success") else 1)
+
+    except CaxtonTimeoutError:
+        print(
+            f"\n{prog_name}: timed out after {args.timeout} seconds",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    except Exception as e:
+        print(f"{prog_name}: error during execution: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
