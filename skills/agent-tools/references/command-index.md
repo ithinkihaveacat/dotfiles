@@ -10,6 +10,7 @@
 - [photo-query](#photo-query) - Ask Gemini about photos (boolean / schema /
   free-text)
 - [oracle](#oracle) - Deep reasoning and synthesis over files or directories
+- [caxton](#caxton) - Transform, refactor or audit a whole directory
 - [emerson](#emerson) - Generate essay-length analysis from text
 - [pascal](#pascal) - Ask a question and get a short response
 - [context](#context) - Generate aggregated context for analysis
@@ -418,6 +419,107 @@ processing media files.)*
 | 0    | Success                     |
 | 1    | General error               |
 | 127  | Missing required dependency |
+
+______________________________________________________________________
+
+## caxton
+
+Autonomous whole-directory transformation, refactoring, and audit engine.
+Read-only by default; `-i`/`-o` grant the agent file-mutation tools.
+
+### Help
+
+<!-- generated: ../scripts/caxton --help -->
+
+```text
+Usage: caxton [OPTIONS] "PROMPT" [SRC_DIR]
+
+Autonomous whole-directory transformation, refactoring, and audit engine.
+By default, caxton operates in safe read-only mode (inspection and Q&A).
+To modify files, specify -i/--in-place or -o/--output DIR.
+
+Arguments:
+  PROMPT              Instruction, question, or goal for the agent.
+  SRC_DIR             Target source directory. (default: current directory '.')
+
+Options:
+  -i, --in-place      Apply transformations in-place on SRC_DIR.
+  -o, --output DIR    Copy SRC_DIR to DIR first and apply transformations on
+                      the copy (leaving SRC_DIR untouched).
+  -n, --dry-run       Print the payload that would be sent (resolved files,
+                      sizes, mode, prompt) and exit without calling the API.
+  --inline, --no-inline
+                      Inline all text files into initial prompt (default: on).
+  --force             Bypass safety checks: the 1MB text context threshold and
+                      the dirty-worktree guard on -i.
+  --model MODEL       Gemini model to use (default: gemini-3.1-pro-preview).
+  --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
+  --search, --no-search
+                      Google Search grounding for external context (default: on).
+  --code, --no-code   Python code execution in cloud sandbox (default: on).
+  --max-steps N       Maximum tool steps before stopping (default: 100).
+  --timeout SECONDS   Execution timeout in seconds (default: 1800).
+  -h, --help          Display this help message and exit.
+
+Environment:
+  GEMINI_API_KEY      Required. Your Gemini API key.
+  GEMINI_MODEL        Optional. Default model if --model is not given.
+  CAXTON_OFFLINE      Refuse network calls. Exits immediately if set.
+  AGENT_OFFLINE       Workspace-wide offline policy fallback.
+
+Examples:
+  # Safe read-only architectural audit or repository Q&A (default)
+  caxton "Count deprecated function usages and summarize" ./lib
+
+  # Preview exactly what would be sent, without calling the API
+  caxton --dry-run -i "Translate all markdown files into French" ./docs
+
+  # In-place transformation
+  caxton -i "Translate all markdown files into French" ./docs
+
+  # Safe refactoring into a new destination directory
+  caxton -o ./src-v2 "Rename user_id to account_id across all python files" ./src
+
+Files and directories matched by .gitignore, plus common build and vendor
+directories, are excluded from both the context and the -o copy. In-place runs
+on a git worktree with uncommitted changes are refused unless --force is given,
+so a partial transformation can always be undone with 'git checkout'.
+```
+
+<!-- /generated -->
+
+### Raw API Command
+
+Model: `gemini-3.1-pro-preview` with `thinking_level="high"`, Google Search and
+code execution enabled, and a `search_and_replace` / `write_file` /
+`delete_file` / `read_file` / `list_files` / `complete_task` tool loop under
+`function_calling_config(mode="ANY")`. *(Complex Python script; see the source
+for the agent loop and sandbox.)*
+
+### Safety Model
+
+| Mode                | Tools offered                                                    |
+| ------------------- | ---------------------------------------------------------------- |
+| default (read-only) | `read_file`, `list_files`, `complete_task`                       |
+| `-i` / `-o DIR`     | the above plus `search_and_replace`, `write_file`, `delete_file` |
+
+- All tool paths are resolved with `realpath` and must stay inside the target
+  directory; traversal and escaping symlinks are refused.
+- `-i` refuses to run on a git worktree with uncommitted changes unless
+  `--force` is given, so a partial run can be undone with `git checkout`.
+- `--dry-run` reports the payload, mode, and resolved file list without calling
+  the API.
+- Files matched by `.gitignore`, common vendor/build directories, and
+  `.DS_Store` are excluded from both the context and the `-o` copy.
+
+### Exit Codes
+
+| Code | Description                    |
+| ---- | ------------------------------ |
+| 0    | Success                        |
+| 1    | General error, or task failure |
+| 2    | Timed out                      |
+| 130  | Interrupted (SIGINT)           |
 
 ______________________________________________________________________
 

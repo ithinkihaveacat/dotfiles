@@ -224,28 +224,48 @@ scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
 - `-i, --in-place`: Apply transformations in-place on `SRC_DIR`.
 - `-o, --output DIR`: Copy `SRC_DIR` to `DIR` first and apply all
   transformations on the copy, leaving `SRC_DIR` untouched.
+- `-n, --dry-run`: Print the payload that would be sent (mode, model, resolved
+  files, sizes, prompt) and exit without calling the API.
 - `--inline` / `--no-inline`: Inline all text files into initial prompt context
   (default: on).
-- `--force`: Bypass the 1MB text context threshold for inlining.
+- `--force`: Bypass safety checks — the 1MB text context threshold and the
+  dirty-worktree guard on `-i`.
 - `--model MODEL`: Gemini model to use (default: `gemini-3.1-pro-preview`).
 - `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
 - `--search` / `--no-search`: Google Search grounding for live external context
   (default: on).
 - `--code` / `--no-code`: Python code execution in cloud sandbox (default: on).
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 100).
-- `--timeout SECONDS`: Execution timeout in seconds (default: 300).
+- `--timeout SECONDS`: Execution timeout in seconds (default: 1800).
 
 **Environment:** `GEMINI_API_KEY` (Required), `CAXTON_OFFLINE` / `AGENT_OFFLINE`
 (Optional)
 
-**Exit codes:** 0 success, 1 error, 2 timeout, 127 missing dependency, 130
-interrupted
+**Exit codes:** 0 success, 1 error, 2 timeout, 130 interrupted
+
+**Scope and safety:**
+
+- Files matched by the target's `.gitignore`, common vendor and build
+  directories, and `.DS_Store` are excluded from both the context and the `-o`
+  copy. Use `--dry-run` to see exactly what a run will read and write.
+- Mutation tools are withheld entirely in the default read-only mode.
+- Tool paths are resolved with `realpath` and confined to the target directory.
+- `-i` refuses to run on a git worktree with uncommitted changes unless
+  `--force` is given, so a partial run can be undone with `git checkout`. Every
+  run reports the files it modified, created, and deleted on stderr, including
+  when it times out or exhausts `--max-steps`.
+- Because `-i`/`-o` rewrite files across a whole tree, `caxton` is declared
+  unsafe in `permissions/unsafe` and always prompts rather than being
+  pre-approved by `permission apply`.
 
 **Examples:**
 
 ```bash
 # Safe read-only architectural audit or repository Q&A (default)
 scripts/caxton "Count deprecated function usages and summarize" ./lib
+
+# Preview the payload without calling the API
+scripts/caxton --dry-run -i "Translate all markdown files into French" ./docs
 
 # In-place translation of documentation
 scripts/caxton -i "Translate all markdown files into French" ./docs

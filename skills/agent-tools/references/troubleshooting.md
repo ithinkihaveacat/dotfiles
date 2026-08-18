@@ -7,6 +7,7 @@
 - [API Errors](#api-errors)
 - [File Issues](#file-issues)
 - [Output Issues](#output-issues)
+- [Caxton (Directory Transformation) Issues](#caxton-directory-transformation-issues)
 - [Popper (Android UI) Issues](#popper-android-ui-issues)
 - [Platform Differences](#platform-differences)
 
@@ -373,6 +374,85 @@ scripts/satisfies "condition"  # Will fail
 1. Test with known inputs first
 
 1. Use explicit phrasing like "contains", "mentions", "starts with"
+
+______________________________________________________________________
+
+## Caxton (Directory Transformation) Issues
+
+### Uncommitted Changes Block an In-Place Run
+
+**Error:**
+`caxton: error: '<dir>' has uncommitted changes; an in-place run cannot be undone cleanly`
+
+**Solution:**
+
+An in-place run rewrites files with no undo of its own, so it insists on a clean
+worktree. Commit or stash first, transform a copy instead, or override:
+
+```bash
+git stash                                     # or commit
+scripts/caxton -o ./out "PROMPT" ./src        # transform a copy
+scripts/caxton -i --force "PROMPT" ./src      # override the guard
+```
+
+### Output Directory Rejected
+
+**Error:** `output directory ... cannot be a subdirectory of source`,
+`... is a parent of source`, or `... is the source directory`
+
+**Solution:**
+
+`-o DIR` copies the source before transforming it, so the destination must sit
+outside the source tree and must not contain it. Use a sibling directory, or
+`-i` when in-place really is what you want.
+
+### Expected Files Are Missing From the Context
+
+**Symptom:** the report says a file does not exist, or a transformation skips
+files that are plainly there.
+
+**Solution:**
+
+Files matched by the target's `.gitignore`, common vendor and build directories
+(`node_modules`, `build`, `dist`, `.git`, ...), and `.DS_Store` are excluded
+from both the context and the `-o` copy. Confirm what the run will actually see:
+
+```bash
+scripts/caxton --dry-run "PROMPT" ./src
+```
+
+### Refusing to Edit a File
+
+**Error:** `'<path>' is not valid UTF-8; refusing to edit it`
+
+**Solution:**
+
+The file is text-like but not UTF-8 (often legacy Latin-1). Rewriting it would
+replace every undecodable byte with U+FFFD, so caxton declines. Convert the file
+first (`iconv -f latin1 -t utf-8`) or exclude it from the run.
+
+### Timed Out (Exit Code 2)
+
+**Error:** `caxton: timed out after N seconds`
+
+**Solution:**
+
+The run is bounded by `--timeout` (default 1800s) and `--max-steps` (default
+100). A timeout in `-i` mode leaves a partly transformed tree; the `[caxton]`
+footer on stderr lists every file modified, created, and deleted, and
+`git checkout` undoes the rest. Raise `--timeout` for large trees, or narrow the
+prompt.
+
+### Context Exceeds the 1MB Threshold
+
+**Error:** `text context (N MB) exceeds 1MB threshold`
+
+**Solution:**
+
+Point caxton at a narrower directory, pass `--no-inline` to send only the file
+tree (the agent then reads files on demand), or `--force` to inline anyway. A
+`--dry-run` over the threshold still prints the full resolved file list before
+reporting the error, so it shows which files consumed the budget.
 
 ______________________________________________________________________
 
