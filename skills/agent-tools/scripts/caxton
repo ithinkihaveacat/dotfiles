@@ -124,9 +124,7 @@ class CaxtonTimeoutError(Exception):
 def atomic_write_text(target_path: Path, content: str, encoding: str = "utf-8"):
     """Atomically writes text to a file via a temporary file and replace."""
     os.makedirs(target_path.parent, exist_ok=True)
-    tmp_target = target_path.with_name(
-        f".{target_path.name}.caxton.tmp.{os.getpid()}_{time.time_ns()}"
-    )
+    tmp_target = target_path.with_name(f".caxton.tmp.{os.getpid()}_{time.time_ns()}")
     try:
         tmp_target.write_text(content, encoding=encoding)
         os.replace(tmp_target, target_path)
@@ -195,7 +193,10 @@ def load_gitignore_patterns(root_dir: Path) -> list[str]:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#"):
-                        patterns.append(line)
+                        # Strip inline trailing comments
+                        clean_pat = line.split(" #")[0].strip()
+                        if clean_pat:
+                            patterns.append(clean_pat)
         except Exception:
             pass
     return patterns
@@ -204,20 +205,21 @@ def load_gitignore_patterns(root_dir: Path) -> list[str]:
 def is_path_ignored(path: Path, root_dir: Path, gitignore_patterns: list[str]) -> bool:
     """Check if a path matches ignored directory names or gitignore patterns."""
     rel = path.relative_to(root_dir)
-    parts = rel.parts
-    for part in parts:
+    for part in rel.parts:
         if part in IGNORED_DIRS or (part.startswith(".") and part != "."):
             return True
 
     rel_str = str(rel).replace("\\", "/")
     for pat in gitignore_patterns:
         cleaned_pat = pat.rstrip("/")
-        if fnmatch.fnmatch(rel_str, cleaned_pat) or fnmatch.fnmatch(
-            path.name, cleaned_pat
-        ):
-            return True
-        if fnmatch.fnmatch(rel_str, f"*{cleaned_pat}*"):
-            return True
+        if "/" not in cleaned_pat:
+            if any(fnmatch.fnmatch(part, cleaned_pat) for part in rel.parts):
+                return True
+        else:
+            if fnmatch.fnmatch(rel_str, cleaned_pat) or fnmatch.fnmatch(
+                rel_str, f"{cleaned_pat}/*"
+            ):
+                return True
     return False
 
 
@@ -505,8 +507,9 @@ def main():
             rel_str = str(tf.relative_to(target_root)).replace("\\", "/")
             try:
                 content = tf.read_text(encoding="utf-8", errors="replace")
+                escaped_content = content.replace("]]>", "]]]]><![CDATA[>")
                 doc_blocks.append(
-                    f'<document path="{rel_str}">\n<![CDATA[\n{content}\n]]>\n</document>'
+                    f'<document path="{rel_str}">\n<![CDATA[\n{escaped_content}\n]]>\n</document>'
                 )
             except Exception as e:
                 print(
@@ -536,6 +539,10 @@ def main():
             dict with status, occurrences_replaced, and updated file_lines.
         """
         telemetry.search_replace_attempts += 1
+        if not old_string:
+            telemetry.search_replace_failures += 1
+            return {"status": "error", "message": "old_string cannot be empty."}
+
         try:
             target_file = resolve_sandboxed_path(target_root, path)
             if not target_file.is_file():
@@ -556,18 +563,22 @@ def main():
             if count == 0:
                 telemetry.search_replace_failures += 1
                 lines = content.splitlines()
-                # Find close line match for debugging hint
+                # Find close line match for debugging hint (capped to prevent CPU hang)
                 search_first_line = (
                     norm_old.splitlines()[0].strip() if norm_old.splitlines() else ""
                 )
-                matches = difflib.get_close_matches(
-                    search_first_line, [line_str.strip() for line_str in lines], n=1
-                )
-                hint = (
-                    f" (Near match: '{matches[0]}')"
-                    if matches
-                    else " (Verify exact whitespace/indentation)"
-                )
+                if search_first_line and len(lines) <= 2000:
+                    matches = difflib.get_close_matches(
+                        search_first_line, [line_str.strip() for line_str in lines], n=1
+                    )
+                    hint = (
+                        f" (Near match: '{matches[0]}')"
+                        if matches
+                        else " (Verify exact whitespace/indentation)"
+                    )
+                else:
+                    hint = " (Verify exact whitespace/indentation)"
+
                 return {
                     "status": "error",
                     "message": (f"Exact old_string not found in '{path}'.{hint}"),
@@ -688,18 +699,15 @@ def main():
                 and end_line is None
             ):
                 with open(target_file, encoding="utf-8", errors="replace") as f:
-                    chunk_lines = [f.readline() for _ in range(500)]
-                first_chunk = "".join(chunk_lines)
+                    content_chunk = f.read(MAX_READ_CHUNK_BYTES)
                 return {
                     "status": "success",
                     "path": path,
-                    "start_line": 1,
-                    "end_line": len(chunk_lines),
                     "total_bytes": file_size,
-                    "content": first_chunk,
+                    "content": content_chunk,
                     "note": (
                         f"File is large ({file_size / 1024:.1f} KB); returned first"
-                        f" {len(chunk_lines)} lines. Use start_line/end_line to read specific slices."
+                        f" {MAX_READ_CHUNK_BYTES // 1024} KB. Use start_line/end_line to read specific slices."
                     ),
                 }
 
@@ -873,9 +881,9 @@ Your goal is to achieve the user's objective across the target directory.
             500,
             503,
         ):
+            msg = getattr(exception, "message", getattr(exception, "status", "Unknown"))
             print(
-                f"[caxton] Warning: API error {exception.code}"
-                f" ({exception.status}). Retrying with backoff...",
+                f"[caxton] Warning: API error {exception.code} ({msg}). Retrying with backoff...",
                 file=sys.stderr,
             )
             return True
