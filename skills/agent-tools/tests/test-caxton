@@ -8,11 +8,19 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 BIN="$DIR/../scripts/caxton"
 
 OUTPUT=$(mktemp)
-TEST_DIR=$(mktemp -d)
-DST_DIR=$(mktemp -d)
-trap 'rm -rf "$OUTPUT" "$TEST_DIR" "$DST_DIR"' EXIT
+WORK=$(mktemp -d)
+trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..9"
+TEST_DIR="$WORK/src"
+DST_DIR="$WORK/dst"
+mkdir -p "$TEST_DIR"
+
+# Content hash of a directory tree, for asserting a run changed nothing.
+snapshot() {
+  (cd "$1" && find . -type f -exec cksum {} + | sort)
+}
+
+echo "1..25"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -26,20 +34,20 @@ else
   echo "not ok 1 - caxton --help exited non-zero"
 fi
 
-# Test 2: caxton with no arguments prints short usage and exits 1
+# Test 2: caxton with no arguments prints short usage (with an example) and exits 1
 if "$BIN" >"$OUTPUT" 2>&1; then
   echo "not ok 2 - Expected caxton without arguments to fail"
 else
-  if grep -q "Usage: caxton" "$OUTPUT" && grep -q "Try 'caxton --help'" "$OUTPUT"; then
-    echo "ok 2 - Bare caxton prints concise usage to stderr"
+  if grep -q "Usage: caxton" "$OUTPUT" && grep -q "Examples:" "$OUTPUT" && grep -q "Try 'caxton --help'" "$OUTPUT"; then
+    echo "ok 2 - Bare caxton prints concise usage with an example to stderr"
   else
-    echo "not ok 2 - Bare caxton output missing short usage"
+    echo "not ok 2 - Bare caxton output missing short usage, example, or help pointer"
     sed 's/^/# /' "$OUTPUT"
   fi
 fi
 
 # Test 3: Offline policy rejection
-if CAXTON_OFFLINE=1 "$BIN" "prompt" . >"$OUTPUT" 2>&1; then
+if CAXTON_OFFLINE=1 "$BIN" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
   echo "not ok 3 - Expected CAXTON_OFFLINE to fail"
 else
   if grep -q "caxton: offline (CAXTON_OFFLINE=1)" "$OUTPUT"; then
@@ -50,12 +58,13 @@ else
   fi
 fi
 
-# Test 4: Missing directory error
-if "$BIN" "some prompt" "./nonexistent_path_for_caxton_test" >"$OUTPUT" 2>&1; then
+# Test 4: Missing directory error. Argument validation must run before the
+# GEMINI_API_KEY check, so this reports the real problem without a key set.
+if "$BIN" "some prompt" "$WORK/nonexistent" >"$OUTPUT" 2>&1; then
   echo "not ok 4 - Expected nonexistent directory to fail"
 else
   if grep -q "source directory not found" "$OUTPUT" || grep -q "cannot access source directory" "$OUTPUT"; then
-    echo "ok 4 - Rejects nonexistent source directory"
+    echo "ok 4 - Rejects nonexistent source directory before checking credentials"
   else
     echo "not ok 4 - Nonexistent directory output missing expected text"
     sed 's/^/# /' "$OUTPUT"
@@ -86,11 +95,282 @@ else
   fi
 fi
 
+# Test 7: Rejects an output directory equal to the source (silent in-place)
+if "$BIN" -o "$TEST_DIR" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
+  echo "not ok 7 - Expected output directory equal to source to be rejected"
+else
+  if grep -q "is the source directory" "$OUTPUT"; then
+    echo "ok 7 - Rejects output directory identical to source"
+  else
+    echo "not ok 7 - Identical-directory rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 8: Rejects an output directory that is a parent of the source
+if "$BIN" -o "$WORK" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
+  echo "not ok 8 - Expected parent output directory to be rejected"
+else
+  if grep -q "is a parent of source" "$OUTPUT"; then
+    echo "ok 8 - Rejects output directory that contains the source directory"
+  else
+    echo "not ok 8 - Parent-directory rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Prepare a git worktree with an uncommitted change
+REPO_DIR="$WORK/repo"
+mkdir -p "$REPO_DIR"
+(
+  cd "$REPO_DIR"
+  git init -q .
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git config commit.gpgsign false
+  echo "committed" >tracked.md
+  git add -A
+  git commit -q --no-gpg-sign -m "init"
+  echo "uncommitted" >>tracked.md
+) >/dev/null 2>&1
+
+# Test 9: Refuses an in-place run on a dirty git worktree
+if "$BIN" -i "prompt" "$REPO_DIR" >"$OUTPUT" 2>&1; then
+  echo "not ok 9 - Expected in-place run on a dirty worktree to be refused"
+else
+  if grep -q "has uncommitted changes" "$OUTPUT"; then
+    echo "ok 9 - Refuses in-place transformation of a dirty git worktree"
+  else
+    echo "not ok 9 - Dirty worktree rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 10: --force overrides the dirty worktree guard (reaching the offline check)
+if CAXTON_OFFLINE=1 "$BIN" -i --force "prompt" "$REPO_DIR" >"$OUTPUT" 2>&1; then
+  echo "not ok 10 - Expected offline rejection after passing the dirty guard"
+else
+  if grep -q "caxton: offline" "$OUTPUT"; then
+    echo "ok 10 - --force overrides the dirty worktree guard"
+  else
+    echo "not ok 10 - --force did not get past the dirty worktree guard"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Prepare a directory exercising gitignore, dotfiles and ignored build output
+DRY_DIR="$WORK/dry"
+mkdir -p "$DRY_DIR/.github" "$DRY_DIR/build" "$DRY_DIR/node_modules"
+printf 'build/\n*.log\n' >"$DRY_DIR/.gitignore"
+printf '# Doc\n' >"$DRY_DIR/doc.md"
+printf 'ci\n' >"$DRY_DIR/.github/ci.yml"
+printf 'junk\n' >"$DRY_DIR/build/out.md"
+printf 'noise\n' >"$DRY_DIR/debug.log"
+printf 'dep\n' >"$DRY_DIR/node_modules/dep.js"
+
+# Test 11: --dry-run reports the payload, exits 0, and changes nothing —
+# without a key, and even under an offline policy.
+DRY_BEFORE=$(snapshot "$DRY_DIR")
+if CAXTON_OFFLINE=1 "$BIN" --dry-run "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && grep -q "Resolved Files:" "$OUTPUT" &&
+    [[ "$DRY_BEFORE" == "$(snapshot "$DRY_DIR")" ]]; then
+    echo "ok 11 - Dry run prints a payload summary offline and changes nothing"
+  else
+    echo "not ok 11 - Dry run output incomplete or directory was modified"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 11 - Dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 12: Context excludes gitignored and vendor paths but keeps dotfiles
+if "$BIN" --dry-run "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "doc.md" "$OUTPUT" && grep -q ".github/ci.yml" "$OUTPUT" &&
+    ! grep -q "build/out.md" "$OUTPUT" && ! grep -q "debug.log" "$OUTPUT" &&
+    ! grep -q "node_modules/dep.js" "$OUTPUT"; then
+    echo "ok 12 - Honors .gitignore and vendor dirs while keeping dotfiles visible"
+  else
+    echo "not ok 12 - Resolved file list did not match the expected filter"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 12 - Dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 13: Read-only mode withholds the mutation tools; -i grants them
+"$BIN" --dry-run "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1 || true
+RO_TOOLS=$(grep "Tools:" "$OUTPUT" || true)
+"$BIN" --dry-run -i "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1 || true
+RW_TOOLS=$(grep "Tools:" "$OUTPUT" || true)
+if [[ "$RO_TOOLS" != *write_file* && "$RO_TOOLS" != *delete_file* &&
+  "$RW_TOOLS" == *write_file* && "$RW_TOOLS" == *delete_file* ]]; then
+  echo "ok 13 - Mutation tools are offered only in -i/-o modes"
+else
+  echo "not ok 13 - Unexpected tool surface"
+  echo "# read-only: $RO_TOOLS"
+  echo "# in-place: $RW_TOOLS"
+fi
+
+# Test 14: a '-h' prompt after '--' is a prompt, not a help request, while a
+# genuine help flag elsewhere on the line still wins.
+if "$BIN" --dry-run -- -h "$DRY_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && ! grep -q "Arguments:" "$OUTPUT" &&
+    "$BIN" --model gemini-x -h 2>&1 | grep -q "Arguments:"; then
+    echo "ok 14 - Treats '-h' after '--' as the prompt, not as a help flag"
+  else
+    echo "not ok 14 - Help flag detection misread the command line"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 14 - Run with a '-h' prompt exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 15: an over-threshold dry run still reports the payload before failing,
+# so the caller can see which files blew the budget.
+BIG_DIR="$WORK/big"
+mkdir -p "$BIG_DIR"
+printf '# Small\n' >"$BIG_DIR/small.md"
+head -c 1200000 /dev/zero | tr '\0' 'a' >"$BIG_DIR/big.md"
+if "$BIN" --dry-run "prompt" "$BIG_DIR" >"$OUTPUT" 2>&1; then
+  echo "not ok 15 - Expected an over-threshold dry run to exit non-zero"
+else
+  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && grep -q "big.md" "$OUTPUT" &&
+    grep -q "exceeds 1MB threshold" "$OUTPUT"; then
+    echo "ok 15 - Over-threshold dry run reports the payload before failing"
+  else
+    echo "not ok 15 - Over-threshold dry run did not report the payload"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Unit checks against caxton's helpers. The google imports are stripped so the
+# helpers load under a plain interpreter with no third-party dependencies.
+UNIT_OUT="$WORK/unit.out"
+cat >"$WORK/unit.py" <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line for line in source.splitlines() if not line.startswith("from google")
+)
+cx = {"__name__": "caxton_helpers"}
+exec(compile(stripped, "caxton", "exec"), cx)
+
+root = Path(sys.argv[2])
+root.mkdir(parents=True, exist_ok=True)
+
+
+def report(name, ok, detail=""):
+    print(f"check:{name}:{'pass' if ok else 'fail'} {detail}".rstrip())
+
+
+# Sandbox containment
+resolve = cx["resolve_sandboxed_path"]
+(root / "inside.txt").write_text("x\n")
+os.symlink("/etc/passwd", root / "escape-link")
+(root / "target.txt").write_text("y\n")
+os.symlink("target.txt", root / "inside-link")
+
+blocked = []
+for candidate in ("../outside.txt", "/etc/passwd", "escape-link", "a/../../b"):
+    try:
+        resolve(root, candidate)
+        blocked.append(f"{candidate} NOT blocked")
+    except PermissionError:
+        pass
+report("sandbox-escape", not blocked, "; ".join(blocked))
+
+resolved_ok = resolve(root, "inside.txt") == (root / "inside.txt").resolve()
+# A symlink inside the sandbox resolves to its target, so edits go through the
+# link instead of replacing it.
+link_ok = resolve(root, "inside-link").name == "target.txt"
+report("sandbox-inside", resolved_ok and link_ok)
+
+# Permission bits survive an edit
+script = root / "s.sh"
+script.write_text("#!/bin/sh\necho hi\n")
+os.chmod(script, 0o755)
+cx["atomic_write_text"](script, "#!/bin/sh\necho bye\n")
+mode = oct(script.stat().st_mode & 0o777)
+report("preserve-mode", mode == "0o755", mode)
+
+# CRLF files stay CRLF
+crlf = root / "crlf.txt"
+crlf.write_bytes(b"alpha\r\nbeta\r\n")
+raw = cx["read_text_verbatim"](crlf)
+body = raw.replace("\r\n", "\n").replace("beta", "BETA")
+cx["atomic_write_text"](crlf, body.replace("\n", "\r\n") if "\r\n" in raw else body)
+report("preserve-crlf", crlf.read_bytes() == b"alpha\r\nBETA\r\n", str(crlf.read_bytes()))
+
+# Non-UTF-8 text is refused for mutation but readable for display
+latin = root / "latin.txt"
+latin.write_bytes("café price\n".encode("latin-1"))
+try:
+    cx["read_text_verbatim"](latin)
+    strict_refused = False
+except UnicodeDecodeError:
+    strict_refused = True
+lossy_ok = "price" in cx["read_text_verbatim"](latin, lossy=True)
+report("refuse-non-utf8", strict_refused and lossy_ok)
+
+# Ignore rules: dotfiles visible, vendor and VCS directories hidden
+ignored = cx["is_path_ignored"]
+cases = {
+    ".github/ci.yml": False,
+    ".gitignore": False,
+    ".git/config": True,
+    "node_modules/dep.js": True,
+    ".DS_Store": True,
+    "src/a.py": False,
+}
+wrong = [
+    rel for rel, want in cases.items() if ignored(root / rel, root, []) is not want
+]
+report("ignore-rules", not wrong, "; ".join(wrong))
+
+# Help detection skips option values and stops at '--'
+wants_help = cx["wants_help"]
+help_cases = {
+    ("-h",): True,
+    ("--help",): True,
+    ("-i", "prompt", "--help"): True,
+    ("--model", "-h", "prompt"): False,
+    ("--", "-h"): False,
+    ("prompt", "."): False,
+}
+bad = [str(a) for a, want in help_cases.items() if wants_help(list(a)) is not want]
+report("wants-help", not bad, "; ".join(bad))
+PYEOF
+
+python3 "$WORK/unit.py" "$BIN" "$WORK/unit" >"$UNIT_OUT" 2>&1 || true
+
+unit_check() {
+  if grep -q "^check:$1:pass" "$UNIT_OUT"; then
+    echo "ok $2 - $3"
+  else
+    echo "not ok $2 - $3"
+    sed 's/^/# /' "$UNIT_OUT"
+  fi
+}
+
+unit_check sandbox-escape 16 "Blocks path traversal, absolute paths and escaping symlinks"
+unit_check sandbox-inside 17 "Resolves in-sandbox paths and follows in-sandbox symlinks"
+unit_check preserve-mode 18 "Preserves permission bits when rewriting a file"
+unit_check preserve-crlf 19 "Preserves CRLF line endings when rewriting a file"
+unit_check refuse-non-utf8 20 "Refuses to mutate non-UTF-8 files but still reads them"
+unit_check ignore-rules 21 "Ignores vendor and VCS paths without hiding dotfiles"
+unit_check wants-help 22 "Detects help flags without misreading option values"
+
 # Live API tests require GEMINI_API_KEY
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "ok 7 # SKIP GEMINI_API_KEY not set"
-  echo "ok 8 # SKIP GEMINI_API_KEY not set"
-  echo "ok 9 # SKIP GEMINI_API_KEY not set"
+  echo "ok 23 # SKIP GEMINI_API_KEY not set"
+  echo "ok 24 # SKIP GEMINI_API_KEY not set"
+  echo "ok 25 # SKIP GEMINI_API_KEY not set"
   exit 0
 fi
 
@@ -110,42 +390,43 @@ EOF
 # Use fast and cheap flash-lite model with low thinking for rapid test execution
 TEST_MODEL="${TEST_MODEL:-gemini-3.5-flash-lite}"
 
-# Test 7: Live in-place transformation with -i
+# Test 22: Live in-place transformation with -i
 if "$BIN" --model "$TEST_MODEL" --thinking low -i "Replace every occurrence of 'ALPHA' with 'BETA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
   if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "BETA" "$TEST_DIR/doc2.md" && ! grep -q "ALPHA" "$TEST_DIR/doc1.md"; then
-    echo "ok 7 - In-place transformation successfully modified files"
+    echo "ok 23 - In-place transformation successfully modified files"
   else
-    echo "not ok 7 - Files did not contain expected replacements"
+    echo "not ok 23 - Files did not contain expected replacements"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 7 - Live in-place transformation failed"
+  echo "not ok 23 - Live in-place transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 8: Safe copy transformation with -o
+# Test 23: Safe copy transformation with -o
 rm -rf "$DST_DIR"
 if "$BIN" --model "$TEST_MODEL" --thinking low -o "$DST_DIR" "Replace every occurrence of 'BETA' with 'GAMMA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
   if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "GAMMA" "$DST_DIR/doc1.md" && ! grep -q "BETA" "$DST_DIR/doc1.md"; then
-    echo "ok 8 - Safe copy transformation left source intact and modified destination"
+    echo "ok 24 - Safe copy transformation left source intact and modified destination"
   else
-    echo "not ok 8 - Copy mode failed validation"
+    echo "not ok 24 - Copy mode failed validation"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 8 - Copy transformation failed"
+  echo "not ok 24 - Copy transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 9: Safe read-only audit mode (default)
+# Test 24: Safe read-only audit mode (default) answers without touching files
+BEFORE=$(snapshot "$DST_DIR")
 if RESPONSE=$("$BIN" --model "$TEST_MODEL" --thinking low "Count the exact number of times the word 'GAMMA' appears across all files in this directory. State the count clearly in your report." "$DST_DIR" 2>"$OUTPUT"); then
-  if echo "$RESPONSE" | grep -Eq "4|four"; then
-    echo "ok 9 - Safe read-only default correctly counted occurrences without modifying files"
+  if echo "$RESPONSE" | grep -Eq "4|four" && [[ "$BEFORE" == "$(snapshot "$DST_DIR")" ]]; then
+    echo "ok 25 - Safe read-only default counted occurrences and modified nothing"
   else
-    echo "not ok 9 - Read-only mode returned unexpected summary: $RESPONSE"
+    echo "not ok 25 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 9 - Read-only mode execution failed"
+  echo "not ok 25 - Read-only mode execution failed"
   sed 's/^/# /' "$OUTPUT"
 fi
