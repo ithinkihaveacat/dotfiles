@@ -408,6 +408,18 @@ a file present only in the destination would be missing from the agent's
 snapshot while still being writable by its tools. Use a directory that does not
 exist yet, or `-i` when in-place really is what you want.
 
+### Cannot Determine Whether the Worktree Is Clean
+
+**Error:** `cannot determine whether '<dir>' has uncommitted changes: ...`, or
+`git not found; cannot check whether ...`
+
+**Solution:**
+
+The `-i` guard fails closed: if git cannot report the worktree state, caxton
+will not rewrite the tree on the assumption that it is clean. The message
+carries git's own error. Fix the repository, install git, or sidestep the check
+with `-o DIR` (which never touches the source) or `--force`.
+
 ### Expected Files Are Missing From the Context
 
 **Symptom:** the report says a file does not exist, or a transformation skips
@@ -415,13 +427,20 @@ files that are plainly there.
 
 **Solution:**
 
-Files matched by the target's `.gitignore`, common vendor and build directories
-(`node_modules`, `build`, `dist`, `.git`, ...), and `.DS_Store` are excluded
-from both the context and the `-o` copy. Confirm what the run will actually see:
+Inside a git repository the ignore list comes from git itself
+(`git ls-files --cached --others --exclude-standard`), so anything git ignores
+is excluded — including files covered by a nested `.gitignore` or by
+`core.excludesFile`. Common vendor and build directories (`node_modules`,
+`build`, `dist`, ...) and `.DS_Store` are excluded on top. Confirm what the run
+will actually see:
 
 ```bash
 scripts/caxton --dry-run "PROMPT" ./src
+git -C ./src ls-files --cached --others --exclude-standard   # the same list
 ```
+
+If the filter leaves nothing at all, caxton exits with `no files to work with`
+rather than sending an empty tree to the model.
 
 ### A Credential File Is Missing From the Context
 

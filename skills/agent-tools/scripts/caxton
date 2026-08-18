@@ -404,10 +404,11 @@ Examples:
   # Safe refactoring into a new destination directory
   {prog_name} -o ./src-v2 "Rename user_id to account_id across all python files" ./src
 
-Files and directories matched by .gitignore, common build and vendor
-directories, and credential paths (.ssh, .npmrc, .netrc, *.pem and similar) are
-excluded from both the context and the -o copy; --dry-run lists what a run will
-read. In-place runs on a git worktree with uncommitted changes are refused
+Inside a git repository, git itself decides what is ignored (negation, nested
+.gitignore files and anchored rules all apply); elsewhere a simpler .gitignore
+matcher is used. Common build and vendor directories and credential paths
+(.ssh, .npmrc, .netrc, *.pem and similar) are excluded on top, from both the
+context and the -o copy; --dry-run lists what a run will read. In-place runs on a git worktree with uncommitted changes are refused
 unless --force is given, so a partial transformation can be undone:
 'git checkout -- .' restores files the run modified and 'git clean -fd' removes
 the ones it created. Every run lists both sets on stderr, including on timeout.\
@@ -450,24 +451,79 @@ def wants_help(argv: list[str]) -> bool:
     return False
 
 
-def git_worktree_is_dirty(path: Path) -> bool:
-    """Whether path is inside a git worktree with uncommitted changes.
-
-    Returns False when path is not in a repository, or when git is unavailable.
-    """
+def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess | None:
+    """Runs a git command, or returns None if git could not be run at all."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(path), "status", "--porcelain"],
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    if proc.returncode != 0:
-        return False
-    return bool(proc.stdout.strip())
+        return None
+
+
+def has_git_dir_at_or_above(path: Path) -> bool:
+    """Whether any directory from path upwards contains a .git entry."""
+    return any((candidate / ".git").exists() for candidate in [path, *path.parents])
+
+
+def git_worktree_state(path: Path) -> tuple[str, str]:
+    """Classifies path's git state as one of:
+
+    'dirty'/'clean' - path is in a worktree, with or without local changes
+    'absent'        - path is genuinely outside any repository
+    'missing'       - git is not installed
+    'unknown'       - git could not answer, which is NOT the same as 'absent':
+                      a caller guarding a destructive operation must fail closed
+                      rather than assume there is nothing to protect.
+
+    The second element carries the detail to report for 'unknown'.
+    """
+    if shutil.which("git") is None:
+        return "missing", "git not found on PATH"
+
+    probe = run_git(["rev-parse", "--is-inside-work-tree"], path)
+    if probe is None:
+        return "unknown", "git rev-parse could not be run (timed out or failed)"
+    if probe.returncode != 0:
+        detail = probe.stderr.strip()
+        # A directory that claims to be a repository (it has a .git entry
+        # somewhere above it) but that git rejects is a broken repository, not
+        # an absent one.
+        if "not a git repository" in detail and not has_git_dir_at_or_above(path):
+            return "absent", ""
+        return "unknown", detail or f"git rev-parse exited {probe.returncode}"
+    if probe.stdout.strip() != "true":
+        return "absent", ""
+
+    status = run_git(["status", "--porcelain"], path)
+    if status is None:
+        return "unknown", "git status could not be run (timed out or failed)"
+    if status.returncode != 0:
+        detail = status.stderr.strip()
+        return "unknown", detail or f"git status exited {status.returncode}"
+    return ("dirty" if status.stdout.strip() else "clean"), ""
+
+
+def git_unignored_paths(root: Path) -> set[Path] | None:
+    """Every path under root that git does not ignore, or None outside a repo.
+
+    Gitignore semantics are git's to define: negation (!keep.log), nested
+    .gitignore files, anchored rules, .git/info/exclude and core.excludesFile
+    all come free by asking git instead of re-implementing the matcher. The
+    listing is also pre-pruned, so ignored directories are never walked.
+    """
+    if shutil.which("git") is None:
+        return None
+    proc = run_git(
+        ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root
+    )
+    if proc is None or proc.returncode != 0:
+        return None
+    return {root / rel for rel in proc.stdout.split("\0") if rel}
 
 
 def main():
@@ -663,25 +719,52 @@ def main():
 
         # An in-place run rewrites files with no undo of its own. Insist on a
         # clean worktree so git can undo the whole run: 'git checkout' restores
-        # modified files, 'git clean' removes the ones the run created.
-        if args.in_place and not args.force and git_worktree_is_dirty(src_path):
-            print(
-                f"{prog_name}: error: '{src_path}' has uncommitted changes; an"
-                " in-place run cannot be undone cleanly",
-                file=sys.stderr,
-            )
-            print(
-                "hint: commit or stash first, use -o DIR to transform a copy, or"
-                " pass --force to override",
-                file=sys.stderr,
-            )
-            print(
-                "note: undoing a partial in-place run needs both"
-                " 'git checkout -- .' and 'git clean -fd'; files the run creates"
-                " are untracked",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        # modified files, 'git clean' removes the ones the run created. If git
+        # cannot tell us, fail closed: an unanswered question is not a "no".
+        if args.in_place and not args.force:
+            state, detail = git_worktree_state(src_path)
+            if state == "missing":
+                print(
+                    f"{prog_name}: git not found; cannot check whether"
+                    f" '{src_path}' has uncommitted changes before rewriting it",
+                    file=sys.stderr,
+                )
+                print(
+                    "hint: install git, use -o DIR to transform a copy, or pass"
+                    " --force to skip the check",
+                    file=sys.stderr,
+                )
+                sys.exit(127)
+            if state == "unknown":
+                print(
+                    f"{prog_name}: error: cannot determine whether '{src_path}'"
+                    f" has uncommitted changes: {detail}",
+                    file=sys.stderr,
+                )
+                print(
+                    "hint: use -o DIR to transform a copy, or pass --force to"
+                    " skip the check",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if state == "dirty":
+                print(
+                    f"{prog_name}: error: '{src_path}' has uncommitted changes;"
+                    " an in-place run cannot be undone cleanly",
+                    file=sys.stderr,
+                )
+                print(
+                    "hint: commit or stash first, use -o DIR to transform a"
+                    " copy, or pass --force to override",
+                    file=sys.stderr,
+                )
+                print(
+                    "note: undoing a partial in-place run needs both"
+                    " 'git checkout -- .' and 'git clean -fd'; files the run"
+                    " creates are untracked",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
@@ -704,18 +787,30 @@ def main():
 
     telemetry = Telemetry()
     task_result: dict | None = None
-    gitignore_patterns = load_gitignore_patterns(src_path)
 
-    def is_ignored(path: Path) -> bool:
-        return is_path_ignored(path, src_path, gitignore_patterns)
+    # Inside a repository git decides what is ignored. Outside one, fall back to
+    # the approximate .gitignore matcher, which handles only simple patterns.
+    git_unignored = git_unignored_paths(src_path)
+    if git_unignored is None:
+        gitignore_patterns = load_gitignore_patterns(src_path)
+        git_unignored_dirs: set[Path] = set()
+    else:
+        gitignore_patterns = []
+        git_unignored_dirs = {parent for f in git_unignored for parent in f.parents}
+
+    def is_excluded(path: Path) -> bool:
+        """The single filter shared by discovery and the -o copy."""
+        if is_path_ignored(path, src_path, gitignore_patterns):
+            return True
+        if is_secret_path(path, src_path):
+            return True
+        if git_unignored is not None:
+            return path not in git_unignored and path not in git_unignored_dirs
+        return False
 
     def excluded_from_copy(directory: str, names: list[str]) -> set[str]:
         base = Path(directory)
-        return {
-            n
-            for n in names
-            if is_ignored(base / n) or is_secret_path(base / n, src_path)
-        }
+        return {n for n in names if is_excluded(base / n)}
 
     # 1. Discover all files. Discovery runs on the source: with -o the copy
     #    applies the same filter, so the two trees agree file for file.
@@ -724,37 +819,43 @@ def main():
     secret_files: list[Path] = []
     total_text_bytes = 0
 
-    for root, dirs, files in os.walk(src_path):
-        root_path = Path(root)
-        kept_dirs = []
-        for d in dirs:
-            if is_ignored(root_path / d):
-                continue
-            if is_secret_path(root_path / d, src_path):
-                # Report the pruned directory itself; its contents are never
-                # walked, so they would otherwise vanish without a trace.
-                secret_files.append(root_path / d)
-                continue
-            kept_dirs.append(d)
-        dirs[:] = kept_dirs
-        for f in sorted(files):
-            file_path = root_path / f
-            if is_ignored(file_path):
-                continue
-            if is_secret_path(file_path, src_path):
-                secret_files.append(file_path)
-                continue
-            # Skip FIFOs, sockets, devices and dangling symlinks: opening one
-            # can block forever, and none of them are content to transform.
-            if not file_path.is_file():
-                continue
-            all_files.append(file_path)
-            if is_text_file(file_path):
-                text_files.append(file_path)
-                try:
-                    total_text_bytes += file_path.stat().st_size
-                except OSError:
-                    pass
+    if git_unignored is not None:
+        candidates = sorted(git_unignored)
+    else:
+        candidates = []
+        for root, dirs, files in os.walk(src_path):
+            root_path = Path(root)
+            kept_dirs = []
+            for d in dirs:
+                if is_path_ignored(root_path / d, src_path, gitignore_patterns):
+                    continue
+                if is_secret_path(root_path / d, src_path):
+                    # Report the pruned directory itself; its contents are never
+                    # walked, so they would otherwise vanish without a trace.
+                    secret_files.append(root_path / d)
+                    continue
+                kept_dirs.append(d)
+            dirs[:] = kept_dirs
+            candidates.extend(root_path / f for f in sorted(files))
+
+    for file_path in candidates:
+        if is_path_ignored(file_path, src_path, gitignore_patterns):
+            continue
+        if is_secret_path(file_path, src_path):
+            secret_files.append(file_path)
+            continue
+        # Skip FIFOs, sockets, devices, dangling symlinks and submodule
+        # gitlinks: opening one can block forever, and none of them are
+        # content to transform.
+        if not file_path.is_file():
+            continue
+        all_files.append(file_path)
+        if is_text_file(file_path):
+            text_files.append(file_path)
+            try:
+                total_text_bytes += file_path.stat().st_size
+            except OSError:
+                pass
 
     if secret_files and not args.dry_run:
         print(
@@ -762,6 +863,18 @@ def main():
             " patterns; --dry-run lists them",
             file=sys.stderr,
         )
+
+    if not all_files:
+        print(
+            f"{prog_name}: error: no files to work with under '{src_path}'",
+            file=sys.stderr,
+        )
+        print(
+            "hint: everything there is gitignored, vendored, or excluded as a"
+            " credential path; run with --dry-run to see the filter's decisions",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # 2. Context Inlining Threshold Check. A dry run still reports the payload
     #    first: knowing which files blew the budget is the point of asking.

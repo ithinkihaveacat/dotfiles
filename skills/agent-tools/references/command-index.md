@@ -480,10 +480,11 @@ Examples:
   # Safe refactoring into a new destination directory
   caxton -o ./src-v2 "Rename user_id to account_id across all python files" ./src
 
-Files and directories matched by .gitignore, common build and vendor
-directories, and credential paths (.ssh, .npmrc, .netrc, *.pem and similar) are
-excluded from both the context and the -o copy; --dry-run lists what a run will
-read. In-place runs on a git worktree with uncommitted changes are refused
+Inside a git repository, git itself decides what is ignored (negation, nested
+.gitignore files and anchored rules all apply); elsewhere a simpler .gitignore
+matcher is used. Common build and vendor directories and credential paths
+(.ssh, .npmrc, .netrc, *.pem and similar) are excluded on top, from both the
+context and the -o copy; --dry-run lists what a run will read. In-place runs on a git worktree with uncommitted changes are refused
 unless --force is given, so a partial transformation can be undone:
 'git checkout -- .' restores files the run modified and 'git clean -fd' removes
 the ones it created. Every run lists both sets on stderr, including on timeout.
@@ -515,10 +516,12 @@ for the agent loop and sandbox.)*
 - `-o` refuses a destination that already holds files.
 - `--dry-run` reports the payload, mode, and resolved file list without calling
   the API or reading any file's contents.
-- Files matched by `.gitignore`, common vendor/build directories, and
-  `.DS_Store` are excluded from both the context and the `-o` copy, as are
-  credential paths (`.ssh/`, `.npmrc`, `.netrc`, `*.pem`, `id_rsa*` and
-  similar), which `--dry-run` lists separately.
+- Ignore filtering inside a repository is delegated to `git ls-files`, so it
+  matches git exactly; outside one, a simpler `.gitignore` matcher applies.
+  Common vendor/build directories and `.DS_Store` are excluded on top, from both
+  the context and the `-o` copy, as are credential paths (`.ssh/`, `.npmrc`,
+  `.netrc`, `*.pem`, `id_rsa*` and similar), which `--dry-run` lists separately.
+  A filter that leaves no files at all is an error, not an empty run.
 - Non-regular files are skipped, and `--timeout` covers traversal as well as the
   agent loop.
 
@@ -529,6 +532,7 @@ for the agent loop and sandbox.)*
 | 0    | Success                         |
 | 1    | General error, or task failure  |
 | 2    | Timed out                       |
+| 127  | git required but not installed  |
 | 130  | Interrupted (SIGINT or SIGTERM) |
 | 141  | stdout closed early (SIGPIPE)   |
 
