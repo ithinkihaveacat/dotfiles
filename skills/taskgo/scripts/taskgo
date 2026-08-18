@@ -200,6 +200,20 @@ def die(msg: str, exit_code: int = 1) -> None:
     sys.exit(exit_code)
 
 
+_REPO_ROOT_CACHE: Path | None = None
+
+
+def get_repo_root() -> Path:
+    global _REPO_ROOT_CACHE
+    if _REPO_ROOT_CACHE is not None:
+        return _REPO_ROOT_CACHE
+    res = run_git(["rev-parse", "--show-toplevel"], check=False)
+    if res.returncode != 0:
+        die("not in a Git repo")
+    _REPO_ROOT_CACHE = Path(res.stdout.strip())
+    return _REPO_ROOT_CACHE
+
+
 def run_git(
     args: list[str],
     cwd: Path | None = None,
@@ -208,6 +222,8 @@ def run_git(
     text: bool = True,
     input_data: str | None = None,
 ) -> subprocess.CompletedProcess:
+    if cwd is None and args != ["rev-parse", "--show-toplevel"]:
+        cwd = get_repo_root()
     cmd = ["git", *args]
     proc = subprocess.Popen(
         cmd,
@@ -229,13 +245,6 @@ def run_git(
             sys.stderr.write(ret.stderr)
         die(f"git {' '.join(args)} failed (exit {ret.returncode})")
     return ret
-
-
-def get_repo_root() -> Path:
-    res = run_git(["rev-parse", "--show-toplevel"], check=False)
-    if res.returncode != 0:
-        die("not in a Git repo")
-    return Path(res.stdout.strip())
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -263,6 +272,10 @@ def get_proj_dir(project_name: str, root: Path) -> Path:
             f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
         )
     p = root / project_name
+    if p.is_file():
+        die(
+            f"invalid project name (a file with this name already exists): {project_name}"
+        )
     if not p.is_dir():
         die(f"unknown project: {project_name}")
     return p
@@ -932,12 +945,16 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 if mformatted != mcontent:
                     rel_path = str(mf.relative_to(root))
 
-                    def make_remediate_proj_md(
-                        target_file=mf, formatted_text=mformatted
-                    ):
+                    def make_remediate_proj_md(target_file=mf):
                         def remediate() -> list[Path]:
-                            atomic_write(target_file, formatted_text)
-                            return [target_file]
+                            if not target_file.is_file():
+                                return []
+                            current = target_file.read_text(encoding="utf-8")
+                            formatted = format_markdown(current)
+                            if current != formatted:
+                                atomic_write(target_file, formatted)
+                                return [target_file]
+                            return []
 
                         return remediate
 
@@ -947,7 +964,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             severity="INFO",
                             message=f"{rel_path}: markdown formatting needed",
                             file_path=mf,
-                            remediation=make_remediate_proj_md(mf, mformatted),
+                            remediation=make_remediate_proj_md(mf),
                         )
                     )
             except Exception as e:
@@ -972,12 +989,16 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 if rformatted != rcontent:
                     rel_path = rmf.name
 
-                    def make_remediate_root_md(
-                        target_file=rmf, formatted_text=rformatted
-                    ):
+                    def make_remediate_root_md(target_file=rmf):
                         def remediate() -> list[Path]:
-                            atomic_write(target_file, formatted_text)
-                            return [target_file]
+                            if not target_file.is_file():
+                                return []
+                            current = target_file.read_text(encoding="utf-8")
+                            formatted = format_markdown(current)
+                            if current != formatted:
+                                atomic_write(target_file, formatted)
+                                return [target_file]
+                            return []
 
                         return remediate
 
@@ -987,7 +1008,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             severity="INFO",
                             message=f"{rel_path}: markdown formatting needed",
                             file_path=rmf,
-                            remediation=make_remediate_root_md(rmf, rformatted),
+                            remediation=make_remediate_root_md(rmf),
                         )
                     )
             except Exception as e:
@@ -1111,6 +1132,10 @@ def cmd_create(
     conv_id = get_active_conversation_id(conv)
     root = get_repo_root()
     proj_dir = root / project_name
+    if proj_dir.is_file():
+        die(
+            f"cannot create project '{project_name}': a file with this name already exists"
+        )
 
     task_id = generate_task_id(root)
     slug = slugify(title) or "task"
@@ -1661,27 +1686,44 @@ def cmd_history(query: str, field: str = "status") -> None:
     target_path = resolve_target(root, query)
     rel_path = str(target_path.relative_to(root))
 
-    cmd = ["log", "--follow", "--format=%H\t%ad\t%s", "--date=short", "--", rel_path]
+    cmd = [
+        "log",
+        "--follow",
+        "--name-only",
+        "--format=COMMIT:%H\t%ad\t%s",
+        "--date=short",
+        "--",
+        rel_path,
+    ]
     res = run_git(cmd)
     if not res.stdout.strip():
         die(f"no git history for {rel_path}")
 
-    prev = "__x"
-    for line in reversed(res.stdout.splitlines()):
+    entries: list[tuple[str, str, str, str]] = []
+    cur_sha = ""
+    cur_date = ""
+    cur_subj = ""
+
+    for line in res.stdout.splitlines():
+        line = line.strip()
         if not line:
             continue
-        sha = line.split("\t")[0]
-        show_res = run_git(["show", f"{sha}:{rel_path}"], check=False)
+        if line.startswith("COMMIT:"):
+            parts = line[len("COMMIT:") :].split("\t", 2)
+            cur_sha = parts[0]
+            cur_date = parts[1] if len(parts) > 1 else ""
+            cur_subj = parts[2] if len(parts) > 2 else ""
+        else:
+            entries.append((cur_sha, cur_date, cur_subj, line))
+
+    prev = "__x"
+    for sha, d, s, p in reversed(entries):
+        show_res = run_git(["show", f"{sha}:{p}"], check=False)
         if show_res.returncode != 0:
             continue
         v = extract_frontmatter_field(show_res.stdout, field)
         if v == prev:
             continue
-
-        meta_res = run_git(["log", "-1", "--format=%ad\t%s", "--date=short", sha])
-        parts = meta_res.stdout.strip().split("\t", 1)
-        d = parts[0]
-        s = parts[1] if len(parts) > 1 else ""
 
         prev_label = "(none)" if prev == "__x" else prev
         v_label = v or "(missing)"
