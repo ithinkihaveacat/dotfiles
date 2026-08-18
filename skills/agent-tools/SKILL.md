@@ -229,6 +229,7 @@ scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
 - `--force`: Bypass the 1MB text context threshold for inlining.
 - `--read-only`: Disable file modification tools (inspection/audit only).
 - `--model MODEL`: Gemini model to use (default: `gemini-3.1-pro-preview`).
+- `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 30).
 - `--timeout SECONDS`: Execution timeout in seconds (default: 300).
 
