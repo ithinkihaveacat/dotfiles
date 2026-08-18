@@ -62,9 +62,12 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
 1. Canonical history is append-oriented. Rewrite unpublished work if useful;
    normally correct integrated history with new commits.
 1. Private tracker information must not implicitly flow into linked
-   public/shared artifacts. Artifact path references prefer `$HOME`-relative
-   form (`~/...`) to remain portable across machines (list multiple checkout
-   paths when locations vary per environment).
+   public/shared artifacts. `Conversation:` trailers and `conversation://` URLs
+   belong strictly in control repository metadata (`STATUS.md`, task
+   frontmatter, and control repo commits); they must never be added to commits
+   in linked artifact repositories. Artifact path references prefer
+   `$HOME`-relative form (`~/...`) to remain portable across machines (list
+   multiple checkout paths when locations vary per environment).
 1. `STATUS.md` is the self-contained projection of current operational state:
    reading `STATUS.md` directly answers status, recent progress, and immediate
    next steps without traversing individual task files. Generated task state
@@ -217,7 +220,8 @@ After meaningful work:
 
 1. Rewrite specific files to the new current truth.
 1. Update affected task record(s) (e.g. mark `done` with `## Outcome` and
-   `## Findings`, recording `[<conversation-id>](conversation://<conversation-id>)`).
+   `## Findings`, recording
+   `[<conversation-id>](conversation://<conversation-id>)`).
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
    session link, and recent outcome; `## Next` reflects immediate next actions);
    `PLAN.md` only if intended direction changed.
@@ -245,7 +249,8 @@ compiler: defer parser migration until v3
 
 Use commit bodies for useful reasoning not recoverable from state/diff. Add
 repeatable `Ref:` trailers for non-derivable external relationships and
-`Conversation:` trailers for session traceability.
+`Conversation:` trailers for session traceability (in control repo commits only;
+never in external artifact repos).
 
 ## CLI
 
@@ -265,7 +270,6 @@ taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 ```
-
 
 `create` is the atomic task creation command: it allocates a unique ID, writes
 the initial task record, synchronizes `STATUS.md`, and when the
