@@ -6,19 +6,20 @@ description: >
   comparison, smart cropping, token counting, technical essay generation,
   boolean condition evaluation, live context gathering, Android UI interaction
   via popper, receipt extraction via pacioli, GitHub PR/Issue/Workflow Run
-  formatting via gh-markdown, deep reasoning research via Oracle, and recipes
+  formatting via gh-markdown, deep reasoning research via Oracle, whole-directory
+  transformation and multi-file refactoring via Caxton, and recipes
   for consulting advanced reasoning tools (oracle and emerson) for plans and documents.
   Use
   this skill when the user needs to analyze images, count tokens, evaluate conditions,
   extract receipts, gather the latest authoritative documentation, format GitHub data,
-  automate Android apps, generate technical essays, perform complex architectural
-  reasoning requiring recursive directory traversal and external search, or obtain
-  an independent plan or prose review. Triggers: ai analysis, describe image, visual
-  diff,
-  token count, receipt extraction, pacioli, generate essay, boolean evaluation, gather
-  context, latest docs, research topic, github, pull request, gh-markdown, automate
-  app,
-  oracle, deep research, architecture, plan review, prose review.
+  automate Android apps, transform or refactor whole directories of files, generate
+  technical essays, perform complex architectural reasoning requiring recursive directory
+  traversal and external search, or obtain an independent plan or prose review. Triggers:
+  ai analysis, describe image, visual diff, token count, receipt extraction, pacioli,
+  generate essay, boolean evaluation, gather context, latest docs, research topic,
+  github,
+  pull request, gh-markdown, automate app, oracle, caxton, directory transformation,
+  batch refactor, bulk edit, deep research, architecture, plan review, prose review.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick
   (ImageMagick). Needs a Gemini API key (`GEMINI_API_KEY`) and network access to
@@ -63,6 +64,9 @@ tools only)
 ```bash
 # Gather context and analyze
 scripts/context show gemini-api | scripts/emerson "Explain the key features"
+
+# Transform an entire directory of documents or code
+scripts/caxton "Translate all markdown files into French" ./docs
 
 # Fetch a GitHub PR, Issue, or Workflow Run as Markdown
 scripts/gh-markdown https://github.com/owner/repo/pull/123
@@ -200,6 +204,51 @@ scripts/oracle "Evaluate this implementation against solid principles and propos
 
 # Time-sensitive research based on context
 scripts/oracle "What are the latest developments in this framework as of May 2026?" framework-docs.md
+```
+
+### caxton
+
+Autonomous whole-directory transformation and multi-file refactoring tool.
+Combines Oracle's broad upfront context inlining with Popper's autonomous
+tool-calling loop. It inlines the entire target directory into the initial
+prompt and provides the model with exact byte-for-byte `search_and_replace`,
+`write_file`, `delete_file`, `read_file`, and `list_files` tools to execute
+changes across multiple files before finalizing via `complete_task`.
+
+```bash
+scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
+```
+
+**Options:**
+
+- `-o, --output DIR`: Copy `SRC_DIR` to `DIR` first and apply all
+  transformations on the copy, leaving `SRC_DIR` untouched.
+- `--inline`: Inline all text files into initial prompt (default: on).
+- `--no-inline`: Pass only the file tree listing in the initial prompt and let
+  the agent read files on demand.
+- `--force`: Bypass the 1MB text context threshold for inlining.
+- `--read-only`: Disable file modification tools (inspection/audit only).
+- `--model MODEL`: Gemini model to use (default: `gemini-3.1-pro-preview`).
+- `--max-steps N`: Maximum agent tool steps before stopping (default: 30).
+- `--timeout SECONDS`: Execution timeout in seconds (default: 300).
+
+**Environment:** `GEMINI_API_KEY` (Required), `CAXTON_OFFLINE` / `AGENT_OFFLINE`
+(Optional)
+
+**Exit codes:** 0 success, 1 error, 2 timeout, 127 missing dependency, 130
+interrupted
+
+**Examples:**
+
+```bash
+# In-place translation of documentation
+scripts/caxton "Translate all markdown files into French" ./docs
+
+# Safe refactoring into a new destination directory
+scripts/caxton -o ./src-v2 "Rename user_id to account_id across all python files" ./src
+
+# Read-only architectural audit
+scripts/caxton --read-only "Count deprecated function usages and summarize" ./lib
 ```
 
 ### gh-markdown

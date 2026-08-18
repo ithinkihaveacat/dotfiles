@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+# Tests: skills/agent-tools/tests/test-caxton
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/caxton"
+
+OUTPUT=$(mktemp)
+TEST_DIR=$(mktemp -d)
+DST_DIR=$(mktemp -d)
+trap 'rm -rf "$OUTPUT" "$TEST_DIR" "$DST_DIR"' EXIT
+
+echo "1..7"
+
+# Test 1: caxton --help outputs valid GNU-style help and exits 0
+if "$BIN" --help >"$OUTPUT" 2>&1; then
+  if grep -q "Usage: caxton" "$OUTPUT" && grep -q "Arguments:" "$OUTPUT" && grep -q "Options:" "$OUTPUT"; then
+    echo "ok 1 - Help output is formatted correctly"
+  else
+    echo "not ok 1 - Help output missing expected sections"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 1 - caxton --help exited non-zero"
+fi
+
+# Test 2: caxton with no arguments prints short usage and exits 1
+if "$BIN" >"$OUTPUT" 2>&1; then
+  echo "not ok 2 - Expected caxton without arguments to fail"
+else
+  if grep -q "Usage: caxton" "$OUTPUT" && grep -q "Try 'caxton --help'" "$OUTPUT"; then
+    echo "ok 2 - Bare caxton prints concise usage to stderr"
+  else
+    echo "not ok 2 - Bare caxton output missing short usage"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 3: Offline policy rejection
+if CAXTON_OFFLINE=1 "$BIN" "prompt" . >"$OUTPUT" 2>&1; then
+  echo "not ok 3 - Expected CAXTON_OFFLINE to fail"
+else
+  if grep -q "caxton: offline (CAXTON_OFFLINE=1)" "$OUTPUT"; then
+    echo "ok 3 - Honors CAXTON_OFFLINE switch"
+  else
+    echo "not ok 3 - CAXTON_OFFLINE output missing expected text"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 4: Missing directory error
+if "$BIN" "some prompt" "./nonexistent_path_for_caxton_test" >"$OUTPUT" 2>&1; then
+  echo "not ok 4 - Expected nonexistent directory to fail"
+else
+  if grep -q "source directory not found" "$OUTPUT" || grep -q "cannot access source directory" "$OUTPUT"; then
+    echo "ok 4 - Rejects nonexistent source directory"
+  else
+    echo "not ok 4 - Nonexistent directory output missing expected text"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Live API tests require GEMINI_API_KEY
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "ok 5 # SKIP GEMINI_API_KEY not set"
+  echo "ok 6 # SKIP GEMINI_API_KEY not set"
+  echo "ok 7 # SKIP GEMINI_API_KEY not set"
+  exit 0
+fi
+
+# Prepare test files in $TEST_DIR
+cat <<'EOF' >"$TEST_DIR/doc1.md"
+# Document 1
+This is the ALPHA version of the document.
+Status: ALPHA testing.
+EOF
+
+cat <<'EOF' >"$TEST_DIR/doc2.md"
+# Document 2
+ALPHA release notes.
+Feature: ALPHA mode enabled.
+EOF
+
+# Test 5: Live in-place transformation
+if "$BIN" "Replace every occurrence of 'ALPHA' with 'BETA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "BETA" "$TEST_DIR/doc2.md" && ! grep -q "ALPHA" "$TEST_DIR/doc1.md"; then
+    echo "ok 5 - In-place transformation successfully modified files"
+  else
+    echo "not ok 5 - Files did not contain expected replacements"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 5 - Live in-place transformation failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 6: Safe copy transformation with -o
+rm -rf "$DST_DIR"
+if "$BIN" -o "$DST_DIR" "Replace every occurrence of 'BETA' with 'GAMMA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "GAMMA" "$DST_DIR/doc1.md" && ! grep -q "BETA" "$DST_DIR/doc1.md"; then
+    echo "ok 6 - Safe copy transformation left source intact and modified destination"
+  else
+    echo "not ok 6 - Copy mode failed validation"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 6 - Copy transformation failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 7: Read-only audit mode
+if RESPONSE=$("$BIN" --read-only "Count the exact number of times the word 'GAMMA' appears across all files in this directory. State the count clearly in your summary." "$DST_DIR" 2>"$OUTPUT"); then
+  if echo "$RESPONSE" | grep -Eq "4|four"; then
+    echo "ok 7 - Read-only mode correctly counted occurrences without modifying files"
+  else
+    echo "not ok 7 - Read-only mode returned unexpected summary: $RESPONSE"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 7 - Read-only mode execution failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
