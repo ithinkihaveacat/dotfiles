@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import mdformat
 from ruamel.yaml import YAML
@@ -56,6 +56,9 @@ def get_active_conversation_id(cli_arg: str | None = None) -> str | None:
     """Resolves the conversation ID from explicit CLI arg or opportunistic environment variables."""
     if cli_arg:
         return normalize_conversation_id(cli_arg)
+    # TODO: Verify whether these candidate environment variable names are
+    # actively populated in practice across different agent runtimes (e.g.
+    # Jetski, Claude Code, Antigravity) or if other conventions are used.
     for var in (
         "JETSKI_CONVERSATION_ID",
         "INVOKER_INFO_ROOT_SESSION_ID",
@@ -215,8 +218,10 @@ def run_git(
         text=text,
     )
     _active_subprocesses.add(proc)
-    stdout, stderr = proc.communicate(input=input_data)
-    _active_subprocesses.discard(proc)
+    try:
+        stdout, stderr = proc.communicate(input=input_data)
+    finally:
+        _active_subprocesses.discard(proc)
 
     ret = subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
     if check and ret.returncode != 0:
@@ -253,7 +258,7 @@ def get_proj_dir(project_name: str, root: Path) -> Path:
     return p
 
 
-def parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
+def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Tolerant frontmatter parser using ruamel.yaml. Returns (dict_of_fields, body_without_fm)."""
     if not content.startswith("---\n"):
         return {}, content
@@ -277,7 +282,10 @@ def parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
 
 def extract_frontmatter_field(content: str, key: str) -> str:
     fm, _ = parse_frontmatter(content)
-    return str(fm.get(key.lower(), ""))
+    val = fm.get(key.lower(), "")
+    if isinstance(val, (list, dict)):
+        return json.dumps(val)
+    return str(val)
 
 
 def extract_title(content: str) -> str:
@@ -1175,12 +1183,13 @@ def cmd_create(
         else f"{subject}\n"
     )
     if conv_id:
-        commit_msg = commit_msg.rstrip() + f"\n\nConversation: conversation://{conv_id}\n"
+        commit_msg = (
+            commit_msg.rstrip() + f"\n\nConversation: conversation://{conv_id}\n"
+        )
 
     run_git(["commit", "--no-verify", "-m", commit_msg])
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
     print(f"[INFO]  Committed new task: {commit_sha[:10]}", file=sys.stderr)
-
 
 
 def cmd_update(
@@ -1239,7 +1248,6 @@ def cmd_update(
     buf = io.StringIO()
     yaml.dump(data, buf)
     fm_text = f"---\n{buf.getvalue()}---\n"
-
 
     if title:
         body = re.sub(r"^#\s+[^\n]+", f"# {title}", body, count=1, flags=re.MULTILINE)
@@ -1451,7 +1459,6 @@ def cmd_doctor(
         Check private tracker material has not leaked to public/shared artifacts.
         After merges, check reconciled files express one coherent current state."""
     )
-
 
     if has_warn_or_fail:
         sys.exit(1)
@@ -1683,10 +1690,20 @@ def cmd_checkpoint(
     sync_status(root, project_name)
 
     # Find project changes
-    diff_proj = run_git(["diff", "--name-only", "--", project_name]).stdout.splitlines()
-    untracked_proj = run_git(
-        ["ls-files", "--others", "--exclude-standard", "--", project_name]
-    ).stdout.splitlines()
+    diff_proj = [
+        f
+        for f in run_git(
+            ["diff", "-z", "--name-only", "--", project_name]
+        ).stdout.split("\0")
+        if f
+    ]
+    untracked_proj = [
+        f
+        for f in run_git(
+            ["ls-files", "-z", "--others", "--exclude-standard", "--", project_name]
+        ).stdout.split("\0")
+        if f
+    ]
     all_changed = sorted(set(diff_proj + untracked_proj))
 
     if all_files:
@@ -1722,7 +1739,13 @@ def cmd_checkpoint(
         if cached_check.returncode == 0:
             die("checkpoint: nothing to commit")
 
-        staged_files = run_git(["diff", "--cached", "--name-only"]).stdout.splitlines()
+        staged_files = [
+            f
+            for f in run_git(["diff", "-z", "--cached", "--name-only"]).stdout.split(
+                "\0"
+            )
+            if f
+        ]
         for sf in staged_files:
             if sf and sf not in requested:
                 die(f"checkpoint: refused staged path: {sf}")
@@ -1759,7 +1782,11 @@ def cmd_commit(
     if diff_cached.returncode == 0:
         die("nothing staged")
 
-    staged_files = run_git(["diff", "--cached", "--name-only"]).stdout.splitlines()
+    staged_files = [
+        f
+        for f in run_git(["diff", "-z", "--cached", "--name-only"]).stdout.split("\0")
+        if f
+    ]
     projects = {
         f.split("/")[0]
         for f in staged_files
@@ -1771,11 +1798,11 @@ def cmd_commit(
     if projects:
         project_name = next(iter(projects))
         get_proj_dir(project_name, root)
-        if sync_status(root, project_name):
-            run_git(["add", f"{project_name}/STATUS.md"])
         findings = audit_workspace(root, project_name)
         if any(f.severity in ("WARN", "FAIL") for f in findings):
             die("doctor found errors")
+        if sync_status(root, project_name):
+            run_git(["add", f"{project_name}/STATUS.md"])
 
     msg_lines = [subject]
     if body:
@@ -1787,7 +1814,6 @@ def cmd_commit(
     msg = "\n".join(msg_lines) + "\n"
 
     run_git(["commit", "--no-verify", "-F", "-"], input_data=msg)
-
 
 
 HELP_TEXT = """Usage: taskgo COMMAND [OPTIONS]
@@ -2212,7 +2238,6 @@ def main(argv: list[str] | None = None) -> None:
     else:
         print(HELP_TEXT)
         sys.exit(0)
-
 
 
 if __name__ == "__main__":
