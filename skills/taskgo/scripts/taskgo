@@ -238,6 +238,13 @@ def get_repo_root() -> Path:
     return Path(res.stdout.strip())
 
 
+def atomic_write(path: Path, content: str) -> None:
+    """Atomically writes content to path using a PID-tagged temp file and os.replace."""
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def is_project_dir(p: Path) -> bool:
     if not p.is_dir() or p.name.startswith("."):
         return False
@@ -250,8 +257,11 @@ def get_proj_dir(project_name: str, root: Path) -> Path:
         or "\\" in project_name
         or ".." in project_name
         or not project_name
+        or project_name.startswith(".")
     ):
-        die(f"invalid project name (must be a top-level directory): {project_name}")
+        die(
+            f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
+        )
     p = root / project_name
     if not p.is_dir():
         die(f"unknown project: {project_name}")
@@ -260,14 +270,12 @@ def get_proj_dir(project_name: str, root: Path) -> Path:
 
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Tolerant frontmatter parser using ruamel.yaml. Returns (dict_of_fields, body_without_fm)."""
-    if not content.startswith("---\n"):
-        return {}, content
-    end = content.find("\n---\n", 4)
-    if end == -1:
+    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+    if not match:
         return {}, content
 
-    frontmatter_str = content[4:end]
-    body = content[end + 5 :]
+    frontmatter_str = match.group(1)
+    body = content[match.end() :]
 
     yaml = YAML()
     try:
@@ -280,6 +288,27 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return {str(k).lower(): v for k, v in data.items()}, body
 
 
+def parse_frontmatter_for_edit(content: str) -> tuple[Any, str]:
+    """Loads frontmatter preserving raw ruamel.yaml CommentedMap and body."""
+    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+    if not match:
+        yaml = YAML()
+        return yaml.load("{}"), content
+
+    frontmatter_str = match.group(1)
+    body = content[match.end() :]
+
+    yaml = YAML()
+    try:
+        data = yaml.load(frontmatter_str)
+        if not isinstance(data, dict):
+            data = yaml.load("{}")
+    except Exception:
+        data = yaml.load("{}")
+
+    return data, body
+
+
 def extract_frontmatter_field(content: str, key: str) -> str:
     fm, _ = parse_frontmatter(content)
     val = fm.get(key.lower(), "")
@@ -290,7 +319,8 @@ def extract_frontmatter_field(content: str, key: str) -> str:
 
 def extract_title(content: str) -> str:
     _, body = parse_frontmatter(content)
-    for line in body.splitlines():
+    body_no_code = re.sub(r"```.*?```", "", body, flags=re.DOTALL)
+    for line in body_no_code.splitlines():
         if line.startswith("# "):
             return line[2:].strip()
     return ""
@@ -359,7 +389,7 @@ def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
         status = extract_frontmatter_field(content, "status")
         title = extract_title(content)
         rel_path = str(f.relative_to(root))
-        project = rel_path.split(os.sep, maxsplit=1)[0]
+        project = Path(rel_path).as_posix().split("/")[0]
         rows.append(TaskRow(project, task_id, status, title, rel_path, f.resolve()))
     return rows
 
@@ -462,7 +492,7 @@ def sync_status(root: Path, project_name: str) -> bool:
         current = status_file.read_text(encoding="utf-8")
         if current == rendered:
             return False
-    status_file.write_text(rendered, encoding="utf-8")
+    atomic_write(status_file, rendered)
     return True
 
 
@@ -554,9 +584,9 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
         def remediate_missing_agents() -> list[Path]:
             # Tracking repos include commit authorization by default so agents can maintain tracker state.
-            agents_file.write_text(
+            atomic_write(
+                agents_file,
                 f"# Agent instructions\n\nThis repository follows taskgo: <{CANONICAL_URL}>.\n\n{COMMIT_AUTH}\n",
-                encoding="utf-8",
             )
             return [agents_file]
 
@@ -598,7 +628,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     cur += f"\nCanonical URL: <{CANONICAL_URL}>\n"
                 if COMMIT_AUTH not in cur:
                     cur = cur.rstrip() + f"\n\n{COMMIT_AUTH}\n"
-                agents_file.write_text(cur, encoding="utf-8")
+                atomic_write(agents_file, cur)
                 return [agents_file]
 
             if needs_decl:
@@ -637,7 +667,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
     if not inbox_file.is_file():
 
         def remediate_missing_inbox() -> list[Path]:
-            inbox_file.write_text("# Inbox\n", encoding="utf-8")
+            atomic_write(inbox_file, "# Inbox\n")
             return [inbox_file]
 
         findings.append(
@@ -732,31 +762,38 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     ):
                         def remediate() -> list[Path]:
                             t_content = target_tf.read_text(encoding="utf-8")
-                            t_fm, t_body = parse_frontmatter(t_content)
-                            t_id = t_fm.get("id", "")
+                            t_fm, t_body = parse_frontmatter_for_edit(t_content)
+                            t_id = ""
+                            id_key = None
+                            for k in list(t_fm.keys()):
+                                if str(k).lower() == "id":
+                                    t_id = str(t_fm[k])
+                                    id_key = k
+                                    break
                             if not ID_PATTERN.match(t_id):
                                 t_id = generate_task_id(p_root)
-                            t_status = normalize_status(t_fm.get("status", "todo"))
+
+                            raw_status = "todo"
+                            status_key = None
+                            for k in list(t_fm.keys()):
+                                if str(k).lower() == "status":
+                                    raw_status = str(t_fm[k])
+                                    status_key = k
+                                    break
+                            t_status = normalize_status(raw_status)
                             t_title = extract_title(t_content) or target_tf.stem
                             if not t_body.strip():
                                 t_body = f"\n# {t_title}\n\n## Outcome\n\n## Findings\n\n## Next\n"
 
-                            new_fm = {
-                                "id": t_id,
-                                "status": t_status,
-                                **{
-                                    k: v
-                                    for k, v in t_fm.items()
-                                    if k not in ("id", "status")
-                                },
-                            }
+                            t_fm[id_key or "id"] = t_id
+                            t_fm[status_key or "status"] = t_status
 
                             yaml = YAML()
                             yaml.width = WRAP_WIDTH
                             yaml.preserve_quotes = True
                             yaml.default_flow_style = False
                             buf = io.StringIO()
-                            yaml.dump(new_fm, buf)
+                            yaml.dump(t_fm, buf)
                             new_content = (
                                 f"---\n{buf.getvalue()}---\n\n{t_body.lstrip()}\n"
                             )
@@ -764,7 +801,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                                 new_content = format_markdown(new_content)
                             except Exception:
                                 pass
-                            target_tf.write_text(new_content, encoding="utf-8")
+                            atomic_write(target_tf, new_content)
                             slug = slugify(t_title) or "task"
                             new_name = f"{t_id}-{slug}.md"
                             new_path = p_tasks / new_name
@@ -899,7 +936,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         target_file=mf, formatted_text=mformatted
                     ):
                         def remediate() -> list[Path]:
-                            target_file.write_text(formatted_text, encoding="utf-8")
+                            atomic_write(target_file, formatted_text)
                             return [target_file]
 
                         return remediate
@@ -939,7 +976,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         target_file=rmf, formatted_text=rformatted
                     ):
                         def remediate() -> list[Path]:
-                            target_file.write_text(formatted_text, encoding="utf-8")
+                            atomic_write(target_file, formatted_text)
                             return [target_file]
 
                         return remediate
@@ -1064,8 +1101,11 @@ def cmd_create(
         or "\\" in project_name
         or ".." in project_name
         or not project_name
+        or project_name.startswith(".")
     ):
-        die(f"invalid project name (must be a top-level directory): {project_name}")
+        die(
+            f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
+        )
 
     status = normalize_status(status)
     conv_id = get_active_conversation_id(conv)
@@ -1111,14 +1151,15 @@ def cmd_create(
         proj_dir.mkdir(parents=True, exist_ok=True)
         readme = proj_dir / "README.md"
         if not readme.is_file():
-            readme.write_text(
-                f"# {project_name}\n\nProject overview.\n", encoding="utf-8"
+            atomic_write(
+                readme,
+                f"# {project_name}\n\nProject overview.\n",
             )
         status_file = proj_dir / "STATUS.md"
         if not status_file.is_file():
-            status_file.write_text(
+            atomic_write(
+                status_file,
                 f"# Status\n\n## Summary\n\nInitial setup for {project_name}.\n\n<!-- taskgo:begin -->\n<!-- taskgo:end -->\n\n## Next\n",
-                encoding="utf-8",
             )
 
     tasks_dir = proj_dir / "tasks"
@@ -1139,7 +1180,7 @@ def cmd_create(
         next_steps=next_steps,
         conv=conv_id,
     )
-    task_file.write_text(content, encoding="utf-8")
+    atomic_write(task_file, content)
 
     # Sync project STATUS.md
     sync_status(root, project_name)
@@ -1177,15 +1218,12 @@ def cmd_create(
     else:
         subject = prefix
 
-    commit_msg = (
-        f"{subject}\n\n{title}\n"
-        if subject != f"{prefix} ({title})"
-        else f"{subject}\n"
-    )
+    msg_lines = [subject]
+    if subject != f"{prefix} ({title})":
+        msg_lines.extend(["", title])
     if conv_id:
-        commit_msg = (
-            commit_msg.rstrip() + f"\n\nConversation: conversation://{conv_id}\n"
-        )
+        msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
+    commit_msg = "\n".join(msg_lines) + "\n"
 
     run_git(["commit", "--no-verify", "-m", commit_msg])
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1210,30 +1248,39 @@ def cmd_update(
     root = get_repo_root()
     target_path = resolve_target(root, query)
     rel_path = str(target_path.relative_to(root))
-    project_name = rel_path.split(os.sep, maxsplit=1)[0]
+    project_name = Path(rel_path).as_posix().split("/")[0]
 
     content = target_path.read_text(encoding="utf-8")
-    data, body = parse_frontmatter(content)
-    if data is None:
-        data = {}
+    data, body = parse_frontmatter_for_edit(content)
 
     if status:
-        data["status"] = normalize_status(status)
+        norm_status = normalize_status(status)
+        status_key = next((k for k in data if str(k).lower() == "status"), "status")
+        data[status_key] = norm_status
 
     conv_id = normalize_conversation_id(conv) if conv else None
     if conv_id:
         conv_uri = f"conversation://{conv_id}"
-        existing = data.get("conversations")
-        if isinstance(existing, list):
-            if conv_uri not in existing:
-                existing.append(conv_uri)
-        elif isinstance(existing, str):
-            if existing != conv_uri:
-                data["conversations"] = [existing, conv_uri]
+        conversations_key = next(
+            (k for k in data if str(k).lower() == "conversations"), None
+        )
+        conversation_key = next(
+            (k for k in data if str(k).lower() == "conversation"), None
+        )
+        if conversations_key:
+            existing = data[conversations_key]
+            if isinstance(existing, list):
+                if conv_uri not in existing:
+                    existing.append(conv_uri)
+            elif isinstance(existing, str):
+                if existing != conv_uri:
+                    data[conversations_key] = [existing, conv_uri]
+                else:
+                    data[conversations_key] = [conv_uri]
             else:
-                data["conversations"] = [conv_uri]
-        elif "conversation" in data:
-            old_c = data.pop("conversation")
+                data[conversations_key] = [conv_uri]
+        elif conversation_key:
+            old_c = data.pop(conversation_key)
             if old_c != conv_uri:
                 data["conversations"] = [old_c, conv_uri]
             else:
@@ -1298,10 +1345,13 @@ def cmd_update(
         new_content = format_markdown(new_content)
     except Exception:
         pass
-    target_path.write_text(new_content, encoding="utf-8")
+    atomic_write(target_path, new_content)
 
     sync_status(root, project_name)
-    print(f"[INFO]  Updated {data.get('id', query)} in {rel_path}", file=sys.stderr)
+    task_id_val = next(
+        (str(v) for k, v in data.items() if str(k).lower() == "id"), query
+    )
+    print(f"[INFO]  Updated {task_id_val} in {rel_path}", file=sys.stderr)
 
 
 def cmd_list(
@@ -1667,7 +1717,7 @@ def cmd_checkpoint(
 
     target_path = resolve_target(root, task_id)
     rel_path = str(target_path.relative_to(root))
-    project_name = rel_path.split(os.sep, maxsplit=1)[0]
+    project_name = Path(rel_path).as_posix().split("/")[0]
     get_proj_dir(project_name, root)
     status_rel = f"{project_name}/STATUS.md"
 
@@ -1753,10 +1803,14 @@ def cmd_checkpoint(
         msg_lines = [subject]
         if body:
             msg_lines.extend(["", body])
+        trailers = []
         if conv_id:
-            msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
+            trailers.append(f"Conversation: conversation://{conv_id}")
         for r in refs_list:
-            msg_lines.extend(["", f"Ref: {r}"])
+            trailers.append(f"Ref: {r}")
+        if trailers:
+            msg_lines.append("")
+            msg_lines.extend(trailers)
         msg = "\n".join(msg_lines) + "\n"
 
         run_git(["commit", "--no-verify", "-F", "-"], input_data=msg)
@@ -1807,10 +1861,14 @@ def cmd_commit(
     msg_lines = [subject]
     if body:
         msg_lines.extend(["", body])
+    trailers = []
     if conv_id:
-        msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
+        trailers.append(f"Conversation: conversation://{conv_id}")
     for r in refs_list:
-        msg_lines.extend(["", f"Ref: {r}"])
+        trailers.append(f"Ref: {r}")
+    if trailers:
+        msg_lines.append("")
+        msg_lines.extend(trailers)
     msg = "\n".join(msg_lines) + "\n"
 
     run_git(["commit", "--no-verify", "-F", "-"], input_data=msg)
