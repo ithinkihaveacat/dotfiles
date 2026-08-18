@@ -9,6 +9,7 @@
 # ]
 # ///
 
+import argparse
 import hashlib
 import io
 import json
@@ -102,28 +103,20 @@ _active_subprocesses: set[subprocess.Popen] = set()
 _received_sigterm: bool = False
 
 
-def reap_subprocesses(signaled_by_parent: bool) -> None:
-    """Gracefully tear down active subprocesses in compliance with POSIX standards.
-
-    :param signaled_by_parent: True if the parent received a targeted signal (SIGTERM).
-                               False if a broadcast signal (SIGINT) was sent to the process group.
-    """
+def reap_subprocesses(signaled_by_parent: bool = True) -> None:
+    """Gracefully tear down active subprocesses in compliance with POSIX standards."""
     for proc in list(_active_subprocesses):
         if proc.poll() is not None:
             _active_subprocesses.discard(proc)
             continue
 
-        if signaled_by_parent:
-            # Forward the signal, as the child process was not targeted natively by the OS.
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-
-        # Wait patiently for Git's internal sigchain handlers to release index.lock.
-        # 3.0 seconds provides ample margin for Git to finish writing packfiles or unlinking locks.
         try:
-            proc.wait(timeout=3.0)
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+
+        try:
+            proc.wait(timeout=1.5)
         except subprocess.TimeoutExpired:
             try:
                 proc.kill()
@@ -137,14 +130,30 @@ def reap_subprocesses(signaled_by_parent: bool) -> None:
         _active_subprocesses.discard(proc)
 
 
+def handle_signal_exit(signum: int) -> None:
+    # Protect teardown logic from re-entrant signals
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+    reap_subprocesses(signaled_by_parent=(signum == signal.SIGTERM))
+    try:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
+    sys.exit(128 + signum)
+
+
 def sigterm_handler(signum, frame):
-    """Handle targeted termination (kill <pid>) by translating to an interrupt."""
-    global _received_sigterm
-    _received_sigterm = True
-    raise KeyboardInterrupt
+    handle_signal_exit(signal.SIGTERM)
+
+
+def sigint_handler(signum, frame):
+    handle_signal_exit(signal.SIGINT)
 
 
 signal.signal(signal.SIGTERM, sigterm_handler)
+signal.signal(signal.SIGINT, sigint_handler)
 
 
 def die(msg: str, exit_code: int = 1) -> None:
@@ -170,10 +179,8 @@ def run_git(
         text=text,
     )
     _active_subprocesses.add(proc)
-    try:
-        stdout, stderr = proc.communicate(input=input_data)
-    finally:
-        _active_subprocesses.discard(proc)
+    stdout, stderr = proc.communicate(input=input_data)
+    _active_subprocesses.discard(proc)
 
     ret = subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
     if check and ret.returncode != 0:
@@ -892,51 +899,29 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
     return findings
 
 
-# ---------------------------------------------------------------------------
-# CLI Commands
-# ---------------------------------------------------------------------------
-
-
-def cmd_id(args: list[str]) -> None:
+def cmd_id() -> None:
+    """Allocate a unique task ID."""
     root = get_repo_root()
     print(generate_task_id(root))
 
 
-def cmd_create(args: list[str]) -> None:
-    project_name = None
-    title = None
-    dry_run = False
-    no_commit = False
-    status = "todo"
-
-    idx = 0
-    while idx < len(args):
-        arg = args[idx]
-        if arg == "--status":
-            if idx + 1 >= len(args):
-                die("--status requires a value")
-            status = normalize_status(args[idx + 1])
-            idx += 2
-        elif arg == "--no-commit":
-            no_commit = True
-            idx += 1
-        elif arg == "--dry-run":
-            dry_run = True
-            idx += 1
-        elif not arg.startswith("--"):
-            if project_name is None:
-                project_name = arg
-            elif title is None:
-                title = arg
-            else:
-                die(f"unexpected argument: {arg}")
-            idx += 1
-        else:
-            die(f"unknown option: {arg}")
-
-    if not project_name or not title:
-        die("create PROJECT TITLE [--status STATE] [--no-commit] [--dry-run]")
-
+def cmd_create(
+    project_name: str,
+    title: str,
+    status: str = "todo",
+    problem: str | None = None,
+    goal: str | None = None,
+    criteria: str | None = None,
+    sketch: str | None = None,
+    constraints: str | None = None,
+    outcome: str | None = None,
+    findings: str | None = None,
+    next_steps: str | None = None,
+    no_commit: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Create a new task in PROJECT."""
+    status = normalize_status(status)
     root = get_repo_root()
     proj_dir = root / project_name
 
@@ -993,6 +978,39 @@ def cmd_create(args: list[str]) -> None:
     tasks_dir.mkdir(parents=True, exist_ok=True)
     task_path = tasks_dir / filename
 
+    body_blocks = []
+    if problem:
+        body_blocks.append(f"**Problem:** {problem}")
+    if goal:
+        body_blocks.append(f"**Goal:** {goal}")
+    if criteria:
+        body_blocks.append(f"**Criteria:** {criteria}")
+    if sketch:
+        body_blocks.append(
+            f"**Sketch:**\n\n{sketch}"
+            if ("\n" in sketch or sketch.strip().startswith("1."))
+            else f"**Sketch:** {sketch}"
+        )
+    if constraints:
+        body_blocks.append(f"**Constraints:** {constraints}")
+
+    if outcome:
+        body_blocks.append(f"## Outcome\n\n{outcome}")
+    elif not body_blocks:
+        body_blocks.append("## Outcome")
+
+    if findings:
+        body_blocks.append(f"## Findings\n\n{findings}")
+    elif not problem and not goal:
+        body_blocks.append("## Findings")
+
+    if next_steps:
+        body_blocks.append(f"## Next\n\n{next_steps}")
+    elif not problem and not goal:
+        body_blocks.append("## Next")
+
+    body = "\n\n".join(body_blocks)
+
     content = f"""---
 id: {task_id}
 status: {status}
@@ -1000,11 +1018,7 @@ status: {status}
 
 # {title}
 
-## Outcome
-
-## Findings
-
-## Next
+{body}
 """
     try:
         content = format_markdown(content)
@@ -1060,170 +1074,241 @@ status: {status}
     print(f"[INFO]  Committed new task: {commit_sha[:10]}", file=sys.stderr)
 
 
-def cmd_list(args: list[str]) -> None:
-    project_name = None
-    filter_state = None
-    as_json = False
-
-    idx = 0
-    while idx < len(args):
-        arg = args[idx]
-        if arg == "--state":
-            if idx + 1 >= len(args):
-                die("--state requires a value")
-            filter_state = normalize_status(args[idx + 1])
-            idx += 2
-        elif arg == "--json":
-            as_json = True
-            idx += 1
-        elif not arg.startswith("--") and project_name is None:
-            project_name = arg
-            idx += 1
-        else:
-            die(f"unknown option: {arg}")
-
+def cmd_update(
+    query: str,
+    status: str | None = None,
+    title: str | None = None,
+    problem: str | None = None,
+    goal: str | None = None,
+    criteria: str | None = None,
+    sketch: str | None = None,
+    constraints: str | None = None,
+    outcome: str | None = None,
+    findings: str | None = None,
+    next_steps: str | None = None,
+) -> None:
+    """Update task fields, status, or headings."""
     root = get_repo_root()
-    rows = get_task_rows(root, project_name)
-    if filter_state:
-        rows = [r for r in rows if r.status == filter_state]
+    target_path = resolve_target(root, query)
+    rel_path = str(target_path.relative_to(root))
+    project_name = rel_path.split(os.sep, maxsplit=1)[0]
+
+    content = target_path.read_text(encoding="utf-8")
+    data, body = parse_frontmatter(content)
+    if data is None:
+        data = {}
+
+    if status:
+        data["status"] = normalize_status(status)
+
+    yaml = YAML()
+    yaml.width = WRAP_WIDTH
+    yaml.preserve_quotes = True
+    yaml.default_flow_style = False
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    fm_text = f"---\n{buf.getvalue()}---\n"
+
+    if title:
+        body = re.sub(r"^#\s+[^\n]+", f"# {title}", body, count=1, flags=re.MULTILINE)
+
+    def upsert_runin(body_str: str, label: str, val: str) -> str:
+        pattern = re.compile(
+            rf"\*\*{re.escape(label)}:\*\*.*?(?=(\n\n\*\*|\n\n##|\Z))",
+            re.DOTALL,
+        )
+        replacement = (
+            f"**{label}:**\n\n{val}"
+            if ("\n" in val or val.strip().startswith("1."))
+            else f"**{label}:** {val}"
+        )
+        if pattern.search(body_str):
+            return pattern.sub(lambda _: replacement, body_str, count=1)
+        return body_str.rstrip() + f"\n\n{replacement}\n"
+
+    def upsert_section(body_str: str, heading: str, val: str) -> str:
+        pattern = re.compile(
+            rf"^##\s+{re.escape(heading)}\b.*?(?=(\n##\s+|\Z))",
+            re.DOTALL | re.MULTILINE,
+        )
+        replacement = f"## {heading}\n\n{val}"
+        if pattern.search(body_str):
+            return pattern.sub(lambda _: replacement, body_str, count=1)
+        return body_str.rstrip() + f"\n\n{replacement}\n"
+
+    if problem:
+        body = upsert_runin(body, "Problem", problem)
+    if goal:
+        body = upsert_runin(body, "Goal", goal)
+    if criteria:
+        body = upsert_runin(body, "Criteria", criteria)
+    if sketch:
+        body = upsert_runin(body, "Sketch", sketch)
+    if constraints:
+        body = upsert_runin(body, "Constraints", constraints)
+    if outcome:
+        body = upsert_section(body, "Outcome", outcome)
+    if findings:
+        body = upsert_section(body, "Findings", findings)
+    if next_steps:
+        body = upsert_section(body, "Next", next_steps)
+
+    new_content = fm_text + "\n" + body.lstrip()
+    try:
+        new_content = format_markdown(new_content)
+    except Exception:
+        pass
+    target_path.write_text(new_content, encoding="utf-8")
+
+    sync_status(root, project_name)
+    print(f"[INFO]  Updated {data.get('id', query)} in {rel_path}", file=sys.stderr)
+
+
+def cmd_list(
+    project: str | None = None,
+    state: str | None = None,
+    as_json: bool = False,
+) -> None:
+    """List tasks in the repository or a specific project."""
+    root = get_repo_root()
+    rows = get_task_rows(root, project)
+    if state:
+        norm_state = normalize_status(state)
+        rows = [r for r in rows if r.status == norm_state]
 
     if as_json:
-        data = [
+        out = [
             {
                 "project": r.project,
-                "task_id": r.task_id,
+                "id": r.task_id,
                 "status": r.status,
                 "title": r.title,
-                "path": r.rel_path,
+                "path": str(r.abs_path.relative_to(root)),
             }
             for r in rows
         ]
-        print(json.dumps(data, indent=2))
+        print(json.dumps(out, indent=2))
+        return
+
+    if not rows:
         return
 
     print("PROJECT\tTASK\tSTATE\tTITLE\tPATH")
     for r in rows:
-        print(f"{r.project}\t{r.task_id}\t{r.status}\t{r.title}\t{r.rel_path}")
+        rel = str(r.abs_path.relative_to(root))
+        print(f"{r.project}\t{r.task_id}\t{r.status or '(missing)'}\t{r.title}\t{rel}")
 
 
-def cmd_status(args: list[str]) -> None:
-    project_name = None
-    as_json = False
-
-    idx = 0
-    while idx < len(args):
-        arg = args[idx]
-        if arg == "--json":
-            as_json = True
-            idx += 1
-        elif not arg.startswith("--") and project_name is None:
-            project_name = arg
-            idx += 1
-        else:
-            die(f"unknown option: {arg}")
-
+def cmd_status(
+    project: str | None = None,
+    as_json: bool = False,
+) -> None:
+    """Show project status or whole-workspace summary."""
     root = get_repo_root()
-
-    if project_name:
-        proj_dir = get_proj_dir(project_name, root)
-        status_file = proj_dir / "STATUS.md"
-        if not status_file.is_file():
-            die("missing STATUS.md")
+    if project:
+        proj_dir = get_proj_dir(project, root)
         if as_json:
-            rows = get_task_rows(root, project_name)
-            in_prog = sum(1 for r in rows if r.status == "in-progress")
-            blocked = sum(1 for r in rows if r.status == "blocked")
-            todo = sum(1 for r in rows if r.status == "todo")
-            done = sum(1 for r in rows if r.status == "done")
-            data = {
-                "project": project_name,
-                "in_progress": in_prog,
-                "blocked": blocked,
-                "todo": todo,
-                "done": done,
+            rows = get_task_rows(root, project)
+            out = {
+                "project": project,
+                "in_progress": [r.task_id for r in rows if r.status == "in-progress"],
+                "blocked": [r.task_id for r in rows if r.status == "blocked"],
+                "todo_count": sum(1 for r in rows if r.status == "todo"),
+                "done_count": sum(1 for r in rows if r.status == "done"),
                 "tasks": [
                     {
-                        "task_id": r.task_id,
+                        "id": r.task_id,
                         "status": r.status,
                         "title": r.title,
-                        "path": r.rel_path,
+                        "path": str(r.abs_path.relative_to(root)),
                     }
                     for r in rows
                 ],
             }
-            print(json.dumps(data, indent=2))
+            print(json.dumps(out, indent=2))
             return
-        print(status_file.read_text(encoding="utf-8"), end="")
+        status_file = proj_dir / "STATUS.md"
+        if status_file.is_file():
+            print(status_file.read_text(encoding="utf-8").rstrip())
+        else:
+            print(render_status_file(root, project).rstrip())
         return
 
-    projects_data = []
-    for p in sorted(root.iterdir()):
-        if is_project_dir(p):
-            name = p.name
-            rows = get_task_rows(root, name)
-            in_prog = sum(1 for r in rows if r.status == "in-progress")
-            blocked = sum(1 for r in rows if r.status == "blocked")
-            todo = sum(1 for r in rows if r.status == "todo")
-            done = sum(1 for r in rows if r.status == "done")
-            projects_data.append(
+    # All projects
+    projects = list_projects(root)
+    if as_json:
+        all_data = []
+        for p in projects:
+            rows = get_task_rows(root, p)
+            all_data.append(
                 {
-                    "project": name,
-                    "in_progress": in_prog,
-                    "blocked": blocked,
-                    "todo": todo,
-                    "done": done,
+                    "project": p,
+                    "in_progress": [
+                        r.task_id for r in rows if r.status == "in-progress"
+                    ],
+                    "blocked": [r.task_id for r in rows if r.status == "blocked"],
+                    "todo_count": sum(1 for r in rows if r.status == "todo"),
+                    "done_count": sum(1 for r in rows if r.status == "done"),
                 }
             )
-
-    if as_json:
-        print(json.dumps(projects_data, indent=2))
+        print(json.dumps(all_data, indent=2))
         return
 
-    print("PROJECT\tIN-PROGRESS\tBLOCKED\tTODO")
-    for item in projects_data:
+    for p in projects:
+        rows = get_task_rows(root, p)
+        in_prog = [r.task_id for r in rows if r.status == "in-progress"]
+        blocked = [r.task_id for r in rows if r.status == "blocked"]
+        todo = sum(1 for r in rows if r.status == "todo")
+        done = sum(1 for r in rows if r.status == "done")
+        prog_str = ", ".join(in_prog) if in_prog else "none"
+        blk_str = ", ".join(blocked) if blocked else "none"
         print(
-            f"{item['project']}\t{item['in_progress']}\t{item['blocked']}\t{item['todo']}"
+            f"{p}: in-progress=[{prog_str}] blocked=[{blk_str}] todo={todo} done={done}"
         )
 
 
-def cmd_sync(args: list[str]) -> None:
-    if len(args) > 1:
-        die("sync [PROJECT]")
-    root = get_repo_root()
+def list_projects(root: Path) -> list[str]:
+    return [p.name for p in sorted(root.iterdir()) if is_project_dir(p)]
 
-    if len(args) == 1:
-        project_name = args[0]
-        get_proj_dir(project_name, root)
-        if sync_status(root, project_name):
+
+def cmd_sync(
+    project: str | None = None,
+) -> None:
+    """Update STATUS.md snapshot for a project or the workspace."""
+    root = get_repo_root()
+    if project:
+        get_proj_dir(project, root)
+        updated = sync_status(root, project)
+        if updated:
             print("updated")
         else:
             print("current")
         return
 
-    for p in sorted(root.iterdir()):
-        if is_project_dir(p):
-            if sync_status(root, p.name):
-                print(f"{p.name}: updated")
-            else:
-                print(f"{p.name}: current")
+    projects = list_projects(root)
+    any_updated = False
+    for p in projects:
+        if sync_status(root, p):
+            any_updated = True
+    if any_updated:
+        print("updated")
+    else:
+        print("current")
 
 
-def cmd_doctor(args: list[str]) -> None:
-    """Strictly read-only diagnostics per cli-tools.md standard."""
-    if len(args) > 1:
-        die("doctor [PROJECT]")
-    want_project = args[0] if len(args) == 1 else None
-
+def cmd_doctor(
+    project: str | None = None,
+) -> None:
+    """Run mechanical health checks across the workspace or a project."""
     root = get_repo_root()
-    findings = audit_workspace(root, want_project)
+    findings = audit_workspace(root, project)
 
-    has_errors = False
+    has_warn_or_fail = False
     for f in findings:
+        prefix = f"[{f.severity}]".ljust(8)
+        print(f"{prefix}{f.message}")
         if f.severity in ("WARN", "FAIL"):
-            has_errors = True
-            print(f"[{f.severity}]  {f.message}", file=sys.stderr)
-        elif f.severity in ("INFO", "PASS"):
-            print(f"[{f.severity}]  {f.message}", file=sys.stderr)
+            has_warn_or_fail = True
 
     print(
         """[INFO]  Agent semantic review
@@ -1231,39 +1316,24 @@ def cmd_doctor(args: list[str]) -> None:
         Check PLAN is current direction, not accumulated history.
         Check ADR status/rationale and artifact references remain meaningful.
         Check private tracker material has not leaked to public/shared artifacts.
-        After merges, check reconciled files express one coherent current state.""",
-        file=sys.stderr,
+        After merges, check reconciled files express one coherent current state."""
     )
 
-    if has_errors:
+    if has_warn_or_fail:
         sys.exit(1)
 
 
-def cmd_fix(args: list[str]) -> None:
-    """Auto-healing engine: repairs findings from audit_workspace and commits by default."""
-    dry_run = False
-    no_commit = False
-    want_project = None
-
-    idx = 0
-    while idx < len(args):
-        if args[idx] == "--dry-run":
-            dry_run = True
-            idx += 1
-        elif args[idx] == "--no-commit":
-            no_commit = True
-            idx += 1
-        elif not args[idx].startswith("--") and want_project is None:
-            want_project = args[idx]
-            idx += 1
-        else:
-            die(f"unknown option: {args[idx]}")
-
+def cmd_fix(
+    project: str | None = None,
+    dry_run: bool = False,
+    no_commit: bool = False,
+) -> None:
+    """Auto-heal IDs, statuses, and snapshot drift."""
     root = get_repo_root()
-    if want_project:
-        get_proj_dir(want_project, root)
+    if project:
+        get_proj_dir(project, root)
 
-    findings = audit_workspace(root, want_project)
+    findings = audit_workspace(root, project)
     fixable = [f for f in findings if f.remediation is not None]
 
     if not fixable:
@@ -1271,11 +1341,12 @@ def cmd_fix(args: list[str]) -> None:
         if unfixable:
             for f in unfixable:
                 print(
-                    f"[{f.severity}]  Manual fix required: {f.message}", file=sys.stderr
+                    f"[{f.severity}]  Manual fix required: {f.message}",
+                    file=sys.stderr,
                 )
         else:
             print("[INFO]  Workspace is clean, no fixes needed.", file=sys.stderr)
-        sys.exit(0)
+        return
 
     if dry_run:
         print(
@@ -1316,7 +1387,7 @@ def cmd_fix(args: list[str]) -> None:
             touched_paths.add(f.file_path)
 
     # Re-run audit to verify convergence
-    post_findings = audit_workspace(root, want_project)
+    post_findings = audit_workspace(root, project)
     remaining_errors = [f for f in post_findings if f.severity in ("WARN", "FAIL")]
     if remaining_errors:
         for f in remaining_errors:
@@ -1324,8 +1395,8 @@ def cmd_fix(args: list[str]) -> None:
 
     # Ensure all affected projects have their STATUS.md synchronized and included if modified
     affected_projects: set[str] = set()
-    if want_project:
-        affected_projects.add(want_project)
+    if project:
+        affected_projects.add(project)
     for tp in touched_paths:
         try:
             rel = tp.resolve().relative_to(root.resolve())
@@ -1354,7 +1425,7 @@ def cmd_fix(args: list[str]) -> None:
 
     if not modified_files:
         print("[INFO]  Workspace is clean, no files changed.", file=sys.stderr)
-        sys.exit(0)
+        return
 
     if no_commit:
         print(
@@ -1364,16 +1435,19 @@ def cmd_fix(args: list[str]) -> None:
         print("\n".join(modified_files))
         return
 
-    # NOTE: In taskgo, the Git repository is the persistence/audit backend for
-    # the task control repository. 'taskgo fix' automatically commits healed tracker
-    # state by default to maintain tracking integrity across turns without requiring
-    # separate authorization ceremony. Use '--dry-run' to preview repairs without modifying files,
-    # or '--no-commit' to apply repairs on disk without committing.
+    if not has_commit_auth(root):
+        print(
+            f"[INFO]  Applied {len(modified_files)} repair(s) (commit skipped: no auth marker).",
+            file=sys.stderr,
+        )
+        print("\n".join(modified_files))
+        return
+
     run_git(["add", "--", *modified_files])
-    if want_project:
-        commit_msg = f"chore({want_project}): fix metadata and status\n"
+    if project:
+        commit_msg = f"chore({project}): fix metadata and status\n"
         if len(commit_msg.strip()) > 50:
-            commit_msg = f"{want_project}: fix metadata and status\n"
+            commit_msg = f"{project}: fix metadata and status\n"
     else:
         commit_msg = "chore: fix task metadata and status\n"
     run_git(["commit", "--no-verify", "-m", commit_msg])
@@ -1390,33 +1464,30 @@ def cmd_fix(args: list[str]) -> None:
     print(f"SUMMARY: {commit_msg.strip()}")
 
 
-def cmd_history(args: list[str]) -> None:
-    if len(args) < 1 or len(args) > 2:
-        die("history PATH_OR_TASK_ID [FIELD]")
-    query = args[0]
-    key = args[1] if len(args) == 2 else "status"
-
+def cmd_history(query: str, field: str = "status") -> None:
+    """Show frontmatter field history across git revisions."""
     root = get_repo_root()
     target_path = resolve_target(root, query)
     rel_path = str(target_path.relative_to(root))
 
-    # Single pass git log
-    res = run_git(["log", "--reverse", "--format=%H", "--", rel_path])
-    shas = [s.strip() for s in res.stdout.splitlines() if s.strip()]
+    cmd = ["log", "--follow", "--format=%H\t%ad\t%s", "--date=short", "--", rel_path]
+    res = run_git(cmd)
+    if not res.stdout.strip():
+        die(f"no git history for {rel_path}")
 
-    print("RECORDED_AT\tTRANSITION\tCOMMIT\tSUBJECT")
     prev = "__x"
-
-    for sha in shas:
+    for line in reversed(res.stdout.splitlines()):
+        if not line:
+            continue
+        sha = line.split("\t")[0]
         show_res = run_git(["show", f"{sha}:{rel_path}"], check=False)
-        v = ""
-        if show_res.returncode == 0:
-            v = extract_frontmatter_field(show_res.stdout, key)
-
+        if show_res.returncode != 0:
+            continue
+        v = extract_frontmatter_field(show_res.stdout, field)
         if v == prev:
             continue
 
-        meta_res = run_git(["show", "-s", "--format=%cI%x09%s", sha])
+        meta_res = run_git(["log", "-1", "--format=%ad\t%s", "--date=short", sha])
         parts = meta_res.stdout.strip().split("\t", 1)
         d = parts[0]
         s = parts[1] if len(parts) > 1 else ""
@@ -1427,39 +1498,21 @@ def cmd_history(args: list[str]) -> None:
         prev = v
 
 
-def cmd_checkpoint(args: list[str]) -> None:
-    if len(args) < 2:
-        die("checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...")
-    query = args[0]
-    subject = args[1]
-    body = ""
-    paths: list[str] = []
-    refs: list[str] = []
-
-    idx = 2
-    while idx < len(args):
-        opt = args[idx]
-        if opt == "--path":
-            if idx + 1 >= len(args):
-                die("checkpoint: --path requires a value")
-            paths.append(args[idx + 1])
-            idx += 2
-        elif opt == "--body":
-            if idx + 1 >= len(args):
-                die("checkpoint: --body requires a value")
-            body = args[idx + 1]
-            idx += 2
-        elif opt == "--ref":
-            if idx + 1 >= len(args):
-                die("checkpoint: --ref requires a value")
-            refs.append(args[idx + 1])
-            idx += 2
-        else:
-            die(f"unknown option: {opt}")
+def cmd_checkpoint(
+    task_id: str,
+    subject: str,
+    all_files: bool = False,
+    paths: list[str] | None = None,
+    body: str = "",
+    refs: list[str] | None = None,
+) -> None:
+    """Commit an authorized tracker checkpoint for TASK_ID."""
+    paths_list = paths or []
+    refs_list = refs or []
 
     root = get_repo_root()
-    if not ID_PATTERN.match(query):
-        die(f"checkpoint: invalid task ID: {query}")
+    if not ID_PATTERN.match(task_id):
+        die(f"checkpoint: invalid task ID: {task_id}")
 
     if not has_commit_auth(root):
         die(f"checkpoint: committed AGENTS.md must contain {COMMIT_AUTH}")
@@ -1469,14 +1522,14 @@ def cmd_checkpoint(args: list[str]) -> None:
     if diff_cached.returncode != 0:
         die("checkpoint: index is not empty")
 
-    target_path = resolve_target(root, query)
+    target_path = resolve_target(root, task_id)
     rel_path = str(target_path.relative_to(root))
     project_name = rel_path.split(os.sep, maxsplit=1)[0]
     get_proj_dir(project_name, root)
     status_rel = f"{project_name}/STATUS.md"
 
     requested = [rel_path, status_rel]
-    for p_arg in paths:
+    for p_arg in paths_list:
         p_clean = p_arg.removeprefix("./")
         if p_clean.startswith("/") or ".." in p_clean.split("/"):
             die(f"checkpoint: unsafe path: {p_arg}")
@@ -1493,6 +1546,16 @@ def cmd_checkpoint(args: list[str]) -> None:
     # Synchronize status for project
     sync_status(root, project_name)
 
+    # Find project changes
+    diff_proj = run_git(["diff", "--name-only", "--", project_name]).stdout.splitlines()
+    untracked_proj = run_git(
+        ["ls-files", "--others", "--exclude-standard", "--", project_name]
+    ).stdout.splitlines()
+    all_changed = sorted(set(diff_proj + untracked_proj))
+
+    if all_files:
+        requested = sorted(set(requested + [c for c in all_changed if c]))
+
     # Check that at least one project file has changes
     has_changes = any(
         bool(run_git(["status", "--porcelain", "--", req]).stdout.strip())
@@ -1502,17 +1565,11 @@ def cmd_checkpoint(args: list[str]) -> None:
         die("checkpoint: no project changes detected to commit")
 
     # Check for unlisted project changes
-    diff_proj = run_git(["diff", "--name-only", "--", project_name]).stdout.splitlines()
-    untracked_proj = run_git(
-        ["ls-files", "--others", "--exclude-standard", "--", project_name]
-    ).stdout.splitlines()
-    all_changed = sorted(set(diff_proj + untracked_proj))
-
     unlisted = [c for c in all_changed if c and c not in requested]
     if unlisted:
         suggested = " ".join(f"--path {p}" for p in unlisted)
         print(
-            f"[HINT] To include unlisted project file(s), add: {suggested}",
+            f"[HINT] To include unlisted project file(s), add --all or: {suggested}",
             file=sys.stderr,
         )
         die(f"checkpoint: unlisted project change: {unlisted[0]}")
@@ -1537,7 +1594,7 @@ def cmd_checkpoint(args: list[str]) -> None:
         msg_lines = [subject]
         if body:
             msg_lines.extend(["", body])
-        for r in refs:
+        for r in refs_list:
             msg_lines.extend(["", f"Ref: {r}"])
         msg = "\n".join(msg_lines) + "\n"
 
@@ -1547,30 +1604,17 @@ def cmd_checkpoint(args: list[str]) -> None:
         raise
 
 
-def cmd_commit(args: list[str]) -> None:
-    if len(args) < 1:
-        die("commit SUBJECT [--body TEXT] [--ref REF]...")
-    subject = args[0]
-    body = ""
-    refs: list[str] = []
-
-    idx = 1
-    while idx < len(args):
-        opt = args[idx]
-        if opt == "--body":
-            if idx + 1 >= len(args):
-                die("commit: --body requires a value")
-            body = args[idx + 1]
-            idx += 2
-        elif opt == "--ref":
-            if idx + 1 >= len(args):
-                die("commit: --ref requires a value")
-            refs.append(args[idx + 1])
-            idx += 2
-        else:
-            die(f"unknown option: {opt}")
-
+def cmd_commit(
+    subject: str,
+    body: str = "",
+    refs: list[str] | None = None,
+) -> None:
+    """Commit a logical transition with automatic project status synchronization."""
+    refs_list = refs or []
     root = get_repo_root()
+    if not has_commit_auth(root):
+        die(f"commit: committed AGENTS.md must contain {COMMIT_AUTH}")
+
     diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
     if diff_cached.returncode == 0:
         die("nothing staged")
@@ -1596,29 +1640,28 @@ def cmd_commit(args: list[str]) -> None:
     msg_lines = [subject]
     if body:
         msg_lines.extend(["", body])
-    for r in refs:
+    for r in refs_list:
         msg_lines.extend(["", f"Ref: {r}"])
     msg = "\n".join(msg_lines) + "\n"
 
     run_git(["commit", "--no-verify", "-F", "-"], input_data=msg)
 
 
-def usage():
-    print(
-        """Usage: taskgo COMMAND [OPTIONS]
+HELP_TEXT = """Usage: taskgo COMMAND [OPTIONS]
 
 Maintain a private Git-backed personal project/task control repo.
 
 Commands:
   id                               Allocate a unique task ID
-  create PROJECT TITLE [OPTIONS]   Create a new task
+  create PROJECT TITLE [OPTIONS]   Create a new task (--problem, --goal, etc.)
+  update TASK_ID [OPTIONS]         Update task fields, status, or headings
   list [PROJECT] [OPTIONS]         List tasks
   status [PROJECT] [--json]        Show project status
   sync [PROJECT]                   Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
-  checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint
+  checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
 
 Options:
@@ -1627,57 +1670,376 @@ Options:
 Examples:
   taskgo id
   taskgo create my-project "Diagnose intermittent disconnects"
+  taskgo create my-project "Add cache layer" --problem "High latency" --goal "Sub-10ms"
+  taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
   taskgo sync my-project
   taskgo fix my-project
-  taskgo checkpoint TASK-3A91F "project: start diagnosis\""""
+  taskgo checkpoint TASK-3A91F "project: start diagnosis" --all"""
+
+
+def create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="taskgo",
+        description="Maintain a private Git-backed personal project/task control repo.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
     )
-    sys.exit(0)
+    parser.add_argument(
+        "--help",
+        "-h",
+        action="store_true",
+        help="Display this help message and exit",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    # id
+    subparsers.add_parser(
+        "id",
+        help="Allocate a unique task ID",
+        description="Allocate a unique task ID.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # create
+    p_create = subparsers.add_parser(
+        "create",
+        help="Create a new task in PROJECT",
+        description="Create a new task in PROJECT.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  taskgo create my-project "Diagnose intermittent disconnects"
+  taskgo create my-project "Add cache layer" --problem "High latency" --goal "Sub-10ms"
+  taskgo create --status in-progress my-project "Initial implementation" """,
+    )
+    p_create.add_argument("project_name", metavar="PROJECT", help="Project identifier")
+    p_create.add_argument("title", metavar="TITLE", help="Task title")
+    p_create.add_argument(
+        "--status",
+        "-s",
+        default="todo",
+        help="Initial task state (default: todo)",
+    )
+    p_create.add_argument("--problem", "-p", default=None, help="Problem description")
+    p_create.add_argument("--goal", "-g", default=None, help="Goal description")
+    p_create.add_argument(
+        "--criteria", "-c", default=None, help="Observable end condition"
+    )
+    p_create.add_argument("--sketch", default=None, help="Implementation sketch")
+    p_create.add_argument("--constraints", default=None, help="Constraints")
+    p_create.add_argument("--outcome", default=None, help="Outcome description")
+    p_create.add_argument("--findings", default=None, help="Findings")
+    p_create.add_argument("--next", dest="next_steps", default=None, help="Next steps")
+    p_create.add_argument(
+        "--no-commit", action="store_true", help="Do not commit created task"
+    )
+    p_create.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview allocation without modifying files",
+    )
+
+    # update
+    p_update = subparsers.add_parser(
+        "update",
+        help="Update task fields, status, or headings",
+        description="Update task fields, status, or headings.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  taskgo update TASK-3A91F --status in-progress
+  taskgo update TASK-3A91F --sketch "Use in-memory dict" --findings "Latency reduced by 40%" """,
+    )
+    p_update.add_argument("query", metavar="TASK_ID", help="Task ID or relative path")
+    p_update.add_argument("--status", "-s", default=None, help="New task state")
+    p_update.add_argument("--title", "-t", default=None, help="New task title")
+    p_update.add_argument("--problem", "-p", default=None, help="Problem description")
+    p_update.add_argument("--goal", "-g", default=None, help="Goal description")
+    p_update.add_argument(
+        "--criteria", "-c", default=None, help="Observable end condition"
+    )
+    p_update.add_argument("--sketch", default=None, help="Implementation sketch")
+    p_update.add_argument("--constraints", default=None, help="Constraints")
+    p_update.add_argument("--outcome", default=None, help="Outcome description")
+    p_update.add_argument("--findings", default=None, help="Findings")
+    p_update.add_argument("--next", dest="next_steps", default=None, help="Next steps")
+
+    # list
+    p_list = subparsers.add_parser(
+        "list",
+        help="List tasks in the repository or a specific project",
+        description="List tasks in the repository or a specific project.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_list.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        metavar="PROJECT",
+        help="Optional project name filter",
+    )
+    p_list.add_argument(
+        "--state",
+        "--status",
+        "-s",
+        dest="state",
+        default=None,
+        help="Filter tasks by state (e.g. in-progress, done)",
+    )
+    p_list.add_argument(
+        "--json",
+        "-j",
+        dest="as_json",
+        action="store_true",
+        help="Output machine-readable JSON",
+    )
+
+    # status
+    p_status = subparsers.add_parser(
+        "status",
+        help="Show project status or whole-workspace summary",
+        description="Show project status or whole-workspace summary.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_status.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        metavar="PROJECT",
+        help="Optional target project",
+    )
+    p_status.add_argument(
+        "--json",
+        "-j",
+        dest="as_json",
+        action="store_true",
+        help="Output machine-readable JSON",
+    )
+
+    # sync
+    p_sync = subparsers.add_parser(
+        "sync",
+        help="Update STATUS.md snapshot for a project or the workspace",
+        description="Update STATUS.md snapshot for a project or the workspace.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_sync.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        metavar="PROJECT",
+        help="Optional target project",
+    )
+
+    # doctor
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="Run mechanical health checks across the workspace or a project",
+        description="Run mechanical health checks across the workspace or a project.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_doctor.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        metavar="PROJECT",
+        help="Optional target project",
+    )
+
+    # fix
+    p_fix = subparsers.add_parser(
+        "fix",
+        help="Auto-heal IDs, statuses, and snapshot drift",
+        description="Auto-heal IDs, statuses, and snapshot drift.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_fix.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        metavar="PROJECT",
+        help="Optional target project",
+    )
+    p_fix.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview repairs without modifying files",
+    )
+    p_fix.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="Apply repairs on disk without committing",
+    )
+
+    # history
+    p_history = subparsers.add_parser(
+        "history",
+        help="Show frontmatter field history across git revisions",
+        description="Show frontmatter field history across git revisions.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_history.add_argument(
+        "query", metavar="PATH_OR_TASK_ID", help="Task ID or relative path"
+    )
+    p_history.add_argument(
+        "field",
+        nargs="?",
+        default="status",
+        metavar="FIELD",
+        help="Frontmatter field to track (default: status)",
+    )
+
+    # checkpoint
+    p_checkpoint = subparsers.add_parser(
+        "checkpoint",
+        help="Commit an authorized tracker checkpoint for TASK_ID",
+        description="Commit an authorized tracker checkpoint for TASK_ID.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  taskgo checkpoint TASK-3A91F "proj: start diagnosis" --all
+  taskgo checkpoint TASK-3A91F "proj: update task" --path proj/tasks/TASK-3A91F-slug.md """,
+    )
+    p_checkpoint.add_argument("task_id", metavar="TASK_ID", help="Target task ID")
+    p_checkpoint.add_argument("subject", metavar="SUBJECT", help="Commit subject line")
+    p_checkpoint.add_argument(
+        "--all",
+        "-a",
+        dest="all_files",
+        action="store_true",
+        help="Stage all modified/untracked project files",
+    )
+    p_checkpoint.add_argument(
+        "--path",
+        "-p",
+        dest="paths",
+        action="append",
+        default=[],
+        help="Explicit project files to stage",
+    )
+    p_checkpoint.add_argument("--body", "-b", default="", help="Commit body")
+    p_checkpoint.add_argument(
+        "--ref",
+        "-r",
+        dest="refs",
+        action="append",
+        default=[],
+        help="External references (e.g. artifact@sha)",
+    )
+
+    # commit
+    p_commit = subparsers.add_parser(
+        "commit",
+        help="Commit a logical transition with automatic project status synchronization",
+        description="Commit a logical transition with automatic project status synchronization.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_commit.add_argument("subject", metavar="SUBJECT", help="Commit subject line")
+    p_commit.add_argument("--body", "-b", default="", help="Commit body")
+    p_commit.add_argument(
+        "--ref",
+        "-r",
+        dest="refs",
+        action="append",
+        default=[],
+        help="External references (e.g. artifact@sha)",
+    )
+
+    return parser
 
 
-def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
-        usage()
+def main(argv: list[str] | None = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
 
-    cmd = sys.argv[1]
-    args = sys.argv[2:]
+    if not argv or (len(argv) == 1 and argv[0] in ("--help", "-h", "help")):
+        print(HELP_TEXT)
+        sys.exit(0)
 
-    commands = {
-        "id": cmd_id,
-        "create": cmd_create,
-        "list": cmd_list,
-        "status": cmd_status,
-        "sync": cmd_sync,
-        "doctor": cmd_doctor,
-        "fix": cmd_fix,
-        "history": cmd_history,
-        "checkpoint": cmd_checkpoint,
-        "commit": cmd_commit,
-    }
+    parser = create_parser()
+    args = parser.parse_args(argv)
 
-    if cmd not in commands:
-        die(f"unknown command: {cmd}. Try 'taskgo --help' for more information.")
-
-    commands[cmd](args)
+    if args.command == "id":
+        cmd_id()
+    elif args.command == "create":
+        cmd_create(
+            project_name=args.project_name,
+            title=args.title,
+            status=args.status,
+            problem=args.problem,
+            goal=args.goal,
+            criteria=args.criteria,
+            sketch=args.sketch,
+            constraints=args.constraints,
+            outcome=args.outcome,
+            findings=args.findings,
+            next_steps=args.next_steps,
+            no_commit=args.no_commit,
+            dry_run=args.dry_run,
+        )
+    elif args.command == "update":
+        cmd_update(
+            query=args.query,
+            status=args.status,
+            title=args.title,
+            problem=args.problem,
+            goal=args.goal,
+            criteria=args.criteria,
+            sketch=args.sketch,
+            constraints=args.constraints,
+            outcome=args.outcome,
+            findings=args.findings,
+            next_steps=args.next_steps,
+        )
+    elif args.command == "list":
+        cmd_list(
+            project=args.project,
+            state=args.state,
+            as_json=args.as_json,
+        )
+    elif args.command == "status":
+        cmd_status(
+            project=args.project,
+            as_json=args.as_json,
+        )
+    elif args.command == "sync":
+        cmd_sync(project=args.project)
+    elif args.command == "doctor":
+        cmd_doctor(project=args.project)
+    elif args.command == "fix":
+        cmd_fix(
+            project=args.project,
+            dry_run=args.dry_run,
+            no_commit=args.no_commit,
+        )
+    elif args.command == "history":
+        cmd_history(
+            query=args.query,
+            field=args.field,
+        )
+    elif args.command == "checkpoint":
+        cmd_checkpoint(
+            task_id=args.task_id,
+            subject=args.subject,
+            all_files=args.all_files,
+            paths=args.paths,
+            body=args.body,
+            refs=args.refs,
+        )
+    elif args.command == "commit":
+        cmd_commit(
+            subject=args.subject,
+            body=args.body,
+            refs=args.refs,
+        )
+    else:
+        print(HELP_TEXT)
+        sys.exit(0)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        # Protect teardown logic from re-entrant signals
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-
-        # If SIGTERM was received, forward termination to children because they were not
-        # part of an OS broadcast process group. For SIGINT (TTY broadcast), children
-        # tear down natively, so we do not double-signal.
-        reap_subprocesses(signaled_by_parent=_received_sigterm)
-        try:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
-        except OSError:
-            pass
-        sys.exit(128 + (signal.SIGTERM if _received_sigterm else signal.SIGINT))
+        handle_signal_exit(signal.SIGINT)
     except BrokenPipeError:
         import os
 

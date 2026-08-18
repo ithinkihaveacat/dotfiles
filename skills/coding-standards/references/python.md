@@ -97,15 +97,25 @@ cache, or network restrictions, treat that as an environment problem to solve
 with permissions or configuration. Do not change the script to depend on a
 specific Python executable merely to work around those constraints.
 
-When creating standalone scripts using `uv`, specify the required version in the
-script metadata:
+### CLI Argument Parsing
 
-```python
-#!/usr/bin/env -S PYTHONDONTWRITEBYTECODE=1 uv run --script
-# /// script
-# requires-python = ">=3.11"
-# ///
-```
+When building standalone Python CLI tools, standardize on Python's built-in
+**`argparse`** module:
+
+- **Canonical Standard (`argparse`):** Use `argparse.ArgumentParser` (and
+  `add_subparsers()` for multi-command tools) as the primary CLI framework.
+  `argparse` natively complies with the GNU coreutils house style defined in
+  [`cli-tools.md`](cli-tools.md) — uppercase positional placeholders (`PROJECT`,
+  `TITLE`), standard `-h, --help` flags, plain-text indentation without Unicode
+  box clutter, and formatted `epilog` examples — with zero external
+  dependencies.
+- **Simple Single-Purpose Scripts:** Minimal hand-built parsers (e.g. basic
+  `sys.argv` inspection) are completely acceptable for trivial utilities with
+  one or two arguments.
+- **Avoiding Rich/Typer Formatting Divergence:** Avoid third-party CLI libraries
+  (such as `typer` or `rich`-based wrappers) that impose non-standard formatting
+  (e.g., Unicode box-drawing panels, curly-brace placeholders, or missing `-h`
+  aliases) that diverge from the repository's CLI Design Standard.
 
 ### Handling Ctrl+C, Signals, and Broken Pipes
 

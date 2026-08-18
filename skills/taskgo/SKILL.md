@@ -86,26 +86,62 @@ scripts/taskgo id
 scripts/taskgo create PROJECT "Diagnose intermittent disconnects"
 ```
 
-Preferred task form:
+Preferred states: `todo`, `in-progress`, `blocked`, `done`, `cancelled`.
+Unknown/missing values remain readable but should be reported.
+
+### Planning & In-Progress Task Template
+
+For new and in-flight tasks, use bold run-in labels to capture the brief for
+future implementers without hardening into a rigid step-by-step plan:
 
 ```markdown
 ---
 id: TASK-3A91F
-status: in-progress
+status: todo
 ---
 
-# Diagnose intermittent disconnects
+# Title as imperative verb phrase
 
-## Outcome
-...
-## Findings
-...
-## Next
-...
+**Problem:** (optional) How the current system behaves and why that is a
+problem — the mechanics, not just the motivation.
+
+**Goal:** (required) The outcome — what should be true once the item is done,
+stated as requirements rather than implementation.
+
+**Criteria:** (required where definable) The end condition — an observable,
+checkable state (e.g. metrics, test outputs, specific behavior).
+
+**Sketch:** (optional) Early thinking on a candidate approach, research
+findings, pointers to relevant code, or approaches ruled out.
+
+**Constraints:** (optional) Boundaries on the solution: simplest thing that
+works, no new dependencies, must keep existing APIs, etc.
 ```
 
-Preferred states: `todo`, `in-progress`, `blocked`, `done`, `cancelled`.
-Unknown/missing values remain readable but should be reported.
+### Completed Task Template
+
+Once a task is completed, rewrite the body as a concise past-tense record of
+what was implemented and discovered:
+
+```markdown
+---
+id: TASK-3A91F
+status: done
+---
+
+# Title as imperative verb phrase
+
+## Outcome
+Summary of what shipped, where it lives (commits, files, endpoints), and
+outcomes.
+
+## Findings
+Key technical discoveries, trade-offs, reproduction steps, or unexpected
+behavior.
+
+## Next
+Immediate follow-up actions or subsequent tasks.
+```
 
 ## Decisions
 
@@ -206,14 +242,15 @@ files/history:
 
 ```text
 taskgo id
-taskgo create PROJECT TITLE [--status STATE] [--no-commit] [--dry-run]
+taskgo create PROJECT TITLE [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo status [PROJECT] [--json]
 taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
-taskgo checkpoint TASK_ID SUBJECT [--path PATH]... [--body TEXT] [--ref REF]...
+taskgo checkpoint TASK_ID SUBJECT [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--body TEXT] [--ref REF]...
 ```
 
