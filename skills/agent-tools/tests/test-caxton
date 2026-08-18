@@ -20,7 +20,7 @@ snapshot() {
   (cd "$1" && find . -type f -exec cksum {} + | sort)
 }
 
-echo "1..25"
+echo "1..31"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -246,6 +246,116 @@ else
   fi
 fi
 
+# Prepare a tree holding credential files a transformation must never read
+SECRET_DIR="$WORK/secrets"
+mkdir -p "$SECRET_DIR/.ssh" "$SECRET_DIR/.github"
+printf '# Readme\n' >"$SECRET_DIR/README.md"
+printf 'ci\n' >"$SECRET_DIR/.github/ci.yml"
+printf '//registry.npmjs.org/:_authToken=SECRET\n' >"$SECRET_DIR/.npmrc"
+printf 'machine example.com login me password hunter2\n' >"$SECRET_DIR/.netrc"
+printf 'KEYMATERIAL\n' >"$SECRET_DIR/.ssh/id_rsa"
+printf 'KEYMATERIAL\n' >"$SECRET_DIR/server.pem"
+
+# Test 16: credential paths are excluded from the payload but still reported
+if "$BIN" --dry-run "prompt" "$SECRET_DIR" >"$OUTPUT" 2>&1; then
+  RESOLVED=$(sed -n '/^Resolved Files:/,/^Excluded/p' "$OUTPUT")
+  if [[ "$RESOLVED" == *README.md* && "$RESOLVED" == *.github/ci.yml* &&
+    "$RESOLVED" != *.npmrc* && "$RESOLVED" != *.netrc* &&
+    "$RESOLVED" != *server.pem* && "$RESOLVED" != *id_rsa* ]] &&
+    grep -q "Excluded (credential patterns" "$OUTPUT"; then
+    echo "ok 16 - Excludes credential paths while keeping project dotfiles"
+  else
+    echo "not ok 16 - Credential paths were not excluded from the payload"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 16 - Dry run over the credential fixture exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 17: an unreadable file proves a dry run never opens file contents
+UNREADABLE_DIR="$WORK/unreadable"
+mkdir -p "$UNREADABLE_DIR"
+printf 'fine\n' >"$UNREADABLE_DIR/ok.md"
+printf 'private\n' >"$UNREADABLE_DIR/locked.md"
+chmod 000 "$UNREADABLE_DIR/locked.md"
+if "$BIN" --dry-run "prompt" "$UNREADABLE_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "locked.md" "$OUTPUT" && ! grep -q "failed to read" "$OUTPUT"; then
+    echo "ok 17 - Dry run reports metadata without reading file contents"
+  else
+    echo "not ok 17 - Dry run read file contents"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 17 - Dry run over an unreadable file exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+chmod 644 "$UNREADABLE_DIR/locked.md"
+
+# Test 18: a FIFO in the tree neither hangs discovery nor reaches the payload
+FIFO_DIR="$WORK/fifo"
+mkdir -p "$FIFO_DIR"
+printf 'content\n' >"$FIFO_DIR/real.md"
+if mkfifo "$FIFO_DIR/pipe" 2>/dev/null; then
+  if "$BIN" --dry-run --timeout 10 "prompt" "$FIFO_DIR" >"$OUTPUT" 2>&1; then
+    if grep -q "real.md" "$OUTPUT" && ! grep -q "pipe" "$OUTPUT"; then
+      echo "ok 18 - Skips non-regular files instead of blocking on them"
+    else
+      echo "not ok 18 - FIFO handling was wrong"
+      sed 's/^/# /' "$OUTPUT"
+    fi
+  else
+    echo "not ok 18 - Dry run over a tree containing a FIFO failed"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "ok 18 # SKIP mkfifo not available"
+fi
+
+# Test 19: a non-empty -o destination is rejected, an absent one accepted
+mkdir -p "$WORK/stale-dst"
+printf 'leftover\n' >"$WORK/stale-dst/leftover.md"
+if "$BIN" -o "$WORK/stale-dst" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
+  echo "not ok 19 - Expected a non-empty output directory to be rejected"
+else
+  if grep -q "is not empty" "$OUTPUT"; then
+    echo "ok 19 - Rejects an output directory that already holds files"
+  else
+    echo "not ok 19 - Non-empty destination rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 20: offline policy is refused before the source tree is traversed
+if CAXTON_OFFLINE=1 "$BIN" "prompt" "$WORK/unreadable" >"$OUTPUT" 2>&1; then
+  echo "not ok 20 - Expected an offline run to be refused"
+else
+  # Traversal would have emitted the inline banner before failing.
+  if grep -q "caxton: offline" "$OUTPUT" && ! grep -q "Inlined" "$OUTPUT"; then
+    echo "ok 20 - Refuses an offline run before traversing the source"
+  else
+    echo "not ok 20 - Offline rejection happened after traversal"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 21: a closed stdout exits cleanly instead of dumping a traceback. The
+# listing must exceed the pipe buffer, or the writer never sees EPIPE.
+PIPE_DIR="$WORK/pipe-src"
+mkdir -p "$PIPE_DIR"
+(cd "$PIPE_DIR" && touch file{0001..4000}.md)
+# pipefail would turn the expected SIGPIPE exit into an errexit abort.
+set +o pipefail
+"$BIN" --dry-run "prompt" "$PIPE_DIR" 2>"$WORK/pipe.err" | head -2 >/dev/null
+PIPE_STATUS=${PIPESTATUS[0]}
+set -o pipefail
+if [[ "$PIPE_STATUS" -eq 141 ]] && ! grep -q "Traceback" "$WORK/pipe.err"; then
+  echo "ok 21 - Exits 141 without a traceback when stdout closes early"
+else
+  echo "not ok 21 - Broken pipe was not handled (exit $PIPE_STATUS)"
+  sed 's/^/# /' "$WORK/pipe.err"
+fi
+
 # Unit checks against caxton's helpers. The google imports are stripped so the
 # helpers load under a plain interpreter with no third-party dependencies.
 UNIT_OUT="$WORK/unit.out"
@@ -358,19 +468,19 @@ unit_check() {
   fi
 }
 
-unit_check sandbox-escape 16 "Blocks path traversal, absolute paths and escaping symlinks"
-unit_check sandbox-inside 17 "Resolves in-sandbox paths and follows in-sandbox symlinks"
-unit_check preserve-mode 18 "Preserves permission bits when rewriting a file"
-unit_check preserve-crlf 19 "Preserves CRLF line endings when rewriting a file"
-unit_check refuse-non-utf8 20 "Refuses to mutate non-UTF-8 files but still reads them"
-unit_check ignore-rules 21 "Ignores vendor and VCS paths without hiding dotfiles"
-unit_check wants-help 22 "Detects help flags without misreading option values"
+unit_check sandbox-escape 22 "Blocks path traversal, absolute paths and escaping symlinks"
+unit_check sandbox-inside 23 "Resolves in-sandbox paths and follows in-sandbox symlinks"
+unit_check preserve-mode 24 "Preserves permission bits when rewriting a file"
+unit_check preserve-crlf 25 "Preserves CRLF line endings when rewriting a file"
+unit_check refuse-non-utf8 26 "Refuses to mutate non-UTF-8 files but still reads them"
+unit_check ignore-rules 27 "Ignores vendor and VCS paths without hiding dotfiles"
+unit_check wants-help 28 "Detects help flags without misreading option values"
 
 # Live API tests require GEMINI_API_KEY
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "ok 23 # SKIP GEMINI_API_KEY not set"
-  echo "ok 24 # SKIP GEMINI_API_KEY not set"
-  echo "ok 25 # SKIP GEMINI_API_KEY not set"
+  echo "ok 29 # SKIP GEMINI_API_KEY not set"
+  echo "ok 30 # SKIP GEMINI_API_KEY not set"
+  echo "ok 31 # SKIP GEMINI_API_KEY not set"
   exit 0
 fi
 
@@ -393,13 +503,13 @@ TEST_MODEL="${TEST_MODEL:-gemini-3.5-flash-lite}"
 # Test 22: Live in-place transformation with -i
 if "$BIN" --model "$TEST_MODEL" --thinking low -i "Replace every occurrence of 'ALPHA' with 'BETA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
   if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "BETA" "$TEST_DIR/doc2.md" && ! grep -q "ALPHA" "$TEST_DIR/doc1.md"; then
-    echo "ok 23 - In-place transformation successfully modified files"
+    echo "ok 29 - In-place transformation successfully modified files"
   else
-    echo "not ok 23 - Files did not contain expected replacements"
+    echo "not ok 29 - Files did not contain expected replacements"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 23 - Live in-place transformation failed"
+  echo "not ok 29 - Live in-place transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
@@ -407,13 +517,13 @@ fi
 rm -rf "$DST_DIR"
 if "$BIN" --model "$TEST_MODEL" --thinking low -o "$DST_DIR" "Replace every occurrence of 'BETA' with 'GAMMA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
   if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "GAMMA" "$DST_DIR/doc1.md" && ! grep -q "BETA" "$DST_DIR/doc1.md"; then
-    echo "ok 24 - Safe copy transformation left source intact and modified destination"
+    echo "ok 30 - Safe copy transformation left source intact and modified destination"
   else
-    echo "not ok 24 - Copy mode failed validation"
+    echo "not ok 30 - Copy mode failed validation"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 24 - Copy transformation failed"
+  echo "not ok 30 - Copy transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
@@ -421,12 +531,12 @@ fi
 BEFORE=$(snapshot "$DST_DIR")
 if RESPONSE=$("$BIN" --model "$TEST_MODEL" --thinking low "Count the exact number of times the word 'GAMMA' appears across all files in this directory. State the count clearly in your report." "$DST_DIR" 2>"$OUTPUT"); then
   if echo "$RESPONSE" | grep -Eq "4|four" && [[ "$BEFORE" == "$(snapshot "$DST_DIR")" ]]; then
-    echo "ok 25 - Safe read-only default counted occurrences and modified nothing"
+    echo "ok 31 - Safe read-only default counted occurrences and modified nothing"
   else
-    echo "not ok 25 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
+    echo "not ok 31 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 25 - Read-only mode execution failed"
+  echo "not ok 31 - Read-only mode execution failed"
   sed 's/^/# /' "$OUTPUT"
 fi

@@ -480,10 +480,13 @@ Examples:
   # Safe refactoring into a new destination directory
   caxton -o ./src-v2 "Rename user_id to account_id across all python files" ./src
 
-Files and directories matched by .gitignore, plus common build and vendor
-directories, are excluded from both the context and the -o copy. In-place runs
-on a git worktree with uncommitted changes are refused unless --force is given,
-so a partial transformation can always be undone with 'git checkout'.
+Files and directories matched by .gitignore, common build and vendor
+directories, and credential paths (.ssh, .npmrc, .netrc, *.pem and similar) are
+excluded from both the context and the -o copy; --dry-run lists what a run will
+read. In-place runs on a git worktree with uncommitted changes are refused
+unless --force is given, so a partial transformation can be undone:
+'git checkout -- .' restores files the run modified and 'git clean -fd' removes
+the ones it created. Every run lists both sets on stderr, including on timeout.
 ```
 
 <!-- /generated -->
@@ -506,20 +509,28 @@ for the agent loop and sandbox.)*
 - All tool paths are resolved with `realpath` and must stay inside the target
   directory; traversal and escaping symlinks are refused.
 - `-i` refuses to run on a git worktree with uncommitted changes unless
-  `--force` is given, so a partial run can be undone with `git checkout`.
+  `--force` is given. Undoing a partial run takes `git checkout -- .` for
+  modified files and `git clean -fd` for created ones; both sets are listed on
+  stderr at the end of every run.
+- `-o` refuses a destination that already holds files.
 - `--dry-run` reports the payload, mode, and resolved file list without calling
-  the API.
+  the API or reading any file's contents.
 - Files matched by `.gitignore`, common vendor/build directories, and
-  `.DS_Store` are excluded from both the context and the `-o` copy.
+  `.DS_Store` are excluded from both the context and the `-o` copy, as are
+  credential paths (`.ssh/`, `.npmrc`, `.netrc`, `*.pem`, `id_rsa*` and
+  similar), which `--dry-run` lists separately.
+- Non-regular files are skipped, and `--timeout` covers traversal as well as the
+  agent loop.
 
 ### Exit Codes
 
-| Code | Description                    |
-| ---- | ------------------------------ |
-| 0    | Success                        |
-| 1    | General error, or task failure |
-| 2    | Timed out                      |
-| 130  | Interrupted (SIGINT)           |
+| Code | Description                     |
+| ---- | ------------------------------- |
+| 0    | Success                         |
+| 1    | General error, or task failure  |
+| 2    | Timed out                       |
+| 130  | Interrupted (SIGINT or SIGTERM) |
+| 141  | stdout closed early (SIGPIPE)   |
 
 ______________________________________________________________________
 

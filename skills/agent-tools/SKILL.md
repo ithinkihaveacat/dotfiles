@@ -241,19 +241,30 @@ scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
 **Environment:** `GEMINI_API_KEY` (Required), `CAXTON_OFFLINE` / `AGENT_OFFLINE`
 (Optional)
 
-**Exit codes:** 0 success, 1 error, 2 timeout, 130 interrupted
+**Exit codes:** 0 success, 1 error, 2 timeout, 130 interrupted, 141 stdout
+closed early
 
 **Scope and safety:**
 
 - Files matched by the target's `.gitignore`, common vendor and build
   directories, and `.DS_Store` are excluded from both the context and the `-o`
   copy. Use `--dry-run` to see exactly what a run will read and write.
+- Credential paths are never sent: `.ssh/`, `.gnupg/`, `.aws/` and similar
+  directories, files such as `.npmrc`, `.netrc`, `.envrc` and
+  `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.
+  Project dotfiles (`.github/`, `.prettierrc`) stay visible. `--dry-run` lists
+  what was excluded.
+- Non-regular files (FIFOs, sockets, devices, dangling symlinks) are skipped,
+  and `--timeout` covers directory traversal as well as the agent loop.
 - Mutation tools are withheld entirely in the default read-only mode.
 - Tool paths are resolved with `realpath` and confined to the target directory.
+- `-o` refuses a destination that already holds files: destination-only files
+  would be missing from the agent's snapshot yet writable by its tools.
 - `-i` refuses to run on a git worktree with uncommitted changes unless
-  `--force` is given, so a partial run can be undone with `git checkout`. Every
-  run reports the files it modified, created, and deleted on stderr, including
-  when it times out or exhausts `--max-steps`.
+  `--force` is given. Undoing a partial run takes both `git checkout -- .` (for
+  files it modified) and `git clean -fd` (for files it created, which are
+  untracked). Every run reports what it modified, created, and deleted on
+  stderr, including when it times out or exhausts `--max-steps`.
 - Because `-i`/`-o` rewrite files across a whole tree, `caxton` is declared
   unsafe in `permissions/unsafe` and always prompts rather than being
   pre-approved by `permission apply`.

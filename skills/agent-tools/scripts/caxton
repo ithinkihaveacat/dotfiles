@@ -130,6 +130,52 @@ IGNORED_FILES = {
     "Thumbs.db",
 }
 
+# Directories that hold credentials rather than project files. Hidden paths are
+# otherwise visible (a project's .github/ must be), so secrets are excluded by
+# name instead of by being hidden.
+SECRET_DIRS = {
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".gcloud",
+    ".kube",
+    ".docker",
+    ".chef",
+    ".password-store",
+}
+
+SECRET_FILE_NAMES = {
+    ".netrc",
+    "_netrc",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
+    ".dockercfg",
+    ".pgpass",
+    ".my.cnf",
+    ".htpasswd",
+    ".htdigest",
+    ".envrc",
+    "credentials",
+    "credentials.json",
+}
+
+SECRET_FILE_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "id_rsa*",
+    "id_dsa*",
+    "id_ecdsa*",
+    "id_ed25519*",
+)
+
 # Options that consume the following argv token, so a bare '-h' there is a
 # value rather than a help request.
 VALUE_OPTIONS = {
@@ -144,6 +190,10 @@ VALUE_OPTIONS = {
 
 class CaxtonTimeoutError(Exception):
     """Raised when execution exceeds the timeout limit."""
+
+
+# Set once the alarm is armed, so the top-level handler can name the limit.
+TIMEOUT_SECONDS = 0
 
 
 def read_text_verbatim(path: Path, lossy: bool = False) -> str:
@@ -250,6 +300,22 @@ def load_gitignore_patterns(root_dir: Path) -> list[str]:
     return patterns
 
 
+def is_secret_path(path: Path, root_dir: Path) -> bool:
+    """Whether a path looks like a credential store rather than project content.
+
+    Hidden files are part of a project (.github/, .prettierrc) and must stay
+    visible, so credentials are matched by name: sending a .npmrc or an SSH key
+    to a model is not a transformation anyone asked for.
+    """
+    rel = path.relative_to(root_dir)
+    if any(part in SECRET_DIRS for part in rel.parts):
+        return True
+    name = rel.name
+    if name in SECRET_FILE_NAMES:
+        return True
+    return any(fnmatch.fnmatch(name, pat) for pat in SECRET_FILE_PATTERNS)
+
+
 def is_path_ignored(path: Path, root_dir: Path, gitignore_patterns: list[str]) -> bool:
     """Check if a path matches ignored directory names or gitignore patterns."""
     rel = path.relative_to(root_dir)
@@ -338,10 +404,13 @@ Examples:
   # Safe refactoring into a new destination directory
   {prog_name} -o ./src-v2 "Rename user_id to account_id across all python files" ./src
 
-Files and directories matched by .gitignore, plus common build and vendor
-directories, are excluded from both the context and the -o copy. In-place runs
-on a git worktree with uncommitted changes are refused unless --force is given,
-so a partial transformation can always be undone with 'git checkout'.\
+Files and directories matched by .gitignore, common build and vendor
+directories, and credential paths (.ssh, .npmrc, .netrc, *.pem and similar) are
+excluded from both the context and the -o copy; --dry-run lists what a run will
+read. In-place runs on a git worktree with uncommitted changes are refused
+unless --force is given, so a partial transformation can be undone:
+'git checkout -- .' restores files the run modified and 'git clean -fd' removes
+the ones it created. Every run lists both sets on stderr, including on timeout.\
 """,
         file=file,
     )
@@ -563,8 +632,75 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
+        if dst_path.is_dir() and any(dst_path.iterdir()):
+            print(
+                f"{prog_name}: error: output directory '{dst_path}' is not empty;"
+                " destination-only files would be invisible to the agent's"
+                " snapshot yet writable by its tools",
+                file=sys.stderr,
+            )
+            print(
+                "hint: remove the directory, or name one that does not exist yet",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     is_mutation_mode = bool(args.in_place or args.output_dir)
+
+    # Every precondition that does not need the tree runs before discovery: a
+    # large or remote SRC_DIR must not delay a failure that is already certain.
+    api_key: str | None = None
+    if not args.dry_run:
+        offline, desc = offline_switch()
+        if offline:
+            print(
+                f"{prog_name}: offline ({desc}) and no cached answer: this command"
+                " calls the Gemini API. Re-run where there is network, or set"
+                " CAXTON_OFFLINE=0 to exempt this tool",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # An in-place run rewrites files with no undo of its own. Insist on a
+        # clean worktree so git can undo the whole run: 'git checkout' restores
+        # modified files, 'git clean' removes the ones the run created.
+        if args.in_place and not args.force and git_worktree_is_dirty(src_path):
+            print(
+                f"{prog_name}: error: '{src_path}' has uncommitted changes; an"
+                " in-place run cannot be undone cleanly",
+                file=sys.stderr,
+            )
+            print(
+                "hint: commit or stash first, use -o DIR to transform a copy, or"
+                " pass --force to override",
+                file=sys.stderr,
+            )
+            print(
+                "note: undoing a partial in-place run needs both"
+                " 'git checkout -- .' and 'git clean -fd'; files the run creates"
+                " are untracked",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            print(
+                f"{prog_name}: error: GEMINI_API_KEY environment variable not set",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Arm the timeout before walking the tree: discovery reads files, and an
+    # unresponsive filesystem must not hang past --timeout.
+    def timeout_handler(signum, frame):
+        raise CaxtonTimeoutError()
+
+    if args.timeout and hasattr(signal, "SIGALRM"):
+        global TIMEOUT_SECONDS
+        TIMEOUT_SECONDS = args.timeout
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(args.timeout)
 
     telemetry = Telemetry()
     task_result: dict | None = None
@@ -573,25 +709,59 @@ def main():
     def is_ignored(path: Path) -> bool:
         return is_path_ignored(path, src_path, gitignore_patterns)
 
+    def excluded_from_copy(directory: str, names: list[str]) -> set[str]:
+        base = Path(directory)
+        return {
+            n
+            for n in names
+            if is_ignored(base / n) or is_secret_path(base / n, src_path)
+        }
+
     # 1. Discover all files. Discovery runs on the source: with -o the copy
     #    applies the same filter, so the two trees agree file for file.
     all_files: list[Path] = []
     text_files: list[Path] = []
+    secret_files: list[Path] = []
     total_text_bytes = 0
 
     for root, dirs, files in os.walk(src_path):
         root_path = Path(root)
-        dirs[:] = [d for d in dirs if not is_ignored(root_path / d)]
+        kept_dirs = []
+        for d in dirs:
+            if is_ignored(root_path / d):
+                continue
+            if is_secret_path(root_path / d, src_path):
+                # Report the pruned directory itself; its contents are never
+                # walked, so they would otherwise vanish without a trace.
+                secret_files.append(root_path / d)
+                continue
+            kept_dirs.append(d)
+        dirs[:] = kept_dirs
         for f in sorted(files):
             file_path = root_path / f
-            if not is_ignored(file_path):
-                all_files.append(file_path)
-                if is_text_file(file_path):
-                    text_files.append(file_path)
-                    try:
-                        total_text_bytes += file_path.stat().st_size
-                    except OSError:
-                        pass
+            if is_ignored(file_path):
+                continue
+            if is_secret_path(file_path, src_path):
+                secret_files.append(file_path)
+                continue
+            # Skip FIFOs, sockets, devices and dangling symlinks: opening one
+            # can block forever, and none of them are content to transform.
+            if not file_path.is_file():
+                continue
+            all_files.append(file_path)
+            if is_text_file(file_path):
+                text_files.append(file_path)
+                try:
+                    total_text_bytes += file_path.stat().st_size
+                except OSError:
+                    pass
+
+    if secret_files and not args.dry_run:
+        print(
+            f"[caxton] Excluded {len(secret_files)} path(s) matching credential"
+            " patterns; --dry-run lists them",
+            file=sys.stderr,
+        )
 
     # 2. Context Inlining Threshold Check. A dry run still reports the payload
     #    first: knowing which files blew the budget is the point of asking.
@@ -629,7 +799,7 @@ def main():
     # 4. Build Document Blocks (if inlining). Content is shown with LF endings;
     #    search_and_replace normalises both sides the same way.
     doc_blocks = []
-    if args.inline:
+    if args.inline and not args.dry_run:
         for tf in text_files:
             rel_str = str(tf.relative_to(src_path)).replace("\\", "/")
             try:
@@ -695,47 +865,19 @@ def main():
             except OSError:
                 size_kb = "unknown size"
             print(f"  [{kind}]  {rel_str} ({size_kb})")
+        if secret_files:
+            print("\nExcluded (credential patterns, never sent):")
+            for fp in sorted(secret_files):
+                rel_str = str(fp.relative_to(src_path)).replace("\\", "/")
+                suffix = "/" if fp.is_dir() else ""
+                print(f"  [SKIP]  {rel_str}{suffix}")
         if over_threshold:
             print()
             report_over_threshold()
             sys.exit(1)
         sys.exit(0)
 
-    # 6. An in-place run rewrites files with no undo of its own. Insist on a
-    #    clean worktree so 'git checkout' can always undo a partial run.
-    if args.in_place and not args.force and git_worktree_is_dirty(src_path):
-        print(
-            f"{prog_name}: error: '{src_path}' has uncommitted changes; an"
-            " in-place run cannot be undone cleanly",
-            file=sys.stderr,
-        )
-        print(
-            "hint: commit or stash first, use -o DIR to transform a copy, or"
-            " pass --force to override",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # 7. Everything past here talks to the API.
-    offline, desc = offline_switch()
-    if offline:
-        print(
-            f"{prog_name}: offline ({desc}) and no cached answer: this command"
-            " calls the Gemini API. Re-run where there is network, or set"
-            " CAXTON_OFFLINE=0 to exempt this tool",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print(
-            f"{prog_name}: error: GEMINI_API_KEY environment variable not set",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # 8. Materialise the -o copy, applying the same filter as discovery.
+    # 6. Materialise the -o copy, applying the same filter as discovery.
     if dst_path is not None:
         print(f"[caxton] Copying '{src_path}' -> '{dst_path}'...", file=sys.stderr)
         try:
@@ -744,7 +886,7 @@ def main():
                 src_path,
                 dst_path,
                 dirs_exist_ok=True,
-                ignore=lambda d, names: {n for n in names if is_ignored(Path(d) / n)},
+                ignore=excluded_from_copy,
             )
         except (OSError, shutil.Error) as e:
             print(
@@ -755,14 +897,6 @@ def main():
         target_root = dst_path
     else:
         target_root = src_path
-
-    # Timeout handler
-    def timeout_handler(signum, frame):
-        raise CaxtonTimeoutError()
-
-    if args.timeout and hasattr(signal, "SIGALRM"):
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(args.timeout)
 
     def rel_key(target_file: Path) -> str:
         """Canonical sandbox-relative path, so telemetry counts each file once."""
@@ -1434,13 +1568,38 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     print(f"[caxton]   {label}: {p}", file=sys.stderr)
 
 
+def sigterm_handler(signum, frame):
+    """Translate SIGTERM into KeyboardInterrupt to trigger clean teardown."""
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
     try:
         main()
+    except CaxtonTimeoutError:
+        # A timeout raised before the agent loop is armed (during discovery or
+        # the -o copy) lands here rather than in the loop's own handler.
+        print(
+            f"\n{os.path.basename(sys.argv[0])}: timed out after"
+            f" {TIMEOUT_SECONDS} seconds",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     except KeyboardInterrupt:
+        # Protect teardown from re-entrant signals (user mashing Ctrl+C)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             sys.stderr.write("\n")
             sys.stderr.flush()
         except Exception:
             pass
         sys.exit(130)
+    except BrokenPipeError:
+        # Python flushes standard streams on exit; redirect remaining output to
+        # devnull to avoid another BrokenPipeError at shutdown.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
