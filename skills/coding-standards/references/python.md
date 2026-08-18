@@ -64,7 +64,7 @@ Renaming an existing script solely for style is not required.
 Use this pattern:
 
 ```python
-#!/usr/bin/env -S uv run --script
+#!/usr/bin/env -S PYTHONDONTWRITEBYTECODE=1 uv run --script
 # /// script
 # requires-python = ">=3.11"
 # ///
@@ -74,9 +74,18 @@ This guidance applies to executable script entrypoints. It does not apply to
 ordinary Python modules, packages, libraries, or non-executable Python source
 files.
 
+Standalone CLI tools and helper scripts are strongly recommended to include
+`PYTHONDONTWRITEBYTECODE=1` in their shebang by default. This prevents the
+interpreter from creating `__pycache__/` directories and `.pyc` bytecode files
+across the repository tree when running simple CLI tools, keeping working trees
+clean. Scripts that explicitly benefit from caching (e.g., complex,
+computationally heavy, or multi-module applications) may omit the variable.
+
 Rationale:
 
 - It makes the script's execution model explicit and self-contained.
+- It prevents `__pycache__/` pollution in repository trees when invoking
+  standalone utilities.
 - It keeps the declared Python requirement with the script itself.
 - It avoids coupling the script to whichever `python` executable happens to be
   first on `PATH`.
@@ -92,7 +101,7 @@ When creating standalone scripts using `uv`, specify the required version in the
 script metadata:
 
 ```python
-#!/usr/bin/env -S uv run --script
+#!/usr/bin/env -S PYTHONDONTWRITEBYTECODE=1 uv run --script
 # /// script
 # requires-python = ">=3.11"
 # ///
