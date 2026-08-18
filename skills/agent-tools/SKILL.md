@@ -230,8 +230,9 @@ scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
 - `--read-only`: Disable file modification tools (inspection/audit only).
 - `--model MODEL`: Gemini model to use (default: `gemini-3.1-pro-preview`).
 - `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
-- `--search`: Enable Google Search grounding for live external context.
-- `--code`: Enable Python code execution in cloud sandbox.
+- `--search` / `--no-search`: Google Search grounding for live external context
+  (default: on).
+- `--code` / `--no-code`: Python code execution in cloud sandbox (default: on).
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 100).
 - `--timeout SECONDS`: Execution timeout in seconds (default: 300).
 

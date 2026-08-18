@@ -257,8 +257,9 @@ Options:
   --read-only         Disable file modification tools (inspection/audit only).
   --model MODEL       Gemini model to use (default: gemini-3.1-pro-preview).
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
-  --search            Enable Google Search grounding for external context.
-  --code              Enable Python code execution in cloud sandbox.
+  --search, --no-search
+                      Google Search grounding for external context (default: on).
+  --code, --no-code   Python code execution in cloud sandbox (default: on).
   --max-steps N       Maximum tool steps before stopping (default: 100).
   --timeout SECONDS   Execution timeout in seconds (default: 300).
   -h, --help          Display this help message and exit.
@@ -353,13 +354,15 @@ def main():
     )
     parser.add_argument(
         "--search",
-        action="store_true",
-        help="Enable Google Search grounding for external context.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Google Search grounding for external context. (default: enabled)",
     )
     parser.add_argument(
         "--code",
-        action="store_true",
-        help="Enable Python code execution in cloud sandbox.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Python code execution in cloud sandbox. (default: enabled)",
     )
     parser.add_argument(
         "--max-steps",
@@ -977,6 +980,68 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                         file=sys.stderr,
                     )
 
+            def format_tool_log(fc_name: str, args_dict: dict, res: dict) -> str:
+                status_ok = res.get("status") == "success"
+                status_label = "OK" if status_ok else f"FAIL ({res.get('message', '')})"
+
+                if fc_name == "search_and_replace":
+                    path = args_dict.get("path", "")
+                    if status_ok:
+                        start = res.get("modified_start_line")
+                        end = res.get("modified_end_line")
+                        line_info = f" (lines {start}-{end})" if start and end else ""
+                        return (
+                            f"search_and_replace({path!r}) -> {status_label}{line_info}"
+                        )
+                    return f"search_and_replace({path!r}) -> {status_label}"
+
+                if fc_name == "write_file":
+                    path = args_dict.get("path", "")
+                    content = args_dict.get("content", "")
+                    size_str = (
+                        f"{len(content) / 1024:.1f} KB"
+                        if len(content) >= 1024
+                        else f"{len(content)} B"
+                    )
+                    return f"write_file({path!r}, {size_str}) -> {status_label}"
+
+                if fc_name == "delete_file":
+                    path = args_dict.get("path", "")
+                    return f"delete_file({path!r}) -> {status_label}"
+
+                if fc_name == "read_file":
+                    path = args_dict.get("path", "")
+                    s = args_dict.get("start_line")
+                    e = args_dict.get("end_line")
+                    range_str = f", lines {s}-{e}" if s or e else ""
+                    if status_ok:
+                        lines = res.get("total_lines", "")
+                        lines_info = f" ({lines} lines)" if lines else ""
+                        return (
+                            f"read_file({path!r}{range_str}) ->"
+                            f" {status_label}{lines_info}"
+                        )
+                    return f"read_file({path!r}{range_str}) -> {status_label}"
+
+                if fc_name == "list_files":
+                    d = args_dict.get("directory", ".")
+                    pat = args_dict.get("pattern")
+                    pat_str = f", pattern={pat!r}" if pat else ""
+                    if status_ok:
+                        cnt = len(res.get("files", []))
+                        return (
+                            f"list_files({d!r}{pat_str}) -> {status_label} ({cnt}"
+                            " files)"
+                        )
+                    return f"list_files({d!r}{pat_str}) -> {status_label}"
+
+                if fc_name == "complete_task":
+                    succ = args_dict.get("success", True)
+                    return f"complete_task(success={succ}) -> {status_label}"
+
+                first_arg = next(iter(args_dict.values()), "") if args_dict else ""
+                return f"{fc_name}({first_arg!r}) -> {status_label}"
+
             tool_results = []
             for fc in function_calls:
                 telemetry.steps += 1
@@ -986,20 +1051,15 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                         "status": "error",
                         "message": f"Unknown tool: '{fc.name}'",
                     }
+                    args_dict = {}
                 else:
                     args_dict = dict(fc.args) if fc.args else {}
                     res = fn(**args_dict)
 
                 # Format log snippet for stderr
-                status_label = (
-                    "OK"
-                    if res.get("status") == "success"
-                    else f"FAIL ({res.get('message', '')})"
-                )
-                first_arg = next(iter(args_dict.values()), "") if args_dict else ""
+                log_line = format_tool_log(fc.name, args_dict, res)
                 print(
-                    f"[caxton] Step {telemetry.steps}/{args.max_steps}:"
-                    f" {fc.name}({first_arg!r}) -> {status_label}",
+                    f"[caxton] Step {telemetry.steps}/{args.max_steps}: {log_line}",
                     file=sys.stderr,
                 )
 
