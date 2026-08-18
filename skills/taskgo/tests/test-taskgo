@@ -29,7 +29,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..41'
+echo '1..49'
 
 if (cd "$REPO" && "$BIN" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -640,3 +640,109 @@ if [ "$(git -C "$ZERO_REPO" rev-list --count HEAD 2>/dev/null || echo 0)" -eq 1 
 else
   echo "not ok 41 - create auto-commits first task in a 0-commit repository"
 fi
+
+# 42: resolve_target rejects paths outside repository gracefully without traceback
+OUT_ERR="$(cd "$REPO" && "$BIN" update /etc/passwd --status done 2>&1 || true)"
+if echo "$OUT_ERR" | grep -q "path is outside control repository" && ! echo "$OUT_ERR" | grep -q "Traceback"; then
+  echo "ok 42 - resolve_target rejects paths outside repository gracefully without traceback"
+else
+  echo "not ok 42 - resolve_target rejects paths outside repository gracefully without traceback"
+fi
+
+# 43: get_repo_root prints clean error when outside git repo
+NON_GIT_DIR="$(mktemp -d)"
+OUT_NONGIT="$(cd "$NON_GIT_DIR" && "$BIN" id 2>&1 || true)"
+rm -rf "$NON_GIT_DIR"
+if echo "$OUT_NONGIT" | grep -q "not in a Git repo" && ! echo "$OUT_NONGIT" | grep -q "Traceback" && ! echo "$OUT_NONGIT" | grep -q "failed (exit 128)"; then
+  echo "ok 43 - get_repo_root prints clean error when outside git repo"
+else
+  echo "not ok 43 - get_repo_root prints clean error when outside git repo"
+fi
+
+# 44: fix preserves complex YAML types during auto-heal
+FIX_REPO="$TEST_ROOT/fix-complex-repo"
+mkdir -p "$FIX_REPO/proj/tasks"
+git -C "$FIX_REPO" init -q
+printf '# Agent\n\n<!-- taskgo:allow-local-commits -->\n' >"$FIX_REPO/AGENTS.md"
+printf '# Proj\n' >"$FIX_REPO/proj/README.md"
+printf '# Status\n' >"$FIX_REPO/proj/STATUS.md"
+cat <<'EOF' >"$FIX_REPO/proj/tasks/fixme.md"
+---
+status: open
+tags:
+  - first
+  - second
+active: true
+---
+
+# Unallocated Task
+
+## Outcome
+EOF
+git -C "$FIX_REPO" add .
+git -C "$FIX_REPO" commit -q -m "init unallocated"
+(cd "$FIX_REPO" && "$BIN" fix proj)
+FIXED_FILE="$(ls "$FIX_REPO/proj/tasks"/TASK-*-unallocated-task.md 2>/dev/null || true)"
+if [ -n "$FIXED_FILE" ] && grep -q '  - first' "$FIXED_FILE" && grep -q 'active: true' "$FIXED_FILE" && ! grep -q "active: 'True'" "$FIXED_FILE"; then
+  echo "ok 44 - fix preserves complex YAML types during auto-heal"
+else
+  echo "not ok 44 - fix preserves complex YAML types during auto-heal"
+fi
+
+# 45: list rejects traversing project names
+if (cd "$REPO" && "$BIN" list "../escaped" 2>/dev/null); then
+  echo "not ok 45 - list should reject traversing project names"
+else
+  echo "ok 45 - list rejects traversing project names"
+fi
+
+# 46: create --conv records conversation in frontmatter and commit trailer
+CONV_REPO="$TEST_ROOT/conv-repo"
+mkdir -p "$CONV_REPO"
+git -C "$CONV_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$CONV_REPO/AGENTS.md"
+printf '# Inbox\n' >"$CONV_REPO/INBOX.md"
+git -C "$CONV_REPO" add AGENTS.md INBOX.md
+git -C "$CONV_REPO" commit -q -m "initial repo"
+(cd "$CONV_REPO" && "$BIN" create convproj "Conv task" --conv "afb6245a-b957-464c-934e-9d09ee099e97")
+CONV_TASK="$(ls "$CONV_REPO/convproj/tasks"/TASK-*.md 2>/dev/null || true)"
+LAST_COMMIT_MSG="$(git -C "$CONV_REPO" log -1 --pretty=%B)"
+if [ -n "$CONV_TASK" ] && grep -q 'conversation://afb6245a-b957-464c-934e-9d09ee099e97' "$CONV_TASK" && echo "$LAST_COMMIT_MSG" | grep -q "Conversation: conversation://afb6245a-b957-464c-934e-9d09ee099e97"; then
+  echo "ok 46 - create --conv records conversation in frontmatter and commit trailer"
+else
+  echo "not ok 46 - create --conv records conversation in frontmatter and commit trailer"
+fi
+
+# 47: update --conv appends conversation to frontmatter
+(cd "$CONV_REPO" && "$BIN" update "$CONV_TASK" --conv "3109efcc-bb3f-44a5-8d91-eb678656cc0c")
+if grep -q 'conversation://afb6245a-b957-464c-934e-9d09ee099e97' "$CONV_TASK" && grep -q 'conversation://3109efcc-bb3f-44a5-8d91-eb678656cc0c' "$CONV_TASK"; then
+  echo "ok 47 - update --conv appends conversation to frontmatter"
+else
+  echo "not ok 47 - update --conv appends conversation to frontmatter"
+fi
+
+# 48: checkpoint --conv appends Conversation trailer to commit
+printf '\nNew line\n' >>"$CONV_TASK"
+(cd "$CONV_REPO" && "$BIN" checkpoint "$(basename "$CONV_TASK" | grep -oE 'TASK-[0-9A-F]{5}')" "convproj: test checkpoint" --all --conv "09825342-4500-4dc2-ba68-6f22bfa9646e")
+CP_MSG="$(git -C "$CONV_REPO" log -1 --pretty=%B)"
+if echo "$CP_MSG" | grep -q "Conversation: conversation://09825342-4500-4dc2-ba68-6f22bfa9646e"; then
+  echo "ok 48 - checkpoint --conv appends Conversation trailer to commit"
+else
+  echo "not ok 48 - checkpoint --conv appends Conversation trailer to commit"
+fi
+
+# 49: create rejects invalid short conversation IDs
+SHORT_ERR="$(cd "$CONV_REPO" && "$BIN" create convproj "Bad task" --conv "short" 2>&1 || true)"
+if echo "$SHORT_ERR" | grep -q "invalid conversation ID"; then
+  echo "ok 49 - create rejects invalid short conversation IDs"
+else
+  echo "not ok 49 - create rejects invalid short conversation IDs"
+fi
+

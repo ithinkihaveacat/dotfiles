@@ -36,6 +36,42 @@ STANDARD_STATES = {"todo", "in-progress", "blocked", "done", "cancelled"}
 WRAP_WIDTH = 80
 
 
+def normalize_conversation_id(conv: str | None) -> str | None:
+    """Validates and normalizes a conversation or session identifier."""
+    if not conv:
+        return None
+    c = conv.strip()
+    if c.startswith("conversation://"):
+        c = c.removeprefix("conversation://")
+    if not c:
+        return None
+    if len(c) < 16 or not re.match(r"^[A-Za-z0-9_-]+$", c):
+        die(
+            f"invalid conversation ID '{conv}' (must be a globally unique identifier with at least 16 alphanumeric characters, dashes, or underscores)"
+        )
+    return c
+
+
+def get_active_conversation_id(cli_arg: str | None = None) -> str | None:
+    """Resolves the conversation ID from explicit CLI arg or opportunistic environment variables."""
+    if cli_arg:
+        return normalize_conversation_id(cli_arg)
+    for var in (
+        "JETSKI_CONVERSATION_ID",
+        "INVOKER_INFO_ROOT_SESSION_ID",
+        "CONVERSATION_ID",
+    ):
+        val = os.environ.get(var)
+        if val:
+            try:
+                norm = normalize_conversation_id(val)
+                if norm:
+                    return norm
+            except SystemExit:
+                pass
+    return None
+
+
 def reformat_frontmatter(text: str) -> str:
     """Reflows YAML frontmatter scalars to WRAP_WIDTH using ruamel.yaml."""
     if not text.startswith("---\n"):
@@ -191,11 +227,10 @@ def run_git(
 
 
 def get_repo_root() -> Path:
-    try:
-        res = run_git(["rev-parse", "--show-toplevel"], check=True)
-        return Path(res.stdout.strip())
-    except Exception:
+    res = run_git(["rev-parse", "--show-toplevel"], check=False)
+    if res.returncode != 0:
         die("not in a Git repo")
+    return Path(res.stdout.strip())
 
 
 def is_project_dir(p: Path) -> bool:
@@ -269,9 +304,8 @@ def normalize_status(raw_status: str) -> str:
 def get_task_files(root: Path, project_name: str | None = None) -> list[Path]:
     files: list[Path] = []
     if project_name:
-        tasks_dir = root / project_name / "tasks"
-        if not (root / project_name).is_dir():
-            die(f"unknown project: {project_name}")
+        proj_dir = get_proj_dir(project_name, root)
+        tasks_dir = proj_dir / "tasks"
         if tasks_dir.is_dir():
             for f in sorted(tasks_dir.glob("*.md")):
                 if f.is_file():
@@ -427,11 +461,18 @@ def sync_status(root: Path, project_name: str) -> bool:
 def resolve_target(root: Path, query: str) -> Path:
     # Direct file path
     p = Path(query)
+    target = None
     if p.is_file():
-        return p.resolve()
-    p_rel = root / query
-    if p_rel.is_file():
-        return p_rel.resolve()
+        target = p.resolve()
+    elif (root / query).is_file():
+        target = (root / query).resolve()
+
+    if target is not None:
+        try:
+            target.relative_to(root.resolve())
+            return target
+        except ValueError:
+            die(f"path is outside control repository: {query}")
 
     if not ID_PATTERN.match(query):
         die(f"cannot resolve: {query}")
@@ -692,7 +733,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             if not t_body.strip():
                                 t_body = f"\n# {t_title}\n\n## Outcome\n\n## Findings\n\n## Next\n"
 
-                            new_fm: dict[str, str] = {
+                            new_fm = {
                                 "id": t_id,
                                 "status": t_status,
                                 **{
@@ -702,9 +743,19 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                                 },
                             }
 
-                            fm_lines = [f"{k}: {v}" for k, v in new_fm.items()]
-                            fm_block = "\n".join(fm_lines)
-                            new_content = f"---\n{fm_block}\n---\n{t_body.lstrip()}"
+                            yaml = YAML()
+                            yaml.width = WRAP_WIDTH
+                            yaml.preserve_quotes = True
+                            yaml.default_flow_style = False
+                            buf = io.StringIO()
+                            yaml.dump(new_fm, buf)
+                            new_content = (
+                                f"---\n{buf.getvalue()}---\n\n{t_body.lstrip()}\n"
+                            )
+                            try:
+                                new_content = format_markdown(new_content)
+                            except Exception:
+                                pass
                             target_tf.write_text(new_content, encoding="utf-8")
                             slug = slugify(t_title) or "task"
                             new_name = f"{t_id}-{slug}.md"
@@ -927,6 +978,7 @@ def render_task_file(
     outcome: str | None = None,
     findings: str | None = None,
     next_steps: str | None = None,
+    conv: str | None = None,
 ) -> str:
     """Render and format a task Markdown document."""
     body_blocks = []
@@ -962,9 +1014,14 @@ def render_task_file(
 
     body = "\n\n".join(body_blocks)
 
+    fm_lines = [f"id: {task_id}", f"status: {status}"]
+    if conv:
+        fm_lines.append("conversations:")
+        fm_lines.append(f"  - conversation://{conv}")
+    fm_block = "\n".join(fm_lines)
+
     raw = f"""---
-id: {task_id}
-status: {status}
+{fm_block}
 ---
 
 # {title}
@@ -989,6 +1046,7 @@ def cmd_create(
     outcome: str | None = None,
     findings: str | None = None,
     next_steps: str | None = None,
+    conv: str | None = None,
     no_commit: bool = False,
     dry_run: bool = False,
 ) -> None:
@@ -1002,6 +1060,7 @@ def cmd_create(
         die(f"invalid project name (must be a top-level directory): {project_name}")
 
     status = normalize_status(status)
+    conv_id = get_active_conversation_id(conv)
     root = get_repo_root()
     proj_dir = root / project_name
 
@@ -1070,6 +1129,7 @@ def cmd_create(
         outcome=outcome,
         findings=findings,
         next_steps=next_steps,
+        conv=conv_id,
     )
     task_file.write_text(content, encoding="utf-8")
 
@@ -1114,10 +1174,13 @@ def cmd_create(
         if subject != f"{prefix} ({title})"
         else f"{subject}\n"
     )
+    if conv_id:
+        commit_msg = commit_msg.rstrip() + f"\n\nConversation: conversation://{conv_id}\n"
 
     run_git(["commit", "--no-verify", "-m", commit_msg])
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
     print(f"[INFO]  Committed new task: {commit_sha[:10]}", file=sys.stderr)
+
 
 
 def cmd_update(
@@ -1132,6 +1195,7 @@ def cmd_update(
     outcome: str | None = None,
     findings: str | None = None,
     next_steps: str | None = None,
+    conv: str | None = None,
 ) -> None:
     """Update task fields, status, or headings."""
     root = get_repo_root()
@@ -1147,6 +1211,27 @@ def cmd_update(
     if status:
         data["status"] = normalize_status(status)
 
+    conv_id = normalize_conversation_id(conv) if conv else None
+    if conv_id:
+        conv_uri = f"conversation://{conv_id}"
+        existing = data.get("conversations")
+        if isinstance(existing, list):
+            if conv_uri not in existing:
+                existing.append(conv_uri)
+        elif isinstance(existing, str):
+            if existing != conv_uri:
+                data["conversations"] = [existing, conv_uri]
+            else:
+                data["conversations"] = [conv_uri]
+        elif "conversation" in data:
+            old_c = data.pop("conversation")
+            if old_c != conv_uri:
+                data["conversations"] = [old_c, conv_uri]
+            else:
+                data["conversations"] = [conv_uri]
+        else:
+            data["conversations"] = [conv_uri]
+
     yaml = YAML()
     yaml.width = WRAP_WIDTH
     yaml.preserve_quotes = True
@@ -1154,6 +1239,7 @@ def cmd_update(
     buf = io.StringIO()
     yaml.dump(data, buf)
     fm_text = f"---\n{buf.getvalue()}---\n"
+
 
     if title:
         body = re.sub(r"^#\s+[^\n]+", f"# {title}", body, count=1, flags=re.MULTILINE)
@@ -1359,11 +1445,13 @@ def cmd_doctor(
     print(
         """[INFO]  Agent semantic review
         Check STATUS Summary/Next for contradictions with tasks and recent work.
+        Check active conversation ID ([<conversation-id>](conversation://<conversation-id>)) is recorded in STATUS.md Summary or task Outcome.
         Check PLAN is current direction, not accumulated history.
         Check ADR status/rationale and artifact references remain meaningful.
         Check private tracker material has not leaked to public/shared artifacts.
         After merges, check reconciled files express one coherent current state."""
     )
+
 
     if has_warn_or_fail:
         sys.exit(1)
@@ -1551,10 +1639,12 @@ def cmd_checkpoint(
     paths: list[str] | None = None,
     body: str = "",
     refs: list[str] | None = None,
+    conv: str | None = None,
 ) -> None:
     """Commit an authorized tracker checkpoint for TASK_ID."""
     paths_list = paths or []
     refs_list = refs or []
+    conv_id = get_active_conversation_id(conv)
 
     root = get_repo_root()
     if not ID_PATTERN.match(task_id):
@@ -1640,6 +1730,8 @@ def cmd_checkpoint(
         msg_lines = [subject]
         if body:
             msg_lines.extend(["", body])
+        if conv_id:
+            msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
         for r in refs_list:
             msg_lines.extend(["", f"Ref: {r}"])
         msg = "\n".join(msg_lines) + "\n"
@@ -1654,9 +1746,11 @@ def cmd_commit(
     subject: str,
     body: str = "",
     refs: list[str] | None = None,
+    conv: str | None = None,
 ) -> None:
     """Commit a logical transition with automatic project status synchronization."""
     refs_list = refs or []
+    conv_id = get_active_conversation_id(conv)
     root = get_repo_root()
     if not has_commit_auth(root):
         die(f"commit: committed AGENTS.md must contain {COMMIT_AUTH}")
@@ -1686,11 +1780,14 @@ def cmd_commit(
     msg_lines = [subject]
     if body:
         msg_lines.extend(["", body])
+    if conv_id:
+        msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
     for r in refs_list:
         msg_lines.extend(["", f"Ref: {r}"])
     msg = "\n".join(msg_lines) + "\n"
 
     run_git(["commit", "--no-verify", "-F", "-"], input_data=msg)
+
 
 
 HELP_TEXT = """Usage: taskgo COMMAND [OPTIONS]
@@ -1777,6 +1874,14 @@ def create_parser() -> argparse.ArgumentParser:
     p_create.add_argument("--findings", default=None, help="Findings")
     p_create.add_argument("--next", dest="next_steps", default=None, help="Next steps")
     p_create.add_argument(
+        "--conv",
+        "-C",
+        "--conversation",
+        dest="conv",
+        default=None,
+        help="Active conversation or session ID",
+    )
+    p_create.add_argument(
         "--no-commit", action="store_true", help="Do not commit created task"
     )
     p_create.add_argument(
@@ -1808,6 +1913,14 @@ def create_parser() -> argparse.ArgumentParser:
     p_update.add_argument("--outcome", default=None, help="Outcome description")
     p_update.add_argument("--findings", default=None, help="Findings")
     p_update.add_argument("--next", dest="next_steps", default=None, help="Next steps")
+    p_update.add_argument(
+        "--conv",
+        "-C",
+        "--conversation",
+        dest="conv",
+        default=None,
+        help="Active conversation or session ID",
+    )
 
     # list
     p_list = subparsers.add_parser(
@@ -1970,6 +2083,14 @@ def create_parser() -> argparse.ArgumentParser:
         default=[],
         help="External references (e.g. artifact@sha)",
     )
+    p_checkpoint.add_argument(
+        "--conv",
+        "-C",
+        "--conversation",
+        dest="conv",
+        default=None,
+        help="Active conversation or session ID",
+    )
 
     # commit
     p_commit = subparsers.add_parser(
@@ -1987,6 +2108,14 @@ def create_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="External references (e.g. artifact@sha)",
+    )
+    p_commit.add_argument(
+        "--conv",
+        "-C",
+        "--conversation",
+        dest="conv",
+        default=None,
+        help="Active conversation or session ID",
     )
 
     return parser
@@ -2018,6 +2147,7 @@ def main(argv: list[str] | None = None) -> None:
             outcome=args.outcome,
             findings=args.findings,
             next_steps=args.next_steps,
+            conv=getattr(args, "conv", None),
             no_commit=args.no_commit,
             dry_run=args.dry_run,
         )
@@ -2034,6 +2164,7 @@ def main(argv: list[str] | None = None) -> None:
             outcome=args.outcome,
             findings=args.findings,
             next_steps=args.next_steps,
+            conv=getattr(args, "conv", None),
         )
     elif args.command == "list":
         cmd_list(
@@ -2069,16 +2200,19 @@ def main(argv: list[str] | None = None) -> None:
             paths=args.paths,
             body=args.body,
             refs=args.refs,
+            conv=getattr(args, "conv", None),
         )
     elif args.command == "commit":
         cmd_commit(
             subject=args.subject,
             body=args.body,
             refs=args.refs,
+            conv=getattr(args, "conv", None),
         )
     else:
         print(HELP_TEXT)
         sys.exit(0)
+
 
 
 if __name__ == "__main__":

@@ -98,6 +98,8 @@ future implementers without hardening into a rigid step-by-step plan:
 ---
 id: TASK-3A91F
 status: todo
+conversations:
+  - conversation://<conversation-id>
 ---
 
 # Title as imperative verb phrase
@@ -127,13 +129,15 @@ what was implemented and discovered:
 ---
 id: TASK-3A91F
 status: done
+conversations:
+  - conversation://<conversation-id>
 ---
 
 # Title as imperative verb phrase
 
 ## Outcome
 Summary of what shipped, where it lives (commits, files, endpoints), and
-outcomes.
+outcomes. Completed in [<conversation-id>](conversation://<conversation-id>).
 
 ## Findings
 Key technical discoveries, trade-offs, reproduction steps, or unexpected
@@ -161,10 +165,14 @@ task records.
 Structure:
 
 - `## Summary`: Human/agent prose describing the current situation and the key
-  outcome/findings of the most recently completed task(s). Mentioning the active
-  agent session or conversation ID (e.g. `conversation://<id>` or session UUID)
-  helps easily locate and resume past context. Replace older transition notes
-  rather than accumulating a journal.
+  outcome/findings of the most recently completed task(s). The active session
+  must be cited using full identifier syntax:
+  `Active session ([<conversation-id>](conversation://<conversation-id>)): ...`.
+  "Conversation ID" refers to the globally unique session, conversation, or
+  thread identifier used by the host agent platform (e.g. at least 16
+  characters). Do not abbreviate the identifier in the link text or target, and
+  never invent fake placeholder IDs. Replace older transition notes rather than
+  accumulating a journal.
 - `<!-- taskgo:begin -->` to `<!-- taskgo:end -->`: Mechanically maintained
   snapshot (`In progress`, `Blocked`, task counts).
 - `## Next`: Immediate next actions (the active horizon of `PLAN.md`).
@@ -199,7 +207,8 @@ matters):
 1. Authorized: commit a meaningful `in-progress` transition before artifact work
    that may span sessions; commit completion with `Ref:` trailers for linked
    artifact commits. A small task completed atomically may go directly `todo` ->
-   `done`.
+   `done`. Pass `--conv <conversation-id>` or verify `conversations` frontmatter
+   and `STATUS.md` cite the full active session identifier.
 1. Not authorized: keep changes uncommitted; state clearly that intermediate
    transitions will not be retained. Never create retrospective state commits
    that did not reflect reality at the time.
@@ -208,19 +217,21 @@ After meaningful work:
 
 1. Rewrite specific files to the new current truth.
 1. Update affected task record(s) (e.g. mark `done` with `## Outcome` and
-   `## Findings`).
-1. Update `STATUS.md` prose (`## Summary` captures the new baseline and recent
-   outcome; `## Next` reflects immediate next actions); `PLAN.md` only if
-   intended direction changed.
+   `## Findings`, recording `[<conversation-id>](conversation://<conversation-id>)`).
+1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
+   session link, and recent outcome; `## Next` reflects immediate next actions);
+   `PLAN.md` only if intended direction changed.
 1. Run `scripts/taskgo sync PROJECT` after the semantic edits are coherent.
 1. Run `scripts/taskgo doctor PROJECT` and perform its semantic review.
-1. Commit a coherent transition when practical. Use `checkpoint` when standing
-   authority is present. Subject = what became true, not what file changed.
+1. Commit a coherent transition when practical. Use `checkpoint` with `--conv`
+   when standing authority is present. Subject = what became true, not what file
+   changed.
 
 Before leaving or completing a task, double-check:
 
-1. Handoff: state, findings, decisions, and session/conversation IDs needed to
-   resume are written into the task/STATUS/PLAN, not left only in conversation.
+1. Handoff: state, findings, decisions, and full session/conversation IDs
+   (`[<conversation-id>](conversation://<conversation-id>)`) needed to resume
+   are written into the task/STATUS/PLAN, not left only in conversation.
 1. Consistency: tracker claims match actual artifact-repo state (e.g. a task is
    not `done` while its artifact-repo commit remains uncommitted).
 
@@ -233,7 +244,8 @@ compiler: defer parser migration until v3
 ```
 
 Use commit bodies for useful reasoning not recoverable from state/diff. Add
-repeatable `Ref:` trailers for non-derivable external relationships.
+repeatable `Ref:` trailers for non-derivable external relationships and
+`Conversation:` trailers for session traceability.
 
 ## CLI
 
@@ -242,17 +254,18 @@ files/history:
 
 ```text
 taskgo id
-taskgo create PROJECT TITLE [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
+taskgo create PROJECT TITLE [--conv ID] [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo status [PROJECT] [--json]
 taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
-taskgo checkpoint TASK_ID SUBJECT [--all] [--path PATH]... [--body TEXT] [--ref REF]...
-taskgo commit SUBJECT [--body TEXT] [--ref REF]...
+taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
+taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 ```
+
 
 `create` is the atomic task creation command: it allocates a unique ID, writes
 the initial task record, synchronizes `STATUS.md`, and when the
