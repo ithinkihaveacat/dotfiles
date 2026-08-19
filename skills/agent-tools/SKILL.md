@@ -224,28 +224,68 @@ scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
 - `-i, --in-place`: Apply transformations in-place on `SRC_DIR`.
 - `-o, --output DIR`: Copy `SRC_DIR` to `DIR` first and apply all
   transformations on the copy, leaving `SRC_DIR` untouched.
+- `-n, --dry-run`: Print the payload that would be sent (mode, model, resolved
+  files, sizes, prompt) and exit without calling the API.
 - `--inline` / `--no-inline`: Inline all text files into initial prompt context
   (default: on).
-- `--force`: Bypass the 1MB text context threshold for inlining.
+- `--force`: Bypass safety checks — the 1MB text context threshold and the
+  dirty-worktree guard on `-i`.
 - `--model MODEL`: Gemini model to use (default: `gemini-3.1-pro-preview`).
 - `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
 - `--search` / `--no-search`: Google Search grounding for live external context
   (default: on).
 - `--code` / `--no-code`: Python code execution in cloud sandbox (default: on).
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 100).
-- `--timeout SECONDS`: Execution timeout in seconds (default: 300).
+- `--timeout SECONDS`: Execution timeout in seconds (default: 1800).
 
 **Environment:** `GEMINI_API_KEY` (Required), `CAXTON_OFFLINE` / `AGENT_OFFLINE`
 (Optional)
 
-**Exit codes:** 0 success, 1 error, 2 timeout, 127 missing dependency, 130
-interrupted
+**Exit codes:** 0 success, 1 error, 2 timeout, 130 interrupted, 141 stdout
+closed early
+
+**Scope and safety:**
+
+- Inside a git repository, ignore filtering is delegated to
+  `git ls-files --cached --others --exclude-standard`, so negation
+  (`!keep.log`), nested `.gitignore` files, anchored rules and
+  `core.excludesFile` behave exactly as git defines them. Outside a repository a
+  simpler `.gitignore` matcher applies. If git is present but cannot answer — a
+  broken repository, a timed-out query — caxton aborts rather than falling back,
+  since the simple matcher would re-admit files a nested or anchored rule
+  excludes; `--force` downgrades that to a warning. Common vendor and build
+  directories and `.DS_Store` are excluded on top, from both the context and the
+  `-o` copy. Use `--dry-run` to see exactly what a run will read and write.
+- Credential paths are never sent: `.ssh/`, `.gnupg/`, `.aws/` and similar
+  directories, files such as `.npmrc`, `.netrc`, `.envrc` and
+  `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.
+  Project dotfiles (`.github/`, `.prettierrc`) stay visible. `--dry-run` lists
+  what was excluded.
+- Non-regular files (FIFOs, sockets, devices, dangling symlinks) are skipped,
+  and `--timeout` covers directory traversal as well as the agent loop.
+- Mutation tools are withheld entirely in the default read-only mode.
+- Tool paths are resolved with `realpath` and confined to the target directory.
+- `-o` refuses a destination that already holds files: destination-only files
+  would be missing from the agent's snapshot yet writable by its tools.
+- `-i` refuses to run on a git worktree with uncommitted changes unless
+  `--force` is given, and fails closed when git cannot answer: a broken
+  repository exits `1` and a missing `git` exits `127`, rather than silently
+  proceeding as if the tree were clean. Undoing a partial run takes both
+  `git checkout -- .` (for files it modified) and `git clean -fd` (for files it
+  created, which are untracked). Every run reports what it modified, created,
+  and deleted on stderr, including when it times out or exhausts `--max-steps`.
+- Because `-i`/`-o` rewrite files across a whole tree, `caxton` is declared
+  unsafe in `permissions/unsafe` and always prompts rather than being
+  pre-approved by `permission apply`.
 
 **Examples:**
 
 ```bash
 # Safe read-only architectural audit or repository Q&A (default)
 scripts/caxton "Count deprecated function usages and summarize" ./lib
+
+# Preview the payload without calling the API
+scripts/caxton --dry-run -i "Translate all markdown files into French" ./docs
 
 # In-place translation of documentation
 scripts/caxton -i "Translate all markdown files into French" ./docs
