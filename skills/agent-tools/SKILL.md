@@ -301,6 +301,10 @@ which each consume every following path.
   dotfiles (`.github/`, `.prettierrc`) stay visible. Creation is checked against
   the narrower rule that only credential directories are off limits, so adding a
   `.env.example` is not refused.
+- Git's own metadata is never readable or writable, at any depth: `.git/` is
+  outside every listing, `git clean -fd` never touches it, and a file dropped
+  into it can execute on the next git command. Project dotfiles such as
+  `.github/` and `.gitignore` stay ordinary content.
 - Symlinks, submodules (checked out or not) and non-regular files (FIFOs,
   sockets and devices) are never included, and naming one explicitly is an
   error. That covers paths reached *through* a symlinked parent or a submodule

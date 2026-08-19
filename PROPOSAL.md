@@ -323,6 +323,12 @@ These are safety boundaries, not conveniences, and apply to explicit paths too:
 
 - Credential paths and credential-like files (`.ssh/`, `.aws/`, `.npmrc`,
   `.netrc`, `*.pem`, `id_rsa*`, and the rest of the existing lists).
+- Git's own metadata, at any depth. `.git/` is outside every listing, untouched
+  by `git clean -fd`, and a file dropped into it can execute on the next git
+  command, so it is refused for reading and for creation alike — the listing
+  keeps it out of ordinary discovery, but an explicitly named path and a
+  `write_file` creation both reach past the listing. Project dotfiles such as
+  `.github/` and `.gitignore` are unaffected.
 - Symlinks — including any path reached *through* one. A selector belongs to
   this repository only if every component of it does: `lstat` and `O_NOFOLLOW`
   both resolve leading components, so admitting `alias/notes.txt` where `alias`

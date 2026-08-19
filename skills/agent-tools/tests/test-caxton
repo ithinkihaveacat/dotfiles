@@ -48,7 +48,7 @@ commit_all() {
   fi
 }
 
-echo "1..62"
+echo "1..64"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -1007,6 +1007,9 @@ TILDE_REPO=$(make_repo tilde)
 mkdir -p "$TILDE_REPO/~"
 printf 'note\n' >"$TILDE_REPO/~/note.md"
 commit_all "$TILDE_REPO"
+# The tilde is the fixture: this test asserts that a listed path keeps it
+# literal while a typed one expands, so quoting it is the point.
+# shellcheck disable=SC2088
 if (cd "$TILDE_REPO" && printf '~/note.md\n' |
   "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
   if [[ "$(resolved "$OUTPUT")" == "~/note.md R-I" ]] &&
@@ -1198,5 +1201,66 @@ if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/strand.py" \
   fi
 else
   echo "not ok 62 - Stranded-creation check exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 63: git's own metadata is not project content. It sits outside every
+# listing, 'git clean -fd' never touches it, and a file dropped into it can
+# execute on the next git command, so naming it explicitly is refused rather
+# than quietly admitted.
+META=$(make_repo metadata)
+printf 'a\n' >"$META/a.md"
+commit_all "$META"
+if (cd "$META" && "$BIN" --dry-run "prompt" --read .git/config) >"$OUTPUT" 2>&1; then
+  echo "not ok 63 - Expected an explicit .git path to be refused"
+else
+  if grep -q "git's own metadata" "$OUTPUT" &&
+    (cd "$META" && "$BIN" --dry-run "prompt" --read . 2>&1 | grep -qv '\.git/'); then
+    echo "ok 63 - Refuses git metadata as a selection"
+  else
+    echo "not ok 63 - Metadata rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 64: the same rule guards creation, which never consults the listing and
+# which git's ignore rules do not cover.
+cat >"$WORK/meta.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line for line in source.splitlines() if not line.startswith("from google")
+)
+cx = {"__name__": "caxton_helpers"}
+exec(compile(stripped, "caxton", "exec"), cx)
+
+blocks = cx["in_repository_metadata"]
+cases = {
+    ".git/hooks/pre-commit": True,
+    ".git": True,
+    "sub/.git/config": True,
+    ".github/ci.yml": False,
+    ".gitignore": False,
+    "docs/guide.md": False,
+    "": False,
+}
+wrong = [rel for rel, want in cases.items() if blocks(rel) is not want]
+print("WRONG" if wrong else "OK", "; ".join(wrong))
+PYEOF
+if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/meta.py" "$BIN" >"$OUTPUT" 2>&1; then
+  if grep -q "^OK" "$OUTPUT"; then
+    echo "ok 64 - Creation is barred from git metadata without touching dotfiles"
+  else
+    echo "not ok 64 - Metadata guard misclassified a path"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 64 - Metadata guard check exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
