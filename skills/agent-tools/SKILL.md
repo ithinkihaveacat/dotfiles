@@ -250,9 +250,12 @@ closed early
   `git ls-files --cached --others --exclude-standard`, so negation
   (`!keep.log`), nested `.gitignore` files, anchored rules and
   `core.excludesFile` behave exactly as git defines them. Outside a repository a
-  simpler `.gitignore` matcher applies. Common vendor and build directories and
-  `.DS_Store` are excluded on top, from both the context and the `-o` copy. Use
-  `--dry-run` to see exactly what a run will read and write.
+  simpler `.gitignore` matcher applies. If git is present but cannot answer — a
+  broken repository, a timed-out query — caxton aborts rather than falling back,
+  since the simple matcher would re-admit files a nested or anchored rule
+  excludes; `--force` downgrades that to a warning. Common vendor and build
+  directories and `.DS_Store` are excluded on top, from both the context and the
+  `-o` copy. Use `--dry-run` to see exactly what a run will read and write.
 - Credential paths are never sent: `.ssh/`, `.gnupg/`, `.aws/` and similar
   directories, files such as `.npmrc`, `.netrc`, `.envrc` and
   `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.

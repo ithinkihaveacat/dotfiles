@@ -470,19 +470,22 @@ def has_git_dir_at_or_above(path: Path) -> bool:
     return any((candidate / ".git").exists() for candidate in [path, *path.parents])
 
 
-def git_worktree_state(path: Path) -> tuple[str, str]:
-    """Classifies path's git state as one of:
+def git_repo_probe(path: Path) -> tuple[str, str]:
+    """Classifies whether path sits in a usable git worktree:
 
-    'dirty'/'clean' - path is in a worktree, with or without local changes
-    'absent'        - path is genuinely outside any repository
-    'missing'       - git is not installed
-    'unknown'       - git could not answer, which is NOT the same as 'absent':
-                      a caller guarding a destructive operation must fail closed
-                      rather than assume there is nothing to protect.
+    'repo'    - path is inside a worktree git can read
+    'absent'  - path is genuinely outside any repository
+    'missing' - git is not installed, and path claims to be a repository
+    'unknown' - git could not answer, which is NOT the same as 'absent': a
+                caller relying on git must fail closed rather than assume
+                there is nothing there.
 
-    The second element carries the detail to report for 'unknown'.
+    The second element carries the detail to report.
     """
     if shutil.which("git") is None:
+        # With no .git anywhere, there is nothing git would have told us.
+        if not has_git_dir_at_or_above(path):
+            return "absent", ""
         return "missing", "git not found on PATH"
 
     probe = run_git(["rev-parse", "--is-inside-work-tree"], path)
@@ -498,32 +501,56 @@ def git_worktree_state(path: Path) -> tuple[str, str]:
         return "unknown", detail or f"git rev-parse exited {probe.returncode}"
     if probe.stdout.strip() != "true":
         return "absent", ""
+    return "repo", ""
+
+
+def git_worktree_state(path: Path) -> tuple[str, str]:
+    """Classifies path's worktree as 'dirty', 'clean', or a git_repo_probe state."""
+    state, detail = git_repo_probe(path)
+    if state != "repo":
+        return state, detail
 
     status = run_git(["status", "--porcelain"], path)
     if status is None:
         return "unknown", "git status could not be run (timed out or failed)"
     if status.returncode != 0:
-        detail = status.stderr.strip()
-        return "unknown", detail or f"git status exited {status.returncode}"
+        return (
+            "unknown",
+            status.stderr.strip() or f"git status exited {status.returncode}",
+        )
     return ("dirty" if status.stdout.strip() else "clean"), ""
 
 
-def git_unignored_paths(root: Path) -> set[Path] | None:
-    """Every path under root that git does not ignore, or None outside a repo.
+def git_unignored_paths(root: Path) -> tuple[str, set[Path] | None, str]:
+    """Every path under root that git does not ignore.
+
+    Returns (state, paths, detail) where state is 'listed' (paths is the set),
+    'absent' (root is not in a repository, so a caller may fall back to the
+    approximate matcher), or a git_repo_probe failure state. A failed query is
+    never reported as 'absent': falling back to the root-only matcher there
+    would silently re-admit files a nested or anchored rule excludes.
 
     Gitignore semantics are git's to define: negation (!keep.log), nested
     .gitignore files, anchored rules, .git/info/exclude and core.excludesFile
     all come free by asking git instead of re-implementing the matcher. The
     listing is also pre-pruned, so ignored directories are never walked.
     """
-    if shutil.which("git") is None:
-        return None
+    state, detail = git_repo_probe(root)
+    if state != "repo":
+        return state, None, detail
+
     proc = run_git(
         ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root
     )
-    if proc is None or proc.returncode != 0:
-        return None
-    return {root / rel for rel in proc.stdout.split("\0") if rel}
+    if proc is None:
+        return "unknown", None, "git ls-files could not be run (timed out or failed)"
+    if proc.returncode != 0:
+        return (
+            "unknown",
+            None,
+            proc.stderr.strip() or f"git ls-files exited {proc.returncode}",
+        )
+    return "listed", {root / rel for rel in proc.stdout.split("\0") if rel}, ""
 
 
 def main():
@@ -688,7 +715,16 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-        if dst_path.is_dir() and any(dst_path.iterdir()):
+        try:
+            dst_not_empty = dst_path.is_dir() and any(dst_path.iterdir())
+        except OSError as e:
+            print(
+                f"{prog_name}: error: cannot inspect output directory"
+                f" '{dst_path}': {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if dst_not_empty:
             print(
                 f"{prog_name}: error: output directory '{dst_path}' is not empty;"
                 " destination-only files would be invisible to the agent's"
@@ -790,8 +826,34 @@ def main():
 
     # Inside a repository git decides what is ignored. Outside one, fall back to
     # the approximate .gitignore matcher, which handles only simple patterns.
-    git_unignored = git_unignored_paths(src_path)
+    listing_state, git_unignored, listing_detail = git_unignored_paths(src_path)
+    if listing_state in ("missing", "unknown") and not args.force:
+        if listing_state == "missing":
+            print(
+                f"{prog_name}: git not found, but '{src_path}' is inside a"
+                " repository whose ignore rules decide what is sent to the API",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"{prog_name}: error: cannot list the files git ignores under"
+                f" '{src_path}': {listing_detail}",
+                file=sys.stderr,
+            )
+        print(
+            "hint: fix the repository or install git; --force falls back to a"
+            " simple .gitignore matcher that may include files git would ignore",
+            file=sys.stderr,
+        )
+        sys.exit(127 if listing_state == "missing" else 1)
+
     if git_unignored is None:
+        if listing_state in ("missing", "unknown"):
+            print(
+                f"[caxton] warning: --force: falling back to the simple"
+                f" .gitignore matcher ({listing_detail})",
+                file=sys.stderr,
+            )
         gitignore_patterns = load_gitignore_patterns(src_path)
         git_unignored_dirs: set[Path] = set()
     else:
@@ -1690,7 +1752,13 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, sigterm_handler)
 
     try:
-        main()
+        try:
+            main()
+        finally:
+            # Flush inside the guard. Buffered output would otherwise fail at
+            # interpreter shutdown, past every handler here, and CPython would
+            # print "Exception ignored ... BrokenPipeError" and exit 120.
+            sys.stdout.flush()
     except CaxtonTimeoutError:
         # A timeout raised before the agent loop is armed (during discovery or
         # the -o copy) lands here rather than in the loop's own handler.

@@ -20,7 +20,7 @@ snapshot() {
   (cd "$1" && find . -type f -exec cksum {} + | sort)
 }
 
-echo "1..35"
+echo "1..37"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -339,21 +339,34 @@ else
   fi
 fi
 
-# Test 21: a closed stdout exits cleanly instead of dumping a traceback. The
-# listing must exceed the pipe buffer, or the writer never sees EPIPE.
+# Test 21: a closed stdout exits cleanly instead of dumping a traceback. Two
+# distinct paths: a large listing raises inside the write, while a small one is
+# buffered and only fails at the interpreter's final flush. PYTHONUNBUFFERED
+# would hide the second, so it is cleared for both.
 PIPE_DIR="$WORK/pipe-src"
 mkdir -p "$PIPE_DIR"
 (cd "$PIPE_DIR" && touch file{0001..4000}.md)
+SMALL_DIR="$WORK/pipe-small"
+mkdir -p "$SMALL_DIR"
+printf 'x\n' >"$SMALL_DIR/only.md"
+
 # pipefail would turn the expected SIGPIPE exit into an errexit abort.
 set +o pipefail
-"$BIN" --dry-run "prompt" "$PIPE_DIR" 2>"$WORK/pipe.err" | head -2 >/dev/null
-PIPE_STATUS=${PIPESTATUS[0]}
+env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" "$PIPE_DIR" \
+  2>"$WORK/pipe.err" | head -2 >/dev/null
+LARGE_STATUS=${PIPESTATUS[0]}
+# 'true' never reads, so the whole (small) payload is still buffered when the
+# reader goes away.
+env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" "$SMALL_DIR" \
+  2>"$WORK/pipe-small.err" | true
+SMALL_STATUS=${PIPESTATUS[0]}
 set -o pipefail
-if [[ "$PIPE_STATUS" -eq 141 ]] && ! grep -q "Traceback" "$WORK/pipe.err"; then
+if [[ "$LARGE_STATUS" -eq 141 && "$SMALL_STATUS" -eq 141 ]] &&
+  ! grep -q "Exception ignored" "$WORK/pipe.err" "$WORK/pipe-small.err"; then
   echo "ok 21 - Exits 141 without a traceback when stdout closes early"
 else
-  echo "not ok 21 - Broken pipe was not handled (exit $PIPE_STATUS)"
-  sed 's/^/# /' "$WORK/pipe.err"
+  echo "not ok 21 - Broken pipe mishandled (large=$LARGE_STATUS small=$SMALL_STATUS)"
+  sed 's/^/# /' "$WORK/pipe.err" "$WORK/pipe-small.err"
 fi
 
 # A repository exercising gitignore features the old matcher got wrong:
@@ -439,10 +452,50 @@ else
   fi
 fi
 
+# Test 25: a repository git cannot read must not fall back to the simple
+# matcher, which would re-admit files a nested .gitignore excludes.
+UNREADABLE_REPO="$WORK/unreadable-repo"
+mkdir -p "$UNREADABLE_REPO/sub"
+printf 'gitdir: /nonexistent-caxton-test\n' >"$UNREADABLE_REPO/.git"
+printf 'nested-secret.md\n' >"$UNREADABLE_REPO/sub/.gitignore"
+printf 'TOKEN=abc123\n' >"$UNREADABLE_REPO/sub/nested-secret.md"
+printf 'fine\n' >"$UNREADABLE_REPO/a.md"
+if "$BIN" --dry-run "prompt" "$UNREADABLE_REPO" >"$OUTPUT" 2>&1; then
+  echo "not ok 26 - Expected an unreadable repository to abort"
+else
+  if grep -q "cannot list the files git ignores" "$OUTPUT" &&
+    ! grep -q "nested-secret.md" "$OUTPUT"; then
+    echo "ok 26 - Aborts rather than guessing when git cannot list ignored files"
+  else
+    echo "not ok 26 - Unreadable repository did not abort cleanly"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 26: --force downgrades that abort to the simple matcher, and says so
+if "$BIN" --dry-run --force "prompt" "$UNREADABLE_REPO" >"$OUTPUT" 2>&1; then
+  if grep -q "falling back to the simple" "$OUTPUT" && grep -q "a.md" "$OUTPUT"; then
+    echo "ok 27 - --force falls back to the simple matcher with a warning"
+  else
+    echo "not ok 27 - --force fallback did not warn or produced no files"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 27 - --force over an unreadable repository exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
 # Unit checks against caxton's helpers. The google imports are stripped so the
-# helpers load under a plain interpreter with no third-party dependencies.
+# helpers load with no third-party dependencies, but the file still needs the
+# Python version caxton declares: the system python3 is 3.9 on macOS, which
+# cannot even parse its "X | None" annotations. Run it through uv, as the
+# script itself is run.
 UNIT_OUT="$WORK/unit.out"
 cat >"$WORK/unit.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 import os
 import sys
 from pathlib import Path
@@ -540,7 +593,8 @@ bad = [str(a) for a, want in help_cases.items() if wants_help(list(a)) is not wa
 report("wants-help", not bad, "; ".join(bad))
 PYEOF
 
-python3 "$WORK/unit.py" "$BIN" "$WORK/unit" >"$UNIT_OUT" 2>&1 || true
+PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/unit.py" \
+  "$BIN" "$WORK/unit" >"$UNIT_OUT" 2>&1 || true
 
 unit_check() {
   if grep -q "^check:$1:pass" "$UNIT_OUT"; then
@@ -551,19 +605,19 @@ unit_check() {
   fi
 }
 
-unit_check sandbox-escape 26 "Blocks path traversal, absolute paths and escaping symlinks"
-unit_check sandbox-inside 27 "Resolves in-sandbox paths and follows in-sandbox symlinks"
-unit_check preserve-mode 28 "Preserves permission bits when rewriting a file"
-unit_check preserve-crlf 29 "Preserves CRLF line endings when rewriting a file"
-unit_check refuse-non-utf8 30 "Refuses to mutate non-UTF-8 files but still reads them"
-unit_check ignore-rules 31 "Ignores vendor and VCS paths without hiding dotfiles"
-unit_check wants-help 32 "Detects help flags without misreading option values"
+unit_check sandbox-escape 28 "Blocks path traversal, absolute paths and escaping symlinks"
+unit_check sandbox-inside 29 "Resolves in-sandbox paths and follows in-sandbox symlinks"
+unit_check preserve-mode 30 "Preserves permission bits when rewriting a file"
+unit_check preserve-crlf 31 "Preserves CRLF line endings when rewriting a file"
+unit_check refuse-non-utf8 32 "Refuses to mutate non-UTF-8 files but still reads them"
+unit_check ignore-rules 33 "Ignores vendor and VCS paths without hiding dotfiles"
+unit_check wants-help 34 "Detects help flags without misreading option values"
 
 # Live API tests require GEMINI_API_KEY
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "ok 33 # SKIP GEMINI_API_KEY not set"
-  echo "ok 34 # SKIP GEMINI_API_KEY not set"
   echo "ok 35 # SKIP GEMINI_API_KEY not set"
+  echo "ok 36 # SKIP GEMINI_API_KEY not set"
+  echo "ok 37 # SKIP GEMINI_API_KEY not set"
   exit 0
 fi
 
@@ -586,13 +640,13 @@ TEST_MODEL="${TEST_MODEL:-gemini-3.5-flash-lite}"
 # Test 22: Live in-place transformation with -i
 if "$BIN" --model "$TEST_MODEL" --thinking low -i "Replace every occurrence of 'ALPHA' with 'BETA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
   if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "BETA" "$TEST_DIR/doc2.md" && ! grep -q "ALPHA" "$TEST_DIR/doc1.md"; then
-    echo "ok 33 - In-place transformation successfully modified files"
+    echo "ok 35 - In-place transformation successfully modified files"
   else
-    echo "not ok 33 - Files did not contain expected replacements"
+    echo "not ok 35 - Files did not contain expected replacements"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 33 - Live in-place transformation failed"
+  echo "not ok 35 - Live in-place transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
@@ -600,13 +654,13 @@ fi
 rm -rf "$DST_DIR"
 if "$BIN" --model "$TEST_MODEL" --thinking low -o "$DST_DIR" "Replace every occurrence of 'BETA' with 'GAMMA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
   if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "GAMMA" "$DST_DIR/doc1.md" && ! grep -q "BETA" "$DST_DIR/doc1.md"; then
-    echo "ok 34 - Safe copy transformation left source intact and modified destination"
+    echo "ok 36 - Safe copy transformation left source intact and modified destination"
   else
-    echo "not ok 34 - Copy mode failed validation"
+    echo "not ok 36 - Copy mode failed validation"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 34 - Copy transformation failed"
+  echo "not ok 36 - Copy transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
@@ -614,12 +668,12 @@ fi
 BEFORE=$(snapshot "$DST_DIR")
 if RESPONSE=$("$BIN" --model "$TEST_MODEL" --thinking low "Count the exact number of times the word 'GAMMA' appears across all files in this directory. State the count clearly in your report." "$DST_DIR" 2>"$OUTPUT"); then
   if echo "$RESPONSE" | grep -Eq "4|four" && [[ "$BEFORE" == "$(snapshot "$DST_DIR")" ]]; then
-    echo "ok 35 - Safe read-only default counted occurrences and modified nothing"
+    echo "ok 37 - Safe read-only default counted occurrences and modified nothing"
   else
-    echo "not ok 35 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
+    echo "not ok 37 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 35 - Read-only mode execution failed"
+  echo "not ok 37 - Read-only mode execution failed"
   sed 's/^/# /' "$OUTPUT"
 fi
