@@ -128,24 +128,16 @@ ADB simulation), the following conditions must be met on the Wear OS device:
      gesture_dismiss_action_user_preference=1
      ```
 
-1. **External Device Control Enabled (CRITICAL for ADB Simulation)**:
+1. **Screen State & Foreground Window Focus**:
 
-   - To allow ADB to inject gesture events, the developer option "External
-     device control" must be enabled.
-   - On the watch: Go to **Settings** -> **Gestures** -> **Hand gestures** ->
-     **External Control** -> Turn **ON** **"External device control"**.
-   - Or configure it programmatically via ADB:
+   - The watch screen must be awake and turned **ON** (`mWakefulness=Awake`).
+     The gesture framework does not dispatch gestures to applications while the
+     screen is off or in ambient/AOD mode. Wake the screen via ADB if needed:
      ```bash
-     adb shell settings put secure gesture_external_control_user_preference 1
+     adb shell input keyevent KEYCODE_WAKEUP
      ```
-   - Verify the setting value:
-     ```bash
-     adb shell settings get secure gesture_external_control_user_preference
-     ```
-     *Expected Output*: `1`
-   - *Warning*: If this setting is OFF (`0`), any ADB gesture simulation will
-     fail with:
-     `Failed to complete gesture. injectGestureInternal: Gesture DoublePinch is not active.`
+   - The target application must be in the foreground and its window must hold
+     focus (`mCurrentFocus`).
 
 ### Simulating Gestures via ADB
 
@@ -155,47 +147,39 @@ using the `IWearGestureService` command-line tool.
 - **Simulate Double Pinch (Primary Action)**:
 
   ```bash
-  adb shell cmd IWearGestureService gesture 1
+  adb shell cmd IWearGestureService gesture DoublePinch
   ```
 
-  *Alternative (using constant name)*:
+  *Alternative (using integer ID)*:
 
   ```bash
-  adb shell cmd IWearGestureService gesture GESTURE_DOUBLE_PINCH
+  adb shell cmd IWearGestureService gesture 1
   ```
 
 - **Simulate Wrist Turn (Dismiss Action)**:
 
   ```bash
-  adb shell cmd IWearGestureService gesture 2
+  adb shell cmd IWearGestureService gesture WristTurn
   ```
 
-  *Alternative (using constant name)*:
+  *Alternative (using integer ID)*:
 
   ```bash
-  adb shell cmd IWearGestureService gesture GESTURE_WRIST_TURN
+  adb shell cmd IWearGestureService gesture 2
   ```
 
 #### Gesture ID Reference Table
 
-The gesture service expects the exact integer ID or the matching `GESTURE_`
-constant name defined in `IWearGestureService.aidl`:
+The gesture service accepts standard PascalCase string names or integer IDs:
 
-| Gesture Name             | Integer ID | AIDL Constant Name             | Common Action Mapping                                  |
-| :----------------------- | :--------- | :----------------------------- | :----------------------------------------------------- |
-| **Double Pinch**         | `1`        | `GESTURE_DOUBLE_PINCH`         | `PrimaryAction` (Select, Play/Pause, Answer Call)      |
-| **Wrist Turn**           | `2`        | `GESTURE_WRIST_TURN`           | `DismissAction` (Back, Silence/Dismiss Alarm, Hang Up) |
-| **Single Pinch**         | `3`        | `GESTURE_SINGLE_PINCH`         | Custom                                                 |
-| **Palm Up Single Pinch** | `4`        | `GESTURE_PALM_UP_SINGLE_PINCH` | Custom                                                 |
-| **Palm Up Double Pinch** | `5`        | `GESTURE_PALM_UP_DOUBLE_PINCH` | Custom                                                 |
-| **Double Wrist Turn**    | `6`        | `GESTURE_DOUBLE_WRIST_TURN`    | Custom                                                 |
-
-> [!CAUTION] **Avoid Informal Names**: Passing informal string names like
-> `"DoublePinch"` or `"WristTurn"` will cause the command parser to fail with a
-> `NumberFormatException` in the system server:
-> `java.lang.NumberFormatException: For input string: "DoublePinch"` Always use
-> the integer ID (`1`, `2`) or the formal constant name (`GESTURE_DOUBLE_PINCH`,
-> `GESTURE_WRIST_TURN`).
+| Gesture Name             | CLI String Name     | Integer ID | Common Action Mapping                                  |
+| :----------------------- | :------------------ | :--------- | :----------------------------------------------------- |
+| **Double Pinch**         | `DoublePinch`       | `1`        | `PrimaryAction` (Select, Play/Pause, Answer Call)      |
+| **Wrist Turn**           | `WristTurn`         | `2`        | `DismissAction` (Back, Silence/Dismiss Alarm, Hang Up) |
+| **Single Pinch**         | `SinglePinch`       | `3`        | Custom                                                 |
+| **Palm Up Single Pinch** | `PalmUpSinglePinch` | `4`        | Custom                                                 |
+| **Palm Up Double Pinch** | `PalmUpDoublePinch` | `5`        | Custom                                                 |
+| **Double Wrist Turn**    | `DoubleWristTurn`   | `6`        | Custom                                                 |
 
 ### Developer Overrides (Bypassing Constraints)
 
