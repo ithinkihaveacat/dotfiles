@@ -24,6 +24,7 @@ import mimetypes
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -196,6 +197,36 @@ class CaxtonTimeoutError(Exception):
 TIMEOUT_SECONDS = 0
 
 
+def open_regular_file(path: Path, mode: str = "r", **kwargs):
+    """Opens a regular file without following a final symlink.
+
+    Discovery rejects symlink entries, but the tree can change between
+    discovery and a later read. O_NOFOLLOW closes that race on the supported
+    macOS and Linux platforms, while fstat also rejects devices, FIFOs, and
+    sockets after the file descriptor has been opened.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    elif path.is_symlink():
+        raise OSError(f"refusing to follow symlink: '{path}'")
+
+    fd = os.open(path, flags)
+    try:
+        file_mode = os.fstat(fd).st_mode
+    except OSError:
+        os.close(fd)
+        raise
+    if not stat.S_ISREG(file_mode):
+        os.close(fd)
+        raise OSError(f"not a regular file: '{path}'")
+    try:
+        return os.fdopen(fd, mode, **kwargs)
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def read_text_verbatim(path: Path, lossy: bool = False) -> str:
     """Reads a file as UTF-8 with no newline translation.
 
@@ -204,7 +235,7 @@ def read_text_verbatim(path: Path, lossy: bool = False) -> str:
     bytes. Callers that only display content pass lossy=True.
     """
     errors = "replace" if lossy else "strict"
-    with open(path, encoding="utf-8", errors=errors, newline="") as f:
+    with open_regular_file(path, encoding="utf-8", errors=errors, newline="") as f:
         return f.read()
 
 
@@ -259,10 +290,19 @@ def is_text_file(path: Path) -> bool:
         return True
     # For unrecognized files, sniff for null bytes in the first 8 KB
     try:
-        with open(path, "rb") as f:
+        with open_regular_file(path, "rb") as f:
             return b"\x00" not in f.read(8192)
     except Exception:
         return False
+
+
+def is_safe_tree_entry(path: Path) -> bool:
+    """Whether path is a regular file or directory, without following links."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) or stat.S_ISDIR(mode)
 
 
 def resolve_sandboxed_path(sandbox_root: Path, rel_or_abs_path: str) -> Path:
@@ -407,9 +447,10 @@ Examples:
 Inside a git repository, git itself decides what is ignored (negation, nested
 .gitignore files and anchored rules all apply); elsewhere a simpler .gitignore
 matcher is used. Common build and vendor directories and credential paths
-(.ssh, .npmrc, .netrc, *.pem and similar) are excluded on top, from both the
-context and the -o copy; --dry-run lists what a run will read. In-place runs on a git worktree with uncommitted changes are refused
-unless --force is given, so a partial transformation can be undone:
+(.ssh, .npmrc, .netrc, *.pem and similar), symlinks, and non-regular files are
+excluded on top, from both the context and the -o copy; --dry-run lists what a
+run will read. In-place runs on a git worktree with uncommitted changes are
+refused unless --force is given, so a partial transformation can be undone:
 'git checkout -- .' restores files the run modified and 'git clean -fd' removes
 the ones it created. Every run lists both sets on stderr, including on timeout.\
 """,
@@ -862,6 +903,8 @@ def main():
 
     def is_excluded(path: Path) -> bool:
         """The single filter shared by discovery and the -o copy."""
+        if not is_safe_tree_entry(path):
+            return True
         if is_path_ignored(path, src_path, gitignore_patterns):
             return True
         if is_secret_path(path, src_path):
@@ -879,6 +922,7 @@ def main():
     all_files: list[Path] = []
     text_files: list[Path] = []
     secret_files: list[Path] = []
+    symlink_files: list[Path] = []
     total_text_bytes = 0
 
     if git_unignored is not None:
@@ -889,6 +933,9 @@ def main():
             root_path = Path(root)
             kept_dirs = []
             for d in dirs:
+                if (root_path / d).is_symlink():
+                    symlink_files.append(root_path / d)
+                    continue
                 if is_path_ignored(root_path / d, src_path, gitignore_patterns):
                     continue
                 if is_secret_path(root_path / d, src_path):
@@ -901,23 +948,33 @@ def main():
             candidates.extend(root_path / f for f in sorted(files))
 
     for file_path in candidates:
+        if file_path.is_symlink():
+            symlink_files.append(file_path)
+            continue
         if is_path_ignored(file_path, src_path, gitignore_patterns):
             continue
         if is_secret_path(file_path, src_path):
             secret_files.append(file_path)
             continue
-        # Skip FIFOs, sockets, devices, dangling symlinks and submodule
-        # gitlinks: opening one can block forever, and none of them are
-        # content to transform.
-        if not file_path.is_file():
+        # Skip FIFOs, sockets, devices and submodule gitlinks: opening one can
+        # block forever, and none of them are content to transform.
+        if not is_safe_tree_entry(file_path) or not stat.S_ISREG(
+            file_path.lstat().st_mode
+        ):
             continue
         all_files.append(file_path)
         if is_text_file(file_path):
             text_files.append(file_path)
             try:
-                total_text_bytes += file_path.stat().st_size
+                total_text_bytes += file_path.lstat().st_size
             except OSError:
                 pass
+
+    if symlink_files and not args.dry_run:
+        print(
+            f"[caxton] Excluded {len(symlink_files)} symlink(s); --dry-run lists them",
+            file=sys.stderr,
+        )
 
     if secret_files and not args.dry_run:
         print(
@@ -965,7 +1022,7 @@ def main():
     for fp in all_files:
         rel_str = str(fp.relative_to(src_path)).replace("\\", "/")
         try:
-            size_kb = fp.stat().st_size / 1024
+            size_kb = fp.lstat().st_size / 1024
             tree_lines.append(f"- {rel_str} ({size_kb:.1f} KB)")
         except OSError:
             tree_lines.append(f"- {rel_str}")
@@ -1036,7 +1093,7 @@ def main():
             rel_str = str(fp.relative_to(src_path)).replace("\\", "/")
             kind = "TEXT" if fp in text_set else "BIN "
             try:
-                size_kb = f"{fp.stat().st_size / 1024:.1f} KB"
+                size_kb = f"{fp.lstat().st_size / 1024:.1f} KB"
             except OSError:
                 size_kb = "unknown size"
             print(f"  [{kind}]  {rel_str} ({size_kb})")
@@ -1046,6 +1103,11 @@ def main():
                 rel_str = str(fp.relative_to(src_path)).replace("\\", "/")
                 suffix = "/" if fp.is_dir() else ""
                 print(f"  [SKIP]  {rel_str}{suffix}")
+        if symlink_files:
+            print("\nExcluded (symlinks, never followed):")
+            for fp in sorted(set(symlink_files)):
+                rel_str = str(fp.relative_to(src_path)).replace("\\", "/")
+                print(f"  [SKIP]  {rel_str}")
         if over_threshold:
             print()
             report_over_threshold()
@@ -1062,6 +1124,7 @@ def main():
                 dst_path,
                 dirs_exist_ok=True,
                 ignore=excluded_from_copy,
+                symlinks=True,
             )
         except (OSError, shutil.Error) as e:
             print(
@@ -1280,13 +1343,13 @@ def main():
                     "message": f"File not found: '{path}'",
                 }
 
-            file_size = target_file.stat().st_size
+            file_size = target_file.lstat().st_size
             if (
                 file_size > MAX_READ_CHUNK_BYTES
                 and start_line is None
                 and end_line is None
             ):
-                with open(
+                with open_regular_file(
                     target_file, encoding="utf-8", errors="replace", newline=""
                 ) as f:
                     content_chunk = f.read(MAX_READ_CHUNK_BYTES).replace("\r\n", "\n")
@@ -1356,11 +1419,14 @@ def main():
                 dirs[:] = [
                     d
                     for d in dirs
-                    if not is_path_ignored(r_path / d, target_root, gitignore_patterns)
+                    if is_safe_tree_entry(r_path / d)
+                    and not is_path_ignored(r_path / d, target_root, gitignore_patterns)
                 ]
                 for f in sorted(files):
                     f_path = r_path / f
-                    if not is_path_ignored(f_path, target_root, gitignore_patterns):
+                    if is_safe_tree_entry(f_path) and not is_path_ignored(
+                        f_path, target_root, gitignore_patterns
+                    ):
                         rel = str(f_path.relative_to(target_root)).replace("\\", "/")
                         if pattern and not fnmatch.fnmatch(f_path.name, pattern):
                             continue

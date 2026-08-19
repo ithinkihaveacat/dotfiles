@@ -261,8 +261,10 @@ closed early
   `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.
   Project dotfiles (`.github/`, `.prettierrc`) stay visible. `--dry-run` lists
   what was excluded.
-- Non-regular files (FIFOs, sockets, devices, dangling symlinks) are skipped,
-  and `--timeout` covers directory traversal as well as the agent loop.
+- Symlinks and non-regular files (FIFOs, sockets and devices) are excluded from
+  both the context and the `-o` copy. Reads open regular files without following
+  a final symlink, and `--timeout` covers directory traversal as well as the
+  agent loop.
 - Mutation tools are withheld entirely in the default read-only mode.
 - Tool paths are resolved with `realpath` and confined to the target directory.
 - `-o` refuses a destination that already holds files: destination-only files

@@ -20,7 +20,7 @@ snapshot() {
   (cd "$1" && find . -type f -exec cksum {} + | sort)
 }
 
-echo "1..37"
+echo "1..39"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -564,6 +564,20 @@ except UnicodeDecodeError:
 lossy_ok = "price" in cx["read_text_verbatim"](latin, lossy=True)
 report("refuse-non-utf8", strict_refused and lossy_ok)
 
+# Tree discovery and direct reads both reject symlinks
+safe_entry = cx["is_safe_tree_entry"]
+entries_ok = (
+    safe_entry(root / "inside.txt")
+    and not safe_entry(root / "escape-link")
+    and not safe_entry(root / "inside-link")
+)
+try:
+    cx["read_text_verbatim"](root / "escape-link", lossy=True)
+    read_blocked = False
+except OSError:
+    read_blocked = True
+report("reject-symlinks", entries_ok and read_blocked)
+
 # Ignore rules: dotfiles visible, vendor and VCS directories hidden
 ignored = cx["is_path_ignored"]
 cases = {
@@ -612,12 +626,39 @@ unit_check preserve-crlf 31 "Preserves CRLF line endings when rewriting a file"
 unit_check refuse-non-utf8 32 "Refuses to mutate non-UTF-8 files but still reads them"
 unit_check ignore-rules 33 "Ignores vendor and VCS paths without hiding dotfiles"
 unit_check wants-help 34 "Detects help flags without misreading option values"
+unit_check reject-symlinks 35 "Rejects symlinks during discovery and direct reads"
+
+# Symlinks to files and directories never enter the resolved payload, whether
+# their targets are inside or outside the source tree.
+SYMLINK_DIR="$WORK/symlink-tree"
+SYMLINK_OUTSIDE="$WORK/symlink-outside"
+mkdir -p "$SYMLINK_DIR" "$SYMLINK_OUTSIDE/docs"
+printf 'safe\n' >"$SYMLINK_DIR/real.md"
+printf 'outside\n' >"$SYMLINK_OUTSIDE/outside.md"
+printf 'outside dir\n' >"$SYMLINK_OUTSIDE/docs/outside.md"
+ln -s "real.md" "$SYMLINK_DIR/inside-link.md"
+ln -s "$SYMLINK_OUTSIDE/outside.md" "$SYMLINK_DIR/outside-link.md"
+ln -s "$SYMLINK_OUTSIDE/docs" "$SYMLINK_DIR/outside-dir"
+if "$BIN" --dry-run "prompt" "$SYMLINK_DIR" >"$OUTPUT" 2>&1; then
+  RESOLVED=$(sed -n '/^Resolved Files:/,/^Excluded/p' "$OUTPUT")
+  if [[ "$RESOLVED" == *real.md* && "$RESOLVED" != *inside-link.md* &&
+    "$RESOLVED" != *outside-link.md* && "$RESOLVED" != *outside-dir* ]] &&
+    grep -q "Excluded (symlinks, never followed)" "$OUTPUT"; then
+    echo "ok 36 - Excludes file and directory symlinks from the payload"
+  else
+    echo "not ok 36 - Symlink paths reached the resolved payload"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 36 - Dry run over a tree containing symlinks failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
 
 # Live API tests require GEMINI_API_KEY
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "ok 35 # SKIP GEMINI_API_KEY not set"
-  echo "ok 36 # SKIP GEMINI_API_KEY not set"
   echo "ok 37 # SKIP GEMINI_API_KEY not set"
+  echo "ok 38 # SKIP GEMINI_API_KEY not set"
+  echo "ok 39 # SKIP GEMINI_API_KEY not set"
   exit 0
 fi
 
@@ -634,33 +675,40 @@ ALPHA release notes.
 Feature: ALPHA mode enabled.
 EOF
 
+printf 'outside tree\n' >"$WORK/outside-tree.md"
+ln -s "doc1.md" "$TEST_DIR/inside-link.md"
+ln -s "$WORK/outside-tree.md" "$TEST_DIR/outside-link.md"
+
 # Use fast and cheap flash-lite model with low thinking for rapid test execution
 TEST_MODEL="${TEST_MODEL:-gemini-3.5-flash-lite}"
 
 # Test 22: Live in-place transformation with -i
 if "$BIN" --model "$TEST_MODEL" --thinking low -i "Replace every occurrence of 'ALPHA' with 'BETA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
   if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "BETA" "$TEST_DIR/doc2.md" && ! grep -q "ALPHA" "$TEST_DIR/doc1.md"; then
-    echo "ok 35 - In-place transformation successfully modified files"
+    echo "ok 37 - In-place transformation successfully modified files"
   else
-    echo "not ok 35 - Files did not contain expected replacements"
+    echo "not ok 37 - Files did not contain expected replacements"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 35 - Live in-place transformation failed"
+  echo "not ok 37 - Live in-place transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
 # Test 23: Safe copy transformation with -o
 rm -rf "$DST_DIR"
 if "$BIN" --model "$TEST_MODEL" --thinking low -o "$DST_DIR" "Replace every occurrence of 'BETA' with 'GAMMA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "GAMMA" "$DST_DIR/doc1.md" && ! grep -q "BETA" "$DST_DIR/doc1.md"; then
-    echo "ok 36 - Safe copy transformation left source intact and modified destination"
+  if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "GAMMA" "$DST_DIR/doc1.md" &&
+    ! grep -q "BETA" "$DST_DIR/doc1.md" &&
+    [[ ! -e "$DST_DIR/inside-link.md" && ! -L "$DST_DIR/inside-link.md" &&
+      ! -e "$DST_DIR/outside-link.md" && ! -L "$DST_DIR/outside-link.md" ]]; then
+    echo "ok 38 - Copy transformation excluded symlinks and left source intact"
   else
-    echo "not ok 36 - Copy mode failed validation"
+    echo "not ok 38 - Copy mode failed validation"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 36 - Copy transformation failed"
+  echo "not ok 38 - Copy transformation failed"
   sed 's/^/# /' "$OUTPUT"
 fi
 
@@ -668,12 +716,12 @@ fi
 BEFORE=$(snapshot "$DST_DIR")
 if RESPONSE=$("$BIN" --model "$TEST_MODEL" --thinking low "Count the exact number of times the word 'GAMMA' appears across all files in this directory. State the count clearly in your report." "$DST_DIR" 2>"$OUTPUT"); then
   if echo "$RESPONSE" | grep -Eq "4|four" && [[ "$BEFORE" == "$(snapshot "$DST_DIR")" ]]; then
-    echo "ok 37 - Safe read-only default counted occurrences and modified nothing"
+    echo "ok 39 - Safe read-only default counted occurrences and modified nothing"
   else
-    echo "not ok 37 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
+    echo "not ok 39 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 37 - Read-only mode execution failed"
+  echo "not ok 39 - Read-only mode execution failed"
   sed 's/^/# /' "$OUTPUT"
 fi

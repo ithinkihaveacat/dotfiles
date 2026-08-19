@@ -483,9 +483,10 @@ Examples:
 Inside a git repository, git itself decides what is ignored (negation, nested
 .gitignore files and anchored rules all apply); elsewhere a simpler .gitignore
 matcher is used. Common build and vendor directories and credential paths
-(.ssh, .npmrc, .netrc, *.pem and similar) are excluded on top, from both the
-context and the -o copy; --dry-run lists what a run will read. In-place runs on a git worktree with uncommitted changes are refused
-unless --force is given, so a partial transformation can be undone:
+(.ssh, .npmrc, .netrc, *.pem and similar), symlinks, and non-regular files are
+excluded on top, from both the context and the -o copy; --dry-run lists what a
+run will read. In-place runs on a git worktree with uncommitted changes are
+refused unless --force is given, so a partial transformation can be undone:
 'git checkout -- .' restores files the run modified and 'git clean -fd' removes
 the ones it created. Every run lists both sets on stderr, including on timeout.
 ```

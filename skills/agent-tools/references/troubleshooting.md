@@ -431,8 +431,9 @@ Inside a git repository the ignore list comes from git itself
 (`git ls-files --cached --others --exclude-standard`), so anything git ignores
 is excluded — including files covered by a nested `.gitignore` or by
 `core.excludesFile`. Common vendor and build directories (`node_modules`,
-`build`, `dist`, ...) and `.DS_Store` are excluded on top. Confirm what the run
-will actually see:
+`build`, `dist`, ...), `.DS_Store`, symlinks and non-regular files are excluded
+on top. Symlinks are never followed into the initial context or an `-o` copy.
+Confirm what the run will actually see:
 
 ```bash
 scripts/caxton --dry-run "PROMPT" ./src
