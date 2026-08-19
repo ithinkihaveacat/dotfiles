@@ -10,7 +10,7 @@
 - [photo-query](#photo-query) - Ask Gemini about photos (boolean / schema /
   free-text)
 - [oracle](#oracle) - Deep reasoning and synthesis over files or directories
-- [caxton](#caxton) - Transform, refactor or audit a whole directory
+- [caxton](#caxton) - Transform, refactor or audit selected repository paths
 - [emerson](#emerson) - Generate essay-length analysis from text
 - [pascal](#pascal) - Ask a question and get a short response
 - [context](#context) - Generate aggregated context for analysis
@@ -424,34 +424,42 @@ ______________________________________________________________________
 
 ## caxton
 
-Autonomous whole-directory transformation, refactoring, and audit engine.
-Read-only by default; `-i`/`-o` grant the agent file-mutation tools.
+Autonomous repository transformation, refactoring, and audit engine, scoped to
+the paths you name. Read-only unless `--edit` names something writable.
 
 ### Help
 
 <!-- generated: ../scripts/caxton --help -->
 
 ```text
-Usage: caxton [OPTIONS] "PROMPT" [SRC_DIR]
+Usage: caxton "PROMPT" [OPTIONS]
 
-Autonomous whole-directory transformation, refactoring, and audit engine.
-By default, caxton operates in safe read-only mode (inspection and Q&A).
-To modify files, specify -i/--in-place or -o/--output DIR.
+Autonomous repository transformation, refactoring, and audit engine, scoped to
+the paths you name. Paths given with --read are visible to the model; paths
+given with --edit are visible and writable. Everything else in the repository
+is invisible: absent from the file listing and refused by the read tool.
+
+With no --edit, caxton runs read-only and the mutation tools are withheld.
 
 Arguments:
-  PROMPT              Instruction, question, or goal for the agent.
-  SRC_DIR             Target source directory. (default: current directory '.')
+  PROMPT              Instruction, question, or goal for the agent. Must come
+                      before any path option.
 
 Options:
-  -i, --in-place      Apply transformations in-place on SRC_DIR.
-  -o, --output DIR    Copy SRC_DIR to DIR first and apply transformations on
-                      the copy (leaving SRC_DIR untouched).
-  -n, --dry-run       Print the payload that would be sent (resolved files,
-                      sizes, mode, prompt) and exit without calling the API.
-  --inline, --no-inline
-                      Inline all text files into initial prompt (default: on).
-  --force             Bypass safety checks: the 1MB text context threshold and
-                      the dirty-worktree guard on -i.
+  --read PATH...      Make paths visible to the model. (default: '.')
+  --edit PATH...      Make paths visible and writable. Any --edit makes this a
+                      mutation run and requires a clean git worktree.
+  --read-from FILE    Read further --read paths from FILE, or '-' for stdin.
+  --edit-from FILE    Read further --edit paths from FILE, or '-' for stdin.
+  -0, --null          Path list files are NUL-delimited, not one path per line.
+  --inline PATH...    Inline only these paths into the initial prompt.
+                      (default: every visible text file)
+  --no-inline         Inline nothing; the model reads files on demand.
+  -n, --dry-run       Print the resolved policy and payload, then exit without
+                      calling the API.
+  --force             Bypass safety checks: the 1MB text context threshold, the
+                      dirty-worktree guard, and the refusal to write paths git
+                      cannot restore.
   --model MODEL       Gemini model to use (default: gemini-3.1-pro-preview).
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
   --search, --no-search
@@ -468,27 +476,32 @@ Environment:
   AGENT_OFFLINE       Workspace-wide offline policy fallback.
 
 Examples:
-  # Safe read-only architectural audit or repository Q&A (default)
-  caxton "Count deprecated function usages and summarize" ./lib
+  # Read-only audit of the current directory (the default selection)
+  caxton "Count deprecated function usages and summarize"
 
-  # Preview exactly what would be sent, without calling the API
-  caxton --dry-run -i "Translate all markdown files into French" ./docs
+  # Edit two files while consulting a third that must not change
+  caxton "Update the parser but keep the documented behavior" \
+    --edit src/parser.py tests/test_parser.py --read docs/architecture.md
 
-  # In-place transformation
-  caxton -i "Translate all markdown files into French" ./docs
+  # Edit a directory with one file carved out as read-only
+  caxton "Refresh the guides" --edit docs/ --read docs/architecture.md
 
-  # Safe refactoring into a new destination directory
-  caxton -o ./src-v2 "Rename user_id to account_id across all python files" ./src
+  # Preview exactly what would be sent, and what could be written
+  caxton --dry-run "Translate the guides into French" --edit docs/
 
-Inside a git repository, git itself decides what is ignored (negation, nested
-.gitignore files and anchored rules all apply); elsewhere a simpler .gitignore
-matcher is used. Common build and vendor directories and credential paths
-(.ssh, .npmrc, .netrc, *.pem and similar), symlinks, and non-regular files are
-excluded on top, from both the context and the -o copy; --dry-run lists what a
-run will read. In-place runs on a git worktree with uncommitted changes are
-refused unless --force is given, so a partial transformation can be undone:
-'git checkout -- .' restores files the run modified and 'git clean -fd' removes
-the ones it created. Every run lists both sets on stderr, including on timeout.
+  # Select many paths safely, and inline only the Markdown among them
+  git ls-files -z '*.md' | caxton "Normalize headings" \
+    --edit-from - --null
+
+caxton runs only inside a git worktree. Paths are shown relative to the
+repository top level, git alone decides what is ignored, and git alone provides
+undo: 'git checkout -- .' restores files a run modified and 'git clean -fd'
+removes the ones it created. A mutation run therefore refuses to start on a
+dirty worktree, and refuses to write paths git cannot restore (ignored files),
+unless --force is given. Credential paths (.ssh, .npmrc, .netrc, *.pem and
+similar), symlinks, submodules and non-regular files are never readable or
+writable, even when named explicitly. Every run lists what it modified,
+created, and deleted on stderr, including on timeout.
 ```
 
 <!-- /generated -->

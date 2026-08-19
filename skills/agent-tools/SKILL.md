@@ -18,7 +18,7 @@ description: >
   ai analysis, describe image, visual diff, token count, receipt extraction, pacioli,
   generate essay, boolean evaluation, gather context, latest docs, research topic,
   github,
-  pull request, gh-markdown, automate app, oracle, caxton, directory transformation,
+  pull request, gh-markdown, automate app, oracle, caxton, repository transformation,
   batch refactor, bulk edit, deep research, architecture, plan review, prose review.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick
@@ -66,7 +66,7 @@ tools only)
 scripts/context show gemini-api | scripts/emerson "Explain the key features"
 
 # Transform an entire directory of documents or code
-scripts/caxton "Translate all markdown files into French" ./docs
+scripts/caxton "Translate the guides into French" --edit docs/
 
 # Fetch a GitHub PR, Issue, or Workflow Run as Markdown
 scripts/gh-markdown https://github.com/owner/repo/pull/123
@@ -208,28 +208,42 @@ scripts/oracle "What are the latest developments in this framework as of May 202
 
 ### caxton
 
-Autonomous whole-directory transformation and multi-file refactoring tool.
-Combines Oracle's broad upfront context inlining with Popper's autonomous
-tool-calling loop. It inlines the entire target directory into the initial
-prompt and provides the model with exact byte-for-byte `search_and_replace`,
-`write_file`, `delete_file`, `read_file`, and `list_files` tools to execute
-changes across multiple files before finalizing via `complete_task`.
+Autonomous repository transformation and multi-file refactoring tool, scoped to
+the paths you name. Combines Oracle's broad upfront context inlining with
+Popper's autonomous tool-calling loop. It inlines the selected files into the
+initial prompt and provides the model with exact byte-for-byte
+`search_and_replace`, `write_file`, `delete_file`, `read_file`, and `list_files`
+tools to execute changes across multiple files before finalizing via
+`complete_task`.
 
 ```bash
-scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
+scripts/caxton "PROMPT" [OPTIONS]
 ```
+
+Each path is either **visible** (`--read`), **visible and writable** (`--edit`),
+or invisible. Invisible means invisible: absent from the file listing and
+refused by the read tool, not merely left out of the initial prompt. A third,
+independent property — whether a visible file's contents are inlined into the
+initial prompt — is controlled by `--inline`/`--no-inline`.
 
 **Options:**
 
-- `-i, --in-place`: Apply transformations in-place on `SRC_DIR`.
-- `-o, --output DIR`: Copy `SRC_DIR` to `DIR` first and apply all
-  transformations on the copy, leaving `SRC_DIR` untouched.
-- `-n, --dry-run`: Print the payload that would be sent (mode, model, resolved
-  files, sizes, prompt) and exit without calling the API.
-- `--inline` / `--no-inline`: Inline all text files into initial prompt context
-  (default: on).
-- `--force`: Bypass safety checks — the 1MB text context threshold and the
-  dirty-worktree guard on `-i`.
+- `--read PATH...`: Make paths visible to the model (default: `.`).
+- `--edit PATH...`: Make paths visible and writable. Any `--edit` makes this a
+  mutation run and requires a clean git worktree. `--edit DIR` also permits
+  creating and deleting files beneath `DIR`; `--edit FILE` does not authorize
+  creating siblings.
+- `--read-from FILE` / `--edit-from FILE`: Read further paths from `FILE`, or
+  `-` for standard input.
+- `-0, --null`: Path list files are NUL-delimited rather than one path per line.
+- `--inline PATH...`: Inline only these paths (default: every visible text
+  file). Must be a subset of what is already visible — `--inline` narrows the
+  initial context and can never widen access.
+- `--no-inline`: Inline nothing; the agent reads files on demand.
+- `-n, --dry-run`: Print the resolved policy and payload and exit without
+  calling the API.
+- `--force`: Bypass safety checks — the 1MB inlined-text threshold, the
+  dirty-worktree guard, and the refusal to write paths git cannot restore.
 - `--model MODEL`: Gemini model to use (default: `gemini-3.1-pro-preview`).
 - `--thinking LEVEL`: Thinking level: `high`, `low`, `none` (default: `high`).
 - `--search` / `--no-search`: Google Search grounding for live external context
@@ -238,62 +252,77 @@ scripts/caxton [OPTIONS] "PROMPT" [SRC_DIR]
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 100).
 - `--timeout SECONDS`: Execution timeout in seconds (default: 1800).
 
+`PROMPT` is the only positional argument and must come before the path options,
+which each consume every following path.
+
 **Environment:** `GEMINI_API_KEY` (Required), `CAXTON_OFFLINE` / `AGENT_OFFLINE`
 (Optional)
 
-**Exit codes:** 0 success, 1 error, 2 timeout, 130 interrupted, 141 stdout
-closed early
+**Exit codes:** 0 success, 1 error, 2 timeout, 127 git missing, 130 interrupted,
+141 stdout closed early
 
 **Scope and safety:**
 
-- Inside a git repository, ignore filtering is delegated to
-  `git ls-files --cached --others --exclude-standard`, so negation
+- Caxton runs only inside a git worktree. The repository top level is the path
+  namespace, so every path the model sees and reports is the one `git status`
+  uses. The default selection is the current directory, which is not necessarily
+  the repository root.
+- Selection is enforced, not descriptive: the initial prompt, `list_files`,
+  `read_file`, and every mutation tool consult one policy. Where two selections
+  overlap the most specific wins, and at equal specificity the more restrictive
+  one does, so `--edit docs/ --read docs/architecture.md` makes the directory
+  writable with that one file carved out.
+- Ignore filtering is git's alone
+  (`git ls-files --cached --others --exclude-standard`), so negation
   (`!keep.log`), nested `.gitignore` files, anchored rules and
-  `core.excludesFile` behave exactly as git defines them. Outside a repository a
-  simpler `.gitignore` matcher applies. If git is present but cannot answer — a
-  broken repository, a timed-out query — caxton aborts rather than falling back,
-  since the simple matcher would re-admit files a nested or anchored rule
-  excludes; `--force` downgrades that to a warning. Common vendor and build
-  directories and `.DS_Store` are excluded on top, from both the context and the
-  `-o` copy. Use `--dry-run` to see exactly what a run will read and write.
+  `core.excludesFile` behave exactly as git defines them, and a deliberately
+  tracked `dist/` is not second-guessed. A path typed on the command line
+  overrides those rules; a path arriving from `--read-from`/`--edit-from`, or
+  found by walking a selected directory, does not.
+- Anything writable must be restorable by git. A mutation run refuses to start
+  on a dirty worktree, refuses to make a git-ignored path writable, and refuses
+  to create one during the run — `git checkout -- .` and `git clean -fd` would
+  not undo it. `--force` waives all three.
 - Credential paths are never sent: `.ssh/`, `.gnupg/`, `.aws/` and similar
   directories, files such as `.npmrc`, `.netrc`, `.envrc` and
   `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.
-  Project dotfiles (`.github/`, `.prettierrc`) stay visible. `--dry-run` lists
-  what was excluded.
-- Symlinks and non-regular files (FIFOs, sockets and devices) are excluded from
-  both the context and the `-o` copy. Reads open regular files without following
-  a final symlink, and `--timeout` covers directory traversal as well as the
-  agent loop.
-- Mutation tools are withheld entirely in the default read-only mode.
-- Tool paths are resolved with `realpath` and confined to the target directory.
-- `-o` refuses a destination that already holds files: destination-only files
-  would be missing from the agent's snapshot yet writable by its tools.
-- `-i` refuses to run on a git worktree with uncommitted changes unless
-  `--force` is given, and fails closed when git cannot answer: a broken
-  repository exits `1` and a missing `git` exits `127`, rather than silently
-  proceeding as if the tree were clean. Undoing a partial run takes both
-  `git checkout -- .` (for files it modified) and `git clean -fd` (for files it
-  created, which are untracked). Every run reports what it modified, created,
-  and deleted on stderr, including when it times out or exhausts `--max-steps`.
-- Because `-i`/`-o` rewrite files across a whole tree, `caxton` is declared
-  unsafe in `permissions/unsafe` and always prompts rather than being
-  pre-approved by `permission apply`.
+  Naming one explicitly is an error rather than a silent omission. Project
+  dotfiles (`.github/`, `.prettierrc`) stay visible. Creation is checked against
+  the narrower rule that only credential directories are off limits, so adding a
+  `.env.example` is not refused.
+- Symlinks, submodules and non-regular files (FIFOs, sockets and devices) are
+  never included, and naming one explicitly is an error. Reads open regular
+  files without following a final symlink, and `--timeout` covers directory
+  traversal as well as the agent loop.
+- Mutation tools are withheld entirely unless `--edit` names something.
+- Tool paths are resolved with `realpath` and confined to the repository, as a
+  backstop behind the per-path policy.
+- Undoing a partial run takes both `git checkout -- .` (for files it modified)
+  and `git clean -fd` (for files it created, which are untracked). Every run
+  reports what it modified, created, and deleted on stderr, including when it
+  times out or exhausts `--max-steps`.
+- Because `--edit` rewrites files across a tree, `caxton` is declared unsafe in
+  `permissions/unsafe` and always prompts rather than being pre-approved by
+  `permission apply`.
 
 **Examples:**
 
 ```bash
-# Safe read-only architectural audit or repository Q&A (default)
-scripts/caxton "Count deprecated function usages and summarize" ./lib
+# Safe read-only architectural audit or repository Q&A (the default)
+scripts/caxton "Count deprecated function usages and summarize"
 
-# Preview the payload without calling the API
-scripts/caxton --dry-run -i "Translate all markdown files into French" ./docs
+# Edit two files while consulting a third that must not change
+scripts/caxton "Update the parser but keep the documented behavior" \
+  --edit src/parser.py tests/test_parser.py --read docs/architecture.md
 
-# In-place translation of documentation
-scripts/caxton -i "Translate all markdown files into French" ./docs
+# Edit a directory with one file carved out as read-only
+scripts/caxton "Refresh the guides" --edit docs/ --read docs/architecture.md
 
-# Safe refactoring into a new destination directory
-scripts/caxton -o ./src-v2 "Rename user_id to account_id across all python files" ./src
+# Preview the resolved policy without calling the API
+scripts/caxton --dry-run "Translate the guides into French" --edit docs/
+
+# Select many paths safely, inlining only what is needed
+git ls-files -z '*.md' | scripts/caxton "Normalize headings" --edit-from - --null
 ```
 
 ### gh-markdown
