@@ -141,10 +141,6 @@ SECRET_FILE_PATTERNS = (
     "id_ed25519*",
 )
 
-# A name that cannot plausibly carry its own ignore rule, used to ask git
-# whether a directory is excluded by asking about a path inside it.
-IGNORE_PROBE_NAME = ".caxton-ignore-probe"
-
 # Options that consume the following argv token, so a bare '-h' there is a
 # value rather than a help request.
 SINGLE_VALUE_OPTIONS = {
@@ -325,8 +321,17 @@ def is_secret_dir_path(path: Path, root_dir: Path) -> bool:
 
 
 def to_rel(root: Path, path: Path) -> str:
-    """Repository-relative POSIX path; the empty string is the root itself."""
-    rel = os.path.relpath(str(path), str(root)).replace("\\", "/")
+    """Repository-relative POSIX path; the empty string is the root itself.
+
+    Separators are normalized only where the platform actually uses something
+    other than '/'. On the supported macOS and Linux systems a backslash is an
+    ordinary filename character, and rewriting it would invent a policy key
+    that matches no file: the path would be listed under one name and then
+    denied under another.
+    """
+    rel = os.path.relpath(str(path), str(root))
+    if os.sep != "/":
+        rel = rel.replace(os.sep, "/")
     return "" if rel == "." else rel
 
 
@@ -351,18 +356,24 @@ def rel_ancestors(rel: str) -> list[str]:
     return ["/".join(parts[:i]) for i in range(len(parts))]
 
 
-def symlinked_ancestor(root: Path, rel: str) -> str | None:
-    """The first ancestor of rel that is a symlink, or None.
+def blocked_ancestor(root: Path, rel: str) -> tuple[str, str] | None:
+    """The first ancestor of rel that bars access, as (reason, ancestor).
 
-    A path is only inside the repository if every component of it is. Checking
-    the final entry alone would admit 'alias/notes.txt' where 'alias' points
-    outside: lstat and O_NOFOLLOW both resolve the leading components, so the
-    containment and credential checks would be reading a different file from
-    the one they judged.
+    A path belongs to this repository only if every component of it does.
+    Checking the final entry alone would admit 'alias/notes.txt' where 'alias'
+    points outside — lstat and O_NOFOLLOW both resolve leading components, so
+    the containment and credential checks would judge a different file from the
+    one the reader opens — and 'sub/child.txt' where 'sub' is a submodule,
+    whose contents belong to another repository's index and restorability.
     """
     for ancestor in rel_ancestors(rel):
-        if ancestor and (root / ancestor).is_symlink():
-            return ancestor
+        if not ancestor:
+            continue
+        path = root / ancestor
+        if path.is_symlink():
+            return "symlink", ancestor
+        if (path / ".git").exists():
+            return "submodule", ancestor
     return None
 
 
@@ -650,17 +661,32 @@ def git_unignored_paths(root: Path) -> tuple[set[str] | None, str]:
     return {rel for rel in proc.stdout.split("\0") if rel}, ""
 
 
-def git_ignored_subset(root: Path, rels: list[str]) -> set[str] | None:
+def git_ignored_subset(
+    root: Path, rels: list[str], no_index: bool = False
+) -> set[str] | None:
     """Which of rels git ignores, or None if git could not answer.
 
     None is not the same as "none of them": a caller deciding whether a write
     is restorable must refuse rather than assume the path is tracked.
+
+    With no_index the question becomes "do the ignore rules exclude this path",
+    disregarding what the index happens to hold under it. Git otherwise
+    declines to call a directory ignored while it still contains tracked
+    content, which hides exactly the force-tracked case.
     """
     if not rels:
         return set()
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
+            [
+                "git",
+                "-C",
+                str(root),
+                "check-ignore",
+                "-z",
+                "--stdin",
+                *(["--no-index"] if no_index else []),
+            ],
             input=("\0".join(rels) + "\0").encode("utf-8", "surrogateescape"),
             capture_output=True,
             timeout=60,
@@ -904,17 +930,25 @@ def main():
             skipped_listed.append(raw)
             continue
 
-        via = symlinked_ancestor(root, rel)
-        if via is not None:
+        blocked = blocked_ancestor(root, rel)
+        if blocked is not None:
+            kind, via = blocked
             if explicit:
+                detail = (
+                    "which is a symlink; symlinks are never followed"
+                    if kind == "symlink"
+                    else "which is a submodule; run caxton inside it"
+                )
                 print(
                     f"{prog_name}: error: cannot select '{raw}': it is reached"
-                    f" through '{via}', which is a symlink; symlinks are never"
-                    " followed",
+                    f" through '{via}', {detail}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            symlink_paths.append(via)
+            if kind == "symlink":
+                symlink_paths.append(via)
+            else:
+                skipped_listed.append(rel)
             continue
 
         if not resolved.exists() and not resolved.is_symlink():
@@ -1021,20 +1055,12 @@ def main():
         print("hint: fix the repository, then re-run", file=sys.stderr)
         sys.exit(1)
 
-    # Whether a directory is ignored has to be asked about a path inside it:
-    # git declines to call a directory ignored while it still holds tracked
-    # content, even when a rule plainly excludes it, so asking about the
-    # directory itself would miss exactly the force-tracked case.
-    def ignore_query(sel: Selector) -> str:
-        return f"{sel.rel}/{IGNORE_PROBE_NAME}" if sel.is_dir else sel.rel
-
-    answered = git_ignored_subset(
-        root, sorted({ignore_query(sel) for sel in selectors if sel.rel})
-    )
-    ignored_selectors = (
-        None
-        if answered is None
-        else {sel.rel for sel in selectors if sel.rel and ignore_query(sel) in answered}
+    # Ask the ignore rules directly, disregarding the index: git will not call
+    # a directory ignored while it still holds tracked content, and a path
+    # invented to probe from inside would be judged by its own name, so a rule
+    # such as '.*' would report an unignored directory as ignored.
+    ignored_selectors = git_ignored_subset(
+        root, sorted({sel.rel for sel in selectors if sel.rel}), no_index=True
     )
     if ignored_selectors is None:
         # Restorability cannot be established without this answer, so a run

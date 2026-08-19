@@ -283,7 +283,8 @@ which each consume every following path.
   admits everything beneath it, including files force-tracked among ignored
   ones. Path-list entries are taken literally — no tilde expansion, and a
   NUL-delimited list is split without newline translation, so filenames
-  containing a carriage return or newline survive intact.
+  containing a carriage return or newline survive intact. A backslash is an
+  ordinary character in a filename here, not a separator, and is left alone.
 - Anything writable must be restorable by git. A mutation run refuses to start
   on a dirty worktree, refuses to make a git-ignored path writable, and refuses
   to create one during the run — `git checkout -- .` and `git clean -fd` would
@@ -299,10 +300,10 @@ which each consume every following path.
   `.env.example` is not refused.
 - Symlinks, submodules and non-regular files (FIFOs, sockets and devices) are
   never included, and naming one explicitly is an error. That covers paths
-  reached *through* a symlinked parent as well: a selector is inside the
-  repository only if every component of it is. Reads open regular files without
-  following a final symlink, and `--timeout` covers directory traversal as well
-  as the agent loop.
+  reached *through* a symlinked parent or a submodule boundary as well: a
+  selector belongs to this repository only if every component of it does. Reads
+  open regular files without following a final symlink, and `--timeout` covers
+  directory traversal as well as the agent loop.
 - Mutation tools are withheld entirely unless `--edit` names something.
 - Tool paths are resolved with `realpath` and confined to the repository, as a
   backstop behind the per-path policy.

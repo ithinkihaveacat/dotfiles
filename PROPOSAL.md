@@ -278,6 +278,11 @@ a path the user typed is stronger evidence of intent than a general ignore rule:
   walking a selected directory, is **implicit**: ordinary ignore rules apply,
   and hard exclusions are skipped and counted.
 
+A filename is a sequence of bytes rather than a syntax to normalize. On the
+supported systems a backslash is an ordinary character in a name, not a
+separator, so caxton leaves it alone: rewriting it would invent a policy key
+matching no file, listing a path under one name and denying it under another.
+
 Path lists are producer output rather than shell input, so their entries are
 taken literally: no tilde expansion, and NUL-delimited lists are split without
 any newline translation, which is the whole point of asking for NUL. Git's own
@@ -294,10 +299,14 @@ regular file beneath it is admitted — its ignored contents as well as any
 force-tracked file living among them. Consulting the listing first would show
 only the tracked ones, silently narrowing what the user named.
 
-Whether such a directory is ignored has to be asked about a path *inside* it.
-Git declines to call a directory ignored while it still holds tracked content,
-even when a rule plainly excludes it, so asking about the directory itself would
-miss exactly the force-tracked case.
+Whether such a directory is ignored is asked of the ignore rules directly, with
+`git check-ignore --no-index`. Git otherwise declines to call a directory
+ignored while it still holds tracked content, even when a rule plainly excludes
+it, which would miss the force-tracked case entirely. Probing with a name
+invented inside the directory would answer a different question — the sentinel
+would be judged by its own name, so a rule as ordinary as `.*` would report an
+unignored directory as ignored and expose everything genuinely ignored beneath
+it.
 
 ### Hard: never yields
 
@@ -305,15 +314,16 @@ These are safety boundaries, not conveniences, and apply to explicit paths too:
 
 - Credential paths and credential-like files (`.ssh/`, `.aws/`, `.npmrc`,
   `.netrc`, `*.pem`, `id_rsa*`, and the rest of the existing lists).
-- Symlinks — including any path reached *through* one. A selector is inside the
-  repository only if every component of it is: `lstat` and `O_NOFOLLOW` both
-  resolve leading components, so admitting `alias/notes.txt` where `alias`
+- Symlinks — including any path reached *through* one. A selector belongs to
+  this repository only if every component of it does: `lstat` and `O_NOFOLLOW`
+  both resolve leading components, so admitting `alias/notes.txt` where `alias`
   points outside would mean the containment and credential checks judged one
   file while the reader opened another.
 - Sockets, FIFOs, devices, and other non-regular entries.
-- Submodule boundaries. A path inside a submodule is governed by a different
-  repository's index and restorability; caxton reports it and directs the user
-  to run inside that repository.
+- Submodule boundaries, at any depth. A path inside a submodule is governed by a
+  different repository's index and restorability, so `sub/child.txt` is refused
+  for the same reason `sub` is; caxton reports it and directs the user to run
+  inside that repository.
 - Anything resolving outside the repository top level.
 
 An explicit request for a hard-excluded path fails with a specific error.

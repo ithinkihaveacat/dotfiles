@@ -38,7 +38,7 @@ commit_all() {
   ) >/dev/null 2>&1
 }
 
-echo "1..55"
+echo "1..59"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -1008,4 +1008,89 @@ if (cd "$TILDE_REPO" && printf '~/note.md\n' |
 else
   echo "not ok 55 - Literal-tilde dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 56: an unignored directory stays unignored however the ignore rules
+# would judge a name invented inside it. A '.*' rule matches any sentinel a
+# probe could use, which would turn every directory into an explicit override
+# and expose its genuinely ignored contents.
+DOTGLOB=$(make_repo dotglob)
+mkdir -p "$DOTGLOB/docs"
+printf '.*\n!.gitignore\n*.log\n' >"$DOTGLOB/.gitignore"
+printf 'guide\n' >"$DOTGLOB/docs/guide.md"
+printf 'LOCAL\n' >"$DOTGLOB/docs/local.log"
+commit_all "$DOTGLOB"
+if (cd "$DOTGLOB" && "$BIN" --dry-run "prompt" --read docs/) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "docs/guide.md R-I" ]] &&
+    ! grep -q "Explicit Overrides" "$OUTPUT"; then
+    echo "ok 56 - An unignored directory is not treated as an override"
+  else
+    echo "not ok 56 - Ignored descendants were exposed by a filename-sensitive probe"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 56 - Dotglob dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# A repository containing an initialized submodule.
+SUB_HOST=$(make_repo submodule-host)
+printf 'top\n' >"$SUB_HOST/top.md"
+mkdir -p "$SUB_HOST/sub"
+(
+  cd "$SUB_HOST/sub"
+  git init -q .
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git config commit.gpgsign false
+  printf 'SUBMODULE CONTENT\n' >child.txt
+  git add -A
+  git commit -q --no-gpg-sign -m sub
+) >/dev/null 2>&1
+
+# Test 57: a file inside a submodule is refused, not just the submodule root.
+# Its contents belong to another repository's index and restorability.
+if (cd "$SUB_HOST" && "$BIN" --dry-run "prompt" --read sub/child.txt) >"$OUTPUT" 2>&1; then
+  echo "not ok 57 - Expected a path inside a submodule to be refused"
+else
+  if grep -q "reached through 'sub'" "$OUTPUT" && grep -q "is a submodule" "$OUTPUT"; then
+    echo "ok 57 - Refuses a file beneath a submodule boundary"
+  else
+    echo "not ok 57 - Submodule ancestor rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 58: the same path from a list is skipped rather than aborting the run
+if (cd "$SUB_HOST" && printf 'sub/child.txt\ntop.md\n' |
+  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "top.md R-I" ]] &&
+    grep -q "Skipped (listed paths" "$OUTPUT"; then
+    echo "ok 58 - Drops a listed path beneath a submodule boundary"
+  else
+    echo "not ok 58 - A listed submodule path was admitted"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 58 - Submodule list dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 59: a backslash is an ordinary filename character here, so it must not
+# be rewritten into a separator: the file would be listed under one key and
+# then denied under another by every tool call.
+BS_REPO=$(make_repo backslash)
+BS_NAME='back\slash.md'
+printf 'plain\n' >"$BS_REPO/plain.md"
+if printf 'bs\n' >"$BS_REPO/$BS_NAME" 2>/dev/null && [[ -f "$BS_REPO/$BS_NAME" ]]; then
+  commit_all "$BS_REPO"
+  (cd "$BS_REPO" && "$BIN" --dry-run "prompt" --read "$BS_NAME") >"$OUTPUT" 2>&1 || true
+  if [[ "$(resolved "$OUTPUT")" == "$BS_NAME R-I" ]]; then
+    echo "ok 59 - A backslash in a filename survives as itself"
+  else
+    echo "not ok 59 - A backslash was rewritten into a path separator"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "ok 59 # SKIP filesystem rejects backslashes in filenames"
 fi
