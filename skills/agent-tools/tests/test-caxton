@@ -11,16 +11,44 @@ OUTPUT=$(mktemp)
 WORK=$(mktemp -d)
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-TEST_DIR="$WORK/src"
-DST_DIR="$WORK/dst"
-mkdir -p "$TEST_DIR"
-
 # Content hash of a directory tree, for asserting a run changed nothing.
 snapshot() {
-  (cd "$1" && find . -type f -exec cksum {} + | sort)
+  (cd "$1" && find . -path ./.git -prune -o -type f -exec cksum {} + | sort)
 }
 
-echo "1..39"
+# Builds a repository fixture and prints its path. Global ignore rules are
+# neutralized: a developer's core.excludesFile commonly carries patterns like
+# '*~', which would silently exclude a fixture's files and make the run under
+# test disagree with what the test believes it set up.
+make_repo() {
+  local repo="$WORK/$1"
+  mkdir -p "$repo"
+  (
+    cd "$repo"
+    git init -q .
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    git config core.excludesFile /dev/null
+  ) >/dev/null 2>&1
+  echo "$repo"
+}
+
+# A fixture that cannot be committed is a broken test, not a failing one: bail
+# out loudly rather than letting 'set -e' truncate the plan without a word.
+commit_all() {
+  if ! (
+    cd "$1"
+    git add -A
+    git commit -q --no-gpg-sign -m "${2:-init}"
+  ) >"$WORK/commit.err" 2>&1; then
+    echo "Bail out! fixture '$1' could not be committed"
+    sed 's/^/# /' "$WORK/commit.err"
+    exit 1
+  fi
+}
+
+echo "1..64"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -46,8 +74,30 @@ else
   fi
 fi
 
+# The main fixture: a repository holding tracked sources, an ignored build
+# directory, project dotfiles, and credential paths.
+REPO=$(make_repo repo)
+mkdir -p "$REPO/docs" "$REPO/src" "$REPO/build" "$REPO/.github" "$REPO/.ssh"
+printf 'build/\n*.log\n' >"$REPO/.gitignore"
+printf '# Guide\n' >"$REPO/docs/guide.md"
+printf '# Architecture\n' >"$REPO/docs/architecture.md"
+printf 'print(1)\n' >"$REPO/src/a.py"
+printf 'print(2)\n' >"$REPO/src/b.py"
+printf 'ci\n' >"$REPO/.github/ci.yml"
+printf 'junk\n' >"$REPO/build/out.md"
+printf 'noise\n' >"$REPO/debug.log"
+printf 'TOKEN=abc\n' >"$REPO/.env"
+printf 'KEYMATERIAL\n' >"$REPO/.ssh/id_rsa"
+printf 'KEYMATERIAL\n' >"$REPO/server.pem"
+commit_all "$REPO"
+
+# Resolved capability tags from a dry run, as "REL TAG" lines.
+resolved() {
+  sed -n 's/^  \[\([RW I-]*\)\]  \(.*\) (.*)$/\2 \1/p' "$1"
+}
+
 # Test 3: Offline policy rejection
-if CAXTON_OFFLINE=1 "$BIN" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
+if (cd "$REPO" && CAXTON_OFFLINE=1 "$BIN" "prompt") >"$OUTPUT" 2>&1; then
   echo "not ok 3 - Expected CAXTON_OFFLINE to fail"
 else
   if grep -q "caxton: offline (CAXTON_OFFLINE=1)" "$OUTPUT"; then
@@ -58,209 +108,187 @@ else
   fi
 fi
 
-# Test 4: Missing directory error. Argument validation must run before the
-# GEMINI_API_KEY check, so this reports the real problem without a key set.
-if "$BIN" "some prompt" "$WORK/nonexistent" >"$OUTPUT" 2>&1; then
-  echo "not ok 4 - Expected nonexistent directory to fail"
+# Test 4: a missing explicit path is an error. Argument validation must run
+# before the GEMINI_API_KEY check, so this reports the real problem with no key.
+if (cd "$REPO" && "$BIN" "prompt" --read nonexistent.md) >"$OUTPUT" 2>&1; then
+  echo "not ok 4 - Expected a nonexistent path to fail"
 else
-  if grep -q "source directory not found" "$OUTPUT" || grep -q "cannot access source directory" "$OUTPUT"; then
-    echo "ok 4 - Rejects nonexistent source directory before checking credentials"
+  if grep -q "path not found: nonexistent.md" "$OUTPUT"; then
+    echo "ok 4 - Rejects a nonexistent explicit path before checking credentials"
   else
-    echo "not ok 4 - Nonexistent directory output missing expected text"
+    echo "not ok 4 - Nonexistent path output missing expected text"
     sed 's/^/# /' "$OUTPUT"
   fi
 fi
 
-# Test 5: Rejects output directory when it is a subdirectory of source
-if "$BIN" -o "$TEST_DIR/subdir" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 5 - Expected child output directory to be rejected"
+# Test 5: outside a git worktree caxton refuses to run
+PLAIN="$WORK/plain"
+mkdir -p "$PLAIN"
+printf 'hello\n' >"$PLAIN/a.md"
+if (cd "$PLAIN" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  echo "not ok 5 - Expected a non-repository directory to be refused"
 else
-  if grep -q "cannot be a subdirectory of source" "$OUTPUT"; then
-    echo "ok 5 - Rejects output directory that is inside source directory"
+  if grep -q "not inside a git worktree" "$OUTPUT"; then
+    echo "ok 5 - Refuses to run outside a git worktree"
   else
-    echo "not ok 5 - Subdirectory rejection output missing expected error"
+    echo "not ok 5 - Non-repository rejection missing expected error"
     sed 's/^/# /' "$OUTPUT"
   fi
 fi
 
-# Test 6: Rejects mutually exclusive -i and -o
-if "$BIN" -i -o "$DST_DIR" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 6 - Expected -i and -o combination to fail"
+# Test 6: PROMPT after a path option is consumed as a path, and caxton says so
+if (cd "$REPO" && "$BIN" --dry-run --read docs/ "audit this") >"$OUTPUT" 2>&1; then
+  echo "not ok 6 - Expected a prompt after --read to fail"
 else
-  if grep -qi "not allowed with argument" "$OUTPUT" || grep -qi "mutually exclusive" "$OUTPUT"; then
-    echo "ok 6 - Rejects mutually exclusive -i and -o"
+  if grep -q "PROMPT is required" "$OUTPUT" && grep -q "must come before" "$OUTPUT"; then
+    echo "ok 6 - Explains that PROMPT must precede the path options"
   else
-    echo "not ok 6 - Output missing mutual exclusion message"
+    echo "not ok 6 - Missing prompt was not explained"
     sed 's/^/# /' "$OUTPUT"
   fi
 fi
 
-# Test 7: Rejects an output directory equal to the source (silent in-place)
-if "$BIN" -o "$TEST_DIR" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 7 - Expected output directory equal to source to be rejected"
-else
-  if grep -q "is the source directory" "$OUTPUT"; then
-    echo "ok 7 - Rejects output directory identical to source"
+# Test 7: the default selection is the current directory, read-only, and a dry
+# run reports it without touching a single file
+BEFORE=$(snapshot "$REPO")
+if (cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  if grep -q "read-only (no files are modified)" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" == *"docs/guide.md R-I"* ]] &&
+    [[ "$(resolved "$OUTPUT")" != *W* ]] &&
+    [[ "$BEFORE" == "$(snapshot "$REPO")" ]]; then
+    echo "ok 7 - Defaults to a read-only selection of the current directory"
   else
-    echo "not ok 7 - Identical-directory rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 8: Rejects an output directory that is a parent of the source
-if "$BIN" -o "$WORK" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 8 - Expected parent output directory to be rejected"
-else
-  if grep -q "is a parent of source" "$OUTPUT"; then
-    echo "ok 8 - Rejects output directory that contains the source directory"
-  else
-    echo "not ok 8 - Parent-directory rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Prepare a git worktree with an uncommitted change
-REPO_DIR="$WORK/repo"
-mkdir -p "$REPO_DIR"
-(
-  cd "$REPO_DIR"
-  git init -q .
-  git config user.email "test@example.com"
-  git config user.name "Test"
-  git config commit.gpgsign false
-  echo "committed" >tracked.md
-  git add -A
-  git commit -q --no-gpg-sign -m "init"
-  echo "uncommitted" >>tracked.md
-) >/dev/null 2>&1
-
-# Test 9: Refuses an in-place run on a dirty git worktree
-if "$BIN" -i "prompt" "$REPO_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 9 - Expected in-place run on a dirty worktree to be refused"
-else
-  if grep -q "has uncommitted changes" "$OUTPUT"; then
-    echo "ok 9 - Refuses in-place transformation of a dirty git worktree"
-  else
-    echo "not ok 9 - Dirty worktree rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 10: --force overrides the dirty worktree guard (reaching the offline check)
-if CAXTON_OFFLINE=1 "$BIN" -i --force "prompt" "$REPO_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 10 - Expected offline rejection after passing the dirty guard"
-else
-  if grep -q "caxton: offline" "$OUTPUT"; then
-    echo "ok 10 - --force overrides the dirty worktree guard"
-  else
-    echo "not ok 10 - --force did not get past the dirty worktree guard"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Prepare a directory exercising gitignore, dotfiles and ignored build output
-DRY_DIR="$WORK/dry"
-mkdir -p "$DRY_DIR/.github" "$DRY_DIR/build" "$DRY_DIR/node_modules"
-printf 'build/\n*.log\n' >"$DRY_DIR/.gitignore"
-printf '# Doc\n' >"$DRY_DIR/doc.md"
-printf 'ci\n' >"$DRY_DIR/.github/ci.yml"
-printf 'junk\n' >"$DRY_DIR/build/out.md"
-printf 'noise\n' >"$DRY_DIR/debug.log"
-printf 'dep\n' >"$DRY_DIR/node_modules/dep.js"
-
-# Test 11: --dry-run reports the payload, exits 0, and changes nothing —
-# without a key, and even under an offline policy.
-DRY_BEFORE=$(snapshot "$DRY_DIR")
-if CAXTON_OFFLINE=1 "$BIN" --dry-run "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && grep -q "Resolved Files:" "$OUTPUT" &&
-    [[ "$DRY_BEFORE" == "$(snapshot "$DRY_DIR")" ]]; then
-    echo "ok 11 - Dry run prints a payload summary offline and changes nothing"
-  else
-    echo "not ok 11 - Dry run output incomplete or directory was modified"
+    echo "not ok 7 - Default selection was not read-only over the cwd"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 11 - Dry run exited non-zero"
+  echo "not ok 7 - Default dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 12: Context excludes gitignored and vendor paths but keeps dotfiles
-if "$BIN" --dry-run "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "doc.md" "$OUTPUT" && grep -q ".github/ci.yml" "$OUTPUT" &&
-    ! grep -q "build/out.md" "$OUTPUT" && ! grep -q "debug.log" "$OUTPUT" &&
-    ! grep -q "node_modules/dep.js" "$OUTPUT"; then
-    echo "ok 12 - Honors .gitignore and vendor dirs while keeping dotfiles visible"
+# Test 8: running from a subdirectory keeps repository-relative paths but
+# selects only the current directory
+if (cd "$REPO/docs" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  if grep -q "Repository:    $REPO" "$OUTPUT" && grep -q "docs/guide.md" "$OUTPUT" &&
+    ! grep -q "src/a.py" "$OUTPUT"; then
+    echo "ok 8 - Names paths from the repository root while selecting the cwd"
   else
-    echo "not ok 12 - Resolved file list did not match the expected filter"
+    echo "not ok 8 - Subdirectory run resolved the wrong namespace or selection"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 12 - Dry run exited non-zero"
+  echo "not ok 8 - Subdirectory dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 13: Read-only mode withholds the mutation tools; -i grants them
-"$BIN" --dry-run "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1 || true
+# Test 9: --edit grants write access and a creation root; --read does not
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/ --read src/) >"$OUTPUT" 2>&1; then
+  TAGS=$(resolved "$OUTPUT")
+  if [[ "$TAGS" == *"docs/guide.md RWI"* && "$TAGS" == *"src/a.py R-I"* ]] &&
+    grep -q "Creation Roots" "$OUTPUT" && grep -q "\[ W \]  docs/" "$OUTPUT"; then
+    echo "ok 9 - --edit is writable with a creation root, --read is not"
+  else
+    echo "not ok 9 - Access levels were not applied as expected"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 9 - Mixed --edit/--read dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 10: a more specific --read carves a file out of a writable directory
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/ --read docs/architecture.md) >"$OUTPUT" 2>&1; then
+  TAGS=$(resolved "$OUTPUT")
+  if [[ "$TAGS" == *"docs/guide.md RWI"* && "$TAGS" == *"docs/architecture.md R-I"* ]]; then
+    echo "ok 10 - The most specific selection wins, restriction breaking ties"
+  else
+    echo "not ok 10 - Carve-out did not take precedence over the directory"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 10 - Carve-out dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 11: --edit FILE authorizes that file only, with no creation root
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/guide.md) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "docs/guide.md RWI" ]] &&
+    ! grep -q "Creation Roots" "$OUTPUT"; then
+    echo "ok 11 - A file selection grants no authority to create siblings"
+  else
+    echo "not ok 11 - File selection granted more than the file"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 11 - File selection dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 12: unselected paths are invisible, not merely un-inlined
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --read docs/guide.md) >"$OUTPUT" 2>&1; then
+  if grep -q "docs/guide.md" "$OUTPUT" && ! grep -q "src/a.py" "$OUTPUT" &&
+    ! grep -q "docs/architecture.md" "$OUTPUT" && grep -q "Visible:       1 file" "$OUTPUT"; then
+    echo "ok 12 - Everything outside the selection is invisible"
+  else
+    echo "not ok 12 - Unselected paths leaked into the payload"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 12 - Narrow selection dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 13: mutation tools appear only when something is writable
+(cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1 || true
 RO_TOOLS=$(grep "Tools:" "$OUTPUT" || true)
-"$BIN" --dry-run -i "prompt" "$DRY_DIR" >"$OUTPUT" 2>&1 || true
+(cd "$REPO" && "$BIN" --dry-run "prompt" --edit docs/) >"$OUTPUT" 2>&1 || true
 RW_TOOLS=$(grep "Tools:" "$OUTPUT" || true)
 if [[ "$RO_TOOLS" != *write_file* && "$RO_TOOLS" != *delete_file* &&
   "$RW_TOOLS" == *write_file* && "$RW_TOOLS" == *delete_file* ]]; then
-  echo "ok 13 - Mutation tools are offered only in -i/-o modes"
+  echo "ok 13 - Mutation tools are offered only when --edit names something"
 else
   echo "not ok 13 - Unexpected tool surface"
   echo "# read-only: $RO_TOOLS"
-  echo "# in-place: $RW_TOOLS"
+  echo "# mutation:  $RW_TOOLS"
 fi
 
-# Test 14: a '-h' prompt after '--' is a prompt, not a help request, while a
-# genuine help flag elsewhere on the line still wins.
-if "$BIN" --dry-run -- -h "$DRY_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && ! grep -q "Arguments:" "$OUTPUT" &&
-    "$BIN" --model gemini-x -h 2>&1 | grep -q "Arguments:"; then
-    echo "ok 14 - Treats '-h' after '--' as the prompt, not as a help flag"
+# Test 14: git decides what is ignored, and dotfiles stay visible
+if (cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  if grep -q ".github/ci.yml" "$OUTPUT" && ! grep -q "build/out.md" "$OUTPUT" &&
+    ! grep -q "debug.log" "$OUTPUT"; then
+    echo "ok 14 - Honors .gitignore while keeping project dotfiles visible"
   else
-    echo "not ok 14 - Help flag detection misread the command line"
+    echo "not ok 14 - Resolved file list did not match the expected filter"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 14 - Run with a '-h' prompt exited non-zero"
+  echo "not ok 14 - Dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 15: an over-threshold dry run still reports the payload before failing,
-# so the caller can see which files blew the budget.
-BIG_DIR="$WORK/big"
-mkdir -p "$BIG_DIR"
-printf '# Small\n' >"$BIG_DIR/small.md"
-head -c 1200000 /dev/zero | tr '\0' 'a' >"$BIG_DIR/big.md"
-if "$BIN" --dry-run "prompt" "$BIG_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 15 - Expected an over-threshold dry run to exit non-zero"
-else
-  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && grep -q "big.md" "$OUTPUT" &&
-    grep -q "exceeds 1MB threshold" "$OUTPUT"; then
-    echo "ok 15 - Over-threshold dry run reports the payload before failing"
+# Test 15: a tracked path a vendor list would have hidden stays visible, because
+# git is the only authority on what is ignored
+VENDOR_REPO=$(make_repo vendor-repo)
+mkdir -p "$VENDOR_REPO/node_modules" "$VENDOR_REPO/dist"
+printf 'vendored\n' >"$VENDOR_REPO/node_modules/dep.js"
+printf 'built\n' >"$VENDOR_REPO/dist/app.js"
+commit_all "$VENDOR_REPO"
+if (cd "$VENDOR_REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  if grep -q "node_modules/dep.js" "$OUTPUT" && grep -q "dist/app.js" "$OUTPUT"; then
+    echo "ok 15 - Deliberately tracked vendor paths are not second-guessed"
   else
-    echo "not ok 15 - Over-threshold dry run did not report the payload"
+    echo "not ok 15 - A tracked path was hidden by a built-in vendor list"
     sed 's/^/# /' "$OUTPUT"
   fi
+else
+  echo "not ok 15 - Vendor fixture dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
 fi
 
-# Prepare a tree holding credential files a transformation must never read
-SECRET_DIR="$WORK/secrets"
-mkdir -p "$SECRET_DIR/.ssh" "$SECRET_DIR/.github"
-printf '# Readme\n' >"$SECRET_DIR/README.md"
-printf 'ci\n' >"$SECRET_DIR/.github/ci.yml"
-printf '//registry.npmjs.org/:_authToken=SECRET\n' >"$SECRET_DIR/.npmrc"
-printf 'machine example.com login me password hunter2\n' >"$SECRET_DIR/.netrc"
-printf 'KEYMATERIAL\n' >"$SECRET_DIR/.ssh/id_rsa"
-printf 'KEYMATERIAL\n' >"$SECRET_DIR/server.pem"
-
 # Test 16: credential paths are excluded from the payload but still reported
-if "$BIN" --dry-run "prompt" "$SECRET_DIR" >"$OUTPUT" 2>&1; then
+if (cd "$REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
   RESOLVED=$(sed -n '/^Resolved Files:/,/^Excluded/p' "$OUTPUT")
-  if [[ "$RESOLVED" == *README.md* && "$RESOLVED" == *.github/ci.yml* &&
-    "$RESOLVED" != *.npmrc* && "$RESOLVED" != *.netrc* &&
+  if [[ "$RESOLVED" == *.github/ci.yml* && "$RESOLVED" != *.env* &&
     "$RESOLVED" != *server.pem* && "$RESOLVED" != *id_rsa* ]] &&
     grep -q "Excluded (credential patterns" "$OUTPUT"; then
     echo "ok 16 - Excludes credential paths while keeping project dotfiles"
@@ -273,223 +301,333 @@ else
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 17: an unreadable file proves a dry run never opens file contents
-UNREADABLE_DIR="$WORK/unreadable"
-mkdir -p "$UNREADABLE_DIR"
-printf 'fine\n' >"$UNREADABLE_DIR/ok.md"
-printf 'private\n' >"$UNREADABLE_DIR/locked.md"
-chmod 000 "$UNREADABLE_DIR/locked.md"
-if "$BIN" --dry-run "prompt" "$UNREADABLE_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "locked.md" "$OUTPUT" && ! grep -q "failed to read" "$OUTPUT"; then
-    echo "ok 17 - Dry run reports metadata without reading file contents"
+# Test 17: a credential path named explicitly is a hard error, not a silent skip
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --read .env) >"$OUTPUT" 2>&1; then
+  echo "not ok 17 - Expected an explicit credential path to be refused"
+else
+  if grep -q "matches a credential pattern" "$OUTPUT"; then
+    echo "ok 17 - Refuses an explicitly named credential path"
   else
-    echo "not ok 17 - Dry run read file contents"
+    echo "not ok 17 - Explicit credential path was not reported"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 18: an explicitly named ignored file overrides the ignore rules
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --read build/out.md) >"$OUTPUT" 2>&1; then
+  if grep -q "build/out.md" "$OUTPUT" && grep -q "Explicit Overrides" "$OUTPUT"; then
+    echo "ok 18 - An explicitly named ignored path overrides the ignore rules"
+  else
+    echo "not ok 18 - Explicit ignored path was not admitted or not reported"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 17 - Dry run over an unreadable file exited non-zero"
+  echo "not ok 18 - Explicit ignored path dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
-chmod 644 "$UNREADABLE_DIR/locked.md"
 
-# Test 18: a FIFO in the tree neither hangs discovery nor reaches the payload
-FIFO_DIR="$WORK/fifo"
-mkdir -p "$FIFO_DIR"
-printf 'content\n' >"$FIFO_DIR/real.md"
-if mkfifo "$FIFO_DIR/pipe" 2>/dev/null; then
-  if "$BIN" --dry-run --timeout 10 "prompt" "$FIFO_DIR" >"$OUTPUT" 2>&1; then
-    if grep -q "real.md" "$OUTPUT" && ! grep -q "pipe" "$OUTPUT"; then
-      echo "ok 18 - Skips non-regular files instead of blocking on them"
+# Test 19: the same path arriving from a list is filtered normally
+if (cd "$REPO" && printf 'build/out.md\ndocs/guide.md\n' |
+  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
+  if grep -q "docs/guide.md" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" != *"build/out.md"* ]] &&
+    grep -q "Skipped (listed paths" "$OUTPUT"; then
+    echo "ok 19 - Listed paths are implicit and stay subject to ignore rules"
+  else
+    echo "not ok 19 - A listed ignored path was treated as explicit"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 19 - Path-list dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 20: a NUL-delimited list handles paths verbatim
+if (cd "$REPO" && printf 'docs/guide.md\0src/a.py\0' |
+  "$BIN" --dry-run "prompt" --read-from - --null) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT" | wc -l | tr -d ' ')" == "2" ]] &&
+    grep -q "docs/guide.md" "$OUTPUT" && grep -q "src/a.py" "$OUTPUT"; then
+    echo "ok 20 - Reads a NUL-delimited path list"
+  else
+    echo "not ok 20 - NUL-delimited list was not read correctly"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 20 - NUL-delimited dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 21: an explicitly empty path list selects nothing and exits 0
+if (cd "$REPO" && printf '' | "$BIN" --dry-run "prompt" --read-from - --null) >"$OUTPUT" 2>&1; then
+  if grep -q "path list is empty" "$OUTPUT" && ! grep -q "Resolved Files" "$OUTPUT"; then
+    echo "ok 21 - An empty path list is a selection of nothing, not of everything"
+  else
+    echo "not ok 21 - Empty path list did not stop the run"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 21 - Empty path list exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 22: an ignored path cannot be made writable, because git cannot restore it
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --edit build/out.md) >"$OUTPUT" 2>&1; then
+  echo "not ok 22 - Expected an ignored --edit path to be refused"
+else
+  if grep -q "ignored by git, which cannot restore them" "$OUTPUT"; then
+    echo "ok 22 - Refuses to make a git-ignored path writable"
+  else
+    echo "not ok 22 - Unrestorable path rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 23: --force accepts that risk
+if (cd "$REPO" && "$BIN" --dry-run --force "prompt" --edit build/out.md) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == *"build/out.md RWI"* ]]; then
+    echo "ok 23 - --force permits writing a path git cannot restore"
+  else
+    echo "not ok 23 - --force did not grant write access"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 23 - --force dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 24: a mutation run refuses a dirty worktree; a read-only run does not
+DIRTY=$(make_repo dirty)
+printf 'committed\n' >"$DIRTY/tracked.md"
+commit_all "$DIRTY"
+printf 'uncommitted\n' >>"$DIRTY/tracked.md"
+if (cd "$DIRTY" && "$BIN" "prompt" --edit tracked.md) >"$OUTPUT" 2>&1; then
+  echo "not ok 24 - Expected a mutation run on a dirty worktree to be refused"
+else
+  (cd "$DIRTY" && CAXTON_OFFLINE=1 "$BIN" "prompt") >"$WORK/dirty-read.out" 2>&1 || true
+  if grep -q "has uncommitted changes" "$OUTPUT" &&
+    grep -q "caxton: offline" "$WORK/dirty-read.out"; then
+    echo "ok 24 - Refuses a dirty worktree for mutation but not for reading"
+  else
+    echo "not ok 24 - Dirty worktree guard applied incorrectly"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 25: --force overrides the dirty worktree guard (reaching the offline check)
+if (cd "$DIRTY" && CAXTON_OFFLINE=1 "$BIN" --force "prompt" --edit tracked.md) >"$OUTPUT" 2>&1; then
+  echo "not ok 25 - Expected offline rejection after passing the dirty guard"
+else
+  if grep -q "caxton: offline" "$OUTPUT"; then
+    echo "ok 25 - --force overrides the dirty worktree guard"
+  else
+    echo "not ok 25 - --force did not get past the dirty worktree guard"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 26: --inline narrows the inlined set within the visible set
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --read . --inline docs/) >"$OUTPUT" 2>&1; then
+  TAGS=$(resolved "$OUTPUT")
+  if [[ "$TAGS" == *"docs/guide.md R-I"* && "$TAGS" == *"src/a.py R--"* ]] &&
+    grep -q "Inlined:       2 file" "$OUTPUT"; then
+    echo "ok 26 - --inline narrows the initial context without narrowing access"
+  else
+    echo "not ok 26 - --inline did not narrow the inlined set correctly"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 26 - --inline dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 27: --inline cannot widen access
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --read docs/ --inline src/a.py) >"$OUTPUT" 2>&1; then
+  echo "not ok 27 - Expected --inline outside the visible set to be refused"
+else
+  if grep -q "is not visible" "$OUTPUT" && grep -q "cannot widen access" "$OUTPUT"; then
+    echo "ok 27 - --inline is refused for a path that is not visible"
+  else
+    echo "not ok 27 - Out-of-scope --inline was not reported"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 28: --no-inline keeps the tree but sends no file contents
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --no-inline) >"$OUTPUT" 2>&1; then
+  if grep -q "Inlined:       nothing" "$OUTPUT" && grep -q "docs/guide.md" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" == *"docs/guide.md R--"* ]]; then
+    echo "ok 28 - --no-inline keeps files visible while inlining nothing"
+  else
+    echo "not ok 28 - --no-inline output was wrong"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 28 - --no-inline dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 29: an over-threshold dry run still reports the payload before failing
+BIG=$(make_repo big)
+printf '# Small\n' >"$BIG/small.md"
+head -c 1200000 /dev/zero | tr '\0' 'a' >"$BIG/big.md"
+commit_all "$BIG"
+if (cd "$BIG" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  echo "not ok 29 - Expected an over-threshold dry run to exit non-zero"
+else
+  if grep -q "Caxton Dry Run Summary" "$OUTPUT" && grep -q "big.md" "$OUTPUT" &&
+    grep -q "exceeds 1MB threshold" "$OUTPUT"; then
+    echo "ok 29 - Over-threshold dry run reports the payload before failing"
+  else
+    echo "not ok 29 - Over-threshold dry run did not report the payload"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 30: the threshold counts inlined bytes, so narrowing the inline set clears it
+if (cd "$BIG" && "$BIN" --dry-run "prompt" --read . --inline small.md) >"$OUTPUT" 2>&1; then
+  if ! grep -q "exceeds 1MB threshold" "$OUTPUT" && grep -q "big.md" "$OUTPUT"; then
+    echo "ok 30 - The context threshold counts only what is inlined"
+  else
+    echo "not ok 30 - Threshold was applied to the visible set, not the inlined set"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 30 - Narrowed-inline dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 31: symlinks are excluded, and naming one explicitly is an error
+SYMLINK_REPO=$(make_repo symlinks)
+OUTSIDE="$WORK/outside"
+mkdir -p "$OUTSIDE/docs"
+printf 'outside\n' >"$OUTSIDE/docs/outside.md"
+printf 'safe\n' >"$SYMLINK_REPO/real.md"
+ln -s "real.md" "$SYMLINK_REPO/inside-link.md"
+ln -s "$OUTSIDE/docs" "$SYMLINK_REPO/outside-dir"
+commit_all "$SYMLINK_REPO"
+if (cd "$SYMLINK_REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  if grep -q "real.md" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" != *"inside-link.md"* ]] &&
+    grep -q "Excluded (symlinks, never followed)" "$OUTPUT" &&
+    ! (cd "$SYMLINK_REPO" && "$BIN" --dry-run "prompt" --read inside-link.md >/dev/null 2>&1); then
+    echo "ok 31 - Excludes symlinks and refuses to select one explicitly"
+  else
+    echo "not ok 31 - Symlink handling was wrong"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 31 - Dry run over a tree containing symlinks failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 32: a FIFO neither hangs discovery nor reaches the payload
+FIFO_REPO=$(make_repo fifo)
+printf 'content\n' >"$FIFO_REPO/real.md"
+commit_all "$FIFO_REPO"
+if mkfifo "$FIFO_REPO/pipe" 2>/dev/null; then
+  if (cd "$FIFO_REPO" && "$BIN" --dry-run --timeout 10 "prompt") >"$OUTPUT" 2>&1; then
+    if grep -q "real.md" "$OUTPUT" && [[ "$(resolved "$OUTPUT")" != *pipe* ]]; then
+      echo "ok 32 - Skips non-regular files instead of blocking on them"
     else
-      echo "not ok 18 - FIFO handling was wrong"
+      echo "not ok 32 - FIFO handling was wrong"
       sed 's/^/# /' "$OUTPUT"
     fi
   else
-    echo "not ok 18 - Dry run over a tree containing a FIFO failed"
+    echo "not ok 32 - Dry run over a tree containing a FIFO failed"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "ok 18 # SKIP mkfifo not available"
+  echo "ok 32 # SKIP mkfifo not available"
 fi
 
-# Test 19: a non-empty -o destination is rejected, an absent one accepted
-mkdir -p "$WORK/stale-dst"
-printf 'leftover\n' >"$WORK/stale-dst/leftover.md"
-if "$BIN" -o "$WORK/stale-dst" "prompt" "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 19 - Expected a non-empty output directory to be rejected"
+# Test 33: a submodule is refused rather than half-managed
+SUB_PARENT=$(make_repo submodule-parent)
+printf 'top\n' >"$SUB_PARENT/top.md"
+mkdir -p "$SUB_PARENT/vendor/lib"
+(cd "$SUB_PARENT/vendor/lib" && git init -q . &&
+  git config core.excludesFile /dev/null) >/dev/null 2>&1
+printf 'inner\n' >"$SUB_PARENT/vendor/lib/inner.md"
+if (cd "$SUB_PARENT" && "$BIN" --dry-run "prompt" --read vendor/lib) >"$OUTPUT" 2>&1; then
+  echo "not ok 33 - Expected a submodule path to be refused"
 else
-  if grep -q "is not empty" "$OUTPUT"; then
-    echo "ok 19 - Rejects an output directory that already holds files"
+  if grep -q "is a submodule" "$OUTPUT"; then
+    echo "ok 33 - Refuses a submodule path and says where to run instead"
   else
-    echo "not ok 19 - Non-empty destination rejection missing expected error"
+    echo "not ok 33 - Submodule rejection missing expected error"
     sed 's/^/# /' "$OUTPUT"
   fi
 fi
 
-# Test 20: offline policy is refused before the source tree is traversed
-if CAXTON_OFFLINE=1 "$BIN" "prompt" "$WORK/unreadable" >"$OUTPUT" 2>&1; then
-  echo "not ok 20 - Expected an offline run to be refused"
-else
-  # Traversal would have emitted the inline banner before failing.
-  if grep -q "caxton: offline" "$OUTPUT" && ! grep -q "Inlined" "$OUTPUT"; then
-    echo "ok 20 - Refuses an offline run before traversing the source"
+# Test 34: negated, anchored and nested ignore rules follow git exactly
+GI=$(make_repo gitignore-repo)
+mkdir -p "$GI/sub" "$GI/docs"
+printf '*.log\n!important.log\n/root-only.txt\n' >"$GI/.gitignore"
+printf 'nested-secret.md\n' >"$GI/sub/.gitignore"
+touch "$GI/important.log" "$GI/noise.log" "$GI/root-only.txt" \
+  "$GI/sub/root-only.txt" "$GI/sub/nested-secret.md" \
+  "$GI/sub/keep.md" "$GI/docs/a.md"
+if (cd "$GI" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  EXPECTED=$(git -C "$GI" ls-files --cached --others --exclude-standard | sort)
+  ACTUAL=$(resolved "$OUTPUT" | cut -d' ' -f1 | sort)
+  if [[ "$EXPECTED" == "$ACTUAL" ]]; then
+    echo "ok 34 - Ignore filtering matches git exactly"
   else
-    echo "not ok 20 - Offline rejection happened after traversal"
+    echo "not ok 34 - Ignore filtering diverged from git"
+    diff <(echo "$EXPECTED") <(echo "$ACTUAL") | sed 's/^/# /'
+  fi
+else
+  echo "not ok 34 - Dry run over the gitignore fixture exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 35: a selection that resolves to nothing is an error, not an empty run
+EMPTY=$(make_repo all-ignored)
+printf '*\n' >"$EMPTY/.gitignore"
+printf 'ignored\n' >"$EMPTY/thing.md"
+if (cd "$EMPTY" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  echo "not ok 35 - Expected an empty payload to be rejected"
+else
+  if grep -q "no files to work with" "$OUTPUT"; then
+    echo "ok 35 - Refuses to run when the selection leaves no files"
+  else
+    echo "not ok 35 - Empty payload rejection missing expected error"
     sed 's/^/# /' "$OUTPUT"
   fi
 fi
 
-# Test 21: a closed stdout exits cleanly instead of dumping a traceback. Two
+# Test 36: a closed stdout exits cleanly instead of dumping a traceback. Two
 # distinct paths: a large listing raises inside the write, while a small one is
 # buffered and only fails at the interpreter's final flush. PYTHONUNBUFFERED
 # would hide the second, so it is cleared for both.
-PIPE_DIR="$WORK/pipe-src"
-mkdir -p "$PIPE_DIR"
-(cd "$PIPE_DIR" && touch file{0001..4000}.md)
-SMALL_DIR="$WORK/pipe-small"
-mkdir -p "$SMALL_DIR"
-printf 'x\n' >"$SMALL_DIR/only.md"
+PIPE_REPO=$(make_repo pipe-src)
+(cd "$PIPE_REPO" && touch file{0001..4000}.md)
+SMALL_REPO=$(make_repo pipe-small)
+printf 'x\n' >"$SMALL_REPO/only.md"
 
 # pipefail would turn the expected SIGPIPE exit into an errexit abort.
 set +o pipefail
-env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" "$PIPE_DIR" \
-  2>"$WORK/pipe.err" | head -2 >/dev/null
+(cd "$PIPE_REPO" && env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" \
+  2>"$WORK/pipe.err") | head -2 >/dev/null
 LARGE_STATUS=${PIPESTATUS[0]}
 # 'true' never reads, so the whole (small) payload is still buffered when the
 # reader goes away.
-env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" "$SMALL_DIR" \
-  2>"$WORK/pipe-small.err" | true
+(cd "$SMALL_REPO" && env -u PYTHONUNBUFFERED "$BIN" --dry-run "prompt" \
+  2>"$WORK/pipe-small.err") | true
 SMALL_STATUS=${PIPESTATUS[0]}
 set -o pipefail
 if [[ "$LARGE_STATUS" -eq 141 && "$SMALL_STATUS" -eq 141 ]] &&
   ! grep -q "Exception ignored" "$WORK/pipe.err" "$WORK/pipe-small.err"; then
-  echo "ok 21 - Exits 141 without a traceback when stdout closes early"
+  echo "ok 36 - Exits 141 without a traceback when stdout closes early"
 else
-  echo "not ok 21 - Broken pipe mishandled (large=$LARGE_STATUS small=$SMALL_STATUS)"
+  echo "not ok 36 - Broken pipe mishandled (large=$LARGE_STATUS small=$SMALL_STATUS)"
   sed 's/^/# /' "$WORK/pipe.err" "$WORK/pipe-small.err"
 fi
 
-# A repository exercising gitignore features the old matcher got wrong:
-# negation, anchored rules and a nested .gitignore.
-GI_DIR="$WORK/gitignore-repo"
-mkdir -p "$GI_DIR/sub" "$GI_DIR/docs"
-printf '*.log\n!important.log\n/root-only.txt\n' >"$GI_DIR/.gitignore"
-printf 'nested-secret.md\n' >"$GI_DIR/sub/.gitignore"
-touch "$GI_DIR/important.log" "$GI_DIR/noise.log" "$GI_DIR/root-only.txt" \
-  "$GI_DIR/sub/root-only.txt" "$GI_DIR/sub/nested-secret.md" \
-  "$GI_DIR/sub/keep.md" "$GI_DIR/docs/a.md"
-(
-  cd "$GI_DIR"
-  git init -q .
-  git config user.email "test@example.com"
-  git config user.name "Test"
-) >/dev/null 2>&1
-
-# Test 22: the resolved file list matches 'git ls-files' exactly
-if "$BIN" --dry-run "prompt" "$GI_DIR" >"$OUTPUT" 2>&1; then
-  EXPECTED=$(git -C "$GI_DIR" ls-files --cached --others --exclude-standard | sort)
-  ACTUAL=$(sed -n 's/^  \[TEXT\]  \(.*\) (.*)$/\1/p;s/^  \[BIN \]  \(.*\) (.*)$/\1/p' "$OUTPUT" | sort)
-  if [[ "$EXPECTED" == "$ACTUAL" ]]; then
-    echo "ok 22 - Ignore filtering matches git exactly"
-  else
-    echo "not ok 22 - Ignore filtering diverged from git"
-    diff <(echo "$EXPECTED") <(echo "$ACTUAL") | sed 's/^/# /'
-  fi
-else
-  echo "not ok 22 - Dry run over the gitignore fixture exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 23: negated and anchored patterns specifically
-if "$BIN" --dry-run "prompt" "$GI_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "important.log" "$OUTPUT" && ! grep -q "noise.log" "$OUTPUT" &&
-    ! grep -qE '^  \[[A-Z ]+\]  root-only.txt' "$OUTPUT" &&
-    grep -q "sub/root-only.txt" "$OUTPUT" &&
-    ! grep -q "nested-secret.md" "$OUTPUT"; then
-    echo "ok 23 - Honors negation, anchoring and nested .gitignore files"
-  else
-    echo "not ok 23 - gitignore semantics were not honored"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 23 - Dry run over the gitignore fixture exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Test 24: an in-place run fails closed when git cannot answer
-BROKEN_DIR="$WORK/broken-repo"
-mkdir -p "$BROKEN_DIR"
-printf 'content\n' >"$BROKEN_DIR/a.md"
-printf 'gitdir: /nonexistent-caxton-test\n' >"$BROKEN_DIR/.git"
-if "$BIN" -i "prompt" "$BROKEN_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 24 - Expected an unverifiable worktree to be refused"
-else
-  if grep -q "cannot determine whether" "$OUTPUT"; then
-    echo "ok 24 - Fails closed when git cannot report the worktree state"
-  else
-    echo "not ok 24 - Unverifiable worktree was not reported as such"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 25: a directory left with nothing to send is an error, not an empty run
-EMPTY_DIR="$WORK/all-ignored"
-mkdir -p "$EMPTY_DIR"
-printf '*\n' >"$EMPTY_DIR/.gitignore"
-printf 'ignored\n' >"$EMPTY_DIR/thing.md"
-(
-  cd "$EMPTY_DIR"
-  git init -q .
-) >/dev/null 2>&1
-if "$BIN" --dry-run "prompt" "$EMPTY_DIR" >"$OUTPUT" 2>&1; then
-  echo "not ok 25 - Expected an empty payload to be rejected"
-else
-  if grep -q "no files to work with" "$OUTPUT"; then
-    echo "ok 25 - Refuses to run when the filter leaves no files"
-  else
-    echo "not ok 25 - Empty payload rejection missing expected error"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 25: a repository git cannot read must not fall back to the simple
-# matcher, which would re-admit files a nested .gitignore excludes.
-UNREADABLE_REPO="$WORK/unreadable-repo"
-mkdir -p "$UNREADABLE_REPO/sub"
-printf 'gitdir: /nonexistent-caxton-test\n' >"$UNREADABLE_REPO/.git"
-printf 'nested-secret.md\n' >"$UNREADABLE_REPO/sub/.gitignore"
-printf 'TOKEN=abc123\n' >"$UNREADABLE_REPO/sub/nested-secret.md"
-printf 'fine\n' >"$UNREADABLE_REPO/a.md"
-if "$BIN" --dry-run "prompt" "$UNREADABLE_REPO" >"$OUTPUT" 2>&1; then
-  echo "not ok 26 - Expected an unreadable repository to abort"
-else
-  if grep -q "cannot list the files git ignores" "$OUTPUT" &&
-    ! grep -q "nested-secret.md" "$OUTPUT"; then
-    echo "ok 26 - Aborts rather than guessing when git cannot list ignored files"
-  else
-    echo "not ok 26 - Unreadable repository did not abort cleanly"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-fi
-
-# Test 26: --force downgrades that abort to the simple matcher, and says so
-if "$BIN" --dry-run --force "prompt" "$UNREADABLE_REPO" >"$OUTPUT" 2>&1; then
-  if grep -q "falling back to the simple" "$OUTPUT" && grep -q "a.md" "$OUTPUT"; then
-    echo "ok 27 - --force falls back to the simple matcher with a warning"
-  else
-    echo "not ok 27 - --force fallback did not warn or produced no files"
-    sed 's/^/# /' "$OUTPUT"
-  fi
-else
-  echo "not ok 27 - --force over an unreadable repository exited non-zero"
-  sed 's/^/# /' "$OUTPUT"
-fi
-
-# Unit checks against caxton's helpers. The google imports are stripped so the
-# helpers load with no third-party dependencies, but the file still needs the
-# Python version caxton declares: the system python3 is 3.9 on macOS, which
-# cannot even parse its "X | None" annotations. Run it through uv, as the
-# script itself is run.
+# Unit checks against caxton's helpers and its capability policy. The google
+# imports are stripped so the helpers load with no third-party dependencies,
+# but the file still needs the Python version caxton declares: the system
+# python3 is 3.9 on macOS, which cannot even parse its "X | None" annotations.
+# Run it through uv, as the script itself is run.
 UNIT_OUT="$WORK/unit.out"
 cat >"$WORK/unit.py" <<'PYEOF'
 # /// script
@@ -578,30 +716,100 @@ except OSError:
     read_blocked = True
 report("reject-symlinks", entries_ok and read_blocked)
 
-# Ignore rules: dotfiles visible, vendor and VCS directories hidden
-ignored = cx["is_path_ignored"]
-cases = {
+# Credential rules: reading is refused broadly, creation only in credential
+# directories, so '.env.example' stays writable while '.ssh/config' does not.
+secret = cx["is_secret_path"]
+secret_dir = cx["is_secret_dir_path"]
+secret_cases = {
     ".github/ci.yml": False,
     ".gitignore": False,
-    ".git/config": True,
-    "node_modules/dep.js": True,
-    ".DS_Store": True,
+    ".env": True,
+    ".env.example": True,
+    ".ssh/config": True,
     "src/a.py": False,
 }
 wrong = [
-    rel for rel, want in cases.items() if ignored(root / rel, root, []) is not want
+    rel for rel, want in secret_cases.items() if secret(root / rel, root) is not want
 ]
-report("ignore-rules", not wrong, "; ".join(wrong))
+create_cases = {".env.example": False, ".ssh/config": True, "docs/a.md": False}
+wrong += [
+    rel
+    for rel, want in create_cases.items()
+    if secret_dir(root / rel, root) is not want
+]
+report("credential-rules", not wrong, "; ".join(wrong))
 
-# Help detection skips option values and stops at '--'
+# The policy answers every access question, including for paths created mid-run
+Policy = cx["Policy"]
+policy = Policy(
+    root,
+    visible={"docs/guide.md", "docs/arch.md", "src/a.py"},
+    writable={"docs/guide.md"},
+    dir_selectors={"docs": "edit"},
+    inlined=["docs/guide.md"],
+)
+policy_wrong = []
+if not policy.is_visible("src/a.py"):
+    policy_wrong.append("selected file not visible")
+if policy.is_visible("secret.txt"):
+    policy_wrong.append("unselected file visible")
+if policy.is_writable("docs/arch.md"):
+    policy_wrong.append("carve-out is writable")
+if not policy.can_create("docs/new.md"):
+    policy_wrong.append("cannot create under a writable directory")
+if policy.can_create("src/new.py"):
+    policy_wrong.append("can create outside a writable directory")
+# A read carve-out inside a writable directory must block creation too.
+carved = Policy(
+    root,
+    visible={"docs/guide.md", "docs/private/secret.md"},
+    writable={"docs/guide.md"},
+    dir_selectors={"docs": "edit", "docs/private": "read"},
+    inlined=[],
+)
+if not carved.can_create("docs/new.md"):
+    policy_wrong.append("cannot create beside a carve-out")
+if carved.can_create("docs/private/new.md") or carved.can_create("docs/private/a/b.md"):
+    policy_wrong.append("can create inside a read-only carve-out")
+policy.note_created("docs/new.md")
+if not (policy.is_visible("docs/new.md") and policy.is_writable("docs/new.md")):
+    policy_wrong.append("created file is not readable back")
+policy.note_deleted("docs/guide.md")
+if policy.is_visible("docs/guide.md") or policy.is_writable("docs/guide.md"):
+    policy_wrong.append("deleted file still in scope")
+if not policy.is_visible_dir("docs"):
+    policy_wrong.append("directory holding visible files is not listable")
+report("policy", not policy_wrong, "; ".join(policy_wrong))
+
+# An unanswerable check-ignore is indeterminate, not "not ignored": a creation
+# that cannot be classified must be refused rather than assumed restorable.
+broken = root / "not-a-repo"
+broken.mkdir(exist_ok=True)
+report("check-ignore-closed", cx["git_ignored_subset"](broken, ["a.md"]) is None)
+
+# NUL-delimited lists are verbatim; line-delimited lists only lose the newline
+list_wrong = []
+nul = root / "list.nul"
+nul.write_bytes(b"trailing.md\n\0\nleading.md\0")
+if cx["read_path_list"](str(nul), True, "caxton") != ["trailing.md\n", "\nleading.md"]:
+    list_wrong.append("NUL list mangled a newline")
+lines = root / "list.txt"
+lines.write_text("a.md\r\nb.md\n")
+if cx["read_path_list"](str(lines), False, "caxton") != ["a.md", "b.md"]:
+    list_wrong.append("line list mishandled CRLF")
+report("path-lists", not list_wrong, "; ".join(list_wrong))
+
+# Help detection skips single values and whole path lists, and stops at '--'
 wants_help = cx["wants_help"]
 help_cases = {
     ("-h",): True,
     ("--help",): True,
-    ("-i", "prompt", "--help"): True,
+    ("prompt", "--edit", "docs/", "--help"): True,
     ("--model", "-h", "prompt"): False,
+    ("--read", "-h"): False,
+    ("--read", "a.md", "b.md", "-h"): False,
     ("--", "-h"): False,
-    ("prompt", "."): False,
+    ("prompt",): False,
 }
 bad = [str(a) for a, want in help_cases.items() if wants_help(list(a)) is not want]
 report("wants-help", not bad, "; ".join(bad))
@@ -619,109 +827,440 @@ unit_check() {
   fi
 }
 
-unit_check sandbox-escape 28 "Blocks path traversal, absolute paths and escaping symlinks"
-unit_check sandbox-inside 29 "Resolves in-sandbox paths and follows in-sandbox symlinks"
-unit_check preserve-mode 30 "Preserves permission bits when rewriting a file"
-unit_check preserve-crlf 31 "Preserves CRLF line endings when rewriting a file"
-unit_check refuse-non-utf8 32 "Refuses to mutate non-UTF-8 files but still reads them"
-unit_check ignore-rules 33 "Ignores vendor and VCS paths without hiding dotfiles"
-unit_check wants-help 34 "Detects help flags without misreading option values"
-unit_check reject-symlinks 35 "Rejects symlinks during discovery and direct reads"
+unit_check sandbox-escape 37 "Blocks path traversal, absolute paths and escaping symlinks"
+unit_check sandbox-inside 38 "Resolves in-sandbox paths and follows in-sandbox symlinks"
+unit_check preserve-mode 39 "Preserves permission bits when rewriting a file"
+unit_check preserve-crlf 40 "Preserves CRLF line endings when rewriting a file"
+unit_check refuse-non-utf8 41 "Refuses to mutate non-UTF-8 files but still reads them"
+unit_check reject-symlinks 42 "Rejects symlinks during discovery and direct reads"
+unit_check credential-rules 43 "Blocks credential reads without blocking ordinary creates"
+unit_check policy 44 "Enforces visibility, writability, creation roots and created files"
+unit_check check-ignore-closed 45 "Reports an unanswerable check-ignore as indeterminate"
+unit_check path-lists 46 "Reads NUL lists verbatim and line lists without their newline"
 
-# Symlinks to files and directories never enter the resolved payload, whether
-# their targets are inside or outside the source tree.
-SYMLINK_DIR="$WORK/symlink-tree"
-SYMLINK_OUTSIDE="$WORK/symlink-outside"
-mkdir -p "$SYMLINK_DIR" "$SYMLINK_OUTSIDE/docs"
-printf 'safe\n' >"$SYMLINK_DIR/real.md"
-printf 'outside\n' >"$SYMLINK_OUTSIDE/outside.md"
-printf 'outside dir\n' >"$SYMLINK_OUTSIDE/docs/outside.md"
-ln -s "real.md" "$SYMLINK_DIR/inside-link.md"
-ln -s "$SYMLINK_OUTSIDE/outside.md" "$SYMLINK_DIR/outside-link.md"
-ln -s "$SYMLINK_OUTSIDE/docs" "$SYMLINK_DIR/outside-dir"
-if "$BIN" --dry-run "prompt" "$SYMLINK_DIR" >"$OUTPUT" 2>&1; then
-  RESOLVED=$(sed -n '/^Resolved Files:/,/^Excluded/p' "$OUTPUT")
-  if [[ "$RESOLVED" == *real.md* && "$RESOLVED" != *inside-link.md* &&
-    "$RESOLVED" != *outside-link.md* && "$RESOLVED" != *outside-dir* ]] &&
+# Test 47: a selector reached through a symlinked ancestor is refused, whether
+# or not its final component is an ordinary file. lstat and O_NOFOLLOW resolve
+# leading components, so admitting one would read a file outside the repository.
+ESCAPE_OUTSIDE="$WORK/escape-outside"
+mkdir -p "$ESCAPE_OUTSIDE"
+printf 'OUTSIDE-CONTENT\n' >"$ESCAPE_OUTSIDE/notes.txt"
+ESCAPE_REPO=$(make_repo escape)
+printf 'inside\n' >"$ESCAPE_REPO/real.md"
+ln -s "$ESCAPE_OUTSIDE" "$ESCAPE_REPO/alias"
+commit_all "$ESCAPE_REPO"
+if (cd "$ESCAPE_REPO" && "$BIN" --dry-run "prompt" --read alias/notes.txt) >"$OUTPUT" 2>&1; then
+  echo "not ok 47 - Expected a path through a symlinked ancestor to be refused"
+else
+  if grep -q "reached through 'alias'" "$OUTPUT"; then
+    echo "ok 47 - Refuses a selector that traverses a symlinked ancestor"
+  else
+    echo "not ok 47 - Symlinked-ancestor rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 48: the same path arriving from a list is skipped, not admitted
+if (cd "$ESCAPE_REPO" && printf 'alias/notes.txt\nreal.md\n' |
+  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "real.md R-I" ]] &&
     grep -q "Excluded (symlinks, never followed)" "$OUTPUT"; then
-    echo "ok 36 - Excludes file and directory symlinks from the payload"
+    echo "ok 48 - Drops a listed path that traverses a symlinked ancestor"
   else
-    echo "not ok 36 - Symlink paths reached the resolved payload"
+    echo "not ok 48 - A listed path escaped the repository through a symlink"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 36 - Dry run over a tree containing symlinks failed"
+  echo "not ok 48 - Symlinked-ancestor list dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Live API tests require GEMINI_API_KEY
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "ok 37 # SKIP GEMINI_API_KEY not set"
-  echo "ok 38 # SKIP GEMINI_API_KEY not set"
-  echo "ok 39 # SKIP GEMINI_API_KEY not set"
-  exit 0
-fi
-
-# Prepare test files in $TEST_DIR
-cat <<'EOF' >"$TEST_DIR/doc1.md"
-# Document 1
-This is the ALPHA version of the document.
-Status: ALPHA testing.
-EOF
-
-cat <<'EOF' >"$TEST_DIR/doc2.md"
-# Document 2
-ALPHA release notes.
-Feature: ALPHA mode enabled.
-EOF
-
-printf 'outside tree\n' >"$WORK/outside-tree.md"
-ln -s "doc1.md" "$TEST_DIR/inside-link.md"
-ln -s "$WORK/outside-tree.md" "$TEST_DIR/outside-link.md"
-
-# Use fast and cheap flash-lite model with low thinking for rapid test execution
-TEST_MODEL="${TEST_MODEL:-gemini-3.5-flash-lite}"
-
-# Test 22: Live in-place transformation with -i
-if "$BIN" --model "$TEST_MODEL" --thinking low -i "Replace every occurrence of 'ALPHA' with 'BETA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "BETA" "$TEST_DIR/doc2.md" && ! grep -q "ALPHA" "$TEST_DIR/doc1.md"; then
-    echo "ok 37 - In-place transformation successfully modified files"
+# Test 49: a read carve-out inside a writable directory blocks creation there
+CARVE=$(make_repo carve)
+mkdir -p "$CARVE/docs/private"
+printf 'guide\n' >"$CARVE/docs/guide.md"
+printf 'secret\n' >"$CARVE/docs/private/secret.md"
+commit_all "$CARVE"
+if (cd "$CARVE" && "$BIN" --dry-run "prompt" --edit docs/ --read docs/private/) >"$OUTPUT" 2>&1; then
+  if grep -q "\[ W \]  docs/" "$OUTPUT" &&
+    grep -q "\[ R \]  docs/private/ (read-only; no new files here)" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" == *"docs/private/secret.md R-I"* ]]; then
+    echo "ok 49 - A read carve-out is reported as accepting no new files"
   else
-    echo "not ok 37 - Files did not contain expected replacements"
+    echo "not ok 49 - Creation carve-out was not reported"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 37 - Live in-place transformation failed"
+  echo "not ok 49 - Carve-out dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 23: Safe copy transformation with -o
-rm -rf "$DST_DIR"
-if "$BIN" --model "$TEST_MODEL" --thinking low -o "$DST_DIR" "Replace every occurrence of 'BETA' with 'GAMMA' across all files." "$TEST_DIR" >"$OUTPUT" 2>&1; then
-  if grep -q "BETA" "$TEST_DIR/doc1.md" && grep -q "GAMMA" "$DST_DIR/doc1.md" &&
-    ! grep -q "BETA" "$DST_DIR/doc1.md" &&
-    [[ ! -e "$DST_DIR/inside-link.md" && ! -L "$DST_DIR/inside-link.md" &&
-      ! -e "$DST_DIR/outside-link.md" && ! -L "$DST_DIR/outside-link.md" ]]; then
-    echo "ok 38 - Copy transformation excluded symlinks and left source intact"
+# Test 50: NUL-delimited lists keep filenames verbatim. A name ending in a
+# newline is the case NUL delimiters exist for, and the one that stripping
+# silently turns into a different (nonexistent) path.
+NL_REPO=$(make_repo newline-names)
+NL_NAME=$'trail.md\n'
+printf 'plain\n' >"$NL_REPO/plain.md"
+if printf 'odd\n' >"$NL_REPO/$NL_NAME" 2>/dev/null && [[ -f "$NL_REPO/$NL_NAME" ]]; then
+  commit_all "$NL_REPO"
+  if (cd "$NL_REPO" && git ls-files -z |
+    "$BIN" --dry-run "prompt" --read-from - --null) >"$OUTPUT" 2>&1; then
+    if grep -q "Visible:       2 file" "$OUTPUT" &&
+      ! grep -q "Skipped (listed paths" "$OUTPUT"; then
+      echo "ok 50 - A NUL-delimited list preserves newlines inside filenames"
+    else
+      echo "not ok 50 - A filename ending in a newline was mangled"
+      sed 's/^/# /' "$OUTPUT"
+    fi
   else
-    echo "not ok 38 - Copy mode failed validation"
+    echo "not ok 50 - NUL-delimited newline dry run exited non-zero"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 38 - Copy transformation failed"
+  echo "ok 50 # SKIP filesystem rejects newlines in filenames"
+fi
+
+# A repository whose ignored directory holds a force-tracked file: git declines
+# to call such a directory ignored, which is the case that used to slip through.
+FORCED=$(make_repo forced)
+mkdir -p "$FORCED/build" "$FORCED/empty-build" "$FORCED/docs"
+printf 'build/\nempty-build/\n' >"$FORCED/.gitignore"
+printf 'kept\n' >"$FORCED/build/tracked.md"
+printf 'sibling\n' >"$FORCED/build/sibling.md"
+printf 'doc\n' >"$FORCED/docs/a.md"
+printf 'top\n' >"$FORCED/top.md"
+(
+  cd "$FORCED"
+  git add -A
+  git add -f build/tracked.md
+  git commit -q --no-gpg-sign -m init
+) >/dev/null 2>&1
+
+# Test 51: naming an ignored directory admits its ignored files too, even when
+# a force-tracked descendant makes git report the directory as not ignored
+if (cd "$FORCED" && "$BIN" --dry-run "prompt" --read build/) >"$OUTPUT" 2>&1; then
+  TAGS=$(resolved "$OUTPUT")
+  if [[ "$TAGS" == *"build/sibling.md R-I"* && "$TAGS" == *"build/tracked.md R-I"* ]]; then
+    echo "ok 51 - An explicit ignored directory admits ignored and tracked files alike"
+  else
+    echo "not ok 51 - Ignored siblings were hidden beside a force-tracked file"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 51 - Explicit ignored directory dry run exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 24: Safe read-only audit mode (default) answers without touching files
-BEFORE=$(snapshot "$DST_DIR")
-if RESPONSE=$("$BIN" --model "$TEST_MODEL" --thinking low "Count the exact number of times the word 'GAMMA' appears across all files in this directory. State the count clearly in your report." "$DST_DIR" 2>"$OUTPUT"); then
-  if echo "$RESPONSE" | grep -Eq "4|four" && [[ "$BEFORE" == "$(snapshot "$DST_DIR")" ]]; then
-    echo "ok 39 - Safe read-only default counted occurrences and modified nothing"
+# Test 52: naming it with --edit rejects the unrestorable files rather than
+# silently narrowing the selection to the tracked one
+if (cd "$FORCED" && "$BIN" --dry-run "prompt" --edit build/) >"$OUTPUT" 2>&1; then
+  echo "not ok 52 - Expected the ignored contents of build/ to be refused"
+else
+  if grep -q "ignored by git, which cannot restore them" "$OUTPUT" &&
+    grep -q "build/sibling.md" "$OUTPUT"; then
+    echo "ok 52 - Refuses an ignored directory's files instead of narrowing scope"
   else
-    echo "not ok 39 - Read-only mode returned unexpected summary or modified files: $RESPONSE"
+    echo "not ok 52 - Unrestorable rejection did not name the ignored sibling"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 53: an ignored directory is not a usable creation root either, even when
+# it is empty and nothing lands in the unrestorable file list
+if (cd "$FORCED" && "$BIN" --dry-run "prompt" --edit empty-build/) >"$OUTPUT" 2>&1; then
+  echo "not ok 53 - Expected an ignored creation root to be refused"
+else
+  if grep -q "ignored by git, which cannot restore them" "$OUTPUT" &&
+    grep -q "empty-build/" "$OUTPUT"; then
+    echo "ok 53 - Refuses a creation root whose every creation would be rejected"
+  else
+    echo "not ok 53 - Ignored creation root was advertised rather than refused"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 54: a filename containing a carriage return survives the git listing and
+# a NUL path list. Text-mode reads translate it to a newline, which points at a
+# path that does not exist, so the file silently vanishes.
+CR_REPO=$(make_repo carriage)
+CR_NAME=$'carriage\r.md'
+printf 'plain\n' >"$CR_REPO/plain.md"
+if printf 'cr\n' >"$CR_REPO/$CR_NAME" 2>/dev/null && [[ -f "$CR_REPO/$CR_NAME" ]]; then
+  commit_all "$CR_REPO"
+  (cd "$CR_REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1 || true
+  (cd "$CR_REPO" && printf 'carriage\r.md\0' |
+    "$BIN" --dry-run "prompt" --read-from - --null) >"$WORK/cr-list.out" 2>&1 || true
+  if grep -q "Visible:       2 file" "$OUTPUT" &&
+    grep -q "Visible:       1 file" "$WORK/cr-list.out" &&
+    ! grep -q "Skipped (listed paths" "$WORK/cr-list.out"; then
+    echo "ok 54 - A carriage return in a filename survives git output and path lists"
+  else
+    echo "not ok 54 - A filename containing a carriage return was rewritten"
+    sed 's/^/# /' "$OUTPUT" "$WORK/cr-list.out"
+  fi
+else
+  echo "ok 54 # SKIP filesystem rejects carriage returns in filenames"
+fi
+
+# Test 55: a tilde is shell syntax, so a listed path keeps it literal; only a
+# typed path is expanded
+TILDE_REPO=$(make_repo tilde)
+mkdir -p "$TILDE_REPO/~"
+printf 'note\n' >"$TILDE_REPO/~/note.md"
+commit_all "$TILDE_REPO"
+# The tilde is the fixture: this test asserts that a listed path keeps it
+# literal while a typed one expands, so quoting it is the point.
+# shellcheck disable=SC2088
+if (cd "$TILDE_REPO" && printf '~/note.md\n' |
+  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "~/note.md R-I" ]] &&
+    ! (cd "$TILDE_REPO" && "$BIN" --dry-run "prompt" --read '~/note.md' >/dev/null 2>&1); then
+    echo "ok 55 - Listed paths keep a literal tilde while typed paths expand it"
+  else
+    echo "not ok 55 - Tilde handling did not distinguish listed from typed paths"
     sed 's/^/# /' "$OUTPUT"
   fi
 else
-  echo "not ok 39 - Read-only mode execution failed"
+  echo "not ok 55 - Literal-tilde dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 56: an unignored directory stays unignored however the ignore rules
+# would judge a name invented inside it. A '.*' rule matches any sentinel a
+# probe could use, which would turn every directory into an explicit override
+# and expose its genuinely ignored contents.
+DOTGLOB=$(make_repo dotglob)
+mkdir -p "$DOTGLOB/docs"
+printf '.*\n!.gitignore\n*.log\n' >"$DOTGLOB/.gitignore"
+printf 'guide\n' >"$DOTGLOB/docs/guide.md"
+printf 'LOCAL\n' >"$DOTGLOB/docs/local.log"
+commit_all "$DOTGLOB"
+if (cd "$DOTGLOB" && "$BIN" --dry-run "prompt" --read docs/) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "docs/guide.md R-I" ]] &&
+    ! grep -q "Explicit Overrides" "$OUTPUT"; then
+    echo "ok 56 - An unignored directory is not treated as an override"
+  else
+    echo "not ok 56 - Ignored descendants were exposed by a filename-sensitive probe"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 56 - Dotglob dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# A repository containing an initialized submodule.
+SUB_HOST=$(make_repo submodule-host)
+printf 'top\n' >"$SUB_HOST/top.md"
+mkdir -p "$SUB_HOST/sub"
+(
+  cd "$SUB_HOST/sub"
+  git init -q .
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git config commit.gpgsign false
+  git config core.excludesFile /dev/null
+  printf 'SUBMODULE CONTENT\n' >child.txt
+  git add -A
+  git commit -q --no-gpg-sign -m sub
+) >/dev/null 2>&1
+
+# Test 57: a file inside a submodule is refused, not just the submodule root.
+# Its contents belong to another repository's index and restorability.
+if (cd "$SUB_HOST" && "$BIN" --dry-run "prompt" --read sub/child.txt) >"$OUTPUT" 2>&1; then
+  echo "not ok 57 - Expected a path inside a submodule to be refused"
+else
+  if grep -q "reached through 'sub'" "$OUTPUT" && grep -q "is a submodule" "$OUTPUT"; then
+    echo "ok 57 - Refuses a file beneath a submodule boundary"
+  else
+    echo "not ok 57 - Submodule ancestor rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 58: the same path from a list is skipped rather than aborting the run
+if (cd "$SUB_HOST" && printf 'sub/child.txt\ntop.md\n' |
+  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "top.md R-I" ]] &&
+    grep -q "Skipped (listed paths" "$OUTPUT"; then
+    echo "ok 58 - Drops a listed path beneath a submodule boundary"
+  else
+    echo "not ok 58 - A listed submodule path was admitted"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 58 - Submodule list dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 59: a backslash is an ordinary filename character here, so it must not
+# be rewritten into a separator: the file would be listed under one key and
+# then denied under another by every tool call.
+BS_REPO=$(make_repo backslash)
+BS_NAME='back\slash.md'
+printf 'plain\n' >"$BS_REPO/plain.md"
+if printf 'bs\n' >"$BS_REPO/$BS_NAME" 2>/dev/null && [[ -f "$BS_REPO/$BS_NAME" ]]; then
+  commit_all "$BS_REPO"
+  (cd "$BS_REPO" && "$BIN" --dry-run "prompt" --read "$BS_NAME") >"$OUTPUT" 2>&1 || true
+  if [[ "$(resolved "$OUTPUT")" == "$BS_NAME R-I" ]]; then
+    echo "ok 59 - A backslash in a filename survives as itself"
+  else
+    echo "not ok 59 - A backslash was rewritten into a path separator"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "ok 59 # SKIP filesystem rejects backslashes in filenames"
+fi
+
+# Test 60: a submodule that has been deinitialized keeps its gitlink in the
+# index but loses its .git marker, and git still refuses to clean inside it,
+# so anything written there would outlive the run's undo.
+DEINIT=$(make_repo deinit-host)
+printf 'top\n' >"$DEINIT/top.md"
+mkdir -p "$DEINIT/sub"
+(
+  cd "$DEINIT/sub"
+  git init -q .
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git config commit.gpgsign false
+  git config core.excludesFile /dev/null
+  printf 'inner\n' >child.txt
+  git add -A
+  git commit -q --no-gpg-sign -m sub
+) >/dev/null 2>&1
+(cd "$DEINIT" && git add top.md sub && git commit -q --no-gpg-sign -m init) >/dev/null 2>&1
+rm -rf "$DEINIT/sub/.git"
+printf 'STRAY\n' >"$DEINIT/sub/child.txt"
+if (cd "$DEINIT" && "$BIN" --dry-run "prompt" --read sub/child.txt) >"$OUTPUT" 2>&1; then
+  echo "not ok 60 - Expected a deinitialized submodule path to be refused"
+else
+  if grep -q "which is a submodule" "$OUTPUT"; then
+    echo "ok 60 - Detects a submodule boundary from the index, not just .git"
+  else
+    echo "not ok 60 - Deinitialized submodule was not recognized"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 61: the repository root is whatever git printed, minus its line
+# terminator. Stripping whitespace would name a directory that does not exist.
+SPACED="$WORK/spaced dir "
+mkdir -p "$SPACED"
+(
+  cd "$SPACED"
+  git init -q .
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git config commit.gpgsign false
+  git config core.excludesFile /dev/null
+) >/dev/null 2>&1
+printf 'a\n' >"$SPACED/a.md"
+if (cd "$SPACED" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  if grep -q "Repository:    $SPACED" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" == "a.md R-I" ]]; then
+    echo "ok 61 - A repository whose name ends in a space still resolves"
+  else
+    echo "not ok 61 - Trailing whitespace was stripped from the repository root"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 61 - Spaced-root dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 62: a run may edit the ignore rules, stranding files it created earlier
+# beyond the reach of its own undo. Those are named rather than forbidden.
+STRAND=$(make_repo stranded)
+printf 'keep\n' >"$STRAND/keep.md"
+commit_all "$STRAND"
+printf 'residue\n' >"$STRAND/residue.tmp"
+printf 'plain\n' >"$STRAND/plain.md"
+printf 'residue.tmp\n' >"$STRAND/.gitignore"
+cat >"$WORK/strand.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line for line in source.splitlines() if not line.startswith("from google")
+)
+cx = {"__name__": "caxton_helpers"}
+exec(compile(stripped, "caxton", "exec"), cx)
+print(cx["unrestorable_creations"](Path(sys.argv[2]), ["residue.tmp", "plain.md"]))
+PYEOF
+if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/strand.py" \
+  "$BIN" "$STRAND" >"$OUTPUT" 2>&1; then
+  if grep -q "^\['residue.tmp'\]$" "$OUTPUT"; then
+    echo "ok 62 - Names a creation stranded by an ignore rule the run added"
+  else
+    echo "not ok 62 - Stranded creations were not identified"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 62 - Stranded-creation check exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 63: git's own metadata is not project content. It sits outside every
+# listing, 'git clean -fd' never touches it, and a file dropped into it can
+# execute on the next git command, so naming it explicitly is refused rather
+# than quietly admitted.
+META=$(make_repo metadata)
+printf 'a\n' >"$META/a.md"
+commit_all "$META"
+if (cd "$META" && "$BIN" --dry-run "prompt" --read .git/config) >"$OUTPUT" 2>&1; then
+  echo "not ok 63 - Expected an explicit .git path to be refused"
+else
+  if grep -q "git's own metadata" "$OUTPUT" &&
+    (cd "$META" && "$BIN" --dry-run "prompt" --read . 2>&1 | grep -qv '\.git/'); then
+    echo "ok 63 - Refuses git metadata as a selection"
+  else
+    echo "not ok 63 - Metadata rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 64: the same rule guards creation, which never consults the listing and
+# which git's ignore rules do not cover.
+cat >"$WORK/meta.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line for line in source.splitlines() if not line.startswith("from google")
+)
+cx = {"__name__": "caxton_helpers"}
+exec(compile(stripped, "caxton", "exec"), cx)
+
+blocks = cx["in_repository_metadata"]
+cases = {
+    ".git/hooks/pre-commit": True,
+    ".git": True,
+    "sub/.git/config": True,
+    ".github/ci.yml": False,
+    ".gitignore": False,
+    "docs/guide.md": False,
+    "": False,
+}
+wrong = [rel for rel, want in cases.items() if blocks(rel) is not want]
+print("WRONG" if wrong else "OK", "; ".join(wrong))
+PYEOF
+if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/meta.py" "$BIN" >"$OUTPUT" 2>&1; then
+  if grep -q "^OK" "$OUTPUT"; then
+    echo "ok 64 - Creation is barred from git metadata without touching dotfiles"
+  else
+    echo "not ok 64 - Metadata guard misclassified a path"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 64 - Metadata guard check exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi

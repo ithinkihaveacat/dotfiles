@@ -7,7 +7,7 @@
 - [API Errors](#api-errors)
 - [File Issues](#file-issues)
 - [Output Issues](#output-issues)
-- [Caxton (Directory Transformation) Issues](#caxton-directory-transformation-issues)
+- [Caxton (Repository Transformation) Issues](#caxton-repository-transformation-issues)
 - [Popper (Android UI) Issues](#popper-android-ui-issues)
 - [Platform Differences](#platform-differences)
 
@@ -377,48 +377,70 @@ scripts/satisfies "condition"  # Will fail
 
 ______________________________________________________________________
 
-## Caxton (Directory Transformation) Issues
+## Caxton (Repository Transformation) Issues
 
-### Uncommitted Changes Block an In-Place Run
+### Not Inside a Git Worktree
+
+**Error:** `caxton: error: not inside a git worktree: <dir>`
+
+**Solution:**
+
+Caxton runs only inside a git repository. Git decides what is ignored, and git
+is the only undo a run has: `git checkout -- .` restores files it modified and
+`git clean -fd` removes the ones it created. Work inside a repository, or
+`git init` the directory first and commit before a mutation run.
+
+### Uncommitted Changes Block a Mutation Run
 
 **Error:**
-`caxton: error: '<dir>' has uncommitted changes; an in-place run cannot be undone cleanly`
+`caxton: error: '<dir>' has uncommitted changes; a mutation run cannot be undone cleanly`
 
 **Solution:**
 
-An in-place run rewrites files with no undo of its own, so it insists on a clean
-worktree. Commit or stash first, transform a copy instead, or override:
+A run that can write rewrites files with no undo of its own, so it insists on a
+clean worktree — otherwise its changes cannot be told apart from yours. Commit
+or stash first, drop the `--edit` to run read-only, or override:
 
 ```bash
-git stash                                     # or commit
-scripts/caxton -o ./out "PROMPT" ./src        # transform a copy
-scripts/caxton -i --force "PROMPT" ./src      # override the guard
+git add -A && git commit -m wip                       # or git stash
+scripts/caxton "PROMPT" --read src/                   # read-only, no guard
+scripts/caxton --force "PROMPT" --edit src/           # override the guard
 ```
 
-### Output Directory Rejected
+A freshly `git init`ed repository has no commits, so every file is untracked and
+the worktree counts as dirty. Commit once before the first mutation run.
 
-**Error:** `output directory ... cannot be a subdirectory of source`,
-`... is a parent of source`, or `... is the source directory`
+### PROMPT Is Required
 
-**Solution:**
-
-`-o DIR` copies the source before transforming it, so the destination must sit
-outside the source tree, must not contain it, and must not already hold files —
-a file present only in the destination would be missing from the agent's
-snapshot while still being writable by its tools. Use a directory that does not
-exist yet, or `-i` when in-place really is what you want.
-
-### Cannot Determine Whether the Worktree Is Clean
-
-**Error:** `cannot determine whether '<dir>' has uncommitted changes: ...`, or
-`git not found; cannot check whether ...`
+**Error:** `caxton: error: PROMPT is required`, followed by
+`PROMPT must come before --read/--edit/--inline`
 
 **Solution:**
 
-The `-i` guard fails closed: if git cannot report the worktree state, caxton
-will not rewrite the tree on the assumption that it is clean. The message
-carries git's own error. Fix the repository, install git, or sidestep the check
-with `-o DIR` (which never touches the source) or `--force`.
+`--read`, `--edit` and `--inline` each take a list of paths and consume every
+following argument up to the next option, so a prompt written after them is
+swallowed as a path. Put the prompt first:
+
+```bash
+scripts/caxton "PROMPT" --edit docs/     # correct
+scripts/caxton --edit docs/ "PROMPT"     # the prompt becomes a path
+```
+
+### A Path Cannot Be Made Writable
+
+**Error:**
+`caxton: error: N selected path(s) are ignored by git, which cannot restore them`
+
+**Solution:**
+
+Everything writable must be restorable. Git can undo an edit to a tracked file
+and can `git clean` an untracked one, but it will do neither for an ignored
+file, so caxton refuses to write one. Select it with `--read` instead, track it
+with `git add`, or pass `--force` to accept that the `[caxton]` change report is
+the only record of what happened.
+
+The same rule applies during a run: `write_file` refuses to create a path git
+would ignore.
 
 ### Expected Files Are Missing From the Context
 
@@ -427,33 +449,34 @@ files that are plainly there.
 
 **Solution:**
 
-Inside a git repository the ignore list comes from git itself
-(`git ls-files --cached --others --exclude-standard`), so anything git ignores
-is excluded — including files covered by a nested `.gitignore` or by
-`core.excludesFile`. Common vendor and build directories (`node_modules`,
-`build`, `dist`, ...), `.DS_Store`, symlinks and non-regular files are excluded
-on top. Symlinks are never followed into the initial context or an `-o` copy.
-Confirm what the run will actually see:
+Only what you selected is visible. With no `--read`/`--edit` the selection is
+the current directory, and paths outside it are invisible to every tool, not
+merely absent from the initial prompt. On top of that, git decides what is
+ignored (`git ls-files --cached --others --exclude-standard`), so anything
+covered by a nested `.gitignore` or by `core.excludesFile` is excluded unless
+you name it explicitly on the command line. Symlinks, submodules and non-regular
+files are never included. Confirm what a run will actually see:
 
 ```bash
-scripts/caxton --dry-run "PROMPT" ./src
-git -C ./src ls-files --cached --others --exclude-standard   # the same list
+scripts/caxton --dry-run "PROMPT" --edit src/
+git ls-files --cached --others --exclude-standard   # the same ignore rules
 ```
 
-If the filter leaves nothing at all, caxton exits with `no files to work with`
-rather than sending an empty tree to the model.
+If the selection leaves nothing at all, caxton exits with
+`no files to work with` rather than sending an empty tree to the model.
 
 ### A Credential File Is Missing From the Context
 
 **Symptom:** a `.npmrc`, `.netrc`, `*.pem` or `.ssh/` path is absent from the
-resolved file list.
+resolved file list, or naming one is an error.
 
 **Solution:**
 
 This is deliberate: caxton never sends credential paths to the model, even when
-they are not gitignored. `--dry-run` lists them under "Excluded (credential
-patterns)". There is no flag to override it — copy the specific file you really
-need transformed into a scratch directory and run caxton there.
+they are not gitignored, and naming one explicitly is a hard error rather than a
+silent omission. `--dry-run` lists them under "Excluded (credential patterns)".
+There is no flag to override it — copy the specific file you really need
+transformed to another name and run caxton on that.
 
 ### Refusing to Edit a File
 
@@ -463,7 +486,7 @@ need transformed into a scratch directory and run caxton there.
 
 The file is text-like but not UTF-8 (often legacy Latin-1). Rewriting it would
 replace every undecodable byte with U+FFFD, so caxton declines. Convert the file
-first (`iconv -f latin1 -t utf-8`) or exclude it from the run.
+first (`iconv -f latin1 -t utf-8`) or leave it out of the selection.
 
 ### Timed Out (Exit Code 2)
 
@@ -473,9 +496,9 @@ first (`iconv -f latin1 -t utf-8`) or exclude it from the run.
 
 The run is bounded by `--timeout` (default 1800s) and `--max-steps` (default
 100), and the timeout covers directory traversal as well as the agent loop. A
-timeout in `-i` mode leaves a partly transformed tree; the `[caxton]` footer on
-stderr lists every file modified, created, and deleted. Undoing it takes two
-steps, because files the run created are untracked:
+timeout during a mutation run leaves a partly transformed tree; the `[caxton]`
+footer on stderr lists every file modified, created, and deleted. Undoing it
+takes two steps, because files the run created are untracked:
 
 ```bash
 git checkout -- .   # restore files the run modified
@@ -483,18 +506,20 @@ git clean -n -d     # review what it created
 git clean -f -d     # remove those
 ```
 
-Raise `--timeout` for large trees, or narrow the prompt.
+Raise `--timeout` for large selections, or narrow the prompt.
 
 ### Context Exceeds the 1MB Threshold
 
-**Error:** `text context (N MB) exceeds 1MB threshold`
+**Error:** `inlined text (N MB) exceeds 1MB threshold`
 
 **Solution:**
 
-Point caxton at a narrower directory, pass `--no-inline` to send only the file
-tree (the agent then reads files on demand), or `--force` to inline anyway. A
-`--dry-run` over the threshold still prints the full resolved file list before
-reporting the error, so it shows which files consumed the budget.
+The threshold counts only what is inlined, so narrowing the initial context is
+usually enough: `--inline PATH...` inlines a subset of what is visible, and
+`--no-inline` sends only the file tree so the agent reads on demand. Selecting
+fewer paths works too, and `--force` inlines anyway. A `--dry-run` over the
+threshold still prints the full resolved file list before reporting the error,
+so it shows which files consumed the budget.
 
 ______________________________________________________________________
 
