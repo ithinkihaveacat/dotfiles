@@ -279,12 +279,17 @@ which each consume every following path.
   `core.excludesFile` behave exactly as git defines them, and a deliberately
   tracked `dist/` is not second-guessed. A path typed on the command line
   overrides those rules; a path arriving from `--read-from`/`--edit-from`, or
-  found by walking a selected directory, does not.
+  found by walking a selected directory, does not. Naming an ignored directory
+  admits everything beneath it, including files force-tracked among ignored
+  ones. Path-list entries are taken literally — no tilde expansion, and a
+  NUL-delimited list is split without newline translation, so filenames
+  containing a carriage return or newline survive intact.
 - Anything writable must be restorable by git. A mutation run refuses to start
   on a dirty worktree, refuses to make a git-ignored path writable, and refuses
   to create one during the run — `git checkout -- .` and `git clean -fd` would
-  not undo it. A creation git cannot classify is refused rather than assumed
-  safe. `--force` waives all three.
+  not undo it. An ignored directory is refused as a creation root at preflight
+  for the same reason, and a creation git cannot classify is refused rather than
+  assumed safe. `--force` waives all of these.
 - Credential paths are never sent: `.ssh/`, `.gnupg/`, `.aws/` and similar
   directories, files such as `.npmrc`, `.netrc`, `.envrc` and
   `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.

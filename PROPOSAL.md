@@ -239,6 +239,11 @@ Therefore:
 - An **ignored** path is undone by neither. Caxton refuses to make ignored paths
   writable, and refuses tool calls that would create one.
 
+An ignored *directory* is refused as a creation root for the same reason, at
+preflight rather than one rejected tool call at a time: every creation beneath
+it would be unrestorable, so offering it would advertise authority that cannot
+be exercised.
+
 A creation git cannot classify is refused rather than assumed safe: if
 `git check-ignore` cannot answer, there is no basis for claiming the new file
 could be undone.
@@ -273,14 +278,26 @@ a path the user typed is stronger evidence of intent than a general ignore rule:
   walking a selected directory, is **implicit**: ordinary ignore rules apply,
   and hard exclusions are skipped and counted.
 
+Path lists are producer output rather than shell input, so their entries are
+taken literally: no tilde expansion, and NUL-delimited lists are split without
+any newline translation, which is the whole point of asking for NUL. Git's own
+output is decoded the same way, since a carriage return is legal in a filename
+and translating one would leave caxton looking for a path that does not exist.
+
 The distinction matters because bulk producers do not know about ignore rules.
 `find . -name '*.md' -print0` happily emits `node_modules` and `.env`; treating
 those as explicit would inline thousands of vendored files and abort the run on
 the first credential path.
 
 An explicitly named ignored **directory** is walked, and every non-hard-excluded
-regular file beneath it is admitted. Git considers the whole subtree ignored, so
-there are no nested rules left to honor within it.
+regular file beneath it is admitted — its ignored contents as well as any
+force-tracked file living among them. Consulting the listing first would show
+only the tracked ones, silently narrowing what the user named.
+
+Whether such a directory is ignored has to be asked about a path *inside* it.
+Git declines to call a directory ignored while it still holds tracked content,
+even when a rule plainly excludes it, so asking about the directory itself would
+miss exactly the force-tracked case.
 
 ### Hard: never yields
 

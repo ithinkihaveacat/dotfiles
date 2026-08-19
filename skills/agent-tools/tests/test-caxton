@@ -38,7 +38,7 @@ commit_all() {
   ) >/dev/null 2>&1
 }
 
-echo "1..50"
+echo "1..55"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -906,4 +906,106 @@ if printf 'odd\n' >"$NL_REPO/$NL_NAME" 2>/dev/null && [[ -f "$NL_REPO/$NL_NAME" 
   fi
 else
   echo "ok 50 # SKIP filesystem rejects newlines in filenames"
+fi
+
+# A repository whose ignored directory holds a force-tracked file: git declines
+# to call such a directory ignored, which is the case that used to slip through.
+FORCED=$(make_repo forced)
+mkdir -p "$FORCED/build" "$FORCED/empty-build" "$FORCED/docs"
+printf 'build/\nempty-build/\n' >"$FORCED/.gitignore"
+printf 'kept\n' >"$FORCED/build/tracked.md"
+printf 'sibling\n' >"$FORCED/build/sibling.md"
+printf 'doc\n' >"$FORCED/docs/a.md"
+printf 'top\n' >"$FORCED/top.md"
+(
+  cd "$FORCED"
+  git add -A
+  git add -f build/tracked.md
+  git commit -q --no-gpg-sign -m init
+) >/dev/null 2>&1
+
+# Test 51: naming an ignored directory admits its ignored files too, even when
+# a force-tracked descendant makes git report the directory as not ignored
+if (cd "$FORCED" && "$BIN" --dry-run "prompt" --read build/) >"$OUTPUT" 2>&1; then
+  TAGS=$(resolved "$OUTPUT")
+  if [[ "$TAGS" == *"build/sibling.md R-I"* && "$TAGS" == *"build/tracked.md R-I"* ]]; then
+    echo "ok 51 - An explicit ignored directory admits ignored and tracked files alike"
+  else
+    echo "not ok 51 - Ignored siblings were hidden beside a force-tracked file"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 51 - Explicit ignored directory dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 52: naming it with --edit rejects the unrestorable files rather than
+# silently narrowing the selection to the tracked one
+if (cd "$FORCED" && "$BIN" --dry-run "prompt" --edit build/) >"$OUTPUT" 2>&1; then
+  echo "not ok 52 - Expected the ignored contents of build/ to be refused"
+else
+  if grep -q "ignored by git, which cannot restore them" "$OUTPUT" &&
+    grep -q "build/sibling.md" "$OUTPUT"; then
+    echo "ok 52 - Refuses an ignored directory's files instead of narrowing scope"
+  else
+    echo "not ok 52 - Unrestorable rejection did not name the ignored sibling"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 53: an ignored directory is not a usable creation root either, even when
+# it is empty and nothing lands in the unrestorable file list
+if (cd "$FORCED" && "$BIN" --dry-run "prompt" --edit empty-build/) >"$OUTPUT" 2>&1; then
+  echo "not ok 53 - Expected an ignored creation root to be refused"
+else
+  if grep -q "ignored by git, which cannot restore them" "$OUTPUT" &&
+    grep -q "empty-build/" "$OUTPUT"; then
+    echo "ok 53 - Refuses a creation root whose every creation would be rejected"
+  else
+    echo "not ok 53 - Ignored creation root was advertised rather than refused"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 54: a filename containing a carriage return survives the git listing and
+# a NUL path list. Text-mode reads translate it to a newline, which points at a
+# path that does not exist, so the file silently vanishes.
+CR_REPO=$(make_repo carriage)
+CR_NAME=$'carriage\r.md'
+printf 'plain\n' >"$CR_REPO/plain.md"
+if printf 'cr\n' >"$CR_REPO/$CR_NAME" 2>/dev/null && [[ -f "$CR_REPO/$CR_NAME" ]]; then
+  commit_all "$CR_REPO"
+  (cd "$CR_REPO" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1 || true
+  (cd "$CR_REPO" && printf 'carriage\r.md\0' |
+    "$BIN" --dry-run "prompt" --read-from - --null) >"$WORK/cr-list.out" 2>&1 || true
+  if grep -q "Visible:       2 file" "$OUTPUT" &&
+    grep -q "Visible:       1 file" "$WORK/cr-list.out" &&
+    ! grep -q "Skipped (listed paths" "$WORK/cr-list.out"; then
+    echo "ok 54 - A carriage return in a filename survives git output and path lists"
+  else
+    echo "not ok 54 - A filename containing a carriage return was rewritten"
+    sed 's/^/# /' "$OUTPUT" "$WORK/cr-list.out"
+  fi
+else
+  echo "ok 54 # SKIP filesystem rejects carriage returns in filenames"
+fi
+
+# Test 55: a tilde is shell syntax, so a listed path keeps it literal; only a
+# typed path is expanded
+TILDE_REPO=$(make_repo tilde)
+mkdir -p "$TILDE_REPO/~"
+printf 'note\n' >"$TILDE_REPO/~/note.md"
+commit_all "$TILDE_REPO"
+if (cd "$TILDE_REPO" && printf '~/note.md\n' |
+  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "~/note.md R-I" ]] &&
+    ! (cd "$TILDE_REPO" && "$BIN" --dry-run "prompt" --read '~/note.md' >/dev/null 2>&1); then
+    echo "ok 55 - Listed paths keep a literal tilde while typed paths expand it"
+  else
+    echo "not ok 55 - Tilde handling did not distinguish listed from typed paths"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 55 - Literal-tilde dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
 fi

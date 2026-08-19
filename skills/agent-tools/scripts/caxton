@@ -141,6 +141,10 @@ SECRET_FILE_PATTERNS = (
     "id_ed25519*",
 )
 
+# A name that cannot plausibly carry its own ignore rule, used to ask git
+# whether a directory is excluded by asking about a path inside it.
+IGNORE_PROBE_NAME = ".caxton-ignore-probe"
+
 # Options that consume the following argv token, so a bare '-h' there is a
 # value rather than a help request.
 SINGLE_VALUE_OPTIONS = {
@@ -567,17 +571,26 @@ def wants_help(argv: list[str]) -> bool:
 
 
 def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess | None:
-    """Runs a git command, or returns None if git could not be run at all."""
+    """Runs a git command, or returns None if git could not be run at all.
+
+    Output is captured as bytes and decoded here rather than by subprocess's
+    text mode, which applies universal-newline translation: a filename may
+    legally contain a carriage return, and text mode would silently rewrite it
+    to a newline, leaving caxton looking for a path that does not exist.
+    surrogateescape keeps filenames that are not valid UTF-8 round-trippable.
+    """
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             ["git", "-C", str(cwd), *args],
             capture_output=True,
-            text=True,
             timeout=60,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    proc.stdout = proc.stdout.decode("utf-8", "surrogateescape")
+    proc.stderr = proc.stderr.decode("utf-8", "replace")
+    return proc
 
 
 def git_toplevel(path: Path) -> tuple[str, Path | None, str]:
@@ -648,18 +661,18 @@ def git_ignored_subset(root: Path, rels: list[str]) -> set[str] | None:
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
-            input="\0".join(rels) + "\0",
+            input=("\0".join(rels) + "\0").encode("utf-8", "surrogateescape"),
             capture_output=True,
-            text=True,
             timeout=60,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    stdout = proc.stdout.decode("utf-8", "surrogateescape")
     # Exit 0 means some paths matched, 1 means none did; anything else failed.
     if proc.returncode not in (0, 1):
         return None
-    return {rel for rel in proc.stdout.split("\0") if rel}
+    return {rel for rel in stdout.split("\0") if rel}
 
 
 @dataclasses.dataclass
@@ -678,11 +691,13 @@ class Telemetry:
 
 def read_path_list(spec: str, nul_delimited: bool, prog_name: str) -> list[str]:
     """Reads a path list from a file or, for '-', from standard input."""
+    # Read bytes: text mode would translate a carriage return inside a filename
+    # into a newline, which is exactly what NUL delimiters exist to prevent.
     try:
         if spec == "-":
-            raw = sys.stdin.read()
+            raw = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
         else:
-            raw = Path(spec).read_text(encoding="utf-8", errors="replace")
+            raw = Path(spec).read_bytes().decode("utf-8", "surrogateescape")
     except OSError as e:
         print(
             f"{prog_name}: error: cannot read path list '{spec}': {e}", file=sys.stderr
@@ -866,8 +881,12 @@ def main():
         return None
 
     for raw, access, explicit in raw_selectors:
+        # A tilde is shell syntax, so it is only expanded for a path a person
+        # typed. In a path list it is an ordinary character, and a repository
+        # may legitimately track a directory named '~'.
         try:
-            resolved = Path(os.path.abspath(os.path.expanduser(raw)))
+            expanded = os.path.expanduser(raw) if explicit else raw
+            resolved = Path(os.path.abspath(expanded))
         except OSError as e:
             print(f"{prog_name}: error: cannot resolve '{raw}': {e}", file=sys.stderr)
             sys.exit(1)
@@ -876,11 +895,14 @@ def main():
         except ValueError:
             rel = ".."
         if rel == ".." or rel.startswith("../"):
-            print(
-                f"{prog_name}: error: '{raw}' is outside the repository '{root}'",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            if explicit:
+                print(
+                    f"{prog_name}: error: '{raw}' is outside the repository '{root}'",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            skipped_listed.append(raw)
+            continue
 
         via = symlinked_ancestor(root, rel)
         if via is not None:
@@ -999,14 +1021,44 @@ def main():
         print("hint: fix the repository, then re-run", file=sys.stderr)
         sys.exit(1)
 
-    explicit_rels = [s.rel for s in selectors if s.explicit and s.rel != ""]
-    # check-ignore matches rules, not tracking state, so a tracked file under an
-    # ignored directory can match. The listing is the authority on what is
-    # actually excluded; intersecting the two leaves the genuine overrides.
+    # Whether a directory is ignored has to be asked about a path inside it:
+    # git declines to call a directory ignored while it still holds tracked
+    # content, even when a rule plainly excludes it, so asking about the
+    # directory itself would miss exactly the force-tracked case.
+    def ignore_query(sel: Selector) -> str:
+        return f"{sel.rel}/{IGNORE_PROBE_NAME}" if sel.is_dir else sel.rel
+
+    answered = git_ignored_subset(
+        root, sorted({ignore_query(sel) for sel in selectors if sel.rel})
+    )
+    ignored_selectors = (
+        None
+        if answered is None
+        else {sel.rel for sel in selectors if sel.rel and ignore_query(sel) in answered}
+    )
+    if ignored_selectors is None:
+        # Restorability cannot be established without this answer, so a run
+        # that may write must not proceed on an assumption.
+        if is_mutation_mode and not args.force:
+            print(
+                f"{prog_name}: error: cannot determine which selected paths git"
+                " ignores, so there is no way to know a change could be undone",
+                file=sys.stderr,
+            )
+            print(
+                "hint: fix the repository, or pass --force to accept that the"
+                " change report is the only record",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        ignored_selectors = set()
+    # check-ignore matches rules, not tracking state, so a force-tracked file
+    # under an ignored directory can match. The listing is the authority on what
+    # is actually excluded; intersecting the two leaves the genuine overrides.
     ignored_explicit = {
-        rel
-        for rel in (git_ignored_subset(root, explicit_rels) or set())
-        if rel not in unignored
+        sel.rel
+        for sel in selectors
+        if sel.explicit and sel.rel in ignored_selectors and sel.rel not in unignored
     }
 
     # 6. Expand selectors into candidate files.
@@ -1041,19 +1093,13 @@ def main():
                 skipped_listed.append(sel.rel)
             continue
 
-        # A directory selector grants its eligible descendants.
-        under = [
-            rel
-            for rel in unignored
-            if rel_covers(sel.rel, True, rel) and rel != sel.rel
-        ]
-        if under:
-            for rel in under:
-                admit(rel)
-        elif sel.explicit and sel.rel in ignored_explicit:
-            # An explicitly named ignored directory is entered: git considers
-            # the whole subtree ignored, so there are no nested rules left to
-            # honor within it.
+        # An explicitly named ignored directory is entered rather than looked
+        # up: git considers the whole subtree ignored, so there are no nested
+        # rules left to honor within it, and walking admits force-tracked files
+        # alongside their ignored siblings. Consulting the listing first would
+        # hide those siblings whenever one descendant happens to be tracked,
+        # silently narrowing what the user named.
+        if sel.explicit and sel.rel in ignored_explicit:
             ignored_overrides.append(sel.rel + "/")
             base = root / sel.rel
             for walk_root, dirs, files in os.walk(base):
@@ -1068,6 +1114,12 @@ def main():
                 ]
                 for name in sorted(files):
                     admit(to_rel(root, walk_path / name))
+            continue
+
+        # Otherwise the selector grants its eligible descendants.
+        for rel in unignored:
+            if rel_covers(sel.rel, True, rel) and rel != sel.rel:
+                admit(rel)
 
     # 7. Compile per-path capabilities. The most specific selector wins; at
     #    equal specificity the more restrictive access does.
@@ -1112,6 +1164,14 @@ def main():
         for d, a in dir_selectors.items()
         if a == "read" and any(w == "" or d.startswith(w + "/") for w in writable_dirs)
     )
+
+    # A writable directory git ignores is authority that cannot be exercised:
+    # every creation beneath it would be refused as unrestorable, so the run
+    # would advertise a creation root and then reject every use of it.
+    if not args.force:
+        unrestorable.extend(
+            f"{d}/" for d in sorted(writable_dirs) if d and d in ignored_selectors
+        )
 
     if unrestorable:
         print(
@@ -2125,6 +2185,16 @@ def sigterm_handler(signum, frame):
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, sigterm_handler)
+
+    # Paths are decoded with surrogateescape so they round-trip to the
+    # filesystem; rendering one that is not valid UTF-8 must degrade rather
+    # than raise part-way through a report.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
 
     try:
         try:
