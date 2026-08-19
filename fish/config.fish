@@ -175,7 +175,9 @@ set -x VISUAL $EDITOR
 type -q pbcopy; or alias pbcopy fish_clipboard_copy
 type -q pbpaste; or alias pbpaste fish_clipboard_paste
 
-# uv
+# python / uv
+set -x PYTHONPYCACHEPREFIX $XDG_CACHE_HOME/cpython/pycache
+set -x UV_COMPILE_BYTECODE 1
 set -x UV_EXCLUDE_NEWER "7 days"
 
 # Force uv to use its own managed/hermetic Python installations instead of system ones.

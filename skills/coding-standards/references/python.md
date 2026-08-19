@@ -64,7 +64,7 @@ Renaming an existing script solely for style is not required.
 Use this pattern:
 
 ```python
-#!/usr/bin/env -S PYTHONDONTWRITEBYTECODE=1 uv run --script
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
 # ///
@@ -74,21 +74,23 @@ This guidance applies to executable script entrypoints. It does not apply to
 ordinary Python modules, packages, libraries, or non-executable Python source
 files.
 
-Standalone CLI tools and helper scripts are strongly recommended to include
-`PYTHONDONTWRITEBYTECODE=1` in their shebang by default. This prevents the
-interpreter from creating `__pycache__/` directories and `.pyc` bytecode files
-across the repository tree when running simple CLI tools, keeping working trees
-clean. Scripts that explicitly benefit from caching (e.g., complex,
-computationally heavy, or multi-module applications) may omit the variable.
+Bytecode caching is managed outside source trees via `PYTHONPYCACHEPREFIX` (set
+globally in user environment configuration to
+`$XDG_CACHE_HOME/cpython/pycache`). This centralizes all `.pyc` files into a
+dedicated cache directory, keeping working trees clean of `__pycache__/` folders
+while preserving full bytecode caching performance. In addition,
+`UV_COMPILE_BYTECODE=1` pre-compiles dependency wheels at virtual environment
+creation time. Do not add `PYTHONDONTWRITEBYTECODE=1` to script shebangs, as
+disabling bytecode caching forces the interpreter to re-parse and compile all
+third-party dependencies on every invocation, degrading CLI startup latency.
 
 Rationale:
 
 - It makes the script's execution model explicit and self-contained.
-- It prevents `__pycache__/` pollution in repository trees when invoking
-  standalone utilities.
 - It keeps the declared Python requirement with the script itself.
 - It avoids coupling the script to whichever `python` executable happens to be
   first on `PATH`.
+- It preserves fast CLI startup times across repeated invocations.
 - It aligns with the existing standalone Python script pattern used elsewhere in
   this repository.
 
