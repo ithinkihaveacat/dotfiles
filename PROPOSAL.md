@@ -169,6 +169,10 @@ absent from `list_files`, and rejected by `read_file`.
 as modifying the ones already there. `--edit FILE` permits modifying or deleting
 that file only; it does not authorize creating siblings.
 
+Creation is resolved by the same precedence as everything else, so a `--read`
+carve-out inside a writable directory takes back the right to add files there as
+well as the right to change the ones already present.
+
 A run is a **mutation run** if any `--edit` is given. Mutation runs expose the
 mutation tools and require a clean worktree. A run with no `--edit` is
 read-only: the mutation tools are not offered at all.
@@ -235,6 +239,10 @@ Therefore:
 - An **ignored** path is undone by neither. Caxton refuses to make ignored paths
   writable, and refuses tool calls that would create one.
 
+A creation git cannot classify is refused rather than assumed safe: if
+`git check-ignore` cannot answer, there is no basis for claiming the new file
+could be undone.
+
 `--force` waives the clean-worktree requirement and the ignored-path restriction
 together, with a warning that the end-of-run change report is then the only
 inventory caxton provides.
@@ -280,7 +288,11 @@ These are safety boundaries, not conveniences, and apply to explicit paths too:
 
 - Credential paths and credential-like files (`.ssh/`, `.aws/`, `.npmrc`,
   `.netrc`, `*.pem`, `id_rsa*`, and the rest of the existing lists).
-- Symlinks.
+- Symlinks — including any path reached *through* one. A selector is inside the
+  repository only if every component of it is: `lstat` and `O_NOFOLLOW` both
+  resolve leading components, so admitting `alias/notes.txt` where `alias`
+  points outside would mean the containment and credential checks judged one
+  file while the reader opened another.
 - Sockets, FIFOs, devices, and other non-regular entries.
 - Submodule boundaries. A path inside a submodule is governed by a different
   repository's index and restorability; caxton reports it and directs the user

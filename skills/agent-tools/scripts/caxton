@@ -347,6 +347,21 @@ def rel_ancestors(rel: str) -> list[str]:
     return ["/".join(parts[:i]) for i in range(len(parts))]
 
 
+def symlinked_ancestor(root: Path, rel: str) -> str | None:
+    """The first ancestor of rel that is a symlink, or None.
+
+    A path is only inside the repository if every component of it is. Checking
+    the final entry alone would admit 'alias/notes.txt' where 'alias' points
+    outside: lstat and O_NOFOLLOW both resolve the leading components, so the
+    containment and credential checks would be reading a different file from
+    the one they judged.
+    """
+    for ancestor in rel_ancestors(rel):
+        if ancestor and (root / ancestor).is_symlink():
+            return ancestor
+    return None
+
+
 @dataclasses.dataclass(frozen=True)
 class Selector:
     """One path the user named, and what it grants."""
@@ -370,13 +385,16 @@ class Policy:
         root: Path,
         visible: set[str],
         writable: set[str],
-        writable_dirs: set[str],
+        dir_selectors: dict[str, str],
         inlined: list[str],
     ):
         self.root = root
         self.visible = set(visible)
         self.writable = set(writable)
-        self.writable_dirs = set(writable_dirs)
+        # Every directory selection with its effective access, so creation can
+        # honour a read-only carve-out inside a writable directory.
+        self.dir_selectors = dict(dir_selectors)
+        self.writable_dirs = {d for d, a in self.dir_selectors.items() if a == "edit"}
         self.inlined = list(inlined)
         self.visible_dirs: set[str] = set()
         for rel in self.visible:
@@ -397,10 +415,23 @@ class Policy:
     def can_create(self, rel: str) -> bool:
         """Whether a new file may be created at rel.
 
-        Creation follows directory authority: '--edit docs/' permits new files
-        under docs/, while '--edit docs/guide.md' authorizes that file alone.
+        Creation follows directory authority, resolved by the same precedence
+        as everything else: '--edit docs/' permits new files under docs/, but
+        an inner '--read docs/private/' takes them back, and
+        '--edit docs/guide.md' authorizes that one file rather than its
+        siblings.
         """
-        return any(d == "" or rel.startswith(d + "/") for d in self.writable_dirs)
+        best: str | None = None
+        best_depth = -1
+        for d, access in self.dir_selectors.items():
+            if not (d == "" or rel.startswith(d + "/")):
+                continue
+            depth = rel_depth(d)
+            if depth > best_depth:
+                best, best_depth = access, depth
+            elif depth == best_depth and access == "read":
+                best = "read"
+        return best == "edit"
 
     def note_created(self, rel: str):
         """Records a path the model created, so it can read back what it wrote."""
@@ -431,8 +462,9 @@ Arguments:
 
 Options:
   --read PATH...      Make paths visible to the model. (default: '.')
-  --edit PATH...      Make paths visible and writable. Any --edit makes this a
-                      mutation run and requires a clean git worktree.
+  --edit PATH...      Make paths visible and writable, and for a directory
+                      permit creating and deleting files beneath it. Any --edit
+                      makes this a mutation run and requires a clean worktree.
   --read-from FILE    Read further --read paths from FILE, or '-' for stdin.
   --edit-from FILE    Read further --edit paths from FILE, or '-' for stdin.
   -0, --null          Path list files are NUL-delimited, not one path per line.
@@ -484,7 +516,8 @@ removes the ones it created. A mutation run therefore refuses to start on a
 dirty worktree, and refuses to write paths git cannot restore (ignored files),
 unless --force is given. Credential paths (.ssh, .npmrc, .netrc, *.pem and
 similar), symlinks, submodules and non-regular files are never readable or
-writable, even when named explicitly. Every run lists what it modified,
+writable, even when named explicitly, and neither is anything reached through
+a symlinked parent directory. Every run lists what it modified,
 created, and deleted on stderr, including on timeout.\
 """,
         file=file,
@@ -604,8 +637,12 @@ def git_unignored_paths(root: Path) -> tuple[set[str] | None, str]:
     return {rel for rel in proc.stdout.split("\0") if rel}, ""
 
 
-def git_ignored_subset(root: Path, rels: list[str]) -> set[str]:
-    """Which of rels git ignores. An unanswerable query reports none ignored."""
+def git_ignored_subset(root: Path, rels: list[str]) -> set[str] | None:
+    """Which of rels git ignores, or None if git could not answer.
+
+    None is not the same as "none of them": a caller deciding whether a write
+    is restorable must refuse rather than assume the path is tracked.
+    """
     if not rels:
         return set()
     try:
@@ -618,10 +655,10 @@ def git_ignored_subset(root: Path, rels: list[str]) -> set[str]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return set()
+        return None
     # Exit 0 means some paths matched, 1 means none did; anything else failed.
     if proc.returncode not in (0, 1):
-        return set()
+        return None
     return {rel for rel in proc.stdout.split("\0") if rel}
 
 
@@ -651,8 +688,13 @@ def read_path_list(spec: str, nul_delimited: bool, prog_name: str) -> list[str]:
             f"{prog_name}: error: cannot read path list '{spec}': {e}", file=sys.stderr
         )
         sys.exit(1)
-    parts = raw.split("\0") if nul_delimited else raw.splitlines()
-    return [p for p in (part.strip("\n") for part in parts) if p]
+    if nul_delimited:
+        # NUL delimiters exist precisely so a filename containing a newline
+        # survives; splitting is the only processing allowed here.
+        parts = raw.split("\0")
+    else:
+        parts = [line.rstrip("\r") for line in raw.split("\n")]
+    return [p for p in parts if p]
 
 
 def main():
@@ -840,6 +882,19 @@ def main():
             )
             sys.exit(1)
 
+        via = symlinked_ancestor(root, rel)
+        if via is not None:
+            if explicit:
+                print(
+                    f"{prog_name}: error: cannot select '{raw}': it is reached"
+                    f" through '{via}', which is a symlink; symlinks are never"
+                    " followed",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            symlink_paths.append(via)
+            continue
+
         if not resolved.exists() and not resolved.is_symlink():
             if explicit:
                 print(f"{prog_name}: error: path not found: {raw}", file=sys.stderr)
@@ -949,7 +1004,9 @@ def main():
     # ignored directory can match. The listing is the authority on what is
     # actually excluded; intersecting the two leaves the genuine overrides.
     ignored_explicit = {
-        rel for rel in git_ignored_subset(root, explicit_rels) if rel not in unignored
+        rel
+        for rel in (git_ignored_subset(root, explicit_rels) or set())
+        if rel not in unignored
     }
 
     # 6. Expand selectors into candidate files.
@@ -1044,9 +1101,17 @@ def main():
             continue
         writable.add(rel)
 
-    writable_dirs = {
-        sel.rel for sel in selectors if sel.is_dir and access_for(sel.rel) == "edit"
+    dir_selectors = {
+        sel.rel: access_for(sel.rel) or "read" for sel in selectors if sel.is_dir
     }
+    writable_dirs = {d for d, a in dir_selectors.items() if a == "edit"}
+    # Read-only directories nested inside a writable one: creation must respect
+    # them, so the dry run and the prompt name them alongside the roots.
+    carve_outs = sorted(
+        d
+        for d, a in dir_selectors.items()
+        if a == "read" and any(w == "" or d.startswith(w + "/") for w in writable_dirs)
+    )
 
     if unrestorable:
         print(
@@ -1117,7 +1182,7 @@ def main():
     else:
         inlined = list(text_files)
 
-    policy = Policy(root, visible, writable, writable_dirs, inlined)
+    policy = Policy(root, visible, writable, dir_selectors, inlined)
 
     inlined_bytes = 0
     for rel in policy.inlined:
@@ -1248,6 +1313,8 @@ def main():
             print("\nCreation Roots (new files may be written here):")
             for rel in sorted(writable_dirs):
                 print(f"  [ W ]  {rel or '.'}/")
+            for rel in carve_outs:
+                print(f"  [ R ]  {rel}/ (read-only; no new files here)")
         if ignored_overrides:
             print("\nExplicit Overrides (git-ignored, selected anyway):")
             for rel in sorted(set(ignored_overrides)):
@@ -1454,15 +1521,28 @@ def main():
                             " directory."
                         ),
                     }
-                if not args.force and git_ignored_subset(root, [rel]):
-                    return {
-                        "status": "error",
-                        "message": (
-                            f"Cannot create '{path}': git ignores it, so"
-                            " 'git clean -fd' would not remove it and the change"
-                            " could not be undone. Choose a path git tracks."
-                        ),
-                    }
+                if not args.force:
+                    ignored = git_ignored_subset(root, [rel])
+                    if ignored is None:
+                        return {
+                            "status": "error",
+                            "message": (
+                                f"Cannot create '{path}': git could not report"
+                                " whether it would be ignored, so there is no way"
+                                " to know the file could be undone. Retry, or"
+                                " report this to the user."
+                            ),
+                        }
+                    if ignored:
+                        return {
+                            "status": "error",
+                            "message": (
+                                f"Cannot create '{path}': git ignores it, so"
+                                " 'git clean -fd' would not remove it and the"
+                                " change could not be undone. Choose a path git"
+                                " tracks."
+                            ),
+                        }
 
             out_content = content
             if existed:
@@ -1738,6 +1818,9 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
         if writable_dirs:
             scope_lines.append("Creation roots (new files may be added here):")
             scope_lines.extend(f"- {rel or '.'}/" for rel in sorted(writable_dirs))
+            if carve_outs:
+                scope_lines.append("Except these, which accept no new files:")
+                scope_lines.extend(f"- {rel}/" for rel in carve_outs)
         else:
             scope_lines.append("Creation roots: none; do not create new files")
     else:

@@ -38,7 +38,7 @@ commit_all() {
   ) >/dev/null 2>&1
 }
 
-echo "1..44"
+echo "1..50"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -734,7 +734,7 @@ policy = Policy(
     root,
     visible={"docs/guide.md", "docs/arch.md", "src/a.py"},
     writable={"docs/guide.md"},
-    writable_dirs={"docs"},
+    dir_selectors={"docs": "edit"},
     inlined=["docs/guide.md"],
 )
 policy_wrong = []
@@ -748,6 +748,18 @@ if not policy.can_create("docs/new.md"):
     policy_wrong.append("cannot create under a writable directory")
 if policy.can_create("src/new.py"):
     policy_wrong.append("can create outside a writable directory")
+# A read carve-out inside a writable directory must block creation too.
+carved = Policy(
+    root,
+    visible={"docs/guide.md", "docs/private/secret.md"},
+    writable={"docs/guide.md"},
+    dir_selectors={"docs": "edit", "docs/private": "read"},
+    inlined=[],
+)
+if not carved.can_create("docs/new.md"):
+    policy_wrong.append("cannot create beside a carve-out")
+if carved.can_create("docs/private/new.md") or carved.can_create("docs/private/a/b.md"):
+    policy_wrong.append("can create inside a read-only carve-out")
 policy.note_created("docs/new.md")
 if not (policy.is_visible("docs/new.md") and policy.is_writable("docs/new.md")):
     policy_wrong.append("created file is not readable back")
@@ -757,6 +769,24 @@ if policy.is_visible("docs/guide.md") or policy.is_writable("docs/guide.md"):
 if not policy.is_visible_dir("docs"):
     policy_wrong.append("directory holding visible files is not listable")
 report("policy", not policy_wrong, "; ".join(policy_wrong))
+
+# An unanswerable check-ignore is indeterminate, not "not ignored": a creation
+# that cannot be classified must be refused rather than assumed restorable.
+broken = root / "not-a-repo"
+broken.mkdir(exist_ok=True)
+report("check-ignore-closed", cx["git_ignored_subset"](broken, ["a.md"]) is None)
+
+# NUL-delimited lists are verbatim; line-delimited lists only lose the newline
+list_wrong = []
+nul = root / "list.nul"
+nul.write_bytes(b"trailing.md\n\0\nleading.md\0")
+if cx["read_path_list"](str(nul), True, "caxton") != ["trailing.md\n", "\nleading.md"]:
+    list_wrong.append("NUL list mangled a newline")
+lines = root / "list.txt"
+lines.write_text("a.md\r\nb.md\n")
+if cx["read_path_list"](str(lines), False, "caxton") != ["a.md", "b.md"]:
+    list_wrong.append("line list mishandled CRLF")
+report("path-lists", not list_wrong, "; ".join(list_wrong))
 
 # Help detection skips single values and whole path lists, and stops at '--'
 wants_help = cx["wants_help"]
@@ -794,3 +824,86 @@ unit_check refuse-non-utf8 41 "Refuses to mutate non-UTF-8 files but still reads
 unit_check reject-symlinks 42 "Rejects symlinks during discovery and direct reads"
 unit_check credential-rules 43 "Blocks credential reads without blocking ordinary creates"
 unit_check policy 44 "Enforces visibility, writability, creation roots and created files"
+unit_check check-ignore-closed 45 "Reports an unanswerable check-ignore as indeterminate"
+unit_check path-lists 46 "Reads NUL lists verbatim and line lists without their newline"
+
+# Test 47: a selector reached through a symlinked ancestor is refused, whether
+# or not its final component is an ordinary file. lstat and O_NOFOLLOW resolve
+# leading components, so admitting one would read a file outside the repository.
+ESCAPE_OUTSIDE="$WORK/escape-outside"
+mkdir -p "$ESCAPE_OUTSIDE"
+printf 'OUTSIDE-CONTENT\n' >"$ESCAPE_OUTSIDE/notes.txt"
+ESCAPE_REPO=$(make_repo escape)
+printf 'inside\n' >"$ESCAPE_REPO/real.md"
+ln -s "$ESCAPE_OUTSIDE" "$ESCAPE_REPO/alias"
+commit_all "$ESCAPE_REPO"
+if (cd "$ESCAPE_REPO" && "$BIN" --dry-run "prompt" --read alias/notes.txt) >"$OUTPUT" 2>&1; then
+  echo "not ok 47 - Expected a path through a symlinked ancestor to be refused"
+else
+  if grep -q "reached through 'alias'" "$OUTPUT"; then
+    echo "ok 47 - Refuses a selector that traverses a symlinked ancestor"
+  else
+    echo "not ok 47 - Symlinked-ancestor rejection missing expected error"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 48: the same path arriving from a list is skipped, not admitted
+if (cd "$ESCAPE_REPO" && printf 'alias/notes.txt\nreal.md\n' |
+  "$BIN" --dry-run "prompt" --read-from -) >"$OUTPUT" 2>&1; then
+  if [[ "$(resolved "$OUTPUT")" == "real.md R-I" ]] &&
+    grep -q "Excluded (symlinks, never followed)" "$OUTPUT"; then
+    echo "ok 48 - Drops a listed path that traverses a symlinked ancestor"
+  else
+    echo "not ok 48 - A listed path escaped the repository through a symlink"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 48 - Symlinked-ancestor list dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 49: a read carve-out inside a writable directory blocks creation there
+CARVE=$(make_repo carve)
+mkdir -p "$CARVE/docs/private"
+printf 'guide\n' >"$CARVE/docs/guide.md"
+printf 'secret\n' >"$CARVE/docs/private/secret.md"
+commit_all "$CARVE"
+if (cd "$CARVE" && "$BIN" --dry-run "prompt" --edit docs/ --read docs/private/) >"$OUTPUT" 2>&1; then
+  if grep -q "\[ W \]  docs/" "$OUTPUT" &&
+    grep -q "\[ R \]  docs/private/ (read-only; no new files here)" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" == *"docs/private/secret.md R-I"* ]]; then
+    echo "ok 49 - A read carve-out is reported as accepting no new files"
+  else
+    echo "not ok 49 - Creation carve-out was not reported"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 49 - Carve-out dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 50: NUL-delimited lists keep filenames verbatim. A name ending in a
+# newline is the case NUL delimiters exist for, and the one that stripping
+# silently turns into a different (nonexistent) path.
+NL_REPO=$(make_repo newline-names)
+NL_NAME=$'trail.md\n'
+printf 'plain\n' >"$NL_REPO/plain.md"
+if printf 'odd\n' >"$NL_REPO/$NL_NAME" 2>/dev/null && [[ -f "$NL_REPO/$NL_NAME" ]]; then
+  commit_all "$NL_REPO"
+  if (cd "$NL_REPO" && git ls-files -z |
+    "$BIN" --dry-run "prompt" --read-from - --null) >"$OUTPUT" 2>&1; then
+    if grep -q "Visible:       2 file" "$OUTPUT" &&
+      ! grep -q "Skipped (listed paths" "$OUTPUT"; then
+      echo "ok 50 - A NUL-delimited list preserves newlines inside filenames"
+    else
+      echo "not ok 50 - A filename ending in a newline was mangled"
+      sed 's/^/# /' "$OUTPUT"
+    fi
+  else
+    echo "not ok 50 - NUL-delimited newline dry run exited non-zero"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "ok 50 # SKIP filesystem rejects newlines in filenames"
+fi

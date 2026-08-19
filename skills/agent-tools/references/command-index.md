@@ -447,8 +447,9 @@ Arguments:
 
 Options:
   --read PATH...      Make paths visible to the model. (default: '.')
-  --edit PATH...      Make paths visible and writable. Any --edit makes this a
-                      mutation run and requires a clean git worktree.
+  --edit PATH...      Make paths visible and writable, and for a directory
+                      permit creating and deleting files beneath it. Any --edit
+                      makes this a mutation run and requires a clean worktree.
   --read-from FILE    Read further --read paths from FILE, or '-' for stdin.
   --edit-from FILE    Read further --edit paths from FILE, or '-' for stdin.
   -0, --null          Path list files are NUL-delimited, not one path per line.
@@ -500,7 +501,8 @@ removes the ones it created. A mutation run therefore refuses to start on a
 dirty worktree, and refuses to write paths git cannot restore (ignored files),
 unless --force is given. Credential paths (.ssh, .npmrc, .netrc, *.pem and
 similar), symlinks, submodules and non-regular files are never readable or
-writable, even when named explicitly. Every run lists what it modified,
+writable, even when named explicitly, and neither is anything reached through
+a symlinked parent directory. Every run lists what it modified,
 created, and deleted on stderr, including on timeout.
 ```
 

@@ -231,8 +231,9 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
 - `--read PATH...`: Make paths visible to the model (default: `.`).
 - `--edit PATH...`: Make paths visible and writable. Any `--edit` makes this a
   mutation run and requires a clean git worktree. `--edit DIR` also permits
-  creating and deleting files beneath `DIR`; `--edit FILE` does not authorize
-  creating siblings.
+  creating and deleting files beneath `DIR`, except where a more specific
+  `--read` carves part of it out; `--edit FILE` does not authorize creating
+  siblings.
 - `--read-from FILE` / `--edit-from FILE`: Read further paths from `FILE`, or
   `-` for standard input.
 - `-0, --null`: Path list files are NUL-delimited rather than one path per line.
@@ -282,7 +283,8 @@ which each consume every following path.
 - Anything writable must be restorable by git. A mutation run refuses to start
   on a dirty worktree, refuses to make a git-ignored path writable, and refuses
   to create one during the run — `git checkout -- .` and `git clean -fd` would
-  not undo it. `--force` waives all three.
+  not undo it. A creation git cannot classify is refused rather than assumed
+  safe. `--force` waives all three.
 - Credential paths are never sent: `.ssh/`, `.gnupg/`, `.aws/` and similar
   directories, files such as `.npmrc`, `.netrc`, `.envrc` and
   `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.
@@ -291,9 +293,11 @@ which each consume every following path.
   the narrower rule that only credential directories are off limits, so adding a
   `.env.example` is not refused.
 - Symlinks, submodules and non-regular files (FIFOs, sockets and devices) are
-  never included, and naming one explicitly is an error. Reads open regular
-  files without following a final symlink, and `--timeout` covers directory
-  traversal as well as the agent loop.
+  never included, and naming one explicitly is an error. That covers paths
+  reached *through* a symlinked parent as well: a selector is inside the
+  repository only if every component of it is. Reads open regular files without
+  following a final symlink, and `--timeout` covers directory traversal as well
+  as the agent loop.
 - Mutation tools are withheld entirely unless `--edit` names something.
 - Tool paths are resolved with `realpath` and confined to the repository, as a
   backstop behind the per-path policy.
