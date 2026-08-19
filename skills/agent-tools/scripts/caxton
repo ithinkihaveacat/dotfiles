@@ -22,6 +22,7 @@ import difflib
 import fnmatch
 import mimetypes
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -623,7 +624,10 @@ def git_toplevel(path: Path) -> tuple[str, Path | None, str]:
         if "not a git repository" in detail:
             return "absent", None, detail
         return "unknown", None, detail or f"git rev-parse exited {probe.returncode}"
-    top = probe.stdout.strip()
+    # Strip only git's line terminator: a directory name may legitimately end
+    # in a space, and stripping whitespace would name a path that does not
+    # exist, leaving caxton to reject its own default selection.
+    top = probe.stdout.removesuffix("\n")
     if not top:
         return "unknown", None, "git rev-parse returned no top level"
     return "repo", Path(os.path.realpath(top)), ""
@@ -659,6 +663,21 @@ def git_unignored_paths(root: Path) -> tuple[set[str] | None, str]:
     if proc.returncode != 0:
         return None, proc.stderr.strip() or f"git ls-files exited {proc.returncode}"
     return {rel for rel in proc.stdout.split("\0") if rel}, ""
+
+
+def unrestorable_creations(root: Path, created: list[str]) -> list[str]:
+    """Created paths that git would now ignore, and so would not clean.
+
+    Creation is checked against the ignore rules in force at the time, but a
+    run may edit those rules: creating 'dist/app.js' and then adding 'dist/'
+    to .gitignore leaves a file that 'git checkout -- . && git clean -fd' does
+    not remove. Rather than forbid the edit — gitignoring what you generate is
+    an ordinary thing to ask for — the run names what its own undo will miss.
+    """
+    if not created:
+        return []
+    ignored = git_ignored_subset(root, sorted(created))
+    return sorted(ignored) if ignored else []
 
 
 def git_ignored_subset(
@@ -1059,6 +1078,39 @@ def main():
     # a directory ignored while it still holds tracked content, and a path
     # invented to probe from inside would be judged by its own name, so a rule
     # such as '.*' would report an unignored directory as ignored.
+    # 'ls-files --cached' lists a submodule as a gitlink entry and '--others'
+    # never lists directories, so any listed path that is a directory on disk
+    # is a submodule boundary. A deinitialized one has no '.git' marker for the
+    # ancestor walk to find, but git still refuses to clean inside it, so
+    # anything written there would outlive the run's undo.
+    gitlink_dirs = {rel for rel in unignored if (root / rel).is_dir()}
+    if gitlink_dirs:
+        kept: list[Selector] = []
+        for sel in selectors:
+            via = next(
+                (a for a in [*rel_ancestors(sel.rel), sel.rel] if a in gitlink_dirs),
+                None,
+            )
+            if via is None:
+                kept.append(sel)
+                continue
+            if sel.explicit:
+                print(
+                    f"{prog_name}: error: cannot select '{sel.rel}': it is"
+                    f" reached through '{via}', which is a submodule; run"
+                    " caxton inside it",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            skipped_listed.append(sel.rel)
+        selectors = kept
+        if not selectors:
+            print(
+                f"{prog_name}: the selection is empty; nothing to do",
+                file=sys.stderr,
+            )
+            sys.exit(0)
+
     ignored_selectors = git_ignored_subset(
         root, sorted({sel.rel for sel in selectors if sel.rel}), no_index=True
     )
@@ -1137,6 +1189,7 @@ def main():
                     and not (walk_path / d).is_symlink()
                     and not is_secret_dir_path(walk_path / d, root)
                     and not (walk_path / d / ".git").exists()
+                    and to_rel(root, walk_path / d) not in gitlink_dirs
                 ]
                 for name in sorted(files):
                     admit(to_rel(root, walk_path / name))
@@ -2202,6 +2255,22 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             ):
                 for p in sorted(paths):
                     print(f"[caxton]   {label}: {p}", file=sys.stderr)
+            # A run that edited the ignore rules can leave creations its own
+            # undo will skip, so say which and how to remove them.
+            stranded = unrestorable_creations(root, list(telemetry.created_files))
+            if stranded:
+                print(
+                    f"[caxton] warning: {len(stranded)} created path(s) are now"
+                    " git-ignored, so 'git clean -fd' will not remove them:",
+                    file=sys.stderr,
+                )
+                for p in stranded:
+                    print(f"[caxton]   stranded: {p}", file=sys.stderr)
+                quoted = " ".join(shlex.quote(p) for p in stranded)
+                print(
+                    f"[caxton] remove them with: git clean -fdx -- {quoted}",
+                    file=sys.stderr,
+                )
 
 
 def sigterm_handler(signum, frame):

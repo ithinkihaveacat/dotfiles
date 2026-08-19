@@ -248,6 +248,15 @@ A creation git cannot classify is refused rather than assumed safe: if
 `git check-ignore` cannot answer, there is no basis for claiming the new file
 could be undone.
 
+One gap in this stays open by choice. Creation is checked against the ignore
+rules in force at the time, and a run may edit those rules: creating
+`dist/app.js` and then adding `dist/` to `.gitignore` leaves a file that
+`git clean -fd` will not remove. Forbidding the edit would rule out an ordinary
+request — gitignoring what you generate — and reconstructing the baseline rules
+would put a second ignore engine back into caxton, which is what requiring git
+was meant to avoid. Instead the run audits its own creations at the end and
+names the ones its undo will miss, with the command that removes them.
+
 `--force` waives the clean-worktree requirement and the ignored-path restriction
 together, with a warning that the end-of-run change report is then the only
 inventory caxton provides.
@@ -320,10 +329,12 @@ These are safety boundaries, not conveniences, and apply to explicit paths too:
   points outside would mean the containment and credential checks judged one
   file while the reader opened another.
 - Sockets, FIFOs, devices, and other non-regular entries.
-- Submodule boundaries, at any depth. A path inside a submodule is governed by a
-  different repository's index and restorability, so `sub/child.txt` is refused
-  for the same reason `sub` is; caxton reports it and directs the user to run
-  inside that repository.
+- Submodule boundaries, at any depth, whether or not the submodule is checked
+  out. A path inside one is governed by a different repository's index and
+  restorability, so `sub/child.txt` is refused for the same reason `sub` is. A
+  deinitialized submodule has no `.git` marker to find, but its gitlink stays in
+  the superproject's index and git still refuses to clean inside it, so the
+  boundary is read from the listing rather than from the worktree.
 - Anything resolving outside the repository top level.
 
 An explicit request for a hard-excluded path fails with a specific error.

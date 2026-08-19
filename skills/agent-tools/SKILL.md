@@ -290,7 +290,10 @@ which each consume every following path.
   to create one during the run — `git checkout -- .` and `git clean -fd` would
   not undo it. An ignored directory is refused as a creation root at preflight
   for the same reason, and a creation git cannot classify is refused rather than
-  assumed safe. `--force` waives all of these.
+  assumed safe. `--force` waives all of these. A run that adds an ignore rule
+  covering something it created earlier is allowed — gitignoring generated
+  output is an ordinary request — but the closing report names every such file
+  and the command that removes it, since `git clean -fd` will not.
 - Credential paths are never sent: `.ssh/`, `.gnupg/`, `.aws/` and similar
   directories, files such as `.npmrc`, `.netrc`, `.envrc` and
   `.git-credentials`, and patterns such as `*.pem`, `*.key` and `id_rsa*`.
@@ -298,12 +301,12 @@ which each consume every following path.
   dotfiles (`.github/`, `.prettierrc`) stay visible. Creation is checked against
   the narrower rule that only credential directories are off limits, so adding a
   `.env.example` is not refused.
-- Symlinks, submodules and non-regular files (FIFOs, sockets and devices) are
-  never included, and naming one explicitly is an error. That covers paths
-  reached *through* a symlinked parent or a submodule boundary as well: a
-  selector belongs to this repository only if every component of it does. Reads
-  open regular files without following a final symlink, and `--timeout` covers
-  directory traversal as well as the agent loop.
+- Symlinks, submodules (checked out or not) and non-regular files (FIFOs,
+  sockets and devices) are never included, and naming one explicitly is an
+  error. That covers paths reached *through* a symlinked parent or a submodule
+  boundary as well: a selector belongs to this repository only if every
+  component of it does. Reads open regular files without following a final
+  symlink, and `--timeout` covers directory traversal as well as the agent loop.
 - Mutation tools are withheld entirely unless `--edit` names something.
 - Tool paths are resolved with `realpath` and confined to the repository, as a
   backstop behind the per-path policy.

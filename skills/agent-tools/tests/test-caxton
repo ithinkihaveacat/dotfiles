@@ -16,7 +16,10 @@ snapshot() {
   (cd "$1" && find . -path ./.git -prune -o -type f -exec cksum {} + | sort)
 }
 
-# Builds a repository fixture and prints its path.
+# Builds a repository fixture and prints its path. Global ignore rules are
+# neutralized: a developer's core.excludesFile commonly carries patterns like
+# '*~', which would silently exclude a fixture's files and make the run under
+# test disagree with what the test believes it set up.
 make_repo() {
   local repo="$WORK/$1"
   mkdir -p "$repo"
@@ -26,19 +29,26 @@ make_repo() {
     git config user.email "test@example.com"
     git config user.name "Test"
     git config commit.gpgsign false
+    git config core.excludesFile /dev/null
   ) >/dev/null 2>&1
   echo "$repo"
 }
 
+# A fixture that cannot be committed is a broken test, not a failing one: bail
+# out loudly rather than letting 'set -e' truncate the plan without a word.
 commit_all() {
-  (
+  if ! (
     cd "$1"
     git add -A
     git commit -q --no-gpg-sign -m "${2:-init}"
-  ) >/dev/null 2>&1
+  ) >"$WORK/commit.err" 2>&1; then
+    echo "Bail out! fixture '$1' could not be committed"
+    sed 's/^/# /' "$WORK/commit.err"
+    exit 1
+  fi
 }
 
-echo "1..59"
+echo "1..62"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -534,7 +544,8 @@ fi
 SUB_PARENT=$(make_repo submodule-parent)
 printf 'top\n' >"$SUB_PARENT/top.md"
 mkdir -p "$SUB_PARENT/vendor/lib"
-(cd "$SUB_PARENT/vendor/lib" && git init -q .) >/dev/null 2>&1
+(cd "$SUB_PARENT/vendor/lib" && git init -q . &&
+  git config core.excludesFile /dev/null) >/dev/null 2>&1
 printf 'inner\n' >"$SUB_PARENT/vendor/lib/inner.md"
 if (cd "$SUB_PARENT" && "$BIN" --dry-run "prompt" --read vendor/lib) >"$OUTPUT" 2>&1; then
   echo "not ok 33 - Expected a submodule path to be refused"
@@ -1043,6 +1054,7 @@ mkdir -p "$SUB_HOST/sub"
   git config user.email "test@example.com"
   git config user.name "Test"
   git config commit.gpgsign false
+  git config core.excludesFile /dev/null
   printf 'SUBMODULE CONTENT\n' >child.txt
   git add -A
   git commit -q --no-gpg-sign -m sub
@@ -1093,4 +1105,98 @@ if printf 'bs\n' >"$BS_REPO/$BS_NAME" 2>/dev/null && [[ -f "$BS_REPO/$BS_NAME" ]
   fi
 else
   echo "ok 59 # SKIP filesystem rejects backslashes in filenames"
+fi
+
+# Test 60: a submodule that has been deinitialized keeps its gitlink in the
+# index but loses its .git marker, and git still refuses to clean inside it,
+# so anything written there would outlive the run's undo.
+DEINIT=$(make_repo deinit-host)
+printf 'top\n' >"$DEINIT/top.md"
+mkdir -p "$DEINIT/sub"
+(
+  cd "$DEINIT/sub"
+  git init -q .
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git config commit.gpgsign false
+  git config core.excludesFile /dev/null
+  printf 'inner\n' >child.txt
+  git add -A
+  git commit -q --no-gpg-sign -m sub
+) >/dev/null 2>&1
+(cd "$DEINIT" && git add top.md sub && git commit -q --no-gpg-sign -m init) >/dev/null 2>&1
+rm -rf "$DEINIT/sub/.git"
+printf 'STRAY\n' >"$DEINIT/sub/child.txt"
+if (cd "$DEINIT" && "$BIN" --dry-run "prompt" --read sub/child.txt) >"$OUTPUT" 2>&1; then
+  echo "not ok 60 - Expected a deinitialized submodule path to be refused"
+else
+  if grep -q "which is a submodule" "$OUTPUT"; then
+    echo "ok 60 - Detects a submodule boundary from the index, not just .git"
+  else
+    echo "not ok 60 - Deinitialized submodule was not recognized"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 61: the repository root is whatever git printed, minus its line
+# terminator. Stripping whitespace would name a directory that does not exist.
+SPACED="$WORK/spaced dir "
+mkdir -p "$SPACED"
+(
+  cd "$SPACED"
+  git init -q .
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git config commit.gpgsign false
+  git config core.excludesFile /dev/null
+) >/dev/null 2>&1
+printf 'a\n' >"$SPACED/a.md"
+if (cd "$SPACED" && "$BIN" --dry-run "prompt") >"$OUTPUT" 2>&1; then
+  if grep -q "Repository:    $SPACED" "$OUTPUT" &&
+    [[ "$(resolved "$OUTPUT")" == "a.md R-I" ]]; then
+    echo "ok 61 - A repository whose name ends in a space still resolves"
+  else
+    echo "not ok 61 - Trailing whitespace was stripped from the repository root"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 61 - Spaced-root dry run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 62: a run may edit the ignore rules, stranding files it created earlier
+# beyond the reach of its own undo. Those are named rather than forbidden.
+STRAND=$(make_repo stranded)
+printf 'keep\n' >"$STRAND/keep.md"
+commit_all "$STRAND"
+printf 'residue\n' >"$STRAND/residue.tmp"
+printf 'plain\n' >"$STRAND/plain.md"
+printf 'residue.tmp\n' >"$STRAND/.gitignore"
+cat >"$WORK/strand.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line for line in source.splitlines() if not line.startswith("from google")
+)
+cx = {"__name__": "caxton_helpers"}
+exec(compile(stripped, "caxton", "exec"), cx)
+print(cx["unrestorable_creations"](Path(sys.argv[2]), ["residue.tmp", "plain.md"]))
+PYEOF
+if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/strand.py" \
+  "$BIN" "$STRAND" >"$OUTPUT" 2>&1; then
+  if grep -q "^\['residue.tmp'\]$" "$OUTPUT"; then
+    echo "ok 62 - Names a creation stranded by an ignore rule the run added"
+  else
+    echo "not ok 62 - Stranded creations were not identified"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 62 - Stranded-creation check exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
 fi
