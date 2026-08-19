@@ -10,7 +10,7 @@ changes** that facilitate those tests.
 
 ______________________________________________________________________
 
-## 1. Debug Broadcast Receivers
+## Debug Broadcast Receivers
 
 Adding a non-exported (or signature-protected) `BroadcastReceiver` strictly for
 debug builds allows you to bypass complex UI flows and reliably simulate rare
@@ -51,7 +51,7 @@ schedules.
 
 ______________________________________________________________________
 
-## 2. Sync & State Control
+## Sync & State Control
 
 - **Force Immediate Sync**: Instead of waiting for `WorkManager` or
   `GcmNetworkManager` intervals, add a debug trigger to force an end-to-end sync
@@ -63,7 +63,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## 3. Instrumenting Against Common Pitfalls
+## Instrumenting Against Common Pitfalls
 
 These are common Wear OS failure modes. Consider adding specific debug hooks to
 make testing these transitions reliable.

@@ -30,12 +30,12 @@ ______________________________________________________________________
 
 ## Base URL
 
-```
+```text
 https://www.finnair.com/gb-en/booking/flight-selection?json=<URL-encoded JSON>
 ```
 
-> 🔓 **No login required** — the URL works from a cold start with no Finnair
-> session, cookie, or prior homepage visit (see
+> [!NOTE] **No login required** — the URL works from a cold start with no
+> Finnair session, cookie, or prior homepage visit (see
 > [Quirks](#no-sessioncookie-required)).
 
 The locale segment (`gb-en`) can be changed for other markets (e.g. `fi-fi`,
@@ -142,7 +142,7 @@ ______________________________________________________________________
 
 ### One-way, Economy, 1 adult
 
-```
+```text
 https://www.finnair.com/gb-en/booking/flight-selection?json=%7B%22flights%22%3A%5B%7B%22origin%22%3A%22HEL%22%2C%22destination%22%3A%22MEL%22%2C%22departureDate%22%3A%222026-12-26%22%7D%5D%2C%22cabin%22%3A%22ECONOMY%22%2C%22adults%22%3A1%2C%22c15s%22%3A0%2C%22children%22%3A0%2C%22infants%22%3A0%7D
 ```
 
@@ -154,7 +154,7 @@ Decoded JSON:
 
 ### Multi-city, Premium Economy, 3 adults
 
-```
+```text
 https://www.finnair.com/gb-en/booking/flight-selection?json=%7B%22flights%22%3A%5B%7B%22origin%22%3A%22LON%22%2C%22destination%22%3A%22HEL%22%2C%22departureDate%22%3A%222026-12-19%22%7D%2C%7B%22origin%22%3A%22HEL%22%2C%22destination%22%3A%22MEL%22%2C%22departureDate%22%3A%222026-12-26%22%7D%2C%7B%22origin%22%3A%22MEL%22%2C%22destination%22%3A%22LHR%22%2C%22departureDate%22%3A%222027-01-08%22%7D%5D%2C%22cabin%22%3A%22ECOPREMIUM%22%2C%22adults%22%3A3%2C%22c15s%22%3A0%2C%22children%22%3A0%2C%22infants%22%3A0%7D
 ```
 

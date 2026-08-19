@@ -1,6 +1,9 @@
 ---
 name: taskgo
-description: Maintain a private Git-backed personal project/task control repo using concise current Markdown, derived Git history, ADRs, status synchronization, and external artifact references.
+description: >-
+  Maintain a private Git-backed personal project/task control repo using concise
+  current Markdown, derived Git history, ADRs, status synchronization, and
+  external artifact references.
 ---
 
 # taskgo

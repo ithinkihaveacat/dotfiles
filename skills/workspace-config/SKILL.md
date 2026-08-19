@@ -1,6 +1,10 @@
 ---
 name: workspace-config
-description: Discover and select relevant agent skills, and manage workspace tool execution permissions. Use this to determine which skills apply to a workspace, to install or remove skills, and to manage allow/deny/ask rules for local agent tool execution across agents (Claude Code, Antigravity).
+description: >-
+  Discover and select relevant agent skills, and manage workspace tool execution
+  permissions. Use this to determine which skills apply to a workspace, to install
+  or remove skills, and to manage allow/deny/ask rules for local agent tool
+  execution across agents (Claude Code, Antigravity).
 ---
 
 # Workspace Configuration
@@ -26,7 +30,7 @@ post-checkout hook.
 
 ______________________________________________________________________
 
-## 1. Managing Skills (`skill`)
+## Managing Skills (`skill`)
 
 The `skill` tool (symlinked in `bin/`) manages agent skills as untracked
 symlinks in your workspace. It automatically detects your environment and
@@ -105,7 +109,7 @@ and the one place `doctor` and `preflight` deliberately differ — see
 
 ______________________________________________________________________
 
-## 2. Managing Git Hooks (`hook`)
+## Managing Git Hooks (`hook`)
 
 The `hook` tool (symlinked in `bin/`) manages Git hooks in your repository as
 lightweight trampolines pointing into source scripts under `etc/git/hooks/`,
@@ -150,7 +154,7 @@ hook <command> [arguments]
 
 ______________________________________________________________________
 
-## 3. Managing Workspace Permissions (`permission`)
+## Managing Workspace Permissions (`permission`)
 
 The `permission` tool (symlinked in `bin/`) manages workspace-specific agent
 tool permissions. Rules are written as clean command patterns (e.g.
@@ -210,7 +214,7 @@ See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 
-## 4. Managing `.envrc` (`envrc`)
+## Managing `.envrc` (`envrc`)
 
 The `envrc` tool (symlinked in `bin/`) is the single write path for `.envrc`
 files: it manages marker-delimited configuration blocks so multiple
@@ -221,7 +225,8 @@ configurations co-exist safely and other tools never edit `.envrc` directly.
   `appengine`, `skills`, or a raw `block NAME` whose content is read from
   stdin).
 - **`add skills NAME...`** / **`remove skills NAME...`** / **`list [skills]`**:
-  Edit the workspace's required-skills declaration item-by-item (see section 1).
+  Edit the workspace's required-skills declaration item-by-item (see
+  [Managing Skills (`skill`)](#managing-skills-skill)).
 - **`set VAR VALUE`** / **`unset VAR`** / **`get VAR`**: Manage individual
   environment variables in a managed `env` block. Values are written
   single-quoted, so they are always literal data — shell syntax is never

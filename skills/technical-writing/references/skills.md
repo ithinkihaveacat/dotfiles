@@ -21,7 +21,7 @@ environments (local Git repositories, CitC workspaces, cloud runtimes, Skill Hub
 marketplace), **every skill must be designed as an independent, self-contained
 unit of capability**.
 
-### 1. Skill Independence & Self-Containment
+### Skill Independence & Self-Containment
 
 - **No Hard Skill Dependencies:** A skill MUST NOT directly mandate the use of
   another skill, specify another skill as a strict prerequisite, or instruct the

@@ -194,7 +194,8 @@ layout uv              # creates .venv if absent, activates it
 ## Installation
 
 The same `install.sh` script both installs and updates, and runs in two ways.
-`git` must already be installed either way (see [Prerequisites](#git)).
+`git` must already be installed either way (see
+[Prerequisites](#prerequisites)).
 
 ### Option 1: Straight from the network
 

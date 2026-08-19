@@ -1,6 +1,9 @@
 ---
 name: wear-widget
-description: Workflows, checklists, and scripts for reverse-engineering, analyzing, and extracting Wear OS and Android widgets, including manifest declarations, XML configurations, and rendering preview assets.
+description: >-
+  Workflows, checklists, and scripts for reverse-engineering, analyzing, and
+  extracting Wear OS and Android widgets, including manifest declarations, XML
+  configurations, and rendering preview assets.
 ---
 
 # Wear Widget Skill
@@ -19,12 +22,12 @@ Use this skill when:
 
 ______________________________________________________________________
 
-## 📋 Widget Analysis & Extraction Checklist
+## Widget Analysis & Extraction Checklist
 
 Follow this step-by-step methodology when analyzing an APK. Ensure you leverage
 binary analysis and ADB device management tools where applicable.
 
-### 1. Decompile the APK
+### Decompile the APK
 
 Decompile the APK to decode binary manifests, layouts, and resource values into
 readable plain-text formats using binary decoding tools (such as `apktool` or
@@ -34,7 +37,7 @@ workspace APK helpers):
 apktool d <app_name>.apk -o <output_dir>
 ```
 
-### 2. Identify Widget Services in the Manifest
+### Identify Widget Services in the Manifest
 
 Search the decompiled `AndroidManifest.xml` for services or receivers acting as
 widget or tile providers:
@@ -52,7 +55,7 @@ widget or tile providers:
   - **Resource**: Note the xml resource path (e.g., `@xml/widget_info`, mapping
     to `res/xml/widget_info.xml`).
 
-### 3. Extract and Parse the Configuration XML
+### Extract and Parse the Configuration XML
 
 Open the resolved XML file in `res/xml/` to extract metadata:
 
@@ -61,7 +64,7 @@ Open the resolved XML file in `res/xml/` to extract metadata:
 - **Containers**: Note all supported container sizes/types and their
   corresponding `previewImage` drawables.
 
-### 4. Resolve Resource Strings & Extract Preview Images
+### Resolve Resource Strings & Extract Preview Images
 
 - Search `res/values/strings.xml` for any `@string/...` identifiers.
 - For each referenced `previewImage` and `icon` drawable:
@@ -70,7 +73,7 @@ Open the resolved XML file in `res/xml/` to extract metadata:
   - **If Vector (XML)**: Translate the Android Vector Drawable (AVD) to SVG and
     render it to PNG using the `avd-to-png` tool.
 
-### 5. Install & Onboard the Corresponding Mobile App
+### Install & Onboard the Corresponding Mobile App
 
 Depending on the task (e.g., if auditing a companion feature requiring active
 backend state), you may need the corresponding mobile app installed and
@@ -90,14 +93,14 @@ configured in a clean, logged-in state.
 
 ______________________________________________________________________
 
-## 📦 On-Device APK Preview Metadata & Linking
+## On-Device APK Preview Metadata & Linking
 
 When deploying Wear Widgets, the OS requires strict metadata declarations and
 asset formatting inside the APK. Do not confuse these declaration requirements
 with the mechanisms used to generate the asset files (see
-[Developer Preview Generation Mechanisms](#-developer-preview-generation-mechanisms)).
+[Developer Preview Generation Mechanisms](#developer-preview-generation-mechanisms)).
 
-### 1. Asset Requirements & Rules
+### Asset Requirements & Rules
 
 - **The `nodpi` Folder Recommendation**: Static raster previews should be placed
   in `nodpi` directories (e.g., `res/drawable-nodpi/`) to ensure the system does
@@ -115,7 +118,7 @@ with the mechanisms used to generate the asset files (see
   system automatically clip the edges to the device's shape. Do not pre-mask
   background assets into a circle.
 
-### 2. Widget Picker Previews (Glance/AppWidget)
+### Widget Picker Previews (Glance/AppWidget)
 
 Shown in the native widget picker on devices supporting partial-height widgets
 (Wear OS 7+). Previews are linked inside the provider XML configuration file
@@ -130,7 +133,7 @@ Shown in the native widget picker on devices supporting partial-height widgets
     previewImage="@drawable/my_widget_preview_large" />
 ```
 
-### 3. Tile Carousel Previews
+### Tile Carousel Previews
 
 Shown in the tile carousel editor (on-watch) and mobile companion app
 (on-phone). On Wear OS 6 or lower, systems run in **compatibility mode** and
@@ -145,7 +148,7 @@ translate widgets into full-screen Tiles. Previews are declared in
 
 ______________________________________________________________________
 
-## 🛠️ Developer Preview Generation Mechanisms
+## Developer Preview Generation Mechanisms
 
 Developers use several mechanisms to preview widgets during development and
 testing. Some of these mechanisms can also be used to generate the static
@@ -238,7 +241,7 @@ A preview helper app enabled exclusively on internal/developer builds of the
 
 ______________________________________________________________________
 
-## ⚙️ Device & Emulator Guidelines
+## Device & Emulator Guidelines
 
 ### Wear OS Emulator Constraints
 
@@ -298,7 +301,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## 💡 Key Gotchas & Best Practices
+## Key Gotchas & Best Practices
 
 - **Anti-Pattern: Force-Stopping System Services**: You do NOT need to
   force-stop `com.google.android.gms`, `com.google.android.wearable.app`, or
@@ -315,7 +318,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## 🧰 Tooling Reference
+## Tooling Reference
 
 ### `avd-to-png`
 
@@ -338,7 +341,7 @@ avd-to-png -o ./preview-small.png decompiled_app/res/drawable/ic_preview.xml dec
 
 ______________________________________________________________________
 
-## 📝 Reporting & Audits
+## Reporting & Audits
 
 When synthesizing findings or preparing integration reports based on the
 workflows in this skill, adhere to the strict presentation formatting defined in

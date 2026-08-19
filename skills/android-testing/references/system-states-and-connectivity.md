@@ -7,7 +7,7 @@ encounter but are tedious to trigger manually.
 
 ______________________________________________________________________
 
-## 1. Network & Connectivity Constraints
+## Network & Connectivity Constraints
 
 ### The Bluetooth Companion Proxy (Wear OS)
 
@@ -92,7 +92,7 @@ use the raw Android `svc` power and network services:
 
 ______________________________________________________________________
 
-## 2. Power & Doze Mode
+## Power & Doze Mode
 
 Apps must respect battery constraints and handle Doze mode cleanly.
 
@@ -116,7 +116,7 @@ Apps must respect battery constraints and handle Doze mode cleanly.
 
 ______________________________________________________________________
 
-## 3. UI, Accessibility & Display
+## UI, Accessibility & Display
 
 Ensure your application's layouts and text scale gracefully across different
 form factors and configurations.
@@ -150,7 +150,7 @@ form factors and configurations.
 
 ______________________________________________________________________
 
-## 4. Physical Inputs & Gestures
+## Physical Inputs & Gestures
 
 Simulate physical Wear OS interactions using `keyevent`.
 
@@ -172,7 +172,7 @@ Simulate physical Wear OS interactions using `keyevent`.
 
 ______________________________________________________________________
 
-## 5. Language & Localization
+## Language & Localization
 
 Test localized strings without diving into the UI settings.
 
@@ -185,7 +185,7 @@ Test localized strings without diving into the UI settings.
 
 ______________________________________________________________________
 
-## 6. Cloud Backup & Restore (Wear 4+)
+## Cloud Backup & Restore (Wear 4+)
 
 Wear OS 4+ supports cloud backup and restore (up to 25 MB per app). If the
 backup exceeds 25 MB, **no data** is backed up.

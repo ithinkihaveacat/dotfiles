@@ -6,7 +6,7 @@ architecture.
 
 ______________________________________________________________________
 
-## 1. Location Spoofing & Fused Location Security
+## Location Spoofing & Fused Location Security
 
 Modern Android mapping, routing, and fitness apps (e.g. AllTrails, Strava,
 Google Maps) rely on Google Play Services' **Fused Location Provider** (`fused`)
@@ -38,7 +38,7 @@ Fused Location Provider.**
 
 ______________________________________________________________________
 
-## 2. Health Services & Synthetic Data (Wear OS 3+)
+## Health Services & Synthetic Data (Wear OS 3+)
 
 For physical exertion and biometric tracking on Wear OS, the system provides a
 powerful **Synthetic Data Generation Tool** built directly into Health Services
@@ -92,7 +92,7 @@ Elevation.
 
 ______________________________________________________________________
 
-## 3. Wear OS One-Handed Gestures (Wear OS 7+)
+## Wear OS One-Handed Gestures (Wear OS 7+)
 
 Testing Wear OS 7+ applications that utilize one-handed gestures (specifically
 the Double Pinch / Primary action and Wrist Turn / Dismiss action) requires
@@ -100,7 +100,7 @@ understanding how the gesture framework registers subscribers, how to simulate
 these gestures via ADB, and how to bypass hardware constraints (like the
 off-body sensor) during development.
 
-### A. Prerequisites for Gesture Testing
+### Prerequisites for Gesture Testing
 
 For any gesture interaction to be active and testable (either physically or via
 ADB simulation), the following conditions must be met on the Wear OS device:
@@ -123,7 +123,7 @@ ADB simulation), the following conditions must be met on the Wear OS device:
      adb shell settings list secure | grep -E "gesture_primary_action_user_preference|gesture_dismiss_action_user_preference"
      ```
      *Expected Output*:
-     ```
+     ```text
      gesture_primary_action_user_preference=1
      gesture_dismiss_action_user_preference=1
      ```
@@ -143,11 +143,11 @@ ADB simulation), the following conditions must be met on the Wear OS device:
      adb shell settings get secure gesture_external_control_user_preference
      ```
      *Expected Output*: `1`
-   - *Warning*: If this setting is OFF (`0`), any ADB gesture simulation will fail
-     with:
+   - *Warning*: If this setting is OFF (`0`), any ADB gesture simulation will
+     fail with:
      `Failed to complete gesture. injectGestureInternal: Gesture DoublePinch is not active.`
 
-### B. Simulating Gestures via ADB
+### Simulating Gestures via ADB
 
 You can inject simulated gesture events into the active foreground application
 using the `IWearGestureService` command-line tool.
@@ -197,7 +197,7 @@ constant name defined in `IWearGestureService.aidl`:
 > the integer ID (`1`, `2`) or the formal constant name (`GESTURE_DOUBLE_PINCH`,
 > `GESTURE_WRIST_TURN`).
 
-### C. Developer Overrides (Bypassing Constraints)
+### Developer Overrides (Bypassing Constraints)
 
 The gesture service enforces strict environmental constraints before it
 activates gesture detection. In a development or test automation environment,
@@ -235,7 +235,7 @@ or test automation:
   adb shell cmd IWearGestureService override-constraints reset
   ```
 
-### D. Diagnostics & Troubleshooting
+### Diagnostics & Troubleshooting
 
 #### Query Active Gestures
 
@@ -287,7 +287,7 @@ Key sections to inspect in the dump:
 - **Overridden Constraints**: Confirms which developer overrides are currently
   active.
 
-### E. Testing UI Hints & Smart Nudging
+### Testing UI Hints & Smart Nudging
 
 To prevent visual clutter and annoying experienced users, the Wear OS gesture
 framework implements a **Smart Nudging** policy.
@@ -371,7 +371,7 @@ adb shell dumpsys IWearGestureService | grep -A 5 "GestureHintConfigurationProvi
 
 *Expected Output*:
 
-```
+```text
   GestureHintConfigurationProvider: 
     millisBeforeNudge=0
     useGestureTime=true

@@ -18,7 +18,7 @@ setup, usage, and friction points.
 
 A complete friction log consists of the following sections:
 
-### 1. Document Metadata & Introduction
+### Document Metadata & Introduction
 
 Provide the context of the evaluation:
 
@@ -37,7 +37,7 @@ _Example Introduction:_
 > it will become an important asset for developers. This document captures my
 > experiences with the tool. I hope the observations/suggestions are useful."
 
-### 2. Executive Summary
+### Executive Summary
 
 Before jumping into the step-by-step log, highlight 3–4 core themes or systemic
 issues identified during the walkthrough. Frame these constructively.
@@ -47,7 +47,7 @@ issues identified during the walkthrough. Frame these constructively.
 - Prefer constructive framing like "Adding `--verbose` flags would be helpful
   for debugging."
 
-### 3. Chronological Walkthrough (The "Log")
+### Chronological Walkthrough (The "Log")
 
 Break down your interaction into distinct chronological steps (e.g.,
 Installation, Setup, Core Command Execution).
@@ -71,7 +71,7 @@ _Example Observation Block:_
 > Adding this flag would be very helpful, as returning to a clean state is a
 > frequent requirement for reliable testing.
 
-### 4. Feature Requests & General Observations
+### Feature Requests & General Observations
 
 Conclude the document with any systemic feature requests or observations that
 fall outside a specific chronological step. Explain _why_ these features matter

@@ -4,7 +4,7 @@ Measurements of whether the `jetpack` skill actually helps, and whether it loads
 when it should. Run with
 [skill-eval-harness](https://github.com/adewale/skill-eval-harness).
 
-> **Temporary:** run the harness from the
+> [!NOTE] **Temporary:** run the harness from the
 > [`agy-adapter` branch of this fork](https://github.com/ithinkihaveacat/skill-eval-harness/tree/agy-adapter),
 > not from upstream. It carries the Google Antigravity backend these evals use,
 > which is not yet released upstream. Once it lands, use upstream and delete

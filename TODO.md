@@ -316,14 +316,14 @@ def main():
         print("\nMISMATCHED / MISSING PAIRS:")
         for item in failed:
             if item[1] == "MISSING_EMULATOR_CAPTURE":
-                print(f"  ❌ {item[0]:45s} -> Missing emulator capture")
+                print(f"  [FAIL] {item[0]:45s} -> Missing emulator capture")
             else:
-                print(f"  ❌ {item[0]:45s} -> Sim: {item[2]:5.2f}% (RMSE: {item[3]:5.2f})")
+                print(f"  [FAIL] {item[0]:45s} -> Sim: {item[2]:5.2f}% (RMSE: {item[3]:5.2f})")
 
     if passed:
         print("\nVERIFIED MATCHING PAIRS (Sample):")
         for item in passed[:10]:
-            print(f"  ✅ {item[0]:45s} -> Sim: {item[1]:5.2f}% (RMSE: {item[2]:5.2f})")
+            print(f"  [PASS] {item[0]:45s} -> Sim: {item[1]:5.2f}% (RMSE: {item[2]:5.2f})")
 
     # Save full audit json
     audit_data = {
@@ -393,13 +393,13 @@ adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
 
 ## Make the agent-review documentation world class (2026-07-13)
 
-**Problem:** `skills/agent-tools/references/agent-review.md` (plus the "Second
-Opinions" section in `SKILL.md`) was written in one pass immediately after the
-first two successful uses of the workflow — an Oracle plan review and a codex
-code review during the ptracker backfill work. It documents what worked that
-day, verified only against that day's `--help` output. Three structural
-weaknesses are already visible, and the external CLIs it documents (`codex`,
-`claude`, `agy`) ship frequently, so the flag-level details will drift.
+**Problem:** `skills/agent-review/SKILL.md` (plus the "Second Opinions" section
+in `SKILL.md`) was written in one pass immediately after the first two
+successful uses of the workflow — an Oracle plan review and a codex code review
+during the ptracker backfill work. It documents what worked that day, verified
+only against that day's `--help` output. Three structural weaknesses are already
+visible, and the external CLIs it documents (`codex`, `claude`, `agy`) ship
+frequently, so the flag-level details will drift.
 
 **Goal:** The review-related documentation is trustworthy (documented
 invocations verifiably work), coherent (one conceptual frame instead of a
@@ -451,9 +451,10 @@ for each row of the decision table without consulting `--help`.
   disposition record should get a canonical format the commit/PR templates in
   `technical-writing` can reference; whether `gh-markdown`-piped PR review
   deserves a worked example with real output shape; and whether SKILL.md's copy
-  of the decision table should be generated from `agent-review.md` to avoid the
-  two drifting apart.
+  of the decision table should be generated from `agent-review/SKILL.md` to
+  avoid the two drifting apart.
 
-**Constraints:** Keep `agent-review.md` as the single detailed source with
-`SKILL.md` carrying only a pointer-plus-table summary; no new heavyweight
-dependencies for the drift tests (shell + grep in the existing test layout).
+**Constraints:** Keep `skills/agent-review/SKILL.md` as the single detailed
+source with `SKILL.md` carrying only a pointer-plus-table summary; no new
+heavyweight dependencies for the drift tests (shell + grep in the existing test
+layout).

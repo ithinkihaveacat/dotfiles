@@ -6,7 +6,7 @@ understanding both baseline Android security changes and Wear-specific quirks
 
 ______________________________________________________________________
 
-## 1. Health & Biometric Permissions
+## Health & Biometric Permissions
 
 The most volatile area of Wear OS permissions is body sensor access. You must
 test these across different API levels, particularly focusing on the transition
@@ -60,7 +60,7 @@ permission states to test your app's "denied" fallbacks.
 
 ______________________________________________________________________
 
-## 2. Foreground Services (FGS)
+## Foreground Services (FGS)
 
 Wear apps rely heavily on Foreground Services to survive ambient mode and track
 workouts in the background.
@@ -78,7 +78,7 @@ workouts in the background.
 
 ______________________________________________________________________
 
-## 3. Watch Face & Complication Permissions
+## Watch Face & Complication Permissions
 
 Watch Faces themselves should *not* request runtime permissions directly to
 avoid interrupting the user's quick glance. Instead, complications should handle

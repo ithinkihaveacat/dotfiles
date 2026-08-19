@@ -22,7 +22,7 @@ as long as a tool is internally consistent. This repo fixes one order for its
 - **Verb Consistency:** Do not switch verbs for similar actions. If `list` is
   used for users, do not use `get` for databases.
 
-| ✅ **Do This**                    | ❌ **Avoid This**                                           |
+| **Do This**                       | **Avoid This**                                              |
 | --------------------------------- | ----------------------------------------------------------- |
 | `tool create user --name="alice"` | `tool create-user --name="alice"` (hyphenated commands)     |
 | `tool list databases`             | `tool show-dbs` (inconsistent verb/abbreviation)            |

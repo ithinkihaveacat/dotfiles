@@ -11,7 +11,7 @@ or the resources linked throughout.
 
 ______________________________________________________________________
 
-## 1. Earning: American Express® Premium Plus Card
+## Earning: American Express® Premium Plus Card
 
 *Card details current as of June 2026.*
 
@@ -60,7 +60,7 @@ Airways, Iberia, and Aer Lingus. Key details:
 
 ______________________________________________________________________
 
-## 2. The Avios Group — Transfer Partners
+## The Avios Group — Transfer Partners
 
 Avios earned in one programme transfer **1:1 instantly** to any other programme
 in the group. This is not a devaluation or conversion — it's a direct
@@ -79,11 +79,11 @@ account-to-account transfer.
 can mean lower carrier surcharges and different seat availability. The most
 important example is transatlantic: booking on Iberia (transferred Avios)
 instead of BA can cut the cash component by hundreds of pounds. See
-[Section 6 (Carrier Surcharges)](#6-carrier-surcharges).
+[Carrier Surcharges](#carrier-surcharges).
 
 ______________________________________________________________________
 
-## 3. Reward Types at a Glance
+## Reward Types at a Glance
 
 | Type                           | Avios cost        | Availability                 | Notes                                     |
 | ------------------------------ | ----------------- | ---------------------------- | ----------------------------------------- |
@@ -97,7 +97,7 @@ gives the most predictable and highest value per Avios.
 
 ______________________________________________________________________
 
-## 4. Award Chart — BA, Iberia, Aer Lingus Own Flights
+## Award Chart — BA, Iberia, Aer Lingus Own Flights
 
 These rates apply to flights operated by BA, IB, or EI — regardless of which
 partner's booking system you use. Prices are **per person, one-way**. Return
@@ -120,15 +120,15 @@ No Premium Economy or First cabin on BA European short-haul routes.
 
 ### Long-haul (Zones 5–9)
 
-> ⚠️ **Read this before the table — long-haul pricing changed materially in Dec
-> 2025.** Since the rebrand to *The British Airways Club*, BA **no longer
+> [!WARNING] **Read this before the table — long-haul pricing changed materially
+> in Dec 2025.** Since the rebrand to *The British Airways Club*, BA **no longer
 > publishes a fixed long-haul award chart**. Long-haul rewards are priced per
 > distance band under the **Reward Flight Saver (RFS)** model, with a cash⇄Avios
 > slider at checkout (you can pay more Avios for less cash, or vice-versa — see
-> [§6](#6-carrier-surcharges)). As one tracker put it after the change, "British
-> Airways Club has no award charts, and the price is whatever they say it is."
-> On **15 December 2025**, BA-operated long-haul awards (Zones 5+) rose **~10%**
-> and partner awards rose **8–14%**. Sources:
+> [Carrier Surcharges](#carrier-surcharges)). As one tracker put it after the
+> change, "British Airways Club has no award charts, and the price is whatever
+> they say it is." On **15 December 2025**, BA-operated long-haul awards (Zones
+> 5+) rose **~10%** and partner awards rose **8–14%**. Sources:
 > [The Points Guy, Dec 2025](https://thepointsguy.com/news/british-airways-2025-avios-devaluation/)
 > ·
 > [The MileLion, Dec 2025](https://milelion.com/2025/12/16/details-british-airways-avios-award-devaluation/).
@@ -168,15 +168,15 @@ off-peak than on peak dates, before the slider is even applied.
 > **Important on surcharges:** The Avios figures are the *minimum-Avios anchor
 > only*. BA adds substantial carrier surcharges in cash on its own flights, and
 > the RFS slider lets you trade Avios against that cash — see
-> [Section 6](#6-carrier-surcharges).
+> [Carrier Surcharges](#carrier-surcharges).
 
 ______________________________________________________________________
 
-## 5. Partner Flights — Single Partner and Multi-Carrier
+## Partner Flights — Single Partner and Multi-Carrier
 
 When booking a flight not operated by BA, IB, or EI, a different chart applies.
 
-### 5a. Single-Partner Chart
+### Single-Partner Chart
 
 Applies when your entire journey is on **one non-BA/IB/EI airline** (e.g. all
 sectors on American Airlines, or all on JAL). Costs are slightly higher than the
@@ -195,7 +195,7 @@ BA own-flight chart, but partner surcharges are often much lower.
 **No peak/off-peak pricing on the single-partner chart** — the rates are fixed
 year-round.
 
-### 5b. Multi-Carrier Oneworld Chart
+### Multi-Carrier Oneworld Chart
 
 Applies when your itinerary involves **two or more different airlines** (e.g. BA
 to Singapore, then Qantas to Melbourne). Crucially, this chart is based on the
@@ -205,7 +205,7 @@ bookings at the same rate.
 *Source:
 [BA multi-carrier chart](https://www.britishairways.com/en-gb/information/avios-programmes/british-airways-executive-club/spending-avios/multi-carrier-avios-costs)*
 
-> ⚠️ **Verify before relying on these.** The figures below are the
+> [!WARNING] **Verify before relying on these.** The figures below are the
 > **pre-15-December-2025** multi-carrier bands. In the Dec 2025 devaluation BA
 > raised partner/Oneworld award pricing by **8–14%**
 > ([The MileLion](https://milelion.com/2025/12/16/details-british-airways-avios-award-devaluation/)),
@@ -230,7 +230,7 @@ multi-carrier can be more expensive but opens more routing options.
 
 ______________________________________________________________________
 
-## 6. Carrier Surcharges
+## Carrier Surcharges
 
 This is **the most important variable** in any BA Avios booking. Even with a
 "fixed" Avios cost, the mandatory cash component varies enormously depending on
@@ -248,8 +248,8 @@ rose ~10% in the **15 December 2025** devaluation
 
 - LHR → JFK → LHR, Club World (Business), return: **176,000 Avios + ~£499** cash
   — i.e. the **88,000 Avios/way** anchor from
-  [§4](#4-award-chart--ba-iberia-aer-lingus-own-flights), doubled, with the
-  higher post-May-2026 surcharge.
+  [Award Chart](#award-chart--ba-iberia-aer-lingus-own-flights), doubled, with
+  the higher post-May-2026 surcharge.
 - LHR → LAX → LHR, Club World, return: approximately similar scale
 
 Because BA prices on the **Reward Flight Saver slider**, 176,000 is the
@@ -313,12 +313,12 @@ is highly regarded.
 
 ______________________________________________________________________
 
-## 7. Key Routes from London
+## Key Routes from London
 
 *All costs are per person, one-way, Business class, off-peak, Avios only
 (taxes/surcharges additional). Routes are from London (LHR unless noted).*
 
-> ⚠️ **Dated baseline.** Except where a row is explicitly marked
+> [!NOTE] **Dated baseline.** Except where a row is explicitly marked
 > post-15-Dec-2025, the long-haul Avios figures in the tables below are the
 > **pre-15-December-2025 base**. BA raised own-flight long-haul awards ~10% and
 > partner awards 8–14% on that date and no longer guarantees a fixed chart
@@ -420,9 +420,9 @@ particularly when departing from Australia.
 
 ______________________________________________________________________
 
-## 8. Companion Voucher — Complete Guide
+## Companion Voucher — Complete Guide
 
-### 8a. Finding your voucher
+### Finding Your Voucher
 
 Once your Amex spending hits £15,000 in a card year, Amex deposits the voucher
 into your BA Executive Club account within 2–3 days. To confirm it's there: log
@@ -433,9 +433,9 @@ The voucher from the **Premium Plus** card is valid for **2 years** and usable
 in any cabin. The voucher from the free BA Amex is valid for **1 year** and
 Economy-only.
 
-### 8b. The critical "use a voucher" checkbox
+### The Critical "Use a Voucher" Checkbox
 
-> ⚠️ **You must tick "use a voucher" before searching, not just during
+> [!IMPORTANT] **You must tick "use a voucher" before searching, not just during
 > checkout.**
 
 When you're logged into ba.com and have an active voucher, a **"Use a Companion
@@ -461,7 +461,7 @@ If the box doesn't appear, either you're not logged in or no active voucher is
 in the account. There is no URL shortcut that replicates this — the voucher
 check is session/account-based.
 
-### 8c. Searching with the voucher
+### Searching with the Voucher
 
 The booking flow with a companion voucher is identical to a normal reward
 search, with one extra step:
@@ -478,7 +478,7 @@ search, with one extra step:
 You can also use the voucher on Iberia or Aer Lingus flights — same process,
 both are bookable via ba.com.
 
-### 8d. Standard seat allocation per BA flight
+### Standard Seat Allocation per BA Flight
 
 BA guarantees a minimum number of reward seats per flight, released 355 days
 before departure:
@@ -494,7 +494,7 @@ More seats (of all types) often open up as departure approaches. The 355-day
 release is most important for peak dates and popular routes (Cape Town,
 Maldives, Sydney, Caribbean over Christmas/summer).
 
-### 8e. Booking rules
+### Booking Rules
 
 - **Eligible airlines**: BA, Iberia, Aer Lingus only. Cannot be used on Qatar
   Airways, Cathay Pacific, American Airlines, or any other oneworld partner.
@@ -507,7 +507,7 @@ Maldives, Sydney, Caribbean over Christmas/summer).
   (expiry date unchanged).
 - **Name changes**: The companion's name cannot be changed after booking.
 
-### 8f. Advance booking strategy (355 days)
+### Advance Booking Strategy (355 Days)
 
 For peak routes in Business class, seats sell out quickly at the 355-day mark.
 Tips:
@@ -539,18 +539,18 @@ Tips:
 **For midnight GMT bookings**, UK call centres may be closed. The **US call
 centre** can be used when time zones align: +1-800-247-9297.
 
-### 8g. SeatSpy and third-party tools cannot see companion voucher seats
+### SeatSpy and Third-Party Tools Cannot See Companion Voucher Seats
 
-> ⚠️ SeatSpy, Reward Flight Finder, and Award Travel Finder **cannot detect**
-> companion voucher fare (CVF) seats. They only show the standard reward seat
-> pool.
+> [!WARNING] SeatSpy, Reward Flight Finder, and Award Travel Finder **cannot
+> detect** companion voucher fare (CVF) seats. They only show the standard
+> reward seat pool.
 
 This means if SeatSpy reports no Business class availability, it may still exist
 for companion voucher holders. **You must check directly on ba.com with the
 voucher box ticked to see the full picture.** There is no workaround — these
 extra seats are only surfaced through BA's own logged-in booking system.
 
-### 8h. Maximising voucher value
+### Maximising Voucher Value
 
 - Use it on **long-haul Business or First** — the more Avios the companion seat
   would cost, the more the voucher saves you
@@ -564,7 +564,7 @@ extra seats are only surfaced through BA's own logged-in booking system.
   restricts it to Economy anyway) — you leave enormous value on the table
 - The 2-year validity gives time to plan
 
-### 8i. Upgrading with Avios (separate from Reward Flights)
+### Upgrading with Avios (Separate from Reward Flights)
 
 Avios can also be used to upgrade a *paid* cash ticket to the next cabin on
 eligible BA flights. The Avios cost depends on route distance and fare class.
@@ -578,7 +578,7 @@ Details:
 
 ______________________________________________________________________
 
-## 9. Economy Class Reward Flights
+## Economy Class Reward Flights
 
 Most guides focus on premium cabins, but Economy ("World Traveller") Avios
 redemptions are worth knowing about.
@@ -629,7 +629,7 @@ use** of points. The key comparison:
 
 > **Note:** Economy figures in the tables of this section are the
 > **pre-15-Dec-2025 base**. Add ~10% and confirm live — see the dated note in
-> [§4](#4-award-chart--ba-iberia-aer-lingus-own-flights).
+> [Award Chart](#award-chart--ba-iberia-aer-lingus-own-flights).
 
 The sweet spot is short-haul Economy (Zones 1–3) and long-haul Business —
 Economy Avios on transatlantic routes sits in a middle ground that rarely wins
@@ -651,13 +651,13 @@ time-critical at the 355-day mark.
 
 ______________________________________________________________________
 
-## 10. Technical: Searching for Availability
+## Technical: Searching for Availability
 
-### 10a. BA Reward Flight Finder (official, BA-only)
+### BA Reward Flight Finder (Official, BA-Only)
 
-> 🔓 **No login required** to browse availability.
+> [!NOTE] **No login required** to browse availability.
 
-```
+```text
 https://www.britishairways.com/travel/flightfinderhome/public/en_gb
 ```
 
@@ -671,21 +671,22 @@ checking which dates have Business class available before committing to dates.
 **What it does not show:** Partner airlines (AA, JAL, Finnair, Cathay, etc.),
 Companion Voucher fare seats.
 
-> ⚠️ **No deep-link URL parameters — verified June 2026.** The form always loads
-> blank regardless of any URL parameters. There is no bookmarkable URL that
-> pre-fills the route, dates, or class. Enter everything manually each time.
+> [!NOTE] **No deep-link URL parameters — verified June 2026.** The form always
+> loads blank regardless of any URL parameters. There is no bookmarkable URL
+> that pre-fills the route, dates, or class. Enter everything manually each
+> time.
 
 **Form note:** The Reward Flight Finder uses a city/country search, not airport
 codes. Type the city name rather than IATA code.
 
 ______________________________________________________________________
 
-### 10b. BA.com Reward Booking Search (official, all airlines, companion voucher)
+### BA.com Reward Booking Search (Official, All Airlines, Companion Voucher)
 
-> 🔒 **Login required** to search. The form renders without login, but clicking
-> "Get flights" requires a signed-in BA Executive Club account.
+> [!NOTE] **Login required** to search. The form renders without login, but
+> clicking "Get flights" requires a signed-in BA Executive Club account.
 
-```
+```text
 https://www.britishairways.com/travel/redeem/execclub/_gf/en_gb?tab_selected=redeem&redemption_type=STD_RED
 ```
 
@@ -708,7 +709,7 @@ oneworld partner availability.
 **After clicking "Get flights":** The system processes the search and redirects
 to a results page at:
 
-```
+```text
 https://www.britishairways.com/travel/redeem/execclub/_gf/en_gb
 ```
 
@@ -718,7 +719,7 @@ reconstructed. This was verified live in June 2026: submitting a LHR→JFK,
 Business class, 2 adults, 15 Oct 2026 search produced a results page at the bare
 URL above with no query string.
 
-> ⚠️ **No constructable or bookmarkable results URL exists — verified June
+> [!NOTE] **No constructable or bookmarkable results URL exists — verified June
 > 2026.** Unlike the Qantas Flight Reward Finder (which supports deep-link
 > parameters), BA's booking search has no equivalent. Do not spend time trying
 > to reverse-engineer URL parameters for results — none exist. Every session
@@ -728,7 +729,8 @@ URL above with no query string.
 Companion Voucher" checkbox appears at the top of the form. **This must be
 ticked before searching** — it is not a checkout-only step. Ticking it reveals
 additional Club World seats in results. See
-[Section 8](#8-companion-voucher--complete-guide) for full details.
+[Companion Voucher — Complete Guide](#companion-voucher--complete-guide) for
+full details.
 
 **Results page observations** (verified June 2026, LHR→JFK, Business class):
 
@@ -746,26 +748,26 @@ additional Club World seats in results. See
 
 ______________________________________________________________________
 
-### 10c. Third-Party Tools
+### Third-Party Tools
 
 These search BA availability without login and are better for date-flexible
 searching across a month.
 
-| Tool                     | URL                                                                             | Login                | Notes                                                              |
-| ------------------------ | ------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------ |
-| **Reward Flight Finder** | [rewardflightfinder.com](https://rewardflightfinder.com/)                       | 🔓 None              | Grid view of BA availability across a month; free; filter by class |
-| **SeatSpy**              | [seatspy.com](https://www.seatspy.com/reward-flight-finder/british-airways)     | 🔓 None (for alerts) | Email alerts when reward seats appear on a specific route          |
-| **Award Travel Finder**  | [awardtravelfinder.com](https://awardtravelfinder.com/airlines/british-airways) | 🔓 None              | Searches oneworld partners including AA, JAL, Cathay               |
+| Tool                     | URL                                                                             | Login             | Notes                                                              |
+| ------------------------ | ------------------------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------ |
+| **Reward Flight Finder** | [rewardflightfinder.com](https://rewardflightfinder.com/)                       | None              | Grid view of BA availability across a month; free; filter by class |
+| **SeatSpy**              | [seatspy.com](https://www.seatspy.com/reward-flight-finder/british-airways)     | None (for alerts) | Email alerts when reward seats appear on a specific route          |
+| **Award Travel Finder**  | [awardtravelfinder.com](https://awardtravelfinder.com/airlines/british-airways) | None              | Searches oneworld partners including AA, JAL, Cathay               |
 
-> ⚠️ **SeatSpy and Reward Flight Finder cannot see companion voucher fare
-> seats.** They show only the standard reward seat pool. If SeatSpy reports "no
-> availability" for Business class on a route, extra seats may still exist for
-> companion voucher holders. You must check on ba.com directly, logged in, with
-> the voucher box ticked. There is no third-party workaround for this.
+> [!WARNING] **SeatSpy and Reward Flight Finder cannot see companion voucher
+> fare seats.** They show only the standard reward seat pool. If SeatSpy reports
+> "no availability" for Business class on a route, extra seats may still exist
+> for companion voucher holders. You must check on ba.com directly, logged in,
+> with the voucher box ticked. There is no third-party workaround for this.
 
 ______________________________________________________________________
 
-## 11. Route Tips by Destination
+## Route Tips by Destination
 
 ### For North America
 
@@ -827,7 +829,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## 12. Resources
+## Resources
 
 ### Official BA
 

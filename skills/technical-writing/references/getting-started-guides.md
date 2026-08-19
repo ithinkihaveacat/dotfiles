@@ -17,7 +17,7 @@ tangible, successful outcome with minimum friction.
 
 ## Core Principles
 
-### 1. Action-First & High Focus (The "Golden Path")
+### Action-First & High Focus (The "Golden Path")
 
 - **Focus on the Immediate Goal:** Structure the guide around a single, highly
   practical milestone (e.g., *From Zero to Running Benchmark*).
@@ -29,7 +29,7 @@ tangible, successful outcome with minimum friction.
   theoretical rationales in the walkthrough. Keep prose concise so the user or
   agent can easily scan, copy, and run commands.
 
-### 2. Dual Optimization: Agent-Executable & Human-Readable
+### Dual Optimization: Agent-Executable & Human-Readable
 
 - **Idempotency:** Every setup command must be safe to re-execute multiple times
   without failing, corrupting state, or appending duplicate configuration
@@ -44,7 +44,7 @@ tangible, successful outcome with minimum friction.
   constructs. Avoid esoteric syntax, fragile pipelines, or complex subshell
   tricks.
 
-### 3. Fail-Fast Prerequisite Checks
+### Fail-Fast Prerequisite Checks
 
 - **Scale Complexity Proportionally:**
   - **Simple Setups (1–3 Checks):** Prefer discrete, individual command lines or
@@ -65,7 +65,7 @@ tangible, successful outcome with minimum friction.
   self-configuring shell snippets over asking users to manually search their
   filesystem.
 
-### 4. Actionable Error Recovery & Co-Location
+### Actionable Error Recovery & Co-Location
 
 - **Anticipate Common Failure Modes:** Proactively identify a realistic range of
   frequent errors (e.g., missing auth, wrong working directory, missing
@@ -78,7 +78,7 @@ tangible, successful outcome with minimum friction.
   beneath the relevant step) or in a consolidated summary table. Keep all fixes
   immediate, factual, and 1-line actionable.
 
-### 5. Clear Separation: Walkthrough vs. Reference
+### Clear Separation: Walkthrough vs. Reference
 
 - **Keep the Getting Started Flow Clean:** The walkthrough itself must contain
   only the sequential setup, execution, and verification steps.
@@ -90,7 +90,7 @@ tangible, successful outcome with minimum friction.
 
 ## Authoring Patterns & Examples
 
-### 1. Writing Pre-requisite Checks
+### Writing Pre-requisite Checks
 
 #### Pattern A: Discrete Checks (Preferred for 1–3 Simple Checks)
 
@@ -137,7 +137,7 @@ else
 fi
 ```
 
-### 2. Writing Core Execution Commands
+### Writing Core Execution Commands
 
 Provide the single, standard invocation for a lightweight sample task. Ensure
 the working context is explicit and output artifacts are routed predictably:
@@ -157,7 +157,7 @@ foo run \
   --verbose
 ```
 
-### 3. Formatting Error Recovery & Troubleshooting
+### Formatting Error Recovery & Troubleshooting
 
 #### Pattern A: Co-Located Recovery (Preferred for Step-by-Step Walkthroughs)
 

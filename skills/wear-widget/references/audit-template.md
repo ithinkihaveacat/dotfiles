@@ -29,7 +29,7 @@ covers.>
 
 ______________________________________________________________________
 
-## 1. Executive Summary & Build Metadata
+## Executive Summary & Build Metadata
 
 ### Executive Summary
 
@@ -105,7 +105,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## 2. Tile & Widget Services
+## Tile & Widget Services
 
 <!-- GUIDANCE: 
   Create a self-contained section per declared service component. 
@@ -114,7 +114,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-### 2.1: `<Service Simple Name>` (\<Glance Widget | Tile | AppWidget>)
+### `<Service Simple Name>` (\<Glance Widget | Tile | AppWidget>)
 
 #### Component Identity & Service Purpose
 
@@ -124,7 +124,7 @@ ______________________________________________________________________
 - **User Functional Purpose:**
   <Brief explanation of what the surface presents to the user on the watch.>
 
-#### 1. APK Extraction & Manifest Declarations
+#### APK Extraction & Manifest Declarations
 
 <!-- GUIDANCE: 
   Display the exact code block as decompiled from AndroidManifest.xml. 
@@ -182,10 +182,10 @@ ______________________________________________________________________
 | :------------------------------------------------------------- | :----------------------------------- |
 | `@string/<label_res>`                                          | `"Literal String Value"`             |
 | `@string/<description_res>`                                    | `"Literal Description String Value"` |
-| `preferredType` / Tile Metadata                                | \`\[SMALL                            |
-| `com.google.android.clockwork.tiles.MULTI_INSTANCES_SUPPORTED` | \`true                               |
+| `preferredType` / Tile Metadata                                | `[SMALL, LARGE]`                     |
+| `com.google.android.clockwork.tiles.MULTI_INSTANCES_SUPPORTED` | `true`                               |
 
-#### 2. Static Preview Assets
+#### Static Preview Assets
 
 <!-- GUIDANCE: 
   Present the raw extracted static preview drawable assets from the APK. 
@@ -200,7 +200,7 @@ ______________________________________________________________________
 ![ Static Preview](resources/%3Cpreview_filename%3E.png) *Static preview image
 (`<preview_filename>.png`) extracted from `res/<directory>/`.*
 
-#### 3. Live Hardware Screen Captures
+#### Live Hardware Screen Captures
 
 <!-- GUIDANCE: 
   Embed physical device or emulator screen captures of the service active on watch displays.
@@ -215,7 +215,7 @@ ______________________________________________________________________
 ![ Hardware Capture](resources/%3Clive_screenshot%3E.png) *Live device capture
 on <Device Model>.*
 
-#### 4. Service Review & Observations
+#### Service Review & Observations
 
 <!-- GUIDANCE: 
   Evaluate the service against relevant platform guidelines, preview formats, container dimensions, visual themes, fallback states, and device behavior. 

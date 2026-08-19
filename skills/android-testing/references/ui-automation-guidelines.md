@@ -7,7 +7,7 @@ permission blockers that a real user would face.
 
 ______________________________________________________________________
 
-## 1. Behave Like a Real User Policy
+## Behave Like a Real User Policy
 
 By default, automated tests and AI agents must interact with the application
 exactly as a human would.
@@ -38,7 +38,7 @@ exactly as a human would.
 
 ______________________________________________________________________
 
-## 2. Visual Timeline Methodology
+## Visual Timeline Methodology
 
 State validation must be observable, chronological, and verifiable.
 
@@ -63,7 +63,7 @@ State validation must be observable, chronological, and verifiable.
 
 ______________________________________________________________________
 
-## 3. Device Awake & Unlocked States
+## Device Awake & Unlocked States
 
 To prevent automated tests or AI agents from stalling or failing due to
 screen-off timeouts or security lockouts, the target device (both phone and
@@ -125,7 +125,7 @@ static status bar:
 
 ______________________________________________________________________
 
-## 4. Companion Sync Verification (Phone & Watch)
+## Companion Sync Verification (Phone & Watch)
 
 When testing paired companion applications (e.g. a phone app paired with a Wear
 OS watch companion), verify that the synchronization is robust and real-time.

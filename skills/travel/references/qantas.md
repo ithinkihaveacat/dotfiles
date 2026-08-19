@@ -11,7 +11,7 @@ or the official points tables linked throughout.
 
 ______________________________________________________________________
 
-## 1. Earning: Amex Membership Rewards → Qantas Points
+## Earning: Amex Membership Rewards → Qantas Points
 
 ### Transfer Rates (Australia, as of June 2026)
 
@@ -70,7 +70,7 @@ Rewards leg (e.g. a 15% bonus ran until mid-June 2026).
 
 ______________________________________________________________________
 
-## 2. Reward Types at a Glance
+## Reward Types at a Glance
 
 Qantas offers three ways to use points on flights:
 
@@ -104,12 +104,12 @@ Qantas offers three ways to use points on flights:
 - Available on Qantas-operated (QF-numbered) flights only
 - Requests processed based on status tier (Platinum One > Platinum >
   Gold/Silver/Bronze)
-- See [§5 Upgrade Rewards](#5-upgrade-rewards) below
+- See [Upgrade Rewards](#upgrade-rewards) below
 - [Classic Upgrade Rewards overview](https://www.qantas.com/au/en/frequent-flyer/use-points/classic-upgrade-rewards.html)
 
 ______________________________________________________________________
 
-## 3. Classic Flight Reward Points: Representative Examples
+## Classic Flight Reward Points: Representative Examples
 
 Points are calculated per-passenger, per-direction (one-way), based on **flight
 distance in miles** mapped to one of 10 zones. The relevant zone is determined
@@ -179,10 +179,10 @@ miles).
 | MEL–LHR | Partner (BA, CX, QR, JAL, MAS, Finnair…) | 76,100  | 143,500  | **182,900** | 261,600 |
 | MEL–LHR | Emirates (via DXB)                       | 69,900  | 164,700  | **182,900** | 299,300 |
 
-> ⚡ **Perth advantage:** PER–LHR (Qantas non-stop Dreamliner) is ~9,009 miles,
-> landing in **Zone 9** — one zone cheaper. Qantas Zone 9: Economy 58,900 / Prem
-> Eco 113,900 / Business **151,800**. This makes a MEL–PER connection + PER–LHR
-> reward potentially worthwhile if PER–LHR reward space is available.
+> [!TIP] **Perth advantage:** PER–LHR (Qantas non-stop Dreamliner) is ~9,009
+> miles, landing in **Zone 9** — one zone cheaper. Qantas Zone 9: Economy 58,900
+> / Prem Eco 113,900 / Business **151,800**. This makes a MEL–PER connection +
+> PER–LHR reward potentially worthwhile if PER–LHR reward space is available.
 
 **Return trip cost:** The tables above are per direction. A return MEL–LHR–MEL
 in Business on partner airlines would be 182,900 × 2 = **365,800 points** if
@@ -192,7 +192,9 @@ Alternatively, the
 [oneworld Classic Reward](https://www.qantas.com/au/en/frequent-flyer/use-points/classic-flight-rewards.html)
 covers round trips on 2+ oneworld airlines for a flat fee. Zone 10 return
 (19,201–35,000 miles) Business = **365,800 points** — effectively the same cost,
-but allows stopovers and routing flexibility (see §7 for details).
+but allows stopovers and routing flexibility (see
+[Australia → UK: Tips and Tactics](#australia--uk-tips-and-tactics) for
+details).
 
 ### American Express: effective point cost to fly Business MEL–LHR
 
@@ -203,7 +205,7 @@ but allows stopovers and routing flexibility (see §7 for details).
 
 ______________________________________________________________________
 
-## 4. Emirates: Special Considerations
+## Emirates: Special Considerations
 
 Emirates has its own points table (effective 31 March 2026), distinct from the
 Partner table. Key differences:
@@ -224,7 +226,7 @@ From the Flight Reward Finder (verified June 2026, MEL/SYD → LHR):
 
 ______________________________________________________________________
 
-## 5. Upgrade Rewards
+## Upgrade Rewards
 
 Classic Upgrade Rewards let you use points to upgrade a **paid, confirmed
 ticket** one cabin class on Qantas-operated (QF-coded) flights. Partner airline
@@ -271,16 +273,16 @@ flights.
 
 ______________________________________________________________________
 
-## 6. Technical: Searching for Classic Flight Rewards
+## Technical: Searching for Classic Flight Rewards
 
-### 6a. Flight Reward Finder (`flightrewardfinder.qantas.com`)
+### Flight Reward Finder (`flightrewardfinder.qantas.com`)
 
 Launched in 2025/26, this is Qantas's dedicated tool for finding international
 Classic Flight Rewards across Qantas, Jetstar, and 30 partner airlines. It shows
 live availability by date, with colour-coded calendar views (red = Economy, pink
 = Premium Economy, black = Business, light blue = First).
 
-> 🔓 **No login required** to browse availability and search routes.
+> [!NOTE] **No login required** to browse availability and search routes.
 
 > **Key characteristic:** This is a discovery tool only — you cannot book
 > directly from it. Once you identify a flight, you click through to complete
@@ -288,7 +290,7 @@ live availability by date, with colour-coded calendar views (red = Economy, pink
 
 #### Base URL
 
-```
+```text
 https://flightrewardfinder.qantas.com/
 ```
 
@@ -314,25 +316,25 @@ destination airport at a time.
 
 **Business class, MEL → LHR, any date:**
 
-```
+```text
 https://flightrewardfinder.qantas.com/?pg=1&o=MEL&d=LHR&c=Business
 ```
 
 **All cabins, MEL → LHR, October 2026:**
 
-```
+```text
 https://flightrewardfinder.qantas.com/?pg=1&o=MEL&d=LHR&dr=2026-10-01I2026-10-31
 ```
 
 **Business class, MEL → LHR, specific week:**
 
-```
+```text
 https://flightrewardfinder.qantas.com/?pg=1&o=MEL&d=LHR&c=Business&dr=2026-10-27I2026-11-03
 ```
 
 **Premium Economy, MEL → NRT (Tokyo), January 2027:**
 
-```
+```text
 https://flightrewardfinder.qantas.com/?pg=1&o=MEL&d=NRT&c=Premium%20Economy&dr=2027-01-01I2027-01-31
 ```
 
@@ -357,25 +359,26 @@ https://flightrewardfinder.qantas.com/?pg=1&o=MEL&d=NRT&c=Premium%20Economy&dr=2
 
 ______________________________________________________________________
 
-### 6b. qantas.com Booking Search
+### qantas.com Booking Search
 
-> 🔒 **Login required** to see Classic Flight Reward pricing. Without a logged-in
-> Frequent Flyer account, only paid cash fares display — the rewards pricing is
-> hidden entirely.
+> [!NOTE] **Login required** to see Classic Flight Reward pricing. Without a
+> logged-in Frequent Flyer account, only paid cash fares display — the rewards
+> pricing is hidden entirely.
 
 For making the actual reward booking (or checking seat availability while logged
 in), use the standard Qantas search page.
 
-> ⚠️ **No deep-link URL exists (verified June 2026).** Unlike the Flight Reward
-> Finder, the Qantas booking search **does not support pre-filled deep-link
-> URLs**. URL parameters (`?origin=MEL&destination=LHR&bookingType=classicAward`
-> etc.) are accepted by the page but do **not** pre-populate the form fields —
-> the form loads blank regardless of what parameters are in the URL. You must
-> enter the search criteria manually.
+> [!NOTE] **No deep-link URL exists (verified June 2026).** Unlike the Flight
+> Reward Finder, the Qantas booking search **does not support pre-filled
+> deep-link URLs**. URL parameters
+> (`?origin=MEL&destination=LHR&bookingType=classicAward` etc.) are accepted by
+> the page but do **not** pre-populate the form fields — the form loads blank
+> regardless of what parameters are in the URL. You must enter the search
+> criteria manually.
 
 #### Entry point (fill manually)
 
-```
+```text
 https://www.qantas.com/en-au/book/flights
 ```
 
@@ -389,7 +392,7 @@ https://www.qantas.com/en-au/book/flights
 
 The system redirects to a session-specific URL on `book.qantas.com`:
 
-```
+```text
 https://book.qantas.com/qf-booking/dyn/air/booking/FFPP?SITE=QFQFQFBI&LANGUAGE=GB&TAB_ID=<session-token>
 ```
 
@@ -417,7 +420,7 @@ reused. The `book.qantas.com` results page is not bookmarkable.
 
 ______________________________________________________________________
 
-## 7. Australia → UK: Tips and Tactics
+## Australia → UK: Tips and Tactics
 
 > **Note:** This section covers Australia-origin redemptions using Qantas
 > points. For UK-origin redemptions on the same route using BA Executive Club
@@ -527,7 +530,7 @@ through individual dates.
 
 ______________________________________________________________________
 
-## 8. Resources
+## Resources
 
 ### Official Qantas
 

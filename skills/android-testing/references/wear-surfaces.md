@@ -6,7 +6,7 @@ UI surfaces that live outside the main application container, such as **Tiles**,
 
 ______________________________________________________________________
 
-## 1. Active Tiles Carousel
+## Active Tiles Carousel
 
 Tiles provide quick, swipeable access to information and actions. Testing Tiles
 requires simulating how the system adds, removes, and brings them to the
@@ -34,7 +34,7 @@ To automate Tile testing, do not write custom scripts or send raw SysUI intents.
 
 ______________________________________________________________________
 
-## 2. Complications & Watch Faces
+## Complications & Watch Faces
 
 Complications are modular data fields on a Watch Face. Testing complications
 involves simulating data updates and tapping actions.
@@ -72,20 +72,20 @@ Test how complications and watch faces render across different system states
 
 ______________________________________________________________________
 
-## 3. Headless Emulator Bootstrapping & Setup Bypass
+## Headless Emulator Bootstrapping & Setup Bypass
 
 When running automated UI or visual tests on a headless Wear OS emulator, the
 system may boot into a locked or setup state with tutorial overlays, and GMS
 Core capability sync issues can prevent widget tiles from loading.
 
-### 1. Waking up and Unlocking the Device
+### Waking up and Unlocking the Device
 
 ```bash
 adb shell input keyevent KEYCODE_WAKEUP
 adb shell wm dismiss-keyguard
 ```
 
-### 2. Dismissing Charging Overlay
+### Dismissing Charging Overlay
 
 If the emulator is simulating a charging state (locking the screen with a
 charging animation), unplug the battery to dismiss it:
@@ -94,7 +94,7 @@ charging animation), unplug the battery to dismiss it:
 adb shell dumpsys battery unplug
 ```
 
-### 3. Wear OS OOBE and Tutorial Bypass
+### Wear OS OOBE and Tutorial Bypass
 
 Send debug broadcasts to bypass the Wear OS setup tutorial overlays and start in
 active test mode:
@@ -104,7 +104,7 @@ adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE
 adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
 ```
 
-### 4. GMS Core Capability Sync Workaround (for Tiles/Widgets)
+### GMS Core Capability Sync Workaround (for Tiles/Widgets)
 
 If the System UI fails to sync capabilities with GMS Core, it may assume
 widgets/tiles are unsupported and render a default watch face instead of binding

@@ -12,35 +12,34 @@ description: >-
 # Travel Booking
 
 This skill provides practical, field-tested references for redeeming airline
-loyalty points and constructing booking URLs. The redemption guides pre-calculate
-points-plus-cash costs, document the actual booking workflows and search tools,
-and record verified dead ends so they aren't repeated.
+loyalty points and constructing booking URLs. The redemption guides
+pre-calculate points-plus-cash costs, document the actual booking workflows and
+search tools, and record verified dead ends so they aren't repeated.
 
 ## Reward Flight Redemption Guides
 
-- **[British Airways Avios](references/ba.md)** — UK-origin
-  redemptions. BA Executive Club Avios (earned via the Amex Premium Plus Card),
-  the Companion Voucher, the Avios group transfer partners, award charts,
-  carrier surcharge comparisons, key routes from London, and availability tools.
+- **[British Airways Avios](references/ba.md)** — UK-origin redemptions. BA
+  Executive Club Avios (earned via the Amex Premium Plus Card), the Companion
+  Voucher, the Avios group transfer partners, award charts, carrier surcharge
+  comparisons, key routes from London, and availability tools.
 
-- **[Qantas Points & Amex MR](references/qantas.md)** —
-  Australia-origin redemptions. Qantas Frequent Flyer points (earned via Amex
-  Membership Rewards transfers), Classic / Classic Plus / Upgrade rewards, the
-  Australia–UK route, carrier-charge comparisons, and the Flight Reward Finder.
+- **[Qantas Points & Amex MR](references/qantas.md)** — Australia-origin
+  redemptions. Qantas Frequent Flyer points (earned via Amex Membership Rewards
+  transfers), Classic / Classic Plus / Upgrade rewards, the Australia–UK route,
+  carrier-charge comparisons, and the Flight Reward Finder.
 
-These two guides are counterparts: for a round trip between the UK and Australia,
-compare booking each one-way leg through the cheaper programme. They cross-link
-to each other for this reason.
+These two guides are counterparts: for a round trip between the UK and
+Australia, compare booking each one-way leg through the cheaper programme. They
+cross-link to each other for this reason.
 
 ## Finnair Booking URL Engineering
 
 To construct direct booking URLs for Finnair with custom segments, cabin
 classes, and passenger options:
 
-- See
-  [Finnair Booking URL Engineering Reference](references/finnair.md)
-  for the full JSON parameter structure, valid cabin options, passenger
-  configurations, and code examples.
+- See [Finnair Booking URL Engineering Reference](references/finnair.md) for the
+  full JSON parameter structure, valid cabin options, passenger configurations,
+  and code examples.
 
 ### Core Tip
 
@@ -55,5 +54,6 @@ are sourced, pre-calculated, timestamped, and how dead ends are documented:
 
 - See the [Travel Booking Guides — Meta Reference](references/guide-meta.md) for
   the design goals, volatility tiers, pre-calculation format, access-requirement
-  annotations (🔓 / 🔒 / 🌐 / 📞), dead-end documentation format, and source
-  standards. Consult it when creating or updating any guide in this skill.
+  annotations (public, login required, region-restricted, phone only), dead-end
+  documentation format, and source standards. Consult it when creating or
+  updating any guide in this skill.
