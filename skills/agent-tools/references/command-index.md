@@ -434,33 +434,29 @@ the paths you name. Read-only unless `--edit` names something writable.
 ```text
 Usage: caxton "PROMPT" [OPTIONS]
 
-Autonomous repository transformation, refactoring, and audit engine, scoped to
-the paths you name. Paths given with --read are visible to the model; paths
-given with --edit are visible and writable. Everything else in the repository
-is invisible: absent from the file listing and refused by the read tool.
+Autonomous repository transformation, refactoring, and audit engine.
 
-With no --edit, caxton runs read-only and the mutation tools are withheld.
+By default, runs read-only on the current directory. You can scope access by
+naming explicit paths. Paths given with --read are visible to the model; paths
+given with --edit are visible and writable. Everything else is inaccessible.
 
 Arguments:
   PROMPT              Instruction, question, or goal for the agent. Must come
                       before any path option.
 
 Options:
-  --read PATH...      Make paths visible to the model. (default: '.')
-  --edit PATH...      Make paths visible and writable, and for a directory
-                      permit creating and deleting files beneath it. Any --edit
-                      makes this a mutation run and requires a clean worktree.
-  --read-from FILE    Read further --read paths from FILE, or '-' for stdin.
-  --edit-from FILE    Read further --edit paths from FILE, or '-' for stdin.
-  -0, --null          Path list files are NUL-delimited, not one path per line.
-  --inline PATH...    Inline only these paths into the initial prompt.
-                      (default: every visible text file)
+  --read PATH...      Make paths visible. (default: '.')
+  --edit PATH...      Make paths visible and writable. Permits creating and
+                      deleting files beneath writable directories. Requires
+                      a clean git worktree.
+  --read-from FILE    Read further --read paths from FILE ('-' for stdin).
+  --edit-from FILE    Read further --edit paths from FILE ('-' for stdin).
+  -0, --null          Path list files are NUL-delimited.
+  --inline PATH...    Inline only these paths into the prompt (default: all
+                      visible text files).
   --no-inline         Inline nothing; the model reads files on demand.
-  -n, --dry-run       Print the resolved policy and payload, then exit without
-                      calling the API.
-  --force             Bypass safety checks: the 1MB text context threshold, the
-                      dirty-worktree guard, and the refusal to write paths git
-                      cannot restore.
+  -n, --dry-run       Print the resolved policy and payload, then exit.
+  --force             Bypass safety checks (dirty worktree, 1MB limit, etc.).
   --model MODEL       Gemini model to use (default: gemini-3.1-pro-preview).
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
   --search, --no-search
@@ -494,16 +490,10 @@ Examples:
   git ls-files -z '*.md' | caxton "Normalize headings" \
     --edit-from - --null
 
-caxton runs only inside a git worktree. Paths are shown relative to the
-repository top level, git alone decides what is ignored, and git alone provides
-undo: 'git checkout -- .' restores files a run modified and 'git clean -fd'
-removes the ones it created. A mutation run therefore refuses to start on a
-dirty worktree, and refuses to write paths git cannot restore (ignored files),
-unless --force is given. Credential paths (.ssh, .npmrc, .netrc, *.pem and
-similar), symlinks, submodules and non-regular files are never readable or
-writable, even when named explicitly, and neither is anything reached through
-a symlinked parent directory. Every run lists what it modified,
-created, and deleted on stderr, including on timeout.
+Notes:
+  caxton runs only inside a git worktree. Mutation runs require a clean
+  worktree, allowing 'git checkout' and 'git clean' to provide safe undo.
+  Secret files, symlinks, and submodules are always excluded for safety.
 ```
 
 <!-- /generated -->

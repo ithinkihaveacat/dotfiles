@@ -238,6 +238,13 @@ def atomic_write_text(target_path: Path, content: str, encoding: str = "utf-8"):
                 pass
 
 
+def format_bytes(size: float) -> str:
+    """Formats a byte count into a human-readable string (e.g. 88.4 KB, 1.2 MB)."""
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / 1024:.1f} KB"
+
+
 def offline_switch() -> tuple[bool, str]:
     """Whether network access is forbidden here, and which switch says so."""
     var = "CAXTON_OFFLINE" if "CAXTON_OFFLINE" in os.environ else "AGENT_OFFLINE"
@@ -2011,22 +2018,31 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
 
     initial_prompt = "\n\n".join(prompt_sections)
 
-    if policy.inlined:
-        print(
-            f"[caxton] Inlined {len(policy.inlined)} text files"
-            f" ({inlined_bytes / 1024:.1f} KB total) of"
-            f" {len(visible_sorted)} visible",
-            file=sys.stderr,
-        )
+    inlined_count = len(policy.inlined)
+    total_readable = len(visible_sorted)
+    on_demand_count = total_readable - inlined_count
+    total_prompt_bytes = len(initial_prompt.encode("utf-8")) + len(
+        system_instruction.encode("utf-8")
+    )
+
+    if inlined_count > 0:
+        inlined_desc = f"Inlined {inlined_count} file(s) ({format_bytes(inlined_bytes)}), {on_demand_count} on demand"
     else:
-        print(
-            f"[caxton] Tree-only mode: {len(visible_sorted)} files visible",
-            file=sys.stderr,
-        )
+        inlined_desc = f"Inlined 0 file(s), {on_demand_count} on demand"
+
+    print(
+        f"[caxton] {inlined_desc} | {total_readable} readable file(s) | {format_bytes(total_prompt_bytes)} prompt payload",
+        file=sys.stderr,
+    )
     if is_mutation_mode:
         print(
             f"[caxton] Writable: {len(writable_set)} file(s),"
             f" {len(writable_dirs)} creation root(s)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[caxton] Read-only: 0 writable file(s), 0 creation root(s)",
             file=sys.stderr,
         )
 
@@ -2062,6 +2078,64 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
 
     session_start = time.perf_counter()
     current_message = initial_prompt
+    telemetry_reported = False
+
+    def print_telemetry_report():
+        nonlocal telemetry_reported
+        if telemetry_reported:
+            return
+        telemetry_reported = True
+        total_elapsed = time.perf_counter() - session_start
+        if task_result is None:
+            status_str = "Incomplete"
+        elif task_result.get("success"):
+            status_str = "Succeeded"
+        else:
+            status_str = "Failed"
+        sr_stat = (
+            f"{telemetry.search_replace_successes}/{telemetry.search_replace_attempts}"
+        )
+        limit_str = (
+            f" of {telemetry.input_limit / 1000:.0f}k" if telemetry.input_limit else ""
+        )
+        print(
+            f"[caxton] {status_str} in {telemetry.steps} steps"
+            f" ({total_elapsed:.1f}s) | {len(telemetry.modified_files)} modified,"
+            f" {len(telemetry.created_files)} created,"
+            f" {len(telemetry.deleted_files)} deleted | search/replace:"
+            f" {sr_stat} | tokens: {telemetry.prompt_tokens / 1000:.1f}k{limit_str}"
+            f" in / {telemetry.candidate_tokens / 1000:.1f}k out",
+            file=sys.stderr,
+        )
+        if is_mutation_mode and (
+            telemetry.modified_files
+            or telemetry.created_files
+            or telemetry.deleted_files
+        ):
+            for label, paths in (
+                ("modified", telemetry.modified_files),
+                ("created", telemetry.created_files),
+                ("deleted", telemetry.deleted_files),
+            ):
+                for p in sorted(paths):
+                    print(f"[caxton]   {label}: {p}", file=sys.stderr)
+            # A run that edited the ignore rules can leave creations its own
+            # undo will skip, so say which and how to remove them.
+            stranded = unrestorable_creations(root, list(telemetry.created_files))
+            if stranded:
+                print(
+                    f"[caxton] warning: {len(stranded)} created path(s) are now"
+                    " git-ignored, so 'git clean -fd' will not remove them:",
+                    file=sys.stderr,
+                )
+                for p in stranded:
+                    print(f"[caxton]   stranded: {p}", file=sys.stderr)
+                quoted = " ".join(shlex.quote(p) for p in stranded)
+                print(
+                    f"[caxton] remove them with: git clean -fdx -- {quoted}",
+                    file=sys.stderr,
+                )
+        sys.stderr.flush()
 
     try:
         while task_result is None and telemetry.steps < args.max_steps:
@@ -2223,12 +2297,16 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                 f"[caxton] Reached maximum step limit ({args.max_steps})",
                 file=sys.stderr,
             )
+            print_telemetry_report()
             sys.exit(1)
+
+        print_telemetry_report()
 
         # Output final result to stdout as the very last thing with a preceding newline
         final_output = task_result.get("report") or ""
         if final_output:
             print(f"\n{final_output}", file=sys.stdout)
+            sys.stdout.flush()
 
         sys.exit(0 if task_result.get("success") else 1)
 
@@ -2237,65 +2315,18 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             f"\n{prog_name}: timed out after {args.timeout} seconds",
             file=sys.stderr,
         )
+        print_telemetry_report()
         sys.exit(2)
     except Exception as e:
         print(f"{prog_name}: error during execution: {e}", file=sys.stderr)
+        print_telemetry_report()
         sys.exit(1)
     finally:
         # Always report what changed on disk. Timeouts and step exhaustion are
         # exactly the cases that leave a partly transformed tree behind.
         if args.timeout and hasattr(signal, "SIGALRM"):
             signal.alarm(0)
-        total_elapsed = time.perf_counter() - session_start
-        if task_result is None:
-            status_str = "Incomplete"
-        elif task_result.get("success"):
-            status_str = "Succeeded"
-        else:
-            status_str = "Failed"
-        sr_stat = (
-            f"{telemetry.search_replace_successes}/{telemetry.search_replace_attempts}"
-        )
-        limit_str = (
-            f" of {telemetry.input_limit / 1000:.0f}k" if telemetry.input_limit else ""
-        )
-        print(
-            f"[caxton] {status_str} in {telemetry.steps} steps"
-            f" ({total_elapsed:.1f}s) | {len(telemetry.modified_files)} modified,"
-            f" {len(telemetry.created_files)} created,"
-            f" {len(telemetry.deleted_files)} deleted | search/replace:"
-            f" {sr_stat} | tokens: {telemetry.prompt_tokens / 1000:.1f}k{limit_str}"
-            f" in / {telemetry.candidate_tokens / 1000:.1f}k out",
-            file=sys.stderr,
-        )
-        if is_mutation_mode and (
-            telemetry.modified_files
-            or telemetry.created_files
-            or telemetry.deleted_files
-        ):
-            for label, paths in (
-                ("modified", telemetry.modified_files),
-                ("created", telemetry.created_files),
-                ("deleted", telemetry.deleted_files),
-            ):
-                for p in sorted(paths):
-                    print(f"[caxton]   {label}: {p}", file=sys.stderr)
-            # A run that edited the ignore rules can leave creations its own
-            # undo will skip, so say which and how to remove them.
-            stranded = unrestorable_creations(root, list(telemetry.created_files))
-            if stranded:
-                print(
-                    f"[caxton] warning: {len(stranded)} created path(s) are now"
-                    " git-ignored, so 'git clean -fd' will not remove them:",
-                    file=sys.stderr,
-                )
-                for p in stranded:
-                    print(f"[caxton]   stranded: {p}", file=sys.stderr)
-                quoted = " ".join(shlex.quote(p) for p in stranded)
-                print(
-                    f"[caxton] remove them with: git clean -fdx -- {quoted}",
-                    file=sys.stderr,
-                )
+        print_telemetry_report()
 
 
 def sigterm_handler(signum, frame):
