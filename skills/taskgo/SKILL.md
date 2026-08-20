@@ -248,13 +248,21 @@ After meaningful work:
    when standing authority is present. Subject = what became true, not what file
    changed.
 
-Before leaving or completing a task, double-check:
+Before leaving or completing a task (especially when marking a task `done`),
+double-check that the project is left in a strict **handoff-ready** state. A
+reader must be able to understand the state of the project and what needs to be
+done next without referencing anything else, as they will have no outside
+information or context from your current session. Both the task tracker and any
+artifacts (including code repos) must reflect this state. Ensure that:
 
-1. Handoff: state, findings, decisions, and full session/conversation IDs
+1. Handoff-ready tracker: state, findings, decisions, and full
+   session/conversation IDs
    (`[<conversation-id>](conversation://<conversation-id>)`) needed to resume
-   are written into the task/STATUS/PLAN, not left only in conversation.
-1. Consistency: tracker claims match actual artifact-repo state (e.g. a task is
-   not `done` while its artifact-repo commit remains uncommitted).
+   are fully written into the task/STATUS/PLAN, not left only in the
+   conversation.
+1. Handoff-ready artifacts: tracker claims match actual artifact-repo state
+   (e.g. a task is never `done` while its artifact-repo commit remains
+   uncommitted).
 
 Examples:
 
