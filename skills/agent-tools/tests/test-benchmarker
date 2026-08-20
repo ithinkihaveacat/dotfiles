@@ -1,0 +1,408 @@
+#!/usr/bin/env bash
+
+# Tests: skills/agent-tools/tests/test-benchmarker
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/benchmarker"
+
+OUTPUT=$(mktemp)
+WORK=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
+
+echo "1..15"
+
+# Test 1: benchmarker --help
+if "$BIN" --help >"$OUTPUT" 2>&1; then
+  if grep -q "Usage: benchmarker" "$OUTPUT" && grep -q "Options:" "$OUTPUT" && grep -q "Examples:" "$OUTPUT"; then
+    echo "ok 1 - Help output is formatted correctly"
+  else
+    echo "not ok 1 - Help output missing expected sections"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 1 - benchmarker --help exited non-zero"
+fi
+
+# Test 2: Bare benchmarker prints short usage and exits 1
+if "$BIN" >"$OUTPUT" 2>&1; then
+  echo "not ok 2 - Expected bare benchmarker to fail"
+else
+  if grep -q "Usage: benchmarker" "$OUTPUT" && grep -q "Try 'benchmarker --help'" "$OUTPUT"; then
+    echo "ok 2 - Bare benchmarker prints concise usage to stderr"
+  else
+    echo "not ok 2 - Bare benchmarker output missing expected usage"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 3: --dry-run expands Cartesian product matrix correctly
+if "$BIN" --cmd "echo '{script} {model} {trial}'" \
+  --dim script=v1,v2 \
+  --dim model=pro,flash \
+  --trials 2 \
+  --dry-run >"$OUTPUT" 2>&1; then
+  if grep -q "Generated 8 run(s) across 4 parameter combination(s)" "$OUTPUT" &&
+    grep -q "CMD: echo 'v1 pro 1'" "$OUTPUT" &&
+    grep -q "CMD: echo 'v2 flash 2'" "$OUTPUT"; then
+    echo "ok 3 - --dry-run expands Cartesian product matrix"
+  else
+    echo "not ok 3 - Dry-run matrix schedule did not match expected combinations"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 3 - --dry-run exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 4: Real execution creates directory artifacts and index.jsonl
+OUTDIR="$WORK/bench_out"
+if "$BIN" --cmd "echo 'result for {var}'" \
+  --dim var=A,B \
+  --trials 1 \
+  --workers 2 \
+  --output-dir "$OUTDIR" >"$OUTPUT" 2>&1; then
+  if [[ -f "$OUTDIR/index.jsonl" ]] && [[ $(wc -l <"$OUTDIR/index.jsonl" | awk '{print $1}') -eq 2 ]] &&
+    grep -q "result for A" "$OUTDIR"/runs/*/stdout.txt &&
+    grep -q "result for B" "$OUTDIR"/runs/*/stdout.txt; then
+    echo "ok 4 - Executes matrix and populates output directory with index.jsonl and artifacts"
+  else
+    echo "not ok 4 - Output artifacts missing or incomplete"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 4 - Execution failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 5: AGENT_TELEMETRY_JSON is passed and captured in metadata.json & index.jsonl
+OUTDIR_TEL="$WORK/bench_tel"
+MOCK_TOOL="$WORK/mock_tool.sh"
+cat <<'EOF' >"$MOCK_TOOL"
+#!/usr/bin/env bash
+echo "tool output for $1"
+if [[ -n "${AGENT_TELEMETRY_JSON:-}" ]]; then
+  cat <<TEL >"$AGENT_TELEMETRY_JSON"
+{
+  "status": "Succeeded",
+  "steps": 3,
+  "prompt_tokens": 12000,
+  "candidate_tokens": 450,
+  "search_replace_successes": 2,
+  "search_replace_attempts": 2
+}
+TEL
+fi
+exit 0
+EOF
+chmod +x "$MOCK_TOOL"
+
+if "$BIN" --cmd "$MOCK_TOOL '{name}'" \
+  --dim name=test1 \
+  --output-dir "$OUTDIR_TEL" >"$OUTPUT" 2>&1; then
+  INDEX_CONTENT=$(cat "$OUTDIR_TEL/index.jsonl")
+  if grep -q '"prompt_tokens":12000' "$OUTDIR_TEL/index.jsonl" &&
+    grep -q '"steps":3' "$OUTDIR_TEL/index.jsonl" &&
+    grep -q '"search_replace_successes": 2' "$OUTDIR_TEL"/runs/*/telemetry.json; then
+    echo "ok 5 - Captures AGENT_TELEMETRY_JSON and indexes token/step telemetry"
+  else
+    echo "not ok 5 - Telemetry JSON was not captured or indexed correctly"
+    echo "# index.jsonl: $INDEX_CONTENT"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 5 - Telemetry test run failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 6: Captures git diffs in ephemeral worktrees (including untracked files)
+OUTDIR_DIFF="$WORK/bench_diff"
+MOCK_MUTATOR="$WORK/mock_mutator.sh"
+cat <<'EOF' >"$MOCK_MUTATOR"
+#!/usr/bin/env bash
+git init -q .
+git config user.email "test@example.com"
+git config user.name "Test"
+printf "initial\n" > file.txt
+git add file.txt
+git commit -q -m "initial"
+printf "modified by mutator\n" > file.txt
+printf "new file\n" > added.txt
+EOF
+chmod +x "$MOCK_MUTATOR"
+
+if "$BIN" --cmd "$MOCK_MUTATOR" \
+  --dim trial=1 \
+  --output-dir "$OUTDIR_DIFF" >"$OUTPUT" 2>&1; then
+  DIFF_FILE=$(ls "$OUTDIR_DIFF"/runs/*/diff.patch 2>/dev/null || true)
+  if [[ -n "$DIFF_FILE" ]] && grep -q -- "-initial" "$DIFF_FILE" &&
+    grep -q -- "+modified by mutator" "$DIFF_FILE" &&
+    grep -q -- "+new file" "$DIFF_FILE"; then
+    echo "ok 6 - Captures git diff patches from ephemeral worktrees"
+  else
+    echo "not ok 6 - diff.patch missing or did not capture modified file"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 6 - Git diff test execution failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 7: Timeouts terminate process group cleanly and record status
+OUTDIR_TO="$WORK/bench_timeout"
+if "$BIN" --cmd "sleep 10" \
+  --timeout 1 \
+  --output-dir "$OUTDIR_TO" >"$OUTPUT" 2>&1; then
+  echo "not ok 7 - Expected timeout run to return non-zero overall"
+else
+  if grep -q '"status":"timed_out"' "$OUTDIR_TO/index.jsonl" &&
+    grep -q '"exit_code":124' "$OUTDIR_TO/index.jsonl"; then
+    echo "ok 7 - Enforces timeout, terminates process group, and records timed_out exit code 124"
+  else
+    echo "not ok 7 - Timeout status or exit code not recorded as expected"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 8: Task suite execution (setup, prompt, flags, verify)
+TASKS_DIR="$WORK/fixtures/tasks"
+mkdir -p "$TASKS_DIR/task_greeting"
+
+cat <<'EOF' >"$TASKS_DIR/task_greeting/setup.sh"
+#!/usr/bin/env bash
+git init -q .
+git config user.email "test@example.com"
+git config user.name "Test"
+printf "old greeting\n" > greeting.txt
+git add greeting.txt
+git commit -q -m "init"
+EOF
+chmod +x "$TASKS_DIR/task_greeting/setup.sh"
+
+printf "%s\n" "Change greeting to hello world" >"$TASKS_DIR/task_greeting/prompt.txt"
+printf "%s\n" "--edit greeting.txt" >"$TASKS_DIR/task_greeting/flags.txt"
+
+cat <<'EOF' >"$TASKS_DIR/task_greeting/verify.sh"
+#!/usr/bin/env bash
+grep -q "hello world" greeting.txt
+EOF
+chmod +x "$TASKS_DIR/task_greeting/verify.sh"
+
+OUTDIR_TASKS="$WORK/bench_tasks"
+MOCK_TASK_RUNNER="$WORK/mock_task_runner.sh"
+cat <<'EOF' >"$MOCK_TASK_RUNNER"
+#!/usr/bin/env bash
+# Simulates reading prompt and flags
+if [[ "$*" == *"Change greeting to hello world"* ]]; then
+  printf "hello world\n" > greeting.txt
+fi
+EOF
+chmod +x "$MOCK_TASK_RUNNER"
+
+if "$BIN" --cmd "$MOCK_TASK_RUNNER '{prompt}' {task_flags}" \
+  --tasks "$TASKS_DIR" \
+  --output-dir "$OUTDIR_TASKS" >"$OUTPUT" 2>&1; then
+  if grep -q '"task":"task_greeting"' "$OUTDIR_TASKS/index.jsonl" &&
+    grep -q '"verify_passed":true' "$OUTDIR_TASKS/index.jsonl"; then
+    echo "ok 8 - Discovers task directory, executes setup and verify hooks, and reports verification"
+  else
+    echo "not ok 8 - Task execution or verification was not recorded properly"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 8 - Task runner failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 9: Summary Markdown table generation
+if grep -q "### Benchmark Summary" "$OUTPUT" &&
+  grep -q "Pass Rate" "$OUTPUT" &&
+  grep -q "Avg Time" "$OUTPUT"; then
+  echo "ok 9 - Outputs consolidated Markdown summary table"
+else
+  echo "not ok 9 - Markdown summary table missing from output"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 10: Automatic shell escaping for complex prompts with quotes and semicolons
+OUTDIR_QUOTE="$WORK/bench_quote"
+MOCK_ECHO="$WORK/mock_echo.sh"
+cat <<'EOF' >"$MOCK_ECHO"
+#!/usr/bin/env bash
+printf "%s" "$1" > captured.txt
+EOF
+chmod +x "$MOCK_ECHO"
+
+COMPLEX_PROMPT="Don't break; echo 'nested' && \"double\""
+if "$BIN" --cmd "$MOCK_ECHO {prompt}" \
+  --dim prompt="$COMPLEX_PROMPT" \
+  --output-dir "$OUTDIR_QUOTE" >"$OUTPUT" 2>&1; then
+  if grep -q "Don't break; echo 'nested'" "$OUTDIR_QUOTE"/runs/*/metadata.json &&
+    grep -q "status.*success" "$OUTDIR_QUOTE"/runs/*/metadata.json; then
+    echo "ok 10 - Injected template placeholders are safely shell-escaped against quote breakout"
+  else
+    echo "not ok 10 - Quote escaping failed or command errored"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 10 - Command with complex quotes failed to execute"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 11: Null telemetry metrics are safely parsed without TypeError
+OUTDIR_NULL="$WORK/bench_null"
+MOCK_NULL_TEL="$WORK/mock_null_tel.sh"
+cat <<'EOF' >"$MOCK_NULL_TEL"
+#!/usr/bin/env bash
+if [[ -n "${AGENT_TELEMETRY_JSON:-}" ]]; then
+  cat <<TEL >"$AGENT_TELEMETRY_JSON"
+{
+  "status": "Succeeded",
+  "steps": null,
+  "prompt_tokens": null,
+  "candidate_tokens": null
+}
+TEL
+fi
+exit 0
+EOF
+chmod +x "$MOCK_NULL_TEL"
+
+if "$BIN" --cmd "$MOCK_NULL_TEL" \
+  --dim test=null_check \
+  --output-dir "$OUTDIR_NULL" >"$OUTPUT" 2>&1; then
+  if grep -q '"prompt_tokens":null' "$OUTDIR_NULL/index.jsonl" &&
+    grep -q "### Benchmark Summary" "$OUTPUT"; then
+    echo "ok 11 - Handles null telemetry fields gracefully without raising TypeError"
+  else
+    echo "not ok 11 - Null telemetry metrics caused failure or invalid index"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 11 - Null telemetry execution failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 12: Graceful SIGTERM escalation allows child processes to flush telemetry before kill
+OUTDIR_GRACE="$WORK/bench_grace"
+MOCK_TRAP_TOOL="$WORK/mock_trap_tool.sh"
+cat <<'EOF' >"$MOCK_TRAP_TOOL"
+#!/usr/bin/env bash
+cleanup() {
+  if [[ -n "${AGENT_TELEMETRY_JSON:-}" ]]; then
+    cat <<TEL >"$AGENT_TELEMETRY_JSON"
+{
+  "status": "TerminatedGracefully",
+  "steps": 2,
+  "prompt_tokens": 5000,
+  "candidate_tokens": 100
+}
+TEL
+  fi
+  exit 0
+}
+trap cleanup TERM INT
+sleep 10 &
+wait $!
+EOF
+chmod +x "$MOCK_TRAP_TOOL"
+
+if "$BIN" --cmd "$MOCK_TRAP_TOOL" \
+  --timeout 1 \
+  --output-dir "$OUTDIR_GRACE" >"$OUTPUT" 2>&1; then
+  echo "not ok 12 - Expected timeout run to return non-zero exit code"
+else
+  if grep -q '"status":"timed_out"' "$OUTDIR_GRACE/index.jsonl" &&
+    grep -q '"prompt_tokens":5000' "$OUTDIR_GRACE/index.jsonl" &&
+    grep -q '"status": "TerminatedGracefully"' "$OUTDIR_GRACE"/runs/*/telemetry.json; then
+    echo "ok 12 - Gracefully sends SIGTERM allowing child process to flush telemetry during grace period"
+  else
+    echo "not ok 12 - Graceful termination telemetry was not captured on timeout"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 13: Non-dict JSON telemetry (e.g. array or primitive) is handled gracefully without crash
+OUTDIR_ARRAY="$WORK/bench_array_tel"
+MOCK_ARRAY_TOOL="$WORK/mock_array_tool.sh"
+cat <<'EOF' >"$MOCK_ARRAY_TOOL"
+#!/usr/bin/env bash
+if [[ -n "${AGENT_TELEMETRY_JSON:-}" ]]; then
+  echo '["item1", "item2", 42]' > "$AGENT_TELEMETRY_JSON"
+fi
+exit 0
+EOF
+chmod +x "$MOCK_ARRAY_TOOL"
+
+if "$BIN" --cmd "$MOCK_ARRAY_TOOL" \
+  --output-dir "$OUTDIR_ARRAY" >"$OUTPUT" 2>&1; then
+  if grep -q '"status":"success"' "$OUTDIR_ARRAY/index.jsonl" &&
+    grep -q '"prompt_tokens":null' "$OUTDIR_ARRAY/index.jsonl"; then
+    echo "ok 13 - Handles non-dict JSON telemetry without raising AttributeError"
+  else
+    echo "not ok 13 - Non-dict JSON telemetry failed to index"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 13 - Non-dict JSON telemetry caused execution crash"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 14: Non-integer string metrics in telemetry (e.g. "prompt_tokens": "N/A") do not crash summary
+OUTDIR_STR_TEL="$WORK/bench_str_tel"
+MOCK_STR_TOOL="$WORK/mock_str_tool.sh"
+cat <<'EOF' >"$MOCK_STR_TOOL"
+#!/usr/bin/env bash
+if [[ -n "${AGENT_TELEMETRY_JSON:-}" ]]; then
+  cat <<TEL >"$AGENT_TELEMETRY_JSON"
+{
+  "status": "Succeeded",
+  "prompt_tokens": "N/A",
+  "candidate_tokens": "unlimited",
+  "steps": "three"
+}
+TEL
+fi
+exit 0
+EOF
+chmod +x "$MOCK_STR_TOOL"
+
+if "$BIN" --cmd "$MOCK_STR_TOOL" \
+  --output-dir "$OUTDIR_STR_TEL" >"$OUTPUT" 2>&1; then
+  if grep -q "### Benchmark Summary" "$OUTPUT" &&
+    grep -q '"prompt_tokens":null' "$OUTDIR_STR_TEL/index.jsonl"; then
+    echo "ok 14 - Handles non-integer string metrics in telemetry without raising ValueError"
+  else
+    echo "not ok 14 - String metrics caused failure or invalid summary"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 14 - String telemetry execution failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 15: Clean cancellation without unhandled CancelledError traceback
+OUTDIR_SIG="$WORK/bench_sig"
+MOCK_LONG="$WORK/mock_long.sh"
+cat <<'EOF' >"$MOCK_LONG"
+#!/usr/bin/env bash
+sleep 30
+EOF
+chmod +x "$MOCK_LONG"
+
+# Launch in background, send SIGTERM, verify clean exit without traceback
+"$BIN" --cmd "$MOCK_LONG" --output-dir "$OUTDIR_SIG" >"$OUTPUT" 2>&1 &
+BG_PID=$!
+sleep 0.5
+kill -TERM "$BG_PID" 2>/dev/null || true
+wait "$BG_PID" 2>/dev/null || true
+
+if grep -q "Traceback (most recent call last)" "$OUTPUT" || grep -q "asyncio.exceptions.CancelledError" "$OUTPUT"; then
+  echo "not ok 15 - SIGTERM caused unhandled Python traceback"
+  sed 's/^/# /' "$OUTPUT"
+else
+  echo "ok 15 - SIGTERM cancels worker tasks cleanly without dumping traceback"
+fi
+
+

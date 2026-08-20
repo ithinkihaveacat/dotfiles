@@ -1,0 +1,995 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Benchmarker: Generic parallel matrix runner and benchmark harness."""
+
+# Tests: skills/agent-tools/tests/test-benchmarker
+
+import argparse
+import asyncio
+import contextlib
+import dataclasses
+import datetime
+import fcntl
+import itertools
+import json
+import os
+import pathlib
+import shlex
+import shutil
+import signal
+import sys
+import tempfile
+import time
+import uuid
+from typing import Any
+
+DEFAULT_TIMEOUT_SECONDS = 600
+DEFAULT_WORKERS = 4
+DEFAULT_TRIALS = 1
+DEFAULT_OUTPUT_DIR = ".benchmarks"
+
+
+def print_help(prog_name: str, file=sys.stdout):
+    print(
+        f"""\
+Usage: {prog_name} [OPTIONS] --cmd "COMMAND_TEMPLATE"
+
+Generic parallel matrix runner and benchmark harness for AI CLI tools and agents.
+
+Executes a Cartesian product of parameter dimensions and tasks in parallel across
+ephemeral, isolated worktrees. Collects fine-grained telemetry, output logs, and
+git diffs into an incremental directory structure with an append-only index.
+
+Arguments:
+  --cmd TEMPLATE        Command template to execute with {{placeholders}} (required).
+                        Example: "{{script}} {{prompt}} --model {{model}} {{task_flags}}"
+                        Note: Injected values are shell-escaped automatically.
+
+Options:
+  -d, --dim NAME=VALS   Define a permutation dimension as comma-separated values.
+                        Can be repeated multiple times.
+                        Example: --dim script=v0,v1 --dim model=pro,flash
+  -t, --tasks DIR       Directory containing task fixtures. Each task directory
+                        can contain setup.sh, prompt.txt, flags.txt, and verify.sh.
+  -o, --output-dir DIR  Directory for output artifacts and index (default: '{DEFAULT_OUTPUT_DIR}').
+  -n, --trials N        Number of trials to run per combination (default: {DEFAULT_TRIALS}).
+  -j, --workers N       Maximum concurrent worker processes (default: {DEFAULT_WORKERS}).
+  --timeout SECONDS     Execution timeout per run in seconds (default: {DEFAULT_TIMEOUT_SECONDS}).
+  --dry-run             Print the resolved list of runs without executing them.
+  -h, --help            Display this help message and exit.
+
+Available Template Placeholders (automatically shell-quoted):
+  {{<dim_name>}}        Value of each dimension specified via --dim
+  {{task}}              Task name (when --tasks is used)
+  {{prompt}}            Prompt text from the task's prompt.txt or dim
+  {{task_flags}}        Extra command-line flags from the task's flags.txt or dim
+  {{trial}}             Current trial index (1..N)
+  {{output_dir}}        Resolved path to the output directory
+  {{run_id}}            Unique ID assigned to the run
+  {{timeout}}           Configured timeout in seconds
+  {{grace_timeout}}     Configured timeout minus 10 seconds (for internal tool timers)
+
+Environment:
+  AGENT_TELEMETRY_JSON  Injected automatically into child environments pointing
+                        to an ephemeral path for structured JSON telemetry.
+  CAXTON_TELEMETRY_FILE Alias for AGENT_TELEMETRY_JSON for Caxton tools.
+
+Examples:
+  # 2x2 matrix sweep across scripts and models
+  {prog_name} --cmd "{{bin}} {{prompt}} --model {{model}}" \\
+    --dim bin=caxton,caxton-v1 \\
+    --dim model=gemini-pro-latest,gemini-2.5-flash \\
+    --dim prompt="Summarize repository structure" \\
+    --trials 3
+
+  # Run a matrix across a suite of task fixtures
+  {prog_name} --cmd "{{script}} {{prompt}} --model {{model}} {{task_flags}}" \\
+    --dim script=caxton,caxton-v1 \\
+    --dim model=gemini-2.5-flash \\
+    --tasks tests/fixtures/tasks/ \\
+    --trials 2 \\
+    --workers 4 \\
+    --output-dir .benchmarks
+""",
+        file=file,
+    )
+
+
+def print_short_usage(prog_name: str, file=sys.stderr):
+    print(
+        f"""\
+Usage: {prog_name} [OPTIONS] --cmd "COMMAND_TEMPLATE"
+
+Generic parallel matrix runner and benchmark harness for AI CLI tools.
+
+Examples:
+  {prog_name} --cmd "{{script}} {{prompt}}" --dim script=v0,v1 --dim prompt="hello"
+  {prog_name} --tasks tests/fixtures/tasks/ --cmd "{{script}} {{prompt}} {{task_flags}}" --dim script=v0,v1
+
+Try '{prog_name} --help' for more information and examples.\
+""",
+        file=file,
+    )
+
+
+@dataclasses.dataclass
+class TaskDef:
+    name: str
+    dir_path: pathlib.Path | None = None
+    prompt: str = ""
+    flags: str = ""
+    has_setup: bool = False
+    has_verify: bool = False
+
+
+@dataclasses.dataclass
+class RunJob:
+    run_id: str
+    params: dict[str, Any]
+    task: TaskDef | None
+    trial: int
+    cmd_template: str
+    timeout: int
+    output_dir: pathlib.Path
+
+
+@dataclasses.dataclass
+class RunResult:
+    run_id: str
+    timestamp: str
+    params: dict[str, Any]
+    command: str
+    status: str
+    exit_code: int
+    duration_seconds: float
+    timed_out: bool
+    telemetry: dict[str, Any] | None
+    verify_passed: bool | None
+    verify_output: str | None
+    artifacts_dir: str
+
+
+def discover_tasks(tasks_dir: pathlib.Path) -> list[TaskDef]:
+    """Discovers task fixtures in a directory."""
+    if not tasks_dir.is_dir():
+        print(
+            f"benchmarker: error: task directory '{tasks_dir}' not found",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    tasks: list[TaskDef] = []
+    for item in sorted(tasks_dir.iterdir()):
+        if not item.is_dir() or item.name.startswith((".", "_")):
+            continue
+        prompt = ""
+        prompt_file = item / "prompt.txt"
+        if prompt_file.is_file():
+            prompt = prompt_file.read_text(encoding="utf-8").strip()
+
+        flags = ""
+        flags_file = item / "flags.txt"
+        if flags_file.is_file():
+            flags = flags_file.read_text(encoding="utf-8").strip()
+
+        has_setup = (item / "setup.sh").is_file() or (item / "setup").is_file()
+        has_verify = (item / "verify.sh").is_file() or (item / "verify").is_file()
+
+        tasks.append(
+            TaskDef(
+                name=item.name,
+                dir_path=item,
+                prompt=prompt,
+                flags=flags,
+                has_setup=has_setup,
+                has_verify=has_verify,
+            )
+        )
+    return tasks
+
+
+def append_to_index(index_path: pathlib.Path, record: dict[str, Any]) -> None:
+    """Appends a single JSON record to index.jsonl with strict POSIX file locking."""
+    try:
+        line = json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n"
+    except (ValueError, TypeError) as e:
+        safe_fallback = {
+            "run_id": record.get("run_id"),
+            "status": "error",
+            "error": f"JSON serialization error: {e}",
+        }
+        line = json.dumps(safe_fallback, separators=(",", ":")) + "\n"
+
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(index_path, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(line)
+            f.flush()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def build_template_vars(job: RunJob, quote_for_shell: bool = True) -> dict[str, Any]:
+    """Constructs dictionary of template variables, optionally quoting values for shell execution."""
+
+    def maybe_quote(val: Any) -> Any:
+        if not quote_for_shell:
+            return val
+        if isinstance(val, (int, float)):
+            return val
+        return shlex.quote(str(val))
+
+    fmt_vars = {k: maybe_quote(v) for k, v in job.params.items()}
+    fmt_vars["run_id"] = maybe_quote(job.run_id)
+    fmt_vars["trial"] = job.trial
+    fmt_vars["output_dir"] = maybe_quote(str(job.output_dir))
+    fmt_vars["timeout"] = job.timeout
+    fmt_vars["grace_timeout"] = max(1, job.timeout - 10)
+
+    if job.task:
+        fmt_vars["task"] = maybe_quote(job.task.name)
+        if "prompt" not in job.params:
+            fmt_vars["prompt"] = maybe_quote(job.task.prompt)
+        if "task_flags" not in job.params:
+            # Task flags can contain multiple switches (e.g. '--edit docs/ --read src/'), so pass unquoted or as string
+            fmt_vars["task_flags"] = job.task.flags
+    else:
+        fmt_vars.setdefault("task", "")
+        fmt_vars.setdefault("prompt", "")
+        fmt_vars.setdefault("task_flags", "")
+
+    return fmt_vars
+
+
+async def drain_stream(stream: asyncio.StreamReader | None) -> bytes:
+    """Reads stream in chunks to preserve partial output even if cancelled."""
+    if stream is None:
+        return b""
+    buf = bytearray()
+    try:
+        while chunk := await stream.read(65536):
+            buf.extend(chunk)
+    except asyncio.CancelledError:
+        pass
+    return bytes(buf)
+
+
+async def teardown_process_group(
+    pgid: int, proc: asyncio.subprocess.Process, grace_period: float = 1.5
+) -> None:
+    """Gracefully escalates process group termination from SIGTERM to SIGKILL."""
+    if proc.returncode is not None:
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+
+    async def _escalate_to_kill() -> None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_period)
+        except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(pgid, signal.SIGKILL)
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.shield(_escalate_to_kill())
+
+    if proc.returncode is None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def safe_int(val: Any) -> int | None:
+    """Safely converts arbitrary value to int, or None on failure."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def safe_float(val: Any) -> float | None:
+    """Safely converts arbitrary value to float, or None on failure."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+async def run_single_job(job: RunJob, sem: asyncio.Semaphore) -> RunResult:
+    """Executes a single benchmark run in an ephemeral worktree."""
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    # 0. Build placeholders mapping with shell quoting
+    fmt_vars = build_template_vars(job, quote_for_shell=True)
+
+    try:
+        cmd_str = job.cmd_template.format_map(fmt_vars)
+    except KeyError as e:
+        # Fail fast on invalid template without creating sandboxes or executing hooks
+        return RunResult(
+            run_id=job.run_id,
+            timestamp=timestamp,
+            params=job.params,
+            command=job.cmd_template,
+            status=f"error: missing placeholder {e}",
+            exit_code=1,
+            duration_seconds=0.0,
+            timed_out=False,
+            telemetry=None,
+            verify_passed=None,
+            verify_output=None,
+            artifacts_dir="",
+        )
+
+    async with sem:
+        sandbox_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"bench_{job.run_id[:12]}_"))
+        t0 = time.perf_counter()
+        stdout_bytes = b""
+        stderr_bytes = b""
+        exit_code = -1
+        timed_out = False
+        status_label = "unknown"
+        telemetry_data: dict[str, Any] | None = None
+        diff_text = ""
+        verify_passed: bool | None = None
+        verify_output: str | None = None
+
+        telemetry_file = sandbox_dir / ".agent_telemetry.json"
+        env = os.environ.copy()
+        env["AGENT_TELEMETRY_JSON"] = str(telemetry_file)
+        env["CAXTON_TELEMETRY_FILE"] = str(telemetry_file)
+
+        try:
+            try:
+                # 1. Execute task setup hook with timeout and process group tracking
+                if job.task and job.task.has_setup and job.task.dir_path:
+                    setup_script = (
+                        job.task.dir_path / "setup.sh"
+                        if (job.task.dir_path / "setup.sh").exists()
+                        else job.task.dir_path / "setup"
+                    )
+                    setup_cmd = (
+                        [str(setup_script)]
+                        if os.access(str(setup_script), os.X_OK)
+                        else ["bash", str(setup_script)]
+                    )
+                    setup_proc = await asyncio.create_subprocess_exec(
+                        *setup_cmd,
+                        cwd=str(sandbox_dir),
+                        env=env,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
+                    )
+                    setup_pgid = setup_proc.pid
+                    try:
+                        s_out, s_err = await asyncio.wait_for(
+                            setup_proc.communicate(), timeout=60.0
+                        )
+                        if setup_proc.returncode != 0:
+                            status_label = "setup_failed"
+                            exit_code = setup_proc.returncode or 1
+                            stderr_bytes = (
+                                b"[benchmarker] task setup failed:\n" + s_out + s_err
+                            )
+                    except (asyncio.TimeoutError, TimeoutError):
+                        status_label = "setup_timed_out"
+                        exit_code = 124
+                        stderr_bytes = (
+                            b"[benchmarker] task setup timed out after 60s.\n"
+                        )
+                        await teardown_process_group(
+                            setup_pgid, setup_proc, grace_period=1.0
+                        )
+                    finally:
+                        await teardown_process_group(
+                            setup_pgid, setup_proc, grace_period=1.0
+                        )
+
+                # 2. Execute main command if setup succeeded
+                if status_label == "unknown":
+                    proc = await asyncio.create_subprocess_shell(
+                        cmd_str,
+                        cwd=str(sandbox_dir),
+                        env=env,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
+                    )
+
+                    pgid = proc.pid
+
+                    # Detach stream reader tasks with chunked buffer to preserve partial output on timeout
+                    out_task = asyncio.create_task(drain_stream(proc.stdout))
+                    err_task = asyncio.create_task(drain_stream(proc.stderr))
+
+                    try:
+                        try:
+                            await asyncio.wait_for(
+                                proc.wait(), timeout=float(job.timeout)
+                            )
+                            exit_code = (
+                                proc.returncode if proc.returncode is not None else 0
+                            )
+                            status_label = "success" if exit_code == 0 else "failed"
+                        except (asyncio.TimeoutError, TimeoutError):
+                            timed_out = True
+                            exit_code = 124
+                            status_label = "timed_out"
+                            if (
+                                proc.stdout is not None
+                                and hasattr(proc.stdout, "_transport")
+                                and proc.stdout._transport
+                            ):
+                                with contextlib.suppress(Exception):
+                                    proc.stdout._transport.close()
+                            if (
+                                proc.stderr is not None
+                                and hasattr(proc.stderr, "_transport")
+                                and proc.stderr._transport
+                            ):
+                                with contextlib.suppress(Exception):
+                                    proc.stderr._transport.close()
+                            await teardown_process_group(pgid, proc, grace_period=1.5)
+                        finally:
+                            # Graceful escalation to ensure process group teardown
+                            await teardown_process_group(pgid, proc, grace_period=1.5)
+
+                        # Await stream readers with safe timeout against orphaned pipe locks
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.gather(out_task, err_task), timeout=5.0
+                            )
+                        except (
+                            asyncio.TimeoutError,
+                            TimeoutError,
+                            asyncio.CancelledError,
+                        ):
+                            pass
+                    finally:
+                        # Guarantee detached readers are cancelled and drained on cascading CancelledError or timeout
+                        if not out_task.done():
+                            out_task.cancel()
+                        if not err_task.done():
+                            err_task.cancel()
+                        stdout_gather, stderr_gather = await asyncio.gather(
+                            out_task, err_task, return_exceptions=True
+                        )
+                        stdout_bytes = (
+                            stdout_gather if isinstance(stdout_gather, bytes) else b""
+                        )
+                        stderr_bytes = (
+                            stderr_gather if isinstance(stderr_gather, bytes) else b""
+                        )
+
+                # 3. Read telemetry file if written
+                if telemetry_file.is_file():
+                    try:
+                        parsed = json.loads(telemetry_file.read_text(encoding="utf-8"))
+                        if isinstance(parsed, dict):
+                            telemetry_data = parsed
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+                # 4. Capture git diff (including untracked files) with timeout if sandbox is a git worktree
+                if (sandbox_dir / ".git").exists():
+                    try:
+                        diff_cmd = "git add -N . 2>/dev/null; (git diff HEAD 2>/dev/null || git diff 4b825dc642cb6eb9a060e54bf8d69288fbee4904 2>/dev/null)"
+                        diff_proc = await asyncio.create_subprocess_shell(
+                            diff_cmd,
+                            cwd=str(sandbox_dir),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            start_new_session=True,
+                        )
+                        diff_pgid = diff_proc.pid
+                        try:
+                            d_out, _ = await asyncio.wait_for(
+                                diff_proc.communicate(), timeout=30.0
+                            )
+                            diff_text = d_out.decode("utf-8", "replace")
+                        except (asyncio.TimeoutError, TimeoutError):
+                            diff_text = "[benchmarker] git diff timed out after 30s."
+                        finally:
+                            await teardown_process_group(
+                                diff_pgid, diff_proc, grace_period=0.5
+                            )
+                    except (asyncio.SubprocessError, OSError):
+                        pass
+
+                # 5. Run verification hook with timeout if present
+                if job.task and job.task.has_verify and job.task.dir_path:
+                    verify_script = (
+                        job.task.dir_path / "verify.sh"
+                        if (job.task.dir_path / "verify.sh").exists()
+                        else job.task.dir_path / "verify"
+                    )
+                    verify_cmd = (
+                        [str(verify_script)]
+                        if os.access(str(verify_script), os.X_OK)
+                        else ["bash", str(verify_script)]
+                    )
+                    v_proc = await asyncio.create_subprocess_exec(
+                        *verify_cmd,
+                        cwd=str(sandbox_dir),
+                        env=env,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
+                    )
+                    v_pgid = v_proc.pid
+                    try:
+                        v_out, v_err = await asyncio.wait_for(
+                            v_proc.communicate(), timeout=60.0
+                        )
+                        verify_passed = v_proc.returncode == 0
+                        verify_output = (v_out + v_err).decode("utf-8", "replace")
+                    except (asyncio.TimeoutError, TimeoutError):
+                        verify_passed = False
+                        verify_output = "[benchmarker] verify hook timed out after 60s."
+                        await teardown_process_group(v_pgid, v_proc, grace_period=1.0)
+                    finally:
+                        await teardown_process_group(v_pgid, v_proc, grace_period=1.0)
+
+            except asyncio.CancelledError:
+                if status_label == "unknown":
+                    status_label = "cancelled"
+                    exit_code = 130
+                raise
+        finally:
+            # Shield artifact persistence and index writing so telemetry and outputs are preserved
+            async def _persist_and_cleanup():
+                nonlocal telemetry_data
+                duration_seconds = time.perf_counter() - t0
+
+                if telemetry_data is None and telemetry_file.is_file():
+                    try:
+                        parsed = json.loads(telemetry_file.read_text(encoding="utf-8"))
+                        if isinstance(parsed, dict):
+                            telemetry_data = parsed
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+                run_artifacts_dir = job.output_dir / "runs" / job.run_id
+                stdout_str = stdout_bytes.decode("utf-8", "replace")
+                stderr_str = stderr_bytes.decode("utf-8", "replace")
+
+                metadata = {
+                    "run_id": job.run_id,
+                    "timestamp": timestamp,
+                    "command": cmd_str,
+                    "params": job.params,
+                    "status": status_label,
+                    "exit_code": exit_code,
+                    "duration_seconds": round(duration_seconds, 3),
+                    "timed_out": timed_out,
+                    "telemetry": telemetry_data,
+                    "verify_passed": verify_passed,
+                    "verify_output": verify_output,
+                    "artifacts": {
+                        "stdout": str(
+                            (run_artifacts_dir / "stdout.txt").relative_to(
+                                job.output_dir
+                            )
+                        ),
+                        "stderr": str(
+                            (run_artifacts_dir / "stderr.txt").relative_to(
+                                job.output_dir
+                            )
+                        ),
+                        "diff": (
+                            str(
+                                (run_artifacts_dir / "diff.patch").relative_to(
+                                    job.output_dir
+                                )
+                            )
+                            if diff_text
+                            else None
+                        ),
+                        "telemetry": (
+                            str(
+                                (run_artifacts_dir / "telemetry.json").relative_to(
+                                    job.output_dir
+                                )
+                            )
+                            if telemetry_data
+                            else None
+                        ),
+                    },
+                }
+
+                def _write_run_artifacts_sync() -> None:
+                    run_artifacts_dir.mkdir(parents=True, exist_ok=True)
+                    (run_artifacts_dir / "stdout.txt").write_text(
+                        stdout_str, encoding="utf-8"
+                    )
+                    (run_artifacts_dir / "stderr.txt").write_text(
+                        stderr_str, encoding="utf-8"
+                    )
+                    if diff_text:
+                        (run_artifacts_dir / "diff.patch").write_text(
+                            diff_text, encoding="utf-8"
+                        )
+                    if telemetry_data:
+                        (run_artifacts_dir / "telemetry.json").write_text(
+                            json.dumps(telemetry_data, indent=2), encoding="utf-8"
+                        )
+                    (run_artifacts_dir / "metadata.json").write_text(
+                        json.dumps(metadata, indent=2), encoding="utf-8"
+                    )
+
+                await asyncio.to_thread(_write_run_artifacts_sync)
+
+                index_record = {
+                    "run_id": job.run_id,
+                    "timestamp": timestamp,
+                    "params": job.params,
+                    "status": status_label,
+                    "exit_code": exit_code,
+                    "duration_s": round(duration_seconds, 2),
+                    "prompt_tokens": (
+                        safe_int(telemetry_data.get("prompt_tokens"))
+                        if isinstance(telemetry_data, dict)
+                        else None
+                    ),
+                    "candidate_tokens": (
+                        safe_int(telemetry_data.get("candidate_tokens"))
+                        if isinstance(telemetry_data, dict)
+                        else None
+                    ),
+                    "steps": (
+                        safe_int(telemetry_data.get("steps"))
+                        if isinstance(telemetry_data, dict)
+                        else None
+                    ),
+                    "sr_success": (
+                        safe_int(telemetry_data.get("search_replace_successes"))
+                        if isinstance(telemetry_data, dict)
+                        else None
+                    ),
+                    "sr_attempts": (
+                        safe_int(telemetry_data.get("search_replace_attempts"))
+                        if isinstance(telemetry_data, dict)
+                        else None
+                    ),
+                    "modified_count": (
+                        len(telemetry_data.get("modified_files", []))
+                        if isinstance(telemetry_data, dict)
+                        and isinstance(telemetry_data.get("modified_files"), list)
+                        else None
+                    ),
+                    "verify_passed": verify_passed,
+                    "artifacts_dir": str(run_artifacts_dir.relative_to(job.output_dir)),
+                }
+                await asyncio.to_thread(
+                    append_to_index, job.output_dir / "index.jsonl", index_record
+                )
+
+                # Unconditional cleanup of ephemeral sandbox directory
+                await asyncio.to_thread(shutil.rmtree, sandbox_dir, ignore_errors=True)
+
+            with contextlib.suppress(asyncio.CancelledError, OSError, RuntimeError):
+                await asyncio.shield(_persist_and_cleanup())
+
+        return RunResult(
+            run_id=job.run_id,
+            timestamp=timestamp,
+            params=job.params,
+            command=cmd_str,
+            status=status_label,
+            exit_code=exit_code,
+            duration_seconds=time.perf_counter() - t0,
+            timed_out=timed_out,
+            telemetry=telemetry_data,
+            verify_passed=verify_passed,
+            verify_output=verify_output,
+            artifacts_dir=str(job.output_dir / "runs" / job.run_id),
+        )
+
+
+def format_progress_line(
+    completed: int, total: int, result: RunResult, param_keys: list[str]
+) -> str:
+    """Formats a concise one-line progress notification for stderr."""
+    status_tag = (
+        "OK"
+        if result.status == "success"
+        else (
+            "TIMEOUT"
+            if result.timed_out
+            else f"FAIL({result.status}:{result.exit_code})"
+        )
+    )
+
+    params_summary = " ".join(
+        f"{k}={result.params.get(k, '')}" for k in param_keys if k in result.params
+    )
+
+    tokens_str = ""
+    if isinstance(result.telemetry, dict):
+        raw_p = safe_float(result.telemetry.get("prompt_tokens"))
+        raw_c = safe_float(result.telemetry.get("candidate_tokens"))
+        if raw_p is not None or raw_c is not None:
+            p_tok = (raw_p or 0.0) / 1000.0
+            c_tok = (raw_c or 0.0) / 1000.0
+            tokens_str = f" | {p_tok:.1f}k in / {c_tok:.1f}k out"
+
+    verify_str = ""
+    if result.verify_passed is not None:
+        verify_str = f" | verify={'PASS' if result.verify_passed else 'FAIL'}"
+
+    return (
+        f"[benchmarker] [{completed:>{len(str(total))}}/{total}] {status_tag:<7}"
+        f" ({result.duration_seconds:.1f}s) | {params_summary}{tokens_str}{verify_str}"
+    )
+
+
+def print_summary_table(
+    results: list[RunResult], param_keys: list[str], file=sys.stdout
+):
+    """Prints a consolidated Markdown summary table grouped by primary dimension."""
+    if not results:
+        return
+
+    print("\n### Benchmark Summary\n", file=file)
+
+    # Header
+    cols = [
+        *param_keys,
+        "Runs",
+        "Pass Rate",
+        "Avg Time (s)",
+        "Avg In Tokens",
+        "Avg Out Tokens",
+        "Avg Steps",
+    ]
+    has_verify = any(r.verify_passed is not None for r in results)
+    if has_verify:
+        cols.append("Verify Pass")
+
+    print("| " + " | ".join(cols) + " |", file=file)
+    print("| " + " | ".join(["---"] * len(cols)) + " |", file=file)
+
+    # Group by unique param values
+    def group_key(r: RunResult):
+        return tuple(str(r.params.get(k, "")) for k in param_keys)
+
+    sorted_results = sorted(results, key=group_key)
+    for k_tuple, group_iter in itertools.groupby(sorted_results, key=group_key):
+        group_list = list(group_iter)
+        total_runs = len(group_list)
+        successes = sum(1 for r in group_list if r.status == "success")
+        pass_rate_str = (
+            f"{successes}/{total_runs} ({successes / total_runs * 100:.0f}%)"
+        )
+        avg_time = sum(r.duration_seconds for r in group_list) / total_runs
+
+        tokens_in = [
+            t
+            for r in group_list
+            if isinstance(r.telemetry, dict)
+            and (t := safe_int(r.telemetry.get("prompt_tokens"))) is not None
+        ]
+        tokens_out = [
+            t
+            for r in group_list
+            if isinstance(r.telemetry, dict)
+            and (t := safe_int(r.telemetry.get("candidate_tokens"))) is not None
+        ]
+        steps = [
+            s
+            for r in group_list
+            if isinstance(r.telemetry, dict)
+            and (s := safe_int(r.telemetry.get("steps"))) is not None
+        ]
+
+        avg_in_str = (
+            f"{sum(tokens_in) / len(tokens_in) / 1000:.1f}k" if tokens_in else "N/A"
+        )
+        avg_out_str = (
+            f"{sum(tokens_out) / len(tokens_out) / 1000:.1f}k" if tokens_out else "N/A"
+        )
+        avg_steps_str = f"{sum(steps) / len(steps):.1f}" if steps else "N/A"
+
+        row = [
+            *k_tuple,
+            str(total_runs),
+            pass_rate_str,
+            f"{avg_time:.1f}s",
+            avg_in_str,
+            avg_out_str,
+            avg_steps_str,
+        ]
+
+        if has_verify:
+            verifies = [
+                r.verify_passed for r in group_list if r.verify_passed is not None
+            ]
+            v_pass = sum(1 for v in verifies if v)
+            row.append(
+                f"{v_pass}/{len(verifies)} ({v_pass / len(verifies) * 100:.0f}%)"
+                if verifies
+                else "N/A"
+            )
+
+        print("| " + " | ".join(row) + " |", file=file)
+    print(file=file)
+
+
+async def async_main() -> int:
+    prog_name = os.path.basename(sys.argv[0])
+
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(
+            signal.SIGTERM,
+            lambda: [
+                task.cancel()
+                for task in asyncio.all_tasks(loop)
+                if task is not asyncio.current_task(loop)
+            ],
+        )
+    except (NotImplementedError, AttributeError):
+        pass
+
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print_help(prog_name)
+        return 0
+
+    if len(sys.argv) == 1:
+        print_short_usage(prog_name)
+        return 1
+
+    parser = argparse.ArgumentParser(prog=prog_name, add_help=False)
+    parser.add_argument("-c", "--cmd", dest="cmd_template", required=True)
+    parser.add_argument("-d", "--dim", action="append", default=[])
+    parser.add_argument("-t", "--tasks", type=pathlib.Path)
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=pathlib.Path,
+        default=pathlib.Path(DEFAULT_OUTPUT_DIR),
+    )
+    parser.add_argument("-n", "--trials", type=int, default=DEFAULT_TRIALS)
+    parser.add_argument("-j", "--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--dry-run", action="store_true")
+
+    args = parser.parse_args()
+
+    # Parse dimensions
+    dims: dict[str, list[str]] = {}
+    for dim_str in args.dim:
+        if "=" not in dim_str:
+            print(
+                f"{prog_name}: error: invalid dimension format '{dim_str}' (expected NAME=VAL1,VAL2)",
+                file=sys.stderr,
+            )
+            return 1
+        name, raw_vals = dim_str.split("=", 1)
+        name = name.strip()
+        vals = [v.strip() for v in raw_vals.split(",") if v.strip()]
+        if not vals:
+            print(
+                f"{prog_name}: error: dimension '{name}' has no values", file=sys.stderr
+            )
+            return 1
+        dims[name] = vals
+
+    # Discover tasks if provided
+    tasks: list[TaskDef | None] = [None]
+    if args.tasks:
+        tasks = discover_tasks(args.tasks)
+        if not tasks:
+            print(
+                f"{prog_name}: error: no tasks found in '{args.tasks}'", file=sys.stderr
+            )
+            return 1
+
+    # Generate Cartesian product of all dimensions and tasks
+    dim_names = list(dims.keys())
+    dim_val_lists = [dims[k] for k in dim_names]
+    combinations = list(itertools.product(*dim_val_lists)) if dim_val_lists else [()]
+
+    jobs: list[RunJob] = []
+    job_counter = 0
+    date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    for task in tasks:
+        for comb in combinations:
+            param_dict = dict(zip(dim_names, comb))
+            if task:
+                param_dict["task"] = task.name
+            for trial in range(1, args.trials + 1):
+                job_counter += 1
+                short_id = uuid.uuid4().hex[:8]
+                run_id = f"{date_str}_{job_counter:03d}_{short_id}"
+                jobs.append(
+                    RunJob(
+                        run_id=run_id,
+                        params={**param_dict, "trial": trial},
+                        task=task,
+                        trial=trial,
+                        cmd_template=args.cmd_template,
+                        timeout=args.timeout,
+                        output_dir=args.output_dir,
+                    )
+                )
+
+    total_jobs = len(jobs)
+    if total_jobs == 0:
+        print(f"{prog_name}: no runs generated from matrix", file=sys.stderr)
+        return 0
+
+    print(
+        f"[benchmarker] Generated {total_jobs} run(s) across {len(combinations)} parameter combination(s)"
+        f" and {len(tasks)} task(s) (trials: {args.trials}, workers: {args.workers}, timeout: {args.timeout}s)",
+        file=sys.stderr,
+    )
+
+    if args.dry_run:
+        print("\nDry Run Schedule:")
+        for idx, j in enumerate(jobs, 1):
+            p_str = " ".join(f"{k}={v}" for k, v in j.params.items())
+            fmt_vars = build_template_vars(j, quote_for_shell=False)
+            resolved_cmd = j.cmd_template.format_map(fmt_vars)
+            print(f"  [{idx:>3}/{total_jobs}] {p_str}\n        CMD: {resolved_cmd}")
+        return 0
+
+    # Ensure output directory exists
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(args.workers)
+    results: list[RunResult] = []
+    display_param_keys = [*dim_names, *(["task"] if args.tasks else []), "trial"]
+
+    # Launch worker tasks
+    tasks_coros = [run_single_job(job, sem) for job in jobs]
+    for completed_count, coro in enumerate(asyncio.as_completed(tasks_coros), 1):
+        try:
+            res = await coro
+            results.append(res)
+            log_line = format_progress_line(
+                completed_count, total_jobs, res, display_param_keys
+            )
+            print(log_line, file=sys.stderr)
+        except asyncio.CancelledError:
+            continue
+
+    # Print consolidated summary
+    print_summary_table(
+        results, [*dim_names, *(["task"] if args.tasks else [])], file=sys.stdout
+    )
+
+    all_passed = bool(results) and all(
+        r.status == "success" and (r.verify_passed is None or r.verify_passed)
+        for r in results
+    )
+    return 0 if all_passed else 1
+
+
+def main():
+    try:
+        exit_code = asyncio.run(async_main())
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except asyncio.CancelledError:
+        sys.exit(143)
+
+
+if __name__ == "__main__":
+    main()
