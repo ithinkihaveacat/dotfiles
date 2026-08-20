@@ -81,6 +81,16 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
 1. Graceful degradation beats ceremony. Humans may edit useful Markdown
    imperfectly.
 
+## Tool Execution
+
+`taskgo` is bundled in `scripts/taskgo` within this skill directory. To execute
+commands from any workspace:
+
+1. **Optimal (`$PATH`):** If `taskgo` is installed on your system `$PATH`,
+   invoke it directly: `taskgo <command>`.
+1. **Dynamic anchor:** Otherwise, execute the bundled script relative to the
+   directory containing this `SKILL.md`: `<skill-dir>/scripts/taskgo <command>`.
+
 ## Tasks
 
 IDs are exactly `TASK-XXXXX`, with five uppercase hexadecimal digits (`0-9`,
@@ -88,8 +98,8 @@ IDs are exactly `TASK-XXXXX`, with five uppercase hexadecimal digits (`0-9`,
 repo. Use random IDs, not a counter:
 
 ```bash
-scripts/taskgo id
-scripts/taskgo create PROJECT "Diagnose intermittent disconnects"
+<skill-dir>/scripts/taskgo id
+<skill-dir>/scripts/taskgo create PROJECT "Diagnose intermittent disconnects"
 ```
 
 Preferred states: `todo`, `in-progress`, `blocked`, `done`, `cancelled`.
@@ -164,9 +174,9 @@ corrections and merge reconciliation are allowed.
 ## STATUS.md
 
 `STATUS.md` is the self-contained operational projection for humans and agents.
-Reading it directly (or running `scripts/taskgo status PROJECT`) answers project
-status, recent outcomes, and immediate direction without inspecting individual
-task records.
+Reading it directly (or running `<skill-dir>/scripts/taskgo status PROJECT`)
+answers project status, recent outcomes, and immediate direction without
+inspecting individual task records.
 
 Structure:
 
@@ -189,16 +199,18 @@ status, update its frontmatter and any affected Summary, Next, or PLAN prose as
 one logical transition before running `sync`; never leave a new snapshot beside
 prose that describes the previous state.
 
-Run `scripts/taskgo sync PROJECT`; the commit helper also synchronizes the
-affected project. `doctor` catches mechanical drift, but the invoking agent must
-compare Summary/Next with current tasks, plan, decisions, and recent work.
+Run `<skill-dir>/scripts/taskgo sync PROJECT`; the commit helper also
+synchronizes the affected project. `doctor` catches mechanical drift, but the
+invoking agent must compare Summary/Next with current tasks, plan, decisions,
+and recent work.
 
 ## Agent workflow
 
 Querying status: to answer questions about project status, recent
 accomplishments, or next steps, read `STATUS.md` (or run
-`scripts/taskgo status PROJECT`). Inspect `PLAN.md`, individual `tasks/`, or Git
-history only if deeper detail or historical transitions are requested.
+`<skill-dir>/scripts/taskgo status PROJECT`). Inspect `PLAN.md`, individual
+`tasks/`, or Git history only if deeper detail or historical transitions are
+requested.
 
 Before work: read root `AGENTS.md`, then project `README.md` (or `PROJECT.md`),
 `STATUS.md`, relevant tasks/ADRs, and `PLAN.md` when direction matters. Inspect
@@ -228,8 +240,10 @@ After meaningful work:
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
    session link, and recent outcome; `## Next` reflects immediate next actions);
    `PLAN.md` only if intended direction changed.
-1. Run `scripts/taskgo sync PROJECT` after the semantic edits are coherent.
-1. Run `scripts/taskgo doctor PROJECT` and perform its semantic review.
+1. Run `<skill-dir>/scripts/taskgo sync PROJECT` after the semantic edits are
+   coherent.
+1. Run `<skill-dir>/scripts/taskgo doctor PROJECT` and perform its semantic
+   review.
 1. Commit a coherent transition when practical. Use `checkpoint` with `--conv`
    when standing authority is present. Subject = what became true, not what file
    changed.
@@ -258,7 +272,8 @@ never in external artifact repos).
 ## CLI
 
 Requires Python 3.11+ (via `uv`) and Git; it remains a thin layer over ordinary
-files/history:
+files/history. In the commands below, `taskgo` refers to either the `$PATH`
+binary or `<skill-dir>/scripts/taskgo`:
 
 ```text
 taskgo id

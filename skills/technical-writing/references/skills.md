@@ -105,6 +105,15 @@ adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es ope
 # (Or run workspace tile helpers like `adb-tile-add com.example/.MyTileService` if present)
 ```
 
+> [!NOTE] **Active Experiment — Bundled Script Discovery (`taskgo`):** A new
+> approach to referencing bundled scripts across heterogeneous environments is
+> currently being tested in `taskgo/SKILL.md`. Instead of assuming a script is
+> on `$PATH` or located at `./scripts/` in CWD, the skill documents both optimal
+> `$PATH` execution (`taskgo <cmd>`) and dynamic anchor resolution
+> (`<skill-dir>/scripts/taskgo <cmd>`, where `<skill-dir>` is the directory
+> containing `SKILL.md`). If this pattern proves effective, consider deploying
+> it to other skills that bundle helper scripts.
+
 ### Example 3: Cross-Skill Relative Hyperlinks vs. Functional Topic References
 
 **DON'T (Broken Relative Link):**
