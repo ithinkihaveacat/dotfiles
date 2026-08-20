@@ -119,6 +119,43 @@ When building standalone Python CLI tools, standardize on Python's built-in
   (e.g., Unicode box-drawing panels, curly-brace placeholders, or missing `-h`
   aliases) that diverge from the repository's CLI Design Standard.
 
+### Domain and Structural Data Modeling
+
+For standalone Python CLI tools and agent scripts, prefer standard library
+typing primitives over heavy third-party runtime validation frameworks (such as
+Pydantic). The Python 3.11+ standard library provides zero-dependency structural
+and nominal data modeling tools with negligible import latency and zero wheel
+resolution overhead:
+
+- **Product Types (Domain Entities):** Use `@dataclass(slots=True, frozen=True)`
+  to model immutable record types and domain entities. Specifying `slots=True`
+  eliminates dynamic `__dict__` overhead, optimizing memory layout and attribute
+  access times, while `frozen=True` prevents accidental in-place mutation during
+  data transformations.
+- **Sum Types & Closed Enums (States & Modes):** Use `enum.StrEnum` to represent
+  enumerated domains, CLI subcommands, and state machines (e.g. task statuses,
+  permission modes). `StrEnum` instances compare directly to strings and
+  serialize transparently to JSON and string-based formats without `.value`
+  unpacking.
+- **Structural Typing for Wire Payloads:** Use `typing.TypedDict` (with
+  `Required` and `NotRequired` modifiers) to annotate unstructured or
+  semi-structured data payloads, such as JSON API responses, LLM structured
+  outputs, and YAML frontmatter mappings. This provides compile-time static type
+  checking under `ruff` and IDE tooling without imposing runtime validation
+  penalties or breaking round-trip unmodeled keys.
+
+> [!NOTE] **Active Experiment — Standard Library Structural Modeling (`taskgo`,
+> `pacioli`):** A zero-dependency pattern for domain and structural data
+> modeling is currently being tested in `skills/taskgo/scripts/taskgo` and
+> `skills/agent-tools/scripts/pacioli`. Instead of introducing heavy third-party
+> validation libraries (like Pydantic) or relying on untyped dictionaries and
+> mutable classes, these scripts model domain concepts using Python 3.11+
+> standard library primitives: `@dataclass(slots=True, frozen=True)` for
+> immutable product types, `enum.StrEnum` for closed state domains, and
+> `typing.TypedDict` for wire payload schemas. If this pattern proves effective,
+> consider adopting it across other standalone Python scripts in this
+> repository.
+
 ### Handling Ctrl+C, Signals, and Broken Pipes
 
 To ensure a professional user experience, Python CLI tools in this repository
