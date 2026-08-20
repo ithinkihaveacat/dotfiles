@@ -55,7 +55,7 @@ Arguments:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
+  --model MODEL  Gemini model to use (default: gemini-flash-latest)
 
 Environment:
   GEMINI_API_KEY               Required. Your Gemini API key.
@@ -119,7 +119,7 @@ Arguments:
 Options:
   --help         Display this help message and exit
   --version      Display version number and exit
-  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
+  --model MODEL  Gemini model to use (default: gemini-flash-latest)
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
@@ -182,7 +182,7 @@ Arguments:
 
 Options:
   --ratio W:H    Aspect ratio for crop (default: 5:3)
-  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
+  --model MODEL  Gemini model to use (default: gemini-flash-latest)
   --help         Display this help message and exit
 
 Processing:
@@ -389,7 +389,7 @@ Options:
   --maps        Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
   --code        Enable Code Execution for Python.
   --dry-run     Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
-  --model MODEL Gemini model to use (default: gemini-3.1-pro-preview).
+  --model MODEL Gemini model to use (default: gemini-pro-latest).
   --serialize   Save the request payload and the answer to files in the cache
                 (~/.cache/oracle/). (Default: on).
   --no-serialize Disable saving the payload and answer to the cache.
@@ -457,7 +457,7 @@ Options:
   --no-inline         Inline nothing; the model reads files on demand.
   -n, --dry-run       Print the resolved policy and payload, then exit.
   --force             Bypass safety checks (dirty worktree, 1MB limit, etc.).
-  --model MODEL       Gemini model to use (default: gemini-3.1-pro-preview).
+  --model MODEL       Gemini model to use (default: gemini-pro-latest).
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
   --search, --no-search
                       Google Search grounding for external context (default: on).
@@ -559,8 +559,8 @@ the provided text.
 Usage: emerson [OPTIONS] "PROMPT" < INPUT_FILE
 
 Generates an essay-length answer (approx. 3000 words) to the PROMPT, based
-primarily on the text provided via standard input. Uses the Gemini 3 Pro
-Preview model by default.
+primarily on the text provided via standard input. Uses the Gemini Pro model
+by default.
 
 Arguments:
   PROMPT      The question or topic to address.
@@ -570,7 +570,7 @@ Input:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-3.1-pro-preview)
+  --model MODEL  Gemini model to use (default: gemini-pro-latest)
 
 Environment:
   GEMINI_API_KEY   Required. Your Gemini API key.
@@ -629,7 +629,7 @@ response (wrapped to 80 columns).
 ```text
 Usage: pascal [OPTIONS] [-] PROMPT
 
-Asks a question to the Gemini 3 Flash model and prints a short, paragraph-style
+Asks a question to the Gemini Flash model and prints a short, paragraph-style
 response (wrapped to 80 columns).
 
 Arguments:
@@ -639,7 +639,7 @@ Arguments:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-3.6-flash)
+  --model MODEL  Gemini model to use (default: gemini-flash-latest)
 
 Environment:
   GEMINI_API_KEY  Required. Your Gemini API key.
@@ -778,7 +778,7 @@ Arguments:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-2.5-flash-lite)
+  --model MODEL  Gemini model to use (default: gemini-3.5-flash-lite)
   -v, --verbose  Output "true" or "false" to stderr
 
 Environment:
@@ -972,7 +972,7 @@ options:
                         the agent (default: current directory)
   --dump-layout         Dump the UI layout as JSON and exit
   --model MODEL         Gemini model to use (default: $GEMINI_MODEL if set,
-                        else gemini-3.6-flash)
+                        else gemini-flash-latest)
   -h, --help            show this help message and exit
 
 Environment:
