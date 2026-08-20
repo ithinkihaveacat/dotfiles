@@ -1,40 +1,452 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Display the focused package, activity, or UI toolkit on an adb-connected device."""
 
-usage() {
-  cat <<EOF
-Usage: $(basename "$0")
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
 
-Displays the package name of the application that currently has focus on an
-adb-connected device.
+# Structural architecture shell containers that host navigation/fragments/insets
+SHELL_CONTAINERS = (
+    "CoordinatorLayout",
+    "FragmentContainerView",
+    "NavHostFragment",
+    "DrawerLayout",
+    "ContentFrameLayout",
+    "ActionBarOverlayLayout",
+    "FitWindowsLinearLayout",
+    "DecorView",
+)
 
-Options:
-  --help      Display this help message and exit
+# Traditional content containers & classic widgets
+CONTENT_CONTAINERS = (
+    "RecyclerView",
+    "ConstraintLayout",
+    "RelativeLayout",
+    "LinearLayout",
+    "ScrollView",
+    "NestedScrollView",
+    "ViewPager",
+    "ViewPager2",
+    "ListView",
+    "GridView",
+    "CardView",
+    "MaterialCardView",
+    "ImageView",
+    "EditText",
+    "SeekBar",
+    "ProgressBar",
+    "RadioGroup",
+    "Spinner",
+)
 
-Environment:
+
+def get_adb_command(args: list[str]) -> list[str]:
+    cmd = ["adb"]
+    serial = os.environ.get("ANDROID_SERIAL")
+    if serial:
+        cmd.extend(["-s", serial])
+    cmd.extend(args)
+    return cmd
+
+
+def check_dependencies():
+    if not shutil.which("adb"):
+        print("adb-currentfocus: adb not found", file=sys.stderr)
+        sys.exit(127)
+
+
+def verify_device():
+    try:
+        res = subprocess.run(
+            get_adb_command(["get-state"]),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.stdout.strip() != "device":
+            print("adb-currentfocus: error: no device connected", file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(f"adb-currentfocus: error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def get_current_focus() -> tuple[str, str]:
+    try:
+        res = subprocess.run(
+            get_adb_command(["exec-out", "dumpsys", "window", "displays"]),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = res.stdout
+
+        # Try matching mCurrentFocus
+        m = re.search(
+            r"mCurrentFocus=Window\{[0-9a-fA-F]+\s+(?:u\d+\s+)?([^/\s]+)/([^}\s]+)\}",
+            output,
+        )
+        if m:
+            pkg = m.group(1)
+            act = m.group(2)
+            if act.startswith("."):
+                act = f"{pkg}{act}"
+            return pkg, act
+
+        # Fallback to mFocusedApp
+        m_app = re.search(
+            r"mFocusedApp=ActivityRecord\{[0-9a-fA-F]+\s+(?:u\d+\s+)?([^/\s]+)/([^}\s]+)",
+            output,
+        )
+        if m_app:
+            pkg = m_app.group(1)
+            act = m_app.group(2)
+            if act.startswith("."):
+                act = f"{pkg}{act}"
+            return pkg, act
+
+    except Exception:
+        pass
+
+    return "unknown", "unknown"
+
+
+def check_cross_platform_package(package: str) -> str | None:
+    if not package or package == "unknown":
+        return None
+    try:
+        res = subprocess.run(
+            get_adb_command(["shell", "dumpsys", "package", package]),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        out = res.stdout.lower()
+        if "flutter" in out or "dev.flutter" in out:
+            return "flutter"
+        if "com.facebook.react" in out or "reactnative" in out or "libhermes" in out:
+            return "react-native"
+    except Exception:
+        pass
+    return None
+
+
+def get_ui_hierarchy_xml() -> str | None:
+    try:
+        res = subprocess.run(
+            get_adb_command(["exec-out", "uiautomator", "dump", "/dev/stdout"]),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        xml_text = res.stdout
+        if "UI hierchary dumped to: /dev/stdout" in xml_text:
+            xml_text = xml_text.replace("UI hierchary dumped to: /dev/stdout", "")
+        xml_text = xml_text.strip()
+        if xml_text.startswith(("<?xml", "<hierarchy")):
+            return xml_text
+    except Exception:
+        pass
+    return None
+
+
+def classify_toolkit(xml_text: str | None, package: str = "") -> dict:
+    if not xml_text:
+        return {
+            "toolkit": "unknown",
+            "compose_views": 0,
+            "legacy_containers": 0,
+            "total_nodes": 0,
+            "summary": "No UI hierarchy available",
+        }
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {
+            "toolkit": "unknown",
+            "compose_views": 0,
+            "legacy_containers": 0,
+            "total_nodes": 0,
+            "summary": "Failed to parse UI hierarchy XML",
+        }
+
+    all_nodes = list(root.iter("node"))
+    if not all_nodes:
+        return {
+            "toolkit": "unknown",
+            "compose_views": 0,
+            "legacy_containers": 0,
+            "total_nodes": 0,
+            "summary": "Empty UI hierarchy",
+        }
+
+    parent_map = {c: p for p in root.iter() for c in p}
+
+    # Trace decor nodes (PhoneWindow / DecorView framework wrappers)
+    decor_nodes = set()
+    for n in all_nodes:
+        if n.get("resource-id") == "android:id/content":
+            curr = n
+            while curr is not None:
+                decor_nodes.add(curr)
+                curr = parent_map.get(curr)
+
+    if not decor_nodes and all_nodes:
+        decor_nodes.add(all_nodes[0])
+
+    classes = [n.get("class", "") for n in all_nodes]
+
+    # Explicit class checks in XML tree
+    if any("FlutterView" in c for c in classes):
+        return {
+            "toolkit": "flutter",
+            "compose_views": 0,
+            "legacy_containers": 0,
+            "total_nodes": len(all_nodes),
+            "summary": "Flutter view detected",
+        }
+
+    if any("ReactRootView" in c or "ReactViewGroup" in c for c in classes):
+        return {
+            "toolkit": "react-native",
+            "compose_views": 0,
+            "legacy_containers": 0,
+            "total_nodes": len(all_nodes),
+            "summary": "React Native view detected",
+        }
+
+    if any(c.endswith(".WebView") or c == "android.webkit.WebView" for c in classes):
+        webview_nodes = [
+            n
+            for n in all_nodes
+            if n.get("class", "").endswith(".WebView")
+            or n.get("class", "") == "android.webkit.WebView"
+        ]
+        if len(all_nodes) <= len(webview_nodes) + len(decor_nodes) + 4:
+            return {
+                "toolkit": "webview",
+                "compose_views": 0,
+                "legacy_containers": 0,
+                "total_nodes": len(all_nodes),
+                "summary": "WebView container detected",
+            }
+
+    compose_nodes = [n for n in all_nodes if "ComposeView" in n.get("class", "")]
+    compose_subtrees = set()
+    for cn in compose_nodes:
+        compose_subtrees.update(cn.iter("node"))
+
+    # If 0 ComposeViews and UI nodes are generic accessibility nodes with no resource IDs,
+    # inspect package components to detect production Flutter or React Native releases.
+    if not compose_nodes:
+        resource_ids = [n.get("resource-id") for n in all_nodes if n.get("resource-id")]
+        if not resource_ids or len(resource_ids) <= 1:
+            cross_platform = check_cross_platform_package(package)
+            if cross_platform == "flutter":
+                return {
+                    "toolkit": "flutter",
+                    "compose_views": 0,
+                    "legacy_containers": 0,
+                    "total_nodes": len(all_nodes),
+                    "summary": "Flutter application detected",
+                }
+            elif cross_platform == "react-native":
+                return {
+                    "toolkit": "react-native",
+                    "compose_views": 0,
+                    "legacy_containers": 0,
+                    "total_nodes": len(all_nodes),
+                    "summary": "React Native application detected",
+                }
+
+    # Trace host shells (e.g. CoordinatorLayout, FragmentContainerView hosting ComposeView)
+    host_shell_nodes = set()
+    for cn in compose_nodes:
+        curr = parent_map.get(cn)
+        while curr is not None and curr not in decor_nodes:
+            c = curr.get("class", "")
+            if any(sc in c for sc in SHELL_CONTAINERS):
+                host_shell_nodes.add(curr)
+            curr = parent_map.get(curr)
+
+    # Legacy content containers (outside decor, outside host shells, outside compose)
+    legacy_content_nodes = []
+    for n in all_nodes:
+        if n in decor_nodes or n in host_shell_nodes or n in compose_subtrees:
+            continue
+        c = n.get("class", "")
+        if any(cc in c for cc in CONTENT_CONTAINERS):
+            legacy_content_nodes.append(c)
+
+    # Check if Compose is hosted inside a list (classic hybrid pattern: RecyclerView rows in Compose)
+    compose_in_list = False
+    for cn in compose_nodes:
+        curr = parent_map.get(cn)
+        while curr is not None:
+            c = curr.get("class", "")
+            if "RecyclerView" in c or "ListView" in c:
+                compose_in_list = True
+                break
+            curr = parent_map.get(curr)
+
+    compose_count = len(compose_nodes)
+    legacy_count = len(legacy_content_nodes)
+
+    if compose_count > 0 and not compose_in_list and legacy_count == 0:
+        toolkit = "compose"
+        summary = f"Jetpack Compose ({compose_count} ComposeView detected)"
+    elif compose_count > 0 and (compose_in_list or legacy_count > 0):
+        toolkit = "hybrid"
+        if compose_in_list:
+            summary = f"Hybrid (Compose hosted inside RecyclerView/ListView, {legacy_count} legacy containers)"
+        else:
+            summary = f"Hybrid ({compose_count} ComposeView, {legacy_count} legacy content containers)"
+    elif compose_count == 0 and (legacy_count > 0 or len(all_nodes) > len(decor_nodes)):
+        toolkit = "views"
+        summary = f"Traditional Views ({legacy_count} layout containers detected)"
+    else:
+        toolkit = "unknown"
+        summary = "Undetermined UI toolkit"
+
+    return {
+        "toolkit": toolkit,
+        "compose_views": compose_count,
+        "legacy_containers": legacy_count,
+        "total_nodes": len(all_nodes),
+        "summary": summary,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="adb-currentfocus",
+        description="Display the package name, activity, or UI toolkit of the application that currently has focus on an adb-connected device.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+        epilog="""Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
-EOF
-  exit 0
-}
 
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
-  usage
-fi
+Examples:
+  # Display the focused package name
+  adb-currentfocus
 
-require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo >&2 "$(basename "$0"): $1 not found"
-    exit 127
-  }
-}
+  # Check if the current screen is using Jetpack Compose, Views, or Hybrid
+  adb-currentfocus --toolkit
 
-require adb
+  # Display the focused package and activity
+  adb-currentfocus --activity
 
-# Check if device is available
-if [ "$(adb get-state 2>/dev/null)" != "device" ]; then
-  echo "$(basename "$0"): error: no device connected" >&2
-  exit 1
-fi
+  # Output detailed inspection as JSON
+  adb-currentfocus --json""",
+    )
 
-# Returns package name of app that currently has focus
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        help="Display this help message and exit",
+    )
 
-adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }' | awk -F '/' '{ print $1 }'
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "-p",
+        "--packagename",
+        action="store_true",
+        help="Display the package name of the focused application (default)",
+    )
+    group.add_argument(
+        "-a",
+        "--activity",
+        action="store_true",
+        help="Display the package and activity name (e.g. com.example/.MainActivity)",
+    )
+    group.add_argument(
+        "-t",
+        "--toolkit",
+        action="store_true",
+        help="Display the detected UI toolkit (compose, views, hybrid, flutter, react-native, webview, unknown)",
+    )
+    group.add_argument(
+        "-d",
+        "--details",
+        action="store_true",
+        help="Display a detailed breakdown of the focused application and UI layout",
+    )
+    group.add_argument(
+        "-j",
+        "--json",
+        action="store_true",
+        help="Output all information as a JSON object",
+    )
+
+    args = parser.parse_args()
+
+    check_dependencies()
+    verify_device()
+
+    package, activity = get_current_focus()
+
+    if args.activity:
+        if package == "unknown":
+            print("unknown")
+        else:
+            print(f"{package}/{activity}")
+        return
+
+    if args.toolkit or args.details or args.json:
+        xml_text = get_ui_hierarchy_xml()
+        classification = classify_toolkit(xml_text, package=package)
+
+        if args.toolkit:
+            print(classification["toolkit"])
+            return
+
+        if args.json:
+            result = {
+                "package": package,
+                "activity": activity,
+                "toolkit": classification["toolkit"],
+                "compose_views": classification["compose_views"],
+                "legacy_containers": classification["legacy_containers"],
+                "total_nodes": classification["total_nodes"],
+                "summary": classification["summary"],
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        if args.details:
+            print(f"Package:   {package}")
+            print(f"Activity:  {activity}")
+            print(f"Toolkit:   {classification['toolkit']}")
+            print(f"Details:   {classification['summary']}")
+            print(f"Nodes:     {classification['total_nodes']} total")
+            return
+
+    # Default / --packagename
+    print(package)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)

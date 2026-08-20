@@ -207,12 +207,18 @@ adb exec-out uiautomator dump /dev/stdout
 
 ### `scripts/adb-currentfocus`
 
-**Purpose**: Display the package name of the application that currently has
-focus. **Dependencies**: `adb` **Usage**: `scripts/adb-currentfocus` **Raw
-Command**:
+**Purpose**: Display the package name, activity, or UI toolkit of the
+application that currently has focus. **Dependencies**: `adb`, `uv` **Usage**:
+`scripts/adb-currentfocus [OPTIONS]` **Options**: `-p, --packagename`,
+`-a, --activity`, `-t, --toolkit`, `-d, --details`, `-j, --json`. **Raw
+Commands**:
 
 ```bash
+# Focused package
 adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }' | awk -F '/' '{ print $1 }'
+
+# Focused activity
+adb exec-out dumpsys window displays | grep mCurrentFocus | grep -oE '{.*?}' | awk -F '[{} ]+' '{ print $4 }'
 ```
 
 ## Package Operations
