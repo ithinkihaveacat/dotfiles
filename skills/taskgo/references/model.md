@@ -29,6 +29,23 @@ project scale:
   sequencing in `PLAN.md` and formal Nygard-style Architecture Decision Records
   in `decisions/*.md`.
 
+## Repository Terminology & Boundaries
+
+A **control repository** (interchangeably called a *control repo*, *taskgo
+tracker*, *tracker repository*, or *project tracker*) manages initiatives,
+tasks, decisions, and exploratory assets across one or more external **artifact
+repositories**:
+
+- **Control Repository (`projects/`):** Houses private task tracking
+  (`STATUS.md`, `tasks/`), roadmaps (`PLAN.md`), Architecture Decision Records
+  (`decisions/`), and project-scoped exploratory research (disposable
+  prototypes, competing optimization variants, synthetic benchmark fixtures, raw
+  trial logs/telemetry).
+- **Artifact Repositories (e.g. `dotfiles`, product codebases):** House
+  permanent production code, reusable libraries, shipping CLIs, and
+  contract/regression test suites (`test-*`). Commits in artifact repositories
+  must remain strictly free of private control repo metadata.
+
 ## Task Records & Archiving
 
 Completed tasks remain as permanent, stable records in `tasks/TASK-XXXXX-*.md`

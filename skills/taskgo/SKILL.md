@@ -8,9 +8,10 @@ description: >-
 
 # taskgo
 
-Use for one user's private control repo spanning multiple technical projects and
-artifacts. Humans mainly read current Markdown; agents mainly edit it, operate
-Git, reconstruct history, and generate summaries.
+Use for one user's private **control repository** (also called the **control
+repo**, **taskgo tracker**, or **project tracker**) spanning multiple technical
+projects and external artifacts. Humans mainly read current Markdown; agents
+mainly edit it, operate Git, reconstruct history, and generate summaries.
 
 ## Model
 
@@ -68,7 +69,11 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
    public/shared artifacts. `Conversation:` trailers and `conversation://` URLs
    belong strictly in control repository metadata (`STATUS.md`, task
    frontmatter, and control repo commits); they must never be added to commits
-   in linked artifact repositories. Artifact path references prefer
+   in linked artifact repositories. Artifact repositories host permanent
+   production code, tools, and regression test suites; transient research
+   artifacts—such as candidate optimization variants, synthetic evaluation
+   fixtures, disposable prototypes, and benchmark telemetry—belong in the
+   control repo alongside their project. Artifact path references prefer
    `$HOME`-relative form (`~/...`) to remain portable across machines (list
    multiple checkout paths when locations vary per environment).
 1. `STATUS.md` is the self-contained projection of current operational state:
