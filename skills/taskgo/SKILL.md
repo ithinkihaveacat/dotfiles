@@ -28,7 +28,8 @@ INBOX.md                  # zero-ceremony capture; no schema
   PLAN.md                 # intended route forward (optional)
   tasks/*.md              # stable task records
   decisions/*.md          # ADRs (optional)
-  docs/*.md               # reference docs (optional)
+  references/*            # supporting context, schemas, media, external docs (optional)
+  experiments/*           # exploratory prototypes, variants, fixtures, telemetry (optional)
 ```
 
 The root `AGENTS.md` must state that the repository follows taskgo and include

@@ -23,11 +23,12 @@ project scale:
   schemas.
 - **Scale 1 (Lightweight Project):** A project directory containing `README.md`
   (serving as project manifest), `STATUS.md` (operational projection), and
-  `tasks/` containing granular task records. `PLAN.md` and `decisions/` remain
-  optional.
+  `tasks/` containing granular task records. `PLAN.md`, `decisions/`,
+  `references/`, and `experiments/` remain optional.
 - **Scale 2 (Multi-Month Initiative):** Extends Scale 1 with explicit roadmap
-  sequencing in `PLAN.md` and formal Nygard-style Architecture Decision Records
-  in `decisions/*.md`.
+  sequencing in `PLAN.md`, formal Nygard-style Architecture Decision Records in
+  `decisions/*.md`, supporting context in `references/`, and candidate
+  prototypes or evaluation suites in `experiments/`.
 
 ## Repository Terminology & Boundaries
 
@@ -38,9 +39,10 @@ repositories**:
 
 - **Control Repository (`projects/`):** Houses private task tracking
   (`STATUS.md`, `tasks/`), roadmaps (`PLAN.md`), Architecture Decision Records
-  (`decisions/`), and project-scoped exploratory research (disposable
-  prototypes, competing optimization variants, synthetic benchmark fixtures, raw
-  trial logs/telemetry).
+  (`decisions/`), supporting context (`references/`), and project-scoped
+  exploratory research (`experiments/` holding disposable prototypes, competing
+  optimization variants, synthetic benchmark fixtures, and raw trial
+  logs/telemetry).
 - **Artifact Repositories (e.g. `dotfiles`, product codebases):** House
   permanent production code, reusable libraries, shipping CLIs, and
   contract/regression test suites (`test-*`). Commits in artifact repositories
