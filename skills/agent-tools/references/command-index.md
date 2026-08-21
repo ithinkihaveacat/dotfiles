@@ -434,7 +434,12 @@ the paths you name. Read-only unless `--edit` names something writable.
 ```text
 Usage: caxton "PROMPT" [OPTIONS]
 
-Autonomous repository transformation, refactoring, and audit engine.
+Autonomous long-form text transformation, documentation audit, and harmonization engine.
+
+Specialized for large-scale text reasoning across whole repositories: auditing
+documentation drift, resolving cross-file contradictions, standardizing style,
+and synchronizing documentation against code. Defaults to aggressive bulk
+inlining (up to 1 MB) to give the model a global overview of the entire corpus.
 
 By default, runs read-only on the current directory. You can scope access by
 naming explicit paths. Paths given with --read are visible to the model; paths
@@ -461,7 +466,7 @@ Options:
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
   --search, --no-search
                       Google Search grounding for external context (default: on).
-  --code, --no-code   Python code execution in cloud sandbox (default: on).
+  --code, --no-code   Python code execution in cloud sandbox (default: off).
   --max-steps N       Maximum tool steps before stopping (default: 100).
   --timeout SECONDS   Execution timeout in seconds (default: 1800).
   -h, --help          Display this help message and exit.
@@ -474,14 +479,14 @@ Environment:
 
 Examples:
   # Read-only audit of the current directory (the default selection)
-  caxton "Count deprecated function usages and summarize"
+  caxton "Audit all policy documents to detect internal contradictions"
 
-  # Edit two files while consulting a third that must not change
-  caxton "Update the parser but keep the documented behavior" \
-    --edit src/parser.py tests/test_parser.py --read docs/architecture.md
+  # Synchronize documentation against codebase without modifying source code
+  caxton "Synchronize the API reference guides with implementation" \
+    --edit docs/ --read src/
 
   # Edit a directory with one file carved out as read-only
-  caxton "Refresh the guides" --edit docs/ --read docs/architecture.md
+  caxton "Harmonize terminology across guides" --edit docs/ --read docs/glossary.md
 
   # Preview exactly what would be sent, and what could be written
   caxton --dry-run "Translate the guides into French" --edit docs/

@@ -36,6 +36,7 @@ import fnmatch
 import json
 import mimetypes
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -518,7 +519,7 @@ Options:
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
   --search, --no-search
                       Google Search grounding for external context (default: on).
-  --code, --no-code   Python code execution in cloud sandbox (default: on).
+  --code, --no-code   Python code execution in cloud sandbox (default: off).
   --max-steps N       Maximum tool steps before stopping (default: 100).
   --timeout SECONDS   Execution timeout in seconds (default: 1800).
   -h, --help          Display this help message and exit.
@@ -821,7 +822,7 @@ def main():
         "--thinking", choices=["high", "low", "none"], default="high", metavar="LEVEL"
     )
     parser.add_argument("--search", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--code", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--code", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-steps", type=int, default=100, metavar="N")
     parser.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS)
@@ -1382,19 +1383,28 @@ def main():
         report_over_threshold()
         sys.exit(1)
 
+    inlined_set = set(policy.inlined)
+    writable_set = set(policy.writable)
+
     # 9. Build the directory tree, limited to what the model may see.
     visible_sorted = sorted(policy.visible)
     tree_lines = []
     for rel in visible_sorted:
+        tag_rw = "RW" if rel in writable_set else "RO"
+        tag_in = "INLINED" if rel in inlined_set else "ON-DEMAND"
         try:
-            size_kb = (root / rel).lstat().st_size / 1024
-            tree_lines.append(f"- {rel} ({size_kb:.1f} KB)")
+            st = (root / rel).lstat()
+            size_kb = st.st_size / 1024
+            line_count = (
+                len(read_text_verbatim(root / rel, lossy=True).splitlines())
+                if is_text_file(root / rel)
+                else 0
+            )
+            lines_str = f"{line_count}L, " if line_count > 0 else ""
+            tree_lines.append(f"- [{tag_rw}-{tag_in}] {rel} ({lines_str}{size_kb:.1f} KB)")
         except OSError:
-            tree_lines.append(f"- {rel}")
+            tree_lines.append(f"- [{tag_rw}-{tag_in}] {rel}")
     directory_tree_text = "\n".join(tree_lines)
-
-    inlined_set = set(policy.inlined)
-    writable_set = set(policy.writable)
 
     # 10. Build document blocks. Content is shown with LF endings;
     #     search_and_replace normalises both sides the same way.
@@ -1405,10 +1415,8 @@ def main():
                 content = read_text_verbatim(root / rel, lossy=True).replace(
                     "\r\n", "\n"
                 )
-                escaped_content = content.replace("]]>", "]]]]><![CDATA[>")
-                doc_blocks.append(
-                    f'<document path="{rel}">\n<![CDATA[\n{escaped_content}\n]]>\n</document>'
-                )
+                ext = Path(rel).suffix.lstrip(".")
+                doc_blocks.append(f"### Document: `{rel}`\n```{ext}\n{content}\n```")
             except OSError as e:
                 print(f"[caxton] warning: failed to read {rel}: {e}", file=sys.stderr)
 
@@ -1416,9 +1424,9 @@ def main():
 
     agent_tools_desc = (
         "search_and_replace, write_file, delete_file, read_file, list_files,"
-        " complete_task"
+        " grep_search, complete_task"
         if is_mutation_mode
-        else "read_file, list_files, complete_task"
+        else "read_file, list_files, grep_search, complete_task"
     )
 
     if symlink_paths and not args.dry_run:
@@ -1594,25 +1602,35 @@ def main():
             if count == 0:
                 telemetry.search_replace_failures += 1
                 lines = content.splitlines()
-                # Find close line match for debugging hint (capped to prevent CPU hang)
-                search_first_line = (
-                    norm_old.splitlines()[0].strip() if norm_old.splitlines() else ""
-                )
-                if search_first_line and len(lines) <= 2000:
+                old_lines = norm_old.splitlines()
+                hint = ""
+                if old_lines and len(lines) <= 2000:
                     matches = difflib.get_close_matches(
-                        search_first_line, [line_str.strip() for line_str in lines], n=1
+                        old_lines[0].strip(), [line_str.strip() for line_str in lines], n=1
                     )
-                    hint = (
-                        f" (Near match: '{matches[0]}')"
-                        if matches
-                        else " (Verify exact whitespace/indentation)"
-                    )
-                else:
+                    if matches:
+                        idx = next(
+                            (i for i, l in enumerate(lines) if l.strip() == matches[0]), 0
+                        )
+                        window = lines[
+                            max(0, idx - 1) : min(len(lines), idx + len(old_lines) + 1)
+                        ]
+                        diff = "\n".join(
+                            difflib.unified_diff(
+                                old_lines,
+                                window,
+                                fromfile="searched",
+                                tofile="file_content",
+                                lineterm="",
+                            )
+                        )
+                        hint = f"\nDiff hint:\n{diff}"
+                if not hint:
                     hint = " (Verify exact whitespace/indentation)"
 
                 return {
                     "status": "error",
-                    "message": (f"Exact old_string not found in '{path}'.{hint}"),
+                    "message": f"Exact old_string not found in '{path}'.{hint}",
                     "file_lines": len(lines),
                 }
 
@@ -1914,9 +1932,71 @@ def main():
         }
         return {"status": "success"}
 
+    def grep_search(
+        query: str,
+        path: str = "",
+        case_insensitive: bool = False,
+    ) -> dict:
+        """Searches across visible text files in the repository for a regex pattern or substring.
+
+        Args:
+            query: Search pattern (regex or literal substring).
+            path: Optional subdirectory or file path prefix to narrow the search.
+            case_insensitive: Whether search should ignore case (default: False).
+
+        Returns:
+            dict with matches list (path, line, snippet), total_matches, and truncated flag.
+        """
+        if not query:
+            return {"status": "error", "message": "query cannot be empty."}
+
+        flags = re.IGNORECASE if case_insensitive else 0
+        try:
+            pattern = re.compile(query, flags)
+        except re.error as e:
+            return {
+                "status": "error",
+                "message": f"Invalid regex pattern '{query}': {e}",
+            }
+
+        target_files = []
+        for rel in sorted(policy.visible):
+            if path and not (rel == path or rel.startswith(path.rstrip("/") + "/")):
+                continue
+            if is_text_file(root / rel):
+                target_files.append(rel)
+
+        matches = []
+        max_matches = 50
+        for rel in target_files:
+            target_path = root / rel
+            try:
+                with open(target_path, "r", encoding="utf-8", errors="replace") as f:
+                    for line_idx, line in enumerate(f, 1):
+                        line_to_search = line[:4000]
+                        if pattern.search(line_to_search):
+                            matches.append({
+                                "path": rel,
+                                "line": line_idx,
+                                "snippet": line.strip()[:200],
+                            })
+                            if len(matches) >= max_matches:
+                                break
+            except OSError:
+                continue
+            if len(matches) >= max_matches:
+                break
+
+        return {
+            "status": "success",
+            "matches": matches,
+            "total_matches": len(matches),
+            "truncated": len(matches) >= max_matches,
+        }
+
     # Assemble tool suite (read-only unless --edit named something writable)
     if not is_mutation_mode:
-        tools = [read_file, list_files, complete_task]
+        tools = [read_file, list_files, grep_search, complete_task]
     else:
         tools = [
             search_and_replace,
@@ -1924,6 +2004,7 @@ def main():
             delete_file,
             read_file,
             list_files,
+            grep_search,
             complete_task,
         ]
 
@@ -1951,10 +2032,11 @@ Your goal is to achieve the user's objective across the paths you have been give
 
 ### Execution Strategy
 1. Contextualize & Plan: Review the full initial context before taking action. Identify all files requiring changes and their cross-file dependencies.
-2. Order of Operations: Update definitions, imports, and references in a logical, dependency-aware order across files.
-3. Exact Matching: When calling search_and_replace, old_string must match the file content byte-for-byte. If a call fails, read the tool error response, inspect surrounding lines, and refine your search string.
-4. String Escaping: In quoted strings, the only allowed escape sequences are \\, \n, and \". Instead of \u escapes, use UTF-8.
-5. Verification: Review the status metadata returned by each mutation. Use read_file if you need to inspect updated lines.
+2. Parallel Batching: When performing transformations or reads across multiple files, ALWAYS issue all independent tool calls simultaneously in parallel batches within a single turn. Do not process files sequentially when they can be batched together.
+3. Order of Operations: Update definitions, imports, and references in a logical, dependency-aware order across files.
+4. Exact Matching: When calling search_and_replace, old_string must match the file content byte-for-byte. If a call fails, read the tool error response, inspect surrounding lines, and refine your search string.
+5. String Escaping: In quoted strings, the only allowed escape sequences are \\, \n, and \". Instead of \u escapes, use UTF-8.
+6. Verification: Review the status metadata returned by each mutation. Use read_file if you need to inspect updated lines.
 
 ### Reporting & Completion (Mandatory Contract)
 Once your work is complete, you MUST call complete_task(success=True, report="...").
