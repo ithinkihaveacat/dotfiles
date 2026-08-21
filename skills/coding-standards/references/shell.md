@@ -95,6 +95,25 @@ Examples of features to avoid:
 - Obscure parameter expansions that harm readability
 - Any feature that would confuse maintainers familiar with basic Bash
 
+### Prefer Built-in Constructs
+
+Take full advantage of standard Bash 3.2 built-ins (`[[ ... ]]`, glob pattern
+matching, regex with `=~`, and parameter expansions) instead of defaulting to
+external utility pipelines (`grep`, `sed`, `cut`) for simple conditions and
+string operations. Built-ins execute in-process, are faster, and avoid subtle
+pipeline hazards under `set -euo pipefail`.
+
+For example, when asserting command output in tests:
+
+```bash
+# Brittle under pipefail: grep -q exits early, causing printf to fail with EPIPE (Broken pipe)
+printf '%s\n' "$output" | grep -q "expected text"
+
+# Robust, in-process, and faster
+[[ "$output" == *"expected text"* ]]
+[[ "$output" =~ expected\ +pattern ]]
+```
+
 ## Script Documentation Guidelines
 
 The content and layout of help text — the usage line, section order, examples
@@ -241,12 +260,19 @@ echo "$(basename "$0") create: AVD name required" >&2
 
 ### Missing Required Arguments
 
-Simple (non-subcommand) tools invoked without a required positional argument must print a concise usage summary, one example, and a pointer to `--help` to `stderr`, then exit `1`. They must **not** dump the full help text, print a bare error without an example or `--help` pointer, or exit `0`.
+Simple (non-subcommand) tools invoked without a required positional argument
+must print a concise usage summary, one example, and a pointer to `--help` to
+`stderr`, then exit `1`. They must **not** dump the full help text, print a bare
+error without an example or `--help` pointer, or exit `0`.
 
-> [!NOTE]
-> Complex subcommand tools (Manager-pattern tools like `skill`, `hook`, `jetpack`, `emumanager`) that show subcommand listings or help on bare invocation are exempt. Simple tools whose zero-argument invocation is a valid default action (e.g. reading from standard input or operating on the current directory/connected device) are also exempt.
+> [!NOTE] Complex subcommand tools (Manager-pattern tools like `skill`, `hook`,
+> `jetpack`, `emumanager`) that show subcommand listings or help on bare
+> invocation are exempt. Simple tools whose zero-argument invocation is a valid
+> default action (e.g. reading from standard input or operating on the current
+> directory/connected device) are also exempt.
 
-To implement this pattern, define a `usage_short()` helper function that prints to `stderr` and exits `1`:
+To implement this pattern, define a `usage_short()` helper function that prints
+to `stderr` and exits `1`:
 
 ```bash
 usage_short() {
