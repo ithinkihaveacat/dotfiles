@@ -11,7 +11,7 @@ OUTPUT=$(mktemp)
 WORK=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..15"
+echo "1..16"
 
 # Test 1: benchmarker --help
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -405,4 +405,66 @@ else
   echo "ok 15 - SIGTERM cancels worker tasks cleanly without dumping traceback"
 fi
 
+# Test 16: Teardown waits for a live orphan, kills it, and does not wait on its zombie
+if BENCHMARKER_BIN="$BIN" python3 <<'PY'
+import asyncio
+import os
+import runpy
+import sys
+import tempfile
+import time
 
+module = runpy.run_path(os.environ["BENCHMARKER_BIN"], run_name="benchmarker_test")
+group_has_live_member = module["group_has_live_member"]
+teardown_process_group = module["teardown_process_group"]
+
+
+async def check():
+    with tempfile.TemporaryDirectory() as directory:
+        pid_file = os.path.join(directory, "child.pid")
+        code = """
+import os, signal, sys, time
+child = os.fork()
+if child == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(sys.argv[1], "w", encoding="utf-8") as output:
+        output.write(str(os.getpid()))
+    time.sleep(30)
+    sys.exit(0)
+while not os.path.exists(sys.argv[1]):
+    time.sleep(0.01)
+"""
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            code,
+            pid_file,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        await proc.wait()
+        pgid = proc.pid
+        assert group_has_live_member(pgid)
+
+        started = time.monotonic()
+        await teardown_process_group(pgid, proc, grace_period=0.2)
+        elapsed = time.monotonic() - started
+
+        # The TERM-resistant child must receive SIGKILL after the grace period.
+        assert elapsed >= 0.15, elapsed
+        assert elapsed < 1.5, elapsed
+        for _ in range(20):
+            if not group_has_live_member(pgid):
+                break
+            await asyncio.sleep(0.05)
+        assert not group_has_live_member(pgid)
+
+
+asyncio.run(check())
+PY
+then
+  echo "ok 16 - Teardown distinguishes live process-group members from zombies"
+else
+  echo "not ok 16 - Teardown did not kill a live orphan promptly or treated its zombie as live"
+fi
