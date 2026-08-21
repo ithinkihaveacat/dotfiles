@@ -208,13 +208,23 @@ scripts/oracle "What are the latest developments in this framework as of May 202
 
 ### caxton
 
-Autonomous repository transformation and multi-file refactoring tool, scoped to
-the paths you name. Combines Oracle's broad upfront context inlining with
-Popper's autonomous tool-calling loop. It inlines the selected files into the
-initial prompt and provides the model with exact byte-for-byte
+Autonomous long-form text transformation, documentation audit, and harmonization
+engine, scoped to the paths you name. Specialized for large-scale text reasoning
+across whole repositories: auditing documentation drift, resolving cross-file
+contradictions, standardizing style, and synchronizing documentation against
+codebases. Combines Oracle's broad upfront bulk context inlining (up to 1 MB)
+with Popper's autonomous tool-calling loop. It inlines the selected files into
+the initial prompt and provides the model with exact byte-for-byte
 `search_and_replace`, `write_file`, `delete_file`, `read_file`, and `list_files`
-tools to execute changes across multiple files before finalizing via
+tools to execute changes across multiple documents before finalizing via
 `complete_task`.
+
+Unlike iterative coding tools that operate in tight compile/test loops, Caxton
+is tailored for narrative text, specifications, and documentation corpuses where
+giving the model a comprehensive global overview of multiple files prevents
+documentation drift. Source code may be provided as read-only reference
+(`--read`) to verify documentation accuracy, but mutations (`--edit`) target
+prose, guides, and specifications.
 
 ```bash
 scripts/caxton "PROMPT" [OPTIONS]
