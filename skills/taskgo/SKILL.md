@@ -28,8 +28,11 @@ INBOX.md                  # zero-ceremony capture; no schema
   PLAN.md                 # intended route forward (optional)
   tasks/*.md              # stable task records
   decisions/*.md          # ADRs (optional)
-  references/*            # supporting context, schemas, media, external docs (optional)
-  experiments/*           # exploratory prototypes, variants, fixtures, telemetry (optional)
+  references/*            # supporting context, schemas, design tokens, external docs (optional)
+  scripts/*               # automation, audit harnesses, pipelines, report generators (optional)
+  data/*                  # input datasets, package lists, static fixtures (optional)
+  results/*               # benchmark telemetry, run logs, audit outputs (optional)
+  dist/*                  # static dashboards, deployable bundles, HTML reports (optional)
 ```
 
 The root `AGENTS.md` must state that the repository follows taskgo and include
@@ -71,12 +74,13 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
    belong strictly in control repository metadata (`STATUS.md`, task
    frontmatter, and control repo commits); they must never be added to commits
    in linked artifact repositories. Artifact repositories host permanent
-   production code, tools, and regression test suites; transient research
-   artifacts—such as candidate optimization variants, synthetic evaluation
-   fixtures, disposable prototypes, and benchmark telemetry—belong in the
-   control repo alongside their project. Artifact path references prefer
-   `$HOME`-relative form (`~/...`) to remain portable across machines (list
-   multiple checkout paths when locations vary per environment).
+   production code, tools, and regression test suites; project-scoped working
+   scripts, datasets, and run results belong in the control repo alongside their
+   project. Very large artifacts (such as cloned Git repositories or heavy
+   binary test data) should not be checked into Git; reference them or download
+   on demand. Artifact path references prefer `$HOME`-relative form (`~/...`) to
+   remain portable across machines (list multiple checkout paths when locations
+   vary per environment).
 1. `STATUS.md` is the self-contained projection of current operational state:
    reading `STATUS.md` directly answers status, recent progress, and immediate
    next steps without traversing individual task files. Generated task state

@@ -24,11 +24,12 @@ project scale:
 - **Scale 1 (Lightweight Project):** A project directory containing `README.md`
   (serving as project manifest), `STATUS.md` (operational projection), and
   `tasks/` containing granular task records. `PLAN.md`, `decisions/`,
-  `references/`, and `experiments/` remain optional.
+  `references/`, `scripts/`, and `data/` remain optional.
 - **Scale 2 (Multi-Month Initiative):** Extends Scale 1 with explicit roadmap
   sequencing in `PLAN.md`, formal Nygard-style Architecture Decision Records in
-  `decisions/*.md`, supporting context in `references/`, and candidate
-  prototypes or evaluation suites in `experiments/`.
+  `decisions/*.md`, supporting context in `references/`, custom tooling in
+  `scripts/`, datasets in `data/`, evaluation/benchmark runs in `results/`, and
+  deployable deliverables in `dist/`.
 
 ## Repository Terminology & Boundaries
 
@@ -39,10 +40,10 @@ repositories**:
 
 - **Control Repository (`projects/`):** Houses private task tracking
   (`STATUS.md`, `tasks/`), roadmaps (`PLAN.md`), Architecture Decision Records
-  (`decisions/`), supporting context (`references/`), and project-scoped
-  exploratory research (`experiments/` holding disposable prototypes, competing
-  optimization variants, synthetic benchmark fixtures, and raw trial
-  logs/telemetry).
+  (`decisions/`), supporting context (`references/`), and project-scoped working
+  artifacts (`scripts/`, `data/`, `results/`, `dist/`). Very large artifacts
+  (such as cloned repositories or heavy binary test data) should be referenced
+  or fetched on demand rather than checked into Git.
 - **Artifact Repositories (e.g. `dotfiles`, product codebases):** House
   permanent production code, reusable libraries, shipping CLIs, and
   contract/regression test suites (`test-*`). Commits in artifact repositories
