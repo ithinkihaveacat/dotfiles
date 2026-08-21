@@ -8,4 +8,5 @@ complete -c benchmarker -s n -l trials -x -d "Number of trials per permutation (
 complete -c benchmarker -s j -l workers -x -d "Maximum concurrent worker processes (default: 4)"
 complete -c benchmarker -l timeout -x -d "Execution timeout per run in seconds (default: 600)"
 complete -c benchmarker -l dry-run -d "Print resolved list of runs without executing"
+complete -c benchmarker -l telemetry-template -d "Print sample JSON telemetry template for child tools"
 complete -c benchmarker -s h -l help -d "Display help message and exit"

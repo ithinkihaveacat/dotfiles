@@ -59,6 +59,7 @@ Options:
   -j, --workers N       Maximum concurrent worker processes (default: {DEFAULT_WORKERS}).
   --timeout SECONDS     Execution timeout per run in seconds (default: {DEFAULT_TIMEOUT_SECONDS}).
   --dry-run             Print the resolved list of runs without executing them.
+  --telemetry-template  Print sample JSON telemetry template for child tools and exit.
   -h, --help            Display this help message and exit.
 
 Available Template Placeholders (automatically shell-quoted):
@@ -73,8 +74,15 @@ Available Template Placeholders (automatically shell-quoted):
   {{grace_timeout}}     Configured timeout minus 10 seconds (for internal tool timers)
 
 Environment:
-  AGENT_TELEMETRY_JSON  Injected automatically into child environments pointing
-                        to an ephemeral path for structured JSON telemetry.
+  AGENT_TELEMETRY_JSON  Ephemeral path injected into child environments for
+                        structured JSON telemetry from AI tools.
+                        Standard keys parsed for indexing & summary tables:
+                          prompt_tokens (int)        Input tokens consumed
+                          candidate_tokens (int)     Output tokens generated
+                          steps (int)                Reasoning turns or LLM calls
+                          tools (dict)               Map of tool name -> {{attempts, successes, failures}}
+                          modified_files (list[str]) Paths modified by tool
+                        Run '{prog_name} --telemetry-template' for a full template.
   CAXTON_TELEMETRY_FILE Alias for AGENT_TELEMETRY_JSON for Caxton tools.
 
 Examples:
@@ -338,6 +346,36 @@ def safe_float(val: Any) -> float | None:
         return float(val)
     except (ValueError, TypeError):
         return None
+
+
+def extract_tool_stats(
+    telemetry_data: dict[str, Any] | None,
+) -> tuple[int | None, int | None]:
+    """Extracts aggregate tool calls and successes from the tools map."""
+    if not isinstance(telemetry_data, dict):
+        return None, None
+    tools = telemetry_data.get("tools")
+    if not isinstance(tools, dict) or not tools:
+        return None, None
+
+    total_calls = 0
+    total_successes = 0
+    found_any = False
+
+    for stats in tools.values():
+        if isinstance(stats, dict):
+            found_any = True
+            attempts = safe_int(stats.get("attempts"))
+            if attempts is not None:
+                total_calls += attempts
+            elif (calls := safe_int(stats.get("calls"))) is not None:
+                total_calls += calls
+            if (successes := safe_int(stats.get("successes"))) is not None:
+                total_successes += successes
+
+    if not found_any:
+        return None, None
+    return total_calls, total_successes
 
 
 async def run_single_job(job: RunJob, sem: asyncio.Semaphore) -> RunResult:
@@ -660,6 +698,10 @@ async def run_single_job(job: RunJob, sem: asyncio.Semaphore) -> RunResult:
 
                 await asyncio.to_thread(_write_run_artifacts_sync)
 
+                tool_calls, tool_successes = extract_tool_stats(
+                    telemetry_data if isinstance(telemetry_data, dict) else None
+                )
+
                 index_record = {
                     "run_id": job.run_id,
                     "timestamp": timestamp,
@@ -682,16 +724,8 @@ async def run_single_job(job: RunJob, sem: asyncio.Semaphore) -> RunResult:
                         if isinstance(telemetry_data, dict)
                         else None
                     ),
-                    "sr_success": (
-                        safe_int(telemetry_data.get("search_replace_successes"))
-                        if isinstance(telemetry_data, dict)
-                        else None
-                    ),
-                    "sr_attempts": (
-                        safe_int(telemetry_data.get("search_replace_attempts"))
-                        if isinstance(telemetry_data, dict)
-                        else None
-                    ),
+                    "tool_calls": tool_calls,
+                    "tool_successes": tool_successes,
                     "modified_count": (
                         len(telemetry_data.get("modified_files", []))
                         if isinstance(telemetry_data, dict)
@@ -876,6 +910,26 @@ async def async_main() -> int:
         print_help(prog_name)
         return 0
 
+    if "--telemetry-template" in sys.argv:
+        template = {
+            "status": "success",
+            "prompt_tokens": 12500,
+            "candidate_tokens": 480,
+            "steps": 4,
+            "modified_files": [
+                "docs/guide.md",
+            ],
+            "tools": {
+                "search_replace": {
+                    "attempts": 3,
+                    "successes": 3,
+                    "failures": 0,
+                },
+            },
+        }
+        print(json.dumps(template, indent=2))
+        return 0
+
     if len(sys.argv) == 1:
         print_short_usage(prog_name)
         return 1
@@ -894,6 +948,7 @@ async def async_main() -> int:
     parser.add_argument("-j", "--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--telemetry-template", action="store_true")
 
     args = parser.parse_args()
 
