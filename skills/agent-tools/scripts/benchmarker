@@ -262,30 +262,29 @@ async def teardown_process_group(
     pgid: int, proc: asyncio.subprocess.Process, grace_period: float = 1.5
 ) -> None:
     """Gracefully escalates process group termination from SIGTERM to SIGKILL."""
-    if proc.returncode is not None:
-        return
-
     try:
         os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return
 
     async def _escalate_to_kill() -> None:
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=grace_period)
-        except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(pgid, signal.SIGKILL)
+        deadline = asyncio.get_running_loop().time() + grace_period
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            await asyncio.sleep(0.05)
+
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
 
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.shield(_escalate_to_kill())
 
     if proc.returncode is None:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(proc.wait(), timeout=0.5)
 
 
 def safe_int(val: Any) -> int | None:
@@ -910,7 +909,7 @@ async def async_main() -> int:
 
     for task in tasks:
         for comb in combinations:
-            param_dict = dict(zip(dim_names, comb))
+            param_dict = dict(zip(dim_names, comb, strict=True))
             if task:
                 param_dict["task"] = task.name
             for trial in range(1, args.trials + 1):
