@@ -3,11 +3,9 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "google-genai",
-#     "google-api-core",
 # ]
 # [tool.uv.sources]
 # google-genai = { index = "pypi" }
-# google-api-core = { index = "pypi" }
 # [[tool.uv.index]]
 # name = "pypi"
 # url = "https://pypi.org/simple"
@@ -47,7 +45,6 @@ import time
 from pathlib import Path
 
 from google import genai
-from google.api_core import retry
 from google.genai import errors as genai_errors
 from google.genai import types
 
@@ -258,6 +255,28 @@ def format_bytes(size: float) -> str:
     if size >= 1024 * 1024:
         return f"{size / (1024 * 1024):.1f} MB"
     return f"{size / 1024:.1f} KB"
+
+
+def extract_retry_delay(exc: Exception) -> float | None:
+    """Extracts suggested retry delay in seconds from an API exception message.
+
+    Matches the deterministic 'Please retry in Xs' string provided in quota
+    exceeded error messages. Returns None if no delay is found.
+    """
+    msg = getattr(exc, "message", None)
+    candidates = [str(msg)] if msg else []
+    candidates.append(str(exc))
+
+    for text in candidates:
+        match = re.search(r"Please retry in ([0-9]+(?:\.[0-9]+)?)\s*s", text)
+        if match:
+            try:
+                sec = float(match.group(1))
+                if sec > 0:
+                    return sec
+            except ValueError:
+                pass
+    return None
 
 
 def offline_switch() -> tuple[bool, str]:
@@ -2159,35 +2178,59 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             file=sys.stderr,
         )
 
-    def should_retry(exception: Exception) -> bool:
-        if isinstance(exception, genai_errors.APIError) and exception.code in (
-            429,
-            500,
-            503,
-        ):
-            msg = getattr(exception, "message", getattr(exception, "status", "Unknown"))
-            print(
-                f"[caxton] Warning: API error {exception.code} ({msg}). Retrying with backoff...",
-                file=sys.stderr,
-            )
-            return True
-        return False
-
-    @retry.Retry(
-        predicate=should_retry,
-        initial=2.0,
-        maximum=60.0,
-        multiplier=2.0,
-        timeout=300.0,
-    )
     def send_with_retry(message):
-        resp = chat.send_message(message)
-        if resp.usage_metadata:
-            telemetry.prompt_tokens = resp.usage_metadata.prompt_token_count or 0
-            telemetry.candidate_tokens += (
-                resp.usage_metadata.candidates_token_count or 0
-            )
-        return resp
+        initial_backoff = 2.0
+        max_backoff = 60.0
+        backoff_multiplier = 2.0
+        retry_timeout = 300.0
+
+        current_backoff = initial_backoff
+        retry_start = time.monotonic()
+
+        while True:
+            try:
+                resp = chat.send_message(message)
+                if resp.usage_metadata:
+                    telemetry.prompt_tokens = (
+                        resp.usage_metadata.prompt_token_count or 0
+                    )
+                    telemetry.candidate_tokens += (
+                        resp.usage_metadata.candidates_token_count or 0
+                    )
+                return resp
+            except Exception as e:
+                is_retryable = isinstance(e, genai_errors.APIError) and e.code in (
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                )
+                if not is_retryable:
+                    raise
+
+                elapsed = time.monotonic() - retry_start
+                delay = extract_retry_delay(e)
+                if delay is not None:
+                    # Add a 1s safety buffer to ensure the rate limit window has fully cleared
+                    sleep_sec = delay + 1.0
+                    wait_desc = f"Retrying in {sleep_sec:.1f}s (quota reset)..."
+                else:
+                    sleep_sec = current_backoff
+                    current_backoff = min(
+                        current_backoff * backoff_multiplier, max_backoff
+                    )
+                    wait_desc = f"Retrying in {sleep_sec:.1f}s with backoff..."
+
+                if elapsed + sleep_sec > retry_timeout:
+                    raise
+
+                msg = getattr(e, "message", getattr(e, "status", "Unknown"))
+                print(
+                    f"[caxton] Warning: API error {e.code} ({msg}). {wait_desc}",
+                    file=sys.stderr,
+                )
+                time.sleep(sleep_sec)
 
     session_start = time.perf_counter()
     current_message = initial_prompt
