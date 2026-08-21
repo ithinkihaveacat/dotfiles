@@ -25,8 +25,8 @@ SHELL_CONTAINERS = (
     "DecorView",
 )
 
-# Traditional content containers & classic widgets
-CONTENT_CONTAINERS = (
+# Traditional content layout containers (which never appear inside pure Compose trees)
+LAYOUT_CONTAINERS = (
     "RecyclerView",
     "ConstraintLayout",
     "RelativeLayout",
@@ -39,12 +39,20 @@ CONTENT_CONTAINERS = (
     "GridView",
     "CardView",
     "MaterialCardView",
-    "ImageView",
-    "EditText",
-    "SeekBar",
-    "ProgressBar",
-    "RadioGroup",
-    "Spinner",
+    "WearableRecyclerView",
+    "GridLayout",
+    "TableLayout",
+    "SlidingPaneLayout",
+    "MotionLayout",
+    "SwipeRefreshLayout",
+)
+
+# Framework package prefixes for built-in platform widgets
+FRAMEWORK_PREFIXES = (
+    "android.widget.",
+    "android.view.",
+    "android.webkit.",
+    "android.inputmethodservice.",
 )
 
 
@@ -193,9 +201,11 @@ def classify_toolkit(xml_text: str | None, package: str = "") -> dict:
     parent_map = {c: p for p in root.iter() for c in p}
 
     # Trace decor nodes (PhoneWindow / DecorView framework wrappers)
+    content_node = None
     decor_nodes = set()
     for n in all_nodes:
         if n.get("resource-id") == "android:id/content":
+            content_node = n
             curr = n
             while curr is not None:
                 decor_nodes.add(curr)
@@ -241,7 +251,69 @@ def classify_toolkit(xml_text: str | None, package: str = "") -> dict:
                 "summary": "WebView container detected",
             }
 
-    compose_nodes = [n for n in all_nodes if "ComposeView" in n.get("class", "")]
+    # Explicit Compose nodes
+    explicit_compose_nodes = [
+        n
+        for n in all_nodes
+        if "ComposeView" in n.get("class", "")
+        or "AndroidComposeView" in n.get("class", "")
+        or "androidx.wear.compose" in n.get("class", "")
+    ]
+
+    # Check for obfuscated Compose roots (e.g. Proguard/R8 minified classes like 'bse', 'bsw', 'bur', 'cal.dyn')
+    obfuscated_compose_roots = []
+    if not explicit_compose_nodes and content_node is not None:
+        candidates = list(content_node)
+        # Unwrap single intermediate layout wrapper if present (e.g. FrameLayout id/container_view)
+        if (
+            len(candidates) == 1
+            and candidates[0].get("class", "").split(".")[-1]
+            in (
+                "FrameLayout",
+                "LinearLayout",
+                "ViewGroup",
+                "FragmentContainerView",
+            )
+            and len(list(candidates[0])) == 1
+        ):
+            candidates = list(candidates[0])
+
+        for cand in candidates:
+            cand_class = cand.get("class", "")
+            cand_short = cand_class.split(".")[-1]
+            cand_nodes = list(cand.iter("node"))
+
+            # An obfuscated Compose root has a non-framework class name or custom identifier
+            is_obfuscated_name = (
+                not any(cand_class.startswith(p) for p in FRAMEWORK_PREFIXES)
+                and cand_short not in SHELL_CONTAINERS
+            )
+
+            if is_obfuscated_name:
+                # Count traditional layout containers inside the candidate subtree
+                inner_layout_containers = [
+                    n
+                    for n in cand_nodes
+                    if any(lc in n.get("class", "") for lc in LAYOUT_CONTAINERS)
+                ]
+
+                # Check for UI elements (TextView, Button, View with text/content-desc)
+                has_ui_elements = any(
+                    n.get("class", "")
+                    in (
+                        "android.widget.TextView",
+                        "android.widget.Button",
+                        "android.widget.ImageView",
+                    )
+                    or bool(n.get("text"))
+                    or bool(n.get("content-desc"))
+                    for n in cand_nodes
+                )
+
+                if len(inner_layout_containers) == 0 and has_ui_elements:
+                    obfuscated_compose_roots.append(cand)
+
+    compose_nodes = explicit_compose_nodes + obfuscated_compose_roots
     compose_subtrees = set()
     for cn in compose_nodes:
         compose_subtrees.update(cn.iter("node"))
@@ -285,7 +357,7 @@ def classify_toolkit(xml_text: str | None, package: str = "") -> dict:
         if n in decor_nodes or n in host_shell_nodes or n in compose_subtrees:
             continue
         c = n.get("class", "")
-        if any(cc in c for cc in CONTENT_CONTAINERS):
+        if any(cc in c for cc in LAYOUT_CONTAINERS):
             legacy_content_nodes.append(c)
 
     # Check if Compose is hosted inside a list (classic hybrid pattern: RecyclerView rows in Compose)
@@ -304,13 +376,15 @@ def classify_toolkit(xml_text: str | None, package: str = "") -> dict:
 
     if compose_count > 0 and not compose_in_list and legacy_count == 0:
         toolkit = "compose"
-        summary = f"Jetpack Compose ({compose_count} ComposeView detected)"
+        is_obf = len(obfuscated_compose_roots) > 0 and len(explicit_compose_nodes) == 0
+        detail = "obfuscated R8 root" if is_obf else f"{compose_count} ComposeView"
+        summary = f"Jetpack Compose ({detail} detected)"
     elif compose_count > 0 and (compose_in_list or legacy_count > 0):
         toolkit = "hybrid"
         if compose_in_list:
-            summary = f"Hybrid (Compose hosted inside RecyclerView/ListView, {legacy_count} legacy containers)"
+            summary = f"Hybrid (Compose hosted inside RecyclerView/ListView, {legacy_count} legacy layout containers)"
         else:
-            summary = f"Hybrid ({compose_count} ComposeView, {legacy_count} legacy content containers)"
+            summary = f"Hybrid ({compose_count} ComposeView, {legacy_count} legacy layout containers)"
     elif compose_count == 0 and (legacy_count > 0 or len(all_nodes) > len(decor_nodes)):
         toolkit = "views"
         summary = f"Traditional Views ({legacy_count} layout containers detected)"
