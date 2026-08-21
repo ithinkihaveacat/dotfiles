@@ -756,6 +756,7 @@ def git_ignored_subset(
 @dataclasses.dataclass
 class Telemetry:
     steps: int = 0
+    tool_calls: int = 0
     modified_files: set = dataclasses.field(default_factory=set)
     created_files: set = dataclasses.field(default_factory=set)
     deleted_files: set = dataclasses.field(default_factory=set)
@@ -2210,9 +2211,14 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
         limit_str = (
             f" of {telemetry.input_limit / 1000:.0f}k" if telemetry.input_limit else ""
         )
+        tool_stat_str = (
+            f" ({telemetry.tool_calls} tool calls, {total_elapsed:.1f}s)"
+            if telemetry.tool_calls != telemetry.steps
+            else f" ({total_elapsed:.1f}s)"
+        )
         print(
             f"[caxton] {status_str} in {telemetry.steps} steps"
-            f" ({total_elapsed:.1f}s) | {len(telemetry.modified_files)} modified,"
+            f"{tool_stat_str} | {len(telemetry.modified_files)} modified,"
             f" {len(telemetry.created_files)} created,"
             f" {len(telemetry.deleted_files)} deleted | search/replace:"
             f" {sr_stat} | tokens: {telemetry.prompt_tokens / 1000:.1f}k{limit_str}"
@@ -2256,6 +2262,7 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     "status": status_str,
                     "success": bool(task_result and task_result.get("success")),
                     "steps": telemetry.steps,
+                    "tool_calls": telemetry.tool_calls,
                     "elapsed_seconds": round(total_elapsed, 3),
                     "prompt_tokens": telemetry.prompt_tokens,
                     "candidate_tokens": telemetry.candidate_tokens,
@@ -2412,11 +2419,17 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                 call_args = ", ".join(f"{k}={v!r}" for k, v in args_dict.items())
                 return f"{fc_name}({call_args}) -> {status_label}"
 
+            telemetry.steps += 1
+            num_calls = len(function_calls)
+            if num_calls > 1:
+                print(
+                    f"[caxton] Step {telemetry.steps}/{args.max_steps} [{num_calls} parallel calls]:",
+                    file=sys.stderr,
+                )
+
             tool_results = []
-            for fc in function_calls:
-                if telemetry.steps >= args.max_steps:
-                    break
-                telemetry.steps += 1
+            for idx, fc in enumerate(function_calls):
+                telemetry.tool_calls += 1
                 fn = tool_map.get(fc.name)
                 if not fn:
                     res = {
@@ -2441,10 +2454,17 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
 
                 # Format log snippet for stderr
                 log_line = format_tool_log(fc.name, args_dict, res)
-                print(
-                    f"[caxton] Step {telemetry.steps}/{args.max_steps}: {log_line}",
-                    file=sys.stderr,
-                )
+                if num_calls == 1:
+                    print(
+                        f"[caxton] Step {telemetry.steps}/{args.max_steps}: {log_line}",
+                        file=sys.stderr,
+                    )
+                else:
+                    branch = "  └── " if idx == num_calls - 1 else "  ├── "
+                    print(
+                        f"[caxton] {branch}{log_line}",
+                        file=sys.stderr,
+                    )
 
                 tool_results.append(
                     types.Part.from_function_response(
