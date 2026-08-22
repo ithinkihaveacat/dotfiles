@@ -101,7 +101,9 @@ operate on a fixed control repository root, resolved in this order:
 1. the default `~/.projects`.
 
 The root must be an existing Git repository; resolution never depends on the
-current working directory, so commands work identically from any workspace. To
+current working directory, so commands work identically from any workspace. Run
+`taskgo root` to print the resolved root (for raw Git operations or direct file
+edits), or `taskgo doctor` to see it with the source that selected it. To
 execute the tool:
 
 1. **Optimal (`$PATH`):** If `taskgo` is installed on your system `$PATH`,
@@ -305,6 +307,7 @@ working directory. In the command list below, `taskgo` refers to either the
 
 ```text
 taskgo id
+taskgo root
 taskgo create PROJECT TITLE [--conv ID] [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
 taskgo update TASK_ID [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]

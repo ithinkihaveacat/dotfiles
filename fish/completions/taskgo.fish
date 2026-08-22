@@ -29,6 +29,7 @@ end
 
 # Complete subcommands
 complete -f -c taskgo -n __fish_use_subcommand -a id -d 'Allocate a unique task ID'
+complete -f -c taskgo -n __fish_use_subcommand -a root -d 'Print the active control repository root'
 complete -f -c taskgo -n __fish_use_subcommand -a create -d 'Create a new task'
 complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
 complete -f -c taskgo -n __fish_use_subcommand -a status -d 'Show project status'
