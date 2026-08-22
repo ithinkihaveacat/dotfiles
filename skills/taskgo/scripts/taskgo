@@ -227,17 +227,56 @@ def die(msg: str, exit_code: int = 1) -> None:
     sys.exit(exit_code)
 
 
+_ACTIVE_COMMAND: str | None = None
+
+
+def die_scoped(msg: str, exit_code: int = 1) -> None:
+    """Dies with a git-style subcommand-scoped message (taskgo list: ...)."""
+    if _ACTIVE_COMMAND:
+        print(f"taskgo {_ACTIVE_COMMAND}: {msg}", file=sys.stderr)
+        sys.exit(exit_code)
+    die(msg, exit_code)
+
+
 _REPO_ROOT_CACHE: Path | None = None
+_EXPLICIT_ROOT: Path | None = None
+DEFAULT_ROOT = "~/.projects"
+
+
+def set_explicit_root(value: str | None) -> None:
+    """Records an explicitly selected control repository root (--root option)."""
+    global _EXPLICIT_ROOT
+    if value:
+        _EXPLICIT_ROOT = Path(value).expanduser()
+
+
+def resolve_root_candidate() -> tuple[Path, str]:
+    """Returns the configured root path and its source for error messages."""
+    if _EXPLICIT_ROOT is not None:
+        return _EXPLICIT_ROOT, "--root"
+    env_root = os.environ.get("TASKGO_ROOT")
+    if env_root:
+        return Path(env_root).expanduser(), "TASKGO_ROOT"
+    return Path(DEFAULT_ROOT).expanduser(), "default"
 
 
 def get_repo_root() -> Path:
     global _REPO_ROOT_CACHE
     if _REPO_ROOT_CACHE is not None:
         return _REPO_ROOT_CACHE
-    res = run_git(["rev-parse", "--show-toplevel"], check=False)
-    if res.returncode != 0:
-        die("not in a Git repo")
-    _REPO_ROOT_CACHE = Path(res.stdout.strip())
+
+    root_dir, source = resolve_root_candidate()
+    shown = DEFAULT_ROOT if source == "default" else f"'{root_dir}'"
+    if not root_dir.is_dir():
+        hint = ""
+        if source == "default":
+            hint = (
+                " (initialize it with: mkdir -p ~/.projects && git -C ~/.projects init)"
+            )
+        die_scoped(f"control repository {shown} does not exist{hint}")
+    if not (root_dir / ".git").exists():
+        die_scoped(f"control repository {shown} is not a Git repository (missing .git)")
+    _REPO_ROOT_CACHE = root_dir.resolve()
     return _REPO_ROOT_CACHE
 
 
@@ -249,7 +288,7 @@ def run_git(
     text: bool = True,
     input_data: str | None = None,
 ) -> subprocess.CompletedProcess:
-    if cwd is None and args != ["rev-parse", "--show-toplevel"]:
+    if cwd is None:
         cwd = get_repo_root()
     cmd = ["git", *args]
     proc = subprocess.Popen(
@@ -1991,7 +2030,10 @@ Commands:
   commit SUBJECT [OPTIONS]         Commit a logical transition
 
 Options:
-  --help, -h  Display this help message and exit
+  -R, --root DIR  Operate on the control repository at DIR instead of the
+                  default (~/.projects); overrides TASKGO_ROOT. Must appear
+                  before COMMAND.
+  --help, -h      Display this help message and exit
 
 Examples:
   taskgo id
@@ -2015,6 +2057,16 @@ def create_parser() -> argparse.ArgumentParser:
         "-h",
         action="store_true",
         help="Display this help message and exit",
+    )
+    parser.add_argument(
+        "--root",
+        "-R",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Control repository to operate on (default: ~/.projects, "
+            "overridden by TASKGO_ROOT); must appear before COMMAND"
+        ),
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -2314,6 +2366,10 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = create_parser()
     args = parser.parse_args(argv)
+
+    global _ACTIVE_COMMAND
+    _ACTIVE_COMMAND = args.command
+    set_explicit_root(getattr(args, "root", None))
 
     if args.command == "id":
         cmd_id()

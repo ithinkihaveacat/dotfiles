@@ -93,8 +93,16 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
 
 ## Tool Execution
 
-`taskgo` is bundled in `scripts/taskgo` within this skill directory. To execute
-commands from any workspace:
+`taskgo` is bundled in `scripts/taskgo` within this skill directory. Commands
+operate on a fixed control repository root, resolved in this order:
+
+1. `--root DIR` / `-R DIR` (must appear before the command),
+1. the `TASKGO_ROOT` environment variable,
+1. the default `~/.projects`.
+
+The root must be an existing Git repository; resolution never depends on the
+current working directory, so commands work identically from any workspace. To
+execute the tool:
 
 1. **Optimal (`$PATH`):** If `taskgo` is installed on your system `$PATH`,
    invoke it directly: `taskgo <command>`.
@@ -290,8 +298,10 @@ never in external artifact repos).
 ## CLI
 
 Requires Python 3.11+ (via `uv`) and Git; it remains a thin layer over ordinary
-files/history. In the commands below, `taskgo` refers to either the `$PATH`
-binary or `<skill-dir>/scripts/taskgo`:
+files/history. Commands operate on the control repository selected by
+`--root`/`-R`, `$TASKGO_ROOT`, or the default `~/.projects`, independent of the
+working directory. In the command list below, `taskgo` refers to either the
+`$PATH` binary or `<skill-dir>/scripts/taskgo`:
 
 ```text
 taskgo id
