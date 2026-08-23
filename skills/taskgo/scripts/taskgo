@@ -18,6 +18,7 @@ import re
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -202,6 +203,51 @@ def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
         file=sys.stderr,
     )
     return new
+
+
+BODY_WRAP_WIDTH = 72
+
+
+def wrap_body(text: str) -> str:
+    """Hard-wrap a plain-text commit body to BODY_WRAP_WIDTH columns.
+
+    Bodies are plain text, not Markdown: blank-line-separated paragraphs
+    are reflowed; lines that start with whitespace or a code fence are
+    left verbatim so pasted structure degrades gracefully. Unbreakable
+    tokens such as URLs are never split (they may exceed the width on
+    their own line). Returns the original text unchanged when it already
+    fits.
+    """
+    if not text:
+        return text
+    out: list[str] = []
+    para: list[str] = []
+
+    def flush() -> None:
+        if para:
+            out.extend(
+                textwrap.wrap(
+                    " ".join(para),
+                    width=BODY_WRAP_WIDTH,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+            para.clear()
+
+    for line in text.splitlines():
+        if not line.strip():
+            flush()
+            out.append("")
+        elif line[0].isspace() or line.startswith(("```", "~~~")):
+            flush()
+            out.append(line.rstrip())
+        else:
+            para.append(line.strip())
+    flush()
+    wrapped = "\n".join(out)
+    return wrapped if wrapped != text else text
 
 
 def reformat_frontmatter(text: str) -> str:
@@ -1492,7 +1538,7 @@ def cmd_create(
 
     subject = conventional_subject(f"create {task_id}", project_name)
 
-    msg_lines = [subject, "", title]
+    msg_lines = [subject, "", wrap_body(title)]
     if conv_id:
         msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
     commit_msg = "\n".join(msg_lines) + "\n"
@@ -2127,9 +2173,15 @@ def cmd_checkpoint(
                 die(f"checkpoint: refused staged path: {sf}")
 
         subject = ensure_conventional_subject(subject, project_name)
+        wrapped_body = wrap_body(body)
+        if body and wrapped_body != body:
+            print(
+                "[WARN]  Rewrapped commit body to fit 72 characters",
+                file=sys.stderr,
+            )
         msg_lines = [subject]
         if body:
-            msg_lines.extend(["", body])
+            msg_lines.extend(["", wrapped_body])
         trailers = []
         if conv_id:
             trailers.append(f"Conversation: conversation://{conv_id}")
@@ -2196,9 +2248,12 @@ def cmd_commit(
 
     project_for_scope = next(iter(projects)) if projects else None
     subject = ensure_conventional_subject(subject, project_for_scope)
+    wrapped_body = wrap_body(body)
+    if body and wrapped_body != body:
+        print("[WARN]  Rewrapped commit body to fit 72 characters", file=sys.stderr)
     msg_lines = [subject]
     if body:
-        msg_lines.extend(["", body])
+        msg_lines.extend(["", wrapped_body])
     trailers = []
     if conv_id:
         trailers.append(f"Conversation: conversation://{conv_id}")
@@ -2554,7 +2609,12 @@ than a few words.""",
         default=[],
         help="Explicit project files to stage",
     )
-    p_checkpoint.add_argument("--body", "-b", default="", help="Commit body")
+    p_checkpoint.add_argument(
+        "--body",
+        "-b",
+        default="",
+        help="Plain-text commit body (hard-wrapped to 72 columns)",
+    )
     p_checkpoint.add_argument(
         "--ref",
         "-r",
@@ -2584,7 +2644,12 @@ than a few words.""",
         metavar="SUBJECT",
         help="Conventional Commits subject line (rewritten when nonconforming)",
     )
-    p_commit.add_argument("--body", "-b", default="", help="Commit body")
+    p_commit.add_argument(
+        "--body",
+        "-b",
+        default="",
+        help="Plain-text commit body (hard-wrapped to 72 columns)",
+    )
     p_commit.add_argument(
         "--ref",
         "-r",

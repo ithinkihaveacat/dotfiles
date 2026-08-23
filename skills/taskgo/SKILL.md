@@ -442,9 +442,11 @@ changes in that project with actionable `--path` hints, and never stages files
 outside it. Unrelated changes elsewhere in the control repo remain unstaged. The
 command validates the project before making one local commit and does not
 contact a remote. Both `checkpoint` and `commit` enforce the workspace commit
-standard on their subjects: nonconforming subjects are rewritten to
-`chore(<project>): <subject>` (truncated to 50 characters) with a `[WARN]`, so
-unattended runs never fail on formatting.
+standard on their messages: nonconforming subjects are rewritten to
+`chore(<project>): <subject>` (truncated to 50 characters), and bodies — which
+are plain text, not Markdown — are hard-wrapped to 72 characters (URLs are never
+split; indented or fenced lines pass through verbatim). Both rewrites emit a
+`[WARN]`, so unattended runs never fail on formatting.
 
 ## Concurrency
 
