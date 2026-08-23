@@ -88,8 +88,21 @@ characters long so findings align cleanly with a single trailing space, e.g.:
   (`... | grep '^\[WARN\]'`), which satisfies clig.dev's `NO_COLOR`/non-TTY rule
   for free. Never use glyph-only tags (`✓`/`!`/`✗`) as the sole carrier of
   status — glyphs degrade to ambiguous punctuation once color is removed.
-- Color may still be layered onto the tags when stdout is a TTY, as an
-  enhancement, per clig.dev's color rules — never as the only signal.
+- Color may still be layered onto the tags as an enhancement, never as the only
+  signal. The canonical mapping is `[PASS]` green (SGR 32), `[WARN]` yellow
+  (33), `[FAIL]` red (31), and `[INFO]` cyan (36); raw SGR codes only — no
+  external color libraries or `tput`. Every color-capable script in this repo
+  implements the same precedence, in this order:
+  1. `NO_COLOR` set (https://no-color.org) — styling is always disabled,
+     regardless of TTY or `FORCE_COLOR`.
+  1. `FORCE_COLOR` set to a non-empty value other than `0` — styling is always
+     enabled, even when piped (the counterpart of `NO_COLOR`, as popularized by
+     Node's `supports-color`; also makes the styled path testable without a
+     pty).
+  1. Otherwise, style only when the destination stream is attached to a TTY.
+- Styling wraps the existing tag characters only; it must not change the tag
+  text, padding, or column alignment, so piped and styled renderings of one line
+  differ solely by escape sequences.
 - **Remediation placement:** attach the fix directly under the finding it
   belongs to (indented detail lines), not collected into a trailing summary
   section — findings scroll off-screen away from a trailing "how to fix" block

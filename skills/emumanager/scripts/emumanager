@@ -9,6 +9,39 @@ fi
 
 set -euo pipefail
 
+# Status-tag colors are an enhancement only: plain-ASCII tags are always
+# emitted when stdout is not a TTY or NO_COLOR is set (https://no-color.org);
+# FORCE_COLOR!=0 forces styling for testing and piped-but-interactive use.
+case "${NO_COLOR:+set}" in
+  set) C_RESET="" C_GREEN="" C_CYAN="" C_YELLOW="" C_RED="" ;;
+  *)
+    if [[ -n ${FORCE_COLOR:-} && $FORCE_COLOR != 0 || -t 1 ]]; then
+      C_RESET=$'\033[0m' C_GREEN=$'\033[32m' C_CYAN=$'\033[36m'
+      C_YELLOW=$'\033[33m' C_RED=$'\033[31m'
+    else
+      C_RESET="" C_GREEN="" C_CYAN="" C_YELLOW="" C_RED=""
+    fi
+    ;;
+esac
+
+# emit TAG MESSAGE — print a canonical diagnostic tag line, colourising the
+# tag when styling is enabled (see the color gate above). The tag text itself
+# is never altered, so output stays greppable and aligned either way.
+emit() { # emit TAG MESSAGE
+  local tag="[$1]" color=""
+  case $1 in
+    PASS) color=$C_GREEN ;;
+    INFO) color=$C_CYAN ;;
+    WARN) color=$C_YELLOW ;;
+    FAIL) color=$C_RED ;;
+  esac
+  if [[ -n $color ]]; then
+    printf '%s\n' "${color}${tag}${C_RESET} $2"
+  else
+    printf '%s\n' "$tag $2"
+  fi
+}
+
 # See https://developer.android.com/tools/variables#envar
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
 export ANDROID_USER_HOME="${ANDROID_USER_HOME:-$HOME/.android}"
@@ -1487,7 +1520,7 @@ run_doctor() {
   local emulator_count
   emulator_count=$(pgrep -f 'qemu-system-.*-avd' | grep -c . || true)
   if [[ "$emulator_count" -gt 0 ]]; then
-    echo "[INFO] Found $emulator_count running emulator process(es)"
+    emit INFO "Found $emulator_count running emulator process(es)"
     # Get list of running AVDs
     if [[ -f "$ANDROID_HOME/platform-tools/adb" ]]; then
       local running_avds
@@ -1496,7 +1529,7 @@ run_doctor() {
     fi
     echo ""
   else
-    echo "[PASS] No emulator processes running"
+    emit PASS "No emulator processes running"
   fi
 
   # Check for orphaned crashpad_handler processes
@@ -1505,13 +1538,13 @@ run_doctor() {
   local crashpad_count
   crashpad_count=$(pgrep -f 'android-sdk/emulator/crashpad_handler' | grep -c . || true)
   if [[ "$crashpad_count" -gt 0 && "$emulator_count" -eq 0 ]]; then
-    echo "[WARN] Found $crashpad_count orphaned crashpad_handler processes"
+    emit WARN "Found $crashpad_count orphaned crashpad_handler processes"
     echo "       These are leftover crash reporters from previous emulator sessions."
     echo "       To clean up: pkill -f 'android-sdk/emulator/crashpad_handler'"
     echo ""
     warnings=$((warnings + 1))
   elif [[ "$crashpad_count" -eq 0 && "$emulator_count" -eq 0 ]]; then
-    echo "[PASS] No orphaned crashpad_handler processes"
+    emit PASS "No orphaned crashpad_handler processes"
   fi
 
   # Check disk space for ANDROID_HOME
@@ -1526,12 +1559,12 @@ run_doctor() {
     avail_gb=$(df -g "$ANDROID_HOME" 2>/dev/null | tail -1 | awk '{print $4}' || echo "0")
 
     if [[ "$avail_gb" -lt 5 ]]; then
-      echo "[WARN] Low disk space: ${avail_space} available at ANDROID_HOME"
+      emit WARN "Low disk space: ${avail_space} available at ANDROID_HOME"
       echo "       AVD images can be several GB each. Consider freeing up space."
       echo ""
       warnings=$((warnings + 1))
     else
-      echo "[PASS] Disk space: ${avail_space} available at ANDROID_HOME"
+      emit PASS "Disk space: ${avail_space} available at ANDROID_HOME"
     fi
   fi
 
@@ -1587,7 +1620,7 @@ run_doctor() {
     done
 
     if [[ ${#orphaned_inis[@]} -gt 0 ]]; then
-      echo "[WARN] Found orphaned AVD .ini files:"
+      emit WARN "Found orphaned AVD .ini files:"
       local i=0
       for orphan in "${orphaned_inis[@]}"; do
         echo "       - $orphan (${orphaned_ini_reasons[$i]})"
@@ -1596,7 +1629,7 @@ run_doctor() {
     fi
 
     if [[ ${#orphaned_avds[@]} -gt 0 ]]; then
-      echo "[WARN] Found orphaned AVD directories (not referenced by any .ini file):"
+      emit WARN "Found orphaned AVD directories (not referenced by any .ini file):"
       for orphan in "${orphaned_avds[@]}"; do
         echo "       - $orphan"
       done
@@ -1624,7 +1657,7 @@ run_doctor() {
       fi
       echo ""
     else
-      echo "[PASS] No orphaned AVD files found"
+      emit PASS "No orphaned AVD files found"
     fi
   fi
 
@@ -1640,7 +1673,7 @@ run_doctor() {
   fi
 
   if [[ -z "$javacmd" ]]; then
-    echo "[FAIL] Java executable not found"
+    emit FAIL "Java executable not found"
     echo "       Android SDK requires Java 17 or higher."
     echo "       Please set JAVA_HOME or add 'java' to your PATH."
     echo ""
@@ -1653,20 +1686,20 @@ run_doctor() {
     java_major_version=$(echo "$java_version_string" | sed -E -n 's/.*version "((1\.)?([0-9]+))\..*".*/\3/p')
 
     if [[ -z "$java_major_version" ]]; then
-      echo "[WARN] Could not determine Java version."
+      emit WARN "Could not determine Java version."
       echo "       Java executable: $javacmd (found via $resolution_method)"
       echo "       'java -version' output:"
       echo "       $java_version_string"
       echo ""
       warnings=$((warnings + 1))
     elif [[ "$java_major_version" -lt 17 ]]; then
-      echo "[FAIL] Java version is too old: $java_major_version"
+      emit FAIL "Java version is too old: $java_major_version"
       echo "       Java executable: $javacmd (found via $resolution_method)"
       echo "       Android SDK requires Java 17 or higher."
       echo ""
       errors=$((errors + 1))
     else
-      echo "[PASS] Java version: $java_major_version"
+      emit PASS "Java version: $java_major_version"
       echo "       - Path: $javacmd"
       echo "       - Source: $resolution_method"
     fi
@@ -1675,32 +1708,32 @@ run_doctor() {
   # Check for hardware acceleration
   if [[ "$(uname -s)" == "Linux" ]]; then
     if [[ ! -e /dev/kvm ]]; then
-      echo "[FAIL] KVM not found at /dev/kvm"
+      emit FAIL "KVM not found at /dev/kvm"
       echo "       Hardware acceleration is required for running x86_64 emulators on Linux."
       echo "       Please ensure KVM is enabled in your BIOS and the module is loaded."
       echo ""
       errors=$((errors + 1))
     elif ! grep -q -E 'vmx|svm' /proc/cpuinfo; then
-      echo "[FAIL] CPU does not support virtualization extensions (VT-x or AMD-V)"
+      emit FAIL "CPU does not support virtualization extensions (VT-x or AMD-V)"
       echo "       KVM acceleration is required for x86_64 emulators on Linux."
       echo "       Please ensure virtualization is enabled in your BIOS."
       echo ""
       errors=$((errors + 1))
     elif ! groups | grep -q "\\bkvm\\b"; then
-      echo "[WARN] User is not in the 'kvm' group."
+      emit WARN "User is not in the 'kvm' group."
       echo "       Emulator may fail to start or run slowly."
       echo "       To fix, run: sudo usermod -aG kvm \$USER"
       echo "       You may need to log out and log back in for the changes to take effect."
       echo ""
       warnings=$((warnings + 1))
     else
-      echo "[PASS] KVM is enabled and user is in the 'kvm' group"
+      emit PASS "KVM is enabled and user is in the 'kvm' group"
     fi
   elif [[ "$(uname -s)" == "Darwin" ]]; then
     if [[ "$(sysctl -n kern.hv.supported 2>/dev/null)" -eq 1 ]]; then
-      echo "[PASS] Hypervisor Framework (HVF) is enabled"
+      emit PASS "Hypervisor Framework (HVF) is enabled"
     else
-      echo "[FAIL] Hypervisor Framework (HVF) is not enabled"
+      emit FAIL "Hypervisor Framework (HVF) is not enabled"
       echo "       Hardware acceleration is required for running emulators on macOS."
       echo "       This is typically available on macOS 10.10 (Yosemite) and newer."
       echo "       To check your system, run: sysctl kern.hv.supported"
@@ -1722,9 +1755,9 @@ run_doctor() {
       check_msg=$(echo "$check_output" | sed -n '3p')
 
       if [[ "$check_code" == "0" ]]; then
-        echo "[PASS] Emulator-check: Acceleration status: $check_msg"
+        emit PASS "Emulator-check: Acceleration status: $check_msg"
       else
-        echo "[FAIL] Emulator-check: Acceleration check failed"
+        emit FAIL "Emulator-check: Acceleration check failed"
         echo "       Message: $check_msg"
         errors=$((errors + 1))
       fi
@@ -1735,36 +1768,36 @@ run_doctor() {
     check_output=$("$emulator_check_cmd" cpu-info 2>&1) || true
     check_msg=$(echo "$check_output" | sed -n '3p')
     if [[ -n "$check_msg" ]]; then
-      echo "[INFO] Emulator-check: CPU Info: $check_msg"
+      emit INFO "Emulator-check: CPU Info: $check_msg"
     fi
   fi
 
   # Check for SDK tools
   if ! require_sdk sdkmanager >/dev/null 2>&1; then
-    echo "[FAIL] Android SDK command-line tools not found (sdkmanager missing)"
+    emit FAIL "Android SDK command-line tools not found (sdkmanager missing)"
     echo "       Run: $(basename "$0") bootstrap"
     echo ""
     errors=$((errors + 1))
   else
-    echo "[PASS] Android SDK command-line tools installed"
+    emit PASS "Android SDK command-line tools installed"
   fi
 
   if ! require_sdk adb >/dev/null 2>&1; then
-    echo "[FAIL] Android platform-tools not found (adb missing)"
+    emit FAIL "Android platform-tools not found (adb missing)"
     echo "       Run: $(basename "$0") bootstrap"
     echo ""
     errors=$((errors + 1))
   else
-    echo "[PASS] Android platform-tools installed"
+    emit PASS "Android platform-tools installed"
   fi
 
   if ! require_sdk emulator >/dev/null 2>&1; then
-    echo "[FAIL] Android emulator not found"
+    emit FAIL "Android emulator not found"
     echo "       Run: $(basename "$0") bootstrap"
     echo ""
     errors=$((errors + 1))
   else
-    echo "[PASS] Android emulator installed"
+    emit PASS "Android emulator installed"
   fi
 
   # Summary

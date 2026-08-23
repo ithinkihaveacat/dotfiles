@@ -38,6 +38,44 @@ ID_PATTERN = re.compile(r"^TASK-[0-9A-F]{5}$")
 WRAP_WIDTH = 80
 SLUG_MAX_LEN = 32
 
+_TAG_ANSI = {
+    "PASS": "\033[32m",
+    "INFO": "\033[36m",
+    "WARN": "\033[33m",
+    "FAIL": "\033[31m",
+}
+_TAG_PATTERN = re.compile(r"\[(PASS|INFO|WARN|FAIL)\]")
+
+
+def _use_color(stream: Any) -> bool:
+    """Decides whether diagnostic output to stream may carry ANSI styling.
+
+    Styling is an enhancement only: disabled when NO_COLOR is set
+    (https://no-color.org), forced by FORCE_COLOR, otherwise on only when
+    the destination stream is attached to a terminal.
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    force = os.environ.get("FORCE_COLOR")
+    if force and force != "0":
+        return True
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _tagged(text: str, stream: Any = sys.stdout) -> str:
+    """Colorises canonical diagnostic tags ([PASS] etc.) found in text.
+
+    Tag characters are never added, removed, or moved, so piped output stays
+    byte-identical to unstyled output and remains greppable either way.
+    """
+    if not _use_color(stream):
+        return text
+
+    def _wrap(m: re.Match[str]) -> str:
+        return f"{_TAG_ANSI[m.group(1)]}{m.group(0)}\033[0m"
+
+    return _TAG_PATTERN.sub(_wrap, text)
+
 
 class TaskStatus(StrEnum):
     TODO = "todo"
@@ -99,7 +137,10 @@ def get_active_conversation_id(cli_arg: str | None = None) -> str | None:
                     return norm
             except SystemExit:
                 print(
-                    f"[WARN]  Ignoring invalid conversation ID in ${var}: {val}",
+                    _tagged(
+                        f"[WARN]  Ignoring invalid conversation ID in ${var}: {val}",
+                        sys.stderr,
+                    ),
                     file=sys.stderr,
                 )
     return None
@@ -180,14 +221,22 @@ def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
                 match.group("desc"), SUBJECT_MAX_LEN - prefix_len
             )
             print(
-                f"[WARN]  Truncated over-long commit subject (> {SUBJECT_MAX_LEN}):\n"
-                f"[WARN]    {original}\n"
-                f"[WARN]    -> {truncated}",
+                _tagged(
+                    f"[WARN]  Truncated over-long commit subject (> {SUBJECT_MAX_LEN}):\n"
+                    f"[WARN]    {original}\n"
+                    f"[WARN]    -> {truncated}",
+                    sys.stderr,
+                ),
                 file=sys.stderr,
             )
             return truncated
         if rebuilt != original:
-            print(f"[WARN]  Normalized commit subject case: {rebuilt}", file=sys.stderr)
+            print(
+                _tagged(
+                    f"[WARN]  Normalized commit subject case: {rebuilt}", sys.stderr
+                ),
+                file=sys.stderr,
+            )
         return rebuilt
     # Legacy 'project: subject' and 'project/TASK-ID: subject' prefixes carry
     # no Conventional Commits meaning; the token becomes redundant once the
@@ -196,10 +245,13 @@ def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
     desc = (stripped.group(1).strip() if stripped else original) or original
     new = conventional_subject(desc, project_name)
     print(
-        "[WARN]  Rewrote nonconforming commit subject"
-        " (expected 'type(scope): description'):\n"
-        f"[WARN]    {original}\n"
-        f"[WARN]    -> {new}",
+        _tagged(
+            "[WARN]  Rewrote nonconforming commit subject"
+            " (expected 'type(scope): description'):\n"
+            f"[WARN]    {original}\n"
+            f"[WARN]    -> {new}",
+            sys.stderr,
+        ),
         file=sys.stderr,
     )
     return new
@@ -1425,11 +1477,14 @@ def cmd_create(
                 else "Title too long for a filename"
             )
             print(
-                f"[WARN]  {reason}; using '{task_slug}'.",
+                _tagged(f"[WARN]  {reason}; using '{task_slug}'.", sys.stderr),
                 file=sys.stderr,
             )
             print(
-                f"[WARN]    Pass --slug SLUG (<= {SLUG_MAX_LEN} chars) to choose a better filename.",
+                _tagged(
+                    f"[WARN]    Pass --slug SLUG (<= {SLUG_MAX_LEN} chars) to choose a better filename.",
+                    sys.stderr,
+                ),
                 file=sys.stderr,
             )
 
@@ -1449,16 +1504,25 @@ def cmd_create(
 
     if dry_run:
         print(
-            "[INFO]  Dry run: would create task record and sync STATUS.md:",
+            _tagged(
+                "[INFO]  Dry run: would create task record and sync STATUS.md:",
+                sys.stderr,
+            ),
             file=sys.stderr,
         )
         if is_new_project:
             print(
-                f"[INFO]    - Scaffolding: {project_name}/README.md, {project_name}/STATUS.md",
+                _tagged(
+                    f"[INFO]    - Scaffolding: {project_name}/README.md, {project_name}/STATUS.md",
+                    sys.stderr,
+                ),
                 file=sys.stderr,
             )
         print(
-            f"[INFO]    - Task file:   {rel_task_path} (status: {status})",
+            _tagged(
+                f"[INFO]    - Task file:   {rel_task_path} (status: {status})",
+                sys.stderr,
+            ),
             file=sys.stderr,
         )
         prefix = f"{project_name}: create {task_id}"
@@ -1470,7 +1534,9 @@ def cmd_create(
             subject = f"{prefix} ({title})"
         else:
             subject = prefix
-        print(f"[INFO]    - Commit:      {subject}", file=sys.stderr)
+        print(
+            _tagged(f"[INFO]    - Commit:      {subject}", sys.stderr), file=sys.stderr
+        )
         print(f"{task_id}\t{rel_task_path}")
         return
 
@@ -1522,7 +1588,10 @@ def cmd_create(
 
     if not has_commit_auth(root):
         print(
-            "[INFO]  Skipping commit: repository lacks authorized <!-- taskgo:allow-local-commits -->",
+            _tagged(
+                "[INFO]  Skipping commit: repository lacks authorized <!-- taskgo:allow-local-commits -->",
+                sys.stderr,
+            ),
             file=sys.stderr,
         )
         return
@@ -1545,7 +1614,10 @@ def cmd_create(
 
     run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
-    print(f"[INFO]  Committed new task: {commit_sha[:10]}", file=sys.stderr)
+    print(
+        _tagged(f"[INFO]  Committed new task: {commit_sha[:10]}", sys.stderr),
+        file=sys.stderr,
+    )
 
 
 def cmd_update(
@@ -1692,13 +1764,19 @@ def cmd_update(
                 die_scoped(f"cannot rename {rel_path}: {new_name} already exists")
             target_path.rename(new_path)
             print(
-                f"[INFO]  Renamed {rel_path} -> {new_path.relative_to(root)}",
+                _tagged(
+                    f"[INFO]  Renamed {rel_path} -> {new_path.relative_to(root)}",
+                    sys.stderr,
+                ),
                 file=sys.stderr,
             )
             rel_path = str(new_path.relative_to(root))
 
     sync_status(root, project_name)
-    print(f"[INFO]  Updated {task_id_val} in {rel_path}", file=sys.stderr)
+    print(
+        _tagged(f"[INFO]  Updated {task_id_val} in {rel_path}", sys.stderr),
+        file=sys.stderr,
+    )
 
 
 def cmd_list(
@@ -1840,7 +1918,7 @@ def cmd_doctor(
     root = get_repo_root()
     _, source = resolve_root_candidate()
 
-    print(f"{'[PASS]'.ljust(8)}Control repository")
+    print(_tagged(f"{'[PASS]'.ljust(8)}Control repository"))
     print(f"        Root: {display_path(root)}")
     print(f"        Source: {source}")
 
@@ -1849,18 +1927,20 @@ def cmd_doctor(
     has_warn_or_fail = False
     for f in findings:
         prefix = f"[{f.severity}]".ljust(8)
-        print(f"{prefix}{f.message}")
+        print(_tagged(f"{prefix}{f.message}"))
         if f.severity in ("WARN", "FAIL"):
             has_warn_or_fail = True
 
     print(
-        """[INFO]  Agent semantic review
+        _tagged(
+            """[INFO]  Agent semantic review
         Check STATUS Summary/Next for contradictions with tasks and recent work.
         Check active conversation ID ([<conversation-id>](conversation://<conversation-id>)) is recorded in STATUS.md Summary or task Outcome.
         Check PLAN is current direction, not accumulated history.
         Check ADR status/rationale and artifact references remain meaningful.
         Check private tracker material has not leaked to public/shared artifacts.
         After merges, check reconciled files express one coherent current state."""
+        )
     )
 
     if has_warn_or_fail:
@@ -1885,21 +1965,29 @@ def cmd_fix(
         if unfixable:
             for f in unfixable:
                 print(
-                    f"[{f.severity}]  Manual fix required: {f.message}",
+                    _tagged(
+                        f"[{f.severity}]  Manual fix required: {f.message}", sys.stderr
+                    ),
                     file=sys.stderr,
                 )
         else:
-            print("[INFO]  Workspace is clean, no fixes needed.", file=sys.stderr)
+            print(
+                _tagged("[INFO]  Workspace is clean, no fixes needed.", sys.stderr),
+                file=sys.stderr,
+            )
         return
 
     if dry_run:
         print(
-            f"[INFO]  Dry run: {len(fixable)} repair(s) would be applied:",
+            _tagged(
+                f"[INFO]  Dry run: {len(fixable)} repair(s) would be applied:",
+                sys.stderr,
+            ),
             file=sys.stderr,
         )
         dry_run_files: set[str] = set()
         for f in fixable:
-            print(f"[INFO]    - {f.message}", file=sys.stderr)
+            print(_tagged(f"[INFO]    - {f.message}", sys.stderr), file=sys.stderr)
             if f.file_path:
                 try:
                     dry_run_files.add(
@@ -1935,7 +2023,12 @@ def cmd_fix(
     remaining_errors = [f for f in post_findings if f.severity in ("WARN", "FAIL")]
     if remaining_errors:
         for f in remaining_errors:
-            print(f"[{f.severity}]  Still open after fix: {f.message}", file=sys.stderr)
+            print(
+                _tagged(
+                    f"[{f.severity}]  Still open after fix: {f.message}", sys.stderr
+                ),
+                file=sys.stderr,
+            )
 
     # Ensure all affected projects have their STATUS.md synchronized and included if modified
     affected_projects: set[str] = set()
@@ -1968,12 +2061,18 @@ def cmd_fix(
             modified_files.append(rel)
 
     if not modified_files:
-        print("[INFO]  Workspace is clean, no files changed.", file=sys.stderr)
+        print(
+            _tagged("[INFO]  Workspace is clean, no files changed.", sys.stderr),
+            file=sys.stderr,
+        )
         return
 
     if no_commit:
         print(
-            f"[INFO]  Applied {len(modified_files)} repair(s) without commit (--no-commit).",
+            _tagged(
+                f"[INFO]  Applied {len(modified_files)} repair(s) without commit (--no-commit).",
+                sys.stderr,
+            ),
             file=sys.stderr,
         )
         print("\n".join(modified_files))
@@ -1981,7 +2080,10 @@ def cmd_fix(
 
     if not has_commit_auth(root):
         print(
-            f"[INFO]  Applied {len(modified_files)} repair(s) (commit skipped: no auth marker).",
+            _tagged(
+                f"[INFO]  Applied {len(modified_files)} repair(s) (commit skipped: no auth marker).",
+                sys.stderr,
+            ),
             file=sys.stderr,
         )
         print("\n".join(modified_files))
@@ -1993,7 +2095,10 @@ def cmd_fix(
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
 
     print(
-        f"[INFO]  Committed {len(modified_files)} fixed file(s): {commit_sha[:10]}",
+        _tagged(
+            f"[INFO]  Committed {len(modified_files)} fixed file(s): {commit_sha[:10]}",
+            sys.stderr,
+        ),
         file=sys.stderr,
     )
 
@@ -2176,7 +2281,9 @@ def cmd_checkpoint(
         wrapped_body = wrap_body(body)
         if body and wrapped_body != body:
             print(
-                "[WARN]  Rewrapped commit body to fit 72 characters",
+                _tagged(
+                    "[WARN]  Rewrapped commit body to fit 72 characters", sys.stderr
+                ),
                 file=sys.stderr,
             )
         msg_lines = [subject]
@@ -2250,7 +2357,10 @@ def cmd_commit(
     subject = ensure_conventional_subject(subject, project_for_scope)
     wrapped_body = wrap_body(body)
     if body and wrapped_body != body:
-        print("[WARN]  Rewrapped commit body to fit 72 characters", file=sys.stderr)
+        print(
+            _tagged("[WARN]  Rewrapped commit body to fit 72 characters", sys.stderr),
+            file=sys.stderr,
+        )
     msg_lines = [subject]
     if body:
         msg_lines.extend(["", wrapped_body])
