@@ -7,8 +7,12 @@
 # Tests: tests/test-hook-agent
 # Design decision: Hard dependency on 'uv'. Required 'uv' runtime is checked and
 # diagnosed by 'hook add' and 'hook doctor' before hook execution.
-"""Strip Co-Authored-By trailers, rewrap over-long body/footer lines, and
-enforce commit message formatting."""
+"""Strip generated trailers and enforce commit-message formatting.
+
+Long prose, bullet-list continuations, and blockquotes are rewrapped. Fenced
+code blocks (including quoted fences), indented code, pipe-bounded table rows,
+ATX/Setext headings, thematic breaks, and git trailer blocks are preserved.
+"""
 
 import os
 import re
@@ -21,8 +25,11 @@ WRAP_WIDTH = 72
 SUBJECT_LIMIT = 50
 
 FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
+QUOTED_FENCE_RE = re.compile(r"^(\s*>+\s*)(`{3,}|~{3,})")
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])(\s+)(.*)$")
 BLOCKQUOTE_RE = re.compile(r"^(\s*)(>+)(\s*)(.*)$")
+ATX_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+.*$")
+TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 LEADING_WS_RE = re.compile(r"^[ \t]*")
 SETEXT_OR_HR_RE = re.compile(r"^\s*([-=*_])(\s*\1){2,}\s*$")
 # Narrower than SETEXT_OR_HR_RE on purpose: only '-'/'=' runs are setext
@@ -126,8 +133,7 @@ def wrap_block(lines):
     n = len(lines)
 
     prose_buffer, prose_raw = [], []
-    bullet_marker, bullet_indent = None, None
-    bullet_buffer, bullet_raw = [], []
+    bullet_stack = []
     quote_marker = None
     quote_buffer, quote_raw = [], []
 
@@ -166,31 +172,42 @@ def wrap_block(lines):
                 out.extend(wrapped or [""])
             prose_buffer, prose_raw = [], []
 
-    def flush_bullet():
-        nonlocal bullet_marker, bullet_indent, bullet_buffer, bullet_raw
-        if bullet_marker is not None:
-            if all_within_width(bullet_raw):
-                out.extend(bullet_raw)
+    def flush_bullet(pop=True):
+        if bullet_stack:
+            bullet = bullet_stack[-1]
+            if not bullet["raw"]:
+                if pop:
+                    bullet_stack.pop()
+                return
+            if all_within_width(bullet["raw"]):
+                out.extend(bullet["raw"])
             else:
-                hard_suffix = get_hard_suffix(bullet_raw)
-                text = " ".join(bullet_buffer)
+                hard_suffix = get_hard_suffix(bullet["raw"])
+                text = " ".join(bullet["buffer"])
                 if hard_suffix == "\\" and text.endswith("\\"):
                     text = text[:-1].rstrip()
                 eff_width = max(1, WRAP_WIDTH - len(hard_suffix))
-                indent = " " * len(bullet_marker)
+                indent = " " * bullet["indent"]
+                initial_indent = bullet["marker"] if not bullet["emitted"] else indent
                 wrapped = textwrap.wrap(
                     text,
                     width=eff_width,
-                    initial_indent=bullet_marker,
+                    initial_indent=initial_indent,
                     subsequent_indent=indent,
                     break_long_words=False,
                     break_on_hyphens=False,
                 )
                 if wrapped and hard_suffix:
                     wrapped[-1] += hard_suffix
-                out.extend(wrapped or [bullet_marker.rstrip()])
-            bullet_marker, bullet_indent = None, None
-            bullet_buffer, bullet_raw = [], []
+                out.extend(wrapped or [bullet["marker"].rstrip()])
+            bullet["emitted"] = True
+            bullet["buffer"], bullet["raw"] = [], []
+            if pop:
+                bullet_stack.pop()
+
+    def flush_bullets():
+        while bullet_stack:
+            flush_bullet()
 
     def flush_quote():
         nonlocal quote_marker, quote_buffer, quote_raw
@@ -223,7 +240,7 @@ def wrap_block(lines):
         fence_match = FENCE_RE.match(line)
         if fence_match:
             flush_prose()
-            flush_bullet()
+            flush_bullets()
             flush_quote()
             token = fence_match.group(2)
             out.append(line)
@@ -241,17 +258,41 @@ def wrap_block(lines):
                     break
             continue
 
+        quoted_fence_match = QUOTED_FENCE_RE.match(line)
+        if quoted_fence_match:
+            flush_prose()
+            flush_bullets()
+            flush_quote()
+            prefix, token = quoted_fence_match.groups()
+            out.append(line)
+            i += 1
+            close_re = re.compile(
+                r"^"
+                + re.escape(prefix)
+                + re.escape(token[0])
+                + r"{"
+                + str(len(token))
+                + r",}\s*$"
+            )
+            while i < n:
+                out.append(lines[i])
+                closed = bool(close_re.match(lines[i]))
+                i += 1
+                if closed:
+                    break
+            continue
+
         if line.strip() == "":
             flush_prose()
-            flush_bullet()
+            flush_bullets()
             flush_quote()
             out.append(line)
             i += 1
             continue
 
-        if line.lstrip().startswith("|") or line.count("|") >= 2:
+        if TABLE_ROW_RE.match(line) or ATX_HEADING_RE.match(line):
             flush_prose()
-            flush_bullet()
+            flush_bullets()
             flush_quote()
             out.append(line)
             i += 1
@@ -260,7 +301,7 @@ def wrap_block(lines):
         setext_or_hr_match = SETEXT_OR_HR_RE.match(line)
         if setext_or_hr_match:
             flush_prose()
-            flush_bullet()
+            flush_bullets()
             flush_quote()
             out.append(line)
             i += 1
@@ -272,7 +313,7 @@ def wrap_block(lines):
         quote_match = BLOCKQUOTE_RE.match(line)
         if quote_match:
             flush_prose()
-            flush_bullet()
+            flush_bullets()
             lead, marks, spaces, text = quote_match.groups()
             marker = lead + marks + (spaces or " ")
             is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
@@ -314,13 +355,23 @@ def wrap_block(lines):
         bullet_match = BULLET_RE.match(line)
         if bullet_match:
             flush_prose()
-            flush_bullet()
             lead, marker_char, spaces, text = bullet_match.groups()
             marker = lead + marker_char + spaces
-            bullet_marker = marker
-            bullet_indent = len(marker)
-            bullet_buffer = [text] if text.strip() else []
-            bullet_raw = [line]
+            lead_indent = len(lead.expandtabs())
+            while bullet_stack and lead_indent <= bullet_stack[-1]["lead_indent"]:
+                flush_bullet()
+            if bullet_stack:
+                flush_bullet(pop=False)
+            bullet_stack.append(
+                {
+                    "marker": marker,
+                    "indent": len(marker.expandtabs()),
+                    "lead_indent": lead_indent,
+                    "emitted": False,
+                    "buffer": [text] if text.strip() else [],
+                    "raw": [line],
+                }
+            )
             is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
                 "\r\n"
             ).endswith("\\")
@@ -331,28 +382,31 @@ def wrap_block(lines):
 
         leading = LEADING_WS_RE.match(line).group(0)
         leading_len = len(leading.expandtabs())
+        bullet_indent = bullet_stack[-1]["indent"] if bullet_stack else None
         code_threshold = (
             bullet_indent + 4 if bullet_indent and bullet_indent >= 4 else 4
         )
         if "\t" in leading or leading_len >= code_threshold:
             flush_prose()
-            flush_bullet()
+            flush_bullets()
             out.append(line)
             i += 1
             continue
 
-        if bullet_indent is not None:
-            if leading_len >= bullet_indent and line.strip() != "":
+        if bullet_stack:
+            while bullet_stack and leading_len < bullet_stack[-1]["indent"]:
+                flush_bullet()
+            if bullet_stack and leading_len >= bullet_stack[-1]["indent"]:
                 is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
                     "\r\n"
                 ).endswith("\\")
-                bullet_buffer.append(line.strip())
-                bullet_raw.append(line)
+                bullet_stack[-1]["buffer"].append(line.strip())
+                bullet_stack[-1]["raw"].append(line)
                 i += 1
                 if is_hard_break:
                     flush_bullet()
                 continue
-            flush_bullet()
+            flush_bullets()
             continue
 
         is_hard_break = line.rstrip("\r\n").endswith("  ") or line.rstrip(
@@ -384,7 +438,7 @@ def wrap_block(lines):
             flush_prose()
 
     flush_prose()
-    flush_bullet()
+    flush_bullets()
     flush_quote()
     return out
 
@@ -473,6 +527,10 @@ def usage(out=sys.stdout):
 
 Strip Co-Authored-By trailers, rewrap over-long body/footer lines, and enforce
 commit message formatting.
+
+Rewraps prose, bullet continuations, and blockquotes. Preserves fenced and
+indented code, quoted fences, pipe-bounded tables, ATX/Setext headings,
+thematic breaks, and git trailers.
 
 Arguments:
   COMMIT_MSG_FILE   Path to the commit message file
