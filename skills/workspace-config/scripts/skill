@@ -497,7 +497,7 @@ class GitWorkspace(Workspace):
             actual_skills
         ):
             issues.append(
-                f"exclude drift  {clean_p(self.exclude_file)} block does not match the actual on-disk skills"
+                f"{clean_p(self.exclude_file)} managed block does not match the installed skills"
             )
         return issues
 
@@ -1103,6 +1103,21 @@ class DiskEntry:
         self.tracked = tracked  # whether the link is VCS-tracked
 
 
+def norm_target(parent: Path, raw: str) -> Path:
+    """Normalize a symlink target without dereferencing its final component.
+
+    readlink returns the literal stored string, so the same directory can
+    appear under different absolute prefixes (/var/... vs macOS's
+    /private/var/...) depending on how each link was created -- pure noise
+    that once made identical targets compare unequal. realpath() fixes that,
+    but used wholesale it would also collapse deliberate resolve:False
+    identities whose final component IS a symlink. Resolving only the parent
+    directory removes prefix indirection while keeping the leaf literal.
+    """
+    p = Path(os.path.abspath(parent / raw))
+    return Path(os.path.realpath(p.parent)) / p.name
+
+
 class ReconcilePlan:
     """The desired-vs-actual comparison shared by doctor and apply."""
 
@@ -1346,7 +1361,7 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
                 continue
             try:
                 target = os.readlink(p)
-                target_abs = Path(os.path.abspath(p.parent / target))
+                target_abs = norm_target(p.parent, target)
             except OSError:
                 target_abs = None
             # 'tracked' is only consulted for dangling entries (to keep
@@ -1406,7 +1421,10 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
                     missing.append(label)
             else:
                 target = os.readlink(p)
-                target_abs = Path(os.path.abspath(p.parent / target))
+                # norm_target keeps prefix indirection (macOS /tmp ->
+                # /private/tmp) from masquerading as a wrong-target mismatch
+                # while leaving resolve:False identities intact.
+                target_abs = norm_target(p.parent, target)
                 if target_abs != r.source_path:
                     label = (
                         f"{r.spec} (linked to {clean_p(target_abs)}, expected {clean_p(r.source_path)})"
@@ -2649,83 +2667,247 @@ def cmd_doctor(
     negated_extra = plan.negated_extra
     collisions = plan.collisions
 
-    # Render the divergence as one aligned item list. The two sides get short
-    # stable labels -- 'env' is the declared set (AGENT_REQUIRED_SKILLS),
-    # 'disk' the symlinks in the destination dirs -- and the first item of
-    # each kind carries the full gloss, so the labels are defined where they
-    # are used instead of in a standing preamble that repeats on every run.
-    disk_label = ", ".join(str(rel(d)) for d in dest_dirs) if dest_dirs else "disk"
-
-    # The plan reports some conditions once per destination dir (e.g. a skill
-    # missing from both .claude/skills and .agents/skills counts twice), but
-    # the report and the command hints below are per-name.
+    # Render findings partitioned by resolution shape, not by cause. Items
+    # with two legitimate resolutions (link vs undeclare; keep vs delete)
+    # form a parallel env/disk ledger in the comm tradition -- bare names,
+    # sorted, one row per side. Items with exactly one sensible resolution
+    # (wrong source: re-link; unresolvable/colliding declarations: fix or
+    # undeclare) cannot live in that grammar and get single lines under
+    # 'Problems:' instead. 'skill apply' appears under both ledger columns
+    # because it genuinely acts on both sides (it links ENV ONLY and deletes
+    # DISK ONLY toward the same target state).
     def uniq(names):
         seen = set()
         return [n for n in names if not (n in seen or seen.add(n))]
 
-    # 'missing' and 'mismatched' carry per-destination labels from the planner
-    # ("spec (missing in .claude/skills)"); specs themselves are env-var tokens
-    # and can never contain whitespace, so the first word is always the spec.
-    skill_items = []
-    for i, lbl in enumerate(uniq(missing)):
-        spec, _, det = lbl.partition(" ")
-        inner = det[1:-1] if det.startswith("(") else det
-        if i == 0:
-            inner = "in AGENT_REQUIRED_SKILLS, " + (
-                inner or f"not linked in {disk_label}"
-            )
-        skill_items.append((spec, f"env only ({inner})" if inner else "env only"))
-    for s in unresolvable:
-        # This bucket also catches ambiguous specs (multiple catalog matches,
-        # fixed by qualifying the namespace) and remote-fetch failures, not
-        # only "no match at all" -- unresolvable_errors carries the specific
-        # reason for each, so the label stays deliberately generic.
-        skill_items.append((s, f"unresolvable ({unresolvable_errors[s]})"))
-    for lbl in uniq(mismatched_target):
-        spec, _, det = lbl.partition(" ")
-        skill_items.append((spec, f"wrong target {det}".rstrip()))
-    for i, s in enumerate(uniq(negated_extra)):
-        gloss = " (negated in AGENT_REQUIRED_SKILLS but still linked)" if i == 0 else ""
-        skill_items.append((s, f"disk only, negated{gloss}"))
-    for i, s in enumerate(uniq(extra)):
-        gloss = (
-            f" (linked in {disk_label}, not in AGENT_REQUIRED_SKILLS)" if i == 0 else ""
-        )
-        skill_items.append((s, f"disk only{gloss}"))
-    name_width = max((len(n) for n, _ in skill_items), default=0)
-    # Collision "names" are whole sentences from the planner, so they get
-    # full-width lines instead of a slot in the aligned name column.
-    skill_details = [f"conflicting: {c}" for c in collisions]
-    skill_details += [f"{n.ljust(name_width)}   {a}" for n, a in skill_items]
+    def spec_of(label):
+        # Planner labels are "spec" or "spec (detail)"; specs are env-var
+        # tokens and can never contain whitespace, so the first word is the
+        # spec.
+        return label.partition(" ")[0]
 
-    if (
-        missing
-        or unresolvable
-        or mismatched_target
-        or extra
-        or negated_extra
-        or collisions
-    ):
-        parts = []
+    mismatched_specs = uniq(spec_of(lbl) for lbl in mismatched_target)
+    env_only = [
+        s for s in uniq(spec_of(lbl) for lbl in missing) if s not in mismatched_specs
+    ]
+    disk_only = [(s, "") for s in uniq(extra)] + [
+        (s, "(negated)") for s in uniq(negated_extra)
+    ]
+    healthy = sorted(
+        {
+            e.link_name
+            for e in plan.disk_entries
+            if e.kind == "live" and e.target in plan.expected_targets
+        }
+    )
+
+    def short_source(path_str) -> str:
+        """Render a source path short and diff-shaped: relative to its
+        SKILL_SOURCE_DIRS root when possible, else its last two components
+        (kills absolute-prefix noise like macOS /private)."""
+        p = Path(os.path.realpath(path_str))
+        for root_str in os.environ.get("SKILL_SOURCE_DIRS", "").split(":"):
+            if not root_str:
+                continue
+            root = Path(root_str).expanduser().resolve()
+            try:
+                return f"{root.name}/{p.relative_to(root)}"
+            except ValueError:
+                continue
+        if p.parent != p:
+            return f"{p.parent.name}/{p.name}"
+        return clean_p(p)
+
+    problem_lines = []
+    if mismatched_target or unresolvable or collisions:
+        import textwrap
+
+        problem_lines.append("Problems:")
+        link_pat = re.compile(r"\(linked to (?P<disk>.+), expected (?P<env>.+)\)$")
+        for lbl in uniq(mismatched_target):
+            spec = spec_of(lbl)
+            m = link_pat.search(lbl)
+            if m:
+                problem_lines.append(
+                    f"  {spec}   on disk as {short_source(m.group('disk'))},"
+                    f" in env as {short_source(m.group('env'))}"
+                )
+            else:
+                problem_lines.append(f"  {spec}   {lbl.partition(' ')[2].strip('()')}")
+            problem_lines.append(f"{'':12}-> 'skill apply' re-links")
+        for s in unresolvable:
+            # This bucket also catches ambiguous specs (multiple catalog
+            # matches) and remote-fetch failures, so render the planner's
+            # specific reason verbatim rather than guessing one.
+            err_lines = (
+                textwrap.wrap(str(unresolvable_errors[s]), width=64) or [""]
+            )
+            problem_lines.append(f"  {s} (?)   {err_lines[0]}")
+            for cont in err_lines[1:]:
+                problem_lines.append(f"{'':12}{cont}")
+            problem_lines.append(f"{'':12}-> qualify namespace, register it, or")
+            problem_lines.append(
+                f"{'':14}'envrc remove skills {s} && direnv reload'"
+            )
         if collisions:
-            parts.append(f"{len(collisions)} conflicting")
-        if missing:
-            parts.append(f"{len(missing)} missing")
-        if unresolvable:
-            parts.append(f"{len(unresolvable)} unresolvable")
-        if mismatched_target:
-            parts.append(f"{len(mismatched_target)} mismatched target")
-        num_extra = len(extra) + len(negated_extra)
-        if num_extra:
-            parts.append(f"{num_extra} extra/stale")
-        summary_str = ", ".join(parts)
-        # Collisions and unresolvable specs are declaration-side defects, not
-        # an env-vs-disk divergence; only call the sides out when at least one
-        # item actually differs between them.
-        if missing or mismatched_target or extra or negated_extra:
-            summary = f"environment and disk disagree ({summary_str})"
+            for c in collisions:
+                problem_lines.append(f"  conflict   {c}")
+            problem_lines.append(f"{'':12}-> declare only one of them:")
+            problem_lines.append(
+                f"{'':14}'envrc remove skills <unwanted>' && direnv reload'"
+            )
+
+    term_width = shutil.get_terminal_size((80, 24)).columns
+
+    def render_columns(columns, width, measure):
+        """Zip equal-height cell lists into aligned columns.
+
+        MEASURE holds the per-column item-name lists: the shared column
+        width derives from those and the headers alone. Overlong cells wrap
+        inside their column rather than widening the grid. Returns the
+        rendered rows and the chosen column width (callers use it to place
+        post-grid content under a specific column). Falls back to vertical
+        stacking only when even the fitted grid exceeds WIDTH.
+        """
+        import textwrap
+
+        gutter = "  "
+        measured = [c for cells in measure for c in cells]
+        col_w = min(
+            38,
+            max([len(c) for c in measured] + [len(h) for h, _ in columns] + [8]),
+        )
+        cols = []
+        for header, cells in columns:
+            wrapped = []
+            for cell in cells:
+                if not cell:
+                    wrapped.append("")
+                else:
+                    # Tokens stay whole (no mid-name splits); an overlong
+                    # unbreakable token simply overflows its column.
+                    wrapped += (
+                        textwrap.wrap(
+                            cell,
+                            width=col_w,
+                            break_long_words=False,
+                            break_on_hyphens=False,
+                        )
+                        or [""]
+                    )
+            cols.append((header, wrapped))
+        total = col_w * len(cols) + len(gutter) * (len(cols) - 1)
+        out = []
+        if total > width and len(cols) > 1:
+            for i, (header, cells) in enumerate(cols):
+                if i:
+                    out.append("")
+                out.append(header)
+                out.extend(cells)
+            return out, col_w
+        out.append(gutter.join(h.ljust(col_w) for h, _ in cols).rstrip())
+        height = max(len(c) for _, c in cols)
+        for i in range(height):
+            row = gutter.join(
+                (c[i] if i < len(c) else "").ljust(col_w) for _, c in cols
+            )
+            out.append(row.rstrip())
+        return out, col_w
+
+    skill_details = []
+    has_ledger = bool(env_only or disk_only)
+    if has_ledger:
+        left_items = list(env_only)
+        right_items = [f"{s} {tag}".rstrip() if tag else s for s, tag in disk_only]
+        item_height = max(len(left_items), len(right_items), 1)
+        left_col = [""] * (item_height - len(left_items)) + left_items + [""]
+        right_col = [""] * (item_height - len(right_items)) + right_items + [""]
+        columns = [("ENV ONLY", left_col), ("DISK ONLY", right_col)]
+        measure = [left_items, right_items]
+        if verbose:
+            columns.append(("HEALTHY", list(healthy)))
+            measure.append(healthy)
+        grid, col_w = render_columns(columns, term_width, measure)
+        skill_details += grid
+        # Hint prose renders beneath its column at a fixed offset, one line
+        # per sentence and never wrapped: these strings are documented
+        # contracts, and splitting them across grid rows makes them both
+        # harder to scan and unmatchable by line-oriented tooling.
+        disk_offset = col_w + len("  ")
+        if collisions:
+            # apply refuses to run at all while declarations collide.
+            blocked = "'skill apply' blocked -- see Problems"
+            skill_details.append(blocked)
+            skill_details.append(" " * disk_offset + blocked)
         else:
-            summary = f"cannot resolve the declared skill set ({summary_str})"
+            for hint in ["skill apply links these"] if env_only else []:
+                skill_details.append(hint)
+            if disk_only:
+                prune_held = bool(plan.prune_names) and plan.destructive_blocked
+                skill_details.append(" " * disk_offset + "skill apply deletes these"
+                                     + ("*" if prune_held else ""))
+                if prune_held:
+                    if plan.stale:
+                        note = "*held back while stale: direnv reload first"
+                    else:
+                        note = "*held back: broken declaration (see Problems)"
+                    skill_details.append(" " * disk_offset + note)
+
+    # The intersection is the least interesting fact, so it collapses to one
+    # line unless verbose mode renders it as the literal third column above.
+    if not (verbose and has_ledger):
+        shown = healthy[:8]
+        more = len(healthy) - len(shown)
+        healthy_line = "Healthy: " + (", ".join(shown) if shown else "none")
+        if more > 0:
+            healthy_line += f", +{more} more"
+        skill_details.append(healthy_line)
+
+    if problem_lines:
+        skill_details.append("")
+        skill_details += problem_lines
+
+    # Reverse-direction recipes: adopt what is on disk (never re-declaring a
+    # negated name, and skipping names .envrc already declares while stale --
+    # those need a reload, not a re-add).
+    fresh_declared = {f.lower() for f in plan.freshness[0]} if plan.stale else set()
+    adopt = [
+        s
+        for s, tag in disk_only
+        if tag != "(negated)" and s.lower() not in fresh_declared
+    ]
+    drop = list(env_only)
+    footer = []
+    if adopt:
+        footer.append(f"  envrc add skills {' '.join(adopt)} && direnv reload")
+    if drop:
+        footer.append(f"  envrc remove skills {' '.join(drop)} && direnv reload")
+    if footer:
+        skill_details.append("")
+        skill_details.append("To make ENV match DISK instead:")
+        skill_details += footer
+
+    n_problems = len(mismatched_target) + len(unresolvable) + len(collisions)
+    if missing or extra or negated_extra or n_problems:
+        counts = []
+        if env_only:
+            counts.append(f"{len(env_only)} env-only")
+        if disk_only:
+            counts.append(f"{len(disk_only)} disk-only")
+        if healthy:
+            counts.append(f"{len(healthy)} healthy")
+        if n_problems:
+            counts.append(f"{n_problems} problem{'s' if n_problems != 1 else ''}")
+        if env_only or disk_only:
+            summary = (
+                "AGENT_REQUIRED_SKILLS and disk have diverged ("
+                + " · ".join(counts)
+                + ")"
+            )
+        else:
+            summary = (
+                "the declared skill set has problems (" + " · ".join(counts) + ")"
+            )
         checks.append(
             {
                 "name": "Required Skills",
@@ -2866,7 +3048,7 @@ def cmd_doctor(
             {
                 "name": "Directory Cleanliness",
                 "status": "ERROR",
-                "summary": f"Found {len(unmanaged)} unmanaged file(s) or directory/directories in skill folders",
+                "summary": f"Found {len(unmanaged)} unmanaged item(s) in skill folders",
                 "details": ["Unmanaged artifacts (should be moved or deleted):"]
                 + [f"  - {rel(item)}" for item in unmanaged],
             }
@@ -3112,7 +3294,9 @@ def cmd_doctor(
 
     # Per-finding remediation, attached to the check it belongs to so fixes
     # never scroll away from the finding that prompted them (emumanager style).
-    generic_sync = "To resolve: run 'git-setup' or 'skill apply' to synchronize and repair your configuration."
+    # Required Skills needs no entry here: its ledger columns carry the
+    # 'skill apply' effects inline, and its Problems entries and reverse-
+    # direction footer are built with the findings themselves.
     for check in checks:
         if check["status"] == "OK":
             continue
@@ -3124,116 +3308,11 @@ def cmd_doctor(
             check["details"].append(
                 "  direnv reload   # or start a new prompt, then re-run 'skill apply'"
             )
-        elif name == "Required Skills":
-            # Several commands can clear these findings, but they push state
-            # in opposite directions: 'skill apply' makes disk match env (and
-            # deletes undeclared symlinks), while 'envrc' edits make env match
-            # disk (and keep them). Phrase each option as a direction with its
-            # concrete effects so choosing one is a decision, not a guess.
-            missing_names = uniq(lbl.partition(" ")[0] for lbl in missing)
-            mismatched_names = uniq(lbl.partition(" ")[0] for lbl in mismatched_target)
-            prune_names = uniq(extra + negated_extra)
-            apply_effects = []
-            if missing_names:
-                apply_effects.append(f"link {', '.join(missing_names)}")
-            if mismatched_names:
-                apply_effects.append(f"re-link {', '.join(mismatched_names)}")
-            if prune_names and not plan.destructive_blocked:
-                plural = "s" if len(prune_names) > 1 else ""
-                apply_effects.append(
-                    f"delete the {', '.join(prune_names)} symlink{plural}"
-                )
-            # 'skill apply' refuses to run at all while declarations collide,
-            # so don't advertise it as a fix then.
-            if apply_effects and not collisions:
-                check["details"].append(
-                    f"Make disk match env ({'; '.join(apply_effects)}):"
-                )
-                check["details"].append("  skill apply")
-            # The env-side path never re-declares negated skills, and when the
-            # environment is stale it skips names .envrc already declares --
-            # suggesting 'envrc add' for those would re-add what only needs a
-            # reload.
-            fresh_declared = (
-                {f.lower() for f in plan.freshness[0]} if plan.stale else set()
-            )
-            declare_names = [s for s in uniq(extra) if s.lower() not in fresh_declared]
-            env_effects = []
-            if missing_names:
-                env_effects.append(f"undeclare {', '.join(missing_names)}")
-            if declare_names:
-                plural = "s" if len(declare_names) > 1 else ""
-                env_effects.append(f"declare {', '.join(declare_names)}")
-                env_effects.append(f"keep the symlink{plural}")
-            if env_effects:
-                check["details"].append(
-                    f"Make env match disk ({'; '.join(env_effects)}):"
-                )
-                cmd_parts = []
-                if missing_names:
-                    cmd_parts.append(
-                        f"envrc remove skills {' '.join(missing_names)}"
-                    )
-                if declare_names:
-                    cmd_parts.append(f"envrc add skills {' '.join(declare_names)}")
-                cmd_parts.append("direnv reload")
-                check["details"].append("  " + " && ".join(cmd_parts))
-            # With a single difference, whole-side resolution IS per-item
-            # resolution, so the mixing hint would be noise.
-            n_diffs = len(missing_names) + len(mismatched_names) + len(prune_names)
-            if n_diffs >= 2 and (apply_effects or env_effects):
-                check["details"].append(
-                    "Or mix per skill: 'skill remove NAME' edits disk; "
-                    "'envrc add/remove skills NAME' edits env."
-                )
-            if unresolvable:
-                check["details"].append(
-                    "Unresolvable declarations: 'skill apply' cannot fix "
-                    "these (the reason is shown per skill above). Fix the "
-                    "catalog registration, qualify an ambiguous name with "
-                    "its namespace, or undeclare:"
-                )
-                check["details"].append(
-                    f"  envrc remove skills {' '.join(uniq(unresolvable))} && direnv reload"
-                )
-            if collisions:
-                check["details"].append(
-                    "Conflicting declarations: 'skill apply' cannot fix "
-                    "these -- undeclare the unwanted spec(s):"
-                )
-                check["details"].append(
-                    "  # envrc remove skills <spec> for the unwanted declaration, then 'direnv reload'"
-                )
-            if prune_names and plan.destructive_blocked:
-                # Self-contained on purpose: preflight suppresses WARNING
-                # checks, so referring the reader to Environment Freshness
-                # would point at a check that is not rendered there.
-                plural = "s" if len(prune_names) > 1 else ""
-                if plan.stale:
-                    fresh_missing, fresh_negated = plan.freshness
-                    reasons = []
-                    if fresh_missing:
-                        reasons.append(
-                            f".envrc declares {', '.join(fresh_missing)} not yet in AGENT_REQUIRED_SKILLS"
-                        )
-                    if fresh_negated:
-                        reasons.append(
-                            f".envrc negates {', '.join(fresh_negated)} still in AGENT_REQUIRED_SKILLS"
-                        )
-                    why = (
-                        f"the environment is stale ({'; '.join(reasons)} "
-                        "-- run 'direnv reload' first)"
-                    )
-                else:
-                    why = "a declared spec is unresolvable (fix or undeclare it first)"
-                check["details"].append(
-                    f"Note: 'skill apply' will not delete the "
-                    f"{', '.join(prune_names)} symlink{plural} while {why}. "
-                    f"'skill remove {' '.join(prune_names)}' deletes by hand."
-                )
         elif name == "Symlink Health":
             if stray_dangling:
-                check["details"].append(generic_sync)
+                check["details"].append(
+                    "To resolve: 'skill apply' removes stray broken links automatically."
+                )
             if tracked_dangling:
                 check["details"].append(
                     "To resolve: 'skill apply' will not remove a VCS-tracked "
@@ -3245,7 +3324,9 @@ def cmd_doctor(
                     + "   # then 'git rm --cached' if already staged/committed"
                 )
         elif name == "Workspace Exclusions":
-            check["details"].append(generic_sync)
+            check["details"].append(
+                "To repair (rewrites the managed block): run 'skill apply'."
+            )
         elif name == "Directory Cleanliness":
             check["details"].append(
                 "To resolve: manually delete or move the unmanaged files/directories out of the skill folders."
