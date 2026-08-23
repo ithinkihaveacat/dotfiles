@@ -308,6 +308,73 @@ repeatable `Ref:` trailers for non-derivable external relationships and
 `Conversation:` trailers for session traceability (in control repo commits only;
 never in external artifact repos).
 
+### Task Export and Ejection (External Agent Handoff)
+
+When delegating a task to an agent, subagent, or contributor operating in an
+isolated artifact repository (with view of only a single repository and no
+knowledge of or access to the control repository), produce a **self-contained
+task export (also called an ejection or task brief)**. This handles requests to
+"export" or "eject" a task (e.g. `export TASK-D3762` or `eject TASK-33B32`).
+
+#### Feasibility Check
+
+Verify whether the task can be performed in isolation before generating the
+brief:
+
+- **Eligible:** Tasks whose implementation, testing, and verification are wholly
+  confined to a single target repository, requiring only repository context,
+  inlined references, and any necessary credentials provided in the export.
+- **Ineligible:** Tasks requiring active multi-repository orchestration or edits
+  to the control repository structure itself. Decline these requests and
+  explicitly state why isolation is impossible.
+
+#### Payload Construction
+
+The exported brief must be entirely self-contained and copy-and-pasteable:
+
+1. **Self-Contained Context:** Embed the Title, Problem, Goal, Constraints, and
+   observable Acceptance Criteria directly from the task record.
+1. **Inlined Dependencies:** Resolve and inline all referenced ADRs
+   (`decisions/`), design guides (`references/`), or project conventions
+   (`README.md`). Strip all tracker-relative Markdown links (e.g.
+   `[ADR-001](../decisions/001.md)`) and replace them with raw text to prevent
+   dangling references in the isolated environment.
+1. **Secrets and Credentials Handling:** If the task requires specific secrets,
+   API keys, or credentials to access necessary systems or fixtures, default to
+   inlining them into the exported brief. When inlining sensitive secrets, emit
+   a clear warning so the user can verify or redact them if necessary.
+1. **Deterministic Verification:** Specify the exact local commands (tests,
+   linters, builds) the worker must run to verify completion, including the
+   expected exit states or terminal output.
+
+#### Handoff & Reconciliation Protocol
+
+Append these operational instructions to the brief to dictate how the isolated
+worker must execute and report back:
+
+1. **Opaque Task ID Preservation:** State the `TASK-XXXXX` identifier clearly.
+   Instruct the worker that this ID is an opaque routing key that must be
+   preserved verbatim.
+1. **Semantic Commits with Trailers:** Instruct the worker to write standard
+   semantic commit messages conforming to the target repository's conventions.
+   The worker must append the Task ID as a Git trailer (e.g.
+   `Resolves TASK-XXXXX` or `Task: TASK-XXXXX`) to permanently link the work in
+   public Git history.
+1. **Out-of-Band Reporting:** Instruct the worker to report back in the chat
+   response upon completion (or if permanently blocked) with:
+   - The verbatim Task ID.
+   - The location where changes were made (e.g. branch name, PR URL, or commit
+     hashes).
+   - Its active conversation ID, session record, or link (e.g.
+     `conversation://<conversation-id>`), if available.
+   - Key technical findings, unexpected behavior, or architectural trade-offs
+     made during implementation.
+1. **Strict Data Segregation:** Explicitly warn the worker: The Task ID belongs
+   in public commit trailers; branch/PR references, conversation links, session
+   telemetry, and internal reasoning belong strictly in the out-of-band chat
+   response. Private session telemetry must never leak into public artifact
+   commits.
+
 ## CLI
 
 Requires Python 3.11+ (via `uv`) and Git; it remains a thin layer over ordinary
