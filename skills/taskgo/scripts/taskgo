@@ -104,6 +104,106 @@ def get_active_conversation_id(cli_arg: str | None = None) -> str | None:
     return None
 
 
+# taskgo owns its control repository commits and bypasses local hooks with
+# --no-verify, so it enforces the workspace commit standard (Conventional
+# Commits plus a 50-character subject limit) on its own output instead.
+COMMIT_TYPES = (
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "feat",
+    "fix",
+    "perf",
+    "refactor",
+    "revert",
+    "style",
+    "test",
+)
+SUBJECT_MAX_LEN = 50
+CONVENTIONAL_SUBJECT_RE = re.compile(
+    r"^(?P<type>"
+    + "|".join(COMMIT_TYPES)
+    + r")(?P<scope>\([^()]*\))?(?P<bang>!?): (?P<desc>.+)$"
+)
+
+
+def _truncate_subject_desc(text: str, budget: int) -> str:
+    """Truncate text to budget characters at a word boundary, with ellipsis."""
+    if budget <= 3:
+        return text[:budget]
+    cut = text[: budget - 3].rstrip()
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")].rstrip()
+    return f"{cut}..."
+
+
+def conventional_subject(desc: str, project_name: str | None) -> str:
+    """Build a conforming 'chore' subject for an auto-generated commit."""
+    scope = ""
+    if project_name:
+        scope = re.sub(r"[^a-z0-9-]+", "-", project_name.lower()).strip("-")
+    candidates = []
+    if scope:
+        candidates.append(f"chore({scope}): {desc}")
+    candidates.append(f"chore: {desc}")
+    for subject in candidates:
+        if len(subject) <= SUBJECT_MAX_LEN:
+            return subject
+    budget = SUBJECT_MAX_LEN - len("chore: ")
+    return f"chore: {_truncate_subject_desc(desc, budget)}"
+
+
+def ensure_conventional_subject(subject: str, project_name: str | None) -> str:
+    """Rewrite a nonconforming commit subject into Conventional Commits form.
+
+    Deterministic and boring: conforming subjects pass through untouched
+    apart from lowercased type/scope; anything else becomes
+    chore(<project>): <subject>, truncated to the 50-character limit.
+    Prints a [WARN] whenever rewriting occurs so agents can adjust.
+    """
+    original = subject.strip()
+    if not original:
+        die("commit subject must not be empty")
+    match = CONVENTIONAL_SUBJECT_RE.match(original)
+    if match:
+        rebuilt = "{}{}{}: {}".format(
+            match.group("type").lower(),
+            match.group("scope") or "",
+            match.group("bang"),
+            match.group("desc").strip(),
+        )
+        prefix_len = len(rebuilt) - len(match.group("desc"))
+        if len(rebuilt) > SUBJECT_MAX_LEN:
+            truncated = rebuilt[:prefix_len] + _truncate_subject_desc(
+                match.group("desc"), SUBJECT_MAX_LEN - prefix_len
+            )
+            print(
+                f"[WARN]  Truncated over-long commit subject (> {SUBJECT_MAX_LEN}):\n"
+                f"[WARN]    {original}\n"
+                f"[WARN]    -> {truncated}",
+                file=sys.stderr,
+            )
+            return truncated
+        if rebuilt != original:
+            print(f"[WARN]  Normalized commit subject case: {rebuilt}", file=sys.stderr)
+        return rebuilt
+    # Legacy 'project: subject' and 'project/TASK-ID: subject' prefixes carry
+    # no Conventional Commits meaning; the token becomes redundant once the
+    # project name is used as the scope, so drop it.
+    stripped = re.match(r"^[A-Za-z0-9._/-]+:[ \t]+(.+)$", original)
+    desc = (stripped.group(1).strip() if stripped else original) or original
+    new = conventional_subject(desc, project_name)
+    print(
+        "[WARN]  Rewrote nonconforming commit subject"
+        " (expected 'type(scope): description'):\n"
+        f"[WARN]    {original}\n"
+        f"[WARN]    -> {new}",
+        file=sys.stderr,
+    )
+    return new
+
+
 def reformat_frontmatter(text: str) -> str:
     """Reflows YAML frontmatter scalars to WRAP_WIDTH using ruamel.yaml."""
     m = re.search(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
@@ -1390,20 +1490,9 @@ def cmd_create(
 
     run_git(["add", "--", *to_stage])
 
-    # Craft commit subject <= 50 chars
-    prefix = f"{project_name}: create {task_id}"
-    remaining = 50 - len(prefix) - 3  # for " ()"
-    if remaining > 5 and len(title) > remaining:
-        short_title = title[: remaining - 3].rstrip() + "..."
-        subject = f"{prefix} ({short_title})"
-    elif remaining > 5:
-        subject = f"{prefix} ({title})"
-    else:
-        subject = prefix
+    subject = conventional_subject(f"create {task_id}", project_name)
 
-    msg_lines = [subject]
-    if subject != f"{prefix} ({title})":
-        msg_lines.extend(["", title])
+    msg_lines = [subject, "", title]
     if conv_id:
         msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
     commit_msg = "\n".join(msg_lines) + "\n"
@@ -1853,12 +1942,7 @@ def cmd_fix(
         return
 
     run_git(["add", "--", *modified_files])
-    if project:
-        commit_msg = f"chore({project}): fix metadata and status\n"
-        if len(commit_msg.strip()) > 50:
-            commit_msg = f"{project}: fix metadata and status\n"
-    else:
-        commit_msg = "chore: fix task metadata and status\n"
+    commit_msg = conventional_subject("fix metadata and status", project) + "\n"
     run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
     commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
 
@@ -2042,6 +2126,7 @@ def cmd_checkpoint(
             if sf and sf not in requested:
                 die(f"checkpoint: refused staged path: {sf}")
 
+        subject = ensure_conventional_subject(subject, project_name)
         msg_lines = [subject]
         if body:
             msg_lines.extend(["", body])
@@ -2109,6 +2194,8 @@ def cmd_commit(
         if sync_status(root, project_name):
             run_git(["add", f"{project_name}/STATUS.md"])
 
+    project_for_scope = next(iter(projects)) if projects else None
+    subject = ensure_conventional_subject(subject, project_for_scope)
     msg_lines = [subject]
     if body:
         msg_lines.extend(["", body])
@@ -2436,14 +2523,22 @@ than a few words.""",
     p_checkpoint = subparsers.add_parser(
         "checkpoint",
         help="Commit an authorized tracker checkpoint for TASK_ID",
-        description="Commit an authorized tracker checkpoint for TASK_ID.",
+        description=(
+            "Commit an authorized tracker checkpoint for TASK_ID. Nonconforming"
+            " subjects are rewritten as 'chore(<project>): <subject>'"
+            " (truncated to 50 characters)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  taskgo checkpoint TASK-3A91F "proj: start diagnosis" --all
-  taskgo checkpoint TASK-3A91F "proj: update task" --path proj/tasks/TASK-3A91F-slug.md """,
+  taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
+  taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md """,
     )
     p_checkpoint.add_argument("task_id", metavar="TASK_ID", help="Target task ID")
-    p_checkpoint.add_argument("subject", metavar="SUBJECT", help="Commit subject line")
+    p_checkpoint.add_argument(
+        "subject",
+        metavar="SUBJECT",
+        help="Conventional Commits subject line (rewritten when nonconforming)",
+    )
     p_checkpoint.add_argument(
         "--all",
         "-a",
@@ -2484,7 +2579,11 @@ than a few words.""",
         description="Commit a logical transition with automatic project status synchronization.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_commit.add_argument("subject", metavar="SUBJECT", help="Commit subject line")
+    p_commit.add_argument(
+        "subject",
+        metavar="SUBJECT",
+        help="Conventional Commits subject line (rewritten when nonconforming)",
+    )
     p_commit.add_argument("--body", "-b", default="", help="Commit body")
     p_commit.add_argument(
         "--ref",

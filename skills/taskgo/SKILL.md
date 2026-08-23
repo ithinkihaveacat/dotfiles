@@ -277,7 +277,9 @@ After meaningful work:
    review.
 1. Commit a coherent transition when practical. Use `checkpoint` with `--conv`
    when standing authority is present. Subject = what became true, not what file
-   changed.
+   changed. Subjects follow the workspace commit standard (Conventional Commits,
+   `type(scope): description`, at most 50 characters); nonconforming subjects
+   are rewritten deterministically with a `[WARN]`.
 
 Before leaving or completing a task (especially when marking a task `done`),
 double-check that the project is left in a strict **handoff-ready** state. A
@@ -298,9 +300,9 @@ artifacts (including code repos) must reflect this state. Ensure that:
 Examples:
 
 ```text
-home-automation/TASK-3A91F: rule out coordinator firmware
-home-automation/TASK-3A91F: block testing pending replacement router
-compiler: defer parser migration until v3
+chore(home-automation): rule out firmware risk
+chore(home-automation): block firmware testing
+chore(compiler): defer parser migration until v3
 ```
 
 Use commit bodies for useful reasoning not recoverable from state/diff. Add
@@ -439,7 +441,10 @@ changed files in the same project, such as `PLAN.md`. It refuses unlisted
 changes in that project with actionable `--path` hints, and never stages files
 outside it. Unrelated changes elsewhere in the control repo remain unstaged. The
 command validates the project before making one local commit and does not
-contact a remote.
+contact a remote. Both `checkpoint` and `commit` enforce the workspace commit
+standard on their subjects: nonconforming subjects are rewritten to
+`chore(<project>): <subject>` (truncated to 50 characters) with a `[WARN]`, so
+unattended runs never fail on formatting.
 
 ## Concurrency
 
