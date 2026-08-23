@@ -1,8 +1,10 @@
 # .dotfiles
 
 Public dotfiles for [fish](https://fishshell.com/), [git](https://git-scm.com/),
-[jed](https://www.jedsoft.org/jed/), [VS Code](https://code.visualstudio.com/),
-and various other tools.
+[jed](https://www.jedsoft.org/jed/), and
+[VS Code](https://code.visualstudio.com/) — plus a large collection of
+[agent skills](#agent-skills) and command-line tools for AI-assisted development
+with agents such as Claude Code, Codex, and Gemini CLI.
 
 ## Repository layout
 
@@ -16,7 +18,9 @@ and various other tools.
 │   └── functions/       # Fish functions (autoloaded)
 ├── home/                # Dotfiles symlinked into $HOME by install.sh
 ├── etc/                 # Tool-specific config (git templates, VS Code, etc.)
-├── skills/              # Agent skill definitions
+├── skills/              # Agent skills (see Agent skills below)
+├── config/              # Plugins for the skill and permission tools
+├── docker/              # Dockerfile + notes for building an image from this repo
 ├── tests/               # TAP tests for bin/ scripts
 └── install.sh           # Idempotent install/update script
 ```
@@ -26,6 +30,55 @@ tool-specific config. It is safe to run multiple times, and doubles as the
 updater: an existing checkout is fast-forwarded before applying. It can be run
 locally (`./install.sh`) or piped straight from the network (see
 [Installation](#installation)).
+
+## Agent skills
+
+The [`skills/`](skills/) directory contains
+[Agent Skills](https://agentskills.io): folders with a `SKILL.md` (metadata and
+instructions) plus supporting scripts and references that teach AI coding agents
+how to perform specific tasks — driving Android devices over adb, inspecting
+APKs, managing emulators, looking up current AndroidX library facts, enforcing
+coding standards, planning award flights, and more.
+
+### Key skills
+
+| Skill                                          | Description                                                                                          |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [`adb`](skills/adb/)                           | ADB device automation with a Wear OS focus: screenshots, screen recording, tiles, dumpsys, logcat    |
+| [`agent-tools`](skills/agent-tools/)           | CLI tools delegating analysis to AI models: image description, screenshot diffing, deep research     |
+| [`apk`](skills/apk/)                           | Offline APK binary analysis: manifests, resources, launcher icons, split APKs                        |
+| [`coding-standards`](skills/coding-standards/) | This repo's coding standards: shell/Python/Markdown formatting, CLI design, commit message style     |
+| [`emumanager`](skills/emumanager/)             | Android SDK bootstrap plus AVD/emulator management (mobile, Wear OS, TV, Automotive)                 |
+| [`jetpack`](skills/jetpack/)                   | Current AndroidX/Jetpack facts that are wrong from memory: versions, Maven coordinates, dependencies |
+
+More specialised skills: [`android-testing`](skills/android-testing/) (system
+state and connectivity testing on phone and Wear OS),
+[`wear-widget`](skills/wear-widget/) (reverse-engineering widgets), and
+[`workspace-config`](skills/workspace-config/) (skill selection and agent tool
+permissions). Personal-workflow skills live here too:
+[`agent-review`](skills/agent-review/), [`taskgo`](skills/taskgo/),
+[`technical-writing`](skills/technical-writing/), and
+[`travel`](skills/travel/).
+
+### Installing skills into a workspace
+
+Skills are intentionally **not** installed globally — every project seeing every
+skill would be noise. Instead, the bundled `skill` command manages them per
+workspace as untracked symlinks in `.claude/skills/` or `.agents/skills/`,
+auto-detecting which agent is installed:
+
+```sh
+skill apply       # sync workspace symlinks with AGENT_REQUIRED_SKILLS
+skill add jetpack # add one skill by name
+skill list        # what's active in this workspace
+```
+
+Skill names resolve against `skills/` in this repo and its `.private`/`.corp`
+overlays (later layers shadow by name); plugins in `config/skill/plugins/`
+register additional remote skills from third-party catalogs. Projects declare
+the skills they require via direnv (`skills NAME …` in `.envrc`, maintained by
+`envrc add skills NAME`), and `skill preflight` verifies them before an agent is
+launched.
 
 ## Overlays
 
@@ -70,18 +123,18 @@ the last overlay to provide a given filename wins.
 
 ### Overlay-aware paths
 
-| Path                         | Mechanism                           | Notes                                                                                                 |
-| ---------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `home/.*`                    | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                        |
-| `etc/agents/AGENTS.md`       | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` (gated on their respective binaries)             |
-| `etc/shpool/config.toml`     | `link_overlay_path`                 |                                                                                                       |
-| `etc/starship/starship.toml` | `link_overlay_path`                 |                                                                                                       |
-| `etc/ghostty/config`         | `link_overlay_path`                 |                                                                                                       |
-| `etc/bat/config`             | `link_overlay_path`                 |                                                                                                       |
-| `etc/code/`                  | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                                     |
-| `etc/macos/KeyBindings`      | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                              |
-| `etc/macos/Solarized.clr`    | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                         |
-| `skills/*/`                  | all overlays                        | Each skill dir linked into `~/.agents/skills/` and `~/.claude/skills/`; later overlays shadow by name |
+| Path                         | Mechanism                           | Notes                                                                                                      |
+| ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `home/.*`                    | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                             |
+| `etc/agents/AGENTS.md`       | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` (gated on their respective binaries)                  |
+| `etc/shpool/config.toml`     | `link_overlay_path`                 |                                                                                                            |
+| `etc/starship/starship.toml` | `link_overlay_path`                 |                                                                                                            |
+| `etc/ghostty/config`         | `link_overlay_path`                 |                                                                                                            |
+| `etc/bat/config`             | `link_overlay_path`                 |                                                                                                            |
+| `etc/code/`                  | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                                          |
+| `etc/macos/KeyBindings`      | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                                   |
+| `etc/macos/Solarized.clr`    | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                              |
+| `skills/*/`                  | `skill` catalog source              | Not linked globally; added per workspace via `skill add`/`skill apply` (see [Agent skills](#agent-skills)) |
 
 ### Per-overlay `update` hooks
 
@@ -357,6 +410,24 @@ Once complete, proceed to [Installation](#installation).
 ## Local binaries
 
 Put manually installed binaries in `~/.local/bin`.
+
+## Testing and CI
+
+Scripts are tested with TAP-format tests run via `prove`. Tests are co-located
+with the code they cover: `tests/test-*` for `bin/` scripts and
+`skills/*/tests/test-*` for skill scripts. Run them with:
+
+```sh
+prove -j 9 tests/test-* skills/*/tests/test-*
+```
+
+See [tests/README.md](tests/README.md) for details, including how to run tests
+offline and in isolated environments.
+
+A GitHub Actions workflow (`.github/workflows/lint.yml`) runs on every push:
+`shellcheck` and `shfmt` over all Bash scripts (`bin/`, `skills/*/scripts/`,
+`install.sh`), `ruff` via `skills/coding-standards/scripts/python-format` over
+all Python scripts, plus the full test suite.
 
 ## Author
 
