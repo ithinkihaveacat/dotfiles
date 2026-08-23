@@ -119,8 +119,19 @@ repo. Use random IDs, not a counter:
 
 ```bash
 <skill-dir>/scripts/taskgo id
-<skill-dir>/scripts/taskgo create PROJECT "Diagnose intermittent disconnects"
+<skill-dir>/scripts/taskgo create PROJECT "Diagnose intermittent disconnects" --slug disconnects
 ```
+
+Task files are named `TASK-XXXXX-<slug>.md`. The slug is a filename mnemonic,
+not the title: `create` derives one from `TITLE` when `--slug` is omitted, but a
+derived slug keeps the *leading* words of the title, which are rarely the
+distinguishing ones ("Generate readable task filename slugs with clean length
+limits" derives `generate-readable-task-filename`, where `filename-slugs` is
+wanted). Pass `--slug` (at most 32 characters after normalization) whenever the
+title runs longer than a few words; `create` warns when it had to shorten a
+derived slug. Nothing resolves tasks by filename — IDs and titles carry that —
+so slugs exist purely for humans reading `tasks/`, `git log`, and fuzzy finders.
+Rename an existing task file with `update --slug`.
 
 Preferred states: `todo`, `in-progress`, `blocked`, `done`, `cancelled`.
 Unknown/missing values remain readable but should be reported.
@@ -308,8 +319,8 @@ working directory. In the command list below, `taskgo` refers to either the
 ```text
 taskgo id
 taskgo root
-taskgo create PROJECT TITLE [--conv ID] [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
+taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo status [PROJECT] [--json]
 taskgo sync [PROJECT]
@@ -323,8 +334,13 @@ taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 `create` is the atomic task creation command: it allocates a unique ID, writes
 the initial task record, synchronizes `STATUS.md`, and when the
 `taskgo:allow-local-commits` marker is present, commits the transition
-automatically. Use `--no-commit` to keep the created task uncommitted in the
-working tree, or `--dry-run` to preview the task path without creating files.
+automatically. Use `--slug` to name the task file (see "Tasks" above),
+`--no-commit` to keep the created task uncommitted in the working tree, or
+`--dry-run` to preview the task path without creating files.
+
+`update --slug` renames the task file in place, keeping its ID prefix. The
+rename is left uncommitted (as with every other `update` edit); commit it with
+`checkpoint --all`, which stages both the old and new paths.
 
 `history` compares a frontmatter field (default `status`) across historical
 blobs. `doctor` performs strictly read-only mechanical checks and prints a

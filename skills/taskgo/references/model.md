@@ -86,8 +86,10 @@ Commands follow the fixed `tool [verb] [noun]` structure with clean,
 unhyphenated verbs:
 
 - `taskgo id`: Allocate unique `TASK-XXXXX` identifier.
-- `taskgo create PROJECT TITLE [--status STATE] [--no-commit] [--dry-run]`:
-  Create a structured task record.
+- `taskgo create PROJECT TITLE [--slug SLUG] [--status STATE] [--no-commit] [--dry-run]`:
+  Create a structured task record. `--slug` names the file
+  (`TASK-XXXXX-<slug>.md`); when omitted, the slug is derived from `TITLE` and
+  shortened at word boundaries to 32 characters, with a warning.
 - `taskgo list [PROJECT] [--state STATE] [--json]`: List tasks in tabular or
   JSON format.
 - `taskgo status [PROJECT] [--json]`: Display operational status or

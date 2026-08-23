@@ -35,6 +35,7 @@ CANONICAL_URL = "https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/
 COMMIT_AUTH = "<!-- taskgo:allow-local-commits -->"
 ID_PATTERN = re.compile(r"^TASK-[0-9A-F]{5}$")
 WRAP_WIDTH = 80
+SLUG_MAX_LEN = 32
 
 
 class TaskStatus(StrEnum):
@@ -426,12 +427,39 @@ def extract_title(content: str) -> str:
     return ""
 
 
-def slugify(title: str) -> str:
-    s = title.lower()
+def normalize_slug(value: str) -> str:
+    """Normalizes VALUE into slug form (lowercase, hyphen-separated, no truncation)."""
+    s = value.lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = s.strip("-")
     s = re.sub(r"-+", "-", s)
-    return s[:48]
+    return s.strip("-")
+
+
+def slugify(title: str, max_len: int = SLUG_MAX_LEN) -> str:
+    """Derives a filename slug from TITLE, truncated at word boundaries."""
+    s = normalize_slug(title)
+    if len(s) <= max_len:
+        return s
+    words = s.split("-")
+    kept: list[str] = []
+    length = 0
+    for word in words:
+        extra = len(word) if not kept else len(word) + 1
+        if length + extra > max_len:
+            break
+        kept.append(word)
+        length += extra
+    if not kept:
+        # A single leading word exceeds the budget; hard-cut it rather than
+        # return nothing.
+        return words[0][:max_len]
+    return "-".join(kept)
+
+
+def filename_slug(name: str) -> str:
+    """Extracts the slug of an already taskgo-named file (empty when not one)."""
+    m = re.match(r"^TASK-[0-9A-F]{5}-(.+)$", name.removesuffix(".md"))
+    return normalize_slug(m.group(1)) if m else ""
 
 
 def normalize_status(raw_status: str) -> str:
@@ -895,7 +923,15 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             except Exception:
                                 pass
                             atomic_write(target_tf, new_content)
-                            slug = slugify(t_title) or "task"
+                            # Preserve a caller-chosen slug when the file is
+                            # already taskgo-named: only its ID prefix is
+                            # being repaired. Files adopted from other names
+                            # still get a slug derived from their title.
+                            slug = (
+                                filename_slug(target_tf.name)
+                                or slugify(t_title)
+                                or "task"
+                            )
                             new_name = f"{t_id}-{slug}.md"
                             new_path = p_tasks / new_name
                             if target_tf.name != new_name:
@@ -1199,6 +1235,7 @@ def render_task_file(
 def cmd_create(
     project_name: str,
     title: str,
+    slug: str | None = None,
     status: str = "todo",
     problem: str | None = None,
     goal: str | None = None,
@@ -1224,6 +1261,32 @@ def cmd_create(
             f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
         )
 
+    if slug is not None:
+        task_slug = normalize_slug(slug)
+        if not task_slug:
+            die_scoped(f"--slug contains no usable characters: {slug}")
+        if len(task_slug) > SLUG_MAX_LEN:
+            die_scoped(
+                f"--slug too long ({len(task_slug)} > {SLUG_MAX_LEN} chars): {task_slug}"
+            )
+    else:
+        full_slug = normalize_slug(title)
+        task_slug = slugify(title) or "task"
+        if not full_slug or len(full_slug) > SLUG_MAX_LEN:
+            reason = (
+                "Title yields no usable filename slug"
+                if not full_slug
+                else "Title too long for a filename"
+            )
+            print(
+                f"[WARN]  {reason}; using '{task_slug}'.",
+                file=sys.stderr,
+            )
+            print(
+                f"[WARN]    Pass --slug SLUG (<= {SLUG_MAX_LEN} chars) to choose a better filename.",
+                file=sys.stderr,
+            )
+
     status = normalize_status(status)
     conv_id = get_active_conversation_id(conv)
     root = get_repo_root()
@@ -1234,8 +1297,7 @@ def cmd_create(
         )
 
     task_id = generate_task_id(root)
-    slug = slugify(title) or "task"
-    filename = f"{task_id}-{slug}.md"
+    filename = f"{task_id}-{task_slug}.md"
     rel_task_path = f"{project_name}/tasks/{filename}"
     is_new_project = not is_project_dir(proj_dir)
 
@@ -1355,6 +1417,7 @@ def cmd_update(
     query: str,
     status: str | None = None,
     title: str | None = None,
+    slug: str | None = None,
     problem: str | None = None,
     goal: str | None = None,
     criteria: str | None = None,
@@ -1366,6 +1429,16 @@ def cmd_update(
     conv: str | None = None,
 ) -> None:
     """Update task fields, status, or headings."""
+    new_slug: str | None = None
+    if slug is not None:
+        new_slug = normalize_slug(slug)
+        if not new_slug:
+            die_scoped(f"--slug contains no usable characters: {slug}")
+        if len(new_slug) > SLUG_MAX_LEN:
+            die_scoped(
+                f"--slug too long ({len(new_slug)} > {SLUG_MAX_LEN} chars): {new_slug}"
+            )
+
     root = get_repo_root()
     target_path = resolve_target(root, query)
     rel_path = str(target_path.relative_to(root))
@@ -1471,10 +1544,25 @@ def cmd_update(
         pass
     atomic_write(target_path, new_content)
 
-    sync_status(root, project_name)
     task_id_val = next(
         (str(v) for k, v in data.items() if str(k).lower() == "id"), query
     )
+
+    if new_slug is not None:
+        prefix = task_id_val if ID_PATTERN.match(task_id_val) else ""
+        new_name = f"{prefix}-{new_slug}.md" if prefix else f"{new_slug}.md"
+        new_path = target_path.with_name(new_name)
+        if new_path != target_path:
+            if new_path.exists():
+                die_scoped(f"cannot rename {rel_path}: {new_name} already exists")
+            target_path.rename(new_path)
+            print(
+                f"[INFO]  Renamed {rel_path} -> {new_path.relative_to(root)}",
+                file=sys.stderr,
+            )
+            rel_path = str(new_path.relative_to(root))
+
+    sync_status(root, project_name)
     print(f"[INFO]  Updated {task_id_val} in {rel_path}", file=sys.stderr)
 
 
@@ -2047,7 +2135,7 @@ Maintain a private Git-backed personal project/task control repo.
 Commands:
   id                               Allocate a unique task ID
   root                             Print the active control repository root
-  create PROJECT TITLE [OPTIONS]   Create a new task (--problem, --goal, etc.)
+  create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
   list [PROJECT] [OPTIONS]         List tasks
   status [PROJECT] [--json]        Show project status
@@ -2070,8 +2158,8 @@ Environment:
 
 Examples:
   taskgo id
-  taskgo create my-project "Diagnose intermittent disconnects"
-  taskgo create my-project "Add cache layer" --problem "High latency" --goal "Sub-10ms"
+  taskgo create my-project "Diagnose intermittent disconnects" --slug disconnects
+  taskgo create my-project "Add cache layer" --slug cache-layer --problem "High latency"
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
   taskgo sync my-project
   taskgo fix my-project
@@ -2130,12 +2218,24 @@ def create_parser() -> argparse.ArgumentParser:
         description="Create a new task in PROJECT.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  taskgo create my-project "Diagnose intermittent disconnects"
-  taskgo create my-project "Add cache layer" --problem "High latency" --goal "Sub-10ms"
-  taskgo create --status in-progress my-project "Initial implementation" """,
+  taskgo create my-project "Diagnose intermittent disconnects" --slug disconnects
+  taskgo create my-project "Add a read-through cache layer in front of the resolver" \\
+    --slug cache-layer --problem "High latency" --goal "Sub-10ms"
+  taskgo create --status in-progress my-project "Initial implementation" --slug initial-impl
+
+TITLE is prose for humans (it becomes the H1 and appears in STATUS.md); SLUG is
+the filename mnemonic. A slug derived from a long TITLE keeps the leading words,
+which are rarely the distinguishing ones, so pass --slug whenever TITLE is longer
+than a few words.""",
     )
     p_create.add_argument("project_name", metavar="PROJECT", help="Project identifier")
     p_create.add_argument("title", metavar="TITLE", help="Task title")
+    p_create.add_argument(
+        "--slug",
+        default=None,
+        metavar="SLUG",
+        help=f"Filename mnemonic, max {SLUG_MAX_LEN} chars (default: derived from TITLE)",
+    )
     p_create.add_argument(
         "--status",
         "-s",
@@ -2182,6 +2282,12 @@ def create_parser() -> argparse.ArgumentParser:
     p_update.add_argument("query", metavar="TASK_ID", help="Task ID or relative path")
     p_update.add_argument("--status", "-s", default=None, help="New task state")
     p_update.add_argument("--title", "-t", default=None, help="New task title")
+    p_update.add_argument(
+        "--slug",
+        default=None,
+        metavar="SLUG",
+        help=f"Rename the task file's slug, max {SLUG_MAX_LEN} chars",
+    )
     p_update.add_argument("--problem", "-p", default=None, help="Problem description")
     p_update.add_argument("--goal", "-g", default=None, help="Goal description")
     p_update.add_argument(
@@ -2423,6 +2529,7 @@ def main(argv: list[str] | None = None) -> None:
         cmd_create(
             project_name=args.project_name,
             title=args.title,
+            slug=args.slug,
             status=args.status,
             problem=args.problem,
             goal=args.goal,
@@ -2441,6 +2548,7 @@ def main(argv: list[str] | None = None) -> None:
             query=args.query,
             status=args.status,
             title=args.title,
+            slug=args.slug,
             problem=args.problem,
             goal=args.goal,
             criteria=args.criteria,

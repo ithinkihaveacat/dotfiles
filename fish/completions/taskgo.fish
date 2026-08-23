@@ -51,6 +51,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from create list status sync do
 complete -f -c taskgo -n '__fish_seen_subcommand_from history checkpoint' -a '(__fish_taskgo_tasks)' -d 'Task ID'
 
 # create options
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l slug -x -d 'Filename mnemonic (max 32 chars)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l status -x -a 'todo in-progress blocked done cancelled' -d 'Initial state'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l no-commit -d 'Create task and sync without committing'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l dry-run -d 'Preview task path without creating files'
