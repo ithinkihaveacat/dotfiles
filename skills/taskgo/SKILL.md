@@ -330,50 +330,59 @@ brief:
 
 #### Payload Construction
 
-The exported brief must be entirely self-contained and copy-and-pasteable:
+The exported brief must be entirely self-contained, portable, and
+copy-and-pasteable. Construct it using the following rules:
 
-1. **Self-Contained Context:** Embed the Title, Problem, Goal, Constraints, and
-   observable Acceptance Criteria directly from the task record.
+1. **Strict Path Portability:** Use strictly repository-relative paths (e.g.
+   `src/parser.py`, `tests/test-parser`). Never output absolute host paths
+   (`/Users/...`), home directory expansions (`~/...`), or `file:///` URLs.
+   These break portability across isolated environments and leak host telemetry.
+1. **Component Orientation:** Synthesize a concise 1–2 sentence overview of the
+   target file(s) or subsystem explaining its role in the artifact codebase.
+1. **Core Specification & Implementer Latitude:** Embed the Title, Problem,
+   Goal, Constraints, and observable Acceptance Criteria directly from the task
+   record. Explicitly state that the implementer possesses the autonomy to adapt
+   to current codebase reality (e.g. resolving moved files, refining outdated
+   sketches, or correcting minor instruction inaccuracies) provided the core
+   goal and acceptance criteria are satisfied.
 1. **Inlined Dependencies:** Resolve and inline all referenced ADRs
    (`decisions/`), design guides (`references/`), or project conventions
    (`README.md`). Strip all tracker-relative Markdown links (e.g.
    `[ADR-001](../decisions/001.md)`) and replace them with raw text to prevent
-   dangling references in the isolated environment.
-1. **Secrets and Credentials Handling:** If the task requires specific secrets,
-   API keys, or credentials to access necessary systems or fixtures, default to
-   inlining them into the exported brief. When inlining sensitive secrets, emit
-   a clear warning so the user can verify or redact them if necessary.
+   dangling references.
+1. **Secrets and Credentials:** If the task requires specific secrets or API
+   keys to access necessary systems, inline them into the exported brief. Emit a
+   clear warning in your chat response so the user can verify or redact
+   sensitive data.
 1. **Deterministic Verification:** Specify the exact local commands (tests,
-   linters, builds) the worker must run to verify completion, including the
-   expected exit states or terminal output.
+   linters, builds) the worker must run to verify completion, including expected
+   terminal output.
 
 #### Handoff & Reconciliation Protocol
 
-Append these operational instructions to the brief to dictate how the isolated
-worker must execute and report back:
+Append the following operational instructions to the bottom of the brief to
+govern how the isolated worker must execute and report back:
 
 1. **Opaque Task ID Preservation:** State the `TASK-XXXXX` identifier clearly.
    Instruct the worker that this ID is an opaque routing key that must be
    preserved verbatim.
-1. **Semantic Commits with Trailers:** Instruct the worker to write standard
-   semantic commit messages conforming to the target repository's conventions.
-   The worker must append the Task ID as a Git trailer (e.g.
-   `Resolves TASK-XXXXX` or `Task: TASK-XXXXX`) to permanently link the work in
-   public Git history.
-1. **Out-of-Band Reporting:** Instruct the worker to report back in the chat
+1. **Commit & Branch Conventions:** Suggest an isolated feature branch (e.g.
+   `<agent>/<task-id>-<slug>`). Instruct the worker to write standard semantic
+   commits appending the Task ID as a Git trailer (e.g. `Resolves: TASK-XXXXX`
+   or `Task: TASK-XXXXX`) to link the work in Git history.
+1. **Out-of-Band Reporting:** Instruct the worker to report back in its chat
    response upon completion (or if permanently blocked) with:
    - The verbatim Task ID.
-   - The location where changes were made (e.g. branch name, PR URL, or commit
+   - The location where changes were made (branch name, PR URL, or commit
      hashes).
    - Its active conversation ID, session record, or link (e.g.
      `conversation://<conversation-id>`), if available.
-   - Key technical findings, unexpected behavior, or architectural trade-offs
-     made during implementation.
+   - Key technical findings or architectural trade-offs made during
+     implementation.
 1. **Strict Data Segregation:** Explicitly warn the worker: The Task ID belongs
    in public commit trailers; branch/PR references, conversation links, session
    telemetry, and internal reasoning belong strictly in the out-of-band chat
-   response. Private session telemetry must never leak into public artifact
-   commits.
+   response. Private session telemetry must never leak into artifact commits.
 
 ## CLI
 
