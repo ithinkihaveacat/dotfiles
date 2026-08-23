@@ -192,7 +192,7 @@ set -x UV_PYTHON_PREFERENCE managed
 
 # Default required skills for agent CLI preflight checks
 if not set -q AGENT_REQUIRED_SKILLS
-    set -gx AGENT_REQUIRED_SKILLS agent-tools coding-standards workspace-config technical-writing
+    set -gx AGENT_REQUIRED_SKILLS agent-tools coding-standards workspace-config technical-writing taskgo
 end
 
 _load_overlay $HOME/.private
