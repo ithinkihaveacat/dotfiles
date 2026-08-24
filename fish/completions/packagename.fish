@@ -1,23 +1,29 @@
 # Fish completion script for packagename
 
+# Return the subcommand while skipping the global serial option and its value.
+function __fish_packagename_command
+    set -l tokens (commandline -opc)
+    set -e tokens[1]
+
+    while test (count $tokens) -gt 0
+        switch $tokens[1]
+            case -s --serial
+                set -e tokens[1..2]
+            case '*'
+                echo $tokens[1]
+                return 0
+        end
+    end
+end
+
 # Helper function: check if we need a command
 function __fish_packagename_needs_command
-    set -l cmd (commandline -opc)
-    if test (count $cmd) -eq 1
-        return 0
-    end
-    return 1
+    test -z (__fish_packagename_command)
 end
 
 # Helper function: check if using specific command
 function __fish_packagename_using_command
-    set -l cmd (commandline -opc)
-    if test (count $cmd) -gt 1
-        if test $argv[1] = $cmd[2]
-            return 0
-        end
-    end
-    return 1
+    test "$argv[1]" = (__fish_packagename_command)
 end
 
 # Helper function: get list of installed packages
