@@ -8,6 +8,12 @@
 > comments out. **Be sure to inspect and edit this template in raw source mode**
 > so you do not miss critical audit guidance.
 
+> [!NOTE] **Reporting Architecture: Service-First Grouping** The primary
+> grouping and sorting hierarchy for this audit is strictly by **individual
+> Service component**. Do not group by artifact type. Each service subsection
+> must self-contain its manifest declaration, provider XML, static previews, and
+> live captures.
+
 <!-- GUIDANCE: 
   This template is a structured guide and adaptable baseline for Wear OS tile and widget integration audits. 
   It is NOT a rigid straitjacket—feel free to adapt, expand, rearrange, or modify sections where appropriate to accurately capture the specific features, architecture, and bugs of the app under audit.

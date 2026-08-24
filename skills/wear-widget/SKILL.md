@@ -347,6 +347,10 @@ When synthesizing findings or preparing integration reports based on the
 workflows in this skill, adhere to the strict presentation formatting defined in
 the audit template.
 
+- **Service-First Architecture**: While extraction proceeds chronologically by
+  artifact type, the final report must be structured strictly by Service
+  component, consolidating all manifests, configurations, and media within each
+  service section.
 - **Formatted, Readable XML**: Always format and pretty-print XML manifest
   declarations (`<service>`), provider definitions (`<wearwidget-provider>`),
   and container layouts (`<container>`) with clean 4-space indentation and **one
