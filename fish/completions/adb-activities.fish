@@ -1,6 +1,7 @@
 # Fish completion for adb-activities
 
 complete -c adb-activities -f
+complete -c adb-activities -s s -l serial -r -d 'Target device serial'
 complete -c adb-activities -s h -l help -d "Display help message"
 complete -c adb-activities -l launcher-only -d "List only launcher activities"
 complete -c adb-activities -l home-only -d "List only home/launcher app activities"

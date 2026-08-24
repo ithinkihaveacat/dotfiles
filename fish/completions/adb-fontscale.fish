@@ -1,5 +1,6 @@
 # completions for adb-fontscale
 complete -c adb-fontscale -f
+complete -c adb-fontscale -s s -l serial -r -d 'Target device serial'
 
 complete -c adb-fontscale -n "not __fish_seen_subcommand_from get set" -a get -d "Print the current font scale"
 complete -c adb-fontscale -n "not __fish_seen_subcommand_from get set" -a set -d "Set the font scale"

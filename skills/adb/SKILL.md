@@ -35,8 +35,10 @@ them as reference when building similar functionality.
 
 ## Quick Start
 
-Target specific devices using the `ANDROID_SERIAL` environment variable if
-multiple devices are connected.
+When multiple devices are connected, pass `-s SERIAL` or `--serial SERIAL`
+before other arguments to any skill script except `adb-screenrecord`. The flag
+overrides `ANDROID_SERIAL`; the environment variable remains available for
+persistent or inherited device selection.
 
 ### Highest-Value Commands
 

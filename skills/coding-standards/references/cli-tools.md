@@ -280,7 +280,7 @@ The first argument must be a verb; the `[Instance]` may be omitted, as in
 <!-- generated: ../../../bin/packagename --help -->
 
 ```text
-Usage: packagename <command> [arguments]
+Usage: packagename [OPTIONS] <command> [arguments]
 
 Android package management utilities via adb.
 
@@ -316,13 +316,14 @@ Commands:
     settings             Open the settings page
 
 Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
   --help        Display this help message and exit
   --list        List available commands (names only)
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
-                  To target a specific device, use:
-                    env ANDROID_SERIAL=<serial> packagename <command> ...
+                  The --serial option takes precedence when both are set.
 
 Examples:
   packagename launch com.android.systemui

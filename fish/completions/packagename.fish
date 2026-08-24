@@ -28,6 +28,7 @@ end
 # Complete subcommands (when no subcommand given)
 # Process/Lifecycle
 complete -c packagename -f -n __fish_packagename_needs_command -a launch -d "Launch an application's main activity"
+complete -c packagename -s s -l serial -r -d 'Target device serial'
 complete -c packagename -f -n __fish_packagename_needs_command -a force-stop -d 'Force stop an application'
 complete -c packagename -f -n __fish_packagename_needs_command -a pid -d 'Get the process ID of a running package'
 complete -c packagename -f -n __fish_packagename_needs_command -a logcat -d "Display logcat filtered by package's PID"

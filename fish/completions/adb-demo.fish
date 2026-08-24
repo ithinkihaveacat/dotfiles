@@ -1,5 +1,6 @@
 # completions for adb-demo
 complete -c adb-demo -f
+complete -c adb-demo -s s -l serial -r -d 'Target device serial'
 
 complete -c adb-demo -n "not __fish_seen_subcommand_from on off" -a on -d "Enter demo mode"
 complete -c adb-demo -n "not __fish_seen_subcommand_from on off" -a off -d "Exit demo mode"
