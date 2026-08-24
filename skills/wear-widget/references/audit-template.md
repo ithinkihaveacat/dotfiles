@@ -127,8 +127,7 @@ ______________________________________________________________________
 #### APK Extraction & Manifest Declarations
 
 <!-- GUIDANCE: 
-  Display the exact code block as decompiled from AndroidManifest.xml. 
-  Do not simplify or generalize the XML—show the actual manifest attributes present in the APK.
+  Display the exact code block as decompiled from AndroidManifest.xml without simplifying attributes, but always pretty-print and format for readability (e.g. 4-space indentation and one attribute per line for multi-attribute tags). Never emit raw single-line XML. Syntax highlighting is not required—prioritize clean formatting and indentation over manual markup.
 -->
 
 ##### AndroidManifest.xml Service Declaration:
@@ -157,6 +156,7 @@ ______________________________________________________________________
   For Glance widgets or AppWidgets, show the exact decompiled XML configuration file from res/xml/. 
   Note the `group="..."` XML attribute if present—this links the Glance capsule widget to its companion full-screen ProtoLayout tile so system pickers group them under the same app accordion item.
   For ProtoLayout Tiles (which declare preview metadata inline in AndroidManifest.xml and do not have a separate res/xml file), note that preview declarations live directly on <meta-data android:name="androidx.wear.tiles.PREVIEW" ... />.
+  Format multi-attribute container tags cleanly with one attribute per line.
 -->
 
 ##### Provider XML Configuration (`res/xml/<info_file>.xml`):
@@ -170,7 +170,9 @@ ______________________________________________________________________
     icon="@drawable/ic_widget_icon" 
     label="@string/widget_label" 
     preferredType="SMALL">
-    <container previewImage="@drawable/widget_preview" type="SMALL" />
+    <container
+        type="SMALL"
+        previewImage="@drawable/widget_preview" />
 </wearwidget-provider>
 ```
 
