@@ -14,7 +14,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..19"
+echo "1..21"
 
 # ==============================================================================
 # Detection (structured JSON assertions)
@@ -458,4 +458,52 @@ else
   echo "not ok 19 - [Catalog Cache] failed to distinguish remote stubs from local paths: $rj"
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_test_catalog.py"
+cd "$TMPDIR"
+
+# Test 20: Symlink target normalization across symlinked parent directory does not report false mismatch.
+PARENT_SYM_DIR="${TMPDIR}/parent-sym-test"
+mkdir -p "${PARENT_SYM_DIR}/real_root/subdir/sym-target-skill"
+printf -- '---\nname: sym-target-skill\ndescription: Sym parent skill\n---\nbody\n' \
+  >"${PARENT_SYM_DIR}/real_root/subdir/sym-target-skill/SKILL.md"
+ln -s "${PARENT_SYM_DIR}/real_root/subdir" "${PARENT_SYM_DIR}/sym_root"
+
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/99_test_symparent.py"
+def register(api):
+    api.register_skill(
+        "jetski:sym-target-skill",
+        {"path": "${PARENT_SYM_DIR}/sym_root/sym-target-skill"}
+    )
+EOF
+
+cd "$PARENT_SYM_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+AGENT_REQUIRED_SKILLS="sym-target-skill" "${SCRIPT}" apply >/dev/null 2>&1
+sj=$(AGENT_REQUIRED_SKILLS="sym-target-skill" doctor_json)
+if [ "$(check_status "$sj" "Required Skills")" = "OK" ] &&
+  [ -z "$(json_get "$sj" 'd["plan"]["mismatched"]')" ] &&
+  [ "$(json_get "$sj" 'd["healthy"]')" = "true" ]; then
+  echo "ok 20 - [Mismatch] symlinked parent directory target normalizes cleanly without false mismatch"
+else
+  echo "not ok 20 - [Mismatch] false mismatch reported for symlinked parent target: $sj"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/99_test_symparent.py"
+export AGENT_REQUIRED_SKILLS=""
+cd "$TMPDIR"
+
+# Test 21: Mismatch reporting with duplicate root names (e.g. dir1/skills vs dir2/skills) renders distinct prefixes.
+DUP_ROOT_DIR="${TMPDIR}/dup-root-test"
+mkdir -p "${DUP_ROOT_DIR}/dir1/skills/dup-skill" "${DUP_ROOT_DIR}/dir2/skills/dup-skill"
+printf -- '---\nname: dup-skill\n---\n' >"${DUP_ROOT_DIR}/dir1/skills/dup-skill/SKILL.md"
+printf -- '---\nname: dup-skill\n---\n' >"${DUP_ROOT_DIR}/dir2/skills/dup-skill/SKILL.md"
+cd "$DUP_ROOT_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills
+SKILL_SOURCE_DIRS="${DUP_ROOT_DIR}/dir1/skills" AGENT_REQUIRED_SKILLS="dup-skill" "${SCRIPT}" apply >/dev/null 2>&1 || true
+dh=$(SKILL_SOURCE_DIRS="${DUP_ROOT_DIR}/dir1/skills:${DUP_ROOT_DIR}/dir2/skills" AGENT_REQUIRED_SKILLS="dup-skill" "${SCRIPT}" doctor 2>&1 || true)
+if [[ "$dh" == *"on disk as dir1/skills/dup-skill, in env as dir2/skills/dup-skill"* ]]; then
+  echo "ok 21 - [Mismatch] duplicate root names include parent directory for unambiguous reporting"
+else
+  echo "not ok 21 - [Mismatch] duplicate root names produced ambiguous report: $dh"
+fi
 cd "$TMPDIR"
