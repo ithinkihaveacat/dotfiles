@@ -1,6 +1,7 @@
 # Fish completion for adb-tiles
 
 complete -c adb-tiles -f
+complete -c adb-tiles -s s -l serial -r -d 'Target device serial'
 complete -c adb-tiles -s h -l help -d "Display help message"
 complete -c adb-tiles -l tiles-only -d "List only tile services"
 complete -c adb-tiles -l widgets-only -d "List only widget services"

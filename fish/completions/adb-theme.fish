@@ -1,5 +1,6 @@
 # completions for adb-theme
 complete -c adb-theme -f
+complete -c adb-theme -s s -l serial -r -d 'Target device serial'
 
 complete -c adb-theme -n "not __fish_seen_subcommand_from get set" -a get -d "Get the current theme configuration"
 complete -c adb-theme -n "not __fish_seen_subcommand_from get set" -a set -d "Set the theme to one of the presets"

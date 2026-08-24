@@ -47,7 +47,9 @@ empty. **Solution**:
 ### Multiple Devices Connected
 
 **Symptom**: `error: more than one device/emulator` **Solution**: Use the
-`ANDROID_SERIAL` environment variable to specify the target device.
+`-s SERIAL` or `--serial SERIAL` before other script arguments to select the
+target device. These options override the `ANDROID_SERIAL` environment variable,
+which remains supported for inherited device selection.
 
 1. List devices:
 
@@ -63,9 +65,12 @@ empty. **Solution**:
    1A2B3C4D               device product:pixel_6 model:Pixel_6 device:oriole
    ```
 
-1. Run script with variable:
+1. Select a device with the flag or environment variable:
 
    ```bash
+   scripts/adb-screenshot -s 1A2B3C4D
+
+   # Or select the device through the environment
    ANDROID_SERIAL=1A2B3C4D scripts/adb-screenshot
    ```
 
