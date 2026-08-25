@@ -66,8 +66,18 @@ timeout 30s find ./skills -name "zipline"
 rg --files ./skills | grep zipline
 ```
 
+## Mid-Task User Interruptions
+
+- **Interruption Invariant**: When the user interrupts an ongoing task or
+  intervenes to question active execution (e.g., *"what are you looking for?"*,
+  *"why are you running commands?"*, *"are you stuck?"*, *"what is the current
+  status?"*), you MUST respond directly from existing conversation context.
+  Execute **ZERO tool calls**. Do not run new investigations, directory
+  searches, or diagnostic probes before answering; reply immediately with your
+  current state and what you were attempting.
+
 ## Summary
 
-Treat available skills as your primary source of truth for workflows, and
-strictly apply bounded search constraints on all command executions to maintain
-system stability.
+Treat available skills as your primary source of truth for workflows, strictly
+apply bounded search constraints on all command executions, and halt tool calls
+immediately when interrupted by the user.
