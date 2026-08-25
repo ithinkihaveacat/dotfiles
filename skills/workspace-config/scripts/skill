@@ -20,11 +20,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING
 from urllib.parse import urlparse
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 
 def die(msg):
@@ -823,18 +819,9 @@ class SkillAPI:
         self.plugin_catalog = {}
         self.all_registrations = []
         self.load_failures = []
-        self.path_normalizers = []
 
     def register_workspace(self, cls):
         self.workspace_classes.append(cls)
-
-    def register_path_normalizer(self, fn: Callable[[Path], Path | None]) -> None:
-        """Register a callback to canonicalize symlink targets.
-
-        The callback takes an absolute Path and returns a normalized Path,
-        or None to fall through to the default normalization.
-        """
-        self.path_normalizers.append(fn)
 
     def register_skill(self, name, spec):
         if isinstance(spec, str):
@@ -1116,31 +1103,40 @@ class DiskEntry:
         self.tracked = tracked  # whether the link is VCS-tracked
 
 
-def norm_target(parent: Path, raw: str | Path) -> Path:
-    """Normalize a symlink target without dereferencing its final component.
+def is_target_match(
+    link_path: Path,
+    expected_target: Path,
+    actual_target: str | Path | None = None,
+) -> bool:
+    """Evaluate if an on-disk symlink matches the expected declared target.
 
-    readlink returns the literal stored string, so the same directory can
-    appear under different absolute prefixes (/var/... vs macOS's
-    /private/var/...) depending on how each link was created -- pure noise
-    that once made identical targets compare unequal. realpath() fixes that,
-    but used wholesale it would also collapse deliberate resolve:False
-    identities whose final component IS a symlink. Resolving only the parent
-    directory removes prefix indirection while keeping the leaf literal.
-
-    Allows registered plugins to intercept and rewrite virtual or ephemeral
-    filesystem paths (e.g. dynamic snapshots or virtual mounts) before standard
-    realpath expansion.
+    Uses a two-phase evaluation:
+    1. Lexical fast-path (intent equality): If the normalized paths are equal,
+       they match. This preserves resolve: False virtual/dynamic paths
+       (e.g. /google/src/head/depot/...) without realpath dereferencing.
+    2. Semantic fallback (physical identity): If literal strings differ, check
+       if they point to the exact same filesystem object via os.path.samefile()
+       to handle OS prefix aliasing (e.g. macOS /var vs /private/var).
     """
-    p = Path(os.path.abspath(parent / raw))
-    api = get_api()
-    for normalizer in getattr(api, "path_normalizers", []):
+    if actual_target is None:
         try:
-            result = normalizer(p)
-            if result is not None:
-                return Path(result)
-        except Exception:
-            pass
-    return Path(os.path.realpath(p.parent)) / p.name
+            actual_target = os.readlink(link_path)
+        except OSError:
+            return False
+
+    actual_p = Path(actual_target)
+    actual_abs = actual_p if actual_p.is_absolute() else (link_path.parent / actual_p)
+
+    # Phase 1: Lexical Fast-Path
+    if os.path.normpath(str(actual_abs)) == os.path.normpath(str(expected_target)):
+        return True
+
+    # Phase 2: Semantic Fallback (Physical Identity)
+    try:
+        return os.path.samefile(actual_abs, expected_target)
+    except OSError:
+        # Either path is dangling or inaccessible
+        return False
 
 
 class ReconcilePlan:
@@ -1298,7 +1294,7 @@ def resolve_reconcile_skill(spec: str) -> ResolvedSkill:
         src_path, _name = resolve_skill_spec(spec)
         return ResolvedSkill(
             spec=spec,
-            source_path=norm_target(Path.cwd(), src_path),
+            source_path=src_path,
             link_name=src_path.name,
         )
     except Exception as e:
@@ -1386,7 +1382,10 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
                 continue
             try:
                 target = os.readlink(p)
-                target_abs = norm_target(p.parent, target)
+                target_p = Path(target)
+                target_abs = (
+                    target_p if target_p.is_absolute() else (p.parent / target_p)
+                )
             except OSError:
                 target_abs = None
             # 'tracked' is only consulted for dangling entries (to keep
@@ -1412,10 +1411,18 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
     ]
 
     # Extra vs. negated classification, from the same disk scan.
+    def is_expected_live_entry(entry: DiskEntry) -> bool:
+        if entry.target is None:
+            return False
+        for r in resolved:
+            if r.resolved and is_target_match(entry.path, r.source_path, entry.target):
+                return True
+        return False
+
     extra: list = []
     negated_extra: list = []
     for e in disk_entries:
-        if e.kind != "live" or e.target is None or e.target in expected_targets:
+        if e.kind != "live" or e.target is None or is_expected_live_entry(e):
             continue
         s = e.link_name
         if s.lower() in negated_lower:
@@ -1445,16 +1452,21 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
                 if label not in missing:
                     missing.append(label)
             else:
-                target = os.readlink(p)
-                # norm_target keeps prefix indirection (macOS /tmp ->
-                # /private/tmp) from masquerading as a wrong-target mismatch
-                # while leaving resolve:False identities intact.
-                target_abs = norm_target(p.parent, target)
-                if target_abs != r.source_path:
+                if not is_target_match(p, r.source_path):
+                    try:
+                        target = os.readlink(p)
+                        target_p = Path(target)
+                        target_display = (
+                            target_p
+                            if target_p.is_absolute()
+                            else (p.parent / target_p)
+                        )
+                    except OSError:
+                        target_display = "unknown"
                     label = (
-                        f"{r.spec} (linked to {clean_p(target_abs)}, expected {clean_p(r.source_path)})"
+                        f"{r.spec} (linked to {clean_p(target_display)}, expected {clean_p(r.source_path)})"
                         if len(dest_dirs) > 1
-                        else f"{r.spec} in {rel_to(ws.root, d)} (linked to {clean_p(target_abs)}, expected {clean_p(r.source_path)})"
+                        else f"{r.spec} in {rel_to(ws.root, d)} (linked to {clean_p(target_display)}, expected {clean_p(r.source_path)})"
                     )
                     if label not in mismatched:
                         mismatched.append(label)
