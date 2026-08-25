@@ -20,7 +20,11 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def die(msg):
@@ -819,9 +823,18 @@ class SkillAPI:
         self.plugin_catalog = {}
         self.all_registrations = []
         self.load_failures = []
+        self.path_normalizers = []
 
     def register_workspace(self, cls):
         self.workspace_classes.append(cls)
+
+    def register_path_normalizer(self, fn: Callable[[Path], Path | None]) -> None:
+        """Register a callback to canonicalize symlink targets.
+
+        The callback takes an absolute Path and returns a normalized Path,
+        or None to fall through to the default normalization.
+        """
+        self.path_normalizers.append(fn)
 
     def register_skill(self, name, spec):
         if isinstance(spec, str):
@@ -1103,7 +1116,7 @@ class DiskEntry:
         self.tracked = tracked  # whether the link is VCS-tracked
 
 
-def norm_target(parent: Path, raw: str) -> Path:
+def norm_target(parent: Path, raw: str | Path) -> Path:
     """Normalize a symlink target without dereferencing its final component.
 
     readlink returns the literal stored string, so the same directory can
@@ -1113,8 +1126,20 @@ def norm_target(parent: Path, raw: str) -> Path:
     but used wholesale it would also collapse deliberate resolve:False
     identities whose final component IS a symlink. Resolving only the parent
     directory removes prefix indirection while keeping the leaf literal.
+
+    Allows registered plugins to intercept and rewrite virtual or ephemeral
+    filesystem paths (e.g. dynamic snapshots or virtual mounts) before standard
+    realpath expansion.
     """
     p = Path(os.path.abspath(parent / raw))
+    api = get_api()
+    for normalizer in getattr(api, "path_normalizers", []):
+        try:
+            result = normalizer(p)
+            if result is not None:
+                return Path(result)
+        except Exception:
+            pass
     return Path(os.path.realpath(p.parent)) / p.name
 
 

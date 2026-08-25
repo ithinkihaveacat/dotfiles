@@ -15,7 +15,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..12"
+echo "1..13"
 
 # ==============================================================================
 # Skill-spec parser (get_parsed_skills)
@@ -268,4 +268,46 @@ if printf '%s\n' "$out" | grep -q '^OK$'; then
   echo "ok 12 - [Planner] deduplicates specs resolving to the exact same source path"
 else
   echo "not ok 12 - [Planner] identical target deduplication failed: $out"
+fi
+
+# Test 13: the planner treats different snapshot targets as the same source path
+# when a custom normalizer is registered in the API.
+out=$(run_plan "
+dest = Path('${TMPDIR}/plan13')
+dest.mkdir(exist_ok=True)
+def fake_resolve_virt(spec):
+    return Path('${TMPDIR}/virt/v2/virt-skill'), 'virt-skill'
+
+m.resolve_skill_spec = fake_resolve_virt
+
+def mock_norm(p: Path) -> Path | None:
+    s = str(p)
+    if '/virt/' in s:
+        return Path('${TMPDIR}/virt/head/virt-skill')
+    return None
+
+m.get_api().register_path_normalizer(mock_norm)
+
+class SnapWorkspace(FakeWorkspace):
+    def get_actual_skills(self):
+        return {'virt-skill'}, [], []
+
+ws = SnapWorkspace(dest, [dest], ['virt-skill'], ({'virt-skill'}, [], []))
+# Create the symlink on disk pointing to snapshot v1
+link = dest / 'virt-skill'
+link.unlink(missing_ok=True)
+os.symlink('${TMPDIR}/virt/v1/virt-skill', link)
+
+plan = m.build_reconcile_plan(ws)
+ok = (
+    len(plan.mismatched) == 0
+    and len(plan.missing) == 0
+    and plan.destructive_blocked is False
+)
+print('OK' if ok else f'FAIL mismatched={plan.mismatched} missing={plan.missing}')
+")
+if printf '%s\n' "$out" | grep -q '^OK$'; then
+  echo "ok 13 - [Planner] snapshot targets normalize to the same source via registered normalizer"
+else
+  echo "not ok 13 - [Planner] snapshot targets failed to normalize: $out"
 fi
