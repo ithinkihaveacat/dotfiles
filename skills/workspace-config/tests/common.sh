@@ -51,12 +51,13 @@ skill_test_init() {
     >"${TMPDIR}/sources/test-skill/SKILL.md"
 
   # Warm the uv cache using the host's credentials/network before isolating
-  # HOME, but only when the caller has not already pointed UV_CACHE_DIR at a
-  # shared (already-warm) cache. Afterwards resolve strictly offline.
+  # HOME and locking down UV_OFFLINE, so tests run strictly offline.
   TEST_UV_CACHE="${TMPDIR}/.cache/uv"
   if [ -z "${UV_CACHE_DIR:-}" ]; then
-    UV_CACHE_DIR="$TEST_UV_CACHE" "${SCRIPT}" --help >/dev/null 2>&1 || true
     export UV_CACHE_DIR="$TEST_UV_CACHE"
+  fi
+  if [ -z "${UV_OFFLINE:-}" ]; then
+    "${SCRIPT}" --help >/dev/null 2>&1 || true
   fi
   export UV_OFFLINE=1
 
