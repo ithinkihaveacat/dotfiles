@@ -16,50 +16,50 @@ require rsync
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS] DESTINATION_DIRECTORY
+Usage: $(basename "$0") [OPTIONS] [COMMAND | TARGET]
 
-Mirror the current Git repository working tree to a destination directory.
+Mirror the current Git repository working tree to pre-registered targets.
 
-Synchronizes files using rsync, respecting .gitignore rules and excluding Git
-metadata (.git/) while preserving file attributes and pruning deleted files.
+Synchronizes working tree files using rsync, respecting .gitignore rules and
+excluding Git metadata (.git/) while preserving attributes and deleting removed
+files. Targets are stored locally in .git/config.
 
-Arguments:
-  DESTINATION_DIRECTORY  Target directory to synchronize repository contents to.
+Commands:
+  add NAME PATH     Register a named sync target destination
+  remove, rm NAME   Unregister a sync target
+  list              List all registered sync targets
+  all               Sync to all registered targets (default action)
+  TARGET            Sync to a specific registered target
 
 Options:
-  -n, --dry-run          Perform a trial run with no changes made
-  --help, -h             Display this help message and exit
+  -n, --dry-run     Perform a trial run with no changes made
+  --help, -h        Display this help message and exit
 
 Examples:
-  # Sync repository to a destination directory
-  $(basename "$0") /tmp/project-mirror
+  # Register a sync target destination
+  $(basename "$0") add backup /Volumes/Backup/my-repo
 
-  # Preview files that would be synchronized without making changes
-  $(basename "$0") --dry-run /tmp/project-mirror
+  # List registered sync targets
+  $(basename "$0") list
+
+  # Sync to all registered targets
+  $(basename "$0")
+
+  # Sync to a specific target
+  $(basename "$0") backup
+
+  # Preview sync to all targets without making changes
+  $(basename "$0") --dry-run
 EOF
   exit 0
 }
 
-usage_short() {
-  cat <<EOF >&2
-Usage: $(basename "$0") [OPTIONS] DESTINATION_DIRECTORY
-
-Mirror the current Git repository working tree to a destination directory.
-
-Examples:
-  $(basename "$0") /tmp/project-mirror
-
-Try '$(basename "$0") --help' for more information.
-EOF
-  exit 1
-}
-
 DRY_RUN=false
-DEST_DIR=""
+POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --help | -h)
+    --help | -h | help)
       usage
       ;;
     -n | --dry-run)
@@ -68,6 +68,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --)
       shift
+      while [[ $# -gt 0 ]]; do
+        POSITIONAL+=("$1")
+        shift
+      done
       break
       ;;
     -*)
@@ -76,75 +80,214 @@ while [[ $# -gt 0 ]]; do
       exit 1
       ;;
     *)
-      if [[ -n "$DEST_DIR" ]]; then
-        echo "$(basename "$0"): extra operand '$1'" >&2
-        echo "Try '$(basename "$0") --help' for more information." >&2
-        exit 1
-      fi
-      DEST_DIR="$1"
+      POSITIONAL+=("$1")
       shift
       ;;
   esac
 done
-
-if [[ -z "$DEST_DIR" && $# -gt 0 ]]; then
-  DEST_DIR="$1"
-  shift
-  if [[ $# -gt 0 ]]; then
-    echo "$(basename "$0"): extra operand '$1'" >&2
-    echo "Try '$(basename "$0") --help' for more information." >&2
-    exit 1
-  fi
-fi
-
-if [[ -z "$DEST_DIR" ]]; then
-  usage_short
-fi
 
 if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
   echo "$(basename "$0"): not a git repository (or any of the parent directories)" >&2
   exit 1
 fi
 
-resolve_abs_path() {
-  local target="$1"
-  if [[ -d "$target" ]]; then
-    (cd "$target" && pwd -P)
+cmd_add() {
+  local name="${1:-}"
+  local dest_path="${2:-}"
+
+  if [[ -z "$name" || -z "$dest_path" ]]; then
+    echo "$(basename "$0") add: missing required arguments (NAME and PATH)" >&2
+    echo "Try '$(basename "$0") --help' for more information." >&2
+    exit 1
+  fi
+
+  case "$name" in
+    add | remove | rm | list | ls | all | help)
+      echo "$(basename "$0") add: '$name' is a reserved command name" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "$(basename "$0") add: invalid target name '$name' (use letters, digits, underscores, dashes)" >&2
+    exit 1
+  fi
+
+  mkdir -p "$dest_path"
+  local dest_abs repo_abs
+  dest_abs=$(cd "$dest_path" && pwd -P)
+  repo_abs=$(cd "$REPO_ROOT" && pwd -P)
+
+  if [[ "$dest_abs" == "$repo_abs" ]]; then
+    echo "$(basename "$0") add: destination cannot be the source repository: $dest_path" >&2
+    exit 1
+  fi
+
+  if [[ "$dest_abs" == "$repo_abs"/* ]]; then
+    echo "$(basename "$0") add: destination cannot be inside the source repository: $dest_path" >&2
+    exit 1
+  fi
+
+  git config "sync.target.$name" "$dest_abs"
+  echo "Registered sync target '$name' -> $dest_abs"
+}
+
+cmd_remove() {
+  local name="${1:-}"
+
+  if [[ -z "$name" ]]; then
+    echo "$(basename "$0") remove: target NAME required" >&2
+    echo "Try '$(basename "$0") --help' for more information." >&2
+    exit 1
+  fi
+
+  if ! git config --get "sync.target.$name" >/dev/null 2>&1; then
+    echo "$(basename "$0") remove: target '$name' not found" >&2
+    exit 1
+  fi
+
+  git config --unset "sync.target.$name"
+  echo "Removed sync target '$name'"
+}
+
+cmd_list() {
+  local targets
+  targets=$(git config --get-regexp '^sync\.target\.' 2>/dev/null || true)
+
+  if [[ -z "$targets" ]]; then
+    echo "No sync targets registered."
+    echo "Use '$(basename "$0") add <name> <path>' to register one."
+    exit 0
+  fi
+
+  echo "Registered sync targets:"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local key value name
+    key="${line%% *}"
+    value="${line#* }"
+    name="${key#sync.target.}"
+    printf "  %-15s %s\n" "$name" "$value"
+  done <<<"$targets"
+}
+
+run_sync() {
+  local target_name="$1"
+  local target_path="$2"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "Syncing '$target_name' -> $target_path (dry-run)"
   else
-    local parent
-    parent=$(dirname "$target")
-    if [[ -d "$parent" ]]; then
-      echo "$(cd "$parent" && pwd -P)/$(basename "$target")"
-    else
-      if [[ "$target" == /* ]]; then
-        echo "$target"
-      else
-        echo "$PWD/$target"
-      fi
-    fi
+    echo "Syncing '$target_name' -> $target_path"
+  fi
+
+  if [[ ! -d "$target_path" ]]; then
+    echo "$(basename "$0"): destination directory does not exist: $target_path" >&2
+    return 1
+  fi
+
+  local rsync_args=(-av --delete --filter=':- .gitignore' --exclude='.git/')
+  if [[ "$DRY_RUN" == "true" ]]; then
+    rsync_args+=(-n)
+  fi
+
+  rsync "${rsync_args[@]}" "$REPO_ROOT/" "$target_path/"
+}
+
+cmd_all() {
+  local targets
+  targets=$(git config --get-regexp '^sync\.target\.' 2>/dev/null || true)
+
+  if [[ -z "$targets" ]]; then
+    echo "$(basename "$0"): no sync targets registered. Use '$(basename "$0") add <name> <path>' to add one." >&2
+    exit 1
+  fi
+
+  local failed=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local key target_path target_name
+    key="${line%% *}"
+    target_path="${line#* }"
+    target_name="${key#sync.target.}"
+    run_sync "$target_name" "$target_path" || failed=1
+  done <<<"$targets"
+
+  if [[ "$failed" -ne 0 ]]; then
+    exit 1
   fi
 }
 
-DEST_ABS=$(resolve_abs_path "$DEST_DIR")
-REPO_ABS=$(cd "$REPO_ROOT" && pwd -P)
+cmd_target() {
+  local target_name="$1"
+  local target_path
+  target_path=$(git config --get "sync.target.$target_name" 2>/dev/null || true)
 
-if [[ "$DEST_ABS" == "$REPO_ABS" ]]; then
-  echo "$(basename "$0"): destination cannot be the source repository: $DEST_DIR" >&2
+  if [[ -z "$target_path" ]]; then
+    echo "$(basename "$0"): unknown command or target '$target_name'" >&2
+    echo "Run '$(basename "$0") list' to see registered targets, or '$(basename "$0") --help' for more information." >&2
+    exit 1
+  fi
+
+  run_sync "$target_name" "$target_path"
+}
+
+# Dispatch commands based on positional arguments
+num_args="${#POSITIONAL[@]}"
+
+if [[ "$num_args" -eq 0 ]]; then
+  cmd_all
+elif [[ "$num_args" -eq 1 ]]; then
+  case "${POSITIONAL[0]}" in
+    list | ls)
+      cmd_list
+      ;;
+    all)
+      cmd_all
+      ;;
+    add)
+      echo "$(basename "$0") add: missing required arguments (NAME and PATH)" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    remove | rm)
+      echo "$(basename "$0") remove: target NAME required" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      cmd_target "${POSITIONAL[0]}"
+      ;;
+  esac
+elif [[ "$num_args" -eq 2 ]]; then
+  case "${POSITIONAL[0]}" in
+    remove | rm)
+      cmd_remove "${POSITIONAL[1]}"
+      ;;
+    add)
+      echo "$(basename "$0") add: missing required PATH argument" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      echo "$(basename "$0"): extra operand '${POSITIONAL[1]}'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+elif [[ "$num_args" -eq 3 ]]; then
+  case "${POSITIONAL[0]}" in
+    add)
+      cmd_add "${POSITIONAL[1]}" "${POSITIONAL[2]}"
+      ;;
+    *)
+      echo "$(basename "$0"): extra operand '${POSITIONAL[1]}'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+else
+  echo "$(basename "$0"): extra operand '${POSITIONAL[3]}'" >&2
+  echo "Try '$(basename "$0") --help' for more information." >&2
   exit 1
 fi
-
-if [[ "$DEST_ABS" == "$REPO_ABS"/* ]]; then
-  echo "$(basename "$0"): destination cannot be inside the source repository: $DEST_DIR" >&2
-  exit 1
-fi
-
-if [[ "$DRY_RUN" == "false" ]]; then
-  mkdir -p "$DEST_DIR"
-fi
-
-RSYNC_ARGS=(-av --delete --filter=':- .gitignore' --exclude='.git/')
-if [[ "$DRY_RUN" == "true" ]]; then
-  RSYNC_ARGS+=(-n)
-fi
-
-rsync "${RSYNC_ARGS[@]}" "$REPO_ROOT/" "$DEST_DIR/"
