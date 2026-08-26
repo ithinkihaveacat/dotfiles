@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-sync
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../bin/git-sync"
+
+echo "1..12"
+
+# Test 1: --help exits zero and includes required sections
+if out=$("$BIN" --help 2>&1) &&
+  printf '%s' "$out" | grep -q 'Usage:' &&
+  printf '%s' "$out" | grep -q 'Arguments:' &&
+  printf '%s' "$out" | grep -q 'Options:' &&
+  printf '%s' "$out" | grep -q 'Examples:' &&
+  printf '%s' "$out" | grep -q -- '--dry-run'; then
+  echo "ok 1 - --help documents usage, arguments, options, and examples"
+else
+  echo "not ok 1 - --help output incomplete or failed"
+fi
+
+# Test 2: -h also exits zero with identical help
+if "$BIN" -h >/dev/null 2>&1; then
+  echo "ok 2 - -h alias works"
+else
+  echo "not ok 2 - -h alias failed"
+fi
+
+# Test 3: bare invocation prints usage_short to stderr and exits 1
+err_out=$("$BIN" 2>&1 || true)
+rc=0
+"$BIN" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] &&
+  printf '%s' "$err_out" | grep -q 'Usage:' &&
+  printf '%s' "$err_out" | grep -q -- "Try 'git-sync --help' for more information."; then
+  echo "ok 3 - bare invocation prints usage_short to stderr and exits 1"
+else
+  echo "not ok 3 - bare invocation failed (rc=$rc)"
+fi
+
+# Test 4: unrecognized option exits 1 with error on stderr
+err_out=$("$BIN" --invalid-flag 2>&1 || true)
+rc=0
+"$BIN" --invalid-flag >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "unrecognized option '--invalid-flag'"; then
+  echo "ok 4 - unrecognized option exits 1 with error"
+else
+  echo "not ok 4 - unrecognized option handling failed (rc=$rc)"
+fi
+
+WORK=$(mktemp -d "/tmp/git-sync-test.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# Test 5: running outside a git repository exits 1
+NON_REPO="$WORK/non-repo"
+mkdir -p "$NON_REPO"
+rc=0
+err_out=$(cd "$NON_REPO" && "$BIN" /tmp/dest 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "not a git repository"; then
+  echo "ok 5 - non-git repository execution fails cleanly with exit code 1"
+else
+  echo "not ok 5 - non-git repository handling failed (rc=$rc)"
+fi
+
+# Test 6: missing dependency exits 127
+STUB_DIR="$WORK/stubs"
+mkdir -p "$STUB_DIR"
+ln -s "$(command -v bash)" "$STUB_DIR/bash"
+ln -s "$(command -v git)" "$STUB_DIR/git"
+rc=0
+err_out=$(PATH="$STUB_DIR" "$BIN" /tmp/dest 2>&1) || rc=$?
+if [ "$rc" -eq 127 ] && printf '%s' "$err_out" | grep -q "rsync not found"; then
+  echo "ok 6 - missing dependency (rsync) exits 127"
+else
+  echo "not ok 6 - missing dependency expected 127 (got $rc: $err_out)"
+fi
+
+# Setup a test Git repository
+REPO="$WORK/test-repo"
+mkdir -p "$REPO"
+git -C "$REPO" init -q
+echo "file1 content" >"$REPO/file1.txt"
+echo "ignored content" >"$REPO/ignored.log"
+echo "*.log" >"$REPO/.gitignore"
+git -C "$REPO" add file1.txt .gitignore
+git -C "$REPO" -c user.name="Test" -c user.email="test@example.com" commit -q -m "initial commit"
+echo "untracked unignored" >"$REPO/untracked.txt"
+
+# Test 7: destination cannot be repository root itself
+rc=0
+err_out=$(cd "$REPO" && "$BIN" "$REPO" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot be the source repository"; then
+  echo "ok 7 - destination as repo root is rejected"
+else
+  echo "not ok 7 - destination as repo root should fail (rc=$rc)"
+fi
+
+# Test 8: destination cannot be inside repository root
+rc=0
+err_out=$(cd "$REPO" && "$BIN" "$REPO/subdir" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot be inside the source repository"; then
+  echo "ok 8 - destination inside repo is rejected"
+else
+  echo "not ok 8 - destination inside repo should fail (rc=$rc)"
+fi
+
+# Test 9: standard sync copies tracked and untracked unignored files, excludes .git/ and gitignored files
+DEST="$WORK/mirror"
+(cd "$REPO" && "$BIN" "$DEST") >/dev/null 2>&1
+if [ -f "$DEST/file1.txt" ] &&
+  [ -f "$DEST/untracked.txt" ] &&
+  [ ! -e "$DEST/.git" ] &&
+  [ ! -e "$DEST/ignored.log" ]; then
+  echo "ok 9 - sync copies files, respects .gitignore, and excludes .git/"
+else
+  echo "not ok 9 - sync content verification failed"
+fi
+
+# Test 10: sync prunes deleted files from destination (--delete)
+rm -f "$REPO/untracked.txt"
+(cd "$REPO" && "$BIN" "$DEST") >/dev/null 2>&1
+if [ ! -e "$DEST/untracked.txt" ]; then
+  echo "ok 10 - deleted files are pruned in destination"
+else
+  echo "not ok 10 - deleted file was not pruned"
+fi
+
+# Test 11: --dry-run does not write new files to destination
+DRY_DEST="$WORK/dry-dest"
+(cd "$REPO" && "$BIN" --dry-run "$DRY_DEST") >/dev/null 2>&1
+if [ ! -d "$DRY_DEST" ]; then
+  echo "ok 11 - --dry-run makes no changes on disk"
+else
+  echo "not ok 11 - --dry-run created destination directory"
+fi
+
+# Test 12: supports -- option separator
+DASH_DEST="$WORK/dash-dest"
+(cd "$REPO" && "$BIN" -- "$DASH_DEST") >/dev/null 2>&1
+if [ -f "$DASH_DEST/file1.txt" ]; then
+  echo "ok 12 - option separator -- works correctly"
+else
+  echo "not ok 12 - option separator -- failed"
+fi
