@@ -4,10 +4,13 @@
 
 set -u
 
+# Isolate from global/system git config (signing, hooks, templates).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 BIN="$DIR/../bin/git-sync"
 
-echo "1..21"
+echo "1..26"
 
 # Test 1: --help exits zero and includes required sections
 if out=$("$BIN" --help 2>&1) &&
@@ -66,7 +69,8 @@ else
 fi
 
 # Setup a test Git repository
-REPO="$WORK/test-repo"
+REPO_PARENT="$WORK/parent"
+REPO="$REPO_PARENT/test-repo"
 mkdir -p "$REPO"
 git -C "$REPO" init -q
 echo "file1 content" >"$REPO/file1.txt"
@@ -130,104 +134,170 @@ else
   echo "not ok 11 - add destination as repo root should fail (rc=$rc)"
 fi
 
-# Test 12: add destination inside repo is rejected
+# Test 12: add destination inside repo is rejected without creating directory
+NON_EXISTENT_SUBDIR="$REPO/should-not-exist"
 rc=0
-err_out=$(cd "$REPO" && "$BIN" add inner "$REPO/subdir" 2>&1) || rc=$?
-if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot be inside the source repository"; then
-  echo "ok 12 - add destination inside repo is rejected"
+err_out=$(cd "$REPO" && "$BIN" add inner "$NON_EXISTENT_SUBDIR" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] &&
+  printf '%s' "$err_out" | grep -q "destination cannot be inside the source repository" &&
+  [ ! -e "$NON_EXISTENT_SUBDIR" ]; then
+  echo "ok 12 - add destination inside repo is rejected without creating directory"
 else
-  echo "not ok 12 - add destination inside repo should fail (rc=$rc)"
+  echo "not ok 12 - add destination inside repo should fail and not create directory (rc=$rc)"
 fi
 
-# Test 13: add registers a target in git config and creates destination
+# Test 13: add destination as ancestor of repo is rejected
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add ancestor "$REPO_PARENT" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot contain the source repository"; then
+  echo "ok 13 - add destination as repo ancestor is rejected"
+else
+  echo "not ok 13 - add destination as repo ancestor should fail (rc=$rc)"
+fi
+
+# Test 14: --dry-run is rejected on add, remove, and list
+rc_add=0
+rc_rm=0
+rc_ls=0
+(cd "$REPO" && "$BIN" --dry-run add target /tmp/foo >/dev/null 2>&1) || rc_add=$?
+(cd "$REPO" && "$BIN" --dry-run rm target >/dev/null 2>&1) || rc_rm=$?
+(cd "$REPO" && "$BIN" --dry-run list >/dev/null 2>&1) || rc_ls=$?
+if [ "$rc_add" -eq 1 ] && [ "$rc_rm" -eq 1 ] && [ "$rc_ls" -eq 1 ]; then
+  echo "ok 14 - --dry-run is rejected for add, remove, and list"
+else
+  echo "not ok 14 - --dry-run should be rejected for non-sync commands"
+fi
+
+# Test 15: add registers a target in git config and creates destination
 DEST1="$WORK/mirror1"
 add_out=$(cd "$REPO" && "$BIN" add backup "$DEST1")
 DEST1_ABS=$(cd "$DEST1" && pwd -P)
 if [ "$(git -C "$REPO" config --get sync.target.backup)" = "$DEST1_ABS" ] &&
   [ -d "$DEST1" ] &&
   printf '%s' "$add_out" | grep -q "Registered sync target 'backup'"; then
-  echo "ok 13 - add registers target in git config"
+  echo "ok 15 - add registers target in git config"
 else
-  echo "not ok 13 - add failed to register target in git config"
+  echo "not ok 15 - add failed to register target in git config"
 fi
 
-# Test 14: list displays registered targets
+# Test 16: list displays registered targets
 list_out=$(cd "$REPO" && "$BIN" list)
 if printf '%s' "$list_out" | grep -q "backup" &&
   printf '%s' "$list_out" | grep -q "$DEST1_ABS"; then
-  echo "ok 14 - list displays registered targets"
+  echo "ok 16 - list displays registered targets"
 else
-  echo "not ok 14 - list did not show registered target"
+  echo "not ok 16 - list did not show registered target"
 fi
 
-# Test 15: sync to named target copies files and respects exclusions
+# Test 17: sync to named target copies files and respects exclusions
 (cd "$REPO" && "$BIN" backup) >/dev/null 2>&1
 if [ -f "$DEST1/file1.txt" ] &&
   [ -f "$DEST1/untracked.txt" ] &&
   [ ! -e "$DEST1/.git" ] &&
   [ ! -e "$DEST1/ignored.log" ]; then
-  echo "ok 15 - sync copies files, respects .gitignore, and excludes .git/"
+  echo "ok 17 - sync copies files, respects .gitignore, and excludes .git/"
 else
-  echo "not ok 15 - sync to named target content verification failed"
+  echo "not ok 17 - sync to named target content verification failed"
 fi
 
-# Test 16: sync prunes deleted files
+# Test 18: sync excludes .git metadata even when .git is a file (worktree case)
+WORKTREE_DIR="$WORK/worktree"
+git -C "$REPO" worktree add -q "$WORKTREE_DIR" -b worktree-branch
+echo "worktree file" >"$WORKTREE_DIR/wt.txt"
+DEST_WT="$WORK/dest-wt"
+(cd "$WORKTREE_DIR" && "$BIN" add wt-target "$DEST_WT") >/dev/null 2>&1
+(cd "$WORKTREE_DIR" && "$BIN" wt-target) >/dev/null 2>&1
+if [ -f "$DEST_WT/wt.txt" ] && [ ! -e "$DEST_WT/.git" ]; then
+  echo "ok 18 - sync excludes .git metadata when .git is a regular file"
+else
+  echo "not ok 18 - .git worktree file was copied or sync failed"
+fi
+
+# Test 19: sync prunes deleted files
 rm -f "$REPO/untracked.txt"
 (cd "$REPO" && "$BIN" backup) >/dev/null 2>&1
 if [ ! -e "$DEST1/untracked.txt" ]; then
-  echo "ok 16 - deleted files are pruned in destination"
+  echo "ok 19 - deleted files are pruned in destination"
 else
-  echo "not ok 16 - deleted file was not pruned"
+  echo "not ok 19 - deleted file was not pruned"
 fi
 
-# Test 17: sync to multiple targets via 'all'
+# Test 20: sync to multiple targets via 'all'
 DEST2="$WORK/mirror2"
 (cd "$REPO" && "$BIN" add cloud "$DEST2") >/dev/null 2>&1
 (cd "$REPO" && "$BIN" all) >/dev/null 2>&1
 if [ -f "$DEST1/file1.txt" ] && [ -f "$DEST2/file1.txt" ]; then
-  echo "ok 17 - sync all synchronizes multiple targets"
+  echo "ok 20 - sync all synchronizes multiple targets"
 else
-  echo "not ok 17 - sync all failed to sync both targets"
+  echo "not ok 20 - sync all failed to sync both targets"
 fi
 
-# Test 18: --dry-run does not write new changes
+# Test 21: --dry-run does not write new changes
 echo "new dry file" >"$REPO/dry.txt"
 (cd "$REPO" && "$BIN" --dry-run backup) >/dev/null 2>&1
 if [ ! -e "$DEST1/dry.txt" ]; then
-  echo "ok 18 - --dry-run does not write files to destination"
+  echo "ok 21 - --dry-run does not write files to destination"
 else
-  echo "not ok 18 - --dry-run wrote file to destination"
+  echo "not ok 21 - --dry-run wrote file to destination"
 fi
 rm -f "$REPO/dry.txt"
 
-# Test 19: destination directory missing reports error
+# Test 22: destination directory missing reports error
 DEST_TEMP="$WORK/missing_dest"
 (cd "$REPO" && "$BIN" add temp "$DEST_TEMP") >/dev/null 2>&1
 rm -rf "$DEST_TEMP"
 rc=0
 err_out=$(cd "$REPO" && "$BIN" temp 2>&1) || rc=$?
 if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination directory does not exist"; then
-  echo "ok 19 - missing destination directory fails with clear error"
+  echo "ok 22 - missing destination directory fails with clear error"
 else
-  echo "not ok 19 - missing destination directory should fail (rc=$rc)"
+  echo "not ok 22 - missing destination directory should fail (rc=$rc)"
 fi
 (cd "$REPO" && "$BIN" rm temp) >/dev/null 2>&1
 
-# Test 20: invocation from deep subdirectory works
+# Test 23: defense-in-depth: manual .git/config edit to ancestor is caught at sync time
+MANUAL_ANCESTOR="$WORK/ancestor_manual"
+mkdir -p "$MANUAL_ANCESTOR"
+git -C "$REPO" config "sync.target.badancestor" "$REPO_PARENT"
+rc=0
+err_out=$(cd "$REPO" && "$BIN" badancestor 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot contain the source repository"; then
+  echo "ok 23 - defense-in-depth catches manually edited ancestor target at sync time"
+else
+  echo "not ok 23 - manual ancestor target was not caught at sync time (rc=$rc)"
+fi
+git -C "$REPO" config --unset "sync.target.badancestor"
+
+# Test 24: invocation from deep subdirectory works
 NESTED_SUBDIR="$REPO/a/deep/nested/dir"
 mkdir -p "$NESTED_SUBDIR"
 echo "nested content" >"$NESTED_SUBDIR/nested.txt"
 (cd "$NESTED_SUBDIR" && "$BIN" backup) >/dev/null 2>&1
 if [ -f "$DEST1/a/deep/nested/dir/nested.txt" ]; then
-  echo "ok 20 - invocation from nested subdirectory mirrors entire repo"
+  echo "ok 24 - invocation from nested subdirectory mirrors entire repo"
 else
-  echo "not ok 20 - nested invocation failed"
+  echo "not ok 24 - nested invocation failed"
 fi
 
-# Test 21: remove unregisters target
+# Test 25: remove unregisters target
 (cd "$REPO" && "$BIN" rm cloud) >/dev/null 2>&1
 if [ -z "$(git -C "$REPO" config --get sync.target.cloud)" ]; then
-  echo "ok 21 - remove unregisters target from git config"
+  echo "ok 25 - remove unregisters target from git config"
 else
-  echo "not ok 21 - remove failed to unregister target"
+  echo "not ok 25 - remove failed to unregister target"
+fi
+
+# Test 26: extra operands on commands are rejected with specific errors
+rc_add=0
+rc_rm=0
+rc_ls=0
+err_add=$(cd "$REPO" && "$BIN" add target "$DEST1" extra 2>&1) || rc_add=$?
+err_rm=$(cd "$REPO" && "$BIN" rm backup extra 2>&1) || rc_rm=$?
+err_ls=$(cd "$REPO" && "$BIN" list extra 2>&1) || rc_ls=$?
+if [ "$rc_add" -eq 1 ] && printf '%s' "$err_add" | grep -q "add: extra operand" &&
+  [ "$rc_rm" -eq 1 ] && printf '%s' "$err_rm" | grep -q "rm: extra operand" &&
+  [ "$rc_ls" -eq 1 ] && printf '%s' "$err_ls" | grep -q "list: extra operand"; then
+  echo "ok 26 - extra operands rejected with specific error prefixes"
+else
+  echo "not ok 26 - extra operand handling failed"
 fi

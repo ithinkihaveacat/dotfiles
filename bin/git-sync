@@ -21,7 +21,7 @@ Usage: $(basename "$0") [OPTIONS] [COMMAND | TARGET]
 Mirror the current Git repository working tree to pre-registered targets.
 
 Synchronizes working tree files using rsync, respecting .gitignore rules and
-excluding Git metadata (.git/) while preserving attributes and deleting removed
+excluding Git metadata (.git) while preserving attributes and deleting removed
 files. Targets are stored locally in .git/config.
 
 Commands:
@@ -91,6 +91,45 @@ if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
   exit 1
 fi
 
+validate_dest_path() {
+  local dest_path="$1"
+  local repo_abs="$2"
+  local prefix="${3:-$(basename "$0")}"
+
+  local dest_abs
+  if [[ -d "$dest_path" ]]; then
+    dest_abs=$(cd "$dest_path" && pwd -P)
+  else
+    local dest_parent dest_parent_abs
+    dest_parent=$(dirname "$dest_path")
+    if [[ -d "$dest_parent" ]]; then
+      dest_parent_abs=$(cd "$dest_parent" && pwd -P)
+    elif [[ "$dest_path" == /* ]]; then
+      dest_parent_abs="$dest_parent"
+    else
+      dest_parent_abs="$(cd "$PWD" && pwd -P)/$dest_parent"
+    fi
+    dest_abs="${dest_parent_abs%/}/$(basename "$dest_path")"
+  fi
+
+  if [[ "$dest_abs" == "$repo_abs" ]]; then
+    echo "$prefix: destination cannot be the source repository: $dest_path" >&2
+    return 1
+  fi
+
+  if [[ "$dest_abs" == "$repo_abs"/* ]]; then
+    echo "$prefix: destination cannot be inside the source repository: $dest_path" >&2
+    return 1
+  fi
+
+  if [[ "$repo_abs" == "$dest_abs"/* || "$dest_abs" == "/" ]]; then
+    echo "$prefix: destination cannot contain the source repository: $dest_path" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 cmd_add() {
   local name="${1:-}"
   local dest_path="${2:-}"
@@ -113,18 +152,18 @@ cmd_add() {
     exit 1
   fi
 
-  mkdir -p "$dest_path"
-  local dest_abs repo_abs
-  dest_abs=$(cd "$dest_path" && pwd -P)
+  local repo_abs
   repo_abs=$(cd "$REPO_ROOT" && pwd -P)
 
-  if [[ "$dest_abs" == "$repo_abs" ]]; then
-    echo "$(basename "$0") add: destination cannot be the source repository: $dest_path" >&2
+  if ! validate_dest_path "$dest_path" "$repo_abs" "$(basename "$0") add"; then
     exit 1
   fi
 
-  if [[ "$dest_abs" == "$repo_abs"/* ]]; then
-    echo "$(basename "$0") add: destination cannot be inside the source repository: $dest_path" >&2
+  mkdir -p "$dest_path"
+  local dest_abs
+  dest_abs=$(cd "$dest_path" && pwd -P)
+
+  if ! validate_dest_path "$dest_abs" "$repo_abs" "$(basename "$0") add"; then
     exit 1
   fi
 
@@ -186,7 +225,15 @@ run_sync() {
     return 1
   fi
 
-  local rsync_args=(-av --delete --filter=':- .gitignore' --exclude='.git/')
+  local repo_abs dest_abs
+  repo_abs=$(cd "$REPO_ROOT" && pwd -P)
+  dest_abs=$(cd "$target_path" && pwd -P)
+
+  if ! validate_dest_path "$dest_abs" "$repo_abs" "$(basename "$0")"; then
+    return 1
+  fi
+
+  local rsync_args=(-av --delete --filter=':- .gitignore' --exclude='.git')
   if [[ "$DRY_RUN" == "true" ]]; then
     rsync_args+=(-n)
   fi
@@ -231,6 +278,17 @@ cmd_target() {
 
   run_sync "$target_name" "$target_path"
 }
+
+# Guard --dry-run against non-sync subcommands
+if [[ "$DRY_RUN" == "true" ]]; then
+  case "${POSITIONAL[0]:-}" in
+    add | remove | rm | list | ls)
+      echo "$(basename "$0") ${POSITIONAL[0]}: --dry-run option not supported" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # Dispatch commands based on positional arguments
 num_args="${#POSITIONAL[@]}"
