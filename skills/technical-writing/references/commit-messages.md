@@ -88,8 +88,10 @@ on assumptions, explicitly state why you believe it is safe.
 
 ### Justifying Omissions (The "Why We Aren't..." Section)
 
-If you are skipping standard practices (like adding automated tests for a new
-feature), you _must_ explain why.
+If you skip standard engineering practices (such as omitting automated tests for
+a new feature or bypassing a migration step), explain why in the commit body
+(e.g., test harness unavailable in target environment, follow-up tracked in
+issue #123).
 
 ## Summary Checklist
 

@@ -12,21 +12,27 @@ in specific domains or codebases.
   keeping instructions portable across workspaces.
 - **Audience:** AI agents (as primary executors) and engineers (as authors and
   maintainers).
-- **Tone:** Direct, imperative, and capability-focused.
+- **Tone:** Direct, explanatory, and capability-focused. Prioritize clear
+  decision rules, underlying rationale, and task-appropriate degrees of freedom
+  over heavy-handed imperatives.
 
 ## Core Principles & Decoupling Rule
 
 To ensure skills remain modular, portable, and maintainable across diverse
 environments (local Git repositories, CitC workspaces, cloud runtimes, Skill Hub
-marketplace), **every skill must be designed as an independent, self-contained
-unit of capability**.
+marketplace), **design every skill as an independent, self-contained unit of
+capability**.
 
-### Skill Independence & Self-Containment
+### Skill Independence & Degrees of Freedom
 
-- **No Hard Skill Dependencies:** A skill MUST NOT directly mandate the use of
-  another skill, specify another skill as a strict prerequisite, or instruct the
-  agent to "activate the X skill".
-- **No Relative Skill Paths:** Never link across skill directories using
+- **Calibrate Degrees of Freedom:** Match instruction specificity to task
+  fragility. Restrict low-freedom, exact commands to truly fragile or
+  destructive operations (e.g. database migrations, security boundaries). For
+  heuristics, reviews, and workflows, provide clear guidelines and rely on the
+  model's context-aware reasoning.
+- **No Hard Skill Dependencies:** Avoid mandating specific external skills as
+  strict prerequisites or instructing agents to "activate the X skill".
+- **No Relative Skill Paths:** Do not link across skill directories using
   relative Markdown paths (e.g., `../other-skill/SKILL.md` or
   `skills/other-skill/SKILL.md`). When skills are distributed individually or
   loaded in different catalog layouts, these links break.

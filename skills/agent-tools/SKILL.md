@@ -28,24 +28,22 @@ compatibility: >-
 
 # Agent Tools
 
-## Important: Use Scripts First
+## Using Helper Scripts vs. Raw API Calls
 
-**ALWAYS prefer the scripts in `scripts/` over raw `curl` API calls.** Scripts
-are located in the `scripts/` subdirectory of this skill's folder. They provide
-features that raw commands do not. References to `scripts/...` in this skill are
-relative to this skill directory.
+Use the scripts in `scripts/` as the primary interface for AI-delegated analysis
+and context gathering. References to `scripts/...` in this skill are relative to
+this skill directory. They encapsulate API boilerplate and formatting logic:
 
 - Proper image encoding (WebP conversion, alpha removal)
-- Appropriate model selection for each task
-- Structured output handling (boolean responses via exit codes)
-- Meaningful exit codes for shell integration
-- Formatting structured data (like GitHub PRs) into LLM-friendly Markdown
+- Task-tuned default model selection
+- Structured output handling (e.g. boolean responses mapped to shell exit codes)
+- Formatting structured data (like GitHub PRs and issues) into LLM-friendly
+  Markdown
 
-**When to read the script source:** If a script doesn't do exactly what you
-need, or fails due to missing dependencies, read the script source. The scripts
-encode API best practices (image ordering, structured output schemas, model
-selection) that may not be obvious—use them as reference when building similar
-functionality.
+**When to inspect script source:** If a script lacks a specific parameter or
+fails due to a local dependency, inspect the script in `scripts/`. They
+demonstrate correct API schemas, request structures, and retry behaviors that
+you can adapt for custom calls.
 
 ## Quick Start
 

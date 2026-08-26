@@ -7,27 +7,25 @@
 
 ### Purpose
 
-Agent Skills contain specialized, highly-curated workflows for this environment.
-The available skills have been carefully selected to be valuable to your tasks.
-You should make liberal use of these installed skills.
+Agent Skills provide domain-specific workflows, helper scripts, and local
+conventions tailored to this repository. Make liberal use of these installed
+skills.
 
-When a task aligns with a skill's description, OR if you are unsure if a skill
-is relevant, you MUST investigate it by reading its `SKILL.md` file. You are
-expected to activate and follow that skill whenever applicable.
+When a task aligns with a skill's description or triggers, investigate it by
+reading its `SKILL.md` file, and apply its prescribed workflow.
 
 ### Rules
 
-1. **Skills supersede general knowledge**: Always review the available skills
-   before beginning a task. If a relevant skill exists, activate it. The
-   instructions, scripts, and methods inside an activated skill always override
-   your default training and general industry practices.
-1. **Investigate when unsure**: The available skills are highly relevant to this
-   environment. Even if you are not certain a skill applies, you should read its
-   `SKILL.md` file to verify relevance. Do not assume general knowledge is
-   sufficient.
-1. **Follow prescribed processes**: If a skill outlines a specific procedure,
-   follow that process exactly as written rather than inventing a custom
-   approach.
+1. **Skills supersede general knowledge**: Review available skills before
+   beginning a task. The instructions, scripts, and conventions inside an
+   activated skill capture local repository requirements and override general
+   defaults.
+1. **Investigate when unsure**: When in doubt about whether a skill applies,
+   read its `SKILL.md` file to check its capabilities. Local scripts and
+   references solve repository-specific quirks that general training does not
+   cover.
+1. **Follow prescribed processes**: When a skill defines a workflow or helper
+   script for a task, use that process rather than inventing an ad-hoc approach.
 
 ### Examples
 

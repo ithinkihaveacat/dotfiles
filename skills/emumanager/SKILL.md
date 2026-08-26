@@ -15,22 +15,23 @@ compatibility: >-
 
 # Android Emulator Manager
 
-## Important: Use Script First
+## Using the Manager Script vs. Raw SDK Tools
 
-**ALWAYS use `scripts/emumanager` over raw `sdkmanager`, `avdmanager`, or
-`emulator` commands.** The script is located in the `scripts/` subdirectory of
-this skill's folder. References to `scripts/...` in this skill are relative to
-this skill directory. It provides features that raw commands do not:
+Use `scripts/emumanager` as the primary interface for managing Android emulators
+and AVDs. References to `scripts/...` in this skill are relative to this skill
+directory. The script unifies and orchestrates `sdkmanager`, `avdmanager`, and
+`emulator`:
 
-- Automatic system image selection for device types (--mobile, --wear, --tv)
-- Boot completion detection with timeout
-- Sensible defaults and helpful error messages
-- Diagnostics via `doctor` subcommand
+- Automatic system image resolution across device form factors (`--mobile`,
+  `--wear`, `--tv`)
+- Boot completion detection with configurable timeouts
+- Preflight SDK environment diagnostics (`scripts/emumanager doctor`)
+- Sensible hardware defaults and clear error diagnostics
 
-**When to read the script source:** If the script doesn't do exactly what you
-need, or fails due to missing dependencies, read the script source. It encodes
-solutions to SDK quirks and boot detection edge cases—use it as reference when
-building similar functionality.
+**When to use raw SDK tools:** If you need specialized emulator launch flags or
+are debugging an isolated SDK installation issue, calling `emulator` or
+`avdmanager` directly is supported. Consult the script source in `scripts/` to
+see the precise command invocations and environment checks it performs.
 
 ## Quick Start
 

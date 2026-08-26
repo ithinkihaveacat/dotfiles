@@ -348,16 +348,14 @@ workflows in this skill, adhere to the strict presentation formatting defined in
 the audit template.
 
 - **Service-First Architecture**: While extraction proceeds chronologically by
-  artifact type, the final report must be structured strictly by Service
-  component, consolidating all manifests, configurations, and media within each
-  service section.
-- **Formatted, Readable XML**: Always format and pretty-print XML manifest
-  declarations (`<service>`), provider definitions (`<wearwidget-provider>`),
-  and container layouts (`<container>`) with clean 4-space indentation and **one
-  attribute per line** for tags containing multiple attributes. Never output raw
-  single-line XML. Syntax highlighting is not required; prioritize clean
-  indentation and structural readability.
-- **Media Preservation**: All media output (images, layouts) must remain
-  unmasked and in native aspect ratios.
-- **Self-Contained Links**: All Markdown reports must be self-contained with
-  relative asset linking.
+  artifact type, structure the final report by Service component, consolidating
+  all manifests, configurations, and media within each service section.
+- **Formatted, Readable XML**: Format and pretty-print XML manifest declarations
+  (`<service>`), provider definitions (`<wearwidget-provider>`), and container
+  layouts (`<container>`) with clean 4-space indentation and **one attribute per
+  line** for tags containing multiple attributes. Do not output raw single-line
+  XML; clean indentation and structural readability are required.
+- **Media Preservation**: Keep all media output (images, layouts) unmasked and
+  in native aspect ratios.
+- **Self-Contained Links**: Use relative asset linking so Markdown reports
+  remain portable and self-contained.

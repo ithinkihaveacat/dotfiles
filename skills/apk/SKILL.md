@@ -17,12 +17,16 @@ compatibility: >-
 This skill provides a comprehensive suite of utilities for working with Android
 APK files and split-APK ZIP archives offline.
 
-## Important: Use Scripts First
+## Using Helper Scripts vs. Raw CLI Tools
 
-**ALWAYS prefer the scripts in `scripts/` over running raw tool commands.**
-Scripts are located in the `scripts/` subdirectory of this skill's folder. They
-handle complex tasks like automatically extracting split APKs from ZIP archives
-and formatting output XML files for readability.
+Use the scripts in `scripts/` as the primary interface for APK inspection. They
+automate handling split-APK ZIP archives (extracting base splits to temporary
+directories), normalize output across `aapt`, `aapt2`, and `apkanalyzer`, and
+format XML manifests for clean readability.
+
+When raw tools like `apkanalyzer` or `aapt2` are needed for specialized flags,
+refer to the helper scripts as reference implementations for handling archive
+extraction and error recovery.
 
 ## Script Index
 

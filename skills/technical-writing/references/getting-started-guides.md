@@ -31,15 +31,15 @@ tangible, successful outcome with minimum friction.
 
 ### Dual Optimization: Agent-Executable & Human-Readable
 
-- **Idempotency:** Every setup command must be safe to re-execute multiple times
-  without failing, corrupting state, or appending duplicate configuration
+- **Idempotency:** Design every setup command to be safe to re-execute multiple
+  times without failing, corrupting state, or appending duplicate configuration
   entries.
-- **Non-Interactive by Default:** Commands must execute cleanly without blocking
-  on interactive prompts or TTY inputs (e.g., pass `--headless`,
+- **Non-Interactive by Default:** Commands should execute cleanly without
+  blocking on interactive prompts or TTY inputs (e.g., pass `--headless`,
   `--non-interactive`, or `-y` where applicable).
-- **Explicit Directory Context:** Never assume the shell is already in the
-  correct working directory. Always declare, verify, or navigate to the target
-  context (`cd "${FOO_HOME:-/opt/toolchain}"`).
+- **Explicit Directory Context:** Do not assume the shell is already in the
+  correct working directory. Declare, verify, or navigate to the target context
+  (`cd "${FOO_HOME:-/opt/toolchain}"`).
 - **Simple, Portable Shell Syntax:** Use standard, readable POSIX/Bash
   constructs. Avoid esoteric syntax, fragile pipelines, or complex subshell
   tricks.
@@ -80,13 +80,13 @@ tangible, successful outcome with minimum friction.
 
 ### Clear Separation: Walkthrough vs. Reference
 
-- **Keep the Getting Started Flow Clean:** The walkthrough itself must contain
-  only the sequential setup, execution, and verification steps.
+- **Keep the Getting Started Flow Clean:** Keep the main walkthrough focused on
+  sequential setup, execution, and verification steps.
 - **Decouple Reference Material:** Place deep technical context (execution
   lifecycles, architectural overviews, full flag tables, JSON schemas, output
-  artifact catalogs, and advanced workflows) outside the primary
-  walkthrough—either in a distinct reference section or split into dedicated
-  companion reference documents.
+  artifact catalogs, and advanced workflows) outside the primary quickstart flow
+  in dedicated reference documents (e.g., `references/architecture.md` or
+  `references/configuration.md`).
 
 ## Authoring Patterns & Examples
 

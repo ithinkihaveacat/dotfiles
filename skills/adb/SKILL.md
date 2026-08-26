@@ -16,22 +16,22 @@ compatibility: >-
 
 # Android ADB
 
-## Important: Use Scripts First
+## Using Helper Scripts vs. Raw ADB
 
-**ALWAYS prefer the scripts in `scripts/` over raw `adb` commands.** Scripts are
-located in the `scripts/` subdirectory of this skill's folder. References to
-`scripts/...` in this skill are relative to this skill directory. They provide
-features that raw commands do not, such as:
+Use the scripts in `scripts/` as the primary interface for device workflows.
+References to `scripts/...` in this skill are relative to this skill directory.
+They encapsulate solutions to common Android and Wear OS platform quirks:
 
-- Automatic circular masking for Wear OS screenshots
-- Device wake-up before capture
+- Automatic circular display masking and density scaling for Wear OS screenshots
+- Device wake-up and keyguard dismissal prior to capture
 - Clipboard integration on macOS
-- Sensible default filenames and error handling
+- Sensible default filenames and robust error handling
 
-**When to read the script source:** If a script doesn't do exactly what you
-need, or fails due to missing dependencies, read the script source. The scripts
-encode solutions to edge cases and platform quirks that may not be obvious—use
-them as reference when building similar functionality.
+**When to use raw `adb`:** For general diagnostic inspection not covered by
+these scripts (e.g. `adb logcat`, `adb shell pm list`), or when building custom
+pipelines, standard `adb` commands are appropriate. If a helper script fails or
+lacks a specific flag you need, inspect its source in `scripts/` to understand
+the underlying `dumpsys` or `input` sequence and adapt it.
 
 ## Quick Start
 

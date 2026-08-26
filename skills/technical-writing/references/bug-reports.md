@@ -13,7 +13,7 @@ the specific timeframe of a defect and identify the root cause.
 - **Tone:** Objective, factual, and assertive. Omit speculation from the primary
   description (reserve hypotheses for the optional Analysis section).
 
-## Required Structure
+## Recommended Structure
 
 To ensure clarity and reproducibility, bug reports (e.g., `BUG.md`) should
 generally adhere to the following structure. While this is the ideal format,
@@ -22,8 +22,8 @@ fragment is available rather than a full reproduction).
 
 ### Description
 
-This section must be **completely factual** and backed up by the attachments
-provided. It should describe:
+This section should be factual and grounded in the attachments provided. It
+should describe:
 
 - What the bug is.
 - The observable symptoms (e.g., crash, UI glitch).
@@ -158,7 +158,7 @@ as the bug report document.
 ### Naming Conventions
 
 - Filenames should be descriptive but concise.
-- **Do not** add a separate textual description for an attachment unless the
+- Avoid adding a separate textual description for an attachment unless the
   filename is ambiguous.
 - **Ambiguity Rule:** If multiple files of the same type are attached (e.g.,
   multiple screenshots), ensure their filenames clearly distinguish them (e.g.,

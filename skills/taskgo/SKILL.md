@@ -35,8 +35,8 @@ INBOX.md                  # zero-ceremony capture; no schema
   dist/*                  # static dashboards, deployable bundles, HTML reports (optional)
 ```
 
-The root `AGENTS.md` must state that the repository follows taskgo and include
-the canonical specification URL:
+The root `AGENTS.md` explicitly states that the repository follows taskgo and
+includes the canonical specification URL:
 <https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>. This
 ensures agents can discover the governing process from the repository itself.
 `doctor` reports a missing declaration or URL.
@@ -83,8 +83,8 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
    vary per environment).
 1. `STATUS.md` is the self-contained projection of current operational state:
    reading `STATUS.md` directly answers status, recent progress, and immediate
-   next steps without traversing individual task files. Generated task state
-   must match tasks; prose requires agent semantic review.
+   next steps without traversing individual task files. Synchronize generated
+   task state with current tasks; prose requires agent semantic review.
 1. `taskgo` tracks work forward from adoption. Historical context predating
    tracker setup remains in external artifact repositories and is not
    retroactively backfilled.
@@ -212,8 +212,8 @@ inspecting individual task records.
 Structure:
 
 - `## Summary`: Human/agent prose describing the current situation and the key
-  outcome/findings of the most recently completed task(s). The active session
-  must be cited using full identifier syntax:
+  outcome/findings of the most recently completed task(s). Cite the active
+  session using full identifier syntax:
   `Active session ([<conversation-id>](conversation://<conversation-id>)): ...`.
   "Conversation ID" refers to the globally unique session, conversation, or
   thread identifier used by the host agent platform (e.g. at least 16
@@ -340,12 +340,13 @@ Before generating the brief, verify feasibility and correctness:
 
 #### Payload Construction
 
-The exported brief must be entirely self-contained, portable, and
-copy-and-pasteable:
+Construct the exported brief to be completely self-contained, portable, and
+ready for worker execution:
 
-1. **Strict Path Portability:** Use strictly repository-relative paths (e.g.
-   `src/parser.py`). Never output absolute host paths (`/Users/...`), home
-   directory expansions (`~/...`), or `file:///` URLs.
+1. **Strict Path Portability:** Use repository-relative paths (e.g.
+   `src/parser.py`) so instructions resolve cleanly in isolated worker
+   environments. Never output absolute host paths (`/Users/...`), home directory
+   expansions (`~/...`), or `file:///` URLs.
 1. **Component Orientation:** Synthesize a concise 1–2 sentence overview of the
    target subsystem, defining its role within the broader artifact codebase.
 1. **Core Specification & Implementer Latitude:** Embed the Title, Problem,

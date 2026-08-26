@@ -19,17 +19,16 @@ compatibility: >-
 
 # Jetpack Library Utilities
 
-## Important: Use Script First
+## Using the Jetpack Script vs. Raw Maven Queries
 
-**ALWAYS use `scripts/jetpack` to answer these questions — never a raw command
-against a Maven URL or against the cache.** The script is located in the
-`scripts/` subdirectory of this skill's folder. References to `scripts/...` in
-this skill are relative to this skill directory. It provides features that raw
-commands do not:
+Use `scripts/jetpack` as the primary interface for resolving AndroidX and
+Jetpack library coordinates, versions, and source locations. References to
+`scripts/...` in this skill are relative to this skill directory. The script
+handles complex resolution logic that manual queries miss:
 
-- Package-to-coordinate resolution with exceptions table
+- Package-to-coordinate resolution with a comprehensive exceptions table
 - Code search integration for finding artifacts by class name
-- Version type handling (ALPHA, BETA, STABLE, SNAPSHOT)
+- Version type filtering (ALPHA, BETA, STABLE, SNAPSHOT)
 - Kotlin Multiplatform platform-specific source detection
 - Build ID resolution for pinned snapshots
 

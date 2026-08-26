@@ -1,6 +1,6 @@
 # UI Automation Guidelines
 
-Automated testing on Android must prioritize verifying the end-to-end user
+Automated testing on Android prioritizes verifying the end-to-end user
 experience. Relying solely on background deep links, mock databases, or
 broadcast receivers can mask critical UI routing failures, layout shifts, or
 permission blockers that a real user would face.
@@ -9,8 +9,8 @@ ______________________________________________________________________
 
 ## Behave Like a Real User Policy
 
-By default, automated tests and AI agents must interact with the application
-exactly as a human would.
+Automated tests and AI agents interact with the application through the UI flow
+as a human user would:
 
 - **Navigate via the UI**: Launch the app from the launcher or via standard
   intents, and click through the UI flow to reach the target state. Do not
@@ -18,21 +18,20 @@ exactly as a human would.
   validating a deeply nested sub-state where OOBE validation is redundant.
 - **Respect and Handle System Dialogs**: Android handles runtime permissions
   (Location, Physical Activity, Notifications) via OS-level dialogs.
-  - **Guideline**: Tests and agents must be instructed to **proactively click
-    and accept all permission prompts** (e.g. selecting "While using the app" or
-    "Allow") when they appear in sequence, rather than silently granting them in
-    the background via `adb shell pm grant`, unless testing the app's *response*
-    to a pre-existing permission state.
+  - **Guideline**: Automation flows and agents **proactively click and accept
+    permission prompts** (e.g. selecting "While using the app" or "Allow") when
+    they appear in sequence, rather than silently granting them in the
+    background via `adb shell pm grant`, unless testing the app's *response* to
+    a pre-existing permission state.
 - **Dismiss Interstitials and Overlays**: Real-world apps frequently display
   unexpected overlays, such as:
   - Onboarding tips ("Got it" or "Next" banners).
   - Promotional popups (e.g., subscription upgrades or discount overlays).
   - System notification prompts.
-  - **Guideline**: Automation flows must be designed to **actively locate, tap
-    the close/cancel buttons, and dismiss these overlays** to unblock the main
-    user journey.
+  - **Guideline**: Automation flows **locate, tap the close/cancel buttons, and
+    dismiss these overlays** to unblock the main user journey.
 - **Wait for Transitions and Network States**: Real networks experience latency.
-  Avoid assuming instantaneous data availability. Test scripts must implement
+  Avoid assuming instantaneous data availability. Test scripts implement
   intelligent waits (e.g. waiting for loading spinners to disappear or specific
   elements to render) rather than hardcoded sleeps.
 
@@ -40,7 +39,7 @@ ______________________________________________________________________
 
 ## Visual Timeline Methodology
 
-State validation must be observable, chronological, and verifiable.
+State validation is designed to be observable, chronological, and verifiable.
 
 - **Capture Step-by-Step Screenshots**: Configure your UI automation or
   interaction tools to save screenshots at every single step, button tap, and
@@ -67,7 +66,7 @@ ______________________________________________________________________
 
 To prevent automated tests or AI agents from stalling or failing due to
 screen-off timeouts or security lockouts, the target device (both phone and
-watch) must be configured in an awake, unlocked, and clean visual state before
+watch) should be configured in an awake, unlocked, and clean visual state before
 initiating any UI automation.
 
 ### Keep Screen Awake Indefinitely
