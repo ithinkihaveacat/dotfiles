@@ -10,7 +10,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 BIN="$DIR/../bin/git-sync"
 
-echo "1..29"
+echo "1..33"
 
 # Test 1: --help exits zero and includes required sections
 if out=$("$BIN" --help 2>&1) &&
@@ -172,7 +172,7 @@ fi
 DEST1="$WORK/mirror1"
 add_out=$(cd "$REPO" && "$BIN" add backup "$DEST1")
 DEST1_ABS="$(cd "$WORK" && pwd -P)/mirror1"
-if [ "$(git -C "$REPO" config --get sync.target.backup)" = "$DEST1_ABS" ] &&
+if [ "$(git -C "$REPO" config --local --get sync.target.backup)" = "$DEST1_ABS" ] &&
   [ ! -e "$DEST1" ] &&
   printf '%s' "$add_out" | grep -q "Registered sync target 'backup'"; then
   echo "ok 15 - add registers target without creating destination directory"
@@ -244,25 +244,29 @@ fi
 rm -f "$REPO/dry.txt"
 
 # Test 22: sync destination creation failure reports error
-UNWRITABLE_ROOT="$WORK/unwritable_root"
-mkdir -p "$UNWRITABLE_ROOT"
-chmod 555 "$UNWRITABLE_ROOT"
-UNWRITABLE_DEST="$UNWRITABLE_ROOT/subdir/target"
-(cd "$REPO" && "$BIN" add unwritable "$UNWRITABLE_DEST") >/dev/null 2>&1
-rc=0
-err_out=$(cd "$REPO" && "$BIN" unwritable 2>&1) || rc=$?
-chmod 755 "$UNWRITABLE_ROOT"
-if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "failed to create destination directory"; then
-  echo "ok 22 - failed destination directory creation reports error"
+if [ "$(id -u)" -eq 0 ]; then
+  echo "ok 22 - failed destination directory creation reports error # SKIP root user bypasses permissions"
 else
-  echo "not ok 22 - directory creation failure handling failed (rc=$rc)"
+  UNWRITABLE_ROOT="$WORK/unwritable_root"
+  mkdir -p "$UNWRITABLE_ROOT"
+  chmod 555 "$UNWRITABLE_ROOT"
+  UNWRITABLE_DEST="$UNWRITABLE_ROOT/subdir/target"
+  (cd "$REPO" && "$BIN" add unwritable "$UNWRITABLE_DEST") >/dev/null 2>&1
+  rc=0
+  err_out=$(cd "$REPO" && "$BIN" unwritable 2>&1) || rc=$?
+  chmod 755 "$UNWRITABLE_ROOT"
+  if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "failed to create destination directory"; then
+    echo "ok 22 - failed destination directory creation reports error"
+  else
+    echo "not ok 22 - directory creation failure handling failed (rc=$rc)"
+  fi
+  (cd "$REPO" && "$BIN" rm unwritable) >/dev/null 2>&1
 fi
-(cd "$REPO" && "$BIN" rm unwritable) >/dev/null 2>&1
 
 # Test 23: defense-in-depth: manual .git/config edit to ancestor is caught at sync time
 MANUAL_ANCESTOR="$WORK/ancestor_manual"
 mkdir -p "$MANUAL_ANCESTOR"
-git -C "$REPO" config "sync.target.badancestor" "$REPO_PARENT"
+git -C "$REPO" config --local "sync.target.badancestor" "$REPO_PARENT"
 rc=0
 err_out=$(cd "$REPO" && "$BIN" badancestor 2>&1) || rc=$?
 if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot contain the source repository"; then
@@ -270,7 +274,7 @@ if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot conta
 else
   echo "not ok 23 - manual ancestor target was not caught at sync time (rc=$rc)"
 fi
-git -C "$REPO" config --unset "sync.target.badancestor"
+git -C "$REPO" config --local --unset "sync.target.badancestor"
 
 # Test 24: invocation from deep subdirectory works
 NESTED_SUBDIR="$REPO/a/deep/nested/dir"
@@ -285,7 +289,7 @@ fi
 
 # Test 25: remove unregisters target
 (cd "$REPO" && "$BIN" rm cloud) >/dev/null 2>&1
-if [ -z "$(git -C "$REPO" config --get sync.target.cloud)" ]; then
+if [ -z "$(git -C "$REPO" config --local --get sync.target.cloud)" ]; then
   echo "ok 25 - remove unregisters target from git config"
 else
   echo "not ok 25 - remove failed to unregister target"
@@ -344,3 +348,48 @@ else
 fi
 rm -f "$REPO/test.globalignore"
 git -C "$REPO" config --unset core.excludesfile
+
+# Test 30: reject uppercase target names to avoid case-folding ambiguity
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add "MyBackup" /tmp/dest 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "invalid target name"; then
+  echo "ok 30 - uppercase target name is rejected"
+else
+  echo "not ok 30 - uppercase target name should fail (rc=$rc)"
+fi
+
+# Test 31: global sync.target config entries are isolated and not read
+FAKE_GLOBAL="$WORK/fake_global"
+mkdir -p "$FAKE_GLOBAL"
+git config -f "$FAKE_GLOBAL/gitconfig" sync.target.globalonly "/tmp/globaldest"
+rc=0
+list_out=$(cd "$REPO" && GIT_CONFIG_GLOBAL="$FAKE_GLOBAL/gitconfig" "$BIN" list) || rc=$?
+if [ "$rc" -eq 0 ] && ! printf '%s' "$list_out" | grep -q "globalonly"; then
+  echo "ok 31 - global sync.target entries are ignored by local list"
+else
+  echo "not ok 31 - global sync.target was leaked into local list"
+fi
+
+# Test 32: defense-in-depth inside run_sync rejects invalid child target without creating directory
+MANUAL_INSIDE="$REPO/manual_inside_dest"
+git -C "$REPO" config --local "sync.target.badinside" "$MANUAL_INSIDE"
+rc=0
+err_out=$(cd "$REPO" && "$BIN" badinside 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] &&
+  printf '%s' "$err_out" | grep -q "destination cannot be inside the source repository" &&
+  [ ! -e "$MANUAL_INSIDE" ]; then
+  echo "ok 32 - defense-in-depth catches invalid child target at sync time without creating dir"
+else
+  echo "not ok 32 - manual inside target failed or created directory"
+fi
+git -C "$REPO" config --local --unset "sync.target.badinside"
+
+# Test 33: target destination with spaces in path syncs cleanly
+SPACED_DEST="$WORK/my destination folder"
+(cd "$REPO" && "$BIN" add spaced "$SPACED_DEST") >/dev/null 2>&1
+(cd "$REPO" && "$BIN" spaced) >/dev/null 2>&1
+if [ -f "$SPACED_DEST/file1.txt" ]; then
+  echo "ok 33 - destination path containing spaces syncs successfully"
+else
+  echo "not ok 33 - destination path containing spaces failed"
+fi
