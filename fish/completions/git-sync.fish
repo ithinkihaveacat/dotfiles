@@ -4,6 +4,6 @@ complete -c git-sync -n __fish_use_subcommand -a add -d "Register a named sync t
 complete -c git-sync -n __fish_use_subcommand -a "remove rm" -d "Unregister a sync target"
 complete -c git-sync -n __fish_use_subcommand -a list -d "List all registered sync targets"
 complete -c git-sync -n __fish_use_subcommand -a all -d "Sync to all registered targets"
-complete -c git-sync -n __fish_use_subcommand -a "(git config --get-regexp '^sync\\.target\\.' 2>/dev/null | string replace -r '^sync\\.target\\.(\\S+).*' '\$1')" -d "Sync target"
-complete -c git-sync -n "__fish_seen_subcommand_from remove rm" -a "(git config --get-regexp '^sync\\.target\\.' 2>/dev/null | string replace -r '^sync\\.target\\.(\\S+).*' '\$1')" -d "Sync target"
+complete -c git-sync -n __fish_use_subcommand -a "(git config --local --get-regexp '^sync\\.target\\.' 2>/dev/null | string replace -r '^sync\\.target\\.(\\S+).*' '\$1')" -d "Sync target"
+complete -c git-sync -n "__fish_seen_subcommand_from remove rm" -a "(git config --local --get-regexp '^sync\\.target\\.' 2>/dev/null | string replace -r '^sync\\.target\\.(\\S+).*' '\$1')" -d "Sync target"
 complete -c git-sync -n "__fish_seen_subcommand_from add" -a "(__fish_complete_directories)" -d "Destination directory"

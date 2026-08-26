@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-trap 'echo >&2; exit 130' INT TERM
+trap 'echo >&2 || true; exit 130' INT TERM
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -22,10 +22,10 @@ Usage: $(basename "$0") [OPTIONS] [COMMAND | TARGET]
 
 Mirror the current Git repository working tree to pre-registered targets.
 
-Synchronizes working tree files using rsync, respecting .gitignore rules,
-global/local exclude files, and excluding Git metadata (.git) and external
-symlinks while preserving attributes and deleting removed files. Targets are
-stored locally in .git/config.
+Synchronizes working tree files using rsync, respecting .gitignore rules and
+global/local exclude files, excluding Git metadata (.git), preserving
+attributes and deleting removed files. Targets are stored locally in
+.git/config.
 
 Commands:
   add NAME PATH     Register a named sync target destination
@@ -55,6 +55,19 @@ Examples:
   $(basename "$0") --dry-run
 
 Notes:
+  Which files are synchronized is decided by Git, not by re-interpreting
+  .gitignore: the working tree is whatever 'git ls-files --cached --others
+  --exclude-standard' reports, so negated (!) rules and tracked-but-ignored
+  files are mirrored the same way Git treats them.
+
+  Symbolic links pointing outside the repository are skipped, silently and
+  without failing the sync. Links pointing within the repository are
+  preserved as links.
+
+  The destination is treated as raw files: anything not present in the
+  working tree is deleted, including files a .gitignore at the destination
+  would otherwise match. A .git directory at the destination is preserved.
+
   When invoked via 'git sync', note that 'git sync --help' is intercepted by
   Git; use 'git sync -h' or 'git-sync --help' for command-line help.
 EOF
@@ -98,6 +111,41 @@ if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
   exit 1
 fi
 
+WORKDIR=""
+KEEPLIST=""
+
+cleanup() {
+  if [[ -n "$WORKDIR" ]]; then
+    rm -rf -- "$WORKDIR"
+  fi
+}
+trap cleanup EXIT
+
+# Build the list of paths Git considers part of the working tree, as anchored
+# rsync include rules. Git owns the ignore semantics; rsync's ':- ' merge
+# cannot express negated (!) rules or tracked-but-ignored files, so placing
+# this ahead of the merge (first match wins) keeps both in step. Memoized so
+# 'all' pays for it once.
+ensure_keeplist() {
+  if [[ -n "$KEEPLIST" ]]; then
+    return 0
+  fi
+
+  if [[ -z "$WORKDIR" ]]; then
+    WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/git-sync.XXXXXX")
+  fi
+
+  local list="$WORKDIR/keep.rules"
+  if ! git -C "$REPO_ROOT" ls-files -z --cached --others --exclude-standard 2>/dev/null |
+    tr '\0' '\n' | sed 's|^|/|' >"$list"; then
+    echo "$(basename "$0"): failed to enumerate working tree files" >&2
+    return 1
+  fi
+
+  KEEPLIST="$list"
+  return 0
+}
+
 resolve_dest_abs_path() {
   local dest_path="$1"
   if [[ -d "$dest_path" ]]; then
@@ -116,26 +164,24 @@ resolve_dest_abs_path() {
   fi
 }
 
+# Takes an already-resolved absolute path (see resolve_dest_abs_path).
 validate_dest_path() {
-  local dest_path="$1"
+  local dest_abs="$1"
   local repo_abs="$2"
   local prefix="${3:-$(basename "$0")}"
 
-  local dest_abs
-  dest_abs=$(resolve_dest_abs_path "$dest_path")
-
   if [[ "$dest_abs" == "$repo_abs" ]]; then
-    echo "$prefix: destination cannot be the source repository: $dest_path" >&2
+    echo "$prefix: destination cannot be the source repository: $dest_abs" >&2
     return 1
   fi
 
   if [[ "$dest_abs" == "$repo_abs"/* ]]; then
-    echo "$prefix: destination cannot be inside the source repository: $dest_path" >&2
+    echo "$prefix: destination cannot be inside the source repository: $dest_abs" >&2
     return 1
   fi
 
   if [[ "$repo_abs" == "$dest_abs"/* || "$dest_abs" == "/" ]]; then
-    echo "$prefix: destination cannot contain the source repository: $dest_path" >&2
+    echo "$prefix: destination cannot contain the source repository: $dest_abs" >&2
     return 1
   fi
 
@@ -167,12 +213,12 @@ cmd_add() {
   local repo_abs
   repo_abs=$(cd "$REPO_ROOT" && pwd -P)
 
-  if ! validate_dest_path "$dest_path" "$repo_abs" "$(basename "$0") add"; then
-    exit 1
-  fi
-
   local dest_abs
   dest_abs=$(resolve_dest_abs_path "$dest_path")
+
+  if ! validate_dest_path "$dest_abs" "$repo_abs" "$(basename "$0") add"; then
+    exit 1
+  fi
 
   git config --local "sync.target.$name" "$dest_abs"
   echo "Registered sync target '$name' -> $dest_abs"
@@ -206,6 +252,17 @@ cmd_list() {
     exit 0
   fi
 
+  local width=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local key name
+    key="${line%% *}"
+    name="${key#sync.target.}"
+    if [[ "${#name}" -gt "$width" ]]; then
+      width="${#name}"
+    fi
+  done <<<"$targets"
+
   echo "Registered sync targets:"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -213,7 +270,7 @@ cmd_list() {
     key="${line%% *}"
     value="${line#* }"
     name="${key#sync.target.}"
-    printf "  %-15s %s\n" "$name" "$value"
+    printf "  %-*s %s\n" "$width" "$name" "$value"
   done <<<"$targets"
 }
 
@@ -244,12 +301,22 @@ run_sync() {
 
   local rsync_args=(-av --delete --safe-links --exclude='.DS_Store')
 
+  if ! ensure_keeplist; then
+    return 1
+  fi
+  if [[ -s "$KEEPLIST" ]]; then
+    rsync_args+=(--include-from="$KEEPLIST")
+  fi
+
+  # Git falls back to $XDG_CONFIG_HOME/git/ignore only when core.excludesFile
+  # is unset; a configured-but-missing file means no global excludes at all.
   local global_exclude
   global_exclude=$(git config --path core.excludesfile 2>/dev/null || true)
-  if [[ -n "$global_exclude" && -f "$global_exclude" ]]; then
+  if [[ -z "$global_exclude" ]]; then
+    global_exclude="${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore"
+  fi
+  if [[ -f "$global_exclude" ]]; then
     rsync_args+=(--exclude-from="$global_exclude")
-  elif [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore" ]]; then
-    rsync_args+=(--exclude-from="${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore")
   fi
 
   local repo_exclude
@@ -258,13 +325,24 @@ run_sync() {
     rsync_args+=(--exclude-from="$repo_exclude")
   fi
 
-  rsync_args+=(--filter=':- .gitignore' --exclude='.git')
+  # ':s-' keeps the merge sender-side. A two-sided rule would make rsync read
+  # the destination's own .gitignore and protect matching files from
+  # --delete, so the first sync into a directory and every later one would
+  # behave differently. The destination is raw files.
+  rsync_args+=(--filter=':s- .gitignore' --exclude='.git')
 
   if [[ "$DRY_RUN" == "true" ]]; then
     rsync_args+=(-n)
   fi
 
-  rsync "${rsync_args[@]}" "$REPO_ROOT/" "$dest_abs/"
+  # Exit 24 means source files vanished mid-transfer, which is routine when
+  # mirroring a live working tree; everything else is a real failure.
+  local status=0
+  rsync "${rsync_args[@]}" "$REPO_ROOT/" "$dest_abs/" || status=$?
+  if [[ "$status" -ne 0 && "$status" -ne 24 ]]; then
+    return "$status"
+  fi
+  return 0
 }
 
 cmd_all() {

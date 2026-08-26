@@ -10,7 +10,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 BIN="$DIR/../bin/git-sync"
 
-echo "1..33"
+echo "1..36"
 
 # Test 1: --help exits zero and includes required sections
 if out=$("$BIN" --help 2>&1) &&
@@ -392,4 +392,69 @@ if [ -f "$SPACED_DEST/file1.txt" ]; then
   echo "ok 33 - destination path containing spaces syncs successfully"
 else
   echo "not ok 33 - destination path containing spaces failed"
+fi
+
+# Test 34: ignore semantics come from Git, including negation and
+# tracked-but-ignored files (which rsync's own .gitignore handling cannot
+# express). A fresh repo keeps these rules isolated from the shared one.
+NEGREPO="$WORK/negation-repo"
+mkdir -p "$NEGREPO/logs" "$NEGREPO/docs"
+git -C "$NEGREPO" init -q
+printf '*.log\n!keep.log\n!logs/important.log\nbuild/\n' >"$NEGREPO/.gitignore"
+printf 'docs-*.tmp\n!docs-keep.tmp\n' >"$NEGREPO/docs/.gitignore"
+mkdir -p "$NEGREPO/build"
+touch "$NEGREPO/keep.log" "$NEGREPO/a.log" "$NEGREPO/logs/important.log" \
+  "$NEGREPO/logs/other.log" "$NEGREPO/docs/docs-keep.tmp" \
+  "$NEGREPO/docs/docs-x.tmp" "$NEGREPO/plain.txt" "$NEGREPO/build/out.o"
+echo "tracked" >"$NEGREPO/tracked.json"
+git -C "$NEGREPO" add -A >/dev/null 2>&1
+git -C "$NEGREPO" -c user.name="Test" -c user.email="test@example.com" \
+  commit -q -m "initial"
+# Ignore a file that is already tracked; Git keeps tracking it.
+printf '*.json\n' >>"$NEGREPO/.gitignore"
+git -C "$NEGREPO" add .gitignore >/dev/null 2>&1
+git -C "$NEGREPO" -c user.name="Test" -c user.email="test@example.com" \
+  commit -q -m "ignore json"
+
+NEGDEST="$WORK/negation-mirror"
+(cd "$NEGREPO" && "$BIN" add neg "$NEGDEST") >/dev/null 2>&1
+(cd "$NEGREPO" && "$BIN" neg) >/dev/null 2>&1
+neg_ok=1
+for f in keep.log logs/important.log docs/docs-keep.tmp tracked.json plain.txt; do
+  [ -e "$NEGDEST/$f" ] || neg_ok=0
+done
+for f in a.log logs/other.log docs/docs-x.tmp build/out.o; do
+  [ -e "$NEGDEST/$f" ] && neg_ok=0
+done
+if [ "$neg_ok" -eq 1 ]; then
+  echo "ok 34 - negated and tracked-but-ignored files mirror as Git sees them"
+else
+  echo "not ok 34 - mirror disagrees with Git about which files belong"
+fi
+
+# Test 35: the destination is treated as raw files, so pruning is idempotent.
+# A two-sided filter would let the destination's own .gitignore protect these
+# on every run after the first.
+idem_ok=1
+for _run in 1 2; do
+  echo stale >"$NEGDEST/stale.log"
+  mkdir -p "$NEGDEST/build"
+  echo stale >"$NEGDEST/build/old.o"
+  (cd "$NEGREPO" && "$BIN" neg) >/dev/null 2>&1
+  { [ -e "$NEGDEST/stale.log" ] || [ -e "$NEGDEST/build/old.o" ]; } && idem_ok=0
+done
+if [ "$idem_ok" -eq 1 ]; then
+  echo "ok 35 - destination pruning is idempotent across repeated syncs"
+else
+  echo "not ok 35 - ignored files at the destination survived a sync"
+fi
+
+# Test 36: a Git repository at the destination keeps its own metadata.
+git -C "$NEGDEST" init -q
+echo "precious" >"$NEGDEST/.git/PRECIOUS"
+(cd "$NEGREPO" && "$BIN" neg) >/dev/null 2>&1
+if [ -f "$NEGDEST/.git/PRECIOUS" ]; then
+  echo "ok 36 - destination .git metadata is preserved"
+else
+  echo "not ok 36 - destination .git was deleted"
 fi
