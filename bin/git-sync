@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-sync
+
+set -euo pipefail
+
+trap 'echo >&2 || true; exit 130' INT TERM
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require git
+require rsync
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [COMMAND | TARGET]
+
+Mirror the current Git repository working tree to pre-registered targets.
+
+Synchronizes working tree files using rsync, respecting .gitignore rules and
+global/local exclude files, excluding Git metadata (.git), preserving
+attributes and deleting removed files. Targets are stored locally in
+.git/config.
+
+Commands:
+  add NAME PATH     Register a named sync target destination
+  remove, rm NAME   Unregister a sync target
+  list              List all registered sync targets
+  all               Sync to all registered targets (default action)
+  TARGET            Sync to a specific registered target
+
+Options:
+  -n, --dry-run     Perform a trial run with no changes made
+  --help, -h        Display this help message and exit
+
+Examples:
+  # Register a sync target destination
+  $(basename "$0") add backup /Volumes/Backup/my-repo
+
+  # List registered sync targets
+  $(basename "$0") list
+
+  # Sync to all registered targets
+  $(basename "$0")
+
+  # Sync to a specific target
+  $(basename "$0") backup
+
+  # Preview sync to all targets without making changes
+  $(basename "$0") --dry-run
+
+Notes:
+  Which files are synchronized is decided by Git, not by re-interpreting
+  .gitignore: the working tree is whatever 'git ls-files --cached --others
+  --exclude-standard' reports, so negated (!) rules and tracked-but-ignored
+  files are mirrored the same way Git treats them.
+
+  Symbolic links pointing outside the repository are skipped, silently and
+  without failing the sync. Links pointing within the repository are
+  preserved as links.
+
+  The destination is treated as raw files: anything not present in the
+  working tree is deleted, including files a .gitignore at the destination
+  would otherwise match. A .git directory at the destination is preserved.
+
+  When invoked via 'git sync', note that 'git sync --help' is intercepted by
+  Git; use 'git sync -h' or 'git-sync --help' for command-line help.
+EOF
+  exit 0
+}
+
+DRY_RUN=false
+POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help | -h | help)
+      usage
+      ;;
+    -n | --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        POSITIONAL+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "$(basename "$0"): unrecognized option '$1'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
+  echo "$(basename "$0"): not a git repository (or any of the parent directories)" >&2
+  exit 1
+fi
+
+WORKDIR=""
+KEEPLIST=""
+
+cleanup() {
+  if [[ -n "$WORKDIR" ]]; then
+    rm -rf -- "$WORKDIR"
+  fi
+}
+trap cleanup EXIT
+
+# Build the list of paths Git considers part of the working tree, as anchored
+# rsync include rules. Git owns the ignore semantics; rsync's ':- ' merge
+# cannot express negated (!) rules or tracked-but-ignored files, so placing
+# this ahead of the merge (first match wins) keeps both in step. Memoized so
+# 'all' pays for it once.
+ensure_keeplist() {
+  if [[ -n "$KEEPLIST" ]]; then
+    return 0
+  fi
+
+  if [[ -z "$WORKDIR" ]]; then
+    WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/git-sync.XXXXXX")
+  fi
+
+  local list="$WORKDIR/keep.rules"
+  if ! git -C "$REPO_ROOT" ls-files -z --cached --others --exclude-standard 2>/dev/null |
+    tr '\0' '\n' | sed 's|^|/|' >"$list"; then
+    echo "$(basename "$0"): failed to enumerate working tree files" >&2
+    return 1
+  fi
+
+  KEEPLIST="$list"
+  return 0
+}
+
+resolve_dest_abs_path() {
+  local dest_path="$1"
+  if [[ -d "$dest_path" ]]; then
+    (cd "$dest_path" && pwd -P)
+  else
+    local dest_parent dest_parent_abs
+    dest_parent=$(dirname "$dest_path")
+    if [[ -d "$dest_parent" ]]; then
+      dest_parent_abs=$(cd "$dest_parent" && pwd -P)
+    elif [[ "$dest_path" == /* ]]; then
+      dest_parent_abs="$dest_parent"
+    else
+      dest_parent_abs="$(cd "$PWD" && pwd -P)/$dest_parent"
+    fi
+    echo "${dest_parent_abs%/}/$(basename "$dest_path")"
+  fi
+}
+
+# Takes an already-resolved absolute path (see resolve_dest_abs_path).
+validate_dest_path() {
+  local dest_abs="$1"
+  local repo_abs="$2"
+  local prefix="${3:-$(basename "$0")}"
+
+  if [[ "$dest_abs" == "$repo_abs" ]]; then
+    echo "$prefix: destination cannot be the source repository: $dest_abs" >&2
+    return 1
+  fi
+
+  if [[ "$dest_abs" == "$repo_abs"/* ]]; then
+    echo "$prefix: destination cannot be inside the source repository: $dest_abs" >&2
+    return 1
+  fi
+
+  if [[ "$repo_abs" == "$dest_abs"/* || "$dest_abs" == "/" ]]; then
+    echo "$prefix: destination cannot contain the source repository: $dest_abs" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+cmd_add() {
+  local name="${1:-}"
+  local dest_path="${2:-}"
+
+  if [[ -z "$name" || -z "$dest_path" ]]; then
+    echo "$(basename "$0") add: missing required arguments (NAME and PATH)" >&2
+    echo "Try '$(basename "$0") --help' for more information." >&2
+    exit 1
+  fi
+
+  case "$name" in
+    add | remove | rm | list | ls | all | help)
+      echo "$(basename "$0") add: '$name' is a reserved command name" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ ! "$name" =~ ^[a-z0-9_-]+$ ]]; then
+    echo "$(basename "$0") add: invalid target name '$name' (use lowercase letters, digits, underscores, dashes)" >&2
+    exit 1
+  fi
+
+  local repo_abs
+  repo_abs=$(cd "$REPO_ROOT" && pwd -P)
+
+  local dest_abs
+  dest_abs=$(resolve_dest_abs_path "$dest_path")
+
+  if ! validate_dest_path "$dest_abs" "$repo_abs" "$(basename "$0") add"; then
+    exit 1
+  fi
+
+  git config --local "sync.target.$name" "$dest_abs"
+  echo "Registered sync target '$name' -> $dest_abs"
+}
+
+cmd_remove() {
+  local name="${1:-}"
+
+  if [[ -z "$name" ]]; then
+    echo "$(basename "$0") remove: target NAME required" >&2
+    echo "Try '$(basename "$0") --help' for more information." >&2
+    exit 1
+  fi
+
+  if ! git config --local --get "sync.target.$name" >/dev/null 2>&1; then
+    echo "$(basename "$0") remove: target '$name' not found" >&2
+    exit 1
+  fi
+
+  git config --local --unset "sync.target.$name"
+  echo "Removed sync target '$name'"
+}
+
+cmd_list() {
+  local targets
+  targets=$(git config --local --get-regexp '^sync\.target\.' 2>/dev/null | sort || true)
+
+  if [[ -z "$targets" ]]; then
+    echo "No sync targets registered."
+    echo "Use '$(basename "$0") add <name> <path>' to register one."
+    exit 0
+  fi
+
+  local width=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local key name
+    key="${line%% *}"
+    name="${key#sync.target.}"
+    if [[ "${#name}" -gt "$width" ]]; then
+      width="${#name}"
+    fi
+  done <<<"$targets"
+
+  echo "Registered sync targets:"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local key value name
+    key="${line%% *}"
+    value="${line#* }"
+    name="${key#sync.target.}"
+    printf "  %-*s %s\n" "$width" "$name" "$value"
+  done <<<"$targets"
+}
+
+run_sync() {
+  local target_name="$1"
+  local target_path="$2"
+
+  local repo_abs dest_abs
+  repo_abs=$(cd "$REPO_ROOT" && pwd -P)
+  dest_abs=$(resolve_dest_abs_path "$target_path")
+
+  if ! validate_dest_path "$dest_abs" "$repo_abs" "$(basename "$0")"; then
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "Syncing '$target_name' -> $dest_abs (dry-run)"
+  else
+    echo "Syncing '$target_name' -> $dest_abs"
+  fi
+
+  if [[ "$DRY_RUN" == "false" ]]; then
+    if ! mkdir -p "$dest_abs" 2>/dev/null; then
+      echo "$(basename "$0"): failed to create destination directory: $dest_abs" >&2
+      return 1
+    fi
+  fi
+
+  local rsync_args=(-av --delete --safe-links --exclude='.DS_Store')
+
+  if ! ensure_keeplist; then
+    return 1
+  fi
+  if [[ -s "$KEEPLIST" ]]; then
+    rsync_args+=(--include-from="$KEEPLIST")
+  fi
+
+  # Git falls back to $XDG_CONFIG_HOME/git/ignore only when core.excludesFile
+  # is unset; a configured-but-missing file means no global excludes at all.
+  local global_exclude
+  global_exclude=$(git config --path core.excludesfile 2>/dev/null || true)
+  if [[ -z "$global_exclude" ]]; then
+    global_exclude="${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore"
+  fi
+  if [[ -f "$global_exclude" ]]; then
+    rsync_args+=(--exclude-from="$global_exclude")
+  fi
+
+  local repo_exclude
+  repo_exclude=$(git rev-parse --git-path info/exclude 2>/dev/null || true)
+  if [[ -n "$repo_exclude" && -f "$repo_exclude" ]]; then
+    rsync_args+=(--exclude-from="$repo_exclude")
+  fi
+
+  # ':s-' keeps the merge sender-side. A two-sided rule would make rsync read
+  # the destination's own .gitignore and protect matching files from
+  # --delete, so the first sync into a directory and every later one would
+  # behave differently. The destination is raw files.
+  rsync_args+=(--filter=':s- .gitignore' --exclude='.git')
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    rsync_args+=(-n)
+  fi
+
+  # Exit 24 means source files vanished mid-transfer, which is routine when
+  # mirroring a live working tree; everything else is a real failure.
+  local status=0
+  rsync "${rsync_args[@]}" "$REPO_ROOT/" "$dest_abs/" || status=$?
+  if [[ "$status" -ne 0 && "$status" -ne 24 ]]; then
+    return "$status"
+  fi
+  return 0
+}
+
+cmd_all() {
+  local targets
+  targets=$(git config --local --get-regexp '^sync\.target\.' 2>/dev/null | sort || true)
+
+  if [[ -z "$targets" ]]; then
+    echo "$(basename "$0"): no sync targets registered. Use '$(basename "$0") add <name> <path>' to add one." >&2
+    exit 1
+  fi
+
+  local failed=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local key target_path target_name
+    key="${line%% *}"
+    target_path="${line#* }"
+    target_name="${key#sync.target.}"
+    run_sync "$target_name" "$target_path" || failed=1
+  done <<<"$targets"
+
+  if [[ "$failed" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+cmd_target() {
+  local target_name="$1"
+  local target_path
+  target_path=$(git config --local --get "sync.target.$target_name" 2>/dev/null || true)
+
+  if [[ -z "$target_path" ]]; then
+    echo "$(basename "$0"): unknown command or target '$target_name'" >&2
+    echo "Run '$(basename "$0") list' to see registered targets, or '$(basename "$0") --help' for more information." >&2
+    exit 1
+  fi
+
+  run_sync "$target_name" "$target_path"
+}
+
+# Guard --dry-run against non-sync subcommands
+if [[ "$DRY_RUN" == "true" ]]; then
+  case "${POSITIONAL[0]:-}" in
+    add | remove | rm | list | ls)
+      echo "$(basename "$0") ${POSITIONAL[0]}: --dry-run option not supported" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Dispatch commands based on positional arguments
+num_args="${#POSITIONAL[@]}"
+
+case "${POSITIONAL[0]:-}" in
+  "")
+    cmd_all
+    ;;
+  list | ls)
+    if [[ "$num_args" -gt 1 ]]; then
+      echo "$(basename "$0") ${POSITIONAL[0]}: extra operand '${POSITIONAL[1]}'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    fi
+    cmd_list
+    ;;
+  all)
+    if [[ "$num_args" -gt 1 ]]; then
+      echo "$(basename "$0") all: extra operand '${POSITIONAL[1]}'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    fi
+    cmd_all
+    ;;
+  add)
+    if [[ "$num_args" -eq 1 ]]; then
+      echo "$(basename "$0") add: missing required arguments (NAME and PATH)" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    elif [[ "$num_args" -eq 2 ]]; then
+      echo "$(basename "$0") add: missing required PATH argument" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    elif [[ "$num_args" -eq 3 ]]; then
+      cmd_add "${POSITIONAL[1]}" "${POSITIONAL[2]}"
+    else
+      echo "$(basename "$0") add: extra operand '${POSITIONAL[3]}'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    fi
+    ;;
+  remove | rm)
+    if [[ "$num_args" -eq 1 ]]; then
+      echo "$(basename "$0") ${POSITIONAL[0]}: target NAME required" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    elif [[ "$num_args" -eq 2 ]]; then
+      cmd_remove "${POSITIONAL[1]}"
+    else
+      echo "$(basename "$0") ${POSITIONAL[0]}: extra operand '${POSITIONAL[2]}'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    if [[ "$num_args" -eq 1 ]]; then
+      cmd_target "${POSITIONAL[0]}"
+    else
+      echo "$(basename "$0"): extra operand '${POSITIONAL[1]}'" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    fi
+    ;;
+esac

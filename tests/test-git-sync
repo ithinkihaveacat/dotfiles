@@ -1,0 +1,460 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-sync
+
+set -u
+
+# Isolate from global/system git config (signing, hooks, templates).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../bin/git-sync"
+
+echo "1..36"
+
+# Test 1: --help exits zero and includes required sections
+if out=$("$BIN" --help 2>&1) &&
+  printf '%s' "$out" | grep -q 'Usage:' &&
+  printf '%s' "$out" | grep -q 'Commands:' &&
+  printf '%s' "$out" | grep -q 'Options:' &&
+  printf '%s' "$out" | grep -q 'Examples:' &&
+  printf '%s' "$out" | grep -q -- '--dry-run'; then
+  echo "ok 1 - --help documents usage, commands, options, and examples"
+else
+  echo "not ok 1 - --help output incomplete or failed"
+fi
+
+# Test 2: -h alias works
+if "$BIN" -h >/dev/null 2>&1; then
+  echo "ok 2 - -h alias works"
+else
+  echo "not ok 2 - -h alias failed"
+fi
+
+# Test 3: unrecognized option exits 1 with error on stderr
+err_out=$("$BIN" --invalid-flag 2>&1 || true)
+rc=0
+"$BIN" --invalid-flag >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "unrecognized option '--invalid-flag'"; then
+  echo "ok 3 - unrecognized option exits 1 with error"
+else
+  echo "not ok 3 - unrecognized option handling failed (rc=$rc)"
+fi
+
+WORK=$(mktemp -d "/tmp/git-sync-test.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# Test 4: running outside a git repository exits 1
+NON_REPO="$WORK/non-repo"
+mkdir -p "$NON_REPO"
+rc=0
+err_out=$(cd "$NON_REPO" && "$BIN" list 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "not a git repository"; then
+  echo "ok 4 - non-git repository execution fails cleanly with exit code 1"
+else
+  echo "not ok 4 - non-git repository handling failed (rc=$rc)"
+fi
+
+# Test 5: missing dependency exits 127
+STUB_DIR="$WORK/stubs"
+mkdir -p "$STUB_DIR"
+ln -s "$(command -v bash)" "$STUB_DIR/bash"
+ln -s "$(command -v git)" "$STUB_DIR/git"
+rc=0
+err_out=$(PATH="$STUB_DIR" "$BIN" list 2>&1) || rc=$?
+if [ "$rc" -eq 127 ] && printf '%s' "$err_out" | grep -q "rsync not found"; then
+  echo "ok 5 - missing dependency (rsync) exits 127"
+else
+  echo "not ok 5 - missing dependency expected 127 (got $rc: $err_out)"
+fi
+
+# Setup a test Git repository
+REPO_PARENT="$WORK/parent"
+REPO="$REPO_PARENT/test-repo"
+mkdir -p "$REPO"
+git -C "$REPO" init -q
+echo "file1 content" >"$REPO/file1.txt"
+echo "ignored content" >"$REPO/ignored.log"
+echo "*.log" >"$REPO/.gitignore"
+git -C "$REPO" add file1.txt .gitignore
+git -C "$REPO" -c user.name="Test" -c user.email="test@example.com" commit -q -m "initial commit"
+echo "untracked unignored" >"$REPO/untracked.txt"
+
+# Test 6: bare invocation with no targets registered exits 1 with guidance
+rc=0
+err_out=$(cd "$REPO" && "$BIN" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "no sync targets registered"; then
+  echo "ok 6 - bare invocation with no targets registered exits 1"
+else
+  echo "not ok 6 - bare invocation should exit 1 when empty (rc=$rc)"
+fi
+
+# Test 7: list with no targets registered exits 0
+rc=0
+list_out=$(cd "$REPO" && "$BIN" list 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$list_out" | grep -q "No sync targets registered."; then
+  echo "ok 7 - list with no targets registered exits 0"
+else
+  echo "not ok 7 - list should exit 0 when empty (rc=$rc)"
+fi
+
+# Test 8: add without required arguments fails
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "missing required arguments"; then
+  echo "ok 8 - add without arguments fails"
+else
+  echo "not ok 8 - add without arguments should fail (rc=$rc)"
+fi
+
+# Test 9: add with reserved name fails
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add list /tmp/dest 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "is a reserved command name"; then
+  echo "ok 9 - add with reserved name is rejected"
+else
+  echo "not ok 9 - add with reserved name should fail (rc=$rc)"
+fi
+
+# Test 10: add with invalid target name fails
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add "bad name!" /tmp/dest 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "invalid target name"; then
+  echo "ok 10 - add with invalid target name is rejected"
+else
+  echo "not ok 10 - add with invalid target name should fail (rc=$rc)"
+fi
+
+# Test 11: add destination as repo root is rejected
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add root "$REPO" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot be the source repository"; then
+  echo "ok 11 - add destination as repo root is rejected"
+else
+  echo "not ok 11 - add destination as repo root should fail (rc=$rc)"
+fi
+
+# Test 12: add destination inside repo is rejected without creating directory
+NON_EXISTENT_SUBDIR="$REPO/should-not-exist"
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add inner "$NON_EXISTENT_SUBDIR" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] &&
+  printf '%s' "$err_out" | grep -q "destination cannot be inside the source repository" &&
+  [ ! -e "$NON_EXISTENT_SUBDIR" ]; then
+  echo "ok 12 - add destination inside repo is rejected without creating directory"
+else
+  echo "not ok 12 - add destination inside repo should fail and not create directory (rc=$rc)"
+fi
+
+# Test 13: add destination as ancestor of repo is rejected
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add ancestor "$REPO_PARENT" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot contain the source repository"; then
+  echo "ok 13 - add destination as repo ancestor is rejected"
+else
+  echo "not ok 13 - add destination as repo ancestor should fail (rc=$rc)"
+fi
+
+# Test 14: --dry-run is rejected on add, remove, and list
+rc_add=0
+rc_rm=0
+rc_ls=0
+(cd "$REPO" && "$BIN" --dry-run add target /tmp/foo >/dev/null 2>&1) || rc_add=$?
+(cd "$REPO" && "$BIN" --dry-run rm target >/dev/null 2>&1) || rc_rm=$?
+(cd "$REPO" && "$BIN" --dry-run list >/dev/null 2>&1) || rc_ls=$?
+if [ "$rc_add" -eq 1 ] && [ "$rc_rm" -eq 1 ] && [ "$rc_ls" -eq 1 ]; then
+  echo "ok 14 - --dry-run is rejected for add, remove, and list"
+else
+  echo "not ok 14 - --dry-run should be rejected for non-sync commands"
+fi
+
+# Test 15: add registers target in git config without creating destination directory
+DEST1="$WORK/mirror1"
+add_out=$(cd "$REPO" && "$BIN" add backup "$DEST1")
+DEST1_ABS="$(cd "$WORK" && pwd -P)/mirror1"
+if [ "$(git -C "$REPO" config --local --get sync.target.backup)" = "$DEST1_ABS" ] &&
+  [ ! -e "$DEST1" ] &&
+  printf '%s' "$add_out" | grep -q "Registered sync target 'backup'"; then
+  echo "ok 15 - add registers target without creating destination directory"
+else
+  echo "not ok 15 - add failed or created destination directory unexpectedly"
+fi
+
+# Test 16: list displays registered targets
+list_out=$(cd "$REPO" && "$BIN" list)
+if printf '%s' "$list_out" | grep -q "backup" &&
+  printf '%s' "$list_out" | grep -q "$DEST1_ABS"; then
+  echo "ok 16 - list displays registered targets"
+else
+  echo "not ok 16 - list did not show registered target"
+fi
+
+# Test 17: sync creates destination directory and copies files
+(cd "$REPO" && "$BIN" backup) >/dev/null 2>&1
+if [ -d "$DEST1" ] &&
+  [ -f "$DEST1/file1.txt" ] &&
+  [ -f "$DEST1/untracked.txt" ] &&
+  [ ! -e "$DEST1/.git" ] &&
+  [ ! -e "$DEST1/ignored.log" ]; then
+  echo "ok 17 - sync creates destination directory and copies files"
+else
+  echo "not ok 17 - sync content verification failed"
+fi
+
+# Test 18: sync excludes .git metadata even when .git is a file (worktree case)
+WORKTREE_DIR="$WORK/worktree"
+git -C "$REPO" worktree add -q "$WORKTREE_DIR" -b worktree-branch
+echo "worktree file" >"$WORKTREE_DIR/wt.txt"
+DEST_WT="$WORK/dest-wt"
+(cd "$WORKTREE_DIR" && "$BIN" add wt-target "$DEST_WT") >/dev/null 2>&1
+(cd "$WORKTREE_DIR" && "$BIN" wt-target) >/dev/null 2>&1
+if [ -f "$DEST_WT/wt.txt" ] && [ ! -e "$DEST_WT/.git" ]; then
+  echo "ok 18 - sync excludes .git metadata when .git is a regular file"
+else
+  echo "not ok 18 - .git worktree file was copied or sync failed"
+fi
+
+# Test 19: sync prunes deleted files
+rm -f "$REPO/untracked.txt"
+(cd "$REPO" && "$BIN" backup) >/dev/null 2>&1
+if [ ! -e "$DEST1/untracked.txt" ]; then
+  echo "ok 19 - deleted files are pruned in destination"
+else
+  echo "not ok 19 - deleted file was not pruned"
+fi
+
+# Test 20: sync to multiple targets via 'all'
+DEST2="$WORK/mirror2"
+(cd "$REPO" && "$BIN" add cloud "$DEST2") >/dev/null 2>&1
+(cd "$REPO" && "$BIN" all) >/dev/null 2>&1
+if [ -f "$DEST1/file1.txt" ] && [ -f "$DEST2/file1.txt" ]; then
+  echo "ok 20 - sync all synchronizes multiple targets"
+else
+  echo "not ok 20 - sync all failed to sync both targets"
+fi
+
+# Test 21: --dry-run does not write new changes
+echo "new dry file" >"$REPO/dry.txt"
+(cd "$REPO" && "$BIN" --dry-run backup) >/dev/null 2>&1
+if [ ! -e "$DEST1/dry.txt" ]; then
+  echo "ok 21 - --dry-run does not write files to destination"
+else
+  echo "not ok 21 - --dry-run wrote file to destination"
+fi
+rm -f "$REPO/dry.txt"
+
+# Test 22: sync destination creation failure reports error
+if [ "$(id -u)" -eq 0 ]; then
+  echo "ok 22 - failed destination directory creation reports error # SKIP root user bypasses permissions"
+else
+  UNWRITABLE_ROOT="$WORK/unwritable_root"
+  mkdir -p "$UNWRITABLE_ROOT"
+  chmod 555 "$UNWRITABLE_ROOT"
+  UNWRITABLE_DEST="$UNWRITABLE_ROOT/subdir/target"
+  (cd "$REPO" && "$BIN" add unwritable "$UNWRITABLE_DEST") >/dev/null 2>&1
+  rc=0
+  err_out=$(cd "$REPO" && "$BIN" unwritable 2>&1) || rc=$?
+  chmod 755 "$UNWRITABLE_ROOT"
+  if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "failed to create destination directory"; then
+    echo "ok 22 - failed destination directory creation reports error"
+  else
+    echo "not ok 22 - directory creation failure handling failed (rc=$rc)"
+  fi
+  (cd "$REPO" && "$BIN" rm unwritable) >/dev/null 2>&1
+fi
+
+# Test 23: defense-in-depth: manual .git/config edit to ancestor is caught at sync time
+MANUAL_ANCESTOR="$WORK/ancestor_manual"
+mkdir -p "$MANUAL_ANCESTOR"
+git -C "$REPO" config --local "sync.target.badancestor" "$REPO_PARENT"
+rc=0
+err_out=$(cd "$REPO" && "$BIN" badancestor 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "destination cannot contain the source repository"; then
+  echo "ok 23 - defense-in-depth catches manually edited ancestor target at sync time"
+else
+  echo "not ok 23 - manual ancestor target was not caught at sync time (rc=$rc)"
+fi
+git -C "$REPO" config --local --unset "sync.target.badancestor"
+
+# Test 24: invocation from deep subdirectory works
+NESTED_SUBDIR="$REPO/a/deep/nested/dir"
+mkdir -p "$NESTED_SUBDIR"
+echo "nested content" >"$NESTED_SUBDIR/nested.txt"
+(cd "$NESTED_SUBDIR" && "$BIN" backup) >/dev/null 2>&1
+if [ -f "$DEST1/a/deep/nested/dir/nested.txt" ]; then
+  echo "ok 24 - invocation from nested subdirectory mirrors entire repo"
+else
+  echo "not ok 24 - nested invocation failed"
+fi
+
+# Test 25: remove unregisters target
+(cd "$REPO" && "$BIN" rm cloud) >/dev/null 2>&1
+if [ -z "$(git -C "$REPO" config --local --get sync.target.cloud)" ]; then
+  echo "ok 25 - remove unregisters target from git config"
+else
+  echo "not ok 25 - remove failed to unregister target"
+fi
+
+# Test 26: extra operands on commands are rejected with specific errors
+rc_add=0
+rc_rm=0
+rc_ls=0
+err_add=$(cd "$REPO" && "$BIN" add target "$DEST1" extra 2>&1) || rc_add=$?
+err_rm=$(cd "$REPO" && "$BIN" rm backup extra 2>&1) || rc_rm=$?
+err_ls=$(cd "$REPO" && "$BIN" list extra 2>&1) || rc_ls=$?
+if [ "$rc_add" -eq 1 ] && printf '%s' "$err_add" | grep -q "add: extra operand" &&
+  [ "$rc_rm" -eq 1 ] && printf '%s' "$err_rm" | grep -q "rm: extra operand" &&
+  [ "$rc_ls" -eq 1 ] && printf '%s' "$err_ls" | grep -q "list: extra operand"; then
+  echo "ok 26 - extra operands rejected with specific error prefixes"
+else
+  echo "not ok 26 - extra operand handling failed"
+fi
+
+# Test 27: --safe-links ignores external symlinks and preserves internal symlinks
+OUTSIDE_DIR="$WORK/outside_dir"
+mkdir -p "$OUTSIDE_DIR"
+touch "$OUTSIDE_DIR/secret.txt"
+ln -s "$OUTSIDE_DIR/secret.txt" "$REPO/external_link"
+ln -s "file1.txt" "$REPO/internal_link"
+(cd "$REPO" && "$BIN" backup) >/dev/null 2>&1
+if [ ! -e "$DEST1/external_link" ] && [ -L "$DEST1/internal_link" ]; then
+  echo "ok 27 - --safe-links ignores external symlinks and preserves internal symlinks"
+else
+  echo "not ok 27 - external symlink was copied or internal symlink lost"
+fi
+rm -f "$REPO/external_link" "$REPO/internal_link"
+
+# Test 28: .DS_Store files are excluded from sync
+mkdir -p "$REPO/sub_ds"
+touch "$REPO/.DS_Store" "$REPO/sub_ds/.DS_Store"
+(cd "$REPO" && "$BIN" backup) >/dev/null 2>&1
+if [ ! -e "$DEST1/.DS_Store" ] && [ ! -e "$DEST1/sub_ds/.DS_Store" ]; then
+  echo "ok 28 - .DS_Store files are excluded from sync"
+else
+  echo "not ok 28 - .DS_Store files were copied"
+fi
+rm -rf "$REPO/sub_ds" "$REPO/.DS_Store"
+
+# Test 29: core.excludesfile patterns are respected
+GLOBAL_EXCLUDE="$WORK/global_excludes"
+echo "*.globalignore" >"$GLOBAL_EXCLUDE"
+git -C "$REPO" config core.excludesfile "$GLOBAL_EXCLUDE"
+touch "$REPO/test.globalignore"
+(cd "$REPO" && "$BIN" backup) >/dev/null 2>&1
+if [ ! -e "$DEST1/test.globalignore" ]; then
+  echo "ok 29 - core.excludesfile patterns are respected during sync"
+else
+  echo "not ok 29 - core.excludesfile pattern was not excluded"
+fi
+rm -f "$REPO/test.globalignore"
+git -C "$REPO" config --unset core.excludesfile
+
+# Test 30: reject uppercase target names to avoid case-folding ambiguity
+rc=0
+err_out=$(cd "$REPO" && "$BIN" add "MyBackup" /tmp/dest 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q "invalid target name"; then
+  echo "ok 30 - uppercase target name is rejected"
+else
+  echo "not ok 30 - uppercase target name should fail (rc=$rc)"
+fi
+
+# Test 31: global sync.target config entries are isolated and not read
+FAKE_GLOBAL="$WORK/fake_global"
+mkdir -p "$FAKE_GLOBAL"
+git config -f "$FAKE_GLOBAL/gitconfig" sync.target.globalonly "/tmp/globaldest"
+rc=0
+list_out=$(cd "$REPO" && GIT_CONFIG_GLOBAL="$FAKE_GLOBAL/gitconfig" "$BIN" list) || rc=$?
+if [ "$rc" -eq 0 ] && ! printf '%s' "$list_out" | grep -q "globalonly"; then
+  echo "ok 31 - global sync.target entries are ignored by local list"
+else
+  echo "not ok 31 - global sync.target was leaked into local list"
+fi
+
+# Test 32: defense-in-depth inside run_sync rejects invalid child target without creating directory
+MANUAL_INSIDE="$REPO/manual_inside_dest"
+git -C "$REPO" config --local "sync.target.badinside" "$MANUAL_INSIDE"
+rc=0
+err_out=$(cd "$REPO" && "$BIN" badinside 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] &&
+  printf '%s' "$err_out" | grep -q "destination cannot be inside the source repository" &&
+  [ ! -e "$MANUAL_INSIDE" ]; then
+  echo "ok 32 - defense-in-depth catches invalid child target at sync time without creating dir"
+else
+  echo "not ok 32 - manual inside target failed or created directory"
+fi
+git -C "$REPO" config --local --unset "sync.target.badinside"
+
+# Test 33: target destination with spaces in path syncs cleanly
+SPACED_DEST="$WORK/my destination folder"
+(cd "$REPO" && "$BIN" add spaced "$SPACED_DEST") >/dev/null 2>&1
+(cd "$REPO" && "$BIN" spaced) >/dev/null 2>&1
+if [ -f "$SPACED_DEST/file1.txt" ]; then
+  echo "ok 33 - destination path containing spaces syncs successfully"
+else
+  echo "not ok 33 - destination path containing spaces failed"
+fi
+
+# Test 34: ignore semantics come from Git, including negation and
+# tracked-but-ignored files (which rsync's own .gitignore handling cannot
+# express). A fresh repo keeps these rules isolated from the shared one.
+NEGREPO="$WORK/negation-repo"
+mkdir -p "$NEGREPO/logs" "$NEGREPO/docs"
+git -C "$NEGREPO" init -q
+printf '*.log\n!keep.log\n!logs/important.log\nbuild/\n' >"$NEGREPO/.gitignore"
+printf 'docs-*.tmp\n!docs-keep.tmp\n' >"$NEGREPO/docs/.gitignore"
+mkdir -p "$NEGREPO/build"
+touch "$NEGREPO/keep.log" "$NEGREPO/a.log" "$NEGREPO/logs/important.log" \
+  "$NEGREPO/logs/other.log" "$NEGREPO/docs/docs-keep.tmp" \
+  "$NEGREPO/docs/docs-x.tmp" "$NEGREPO/plain.txt" "$NEGREPO/build/out.o"
+echo "tracked" >"$NEGREPO/tracked.json"
+git -C "$NEGREPO" add -A >/dev/null 2>&1
+git -C "$NEGREPO" -c user.name="Test" -c user.email="test@example.com" \
+  commit -q -m "initial"
+# Ignore a file that is already tracked; Git keeps tracking it.
+printf '*.json\n' >>"$NEGREPO/.gitignore"
+git -C "$NEGREPO" add .gitignore >/dev/null 2>&1
+git -C "$NEGREPO" -c user.name="Test" -c user.email="test@example.com" \
+  commit -q -m "ignore json"
+
+NEGDEST="$WORK/negation-mirror"
+(cd "$NEGREPO" && "$BIN" add neg "$NEGDEST") >/dev/null 2>&1
+(cd "$NEGREPO" && "$BIN" neg) >/dev/null 2>&1
+neg_ok=1
+for f in keep.log logs/important.log docs/docs-keep.tmp tracked.json plain.txt; do
+  [ -e "$NEGDEST/$f" ] || neg_ok=0
+done
+for f in a.log logs/other.log docs/docs-x.tmp build/out.o; do
+  [ -e "$NEGDEST/$f" ] && neg_ok=0
+done
+if [ "$neg_ok" -eq 1 ]; then
+  echo "ok 34 - negated and tracked-but-ignored files mirror as Git sees them"
+else
+  echo "not ok 34 - mirror disagrees with Git about which files belong"
+fi
+
+# Test 35: the destination is treated as raw files, so pruning is idempotent.
+# A two-sided filter would let the destination's own .gitignore protect these
+# on every run after the first.
+idem_ok=1
+for _run in 1 2; do
+  echo stale >"$NEGDEST/stale.log"
+  mkdir -p "$NEGDEST/build"
+  echo stale >"$NEGDEST/build/old.o"
+  (cd "$NEGREPO" && "$BIN" neg) >/dev/null 2>&1
+  { [ -e "$NEGDEST/stale.log" ] || [ -e "$NEGDEST/build/old.o" ]; } && idem_ok=0
+done
+if [ "$idem_ok" -eq 1 ]; then
+  echo "ok 35 - destination pruning is idempotent across repeated syncs"
+else
+  echo "not ok 35 - ignored files at the destination survived a sync"
+fi
+
+# Test 36: a Git repository at the destination keeps its own metadata.
+git -C "$NEGDEST" init -q
+echo "precious" >"$NEGDEST/.git/PRECIOUS"
+(cd "$NEGREPO" && "$BIN" neg) >/dev/null 2>&1
+if [ -f "$NEGDEST/.git/PRECIOUS" ]; then
+  echo "ok 36 - destination .git metadata is preserved"
+else
+  echo "not ok 36 - destination .git was deleted"
+fi
