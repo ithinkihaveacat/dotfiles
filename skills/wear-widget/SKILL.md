@@ -115,12 +115,25 @@ with the mechanisms used to generate the asset files (see
   density (`nodpi`), requiring directory names like
   `res/drawable-w225dp-nodpi/`. The **225dp** threshold is the official
   breakpoint between small and large watch displays.
-- **Aspect Ratio & Dimensions**: The Tile carousel preview image must have a
-  perfect **1:1 (square) aspect ratio** at exactly **400x400px**. The Android
-  build system enforces the `TilePreviewImageFormat` lint rule.
-- **Full-Bleed & Masking**: Provide perfectly square images. Let the Wear OS
-  system automatically clip the edges to the device's shape. Do not pre-mask
-  background assets into a circle.
+- **Aspect Ratio & Dimensions**:
+  - **Tile Carousel Preview**: Must have a perfect **1:1 (square) aspect ratio**
+    at exactly **400x400px** (`res/drawable-nodpi/` declared in
+    `AndroidManifest.xml`). The Android build system enforces the
+    `TilePreviewImageFormat` lint rule.
+  - **Widget Picker Previews (Glance / Provider XML)**: Generated via the
+    Rectangular preview parameter suite (`RectangularSmallWidgetPreviewParams`
+    and `RectangularLargeWidgetPreviewParams`) at standard watch density (**320
+    dpi** / 2.0x scaling):
+    - **Small Widget Container (`CONTAINER_TYPE_SMALL`)**: Inner content 192 x
+      60 dp with 16 dp H / 12 dp V padding buffers -> Total canvas **224 x 84
+      dp** (**448 x 168 px**).
+    - **Large Widget Container (`CONTAINER_TYPE_LARGE`)**: Inner content 168 x
+      112 dp with 32 dp H / 16 dp V padding buffers -> Total canvas **232 x 144
+      dp** (**464 x 288 px**).
+- **Full-Bleed & Masking**: Provide perfectly unmasked, rectangular images with
+  square corners (`cornerRadius = 0dp`). Let the Wear OS system automatically
+  clip the edges to the device's shape. Do not pre-mask background assets into a
+  circle or squircle.
 
 ### Widget Picker Previews (Glance/AppWidget)
 
