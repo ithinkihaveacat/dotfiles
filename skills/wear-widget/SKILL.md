@@ -352,10 +352,19 @@ ______________________________________________________________________
   template and authoring directives for Wear OS widget and tile integration
   audits.
   - **4-Level Sorting Hierarchy**:
-    1. **Service Component**: Self-contained section per declared service (`ServiceClassName`).
-    2. **Container Size / Variant**: `LARGE (2x1)` vs `SMALL (1x1)` (with explicit `[NOT DECLARED BY APK]` cards if unsupported).
-    3. **Target Platform / Machine**: Organized across Samsung Galaxy Watch (One UI), Google Pixel Watch (Stock Wear OS), and Wear OS Reference Emulator (adaptive multi-column or stacked layout).
-    4. **Surface Phase & Operational Mode**: Under each device, capture **(1) System Picker Image**, **(2a) Live In-Use Screenshot**, and **(2b) Live Screencast (Context Video)** across active modes.
-  - **Structured Placeholders**: Render explicit `[Pending Capture]` cards with dashed borders for missing/pending slots rather than omitting columns.
-  - **Formatted XML**: Format and pretty-print XML declarations with 4-space indentation and one attribute per line for multi-attribute tags.
-  - **Media Preservation**: Keep static preview assets unmasked with native aspect ratios.
+    1. **Service Component**: Self-contained section per declared service
+       (`ServiceClassName`).
+    1. **Container Size / Variant**: `LARGE (2x1)` vs `SMALL (1x1)` (with
+       explicit `[NOT DECLARED BY APK]` cards if unsupported).
+    1. **Target Platform / Machine**: Organized across Samsung Galaxy Watch (One
+       UI), Google Pixel Watch (Stock Wear OS), and Wear OS Reference Emulator
+       (adaptive multi-column or stacked layout).
+    1. **Surface Phase & Operational Mode**: Under each device, capture **(1)
+       System Picker Image**, **(2a) Live In-Use Screenshot**, and **(2b) Live
+       Screencast (Context Video)** across active modes.
+  - **Structured Placeholders**: Render explicit `[Pending Capture]` cards with
+    dashed borders for missing/pending slots rather than omitting columns.
+  - **Formatted XML**: Format and pretty-print XML declarations with 4-space
+    indentation and one attribute per line for multi-attribute tags.
+  - **Media Preservation**: Keep static preview assets unmasked with native
+    aspect ratios.
