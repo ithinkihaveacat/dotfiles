@@ -31,6 +31,7 @@ INBOX.md                  # zero-ceremony capture; no schema
   tasks/*.md              # stable task records
   decisions/*.md          # ADRs (optional)
   references/*            # supporting context, schemas, design tokens, external docs (optional)
+  bugreports/*            # captured bug reports, reproduction logs, triage traces (optional)
   scripts/*               # automation, audit harnesses, pipelines, report generators (optional)
   data/*                  # input datasets, package lists, static fixtures (optional)
   results/*               # benchmark telemetry, run logs, audit outputs (optional)
