@@ -223,11 +223,10 @@ ______________________________________________________________________
 
   3. Third-Level Dimension (Source Asset vs Target Machine / Device):
      - First: Source of Truth (APK Declared Static Preview Asset from res/drawable-nodpi/).
-     - Next: Multi-Target Device Matrix across all target environments:
-       * Samsung Galaxy Watch (One UI Watch)
-       * Google Pixel Watch (Stock Wear OS)
-       * Wear OS Reference Emulator (AOSP Baseline)
-       * (Adaptable: Use a multi-column grid for 2-3 devices, or stacked device cards if >3 devices).
+     - Next: Multi-Target Device Matrix across all target environments.
+     - Mandatory Device Header Rule: Always state the explicit device model, OS/skin version, AND API level 
+       (e.g., `Samsung Galaxy Watch (One UI Watch 7 / API 37)`, `Google Pixel Watch 4 (Wear OS 5.1 / API 37)`).
+       This prevents ambiguity between Wear OS <= 6 compatibility mode (full tiles) and Wear OS >= 7 modular widgets.
 
   4. Fourth-Level Dimension (Surface Phase & In-Use Operational Modes):
      Under each device target, provide:
@@ -240,7 +239,11 @@ ______________________________________________________________________
              - (a) Live In-Use Screenshot: Active widget in carousel on watch face.
              - (b) Live Screencast (Context Video): Screen recording showing interaction, scrolling context, or border behavior.
 
-  5. Placeholders & Missing Media Invariant:
+  5. Layout Adaptability & Scaling:
+     - For 2–3 target devices: Use the standard Multi-Target Device Matrix table below.
+     - For >3 target devices (or complex media): Use the Stacked Device Card format shown below the table to prevent viewport overflow.
+
+  6. Placeholders & Missing Media Invariant:
      - If a specific capture is missing or pending (e.g. Pixel Watch Picker, Emulator Live), 
        render an explicit `[Pending Capture]` placeholder card rather than omitting the slot.
      - If an asset is shared/reused across sizes, explicitly display the shared asset in both slots.
@@ -258,16 +261,42 @@ ______________________________________________________________________
 ![LARGE APK Preview](resources/my_widget_preview_large.png) *Raw static preview
 image extracted from `res/drawable-nodpi/`.*
 
-###### Multi-Target Device Matrix:
+###### Multi-Target Device Matrix (Standard 2–3 Device Table Format):
 
-| Surface / Media Stage                          | Samsung Galaxy Watch (One UI)                                                                                                     | Google Pixel Watch (Wear OS 5.1)                                                        | Wear OS Emulator (API 37)                                   |
+| Surface / Media Stage                          | Samsung Galaxy Watch (One UI 7 / API 37)                                                                                          | Google Pixel Watch 4 (Wear OS 5.1 / API 37)                                             | Wear OS Emulator (AOSP / API 37)                            |
 | :--------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------- | :---------------------------------------------------------- |
 | **(1) System Picker Image**                    | ![Samsung Picker](resources/samsung_picker_large.png)<br>*Rendered in `SecTileComposeAddableActivity` (Note squashing/letterbox)* | `[Pending Capture]`<br>*Pixel Watch SysUI Picker*                                       | `[Pending Capture]`<br>*Emulator SysUI Picker*              |
 | **(2a) Live Screenshot (Mode: Authenticated)** | ![Samsung Live](resources/samsung_live_large.png)<br>*Boxy card vs native pill styling*                                           | ![Pixel Live](resources/pixel_live_large.png)<br>*Clean single-border rectangular card* | `[Pending Capture]`<br>*AOSP Glance container verification* |
 | **(2b) Live Screencast (Context Video)**       | `<video src="resources/samsung_video.mp4" controls />`<br>*Vertical carousel scrolling*                                           | `[Pending Capture]`<br>*Pixel Watch interaction recording*                              | `[Pending Capture]`<br>*Emulator interaction recording*     |
 
-*(Optional: Repeat 2a/2b rows for additional operational modes such as
-Unauthenticated / Zero State if applicable.)*
+###### Alternative: Stacked Device Card Format (Recommended for >3 Target Devices):
+
+<!-- GUIDANCE: If auditing >3 devices, use this stacked card layout instead of a wide table: -->
+
+> **1. Samsung Galaxy Watch (One UI Watch 7 / API 37 - SM-L340)**
+>
+> - **(1) System Picker Image:**
+>   ![Samsung Picker](resources/samsung_picker_large.png) *(Squashed /
+>   letterboxed in `SecTileComposeAddableActivity`)*
+> - **(2a) Live In-Use Screenshot (Authenticated):**
+>   ![Samsung Live](resources/samsung_live_large.png) *(Boxy card vs native pill
+>   styling)*
+> - **(2b) Live Screencast:**
+>   `<video src="resources/samsung_video.mp4" controls />`
+>
+> **2. Google Pixel Watch 4 (Wear OS 5.1 / API 37)**
+>
+> - **(1) System Picker Image:** `[Pending Capture: Pixel Watch SysUI Picker]`
+> - **(2a) Live In-Use Screenshot (Authenticated):**
+>   ![Pixel Live](resources/pixel_live_large.png) *(Clean single-border card)*
+> - **(2b) Live Screencast:** `[Pending Capture: Pixel Watch Screencast]`
+>
+> **3. Wear OS Reference Emulator (AOSP API 37 Baseline)**
+>
+> - **(1) System Picker Image:** `[Pending Capture: Emulator SysUI Picker]`
+> - **(2a) Live In-Use Screenshot (Authenticated):**
+>   `[Pending Capture: Emulator Live]`
+> - **(2b) Live Screencast:** `[Pending Capture: Emulator Screencast]`
 
 ______________________________________________________________________
 
@@ -292,7 +321,8 @@ ______________________________________________________________________
 | Review Dimension                    | Status                 | Specification Audit & Dynamic Hardware Observations                                                                                  |
 | :---------------------------------- | :--------------------- | :----------------------------------------------------------------------------------------------------------------------------------- |
 | **Container & Size Support**        | **PASS / WARN / FAIL** | Detail container compliance (e.g. missing SMALL container or invalid preferredType).                                                 |
-| **Static Preview Compliance**       | **PASS / WARN / FAIL** | Detail APK preview resolution, aspect ratio (1.61:1 vs square), and unmasked full-bleed format.                                      |
+| **Static Preview Dimensions**       | **PASS / WARN / FAIL** | Detail APK preview resolution, aspect ratio (1.61:1 vs square), and unmasked full-bleed format.                                      |
+| **Preview Qualifier & Directory**   | **PASS / WARN / FAIL** | Verify asset resides in `res/drawable-nodpi/` (or `w225dp-nodpi`) to prevent runtime density scaling.                                |
 | **System Picker Rendering**         | **PASS / WARN / FAIL** | Detail how the preview scales on hardware pickers (e.g. Samsung SecTileComposeAddableActivity squashing / letterboxing b/553584867). |
 | **Container & Shape Styling**       | **PASS / WARN / FAIL** | Detail border stroke modifiers, double borders, or shape mismatches vs native OEM container pills.                                   |
 | **UI Contrast & Visual Hierarchy**  | **PASS / WARN / FAIL** | Detail text readability, theme contrast, and typography.                                                                             |
