@@ -1,0 +1,203 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""TAP-compatible test suite for adb-screenrecord."""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parent.parent
+SCREENRECORD_BIN = str(SKILL_DIR / "scripts" / "adb-screenrecord")
+
+
+class TapRunner:
+    def __init__(self, plan_count: int | None = None) -> None:
+        self.count = 0
+        self.failed = 0
+        if plan_count is not None:
+            print(f"1..{plan_count}")
+
+    def ok(self, description: str) -> None:
+        self.count += 1
+        print(f"ok {self.count} - {description}")
+
+    def not_ok(self, description: str, diagnostic: str = "") -> None:
+        self.count += 1
+        self.failed += 1
+        print(f"not ok {self.count} - {description}")
+        if diagnostic:
+            for line in diagnostic.strip().splitlines():
+                print(f"# {line}")
+
+    def skip(self, description: str, reason: str) -> None:
+        self.count += 1
+        print(f"ok {self.count} - {description} # SKIP {reason}")
+
+    def finish(self, total: int | None = None) -> int:
+        if total is None:
+            print(f"1..{self.count}")
+        return 0 if self.failed == 0 else 1
+
+
+def is_device_connected() -> bool:
+    res = subprocess.run(["adb", "shell", "true"], capture_output=True, check=False)
+    return res.returncode == 0
+
+
+def validate_mp4(file_path: str) -> tuple[bool, str]:
+    if not os.path.exists(file_path):
+        return False, f"File does not exist: {file_path}"
+    if os.path.getsize(file_path) == 0:
+        return False, f"File is empty: {file_path}"
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration,size,bit_rate",
+            "-of",
+            "json",
+            file_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return False, f"ffprobe failed (moov atom missing or invalid):\n{probe.stderr}"
+
+    try:
+        data = json.loads(probe.stdout)
+        duration = float(data.get("format", {}).get("duration", 0.0))
+        if duration <= 0.0:
+            return False, f"Duration {duration} <= 0"
+    except Exception as e:
+        return False, f"Failed parsing ffprobe output: {e}"
+
+    return True, f"Valid MP4 (duration: {duration}s)"
+
+
+def main() -> int:
+    tap = TapRunner(plan_count=5)
+    device_available = is_device_connected()
+
+    # Test 1: Help and usage
+    res = subprocess.run(
+        [SCREENRECORD_BIN, "--help"], capture_output=True, text=True, check=False
+    )
+    res_h = subprocess.run(
+        [SCREENRECORD_BIN, "-h"], capture_output=True, text=True, check=False
+    )
+    if res.returncode == 0 and res_h.returncode == 0 and "Usage:" in res.stdout:
+        tap.ok("prints usage on --help and -h")
+    else:
+        tap.not_ok("help flags failed", f"stdout: {res.stdout}\nstderr: {res.stderr}")
+
+    # Test 2: Invalid argument validation
+    res_unknown = subprocess.run(
+        [SCREENRECORD_BIN, "--invalid-flag"], capture_output=True, check=False
+    )
+    res_missing_arg = subprocess.run(
+        [SCREENRECORD_BIN, "-o"], capture_output=True, check=False
+    )
+    if res_unknown.returncode != 0 and res_missing_arg.returncode != 0:
+        tap.ok("rejects unknown and missing argument flags")
+    else:
+        tap.not_ok("failed to reject invalid arguments")
+
+    # Test 3: Timed capture (--duration)
+    if not device_available:
+        tap.skip("timed capture produces valid playable MP4", "no adb device connected")
+    else:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_file = os.path.join(temp_dir, "test_timed.mp4")
+            res = subprocess.run(
+                [SCREENRECORD_BIN, "--duration", "3", out_file],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            valid, msg = validate_mp4(out_file)
+            if res.returncode == 0 and valid:
+                tap.ok(f"timed capture produces valid playable MP4 ({msg})")
+            else:
+                tap.not_ok("timed capture failed", f"{msg}\nstderr: {res.stderr}")
+
+    # Test 4: SIGINT interruption (Ctrl-C clean exit & moov atom writing)
+    if not device_available:
+        tap.skip(
+            "SIGINT interruption produces valid playable MP4", "no adb device connected"
+        )
+    else:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_file = os.path.join(temp_dir, "test_sigint.mp4")
+            proc = subprocess.Popen(
+                [SCREENRECORD_BIN, out_file],
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            time.sleep(3)
+            proc.send_signal(signal.SIGINT)
+            ret = proc.wait(timeout=10)
+            valid, msg = validate_mp4(out_file)
+            if ret == 0 and valid:
+                tap.ok(f"SIGINT interruption produces valid playable MP4 ({msg})")
+            else:
+                stderr = (
+                    proc.stderr.read().decode("utf-8", errors="replace")
+                    if proc.stderr
+                    else ""
+                )
+                tap.not_ok(
+                    "SIGINT interruption failed",
+                    f"exit: {ret}, {msg}\nstderr: {stderr}",
+                )
+
+    # Test 5: SIGTERM interruption (Task cancellation clean exit & moov atom writing)
+    if not device_available:
+        tap.skip(
+            "SIGTERM interruption produces valid playable MP4",
+            "no adb device connected",
+        )
+    else:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_file = os.path.join(temp_dir, "test_sigterm.mp4")
+            proc = subprocess.Popen(
+                [SCREENRECORD_BIN, out_file],
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            time.sleep(3)
+            proc.send_signal(signal.SIGTERM)
+            ret = proc.wait(timeout=10)
+            valid, msg = validate_mp4(out_file)
+            if ret == 0 and valid:
+                tap.ok(f"SIGTERM interruption produces valid playable MP4 ({msg})")
+            else:
+                stderr = (
+                    proc.stderr.read().decode("utf-8", errors="replace")
+                    if proc.stderr
+                    else ""
+                )
+                tap.not_ok(
+                    "SIGTERM interruption failed",
+                    f"exit: {ret}, {msg}\nstderr: {stderr}",
+                )
+
+    return tap.finish(total=5)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
