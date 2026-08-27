@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Tests: tests/test-adb-screenrecord
 set -euo pipefail
 
 usage() {
@@ -18,6 +19,7 @@ Arguments:
                           (defaults to 'adb-screenrecord-YYYYMMDDHHMMSS.mp4')
 
 Options:
+  -s, --serial SERIAL     Serial number of device to connect to.
   -o, --output FILE       The path to save the screen recording to.
   -t, --duration SECONDS  Max recording duration in seconds.
   --time-limit SECONDS    Alias for --duration.
@@ -50,11 +52,20 @@ fi
 OUTPUT_FILE=""
 FORCE_RAW=""
 DURATION=""
+SERIAL_ARG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help | -h)
       usage
+      ;;
+    -s | --serial)
+      if [ -z "${2:-}" ]; then
+        echo "$(basename "$0"): --serial option requires an argument" >&2
+        exit 1
+      fi
+      SERIAL_ARG="$2"
+      shift 2
       ;;
     -o | --output)
       if [ -z "${2:-}" ]; then
@@ -80,14 +91,31 @@ while [[ $# -gt 0 ]]; do
       FORCE_RAW="0"
       shift
       ;;
+    -*)
+      echo "$(basename "$0"): unrecognized option '$1'" >&2
+      exit 1
+      ;;
     *)
       if [ -z "$OUTPUT_FILE" ]; then
         OUTPUT_FILE="$1"
+      else
+        echo "$(basename "$0"): unrecognized argument '$1'" >&2
+        exit 1
       fi
       shift
       ;;
   esac
 done
+
+if [ -n "$SERIAL_ARG" ]; then
+  ANDROID_SERIAL="$SERIAL_ARG"
+  export ANDROID_SERIAL
+fi
+
+ADB_CMD=(adb)
+if [ -n "${ANDROID_SERIAL:-}" ]; then
+  ADB_CMD=(adb -s "$ANDROID_SERIAL")
+fi
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -99,14 +127,14 @@ require() {
 require adb
 
 # Check if device is available and targetable
-if ! adb shell true >/dev/null 2>&1; then
+if ! "${ADB_CMD[@]}" shell true >/dev/null 2>&1; then
   echo "$(basename "$0"): error: no device connected, unauthorized, or multiple devices connected without ANDROID_SERIAL." >&2
   exit 1
 fi
 
-MANUFACTURER=$(adb exec-out getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
-BRAND=$(adb exec-out getprop ro.product.brand 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
-MODEL=$(adb exec-out getprop ro.product.model 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+MANUFACTURER=$("${ADB_CMD[@]}" exec-out getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+BRAND=$("${ADB_CMD[@]}" exec-out getprop ro.product.brand 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+MODEL=$("${ADB_CMD[@]}" exec-out getprop ro.product.model 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r')
 USE_RAW=0
 if [[ "$FORCE_RAW" == "1" ]]; then
   USE_RAW=1
@@ -120,18 +148,19 @@ if [ -z "$OUTPUT_FILE" ]; then
   OUTPUT_FILE=$(date -u +'adb-screenrecord-%Y%m%d%H%M%S.mp4')
 fi
 
-adb exec-out log -p f -t screenrecord "screen recording to $OUTPUT_FILE"
+"${ADB_CMD[@]}" exec-out log -p f -t screenrecord "screen recording to $OUTPUT_FILE"
 
 # Wake display and pause briefly to allow SurfaceFlinger to transition from doze/off
 # to active, preventing UNASSIGNED_LAYER_STACK errors on sleeping Wear OS displays.
-adb exec-out input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+"${ADB_CMD[@]}" exec-out input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
 sleep 0.5
 
-SHOW_TOUCHES="adb exec-out settings get system show_touches"
-TOUCH_ORIGINAL="$($SHOW_TOUCHES 2>/dev/null || echo 0)"
-adb exec-out settings put system show_touches 1 >/dev/null 2>&1 || true
+TOUCH_ORIGINAL=$("${ADB_CMD[@]}" exec-out settings get system show_touches 2>/dev/null || echo 0)
+"${ADB_CMD[@]}" exec-out settings put system show_touches 1 >/dev/null 2>&1 || true
 
 RECORD_PID=""
+ADB_PID=""
+FIFO_DIR=""
 
 ensure_faststart() {
   # Skip remux if raw capture already generated faststart headers directly
@@ -152,64 +181,62 @@ ensure_faststart() {
 cleanup() {
   trap - EXIT INT TERM
 
-  local adb_timeout=()
-  if [ -n "$TIMEOUT_CMD" ]; then
-    adb_timeout=("$TIMEOUT_CMD" "--foreground" "2s")
+  # 1. Immediately terminate host ADB producer to close pipe/FIFO writer and send EOF to ffmpeg
+  if [ -n "${ADB_PID:-}" ] && kill -0 "$ADB_PID" 2>/dev/null; then
+    kill -TERM "$ADB_PID" 2>/dev/null || true
+    sleep 0.05
+    if kill -0 "$ADB_PID" 2>/dev/null; then
+      kill -KILL "$ADB_PID" 2>/dev/null || true
+    fi
+    wait "$ADB_PID" 2>/dev/null || true
   fi
 
-  # Terminate on-device capture/server processes to unblock host ADB sockets;
-  # scrcpy blocks in waitpid() for its on-device server, so killing the server
-  # allows scrcpy to exit waitpid() and finalize the MP4 header/moov atom.
-  if [ "$USE_RAW" -eq 1 ]; then
-    "${adb_timeout[@]}" adb shell killall -2 screenrecord >/dev/null 2>&1 || true
-  else
-    "${adb_timeout[@]}" adb shell pkill -f scrcpy >/dev/null 2>&1 || true
-  fi
-
-  # Gracefully terminate host recording process (scrcpy or ffmpeg pipeline) and wait for clean exit
-  if [ -n "$RECORD_PID" ] && kill -0 "$RECORD_PID" 2>/dev/null; then
-    # In scrcpy mode, send SIGINT to trigger scrcpy_recorder_close().
-    # In raw mode, closing on-device screenrecord propagates EOF to ffmpeg naturally;
-    # sending SIGINT to ffmpeg concurrently can disrupt its clean EOF trailer flush.
+  # 2. Wait for recording process (ffmpeg or scrcpy) to receive EOF and write MP4 moov atom
+  if [ -n "${RECORD_PID:-}" ] && kill -0 "$RECORD_PID" 2>/dev/null; then
     if [ "$USE_RAW" -eq 0 ]; then
       kill -INT "$RECORD_PID" 2>/dev/null || true
     fi
 
     local count=0
-    while kill -0 "$RECORD_PID" 2>/dev/null && [ $count -lt 30 ]; do
+    while kill -0 "$RECORD_PID" 2>/dev/null && [ $count -lt 50 ]; do
       sleep 0.1
       count=$((count + 1))
     done
 
-    # Allow up to 3 seconds for the recording process to flush MP4 headers before
-    # escalating to SIGTERM/SIGKILL, preventing truncated/corrupted MP4 files.
+    # Escalate only if process remains unresponsive after 5 seconds
     if kill -0 "$RECORD_PID" 2>/dev/null; then
       kill -TERM "$RECORD_PID" 2>/dev/null || true
       sleep 0.5
       if kill -0 "$RECORD_PID" 2>/dev/null; then
         kill -KILL "$RECORD_PID" 2>/dev/null || true
-        wait "$RECORD_PID" 2>/dev/null || true
       fi
     fi
+    wait "$RECORD_PID" 2>/dev/null || true
   fi
 
-  "${adb_timeout[@]}" adb exec-out settings put system show_touches "$TOUCH_ORIGINAL" >/dev/null 2>&1 || true
+  local adb_timeout=()
+  if [ -n "${TIMEOUT_CMD:-}" ]; then
+    adb_timeout=("$TIMEOUT_CMD" "--foreground" "2s")
+  fi
+
+  # 3. Terminate on-device capture/server processes
+  if [ "$USE_RAW" -eq 1 ]; then
+    "${adb_timeout[@]}" "${ADB_CMD[@]}" shell pkill -2 -f screenrecord >/dev/null 2>&1 ||
+      "${adb_timeout[@]}" "${ADB_CMD[@]}" shell killall -2 screenrecord >/dev/null 2>&1 || true
+  else
+    "${adb_timeout[@]}" "${ADB_CMD[@]}" shell pkill -f scrcpy >/dev/null 2>&1 || true
+  fi
+
+  if [ -n "${FIFO_DIR:-}" ] && [ -d "$FIFO_DIR" ]; then
+    rm -rf "$FIFO_DIR"
+  fi
+
+  "${adb_timeout[@]}" "${ADB_CMD[@]}" exec-out settings put system show_touches "$TOUCH_ORIGINAL" >/dev/null 2>&1 || true
   ensure_faststart
 }
 
 trap cleanup EXIT INT TERM
 
-# Note on Wear OS / Raw mode duration handling:
-# In raw frames mode (--output-format=raw-frames), Android's native screenrecord
-# binary ignores the --time-limit flag and streams frames indefinitely until SIGINT.
-# Furthermore, passing -t DURATION to ffmpeg stops ffmpeg from reading stdin after
-# DURATION seconds, but leaves the on-device adb exec-out screenrecord binary running
-# infinitely in the background holding the pipeline open.
-#
-# Wrapping raw capture with `timeout --foreground -s INT "${DURATION}s"` sends a SIGINT
-# signal directly to adb exec-out upon expiration, cleanly terminating the on-device
-# screenrecord binary. This causes ffmpeg to receive EOF on stdin, flush its H.264 video
-# encoder, relocate the moov atom for faststart web streaming, and exit cleanly with status 0.
 TIMEOUT_WRAPPER=()
 TIMEOUT_CMD=""
 
@@ -231,7 +258,7 @@ fi
 if [ "$USE_RAW" -eq 1 ]; then
   require ffmpeg
   echo "$(basename "$0"): note: using raw frame capture (ffmpeg) for device $MODEL ($BRAND/$MANUFACTURER)" >&2
-  SIZE=$(adb exec-out wm size 2>/dev/null | awk -F': ' 'END{print $2}' | tr -d '\r')
+  SIZE=$("${ADB_CMD[@]}" exec-out wm size 2>/dev/null | awk -F': ' 'END{print $2}' | tr -d '\r')
   if [[ ! "$SIZE" =~ ^[0-9]+x[0-9]+$ ]]; then
     SIZE="454x454"
   fi
@@ -247,19 +274,27 @@ if [ "$USE_RAW" -eq 1 ]; then
     FFMPEG_VF=(-vf "geq=r='r(X,Y)*$alpha':g='g(X,Y)*$alpha':b='b(X,Y)*$alpha'")
   fi
 
+  FIFO_DIR=$(mktemp -d "${TMPDIR:-/tmp}/adb_screenrecord_XXXXXX")
+  FIFO="${FIFO_DIR}/raw_frames.fifo"
+  mkfifo "$FIFO"
+
   if [ ${#TIMEOUT_WRAPPER[@]} -gt 0 ]; then
-    "${TIMEOUT_WRAPPER[@]}" adb exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - |
-      ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -i - -an "${FFMPEG_VF[@]}" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p -movflags +faststart -y "$OUTPUT_FILE" &
+    "${TIMEOUT_WRAPPER[@]}" "${ADB_CMD[@]}" exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - >"$FIFO" 2>/dev/null &
   else
-    adb exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - |
-      ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -i - -an "${FFMPEG_VF[@]}" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p -movflags +faststart -y "$OUTPUT_FILE" &
+    "${ADB_CMD[@]}" exec-out screenrecord --output-format=raw-frames --size "$SIZE" --bit-rate "$BITRATE" - >"$FIFO" 2>/dev/null &
   fi
+  ADB_PID=$!
+
+  ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -i "$FIFO" -an "${FFMPEG_VF[@]}" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p -movflags +faststart -y "$OUTPUT_FILE" &
   RECORD_PID=$!
   wait $RECORD_PID 2>/dev/null || true
 elif command -v scrcpy >/dev/null 2>&1; then
   SCRCPY_FLAGS=("--no-audio" "--no-window" "-r" "$OUTPUT_FILE")
   if [ -n "$DURATION" ]; then
     SCRCPY_FLAGS+=("--time-limit=$DURATION")
+  fi
+  if [ -n "${ANDROID_SERIAL:-}" ]; then
+    SCRCPY_FLAGS+=("--serial=$ANDROID_SERIAL")
   fi
   if [ ${#TIMEOUT_WRAPPER[@]} -gt 0 ]; then
     "${TIMEOUT_WRAPPER[@]}" scrcpy "${SCRCPY_FLAGS[@]}" &
