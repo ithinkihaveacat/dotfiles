@@ -1,9 +1,11 @@
 ---
 name: taskgo
 description: >-
-  Maintain a private Git-backed personal project/task control repo using concise
-  current Markdown, derived Git history, ADRs, status synchronization, and
-  external artifact references.
+  Maintains a private Git-backed personal project and task control repository
+  using concise current Markdown, derived Git history, ADRs, and status synchronization.
+  Use when tracking tasks, updating project status (STATUS.md), managing ADRs,
+  synchronizing tracker state, or delegating tasks to external agents across projects.
+compatibility: Requires Python 3.11+ (via uv) and git.
 ---
 
 # taskgo
@@ -458,4 +460,8 @@ not reasons to preserve a broken merge. Avoid squash integration when
 intermediate state transitions matter, because squashing can erase
 reconstructible states.
 
-See `references/model.md` for rationale and prototype caveats.
+## Reference Material
+
+- **[Model & Architecture](references/model.md)** — Context economics, project
+  scaling spectrum (Scale 0/1/2), repository boundaries, and Unified AuditEngine
+  rationale (`doctor` and `fix`).

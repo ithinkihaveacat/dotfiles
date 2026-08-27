@@ -1,10 +1,15 @@
 ---
 name: workspace-config
 description: >-
-  Discover and select relevant agent skills, and manage workspace tool execution
-  permissions. Use this to determine which skills apply to a workspace, to install
-  or remove skills, and to manage allow/deny/ask rules for local agent tool
-  execution across agents (Claude Code, Antigravity).
+  Configures workspaces for agent-assisted development. Manages agent skills (untracked
+  symlinks), workspace tool permissions (allow/deny/ask rules for Claude Code and
+  Antigravity),
+  git hook profiles, and .envrc configurations. Use when configuring a workspace,
+  discovering or installing skills, setting tool permissions, managing git hooks,
+  or
+  updating .envrc configuration blocks.
+compatibility: >-
+  Requires git. Optional: python3, uv, direnv, claude, or agy.
 ---
 
 # Workspace Configuration
@@ -306,3 +311,10 @@ original state:
 skill clean
 permission clean
 ```
+
+## Reference Material
+
+- **[Command Index](references/command-index.md)** — Detailed synopsis, options,
+  and examples for `hook`, `skill`, `permission`, and `envrc`.
+- **[Workspace Config Model](references/model.md)** — Architecture, state
+  invariants, directory layouts, and doctor/preflight auditing models.

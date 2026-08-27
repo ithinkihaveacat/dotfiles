@@ -1,17 +1,16 @@
 ---
 name: agent-review
 description: >-
-  Use this skill whenever the user asks to review code changes, a branch against a
-  base branch,
-  a commit, a working tree, or a pull request, including requests for an independent
-  or second-opinion review.
-  Select a native non-interactive review entry point when the chosen external agent
-  supports the requested target;
-  otherwise perform the synthesized read-only workflow in this skill. Do not use for
-  implementing fixes or
-  reviewing prose or design documents. Triggers: code review, review branch, review
-  diff, review commit,
-  review PR, second opinion, check my changes, look for bugs.
+  Conducts independent, read-only code reviews of branches, diffs, commits, working
+  trees,
+  or pull requests using external CLI agents (Codex, Claude, agy) or a synthesized
+  review
+  workflow. Focuses strictly on actionable defects and evidence-based findings. Use
+  when
+  reviewing code changes, requesting a second opinion on diffs, checking PRs, or auditing
+  for bugs. Do not use for implementing fixes or reviewing prose or design documents.
+compatibility: >-
+  Requires git. Optional external review agents: codex, claude, agy.
 ---
 
 # Code Review
@@ -109,3 +108,9 @@ Treat every finding from any reviewer as unverified until checked against the
 code. When the user asks to act on findings, record each disposition as
 accepted, rejected with evidence, or partially adopted. Re-run a fresh review
 after fixes instead of resuming the earlier reviewer session.
+
+## Reference Material
+
+- **Review Rubric**: Finding thresholds, severity definitions, comment formats,
+  and verdict reporting. See
+  [references/review-rubric.md](references/review-rubric.md).

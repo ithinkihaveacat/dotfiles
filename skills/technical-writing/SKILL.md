@@ -1,14 +1,12 @@
 ---
 name: technical-writing
 description: >-
-  Use this skill when authoring, reviewing, or editing technical documents,
-  including bug reports, known issues, friction logs, PR descriptions, TODO
-  items, Getting Started guides, Agent Skills (SKILL.md), and the structural
-  content and tone of commit messages. Use to ensure engineering content
-  maintains a clear, factual, and constructive tone. Triggers: technical
-  writing, bug report, known issue, friction log, PR description, pull request,
-  commit message tone, review document, TODO, TODO.md, task list, backlog item,
-  getting started, getting started guide, quickstart, skill authoring, agent skill.
+  Guidelines and structural standards for authoring, reviewing, and editing
+  engineering documents with a factual, collegial, and constructive tone. Covers
+  bug reports, known issues, friction logs, PR descriptions, commit message prose,
+  TODO/task lists, Getting Started guides, and Agent Skills (SKILL.md). Use when
+  drafting or reviewing technical documentation, friction logs, issue reports,
+  PR descriptions, onboarding guides, or agent skill files.
 ---
 
 # Technical Writing Style Guidelines
@@ -44,64 +42,26 @@ structural principles:
   analysis for dedicated "Analysis" or "Rationale" sections (or, in TODO items,
   the "Sketch" field).
 
-## Document Types
+## Document Types & Reference Material
 
-Depending on the specific document you are asked to write or review, consult the
-relevant reference guide below:
+Depending on the specific document you are authoring or reviewing, consult the
+relevant reference guide:
 
-### Friction Logs
-
-Use when documenting a first-time user experience or walkthrough of a new tool,
-CLI, or API. **See:** [references/friction-logs.md](references/friction-logs.md)
-
-### Bug Reports
-
-Use when documenting a defect, crash, or unexpected behavior that requires a fix
-from library/tool maintainers. **See:**
-[references/bug-reports.md](references/bug-reports.md)
-
-### Known Issues
-
-Use when translating a "working as intended" bug or unfixable limitation into
-documentation intended to help end-users navigate the current state of a
-library. **See:** [references/known-issues.md](references/known-issues.md)
-
-### Commit Messages
-
-Use when authoring or reviewing git commit messages. Ensures the immediate
-technical "why" and factual record are clearly communicated for the permanent
-history. **See:** [references/commit-messages.md](references/commit-messages.md)
-
-### Pull Request Descriptions
-
-Use when authoring or reviewing pull request descriptions. Ensures the change is
-persuasively justified and broad context is provided for reviewers. **See:**
-[references/pr-descriptions.md](references/pr-descriptions.md)
-
-### Comments
-
-Use when authoring or reviewing comments across different contexts (e.g., code
-reviews, bug reports). Ensures the content is direct, concise, and factual.
-**See:** [references/comments.md](references/comments.md)
-
-### TODO Items
-
-Use when adding, updating, or completing items in a repository's `TODO.md` task
-list. Ensures each item states its goal, end condition, and the writer's
-solution sketch without hardening into a plan. **See:**
-[references/todos.md](references/todos.md)
-
-### Getting Started Guides
-
-Use when authoring, reviewing, or structuring onboarding documents and "getting
-started" guides. Ensures content is strictly action-oriented, focused on a
-verified golden path from zero to concrete outcome, and keeps deep reference
-material decoupled from the primary walkthrough. **See:**
-[references/getting-started-guides.md](references/getting-started-guides.md)
-
-### Agent Skills
-
-Use when authoring, refactoring, or reviewing Agent Skills (`SKILL.md` files and
-reference guides). Ensures skills remain modular, decoupled, and self-contained
-while effectively guiding agents toward available workspace capabilities.
-**See:** [references/skills.md](references/skills.md)
+- **[Friction Logs](references/friction-logs.md)** — Documenting first-time user
+  journeys, setup hurdles, and CLI walkthroughs.
+- **[Bug Reports](references/bug-reports.md)** — Documenting defects, crashes,
+  reproduction steps, and unexpected behaviors factually.
+- **[Known Issues](references/known-issues.md)** — Explaining "working as
+  intended" constraints, upstream limitations, and workarounds for end users.
+- **[Commit Messages](references/commit-messages.md)** — Authoring the technical
+  "why", context, and permanent history behind changes.
+- **[PR Descriptions](references/pr-descriptions.md)** — Summarizing intent,
+  justifying trade-offs, and guiding reviewers through diffs.
+- **[Comments](references/comments.md)** — Writing direct, concise, and factual
+  code review or issue comments.
+- **[TODO Items](references/todos.md)** — Capturing tasks with Goal, Criteria,
+  and Sketch fields without hardening into premature plans.
+- **[Getting Started Guides](references/getting-started-guides.md)** — Building
+  action-oriented onboarding golden paths from zero to first result.
+- **[Agent Skills](references/skills.md)** — Authoring modular, decoupled, and
+  self-contained `SKILL.md` files and reference documents.

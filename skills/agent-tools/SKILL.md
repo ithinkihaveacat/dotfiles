@@ -1,29 +1,17 @@
 ---
 name: agent-tools
-description: >
-  Command-line tools that delegate analysis tasks to AI models and format
-  up-to-date context for agents. Includes image description, screenshot
-  comparison, smart cropping, token counting, technical essay generation,
-  boolean condition evaluation, live context gathering, Android UI interaction
-  via popper, receipt extraction via pacioli, GitHub PR/Issue/Workflow Run
-  formatting via gh-markdown, deep reasoning research via Oracle, whole-directory
-  transformation and multi-file refactoring via Caxton, and recipes
-  for consulting advanced reasoning tools (oracle and emerson) for plans and documents.
-  Use
-  this skill when the user needs to analyze images, count tokens, evaluate conditions,
-  extract receipts, gather the latest authoritative documentation, format GitHub data,
-  automate Android apps, transform or refactor whole directories of files, generate
-  technical essays, perform complex architectural reasoning requiring recursive directory
-  traversal and external search, or obtain an independent plan or prose review. Triggers:
-  ai analysis, describe image, visual diff, token count, receipt extraction, pacioli,
-  generate essay, boolean evaluation, gather context, latest docs, research topic,
-  github,
-  pull request, gh-markdown, automate app, oracle, caxton, repository transformation,
-  batch refactor, bulk edit, deep research, architecture, plan review, prose review.
+description: >-
+  Command-line AI tools and context gatherers for image analysis, screenshot diffing,
+  smart cropping, token counting, technical essays (emerson), boolean condition evaluation,
+  Android UI automation (popper), receipt extraction (pacioli), GitHub data formatting
+  (gh-markdown), deep reasoning research (Oracle), and whole-tree text refactoring
+  (Caxton).
+  Use when analyzing images, comparing screenshots, evaluating conditions, extracting
+  receipts, gathering domain context, automating Android apps, refactoring multi-file
+  repositories with Caxton, or performing deep research with Oracle.
 compatibility: >-
-  Requires curl, jq, and uv. Image tools also need base64 and magick
-  (ImageMagick). Needs a Gemini API key (`GEMINI_API_KEY`) and network access to
-  generativelanguage.googleapis.com.
+  Requires curl, jq, and uv. Image tools also need base64 and magick (ImageMagick).
+  Needs a Gemini API key (GEMINI_API_KEY) and network access to generativelanguage.googleapis.com.
 ---
 
 # Agent Tools

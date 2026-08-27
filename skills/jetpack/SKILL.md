@@ -1,16 +1,14 @@
 ---
 name: jetpack
-description: >
-  Looks up AndroidX/Jetpack library facts that change between releases and are
-  therefore wrong from memory: the current version of an artifact
-  (alpha/beta/rc/stable/snapshot, or a pinned build ID), the Maven coordinate a
-  package or class belongs to, an artifact's direct dependencies, and the real
-  published source of an AndroidX class. Use whenever the answer would
-  otherwise be a remembered version number, coordinate, or API signature —
-  including phrasings that name a library without saying "androidx", such as
-  "the latest release of Compose Material 3". Not for teaching Jetpack Compose
-  or Android APIs in general, where no lookup is needed, and not for the
-  literal rocket-pack sense of the word.
+description: >-
+  Looks up AndroidX and Jetpack library facts that change between releases: current
+  artifact versions (ALPHA, BETA, RC, STABLE, SNAPSHOT, build IDs), Maven coordinates
+  for classes/packages, direct dependencies, and published source code. Use when looking
+  up AndroidX/Jetpack library versions, finding Maven coordinates, downloading source
+  JARs,
+  inspecting class implementations, or resolving library dependencies. Do not use
+  for
+  general Android tutorials or APIs where no lookup is required.
 compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
   access to dl.google.com, androidx.dev, and cs.android.com, or a cache left by

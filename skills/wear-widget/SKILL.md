@@ -2,8 +2,13 @@
 name: wear-widget
 description: >-
   Workflows, checklists, and scripts for reverse-engineering, analyzing, and
-  extracting Wear OS and Android widgets, including manifest declarations, XML
-  configurations, and rendering preview assets.
+  extracting Wear OS and Android widgets (Glance, AppWidget, ProtoLayout Tiles).
+  Covers manifest declarations, XML configurations, preview asset extraction, and
+  AVD rendering. Use when analyzing APK widget features, extracting widget layouts/drawables,
+  auditing Wear OS tile services, or converting vector drawables to PNG previews.
+compatibility: >-
+  Requires apkanalyzer, apktool, and magick (ImageMagick). Optional: popper or adb
+  for device automation.
 ---
 
 # Wear Widget Skill
@@ -18,14 +23,14 @@ Use this skill when:
 - Inspecting widget manifest declarations, services, and XML configuration
   files.
 - Extracting and rendering widget icons and preview images.
-- Developing or testing custom Wear OS widgets or tiles.
+- Developing, testing, or auditing custom Wear OS widgets or tiles.
 
 ______________________________________________________________________
 
 ## Widget Analysis & Extraction Checklist
 
-Follow this step-by-step methodology when analyzing an APK. Ensure you leverage
-binary analysis and ADB device management tools where applicable.
+Follow this step-by-step methodology when analyzing an APK. Leverage binary
+analysis and ADB device management tools where applicable.
 
 ### Decompile the APK
 
@@ -71,7 +76,7 @@ Open the resolved XML file in `res/xml/` to extract metadata:
   - **If Raster (PNG, WebP, JPEG)**: Copy the highest density version (usually
     in `drawable-xxhdpi/` or `drawable-nodpi/`).
   - **If Vector (XML)**: Translate the Android Vector Drawable (AVD) to SVG and
-    render it to PNG using the `avd-to-png` tool.
+    render it to PNG using the `avd-to-png` tool in `scripts/avd-to-png`.
 
 ### Install & Onboard the Corresponding Mobile App
 
@@ -82,8 +87,7 @@ configured in a clean, logged-in state.
 1. **Install the Mobile App**: Open the Play Store page directly on the phone
    using
    `adb shell am start -a android.intent.action.VIEW -d "market://details?id=<package_name>"`
-   (or `packagename playstore <package_name>`), or navigate the Play Store using
-   a UI automation tool like `popper`.
+   or navigate the Play Store using UI automation tools.
 1. **Verify Wear OS Companion App**: Check if installed on the watch via
    `adb -s <watch_serial> shell pm list packages`. If missing, sideload the Wear
    OS APK directly.
@@ -156,9 +160,8 @@ preview image assets embedded in the APK metadata.
 
 ### Method 1: Local Code-Based Rendering (Glance/Compose)
 
-You may have a tool that can generate PNGs directly from `@Preview` annotations
-without deploying to a device or emulator — for example,
-[`compose-preview`](https://github.com/yschimke/compose-ai-tools).
+If you have a tool that can generate PNGs directly from `@Preview` annotations
+without deploying to a device or emulator (such as `compose-preview`):
 
 1. **Define Previews**: Use `@Preview` annotations. For Glance, use
    `RectangularAllWidgetPreviewParams` to generate renders for both sizes, or
@@ -181,48 +184,30 @@ without deploying to a device or emulator — for example,
 
 ### Method 2: Live Device Capture (Tile Carousel)
 
-Capture the active Tile UI directly from a live emulator or physical device.
-Prefer high-level ADB helper scripts (such as `adb-tile-*` or `adb-screenshot`
-if available in your workspace) over raw commands because they automatically
-handle platform edge cases, wait for tile rendering visibility, manage screen
-waking, and apply circular display masking.
-
-**Primary Workflow (Helper Scripts)**: When tile helper scripts are available
-(these may be available as `adb-tile-*` or `adb-screenshot` scripts in your
-environment), use them as the primary workflow:
+Capture the active Tile UI directly from a live emulator or physical device. Use
+standard ADB broadcast commands or high-level ADB helper scripts if available in
+your workspace:
 
 ```bash
-# 1. Add tile to carousel and switch active display
-scripts/adb-tile-add com.example/.MyTileService
-scripts/adb-tile-switch 0
+# 1. Deploy component enforcing FULLSCREEN translation
+adb shell am broadcast \
+  -a com.google.android.wearable.app.DEBUG_SURFACE \
+  --es operation add-tile \
+  --ecn component "<PACKAGE>/<SERVICE_CLASS>" \
+  --ei type 0
 
-# 2. Capture screenshot directly with automatic device waking and circular masking
-scripts/adb-screenshot my_widget_tile_preview.png
-```
+# 2. Switch active display to the tile index (e.g. index 0)
+adb shell am broadcast \
+  -a com.google.android.wearable.app.DEBUG_SYSUI \
+  --es operation show-tile \
+  --ei index 0
 
-**Alternative / Low-Level Workflow (Raw ADB Commands)**:
-
-> [!WARNING] Avoid mixing raw ADB commands (such as manual input taps) with
-> high-level scripts. Manual input taps sent to an active display can interact
-> with widget click handlers and trigger unexpected UI state reloads or
-> transient loading spinners on the captured screenshot.
-
-If helper scripts are unavailable, execute the raw IPC commands manually:
-
-```bash
-# 1. Deploy enforcing FULLSCREEN translation
-adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation add-tile --ecn component <package>/<WidgetService> --ei type 0
-
-# 2. Switch Active Display & Wake Screen (Only If in Ambient Mode)
-adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation show-tile --ei index 0
-sleep 1
-# ONLY execute input tap if display is currently in ambient/dim mode. DO NOT tap if already active!
-adb shell input tap 227 227
-sleep 1
-
-# 3. Capture screenshot
+# 3. Capture screenshot (or use workspace screenshot helpers if available)
 adb shell screencap -p /sdcard/preview.png && adb pull /sdcard/preview.png preview.png
 ```
+
+> [!WARNING] Avoid sending unneeded manual input taps to an active display
+> during capture, as touches can trigger click handlers or loading spinners.
 
 ### Method 3: Standalone Developer Renderer (Widget Tray Viewer)
 
@@ -236,8 +221,7 @@ A preview helper app enabled exclusively on internal/developer builds of the
   ```bash
   adb shell am start -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
   ```
-- Use UI automation tools (e.g., `popper`) for automated interaction inside the
-  renderer list.
+- Use UI automation tools for automated interaction inside the renderer list.
 
 ______________________________________________________________________
 
@@ -262,42 +246,7 @@ ______________________________________________________________________
   Capture validation media immediately after rendering.
 - **UI Automation for Pickers**: The Samsung picker activity
   (`SecTileComposeAddableActivity`) is private. You can automate the on-screen
-  editing interface using UI automation tools (e.g., `popper`):
-  - **Add Recipe**:
-    1. Switch to target page (e.g., using ADB broadcast or a helper like
-       `adb-tile-switch 3`).
-    1. Automate the picker using a UI interaction tool (such as `popper` if
-       available):
-       ```bash
-       popper "Long press the center of the screen, tap the Edit button, scroll down to the bottom of the widget list, tap the '+' Add button. In the Add tiles list, scroll down past 'Featured' and 'Samsung Health' to 'Optimized apps', tap '<App Name>' to expand the accordion, and click the '<Widget Preview Text>' preview widget to add it."
-       ```
-    1. Return to home: `adb shell input keyevent KEYCODE_HOME`
-  - **Remove Recipe**:
-    1. Switch to target page (e.g., using ADB broadcast or a helper like
-       `adb-tile-switch 3`).
-    1. Automate removal using a UI interaction tool (such as `popper` if
-       available):
-       ```bash
-       popper "Long press the center of the screen, tap the Edit button, scroll to the '<Widget Preview Text>' widget, and tap the red minus icon on its right side to delete it."
-       ```
-    1. Return to home: `adb shell input keyevent KEYCODE_HOME`
-
-### Capturing End-to-End User Interaction Videos
-
-- **UI-Driven Recording over Background Broadcasts**: When capturing video
-  recordings for widget audits or deliverables, record the visual UI journey
-  on-screen rather than relying solely on silent background broadcast commands.
-- **Automating the Picker Journey**: Use UI automation tools (like `popper` or
-  scriptable input touch gestures) with `adb-screenrecord` to perform natural
-  gestures through the watch interface:
-  1. Enable visual touch feedback
-     (`adb shell settings put system show_touches 1`).
-  1. Wake screen and establish initial carousel context.
-  1. Navigate to the `+ Add` tiles button.
-  1. Scroll down the *Add tiles* list to *Optimized apps*, expand the accordion
-     item, and tap the widget preview to add it.
-  1. Show the widget active and rendered in its carousel slot, and swipe through
-     adjacent tiles.
+  editing interface using UI automation tools (such as `popper` if available).
 
 ______________________________________________________________________
 
@@ -320,42 +269,37 @@ ______________________________________________________________________
 
 ## Tooling Reference
 
-### `avd-to-png`
+### `scripts/avd-to-png`
 
 Converts Android Vector Drawable (AVD) XML files to standard SVG and renders
 them as high-quality PNG images. Automatically parses `colors.xml` to resolve
-color resource references.
+color resource references. References to `scripts/...` are relative to this
+skill directory.
 
 **Usage**:
 
 ```bash
-avd-to-png [options] AVD_FILE RES_DIR
+scripts/avd-to-png [options] AVD_FILE RES_DIR
 ```
 
 **Examples**:
 
 ```bash
-# Standard conversion saving to specific path
-avd-to-png -o ./preview-small.png decompiled_app/res/drawable/ic_preview.xml decompiled_app/res
+# Convert vector drawable to PNG using color resources from res/
+scripts/avd-to-png -o ./preview-small.png decompiled_app/res/drawable/ic_preview.xml decompiled_app/res
 ```
 
 ______________________________________________________________________
 
-## Reporting & Audits
+## Reference Material & Reporting
 
-When synthesizing findings or preparing integration reports based on the
-workflows in this skill, adhere to the strict presentation formatting defined in
-the audit template.
-
-- **Service-First Architecture**: While extraction proceeds chronologically by
-  artifact type, structure the final report by Service component, consolidating
-  all manifests, configurations, and media within each service section.
-- **Formatted, Readable XML**: Format and pretty-print XML manifest declarations
-  (`<service>`), provider definitions (`<wearwidget-provider>`), and container
-  layouts (`<container>`) with clean 4-space indentation and **one attribute per
-  line** for tags containing multiple attributes. Do not output raw single-line
-  XML; clean indentation and structural readability are required.
-- **Media Preservation**: Keep all media output (images, layouts) unmasked and
-  in native aspect ratios.
-- **Self-Contained Links**: Use relative asset linking so Markdown reports
-  remain portable and self-contained.
+- **[Audit Template](references/audit-template.md)** — Standardized reporting
+  template and authoring directives for Wear OS widget and tile integration
+  audits.
+  - **Service-First Architecture**: Group audit deliverables by individual
+    Service component, consolidating manifests, provider XMLs, static previews,
+    and dynamic captures within each section.
+  - **Formatted XML**: Format and pretty-print XML declarations with 4-space
+    indentation and one attribute per line for multi-attribute tags.
+  - **Media Preservation**: Keep static preview assets unmasked with native
+    aspect ratios.

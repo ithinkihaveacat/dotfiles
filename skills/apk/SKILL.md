@@ -1,12 +1,12 @@
 ---
 name: apk
-description: >
-  Performs offline binary analysis, extraction, decoding, decompilation, and
-  inspection of Android APKs and ZIP archives (split APKs). Provides utilities for
-  reading manifests, extracting launcher icons, listing Wear OS tiles/complications,
-  and decoding resources. Use when inspecting APK properties, performing binary
-  analysis, extracting files from packages, or installing local APKs. Triggers: apk,
-  binary analysis, binary decoding, apkanalyzer, apktool, aapt, android manifest.
+description: >-
+  Performs offline binary analysis, extraction, decoding, decompilation, and inspection
+  of Android APKs and split-APK ZIP archives. Provides tools for reading manifests,
+  extracting launcher icons, inspecting Wear OS tiles/complications, and decoding
+  resources.
+  Use when inspecting APK metadata, decompiling resources, analyzing binary manifests,
+  extracting icons, or installing local APK packages on a device.
 compatibility: >-
   Requires apkanalyzer, unzip, and xmllint. Some scripts require xpath, aapt, or apktool.
   Designed for filesystem-based agents with bash access.
@@ -56,3 +56,10 @@ See `references/command-index.md` for detailed usage.
 >
 > - **Fish:** `packagename launch (apk-info package app.apk)`
 > - **Bash/Zsh:** `packagename launch $(apk-info package app.apk)`
+
+## Reference Material
+
+- **[Command Index](references/command-index.md)** — Detailed synopsis, options,
+  and examples for all APK scripts.
+- **[Troubleshooting](references/troubleshooting.md)** — Solutions for missing
+  dependencies (`apkanalyzer`, `xpath`, `apktool`, `aapt`).

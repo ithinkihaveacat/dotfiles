@@ -1,16 +1,17 @@
 ---
 name: emumanager
-description: >
-  Manages Android SDK, emulators, and AVDs. Use when bootstrapping Android SDK,
-  creating/starting/stopping AVDs, downloading system images, or troubleshooting
-  emulator issues. Supports mobile, Wear OS, TV, and Automotive devices. Covers
-  sdkmanager, avdmanager, emulator CLI. Triggers: android emulator, android
-  virtual device, avd, system image, wear os emulator, tv emulator, automotive
-  emulator, bootstrap android sdk.
+description: >-
+  Manages Android SDKs, system images, emulators, and Android Virtual Devices (AVDs).
+  Provides workflows for bootstrapping the SDK, downloading images, and creating,
+  starting,
+  or stopping AVDs across mobile, Wear OS, TV, and Automotive form factors. Use when
+  setting up Android SDK tools, launching or debugging emulators, creating AVDs, or
+  troubleshooting emulator boot issues.
 compatibility: >-
-  Requires Java 17+, curl, and unzip. Hardware acceleration (KVM on Linux, HVF
-  on macOS) required for emulators. Needs network access for downloading SDK
-  components. Designed for filesystem-based agents with bash access.
+  Requires Java 17+, curl, unzip, and hardware acceleration (KVM on Linux, HVF on
+  macOS).
+  Requires network access for downloading SDK components. Designed for filesystem-based
+  agents with bash access.
 ---
 
 # Android Emulator Manager
@@ -255,7 +256,9 @@ scripts/emumanager update package
 - The script avoids destructive actions unless explicitly requested
 - Use `ANDROID_SERIAL` environment variable when multiple emulators are running
 
-## Reference Documentation
+## Reference Material
 
-- `references/command-index.md` - Detailed subcommand reference
-- `references/troubleshooting.md` - Common issues and solutions
+- **[Command Index](references/command-index.md)** — Detailed subcommand
+  reference, arguments, options, and raw commands.
+- **[Troubleshooting](references/troubleshooting.md)** — Solutions for common
+  emulator issues, boot loops, and hardware acceleration errors.
