@@ -1416,7 +1416,11 @@ def build_reconcile_plan(ws) -> ReconcilePlan:
         if entry.target is None:
             return False
         for r in resolved:
-            if r.resolved and is_target_match(entry.path, r.source_path, entry.target):
+            if (
+                r.resolved
+                and entry.link_name == r.link_name
+                and is_target_match(entry.path, r.source_path, entry.target)
+            ):
                 return True
         return False
 
@@ -2741,13 +2745,18 @@ def cmd_doctor(
     disk_only = [(s, "") for s in uniq(extra)] + [
         (s, "(negated)") for s in uniq(negated_extra)
     ]
-    healthy = sorted(
-        {
-            e.link_name
-            for e in plan.disk_entries
-            if e.kind == "live" and e.target in plan.expected_targets
-        }
-    )
+
+    def is_live_healthy(e):
+        if e.kind != "live" or e.target is None:
+            return False
+        return any(
+            r.resolved
+            and r.link_name == e.link_name
+            and is_target_match(e.path, r.source_path, e.target)
+            for r in plan.resolved
+        )
+
+    healthy = sorted({e.link_name for e in plan.disk_entries if is_live_healthy(e)})
 
     def short_source(path_str) -> str:
         """Render a source path short and diff-shaped: relative to its
@@ -2781,10 +2790,12 @@ def cmd_doctor(
         import textwrap
 
         problem_lines.append("Problems:")
+        problem_lines.append("  (fix configuration or environment before syncing)")
         link_pat = re.compile(r"\(linked to (?P<disk>.+), expected (?P<env>.+)\)$")
         for lbl in uniq(mismatched_target):
             spec = spec_of(lbl)
             m = link_pat.search(lbl)
+            problem_lines.append(f"    {spec}")
             if m:
                 disk_src = short_source(m.group("disk"))
                 env_src = short_source(m.group("env"))
@@ -2792,158 +2803,113 @@ def cmd_doctor(
                     disk_src = clean_p(Path(m.group("disk")))
                     env_src = clean_p(Path(m.group("env")))
                 problem_lines.append(
-                    f"  {spec}   on disk as {disk_src}, in env as {env_src}"
+                    f"      mismatched target: on disk as {disk_src}, in env as {env_src}"
                 )
             else:
-                problem_lines.append(f"  {spec}   {lbl.partition(' ')[2].strip('()')}")
-            problem_lines.append(f"{'':12}-> 'skill apply' re-links")
+                problem_lines.append(f"      {lbl.partition(' ')[2].strip('()')}")
+            problem_lines.append('      (use "skill apply" to re-link)')
+            problem_lines.append("")
         for s in unresolvable:
-            # This bucket also catches ambiguous specs (multiple catalog
-            # matches) and remote-fetch failures, so render the planner's
-            # specific reason verbatim rather than guessing one.
             err_lines = textwrap.wrap(str(unresolvable_errors[s]), width=64) or [""]
-            problem_lines.append(f"  {s} (?)   {err_lines[0]}")
+            problem_lines.append(f"    {s} (?)")
+            problem_lines.append(f"      error:   {err_lines[0]}")
             for cont in err_lines[1:]:
-                problem_lines.append(f"{'':12}{cont}")
-            problem_lines.append(f"{'':12}-> qualify namespace, register it, or")
-            problem_lines.append(f"{'':14}'envrc remove skills {s} && direnv reload'")
+                problem_lines.append(f"               {cont}")
+            matching_disk = [
+                e for e in plan.disk_entries if e.link_name.lower() == s.lower()
+            ]
+            if matching_disk:
+                disk_paths = ", ".join(clean_p(e.path) for e in matching_disk)
+                problem_lines.append(f"      on disk: {disk_paths} (orphaned symlink)")
+            problem_lines.append(
+                f'      (use "envrc remove skills {s} && direnv reload" to remove)'
+            )
+            problem_lines.append("")
         if collisions:
             for c in collisions:
-                problem_lines.append(f"  conflict   {c}")
-            problem_lines.append(f"{'':12}-> declare only one of them:")
+                problem_lines.append(f"    conflict: {c}")
             problem_lines.append(
-                f"{'':14}'envrc remove skills <unwanted>' && direnv reload'"
+                '      (use "envrc remove skills <unwanted> && direnv reload" to keep only one)'
             )
-
-    term_width = shutil.get_terminal_size((80, 24)).columns
-
-    def render_columns(columns, width, measure):
-        """Zip equal-height cell lists into aligned columns.
-
-        MEASURE holds the per-column item-name lists: the shared column
-        width derives from those and the headers alone. Overlong cells wrap
-        inside their column rather than widening the grid. Returns the
-        rendered rows and the chosen column width (callers use it to place
-        post-grid content under a specific column). Falls back to vertical
-        stacking only when even the fitted grid exceeds WIDTH.
-        """
-        import textwrap
-
-        gutter = "  "
-        measured = [c for cells in measure for c in cells]
-        col_w = min(
-            38,
-            max([len(c) for c in measured] + [len(h) for h, _ in columns] + [8]),
-        )
-        cols = []
-        for header, cells in columns:
-            wrapped = []
-            for cell in cells:
-                if not cell:
-                    wrapped.append("")
-                else:
-                    # Tokens stay whole (no mid-name splits); an overlong
-                    # unbreakable token simply overflows its column.
-                    wrapped += textwrap.wrap(
-                        cell,
-                        width=col_w,
-                        break_long_words=False,
-                        break_on_hyphens=False,
-                    ) or [""]
-            cols.append((header, wrapped))
-        total = col_w * len(cols) + len(gutter) * (len(cols) - 1)
-        out = []
-        if total > width and len(cols) > 1:
-            for i, (header, cells) in enumerate(cols):
-                if i:
-                    out.append("")
-                out.append(header)
-                out.extend(cells)
-            return out, col_w
-        out.append(gutter.join(h.ljust(col_w) for h, _ in cols).rstrip())
-        height = max(len(c) for _, c in cols)
-        for i in range(height):
-            row = gutter.join(
-                (c[i] if i < len(c) else "").ljust(col_w) for _, c in cols
-            )
-            out.append(row.rstrip())
-        return out, col_w
+            problem_lines.append("")
+        if problem_lines and not problem_lines[-1]:
+            problem_lines.pop()
 
     skill_details = []
-    has_ledger = bool(env_only or disk_only)
-    if has_ledger:
-        left_items = list(env_only)
-        right_items = [f"{s} {tag}".rstrip() if tag else s for s, tag in disk_only]
-        item_height = max(len(left_items), len(right_items), 1)
-        left_col = [""] * (item_height - len(left_items)) + left_items + [""]
-        right_col = [""] * (item_height - len(right_items)) + right_items + [""]
-        columns = [("ENV ONLY", left_col), ("DISK ONLY", right_col)]
-        measure = [left_items, right_items]
-        if verbose:
-            columns.append(("HEALTHY", list(healthy)))
-            measure.append(healthy)
-        grid, col_w = render_columns(columns, term_width, measure)
-        skill_details += grid
-        # Hint prose renders beneath its column at a fixed offset, one line
-        # per sentence and never wrapped: these strings are documented
-        # contracts, and splitting them across grid rows makes them both
-        # harder to scan and unmatchable by line-oriented tooling.
-        disk_offset = col_w + len("  ")
+    if env_only:
+        skill_details.append("Missing from disk:")
         if collisions:
-            # apply refuses to run at all while declarations collide.
-            blocked = "'skill apply' blocked -- see Problems"
-            skill_details.append(blocked)
-            skill_details.append(" " * disk_offset + blocked)
+            skill_details.append("  ('skill apply' blocked -- see Problems)")
         else:
-            for hint in ["skill apply links these"] if env_only else []:
-                skill_details.append(hint)
-            if disk_only:
-                prune_held = bool(plan.prune_names) and plan.destructive_blocked
-                skill_details.append(
-                    " " * disk_offset
-                    + "skill apply deletes these"
-                    + ("*" if prune_held else "")
-                )
-                if prune_held:
-                    if plan.stale:
-                        note = "*held back while stale: direnv reload first"
-                    else:
-                        note = "*held back: broken declaration (see Problems)"
-                    skill_details.append(" " * disk_offset + note)
+            skill_details.append('  (use "skill apply" to link declared skills)')
+        for s in env_only:
+            skill_details.append(f"    {s}")
+        skill_details.append("")
 
-    # The intersection is the least interesting fact, so it collapses to one
-    # line unless verbose mode renders it as the literal third column above.
-    if not (verbose and has_ledger):
-        shown = healthy[:8]
-        more = len(healthy) - len(shown)
-        healthy_line = "Healthy: " + (", ".join(shown) if shown else "none")
-        if more > 0:
-            healthy_line += f", +{more} more"
-        skill_details.append(healthy_line)
+    if disk_only:
+        skill_details.append("Extra on disk:")
+        prune_held = bool(plan.prune_names) and plan.destructive_blocked
+        if collisions:
+            skill_details.append("  ('skill apply' blocked -- see Problems)")
+        elif prune_held:
+            if plan.stale:
+                skill_details.append(
+                    '  (pruning held back: use "direnv reload" to reload environment)'
+                )
+            else:
+                skill_details.append(
+                    "  (pruning held back: broken declaration in AGENT_REQUIRED_SKILLS; see Problems)"
+                )
+        else:
+            skill_details.append('  (use "skill apply" to prune unmanaged symlinks)')
+        for s, tag in disk_only:
+            item_str = f"{s} {tag}".rstrip() if tag else s
+            skill_details.append(f"    {item_str}")
+        skill_details.append("")
+
+    import textwrap
+
+    if healthy:
+        h_text = ", ".join(healthy)
+        wrapped_h = textwrap.wrap(
+            h_text, width=72, break_long_words=False, break_on_hyphens=False
+        )
+        skill_details.append("Healthy:")
+        for line in wrapped_h:
+            skill_details.append(f"  {line}")
+    else:
+        skill_details.append("Healthy: none")
 
     if problem_lines:
         skill_details.append("")
         skill_details += problem_lines
 
     # Reverse-direction recipes: adopt what is on disk (never re-declaring a
-    # negated name, and skipping names .envrc already declares while stale --
-    # those need a reload, not a re-add).
+    # negated name, and skipping names .envrc already declares while stale,
+    # names already declared in the expected set, or unresolvable names).
     fresh_declared = {f.lower() for f in plan.freshness[0]} if plan.stale else set()
+    expected_lower = {s.lower() for s in expected_skills}
+    unresolvable_lower = {s.lower() for s in unresolvable}
     adopt = [
         s
         for s, tag in disk_only
-        if tag != "(negated)" and s.lower() not in fresh_declared
+        if tag != "(negated)"
+        and s.lower() not in fresh_declared
+        and s.lower() not in expected_lower
+        and s.lower() not in unresolvable_lower
     ]
     drop = list(env_only)
     footer = []
     if adopt:
-        footer.append(f"  envrc add skills {' '.join(adopt)} && direnv reload")
+        footer.append(f"envrc add skills {' '.join(adopt)} && direnv reload")
     if drop:
-        footer.append(f"  envrc remove skills {' '.join(drop)} && direnv reload")
-    if footer:
+        footer.append(f"envrc remove skills {' '.join(drop)} && direnv reload")
+    if footer and not collisions:
         skill_details.append("")
         skill_details.append("To make ENV match DISK instead:")
-        skill_details += footer
+        skill_details.append('  (use "envrc" to update .envrc declarations)')
+        for cmd in footer:
+            skill_details.append(f"    {cmd}")
 
     n_problems = len(mismatched_target) + len(unresolvable) + len(collisions)
     if missing or extra or negated_extra or n_problems:
