@@ -48,7 +48,7 @@ commit_all() {
   fi
 }
 
-echo "1..65"
+echo "1..66"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -1299,5 +1299,67 @@ if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/meta.py" "$BIN" >"$O
   fi
 else
   echo "not ok 65 - Metadata guard check exited non-zero"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 66: Tool response budget enrichment correctly computes remaining steps,
+# remaining time, and warning escalation tiers.
+cat >"$WORK/budget.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import sys
+import time
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line for line in source.splitlines() if not line.startswith("from google")
+)
+cx = {"__name__": "caxton_helpers"}
+exec(compile(stripped, "caxton", "exec"), cx)
+
+enrich = cx["enrich_tool_result_with_budget"]
+now = time.perf_counter()
+
+# Case 1: Normal budget (plenty of turns and time)
+r1 = enrich({"status": "success", "file_lines": 50}, current_step=1, max_steps=10, session_start=now, timeout_sec=600)
+assert r1["status"] == "success"
+assert r1["file_lines"] == 50
+assert r1["remaining_steps"] == 9
+assert r1["remaining_seconds"] > 590.0
+assert "budget_warning" not in r1
+
+# Case 2: Low turn budget (2 steps remaining)
+r2 = enrich({"status": "success"}, current_step=8, max_steps=10, session_start=now, timeout_sec=0)
+assert r2["remaining_steps"] == 2
+assert "remaining_seconds" not in r2
+assert "LOW BUDGET" in r2.get("budget_warning", "")
+
+# Case 3: Critical turn budget (1 step remaining, on error response)
+r3 = enrich({"status": "error", "message": "not found"}, current_step=9, max_steps=10, session_start=now, timeout_sec=0)
+assert r3["status"] == "error"
+assert r3["message"] == "not found"
+assert r3["remaining_steps"] == 1
+assert "CRITICAL BUDGET LIMIT" in r3.get("budget_warning", "")
+
+# Case 4: Critical time budget (<= 20s remaining)
+r4 = enrich({"status": "success"}, current_step=1, max_steps=100, session_start=now - 585.0, timeout_sec=600)
+assert r4["remaining_steps"] == 99
+assert r4["remaining_seconds"] <= 16.0
+assert "CRITICAL BUDGET LIMIT" in r4.get("budget_warning", "")
+
+print("OK")
+PYEOF
+if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/budget.py" "$BIN" >"$OUTPUT" 2>&1; then
+  if grep -q "^OK" "$OUTPUT"; then
+    echo "ok 66 - Enriches tool responses with remaining turns, time, and urgency signaling"
+  else
+    echo "not ok 66 - Budget enrichment assertions failed"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 66 - Budget enrichment test exited non-zero"
   sed 's/^/# /' "$OUTPUT"
 fi

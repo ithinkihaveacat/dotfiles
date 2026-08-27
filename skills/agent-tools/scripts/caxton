@@ -286,6 +286,41 @@ def offline_switch() -> tuple[bool, str]:
     return value.strip().lower() in ("1", "true", "yes", "on"), f"{var}={value}"
 
 
+def enrich_tool_result_with_budget(
+    res: dict,
+    current_step: int,
+    max_steps: int,
+    session_start: float,
+    timeout_sec: int,
+) -> dict:
+    """Enriches a tool response with remaining step and time budget telemetry."""
+    enriched = dict(res)
+    steps_left = max(0, max_steps - current_step)
+    enriched["remaining_steps"] = steps_left
+
+    secs_left = None
+    if timeout_sec > 0:
+        elapsed = time.perf_counter() - session_start
+        secs_left = max(0.0, round(timeout_sec - elapsed, 1))
+        enriched["remaining_seconds"] = secs_left
+
+    warning = None
+    if steps_left <= 1 or (secs_left is not None and secs_left <= 20.0):
+        warning = (
+            f"CRITICAL BUDGET LIMIT: Only {steps_left} step(s) remaining! "
+            "You MUST call complete_task() now with your best-effort report."
+        )
+    elif steps_left <= 2 or (secs_left is not None and secs_left <= 45.0):
+        warning = (
+            f"LOW BUDGET: {steps_left} step(s) remaining. "
+            "Finalize edits and prepare to call complete_task()."
+        )
+    if warning:
+        enriched["budget_warning"] = warning
+
+    return enriched
+
+
 def is_text_file(path: Path) -> bool:
     """Determine if a file is a text file."""
     ext = path.suffix.lower()
@@ -2069,6 +2104,11 @@ Your goal is to achieve the user's objective across the paths you have been give
 5. String Escaping: In quoted strings, the only allowed escape sequences are \\, \n, and \". Instead of \u escapes, use UTF-8.
 6. Verification: Review the status metadata returned by each mutation. Use read_file if you need to inspect updated lines.
 
+### Budget & Pacing Awareness
+1. Execution Limits: You operate under finite step and time budgets. Every tool response reports `remaining_steps` and `remaining_seconds`.
+2. Low Budget Signaling: If `remaining_steps` is low or a `budget_warning` is present in tool responses, STOP all exploratory reads and un-inlined searching immediately.
+3. Graceful Wrap-up: When budget is nearly exhausted, synthesize your best-effort findings, document partial progress, and call complete_task(success=..., report="...") before the hard cutoff terminates execution.
+
 ### Reporting & Completion (Mandatory Contract)
 Once your work is complete, you MUST call complete_task(success=True, report="...").
 - Your `report` parameter is the ONLY response displayed to the user on stdout.
@@ -2509,10 +2549,18 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                         file=sys.stderr,
                     )
 
+                enriched_res = enrich_tool_result_with_budget(
+                    res=res,
+                    current_step=telemetry.steps,
+                    max_steps=args.max_steps,
+                    session_start=session_start,
+                    timeout_sec=args.timeout,
+                )
+
                 tool_results.append(
                     types.Part.from_function_response(
                         name=fc.name,
-                        response=res,
+                        response=enriched_res,
                     )
                 )
 
