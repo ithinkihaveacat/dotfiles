@@ -112,9 +112,9 @@ The convention itself is documented in
 
 ### 3. Skipping External API Tests (`GEMINI_API_KEY=""`)
 
-Some tests (like `test-pacioli`) include integration tests
-that make actual network calls to the Gemini API. These can be slow, cost quota,
-and be non-deterministic.
+Some tests (like `test-pacioli`) include integration tests that make actual
+network calls to the Gemini API. These can be slow, cost quota, and be
+non-deterministic.
 
 - **Solution**: Set `GEMINI_API_KEY=""` (empty string) in the environment. These
   tests are written to detect the empty key and will gracefully skip their
@@ -166,3 +166,35 @@ When writing new tests or modifying existing ones, follow these guidelines:
    ```
 1. **Parallel-safe**: Avoid hardcoding temporary filenames or writing to shared
    global locations. Always use `mktemp -d` and clean up on exit.
+
+### Choosing Between Bash and Python for Tests
+
+Tests can be written in either Bash or Python, provided they emit standard TAP
+output (`1..N`, `ok`, `not ok`).
+
+- **Prefer Bash** for standard CLI smoke tests and straightforward integration
+  tests that primarily assert command exit codes, CLI flag handling, and textual
+  stdout/stderr matching.
+- **Consider Python (`uv run --script`)** as test complexity grows or when shell
+  scripts become awkward or brittle. Common examples where Python is typically a
+  better fit include:
+  - **Signal & process lifecycle management**: Backgrounded subshells in
+    non-interactive Bash mask `SIGINT` by default (`SIG_IGN`). Testing graceful
+    process termination (`SIGINT`, `SIGTERM`), process group isolation
+    (`start_new_session=True`), and exit status is cleaner with Python's process
+    controls.
+  - **Binary asset & structured metadata validation**: Inspecting media
+    containers (e.g. validating video headers or `moov` atoms via `ffprobe`),
+    parsing structured JSON output, or asserting numerical ranges (such as
+    floating-point timestamps or durations).
+  - **Exception-safe resource cleanup**: Automatically guaranteeing cleanup of
+    named pipes (FIFOs), temporary directories, or background child processes
+    even when assertions fail unexpectedly.
+
+When writing Python TAP tests:
+
+- Use PEP 723 inline script metadata with the shebang:
+  `#!/usr/bin/env -S uv run --script`
+- Format output according to TAP specifications (`1..N`, `ok N - description`).
+- Drop the `.py` extension and ensure the file is executable (`chmod +x`) to
+  follow the flat `skills/<skill>/tests/test-<name>` naming convention.
