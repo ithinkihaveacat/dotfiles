@@ -8,11 +8,12 @@
 > comments out. **Be sure to inspect and edit this template in raw source mode**
 > so you do not miss critical audit guidance.
 
-> [!NOTE] **Reporting Architecture: Service-First Grouping** The primary
-> grouping and sorting hierarchy for this audit is strictly by **individual
-> Service component**. Do not group by artifact type. Each service subsection
-> must self-contain its manifest declaration, provider XML, static previews, and
-> live captures.
+> [!NOTE] **Core Reporting Architecture & Sorting Hierarchy**
+> Reports are organized following a strict 4-level sorting hierarchy:
+> 1. **Dimension 1 (Service Component):** Group by Service Class Name (Service-First architecture).
+> 2. **Dimension 2 (Container Size / Variant):** Iterate through `LARGE (2x1)` and `SMALL (1x1)` (with explicit `[NOT DECLARED BY APK]` cards if unsupported).
+> 3. **Dimension 3 (Target Machine / Device):** Organize targets across Samsung Galaxy Watch, Google Pixel Watch, and Wear OS Reference Emulator (flexible grid or stacked cards).
+> 4. **Dimension 4 (Surface Phase & Mode):** Under each device, capture **(1) System Picker Image**, **(2a) Live In-Use Screenshot**, and **(2b) Live Screencast** across all active operational modes (with structured `[Pending Capture]` placeholders for uncaptured slots).
 
 <!-- GUIDANCE: 
   This template is a structured guide and adaptable baseline for Wear OS tile and widget integration audits. 
@@ -193,35 +194,78 @@ ______________________________________________________________________
 | `preferredType` / Tile Metadata                                | `[SMALL, LARGE]`                     |
 | `com.google.android.clockwork.tiles.MULTI_INSTANCES_SUPPORTED` | `true`                               |
 
-#### Static Preview Assets
+#### Surface Matrix & Multi-Device Verification
 
-<!-- GUIDANCE: 
-  Present the raw extracted static preview drawable assets from the APK. 
-  State the exact directory qualifier path (e.g. res/drawable/ or res/drawable-round-v23/), dimensions, and asset format.
-  Do not clip or mask static previews artificially.
+<!-- GUIDANCE:
+  ========================================================================================
+  CORE REPORTING ARCHITECTURE & SORTING HIERARCHY (KEY DIMENSIONS TO SORT ON FIRST)
+  ========================================================================================
+  Structure all widget audits using this strict 4-level hierarchical breakdown:
+
+  1. Top-Level Dimension (Service Component):
+     Group first by Service Class Name (Service-First grouping).
+  
+  2. Second-Level Dimension (Container Size / Variant):
+     For Widget services, iterate through each container variant:
+     - LARGE (2x1)
+     - SMALL (1x1)
+     If a container size is NOT declared in the provider XML, do NOT omit it silently; 
+     render an explicit `[NOT DECLARED BY APK]` card so readers know it was audited.
+
+  3. Third-Level Dimension (Source Asset vs Target Machine / Device):
+     - First: Source of Truth (APK Declared Static Preview Asset from res/drawable-nodpi/).
+     - Next: Multi-Target Device Matrix across all target environments:
+       * Samsung Galaxy Watch (One UI Watch)
+       * Google Pixel Watch (Stock Wear OS)
+       * Wear OS Reference Emulator (AOSP Baseline)
+       * (Adaptable: Use a multi-column grid for 2-3 devices, or stacked device cards if >3 devices).
+
+  4. Fourth-Level Dimension (Surface Phase & In-Use Operational Modes):
+     Under each device target, provide:
+       * (1) System Widget Picker Image: As rendered by that OS's native picker 
+             (e.g. SecTileComposeAddableActivity on Samsung, System UI Picker on Pixel). 
+             Demonstrates scaling, squashing, letterboxing, or distortion.
+       * (2) Widget In Use (Active Mode):
+             If multiple operational modes exist (e.g. Authenticated / Logged In, Logged Out / Fallback, 
+             Active State, Dark / Light theme), provide:
+             - (a) Live In-Use Screenshot: Active widget in carousel on watch face.
+             - (b) Live Screencast (Context Video): Screen recording showing interaction, scrolling context, or border behavior.
+
+  5. Placeholders & Missing Media Invariant:
+     - If a specific capture is missing or pending (e.g. Pixel Watch Picker, Emulator Live), 
+       render an explicit `[Pending Capture]` placeholder card rather than omitting the slot.
+     - If an asset is shared/reused across sizes, explicitly display the shared asset in both slots.
 -->
 
-- **APK Qualifier Directory:** `res/<drawable_directory>/<preview_file>`
-- **Resolution & Asset Format:** `<width>×<height>` px (\<PNG|WebP>)
-- **Extracted Static Asset:**
+##### Container Variant: LARGE (2x1)
 
-![ Static Preview](resources/%3Cpreview_filename%3E.png) *Static preview image
-(`<preview_filename>.png`) extracted from `res/<directory>/`.*
+- **Container Status:** Declared in XML (`preferredType="LARGE"`)
+- **APK Declared Static Preview:** `res/drawable-nodpi/my_widget_preview_large.png` (609×378 px, 1.61:1 rectangular)
 
-#### Live Hardware Screen Captures
+###### Source of Truth • APK Declared Static Preview:
+![LARGE APK Preview](resources/my_widget_preview_large.png)
+*Raw static preview image extracted from `res/drawable-nodpi/`.*
 
-<!-- GUIDANCE: 
-  Embed physical device or emulator screen captures of the service active on watch displays.
-  Where applicable, attempt to capture BOTH multi-state representations:
-  1. Active Dynamic / Synced State (showing dynamic artwork, playlist title, or rich media metadata).
-  2. Unauthenticated / Zero-Feed Fallback State (e.g. logged-out text or zero-item feed with search/login CTA button).
--->
+###### Multi-Target Device Matrix:
 
-- **Verified Device:** `<Device Name & API Level>`
-- **Screenshot:**
+| Surface / Media Stage | Samsung Galaxy Watch (One UI) | Google Pixel Watch (Wear OS 5.1) | Wear OS Emulator (API 37) |
+| :--- | :--- | :--- | :--- |
+| **(1) System Picker Image** | ![Samsung Picker](resources/samsung_picker_large.png)<br>*Rendered in `SecTileComposeAddableActivity` (Note squashing/letterbox)* | `[Pending Capture]`<br>*Pixel Watch SysUI Picker* | `[Pending Capture]`<br>*Emulator SysUI Picker* |
+| **(2a) Live Screenshot (Mode: Authenticated)** | ![Samsung Live](resources/samsung_live_large.png)<br>*Boxy card vs native pill styling* | ![Pixel Live](resources/pixel_live_large.png)<br>*Clean single-border rectangular card* | `[Pending Capture]`<br>*AOSP Glance container verification* |
+| **(2b) Live Screencast (Context Video)** | `<video src="resources/samsung_video.mp4" controls />`<br>*Vertical carousel scrolling* | `[Pending Capture]`<br>*Pixel Watch interaction recording* | `[Pending Capture]`<br>*Emulator interaction recording* |
 
-![ Hardware Capture](resources/%3Clive_screenshot%3E.png) *Live device capture
-on <Device Model>.*
+*(Optional: Repeat 2a/2b rows for additional operational modes such as Unauthenticated / Zero State if applicable.)*
+
+---
+
+##### Container Variant: SMALL (1x1)
+
+<!-- GUIDANCE: If declared, repeat the matrix above for SMALL (1x1). If NOT declared in XML, use the block below: -->
+
+- **Container Status:** `[NOT DECLARED BY APK]`
+- **Manifest / Provider Analysis:** `res/xml/my_widget_info.xml` only declares `<container android:type="LARGE" ... />`. The application does not support or provide assets for the `SMALL (1x1)` container variant.
+
+---
 
 #### Service Review & Observations
 
@@ -230,16 +274,17 @@ on <Device Model>.*
   Investigate platform lint requirements (e.g. preview aspect ratios, shape qualifiers, container variants) independently and document findings here.
 -->
 
-| Review Dimension                    | Status   | Specification Audit & Dynamic Hardware Observations |
-| :---------------------------------- | :------- | :-------------------------------------------------- |
-| **Container & Size Support**        | \*\*PASS | FAIL                                                |
-| **Static Preview Compliance**       | \*\*PASS | FAIL                                                |
-| **UI Contrast & Visual Hierarchy**  | \*\*PASS | FAIL                                                |
-| **Multi-Instance & Stack Behavior** | \*\*PASS | FAIL                                                |
+| Review Dimension                    | Status | Specification Audit & Dynamic Hardware Observations |
+| :---------------------------------- | :----- | :-------------------------------------------------- |
+| **Container & Size Support**        | **PASS / WARN / FAIL** | Detail container compliance (e.g. missing SMALL container or invalid preferredType). |
+| **Static Preview Compliance**       | **PASS / WARN / FAIL** | Detail APK preview resolution, aspect ratio (1.61:1 vs square), and unmasked full-bleed format. |
+| **System Picker Rendering**         | **PASS / WARN / FAIL** | Detail how the preview scales on hardware pickers (e.g. Samsung SecTileComposeAddableActivity squashing / letterboxing b/553584867). |
+| **Container & Shape Styling**       | **PASS / WARN / FAIL** | Detail border stroke modifiers, double borders, or shape mismatches vs native OEM container pills. |
+| **UI Contrast & Visual Hierarchy**  | **PASS / WARN / FAIL** | Detail text readability, theme contrast, and typography. |
+| **Multi-Instance & Stack Behavior** | **PASS / WARN / FAIL** | Detail multi-widget stacking behavior and carousel routing. |
 
 ______________________________________________________________________
 
-<!-- GUIDANCE: Duplicate Section 2.x block above for each additional glanceable service provided by the application. -->
+<!-- GUIDANCE: Duplicate Section block above for each additional glanceable service provided by the application. -->
 
-*Audit report generated as part of Wear OS Widget Audit Deliverables
-(`<app_name>/index.md`).*
+*Audit report generated as part of Wear OS Widget Audit Deliverables (`<app_name>/index.md`).*
