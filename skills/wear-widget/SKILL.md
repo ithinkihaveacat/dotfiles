@@ -201,13 +201,20 @@ adb shell am broadcast \
   -a com.google.android.wearable.app.DEBUG_SYSUI \
   --es operation show-tile \
   --ei index 0
+sleep 1
+
+# If display is in ambient/dim mode, wake screen with a coordinate tap.
+# (ONLY tap if display is currently ambient/dim; DO NOT tap if already active!)
+adb shell input tap 227 227
+sleep 1
 
 # 3. Capture screenshot (or use workspace screenshot helpers if available)
 adb shell screencap -p /sdcard/preview.png && adb pull /sdcard/preview.png preview.png
 ```
 
 > [!WARNING] Avoid sending unneeded manual input taps to an active display
-> during capture, as touches can trigger click handlers or loading spinners.
+> during capture, as touches can interact with widget click handlers and trigger
+> unexpected UI state reloads or loading spinners.
 
 ### Method 3: Standalone Developer Renderer (Widget Tray Viewer)
 
@@ -246,7 +253,42 @@ ______________________________________________________________________
   Capture validation media immediately after rendering.
 - **UI Automation for Pickers**: The Samsung picker activity
   (`SecTileComposeAddableActivity`) is private. You can automate the on-screen
-  editing interface using UI automation tools (such as `popper` if available).
+  editing interface using UI automation tools (e.g., `popper`):
+  - **Add Recipe**:
+    1. Switch to target page (e.g., via ADB broadcast
+       `DEBUG_SYSUI --es operation show-tile --ei index 3`).
+    1. Automate the picker using a UI interaction tool (such as `popper` if
+       available):
+       ```bash
+       popper "Long press the center of the screen, tap the Edit button, scroll down to the bottom of the widget list, tap the '+' Add button. In the Add tiles list, scroll down past 'Featured' and 'Samsung Health' to 'Optimized apps', tap '<App Name>' to expand the accordion, and click the '<Widget Preview Text>' preview widget to add it."
+       ```
+    1. Return to watch face: `adb shell input keyevent KEYCODE_HOME`
+  - **Remove Recipe**:
+    1. Switch to target page.
+    1. Automate removal using a UI interaction tool:
+       ```bash
+       popper "Long press the center of the screen, tap the Edit button, scroll to the '<Widget Preview Text>' widget, and tap the red minus icon on its right side to delete it."
+       ```
+    1. Return to watch face: `adb shell input keyevent KEYCODE_HOME`
+
+### Capturing End-to-End User Interaction Videos
+
+- **UI-Driven Recording over Background Broadcasts**: When capturing video
+  recordings for widget audits or deliverables, record the visual UI journey
+  on-screen rather than relying solely on silent background broadcast commands.
+- **Automating the Picker Journey**: Use UI automation tools (like `popper` or
+  scriptable input touch gestures) with `adb-screenrecord` to perform natural
+  gestures through the watch interface:
+  1. Enable visual touch feedback:
+     ```bash
+     adb shell settings put system show_touches 1
+     ```
+  1. Wake screen and establish initial carousel context.
+  1. Navigate to the `+ Add` tiles button.
+  1. Scroll down the *Add tiles* list to *Optimized apps*, expand the accordion
+     item, and tap the widget preview to add it.
+  1. Show the widget active and rendered in its carousel slot, and swipe through
+     adjacent tiles.
 
 ______________________________________________________________________
 
