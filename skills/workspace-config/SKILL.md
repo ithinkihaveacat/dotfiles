@@ -29,10 +29,8 @@ control ever seeing the configuration. It consists of three tools:
    Antigravity), including pre-approving the safe commands declared by installed
    skills.
 
-`git-setup` ties these together for git repositories: it runs `hook apply`,
-`skill apply`, then `permission apply` (and `git-setup doctor` aggregates all
-three doctors). It runs automatically on `git clone` via the global template's
-post-checkout hook.
+For Git repositories, `hook apply`, `skill apply`, and `permission apply` run
+automatically on `git clone` via the global template's post-checkout hook.
 
 ______________________________________________________________________
 
@@ -251,15 +249,14 @@ ______________________________________________________________________
 
 ### Default Discovery & Apply (Recommended for new workspaces)
 
-Analyze the current directory, install the recommended skills, and pre-approve
-their safe commands:
+Analyze the current directory, install the required hooks and skills, and
+pre-approve their safe commands:
 
 ```bash
+hook apply
 skill apply
 permission apply
 ```
-
-(Or just run `git-setup`, which also installs hooks.)
 
 ### Targeted Discovery (With Context)
 
