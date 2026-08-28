@@ -25,6 +25,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -230,6 +231,52 @@ def is_text_file(path: Path) -> bool:
         return False
 
 
+def format_tree_manifest(paths: list[Path]) -> str:
+    """Generate an ASCII directory tree manifest from a list of Paths."""
+    if not paths:
+        return ""
+    cwd = Path.cwd()
+    rel_paths = []
+    for p in paths:
+        try:
+            rel = p.relative_to(cwd)
+            rel_paths.append(rel)
+        except Exception:
+            rel_paths.append(p)
+    tree: dict[str, Any] = {}
+    for p in sorted(rel_paths):
+        parts = p.parts
+        curr = tree
+        for part in parts:
+            if part not in curr:
+                curr[part] = {}
+            curr = curr[part]
+
+    lines = ["Directory Structure:"]
+
+    def render(node: dict[str, Any], prefix: str = ""):
+        items = list(node.keys())
+        for idx, item in enumerate(items):
+            is_last = idx == len(items) - 1
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{prefix}{connector}{item}")
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            render(node[item], child_prefix)
+
+    render(tree)
+    return "\n".join(lines)
+
+
+def format_markdown_doc(path: Path | str, content: str) -> str:
+    """Format a document with Markdown headers and backtick code fences."""
+    ext = Path(path).suffix.lstrip(".").lower() if isinstance(path, (Path, str)) else ""
+    max_ticks = 0
+    for match in re.finditer(r"`+", content):
+        max_ticks = max(max_ticks, len(match.group(0)))
+    fence = "`" * max(3, max_ticks + 1)
+    return f"#### File: `{path}`\n\n{fence}{ext}\n{content}\n{fence}\n\n"
+
+
 def usage():
     print(
         f"""\
@@ -281,25 +328,25 @@ Best Practices for Context:
     focuses its reasoning on genuinely novel solutions.
 
 Arguments:
-  PROMPT        The specific question or task for the Oracle.
-  FILE_OR_DIR   Optional. Files or directories to include as context. Directories
-                are recursively walked (ignoring hidden files, credential patterns,
-                and standard ignore lists like node_modules). Text files are inlined;
-                media files are attached directly or uploaded via the Gemini Files API.
+  PROMPT                The specific question or task for the Oracle.
+  FILE_OR_DIR           Optional. Files or directories to include as context. Directories
+                        are recursively walked (ignoring hidden files, credential patterns,
+                        and standard ignore lists like node_modules). Text files are inlined;
+                        media files are attached directly or uploaded via the Gemini Files API.
 
 Input:
-  stdin         Optional. Context or reference material piped into the script.
+  stdin                 Optional. Context or reference material piped into the script.
 
 Options:
-  --force       Bypass context size limits (1MB for text, 20MB per media file).
-  --maps        Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
-  --code        Enable Code Execution for Python.
-  --dry-run     Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
-  --model MODEL Gemini model to use (default: gemini-pro-latest).
-  --serialize   Save the request payload and the answer to files in the cache
-                (~/.cache/oracle/). (Default: on).
-  --no-serialize Disable saving the payload and answer to the cache.
-  --help        Display this help message and exit.
+  --force               Bypass context size limits (1MB for text, 20MB per media file).
+  --maps                Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
+  --code                Enable Code Execution for Python.
+  --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
+  --model MODEL         Gemini model to use (default: gemini-pro-latest).
+  --serialize           Save the request payload and the answer to files in the cache
+                        (~/.cache/oracle/). (Default: on).
+  --no-serialize        Disable saving the payload and answer to the cache.
+  --help                Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
@@ -335,11 +382,28 @@ def main():
     telemetry_status = "Failed"
     telemetry_error = None
 
+    force = False
+    use_maps = False
+    use_code = False
+    dry_run = False
+    serialize = True
+    model_id = os.environ.get("GEMINI_MODEL", "gemini-pro-latest")
+    parts: list[types.Part] = []
+    manifest_str = ""
+    formatted_docs: list[str] = []
+
     def write_telemetry(status_label: str, error_msg: str | None = None):
         if not telemetry_file:
             return
         try:
             elapsed = time.perf_counter() - start_time
+            prospective_parts = (
+                (1 if manifest_str else 0)
+                + len(formatted_docs)
+                + (len(media_files_to_inline) * 2)
+                + (len(media_files_to_upload) * 2)
+                + 1
+            )
             telemetry_data = {
                 "status": status_label,
                 "success": status_label == "Succeeded",
@@ -348,6 +412,10 @@ def main():
                 "candidate_tokens": candidate_tokens,
                 "thinking_tokens": thinking_tokens,
                 "steps": 1,
+                "context_format": "markdown",
+                "manifest": bool(manifest_str),
+                "segmentation": "discrete",
+                "parts_count": len(parts) if parts else prospective_parts,
                 "text_files_count": len(text_files),
                 "media_inline_count": len(media_files_to_inline),
                 "media_upload_count": len(media_files_to_upload),
@@ -374,12 +442,6 @@ def main():
             telemetry_status = "Succeeded"
             sys.exit(0)
 
-        force = False
-        use_maps = False
-        use_code = False
-        dry_run = False
-        serialize = True
-        model_id = os.environ.get("GEMINI_MODEL", "gemini-pro-latest")
         args = []
         argv = sys.argv[1:]
         i = 0
@@ -434,13 +496,13 @@ def main():
                 cleaned_paths.append(p)
         paths = cleaned_paths
 
-        text_context = ""
+        collected_docs: list[tuple[Path | str, str]] = []
 
         # 1. Read stdin
         if read_stdin:
             stdin_content = sys.stdin.read()
             if stdin_content:
-                text_context += f'<document path="stdin">\n<![CDATA[\n{stdin_content}\n]]>\n</document>\n'
+                collected_docs.append(("stdin", stdin_content))
                 total_text_size += len(stdin_content.encode("utf-8"))
 
         # 2. Gather files with secret and symlink filtering
@@ -506,8 +568,8 @@ def main():
                 try:
                     content = path.read_text(encoding="utf-8", errors="replace")
                     total_text_size += size
-                    text_context += f'<document path="{path}">\n<![CDATA[\n{content}\n]]>\n</document>\n'
                     text_files.append(path)
+                    collected_docs.append((path, content))
                     if not dry_run:
                         print(
                             f"{os.path.basename(sys.argv[0])}: inlining {path.name} into context ({size / 1024:.2f} KB)...",
@@ -547,6 +609,17 @@ def main():
 
         total_media_count = len(media_files_to_inline) + len(media_files_to_upload)
 
+        # 4. Format text context, manifest, and individual documents
+        manifest_str = ""
+        if text_files:
+            tree_text = format_tree_manifest(text_files)
+            manifest_str = f"### Directory Manifest\n\n```text\n{tree_text}\n```\n\n"
+
+        formatted_docs = [
+            format_markdown_doc(p, content) for p, content in collected_docs
+        ]
+        text_context = manifest_str + "".join(formatted_docs)
+
         if not text_context and total_media_count == 0:
             print(
                 f"{os.path.basename(sys.argv[0])}: no context provided via stdin or files",
@@ -580,10 +653,14 @@ def main():
 """
 
         # Construct self-contained XML document for caching
-        payload_xml = "<oracle_payload>\n"
+        payload_xml = (
+            '<oracle_payload format="markdown" manifest="1" segmentation="discrete">\n'
+        )
         payload_xml += f"  <system_instruction><![CDATA[\n{system_instruction}\n]]></system_instruction>\n"
         if text_context:
-            payload_xml += f"  <context>\n{text_context}\n  </context>\n"
+            payload_xml += (
+                f'  <context format="markdown"><![CDATA[\n{text_context}]]></context>\n'
+            )
             payload_xml += f"  <task><![CDATA[\nBased on the information in the context above, please perform the following task:\n{user_prompt}\n]]></task>\n"
         else:
             payload_xml += f"  <task><![CDATA[\n{user_prompt}\n]]></task>\n"
@@ -621,7 +698,7 @@ def main():
             total_inline_media_size = sum(s for _, _, s in media_files_to_inline)
             total_upload_media_size = sum(s for _, _, s in media_files_to_upload)
             stdin_note = (
-                " (+ stdin)" if '<document path="stdin">' in text_context else ""
+                " (+ stdin)" if any(p == "stdin" for p, _ in collected_docs) else ""
             )
 
             print("\nOracle Dry Run Summary\n", file=sys.stdout)
@@ -764,10 +841,10 @@ def main():
             uploaded_files = asyncio.run(upload_all(media_files_to_upload))
 
         parts = []
-        if text_context:
-            parts.append(
-                types.Part.from_text(text=f"<context>\n{text_context}\n</context>")
-            )
+        if manifest_str:
+            parts.append(types.Part.from_text(text=manifest_str))
+        for doc in formatted_docs:
+            parts.append(types.Part.from_text(text=doc))
 
         # 1. Inline small media (< 5MB file, <= 10MB aggregate) directly with explicit file labels
         for path, mime_type, _ in media_files_to_inline:

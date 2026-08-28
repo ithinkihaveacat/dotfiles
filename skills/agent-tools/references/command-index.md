@@ -375,25 +375,25 @@ Best Practices for Context:
     focuses its reasoning on genuinely novel solutions.
 
 Arguments:
-  PROMPT        The specific question or task for the Oracle.
-  FILE_OR_DIR   Optional. Files or directories to include as context. Directories
-                are recursively walked (ignoring hidden files, credential patterns,
-                and standard ignore lists like node_modules). Text files are inlined;
-                media files are attached directly or uploaded via the Gemini Files API.
+  PROMPT                The specific question or task for the Oracle.
+  FILE_OR_DIR           Optional. Files or directories to include as context. Directories
+                        are recursively walked (ignoring hidden files, credential patterns,
+                        and standard ignore lists like node_modules). Text files are inlined;
+                        media files are attached directly or uploaded via the Gemini Files API.
 
 Input:
-  stdin         Optional. Context or reference material piped into the script.
+  stdin                 Optional. Context or reference material piped into the script.
 
 Options:
-  --force       Bypass context size limits (1MB for text, 20MB per media file).
-  --maps        Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
-  --code        Enable Code Execution for Python.
-  --dry-run     Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
-  --model MODEL Gemini model to use (default: gemini-pro-latest).
-  --serialize   Save the request payload and the answer to files in the cache
-                (~/.cache/oracle/). (Default: on).
-  --no-serialize Disable saving the payload and answer to the cache.
-  --help        Display this help message and exit.
+  --force               Bypass context size limits (1MB for text, 20MB per media file).
+  --maps                Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
+  --code                Enable Code Execution for Python.
+  --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
+  --model MODEL         Gemini model to use (default: gemini-pro-latest).
+  --serialize           Save the request payload and the answer to files in the cache
+                        (~/.cache/oracle/). (Default: on).
+  --no-serialize        Disable saving the payload and answer to the cache.
+  --help                Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
@@ -708,7 +708,7 @@ to a file to search locally.
 ```text
 usage: context [-h] {catalog,show,template} ...
 
-Generate aggregated context for a specific catalog entry, a GitHub URL, or a local directory. Fetches resources (repositories, files, URLs) and emits them as structured XML for AI agent consumption.
+Generate aggregated context for a specific catalog entry, a GitHub URL, or a local directory. Fetches resources (repositories, files, URLs) and emits them as structured Markdown for AI agent consumption.
 
 Catalog Entries:
   compose-architecture   Android Compose Architecture documentation

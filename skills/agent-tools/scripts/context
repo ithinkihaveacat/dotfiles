@@ -17,12 +17,15 @@ import tarfile
 import tempfile
 import time
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import requests
 
 # Global state
 ENTRY_COUNTER = 0
 ENTRIES = []
+MANIFEST_PATHS: list[str] = []
 
 CONTEXT_BASE_DIR = os.path.join(
     os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
@@ -260,6 +263,7 @@ def handle_url_target(url):
             continue
 
         rel_to_extract = os.path.relpath(file, extract_dir)
+        MANIFEST_PATHS.append(rel_to_extract)
 
         display_url = (
             f"https://raw.githubusercontent.com/{repo_full}/{branch}/{rel_to_extract}"
@@ -287,6 +291,7 @@ def handle_local_dir(directory):
 
             file_path = os.path.join(root, file)
             rel_path = os.path.relpath(file_path, directory)
+            MANIFEST_PATHS.append(rel_path)
 
             # Use cat <rel_path> as display_cmd
             display_cmd = f"cat '{rel_path}'"
@@ -339,84 +344,129 @@ def entry_skills():
     )
 
 
-def generate_xml(topic_desc, use_toc=True):
-    # We build the XML manually or via ET.
-    # Since we need to calculate line numbers for TOC, and CDATA blocks are hard to do with ET
-    # without third party libraries or hacks (ET escapes < and > inside text even if we want CDATA),
-    # it might be easier to generate strings or use a hybrid approach.
+def format_tree_manifest(paths: list[str | Path]) -> str:
+    """Generate an ASCII directory tree manifest from a list of paths."""
+    if not paths:
+        return ""
+    tree: dict[str, Any] = {}
+    for p_raw in sorted(paths):
+        p = Path(p_raw)
+        parts = p.parts
+        curr = tree
+        for part in parts:
+            if part not in curr:
+                curr[part] = {}
+            curr = curr[part]
 
-    # Let's build the entries strings first to count lines.
+    lines = ["Directory Structure:"]
 
+    def render(node: dict[str, Any], prefix: str = ""):
+        items = list(node.keys())
+        for idx, item in enumerate(items):
+            is_last = idx == len(items) - 1
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{prefix}{connector}{item}")
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            render(node[item], child_prefix)
+
+    render(tree)
+    return "\n".join(lines)
+
+
+def generate_markdown(topic_desc, use_toc=True):
     entry_strings = []
     for entry in ENTRIES:
-        s = f'<entry id="{entry["id"]}">\n'
-        s += f"<command>{entry['command']}</command>\n"
-        s += f"<output><![CDATA[{entry['output']}]]></output>\n"
-        s += "</entry>\n"
-        entry_strings.append(s)
+        content = entry["output"]
+        max_ticks = 0
+        for match in re.finditer(r"`+", content):
+            max_ticks = max(max_ticks, len(match.group(0)))
+        fence = "`" * max(3, max_ticks + 1)
 
-    # Now calculate TOC if needed
-    toc_items = []
-    if use_toc:
-        # We need to know the starting line of entries.
-        # Header lines + TOC lines.
+        cmd_str = entry["command"]
+        published_url = None
+        if "  # published to " in cmd_str:
+            cmd_part, published_url = cmd_str.split("  # published to ", 1)
+            cmd_str = cmd_part.strip()
+            published_url = published_url.strip()
 
-        timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        header = f"""<shell_session>
-<context_summary>
-  <generated_at>{timestamp}</generated_at>
-  <purpose>
-    Topic: {topic_desc}
+        lang = ""
+        m_file = re.search(r"['\"]?([^'\"\s]+\.([a-zA-Z0-9_-]+))['\"]?", cmd_str)
+        if m_file:
+            ext = m_file.group(2).lower()
+            if ext in ("md", "markdown", "mdx"):
+                lang = "markdown"
+            elif ext in ("py", "python"):
+                lang = "python"
+            elif ext in ("json", "ipynb"):
+                lang = "json"
+            elif ext in ("sh", "bash", "zsh"):
+                lang = "bash"
+            elif ext in ("yaml", "yml"):
+                lang = "yaml"
+            elif ext in ("xml", "html", "svg"):
+                lang = ext
+            elif ext in ("toml", "ini"):
+                lang = "toml"
+            elif ext in ("js", "ts", "jsx", "tsx"):
+                lang = ext
 
-    This content represents a recorded shell session designed to provide context for an AI agent.
-    It aggregates resources (local files, remote URLs, system info) by capturing shell commands
-    and their output.
-  </purpose>
-  <structure>
-    The session is organized as a sequence of &lt;entry&gt; elements:
-    1. &lt;command&gt;: The command string acting as the data source. (e.g., "cat file.txt" or "curl url")
-       Treat this as the source of truth for where the data originated.
-    2. &lt;output&gt;: The raw content returned by that command.
-  </structure>
-  <guidelines>
-    - PROVENANCE: The &lt;command&gt; element indicates an approximate source for the data. In some cases
-      the actual retrieval method may differ (e.g., fetched from a local cache or extracted archive).
-    - SNAPSHOT: Outputs represent a best-effort snapshot at the time this script was run.
-    - CITATION: If a &lt;command&gt; contains a "# published to URL" comment, that URL represents the
-      canonical, human-readable source for the content. Agents are encouraged to prioritize this
-      URL when citing sources or providing links to the user.
-  </guidelines>
-</context_summary>
+        lines = [
+            f'### <a id="entry-{entry["id"]}"></a>Entry {entry["id"]}: `{cmd_str}`\n'
+        ]
+        if published_url:
+            lines.append(f"* **Published URL:** <{published_url}>\n")
+        lines.append(f"\n{fence}{lang}\n{content}\n{fence}\n\n")
+        entry_strings.append("".join(lines))
+
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+    header = f"""# Context: {topic_desc}
+
+> **Generated at:** {timestamp}
+> **Provenance & Citations:** Commands indicate data retrieval sources. When citing documentation or linking external resources for users, prioritize the canonical **Published URL**.
+
 """
+
+    manifest_str = ""
+    if MANIFEST_PATHS:
+        tree_text = format_tree_manifest(MANIFEST_PATHS)
+        manifest_str = f"### Directory Manifest\n\n```text\n{tree_text}\n```\n\n"
+
+    toc_items = []
+    if use_toc and ENTRIES:
         header_lines = header.count("\n")
+        manifest_lines = manifest_str.count("\n") if manifest_str else 0
+        toc_header = "### Table of Contents\n\n"
+        toc_footer = "\n---\n\n"
+        toc_fixed_lines = toc_header.count("\n") + len(ENTRIES) + toc_footer.count("\n")
 
-        toc_lines = (
-            len(ENTRIES) + 2
-        )  # <table_of_contents> + items + </table_of_contents>
-
-        current_line = header_lines + toc_lines + 1
+        current_line = header_lines + manifest_lines + toc_fixed_lines + 1
 
         for i, entry in enumerate(ENTRIES):
             est = entry_strings[i]
-            lines = est.count("\n")
+            n_lines = est.count("\n")
             start = current_line
-            end = current_line + lines - 1
+            end = current_line + n_lines - 1
+            cmd_str = entry["command"]
+            published_url = None
+            if "  # published to " in cmd_str:
+                cmd_part, published_url = cmd_str.split("  # published to ", 1)
+                cmd_str = cmd_part.strip()
+                published_url = published_url.strip()
+
+            pub_note = f" (Published: <{published_url}>)" if published_url else ""
             toc_items.append(
-                f'  <item id="{entry["id"]}" startLine="{start}" endLine="{end}">{entry["command"]}</item>'
+                f"{i + 1}. [Entry {entry['id']}](#entry-{entry['id']}) (lines {start}-{end}) — `{cmd_str}`{pub_note}\n"
             )
-            current_line += lines
+            current_line += n_lines
 
-    output = []
-    output.append(header)
-    if use_toc:
-        output.append("<table_of_contents>\n")
-        for item in toc_items:
-            output.append(item + "\n")
-        output.append("</table_of_contents>\n")
-
+    output = [header]
+    if manifest_str:
+        output.append(manifest_str)
+    if use_toc and ENTRIES:
+        output.append(toc_header)
+        output.extend(toc_items)
+        output.append(toc_footer)
     output.extend(entry_strings)
-
-    output.append("</shell_session>\n")
     return "".join(output)
 
 
@@ -1114,7 +1164,7 @@ def cmd_show(target, force, catalog):
         is_dir_target = True
     elif target.startswith(("https://github.com/", "github:", "http://", "github://")):
         url_hash = hashlib.sha256(target.encode("utf-8")).hexdigest()
-        cache_file = os.path.join(cache_dir, f"url_{url_hash}.xml")
+        cache_file = os.path.join(cache_dir, f"url_{url_hash}.md")
         desc = f"GitHub URL: {target}"
         is_url_target = True
 
@@ -1141,10 +1191,10 @@ def cmd_show(target, force, catalog):
                 file=sys.stderr,
             )
             func, desc = catalog[target]
-            cache_file = os.path.join(cache_dir, f"{target}.xml")
+            cache_file = os.path.join(cache_dir, f"{target}.md")
         elif is_entry:
             func, desc = catalog[target]
-            cache_file = os.path.join(cache_dir, f"{target}.xml")
+            cache_file = os.path.join(cache_dir, f"{target}.md")
         elif is_dir:
             desc = f"Local Directory: {target}"
             is_dir_target = True
@@ -1205,18 +1255,18 @@ def cmd_show(target, force, catalog):
     else:
         func()
 
-    xml_output = generate_xml(desc)
+    output_md = generate_markdown(desc)
 
     # Save to cache
     if cache_file:
         try:
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_file, "w") as f:
-                f.write(xml_output)
+                f.write(output_md)
         except Exception as e:
             print(f"context: warning: failed to update cache: {e}", file=sys.stderr)
 
-    print(xml_output, end="")
+    print(output_md, end="")
 
 
 def main():
@@ -1271,7 +1321,7 @@ def main():
     description = (
         "Generate aggregated context for a specific catalog entry, "
         "a GitHub URL, or a local directory. Fetches resources (repositories, "
-        "files, URLs) and emits them as structured XML for AI agent consumption.\n\n"
+        "files, URLs) and emits them as structured Markdown for AI agent consumption.\n\n"
         "Catalog Entries:\n"
     )
     for t in sorted(catalog.keys()):

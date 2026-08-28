@@ -7,3 +7,4 @@ complete -c oracle -l model -x -d "Gemini model to use (default: gemini-pro-late
 complete -c oracle -l serialize -d "Save payload and answer to cache (default: on)"
 complete -c oracle -l no-serialize -d "Disable saving payload and answer to cache"
 complete -c oracle -s h -l help -d "Display help message and exit"
+

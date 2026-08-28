@@ -410,7 +410,7 @@ target), `template` (output plugin template)
 scripts/context catalog
 
 # Gather context for Gemini API
-scripts/context show gemini-api > gemini-context.xml
+scripts/context show gemini-api > gemini-context.md
 
 # Pipe context directly to analysis
 scripts/context show gemini-cli | scripts/emerson "How do commands work?"
