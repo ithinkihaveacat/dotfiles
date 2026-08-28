@@ -1,5 +1,4 @@
-complete -c oracle -f
-
+# Fish completion for oracle
 complete -c oracle -l force -d "Bypass context size limits (1MB text, 20MB media)"
 complete -c oracle -l maps -d "Use Google Maps grounding instead of Google Search"
 complete -c oracle -l code -d "Enable Python code execution sandbox"
