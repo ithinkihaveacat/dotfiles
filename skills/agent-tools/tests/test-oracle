@@ -11,7 +11,7 @@ OUTPUT=$(mktemp)
 WORK=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..10"
+echo "1..13"
 
 # Test 1: oracle --help outputs valid help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -180,6 +180,60 @@ else
     echo "not ok 10 - Error telemetry was overwritten or missing error fields"
     if [[ -f "$ERROR_TEL_JSON" ]]; then
       cat "$ERROR_TEL_JSON" | sed 's/^/# /'
+    fi
+  fi
+fi
+
+# Test 11: gcloud directory and application_default_credentials.json are excluded
+ADC_DIR="$WORK/adc_test"
+mkdir -p "$ADC_DIR/.config/gcloud" "$ADC_DIR/src"
+echo '{"client_secret": "xyz", "refresh_token": "abc"}' >"$ADC_DIR/.config/gcloud/application_default_credentials.json"
+echo 'regular code' >"$ADC_DIR/src/app.py"
+
+if "$BIN" --dry-run "Audit gcloud config" "$ADC_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "app.py" "$OUTPUT" && ! grep -q "application_default_credentials" "$OUTPUT"; then
+    echo "ok 11 - gcloud directory and application_default_credentials.json are filtered"
+  else
+    echo "not ok 11 - gcloud credentials were erroneously included in context"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 11 - Dry run on gcloud project failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 12: macOS /tmp system alias paths are supported without false symlink rejection
+TMP_TEST_FILE="/tmp/oracle_test_file_$$.txt"
+echo "Valid temporary notes" >"$TMP_TEST_FILE"
+trap 'rm -f "$TMP_TEST_FILE"; rm -rf "$OUTPUT" "$WORK"' EXIT
+
+if "$BIN" --dry-run "Inspect temp note" "$TMP_TEST_FILE" >"$OUTPUT" 2>&1; then
+  if grep -q "oracle_test_file_" "$OUTPUT" && ! grep -q "skipping symlink" "$OUTPUT"; then
+    echo "ok 12 - macOS /tmp path is canonicalized and accepted without symlink rejection"
+  else
+    echo "not ok 12 - /tmp path was rejected as a symlink"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 12 - Dry run failed for /tmp path"
+  sed 's/^/# /' "$OUTPUT"
+fi
+rm -f "$TMP_TEST_FILE"
+
+# Test 13: Preprocessing failure (e.g. text > 1MB) writes error telemetry
+PREPROC_TEL_JSON="$WORK/preproc_telemetry.json"
+LARGE_FILE="$WORK/oversized.txt"
+head -c $((2 * 1024 * 1024)) /dev/zero | tr '\0' 'A' >"$LARGE_FILE"
+
+if env AGENT_TELEMETRY_JSON="$PREPROC_TEL_JSON" "$BIN" "Oversized context" "$LARGE_FILE" >"$OUTPUT" 2>&1; then
+  echo "not ok 13 - Expected failure when text exceeds 1MB threshold without --force"
+else
+  if [[ -f "$PREPROC_TEL_JSON" ]] && grep -q '"status": "Error"' "$PREPROC_TEL_JSON" && grep -q '"error": "text context exceeds 1MB threshold"' "$PREPROC_TEL_JSON"; then
+    echo "ok 13 - Preprocessing failure emits error telemetry to AGENT_TELEMETRY_JSON"
+  else
+    echo "not ok 13 - Preprocessing failure did not record expected telemetry"
+    if [[ -f "$PREPROC_TEL_JSON" ]]; then
+      cat "$PREPROC_TEL_JSON" | sed 's/^/# /'
     fi
   fi
 fi
