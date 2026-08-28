@@ -11,7 +11,7 @@ OUTPUT=$(mktemp)
 WORK=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..7"
+echo "1..10"
 
 # Test 1: oracle --help outputs valid help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -99,7 +99,6 @@ fi
 # Test 6: Hybrid media classification: small media tagged [MEDIA-INLINE]
 MEDIA_DIR="$WORK/media_project"
 mkdir -p "$MEDIA_DIR"
-# Create a small dummy png (100 bytes)
 head -c 100 /dev/zero >"$MEDIA_DIR/screenshot.png"
 echo "Text documentation" >"$MEDIA_DIR/doc.txt"
 
@@ -129,4 +128,58 @@ if env AGENT_TELEMETRY_JSON="$TEL_JSON" "$BIN" --dry-run "Test telemetry" "$MEDI
 else
   echo "not ok 7 - Failed running with AGENT_TELEMETRY_JSON"
   sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 8: Reject paths whose ancestors are symlinks on direct CLI args
+ANCESTOR_DIR="$WORK/ancestor_test"
+mkdir -p "$ANCESTOR_DIR/real_ssh"
+echo "Host github.com" >"$ANCESTOR_DIR/real_ssh/config"
+ln -s "$ANCESTOR_DIR/real_ssh" "$ANCESTOR_DIR/symlink_parent"
+
+if "$BIN" --dry-run "Check config" "$ANCESTOR_DIR/symlink_parent/config" >"$OUTPUT" 2>&1; then
+  if grep -q "skipping symlink" "$OUTPUT" && ! grep -q "\[TEXT\].*real_ssh/config" "$OUTPUT"; then
+    echo "ok 8 - Direct paths with symlink ancestors are rejected"
+  else
+    echo "not ok 8 - Path with symlink ancestor was erroneously included in context"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 8 - Dry run failed for symlink ancestor test"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 9: Aggregate media budget overflows to [MEDIA-UPLOAD]
+BUDGET_DIR="$WORK/budget_test"
+mkdir -p "$BUDGET_DIR"
+# Two 4MB files (total 8MB <= 10MB limit: both inline)
+# Third 4MB file (total 12MB > 10MB limit: third overflows to upload)
+head -c $((4 * 1024 * 1024)) /dev/zero >"$BUDGET_DIR/img1.png"
+head -c $((4 * 1024 * 1024)) /dev/zero >"$BUDGET_DIR/img2.png"
+head -c $((4 * 1024 * 1024)) /dev/zero >"$BUDGET_DIR/img3.png"
+
+if "$BIN" --dry-run "Check budget" "$BUDGET_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "Inline Media:   2 file(s)" "$OUTPUT" && grep -q "Uploaded Media: 1 file(s)" "$OUTPUT"; then
+    echo "ok 9 - Aggregate media budget overflows excess files to uploaded media"
+  else
+    echo "not ok 9 - Aggregate media budget did not correctly split inline and upload"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 9 - Dry run failed on aggregate media budget test"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 10: Error telemetry is preserved and not overwritten on failure
+ERROR_TEL_JSON="$WORK/error_telemetry.json"
+if env -u GEMINI_API_KEY AGENT_TELEMETRY_JSON="$ERROR_TEL_JSON" "$BIN" "Prompt without key" "$SAMPLE_DIR" >"$OUTPUT" 2>&1; then
+  echo "not ok 10 - Expected failure when GEMINI_API_KEY is missing"
+else
+  if [[ -f "$ERROR_TEL_JSON" ]] && grep -q '"status": "Error"' "$ERROR_TEL_JSON" && grep -q '"error": "GEMINI_API_KEY not set"' "$ERROR_TEL_JSON"; then
+    echo "ok 10 - Error telemetry retains error status and message without being overwritten"
+  else
+    echo "not ok 10 - Error telemetry was overwritten or missing error fields"
+    if [[ -f "$ERROR_TEL_JSON" ]]; then
+      cat "$ERROR_TEL_JSON" | sed 's/^/# /'
+    fi
+  fi
 fi

@@ -10,6 +10,7 @@
 # name = "pypi"
 # url = "https://pypi.org/simple"
 # ///
+# Tests: skills/agent-tools/tests/test-oracle
 """The Oracle: A high-quality, researched, and authoritative reasoning tool."""
 
 import asyncio
@@ -30,10 +31,9 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 MAX_TEXT_SIZE = 1 * 1024 * 1024  # 1MB
-MAX_MEDIA_SIZE = 20 * 1024 * 1024  # 20MB
-INLINE_MEDIA_SIZE_THRESHOLD = (
-    10 * 1024 * 1024
-)  # 10MB: inline small media to avoid upload/delete roundtrips
+MAX_MEDIA_SIZE = 20 * 1024 * 1024  # 20MB per media file limit
+MAX_INLINE_MEDIA_FILE_SIZE = 5 * 1024 * 1024  # 5MB per inline media file
+MAX_AGGREGATE_INLINE_MEDIA_SIZE = 10 * 1024 * 1024  # 10MB total aggregate inline media
 SMALL_PAYLOAD_SIZE = 50 * 1024  # below this, nudge the caller to add context
 
 TEXT_EXTENSIONS = {
@@ -135,14 +135,37 @@ SECRET_FILE_PATTERNS = (
 )
 
 
+def has_symlink_component(path: Path) -> bool:
+    """Whether path or any of its parent components is a symlink."""
+    curr = path
+    while True:
+        if curr.is_symlink():
+            return True
+        if curr.parent == curr or curr.parent == Path("."):
+            break
+        curr = curr.parent
+    return False
+
+
 def is_secret_path(path: Path) -> bool:
     """Whether a path matches credential patterns or directories."""
-    if any(part in SECRET_DIRS for part in path.parts):
-        return True
-    name = path.name
-    if name in SECRET_FILE_NAMES:
-        return True
-    return any(fnmatch.fnmatch(name, pat) for pat in SECRET_FILE_PATTERNS)
+    paths_to_check = [path]
+    try:
+        resolved = path.resolve()
+        if resolved != path:
+            paths_to_check.append(resolved)
+    except Exception:
+        pass
+
+    for p in paths_to_check:
+        if any(part in SECRET_DIRS for part in p.parts):
+            return True
+        name = p.name
+        if name in SECRET_FILE_NAMES:
+            return True
+        if any(fnmatch.fnmatch(name, pat) for pat in SECRET_FILE_PATTERNS):
+            return True
+    return False
 
 
 def extract_retry_delay(exc: Exception) -> float | None:
@@ -286,6 +309,8 @@ def main():
     media_files_to_upload = []
     total_text_size = 0
     answer_chunks = []
+    telemetry_status = "Failed"
+    telemetry_error = None
 
     def write_telemetry(status_label: str, error_msg: str | None = None):
         if not telemetry_file:
@@ -393,33 +418,21 @@ def main():
     collected_files = []
     for p in paths:
         path = Path(p)
+        if is_secret_path(path):
+            print(
+                f"{os.path.basename(sys.argv[0])}: warning: skipping secret/credential path: {path}",
+                file=sys.stderr,
+            )
+            continue
+        if has_symlink_component(path):
+            print(
+                f"{os.path.basename(sys.argv[0])}: warning: skipping symlink path: {path}",
+                file=sys.stderr,
+            )
+            continue
         if path.is_file():
-            if is_secret_path(path):
-                print(
-                    f"{os.path.basename(sys.argv[0])}: warning: skipping secret/credential path: {path}",
-                    file=sys.stderr,
-                )
-                continue
-            if path.is_symlink():
-                print(
-                    f"{os.path.basename(sys.argv[0])}: warning: skipping symlink: {path}",
-                    file=sys.stderr,
-                )
-                continue
             collected_files.append(path)
         elif path.is_dir():
-            if is_secret_path(path):
-                print(
-                    f"{os.path.basename(sys.argv[0])}: warning: skipping secret/credential directory: {path}",
-                    file=sys.stderr,
-                )
-                continue
-            if path.is_symlink():
-                print(
-                    f"{os.path.basename(sys.argv[0])}: warning: skipping symlink directory: {path}",
-                    file=sys.stderr,
-                )
-                continue
             for root, dirs, files in os.walk(path):
                 dirs[:] = [
                     d
@@ -428,12 +441,15 @@ def main():
                     and d not in IGNORED_DIRS
                     and d not in SECRET_DIRS
                     and not (Path(root) / d).is_symlink()
+                    and not has_symlink_component(Path(root) / d)
+                    and not is_secret_path(Path(root) / d)
                 ]
                 for file in sorted(files):
                     file_path = Path(root) / file
                     if (
                         file.startswith(".")
                         or file_path.is_symlink()
+                        or has_symlink_component(file_path)
                         or is_secret_path(file_path)
                     ):
                         continue
@@ -444,6 +460,7 @@ def main():
             )
 
     # 3. Categorize and enforce limits
+    current_inline_media_size = 0
     for path in collected_files:
         size = path.stat().st_size
         if is_text_file(path):
@@ -466,9 +483,10 @@ def main():
                     )
             except Exception as e:
                 print(
-                    f"{os.path.basename(sys.argv[0])}: warning: failed to read {path}: {e}",
+                    f"{os.path.basename(sys.argv[0])}: error: failed to read file {path}: {e}",
                     file=sys.stderr,
                 )
+                sys.exit(1)
         else:
             mime_type, _ = mimetypes.guess_type(str(path))
             if not mime_type:
@@ -484,8 +502,13 @@ def main():
                 )
                 print("hint: use --force to bypass", file=sys.stderr)
                 sys.exit(1)
-            if size < INLINE_MEDIA_SIZE_THRESHOLD:
+            if (
+                size <= MAX_INLINE_MEDIA_FILE_SIZE
+                and (current_inline_media_size + size)
+                <= MAX_AGGREGATE_INLINE_MEDIA_SIZE
+            ):
                 media_files_to_inline.append((path, mime_type, size))
+                current_inline_media_size += size
             else:
                 media_files_to_upload.append((path, mime_type, size))
 
@@ -704,28 +727,31 @@ def main():
                 types.Part.from_text(text=f"<context>\n{text_context}\n</context>")
             )
 
-        # 1. Inline small media (< 10MB) directly with explicit file labels
+        # 1. Inline small media (< 5MB file, <= 10MB aggregate) directly with explicit file labels
         for path, mime_type, _ in media_files_to_inline:
             try:
                 data = path.read_bytes()
-                parts.append(
-                    types.Part.from_text(
-                        text=f"### Attached File: `{path.name}` (Path: `{path}`, MIME: `{mime_type}`)"
-                    )
-                )
-                parts.append(
-                    types.Part.from_bytes(
-                        data=data,
-                        mime_type=mime_type,
-                    )
-                )
             except Exception as e:
                 print(
-                    f"{os.path.basename(sys.argv[0])}: warning: failed to read media {path}: {e}",
+                    f"{os.path.basename(sys.argv[0])}: error: failed to read media file {path}: {e}",
                     file=sys.stderr,
                 )
+                telemetry_status = "Error"
+                telemetry_error = f"Failed to read media file {path}: {e}"
+                sys.exit(1)
+            parts.append(
+                types.Part.from_text(
+                    text=f"### Attached File: `{path.name}` (Path: `{path}`, MIME: `{mime_type}`)"
+                )
+            )
+            parts.append(
+                types.Part.from_bytes(
+                    data=data,
+                    mime_type=mime_type,
+                )
+            )
 
-        # 2. Attach uploaded large media (>= 10MB) via Files API with explicit file labels
+        # 2. Attach uploaded large media via Files API with explicit file labels
         for path, uf in uploaded_files:
             parts.append(
                 types.Part.from_text(
@@ -741,99 +767,104 @@ def main():
 
         parts.append(types.Part.from_text(text=f"<task>\n{user_prompt}\n</task>"))
 
-        def stream_with_retry():
-            initial_backoff = 2.0
-            max_backoff = 60.0
-            backoff_multiplier = 2.0
-            max_retry_seconds = 300.0
+        initial_backoff = 2.0
+        max_backoff = 60.0
+        backoff_multiplier = 2.0
+        max_retry_seconds = 300.0
 
-            current_backoff = initial_backoff
-            retry_start = time.monotonic()
+        current_backoff = initial_backoff
+        retry_start = time.monotonic()
 
-            while True:
-                try:
-                    return client.models.generate_content_stream(
-                        model=model_id,
-                        contents=[types.Content(role="user", parts=parts)],
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            tools=tools_config,
-                            thinking_config=types.ThinkingConfig(
-                                thinking_level="high", include_thoughts=True
-                            ),
-                            temperature=1.0,
+        while True:
+            try:
+                response = client.models.generate_content_stream(
+                    model=model_id,
+                    contents=[types.Content(role="user", parts=parts)],
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        tools=tools_config,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level="high", include_thoughts=True
                         ),
+                        temperature=1.0,
+                    ),
+                )
+
+                in_thought = False
+                for chunk in response:
+                    if chunk.usage_metadata:
+                        if chunk.usage_metadata.prompt_token_count:
+                            prompt_tokens = chunk.usage_metadata.prompt_token_count
+                        if chunk.usage_metadata.candidates_token_count:
+                            candidate_tokens = (
+                                chunk.usage_metadata.candidates_token_count
+                            )
+                        if getattr(chunk.usage_metadata, "thoughts_token_count", None):
+                            thinking_tokens = chunk.usage_metadata.thoughts_token_count
+
+                    if not chunk.candidates:
+                        continue
+                    for part in chunk.candidates[0].content.parts:
+                        if part.thought:
+                            if not in_thought:
+                                print(
+                                    f"\n{os.path.basename(sys.argv[0])}: thinking...\n\033[2m",
+                                    end="",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                                in_thought = True
+                            print(part.text, end="", file=sys.stderr, flush=True)
+                        elif part.text:
+                            if in_thought:
+                                print(
+                                    "\033[0m\n\n",
+                                    end="",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )  # Dim end
+                                in_thought = False
+                            print(part.text, end="", flush=True)
+                            answer_chunks.append(part.text)
+
+                if in_thought:
+                    print("\033[0m\n", end="", file=sys.stderr, flush=True)
+                print(flush=True)  # Final newline
+                telemetry_status = "Succeeded"
+                break
+
+            except Exception as e:
+                is_retryable = isinstance(e, genai_errors.APIError) and e.code in (
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                )
+                if not is_retryable or answer_chunks:
+                    raise
+
+                elapsed = time.monotonic() - retry_start
+                delay = extract_retry_delay(e)
+                if delay is not None:
+                    sleep_sec = delay + 1.0
+                    wait_desc = f"Retrying in {sleep_sec:.1f}s (quota reset)..."
+                else:
+                    sleep_sec = current_backoff
+                    current_backoff = min(
+                        current_backoff * backoff_multiplier, max_backoff
                     )
-                except Exception as e:
-                    is_retryable = isinstance(e, genai_errors.APIError) and e.code in (
-                        429,
-                        500,
-                        502,
-                        503,
-                        504,
-                    )
-                    if not is_retryable:
-                        raise
+                    wait_desc = f"Retrying in {sleep_sec:.1f}s with backoff..."
 
-                    elapsed = time.monotonic() - retry_start
-                    delay = extract_retry_delay(e)
-                    if delay is not None:
-                        sleep_sec = delay + 1.0
-                        wait_desc = f"Retrying in {sleep_sec:.1f}s (quota reset)..."
-                    else:
-                        sleep_sec = current_backoff
-                        current_backoff = min(
-                            current_backoff * backoff_multiplier, max_backoff
-                        )
-                        wait_desc = f"Retrying in {sleep_sec:.1f}s with backoff..."
+                if elapsed + sleep_sec > max_retry_seconds:
+                    raise
 
-                    if elapsed + sleep_sec > max_retry_seconds:
-                        raise
-
-                    msg = getattr(e, "message", getattr(e, "status", "Unknown"))
-                    print(
-                        f"{os.path.basename(sys.argv[0])}: warning: API error {getattr(e, 'code', 'error')} ({msg}). {wait_desc}",
-                        file=sys.stderr,
-                    )
-                    time.sleep(sleep_sec)
-
-        response = stream_with_retry()
-
-        in_thought = False
-        for chunk in response:
-            if chunk.usage_metadata:
-                if chunk.usage_metadata.prompt_token_count:
-                    prompt_tokens = chunk.usage_metadata.prompt_token_count
-                if chunk.usage_metadata.candidates_token_count:
-                    candidate_tokens = chunk.usage_metadata.candidates_token_count
-                if getattr(chunk.usage_metadata, "thoughts_token_count", None):
-                    thinking_tokens = chunk.usage_metadata.thoughts_token_count
-
-            if not chunk.candidates:
-                continue
-            for part in chunk.candidates[0].content.parts:
-                if part.thought:
-                    if not in_thought:
-                        print(
-                            f"\n{os.path.basename(sys.argv[0])}: thinking...\n\033[2m",
-                            end="",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        in_thought = True
-                    print(part.text, end="", file=sys.stderr, flush=True)
-                elif part.text:
-                    if in_thought:
-                        print(
-                            "\033[0m\n\n", end="", file=sys.stderr, flush=True
-                        )  # Dim end
-                        in_thought = False
-                    print(part.text, end="", flush=True)
-                    answer_chunks.append(part.text)
-
-        if in_thought:
-            print("\033[0m\n", end="", file=sys.stderr, flush=True)
-        print(flush=True)  # Final newline
+                msg = getattr(e, "message", getattr(e, "status", "Unknown"))
+                print(
+                    f"\n{os.path.basename(sys.argv[0])}: warning: API error {getattr(e, 'code', 'error')} ({msg}). {wait_desc}",
+                    file=sys.stderr,
+                )
+                time.sleep(sleep_sec)
 
         if oracle_cache_dir and answer_chunks:
             try:
@@ -854,7 +885,8 @@ def main():
 
     except Exception as e:
         print(f"{os.path.basename(sys.argv[0])}: error: {e}", file=sys.stderr)
-        write_telemetry("Error", error_msg=str(e))
+        telemetry_status = "Error"
+        telemetry_error = str(e)
         sys.exit(1)
 
     finally:
@@ -872,7 +904,7 @@ def main():
                     file=sys.stderr,
                 )
 
-        write_telemetry("Succeeded" if answer_chunks else "Failed")
+        write_telemetry(telemetry_status, error_msg=telemetry_error)
 
 
 if __name__ == "__main__":
