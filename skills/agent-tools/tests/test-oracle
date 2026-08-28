@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+# Tests: skills/agent-tools/tests/test-oracle
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/oracle"
+
+OUTPUT=$(mktemp)
+WORK=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
+
+echo "1..7"
+
+# Test 1: oracle --help outputs valid help and exits 0
+if "$BIN" --help >"$OUTPUT" 2>&1; then
+  if grep -q "Usage: oracle" "$OUTPUT" && grep -q "Options:" "$OUTPUT" && grep -q "Best Practices for Context:" "$OUTPUT"; then
+    echo "ok 1 - Help output is formatted correctly"
+  else
+    echo "not ok 1 - Help output missing expected sections"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 1 - oracle --help exited non-zero"
+fi
+
+# Test 2: Bare oracle with no arguments exits 1 with error on stderr
+if "$BIN" >"$OUTPUT" 2>&1 </dev/null; then
+  echo "not ok 2 - Expected bare oracle to fail"
+else
+  if grep -q "error: prompt is required" "$OUTPUT" && grep -q "Usage: oracle" "$OUTPUT"; then
+    echo "ok 2 - Bare oracle prints error and usage to stderr"
+  else
+    echo "not ok 2 - Bare oracle output missing expected error message"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+fi
+
+# Test 3: oracle --dry-run "prompt" prints dry run summary on stdout
+if "$BIN" --dry-run "Explain quantum computing" >"$OUTPUT" 2>&1; then
+  if grep -q "Oracle Dry Run Summary" "$OUTPUT" && grep -q "Prompt:" "$OUTPUT" && grep -q "Payload Summary:" "$OUTPUT"; then
+    echo "ok 3 - Dry run summary produces expected sections"
+  else
+    echo "not ok 3 - Dry run summary missing expected headers"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 3 - oracle --dry-run failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 4: Directory traversal filters out secret files and directories
+SAMPLE_DIR="$WORK/sample_project"
+mkdir -p "$SAMPLE_DIR/src" "$SAMPLE_DIR/.ssh" "$SAMPLE_DIR/config"
+echo "console.log('hello');" >"$SAMPLE_DIR/src/index.js"
+echo "SECRET_KEY=12345" >"$SAMPLE_DIR/.env"
+echo "LOCAL_SECRET=abc" >"$SAMPLE_DIR/.env.local"
+echo "-----BEGIN PRIVATE KEY-----" >"$SAMPLE_DIR/config/server.pem"
+echo "id_rsa_content" >"$SAMPLE_DIR/.ssh/id_rsa"
+echo "regular docs" >"$SAMPLE_DIR/README.md"
+
+if "$BIN" --dry-run "Audit this project" "$SAMPLE_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "index.js" "$OUTPUT" && grep -q "README.md" "$OUTPUT"; then
+    if ! grep -q "\.env" "$OUTPUT" && ! grep -q "server\.pem" "$OUTPUT" && ! grep -q "id_rsa" "$OUTPUT"; then
+      echo "ok 4 - Secret files and credential directories are filtered from directory context"
+    else
+      echo "not ok 4 - Secret files were erroneously included in context"
+      sed 's/^/# /' "$OUTPUT"
+    fi
+  else
+    echo "not ok 4 - Expected files missing from resolved context"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 4 - Dry run on sample project failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 5: Symlinks are skipped and not followed
+SYMLINK_DIR="$WORK/symlink_project"
+mkdir -p "$SYMLINK_DIR/real"
+echo "Real content" >"$SYMLINK_DIR/real/file.txt"
+ln -s "$SYMLINK_DIR/real/file.txt" "$SYMLINK_DIR/symlinked_file.txt"
+ln -s "$SYMLINK_DIR/real" "$SYMLINK_DIR/symlinked_dir"
+
+if "$BIN" --dry-run "Review code" "$SYMLINK_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "real/file.txt" "$OUTPUT" && ! grep -q "symlinked_file.txt" "$OUTPUT" && ! grep -q "symlinked_dir" "$OUTPUT"; then
+    echo "ok 5 - Symlinks are ignored and skipped during traversal"
+  else
+    echo "not ok 5 - Symlinks were not properly excluded"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 5 - Dry run on symlinks failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 6: Hybrid media classification: small media tagged [MEDIA-INLINE]
+MEDIA_DIR="$WORK/media_project"
+mkdir -p "$MEDIA_DIR"
+# Create a small dummy png (100 bytes)
+head -c 100 /dev/zero >"$MEDIA_DIR/screenshot.png"
+echo "Text documentation" >"$MEDIA_DIR/doc.txt"
+
+if "$BIN" --dry-run "Inspect image and text" "$MEDIA_DIR" >"$OUTPUT" 2>&1; then
+  if grep -q "\[MEDIA-INLINE\]" "$OUTPUT" && grep -q "screenshot.png" "$OUTPUT" && grep -q "\[TEXT\]" "$OUTPUT"; then
+    echo "ok 6 - Small media files are classified as [MEDIA-INLINE]"
+  else
+    echo "not ok 6 - Media file classification output missing expected tags"
+    sed 's/^/# /' "$OUTPUT"
+  fi
+else
+  echo "not ok 6 - Dry run on media project failed"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 7: AGENT_TELEMETRY_JSON is populated on dry-run/completion
+TEL_JSON="$WORK/telemetry.json"
+if env AGENT_TELEMETRY_JSON="$TEL_JSON" "$BIN" --dry-run "Test telemetry" "$MEDIA_DIR" >"$OUTPUT" 2>&1; then
+  if [[ -f "$TEL_JSON" ]] && grep -q '"status": "Succeeded"' "$TEL_JSON" && grep -q '"text_files_count"' "$TEL_JSON" && grep -q '"media_inline_count"' "$TEL_JSON"; then
+    echo "ok 7 - AGENT_TELEMETRY_JSON is generated with structured fields"
+  else
+    echo "not ok 7 - AGENT_TELEMETRY_JSON was not written or is missing expected keys"
+    if [[ -f "$TEL_JSON" ]]; then
+      cat "$TEL_JSON" | sed 's/^/# /'
+    fi
+  fi
+else
+  echo "not ok 7 - Failed running with AGENT_TELEMETRY_JSON"
+  sed 's/^/# /' "$OUTPUT"
+fi

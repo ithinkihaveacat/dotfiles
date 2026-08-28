@@ -377,9 +377,9 @@ Best Practices for Context:
 Arguments:
   PROMPT        The specific question or task for the Oracle.
   FILE_OR_DIR   Optional. Files or directories to include as context. Directories
-                are recursively walked (ignoring hidden files and standard ignore
-                lists like node_modules). Text files are inlined; media files are
-                uploaded to the Gemini API (and cleaned up automatically).
+                are recursively walked (ignoring hidden files, credential patterns,
+                and standard ignore lists like node_modules). Text files are inlined;
+                media files are attached directly or uploaded via the Gemini Files API.
 
 Input:
   stdin         Optional. Context or reference material piped into the script.
@@ -396,8 +396,9 @@ Options:
   --help        Display this help message and exit.
 
 Environment:
-  GEMINI_API_KEY  Required. Your Gemini API key.
-  GEMINI_MODEL    Optional. Default model if --model is not given.
+  GEMINI_API_KEY        Required. Your Gemini API key.
+  GEMINI_MODEL          Optional. Default model if --model is not given.
+  AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
 
 Examples:
   cat codebase.md | oracle "Propose a refactoring plan" -

@@ -14,18 +14,26 @@
 
 import asyncio
 import datetime
+import fnmatch
+import json
 import mimetypes
 import os
+import re
 import signal
 import sys
+import time
 import uuid
 from pathlib import Path
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 MAX_TEXT_SIZE = 1 * 1024 * 1024  # 1MB
 MAX_MEDIA_SIZE = 20 * 1024 * 1024  # 20MB
+INLINE_MEDIA_SIZE_THRESHOLD = (
+    10 * 1024 * 1024
+)  # 10MB: inline small media to avoid upload/delete roundtrips
 SMALL_PAYLOAD_SIZE = 50 * 1024  # below this, nudge the caller to add context
 
 TEXT_EXTENSIONS = {
@@ -82,6 +90,81 @@ IGNORED_DIRS = {
     ".next",
     ".nuxt",
 }
+
+SECRET_DIRS = {
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".gcloud",
+    ".kube",
+    ".docker",
+    ".chef",
+    ".password-store",
+}
+
+SECRET_FILE_NAMES = {
+    ".netrc",
+    "_netrc",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
+    ".dockercfg",
+    ".pgpass",
+    ".my.cnf",
+    ".htpasswd",
+    ".htdigest",
+    ".envrc",
+    "credentials",
+    "credentials.json",
+}
+
+SECRET_FILE_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "id_rsa*",
+    "id_dsa*",
+    "id_ecdsa*",
+    "id_ed25519*",
+)
+
+
+def is_secret_path(path: Path) -> bool:
+    """Whether a path matches credential patterns or directories."""
+    if any(part in SECRET_DIRS for part in path.parts):
+        return True
+    name = path.name
+    if name in SECRET_FILE_NAMES:
+        return True
+    return any(fnmatch.fnmatch(name, pat) for pat in SECRET_FILE_PATTERNS)
+
+
+def extract_retry_delay(exc: Exception) -> float | None:
+    """Extracts suggested retry delay in seconds from an API exception message.
+
+    Matches the deterministic 'Please retry in Xs' string provided in quota
+    exceeded error messages. Returns None if no delay is found.
+    """
+    msg = getattr(exc, "message", None)
+    candidates = [str(msg)] if msg else []
+    candidates.append(str(exc))
+
+    for text in candidates:
+        match = re.search(r"Please retry in ([0-9]+(?:\.[0-9]+)?)\s*s", text)
+        if match:
+            try:
+                sec = float(match.group(1))
+                if sec > 0:
+                    return sec
+            except ValueError:
+                pass
+    return None
 
 
 def is_text_file(path: Path) -> bool:
@@ -154,9 +237,9 @@ Best Practices for Context:
 Arguments:
   PROMPT        The specific question or task for the Oracle.
   FILE_OR_DIR   Optional. Files or directories to include as context. Directories
-                are recursively walked (ignoring hidden files and standard ignore
-                lists like node_modules). Text files are inlined; media files are
-                uploaded to the Gemini API (and cleaned up automatically).
+                are recursively walked (ignoring hidden files, credential patterns,
+                and standard ignore lists like node_modules). Text files are inlined;
+                media files are attached directly or uploaded via the Gemini Files API.
 
 Input:
   stdin         Optional. Context or reference material piped into the script.
@@ -173,8 +256,9 @@ Options:
   --help        Display this help message and exit.
 
 Environment:
-  GEMINI_API_KEY  Required. Your Gemini API key.
-  GEMINI_MODEL    Optional. Default model if --model is not given.
+  GEMINI_API_KEY        Required. Your Gemini API key.
+  GEMINI_MODEL          Optional. Default model if --model is not given.
+  AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
 
 Examples:
   cat codebase.md | {os.path.basename(sys.argv[0])} "Propose a refactoring plan" -
@@ -191,6 +275,50 @@ def sigterm_handler(signum, frame):
 def main():
     signal.signal(signal.SIGTERM, sigterm_handler)
     uploaded_files = []
+    telemetry_file = os.environ.get("AGENT_TELEMETRY_JSON")
+    start_time = time.perf_counter()
+    prompt_tokens = 0
+    candidate_tokens = 0
+    thinking_tokens = 0
+    session_id = uuid.uuid4()
+    text_files = []
+    media_files_to_inline = []
+    media_files_to_upload = []
+    total_text_size = 0
+    answer_chunks = []
+
+    def write_telemetry(status_label: str, error_msg: str | None = None):
+        if not telemetry_file:
+            return
+        try:
+            elapsed = time.perf_counter() - start_time
+            telemetry_data = {
+                "status": status_label,
+                "success": status_label == "Succeeded",
+                "elapsed_seconds": round(elapsed, 3),
+                "prompt_tokens": prompt_tokens,
+                "candidate_tokens": candidate_tokens,
+                "thinking_tokens": thinking_tokens,
+                "steps": 1,
+                "text_files_count": len(text_files),
+                "media_inline_count": len(media_files_to_inline),
+                "media_upload_count": len(media_files_to_upload),
+                "text_bytes": total_text_size,
+                "media_bytes": sum(s for _, _, s in media_files_to_inline)
+                + sum(s for _, _, s in media_files_to_upload),
+                "session_id": str(session_id),
+            }
+            if error_msg:
+                telemetry_data["error"] = error_msg
+            out_path = Path(telemetry_file)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(telemetry_data, f, indent=2)
+        except Exception as e:
+            print(
+                f"{os.path.basename(sys.argv[0])}: warning: failed to write telemetry to {telemetry_file}: {e}",
+                file=sys.stderr,
+            )
 
     if "--help" in sys.argv or "-h" in sys.argv:
         usage()
@@ -253,8 +381,6 @@ def main():
     paths = cleaned_paths
 
     text_context = ""
-    media_files_to_upload = []
-    total_text_size = 0
 
     # 1. Read stdin
     if read_stdin:
@@ -263,20 +389,55 @@ def main():
             text_context += f'<document path="stdin">\n<![CDATA[\n{stdin_content}\n]]>\n</document>\n'
             total_text_size += len(stdin_content.encode("utf-8"))
 
-    # 2. Gather files
+    # 2. Gather files with secret and symlink filtering
     collected_files = []
     for p in paths:
         path = Path(p)
         if path.is_file():
+            if is_secret_path(path):
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: skipping secret/credential path: {path}",
+                    file=sys.stderr,
+                )
+                continue
+            if path.is_symlink():
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: skipping symlink: {path}",
+                    file=sys.stderr,
+                )
+                continue
             collected_files.append(path)
         elif path.is_dir():
+            if is_secret_path(path):
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: skipping secret/credential directory: {path}",
+                    file=sys.stderr,
+                )
+                continue
+            if path.is_symlink():
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: skipping symlink directory: {path}",
+                    file=sys.stderr,
+                )
+                continue
             for root, dirs, files in os.walk(path):
                 dirs[:] = [
-                    d for d in dirs if not d.startswith(".") and d not in IGNORED_DIRS
+                    d
+                    for d in sorted(dirs)
+                    if not d.startswith(".")
+                    and d not in IGNORED_DIRS
+                    and d not in SECRET_DIRS
+                    and not (Path(root) / d).is_symlink()
                 ]
-                for file in files:
-                    if not file.startswith("."):
-                        collected_files.append(Path(root) / file)
+                for file in sorted(files):
+                    file_path = Path(root) / file
+                    if (
+                        file.startswith(".")
+                        or file_path.is_symlink()
+                        or is_secret_path(file_path)
+                    ):
+                        continue
+                    collected_files.append(file_path)
         else:
             print(
                 f"{os.path.basename(sys.argv[0])}: path not found: {p}", file=sys.stderr
@@ -297,6 +458,7 @@ def main():
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
                 text_context += f'<document path="{path}">\n<![CDATA[\n{content}\n]]>\n</document>\n'
+                text_files.append(path)
                 if not dry_run:
                     print(
                         f"{os.path.basename(sys.argv[0])}: inlining {path.name} into context ({size / 1024:.2f} KB)...",
@@ -322,9 +484,14 @@ def main():
                 )
                 print("hint: use --force to bypass", file=sys.stderr)
                 sys.exit(1)
-            media_files_to_upload.append(path)
+            if size < INLINE_MEDIA_SIZE_THRESHOLD:
+                media_files_to_inline.append((path, mime_type, size))
+            else:
+                media_files_to_upload.append((path, mime_type, size))
 
-    if not text_context and not media_files_to_upload:
+    total_media_count = len(media_files_to_inline) + len(media_files_to_upload)
+
+    if not text_context and total_media_count == 0:
         print(
             f"{os.path.basename(sys.argv[0])}: no context provided via stdin or files",
             file=sys.stderr,
@@ -366,12 +533,7 @@ def main():
         payload_xml += f"  <task><![CDATA[\n{user_prompt}\n]]></task>\n"
     payload_xml += "</oracle_payload>\n"
 
-    # Save to the cache directory if enabled. This directory is a transcript of
-    # past consultations, not a response cache: every run is a fresh model call
-    # against a new prompt, so there is nothing here to serve a later run from
-    # and no offline mode to offer (see coding-standards references/caching.md).
-    # The location still follows the convention, so it can be pointed elsewhere.
-    session_id = uuid.uuid4()
+    # Save to the cache directory if enabled
     oracle_cache_dir = None
     if serialize:
         try:
@@ -399,9 +561,9 @@ def main():
             )
 
     if dry_run:
-        # Calculate parallel statistics
-        text_files_count = sum(1 for p in collected_files if is_text_file(p))
-        total_media_size = sum(p.stat().st_size for p in media_files_to_upload)
+        text_files_count = len(text_files)
+        total_inline_media_size = sum(s for _, _, s in media_files_to_inline)
+        total_upload_media_size = sum(s for _, _, s in media_files_to_upload)
         stdin_note = " (+ stdin)" if '<document path="stdin">' in text_context else ""
 
         print("\nOracle Dry Run Summary\n", file=sys.stdout)
@@ -410,29 +572,42 @@ def main():
 
         print("Payload Summary:", file=sys.stdout)
         print(
-            f"  Text Context:  {text_files_count} file(s){stdin_note} ({total_text_size / 1024:.2f} KB, ~{total_text_size / 4 / 1000:.0f}k tokens)",
+            f"  Text Context:   {text_files_count} file(s){stdin_note} ({total_text_size / 1024:.2f} KB, ~{total_text_size / 4 / 1000:.0f}k tokens)",
             file=sys.stdout,
         )
-        print(
-            f"  Media Context: {len(media_files_to_upload)} file(s) ({total_media_size / 1024 / 1024:.2f} MB)",
-            file=sys.stdout,
-        )
+        if media_files_to_inline:
+            print(
+                f"  Inline Media:   {len(media_files_to_inline)} file(s) ({total_inline_media_size / 1024:.2f} KB)",
+                file=sys.stdout,
+            )
+        if media_files_to_upload:
+            print(
+                f"  Uploaded Media: {len(media_files_to_upload)} file(s) ({total_upload_media_size / 1024 / 1024:.2f} MB)",
+                file=sys.stdout,
+            )
+        if not media_files_to_inline and not media_files_to_upload:
+            print("  Media Context:  0 files", file=sys.stdout)
 
         print("\nResolved Files:", file=sys.stdout)
-
-        # Explicitly show stdin if it was piped
         if stdin_note:
-            print("  [TEXT]  <stdin> (included in total text size)", file=sys.stdout)
-        for p in collected_files:
+            print(
+                "  [TEXT]         <stdin> (included in total text size)",
+                file=sys.stdout,
+            )
+        for p in text_files:
             size_kb = p.stat().st_size / 1024
-            # Pad [TEXT] with a trailing space to align horizontally with [MEDIA]
-            type_label = "[TEXT] " if is_text_file(p) else "[MEDIA]"
-            print(f"  {type_label} {p} ({size_kb:.2f} KB)", file=sys.stdout)
+            print(f"  [TEXT]         {p} ({size_kb:.2f} KB)", file=sys.stdout)
+        for p, mime, s in media_files_to_inline:
+            size_kb = s / 1024
+            print(f"  [MEDIA-INLINE] {p} ({mime}, {size_kb:.2f} KB)", file=sys.stdout)
+        for p, mime, s in media_files_to_upload:
+            size_mb = s / 1024 / 1024
+            print(f"  [MEDIA-UPLOAD] {p} ({mime}, {size_mb:.2f} MB)", file=sys.stdout)
 
         if not collected_files and not stdin_note:
             print("  (No files or context resolved)", file=sys.stdout)
 
-        if total_text_size < SMALL_PAYLOAD_SIZE and not media_files_to_upload:
+        if total_text_size < SMALL_PAYLOAD_SIZE and total_media_count == 0:
             print(
                 "\nNote: this payload is small. The Oracle handles hundreds of"
                 " KB, and this is all it gets — consider adding whole"
@@ -448,6 +623,7 @@ def main():
             " size guidance yourself and proceed.",
             file=sys.stdout,
         )
+        write_telemetry("Succeeded")
         sys.exit(0)
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -456,6 +632,7 @@ def main():
             f"{os.path.basename(sys.argv[0])}: error: GEMINI_API_KEY environment variable not set",
             file=sys.stderr,
         )
+        write_telemetry("Error", error_msg="GEMINI_API_KEY not set")
         sys.exit(1)
 
     client = genai.Client(api_key=api_key)
@@ -480,15 +657,17 @@ def main():
     context_parts = []
     if total_text_size > 0:
         context_parts.append(f"{total_text_size / 1024:.2f} KB text")
+    if media_files_to_inline:
+        context_parts.append(f"{len(media_files_to_inline)} inline media")
     if media_files_to_upload:
-        context_parts.append(f"{len(media_files_to_upload)} media files")
+        context_parts.append(f"{len(media_files_to_upload)} uploaded media")
     context_str = ", ".join(context_parts) if context_parts else "no context"
 
     print(
         f"{os.path.basename(sys.argv[0])}: {model_id} | {tools_str} | thinking=high | {context_str}",
         file=sys.stderr,
     )
-    if total_text_size < SMALL_PAYLOAD_SIZE and not media_files_to_upload:
+    if total_text_size < SMALL_PAYLOAD_SIZE and total_media_count == 0:
         print(
             f"{os.path.basename(sys.argv[0])}: note: payload is small"
             f" ({total_text_size / 1024:.0f} KB); the Oracle handles hundreds"
@@ -496,19 +675,24 @@ def main():
             file=sys.stderr,
         )
 
-    async def upload_all(paths: list) -> list:
-        async def upload_one(path: Path) -> types.File:
+    async def upload_all(
+        items: list[tuple[Path, str, int]],
+    ) -> list[tuple[Path, types.File]]:
+        async def upload_one(
+            item: tuple[Path, str, int],
+        ) -> tuple[Path, types.File]:
+            path, mime_type, size = item
             print(
-                f"{os.path.basename(sys.argv[0])}: uploading {path.name} ({path.stat().st_size / 1024 / 1024:.2f} MB)...",  # noqa: ASYNC240 -- one-off stat for a progress log; not worth trio/anyio
+                f"{os.path.basename(sys.argv[0])}: uploading {path.name} ({size / 1024 / 1024:.2f} MB)...",
                 file=sys.stderr,
             )
-            mime_type, _ = mimetypes.guess_type(str(path))
-            return await client.aio.files.upload(
+            uf = await client.aio.files.upload(
                 file=str(path),
                 config=types.UploadFileConfig(mime_type=mime_type),
             )
+            return (path, uf)
 
-        return list(await asyncio.gather(*[upload_one(p) for p in paths]))
+        return list(await asyncio.gather(*[upload_one(it) for it in items]))
 
     try:
         if media_files_to_upload:
@@ -519,7 +703,35 @@ def main():
             parts.append(
                 types.Part.from_text(text=f"<context>\n{text_context}\n</context>")
             )
-        for uf in uploaded_files:
+
+        # 1. Inline small media (< 10MB) directly with explicit file labels
+        for path, mime_type, _ in media_files_to_inline:
+            try:
+                data = path.read_bytes()
+                parts.append(
+                    types.Part.from_text(
+                        text=f"### Attached File: `{path.name}` (Path: `{path}`, MIME: `{mime_type}`)"
+                    )
+                )
+                parts.append(
+                    types.Part.from_bytes(
+                        data=data,
+                        mime_type=mime_type,
+                    )
+                )
+            except Exception as e:
+                print(
+                    f"{os.path.basename(sys.argv[0])}: warning: failed to read media {path}: {e}",
+                    file=sys.stderr,
+                )
+
+        # 2. Attach uploaded large media (>= 10MB) via Files API with explicit file labels
+        for path, uf in uploaded_files:
+            parts.append(
+                types.Part.from_text(
+                    text=f"### Attached File: `{path.name}` (Path: `{path}`, MIME: `{uf.mime_type}`)"
+                )
+            )
             parts.append(
                 types.Part.from_uri(
                     file_uri=uf.uri,
@@ -529,22 +741,74 @@ def main():
 
         parts.append(types.Part.from_text(text=f"<task>\n{user_prompt}\n</task>"))
 
-        response = client.models.generate_content_stream(
-            model=model_id,
-            contents=[types.Content(role="user", parts=parts)],
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                tools=tools_config,
-                thinking_config=types.ThinkingConfig(
-                    thinking_level="high", include_thoughts=True
-                ),
-                temperature=1.0,
-            ),
-        )
+        def stream_with_retry():
+            initial_backoff = 2.0
+            max_backoff = 60.0
+            backoff_multiplier = 2.0
+            max_retry_seconds = 300.0
+
+            current_backoff = initial_backoff
+            retry_start = time.monotonic()
+
+            while True:
+                try:
+                    return client.models.generate_content_stream(
+                        model=model_id,
+                        contents=[types.Content(role="user", parts=parts)],
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            tools=tools_config,
+                            thinking_config=types.ThinkingConfig(
+                                thinking_level="high", include_thoughts=True
+                            ),
+                            temperature=1.0,
+                        ),
+                    )
+                except Exception as e:
+                    is_retryable = isinstance(e, genai_errors.APIError) and e.code in (
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    )
+                    if not is_retryable:
+                        raise
+
+                    elapsed = time.monotonic() - retry_start
+                    delay = extract_retry_delay(e)
+                    if delay is not None:
+                        sleep_sec = delay + 1.0
+                        wait_desc = f"Retrying in {sleep_sec:.1f}s (quota reset)..."
+                    else:
+                        sleep_sec = current_backoff
+                        current_backoff = min(
+                            current_backoff * backoff_multiplier, max_backoff
+                        )
+                        wait_desc = f"Retrying in {sleep_sec:.1f}s with backoff..."
+
+                    if elapsed + sleep_sec > max_retry_seconds:
+                        raise
+
+                    msg = getattr(e, "message", getattr(e, "status", "Unknown"))
+                    print(
+                        f"{os.path.basename(sys.argv[0])}: warning: API error {getattr(e, 'code', 'error')} ({msg}). {wait_desc}",
+                        file=sys.stderr,
+                    )
+                    time.sleep(sleep_sec)
+
+        response = stream_with_retry()
 
         in_thought = False
-        answer_chunks = []
         for chunk in response:
+            if chunk.usage_metadata:
+                if chunk.usage_metadata.prompt_token_count:
+                    prompt_tokens = chunk.usage_metadata.prompt_token_count
+                if chunk.usage_metadata.candidates_token_count:
+                    candidate_tokens = chunk.usage_metadata.candidates_token_count
+                if getattr(chunk.usage_metadata, "thoughts_token_count", None):
+                    thinking_tokens = chunk.usage_metadata.thoughts_token_count
+
             if not chunk.candidates:
                 continue
             for part in chunk.candidates[0].content.parts:
@@ -590,6 +854,7 @@ def main():
 
     except Exception as e:
         print(f"{os.path.basename(sys.argv[0])}: error: {e}", file=sys.stderr)
+        write_telemetry("Error", error_msg=str(e))
         sys.exit(1)
 
     finally:
@@ -597,7 +862,7 @@ def main():
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-        for uf in uploaded_files:
+        for _, uf in uploaded_files:
             try:
                 print(f"Cleaning up {uf.name}...", file=sys.stderr)
                 client.files.delete(name=uf.name)
@@ -606,6 +871,8 @@ def main():
                     f"{os.path.basename(sys.argv[0])}: warning: failed to delete {uf.name}: {e}",
                     file=sys.stderr,
                 )
+
+        write_telemetry("Succeeded" if answer_chunks else "Failed")
 
 
 if __name__ == "__main__":
