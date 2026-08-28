@@ -142,9 +142,11 @@ The block below is `scripts/permission --help`, kept in sync by
 ```text
 Usage: permission <command> [arguments]
 
-Manage per-workspace agent tool permissions (allow/deny/ask rules) across
-all detected local agents. Rules are written as clean command patterns
-(e.g. "git show"); each agent backend translates to its native syntax.
+Manage agent tool permissions (allow/deny/ask rules) across all detected
+local agents. Rules are written as clean command patterns (e.g. "git show");
+each agent backend translates to its native syntax. Note: rules are
+workspace-local for Claude Code and user-wide for Antigravity (as defined
+by each agent's configuration model).
 
 Commands:
   add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
@@ -153,7 +155,7 @@ Commands:
   list               List permission rules per agent (alias: ls)
   apply              Pre-approve the safe commands declared by this
                      workspace's installed skills (idempotent)
-  clean              Clear all workspace-specific permission rules
+  clean              Clear all configured permission rules
   doctor             Report missing or drifted rules (read-only)
 
 Options:
@@ -162,8 +164,8 @@ Options:
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
-  agy                Antigravity/jetski project config (under ~/.gemini)
-  claude             Claude Code (.claude/settings.local.json, untracked)
+  agy                Antigravity CLI (user-wide: ~/.gemini/antigravity-cli/settings.json)
+  claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
 ```
 
 <!-- /generated -->

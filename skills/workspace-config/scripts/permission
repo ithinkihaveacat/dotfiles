@@ -9,16 +9,16 @@ import os
 import subprocess
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
 SKILL_BIN = str(Path(__file__).resolve().parent / "skill")
 
 # Per-agent configuration locations (overridable for testing)
-AGY_CONFIG_HOME = Path(
-    os.environ.get("AGY_CONFIG_HOME")
+AGY_CONFIG_DIR = Path(
+    os.environ.get("AGY_CONFIG_DIR")
+    or os.environ.get("AGY_CONFIG_HOME")
     or os.environ.get("AGENT_CONFIG_HOME")  # legacy name
-    or Path.home() / ".gemini"
+    or Path.home() / ".gemini/antigravity-cli"
 )
 CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
@@ -110,9 +110,10 @@ class PermissionAdapter:
     """
 
     name = "?"
+    scope = "workspace"  # "workspace" or "user"
     # Mode used by 'apply' to guard unsafe subcommands: "ask" if the agent
     # supports prompt-anyway rules, otherwise "deny".
-    guard_mode = "deny"
+    guard_mode = "ask"
 
     def is_available(self, workspace_root: Path) -> bool:
         """True if this agent appears to be in use on this machine."""
@@ -137,37 +138,47 @@ class PermissionAdapter:
         raise NotImplementedError
 
 
-class AgyProjectAdapter(PermissionAdapter):
-    """Antigravity/jetski: per-project JSON under ~/.gemini, keyed by a
-    workspace-path cache. Supports allow and deny lists (no ask)."""
+class AgySettingsAdapter(PermissionAdapter):
+    """Antigravity CLI: user-wide permissions in ~/.gemini/antigravity-cli/settings.json.
+    Supports allow, deny, and ask lists."""
 
     name = "agy"
-    guard_mode = "deny"
+    scope = "user"
+    guard_mode = "ask"
 
-    def _get_cache_path(self) -> Path:
-        # Mapped to the compiled binary's hardcoded caching location
-        return AGY_CONFIG_HOME / "jetski/cli/cache/projects.json"
-
-    def _get_projects_dir(self) -> Path:
-        return AGY_CONFIG_HOME / "config/projects"
+    def _settings_path(self) -> Path:
+        if (
+            AGY_CONFIG_DIR.name == "antigravity-cli"
+            or (AGY_CONFIG_DIR / "settings.json").is_file()
+        ):
+            return AGY_CONFIG_DIR / "settings.json"
+        if (AGY_CONFIG_DIR / "antigravity-cli").is_dir() or AGY_CONFIG_DIR.name in (
+            ".gemini",
+            "gemini",
+        ):
+            return AGY_CONFIG_DIR / "antigravity-cli" / "settings.json"
+        return AGY_CONFIG_DIR / "settings.json"
 
     def is_available(self, workspace_root: Path) -> bool:
         import shutil
 
-        # Require the config home alongside the CLI: a binary that has never
+        # Require the config dir alongside the CLI: a binary that has never
         # been run is not an active agent, and tests isolate detection by
-        # pointing AGY_CONFIG_HOME at a directory they control.
+        # pointing AGY_CONFIG_DIR at a directory they control.
         return bool(
             (
                 (shutil.which("agy") or shutil.which("jetski"))
-                and AGY_CONFIG_HOME.is_dir()
+                and (
+                    AGY_CONFIG_DIR.is_dir()
+                    or (AGY_CONFIG_DIR / "antigravity-cli").is_dir()
+                    or (Path.home() / ".gemini" / "antigravity-cli").is_dir()
+                )
             )
             or self.is_initialized(workspace_root)
         )
 
     def is_initialized(self, workspace_root: Path) -> bool:
-        project_file = self._get_project_file(workspace_root)
-        return project_file is not None and project_file.is_file()
+        return self._settings_path().is_file()
 
     def translate(self, pattern: str) -> str:
         tokens = pattern.strip().split()
@@ -179,157 +190,91 @@ class AgyProjectAdapter(PermissionAdapter):
         inner = rule
         if inner.startswith("command(") and inner.endswith(")"):
             inner = inner[len("command(") : -1]
-        inner = inner.removeprefix("(?:.*/)?")
         return inner
 
-    def _get_project_file(self, workspace_root: Path) -> Path | None:
-        cache_path = self._get_cache_path()
-        if not cache_path.is_file():
-            return None
+    def _load(self) -> dict:
+        settings_path = self._settings_path()
+        if not settings_path.is_file():
+            return {}
         try:
-            with open(cache_path, encoding="utf-8") as f:
-                cache = json.load(f)
-        except Exception:
-            return None
-
-        ws_key = str(workspace_root)
-        if ws_key in cache:
-            return self._get_projects_dir() / f"{cache[ws_key]}.json"
-        return None
-
-    def _get_or_create_project_file(self, workspace_root: Path) -> Path:
-        cache_path = self._get_cache_path()
-        projects_dir = self._get_projects_dir()
-
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-        cache = {}
-        if cache_path.is_file():
-            try:
-                with open(cache_path, encoding="utf-8") as f:
-                    cache = json.load(f)
-            except Exception:
-                pass
-
-        ws_key = str(workspace_root)
-        if ws_key in cache:
-            project_file = projects_dir / f"{cache[ws_key]}.json"
-            if project_file.is_file():
-                return project_file
-
-        # Not found or project file missing: initialize a new project mapping
-        project_id = str(uuid.uuid4())
-        cache[ws_key] = project_id
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2)
-
-        project_path = projects_dir / f"{project_id}.json"
-        projects_dir.mkdir(parents=True, exist_ok=True)
-        project_data = {
-            "id": project_id,
-            "name": workspace_root.name,
-            "projectResources": {
-                "resources": [{"folderUri": f"file://{workspace_root.as_posix()}"}]
-            },
-            "permissionGrants": {"allow": [], "deny": []},
-        }
-        with open(project_path, "w", encoding="utf-8") as f:
-            json.dump(project_data, f, indent=2)
-
-        print(
-            f"[{self.name}] initialized project configuration for {workspace_root}",
-            file=sys.stderr,
-        )
-        return project_path
-
-    def _load(self, project_path: Path) -> dict:
-        try:
-            with open(project_path, encoding="utf-8") as f:
+            with open(settings_path, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            die(f"[{self.name}] error reading {project_path}: {e}")
+            die(f"[{self.name}] error reading {settings_path}: {e}")
 
-    def _save(self, project_path: Path, data: dict) -> None:
+    def _save(self, data: dict) -> None:
+        settings_path = self._settings_path()
+        created = not settings_path.is_file()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(project_path, "w", encoding="utf-8") as f:
+            with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+                f.write("\n")
         except Exception as e:
-            die(f"[{self.name}] error writing {project_path}: {e}")
-
-    def _grants(self, data: dict) -> dict:
-        grants = data.setdefault("permissionGrants", {})
-        if "permissionGrants" in grants and isinstance(
-            grants["permissionGrants"], dict
-        ):
-            inner = grants.pop("permissionGrants")
-            for k in ("allow", "deny"):
-                if k in inner and isinstance(inner[k], list):
-                    grants.setdefault(k, []).extend(inner[k])
-        if grants.get("allow") is None:
-            grants["allow"] = []
-        if grants.get("deny") is None:
-            grants["deny"] = []
-        return grants
-
-    def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
-        if mode == "ask":
+            die(f"[{self.name}] error writing {settings_path}: {e}")
+        if created:
             print(
-                f"[{self.name}] no 'ask' support; skipping: {pattern} "
-                "(use --deny to block outright)",
+                f"[{self.name} ({self.scope})] initialized {settings_path}",
                 file=sys.stderr,
             )
-            return False
+
+    def _perms(self, data: dict) -> dict:
+        perms = data.setdefault("permissions", {})
+        for mode in MODES:
+            if perms.get(mode) is None:
+                perms[mode] = []
+        return perms
+
+    def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
         rule = self.translate(pattern)
         if not rule:
             return False
-        project_path = self._get_or_create_project_file(workspace_root)
-        data = self._load(project_path)
-        grants = self._grants(data)
-        target_list = grants["deny"] if mode == "deny" else grants["allow"]
+        data = self._load()
+        perms = self._perms(data)
+        target_list = perms[mode]
         if rule in target_list:
             return False
         target_list.append(rule)
-        self._save(project_path, data)
+        self._save(data)
         return True
 
     def remove(self, workspace_root: Path, pattern: str) -> list[str]:
-        project_path = self._get_project_file(workspace_root)
-        if not project_path or not project_path.is_file():
+        if not self.is_initialized(workspace_root):
             return []
         rule = self.translate(pattern)
-        data = self._load(project_path)
-        grants = self._grants(data)
+        data = self._load()
+        perms = self._perms(data)
         removed = []
-        for list_name in ("allow", "deny"):
-            lst = grants.get(list_name)
+        for mode in MODES:
+            lst = perms.get(mode)
             if lst and rule in lst:
                 lst.remove(rule)
-                removed.append(list_name)
+                removed.append(mode)
         if removed:
-            self._save(project_path, data)
+            self._save(data)
         return removed
 
     def rules(self, workspace_root: Path) -> dict[str, list[str]]:
-        project_path = self._get_project_file(workspace_root)
-        if not project_path or not project_path.is_file():
+        if not self.is_initialized(workspace_root):
             return {}
-        data = self._load(project_path)
-        grants = self._grants(data)
+        data = self._load()
+        perms = self._perms(data)
         return {
-            "allow": [self.untranslate(r) for r in grants.get("allow") or []],
-            "deny": [self.untranslate(r) for r in grants.get("deny") or []],
+            mode: [self.untranslate(r) for r in perms.get(mode) or []] for mode in MODES
         }
 
     def clean(self, workspace_root: Path) -> None:
-        project_path = self._get_project_file(workspace_root)
-        if not project_path or not project_path.is_file():
+        if not self.is_initialized(workspace_root):
             return
-        data = self._load(project_path)
-        grants = self._grants(data)
-        grants["allow"] = []
-        grants["deny"] = []
-        self._save(project_path, data)
-        print(f"[{self.name}] cleared all permission rules", file=sys.stderr)
+        data = self._load()
+        perms = self._perms(data)
+        for mode in MODES:
+            perms[mode] = []
+        self._save(data)
+        print(
+            f"[{self.name} ({self.scope})] cleared all permission rules",
+            file=sys.stderr,
+        )
 
 
 class ClaudeSettingsAdapter(PermissionAdapter):
@@ -337,6 +282,7 @@ class ClaudeSettingsAdapter(PermissionAdapter):
     workspace's .claude/settings.local.json (personal, never tracked)."""
 
     name = "claude"
+    scope = "workspace"
     guard_mode = "ask"
 
     def _settings_path(self, workspace_root: Path) -> Path:
@@ -448,7 +394,7 @@ class ClaudeSettingsAdapter(PermissionAdapter):
             die(f"[{self.name}] error writing {settings_path}: {e}")
         if created:
             print(
-                f"[{self.name}] initialized {settings_path}",
+                f"[{self.name} ({self.scope})] initialized {settings_path}",
                 file=sys.stderr,
             )
         self._sync_exclude_block(workspace_root, ["/.claude/settings.local.json"])
@@ -501,11 +447,14 @@ class ClaudeSettingsAdapter(PermissionAdapter):
             for mode in MODES:
                 perms[mode] = []
             self._save(workspace_root, data)
-        print(f"[{self.name}] cleared all permission rules", file=sys.stderr)
+        print(
+            f"[{self.name} ({self.scope})] cleared all permission rules",
+            file=sys.stderr,
+        )
 
 
 ADAPTERS: list[PermissionAdapter] = [
-    AgyProjectAdapter(),
+    AgySettingsAdapter(),
     ClaudeSettingsAdapter(),
 ]
 
@@ -530,7 +479,7 @@ def require_adapters(
     if not adapters:
         die(
             "no supported agent configuration found "
-            f"(looked for {AGY_CONFIG_HOME} and {CLAUDE_CONFIG_DIR}); "
+            f"(looked for {AGY_CONFIG_DIR} and {CLAUDE_CONFIG_DIR}); "
             "use --agent to force one"
         )
     return adapters
@@ -637,7 +586,7 @@ def cmd_apply(agent: str | None):
         added_allow = sum(adapter.add(ws, p, "allow") for p in allow)
         added_guard = sum(adapter.add(ws, p, adapter.guard_mode) for p in guard)
         print(
-            f"[{adapter.name}] allow: {added_allow} added, "
+            f"[{adapter.name} ({adapter.scope})] allow: {added_allow} added, "
             f"{len(allow) - added_allow} already present; "
             f"{adapter.guard_mode}: {added_guard} added",
             file=sys.stderr,
@@ -662,15 +611,19 @@ def cmd_doctor(agent: str | None):
         missing_allow = [p for p in allow if p not in current_allow]
         missing_guard = [p for p in guard if p not in guarded]
         if not adapter.is_initialized(ws) and (allow or guard):
-            rule_issues.append(f"  [{adapter.name}] not initialized for this workspace")
+            rule_issues.append(f"  [{adapter.name} ({adapter.scope})] not initialized")
         for p in missing_allow:
-            rule_issues.append(f"  [{adapter.name}] missing allow: {p}")
+            rule_issues.append(
+                f"  [{adapter.name} ({adapter.scope})] missing allow: {p}"
+            )
         for p in missing_guard:
-            rule_issues.append(f"  [{adapter.name}] missing {adapter.guard_mode}: {p}")
+            rule_issues.append(
+                f"  [{adapter.name} ({adapter.scope})] missing {adapter.guard_mode}: {p}"
+            )
     issues += rule_issues
 
     if issues:
-        print("Workspace Permissions:", file=sys.stderr)
+        print("Agent Permissions:", file=sys.stderr)
         for line in issues:
             print(line, file=sys.stderr)
         if load_failures:
@@ -704,10 +657,13 @@ def cmd_add(patterns: list[str], mode: str, agent: str | None):
     for adapter in require_adapters(agent, ws):
         for pattern in patterns:
             if adapter.add(ws, pattern, mode):
-                print(f"[{adapter.name}] added to {mode}: {pattern}", file=sys.stderr)
+                print(
+                    f"[{adapter.name} ({adapter.scope})] added to {mode}: {pattern}",
+                    file=sys.stderr,
+                )
             else:
                 print(
-                    f"[{adapter.name}] already in {mode} (or unsupported): {pattern}",
+                    f"[{adapter.name} ({adapter.scope})] already in {mode} (or unsupported): {pattern}",
                     file=sys.stderr,
                 )
 
@@ -725,11 +681,14 @@ def cmd_remove(patterns: list[str], agent: str | None):
             removed = adapter.remove(ws, pattern)
             for mode in removed:
                 print(
-                    f"[{adapter.name}] removed from {mode}: {pattern}",
+                    f"[{adapter.name} ({adapter.scope})] removed from {mode}: {pattern}",
                     file=sys.stderr,
                 )
             if not removed:
-                print(f"[{adapter.name}] not found: {pattern}", file=sys.stderr)
+                print(
+                    f"[{adapter.name} ({adapter.scope})] not found: {pattern}",
+                    file=sys.stderr,
+                )
 
 
 def cmd_list(agent: str | None):
@@ -741,7 +700,7 @@ def cmd_list(agent: str | None):
         rules = adapter.rules(ws)
         if not any(rules.get(m) for m in MODES):
             continue
-        print(f"[{adapter.name}]")
+        print(f"[{adapter.name} ({adapter.scope})]")
         for mode in MODES:
             patterns = rules.get(mode)
             if patterns:
@@ -766,9 +725,11 @@ def cmd_clean(agent: str | None):
 
 HELP_MAIN = """Usage: permission <command> [arguments]
 
-Manage per-workspace agent tool permissions (allow/deny/ask rules) across
-all detected local agents. Rules are written as clean command patterns
-(e.g. "git show"); each agent backend translates to its native syntax.
+Manage agent tool permissions (allow/deny/ask rules) across all detected
+local agents. Rules are written as clean command patterns (e.g. "git show");
+each agent backend translates to its native syntax. Note: rules are
+workspace-local for Claude Code and user-wide for Antigravity (as defined
+by each agent's configuration model).
 
 Commands:
   add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
@@ -777,7 +738,7 @@ Commands:
   list               List permission rules per agent (alias: ls)
   apply              Pre-approve the safe commands declared by this
                      workspace's installed skills (idempotent)
-  clean              Clear all workspace-specific permission rules
+  clean              Clear all configured permission rules
   doctor             Report missing or drifted rules (read-only)
 
 Options:
@@ -786,8 +747,8 @@ Options:
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
-  agy                Antigravity/jetski project config (under ~/.gemini)
-  claude             Claude Code (.claude/settings.local.json, untracked)"""
+  agy                Antigravity CLI (user-wide: ~/.gemini/antigravity-cli/settings.json)
+  claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)"""
 
 HELP_ADD = """Usage: permission add [options] PATTERN...
 
@@ -798,7 +759,7 @@ from stdin.
 
 Options:
   --deny             Add to the denylist (blocked) instead of the allowlist
-  --ask              Add to the ask list (always prompt); Claude Code only
+  --ask              Add to the ask list (always prompt)
   --agent NAME       Operate on a single agent backend (agy, claude)
   --help             Display this help message and exit"""
 
@@ -825,7 +786,8 @@ skills (idempotent). Every executable in an installed skill's scripts/
 directory is allowed, except entries in the skill's permissions/unsafe
 file: whole-script entries are skipped entirely (they prompt normally),
 and subcommand entries (e.g. "packagename uninstall") are guarded with
-an 'ask' rule on Claude Code and a 'deny' rule on agy.
+an 'ask' rule. Note: Antigravity pre-approvals are applied user-wide;
+Claude Code pre-approvals are applied to the local workspace.
 
 Options:
   --agent NAME       Operate on a single agent backend (agy, claude)
@@ -833,7 +795,8 @@ Options:
 
 HELP_CLEAN = """Usage: permission clean
 
-Clear all workspace-specific permission rules.
+Clear all permission rules for detected agents (workspace-local for
+Claude Code, user-wide for Antigravity).
 
 Options:
   --agent NAME       Operate on a single agent backend (agy, claude)

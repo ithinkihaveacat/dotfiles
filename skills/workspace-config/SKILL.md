@@ -24,9 +24,10 @@ control ever seeing the configuration. It consists of three tools:
    symlinks, automatically adapting to the environment (Git, Perforce, or
    unmanaged directories; more via plugins). Also provides advisory LLM-based
    skill recommendations (`skill suggest`) and manages remote plugin caching.
-1. **`permission`**: The permission manager. Maintains per-workspace
-   allow/deny/ask rules for every detected local agent, including pre-approving
-   the safe commands declared by installed skills.
+1. **`permission`**: The permission manager. Maintains allow/deny/ask rules for
+   every detected local agent (workspace-local for Claude Code, user-wide for
+   Antigravity), including pre-approving the safe commands declared by installed
+   skills.
 
 `git-setup` ties these together for git repositories: it runs `hook apply`,
 `skill apply`, then `permission apply` (and `git-setup doctor` aggregates all
@@ -161,15 +162,17 @@ ______________________________________________________________________
 
 ## Managing Workspace Permissions (`permission`)
 
-The `permission` tool (symlinked in `bin/`) manages workspace-specific agent
-tool permissions. Rules are written as clean command patterns (e.g.
-`"git show"`); each agent backend translates them to its native syntax:
+The `permission` tool (symlinked in `bin/`) manages agent tool permissions.
+Rules are written as clean command patterns (e.g. `"git show"`); each agent
+backend translates them to its native syntax and scope:
 
 - **`claude`** (Claude Code): `Bash(pattern:*)` rules in the workspace's
-  `.claude/settings.local.json` (personal settings; the tool ensures the file is
-  git-ignored). Claude Code picks these up without a restart.
-- **`agy`** (Antigravity/jetski): `command(...)` rules in the per-project
-  configuration under `~/.gemini`.
+  `.claude/settings.local.json` (workspace-local personal settings; the tool
+  ensures the file is git-ignored). Claude Code picks these up without a
+  restart.
+- **`agy`** (Antigravity CLI): `command(...)` rules in
+  `~/.gemini/antigravity-cli/settings.json` (user-wide configuration;
+  Antigravity CLI evaluates permissions from global settings).
 
 By default every command operates on all detected agents; use `--agent NAME` to
 scope to one.
@@ -181,13 +184,13 @@ permission <command> [arguments] [options]
 ### Commands
 
 - **`add PATTERN...`**: Add rule patterns to the allowlist (`--deny` for the
-  denylist, `--ask` for Claude Code's always-prompt list). `add -` reads one
-  pattern per line from stdin.
+  denylist, `--ask` for the always-prompt list). `add -` reads one pattern per
+  line from stdin.
 - **`remove PATTERN...`** (alias: **`rm`**): Remove patterns from all lists.
 - **`list`** (alias: **`ls`**): List rules per agent, as clean patterns.
 - **`apply`**: Pre-approve the safe commands declared by this workspace's
   installed skills (idempotent; see below).
-- **`clean`**: Clear all permission rules for the workspace.
+- **`clean`**: Clear all permission rules for detected agents.
 - **`doctor`**: Report rules that `apply` would add but that are missing
   (read-only; exits non-zero on problems).
 
@@ -201,8 +204,7 @@ permission <command> [arguments] [options]
 - A **bare script name** (e.g. `adb-settings-theme`) is never pre-approved; the
   command prompts normally.
 - A **`script subcommand` line** (e.g. `packagename uninstall`) keeps the
-  blanket allow for the script but guards that subcommand: an `ask` rule on
-  Claude Code, a `deny` rule on agy.
+  blanket allow for the script but guards that subcommand with an `ask` rule.
 
 New scripts added to a skill are therefore pre-approved by default; only the
 exceptions need maintaining. The `permission` tool's own mutating subcommands
