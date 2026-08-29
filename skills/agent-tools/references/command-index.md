@@ -339,7 +339,7 @@ amounts of information and synthesize authoritative answers.
 Stateless: every invocation is an independent, one-shot consultation. The
 Oracle retains nothing between calls — including your own earlier oracle calls
 in the same session. Never write "as you suggested earlier"; attach the earlier
-answer instead (answers are saved to the cache, see --serialize).
+answer instead (answers are saved to the state directory, see --serialize).
 
 Best Practices for Context:
   To get the most out of the Oracle, you must provide comprehensive context.
@@ -360,7 +360,7 @@ Best Practices for Context:
     requirements, decisions, and history from your conversation. Write them
     into a notes file and pass it as context; do not rely on the prompt alone.
   - Follow-ups: To continue a previous consultation, attach the saved answer
-    (and, if useful, the saved payload) from the cache as context files
+    (and, if useful, the saved payload) from the state directory as context files
     alongside your new question.
   - Persona & Audience: Who are you, and who is this answer for?
   - Goals & Intent: What is the ultimate objective of this request?
@@ -390,15 +390,17 @@ Options:
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL         Gemini model to use (default: gemini-pro-latest).
-  --serialize           Save the request payload and the answer to files in the cache
-                        (~/.cache/oracle/). (Default: on).
-  --no-serialize        Disable saving the payload and answer to the cache.
+  --serialize           Save the request payload and the answer to files in the state
+                        directory (~/.local/state/oracle/). (Default: on).
+  --no-serialize        Disable saving the payload and answer to the state directory.
   --help                Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
   GEMINI_MODEL          Optional. Default model if --model is not given.
   AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
+  ORACLE_STATE_DIR      Optional. State directory for serialized payloads and answers
+                        (default: ${XDG_STATE_HOME:-~/.local/state}/oracle).
 
 Examples:
   cat codebase.md | oracle "Propose a refactoring plan" -
@@ -468,6 +470,9 @@ Options:
   --search, --no-search
                       Google Search grounding for external context (default: on).
   --code, --no-code   Python code execution in cloud sandbox (default: off).
+  --serialize, --no-serialize
+                      Save request payload and final response to state directory
+                      (~/.local/state/caxton/). (default: on).
   --max-steps N       Maximum tool steps before stopping (default: 100).
   --timeout SECONDS   Execution timeout in seconds (default: 1800).
   -h, --help          Display this help message and exit.
@@ -477,6 +482,8 @@ Environment:
   GEMINI_MODEL        Optional. Default model if --model is not given.
   CAXTON_OFFLINE      Refuse network calls. Exits immediately if set.
   AGENT_OFFLINE       Workspace-wide offline policy fallback.
+  CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
+                      (default: ${XDG_STATE_HOME:-~/.local/state}/caxton).
 
 Examples:
   # Read-only audit of the current directory (the default selection)

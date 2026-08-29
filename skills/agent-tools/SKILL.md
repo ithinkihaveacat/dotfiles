@@ -110,8 +110,8 @@ and synthesis requiring external data or massive repository context.
    calls in the same session. Never write "as you suggested earlier" or refer to
    a previous consultation; the Oracle has never seen it. To follow up, attach
    the previous answer as a context file (answers are saved automatically to
-   `~/.cache/oracle/answer_*.md`; the path is printed after each run) along with
-   your new question and any critique.
+   `~/.local/state/oracle/answer_*.md`; the path is printed after each run)
+   along with your new question and any critique.
 1. **Self-Contained Prompts:** Write the prompt as if explaining the problem to
    an expert who has zero prior knowledge of your task. Do not use references
    like "the solution we implemented" without explaining exactly what that
@@ -246,14 +246,16 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
 - `--search` / `--no-search`: Google Search grounding for live external context
   (default: on).
 - `--code` / `--no-code`: Python code execution in cloud sandbox (default: on).
+- `--serialize` / `--no-serialize`: Save request payload and final response to
+  the state directory (`~/.local/state/caxton/`) (default: on).
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 100).
 - `--timeout SECONDS`: Execution timeout in seconds (default: 1800).
 
 `PROMPT` is the only positional argument and must come before the path options,
 which each consume every following path.
 
-**Environment:** `GEMINI_API_KEY` (Required), `CAXTON_OFFLINE` / `AGENT_OFFLINE`
-(Optional)
+**Environment:** `GEMINI_API_KEY` (Required), `CAXTON_STATE_DIR` (Optional),
+`CAXTON_OFFLINE` / `AGENT_OFFLINE` (Optional)
 
 **Exit codes:** 0 success, 1 error, 2 timeout, 127 git missing, 130 interrupted,
 141 stdout closed early

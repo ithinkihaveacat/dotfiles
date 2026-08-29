@@ -15,6 +15,8 @@ complete -c caxton -l search -d "Enable Google Search grounding for external con
 complete -c caxton -l no-search -d "Disable Google Search grounding"
 complete -c caxton -l code -d "Enable Python code execution in cloud sandbox (default)"
 complete -c caxton -l no-code -d "Disable Python code execution in cloud sandbox"
+complete -c caxton -l serialize -d "Save payload and response to state directory (default: on)"
+complete -c caxton -l no-serialize -d "Disable saving payload and response to state directory"
 complete -c caxton -l max-steps -x -d "Maximum agent execution steps (default: 100)"
 complete -c caxton -l timeout -x -d "Maximum execution time in seconds (default: 1800)"
 complete -c caxton -s h -l help -d "Display help message and exit"

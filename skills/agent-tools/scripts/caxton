@@ -42,6 +42,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from google import genai
@@ -574,6 +575,9 @@ Options:
   --search, --no-search
                       Google Search grounding for external context (default: on).
   --code, --no-code   Python code execution in cloud sandbox (default: off).
+  --serialize, --no-serialize
+                      Save request payload and final response to state directory
+                      (~/.local/state/caxton/). (default: on).
   --max-steps N       Maximum tool steps before stopping (default: 100).
   --timeout SECONDS   Execution timeout in seconds (default: 1800).
   -h, --help          Display this help message and exit.
@@ -583,6 +587,8 @@ Environment:
   GEMINI_MODEL        Optional. Default model if --model is not given.
   CAXTON_OFFLINE      Refuse network calls. Exits immediately if set.
   AGENT_OFFLINE       Workspace-wide offline policy fallback.
+  CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
+                      (default: ${{XDG_STATE_HOME:-~/.local/state}}/caxton).
 
 Examples:
   # Read-only audit of the current directory (the default selection)
@@ -878,6 +884,9 @@ def main():
     )
     parser.add_argument("--search", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--code", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--serialize", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--max-steps", type=int, default=100, metavar="N")
     parser.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS)
@@ -986,6 +995,24 @@ def main():
         TIMEOUT_SECONDS = args.timeout
         signal.signal(signal.SIGALRM, timeout_handler)
         signal.alarm(args.timeout)
+
+    session_id = uuid.uuid4()
+    caxton_state_dir = None
+    if args.serialize:
+        try:
+            caxton_state_dir = os.environ.get("CAXTON_STATE_DIR")
+            if not caxton_state_dir:
+                state_dir = os.environ.get("XDG_STATE_HOME") or os.path.expanduser(
+                    "~/.local/state"
+                )
+                caxton_state_dir = os.path.join(state_dir, "caxton")
+            caxton_state_dir = os.path.expanduser(caxton_state_dir)
+            os.makedirs(caxton_state_dir, exist_ok=True)
+        except Exception as e:
+            print(
+                f"[caxton] warning: failed to create state directory: {e}",
+                file=sys.stderr,
+            )
 
     telemetry = Telemetry()
     task_result: dict | None = None
@@ -2190,6 +2217,31 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
 
     initial_prompt = "\n\n".join(prompt_sections)
 
+    if caxton_state_dir:
+        try:
+            payload_file_path = os.path.join(
+                caxton_state_dir, f"payload_{session_id}.md"
+            )
+            payload_content = (
+                f"# Caxton Session Payload\n\n"
+                f"Session ID: {session_id}\n\n"
+                f"## System Instruction\n\n"
+                f"{system_instruction}\n\n"
+                f"## User Prompt\n\n"
+                f"{initial_prompt}\n"
+            )
+            with open(payload_file_path, "w", encoding="utf-8") as pf:
+                pf.write(payload_content)
+            print(
+                f"[caxton] Saved self-contained payload to {payload_file_path}",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"[caxton] warning: failed to save payload to state directory: {e}",
+                file=sys.stderr,
+            )
+
     inlined_count = len(policy.inlined)
     total_readable = len(visible_sorted)
     on_demand_count = total_readable - inlined_count
@@ -2274,9 +2326,10 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
     session_start = time.perf_counter()
     current_message = initial_prompt
     telemetry_reported = False
+    response_saved = False
 
     def print_telemetry_report():
-        nonlocal telemetry_reported
+        nonlocal telemetry_reported, response_saved
         if telemetry_reported:
             return
         telemetry_reported = True
@@ -2335,12 +2388,65 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     f"[caxton] remove them with: git clean -fdx -- {quoted}",
                     file=sys.stderr,
                 )
+        if caxton_state_dir and not response_saved:
+            response_saved = True
+            try:
+                response_file_path = os.path.join(
+                    caxton_state_dir, f"response_{session_id}.md"
+                )
+                report_text = (task_result.get("report") if task_result else "") or ""
+                diffstat_text = ""
+                if root:
+                    diff_proc = run_git(["diff", "--stat"], cwd=root)
+                    if (
+                        diff_proc
+                        and diff_proc.returncode == 0
+                        and diff_proc.stdout.strip()
+                    ):
+                        diffstat_text = diff_proc.stdout.strip()
+
+                resp_parts = [
+                    (
+                        f"# Caxton Session Response\n\n"
+                        f"Session ID: {session_id}\n\n"
+                        f"Status: {status_str}\n"
+                    )
+                ]
+                if report_text:
+                    resp_parts.append(f"## Report\n\n{report_text}\n")
+
+                resp_parts.append(
+                    f"## Execution Telemetry\n\n"
+                    f"- **Status:** {status_str}\n"
+                    f"- **Steps:** {telemetry.steps}/{args.max_steps}\n"
+                    f"- **Tool Calls:** {telemetry.tool_calls}\n"
+                    f"- **Elapsed:** {total_elapsed:.2f}s\n"
+                    f"- **Tokens:** {telemetry.prompt_tokens} prompt / {telemetry.candidate_tokens} candidate\n"
+                    f"- **Files Modified:** {len(telemetry.modified_files)}\n"
+                    f"- **Files Created:** {len(telemetry.created_files)}\n"
+                    f"- **Files Deleted:** {len(telemetry.deleted_files)}\n"
+                )
+                if diffstat_text:
+                    resp_parts.append(f"## Git Diffstat\n\n```\n{diffstat_text}\n```\n")
+
+                with open(response_file_path, "w", encoding="utf-8") as rf:
+                    rf.write("\n".join(resp_parts))
+                print(
+                    f"[caxton] Saved response to {response_file_path}",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(
+                    f"[caxton] warning: failed to save response to state directory: {e}",
+                    file=sys.stderr,
+                )
         telemetry_file = os.environ.get("AGENT_TELEMETRY_JSON") or os.environ.get(
             "CAXTON_TELEMETRY_FILE"
         )
         if telemetry_file:
             try:
                 telemetry_data = {
+                    "session_id": str(session_id),
                     "status": status_str,
                     "success": bool(task_result and task_result.get("success")),
                     "steps": telemetry.steps,
