@@ -828,6 +828,95 @@ class Telemetry:
     input_limit: int = 0
 
 
+def ensure_state_dir(state_dir: str) -> None:
+    """Ensure state directory exists with 0700 permissions."""
+    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(state_dir, 0o700)
+    except OSError:
+        pass
+
+
+def write_private_text(file_path: str, content: str) -> None:
+    """Write text file with restricted 0600 permissions."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(file_path, flags, 0o600)
+    try:
+        with open(fd, "w", encoding="utf-8", closefd=True) as f:
+            f.write(content)
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def save_session_payload(
+    state_dir: str,
+    session_id: str | uuid.UUID,
+    system_instruction: str,
+    initial_prompt: str,
+) -> str:
+    """Serialize the initial session prompt and instructions."""
+    ensure_state_dir(state_dir)
+    payload_file_path = os.path.join(state_dir, f"payload_{session_id}.md")
+    payload_content = (
+        f"# Caxton Session Payload\n\n"
+        f"Session ID: {session_id}\n\n"
+        f"## System Instruction\n\n"
+        f"{system_instruction}\n\n"
+        f"## User Prompt\n\n"
+        f"{initial_prompt}\n"
+    )
+    write_private_text(payload_file_path, payload_content)
+    return payload_file_path
+
+
+def save_session_response(
+    state_dir: str,
+    session_id: str | uuid.UUID,
+    status_str: str,
+    report_text: str,
+    telemetry: Telemetry,
+    max_steps: int,
+    total_elapsed: float,
+    root: Path | None,
+) -> str:
+    """Serialize the final response, execution telemetry, and diffstat."""
+    ensure_state_dir(state_dir)
+    response_file_path = os.path.join(state_dir, f"response_{session_id}.md")
+    diffstat_text = ""
+    if root:
+        diff_proc = run_git(["diff", "--stat"], cwd=root)
+        if diff_proc and diff_proc.returncode == 0 and diff_proc.stdout.strip():
+            diffstat_text = diff_proc.stdout.strip()
+
+    resp_parts = [
+        (
+            f"# Caxton Session Response\n\n"
+            f"Session ID: {session_id}\n\n"
+            f"Status: {status_str}\n"
+        )
+    ]
+    if report_text:
+        resp_parts.append(f"## Report\n\n{report_text}\n")
+
+    resp_parts.append(
+        f"## Execution Telemetry\n\n"
+        f"- **Status:** {status_str}\n"
+        f"- **Steps:** {telemetry.steps}/{max_steps}\n"
+        f"- **Tool Calls:** {telemetry.tool_calls}\n"
+        f"- **Elapsed:** {total_elapsed:.2f}s\n"
+        f"- **Tokens:** {telemetry.prompt_tokens} prompt / {telemetry.candidate_tokens} candidate\n"
+        f"- **Files Modified:** {len(telemetry.modified_files)}\n"
+        f"- **Files Created:** {len(telemetry.created_files)}\n"
+        f"- **Files Deleted:** {len(telemetry.deleted_files)}\n"
+    )
+    if diffstat_text:
+        resp_parts.append(f"## Git Diffstat\n\n```\n{diffstat_text}\n```\n")
+
+    write_private_text(response_file_path, "\n".join(resp_parts))
+    return response_file_path
+
+
 def read_path_list(spec: str, nul_delimited: bool, prog_name: str) -> list[str]:
     """Reads a path list from a file or, for '-', from standard input."""
     # Read bytes: text mode would translate a carriage return inside a filename
@@ -2219,23 +2308,18 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
 
     if caxton_state_dir:
         try:
-            payload_file_path = os.path.join(
-                caxton_state_dir, f"payload_{session_id}.md"
+            payload_file_path = save_session_payload(
+                state_dir=caxton_state_dir,
+                session_id=session_id,
+                system_instruction=system_instruction,
+                initial_prompt=initial_prompt,
             )
-            payload_content = (
-                f"# Caxton Session Payload\n\n"
-                f"Session ID: {session_id}\n\n"
-                f"## System Instruction\n\n"
-                f"{system_instruction}\n\n"
-                f"## User Prompt\n\n"
-                f"{initial_prompt}\n"
-            )
-            with open(payload_file_path, "w", encoding="utf-8") as pf:
-                pf.write(payload_content)
             print(
                 f"[caxton] Saved self-contained payload to {payload_file_path}",
                 file=sys.stderr,
             )
+        except CaxtonTimeoutError:
+            raise
         except Exception as e:
             print(
                 f"[caxton] warning: failed to save payload to state directory: {e}",
@@ -2391,50 +2475,23 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
         if caxton_state_dir and not response_saved:
             response_saved = True
             try:
-                response_file_path = os.path.join(
-                    caxton_state_dir, f"response_{session_id}.md"
-                )
                 report_text = (task_result.get("report") if task_result else "") or ""
-                diffstat_text = ""
-                if root:
-                    diff_proc = run_git(["diff", "--stat"], cwd=root)
-                    if (
-                        diff_proc
-                        and diff_proc.returncode == 0
-                        and diff_proc.stdout.strip()
-                    ):
-                        diffstat_text = diff_proc.stdout.strip()
-
-                resp_parts = [
-                    (
-                        f"# Caxton Session Response\n\n"
-                        f"Session ID: {session_id}\n\n"
-                        f"Status: {status_str}\n"
-                    )
-                ]
-                if report_text:
-                    resp_parts.append(f"## Report\n\n{report_text}\n")
-
-                resp_parts.append(
-                    f"## Execution Telemetry\n\n"
-                    f"- **Status:** {status_str}\n"
-                    f"- **Steps:** {telemetry.steps}/{args.max_steps}\n"
-                    f"- **Tool Calls:** {telemetry.tool_calls}\n"
-                    f"- **Elapsed:** {total_elapsed:.2f}s\n"
-                    f"- **Tokens:** {telemetry.prompt_tokens} prompt / {telemetry.candidate_tokens} candidate\n"
-                    f"- **Files Modified:** {len(telemetry.modified_files)}\n"
-                    f"- **Files Created:** {len(telemetry.created_files)}\n"
-                    f"- **Files Deleted:** {len(telemetry.deleted_files)}\n"
+                response_file_path = save_session_response(
+                    state_dir=caxton_state_dir,
+                    session_id=session_id,
+                    status_str=status_str,
+                    report_text=report_text,
+                    telemetry=telemetry,
+                    max_steps=args.max_steps,
+                    total_elapsed=total_elapsed,
+                    root=root,
                 )
-                if diffstat_text:
-                    resp_parts.append(f"## Git Diffstat\n\n```\n{diffstat_text}\n```\n")
-
-                with open(response_file_path, "w", encoding="utf-8") as rf:
-                    rf.write("\n".join(resp_parts))
                 print(
                     f"[caxton] Saved response to {response_file_path}",
                     file=sys.stderr,
                 )
+            except CaxtonTimeoutError:
+                raise
             except Exception as e:
                 print(
                     f"[caxton] warning: failed to save response to state directory: {e}",

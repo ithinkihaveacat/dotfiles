@@ -1372,13 +1372,15 @@ else
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 67: Session serialization saves payload_<id>.md and response_<id>.md to CAXTON_STATE_DIR
+# Test 67: Session serialization saves payload_<id>.md and response_<id>.md with private permissions
 cat >"$WORK/serialize_test.py" <<'PYEOF'
 # /// script
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
 import os
+import stat
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -1393,43 +1395,80 @@ exec(compile(stripped, "caxton", "exec"), cx)
 
 with tempfile.TemporaryDirectory() as tmp:
     custom_state = os.path.join(tmp, "custom_caxton_state")
-    os.environ["CAXTON_STATE_DIR"] = custom_state
     session_id = uuid.uuid4()
-
-    # Simulate writing payload
-    payload_file = os.path.join(custom_state, f"payload_{session_id}.md")
-    os.makedirs(custom_state, exist_ok=True)
-    with open(payload_file, "w", encoding="utf-8") as f:
-        f.write(
-            f"# Caxton Session Payload\n\nSession ID: {session_id}\n\n## System Instruction\n\nsys_inst\n\n## User Prompt\n\nuser_p\n"
-        )
-
+    
+    # 1. Test save_session_payload
+    payload_file = cx["save_session_payload"](
+        state_dir=custom_state,
+        session_id=session_id,
+        system_instruction="System instruction content",
+        initial_prompt="User prompt content",
+    )
     assert os.path.exists(payload_file)
-    content = Path(payload_file).read_text()
-    assert f"Session ID: {session_id}" in content
-    assert "## System Instruction" in content
-    assert "## User Prompt" in content
+    assert os.path.samefile(payload_file, os.path.join(custom_state, f"payload_{session_id}.md"))
+    
+    # Check permissions (0600 file, 0700 dir on POSIX)
+    dir_mode = stat.S_IMODE(os.stat(custom_state).st_mode)
+    file_mode = stat.S_IMODE(os.stat(payload_file).st_mode)
+    assert dir_mode == 0o700, f"Expected 0700 dir mode, got {oct(dir_mode)}"
+    assert file_mode == 0o600, f"Expected 0600 file mode, got {oct(file_mode)}"
+    
+    payload_text = Path(payload_file).read_text(encoding="utf-8")
+    assert f"Session ID: {session_id}" in payload_text
+    assert "System instruction content" in payload_text
+    assert "User prompt content" in payload_text
 
-    # Simulate writing response with diffstat
-    response_file = os.path.join(custom_state, f"response_{session_id}.md")
-    with open(response_file, "w", encoding="utf-8") as f:
-        f.write(
-            f"# Caxton Session Response\n\nSession ID: {session_id}\n\nStatus: Succeeded\n\n"
-            f"## Report\n\nTask finished successfully.\n\n"
-            f"## Execution Telemetry\n\n- **Status:** Succeeded\n- **Steps:** 3/100\n\n"
-            f"## Git Diffstat\n\n```\n docs/guide.md | 4 ++--\n 1 file changed, 2 insertions(+), 2 deletions(-)\n```\n"
-        )
+    # 2. Test save_session_response with real git diff
+    repo_dir = Path(tmp) / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo_dir)], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@test.com"], check=True)
+    tracked_file = repo_dir / "sample.txt"
+    tracked_file.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-q", "-m", "init"], check=True)
+    tracked_file.write_text("modified content\n", encoding="utf-8")
+
+    telemetry = cx["Telemetry"](
+        steps=5,
+        tool_calls=8,
+        modified_files={"sample.txt"},
+        created_files=set(),
+        deleted_files=set(),
+        prompt_tokens=1200,
+        candidate_tokens=350,
+    )
+
+    response_file = cx["save_session_response"](
+        state_dir=custom_state,
+        session_id=session_id,
+        status_str="Succeeded",
+        report_text="All modifications completed cleanly.",
+        telemetry=telemetry,
+        max_steps=100,
+        total_elapsed=4.25,
+        root=repo_dir,
+    )
     assert os.path.exists(response_file)
-    resp_content = Path(response_file).read_text()
-    assert "Status: Succeeded" in resp_content
-    assert "Task finished successfully." in resp_content
-    assert "Git Diffstat" in resp_content
+    assert os.path.samefile(response_file, os.path.join(custom_state, f"response_{session_id}.md"))
+    
+    resp_file_mode = stat.S_IMODE(os.stat(response_file).st_mode)
+    assert resp_file_mode == 0o600, f"Expected 0600 file mode, got {oct(resp_file_mode)}"
+
+    response_text = Path(response_file).read_text(encoding="utf-8")
+    assert f"Session ID: {session_id}" in response_text
+    assert "Status: Succeeded" in response_text
+    assert "All modifications completed cleanly." in response_text
+    assert "- **Steps:** 5/100" in response_text
+    assert "- **Tool Calls:** 8" in response_text
+    assert "sample.txt | 2 +-" in response_text
 
 print("OK")
 PYEOF
 if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/serialize_test.py" "$BIN" >"$OUTPUT" 2>&1; then
   if grep -q "^OK" "$OUTPUT"; then
-    echo "ok 67 - Serializes session payload and response to CAXTON_STATE_DIR"
+    echo "ok 67 - Serializes session payload and response with private permissions"
   else
     echo "not ok 67 - Session serialization assertion failed"
     sed 's/^/# /' "$OUTPUT"
