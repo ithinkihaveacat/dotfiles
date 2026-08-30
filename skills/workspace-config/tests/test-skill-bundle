@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# `skill bundle` packaging behavior and format handling.
+#
+# Asserts on bundle archive and directory creation, -w / --workspace,
+# stdin input, format auto-detection, and workspace isolation.
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-config/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+skill_test_init
+
+echo "1..9"
+
+BUNDLE_TEST_DIR="${TMPDIR}/bundle-test"
+mkdir -p "$BUNDLE_TEST_DIR"
+cd "$BUNDLE_TEST_DIR"
+
+# Test 1: bundle specific skill to a zip archive
+ZIP_OUT="${BUNDLE_TEST_DIR}/test.zip"
+if "${SCRIPT}" bundle coding-standards -o "$ZIP_OUT" >/dev/null 2>&1 &&
+  [ -f "$ZIP_OUT" ] &&
+  unzip -l "$ZIP_OUT" | grep -q "coding-standards/SKILL.md"; then
+  echo "ok 1 - [Bundle] creates valid zip archive containing namespaced files"
+else
+  echo "not ok 1 - [Bundle] failed to create valid zip archive"
+fi
+
+# Test 2: bundle multiple skills to a directory
+DIR_OUT="${BUNDLE_TEST_DIR}/out_dir"
+if "${SCRIPT}" bundle coding-standards emumanager -o "$DIR_OUT" >/dev/null 2>&1 &&
+  [ -f "${DIR_OUT}/coding-standards/SKILL.md" ] &&
+  [ -f "${DIR_OUT}/emumanager/SKILL.md" ]; then
+  echo "ok 2 - [Bundle] creates directory structure with multiple skills"
+else
+  echo "not ok 2 - [Bundle] failed to create directory structure"
+fi
+
+# Test 3: bundle to tar.gz archive
+TAR_OUT="${BUNDLE_TEST_DIR}/test.tar.gz"
+if "${SCRIPT}" bundle test-skill -o "$TAR_OUT" >/dev/null 2>&1 &&
+  [ -f "$TAR_OUT" ] &&
+  tar -tzf "$TAR_OUT" | grep -q "test-skill/SKILL.md"; then
+  echo "ok 3 - [Bundle] creates valid tar.gz archive"
+else
+  echo "not ok 3 - [Bundle] failed to create valid tar.gz archive"
+fi
+
+# Test 4: bundle using -w / --workspace
+WS_ZIP="${BUNDLE_TEST_DIR}/ws.zip"
+export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
+if "${SCRIPT}" bundle -w -o "$WS_ZIP" >/dev/null 2>&1 &&
+  [ -f "$WS_ZIP" ] &&
+  unzip -l "$WS_ZIP" | grep -q "coding-standards/SKILL.md" &&
+  unzip -l "$WS_ZIP" | grep -q "emumanager/SKILL.md"; then
+  echo "ok 4 - [Bundle] -w bundles skills from AGENT_REQUIRED_SKILLS"
+else
+  echo "not ok 4 - [Bundle] -w failed to bundle workspace skills"
+fi
+export AGENT_REQUIRED_SKILLS=""
+
+# Test 5: bundle from stdin with "-"
+STDIN_ZIP="${BUNDLE_TEST_DIR}/stdin.zip"
+if printf "coding-standards\ntest-skill\n" | "${SCRIPT}" bundle - -o "$STDIN_ZIP" >/dev/null 2>&1 &&
+  [ -f "$STDIN_ZIP" ] &&
+  unzip -l "$STDIN_ZIP" | grep -q "coding-standards/SKILL.md" &&
+  unzip -l "$STDIN_ZIP" | grep -q "test-skill/SKILL.md"; then
+  echo "ok 5 - [Bundle] reads skill specs from stdin"
+else
+  echo "not ok 5 - [Bundle] failed to read from stdin"
+fi
+
+# Test 6: piped stdout streams tar.gz archive
+PIPE_OUT="${BUNDLE_TEST_DIR}/pipe.tar.gz"
+if "${SCRIPT}" bundle test-skill >"$PIPE_OUT" 2>/dev/null &&
+  [ -s "$PIPE_OUT" ] &&
+  tar -tzf "$PIPE_OUT" | grep -q "test-skill/SKILL.md"; then
+  echo "ok 6 - [Bundle] non-TTY stdout streams valid tar.gz"
+else
+  echo "not ok 6 - [Bundle] failed to stream tar.gz to stdout"
+fi
+
+# Test 7: unresolvable skill fails with error
+err_output=""
+if err_output=$("${SCRIPT}" bundle nonexistent-skill -o /tmp/unused.zip 2>&1); then
+  echo "not ok 7 - [Bundle] expected failure on non-existent skill"
+else
+  if echo "$err_output" | grep -q "failed to resolve 'nonexistent-skill'"; then
+    echo "ok 7 - [Bundle] cleanly fails on unresolvable skill"
+  else
+    echo "not ok 7 - [Bundle] unexpected error message: $err_output"
+  fi
+fi
+
+# Test 8: collision detection
+COLLISION_DIR="${TMPDIR}/collision_sources"
+mkdir -p "${COLLISION_DIR}/ns1/dup-skill" "${COLLISION_DIR}/ns2/dup-skill"
+printf -- '---\nname: dup-skill\n---\n' >"${COLLISION_DIR}/ns1/dup-skill/SKILL.md"
+printf -- '---\nname: dup-skill\n---\n' >"${COLLISION_DIR}/ns2/dup-skill/SKILL.md"
+
+printf "def register(api):\n    api.register_skill('ns1:dup-skill', {'path': '%s/ns1/dup-skill', 'resolve': True})\n    api.register_skill('ns2:dup-skill', {'path': '%s/ns2/dup-skill', 'resolve': True})\n" "${COLLISION_DIR}" "${COLLISION_DIR}" >"${XDG_CONFIG_HOME}/skill/plugins/90_dup.py"
+
+collision_err=""
+if collision_err=$("${SCRIPT}" bundle ns1:dup-skill ns2:dup-skill -o /tmp/unused.zip 2>&1); then
+  echo "not ok 8 - [Bundle] expected failure on basename collision"
+else
+  if echo "$collision_err" | grep -q "conflict:"; then
+    echo "ok 8 - [Bundle] detects basename collision before writing"
+  else
+    echo "not ok 8 - [Bundle] unexpected error output: $collision_err"
+  fi
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/90_dup.py"
+
+# Test 9: workspace isolation (leaves active workspace untouched)
+ISOLATION_DIR="${TMPDIR}/isolation-ws"
+mkdir -p "$ISOLATION_DIR"
+cd "$ISOLATION_DIR"
+git init -q
+mkdir -p .claude/skills .agents/skills .git/info
+touch .git/info/exclude
+"${SCRIPT}" bundle coding-standards -o "${BUNDLE_TEST_DIR}/iso.zip" >/dev/null 2>&1
+if [ ! -e .claude/skills/coding-standards ] &&
+  [ ! -e .agents/skills/coding-standards ] &&
+  ! grep -q "coding-standards" .git/info/exclude; then
+  echo "ok 9 - [Bundle] does not mutate active workspace or git excludes"
+else
+  echo "not ok 9 - [Bundle] mutated workspace or git excludes"
+fi

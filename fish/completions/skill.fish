@@ -30,6 +30,7 @@ complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed sk
 complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List plugin-provided skills and sources'
 complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path for a name'
 complete -f -c skill -n __fish_use_subcommand -a apply -d 'Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS'
+complete -f -c skill -n __fish_use_subcommand -a bundle -d 'Package skills into an archive or directory'
 complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print advisory LLM skill recommendations'
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Diagnose drift between desired and on-disk skills'
 complete -f -c skill -n __fish_use_subcommand -a preflight -d 'Verify required skills and workspace health before agent launch'
@@ -38,6 +39,15 @@ complete -f -c skill -n __fish_use_subcommand -a info -d 'Show details and metad
 
 # list
 complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, path)'
+
+# bundle
+complete -c skill -n '__fish_seen_subcommand_from bundle' -a '(__fish_skill_catalog)' -d 'Catalog skill'
+complete -c skill -n '__fish_seen_subcommand_from bundle' -a '(__fish_skill_source_skills)' -d Skill
+complete -c skill -n '__fish_seen_subcommand_from bundle' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
+complete -c skill -n '__fish_seen_subcommand_from bundle' -s o -l output -r -d 'Output destination path'
+complete -c skill -n '__fish_seen_subcommand_from bundle' -l format -x -a 'zip tar.gz dir' -d 'Output format'
+complete -c skill -n '__fish_seen_subcommand_from bundle' -s w -l workspace -d 'Bundle required skills for workspace'
+complete -c skill -n '__fish_seen_subcommand_from bundle' -a - -d 'Read skill specs from stdin'
 
 # catalog
 complete -c skill -f -n '__fish_seen_subcommand_from catalog' -l json -d 'Emit JSON'

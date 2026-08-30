@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -1804,6 +1805,218 @@ def cmd_clean():
         print(f"clean: {left} path(s) left in place (not symlinks)", file=sys.stderr)
 
 
+def cmd_bundle(args: list[str]) -> None:
+    output_path_str = None
+    format_override = None
+    use_workspace = False
+    specs = []
+    read_stdin = False
+
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg in ("-h", "--help"):
+            usage()
+        elif arg in ("-w", "--workspace"):
+            use_workspace = True
+            idx += 1
+        elif arg == "-o":
+            idx += 1
+            if idx >= len(args):
+                cmderr("bundle", "-o requires a path argument")
+            output_path_str = args[idx]
+            idx += 1
+        elif arg.startswith("-o="):
+            output_path_str = arg[3:]
+            idx += 1
+        elif arg == "--output":
+            idx += 1
+            if idx >= len(args):
+                cmderr("bundle", "--output requires a path argument")
+            output_path_str = args[idx]
+            idx += 1
+        elif arg.startswith("--output="):
+            output_path_str = arg[9:]
+            idx += 1
+        elif arg == "--format":
+            idx += 1
+            if idx >= len(args):
+                cmderr(
+                    "bundle",
+                    "--format requires a type argument ('zip', 'tar.gz', 'dir')",
+                )
+            format_override = args[idx].lower()
+            idx += 1
+        elif arg.startswith("--format="):
+            format_override = arg[9:].lower()
+            idx += 1
+        elif arg == "-":
+            read_stdin = True
+            idx += 1
+        elif arg.startswith("-"):
+            cmderr("bundle", f"unknown option '{arg}'")
+        else:
+            specs.append(arg)
+            idx += 1
+
+    if read_stdin:
+        stdin_content = sys.stdin.read()
+        specs.extend(stdin_content.split())
+
+    if use_workspace:
+        required_skills, _ = get_parsed_skills()
+        if not required_skills and not specs:
+            cmderr("bundle", "no required skills found in AGENT_REQUIRED_SKILLS")
+        for s in sorted(required_skills):
+            if s not in specs:
+                specs.append(s)
+
+    if not specs:
+        cmderr("bundle", "skill name or --workspace required")
+
+    if format_override:
+        if format_override in ("tgz", "tar.gz"):
+            fmt = "tar.gz"
+        elif format_override in ("zip", "dir"):
+            fmt = format_override
+        else:
+            cmderr(
+                "bundle",
+                f"unsupported format '{format_override}'; expected 'zip', 'tar.gz', or 'dir'",
+            )
+    elif output_path_str:
+        p_name = output_path_str.lower()
+        if p_name.endswith(".zip"):
+            fmt = "zip"
+        elif p_name.endswith((".tar.gz", ".tgz")):
+            fmt = "tar.gz"
+        else:
+            fmt = "dir"
+    else:
+        fmt = "dir" if sys.stdout.isatty() else "tar.gz"
+
+    resolved_skills: list[tuple[Path, str, str]] = []
+    seen_srcs = set()
+    for spec in specs:
+        try:
+            src_path, skill_name = resolve_skill_spec(spec)
+            if src_path not in seen_srcs:
+                seen_srcs.add(src_path)
+                resolved_skills.append((src_path, skill_name, spec))
+        except Exception as e:
+            cmderr("bundle", f"failed to resolve '{spec}': {e}")
+
+    if not resolved_skills:
+        cmderr("bundle", "no valid skills resolved to bundle")
+
+    link_map: dict[str, tuple[Path, str]] = {}
+    for src_path, _skill_name, spec in resolved_skills:
+        folder_name = src_path.name
+        if folder_name in link_map:
+            prev_src, prev_spec = link_map[folder_name]
+            if prev_src != src_path:
+                cmderr(
+                    "bundle",
+                    f"conflict: '{spec}' and '{prev_spec}' both target folder name '{folder_name}' but resolve to different source paths",
+                )
+        link_map[folder_name] = (src_path, spec)
+
+    if fmt == "dir":
+        if output_path_str:
+            out_dir = Path(output_path_str).expanduser().resolve()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for src_path, _, _ in resolved_skills:
+                target_skill_dir = out_dir / src_path.name
+                if target_skill_dir.exists():
+                    shutil.rmtree(target_skill_dir)
+                shutil.copytree(src_path, target_skill_dir)
+            print(
+                f"skill: bundled {len(resolved_skills)} skill(s) to {clean_p(out_dir)}",
+                file=sys.stderr,
+            )
+        else:
+            tmpdir = Path(tempfile.mkdtemp(prefix="skill-bundle-"))
+            for src_path, _, _ in resolved_skills:
+                target_skill_dir = tmpdir / src_path.name
+                shutil.copytree(src_path, target_skill_dir)
+            print(
+                f"skill: bundled {len(resolved_skills)} skill(s) to temporary directory",
+                file=sys.stderr,
+            )
+            print(str(tmpdir))
+
+    elif fmt == "zip":
+
+        def write_zip(dest_zip_path: Path | str) -> None:
+            with zipfile.ZipFile(
+                dest_zip_path, "w", compression=zipfile.ZIP_DEFLATED
+            ) as zf:
+                for src_path, _, _ in resolved_skills:
+                    skill_folder_name = src_path.name
+                    for root, dirs, files in os.walk(src_path):
+                        dirs.sort()
+                        rel_dir = Path(root).relative_to(src_path)
+                        for d in dirs:
+                            dir_path = Path(root) / d
+                            arcname = str(Path(skill_folder_name) / rel_dir / d) + "/"
+                            zf.write(dir_path, arcname=arcname)
+                        for f in sorted(files):
+                            file_path = Path(root) / f
+                            arcname = str(Path(skill_folder_name) / rel_dir / f)
+                            zf.write(file_path, arcname=arcname)
+
+        if output_path_str:
+            out_file = Path(output_path_str).expanduser().resolve()
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            write_zip(out_file)
+            print(
+                f"skill: bundled {len(resolved_skills)} skill(s) to {clean_p(out_file)}",
+                file=sys.stderr,
+            )
+        else:
+            fd, temp_zip_path = tempfile.mkstemp(prefix="skill-bundle-", suffix=".zip")
+            os.close(fd)
+            write_zip(temp_zip_path)
+            print(
+                f"skill: bundled {len(resolved_skills)} skill(s) to temporary zip archive",
+                file=sys.stderr,
+            )
+            print(temp_zip_path)
+
+    elif fmt == "tar.gz":
+
+        def add_to_tar(tar_obj: tarfile.TarFile) -> None:
+            for src_path, _, _ in resolved_skills:
+                tar_obj.add(src_path, arcname=src_path.name)
+
+        if output_path_str:
+            out_file = Path(output_path_str).expanduser().resolve()
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(out_file, "w:gz") as tar:
+                add_to_tar(tar)
+            print(
+                f"skill: bundled {len(resolved_skills)} skill(s) to {clean_p(out_file)}",
+                file=sys.stderr,
+            )
+        else:
+            if sys.stdout.isatty():
+                fd, temp_tar_path = tempfile.mkstemp(
+                    prefix="skill-bundle-", suffix=".tar.gz"
+                )
+                os.close(fd)
+                with tarfile.open(temp_tar_path, "w:gz") as tar:
+                    add_to_tar(tar)
+                print(
+                    f"skill: bundled {len(resolved_skills)} skill(s) to temporary tarball",
+                    file=sys.stderr,
+                )
+                print(temp_tar_path)
+            else:
+                with tarfile.open(fileobj=sys.stdout.buffer, mode="w|gz") as tar:
+                    add_to_tar(tar)
+                sys.stdout.buffer.flush()
+
+
 def cmd_update(names):
     if not names:
         cmderr("update", "skill name, --all, or --catalog required")
@@ -3441,6 +3654,7 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
+  bundle [SPEC...] Package skills into an archive or directory without installing
   suggest [DIR] [-] [PROMPT] Print advisory LLM skill recommendations guided by an
                           optional task prompt (pass '-' to read from stdin)
                           (requires google-genai)
@@ -3544,6 +3758,8 @@ def register(api):
         cmd_clean()
     elif cmd == "apply":
         cmd_apply(args)
+    elif cmd == "bundle":
+        cmd_bundle(args)
     elif cmd == "suggest":
         cmd_suggest(args)
     elif cmd == "preflight":

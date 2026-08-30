@@ -99,6 +99,7 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
+  bundle [SPEC...] Package skills into an archive or directory without installing
   suggest [DIR] [-] [PROMPT] Print advisory LLM skill recommendations guided by an
                           optional task prompt (pass '-' to read from stdin)
                           (requires google-genai)

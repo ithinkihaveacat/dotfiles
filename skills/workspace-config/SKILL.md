@@ -63,6 +63,8 @@ skill <command> [arguments]
 
 - **`apply`**: Synchronize workspace symlinks to match `AGENT_REQUIRED_SKILLS`
   (local-only, fast, and deterministic).
+- **`bundle [SPEC...]`**: Package skills into an archive (`.zip`, `.tar.gz`) or
+  directory without installing them (`-w`/`--workspace` for workspace skills).
 - **`suggest`**: Print recommendations without installing them (implements
   advisory LLM skill recommendations).
 - **`add SPEC...`**: Add a skill (a local path or a plugin-provided catalog
@@ -265,6 +267,15 @@ your situation:
 
 ```bash
 skill suggest --context "Goal: Implement a Wear OS tile in Kotlin. Emulator keeps crashing with OAuth errors."
+```
+
+### Bundling Skills for Portability
+
+Package skills into a self-contained zip file or directory without installing:
+
+```bash
+skill bundle coding-standards personal-network -o skills.zip
+skill bundle --workspace -o /tmp/project-skills/
 ```
 
 ### Manually Adding a Skill
