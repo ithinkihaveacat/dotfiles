@@ -160,8 +160,10 @@ Cost.
 
 **Cost:** (required whenever Problem is present) What leaving this undone
 costs — never the effort to fix it. Name the currency, then the concrete
-consequence and who absorbs it: correctness, ergonomics, performance,
-maintenance, reputation. A magnitude word is fine when evidence follows it
+consequence and who absorbs it. Correctness, ergonomics, performance,
+maintenance and reputation cover most of it; invent a currency where one of
+those would misname the harm, and do not force a task into a listed one to be
+consistent with other tasks. A magnitude word is fine when evidence follows it
 ("Low. Confirmed on 2 of ~107 listings"); a bare "High" or "Critical" is not.
 Say whether the cost is paid loudly or silently, since a fault that announces
 itself is cheaper than one that does not.
