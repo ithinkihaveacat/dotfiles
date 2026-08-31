@@ -46,9 +46,19 @@ evidence) — the labels keep long and short items structurally identical.
 
 - **Problem** (optional): How the current system behaves and why that is a
   problem — the mechanics, not just the motivation. Evidence (query output,
-  measurements, reproduction data) belongs beneath this field. Use it when the
-  background outgrows the sentence or two that Goal can carry; when present it
-  precedes Goal. Omit it when Goal's background already covers the ground.
+  measurements, reproduction data) belongs beneath this field. Leave the
+  consequences to Cost. Use it when the background outgrows the sentence or two
+  that Goal can carry; when present it precedes Goal. Omit it when Goal's
+  background already covers the ground.
+- **Cost** (required whenever Problem is present): What leaving this undone
+  costs — the consequences of doing nothing, never the effort to fix it. Name
+  the currency, then the concrete consequence and who absorbs it: correctness,
+  ergonomics, performance, maintenance, reputation. A magnitude word is fine
+  when the evidence follows it ("Low. Confirmed on 2 of ~107 listings"); a bare
+  "High" or "Critical" is not, since it survives no scrutiny and ranks nothing.
+  Say whether the cost is paid loudly or silently — a fault that announces
+  itself is cheaper than one that does not. This is the field that makes a
+  backlog rankable; without it every item reads as equally worth doing.
 - **Goal** (required): The outcome — what should be true once the item is done,
   stated as requirements rather than implementation. Include a sentence or two
   of background: why this matters now, and what larger effort it serves (the
@@ -112,6 +122,10 @@ when it drops out of the API response; the pipeline has this cleanup at the
 product level but never got the variant equivalent. An audit (2026-07-02)
 found over 2,000 `(product, size)` groups where a stale row still reads
 `available = 1`, so sizes that sold out months ago still surface in search.
+
+**Cost:** Correctness, silent. Sizes that sold out months ago are offered to
+buyers as available, and nothing surfaces the error: the rows look healthy and
+the count grows with every reissue.
 
 **Goal:** A variant row that disappears from the API response is retired on
 the next update of its product. Part of keeping availability filters — the
@@ -181,7 +195,9 @@ The default is to **update the item in place** rather than delete it:
    `## Filter floor plans out of the index (2026-07-04) — done`.
 1. Rewrite the body as a short past-tense record: what shipped, where it lives
    (commit, module, README section), and any deliberate leftovers. Trim the
-   Sketch and Constraints that no longer matter.
+   Sketch and Constraints that no longer matter. Where the item declared a Cost,
+   say whether it is now gone, reduced, or still being paid — the last is a
+   legitimate outcome, and stating it stops the item being reread as solved.
 
 Leave the item in its existing position rather than moving it — the file's sort
 order is creation date, and completion does not change that.
@@ -243,6 +259,8 @@ Before finalizing a TODO item, verify that:
   sorted).
 - [ ] The item defines a clear Goal and End Condition without prescribing rigid
   step-by-step plans.
+- [ ] Any item with a Problem also states its Cost, in a named currency with
+  evidence rather than a bare magnitude adjective.
 - [ ] Solutions in the Sketch are framed as suggestions for a future
   implementer.
 - [ ] Factual grounding (files, metrics) is cited and speculation is explicitly

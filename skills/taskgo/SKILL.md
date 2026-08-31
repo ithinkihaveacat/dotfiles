@@ -155,7 +155,16 @@ conversations:
 # Title as imperative verb phrase
 
 **Problem:** (optional) How the current system behaves and why that is a
-problem — the mechanics, not just the motivation.
+problem — the mechanics, not just the motivation. Leave the consequences to
+Cost.
+
+**Cost:** (required whenever Problem is present) What leaving this undone
+costs — never the effort to fix it. Name the currency, then the concrete
+consequence and who absorbs it: correctness, ergonomics, performance,
+maintenance, reputation. A magnitude word is fine when evidence follows it
+("Low. Confirmed on 2 of ~107 listings"); a bare "High" or "Critical" is not.
+Say whether the cost is paid loudly or silently, since a fault that announces
+itself is cheaper than one that does not.
 
 **Goal:** (required) The outcome — what should be true once the item is done,
 stated as requirements rather than implementation.
@@ -188,6 +197,8 @@ conversations:
 ## Outcome
 Summary of what shipped, where it lives (commits, files, endpoints), and
 outcomes. Completed in [<conversation-id>](conversation://<conversation-id>).
+Where the task declared a Cost, say whether it is now gone, reduced, or still
+being paid — the last is a legitimate outcome and worth stating plainly.
 
 ## Findings
 Key technical discoveries, trade-offs, reproduction steps, or unexpected
