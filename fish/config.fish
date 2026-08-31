@@ -141,6 +141,7 @@ set -x MOSH_TITLE_NOPREFIX 1
 # other scripts
 
 add_path (realpath $HOME/.dotfiles/fish/../bin)
+add_path $HOME/.private/bin
 add_path $HOME/.corp/bin
 
 # http://fishshell.com/docs/current/faq.html#faq-greeting
