@@ -139,46 +139,67 @@ class PermissionAdapter:
 
 
 class AgySettingsAdapter(PermissionAdapter):
-    """Antigravity CLI: user-wide permissions in ~/.gemini/antigravity-cli/settings.json.
-    Supports allow, deny, and ask lists."""
+    """Antigravity / Jetski CLI: user-wide permissions in ~/.gemini/jetski/cli/settings.json
+    or ~/.gemini/antigravity-cli/settings.json. Supports allow, deny, and ask lists."""
 
     name = "agy"
     scope = "user"
     guard_mode = "ask"
 
-    def _settings_path(self) -> Path:
+    def _settings_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        home = Path.home()
+
+        if (AGY_CONFIG_DIR / "settings.json").is_file():
+            paths.append(AGY_CONFIG_DIR / "settings.json")
+        for sub in ("jetski/cli", "antigravity-cli"):
+            p = AGY_CONFIG_DIR / sub / "settings.json"
+            if (p.is_file() or (AGY_CONFIG_DIR / sub).is_dir()) and p not in paths:
+                paths.append(p)
+
+        for sub in (".gemini/jetski/cli", ".gemini/antigravity-cli"):
+            p = home / sub / "settings.json"
+            if (p.is_file() or (home / sub).is_dir()) and p not in paths:
+                paths.append(p)
+
+        if paths:
+            return paths
+
+        import shutil
+
         if (
-            AGY_CONFIG_DIR.name == "antigravity-cli"
-            or (AGY_CONFIG_DIR / "settings.json").is_file()
+            (home / ".gemini/jetski/cli").is_dir()
+            or (AGY_CONFIG_DIR / "jetski/cli").is_dir()
+            or (shutil.which("jetski") and not shutil.which("agy"))
         ):
-            return AGY_CONFIG_DIR / "settings.json"
+            return [home / ".gemini/jetski/cli/settings.json"]
         if (AGY_CONFIG_DIR / "antigravity-cli").is_dir() or AGY_CONFIG_DIR.name in (
             ".gemini",
             "gemini",
         ):
-            return AGY_CONFIG_DIR / "antigravity-cli" / "settings.json"
-        return AGY_CONFIG_DIR / "settings.json"
+            return [AGY_CONFIG_DIR / "antigravity-cli" / "settings.json"]
+        return [AGY_CONFIG_DIR / "settings.json"]
 
     def is_available(self, workspace_root: Path) -> bool:
         import shutil
 
-        # Require the config dir alongside the CLI: a binary that has never
-        # been run is not an active agent, and tests isolate detection by
-        # pointing AGY_CONFIG_DIR at a directory they control.
+        home = Path.home()
         return bool(
             (
                 (shutil.which("agy") or shutil.which("jetski"))
                 and (
                     AGY_CONFIG_DIR.is_dir()
                     or (AGY_CONFIG_DIR / "antigravity-cli").is_dir()
-                    or (Path.home() / ".gemini" / "antigravity-cli").is_dir()
+                    or (AGY_CONFIG_DIR / "jetski" / "cli").is_dir()
+                    or (home / ".gemini" / "antigravity-cli").is_dir()
+                    or (home / ".gemini" / "jetski" / "cli").is_dir()
                 )
             )
             or self.is_initialized(workspace_root)
         )
 
     def is_initialized(self, workspace_root: Path) -> bool:
-        return self._settings_path().is_file()
+        return any(p.is_file() for p in self._settings_paths())
 
     def translate(self, pattern: str) -> str:
         tokens = pattern.strip().split()
@@ -192,8 +213,7 @@ class AgySettingsAdapter(PermissionAdapter):
             inner = inner[len("command(") : -1]
         return inner
 
-    def _load(self) -> dict:
-        settings_path = self._settings_path()
+    def _load(self, settings_path: Path) -> dict:
         if not settings_path.is_file():
             return {}
         try:
@@ -202,8 +222,7 @@ class AgySettingsAdapter(PermissionAdapter):
         except Exception as e:
             die(f"[{self.name}] error reading {settings_path}: {e}")
 
-    def _save(self, data: dict) -> None:
-        settings_path = self._settings_path()
+    def _save(self, settings_path: Path, data: dict) -> None:
         created = not settings_path.is_file()
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -229,48 +248,65 @@ class AgySettingsAdapter(PermissionAdapter):
         rule = self.translate(pattern)
         if not rule:
             return False
-        data = self._load()
-        perms = self._perms(data)
-        target_list = perms[mode]
-        if rule in target_list:
-            return False
-        target_list.append(rule)
-        self._save(data)
-        return True
+        added_any = False
+        for settings_path in self._settings_paths():
+            data = self._load(settings_path)
+            perms = self._perms(data)
+            target_list = perms[mode]
+            if rule not in target_list:
+                target_list.append(rule)
+                self._save(settings_path, data)
+                added_any = True
+        return added_any
 
     def remove(self, workspace_root: Path, pattern: str) -> list[str]:
         if not self.is_initialized(workspace_root):
             return []
         rule = self.translate(pattern)
-        data = self._load()
-        perms = self._perms(data)
-        removed = []
-        for mode in MODES:
-            lst = perms.get(mode)
-            if lst and rule in lst:
-                lst.remove(rule)
-                removed.append(mode)
-        if removed:
-            self._save(data)
-        return removed
+        removed_modes: set[str] = set()
+        for settings_path in self._settings_paths():
+            if not settings_path.is_file():
+                continue
+            data = self._load(settings_path)
+            perms = self._perms(data)
+            path_changed = False
+            for mode in MODES:
+                lst = perms.get(mode)
+                if lst and rule in lst:
+                    lst.remove(rule)
+                    removed_modes.add(mode)
+                    path_changed = True
+            if path_changed:
+                self._save(settings_path, data)
+        return sorted(removed_modes)
 
     def rules(self, workspace_root: Path) -> dict[str, list[str]]:
         if not self.is_initialized(workspace_root):
             return {}
-        data = self._load()
-        perms = self._perms(data)
-        return {
-            mode: [self.untranslate(r) for r in perms.get(mode) or []] for mode in MODES
-        }
+        result: dict[str, list[str]] = {mode: [] for mode in MODES}
+        for settings_path in self._settings_paths():
+            if not settings_path.is_file():
+                continue
+            data = self._load(settings_path)
+            perms = self._perms(data)
+            for mode in MODES:
+                for r in perms.get(mode) or []:
+                    untranslated = self.untranslate(r)
+                    if untranslated and untranslated not in result[mode]:
+                        result[mode].append(untranslated)
+        return result
 
     def clean(self, workspace_root: Path) -> None:
         if not self.is_initialized(workspace_root):
             return
-        data = self._load()
-        perms = self._perms(data)
-        for mode in MODES:
-            perms[mode] = []
-        self._save(data)
+        for settings_path in self._settings_paths():
+            if not settings_path.is_file():
+                continue
+            data = self._load(settings_path)
+            perms = self._perms(data)
+            for mode in MODES:
+                perms[mode] = []
+            self._save(settings_path, data)
         print(
             f"[{self.name} ({self.scope})] cleared all permission rules",
             file=sys.stderr,
@@ -464,9 +500,10 @@ def select_adapters(agent: str | None, workspace_root: Path) -> list[PermissionA
     adapter whose agent appears to be in use. May be empty; commands that
     cannot proceed without one should call require_adapters instead."""
     if agent:
-        matches = [a for a in ADAPTERS if a.name == agent]
+        target = "agy" if agent == "jetski" else agent
+        matches = [a for a in ADAPTERS if a.name == target]
         if not matches:
-            names = ", ".join(a.name for a in ADAPTERS)
+            names = ", ".join(sorted({a.name for a in ADAPTERS} | {"jetski"}))
             die(f"unknown agent '{agent}' (expected one of: {names})")
         return matches
     return [a for a in ADAPTERS if a.is_available(workspace_root)]
@@ -742,12 +779,12 @@ Commands:
   doctor             Report missing or drifted rules (read-only)
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
-  agy                Antigravity CLI (user-wide: ~/.gemini/antigravity-cli/settings.json)
+  agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
   claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)"""
 
 HELP_ADD = """Usage: permission add [options] PATTERN...
@@ -760,7 +797,7 @@ from stdin.
 Options:
   --deny             Add to the denylist (blocked) instead of the allowlist
   --ask              Add to the ask list (always prompt)
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit"""
 
 HELP_REMOVE = """Usage: permission remove PATTERN...
@@ -768,7 +805,7 @@ HELP_REMOVE = """Usage: permission remove PATTERN...
 Remove tool permission rules from all lists (alias: rm).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit"""
 
 HELP_LIST = """Usage: permission list
@@ -776,7 +813,7 @@ HELP_LIST = """Usage: permission list
 List permission rules per agent (alias: ls).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit"""
 
 HELP_APPLY = """Usage: permission apply
@@ -790,7 +827,7 @@ an 'ask' rule. Note: Antigravity pre-approvals are applied user-wide;
 Claude Code pre-approvals are applied to the local workspace.
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit"""
 
 HELP_CLEAN = """Usage: permission clean
@@ -799,7 +836,7 @@ Clear all permission rules for detected agents (workspace-local for
 Claude Code, user-wide for Antigravity).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit"""
 
 HELP_DOCTOR = """Usage: permission doctor
@@ -809,7 +846,7 @@ configure and report anything missing (read-only). Exits non-zero if
 problems are found.
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit"""
 
 SUBCOMMAND_HELP = {

@@ -160,12 +160,12 @@ Commands:
   doctor             Report missing or drifted rules (read-only)
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
-  agy                Antigravity CLI (user-wide: ~/.gemini/antigravity-cli/settings.json)
+  agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
   claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
 ```
 
