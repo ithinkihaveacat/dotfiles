@@ -29,9 +29,18 @@ should describe:
 - The observable symptoms (e.g., crash, UI glitch).
 - The context in which it occurs.
 - **Triggering Code:** Include the specific application source code fragment
-  that initiates the failing sequence.
-  - If the source is public (e.g., GitHub), include a **persistent link** (using
-    a specific commit hash, not `main` or `master`) to the file and line number.
+  that initiates the failing sequence. Keep inline snippets focused and
+  substantially complete (e.g., the specific function body).
+  - **Source Links:** Pair inline snippets with a **persistent link** (pinned
+    commit SHA or repository permalink) whenever the repository is accessible to
+    the tracker's audience (public links for public trackers; internal links for
+    internal trackers).
+  - **Privacy Boundary & Human Gate:** Treat all destination trackers as
+    **public** unless explicitly designated as internal. Never post internal
+    repository links, internal URLs, or confidential path structures to public
+    trackers. You must obtain explicit human approval before including any code
+    snippet originating from a private or local repository in a public bug
+    report.
 - **Log Correlation:** Explicitly link the triggering code line to the
   corresponding timestamped entry in the error log.
 
@@ -95,6 +104,16 @@ If a full bug report archive is available, provide:
 
 <!-- markdownlint-disable MD013 -->
 
+> **Triggering Code:**
+>
+> [`WidgetCatalogService.kt` (Commit `a1b2c3d`)](https://github.com/example/project/blob/a1b2c3d/app/src/main/java/com/example/WidgetCatalogService.kt#L42-L46):
+>
+> ```kotlin
+> override fun onTileRequest(requestParams: TileRequest): ListenableFuture<Tile> {
+>     return Futures.immediateFuture(renderCatalogTile())
+> }
+> ```
+>
 > **Log Extraction Command:**
 >
 > ```bash
@@ -142,13 +161,11 @@ as the bug report document.
 - **APK**: The specific build artifact used to reproduce the bug. Explicitly
   listing the filename (e.g., `app/build/outputs/apk/debug/app-debug.apk`)
   ensures the exact binary is identified.
-- **Code Fragments**: If a full APK or bug report isn't available, include
-  relevant source code snippets.
-  - **Completeness:** Ensure snippets are copy-pasteable and substantially
-    complete (e.g., include the full function body). Avoid excessive omission
-    (...) that makes the logic hard to follow or requires the reader to guess
-    context. You do not need to include all imports/dependencies unless critical
-    to the bug.
+- **Full Reproduction Source Files**: While short triggering snippets belong
+  inline in the Description, attach complete source files (e.g.,
+  `MainActivity.kt` or `build.gradle.kts`) when a full file reproduction is
+  required. Avoid placing full source files exceeding ~30 lines directly into
+  the main issue body.
 
 ### Visual Evidence (Recommended for UI/Interaction Bugs)
 
@@ -173,8 +190,11 @@ Before finalizing a bug report, verify that:
   factual and grounded in logs.
 - [ ] Environment specifications list exact versions, commit SHAs, or APK names
   (no "latest").
-- [ ] Triggering code includes persistent links (pinned commits) or
-  copy-pasteable snippets.
+- [ ] Triggering code snippets are paired with persistent source links (e.g.,
+  pinned commit SHAs or repository permalinks) when accessible to the tracker's
+  audience.
+- [ ] Privacy Gate Passed: Public bug reports contain no internal repository
+  URLs, confidential path structures, or unapproved private code snippets.
 - [ ] Reproduction steps are step-by-step and include any required device states
   or timing conditions.
 - [ ] Hypotheses and root-cause speculations are strictly isolated to the
