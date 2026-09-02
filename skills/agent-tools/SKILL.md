@@ -89,6 +89,42 @@ cat document.md | scripts/token-count
 scripts/popper "start an exercise"
 ```
 
+## Deep Reasoning Tools: Choosing Between Emerson, Oracle, and Caxton
+
+The `agent-tools` skill provides three distinct deep reasoning engines,
+separated by their epistemology (closed-world vs. grounded open-world), agency
+(consultation vs. disk mutation), and execution topology:
+
+| Engine        | Epistemic Model                                                     | Execution Paradigm                                        | Mutation Surface              | Primary Role                                                                                       |
+| :------------ | :------------------------------------------------------------------ | :-------------------------------------------------------- | :---------------------------- | :------------------------------------------------------------------------------------------------- |
+| **`emerson`** | **Strict Closed-World** (zero search, trusts `stdin` as sole truth) | Single-turn Unix filter (`stdin` $\\rightarrow$ `stdout`) | None                          | Distilling pre-gathered text into authoritative, footnoted ~3000-word essays without hallucination |
+| **`oracle`**  | **Grounded Open-World** (Google Search/Maps + Python execution)     | Single-turn streaming consultation                        | None (read-only advice)       | Strategic research, architectural tradeoffs, and multimodal context synthesis (\<1 MB)             |
+| **`caxton`**  | **Hybrid Grounded Action** (Search/Code + Repository tools)         | Multi-turn autonomous agent loop                          | Full disk mutation (`--edit`) | Multi-file text transformation, doc-code synchronization, and whole-tree harmonization             |
+
+### Decision Guide
+
+1. **Piping pre-gathered context for pure distillation? Use `emerson`.**
+   `emerson` is an isolated, closed-world analyst. It has no web access and
+   cannot execute code. It is heavily prompted to treat standard input as the
+   absolute source of truth. Use it when you have already gathered raw context
+   (e.g., via `context show gemini-api | emerson ...`) and need an authoritative
+   summary or spec without any risk of external hallucination.
+
+1. **Asking complex, strategic, or internet-grounded questions? Use `oracle`.**
+   `oracle` is a grounded, open-world synthesizer. It accepts arbitrary
+   files/directories (up to 1 MB upfront), performs Google Searches, and
+   executes Python code to provide a definitive, one-shot strategic answer. Use
+   it for deep architectural research, bug triage, or exploring unfamiliar
+   codebases.
+
+1. **Refactoring files, harmonizing docs, or auditing repositories? Use
+   `caxton`.** `caxton` is an autonomous, multi-turn agent. Unlike `oracle`'s
+   single-shot approach, `caxton` executes an agent loop with exact byte-level
+   tools (`search_and_replace`, `write_file`, `delete_file`). Use read/write
+   `caxton` (`--edit`) for multi-file refactoring and doc synchronization. Use
+   read-only `caxton` (`--read` / `--no-inline`) to iteratively explore and
+   audit repositories that exceed `oracle`'s 1 MB inlining limit.
+
 ## Script Overview
 
 ### oracle

@@ -330,11 +330,12 @@ utilizing deep reasoning and Google Search grounding.
 Usage: oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 
 Consult the Oracle for a very carefully researched and considered answer.
-Designed for the highest quality response possible, utilizing deep reasoning
-and Google Search grounding.
+Designed for high-depth, one-shot strategic consultation, complex research,
+and open-world synthesis across broad file context and media, grounded with
+Google Search (or Google Maps) and optional sandboxed Python code execution.
 
-The Oracle is not a standard, quick-reply AI. It is designed to process massive
-amounts of information and synthesize authoritative answers.
+The Oracle is purely analytical; it processes massive context payloads to
+synthesize authoritative answers and reports without mutating files on disk.
 
 Stateless: every invocation is an independent, one-shot consultation. The
 Oracle retains nothing between calls — including your own earlier oracle calls
@@ -437,12 +438,13 @@ the paths you name. Read-only unless `--edit` names something writable.
 ```text
 Usage: caxton "PROMPT" [OPTIONS]
 
-Autonomous long-form text transformation, documentation audit, and harmonization engine.
+Autonomous multi-turn text transformation, documentation audit, and harmonization engine.
 
-Specialized for large-scale text reasoning across whole repositories: auditing
-documentation drift, resolving cross-file contradictions, standardizing style,
-and synchronizing documentation against code. Defaults to aggressive bulk
-inlining (up to 1 MB) to give the model a global overview of the entire corpus.
+Specialized for whole-tree text reasoning and safe disk mutations within a Git worktree:
+auditing documentation drift, resolving cross-file contradictions, standardizing style,
+and synchronizing documentation against codebases. Combines upfront bulk inlining (up to 1 MB)
+with an interactive agent loop providing exact byte-level editing tools (search_and_replace,
+write_file, delete_file).
 
 By default, runs read-only on the current directory. You can scope access by
 naming explicit paths. Paths given with --read are visible to the model; paths
@@ -571,9 +573,11 @@ the provided text.
 ```text
 Usage: emerson [OPTIONS] "PROMPT" < INPUT_FILE
 
-Generates an essay-length answer (approx. 3000 words) to the PROMPT, based
-primarily on the text provided via standard input. Uses the Gemini Pro model
-by default.
+Generates an essay-length answer (approx. 3000 words) to the PROMPT based
+strictly on the text provided via standard input. Operates as a closed-book,
+sandboxed analyst with zero external search, treating the input as the sole
+source of truth to prevent hallucination. Uses the Gemini Pro model by
+default.
 
 Arguments:
   PROMPT      The question or topic to address.
