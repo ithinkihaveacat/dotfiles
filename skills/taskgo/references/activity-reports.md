@@ -20,6 +20,15 @@ folder Z"). An activity report requires an active perspective shift:
 - **Report what shipped, unblocked, or published:** Prioritize merged pull
   requests/CLs, deployed artifacts, shared specifications, partner unblockers,
   and verified bug resolutions.
+- **Package related tasks (Anti-Fragmentation):** Synthesize a primary milestone
+  and its prerequisite work into a single primary deliverable bullet. If a major
+  deliverable required fixing harness bugs or tooling plumbing along the way,
+  mention those incidental fixes compactly in a trailing clause or brief sibling
+  bullet (e.g., "Also, ...").
+- **Fold background research:** Omit intermediate calculations, exploratory
+  scaffolding, or unreleased telemetry unless they represent a standalone
+  published standard. Fold intermediate findings directly into the final
+  external deliverable they supported.
 - **De-emphasize inward maintenance:** Omit internal task tracker housekeeping,
   file reorganizations, exploratory dead ends, and routine test runs unless the
   methodology itself is the primary deliverable.
@@ -38,6 +47,10 @@ $$\\text{Filed / Reported} \\longrightarrow \\text{Acknowledged}
 \\text{Fix in Progress} \\longrightarrow \\text{Release Scheduled}
 \\longrightarrow \\text{Shipped to Production}$$
 
+- **One Bug $\\rightarrow$ One Bullet:** The entire lifecycle of an issue—from
+  initial root-cause analysis to upstream partner reproduction and release
+  scheduling—must be tracked within a single bullet. Do not split an issue's
+  initial report and its subsequent downstream momentum into separate items.
 - **Report the furthest advanced state:** If an issue you reported has been
   acknowledged or reproduced by an external partner or upstream team, explicitly
   highlight that milestone.
@@ -50,6 +63,9 @@ Do not mechanically mirror project directories as top-level sections. Instead,
 organize around the human and organizational entities reading or affected by the
 work:
 
+- **Crisp Headings:** Keep category headings short and direct (2–3 words
+  maximum, e.g., `Wear Widgets`, `Skills & Evals`). Do not invent verbose,
+  corporate-speak domain titles.
 - **Partners / Customers / Integrations:** External partner engagements,
   integration unblockers, and partner-reported defect triage.
 - **Platform / Core Subsystems:** Low-level engine, framework, or operating
@@ -80,6 +96,9 @@ the level of abstraction:
 - **Direct canonical links:** Inline hyperlinks directly on the noun
   representing the deliverable (e.g.,
   `Published [updated widget audit report](https://...)`).
+- **Single canonical target:** Never include multiple mirror URLs (e.g., citing
+  a staging dashboard, an internal spreadsheet, and a production link) for the
+  same artifact. Pick the single most authoritative target.
 - **Omit mechanical hosting trivia:** Do not waste reader attention explaining
   deployment mechanics (e.g., omit "deployed via Netlify/Zipline/S3") unless the
   deployment infrastructure itself is the deliverable.
