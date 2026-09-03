@@ -179,11 +179,11 @@ callers can redirect it, e.g. to a temp directory:
 
 ## Standard Input (`-`) Contract
 
-Never automatically read from standard input based on TTY checks alone; require
-callers to pass an explicit `-` (as an argument or option value) when reading
-from stdin. This avoids ambiguous blocking or indefinite hangs waiting for EOF
-in non-interactive, SSH, or CI environments where standard input is connected
-but idle.
+Prefer requiring callers to pass an explicit `-` (as an argument or option
+value) to read from standard input over relying solely on automatic TTY
+detection. This avoids ambiguous blocking or indefinite hangs waiting for EOF in
+non-interactive, SSH, or CI environments where standard input is connected but
+idle.
 
 ## Help Flags, Missing Arguments, and Pagers
 
