@@ -4,7 +4,8 @@ description: >-
   Maintains a private Git-backed personal project and task control repository
   using concise current Markdown, derived Git history, ADRs, and status synchronization.
   Use when tracking tasks, updating project status (STATUS.md), managing ADRs,
-  synchronizing tracker state, or delegating tasks to external agents across projects.
+  synchronizing tracker state, delegating tasks to external agents, or generating
+  human-facing activity reports (weekly/monthly/quarterly).
 compatibility: Requires Python 3.11+ (via uv) and git.
 ---
 
@@ -25,7 +26,7 @@ journals just to retain history.
 AGENTS.md                  # taskgo declaration + repository instructions
 INBOX.md                  # zero-ceremony capture; no schema
 <id>/
-  README.md               # identity, scope, constraints, artifacts (or PROJECT.md)
+  README.md               # identity, scope, domain/stakeholders, constraints, artifacts (or PROJECT.md)
   STATUS.md               # current human view + generated task block
   PLAN.md                 # intended route forward (optional)
   tasks/*.md              # stable task records
@@ -154,6 +155,9 @@ conversations:
 
 # Title as imperative verb phrase
 
+*(Tip: Front-load external stakeholder or impact context where applicable, e.g.
+"Unblock Partner X via token parser refactor" rather than bare "Refactor token parser".)*
+
 **Problem:** (optional) How the current system behaves and why that is a
 problem — the mechanics, not just the motivation. Leave the consequences to
 Cost.
@@ -197,14 +201,25 @@ conversations:
 # Title as imperative verb phrase
 
 ## Outcome
-Summary of what shipped, where it lives (commits, files, endpoints), and
-outcomes. Completed in [<conversation-id>](conversation://<conversation-id>).
+Summary of what shipped, where it lives, and explicit verdicts. Completed in
+[<conversation-id>](conversation://<conversation-id>).
+- **External deliverables & links:** Cite direct canonical URLs (PRs, CLs, issue
+  tickets, published docs/dashboards) alongside any local repository commits.
+- **Triage verdicts:** When triaging claims or defects, record an explicit
+  terminal verdict (e.g. `Verified Bug`, `Tooling Discrepancy`, `Working As Intended (WAI)`,
+  `Invalid/Disproven`) to prevent ambiguous summarization.
+- **Quantitative deltas:** For performance, optimization, or scale tasks, record
+  numerical metrics (e.g. `reduced latency from 400ms to 45ms`) rather than
+  qualitative claims.
 Where the task declared a Cost, say whether it is now gone, reduced, or still
 being paid — the last is a legitimate outcome and worth stating plainly.
 
 ## Findings
 Key technical discoveries, trade-offs, reproduction steps, or unexpected
 behavior.
+- **Downstream momentum:** For external issues, PRs, or partner handoffs, append
+  subsequent lifecycle transitions (acknowledged, reproduced upstream, release
+  scheduled) to `Findings` as they occur, even after marking the task `done`.
 
 ## Next
 Immediate follow-up actions or subsequent tasks.
@@ -405,6 +420,25 @@ execution:
    and internal reasoning belong strictly in the out-of-band chat response.
    Private metadata must never leak into artifact commits.
 
+### Activity Reporting
+
+When requested to produce an activity report (e.g. "produce an activity report
+of the last week/month/quarter", standup update, or newsletter item), transform
+the internal operational ledger into an outward-facing impact summary:
+
+1. **Acknowledge Audience & Scope:** Determine the target time horizon (weekly,
+   monthly, quarterly) and external audience from the prompt.
+1. **Extract State:** Query the Git log (`git log --since="<timeframe>"`) and
+   task records (`taskgo list [PROJECT]`). Actively parse the `## Outcome` and
+   `## Findings` blocks of relevant `done` and `cancelled` tasks to extract
+   external entity transitions (e.g. partner reproductions or upstream reviews).
+1. **Apply Guidelines:** Follow the transformation principles, sub-linear
+   scaling rules, and Standard Output Template defined in
+   [`references/activity-reports.md`](references/activity-reports.md).
+1. **Enforce Segregation:** Strip private `conversation://` URLs, local branch
+   names, and internal repository file paths from the final report. Link
+   explicitly to published external artifacts (PRs, issues, dashboards).
+
 ## CLI
 
 Requires Python 3.11+ (via `uv`) and Git; it remains a thin layer over ordinary
@@ -479,3 +513,6 @@ reconstructible states.
 - **[Model & Architecture](references/model.md)** — Context economics, project
   scaling spectrum (Scale 0/1/2), repository boundaries, and Unified AuditEngine
   rationale (`doctor` and `fix`).
+- **[Activity Reports](references/activity-reports.md)** — Guidelines,
+  transformation principles, downstream lifecycle tracking, and output templates
+  for outward-facing reports (weekly/monthly/quarterly).

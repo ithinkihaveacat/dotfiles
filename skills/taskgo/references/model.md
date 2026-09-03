@@ -22,9 +22,11 @@ project scale:
   zero-ceremony capture of unclassified notes, thoughts, and ideas without
   schemas.
 - **Scale 1 (Lightweight Project):** A project directory containing `README.md`
-  (serving as project manifest), `STATUS.md` (operational projection), and
-  `tasks/` containing granular task records. `PLAN.md`, `decisions/`,
-  `references/`, `scripts/`, and `data/` remain optional.
+  (serving as project manifest, optionally declaring
+  `**Domain / Stakeholders:** [Entity]` to anchor thematic grouping for activity
+  reporting), `STATUS.md` (operational projection), and `tasks/` containing
+  granular task records. `PLAN.md`, `decisions/`, `references/`, `scripts/`, and
+  `data/` remain optional.
 - **Scale 2 (Multi-Month Initiative):** Extends Scale 1 with explicit roadmap
   sequencing in `PLAN.md`, formal Nygard-style Architecture Decision Records in
   `decisions/*.md`, supporting context in `references/`, custom tooling in
