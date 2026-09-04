@@ -140,6 +140,39 @@ Rename an existing task file with `update --slug`.
 Preferred states: `todo`, `in-progress`, `blocked`, `done`, `cancelled`.
 Unknown/missing values remain readable but should be reported.
 
+### Dependencies
+
+A task may declare what is holding it up with an optional `blocked_by` list of
+task IDs. Record the edge on the task that is *held*, never on the blocker;
+otherwise a new dependency means editing an unrelated, often already `done`,
+task. Cross-project edges are fine, since IDs are unique across the control
+repo.
+
+```yaml
+blocked_by: [TASK-1627D, TASK-EFD32]
+```
+
+The field is read-only scheduling data, consumed at query time. It never changes
+any task's `status`: `status` stays hand-authored, so `blocked` remains
+available for anything without a task ID (an unshipped upstream release, a
+review you are waiting on). The two combine only in views:
+
+- `taskgo list [PROJECT] --state ready` — the frontier: `todo` tasks with no
+  unresolved edges. `ready` is derived, not a status you can write.
+- The `STATUS.md` snapshot lists a task under `### Blocked` when its `status` is
+  `blocked` **or** an edge is unresolved, naming the blockers. `sync` writes no
+  task frontmatter.
+- `doctor` reports an edge naming an unknown task, a `status: blocked` with
+  nothing actually blocking it (usually a stale hand-set status), and any
+  dependency cycle.
+
+Degradation is deliberate: an edge to a task that no longer exists counts as
+resolved, so deleting a task can never leave its dependents permanently
+unworkable — `doctor` reports it instead. `fix` never writes `blocked_by`: an
+invented edge is worse than an absent one, and most `TASK-` mentions in prose
+are companions or supersessions rather than dependencies. Prose still carries
+*why* something is blocked; the field only carries *that* it is.
+
 ### Planning & In-Progress Task Template
 
 For new and in-flight tasks, use bold run-in labels to capture the brief for

@@ -99,6 +99,10 @@ class TaskFrontmatter(TypedDict, total=False):
     id: str
     status: str
     conversations: list[str]
+    blocked_by: list[str]
+
+
+RESOLVED_STATES = {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
 
 
 def normalize_conversation_id(conv: str | None) -> str | None:
@@ -685,6 +689,16 @@ def get_task_files(root: Path, project_name: str | None = None) -> list[Path]:
     return sorted(files)
 
 
+def parse_blocked_by(fm: dict[str, Any]) -> tuple[str, ...]:
+    """Reads the optional blocked_by edge list, tolerating a bare scalar."""
+    raw = fm.get("blocked_by")
+    if not raw:
+        return ()
+    items = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw))
+    deps = (str(item).strip().strip("'\"").upper() for item in items)
+    return tuple(dict.fromkeys(d for d in deps if d))
+
+
 @dataclass(slots=True, frozen=True)
 class TaskRow:
     project: str
@@ -693,6 +707,7 @@ class TaskRow:
     title: str
     rel_path: str
     abs_path: Path
+    blocked_by: tuple[str, ...] = ()
 
 
 def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
@@ -708,8 +723,68 @@ def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
         title = extract_title(content)
         rel_path = str(f.relative_to(root))
         project = Path(rel_path).as_posix().split("/")[0]
-        rows.append(TaskRow(project, task_id, status, title, rel_path, f.resolve()))
+        fm, _ = parse_frontmatter(content)
+        rows.append(
+            TaskRow(
+                project,
+                task_id,
+                status,
+                title,
+                rel_path,
+                f.resolve(),
+                parse_blocked_by(fm),
+            )
+        )
     return rows
+
+
+def status_index(root: Path) -> dict[str, str]:
+    """Maps every known task ID in the control repo to its declared status."""
+    return {r.task_id: r.status for r in get_task_rows(root) if r.task_id}
+
+
+def unresolved_blockers(row: TaskRow, index: dict[str, str]) -> list[str]:
+    """Blockers still holding ROW back.
+
+    Unknown IDs count as resolved: a deleted blocker must never leave its
+    dependents permanently unworkable.
+    """
+    return [
+        dep
+        for dep in row.blocked_by
+        if dep in index and index[dep] not in RESOLVED_STATES
+    ]
+
+
+def find_dependency_cycles(rows: list[TaskRow]) -> list[list[str]]:
+    """Returns each dependency cycle once, as a list of task IDs."""
+    edges = {r.task_id: r.blocked_by for r in rows if r.task_id}
+    cycles: list[list[str]] = []
+    seen_keys: set[frozenset[str]] = set()
+    state: dict[str, int] = {}
+    stack: list[str] = []
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        stack.append(node)
+        for dep in edges.get(node, ()):
+            if dep not in edges:
+                continue
+            if state.get(dep) == 1:
+                cycle = stack[stack.index(dep) :]
+                key = frozenset(cycle)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    cycles.append(cycle)
+            elif state.get(dep, 0) == 0:
+                visit(dep)
+        stack.pop()
+        state[node] = 2
+
+    for task_id in edges:
+        if state.get(task_id, 0) == 0:
+            visit(task_id)
+    return cycles
 
 
 def generate_task_id(root: Path) -> str:
@@ -725,8 +800,16 @@ def generate_task_id(root: Path) -> str:
 
 def build_status_block(root: Path, project_name: str) -> str:
     rows = get_task_rows(root, project_name)
+    index = status_index(root)
     in_progress = [r for r in rows if r.status == "in-progress"]
-    blocked = [r for r in rows if r.status == "blocked"]
+    # Declared blocked, or held by an unresolved edge. In-progress wins the
+    # row so the two sections stay disjoint; doctor reports the contradiction.
+    blocked = [
+        r
+        for r in rows
+        if r.status != "in-progress"
+        and (r.status == "blocked" or unresolved_blockers(r, index))
+    ]
     todo_count = sum(1 for r in rows if r.status == "todo")
     done_count = sum(1 for r in rows if r.status == "done")
     unclassified_count = sum(
@@ -756,7 +839,11 @@ def build_status_block(root: Path, project_name: str) -> str:
     )
     if blocked:
         for r in blocked:
-            lines.append(f"- `{r.task_id}` — {r.title}")
+            held = unresolved_blockers(r, index)
+            suffix = (
+                f" (blocked by {', '.join(f'`{d}`' for d in held)})" if held else ""
+            )
+            lines.append(f"- `{r.task_id}` — {r.title}{suffix}")
     else:
         lines.append("- None")
 
@@ -1337,6 +1424,57 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     )
                 )
 
+    # Dependency edges. Never auto-remediated: an invented or removed edge is
+    # worse than an absent one, so every finding here needs human review.
+    all_rows = get_task_rows(root)
+    index = {r.task_id: r.status for r in all_rows if r.task_id}
+    scoped_rows = [
+        r for r in all_rows if not target_project or r.project == target_project
+    ]
+    for row in scoped_rows:
+        unknown = [dep for dep in row.blocked_by if dep not in index]
+        if unknown:
+            findings.append(
+                Finding(
+                    category="depends",
+                    severity="WARN",
+                    message=f"{row.rel_path}: blocked_by names unknown task(s): {', '.join(unknown)}",
+                    file_path=row.abs_path,
+                    remediation=None,
+                )
+            )
+        if row.status == TaskStatus.BLOCKED.value and not unresolved_blockers(
+            row, index
+        ):
+            detail = (
+                "no blocked_by edges"
+                if not row.blocked_by
+                else "all blocked_by edges resolved"
+            )
+            findings.append(
+                Finding(
+                    category="depends",
+                    severity="WARN",
+                    message=f"{row.rel_path}: status is blocked but {detail}",
+                    file_path=row.abs_path,
+                    remediation=None,
+                )
+            )
+
+    for cycle in find_dependency_cycles(all_rows):
+        if target_project and not any(
+            r.task_id in cycle and r.project == target_project for r in scoped_rows
+        ):
+            continue
+        findings.append(
+            Finding(
+                category="depends",
+                severity="WARN",
+                message=f"blocked_by cycle: {' -> '.join(cycle)} -> {cycle[0]}",
+                remediation=None,
+            )
+        )
+
     return findings
 
 
@@ -1788,8 +1926,18 @@ def cmd_list(
     root = get_repo_root()
     rows = get_task_rows(root, project)
     if state:
-        norm_state = normalize_status(state)
-        rows = [r for r in rows if r.status == norm_state]
+        # "ready" is derived, not a declared status: todo with nothing holding it.
+        if state.strip().lower() == "ready":
+            index = status_index(root)
+            rows = [
+                r
+                for r in rows
+                if r.status == TaskStatus.TODO.value
+                and not unresolved_blockers(r, index)
+            ]
+        else:
+            norm_state = normalize_status(state)
+            rows = [r for r in rows if r.status == norm_state]
 
     if as_json:
         out = [
@@ -1799,6 +1947,7 @@ def cmd_list(
                 "status": r.status,
                 "title": r.title,
                 "path": str(r.abs_path.relative_to(root)),
+                "blocked_by": list(r.blocked_by),
             }
             for r in rows
         ]
@@ -2392,7 +2541,7 @@ Commands:
   root                             Print the active control repository root
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
-  list [PROJECT] [OPTIONS]         List tasks
+  list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   status [PROJECT] [--json]        Show project status
   sync [PROJECT]                   Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks (read-only)
@@ -2582,7 +2731,7 @@ than a few words.""",
         "-s",
         dest="state",
         default=None,
-        help="Filter tasks by state (e.g. in-progress, done)",
+        help="Filter tasks by state (e.g. in-progress, done, or ready)",
     )
     p_list.add_argument(
         "--json",

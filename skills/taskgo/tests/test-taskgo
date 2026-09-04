@@ -38,7 +38,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..90'
+echo '1..99'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -1685,4 +1685,122 @@ if printf '%s' "$DR_OUT" | grep -q $'\033'; then
   echo 'not ok 90 - NO_COLOR did not suppress styling'
 else
   echo 'ok 90 - NO_COLOR suppresses styling despite FORCE_COLOR'
+fi
+
+# --- blocked_by dependency edges -------------------------------------------
+
+DEP_REPO="$TEST_ROOT/depends"
+mkdir -p "$DEP_REPO/example/tasks"
+git -C "$DEP_REPO" init -q
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$DEP_REPO/AGENTS.md"
+printf '# Inbox\n' >"$DEP_REPO/INBOX.md"
+printf '# Example project\n' >"$DEP_REPO/example/PROJECT.md"
+
+write_dep_task() {
+  # write_dep_task ID STATUS TITLE [BLOCKED_BY_YAML]
+  local id="$1" status="$2" title="$3" deps="${4:-}"
+  {
+    printf -- '---\n'
+    printf 'id: %s\n' "$id"
+    printf 'status: %s\n' "$status"
+    [ -n "$deps" ] && printf 'blocked_by: %s\n' "$deps"
+    printf -- '---\n\n'
+    printf '# %s\n' "$title"
+  } >"$DEP_REPO/example/tasks/$id-dep.md"
+}
+
+write_dep_task TASK-11111 'done' "Finished blocker"
+write_dep_task TASK-22222 todo "Open blocker"
+write_dep_task TASK-33333 todo "Held by an open task" '[TASK-22222]'
+write_dep_task TASK-44444 todo "Held by a finished task" '[TASK-11111]'
+write_dep_task TASK-55555 todo "Held by a deleted task" '[TASK-99999]'
+write_dep_task TASK-66666 blocked "Declared blocked with no edges"
+write_dep_task TASK-77777 todo "Cycle member one" '[TASK-88888]'
+write_dep_task TASK-88888 todo "Cycle member two" '[TASK-77777]'
+
+READY=$("$BIN" --root "$DEP_REPO" list example --state ready 2>/dev/null | tail -n +2 | cut -f2 | sort | tr '\n' ' ')
+
+# Test 91: an unresolved edge keeps a todo task off the frontier
+if [ "${READY#*TASK-33333}" = "$READY" ]; then
+  echo 'ok 91 - unresolved blocked_by excludes a task from --state ready'
+else
+  echo 'not ok 91 - unresolved blocked_by excludes a task from --state ready'
+  echo "# ready=$READY"
+fi
+
+# Test 92: an edge to a done task does not hold the dependent back
+if [ "${READY#*TASK-44444}" != "$READY" ]; then
+  echo 'ok 92 - resolved blocked_by leaves a task ready'
+else
+  echo 'not ok 92 - resolved blocked_by leaves a task ready'
+  echo "# ready=$READY"
+fi
+
+# Test 93: an unknown blocker degrades open rather than freezing the task
+if [ "${READY#*TASK-55555}" != "$READY" ]; then
+  echo 'ok 93 - unknown blocked_by ID does not block readiness'
+else
+  echo 'not ok 93 - unknown blocked_by ID does not block readiness'
+  echo "# ready=$READY"
+fi
+
+"$BIN" --root "$DEP_REPO" sync example >/dev/null 2>&1 || true
+
+# Test 94: the snapshot projects derived blocks and names the blocker
+if grep -q 'TASK-33333.*blocked by.*TASK-22222' "$DEP_REPO/example/STATUS.md"; then
+  echo 'ok 94 - STATUS.md Blocked section names the unresolved blocker'
+else
+  echo 'not ok 94 - STATUS.md Blocked section names the unresolved blocker'
+  echo "# $(sed -n '/### Blocked/,/^Todo:/p' "$DEP_REPO/example/STATUS.md" | tr '\n' '|')"
+fi
+
+# Test 95: sync is a projection and must not rewrite task frontmatter
+if grep -q '^status: todo$' "$DEP_REPO/example/tasks/TASK-33333-dep.md" &&
+  grep -q '^blocked_by: \[TASK-22222\]$' "$DEP_REPO/example/tasks/TASK-33333-dep.md"; then
+  echo 'ok 95 - sync leaves task frontmatter untouched'
+else
+  echo 'not ok 95 - sync leaves task frontmatter untouched'
+  echo "# $(head -6 "$DEP_REPO/example/tasks/TASK-33333-dep.md" | tr '\n' '|')"
+fi
+
+DEP_DR=$("$BIN" --root "$DEP_REPO" doctor example 2>&1) || true
+
+# Test 96: an edge naming a task that does not exist is reported
+if printf '%s\n' "$DEP_DR" | grep -q '^\[WARN\].*TASK-55555.*blocked_by names unknown task(s): TASK-99999'; then
+  echo 'ok 96 - doctor reports an unknown blocked_by target'
+else
+  echo 'not ok 96 - doctor reports an unknown blocked_by target'
+  echo "# $(printf '%s\n' "$DEP_DR" | grep -c '^\[WARN\]') warnings"
+fi
+
+# Test 97: a hand-set blocked status with nothing holding it is stale
+if printf '%s\n' "$DEP_DR" | grep -q '^\[WARN\].*TASK-66666.*status is blocked but no blocked_by edges'; then
+  echo 'ok 97 - doctor reports a stale declared blocked status'
+else
+  echo 'not ok 97 - doctor reports a stale declared blocked status'
+fi
+
+# Test 98: a dependency cycle is reported rather than silently looping
+if printf '%s\n' "$DEP_DR" | grep -q '^\[WARN\]  blocked_by cycle:.*TASK-77777.*TASK-88888'; then
+  echo 'ok 98 - doctor reports a blocked_by cycle'
+else
+  echo 'not ok 98 - doctor reports a blocked_by cycle'
+fi
+
+# Test 99: fix never invents, removes, or rewrites dependency edges
+git -C "$DEP_REPO" add -A >/dev/null 2>&1
+git -C "$DEP_REPO" commit -qm 'seed dependency fixtures' >/dev/null 2>&1
+"$BIN" --root "$DEP_REPO" fix example --no-commit >/dev/null 2>&1 || true
+DEP_AFTER=$(grep -h '^blocked_by:' "$DEP_REPO"/example/tasks/*-dep.md | sort | tr '\n' ' ')
+if [ "$DEP_AFTER" = "blocked_by: [TASK-11111] blocked_by: [TASK-22222] blocked_by: [TASK-77777] blocked_by: [TASK-88888] blocked_by: [TASK-99999] " ]; then
+  echo 'ok 99 - fix leaves blocked_by edges exactly as authored'
+else
+  echo 'not ok 99 - fix leaves blocked_by edges exactly as authored'
+  echo "# after=$DEP_AFTER"
 fi
