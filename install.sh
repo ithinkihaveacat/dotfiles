@@ -76,6 +76,7 @@ OPTIONS:
   --help        Show this help message and exit
   --trace       Print each wrapped command to stderr before running it
   --force       Overwrite existing real files when laying down overlay symlinks
+                and bypass the 24-hour package/tool update TTL
                 (default: refuse and exit)
   --install-optional
                 Install the core and optional package sets
@@ -223,6 +224,21 @@ function is_codex_agent {
   local path
   path=$(type -P codex)
   [ "$path" != "/usr/bin/codex" ] && [ "$path" != "/bin/codex" ]
+}
+
+PACKAGE_STAMP="$XDG_CACHE_HOME/dotfiles/last_package_update"
+
+# Returns success (0) if the stamp file exists and was modified within the last
+# 24 hours (1 day), and --force was not specified.
+function is_fresh {
+  local stamp=$1
+  [ "$FORCE" -ne 1 ] && [ -f "$stamp" ] && find "$stamp" -maxdepth 0 -mtime -1 2>/dev/null | grep -q .
+}
+
+function touch_stamp {
+  local stamp=$1
+  xmkdir "$(dirname "$stamp")"
+  touch "$stamp"
 }
 
 function heading {
@@ -559,13 +575,15 @@ fi
 
 # Package Management Invariants (Homebrew and apt-get):
 # Both Homebrew (macOS) and apt-get (Linux) package management paths enforce four invariants:
-# 1. Non-Interactive Freshness: Index lists are updated and installed packages are
-#    upgraded non-interactively without user prompts on every run.
+# 1. 24-Hour Freshness TTL: Index lists are updated and installed packages are
+#    upgraded non-interactively at most once every 24 hours (bypassed with --force).
+#    Target package sets are always diffed and missing packages are installed
+#    immediately on every run.
 # 2. Accurate State Diffing: Target package sets (core/optional/full) are diffed
 #    against installed states (via `brew list` or `dpkg-query` filtered by
 #    'install ok installed') to prevent redundant installation steps.
 # 3. Cache Purging: Downloaded package archives and build caches are purged from
-#    disk (`brew cleanup`, `apt-get clean`).
+#    disk periodically and after upgrades (brew cleanup, apt-get clean).
 # 4. Unmanaged Package Pruning:
 #    - Homebrew: As a userland manager, packages outside tier allowlists are
 #      reported and pruned when requested (`--prune`).
@@ -578,18 +596,22 @@ if exists brew; then
 
   export HOMEBREW_NO_OUTDATED_FORMULAE_NOTIFIER=1
   export HOMEBREW_NO_ENV_HINTS=1
+  export HOMEBREW_NO_ANALYTICS=1
 
-  brew analytics off
+  installed_formulae=$(brew list --formula 2>/dev/null | sort)
+  installed_casks=$(brew list --cask 2>/dev/null | sort)
 
-  echo "Updating brew (this may prompt for Xcode license agreement)..."
-  if ! brew update; then
-    echo "$(basename "$0"): brew update failed" >&2
-    echo "hint: sudo xcodebuild -license accept" >&2
-    exit 1
+  if ! is_fresh "$PACKAGE_STAMP"; then
+    echo "Updating brew (this may prompt for Xcode license agreement)..."
+    if ! brew update; then
+      echo "$(basename "$0"): brew update failed" >&2
+      echo "hint: sudo xcodebuild -license accept" >&2
+      exit 1
+    fi
   fi
 
   # The non-HEAD version is years old...
-  if ! brew list jed >/dev/null 2>&1; then
+  if ! echo "$installed_formulae" | grep -qx "jed"; then
     x brew install jed --HEAD
   fi
 
@@ -612,36 +634,40 @@ if exists brew; then
 
   install_set=$(install_set_for_tier "$core" "$optional" "$full")
 
-  to_install=$(comm -13 <(brew list --formula | sort) <(echo "$install_set" | tr ' ' '\n' | sort))
+  to_install=$(comm -13 <(echo "$installed_formulae") <(echo "$install_set" | tr ' ' '\n' | sort))
   if [ -n "$to_install" ]; then
-    echo "$to_install" | xargs -n 1 brew install
+    echo "$to_install" | xargs brew install
   fi
 
   # Special handling for imagemagick-full (needs manual linking due to conflicts)
-  if brew list imagemagick-full >/dev/null 2>&1; then
+  if echo "$installed_formulae $to_install" | grep -qw "imagemagick-full"; then
     if ! brew link --dry-run imagemagick-full 2>&1 | grep -q "Already linked"; then
       x brew link --overwrite imagemagick-full
     fi
   fi
-
-  # Upgrade all installed packages non-interactively
-  brew upgrade --no-ask
-
-  prune_brew_extras "$allowlist"
-
-  # Final cleanup of unused dependencies and installer caches from disk
-  brew autoremove
-  brew cleanup -s --prune=all
 
   # JDK: Temurin casks are installed below. They land in:
   #   /Library/Java/JavaVirtualMachines/temurin-*.jdk/Contents/Home
   # JAVA_HOME is set in fish/config.fish; consult that for the current value,
   # how to override it for a single command, etc.
   for jdk in temurin@17 temurin@21; do
-    if ! brew list --cask "$jdk" >/dev/null 2>&1; then
+    if ! echo "$installed_casks" | grep -qx "$jdk"; then
       x brew install --cask "$jdk"
     fi
   done
+
+  if ! is_fresh "$PACKAGE_STAMP"; then
+    # Upgrade all installed packages non-interactively
+    brew upgrade --no-ask
+
+    prune_brew_extras "$allowlist"
+
+    # Final cleanup of unused dependencies and installer caches from disk
+    brew autoremove
+    brew cleanup
+  elif [ "$PRUNE" = 1 ]; then
+    prune_brew_extras "$allowlist"
+  fi
 
 fi
 
@@ -651,7 +677,9 @@ if [ "$PLATFORM" = "linux" ]; then
 
   if exists apt-get && $HAS_SUDO; then
 
-    x sudo apt-get update # refresh package lists
+    if ! is_fresh "$PACKAGE_STAMP"; then
+      x sudo apt-get update # refresh package lists
+    fi
 
     # Core packages: always installed, on every run.
     core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep shfmt shellcheck chafa bat"
@@ -689,7 +717,9 @@ if [ "$PLATFORM" = "linux" ]; then
     if [ "$INSTALL_TIER" != core ] && exists git; then
       RUBY_BUILD_SRC="$HOME/.local/share/ruby-build"
       if [ -d "$RUBY_BUILD_SRC/.git" ]; then
-        x git -C "$RUBY_BUILD_SRC" pull --ff-only || echo "warning: ruby-build update failed"
+        if ! is_fresh "$PACKAGE_STAMP"; then
+          x git -C "$RUBY_BUILD_SRC" pull --ff-only || echo "warning: ruby-build update failed"
+        fi
       else
         x git clone https://github.com/rbenv/ruby-build.git "$RUBY_BUILD_SRC" || echo "warning: ruby-build clone failed"
       fi
@@ -698,16 +728,18 @@ if [ "$PLATFORM" = "linux" ]; then
       fi
     fi
 
-    # Upgrade installed packages non-interactively
-    x sudo apt-get -y upgrade || echo "warning: apt-get upgrade failed, skipping"
-    x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
+    if ! is_fresh "$PACKAGE_STAMP"; then
+      # Upgrade installed packages non-interactively
+      x sudo apt-get -y upgrade || echo "warning: apt-get upgrade failed, skipping"
+      x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
 
-    # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
-    x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"
+      # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
+      x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"
 
-    # Autoclean and clean package archives
-    x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping"
-    x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping"
+      # Autoclean and clean package archives
+      x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping"
+      x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping"
+    fi
 
     if [ -f /var/run/reboot-required ]; then
       REBOOT_REQUIRED=1
@@ -796,15 +828,15 @@ heading "uv"
 if ! exists uv; then
   echo "Installing uv..."
   curl -LsSf https://astral.sh/uv/install.sh | sh || echo "warning: uv installation failed" >&2
-else
+elif ! is_fresh "$PACKAGE_STAMP"; then
   echo "Updating uv..."
   # `uv self update` only works for the standalone installer; a uv provided by a
   # package manager (e.g. a leftover brew uv mid-migration) will refuse, so warn
   # rather than abort.
   uv self update || echo "warning: uv self update failed (uv may be package-managed)"
+  echo "Upgrading uv tools..."
+  uv tool upgrade --all || echo "warning: uv tool upgrade failed"
 fi
-echo "Upgrading uv tools..."
-uv tool upgrade --all || echo "warning: uv tool upgrade failed"
 
 heading "git"
 
@@ -925,14 +957,18 @@ EOF
 fi
 
 if exists android || exists compose-preview || [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; then
-  heading "android"
-  if exists android; then
-    x android update || echo "warning: android update failed" >&2
+  if ! is_fresh "$PACKAGE_STAMP"; then
+    heading "android"
+    if exists android; then
+      x android update || echo "warning: android update failed" >&2
+    fi
+    if exists compose-preview; then
+      x env CLI_ONLY=1 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
+        compose-preview update || echo "warning: compose-preview update failed" >&2
+    fi
   fi
-  if exists compose-preview; then
-    x env CLI_ONLY=1 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
-      compose-preview update || echo "warning: compose-preview update failed" >&2
-  elif [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; then
+  if ! exists compose-preview && { [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; }; then
+    heading "android"
     x env SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
       bash <(curl -fsSL https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh) --cli-only || echo "warning: compose-preview install failed" >&2
   fi
@@ -975,19 +1011,25 @@ fi
 # and .corp overlays) as the source. Keeping ~/.agents/skills and
 # ~/.claude/skills empty prevents every project from seeing every skill.
 
-if exists agy || exists claude || is_codex_agent; then
+if ! is_fresh "$PACKAGE_STAMP"; then
 
-  heading "agent CLIs"
+  if exists agy || exists claude || is_codex_agent; then
 
-  if exists agy; then
-    x agy update || echo "warning: agy update failed" >&2
+    heading "agent CLIs"
+
+    if exists agy; then
+      x agy update || echo "warning: agy update failed" >&2
+    fi
+    if exists claude; then
+      x claude update || echo "warning: claude update failed" >&2
+    fi
+    if is_codex_agent; then
+      x codex update || echo "warning: codex update failed" >&2
+    fi
+
   fi
-  if exists claude; then
-    x claude update || echo "warning: claude update failed" >&2
-  fi
-  if is_codex_agent; then
-    x codex update || echo "warning: codex update failed" >&2
-  fi
+
+  touch_stamp "$PACKAGE_STAMP"
 
 fi
 
