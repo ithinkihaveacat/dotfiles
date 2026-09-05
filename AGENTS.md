@@ -173,10 +173,10 @@ blocks:
 bin/command-index-sync --all
 ```
 
-`./install.sh` runs `command-index-sync --check --all` and warns when blocks
-have drifted. The command named in a marker is executed with its working
-directory set to the directory containing the Markdown file (hence the
-`../scripts/` prefix).
+CI runs `command-index-sync --check --all` to verify that generated blocks are
+up to date. The command named in a marker is executed with its working directory
+set to the directory containing the Markdown file (hence the `../scripts/`
+prefix).
 
 ### Tests
 

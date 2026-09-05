@@ -975,8 +975,6 @@ fi
 # and .corp overlays) as the source. Keeping ~/.agents/skills and
 # ~/.claude/skills empty prevents every project from seeing every skill.
 
-# Warn (but do not fail) if any generated command-index blocks have drifted
-# from their scripts' --help output.
 if exists agy || exists claude || is_codex_agent; then
 
   heading "agent CLIs"
@@ -991,14 +989,6 @@ if exists agy || exists claude || is_codex_agent; then
     x codex update || echo "warning: codex update failed" >&2
   fi
 
-fi
-
-if command -v python3 >/dev/null 2>&1; then
-  heading "command index drift"
-  if ! (cd "$SRCDIR" && bin/command-index-sync --check --all); then
-    echo "warning: generated command-index blocks are stale"
-    echo "hint: (cd $SRCDIR && bin/command-index-sync --all)"
-  fi
 fi
 
 if [ -x "$DSTDIR/.private/update" ]; then
