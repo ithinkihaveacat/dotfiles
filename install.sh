@@ -425,10 +425,6 @@ case "$PLATFORM" in
 
     "$SRCDIR/etc/macos/apply-defaults"
 
-    if [ ! -e "$HOME/iCloud" ] && [ -d "$HOME/Library/Mobile Documents/com~apple~CloudDocs" ]; then
-      x ln -s "$HOME/Library/Mobile Documents/com~apple~CloudDocs" "$HOME/iCloud"
-    fi
-
     # https://github.com/altercation/ethanschoonover.com/tree/master/projects/solarized/apple-colorpalette-solarized
     solarized_clr=$(overlay_path "etc/macos/Solarized.clr") || solarized_clr=""
     if [ -n "$solarized_clr" ]; then
