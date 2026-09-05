@@ -28,9 +28,9 @@
 ## Maintenance
 
 The `Help` sections below are generated from each script's `--help` output by
-`command-index-sync` (in the coding-standards skill). Do not edit the fenced
+`command-index-format` (in the coding-standards skill). Do not edit the fenced
 blocks between `<!-- generated: ... -->` markers by hand: change the script's
-`usage()` text instead, then run `command-index-sync` on this file.
+`usage()` text instead, then run `command-index-format` on this file.
 
 ______________________________________________________________________
 

@@ -163,17 +163,17 @@ script's `--help` output, delimited by marker comments:
 ```
 
 Never edit the content between these markers by hand: it is overwritten by
-`bin/command-index-sync`. The script's `usage()`/help text is the single source
-of truth.
+`bin/command-index-format`. The script's `usage()`/help text is the single
+source of truth.
 
 After changing any script's interface or help text, refresh the generated
 blocks:
 
 ```bash
-bin/command-index-sync --all
+bin/command-index-format --all
 ```
 
-CI runs `command-index-sync --check --all` to verify that generated blocks are
+CI runs `command-index-format --check --all` to verify that generated blocks are
 up to date. The command named in a marker is executed with its working directory
 set to the directory containing the Markdown file (hence the `../scripts/`
 prefix).

@@ -28,7 +28,7 @@ writing to `stdout` when no arguments are provided.
   Fish scripts use `fish_indent`).
 - **`scripts/markdown-format`**: Format Markdown files using `mdformat` with GFM
   and frontmatter preservation (supports `--check` for drift detection).
-- **`scripts/command-index-sync`**: Refresh generated `--help` blocks in
+- **`scripts/command-index-format`**: Refresh generated `--help` blocks in
   `command-index.md` files (marker comments; supports `--check` and `--all`).
 - **`scripts/kotlin-format`**: Format Kotlin files using `ktfmt` with kotlinlang
   style.

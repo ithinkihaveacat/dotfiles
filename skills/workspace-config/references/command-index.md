@@ -12,7 +12,7 @@
 ## hook
 
 The block below is `../../../bin/hook --help`, kept in sync by
-`command-index-sync`.
+`command-index-format`.
 
 <!-- generated: ../../../bin/hook --help -->
 
@@ -85,7 +85,8 @@ which profile is at fault.
 
 ## skill
 
-The block below is `scripts/skill --help`, kept in sync by `command-index-sync`.
+The block below is `scripts/skill --help`, kept in sync by
+`command-index-format`.
 
 <!-- generated: ../scripts/skill --help -->
 
@@ -136,7 +137,7 @@ Environment:
 ## permission
 
 The block below is `scripts/permission --help`, kept in sync by
-`command-index-sync`.
+`command-index-format`.
 
 <!-- generated: ../scripts/permission --help -->
 
@@ -173,7 +174,8 @@ Agents:
 
 ## envrc
 
-The block below is `scripts/envrc --help`, kept in sync by `command-index-sync`.
+The block below is `scripts/envrc --help`, kept in sync by
+`command-index-format`.
 
 <!-- generated: ../scripts/envrc --help -->
 
