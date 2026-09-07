@@ -1,7 +1,7 @@
 # completions for adb-android-serial function
 
 function __fish_adb_android_serial_models
-    if not adb get-state >/dev/null 2>&1
+    if not type -q adb
         return 1
     end
     adb devices -l | tail -n +2 | command grep -o 'model:[^ ]*' | command sed 's/model://'

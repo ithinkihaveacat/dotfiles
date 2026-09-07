@@ -1,6 +1,6 @@
 # Fish completion for adb-screenshot
 
-complete -c adb-screenshot -s s -l serial -r -d 'Target device serial'
+complete -c adb-screenshot -s s -l serial -x -a '(__fish_android_devices)' -d 'Target device serial'
 complete -c adb-screenshot -s o -l output -r -F -d 'The path to save the screenshot to'
 complete -c adb-screenshot -l preview -d 'Display a preview of the image using chafa'
 complete -c adb-screenshot -l no-preview -d 'Disable preview (default)'

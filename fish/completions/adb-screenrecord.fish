@@ -1,6 +1,6 @@
 # completions for adb-screenrecord
 
-complete -c adb-screenrecord -s s -l serial -r -d 'Target device serial'
+complete -c adb-screenrecord -s s -l serial -x -a '(__fish_android_devices)' -d 'Target device serial'
 complete -c adb-screenrecord -s o -l output -r -F -d 'The path to save the screen recording to'
 complete -c adb-screenrecord -s t -l duration -r -d 'Max recording duration in seconds'
 complete -c adb-screenrecord -l time-limit -r -d 'Max recording duration in seconds'
