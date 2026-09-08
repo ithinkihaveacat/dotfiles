@@ -30,6 +30,11 @@ import mdformat
 from ruamel.yaml import YAML
 from ruamel.yaml.representer import Representer, RoundTripRepresenter
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+import harbor  # noqa: E402
+
 BEGIN = "<!-- taskgo:begin -->"
 END = "<!-- taskgo:end -->"
 CANONICAL_URL = "https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo"
@@ -2529,6 +2534,131 @@ def cmd_commit(
     run_git(["commit", "--no-verify", "--no-gpg-sign", "-F", "-"], input_data=msg)
 
 
+def cmd_harbor(args: argparse.Namespace) -> None:
+    """Dispatches Harbor execution lifecycle subcommands: prepare, run, verify."""
+    subcmd = getattr(args, "harbor_command", None)
+    if not subcmd:
+        print(
+            "Usage: taskgo harbor COMMAND [OPTIONS]\n\n"
+            "Prepare, execute, and verify unattended trials with Harbor.\n\n"
+            "Commands:\n"
+            "  prepare [TASK_ID] [OPTIONS]   Package an unattended trial directory\n"
+            "  run [TARGET] [OPTIONS]        Execute a prepared trial with Harbor\n"
+            "  verify [OPTIONS]              Evaluate candidate artifacts and build acceptance packet\n\n"
+            "Run 'taskgo harbor COMMAND --help' for details on a specific command."
+        )
+        sys.exit(0)
+
+    if subcmd == "prepare":
+        task_query = args.task or getattr(args, "task_id", None)
+        task_id = getattr(args, "task_id", None)
+        task_title = getattr(args, "task_title", None)
+        instruction = getattr(args, "instruction", None)
+
+        inst_file = getattr(args, "instruction_file", None)
+        if inst_file:
+            if not inst_file.is_file():
+                die_scoped(f"instruction file not found: {inst_file}")
+            instruction = inst_file.read_text(encoding="utf-8")
+
+        task_slug = None
+        if task_query:
+            try:
+                root = get_repo_root()
+                task_path = resolve_target(root, task_query)
+                content = task_path.read_text(encoding="utf-8")
+                fm, body = parse_frontmatter(content)
+                if not task_id:
+                    task_id = fm.get("id", task_query)
+                if not task_title:
+                    task_title = extract_title(content)
+                task_slug = task_path.stem
+                if task_id and task_slug.startswith(f"{task_id}-"):
+                    task_slug = task_slug.removeprefix(f"{task_id}-")
+
+                if not instruction:
+                    instruction = (
+                        f"Task: {task_title} ({task_id})\n\n"
+                        f"{body.strip()}\n\n"
+                        "Instructions:\n"
+                        "1. Review the files in /app/workspace.\n"
+                        "2. Implement the required changes strictly confined to declared workspace files.\n"
+                        "3. Write /app/completion.json containing:\n"
+                        '   {"status":"completed","skill_used":"none","changed_files":[]}\n'
+                        "4. Finish execution."
+                    )
+            except SystemExit:
+                task_slug = task_query
+
+        if not task_slug:
+            task_slug = "trial-task"
+
+        artifacts = getattr(args, "artifacts", None) or None
+        skills = getattr(args, "skills", None) or None
+        allowed_hosts = getattr(args, "allowed_hosts", None) or None
+
+        harbor.prepare_trial(
+            output_dir=args.output_dir,
+            task_name=task_slug,
+            task_id=task_id,
+            task_title=task_title,
+            instruction=instruction,
+            workspace_dir=getattr(args, "workspace", None),
+            dockerfile=getattr(args, "dockerfile", None),
+            artifacts=artifacts,
+            skills=skills,
+            model=getattr(args, "model", "google/gemini-3.6-flash-low"),
+            agent=getattr(args, "agent", "antigravity-cli"),
+            agent_version=getattr(args, "agent_version", "1.1.25"),
+            timeout_sec=getattr(args, "timeout", 60.0),
+            setup_timeout_sec=getattr(args, "setup_timeout", 180.0),
+            allowed_hosts=allowed_hosts,
+            dry_run=getattr(args, "dry_run", False),
+        )
+
+        if getattr(args, "dry_run", False):
+            print(
+                _tagged(
+                    f"[INFO]  Dry run: would package trial '{task_slug}' in {args.output_dir}"
+                )
+            )
+        else:
+            print(_tagged(f"[INFO]  Packaged harbor trial in {args.output_dir}"))
+        sys.exit(0)
+
+    elif subcmd == "run":
+        root = None
+        try:
+            root = get_repo_root()
+        except SystemExit:
+            pass
+
+        code = harbor.run_trial(
+            target=args.target,
+            harbor_bin=getattr(args, "harbor_bin", None),
+            print_config=getattr(args, "print_config", False),
+            dry_run=getattr(args, "dry_run", False),
+            output_dir=getattr(args, "output_dir", None),
+            control_root=root,
+        )
+        sys.exit(code)
+
+    elif subcmd == "verify":
+        code = harbor.verify_candidate(
+            base_file=args.base_file,
+            candidate_file=args.candidate_file,
+            output_dir=args.output_dir,
+            patch_file=getattr(args, "patch_file", None),
+            task_id=getattr(args, "task_id", "TASK-HARBOR"),
+            task_title=getattr(args, "task_title", "Harbor Trial Candidate"),
+            completion_json=getattr(args, "completion_json", None),
+            result_json=getattr(args, "result_json", None),
+            tool_cmd=getattr(args, "tool_cmd", None),
+            as_json=getattr(args, "json", False),
+        )
+        sys.exit(code)
+
+
 def help_text() -> str:
     """Renders top-level help, including the resolved control repository root."""
     root_dir, source = resolve_root_candidate()
@@ -2549,6 +2679,7 @@ Commands:
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
+  harbor COMMAND [OPTIONS]         Prepare, execute, and verify unattended trials
 
 Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
@@ -2929,6 +3060,183 @@ than a few words.""",
         help="Active conversation or session ID",
     )
 
+    # harbor
+    p_harbor = subparsers.add_parser(
+        "harbor",
+        help="Prepare, execute, and verify unattended trials with Harbor",
+        description="Prepare, execute, and verify unattended trials with Harbor.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Commands:
+  prepare [TASK_ID] [OPTIONS]   Package an unattended trial directory
+  run [TARGET] [OPTIONS]        Execute a prepared trial with Harbor
+  verify [OPTIONS]              Evaluate candidate artifacts and build acceptance packet
+
+Examples:
+  taskgo harbor prepare TASK-12345 -o ./trial
+  taskgo harbor run ./trial --print-config
+  taskgo harbor verify --base-file orig.json --candidate-file cand.json -o ./packet""",
+    )
+    p_harbor_subs = p_harbor.add_subparsers(dest="harbor_command", metavar="COMMAND")
+
+    # harbor prepare
+    p_h_prep = p_harbor_subs.add_parser(
+        "prepare",
+        help="Package an unattended trial directory for Harbor execution",
+        description="Package an unattended trial directory for Harbor execution.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_h_prep.add_argument(
+        "task", nargs="?", help="Task ID or slug from control repository"
+    )
+    p_h_prep.add_argument(
+        "-o",
+        "--output",
+        dest="output_dir",
+        required=True,
+        type=Path,
+        help="Directory to create trial package in",
+    )
+    p_h_prep.add_argument("--task-id", help="Explicit task identifier")
+    p_h_prep.add_argument("--task-title", help="Explicit task title")
+    p_h_prep.add_argument("--instruction", help="Instruction text for agent")
+    p_h_prep.add_argument(
+        "--instruction-file", type=Path, help="Read instruction from file"
+    )
+    p_h_prep.add_argument(
+        "--workspace", type=Path, help="Host workspace directory with initial files"
+    )
+    p_h_prep.add_argument("--dockerfile", type=Path, help="Custom Dockerfile to use")
+    p_h_prep.add_argument(
+        "--artifacts",
+        action="append",
+        default=[],
+        help="Declared container artifacts to collect",
+    )
+    p_h_prep.add_argument(
+        "--skills",
+        action="append",
+        default=[],
+        help="Skills to bundle and inject (e.g. coding-standards)",
+    )
+    p_h_prep.add_argument(
+        "--model",
+        default="google/gemini-3.6-flash-low",
+        help="Model name (default: google/gemini-3.6-flash-low)",
+    )
+    p_h_prep.add_argument(
+        "--agent",
+        default="antigravity-cli",
+        help="Agent name (default: antigravity-cli)",
+    )
+    p_h_prep.add_argument(
+        "--agent-version", default="1.1.25", help="Agent version (default: 1.1.25)"
+    )
+    p_h_prep.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="Agent timeout in seconds (default: 60.0)",
+    )
+    p_h_prep.add_argument(
+        "--setup-timeout",
+        type=float,
+        default=180.0,
+        help="Setup/build timeout in seconds (default: 180.0)",
+    )
+    p_h_prep.add_argument(
+        "--allowed-hosts",
+        action="append",
+        default=[],
+        help="Allowed network egress hosts during agent phase",
+    )
+    p_h_prep.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview generated trial files without writing to disk",
+    )
+
+    # harbor run
+    p_h_run = p_harbor_subs.add_parser(
+        "run",
+        help="Execute a prepared trial with Harbor",
+        description="Execute a prepared trial with Harbor.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_h_run.add_argument(
+        "target",
+        nargs="?",
+        default=".",
+        type=Path,
+        help="Trial package directory or job.json (default: .)",
+    )
+    p_h_run.add_argument("--harbor-bin", type=Path, help="Path to harbor executable")
+    p_h_run.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print resolved Harbor configuration and exit without running",
+    )
+    p_h_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Verify preflights and configuration without executing containers",
+    )
+    p_h_run.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        help="Collect results and artifacts into directory upon completion",
+    )
+
+    # harbor verify
+    p_h_ver = p_harbor_subs.add_parser(
+        "verify",
+        help="Evaluate candidate artifacts and build Candidate Acceptance Packet",
+        description="Evaluate candidate artifacts and build Candidate Acceptance Packet.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_h_ver.add_argument(
+        "--base-file",
+        required=True,
+        type=Path,
+        help="Path to original base file before changes",
+    )
+    p_h_ver.add_argument(
+        "--candidate-file",
+        required=True,
+        type=Path,
+        help="Path to candidate output file produced by worker",
+    )
+    p_h_ver.add_argument(
+        "-o",
+        "--output",
+        "--output-dir",
+        dest="output_dir",
+        required=True,
+        type=Path,
+        help="Directory to write acceptance packet files",
+    )
+    p_h_ver.add_argument(
+        "--patch-file",
+        type=Path,
+        help="Unified diff patch file (auto-generated if omitted)",
+    )
+    p_h_ver.add_argument("--task-id", default="TASK-HARBOR", help="Task identifier")
+    p_h_ver.add_argument(
+        "--task-title", default="Harbor Trial Candidate", help="Task title"
+    )
+    p_h_ver.add_argument(
+        "--completion-json", type=Path, help="Path to worker completion.json"
+    )
+    p_h_ver.add_argument(
+        "--result-json", type=Path, help="Path to Harbor trial result.json"
+    )
+    p_h_ver.add_argument(
+        "--tool-cmd", help="Host command to rerun deterministic transformation"
+    )
+    p_h_ver.add_argument(
+        "--json", action="store_true", help="Emit acceptance packet JSON to stdout"
+    )
+
     return parser
 
 
@@ -3028,6 +3336,8 @@ def main(argv: list[str] | None = None) -> None:
             refs=args.refs,
             conv=getattr(args, "conv", None),
         )
+    elif args.command == "harbor":
+        cmd_harbor(args)
     else:
         print(help_text())
         sys.exit(0)

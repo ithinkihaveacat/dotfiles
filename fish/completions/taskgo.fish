@@ -40,6 +40,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadat
 complete -f -c taskgo -n __fish_use_subcommand -a history -d 'Show frontmatter history'
 complete -f -c taskgo -n __fish_use_subcommand -a checkpoint -d 'Commit an authorized tracker checkpoint'
 complete -f -c taskgo -n __fish_use_subcommand -a commit -d 'Commit a logical transition'
+complete -f -c taskgo -n __fish_use_subcommand -a harbor -d 'Prepare, execute, and verify unattended trials with Harbor'
 
 # Global flags
 complete -c taskgo -n __fish_use_subcommand -l root -s R -r -d 'Control repository (default: ~/.projects)'
@@ -102,3 +103,45 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s C -l conv -
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s r -l ref -x -d 'External reference URL/ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
+
+# harbor subcommands
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and not __fish_seen_subcommand_from prepare run verify' -a prepare -d 'Package an unattended trial directory'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and not __fish_seen_subcommand_from prepare run verify' -a run -d 'Execute a prepared trial with Harbor'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and not __fish_seen_subcommand_from prepare run verify' -a verify -d 'Verify candidate output and build acceptance packet'
+
+# harbor prepare options
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -s o -l output -r -d 'Directory to create trial package in'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -a '(__fish_taskgo_tasks)' -d 'Task ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l task-id -x -a '(__fish_taskgo_tasks)' -d 'Task ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l task-title -x -d 'Explicit task title'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l instruction -x -d 'Instruction prompt'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l instruction-file -r -d 'Read instruction from file'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l workspace -r -d 'Host workspace directory'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l dockerfile -r -d 'Custom Dockerfile'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l artifacts -x -d 'Declared container artifact'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l skills -x -d 'Skill to bundle and inject'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l model -x -d 'Model name'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l agent -x -d 'Agent name'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l agent-version -x -d 'Agent version'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l timeout -x -d 'Agent timeout in seconds'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l setup-timeout -x -d 'Setup timeout in seconds'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l allowed-hosts -x -d 'Allowed network egress host'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from prepare' -l dry-run -d 'Preview without creating files'
+
+# harbor run options
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from run' -l harbor-bin -r -d 'Path to harbor executable'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from run' -l print-config -d 'Print resolved Harbor configuration and exit'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from run' -l dry-run -d 'Validate preflights and configuration'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from run' -s o -l output-dir -r -d 'Collect results into directory'
+
+# harbor verify options
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l base-file -r -d 'Path to original base file'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l candidate-file -r -d 'Path to candidate output file'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -s o -l output -l output-dir -r -d 'Output directory for acceptance packet'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l patch-file -r -d 'Unified diff patch file'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l task-id -x -a '(__fish_taskgo_tasks)' -d 'Task ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l task-title -x -d 'Task title'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l completion-json -r -d 'Worker completion.json'
+complete -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l result-json -r -d 'Trial result.json'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l tool-cmd -x -d 'Host command to rerun verification'
+complete -f -c taskgo -n '__fish_seen_subcommand_from harbor; and __fish_seen_subcommand_from verify' -l json -d 'Emit acceptance packet JSON'

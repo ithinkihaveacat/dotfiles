@@ -453,6 +453,57 @@ execution:
    and internal reasoning belong strictly in the out-of-band chat response.
    Private metadata must never leak into artifact commits.
 
+### Harbor Task Execution
+
+When delegating tasks to autonomous, unattended agent workers running in
+isolated environments, follow the **Harbor lifecycle** using the `taskgo harbor`
+command namespace (`prepare`, `run`, `verify`).
+
+Unattended execution operates under a four-layer evaluation architecture:
+
+1. **Layer A: Worker Assertions (Untrusted):** Self-reported claims
+   (`completion.json`, exit codes, step trajectories) are untrusted and confer
+   zero integration authority.
+1. **Layer B: Independent Verification (Host Rerun):** Controller re-evaluates
+   SHA-256 hashes, runs `patch --dry-run` to test applicability, verifies valid
+   syntax, checks blast radius (no out-of-scope files touched), and re-executes
+   repo-native tools/tests.
+1. **Layer C: Review Judgments:** Synthesizes verification results against task
+   requirements and constraints, producing categorized findings (`BLOCKER`,
+   `WARN`, `INFO`).
+1. **Layer D: Human Acceptance Boundary:** Automated systems compile a
+   self-contained **Candidate Acceptance Packet** (`acceptance-packet.md` and
+   `acceptance-packet.json`) enabling one-click human review. Automatic branch
+   merging or tracker advancement is strictly prohibited; human acceptance is
+   required.
+
+#### Preflight & Installation
+
+- **Harbor CLI:** Install version 0.22.0 via `uv tool install harbor==0.22.0`.
+- **Docker Daemon:** Ensure the local Docker daemon is running (`docker info`).
+- **Preflight Verification:** Validate configuration and runtime dependencies
+  offline without running containers: `taskgo harbor run ./trial --dry-run` or
+  `--print-config`.
+
+#### Workflow
+
+1. **Prepare (`taskgo harbor prepare`):** Packages an isolated trial directory
+   containing `job.json`, `tasks/<slug>/task.toml`, `instruction.md`,
+   `Dockerfile`, initial `workspace/`, and optional bundled `skills/`. Enforces
+   bounded execution (1 attempt, 0 retries, timeouts, and network allowlists).
+1. **Execute (`taskgo harbor run`):** Runs the trial through Harbor, verifies
+   preflights, enforces egress allowlists, deletes ephemeral containers upon
+   teardown, and collects trial artifacts to an output directory.
+1. **Verify (`taskgo harbor verify`):** Deterministically evaluates candidate
+   output against base files without calling an LLM: verifies clean patch
+   application, checks syntax, reruns deterministic host tools (`--tool-cmd`),
+   and generates the Candidate Acceptance Packet.
+1. **Repair Bounding:** Bounded to at most 1 repair attempt. Failed negative
+   gates terminate the loop immediately with `REJECT_OR_REPAIR`.
+
+See [`references/harbor.md`](references/harbor.md) for full architectural
+details, evaluation layers, and preflight configurations.
+
 ### Activity Reporting
 
 When requested to produce an activity report (e.g. "produce an activity report
@@ -493,6 +544,9 @@ taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
+taskgo harbor prepare [TASK_ID] -o DIR [--instruction TEXT] [--workspace DIR] [--skills SKILL...] [--dry-run]
+taskgo harbor run [TARGET] [--print-config] [--dry-run] [-o DIR]
+taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR [--tool-cmd CMD] [--json]
 ```
 
 `create` is the atomic task creation command: it allocates a unique ID, writes
@@ -501,6 +555,13 @@ the initial task record, synchronizes `STATUS.md`, and when the
 automatically. Use `--slug` to name the task file (see "Tasks" above),
 `--no-commit` to keep the created task uncommitted in the working tree, or
 `--dry-run` to preview the task path without creating files.
+
+`harbor` commands orchestrate unattended task execution through Harbor.
+`prepare` packages a task into a self-contained trial bundle (with `job.json`,
+`task.toml`, `instruction.md`, Dockerfile, workspace fixtures, and bundled
+skills); `run` executes the trial with preflight checks and network bounds;
+`verify` runs host-side independent checks across candidate outputs and compiles
+the Candidate Acceptance Packet for human sign-off.
 
 `update --slug` renames the task file in place, keeping its ID prefix. The
 rename is left uncommitted (as with every other `update` edit); commit it with
@@ -546,6 +607,9 @@ reconstructible states.
 - **[Model & Architecture](references/model.md)** — Context economics, project
   scaling spectrum (Scale 0/1/2), repository boundaries, and Unified AuditEngine
   rationale (`doctor` and `fix`).
+- **[Harbor Lifecycle](references/harbor.md)** — Unattended execution
+  architecture, the four evaluation layers, preflights, candidate verification,
+  and Candidate Acceptance Packets.
 - **[Activity Reports](references/activity-reports.md)** — Guidelines,
   transformation principles, downstream lifecycle tracking, and output templates
   for outward-facing reports (weekly/monthly/quarterly).
