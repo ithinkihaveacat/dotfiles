@@ -85,6 +85,15 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
    on demand. Artifact path references prefer `$HOME`-relative form (`~/...`) to
    remain portable across machines (list multiple checkout paths when locations
    vary per environment).
+1. **Strict Link Portability & Zero `file://` URLs:** Markdown links must remain
+   portable across machines and web viewers:
+   - **Internal links:** Use standard relative Markdown links (e.g.
+     `[doc](docs/guide.md)`). Never use `file://`, absolute host paths, or
+     traversals escaping the repository root.
+   - **External references:** Use network URLs (`https://` or `http://` — PRs,
+     issue trackers, web code viewers). Never link to external local filesystem
+     paths or use `file://` URIs. Cite external paths without web viewers as
+     unlinked monospace text (e.g. `src/utils/parser.py`).
 1. `STATUS.md` is the self-contained projection of current operational state:
    reading `STATUS.md` directly answers status, recent progress, and immediate
    next steps without traversing individual task files. Synchronize generated
@@ -236,8 +245,9 @@ conversations:
 ## Outcome
 Summary of what shipped, where it lives, and explicit verdicts. Completed in
 [<conversation-id>](conversation://<conversation-id>).
-- **External deliverables & links:** Cite direct canonical URLs (PRs, CLs, issue
-  tickets, published docs/dashboards) alongside any local repository commits.
+- **External deliverables & links:** Cite direct canonical web URLs (PRs, issue
+  tickets, web code viewers, published docs) rather than local filesystem paths.
+  Never use `file://` links.
 - **Triage verdicts:** When triaging claims or defects, record an explicit
   terminal verdict (e.g. `Verified Bug`, `Tooling Discrepancy`, `Working As Intended (WAI)`,
   `Invalid/Disproven`) to prevent ambiguous summarization.
