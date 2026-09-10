@@ -15,9 +15,10 @@ Agents MUST execute the following before generating the report:
   generate reports solely from task titles or `STATUS.md` summaries.
 - **Strict Redaction:** Never include API keys or unreleased embargoed product
   names.
-- **Abstract Private Identifiers:** Strip all `conversation://` URLs, local
-  branch names, and internal repository file paths. Link exclusively to
-  published external artifacts (PRs, issues, dashboards).
+- **Abstract Private Identifiers:** Strip all private conversation and session
+  URLs (`<agent>://`, `conversation://`), local branch names, and internal
+  repository file paths. Link exclusively to published external artifacts (PRs,
+  issues, dashboards).
 - **Draft Discussion Notes:** Append brief decision notes explaining thematic
   grouping, inclusions/omissions, and downstream verification rationale.
 

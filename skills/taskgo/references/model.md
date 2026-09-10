@@ -103,7 +103,7 @@ unhyphenated verbs:
 - `taskgo history PATH_OR_TASK_ID [FIELD]`: Derive state transitions from Git
   ancestry.
 - `taskgo checkpoint TASK_ID SUBJECT [...]`: Guarded checkpoint transition
-  commit (enriches task frontmatter with `<agent>://<id> (<subject>)`).
+  commit.
 - `taskgo commit SUBJECT [...]`: Commit logical transition.
 
 ## Root Landing Page (`README.md`)

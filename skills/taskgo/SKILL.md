@@ -237,7 +237,7 @@ what was implemented and discovered:
 id: TASK-3A91F
 status: done
 conversations:
-  - <agent>://<conversation-id> (<subject>)
+  - <agent>://<conversation-id>
 ---
 
 # Title as imperative verb phrase
@@ -288,7 +288,7 @@ Structure:
 - `## Summary`: Human/agent prose describing the current situation and the key
   outcome/findings of the most recently completed task(s). Cite the active
   session using full identifier syntax:
-  `Active session ([<conversation-id>](conversation://<conversation-id>)): ...`.
+  `Active session ([<conversation-id>](<agent>://<conversation-id>)): ...`.
   "Conversation ID" refers to the globally unique session, conversation, or
   thread identifier used by the host agent platform (e.g. at least 16
   characters). Do not abbreviate the identifier in the link text or target, and
@@ -340,8 +340,7 @@ After meaningful work:
 
 1. Rewrite specific files to the new current truth.
 1. Update affected task record(s) (e.g. mark `done` with `## Outcome` and
-   `## Findings`, recording
-   `[<conversation-id>](conversation://<conversation-id>)`).
+   `## Findings`, recording `[<conversation-id>](<agent>://<conversation-id>)`).
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
    session link, and recent outcome; `## Next` reflects immediate next actions);
    `PLAN.md` only if intended direction changed.
@@ -363,10 +362,9 @@ information or context from your current session. Both the task tracker and any
 artifacts (including code repos) must reflect this state. Ensure that:
 
 1. Handoff-ready tracker: state, findings, decisions, and full
-   session/conversation IDs
-   (`[<conversation-id>](conversation://<conversation-id>)`) needed to resume
-   are fully written into the task/STATUS/PLAN, not left only in the
-   conversation.
+   session/conversation IDs (`[<conversation-id>](<agent>://<conversation-id>)`)
+   needed to resume are fully written into the task/STATUS/PLAN, not left only
+   in the conversation.
 1. Handoff-ready artifacts: tracker claims match actual artifact-repo state
    (e.g. a task is never `done` while its artifact-repo commit remains
    uncommitted).
@@ -455,8 +453,7 @@ execution:
    permanently blocked states exclusively via chat response, including:
    - The verbatim Task ID.
    - The exact integration target (branch name, PR URL, or commit hashes).
-   - Its active session record or link (e.g.
-     `conversation://<conversation-id>`).
+   - Its active session record or link (e.g. `<agent>://<conversation-id>`).
    - Key technical findings or architectural trade-offs.
 1. **Strict Data Segregation:** Explicitly warn the worker: The Task ID belongs
    in public commit trailers. Branch references, conversation links, telemetry,
@@ -529,9 +526,10 @@ the internal operational ledger into an outward-facing impact summary:
 1. **Apply Guidelines:** Follow the transformation principles, sub-linear
    scaling rules, and Standard Output Template defined in
    [`references/activity-reports.md`](references/activity-reports.md).
-1. **Enforce Segregation:** Strip private `conversation://` URLs, local branch
-   names, and internal repository file paths from the final report. Link
-   explicitly to published external artifacts (PRs, issues, dashboards).
+1. **Enforce Segregation:** Strip private conversation and agent session URLs
+   (`<agent>://`, `conversation://`), local branch names, and internal
+   repository file paths from the final report. Link explicitly to published
+   external artifacts (PRs, issues, dashboards).
 
 ## CLI
 

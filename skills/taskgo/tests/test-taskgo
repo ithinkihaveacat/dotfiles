@@ -8,7 +8,8 @@ unset NO_COLOR FORCE_COLOR
 # Isolate test suite from ambient agent runtime variables.
 unset AI_AGENT INVOKER_INFO_NAME
 unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
-unset CLAUDE_SESSION_ID CLAUDE_PROJECT_ID OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
 unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
 
 export GIT_AUTHOR_NAME="Taskgo Test"
@@ -1913,7 +1914,7 @@ else
   echo 'not ok 106 - doctor reports [FAIL] and exits non-zero on invalid YAML frontmatter syntax'
 fi
 
-# Test 107: agent runtime variables set scheme and checkpoint blends subject as parenthetical annotation
+# Test 107: Claude Code env vars map to canonical claude scheme without annotations
 AGENT_REPO="$TEST_ROOT/agent-repo"
 mkdir -p "$AGENT_REPO/proj/tasks"
 git -C "$AGENT_REPO" init -q
@@ -1939,32 +1940,34 @@ EOF
 git -C "$AGENT_REPO" add .
 git -C "$AGENT_REPO" commit -q -m "initial agent task"
 printf '\nNew content\n' >>"$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md"
-(AI_AGENT=jetski ANTIGRAVITY_CONVERSATION_ID="11112222-3333-4444-5555-666677778888" "$BIN" --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): diagnose runner timeouts" --all)
+(AI_AGENT="claude-code_2-1-267_agent" CLAUDE_CODE_SESSION_ID="11112222-3333-4444-5555-666677778888" "$BIN" --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): diagnose runner timeouts" --all)
 AGENT_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
 AGENT_LOG="$(git -C "$AGENT_REPO" log -1 --pretty=%B)"
-if echo "$AGENT_FM" | grep -q 'jetski://11112222-3333-4444-5555-666677778888 (diagnose runner timeouts)' && \
-   echo "$AGENT_LOG" | grep -q "Conversation: jetski://11112222-3333-4444-5555-666677778888"; then
-  echo 'ok 107 - agent runtime variables set scheme and checkpoint blends subject as parenthetical annotation'
+if echo "$AGENT_FM" | grep -q 'claude://11112222-3333-4444-5555-666677778888' && \
+   ! echo "$AGENT_FM" | grep -q '(' && \
+   ! echo "$AGENT_FM" | grep -q 'claude-code' && \
+   echo "$AGENT_LOG" | grep -q "Conversation: claude://11112222-3333-4444-5555-666677778888"; then
+  echo 'ok 107 - Claude Code env vars map to canonical claude scheme without annotations'
 else
-  echo 'not ok 107 - agent runtime variables set scheme and checkpoint blends subject as parenthetical annotation'
+  echo 'not ok 107 - Claude Code env vars map to canonical claude scheme without annotations'
 fi
 
-# Test 108: checkpoint preserves existing session annotation and novel sessions append
-printf '\nSecond content\n' >>"$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md"
-(AI_AGENT=jetski ANTIGRAVITY_CONVERSATION_ID="11112222-3333-4444-5555-666677778888" "$BIN" --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): second commit same session" --all)
-DEDUP_FM1="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
-printf '\nThird content\n' >>"$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md"
-(AI_AGENT=claude CLAUDE_SESSION_ID="99998888-7777-6666-5555-444433332222" "$BIN" --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): third commit new session" --all)
-DEDUP_FM2="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
-if echo "$DEDUP_FM1" | grep -q 'jetski://11112222-3333-4444-5555-666677778888 (diagnose runner timeouts)' && \
-   ! echo "$DEDUP_FM1" | grep -q 'second commit' && \
-   echo "$DEDUP_FM2" | grep -q 'claude://99998888-7777-6666-5555-444433332222 (third commit new session)'; then
-  echo 'ok 108 - checkpoint preserves existing session annotation and novel sessions append'
+# Test 108: aborted checkpoint does not mutate task file frontmatter
+BEFORE_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
+printf '\nUnlisted file\n' >"$AGENT_REPO/proj/unlisted.txt"
+set +e
+(AI_AGENT="jetski" JETSKI_CONVERSATION_ID="77778888-9999-0000-1111-222233334444" "$BIN" --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): will abort" 2>/dev/null)
+CP_EXIT=$?
+set -e
+AFTER_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
+rm -f "$AGENT_REPO/proj/unlisted.txt"
+if [ "$CP_EXIT" -ne 0 ] && [ "$BEFORE_FM" = "$AFTER_FM" ]; then
+  echo 'ok 108 - aborted checkpoint does not mutate task file frontmatter'
 else
-  echo 'not ok 108 - checkpoint preserves existing session annotation and novel sessions append'
+  echo 'not ok 108 - aborted checkpoint does not mutate task file frontmatter'
 fi
 
-# Test 109: doctor treats unparseable conversation entry as non-blocking INFO
+# Test 109: legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed
 TOL_REPO="$TEST_ROOT/tol-repo"
 mkdir -p "$TOL_REPO/proj/tasks"
 git -C "$TOL_REPO" init -q
@@ -1983,6 +1986,8 @@ cat <<'EOF' >"$TOL_REPO/proj/tasks/TASK-A1B2C-tol-task.md"
 id: TASK-A1B2C
 status: todo
 conversations:
+  - conversation://afb6245a-b957-464c-934e-9d09ee099e97
+  - https://claude.ai/code/session_1234567890abcdef
   - invalid-short
 ---
 
@@ -1993,8 +1998,17 @@ set +e
 TOL_DR_OUT="$("$BIN" --root "$TOL_REPO" doctor proj 2>&1)"
 TOL_EXIT=$?
 set -e
-if [ "$TOL_EXIT" -eq 0 ] && echo "$TOL_DR_OUT" | grep -q '\[INFO\]  proj/tasks/TASK-A1B2C-tol-task.md: unparseable conversation entry'; then
-  echo 'ok 109 - doctor treats unparseable conversation entry as non-blocking INFO'
+
+# Update TASK-A1B2C with active claude session matching the legacy session ID
+(AI_AGENT=claude "$BIN" --root "$TOL_REPO" update TASK-A1B2C --status in-progress --conv "afb6245a-b957-464c-934e-9d09ee099e97" >/dev/null)
+UPGRADED_FM="$(cat "$TOL_REPO/proj/tasks/TASK-A1B2C-tol-task.md")"
+
+if [ "$TOL_EXIT" -eq 0 ] && \
+   echo "$TOL_DR_OUT" | grep -q '\[INFO\]  proj/tasks/TASK-A1B2C-tol-task.md: unparseable conversation entry' && \
+   ! echo "$TOL_DR_OUT" | grep -q 'claude.ai' && \
+   echo "$UPGRADED_FM" | grep -q 'claude://afb6245a-b957-464c-934e-9d09ee099e97' && \
+   ! echo "$UPGRADED_FM" | grep -q 'conversation://afb6245a-b957-464c-934e-9d09ee099e97'; then
+  echo 'ok 109 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
 else
-  echo 'not ok 109 - doctor treats unparseable conversation entry as non-blocking INFO'
+  echo 'not ok 109 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
 fi
