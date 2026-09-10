@@ -31,7 +31,6 @@ complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List plugin-provide
 complete -f -c skill -n __fish_use_subcommand -a resolve -d 'Print source path for a name'
 complete -f -c skill -n __fish_use_subcommand -a apply -d 'Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS'
 complete -f -c skill -n __fish_use_subcommand -a bundle -d 'Package skills into an archive or directory'
-complete -f -c skill -n __fish_use_subcommand -a suggest -d 'Print advisory LLM skill recommendations'
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Diagnose drift between desired and on-disk skills'
 complete -f -c skill -n __fish_use_subcommand -a preflight -d 'Verify required skills and workspace health before agent launch'
 complete -f -c skill -n __fish_use_subcommand -a show -d 'Show details and metadata of a skill (alias: info)'
@@ -50,11 +49,7 @@ complete -c skill -n '__fish_seen_subcommand_from bundle' -s w -l workspace -d '
 complete -c skill -n '__fish_seen_subcommand_from bundle' -a - -d 'Read skill specs from stdin'
 
 # catalog
-complete -c skill -f -n '__fish_seen_subcommand_from catalog' -l json -d 'Emit JSON'
-
-# suggest
-complete -c skill -f -n '__fish_seen_subcommand_from suggest' -l json -d 'Emit JSON'
-complete -c skill -n '__fish_seen_subcommand_from suggest' -a - -d 'Read prompt from stdin'
+complete -c skill -f -n '__fish_seen_subcommand_from catalog' -l json -d 'Emit JSON (description, source, structure)'
 
 # resolve
 complete -f -c skill -n '__fish_seen_subcommand_from resolve' -a '(__fish_skill_catalog)' -d 'Catalog skill'

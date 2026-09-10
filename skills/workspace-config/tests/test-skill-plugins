@@ -15,7 +15,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..20"
+echo "1..24"
 
 # Test 1: add bogus-skill-name reports unknown skill (non-zero exit).
 cd "$TMPDIR"
@@ -369,3 +369,77 @@ else
   echo "not ok 20 - [Android plugin] failed to resolve nested android skills: ${out:-} / ${out2:-}"
 fi
 rm -f "${XDG_CONFIG_HOME}/skill/plugins/20_android.py"
+
+# Test 21: catalog --json profiles a local skill's structure -- the fields an
+# agent surveys candidates with, so it never needs one 'info' call per skill.
+STRUCT_DIR="${TMPDIR}/struct-src"
+mkdir -p "${STRUCT_DIR}/struct-skill/scripts" \
+  "${STRUCT_DIR}/struct-skill/references" "${STRUCT_DIR}/struct-skill/tests"
+printf -- '---\nname: struct-skill\ndescription: Structured sample\n---\nbody\n' \
+  >"${STRUCT_DIR}/struct-skill/SKILL.md"
+printf '#!/bin/sh\n' >"${STRUCT_DIR}/struct-skill/scripts/do-thing"
+printf 'ref one\n' >"${STRUCT_DIR}/struct-skill/references/one.md"
+printf 'ref two\n' >"${STRUCT_DIR}/struct-skill/references/two.md"
+printf 'test\n' >"${STRUCT_DIR}/struct-skill/tests/test-do-thing"
+cj=$(SKILL_SOURCE_DIRS="${STRUCT_DIR}" AGENT_OFFLINE=1 "${SCRIPT}" catalog --json 2>/dev/null)
+if [ "$(catalog_field "$cj" local:struct-skill description)" = "Structured sample" ] &&
+  [ "$(catalog_field "$cj" local:struct-skill status)" = "local" ] &&
+  [ "$(catalog_field "$cj" local:struct-skill scripts)" = "1" ] &&
+  [ "$(catalog_field "$cj" local:struct-skill references)" = "2" ] &&
+  [ "$(catalog_field "$cj" local:struct-skill tests)" = "1" ] &&
+  [ "$(catalog_field "$cj" local:struct-skill file_count)" = "5" ] &&
+  [ "$(catalog_field "$cj" local:struct-skill size_bytes)" -gt 0 ]; then
+  echo "ok 21 - [Catalog JSON] local skill carries its structural profile"
+else
+  echo "not ok 21 - [Catalog JSON] unexpected structure fields: $cj"
+fi
+
+# Test 22: an undownloaded remote skill lists from its cached frontmatter alone
+# -- description present, structure null, status 'remote' -- and never downloads
+# the repository (asserted by running offline, where a fetch would be refused).
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_stub.py"
+def register(api):
+    api.register_skill("remote:stub-skill", {"repo": "owner/repo", "ref": "main", "subpath": "sub"})
+EOF
+STUB_CACHE="${XDG_CACHE_HOME}/skill/catalog/remote:stub-skill"
+mkdir -p "$STUB_CACHE"
+printf -- '---\nname: stub-skill\ndescription: Remote stub sample\n---\nbody\n' \
+  >"${STUB_CACHE}/SKILL.md"
+cj=$(SKILL_SOURCE_DIRS="${STRUCT_DIR}" AGENT_OFFLINE=1 "${SCRIPT}" catalog --json 2>/dev/null)
+if [ "$(catalog_field "$cj" remote:stub-skill description)" = "Remote stub sample" ] &&
+  [ "$(catalog_field "$cj" remote:stub-skill status)" = "remote" ] &&
+  [ "$(catalog_field "$cj" remote:stub-skill scripts)" = "null" ] &&
+  [ "$(catalog_field "$cj" remote:stub-skill file_count)" = "null" ] &&
+  [ "$(catalog_field "$cj" remote:stub-skill size_bytes)" = "null" ]; then
+  echo "ok 22 - [Catalog JSON] uncached remote skill lists as remote with null structure"
+else
+  echo "not ok 22 - [Catalog JSON] unexpected remote stub record: $cj"
+fi
+
+# Test 23: once the remote repository is in the cache, the same entry is
+# measured from disk and reported as 'cached' -- still without any network.
+STUB_REMOTE="${XDG_CACHE_HOME}/skill/remotes/owner/repo/main/sub"
+mkdir -p "${STUB_REMOTE}/scripts"
+printf -- '---\nname: stub-skill\ndescription: Remote stub sample\n---\nbody\n' \
+  >"${STUB_REMOTE}/SKILL.md"
+printf '#!/bin/sh\n' >"${STUB_REMOTE}/scripts/remote-thing"
+cj=$(SKILL_SOURCE_DIRS="${STRUCT_DIR}" AGENT_OFFLINE=1 "${SCRIPT}" catalog --json 2>/dev/null)
+if [ "$(catalog_field "$cj" remote:stub-skill status)" = "cached" ] &&
+  [ "$(catalog_field "$cj" remote:stub-skill scripts)" = "1" ] &&
+  [ "$(catalog_field "$cj" remote:stub-skill references)" = "0" ] &&
+  [ "$(catalog_field "$cj" remote:stub-skill file_count)" = "2" ]; then
+  echo "ok 23 - [Catalog JSON] downloaded remote skill is measured and marked cached"
+else
+  echo "not ok 23 - [Catalog JSON] unexpected cached remote record: $cj"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_stub.py"
+
+# Test 24: the tool is deterministic -- no LLM-backed 'suggest' subcommand, and
+# no third-party imports that would break a stdlib-only Python.
+if ! out=$("${SCRIPT}" suggest 2>&1) &&
+  printf '%s\n' "$out" | grep -q "unknown command 'suggest'" &&
+  ! grep -q "genai" "${SCRIPT}"; then
+  echo "ok 24 - [Determinism] no 'suggest' subcommand and no LLM dependency"
+else
+  echo "not ok 24 - [Determinism] suggest or an LLM dependency survives: ${out:-}"
+fi

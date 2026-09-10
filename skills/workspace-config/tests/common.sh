@@ -117,6 +117,29 @@ else:
 ' "$2"
 }
 
+# catalog_field JSONL NAME FIELD -- print one field of the `skill catalog --json`
+# record named NAME. The catalog emits JSON Lines (one object per skill), so it
+# needs its own reader rather than json_get. Prints "null" for a JSON null (an
+# unmeasured remote skill), "<absent>" if the record lacks the field, and
+# "<missing>" if no record carries that name.
+catalog_field() {
+  printf '%s' "$1" | python3 -c '
+import sys, json
+name, field = sys.argv[1], sys.argv[2]
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    d = json.loads(line)
+    if d["name"] == name:
+        v = d.get(field, "<absent>")
+        print("null" if v is None else v)
+        break
+else:
+    print("<missing>")
+' "$2" "$3"
+}
+
 # check_status JSON NAME -- print the status (OK/WARNING/ERROR) of the doctor
 # check named NAME, or "MISSING" if that check is absent from the report.
 check_status() {

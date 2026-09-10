@@ -1,9 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = [
-#   "google-genai",
-# ]
 # ///
 # Tests: skills/workspace-config/tests/
 
@@ -552,6 +549,26 @@ def get_catalog_dir() -> Path:
     return get_cache_dir() / "catalog"
 
 
+def remote_cache_dir(repo: str, ref: str, subpath: str | None) -> Path:
+    """Where fetch_github() keeps a remote skill's downloaded content."""
+    owner, reponame = repo.split("/", 1)
+    dest_base = get_cache_base() / owner / reponame / ref
+    return dest_base / subpath if subpath else dest_base
+
+
+def cached_remote_dir(entry: dict) -> Path | None:
+    """The already-downloaded directory for a remote catalog entry, if any.
+
+    Purely a disk lookup: it answers whether the content is in hand without
+    fetching anything, so a catalog listing stays offline-safe.
+    """
+    try:
+        target = remote_cache_dir(entry["repo"], entry["ref"], entry.get("subpath"))
+    except (KeyError, ValueError):
+        return None
+    return target if target.is_dir() else None
+
+
 def parse_github_url(url: str) -> tuple[str, str, str | None]:
     parsed = urlparse(url)
     if parsed.netloc != "github.com":
@@ -571,7 +588,7 @@ def fetch_github(
 ) -> str:
     owner, reponame = repo.split("/", 1)
     dest_base = get_cache_base() / owner / reponame / ref
-    target_dir = dest_base / subpath if subpath else dest_base
+    target_dir = remote_cache_dir(repo, ref, subpath)
     meta_file = get_catalog_dir() / ".meta" / name
 
     # Checked before the TTL shortcut below, not after: in the warm-then-freeze
@@ -2210,7 +2227,8 @@ def cmd_apply(args):
             file=sys.stderr,
         )
         print(
-            "To discover recommended skills for this workspace, run 'skill suggest'.",
+            "To review what is installable here, run 'skill catalog' "
+            "(add --json for each skill's description and structure).",
             file=sys.stderr,
         )
         return
@@ -2359,6 +2377,96 @@ def cmd_resolve(name):
         die(str(e))
 
 
+# Top-level subdirectories whose presence tells a caller what kind of capability
+# a skill is: executable automation (scripts/), reference material
+# (references/), or a tested tool (tests/). Reported by name in the catalog's
+# JSON so an agent can triage every candidate skill in one call.
+COMPONENT_DIRS = ("scripts", "references", "tests")
+
+
+def collect_skill_stats(skill_dir: Path) -> dict:
+    """Measure a skill directory: total files/bytes, broken down per subdirectory.
+
+    Returns {"file_count", "size_bytes", "dirs"}, where "dirs" maps each
+    top-level subdirectory name (plus "(root)" for loose files) to a
+    (file_count, size_bytes) pair. Dotfiles and __pycache__ are ignored, and an
+    unreadable entry is skipped rather than failing the walk.
+
+    Shared by 'info' (the human breakdown) and 'catalog --json' (the structural
+    profile), so both report the same footprint for the same skill.
+    """
+    dir_stats: dict[str, tuple[int, int]] = {}
+    root_files = 0
+    root_size = 0
+
+    try:
+        entries = list(skill_dir.iterdir())
+    except OSError:
+        return {"file_count": 0, "size_bytes": 0, "dirs": {}}
+
+    for item in entries:
+        if item.name.startswith(".") or item.name == "__pycache__":
+            continue
+        if item.is_file():
+            try:
+                sz = item.stat().st_size
+            except OSError:
+                continue
+            root_files += 1
+            root_size += sz
+        elif item.is_dir():
+            files_count = 0
+            dir_size = 0
+            for root, dirs, files in os.walk(item):
+                dirs[:] = [
+                    d for d in dirs if not d.startswith(".") and d != "__pycache__"
+                ]
+                for f in files:
+                    if f.startswith("."):
+                        continue
+                    try:
+                        sz = (Path(root) / f).stat().st_size
+                    except OSError:
+                        continue
+                    files_count += 1
+                    dir_size += sz
+            if files_count > 0:
+                dir_stats[item.name] = (files_count, dir_size)
+
+    total_files = root_files + sum(c for c, _ in dir_stats.values())
+    total_size = root_size + sum(b for _, b in dir_stats.values())
+    if root_files > 0:
+        dir_stats["(root)"] = (root_files, root_size)
+
+    return {"file_count": total_files, "size_bytes": total_size, "dirs": dir_stats}
+
+
+def structure_fields(stats: dict | None) -> dict:
+    """The JSON structural profile for a skill, as flat keys.
+
+    stats is None for a skill whose content is not on disk (a remote entry that
+    has never been downloaded). Every key is still emitted, with null standing
+    for "not measured" so a consumer can tell it apart from a measured zero.
+    """
+    if stats is None:
+        fields = {"file_count": None, "size_bytes": None}
+        fields.update(dict.fromkeys(COMPONENT_DIRS))
+        return fields
+    fields = {"file_count": stats["file_count"], "size_bytes": stats["size_bytes"]}
+    for d in COMPONENT_DIRS:
+        fields[d] = stats["dirs"].get(d, (0, 0))[0]
+    return fields
+
+
+def format_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
 def cmd_info(name):
     try:
         src_path, actual_name = resolve_skill_spec(name)
@@ -2374,59 +2482,8 @@ def cmd_info(name):
         metadata.get("description") or "No description found in SKILL.md frontmatter."
     )
 
-    # Gather file metadata (reinstated from history)
-    dir_stats = {}
-    total_size = 0
-    total_files = 0
-    root_files = 0
-    root_size = 0
-
-    for item in src_path.iterdir():
-        if item.is_file():
-            if item.name.startswith("."):
-                continue
-            try:
-                sz = item.stat().st_size
-                root_files += 1
-                root_size += sz
-                total_files += 1
-                total_size += sz
-            except Exception:
-                pass
-        elif item.is_dir():
-            if item.name.startswith(".") or item.name == "__pycache__":
-                continue
-            files_count = 0
-            dir_size = 0
-            for root, dirs, files in os.walk(item):
-                dirs[:] = [
-                    d for d in dirs if not d.startswith(".") and d != "__pycache__"
-                ]
-                for f in files:
-                    if f.startswith("."):
-                        continue
-                    fpath = Path(root) / f
-                    try:
-                        sz = fpath.stat().st_size
-                        files_count += 1
-                        dir_size += sz
-                    except Exception:
-                        pass
-            if files_count > 0:
-                dir_stats[item.name] = (files_count, dir_size)
-                total_files += files_count
-                total_size += dir_size
-
-    if root_files > 0:
-        dir_stats["(root)"] = (root_files, root_size)
-
-    def format_size(size_bytes):
-        if size_bytes < 1024:
-            return f"{size_bytes} B"
-        elif size_bytes < 1024 * 1024:
-            return f"{size_bytes / 1024:.1f} KB"
-        else:
-            return f"{size_bytes / (1024 * 1024):.1f} MB"
+    stats = collect_skill_stats(src_path)
+    dir_stats = stats["dirs"]
 
     print(f"Skill: {actual_name}")
     print(f"Path:  {clean_p(src_path)}")
@@ -2440,7 +2497,10 @@ def cmd_info(name):
     print(wrapped_desc)
     print()
     print("Metadata:")
-    print(f"  Total Size:  {format_size(total_size)} ({total_files} files)")
+    print(
+        f"  Total Size:  {format_size(stats['size_bytes'])} "
+        f"({stats['file_count']} files)"
+    )
     if dir_stats:
         print("  Structure:")
         sorted_dirs = sorted([d for d in dir_stats if d != "(root)"])
@@ -2546,17 +2606,28 @@ def cmd_catalog(as_json=False):
 
     skills_info = []
 
-    # Scan all registered plugin skills
+    # Scan all registered plugin skills. Structural stats are measured from
+    # whatever content is already on disk -- a local source directory, or a
+    # remote repository previously downloaded into the cache. A remote skill
+    # that has never been downloaded is reported from its cached SKILL.md
+    # frontmatter alone and marked "remote": listing a catalog must never pull
+    # a repository over the network.
     for name, entry in api.all_registrations:
         ns = name.split(":")[0] if ":" in name else "default"
         if "path" in entry:
-            meta = get_skill_metadata(Path(entry["path"]), name)
+            src_dir = Path(entry["path"]).expanduser()
+            on_disk = src_dir.is_dir()
+            meta = get_skill_metadata(src_dir, name)
             obj = {
                 "name": name,
                 "description": meta["description"],
                 "source": clean_p(entry["path"]),
                 "namespace": ns,
+                "status": "local" if on_disk else "missing",
             }
+            obj.update(
+                structure_fields(collect_skill_stats(src_dir) if on_disk else None)
+            )
             if entry.get("plugin_file"):
                 obj["plugin"] = entry["plugin_file"]
             skills_info.append(obj)
@@ -2569,12 +2640,19 @@ def cmd_catalog(as_json=False):
                 if subpath
                 else f"github.com/{entry['repo']}@{entry['ref']}"
             )
+            cached_dir = cached_remote_dir(entry)
             obj = {
                 "name": name,
                 "description": meta["description"],
                 "source": src_str,
                 "namespace": ns,
+                "status": "cached" if cached_dir else "remote",
             }
+            obj.update(
+                structure_fields(
+                    collect_skill_stats(cached_dir) if cached_dir else None
+                )
+            )
             if entry.get("plugin_file"):
                 obj["plugin"] = entry["plugin_file"]
             skills_info.append(obj)
@@ -2604,187 +2682,6 @@ def cmd_catalog(as_json=False):
     else:
         term_width = shutil.get_terminal_size((80, 24)).columns
         print_catalog(skills_info, term_width)
-
-
-def cmd_suggest(args):
-    # Lazy import of heavyweight LLM dependencies
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError:
-        die(
-            "The 'google-genai' package is required for suggestions. Please install it."
-        )
-
-    # Separate flags from positional arguments (preserving '-' as a positional)
-    flags = [a for a in args if a.startswith("-") and a != "-"]
-    positional_args = [a for a in args if not a.startswith("-") or a == "-"]
-
-    # Detect explicit stdin request ("-")
-    read_stdin = False
-    if "-" in positional_args:
-        read_stdin = True
-        positional_args.remove("-")
-
-    target_dir = Path.cwd()
-    positional_prompt = None
-
-    if positional_args:
-        # Smart Positional Parsing:
-        # Check if the first argument is a directory on disk.
-        first_arg_path = Path(positional_args[0]).expanduser()
-        if first_arg_path.is_dir():
-            target_dir = first_arg_path.resolve()
-            if len(positional_args) > 1:
-                positional_prompt = " ".join(positional_args[1:])
-        else:
-            # If not a directory, treat the entire list as the prompt.
-            positional_prompt = " ".join(positional_args)
-
-    if not target_dir.is_dir():
-        die(f"target directory '{target_dir}' does not exist")
-
-    # Read from stdin if explicitly requested
-    stdin_prompt = None
-    if read_stdin:
-        print("skill: reading task prompt from stdin...", file=sys.stderr)
-        try:
-            stdin_prompt = sys.stdin.read().strip()
-        except Exception as e:
-            die(f"failed to read from stdin: {e}")
-
-    # Combine prompts if both are present
-    prompt_context = None
-    if positional_prompt and stdin_prompt:
-        prompt_context = f"{positional_prompt}\n\nAdditional Context:\n{stdin_prompt}"
-    elif positional_prompt:
-        prompt_context = positional_prompt
-    elif stdin_prompt:
-        prompt_context = stdin_prompt
-
-    print("skill: scanning workspace to compile recommendations...", file=sys.stderr)
-
-    api = get_api()
-    ensure_catalog_index(api.plugin_catalog)
-
-    available_skills = []
-    for name, entry in api.plugin_catalog.items():
-        if any(s["name"] == name for s in available_skills):
-            continue
-        if "path" in entry:
-            meta = get_skill_metadata(Path(entry["path"]), name)
-            available_skills.append({"name": name, "description": meta["description"]})
-        elif "repo" in entry:
-            stub_dir = get_catalog_dir() / name
-            meta = get_skill_metadata(stub_dir, name)
-            available_skills.append({"name": name, "description": meta["description"]})
-
-    if not available_skills:
-        print(
-            "skill suggest: no available skills found in catalog or paths",
-            file=sys.stderr,
-        )
-        return
-
-    # Gather directory info (context) to feed into prompt
-    repo_files = []
-    for root, dirs, files in os.walk(target_dir):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
-        depth = len(Path(root).relative_to(target_dir).parts)
-        if depth > 3:
-            continue
-        for file in files:
-            if file.startswith("."):
-                continue
-            repo_files.append(str(Path(root).relative_to(target_dir) / file))
-            if len(repo_files) > 150:
-                break
-        if len(repo_files) > 150:
-            break
-
-    readme_content = ""
-    for readme_name in ("README.md", "README.txt", "README"):
-        readme_path = target_dir / readme_name
-        if readme_path.is_file():
-            try:
-                with open(readme_path, encoding="utf-8", errors="replace") as f:
-                    readme_content = f.read(1500)
-                break
-            except Exception:
-                pass
-
-    repo_context = "FILES:\n" + "\n".join(repo_files[:100])
-    if readme_content:
-        repo_context += f"\n\nREADME EXCERPT:\n{readme_content}"
-
-    system_instruction = """
-You are a development environment orchestrator.
-Your goal is to recommend the best agent "skills" to activate for the given project directory and task.
-You will be provided with:
-1. The available skills (name and description).
-2. The user's task or context (optional).
-3. Information about the target directory (e.g. file structure, README).
-
-Recommend exactly the skills that are directly relevant. Err on the side of caution: if a skill is clearly relevant to the tech stack or task, include it. If it is completely irrelevant, do not include it.
-
-Your response must be ONLY a valid JSON array of objects.
-Each object must have:
-- "name": the EXACT name of the skill
-- "reason": a brief 1-sentence explanation of why it is relevant
-
-Return an empty array [] if no skills apply.
-"""
-
-    prompt = f"""
-AVAILABLE SKILLS:
-{available_skills}
-"""
-
-    if prompt_context:
-        prompt += f"""
-USER CONTEXT / TASK:
-{prompt_context}
-"""
-
-    prompt += f"""
-TARGET DIRECTORY INFO:
-{repo_context}
-"""
-
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-    client = genai.Client()
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.0,
-                response_mime_type="application/json",
-            ),
-        )
-    except Exception as e:
-        die(f"Error calling Gemini API: {e}")
-
-    try:
-        results = json.loads(response.text)
-    except Exception as e:
-        die(f"Could not parse JSON response from LLM: {e}\n{response.text}")
-
-    if not isinstance(results, list):
-        die(f"Expected JSON array, got: {type(results)}\n{response.text}")
-
-    as_json = "--json" in sys.argv or "--json" in flags
-    if as_json:
-        for s in results:
-            print(json.dumps(s))
-    else:
-        print("\nRecommended Skills for this Workspace:", file=sys.stderr)
-        if not results:
-            print("  (None recommended)", file=sys.stderr)
-        for s in results:
-            print(f"  * {s['name'].ljust(20)} - {s['reason']}", file=sys.stderr)
-        print("\nTo install a recommendation, run: skill add <name>", file=sys.stderr)
 
 
 def colorize(text: str, color_name: str, enabled: bool = True) -> str:
@@ -3655,9 +3552,6 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
   bundle [SPEC...] Package skills into an archive or directory without installing
-  suggest [DIR] [-] [PROMPT] Print advisory LLM skill recommendations guided by an
-                          optional task prompt (pass '-' to read from stdin)
-                          (requires google-genai)
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
@@ -3667,7 +3561,9 @@ Commands:
   clean           Remove all skills and clear git excludes
   doctor [--json] Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
-  catalog         List plugin-provided skills and sources
+  catalog [--json] List plugin-provided skills and sources; --json adds each
+                  skill's description and structural profile (file counts and
+                  sizes for scripts/, references/ and tests/)
   resolve NAME    Print the source path 'add NAME' would symlink to
   show/info NAME  Show details and metadata of a skill
 
@@ -3760,8 +3656,6 @@ def register(api):
         cmd_apply(args)
     elif cmd == "bundle":
         cmd_bundle(args)
-    elif cmd == "suggest":
-        cmd_suggest(args)
     elif cmd == "preflight":
         caller_label = args[0] if args else "agent"
         cmd_preflight(caller_label)

@@ -101,9 +101,6 @@ which agent is installed on PATH and applies symlinks and local git ignores:
 Commands:
   apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
   bundle [SPEC...] Package skills into an archive or directory without installing
-  suggest [DIR] [-] [PROMPT] Print advisory LLM skill recommendations guided by an
-                          optional task prompt (pass '-' to read from stdin)
-                          (requires google-genai)
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
@@ -113,7 +110,9 @@ Commands:
   clean           Remove all skills and clear git excludes
   doctor [--json] Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
-  catalog         List plugin-provided skills and sources
+  catalog [--json] List plugin-provided skills and sources; --json adds each
+                  skill's description and structural profile (file counts and
+                  sizes for scripts/, references/ and tests/)
   resolve NAME    Print the source path 'add NAME' would symlink to
   show/info NAME  Show details and metadata of a skill
 
