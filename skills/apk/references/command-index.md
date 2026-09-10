@@ -46,7 +46,7 @@ Examples:
 <!-- generated: ../scripts/apk-info --help -->
 
 ```text
-Usage: apk-info <command> [arguments]
+Usage: apk-info COMMAND [ARGUMENTS]
 
 A unified tool for inspecting Android APK files and split-APK ZIP archives.
 
@@ -58,16 +58,17 @@ Commands:
   tiles                List Wear OS tiles services declared in the manifest.
   complications        List Wear OS complications data providers.
   launcher             Print the path of the launcher icon resource.
-  file <path>          Extract and print the contents of a specific file from the APK.
+  file                 Extract and print the contents of a specific file from the APK.
 
 Options:
-  --help               Display this help message and exit.
+  --help, -h           Display this help message and exit.
 
 Examples:
   apk-info package app.apk
   apk-info version app.apk
   apk-info libraries --json app.zip
   apk-info libraries --only androidx.wear.compose_compose-foundation app.apk
+  apk-info file app.apk res/xml/watch_face_info.xml
 ```
 
 <!-- /generated -->

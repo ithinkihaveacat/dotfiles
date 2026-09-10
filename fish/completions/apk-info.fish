@@ -16,17 +16,18 @@ complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a compli
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a launcher -d "Print launcher icon resource path"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a file -d "Extract and print a specific file"
 
+# Top-level options
+complete -c apk-info -s h -l help -d "Display help"
+
 # Complete APK/ZIP files once a subcommand is present
 complete -c apk-info -n "__fish_seen_subcommand_from $subcommands" -F -a '(__fish_complete_suffix .apk .zip)'
 
 # Subcommand-specific: version
 complete -c apk-info -n "__fish_seen_subcommand_from version" -l code -d "Print only the version code string"
 complete -c apk-info -n "__fish_seen_subcommand_from version" -l name -d "Print only the version name string"
-complete -c apk-info -n "__fish_seen_subcommand_from version" -s h -l help -d "Display help"
 
 # Subcommand-specific: libraries
 complete -c apk-info -n "__fish_seen_subcommand_from libraries" -l json -d "Output all libraries as a JSON map"
-complete -c apk-info -n "__fish_seen_subcommand_from libraries" -s h -l help -d "Display help"
 
 # Common libraries for autocompleting the argument of --only / --library
 set -l common_libs \
