@@ -66,6 +66,26 @@ Context boundedness is achieved through `STATUS.md`:
 - If a task record is ever archived or deleted from the working tree,
   `taskgo history` falls back to querying Git history blobs seamlessly.
 
+## Telemetry & Dual-Representation
+
+Taskgo deliberately records agent session identifiers (`<agent>://<id>`) in two
+distinct locations. This is an intentional architectural pattern, not a
+violation of the Single Source of Truth:
+
+1. **YAML Frontmatter (`conversations:`):** Acts as the spatial, fast-read
+   manifest of all sessions that have contributed to the task. It guarantees
+   context portability during task ejection (when Git history is severed) and
+   provides zero-latency visibility for active (`in-progress`) sessions before
+   commits exist.
+1. **Git Commit Trailers (`Conversation:`):** Act as the temporal, immutable
+   event log linking specific lifecycle transitions to exact agent runs.
+
+Drift between these locations is expected and explicitly tolerated. Humans
+executing raw `git commit` commands may omit trailers, and agents operating
+across tasks may leave uncommitted frontmatter traces. `taskgo doctor` emits
+non-blocking `[INFO]` diagnostics for anomalies, but agents must prioritize the
+Markdown files as current state and Git as the historical record.
+
 ## Unified AuditEngine Architecture (`doctor` & `fix`)
 
 To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
