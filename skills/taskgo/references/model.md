@@ -80,11 +80,12 @@ violation of the Single Source of Truth:
 1. **Git Commit Trailers (`Conversation:`):** Act as the temporal, immutable
    event log linking specific lifecycle transitions to exact agent runs.
 
-Drift between these locations is expected and explicitly tolerated. Humans
-executing raw `git commit` commands may omit trailers, and agents operating
-across tasks may leave uncommitted frontmatter traces. `taskgo doctor` emits
-non-blocking `[INFO]` diagnostics for anomalies, but agents must prioritize the
-Markdown files as current state and Git as the historical record.
+Drift between these locations arises in valid workflows (e.g. human
+collaborators executing raw `git commit` commands without trailers, or agents
+actively iterating in uncommitted working trees before forming a checkpoint).
+`taskgo doctor` emits non-blocking `[INFO]` diagnostics for these anomalies, but
+agents must prioritize the Markdown files as current state and Git as the
+historical record.
 
 ## Unified AuditEngine Architecture (`doctor` & `fix`)
 

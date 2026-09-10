@@ -126,7 +126,10 @@ SESSION_VARS = (
 
 
 def canonicalize_agent_name(name: str | None) -> str | None:
-    """Maps free-text or version-stamped agent names to canonical tokens."""
+    """Maps free-text or version-stamped agent names to canonical tokens.
+
+    Checks CANONICAL_AGENTS in priority order (first substring match wins).
+    """
     if not name:
         return None
     lower = name.lower()
@@ -164,7 +167,7 @@ def detect_agent_scheme() -> str:
 def parse_conversation_entry(entry: Any) -> tuple[str, str] | None:
     """Parses a conversation entry into (scheme, session_id).
 
-    Tolerates web URLs and bare IDs without errors.
+    Tolerates web URLs and bare IDs without errors while validating charsets.
     """
     if not entry:
         return None
@@ -178,9 +181,13 @@ def parse_conversation_entry(entry: Any) -> tuple[str, str] | None:
         parts = clean.split("://", 1)
         scheme = parts[0].strip().lower()
         remainder = parts[1].strip()
-        if not scheme or not remainder:
-            return None
-        return scheme, remainder
+        if (
+            re.match(r"^[a-z][a-z0-9+.-]*$", scheme)
+            and len(remainder) >= 16
+            and re.match(r"^[A-Za-z0-9_./?=&%#-]+$", remainder)
+        ):
+            return scheme, remainder
+        return None
 
     # Bare identifier (at least 16 alphanumeric characters, dashes, or underscores)
     if len(clean) >= 16 and re.match(r"^[A-Za-z0-9_-]+$", clean):
@@ -764,6 +771,18 @@ def parse_frontmatter_for_edit(content: str) -> tuple[Any, str]:
         die(f"cannot parse YAML frontmatter: {e}")
 
     return data, body
+
+
+def dump_frontmatter(data: Any) -> str:
+    """Serializes frontmatter mapping to YAML string using ruamel.yaml."""
+    yaml = YAML()
+    yaml.width = WRAP_WIDTH
+    yaml.preserve_quotes = True
+    yaml.default_flow_style = False
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    return f"---\n{buf.getvalue()}---\n"
 
 
 def extract_frontmatter_field(content: str, key: str) -> str:
@@ -1408,14 +1427,8 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             t_fm[id_key or "id"] = t_id
                             t_fm[status_key or "status"] = t_status
 
-                            yaml = YAML()
-                            yaml.width = WRAP_WIDTH
-                            yaml.preserve_quotes = True
-                            yaml.default_flow_style = False
-                            buf = io.StringIO()
-                            yaml.dump(t_fm, buf)
                             new_content = (
-                                f"---\n{buf.getvalue()}---\n\n{t_body.lstrip()}\n"
+                                f"{dump_frontmatter(t_fm)}\n{t_body.lstrip()}\n"
                             )
                             try:
                                 new_content = format_markdown(new_content)
@@ -1762,16 +1775,12 @@ def render_task_file(
 
     body = "\n\n".join(body_blocks)
 
-    fm_lines = [f"id: {task_id}", f"status: {status}"]
+    fm_data: dict[str, Any] = {"id": task_id, "status": status}
     if conv:
-        fm_lines.append("conversations:")
-        fm_lines.append(f"  - {conv}")
-    fm_block = "\n".join(fm_lines)
+        fm_data["conversations"] = [conv]
+    fm_block = dump_frontmatter(fm_data)
 
-    raw = f"""---
-{fm_block}
----
-
+    raw = f"""{fm_block}
 # {title}
 
 {body}
@@ -2020,13 +2029,7 @@ def cmd_update(
         scheme, c_id = session
         update_task_conversation(data, scheme, c_id)
 
-    yaml = YAML()
-    yaml.width = WRAP_WIDTH
-    yaml.preserve_quotes = True
-    yaml.default_flow_style = False
-    buf = io.StringIO()
-    yaml.dump(data, buf)
-    fm_text = f"---\n{buf.getvalue()}---\n"
+    fm_text = dump_frontmatter(data)
 
     if title:
         body = re.sub(r"^#\s+[^\n]+", f"# {title}", body, count=1, flags=re.MULTILINE)
@@ -2605,20 +2608,20 @@ def cmd_checkpoint(
             t_content = target_path.read_text(encoding="utf-8")
             t_data, t_body = parse_frontmatter_for_edit(t_content)
             if update_task_conversation(t_data, scheme, c_id):
-                yaml = YAML()
-                yaml.width = WRAP_WIDTH
-                yaml.preserve_quotes = True
-                yaml.default_flow_style = False
-                buf = io.StringIO()
-                yaml.dump(t_data, buf)
-                new_content = f"---\n{buf.getvalue()}---\n{t_body}"
+                new_content = f"{dump_frontmatter(t_data)}{t_body}"
                 try:
                     new_content = format_markdown(new_content)
                 except Exception:
                     pass
                 atomic_write(target_path, new_content)
-        except Exception:
-            pass
+        except Exception as e:
+            print(
+                _tagged(
+                    f"[WARN]  Failed to update task frontmatter: {e}",
+                    sys.stderr,
+                ),
+                file=sys.stderr,
+            )
 
     # Stage requested files
     try:
@@ -2713,21 +2716,21 @@ def cmd_commit(
                             t_content = p_sf.read_text(encoding="utf-8")
                             t_data, t_body = parse_frontmatter_for_edit(t_content)
                             if update_task_conversation(t_data, scheme, c_id):
-                                yaml = YAML()
-                                yaml.width = WRAP_WIDTH
-                                yaml.preserve_quotes = True
-                                yaml.default_flow_style = False
-                                buf = io.StringIO()
-                                yaml.dump(t_data, buf)
-                                new_content = f"---\n{buf.getvalue()}---\n{t_body}"
+                                new_content = f"{dump_frontmatter(t_data)}{t_body}"
                                 try:
                                     new_content = format_markdown(new_content)
                                 except Exception:
                                     pass
                                 atomic_write(p_sf, new_content)
                                 run_git(["add", sf])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(
+                                _tagged(
+                                    f"[WARN]  Failed to update task frontmatter: {e}",
+                                    sys.stderr,
+                                ),
+                                file=sys.stderr,
+                            )
         status_porcelain = run_git(
             ["status", "--porcelain", "--", f"{project_name}/STATUS.md"],
             check=False,

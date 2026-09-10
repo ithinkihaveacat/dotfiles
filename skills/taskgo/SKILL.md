@@ -392,6 +392,20 @@ git log --grep='Conversation:.*<conversation-id>'
 git log --grep='TASK-XXXXX' --format='%h %s %(trailers:key=Conversation,valueonly)'
 ```
 
+### Session Attribution & Environment Variables
+
+When creating tasks or committing checkpoints (`--conv`), `taskgo` automatically
+detects the active session ID and agent scheme from runtime environment
+variables in priority order:
+
+1. `CLAUDE_CODE_SESSION_ID` / `CLAUDE_CODE_REMOTE_SESSION_ID` (`claude://`)
+1. `JETSKI_CONVERSATION_ID` (`jetski://`)
+1. `ANTIGRAVITY_CONVERSATION_ID` / `ANTIGRAVITY_SESSION` (`antigravity://`)
+1. `CODEX_SESSION_ID` (`codex://`)
+1. `OPENCODE_SESSION_ID` (`opencode://`)
+1. Generic `AI_SESSION_ID` / `CONVERSATION_ID` paired with `AI_AGENT` platform
+   name
+
 ### Task Export and Ejection (External Agent Handoff)
 
 When delegating a task to an isolated agent or contributor—one operating
