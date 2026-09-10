@@ -13,16 +13,24 @@
 >
 > 1. **Dimension 1 (Service Component):** Group by Service Class Name
 >    (Service-First architecture).
-> 1. **Dimension 2 (Container Size / Variant):** Iterate through `LARGE (2x1)`
->    and `SMALL (1x1)` (with explicit `[NOT DECLARED BY APK]` cards if
->    unsupported).
+> 1. **Dimension 2 (Surface Form & Container Size):** Iterate through all
+>    supported surface forms and container sizes:
+>    - **Full-Screen Widget (Tile Compatibility Mode):** Standalone full-screen
+>      tile translation (on Wear OS $\\le$ 6 or via
+>      `adb-tile-add --type FULLSCREEN`).
+>    - **Modular "Real" Widgets:** Partial-height modular containers on Wear OS
+>      7+, iterating through `LARGE (2x1)` and `SMALL (1x1)` (with explicit
+>      `[NOT DECLARED BY APK]` cards if unsupported).
 > 1. **Dimension 3 (Target Machine / Device):** Organize targets across Samsung
 >    Galaxy Watch, Google Pixel Watch, and Wear OS Reference Emulator (flexible
 >    grid or stacked cards).
-> 1. **Dimension 4 (Surface Phase & Mode):** Under each device, capture **(1)
->    System Picker Image**, **(2a) Live In-Use Screenshot**, and **(2b) Live
->    Screencast** across all active operational modes (with structured
->    `[Pending Capture]` placeholders for uncaptured slots).
+> 1. **Dimension 4 (Surface Phase & Operational Mode Permutations):** Under each
+>    device, capture **(1) System Picker Image**, **(2a) Live In-Use
+>    Screenshot**, and **(2b) Live Screencast** across all active operational
+>    modes:
+>    - **Logged Out / Onboarding Mode** (unauthenticated fallback state).
+>    - **Logged In / Populated Mode** (authenticated content state).
+>    - Structured `[Pending Capture]` placeholders for uncaptured slots.
 
 <!-- GUIDANCE: 
   This template is a structured guide and adaptable baseline for Wear OS tile and widget integration audits. 
@@ -214,12 +222,18 @@ ______________________________________________________________________
   1. Top-Level Dimension (Service Component):
      Group first by Service Class Name (Service-First grouping).
   
-  2. Second-Level Dimension (Container Size / Variant):
-     For Widget services, iterate through each container variant:
-     - LARGE (2x1)
-     - SMALL (1x1)
-     If a container size is NOT declared in the provider XML, do NOT omit it silently; 
-     render an explicit `[NOT DECLARED BY APK]` card so readers know it was audited.
+  2. Second-Level Dimension (Surface Form & Container Size Permutations):
+     Widgets can appear across multiple distinct presentation forms, and audits must capture all permutations:
+     - Form A: Full-Screen Standalone Tile (Tile Compatibility Mode)
+       Enforced on Wear OS <= 6 or verified on Wear OS 7+ via `adb-tile-add --type FULLSCREEN` (type 0).
+       Audits whether the glanceable layout gracefully scales to a full display canvas.
+     - Form B: Modular "Real" Widgets
+       On Wear OS 7+, iterate across every supported container size declared in the provider XML:
+       * LARGE (2x1)
+       * SMALL (1x1)
+       If a container size is NOT declared in the provider XML, do NOT omit it silently; 
+       render an explicit `[NOT DECLARED BY APK]` card so readers know it was audited.
+     Capture ALL permutations across full-screen tile compat and modular containers.
 
   3. Third-Level Dimension (Source Asset vs Target Machine / Device):
      - First: Source of Truth (APK Declared Static Preview Asset from res/drawable-nodpi/).
@@ -228,26 +242,60 @@ ______________________________________________________________________
        (e.g., `Samsung Galaxy Watch (One UI Watch 7 / API 37)`, `Google Pixel Watch 4 (Wear OS 5.1 / API 37)`).
        This prevents ambiguity between Wear OS <= 6 compatibility mode (full tiles) and Wear OS >= 7 modular widgets.
 
-  4. Fourth-Level Dimension (Surface Phase & In-Use Operational Modes):
-     Under each device target, provide:
+  4. Fourth-Level Dimension (Surface Phase & Operational Mode Permutations):
+     Under each device target, capture:
        * (1) System Widget Picker Image: As rendered by that OS's native picker 
              (e.g. SecTileComposeAddableActivity on Samsung, System UI Picker on Pixel). 
              Demonstrates scaling, squashing, letterboxing, or distortion.
        * (2) Widget In Use (Active Mode):
-             If multiple operational modes exist (e.g. Authenticated / Logged In, Logged Out / Fallback, 
-             Active State, Dark / Light theme), provide:
-             - (a) Live In-Use Screenshot: Active widget in carousel on watch face.
+             Capture ALL operational mode permutations:
+             - Mode A: Unauthenticated / Logged Out / Fallback (empty onboarding state).
+             - Mode B: Authenticated / Logged In / Content (active data state).
+             For each mode, provide:
+             - (a) Live In-Use Screenshot: Active widget in carousel on watch face (always captured with `adb-screenshot`).
              - (b) Live Screencast (Context Video): Screen recording showing interaction, scrolling context, or border behavior.
 
-  5. Layout Adaptability & Scaling:
-     - For 2–3 target devices: Use the standard Multi-Target Device Matrix table below.
-     - For >3 target devices (or complex media): Use the Stacked Device Card format shown below the table to prevent viewport overflow.
+  5. Layout Adaptability & Centering Invariant (WidgetTrayActivity Spacer Pattern):
+     - When capturing modular widgets within the developer testbed (`WidgetTrayActivity`), widget cards at the
+       top of the list are pushed into the top half of the display above the circular center line.
+     - Centering Technique: Add a separate "spacer" widget (e.g., from `wear-os-samples/WearWidget`, such as
+       `SampleWidgetService`) above the target widget to shift it down into the vertical center slot of the
+       round screen before taking the screenshot with `adb-screenshot`.
+     - Alternatively, deploy the surface directly to the carousel via `adb-tile-add --type LARGE` to capture
+       the native OEM presentation.
 
   6. Placeholders & Missing Media Invariant:
      - If a specific capture is missing or pending (e.g. Pixel Watch Picker, Emulator Live), 
        render an explicit `[Pending Capture]` placeholder card rather than omitting the slot.
      - If an asset is shared/reused across sizes, explicitly display the shared asset in both slots.
 -->
+
+##### Surface Form: Full-Screen Standalone Tile (Tile Compatibility Mode)
+
+<!-- GUIDANCE: 
+  Audit the full-screen presentation mode enforced on Wear OS <= 6 or tested via `adb-tile-add --type FULLSCREEN` (type 0).
+  Verify whether glanceable layouts, margins, and curved text elements adapt properly to the full 400x400 / 408x408 canvas.
+-->
+
+- **Compatibility Mode Status:** Supported via Tile Provider Binding
+  (`BIND_TILE_PROVIDER`)
+- **APK Declared Static Tile Preview:**
+  `res/drawable-nodpi/my_widget_tile_preview.png` (400×400 px, 1:1 square)
+
+###### Source of Truth • APK Declared Tile Preview:
+
+![Tile APK Preview](resources/my_widget_tile_preview.png) *Raw static preview
+image extracted from `res/drawable-nodpi/`.*
+
+###### Multi-Target Device Matrix (Full-Screen Compat):
+
+| Surface / Media Stage                  | Samsung Galaxy Watch (One UI 7 / API 37) | Google Pixel Watch 4 (Wear OS 5.1 / API 37) | Wear OS Emulator (AOSP / API 37) |
+| :------------------------------------- | :--------------------------------------- | :------------------------------------------ | :------------------------------- |
+| **(1) Tile Editor Picker**             | `[Pending Capture]`                      | `[Pending Capture]`                         | `[Pending Capture]`              |
+| **(2a) Full-Screen Live (Logged Out)** | `[Pending Capture]`                      | `[Pending Capture]`                         | `[Pending Capture]`              |
+| **(2b) Full-Screen Live (Logged In)**  | `[Pending Capture]`                      | `[Pending Capture]`                         | `[Pending Capture]`              |
+
+______________________________________________________________________
 
 ##### Container Variant: LARGE (2x1)
 

@@ -241,6 +241,17 @@ A preview helper app enabled exclusively on internal/developer builds of the
   ```bash
   adb shell am start -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
   ```
+- **Widget Centering via Spacer Widgets**: Inside `WidgetTrayActivity`, widget
+  cards placed at the top of the `ScalingLazyColumn` can be pushed into the
+  upper half of the display above the circular center. To center the target
+  widget cleanly for screen captures, add a separate dummy or "spacer" widget
+  (such as one of the reference widgets from
+  `/usr/local/google/home/stillers/workspace/wear-os-samples/WearWidget`) above
+  the target widget to shift it down into the vertical center of the round
+  screen.
+- **Screenshot Invariant**: Always use `adb-screenshot` (which verifies awake
+  state and applies circular masking) rather than raw `screencap` when capturing
+  assets for reports or audits.
 - Use UI automation tools for automated interaction inside the renderer list.
 
 ______________________________________________________________________
