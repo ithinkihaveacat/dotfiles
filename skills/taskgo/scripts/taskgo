@@ -110,49 +110,185 @@ class TaskFrontmatter(TypedDict, total=False):
 RESOLVED_STATES = {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
 
 
-def normalize_conversation_id(conv: str | None) -> str | None:
-    """Validates and normalizes a conversation or session identifier."""
+SESSION_PATTERN = re.compile(
+    r"^(?:(?P<scheme>[a-z0-9_-]+)://)?(?P<id>[A-Za-z0-9_-]{16,})(?:\s*\((?P<annotation>.*)\))?$"
+)
+
+SESSION_VARS = (
+    "JETSKI_CONVERSATION_ID",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "ANTIGRAVITY_SESSION",
+    "CLAUDE_SESSION_ID",
+    "OPENCODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "INVOKER_INFO_ROOT_SESSION_ID",
+    "CONVERSATION_ID",
+)
+
+
+def detect_agent_scheme() -> str:
+    """Detects the active agent platform scheme from runtime environment variables."""
+    for var in ("AI_AGENT", "INVOKER_INFO_NAME"):
+        val = os.environ.get(var)
+        if val:
+            clean = re.sub(r"[^a-z0-9_-]+", "", val.strip().lower())
+            if clean:
+                return clean
+    if os.environ.get("JETSKI_CONVERSATION_ID"):
+        return "jetski"
+    if os.environ.get("ANTIGRAVITY_CONVERSATION_ID") or os.environ.get(
+        "ANTIGRAVITY_SESSION"
+    ):
+        return "antigravity"
+    if os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("CLAUDE_PROJECT_ID"):
+        return "claude"
+    if os.environ.get("OPENCODE_SESSION_ID"):
+        return "opencode"
+    if os.environ.get("CODEX_SESSION_ID"):
+        return "codex"
+    return "conversation"
+
+
+def parse_conversation_entry(entry: Any) -> tuple[str, str, str | None] | None:
+    """Parses a conversation entry into (scheme, id, annotation)."""
+    if not entry:
+        return None
+    if isinstance(entry, dict):
+        clean = ": ".join(f"{k}: {v}" for k, v in entry.items())
+    else:
+        clean = str(entry).strip().replace("\n", " ")
+        clean = re.sub(r"\s+", " ", clean)
+
+    m = SESSION_PATTERN.match(clean)
+    if not m:
+        return None
+    scheme = m.group("scheme") or ""
+    conv_id = m.group("id")
+    annotation = m.group("annotation")
+    if annotation:
+        annotation = annotation.strip()
+    return scheme, conv_id, annotation
+
+
+def normalize_conversation_id(
+    conv: str | None,
+) -> tuple[str, str, str | None] | None:
+    """Validates and normalizes a conversation or session identifier.
+
+    Returns (scheme, conv_id, annotation) or None.
+    """
     if not conv:
         return None
-    c = conv.strip()
-    if c.startswith("conversation://"):
-        c = c.removeprefix("conversation://")
-    if not c:
-        return None
-    if len(c) < 16 or not re.match(r"^[A-Za-z0-9_-]+$", c):
+    parsed = parse_conversation_entry(conv)
+    if not parsed:
         die(
             f"invalid conversation ID '{conv}' (must be a globally unique identifier with at least 16 alphanumeric characters, dashes, or underscores)"
         )
-    return c
+    scheme, conv_id, annotation = parsed
+    if not scheme:
+        scheme = detect_agent_scheme()
+    return scheme, conv_id, annotation
+
+
+def get_active_session(
+    cli_arg: str | None = None,
+) -> tuple[str, str, str | None] | None:
+    """Resolves (scheme, conv_id, annotation) from CLI arg or environment."""
+    if cli_arg:
+        return normalize_conversation_id(cli_arg)
+    for var in SESSION_VARS:
+        val = os.environ.get(var)
+        if val:
+            parsed = parse_conversation_entry(val)
+            if parsed:
+                scheme, conv_id, annotation = parsed
+                if not scheme:
+                    scheme = detect_agent_scheme()
+                return scheme, conv_id, annotation
+            print(
+                _tagged(
+                    f"[WARN]  Ignoring invalid conversation ID in ${var}: {val}",
+                    sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+    return None
 
 
 def get_active_conversation_id(cli_arg: str | None = None) -> str | None:
-    """Resolves the conversation ID from explicit CLI arg or opportunistic environment variables."""
-    if cli_arg:
-        return normalize_conversation_id(cli_arg)
-    # TODO: Verify whether these candidate environment variable names are
-    # actively populated in practice across different agent runtimes (e.g.
-    # Jetski, Claude Code, Antigravity) or if other conventions are used.
-    for var in (
-        "JETSKI_CONVERSATION_ID",
-        "INVOKER_INFO_ROOT_SESSION_ID",
-        "CONVERSATION_ID",
-    ):
-        val = os.environ.get(var)
-        if val:
-            try:
-                norm = normalize_conversation_id(val)
-                if norm:
-                    return norm
-            except SystemExit:
-                print(
-                    _tagged(
-                        f"[WARN]  Ignoring invalid conversation ID in ${var}: {val}",
-                        sys.stderr,
-                    ),
-                    file=sys.stderr,
-                )
-    return None
+    """Resolves the conversation URI ('<scheme>://<id>') from CLI arg or environment."""
+    session = get_active_session(cli_arg)
+    if not session:
+        return None
+    scheme, conv_id, _ = session
+    return f"{scheme}://{conv_id}"
+
+
+def extract_clean_annotation(subject: str | None) -> str | None:
+    """Derives a concise, clean parenthetical annotation from a commit subject."""
+    if not subject:
+        return None
+    m = CONVENTIONAL_SUBJECT_RE.match(subject.strip())
+    desc = m.group("desc") if m else subject.strip()
+    desc = re.sub(r"^[A-Za-z0-9._/-]+:\s*", "", desc)
+    desc = desc.strip("()").replace("\n", " ")
+    desc = re.sub(r"\s+", " ", desc).strip()
+    return desc or None
+
+
+def update_task_conversation(
+    data: dict[str, Any],
+    scheme: str,
+    conv_id: str,
+    subject: str | None = None,
+) -> bool:
+    """Updates frontmatter conversations preserving first annotation and enriching empty."""
+    clean_sub = extract_clean_annotation(subject)
+    convs_key = next((k for k in data if str(k).lower() == "conversations"), None)
+    conv_key = next((k for k in data if str(k).lower() == "conversation"), None)
+
+    entries: list[Any] = []
+    if convs_key and isinstance(data[convs_key], list):
+        entries = data[convs_key]
+    elif convs_key and data[convs_key]:
+        entries = [data[convs_key]]
+        data[convs_key] = entries
+    elif conv_key and data[conv_key]:
+        entries = (
+            list(data[conv_key])
+            if isinstance(data[conv_key], list)
+            else [data[conv_key]]
+        )
+        data.pop(conv_key, None)
+        data["conversations"] = entries
+        convs_key = "conversations"
+    else:
+        entries = []
+        data["conversations"] = entries
+        convs_key = "conversations"
+
+    for idx, item in enumerate(entries):
+        parsed = parse_conversation_entry(item)
+        if parsed and parsed[1] == conv_id:
+            e_scheme, e_id, e_ann = parsed
+            if e_ann:
+                # Preserve First: already has an annotation
+                return False
+            if clean_sub:
+                # Enrich Empty: enrich with annotation
+                effective_scheme = e_scheme or scheme or "conversation"
+                entries[idx] = f"{effective_scheme}://{e_id} ({clean_sub})"
+                return True
+            return False
+
+    effective_scheme = scheme or "conversation"
+    new_entry = (
+        f"{effective_scheme}://{conv_id} ({clean_sub})"
+        if clean_sub
+        else f"{effective_scheme}://{conv_id}"
+    )
+    entries.append(new_entry)
+    return True
 
 
 # taskgo owns its control repository commits and bypasses local hooks with
@@ -1148,8 +1284,55 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 if not tf.is_file():
                     continue
                 content = tf.read_text(encoding="utf-8")
-                fm, _ = parse_frontmatter(content)
                 rel_path = str(tf.relative_to(root))
+
+                m_fm = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+                if m_fm:
+                    yaml = YAML()
+                    try:
+                        parsed_yaml = yaml.load(m_fm.group(1))
+                        if not isinstance(parsed_yaml, dict):
+                            findings.append(
+                                Finding(
+                                    category="task",
+                                    severity="FAIL",
+                                    message=f"{rel_path}: invalid YAML frontmatter: frontmatter must be a YAML mapping",
+                                    file_path=tf,
+                                    remediation=None,
+                                )
+                            )
+                            continue
+                    except Exception as e:
+                        err_line = str(e).splitlines()[0] if str(e) else "syntax error"
+                        findings.append(
+                            Finding(
+                                category="task",
+                                severity="FAIL",
+                                message=f"{rel_path}: invalid YAML frontmatter: {err_line}",
+                                file_path=tf,
+                                remediation=None,
+                            )
+                        )
+                        continue
+
+                fm, _ = parse_frontmatter(content)
+
+                raw_convs = fm.get("conversations") or fm.get("conversation")
+                if raw_convs:
+                    conv_items = (
+                        raw_convs if isinstance(raw_convs, list) else [raw_convs]
+                    )
+                    for c_item in conv_items:
+                        if not parse_conversation_entry(c_item):
+                            findings.append(
+                                Finding(
+                                    category="task",
+                                    severity="INFO",
+                                    message=f"{rel_path}: unparseable conversation entry '{c_item}'",
+                                    file_path=tf,
+                                    remediation=None,
+                                )
+                            )
 
                 task_id = fm.get("id", "")
                 raw_status = fm.get("status", "")
@@ -1556,7 +1739,7 @@ def render_task_file(
     fm_lines = [f"id: {task_id}", f"status: {status}"]
     if conv:
         fm_lines.append("conversations:")
-        fm_lines.append(f"  - conversation://{conv}")
+        fm_lines.append(f"  - {conv}")
     fm_block = "\n".join(fm_lines)
 
     raw = f"""---
@@ -1632,7 +1815,12 @@ def cmd_create(
             )
 
     status = normalize_status(status)
-    conv_id = get_active_conversation_id(conv)
+    session = get_active_session(conv)
+    conv_uri = f"{session[0]}://{session[1]}" if session else None
+    task_conv = None
+    if session:
+        scheme, c_id, ann = session
+        task_conv = f"{scheme}://{c_id} ({ann})" if ann else f"{scheme}://{c_id}"
     root = get_repo_root()
     proj_dir = root / project_name
     if proj_dir.is_file():
@@ -1716,7 +1904,7 @@ def cmd_create(
         outcome=outcome,
         findings=findings,
         next_steps=next_steps,
-        conv=conv_id,
+        conv=task_conv,
     )
     atomic_write(task_file, content)
 
@@ -1751,8 +1939,8 @@ def cmd_create(
     subject = conventional_subject(f"create {task_id}", project_name)
 
     msg_lines = [subject, "", wrap_body(title)]
-    if conv_id:
-        msg_lines.extend(["", f"Conversation: conversation://{conv_id}"])
+    if conv_uri:
+        msg_lines.extend(["", f"Conversation: {conv_uri}"])
     commit_msg = "\n".join(msg_lines) + "\n"
 
     run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
@@ -1805,35 +1993,10 @@ def cmd_update(
         status_key = next((k for k in data if str(k).lower() == "status"), "status")
         data[status_key] = norm_status
 
-    conv_id = normalize_conversation_id(conv) if conv else None
-    if conv_id:
-        conv_uri = f"conversation://{conv_id}"
-        conversations_key = next(
-            (k for k in data if str(k).lower() == "conversations"), None
-        )
-        conversation_key = next(
-            (k for k in data if str(k).lower() == "conversation"), None
-        )
-        if conversations_key:
-            existing = data[conversations_key]
-            if isinstance(existing, list):
-                if conv_uri not in existing:
-                    existing.append(conv_uri)
-            elif isinstance(existing, str):
-                if existing != conv_uri:
-                    data[conversations_key] = [existing, conv_uri]
-                else:
-                    data[conversations_key] = [conv_uri]
-            else:
-                data[conversations_key] = [conv_uri]
-        elif conversation_key:
-            old_c = data.pop(conversation_key)
-            if old_c != conv_uri:
-                data["conversations"] = [old_c, conv_uri]
-            else:
-                data["conversations"] = [conv_uri]
-        else:
-            data["conversations"] = [conv_uri]
+    session = normalize_conversation_id(conv) if conv else None
+    if session:
+        scheme, c_id, ann = session
+        update_task_conversation(data, scheme, c_id, ann)
 
     yaml = YAML()
     yaml.width = WRAP_WIDTH
@@ -2089,7 +2252,7 @@ def cmd_doctor(
         _tagged(
             """[INFO]  Agent semantic review
         Check STATUS Summary/Next for contradictions with tasks and recent work.
-        Check active conversation ID ([<conversation-id>](conversation://<conversation-id>)) is recorded in STATUS.md Summary or task Outcome.
+        Check active conversation ID ([<conversation-id>](<agent>://<conversation-id>)) is recorded in STATUS.md Summary or task Outcome.
         Check PLAN is current direction, not accumulated history.
         Check ADR status/rationale and artifact references remain meaningful.
         Check private tracker material has not leaked to public/shared artifacts.
@@ -2325,7 +2488,8 @@ def cmd_checkpoint(
     """Commit an authorized tracker checkpoint for TASK_ID."""
     paths_list = paths or []
     refs_list = refs or []
-    conv_id = get_active_conversation_id(conv)
+    session = get_active_session(conv)
+    conv_uri = f"{session[0]}://{session[1]}" if session else None
 
     root = get_repo_root()
     if not ID_PATTERN.match(task_id):
@@ -2344,6 +2508,28 @@ def cmd_checkpoint(
     project_name = Path(rel_path).as_posix().split("/")[0]
     get_proj_dir(project_name, root)
     status_rel = f"{project_name}/STATUS.md"
+
+    if session:
+        scheme, c_id, ann = session
+        ann_to_use = ann or subject
+        try:
+            t_content = target_path.read_text(encoding="utf-8")
+            t_data, t_body = parse_frontmatter_for_edit(t_content)
+            if update_task_conversation(t_data, scheme, c_id, ann_to_use):
+                yaml = YAML()
+                yaml.width = WRAP_WIDTH
+                yaml.preserve_quotes = True
+                yaml.default_flow_style = False
+                buf = io.StringIO()
+                yaml.dump(t_data, buf)
+                new_content = f"---\n{buf.getvalue()}---\n{t_body}"
+                try:
+                    new_content = format_markdown(new_content)
+                except Exception:
+                    pass
+                atomic_write(target_path, new_content)
+        except Exception:
+            pass
 
     requested = [rel_path, status_rel]
     for p_arg in paths_list:
@@ -2444,8 +2630,8 @@ def cmd_checkpoint(
         if body:
             msg_lines.extend(["", wrapped_body])
         trailers = []
-        if conv_id:
-            trailers.append(f"Conversation: conversation://{conv_id}")
+        if conv_uri:
+            trailers.append(f"Conversation: {conv_uri}")
         for r in refs_list:
             trailers.append(f"Ref: {r}")
         if trailers:
@@ -2467,7 +2653,8 @@ def cmd_commit(
 ) -> None:
     """Commit a logical transition with automatic project status synchronization."""
     refs_list = refs or []
-    conv_id = get_active_conversation_id(conv)
+    session = get_active_session(conv)
+    conv_uri = f"{session[0]}://{session[1]}" if session else None
     root = get_repo_root()
     if not has_commit_auth(root):
         die(f"commit: committed AGENTS.md must contain {COMMIT_AUTH}")
@@ -2495,6 +2682,34 @@ def cmd_commit(
         findings = audit_workspace(root, project_name)
         if any(f.severity in ("WARN", "FAIL") for f in findings):
             die("doctor found errors")
+        if session:
+            scheme, c_id, ann = session
+            ann_to_use = ann or subject
+            for sf in staged_files:
+                if "/tasks/" in sf and sf.endswith(".md"):
+                    p_sf = root / sf
+                    if p_sf.is_file():
+                        try:
+                            t_content = p_sf.read_text(encoding="utf-8")
+                            t_data, t_body = parse_frontmatter_for_edit(t_content)
+                            if update_task_conversation(
+                                t_data, scheme, c_id, ann_to_use
+                            ):
+                                yaml = YAML()
+                                yaml.width = WRAP_WIDTH
+                                yaml.preserve_quotes = True
+                                yaml.default_flow_style = False
+                                buf = io.StringIO()
+                                yaml.dump(t_data, buf)
+                                new_content = f"---\n{buf.getvalue()}---\n{t_body}"
+                                try:
+                                    new_content = format_markdown(new_content)
+                                except Exception:
+                                    pass
+                                atomic_write(p_sf, new_content)
+                                run_git(["add", sf])
+                        except Exception:
+                            pass
         status_porcelain = run_git(
             ["status", "--porcelain", "--", f"{project_name}/STATUS.md"],
             check=False,
@@ -2522,8 +2737,8 @@ def cmd_commit(
     if body:
         msg_lines.extend(["", wrapped_body])
     trailers = []
-    if conv_id:
-        trailers.append(f"Conversation: conversation://{conv_id}")
+    if conv_uri:
+        trailers.append(f"Conversation: {conv_uri}")
     for r in refs_list:
         trailers.append(f"Ref: {r}")
     if trailers:

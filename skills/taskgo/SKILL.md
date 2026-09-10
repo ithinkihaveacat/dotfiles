@@ -74,17 +74,17 @@ linked artifact repos, pushes, amendments, rebases, or other history rewriting.
 1. Canonical history is append-oriented. Rewrite unpublished work if useful;
    normally correct integrated history with new commits.
 1. Private tracker information must not implicitly flow into linked
-   public/shared artifacts. `Conversation:` trailers and `conversation://` URLs
-   belong strictly in control repository metadata (`STATUS.md`, task
-   frontmatter, and control repo commits); they must never be added to commits
-   in linked artifact repositories. Artifact repositories host permanent
-   production code, tools, and regression test suites; project-scoped working
-   scripts, datasets, and run results belong in the control repo alongside their
-   project. Very large artifacts (such as cloned Git repositories or heavy
-   binary test data) should not be checked into Git; reference them or download
-   on demand. Artifact path references prefer `$HOME`-relative form (`~/...`) to
-   remain portable across machines (list multiple checkout paths when locations
-   vary per environment).
+   public/shared artifacts. `Conversation:` trailers and session URLs
+   (`<agent>://` or `conversation://`) belong strictly in control repository
+   metadata (`STATUS.md`, task frontmatter, and control repo commits); they must
+   never be added to commits in linked artifact repositories. Artifact
+   repositories host permanent production code, tools, and regression test
+   suites; project-scoped working scripts, datasets, and run results belong in
+   the control repo alongside their project. Very large artifacts (such as
+   cloned Git repositories or heavy binary test data) should not be checked into
+   Git; reference them or download on demand. Artifact path references prefer
+   `$HOME`-relative form (`~/...`) to remain portable across machines (list
+   multiple checkout paths when locations vary per environment).
 1. **Strict Link Portability & Zero `file://` URLs:** Markdown links must remain
    portable across machines and web viewers:
    - **Internal links:** Use standard relative Markdown links (e.g.
@@ -192,7 +192,7 @@ future implementers without hardening into a rigid step-by-step plan:
 id: TASK-3A91F
 status: todo
 conversations:
-  - conversation://<conversation-id>
+  - <agent>://<conversation-id>
 ---
 
 # Title as imperative verb phrase
@@ -237,14 +237,14 @@ what was implemented and discovered:
 id: TASK-3A91F
 status: done
 conversations:
-  - conversation://<conversation-id>
+  - <agent>://<conversation-id> (<subject>)
 ---
 
 # Title as imperative verb phrase
 
 ## Outcome
 Summary of what shipped, where it lives, and explicit verdicts. Completed in
-[<conversation-id>](conversation://<conversation-id>).
+[<conversation-id>](<agent>://<conversation-id>).
 - **External deliverables & links:** Cite direct canonical web URLs (PRs, issue
   tickets, web code viewers, published docs) rather than local filesystem paths.
   Never use `file://` links.
