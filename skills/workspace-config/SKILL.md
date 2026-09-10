@@ -88,65 +88,31 @@ skill <command> [arguments]
 
 ### Choosing Skills for a Workspace
 
-Choosing skills is the calling agent's job, not the tool's. `skill` enumerates
-what exists and installs what it is told; the agent — which can see the
-workspace, the conversation, and the task at hand — decides what belongs here
-and says why. The tool itself is deterministic and dependency-free: it never
-calls a model, and it never needs an API key.
+Choosing skills is the calling agent's job. `skill` enumerates what exists and
+installs what it is told; the agent decides what belongs in the workspace based
+on project files, tech stack, and user goals. The tool itself is fully
+deterministic and requires no API keys.
 
-**1. Survey what is installable.** `skill catalog --json` prints one JSON object
-per line (JSON Lines), so an agent reads every candidate in a single call
-instead of one `skill info` round-trip per skill:
+1. **Survey the catalog:** Run `skill catalog --json` to inspect all available
+   skills in a single call (JSON Lines). Each record includes frontmatter
+   (`name`, `description`), origin (`source`, `namespace`, `plugin`), and
+   structural metrics:
+   - `scripts`: Count of executable CLI tools (pre-approved for local agents by
+     `permission apply`).
+   - `references`: Count of reference guides, schemas, or architectural docs.
+   - `tests`: Count of test suites verifying tool behavior.
+   - `status`: `local` (on disk), `cached` (downloaded remote), `remote` (known
+     from cached frontmatter; structure is `null`), or `missing`.
+1. **Apply confirmed choices:** Explain recommendations to the user and persist
+   confirmed selections in `.envrc`:
+   ```bash
+   envrc add skills <names> && direnv reload && skill apply
+   ```
 
-```bash
-skill catalog --json
-```
-
-Each object carries the skill's triggering metadata and its structural profile:
-
-- `name`, `description` — the SKILL.md frontmatter: what the skill does and when
-  to use it.
-- `source`, `namespace`, `plugin` — where it comes from and which plugin
-  registered it.
-- `status` — `local` (a directory on this machine), `cached` (a remote skill
-  already downloaded into the skill cache), `remote` (known only from its cached
-  SKILL.md frontmatter), or `missing` (a registered path that is not on disk).
-- `file_count`, `size_bytes` — the skill's total footprint.
-- `scripts`, `references`, `tests` — how many files each of those subdirectories
-  holds; `null` for a `remote` skill, whose content has not been downloaded.
-
-**2. Read the structure, not just the description.** A skill with `scripts > 0`
-ships executable automation (pre-approved for local agents by
-`permission apply`); one with `references > 0` and no scripts is reference
-material — manuals, schemas, style guides — that costs only context; `tests > 0`
-marks a tool with an executable contract. That distinction decides whether
-installing a skill gives the agent new *actions* or new *knowledge*.
-
-**3. Match, explain, confirm.** Compare the candidates against the workspace
-(build files, languages, frameworks, devices) and the user's stated task. Then
-tell the user which skills you recommend and why, quoting each skill's own
-description rather than inventing a rationale, and install only what they
-confirm.
-
-**4. Apply the confirmed selection.** Record it in the workspace's `.envrc` so
-it survives the next sync, then reconcile:
-
-```bash
-envrc add skills coding-standards adb && direnv reload && skill apply
-```
-
-`skill add NAME` installs a skill for an ad-hoc trial, but the next
-`skill apply` prunes it unless it is declared in `AGENT_REQUIRED_SKILLS`.
-
-`skill catalog` is the **local** discovery channel: the skills this machine
-curates plus everything the loaded plugins register (including remote GitHub
-entries). It is authoritative for what this workspace can install today, and it
-is deliberately not the only channel — in an environment that also runs a
-corporate skill registry, an enterprise discovery service, or a marketplace,
-query those the same way and merge the results before recommending. Listing the
-catalog never downloads a repository, so it works unchanged under
-`AGENT_OFFLINE=1`; a remote skill that has never been fetched still shows its
-cached description with `"status": "remote"`.
+`skill catalog` represents the local and plugin-registered inventory. If
+external or enterprise discovery systems exist in the environment, query those
+as well before making recommendations. Listing the catalog never downloads a
+repository, so it works unchanged under `AGENT_OFFLINE=1`.
 
 ### Environment
 
@@ -326,16 +292,14 @@ skill apply
 permission apply
 ```
 
-### Targeted Discovery (Agent-Driven)
+### Targeted Discovery
 
-For a specific task ("implement a Wear OS tile in Kotlin"), read the catalog,
-narrow it by structure, and inspect the survivors before recommending any of
-them:
+Inspect the catalog to identify skills relevant to a specific task or tech
+stack:
 
 ```bash
-skill catalog --json                                        # every candidate
-skill catalog --json | jq -r 'select(.scripts > 0) | .name' # ones with tooling
-skill info adb                                              # drill into one
+skill catalog --json
+skill info adb  # inspect full details and structure of a specific skill
 ```
 
 ### Bundling Skills for Portability
