@@ -382,6 +382,16 @@ repeatable `Ref:` trailers for non-derivable external relationships and
 `Conversation:` trailers for session traceability (in control repo commits only;
 never in external artifact repos).
 
+To inspect session history or correlate commits with agent sessions, query Git:
+
+```bash
+# Find all commits associated with a specific session ID
+git log --grep='Conversation:.*<conversation-id>'
+
+# List commits and associated session URIs for a specific task
+git log --grep='TASK-XXXXX' --format='%h %s %(trailers:key=Conversation,valueonly)'
+```
+
 ### Task Export and Ejection (External Agent Handoff)
 
 When delegating a task to an isolated agent or contributor—one operating
