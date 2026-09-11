@@ -323,23 +323,39 @@ ______________________________________________________________________
   `com.google.android.wearable.sysui` after installing a new widget APK. Tile
   bindings resolve identically with or without restarting these processes. Rely
   on standard broadcasts (`add-tile` / `show-tile`) to trigger updates.
-- **Glance Wear Widget Disk Cache Invalidation Defect**:
-  - **Observable Symptom**: When dynamic state changes occur (e.g. data updates,
-    database changes, or broadcast layout switches) and the app invokes
-    `GlanceWearWidget.triggerUpdate()`, the widget on screen remains
-    **visually frozen** on the previous layout. The display completely fails to
-    reflect the updated state. Even removing and re-adding the tile to the
-    carousel continues to display the stale layout.
-  - **Root Cause**: Glance caches compiled ProtoLayout payloads in
-    `files/datastore/androidx_glance_wear_widget_cache.pb`. Calling
-    `triggerUpdate()` notifies the system tile provider but fails to mark dirty
-    or purge this disk cache file. When the host binds to the service, Glance
-    reads directly from the cache file and skips invoking `provideWidgetData()`.
-  - **Workaround**: Delete the cache file via ADB before or after triggering an
-    update:
-    ```bash
-    adb shell "run-as <PACKAGE> rm -f files/datastore/androidx_glance_wear_widget_cache.pb"
+- **Mandatory `@AssociateWithGlanceWearWidget` Service Annotation**:
+  - Always annotate your `GlanceWearWidgetService` with
+    `@AssociateWithGlanceWearWidget(MyWidget::class)`:
+    ```kotlin
+    @AssociateWithGlanceWearWidget(MyWidget::class)
+    class MyWidgetService : GlanceWearWidgetService() {
+        override val widget: GlanceWearWidget = MyWidget()
+    }
     ```
+  - **Why Required**: Glance uses static class analysis to resolve the widget
+    provider mapping without instantiating the service. When apps use Dependency
+    Injection frameworks (such as Hilt or Dagger) where the `widget` property is
+    injected or initialized during service lifecycle attachment, reflective
+    service instantiation fails or leaves `widget` uninitialized. The annotation
+    guarantees static resolution across build tools, linters, and runtime
+    resolvers (`GlanceWearWidgetManager.getProviderForWidget`).
+- **Debugging & Updates: `triggerUpdateAll()` vs `fetchActiveWidgets()`**:
+  - When triggering updates programmatically (e.g., from broadcast receivers,
+    background workers, or interactive debug buttons), prefer
+    `myWidget.triggerUpdateAll(context)` over manually iterating over
+    `fetchActiveWidgets(widget::class)`.
+  - **Why It Matters for Emulators and Testbeds**: `fetchActiveWidgets()` queries
+    the platform `TilesManager.getActiveTiles()`. On development testbeds or
+    emulators where widgets/tiles are injected via ADB broadcast commands
+    (`com.google.android.wearable.app.DEBUG_SURFACE add-tile`), `TilesManager`
+    does not register the tile under the app package's UID. Consequently,
+    `fetchActiveWidgets()` returns an empty list (`Update triggered for 0 active widgets.`),
+    silently dropping updates.
+  - `triggerUpdateAll(context)` includes an explicit debug-mode fallback: when
+    debugging is detected, it directly queries
+    `GlanceWearWidgetManager.getProviderForWidget()` and issues a pull update to
+    SysUI (`triggerPullUpdate()`), ensuring dynamic state updates render
+    immediately during development and testing.
 - **Official Tile Preview Checklist**:
   - **Dimensions**: Use exactly **400x400px** for the Tile carousel preview
     (`AndroidManifest.xml`).
