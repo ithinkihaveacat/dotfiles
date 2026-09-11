@@ -323,6 +323,23 @@ ______________________________________________________________________
   `com.google.android.wearable.sysui` after installing a new widget APK. Tile
   bindings resolve identically with or without restarting these processes. Rely
   on standard broadcasts (`add-tile` / `show-tile`) to trigger updates.
+- **Glance Wear Widget Disk Cache Invalidation Defect**:
+  - **Observable Symptom**: When dynamic state changes occur (e.g. data updates,
+    database changes, or broadcast layout switches) and the app invokes
+    `GlanceWearWidget.triggerUpdate()`, the widget on screen remains
+    **visually frozen** on the previous layout. The display completely fails to
+    reflect the updated state. Even removing and re-adding the tile to the
+    carousel continues to display the stale layout.
+  - **Root Cause**: Glance caches compiled ProtoLayout payloads in
+    `files/datastore/androidx_glance_wear_widget_cache.pb`. Calling
+    `triggerUpdate()` notifies the system tile provider but fails to mark dirty
+    or purge this disk cache file. When the host binds to the service, Glance
+    reads directly from the cache file and skips invoking `provideWidgetData()`.
+  - **Workaround**: Delete the cache file via ADB before or after triggering an
+    update:
+    ```bash
+    adb shell "run-as <PACKAGE> rm -f files/datastore/androidx_glance_wear_widget_cache.pb"
+    ```
 - **Official Tile Preview Checklist**:
   - **Dimensions**: Use exactly **400x400px** for the Tile carousel preview
     (`AndroidManifest.xml`).
