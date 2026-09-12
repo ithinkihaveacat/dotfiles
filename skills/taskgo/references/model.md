@@ -51,6 +51,25 @@ repositories**:
   contract/regression test suites (`test-*`). Commits in artifact repositories
   must remain strictly free of private control repo metadata.
 
+### Standard Directory Structure
+
+```text
+AGENTS.md                 # taskgo declaration + repository instructions
+INBOX.md                  # zero-ceremony capture; no schema
+<id>/
+  README.md               # identity, scope, domain/stakeholders, constraints, artifacts (or PROJECT.md)
+  STATUS.md               # current human view + generated task block
+  PLAN.md                 # intended route forward (optional)
+  tasks/*.md              # stable task records
+  decisions/*.md          # ADRs (optional)
+  references/*            # supporting context, schemas, design tokens, external docs (optional)
+  bugreports/*            # captured bug reports, reproduction logs, triage traces (optional)
+  scripts/*               # automation, audit harnesses, pipelines, report generators (optional)
+  data/*                  # input datasets, package lists, static fixtures (optional)
+  results/*               # benchmark telemetry, run logs, audit outputs (optional)
+  dist/*                  # static dashboards, deployable bundles, HTML reports (optional)
+```
+
 ## Task Records & Archiving
 
 Completed tasks remain as permanent, stable records in `tasks/TASK-XXXXX-*.md`
@@ -195,6 +214,15 @@ taskgo fix
 taskgo doctor
 ```
 ````
+
+## Concurrency
+
+Prefer separate branches/worktrees. Random globally checked IDs avoid a shared
+allocator. Resolve merges by reconciling files to one intended current state;
+STATUS may be rewritten freely. Stable paths and accepted ADR text are defaults,
+not reasons to preserve a broken merge. Avoid squash integration when
+intermediate state transitions matter, because squashing can erase
+reconstructible states.
 
 ## References
 
