@@ -151,7 +151,8 @@ external impact summaries.
 ## CLI
 
 Commands operate on the control repo selected by `--root`, `$TASKGO_ROOT`, or
-`~/.projects`.
+`~/.projects`. See the **[Command Index](references/command-index.md)** for full
+help details and subcommand options.
 
 ```text
 taskgo id
@@ -182,6 +183,8 @@ taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR [--tool-cmd C
 
 ## Reference Material
 
+- **[Command Index](references/command-index.md)** — Detailed subcommand
+  synopsis and options
 - **[Model & Architecture](references/model.md)**
 - **[Agent Workflows & Handoff](references/workflows.md)**
 - **[Harbor Lifecycle](references/harbor.md)**
