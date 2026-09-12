@@ -158,6 +158,32 @@ workspace's preferred web hosting utility or static file server (such as
 `zipline upload` or local HTTP preview).
 ```
 
+## Bundled Scripts & Generated Command Indexes
+
+When a skill bundles executable utilities or helper tools in `scripts/`:
+
+1. **Keep `SKILL.md` Lean:** Do not copy exhaustive command-line options, flag
+   tables, or multi-page `--help` text directly into `SKILL.md`. Keep the main
+   skill file focused on high-signal workflows and operational rules.
+
+1. **Provide `references/command-index.md`:** For any skill containing
+   executable utilities in `scripts/`, provide a `references/command-index.md`
+   file that embeds auto-generated `--help` blocks delimited by marker comments:
+
+   ```markdown
+   <!-- generated: ../scripts/<script-name> --help -->
+   (generated block)
+   <!-- /generated -->
+   ```
+
+1. **Synchronize via `command-index-format`:** Never edit content between
+   markers by hand. Run `bin/command-index-format` (from `coding-standards`) to
+   refresh blocks directly from script `usage()` text.
+
+1. **Link from `SKILL.md`:** In `SKILL.md`, link to
+   `[Command Index](references/command-index.md)` both near the tooling overview
+   and under `## Reference Material`.
+
 ## Summary Checklist
 
 Before publishing or committing a skill, verify that:
@@ -172,3 +198,6 @@ Before publishing or committing a skill, verify that:
   own root directory.
 - [ ] Secondary actions describe the required *capability* first, offering
   specific tool names only as non-binding examples.
+- [ ] If the skill bundles helper tools in `scripts/`, an auto-generated
+  `references/command-index.md` is provided, refreshed via
+  `command-index-format`, and linked from `SKILL.md`.
