@@ -340,7 +340,8 @@ ______________________________________________________________________
 Converts Android Vector Drawable (AVD) XML files to standard SVG and renders
 them as high-quality PNG images. Automatically parses `colors.xml` to resolve
 color resource references. References to `scripts/...` are relative to this
-skill directory.
+skill directory. See the **[Command Index](references/command-index.md)** for
+full option details.
 
 **Usage**:
 
@@ -359,6 +360,8 @@ ______________________________________________________________________
 
 ## Reference Material & Reporting
 
+- **[Command Index](references/command-index.md)** — Detailed synopsis and
+  options for helper scripts.
 - **[Audit Template](references/audit-template.md)** — Standardized reporting
   template and authoring directives for Wear OS widget and tile integration
   audits.
