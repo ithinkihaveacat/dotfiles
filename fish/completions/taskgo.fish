@@ -34,7 +34,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a create -d 'Create a new task'
 complete -f -c taskgo -n __fish_use_subcommand -a update -d 'Update task fields, status, or headings'
 complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
 complete -f -c taskgo -n __fish_use_subcommand -a status -d 'Show project status'
-complete -f -c taskgo -n __fish_use_subcommand -a handover -d 'Print handover instructions for a successor'
+complete -f -c taskgo -n __fish_use_subcommand -a dispatch -d 'Print agent instructions for a selected task'
 complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
 complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks (read-only)'
 complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadata and snapshots'
@@ -51,7 +51,7 @@ complete -c taskgo -f -s h -l help -d 'Display help message and exit'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create list status sync doctor fix' -a '(__fish_taskgo_projects)' -d Project
 
 # Subcommand arguments (Task IDs for update / history / checkpoint)
-complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint handover' -a '(__fish_taskgo_tasks)' -d 'Task ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint dispatch' -a '(__fish_taskgo_tasks)' -d 'Task ID'
 
 # create options
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l slug -x -d 'Filename mnemonic (max 32 chars)'

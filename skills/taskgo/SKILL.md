@@ -369,10 +369,10 @@ artifacts (including code repos) must reflect this state. Ensure that:
    (e.g. a task is never `done` while its artifact-repo commit remains
    uncommitted).
 
-Handoff-ready is the precondition for the successor handoff described in
-"Handover Instructions" below, and `taskgo handover` checks the mechanical part
-of it: that note projects committed tracker state and asserts nothing beyond it,
-so anything missing here has nowhere else to be recorded.
+Handoff-ready is also the precondition for dispatching another agent to the
+project. `taskgo dispatch` checks the mechanical part of it: the generated note
+projects committed tracker state and asserts nothing beyond it, so anything
+missing here has nowhere else to be recorded.
 
 Examples:
 
@@ -489,12 +489,14 @@ execution:
    and internal reasoning belong strictly in the out-of-band chat response.
    Private metadata must never leak into artifact commits.
 
-### Handover Instructions (Successor Agent Handoff)
+### Agent Dispatch
 
-When work passes to a successor that can read the control repository, generate a
-dispatch note with `taskgo handover TASK_ID`. Choose the task deliberately;
-`taskgo list PROJECT --state ready` shows the ready frontier, while `## Next` in
-`STATUS.md` normally identifies the intended next action.
+When assigning a selected task to an agent that can read the control repository,
+generate its instructions with `taskgo dispatch TASK_ID`. This applies both when
+starting work in a fresh agent session and when transferring work to a
+successor. Choose the task deliberately; `taskgo list PROJECT --state ready`
+shows the ready frontier, while `## Next` in `STATUS.md` normally identifies the
+intended next action.
 
 Use the generated output without embellishment. It projects the task ID,
 project, title, and `Goal` from the task record committed at `HEAD`; facts that
@@ -510,7 +512,7 @@ artifact. See [Model & Architecture](references/model.md) for the rationale and
 its relationship to isolated-worker ejection.
 
 ```console
-$ taskgo handover TASK-3A91F
+$ taskgo dispatch TASK-3A91F
 Next is TASK-3A91F (compiler): Replace the manifest loader with the
 streaming parser.
 
@@ -607,7 +609,7 @@ taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--proble
 taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo status [PROJECT] [--json]
-taskgo handover TASK_ID
+taskgo dispatch TASK_ID
 taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
@@ -626,12 +628,12 @@ automatically. Use `--slug` to name the task file (see "Tasks" above),
 `--no-commit` to keep the created task uncommitted in the working tree, or
 `--dry-run` to preview the task path without creating files.
 
-`handover` prints paste-ready handover instructions dispatching a successor
-agent to `TASK_ID` (see "Handover Instructions" above). It is read-only and
-makes no judgment about which task to dispatch. The note goes to stdout and
-findings to stderr, so warnings never contaminate a pasted note; it exits `1`
-only for an unresolvable task or one already `done`/`cancelled`, and `0` with
-`[WARN]` findings otherwise.
+`dispatch` prints paste-ready instructions for assigning an agent to `TASK_ID`
+(see "Agent Dispatch" above). It is read-only and makes no judgment about which
+task to dispatch. The note goes to stdout and findings to stderr, so warnings
+never contaminate a pasted note; it exits `1` only for an unresolvable or
+uncommitted task, or one already `done`/`cancelled`, and `0` with `[WARN]`
+findings otherwise.
 
 `harbor` commands orchestrate unattended task execution through Harbor.
 `prepare` packages a task into a self-contained trial bundle (with `job.json`,

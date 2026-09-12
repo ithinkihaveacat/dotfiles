@@ -87,7 +87,7 @@ actively iterating in uncommitted working trees before forming a checkpoint).
 agents must prioritize the Markdown files as current state and Git as the
 historical record.
 
-## Unified AuditEngine Architecture (`doctor`, `fix`, and `handover`)
+## Unified AuditEngine Architecture (`doctor`, `fix`, and `dispatch`)
 
 To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
 `AuditEngine` (`audit_workspace()`):
@@ -102,31 +102,32 @@ To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
   `COMMIT_SHA` output on `stdout`. Use `--dry-run` to preview changes without
   modifying files or committing, or `--no-commit` to apply repairs on disk
   without committing.
-- **`handover` (Committed-State Projection):** Uses the audit engine's project
-  findings alongside handover-specific checks, then emits a dispatch note from
+- **`dispatch` (Committed-State Projection):** Uses the audit engine's project
+  findings alongside dispatch-specific checks, then emits a dispatch note from
   the selected task record at `HEAD`. Findings describe working-tree or tracker
   defects on stderr without changing the committed note on stdout.
 
-## Successor Handover
+## Agent Dispatch
 
-Successor handover and isolated-worker ejection solve different problems. An
+Agent dispatch and isolated-worker ejection solve different problems. An
 isolated worker cannot read the control repository, so an ejection payload must
-inline the task specification and its dependencies. A successor agent with the
-control repository can read the tracker, artifact repositories, and Git history;
-it needs a destination rather than duplicated context.
+inline the task specification and its dependencies. An agent with the control
+repository can read the tracker, artifact repositories, and Git history; it
+needs a destination rather than duplicated context. This is true both at the
+start of a fresh agent session and when work passes to a successor.
 
-`taskgo handover TASK_ID` therefore generates a short dispatch note containing
+`taskgo dispatch TASK_ID` therefore generates a short dispatch note containing
 only the task ID, project, title, `Goal`, and paths to the project status and
 task record. These values come from the task record committed at `HEAD`, which
 keeps the note reproducible even when the working tree is dirty. The human
-transferring the note remains the router: its summary lets that person verify
-the selected task before pasting it, while the successor uses the identifier and
-title as a cross-check before reading the tracker and choosing an approach.
+dispatching the note remains the router: its summary lets that person verify the
+selected task before pasting it, while the receiving agent uses the identifier
+and title as a cross-check before reading the tracker and choosing an approach.
 
 The command does not select work. `taskgo list PROJECT --state ready` exposes
 the ready frontier, and `STATUS.md` records the intended immediate direction. A
-long handover or one requiring extra facts indicates that the tracker is not
-handoff-ready; repair the durable state instead of expanding the note.
+long dispatch note or one requiring extra facts indicates that the tracker is
+not handoff-ready; repair the durable state instead of expanding the note.
 
 ## Command Vocabulary
 
@@ -142,9 +143,8 @@ unhyphenated verbs:
   JSON format.
 - `taskgo status [PROJECT] [--json]`: Display operational status or
   multi-project summary.
-- `taskgo handover TASK_ID`: Generate successor dispatch instructions from the
-  selected task record committed at `HEAD` and report readiness findings on
-  stderr.
+- `taskgo dispatch TASK_ID`: Generate agent instructions from the selected task
+  record committed at `HEAD` and report readiness findings on stderr.
 - `taskgo sync [PROJECT]`: Synchronize `STATUS.md` snapshot block.
 - `taskgo doctor [PROJECT]`: Diagnostic health check (read-only).
 - `taskgo fix [PROJECT] [--dry-run] [--no-commit]`: Auto-heal task metadata,
