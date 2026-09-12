@@ -47,6 +47,9 @@ Execution resolution never depends on the current working directory. Run
    control repo's `AGENTS.md` grants standing authority for guarded local
    checkpoint commits (`create`, `checkpoint`, `fix`). Never rewrite artifact
    history.
+1. **No Administrative Metadata:** Do not invent metadata fields like `created`,
+   `updated`, or `blocked_since` in YAML frontmatter. Git owns administrative
+   history. Do not duplicate `Project:`, `Task:`, or `Event:` trailers.
 
 ## Tasks
 
@@ -66,6 +69,8 @@ blocked_by: [TASK-1627D]
 ```
 
 `status: blocked` is set manually. `blocked_by` is read-only scheduling data.
+Record the edge on the task that is *held*, never on the blocker; otherwise a
+new dependency requires editing an unrelated, already `done` task.
 
 ### Planning & In-Progress Task Template
 
@@ -151,8 +156,8 @@ Commands operate on the control repo selected by `--root`, `$TASKGO_ROOT`, or
 ```text
 taskgo id
 taskgo root
-taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--outcome TEXT] ...
+taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo status [PROJECT] [--json]
 taskgo dispatch TASK_ID
@@ -160,15 +165,16 @@ taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
-taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT]
+taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
-taskgo harbor prepare [TASK_ID] -o DIR [--instruction TEXT] [--workspace DIR]
+taskgo harbor prepare [TASK_ID] -o DIR [--instruction TEXT] [--workspace DIR] [--skills SKILL...] [--dry-run]
 taskgo harbor run [TARGET]
-taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR
+taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR [--tool-cmd CMD] [--json]
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.
-- `update`: Edit task in-place.
+- `update`: Edit task in-place. If using `--slug`, the rename is left
+  uncommitted; commit with `checkpoint --all` to stage both old and new paths.
 - `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, and commit
   repairs by default.
 - `checkpoint`: Safe automatic-commit path requiring
