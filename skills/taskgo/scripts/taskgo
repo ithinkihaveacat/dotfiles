@@ -809,6 +809,24 @@ def extract_title(content: str) -> str:
     return ""
 
 
+def extract_runin(content: str, label: str) -> str:
+    """Extracts the text of a bold run-in label (e.g. '**Goal:** ...') from a task body.
+
+    Returns the label's prose with internal newlines collapsed, or '' when the
+    label is absent. Mirrors the run-in layout written by 'create'/'update'.
+    """
+    _, body = parse_frontmatter(content)
+    body = re.sub(r"```.*?```", "", body, flags=re.DOTALL)
+    m = re.search(
+        rf"\*\*{re.escape(label)}:\*\*(.*?)(?=(\n\n\*\*|\n\n#|\Z))",
+        body,
+        re.DOTALL,
+    )
+    if not m:
+        return ""
+    return " ".join(m.group(1).split())
+
+
 def normalize_slug(value: str) -> str:
     """Normalizes VALUE into slug form (lowercase, hyphen-separated, no truncation)."""
     s = value.lower()
@@ -2228,6 +2246,113 @@ def list_projects(root: Path) -> list[str]:
     return [p.name for p in sorted(root.iterdir()) if is_project_dir(p)]
 
 
+def cmd_dispatch(task_id: str) -> None:
+    """Emit instructions dispatching an agent to TASK_ID."""
+    root = get_repo_root()
+    target_path = resolve_target(root, task_id)
+    rel_path = Path(str(target_path.relative_to(root))).as_posix()
+    project_name = rel_path.split("/")[0]
+
+    committed = run_git(["show", f"HEAD:{rel_path}"], check=False)
+    if committed.returncode != 0:
+        die_scoped(
+            f"{rel_path} is not committed at HEAD; commit the task before dispatching it"
+        )
+    content = committed.stdout
+
+    resolved_id = extract_frontmatter_field(content, "id")
+    if not ID_PATTERN.match(resolved_id):
+        die_scoped(f"{rel_path} has no valid committed task ID")
+    status = extract_frontmatter_field(content, "status")
+    title = extract_title(content)
+    goal = extract_runin(content, "Goal")
+
+    # Dispatching finished work is a selection error, so refuse it.
+    if status in RESOLVED_STATES:
+        die_scoped(
+            f"{resolved_id} is {status}; dispatch accepts only unfinished work "
+            f"(see 'taskgo list {project_name} --state ready')"
+        )
+
+    findings: list[tuple[Literal["WARN", "FAIL"], str]] = []
+    if not title:
+        findings.append(
+            ("WARN", f"{resolved_id} has no title heading; the note names only its ID")
+        )
+    if not goal:
+        findings.append(
+            (
+                "WARN",
+                f"{resolved_id} has no '**Goal:**'; the summary cannot say what the work is",
+            )
+        )
+
+    findings.extend(
+        (finding.severity, finding.message)
+        for finding in audit_workspace(root, project_name)
+        if finding.severity in {"WARN", "FAIL"}
+    )
+
+    rows = get_task_rows(root, project_name)
+    row = next((r for r in rows if r.task_id == resolved_id), None)
+    if row is not None:
+        blockers = unresolved_blockers(row, status_index(root))
+        if blockers:
+            findings.append(
+                (
+                    "WARN",
+                    (
+                        f"{resolved_id} is still blocked by {', '.join(blockers)}; "
+                        "it is not ready to dispatch"
+                    ),
+                )
+            )
+
+    # A dispatch note points at committed state. Uncommitted project files mean
+    # the receiving agent cannot see every current workspace change.
+    dirty = run_git(
+        ["status", "--porcelain", "--", project_name], check=False
+    ).stdout.strip()
+    if dirty:
+        findings.append(
+            (
+                "WARN",
+                (
+                    f"{project_name} has uncommitted changes; the note describes "
+                    "committed state only"
+                ),
+            )
+        )
+
+    for severity, message in findings:
+        print(_tagged(f"[{severity}]  {message}", sys.stderr), file=sys.stderr)
+
+    headline = f"Next is {resolved_id} ({project_name})"
+    if title:
+        headline += f": {title}"
+        if title[-1] not in ".?!":
+            headline += "."
+    else:
+        headline += "."
+
+    status_md = f"{project_name}/STATUS.md"
+    paragraphs = [headline]
+    if goal:
+        paragraphs.append(goal)
+    paragraphs.append(
+        f"Read {status_md} and the task record ({rel_path}) before acting, and "
+        "form your own view of the approach."
+    )
+    # Never break inside a path or hyphenated identifier: the note is pasted and
+    # its file references must stay greppable.
+    print(
+        "\n\n".join(
+            textwrap.fill(p, width=76, break_long_words=False, break_on_hyphens=False)
+            for p in paragraphs
+        )
+    )
+
+
 def cmd_sync(
     project: str | None = None,
 ) -> None:
@@ -2895,6 +3020,18 @@ def cmd_harbor(args: argparse.Namespace) -> None:
         sys.exit(code)
 
 
+class HouseStyleHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Capitalizes argparse's fixed help headings to match the CLI house style."""
+
+    def format_help(self) -> str:
+        rendered = super().format_help()
+        return (
+            rendered.replace("usage:", "Usage:", 1)
+            .replace("positional arguments:", "Arguments:", 1)
+            .replace("options:", "Options:", 1)
+        )
+
+
 def help_text() -> str:
     """Renders top-level help, including the resolved control repository root."""
     root_dir, source = resolve_root_candidate()
@@ -2909,6 +3046,7 @@ Commands:
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   status [PROJECT] [--json]        Show project status
+  dispatch TASK_ID                 Print agent instructions for a selected task
   sync [PROJECT]                   Update STATUS.md snapshot
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
@@ -2932,6 +3070,7 @@ Examples:
   taskgo create my-project "Diagnose intermittent disconnects" --slug disconnects
   taskgo create my-project "Add cache layer" --slug cache-layer --problem "High latency"
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
+  taskgo dispatch TASK-3A91F
   taskgo sync my-project
   taskgo fix my-project
   taskgo checkpoint TASK-3A91F "project: start diagnosis" --all"""
@@ -3128,6 +3267,32 @@ than a few words.""",
         dest="as_json",
         action="store_true",
         help="Output machine-readable JSON",
+    )
+
+    # dispatch
+    p_dispatch = subparsers.add_parser(
+        "dispatch",
+        help="Print agent instructions for a selected task",
+        description="Print instructions dispatching an agent to a selected task.",
+        formatter_class=HouseStyleHelpFormatter,
+        add_help=False,
+        epilog="""Examples:
+  taskgo dispatch TASK-3A91F
+  taskgo --root ~/projects dispatch TASK-3A91F
+
+The note is generated from the task record committed at HEAD. Findings about
+working-tree or tracker readiness are written to stderr.""",
+    )
+    p_dispatch.add_argument(
+        "--help",
+        "-h",
+        action="help",
+        help="Display this help message and exit",
+    )
+    p_dispatch.add_argument(
+        "task_id",
+        metavar="TASK_ID",
+        help="Task to assign to the agent",
     )
 
     # sync
@@ -3540,6 +3705,8 @@ def main(argv: list[str] | None = None) -> None:
             project=args.project,
             as_json=args.as_json,
         )
+    elif args.command == "dispatch":
+        cmd_dispatch(task_id=args.task_id)
     elif args.command == "sync":
         cmd_sync(project=args.project)
     elif args.command == "doctor":
