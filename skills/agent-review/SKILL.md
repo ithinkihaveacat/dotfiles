@@ -111,6 +111,8 @@ after fixes instead of resuming the earlier reviewer session.
 
 ## Reference Material
 
+- **Command Index**: Detailed launcher synopsis, options, and arguments. See
+  [references/command-index.md](references/command-index.md).
 - **Review Rubric**: Finding thresholds, severity definitions, comment formats,
   and verdict reporting. See
   [references/review-rubric.md](references/review-rubric.md).
