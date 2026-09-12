@@ -513,13 +513,13 @@ its relationship to isolated-worker ejection.
 
 ```console
 $ taskgo dispatch TASK-3A91F
-Next is TASK-3A91F (compiler): Replace the manifest loader with the
+Next is taskgo TASK-3A91F (compiler): Replace the manifest loader with the
 streaming parser.
 
 Cold start stops scaling with manifest size.
 
-Read compiler/STATUS.md and the task record
-(compiler/tasks/TASK-3A91F-manifest-loader.md) before acting, and form your
+Read /path/to/compiler/STATUS.md and the task record
+(/path/to/compiler/tasks/TASK-3A91F-manifest-loader.md) before acting, and form your
 own view of the approach.
 ```
 
