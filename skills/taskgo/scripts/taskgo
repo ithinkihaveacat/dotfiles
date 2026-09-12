@@ -2253,12 +2253,16 @@ def cmd_handover(task_id: str) -> None:
     rel_path = Path(str(target_path.relative_to(root))).as_posix()
     project_name = rel_path.split("/")[0]
 
-    try:
-        content = target_path.read_text(encoding="utf-8")
-    except OSError as e:
-        die_scoped(f"cannot read task file {rel_path}: {e}")
+    committed = run_git(["show", f"HEAD:{rel_path}"], check=False)
+    if committed.returncode != 0:
+        die_scoped(
+            f"{rel_path} is not committed at HEAD; commit it before handing over"
+        )
+    content = committed.stdout
 
-    resolved_id = extract_frontmatter_field(content, "id") or task_id.upper()
+    resolved_id = extract_frontmatter_field(content, "id")
+    if not ID_PATTERN.match(resolved_id):
+        die_scoped(f"{rel_path} has no valid committed task ID")
     status = extract_frontmatter_field(content, "status")
     title = extract_title(content)
     goal = extract_runin(content, "Goal")
@@ -2270,26 +2274,38 @@ def cmd_handover(task_id: str) -> None:
             f"(see 'taskgo list {project_name} --state ready')"
         )
 
-    warnings: list[str] = []
+    findings: list[tuple[Literal["WARN", "FAIL"], str]] = []
     if not title:
-        warnings.append(
-            f"{resolved_id} has no title heading; the note names only its ID"
+        findings.append(
+            ("WARN", f"{resolved_id} has no title heading; the note names only its ID")
         )
     if not goal:
-        warnings.append(
-            f"{resolved_id} has no '**Goal:**'; the summary cannot say what the work is"
+        findings.append(
+            (
+                "WARN",
+                f"{resolved_id} has no '**Goal:**'; the summary cannot say what the work is",
+            )
         )
-    if status and status not in STANDARD_STATES:
-        warnings.append(f"{resolved_id} has a nonstandard status: {status}")
+
+    findings.extend(
+        (finding.severity, finding.message)
+        for finding in audit_workspace(root, project_name)
+        if finding.severity in {"WARN", "FAIL"}
+    )
 
     rows = get_task_rows(root, project_name)
     row = next((r for r in rows if r.task_id == resolved_id), None)
     if row is not None:
         blockers = unresolved_blockers(row, status_index(root))
         if blockers:
-            warnings.append(
-                f"{resolved_id} is still blocked by {', '.join(blockers)}; "
-                "it is not ready to dispatch"
+            findings.append(
+                (
+                    "WARN",
+                    (
+                        f"{resolved_id} is still blocked by {', '.join(blockers)}; "
+                        "it is not ready to dispatch"
+                    ),
+                )
             )
 
     # A handover points at committed state. Uncommitted project files mean the
@@ -2298,13 +2314,18 @@ def cmd_handover(task_id: str) -> None:
         ["status", "--porcelain", "--", project_name], check=False
     ).stdout.strip()
     if dirty:
-        warnings.append(
-            f"{project_name} has uncommitted changes; the note points at state "
-            "the successor cannot read (commit before handing over)"
+        findings.append(
+            (
+                "WARN",
+                (
+                    f"{project_name} has uncommitted changes; the note describes "
+                    "committed state only"
+                ),
+            )
         )
 
-    for w in warnings:
-        print(_tagged(f"[WARN]  {w}", sys.stderr), file=sys.stderr)
+    for severity, message in findings:
+        print(_tagged(f"[{severity}]  {message}", sys.stderr), file=sys.stderr)
 
     headline = f"Next is {resolved_id} ({project_name})"
     if title:
@@ -2999,6 +3020,18 @@ def cmd_harbor(args: argparse.Namespace) -> None:
         sys.exit(code)
 
 
+class HouseStyleHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Capitalizes argparse's fixed help headings to match the CLI house style."""
+
+    def format_help(self) -> str:
+        rendered = super().format_help()
+        return (
+            rendered.replace("usage:", "Usage:", 1)
+            .replace("positional arguments:", "Arguments:", 1)
+            .replace("options:", "Options:", 1)
+        )
+
+
 def help_text() -> str:
     """Renders top-level help, including the resolved control repository root."""
     root_dir, source = resolve_root_candidate()
@@ -3241,7 +3274,20 @@ than a few words.""",
         "handover",
         help="Print handover instructions dispatching a successor to a task",
         description="Print handover instructions dispatching a successor to a task.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
+        add_help=False,
+        epilog="""Examples:
+  taskgo handover TASK-3A91F
+  taskgo --root ~/projects handover TASK-3A91F
+
+The note is generated from the task record committed at HEAD. Findings about
+working-tree or tracker readiness are written to stderr.""",
+    )
+    p_handover.add_argument(
+        "--help",
+        "-h",
+        action="help",
+        help="Display this help message and exit",
     )
     p_handover.add_argument(
         "task_id",

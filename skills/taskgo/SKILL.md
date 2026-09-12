@@ -491,55 +491,23 @@ execution:
 
 ### Handover Instructions (Successor Agent Handoff)
 
-When the next step of a task passes to another agent that *does* hold the
-control repository — typically a fresh session started right after this one —
-hand over with `taskgo handover TASK_ID` rather than an ejection payload. The
-two are near opposites. An ejection payload is long because the isolated worker
-can read nothing else; handover instructions are three sentences because the
-successor can read everything: the tracker, the artifact repos, and Git history.
+When work passes to a successor that can read the control repository, generate a
+dispatch note with `taskgo handover TASK_ID`. Choose the task deliberately;
+`taskgo list PROJECT --state ready` shows the ready frontier, while `## Next` in
+`STATUS.md` normally identifies the intended next action.
 
-Their purpose is dispatch, not context transfer. A successor told only to "look
-through the control repo, work out what is next, and start on it" will get
-there, but it pays for that scan in wall-clock time and tokens on every handoff.
-The note names the destination, so the successor begins from an answer instead
-of deriving one.
+Use the generated output without embellishment. It projects the task ID,
+project, title, and `Goal` from the task record committed at `HEAD`; facts that
+are missing belong in the task, `STATUS.md`, or `PLAN.md`. The command writes
+the note to stdout and readiness findings to stderr. Repair `[WARN]` or `[FAIL]`
+findings before dispatching. It refuses tasks that are not committed or are
+already `done`/`cancelled`.
 
-Everything in the note is a projection of committed tracker state — the task ID,
-its project, the title, and the `Goal` — which is why it is generated rather
-than written. **Do not hand-author or embellish the output.** A note carrying a
-fact found nowhere in the control repo is a defect in the tracker, not a richer
-handover: write that fact into the task record, `STATUS.md`, or `PLAN.md` under
-the handoff-ready rules above, and regenerate. Choosing *which* task to dispatch
-is the judgment the command does not make; `taskgo list PROJECT --state ready`
-shows the frontier, and `## Next` in `STATUS.md` normally already names it.
-
-The summary exists for the human, not the agent. Handover instructions are
-pasted into the next agent's prompt by a person, and that person is the router:
-before pasting, they need to satisfy themselves that this is the right task and
-the right thing to do next, which a bare `TASK-XXXXX` does not let them check by
-eye. The successor gets the same line as a cross-check rather than as
-instruction — an identifier and a title that agree let it open the task and
-start work instead of first verifying it has the right one, and ones that
-disagree are worth stopping on. Brevity is deliberate beyond that: the successor
-is meant to form its own reading of the problem from the tracker, so the note
-gives the destination, not the route.
-
-`handover` writes the note to stdout and its findings to stderr, so a warning
-never contaminates a pasted note. Treat any `[WARN]` as a handoff-ready defect
-in the tracker and repair it before dispatching — uncommitted project changes
-mean the successor cannot read the state the note describes, a missing `Goal`
-means the summary cannot say what the work is, and an unresolved `blocked_by`
-edge means the task is not ready to start. Dispatching a `done` or `cancelled`
-task is refused outright. Warnings do not fail the command: the note is still
-correct as far as the tracker goes, and the decision to hand over anyway is the
-user's.
-
-Produce handover instructions unprompted. When a session has completed a
-substantial piece of work and some time has passed since the last human
-interaction, close by leaving the repositories handoff-ready and then offering
-handover instructions for the next step, without being asked. The note itself is
-a chat response, never a tracked artifact: committing it would reintroduce the
-journal that `HEAD` exists to avoid.
+When yielding after substantial work with a clear successor task, leave the
+tracker and artifact repositories handoff-ready and include the generated note
+in the final response. The note remains chat output rather than a tracked
+artifact. See [Model & Architecture](references/model.md) for the rationale and
+its relationship to isolated-worker ejection.
 
 ```console
 $ taskgo handover TASK-3A91F
