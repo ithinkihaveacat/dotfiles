@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..110'
+echo '1..117'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -2053,4 +2053,147 @@ if [ "$SHORT_URI_EXIT" -ne 0 ] && \
   echo 'ok 110 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
 else
   echo 'not ok 110 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
+fi
+
+# --- handover ---------------------------------------------------------------
+
+HO_REPO="$TEST_ROOT/ho-repo"
+mkdir -p "$HO_REPO/proj/tasks"
+git -C "$HO_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$HO_REPO/AGENTS.md"
+printf '# Inbox\n' >"$HO_REPO/INBOX.md"
+printf '# Proj\n' >"$HO_REPO/proj/README.md"
+printf '# Status\n' >"$HO_REPO/proj/STATUS.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-11111' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Replace the manifest loader with the streaming parser' \
+  '' \
+  '**Problem:** The loader buffers the whole manifest.' \
+  '' \
+  '**Goal:** Cold start stops scaling with manifest size.' \
+  '' \
+  '**Criteria:** Cold start is flat across manifest sizes.' \
+  >"$HO_REPO/proj/tasks/TASK-11111-manifest-loader.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-22222' \
+  'status: done' \
+  '---' \
+  '' \
+  '# Land the schema' \
+  >"$HO_REPO/proj/tasks/TASK-22222-schema.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-33333' \
+  'status: todo' \
+  'blocked_by: [TASK-44444]' \
+  '---' \
+  '' \
+  '# Wire the export pipeline' \
+  '' \
+  '**Goal:** Exports run end to end.' \
+  >"$HO_REPO/proj/tasks/TASK-33333-export.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-44444' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Freeze the schema' \
+  >"$HO_REPO/proj/tasks/TASK-44444-freeze.md"
+git -C "$HO_REPO" add -A
+git -C "$HO_REPO" commit -qm 'init handover fixture'
+
+# Test 111: the note projects committed tracker state and asserts nothing else
+HO_OUT="$("$BIN" --root "$HO_REPO" handover TASK-11111 2>/dev/null)"
+# Compare against a single-line rendering: the note is hard-wrapped for pasting.
+HO_FLAT="$(printf '%s' "$HO_OUT" | tr '\n' ' ' | tr -s ' ')"
+if [[ "$HO_FLAT" == *"Next is TASK-11111 (proj): Replace the manifest loader with the streaming parser."* ]] &&
+  [[ "$HO_FLAT" == *"Cold start stops scaling with manifest size."* ]] &&
+  [[ "$HO_FLAT" == *"proj/STATUS.md"* ]] &&
+  [[ "$HO_FLAT" == *"proj/tasks/TASK-11111-manifest-loader.md"* ]] &&
+  [[ "$HO_FLAT" == *"form your own view of the approach."* ]] &&
+  [[ "$HO_FLAT" != *"buffers the whole manifest"* ]] &&
+  [[ "$HO_FLAT" != *"Criteria"* ]]; then
+  echo 'ok 111 - handover emits ID, project, title, and Goal without other task prose'
+else
+  echo 'not ok 111 - handover emits ID, project, title, and Goal without other task prose'
+fi
+
+# Test 112: file references survive wrapping unbroken
+HO_LONG="$("$BIN" --root "$HO_REPO" handover TASK-11111 2>/dev/null)"
+if [[ "$HO_LONG" == *"(proj/tasks/TASK-11111-manifest-loader.md)"* ]]; then
+  echo 'ok 112 - handover never wraps a path mid-token'
+else
+  echo 'not ok 112 - handover never wraps a path mid-token'
+fi
+
+# Test 113: dispatching finished work is refused
+set +e
+HO_DONE_OUT="$("$BIN" --root "$HO_REPO" handover TASK-22222 2>&1)"
+HO_DONE_EXIT=$?
+set -e
+if [ "$HO_DONE_EXIT" -ne 0 ] &&
+  [[ "$HO_DONE_OUT" == *"taskgo handover: TASK-22222 is done"* ]] &&
+  [[ "$HO_DONE_OUT" == *"--state ready"* ]]; then
+  echo 'ok 113 - handover refuses a done task and points at the ready frontier'
+else
+  echo 'not ok 113 - handover refuses a done task and points at the ready frontier'
+fi
+
+# Test 114: unresolved blockers warn on stderr but still emit a note
+set +e
+HO_BLK_ERR="$("$BIN" --root "$HO_REPO" handover TASK-33333 2>&1 >/dev/null)"
+HO_BLK_EXIT=$?
+set -e
+HO_BLK_OUT="$("$BIN" --root "$HO_REPO" handover TASK-33333 2>/dev/null)"
+if [ "$HO_BLK_EXIT" -eq 0 ] &&
+  [[ "$HO_BLK_ERR" == *"[WARN]"* ]] &&
+  [[ "$HO_BLK_ERR" == *"still blocked by TASK-44444"* ]] &&
+  [[ "$HO_BLK_OUT" == *"Next is TASK-33333"* ]]; then
+  echo 'ok 114 - handover warns on unresolved blockers without failing'
+else
+  echo 'not ok 114 - handover warns on unresolved blockers without failing'
+fi
+
+# Test 115: a missing Goal is reported rather than silently producing a thin note
+set +e
+HO_NG_ERR="$("$BIN" --root "$HO_REPO" handover TASK-44444 2>&1 >/dev/null)"
+set -e
+if [[ "$HO_NG_ERR" == *"[WARN]"* ]] && [[ "$HO_NG_ERR" == *"has no '**Goal:**'"* ]]; then
+  echo 'ok 115 - handover warns when the task states no Goal'
+else
+  echo 'not ok 115 - handover warns when the task states no Goal'
+fi
+
+# Test 116: uncommitted project state is reported (handoff-ready precondition)
+printf 'scratch\n' >>"$HO_REPO/proj/STATUS.md"
+set +e
+HO_DIRTY_ERR="$("$BIN" --root "$HO_REPO" handover TASK-11111 2>&1 >/dev/null)"
+HO_DIRTY_EXIT=$?
+set -e
+git -C "$HO_REPO" checkout -q -- proj/STATUS.md
+if [ "$HO_DIRTY_EXIT" -eq 0 ] &&
+  [[ "$HO_DIRTY_ERR" == *"[WARN]"* ]] &&
+  [[ "$HO_DIRTY_ERR" == *"uncommitted changes"* ]]; then
+  echo 'ok 116 - handover warns when the project has uncommitted changes'
+else
+  echo 'not ok 116 - handover warns when the project has uncommitted changes'
+fi
+
+# Test 117: warnings never contaminate the paste-ready note on stdout
+HO_CLEAN="$("$BIN" --root "$HO_REPO" handover TASK-33333 2>/dev/null)"
+if [[ "$HO_CLEAN" != *"[WARN]"* ]] && [[ "$HO_CLEAN" != *"blocked by"* ]]; then
+  echo 'ok 117 - handover keeps diagnostics off stdout'
+else
+  echo 'not ok 117 - handover keeps diagnostics off stdout'
 fi

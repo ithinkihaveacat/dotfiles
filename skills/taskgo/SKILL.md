@@ -370,8 +370,9 @@ artifacts (including code repos) must reflect this state. Ensure that:
    uncommitted).
 
 Handoff-ready is the precondition for the successor handoff described in
-"Handover Instructions" below: that note points at this state and asserts
-nothing beyond it, so anything missing here has nowhere else to be recorded.
+"Handover Instructions" below, and `taskgo handover` checks the mechanical part
+of it: that note projects committed tracker state and asserts nothing beyond it,
+so anything missing here has nowhere else to be recorded.
 
 Examples:
 
@@ -492,77 +493,64 @@ execution:
 
 When the next step of a task passes to another agent that *does* hold the
 control repository — typically a fresh session started right after this one —
-write **handover instructions** rather than an ejection payload. The two are
-near opposites. An ejection payload is long because the isolated worker can read
-nothing else; handover instructions are short because the successor can read
-everything: the tracker, the artifact repos, Git history, and, given a
-conversation identifier, often the prior session transcript.
+hand over with `taskgo handover TASK_ID` rather than an ejection payload. The
+two are near opposites. An ejection payload is long because the isolated worker
+can read nothing else; handover instructions are three sentences because the
+successor can read everything: the tracker, the artifact repos, and Git history.
 
 Their purpose is dispatch, not context transfer. A successor told only to "look
 through the control repo, work out what is next, and start on it" will get
 there, but it pays for that scan in wall-clock time and tokens on every handoff.
-Handover instructions name the destination, so the successor begins from an
-answer instead of deriving one.
+The note names the destination, so the successor begins from an answer instead
+of deriving one.
 
-**The note asserts nothing the tracker does not already record.** It is a
-projection of committed state for dispatch, much as `STATUS.md` is a projection
-of the task records for reading. Anything you find yourself wanting to add — a
-finding, a decision, a caveat — is evidence the tracker is incomplete: write it
-into the task record, `STATUS.md`, or `PLAN.md` under the handoff-ready rules
-above, then point at it. The invariant is what keeps the note short, and it
-makes the note checkable: a handover carrying a fact found nowhere in the
-control repo is a defect in the tracker, not a richer handover.
+Everything in the note is a projection of committed tracker state — the task ID,
+its project, the title, and the `Goal` — which is why it is generated rather
+than written. **Do not hand-author or embellish the output.** A note carrying a
+fact found nowhere in the control repo is a defect in the tracker, not a richer
+handover: write that fact into the task record, `STATUS.md`, or `PLAN.md` under
+the handoff-ready rules above, and regenerate. Choosing *which* task to dispatch
+is the judgment the command does not make; `taskgo list PROJECT --state ready`
+shows the frontier, and `## Next` in `STATUS.md` normally already names it.
 
-Write the summary for the human, not the agent. Handover instructions are pasted
-into the next agent's prompt by a person, and that person is the router: before
-pasting, they need to satisfy themselves that this is the right task and the
-right thing to do next. A bare `TASK-XXXXX` cannot be checked by eye, which is
-the whole reason the summary exists. Phrase it in domain terms the person will
-recognize, not in tracker vocabulary they would have to resolve first.
+The summary exists for the human, not the agent. Handover instructions are
+pasted into the next agent's prompt by a person, and that person is the router:
+before pasting, they need to satisfy themselves that this is the right task and
+the right thing to do next, which a bare `TASK-XXXXX` does not let them check by
+eye. The successor gets the same line as a cross-check rather than as
+instruction — an identifier and a title that agree let it open the task and
+start work instead of first verifying it has the right one, and ones that
+disagree are worth stopping on. Brevity is deliberate beyond that: the successor
+is meant to form its own reading of the problem from the tracker, so the note
+gives the destination, not the route.
 
-The summary earns its place with the successor too, as a cross-check rather than
-as instruction. An identifier and a description that agree let the agent open
-the task and start work instead of first verifying it has the right one; ones
-that disagree are worth stopping on, since a stale or mistyped identifier is
-otherwise caught late. Brevity matters for the same reason: the successor is
-meant to form its own reading of the problem from the tracker, and a detailed
-account of how the previous agent saw it silently substitutes for that. Give the
-destination, not the route.
+`handover` writes the note to stdout and its findings to stderr, so a warning
+never contaminates a pasted note. Treat any `[WARN]` as a handoff-ready defect
+in the tracker and repair it before dispatching — uncommitted project changes
+mean the successor cannot read the state the note describes, a missing `Goal`
+means the summary cannot say what the work is, and an unresolved `blocked_by`
+edge means the task is not ready to start. Dispatching a `done` or `cancelled`
+task is refused outright. Warnings do not fail the command: the note is still
+correct as far as the tracker goes, and the decision to hand over anyway is the
+user's.
 
-Include:
+Produce handover instructions unprompted. When a session has completed a
+substantial piece of work and some time has passed since the last human
+interaction, close by leaving the repositories handoff-ready and then offering
+handover instructions for the next step, without being asked. The note itself is
+a chat response, never a tracked artifact: committing it would reintroduce the
+journal that `HEAD` exists to avoid.
 
-1. **Routing:** the verbatim `TASK-XXXXX` identifier and its project. Where the
-   immediate step is one slice of a larger task, say which slice — `## Next` in
-   `STATUS.md` already names it.
-1. **Summary:** one or two sentences on what the work is, drawn from the task
-   title and `Goal`. Enough for a person to recognize the work and judge whether
-   it should happen now.
-1. **Provenance:** the full prior conversation identifier as
-   `[<conversation-id>](<agent>://<conversation-id>)`, so the successor can
-   query the previous session for detail below the granularity the tracker
-   records — how a conclusion was reached, what was tried and discarded. Supply
-   it even when the tracker is complete: it costs a line, and it is
-   unrecoverable later.
+```console
+$ taskgo handover TASK-3A91F
+Next is TASK-3A91F (compiler): Replace the manifest loader with the
+streaming parser.
 
-Handover instructions are a chat response, not a tracked artifact: committing
-them would reintroduce the journal that `HEAD` exists to avoid. They may cite
-conversation identifiers and control repo paths freely, since the successor
-holds the control repo, but the segregation invariant still applies — none of it
-may be pasted into an artifact repository commit.
+Cold start stops scaling with manifest size.
 
-Produce them unprompted. When a session has completed a substantial piece of
-work and some time has passed since the last human interaction, close by leaving
-the repositories handoff-ready and then offering handover instructions for the
-next step, without being asked.
-
-Example:
-
-```text
-Next is TASK-3A91F (compiler): replace the hand-rolled manifest loader with the
-streaming parser, so cold start stops scaling with manifest size. The schema
-work it was blocked on landed last session. Read STATUS.md and the task record
-first and form your own view of the approach. Prior session:
-[<conversation-id>](<agent>://<conversation-id>).
+Read compiler/STATUS.md and the task record
+(compiler/tasks/TASK-3A91F-manifest-loader.md) before acting, and form your
+own view of the approach.
 ```
 
 ### Harbor Task Execution
@@ -651,6 +639,7 @@ taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--proble
 taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo status [PROJECT] [--json]
+taskgo handover TASK_ID
 taskgo sync [PROJECT]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
@@ -668,6 +657,13 @@ the initial task record, synchronizes `STATUS.md`, and when the
 automatically. Use `--slug` to name the task file (see "Tasks" above),
 `--no-commit` to keep the created task uncommitted in the working tree, or
 `--dry-run` to preview the task path without creating files.
+
+`handover` prints paste-ready handover instructions dispatching a successor
+agent to `TASK_ID` (see "Handover Instructions" above). It is read-only and
+makes no judgment about which task to dispatch. The note goes to stdout and
+findings to stderr, so warnings never contaminate a pasted note; it exits `1`
+only for an unresolvable task or one already `done`/`cancelled`, and `0` with
+`[WARN]` findings otherwise.
 
 `harbor` commands orchestrate unattended task execution through Harbor.
 `prepare` packages a task into a self-contained trial bundle (with `job.json`,
