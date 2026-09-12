@@ -369,6 +369,10 @@ artifacts (including code repos) must reflect this state. Ensure that:
    (e.g. a task is never `done` while its artifact-repo commit remains
    uncommitted).
 
+Handoff-ready is the precondition for the successor handoff described in
+"Handover Instructions" below, not a substitute for it: reaching that state is
+what makes the handover note short enough to be worth writing.
+
 Examples:
 
 ```text
@@ -483,6 +487,78 @@ execution:
    in public commit trailers. Branch references, conversation links, telemetry,
    and internal reasoning belong strictly in the out-of-band chat response.
    Private metadata must never leak into artifact commits.
+
+### Handover Instructions (Successor Agent Handoff)
+
+When the next step of a task passes to another agent that *does* hold the
+control repository — typically a fresh session started immediately after this
+one — write **handover instructions** rather than an ejection payload. The two
+are opposites in what they carry. An ejection payload is long because the
+isolated worker can read nothing else; handover instructions are short because
+the successor can read everything: the tracker, the artifact repos, Git history,
+and, given a conversation identifier, often the prior session transcript itself.
+
+The tracker is the handoff; the note is not. Everything durable — state,
+findings, verdicts, next actions — belongs in the task record, `STATUS.md`, and
+`PLAN.md` under the handoff-ready rules above, and the successor will find it
+there. Handover instructions carry only what is true but not yet worth writing
+down as belief: a path already explored and abandoned, a hunch that never
+reached evidence, a warning about something locally surprising. Drafting the
+note is a good moment to notice a durable fact still trapped in the
+conversation; when that happens, write it into the tracker and leave it out of
+the note.
+
+Keep the note to a few sentences. Length is a symptom: a long handover means the
+tracker is not actually handoff-ready, and the repair belongs in the tracker,
+not in the note. Length also does direct harm, because the successor inherits
+framing along with facts. A second agent is meant to form its own reading of the
+problem, and a detailed account of how the first one saw it quietly substitutes
+for that. State hunches as hunches so they stay cheap to discard.
+
+Include, at minimum:
+
+1. **Routing:** the verbatim `TASK-XXXXX` identifier and its project, so the
+   successor knows where to start reading. Name a specific starting document
+   only when it is not the obvious one.
+1. **Provenance:** the full prior conversation identifier as
+   `[<conversation-id>](<agent>://<conversation-id>)`, so the successor can
+   query the previous session for detail that never reached the tracker. Supply
+   it even when the tracker looks complete: it costs one line, and it is
+   unrecoverable once the handover is the only link back.
+1. **Context:** one or two sentences of conversational residue, marked as
+   unverified wherever it is.
+1. **Calibration:** a short factual read on where the work stands — the
+   groundwork is in place, the remaining change is contained, the test suite is
+   fast. This is orientation rather than cheerleading (see the tone rules in the
+   `technical-writing` skill): a successor with no momentum otherwise infers
+   scope from silence, and usually infers too much.
+
+Handover instructions are a chat response to the human, not a tracked artifact.
+They are ephemeral routing, and committing them would reintroduce precisely the
+journal that `HEAD` exists to avoid. They may cite conversation identifiers and
+control repo paths freely, since the successor holds the control repo, but the
+segregation invariant still applies: none of that may be pasted into an artifact
+repository commit.
+
+Produce handover instructions unprompted. When a session has completed a
+substantial piece of work and some time has passed since the last human
+interaction, close by leaving the repositories handoff-ready and then offering
+handover instructions for the next step, without being asked. That is exactly
+the situation where the context worth carrying forward is largest and nearest to
+being lost.
+
+Example:
+
+```text
+Continue TASK-3A91F (compiler). The tracker is current, so read STATUS.md and
+the task record and form your own view before acting. Prior session:
+[<conversation-id>](<agent>://<conversation-id>) — query it for the reasoning
+behind the manifest loader split. Unverified hunch rather than a finding: the
+remaining latency looks like it sits in the loader and not the streaming parser,
+but the session ended before I measured it. The schema work this depends on is
+done and the suite runs in under a minute, so this should be a contained
+change.
+```
 
 ### Harbor Task Execution
 
