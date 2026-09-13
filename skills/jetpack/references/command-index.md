@@ -62,13 +62,10 @@ Options:
   --help              Display this help message and exit
 
 Environment Variables:
-  JETPACK_OFFLINE     Set to 1 to answer only from the local cache and never
+  AGENT_OFFLINE       Set to 1 to answer only from the local cache and never
                       use the network. Cached answers are served whatever their
                       age, with that age noted on stderr; a cache miss names
                       the command to re-run with network, never a guess.
-  AGENT_OFFLINE       Workspace-wide offline policy, used when JETPACK_OFFLINE
-                      is unset. Set this in a CI job or an agent sandbox that
-                      has no egress.
   JETPACK_CACHE_DIR   Cache directory
                       (default: ${XDG_CACHE_HOME:-$HOME/.cache}/jetpack)
   XDG_CACHE_HOME      Base directory for cache (default: $HOME/.cache)

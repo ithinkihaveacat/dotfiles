@@ -291,7 +291,7 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
 which each consume every following path.
 
 **Environment:** `GEMINI_API_KEY` (Required), `CAXTON_STATE_DIR` (Optional),
-`CAXTON_OFFLINE` / `AGENT_OFFLINE` (Optional)
+`AGENT_OFFLINE` (Optional)
 
 **Exit codes:** 0 success, 1 error, 2 timeout, 127 git missing, 130 interrupted,
 141 stdout closed early

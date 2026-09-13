@@ -482,8 +482,7 @@ Options:
 Environment:
   GEMINI_API_KEY      Required. Your Gemini API key.
   GEMINI_MODEL        Optional. Default model if --model is not given.
-  CAXTON_OFFLINE      Refuse network calls. Exits immediately if set.
-  AGENT_OFFLINE       Workspace-wide offline policy fallback.
+  AGENT_OFFLINE       Refuse network calls. Exits immediately if set.
   CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
                       (default: ${XDG_STATE_HOME:-~/.local/state}/caxton).
 
@@ -998,10 +997,9 @@ Environment:
                     env ANDROID_SERIAL=<serial> popper "accept all permissions"
   GEMINI_API_KEY  Required. Your Gemini API key.
   GEMINI_MODEL    Optional. Default model if --model is not given.
-  POPPER_OFFLINE  Refuse to use the network. This tool caches nothing, so
+  AGENT_OFFLINE   Refuse to use the network. This tool caches nothing, so
                   offline mode fails immediately rather than serving a stale
-                  answer. Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE   Workspace-wide offline policy (see above).
+                  answer.
 ```
 
 <!-- /generated -->

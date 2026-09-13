@@ -156,8 +156,8 @@ interpretation:
 Every tool that makes a network call owes its caller a legible failure: a
 request that never reached a server and one answered with an error are different
 facts. Tools an agent or CI job drives additionally honor an offline switch
-(`<TOOL>_OFFLINE`, else the workspace-wide `AGENT_OFFLINE`) and fail on the spot
-rather than timing out; a one-shot pipe that fails in a second need not.
+(`AGENT_OFFLINE`) and fail on the spot rather than timing out; a one-shot pipe
+that fails in a second need not.
 
 Tools that additionally cache what they fetch follow one repo-wide convention
 for where the cache lives (`<TOOL>_CACHE_DIR`, else

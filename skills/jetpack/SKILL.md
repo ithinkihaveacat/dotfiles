@@ -12,7 +12,7 @@ description: >-
 compatibility: >-
   Requires curl, xmllint (libxml2-utils), jar (JDK), jq, perl. Needs network
   access to dl.google.com, androidx.dev, and cs.android.com, or a cache left by
-  an earlier online run plus JETPACK_OFFLINE/AGENT_OFFLINE where there is none.
+  an earlier online run plus AGENT_OFFLINE where there is none.
 ---
 
 # Jetpack Library Utilities

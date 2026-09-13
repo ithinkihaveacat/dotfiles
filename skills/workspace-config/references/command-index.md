@@ -58,10 +58,8 @@ Environment:
   AGENT_REQUIRED_HOOKS  Whitespace-separated profiles 'apply' installs
                         (default: agent). Profiles it does not name are
                         removed, the way 'skill apply' synchronizes skills.
-  HOOK_OFFLINE          Set to 1 to fail rather than fetch a profile whose
+  AGENT_OFFLINE         Set to 1 to fail rather than fetch a profile whose
                         hook is downloaded (gerrit).
-  AGENT_OFFLINE         Workspace-wide offline policy, used when
-                        HOOK_OFFLINE is unset.
 
 Examples:
   hook apply
@@ -121,12 +119,9 @@ Options:
   --plugin-template  Output a template/documentation for creating a Workspace plugin
 
 Environment:
-  SKILL_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
+  AGENT_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
                      has already been downloaded (at any age) instead. A skill
                      that has never been fetched is an error, not a guess.
-  AGENT_OFFLINE      Workspace-wide offline policy, used when SKILL_OFFLINE is
-                     unset. Set this in a CI job or agent sandbox with no
-                     egress.
   SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
                      (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)
 ```

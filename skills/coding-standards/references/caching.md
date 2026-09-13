@@ -18,8 +18,7 @@ Different scripts have different obligations:
 1. **Every network call:** Must report failure clearly. Never silently treat a
    failed request as an empty result. A connection failure is different from a
    `404 Not Found`.
-1. **Agent/CI driven scripts:** Must honor the offline switch (`<TOOL>_OFFLINE`
-   or `AGENT_OFFLINE`).
+1. **Agent/CI driven scripts:** Must honor the offline switch (`AGENT_OFFLINE`).
 1. **Caching scripts:** Must follow the caching rules in this document (layout,
    write-through, provenance).
 
@@ -28,15 +27,27 @@ queries, unique LLM prompts).
 
 ## The Offline Switch
 
-Control offline behavior via environment variables:
+Control offline behavior via the `AGENT_OFFLINE` environment variable:
 
 ```text
-<TOOL>_OFFLINE   Per-tool override; takes precedence.
-AGENT_OFFLINE    Workspace-wide policy.
+AGENT_OFFLINE    Workspace-wide offline policy.
 ```
 
 Treat `1`, `true`, `yes`, and `on` (case-insensitive) as true. Anything else is
 false. Do not use an `--offline` flag as the *only* way to trigger offline mode.
+
+To run a single command offline in an otherwise online environment:
+
+```bash
+AGENT_OFFLINE=1 <command>
+```
+
+Conversely, to run a single command online when `AGENT_OFFLINE=1` is exported in
+the environment, override it for that invocation:
+
+```bash
+AGENT_OFFLINE=0 <command>
+```
 
 ### What Offline Mode Means
 
@@ -116,14 +127,11 @@ advance but cannot know the exact commands that will be run.
 
 ## Help Text
 
-Document both environment variables under `Environment:`, including the default
-cache location:
+Document `AGENT_OFFLINE` under `Environment:`, along with any cache location:
 
 ```text
 Environment:
-  JETPACK_OFFLINE     Answer only from the local cache; never use the network.
-                      Falls back to AGENT_OFFLINE when unset.
-  AGENT_OFFLINE       Workspace-wide offline policy (see JETPACK_OFFLINE).
+  AGENT_OFFLINE       Answer only from the local cache; never use the network.
   JETPACK_CACHE_DIR   Cache directory
                       (default: ${XDG_CACHE_HOME:-$HOME/.cache}/jetpack)
 ```

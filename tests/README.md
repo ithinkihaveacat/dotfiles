@@ -90,9 +90,9 @@ network calls the scripts themselves make. Scripts in this repository that cache
 what they fetch (`jetpack`, `skill`, `context`) honour a second switch:
 
 - **Solution**: Set `AGENT_OFFLINE=1` to make every such script answer from its
-  cache instead of the network, or `<TOOL>_OFFLINE` (`JETPACK_OFFLINE`,
-  `SKILL_OFFLINE`, `CONTEXT_OFFLINE`) to change one tool's behaviour — the
-  per-tool variable wins, including when set to `0` to opt back in.
+  cache instead of the network. To run a single command online when
+  `AGENT_OFFLINE=1` is exported in the environment, override it for that
+  invocation with `AGENT_OFFLINE=0 <command>`.
 - **Usage**:
   ```bash
   UV_OFFLINE=1 AGENT_OFFLINE=1 prove tests/test-* skills/*/tests/test-*

@@ -72,7 +72,7 @@ tools: clean command structures (`tool [verb] [noun]`), dual output streams
 
 Cross-cutting conventions for tools that fetch remote resources over the
 network: caching under `$XDG_CACHE_HOME`, strict offline mode enforcement via
-`AGENT_OFFLINE=1` / `<TOOL>_OFFLINE=1`, and cache-age reporting. See
+`AGENT_OFFLINE=1`, and cache-age reporting. See
 **[references/caching.md](references/caching.md)**.
 
 ### Git Operations & Commit Messages
