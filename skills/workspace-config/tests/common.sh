@@ -73,6 +73,7 @@ skill_test_init() {
   # Ensure p4 is not found by default during Git/Unmanaged tests.
   export PATH="$MOCK_BIN_DIR:$PATH"
   unset AGENT_PREFLIGHT_SKIP _agent_preflight_skip
+  unset AGENT_REQUIRED_SKILLS
 
   # A dummy p4 that fails, so we never accidentally detect Perforce.
   cat <<'EOF' >"$MOCK_BIN_DIR/p4"

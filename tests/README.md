@@ -110,17 +110,17 @@ what they fetch (`jetpack`, `skill`, `context`) honour a second switch:
 The convention itself is documented in
 `skills/coding-standards/references/caching.md`.
 
-### 3. Skipping External API Tests (`GEMINI_API_KEY=""`)
+### 3. Skipping External API Tests (`GEMINI_API_KEY=""` or `AGENT_OFFLINE=1`)
 
 Some tests (like `test-pacioli`) include integration tests that make actual
 network calls to the Gemini API. These can be slow, cost quota, and be
 non-deterministic.
 
-- **Solution**: Set `GEMINI_API_KEY=""` (empty string) in the environment. These
-  tests are written to detect the empty key and will gracefully skip their
-  API-dependent assertions while passing the rest of the local suite. Run the
-  API-dependent tests manually when making substantive changes to the tested
-  script.
+- **Solution**: Set `GEMINI_API_KEY=""` (empty string) or `AGENT_OFFLINE=1` in
+  the environment. These tests detect an empty key or the offline flag and will
+  gracefully skip their API-dependent assertions while passing the rest of the
+  local suite. Run the API-dependent tests manually when making substantive
+  changes to the tested script.
 - **Usage**:
   ```bash
   GEMINI_API_KEY="" prove tests/test-* skills/*/tests/test-*
@@ -156,11 +156,11 @@ When writing new tests or modifying existing ones, follow these guidelines:
    `# Tests: tests/test-foo`), so tests are discoverable via
    `grep '# Tests:' bin/my-script`.
 1. **Graceful skips**: If a test requires external dependencies or credentials
-   (like `GEMINI_API_KEY`), detect their absence and skip gracefully using TAP
-   skip syntax:
+   (like `GEMINI_API_KEY`), detect their absence or offline mode and skip
+   gracefully using TAP skip syntax:
    ```bash
-   if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-     echo "1..0 # SKIP GEMINI_API_KEY not set"
+   if [[ -z "${GEMINI_API_KEY:-}" || "${AGENT_OFFLINE:-}" == "1" ]]; then
+     echo "1..0 # SKIP GEMINI_API_KEY not set or AGENT_OFFLINE=1"
      exit 0
    fi
    ```
