@@ -31,8 +31,18 @@ def register(api):
     )
 
     api.register_skill(
-        "remote:skill-creator",
+        "remote:claude-skill-creator",
         "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+    )
+
+    api.register_skill(
+        "remote:openai-skill-creator",
+        "https://github.com/openai/skills/tree/main/skills/.system/skill-creator",
+    )
+
+    api.register_skill(
+        "remote:openai-improve-skill",
+        "https://github.com/openai/plugins/tree/main/plugins/plugin-eval/skills/improve-skill",
     )
 
     api.register_skill(
@@ -44,4 +54,3 @@ def register(api):
         "remote:skill-cleaner",
         "https://github.com/steipete/agent-scripts/tree/main/skills/skill-cleaner",
     )
-
