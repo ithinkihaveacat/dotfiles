@@ -72,7 +72,7 @@ adhere to the following formatting rules:
    "bug" to the description if they are already present in the type prefix. Use
    the imperative mood (e.g., "add feature" not "added feature" or "adds
    feature").
-2. **Body Wrapping:** All text within the commit body and footers MUST be
+1. **Body Wrapping:** All text within the commit body and footers MUST be
    hard-wrapped at 72 characters. This ensures that the commit message renders
    cleanly in standard `git log` output and other terminal-based tools that
    indent the commit body.

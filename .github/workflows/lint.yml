@@ -30,24 +30,31 @@ jobs:
 
       - name: ruff
         run: |
-          grep -rlE '^#!.*python|^#!/usr/bin/env -S uv run' bin/ skills/*/scripts/ \
+          grep -rlE '^#!.*python|^#!/usr/bin/env -S uv run' bin/ skills/*/scripts/ tests/ skills/*/tests/ \
             | grep -v '__pycache__' \
             | sort \
             | xargs -r skills/coding-standards/scripts/python-format --check
 
       - name: shellcheck
         run: |
-          grep -rlE '^#!.*\bba?sh\b' bin/ skills/*/scripts/ etc/macos/apply-defaults install.sh \
+          grep -rlE '^#!.*\bba?sh\b' bin/ skills/*/scripts/ tests/ skills/*/tests/ etc/macos/apply-defaults install.sh \
             | grep -v '__pycache__' \
             | sort \
             | xargs shellcheck
 
       - name: shfmt
         run: |
-          grep -rlE '^#!.*\bba?sh\b' bin/ skills/*/scripts/ etc/macos/apply-defaults install.sh \
+          grep -rlE '^#!.*\bba?sh\b' bin/ skills/*/scripts/ tests/ skills/*/tests/ etc/macos/apply-defaults install.sh \
             | grep -v '__pycache__' \
             | sort \
             | xargs shfmt -d -i 2 -ci
+
+      - name: markdown-format
+        run: |
+          git ls-files '*.md' \
+            | grep -v 'fixtures/' \
+            | sort \
+            | xargs -r skills/coding-standards/scripts/markdown-format --check
 
       - name: command-index-format
         run: bin/command-index-format --check --all
@@ -56,8 +63,12 @@ jobs:
     # Same-repo PRs are already covered by the push event; only fork PRs
     # (which do not trigger push here) need the pull_request run.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -65,7 +76,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get install -y --no-install-recommends libxml2-utils fish
 
@@ -77,11 +89,19 @@ jobs:
           curl -sSL "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" | tar -xJ -C /tmp
           sudo cp "/tmp/shellcheck-${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
 
-          # Pre-warm uv dependencies before parallel test execution
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install fish shfmt
+
+      - name: Pre-warm uv dependencies
+        run: |
           skills/workspace-config/scripts/skill --help >/dev/null 2>&1 || true
 
       - name: Run tests
         env:
           # Empty key forces heavy, non-deterministic external LLM tests to skip gracefully.
           GEMINI_API_KEY: ""
-        run: prove -j $(nproc) tests/test-* skills/*/tests/test-*
+          # Enforce hermetic offline execution across all cached repo tools.
+          AGENT_OFFLINE: "1"
+        run: prove -j 4 tests/test-* skills/*/tests/test-*

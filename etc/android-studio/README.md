@@ -23,7 +23,7 @@ Import Settings... | [Choose settings.zip]
 (Does not require a plugin, but only changes the colours of the "source code"
 area.)
 
-1. Preferences | Editor | Color Scheme | Cog | Import Scheme... | [Choose
-   *.icls]
+1. Preferences | Editor | Color Scheme | Cog | Import Scheme... | \[Choose
+   \*.icls\]
 
 [Source](https://github.com/jkaving/intellij-colors-solarized)
