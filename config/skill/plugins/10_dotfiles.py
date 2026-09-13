@@ -41,11 +41,6 @@ def register(api):
     )
 
     api.register_skill(
-        "remote:openai-improve-skill",
-        "https://github.com/openai/plugins/tree/main/plugins/plugin-eval/skills/improve-skill",
-    )
-
-    api.register_skill(
         "remote:playwright-cli",
         "https://github.com/microsoft/playwright-cli/tree/main/skills/playwright-cli",
     )
