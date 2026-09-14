@@ -36,8 +36,8 @@ def register(api):
     )
 
     api.register_skill(
-        "remote:openai-skill-creator",
-        "https://github.com/openai/skills/tree/main/skills/.system/skill-creator",
+        "remote:codex-skill-creator",
+        "https://github.com/openai/codex/tree/main/codex-rs/skills/src/assets/samples/skill-creator",
     )
 
     api.register_skill(
