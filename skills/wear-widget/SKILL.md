@@ -344,13 +344,13 @@ ______________________________________________________________________
     background workers, or interactive debug buttons), prefer
     `myWidget.triggerUpdateAll(context)` over manually iterating over
     `fetchActiveWidgets(widget::class)`.
-  - **Why It Matters for Emulators and Testbeds**: `fetchActiveWidgets()` queries
-    the platform `TilesManager.getActiveTiles()`. On development testbeds or
-    emulators where widgets/tiles are injected via ADB broadcast commands
-    (`com.google.android.wearable.app.DEBUG_SURFACE add-tile`), `TilesManager`
-    does not register the tile under the app package's UID. Consequently,
-    `fetchActiveWidgets()` returns an empty list (`Update triggered for 0 active widgets.`),
-    silently dropping updates.
+  - **Why It Matters for Emulators and Testbeds**: `fetchActiveWidgets()`
+    queries the platform `TilesManager.getActiveTiles()`. On development
+    testbeds or emulators where widgets/tiles are injected via ADB broadcast
+    commands (`com.google.android.wearable.app.DEBUG_SURFACE add-tile`),
+    `TilesManager` does not register the tile under the app package's UID.
+    Consequently, `fetchActiveWidgets()` returns an empty list
+    (`Update triggered for 0 active widgets.`), silently dropping updates.
   - `triggerUpdateAll(context)` includes an explicit debug-mode fallback: when
     debugging is detected, it directly queries
     `GlanceWearWidgetManager.getProviderForWidget()` and issues a pull update to
