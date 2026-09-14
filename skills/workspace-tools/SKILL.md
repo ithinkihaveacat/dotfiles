@@ -31,6 +31,8 @@ control ever seeing the configuration. It consists of four tools:
    every detected local agent (workspace-local for Claude Code, user-wide for
    Antigravity), including pre-approving the safe commands declared by installed
    skills.
+1. **`envrc`**: The configuration manager. Manages marker-delimited blocks in
+   `.envrc` files for direnv integration.
 
 For Git repositories, `hook apply`, `skill apply`, and `permission apply` run
 automatically on `git clone` via the global template's post-checkout hook.
