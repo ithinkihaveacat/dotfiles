@@ -1,0 +1,441 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pillow>=10.0.0",
+# ]
+# ///
+"""Embed local Markdown images as reference-style Base64 Data URIs."""
+
+import argparse
+import base64
+import io
+import math
+import os
+import re
+import sys
+import urllib.parse
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from PIL import Image
+
+SUPPORTED_EXTENSIONS = {
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".gif": "gif",
+}
+
+
+@dataclass(slots=True)
+class ProcessedImage:
+    """Represents a resolved and encoded image."""
+
+    path: Path
+    format: str
+    orig_width: int
+    orig_height: int
+    b64_data_uri: str
+    b64_len: int
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        prog="markdown-embed-images",
+        description=(
+            "Resolves relative Markdown images and rewrites them as"
+            " reference-style Base64 Data URIs."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  # Embed images in place with default 300KB budget:\n"
+            "  markdown-embed-images document.md\n\n"
+            "  # Embed images with a 500KB total budget to a separate file:\n"
+            "  markdown-embed-images --max-size-kb 500 -o out.md document.md\n\n"
+            "  # Preview changes without modifying files:\n"
+            "  markdown-embed-images --dry-run document.md\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "files",
+        metavar="FILE",
+        nargs="+",
+        help="Path to Markdown file(s) to process.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        metavar="OUT_FILE",
+        default=None,
+        help=(
+            "Path to write output file (default: in-place rewrite). Only valid"
+            " when specifying a single input FILE."
+        ),
+    )
+    parser.add_argument(
+        "--max-size-kb",
+        metavar="KB",
+        type=int,
+        default=300,
+        help="Maximum total Base64 image payload in kilobytes (default: 300).",
+    )
+    parser.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Preview actions without modifying or creating files.",
+    )
+    return parser.parse_args(argv)
+
+
+def slugify_filename(path: Path) -> str:
+    """Generate a clean slug identifier from a file path."""
+    stem = path.stem.lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "-", stem).strip("-")
+    return cleaned or "image"
+
+
+def is_remote_or_data(url: str) -> bool:
+    """Check whether a URL is a network URL or already a data URI."""
+    url_lower = url.lower().strip()
+    return url_lower.startswith(("http://", "https://", "data:"))
+
+
+def resolve_image_path(raw_url: str, base_dir: Path) -> Path | None:
+    """Resolve a raw URL string to a local filesystem Path if valid."""
+    cleaned = raw_url.strip()
+    if cleaned.startswith("<") and cleaned.endswith(">"):
+        cleaned = cleaned[1:-1].strip()
+
+    if is_remote_or_data(cleaned):
+        return None
+
+    if cleaned.startswith("file://"):
+        parsed = urllib.parse.urlparse(cleaned)
+        cleaned = urllib.parse.unquote(parsed.path)
+    else:
+        cleaned = urllib.parse.unquote(cleaned)
+
+    candidate = Path(cleaned)
+    if candidate.is_absolute():
+        resolved = candidate
+    else:
+        resolved = (base_dir / candidate).resolve()
+
+    if not resolved.is_file():
+        return None
+
+    ext = resolved.suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return None
+
+    return resolved
+
+
+def encode_image(im: Image.Image, image_format: str) -> tuple[str, int]:
+    """Encode a PIL Image to a Base64 Data URI."""
+    buf = io.BytesIO()
+    fmt_upper = image_format.upper()
+    mime_type = "jpeg" if fmt_upper == "JPEG" else image_format.lower()
+
+    if fmt_upper == "JPEG":
+        if im.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            mask = im.split()[-1] if im.mode in ("RGBA", "LA") else None
+            bg.paste(im, mask=mask)
+            im = bg
+        im.save(buf, format="JPEG", quality=82, optimize=True)
+    elif fmt_upper == "PNG":
+        im.save(buf, format="PNG", optimize=True)
+    elif fmt_upper == "GIF":
+        im.save(buf, format="GIF", optimize=True)
+    else:
+        im.save(buf, format=fmt_upper)
+
+    data = buf.getvalue()
+    b64_str = base64.b64encode(data).decode("ascii")
+    data_uri = f"data:image/{mime_type};base64,{b64_str}"
+    return data_uri, len(data_uri)
+
+
+def process_images_under_budget(
+    image_paths: list[Path],
+    budget_bytes: int,
+) -> dict[Path, ProcessedImage]:
+    """Load, encode, and resize images to stay within the total payload budget."""
+    results: dict[Path, ProcessedImage] = {}
+    if not image_paths:
+        return results
+
+    # Initial load and pass: check original file sizes
+    loaded_images: dict[Path, tuple[Image.Image, str, int, int]] = {}
+    initial_processed: dict[Path, ProcessedImage] = {}
+    total_len = 0
+
+    for path in image_paths:
+        ext = path.suffix.lower()
+        fmt = SUPPORTED_EXTENSIONS[ext]
+        try:
+            with Image.open(path) as im:
+                im.load()
+                w, h = im.size
+                data_uri, b64_len = encode_image(im, fmt)
+                proc = ProcessedImage(
+                    path=path,
+                    format=fmt,
+                    orig_width=w,
+                    orig_height=h,
+                    b64_data_uri=data_uri,
+                    b64_len=b64_len,
+                )
+                initial_processed[path] = proc
+                loaded_images[path] = (im.copy(), fmt, w, h)
+                total_len += b64_len
+        except Exception as err:
+            sys.stderr.write(
+                f"markdown-embed-images: warning: failed to read {path}: {err}\n"
+            )
+
+    if total_len <= budget_bytes or not loaded_images:
+        return initial_processed
+
+    # Need resizing: calculate scale factor and iterate
+    scale = min(0.85, math.sqrt(budget_bytes / total_len))
+    best_results = initial_processed
+
+    for _iteration in range(6):
+        current_results: dict[Path, ProcessedImage] = {}
+        curr_total_len = 0
+
+        for path, (im, fmt, orig_w, orig_h) in loaded_images.items():
+            new_w = max(16, int(orig_w * scale))
+            new_h = max(16, int(orig_h * scale))
+
+            resized_im = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            data_uri, b64_len = encode_image(resized_im, fmt)
+            proc = ProcessedImage(
+                path=path,
+                format=fmt,
+                orig_width=orig_w,
+                orig_height=orig_h,
+                b64_data_uri=data_uri,
+                b64_len=b64_len,
+            )
+            current_results[path] = proc
+            curr_total_len += b64_len
+
+        best_results = current_results
+        if curr_total_len <= budget_bytes:
+            break
+
+        scale *= 0.75
+        if scale < 0.05:
+            break
+
+    return best_results
+
+
+def process_markdown_file(
+    file_path: Path,
+    output_path: Path | None,
+    max_size_kb: int,
+    dry_run: bool,
+) -> bool:
+    """Process a single markdown file, embedding local images as reference base64."""
+    if not file_path.is_file():
+        sys.stderr.write(f"markdown-embed-images: file not found: {file_path}\n")
+        return False
+
+    base_dir = file_path.parent
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except Exception as err:
+        sys.stderr.write(f"markdown-embed-images: error reading {file_path}: {err}\n")
+        return False
+
+    # Regex patterns
+    inline_re = re.compile(
+        r"!(?:\[(?P<alt>[^\]]*)\])\((?P<url><[^>]+>|[^)\s]+)(?:\s+(?P<title>[\"'][^\"']*[\"']))?\)"
+    )
+    def_re = re.compile(
+        r"^(?P<indent>[ \t]*)\[(?P<label>[^\]]+)\]:\s*(?P<url><[^>]+>|\S+)(?:\s+(?P<title>[\"'][^\"']*[\"']))?[ \t]*$",
+        re.MULTILINE,
+    )
+
+    # 1. Discover all candidate images
+    referenced_paths: list[Path] = []
+    seen_paths: set[Path] = set()
+
+    for match in inline_re.finditer(content):
+        raw_url = match.group("url")
+        resolved = resolve_image_path(raw_url, base_dir)
+        if resolved and resolved not in seen_paths:
+            seen_paths.add(resolved)
+            referenced_paths.append(resolved)
+
+    for match in def_re.finditer(content):
+        raw_url = match.group("url")
+        resolved = resolve_image_path(raw_url, base_dir)
+        if resolved and resolved not in seen_paths:
+            seen_paths.add(resolved)
+            referenced_paths.append(resolved)
+
+    if not referenced_paths:
+        sys.stderr.write(
+            f"markdown-embed-images: no relative images found in {file_path}\n"
+        )
+        return True
+
+    budget_bytes = max_size_kb * 1024
+    encoded_images = process_images_under_budget(
+        referenced_paths, budget_bytes=budget_bytes
+    )
+    if not encoded_images:
+        sys.stderr.write(
+            f"markdown-embed-images: no images successfully encoded in {file_path}\n"
+        )
+        return True
+
+    # 2. Existing reference definitions in the file
+    existing_labels: set[str] = set()
+    for match in def_re.finditer(content):
+        existing_labels.add(match.group("label").strip().lower())
+
+    # Map Path -> assigned reference label
+    path_to_label: dict[Path, str] = {}
+    path_to_title: dict[Path, str | None] = {}
+
+    # Check if path is already defined in existing def_re
+    for match in def_re.finditer(content):
+        raw_url = match.group("url")
+        resolved = resolve_image_path(raw_url, base_dir)
+        if resolved and resolved in encoded_images:
+            lbl = match.group("label").strip()
+            path_to_label[resolved] = lbl
+            if match.group("title"):
+                path_to_title[resolved] = match.group("title")
+
+    # Allocate new unique labels for images that don't have one
+    for path in referenced_paths:
+        if path in path_to_label or path not in encoded_images:
+            continue
+        base_slug = f"img-{slugify_filename(path)}"
+        candidate_label = base_slug
+        counter = 2
+        while candidate_label.lower() in existing_labels:
+            candidate_label = f"{base_slug}-{counter}"
+            counter += 1
+        existing_labels.add(candidate_label.lower())
+        path_to_label[path] = candidate_label
+
+    # 3. Rewrite content
+    # Replace existing defs pointing to local paths
+    def replace_def(m: re.Match[str]) -> str:
+        raw_url = m.group("url")
+        resolved = resolve_image_path(raw_url, base_dir)
+        if resolved and resolved in encoded_images:
+            proc = encoded_images[resolved]
+            indent = m.group("indent")
+            label = m.group("label")
+            title_part = f" {m.group('title')}" if m.group("title") else ""
+            return f"{indent}[{label}]: {proc.b64_data_uri}{title_part}"
+        return m.group(0)
+
+    new_content = def_re.sub(replace_def, content)
+
+    # Replace inline images with reference style
+    new_refs_needed: dict[str, str] = {}
+
+    def replace_inline(m: re.Match[str]) -> str:
+        raw_url = m.group("url")
+        resolved = resolve_image_path(raw_url, base_dir)
+        if resolved and resolved in encoded_images:
+            label = path_to_label[resolved]
+            alt = m.group("alt")
+            title = m.group("title")
+            proc = encoded_images[resolved]
+
+            # Record reference definition if not already in file
+            if label.lower() not in existing_labels or resolved not in path_to_title:
+                title_part = f" {title}" if title else ""
+                new_refs_needed[label] = f"{proc.b64_data_uri}{title_part}"
+
+            return f"![{alt}][{label}]"
+        return m.group(0)
+
+    new_content = inline_re.sub(replace_inline, new_content)
+
+    # Append new reference definitions to bottom of file
+    if new_refs_needed:
+        new_content = new_content.rstrip() + "\n\n<!-- Embedded Image References -->\n"
+        for lbl, uri_and_title in sorted(new_refs_needed.items()):
+            new_content += f"[{lbl}]: {uri_and_title}\n"
+
+    total_payload_kb = sum(p.b64_len for p in encoded_images.values()) / 1024.0
+
+    if dry_run:
+        sys.stderr.write(
+            f"markdown-embed-images: dry run: would embed"
+            f" {len(encoded_images)} image(s) ({total_payload_kb:.1f} KB"
+            f" payload) in {file_path}\n"
+        )
+        return True
+
+    target_out = output_path or file_path
+    try:
+        target_out.write_text(new_content, encoding="utf-8")
+        sys.stderr.write(
+            f"markdown-embed-images: embedded {len(encoded_images)} image(s)"
+            f" ({total_payload_kb:.1f} KB payload) into {target_out}\n"
+        )
+        return True
+    except Exception as err:
+        sys.stderr.write(f"markdown-embed-images: error writing {target_out}: {err}\n")
+        return False
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Main entrypoint."""
+    args = parse_args(argv)
+
+    if args.output and len(args.files) > 1:
+        sys.stderr.write(
+            "markdown-embed-images: --output can only be used with a single"
+            " input file\n"
+        )
+        sys.exit(1)
+
+    out_path = Path(args.output).resolve() if args.output else None
+
+    success = True
+    for f in args.files:
+        in_path = Path(f).resolve()
+        if not process_markdown_file(
+            in_path,
+            output_path=out_path,
+            max_size_kb=args.max_size_kb,
+            dry_run=args.dry_run,
+        ):
+            success = False
+
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)

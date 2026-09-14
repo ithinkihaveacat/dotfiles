@@ -14,15 +14,8 @@ function pbclean
         return
     end
 
-    # Process content using perl for robust UTF-8 and cross-platform handling
-    set -l content_out (printf '%s' "$content_in" | perl -CSD -pe '
-        if (/^\[image\d+\]: <data:image\//) { $_ = ""; next; }
-        s/"data:[^"]*"/""/g;
-        s/\x{00A0}/ /g;
-        s/\[cite[^\]]*\]//g;
-        s/ ?\(\[source\]\(http[^)]+\)\)//g;
-        s/---//g;
-    ' | string collect --no-trim-newline)
+    # Process content using markdown-clean
+    set -l content_out (printf '%s' "$content_in" | markdown-clean -q | string collect --no-trim-newline)
 
     set -l size_out (printf '%s' "$content_out" | wc -c | string trim)
 

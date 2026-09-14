@@ -730,6 +730,53 @@ scripts/popper --launch com.example.fitness --stay-in-app "start a running exerc
 env ANDROID_SERIAL=12345 scripts/popper "open settings"
 ```
 
+### markdown-clean
+
+Sanitizes Markdown text by stripping Base64 data URIs, LLM citation tags,
+non-breaking spaces, zero-width characters, and copy-paste artifacts.
+
+```bash
+# Clean clipboard content
+pbpaste | scripts/markdown-clean | pbcopy
+
+# Clean a file in place
+scripts/markdown-clean document.md
+
+# Verify a file is clean (exit code = 0 clean, 1 dirty)
+scripts/markdown-clean --check document.md
+```
+
+**Options:** `-o OUT_FILE` (write to separate file), `-n, --dry-run` (preview
+changes), `--check` (drift detection), `-q, --quiet` (suppress stderr diff
+report), `--keep-dividers` (preserve horizontal rules `---`).
+
+**Exit codes:** 0 success (or clean in `--check` mode), 1 error (or dirty in
+`--check` mode).
+
+### markdown-embed-images
+
+Resolves local relative Markdown image links (`![alt](img.png)`) and rewrites
+them as reference-style Base64 Data URIs (`![alt][ref]` with
+`[ref]: data:image/png;base64,...` at the bottom of the document). Resizes
+images proportionally using Pillow (Lanczos) to stay within a total payload
+budget (default 300KB).
+
+```bash
+# Embed images in place (300KB budget)
+scripts/markdown-embed-images document.md
+
+# Custom payload budget and separate output file
+scripts/markdown-embed-images --max-size-kb 500 -o standalone.md document.md
+
+# Preview planned embeddings without modifying files
+scripts/markdown-embed-images --dry-run document.md
+```
+
+**Options:** `-o OUT_FILE` (write to separate file), `--max-size-kb KB` (total
+Base64 budget, default: 300), `-n, --dry-run` (preview changes).
+
+**Exit codes:** 0 success, 1 error.
+
 ## Image Encoding Notes
 
 - Screenshot tools encode to lossless WebP; `photo-query` uses lossy WebP and

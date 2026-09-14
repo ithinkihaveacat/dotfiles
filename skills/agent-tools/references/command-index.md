@@ -22,6 +22,10 @@
 - [gh-markdown](#gh-markdown) - Format GitHub PRs/Issues/Runs as Markdown
 - [gemini-api-doctor](#gemini-api-doctor) - Ping Gemini models to test the API
   key
+- [markdown-clean](#markdown-clean) - Sanitize Markdown by stripping bloat and
+  citations
+- [markdown-embed-images](#markdown-embed-images) - Embed local Markdown images
+  as reference-style Base64
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
 - [Request Structure](#request-structure) - API request patterns
 
@@ -1106,6 +1110,101 @@ options:
 | ---- | --------------------------- |
 | 0    | All pinged models responded |
 | 1    | At least one model failed   |
+
+______________________________________________________________________
+
+## markdown-clean
+
+Sanitizes Markdown text by stripping Base64 data URIs, LLM citation tags,
+non-breaking spaces, zero-width characters, and copy-paste artifacts.
+
+### Help
+
+<!-- generated: ../scripts/markdown-clean --help -->
+
+```text
+usage: markdown-clean [-h] [-o OUT_FILE] [-n] [--check] [-q] [--keep-dividers]
+                      [FILE ...]
+
+Sanitizes Markdown text by stripping Base64 data URIs, LLM citation tags,
+non-breaking spaces, and copy-paste artifacts.
+
+positional arguments:
+  FILE                  Path to Markdown file(s) to process. Reads stdin if
+                        omitted or '-'.
+
+options:
+  -h, --help            show this help message and exit
+  -o, --output OUT_FILE
+                        Path to write output. Only valid when processing a
+                        single input.
+  -n, --dry-run         Preview actions without modifying or creating files.
+  --check               Check if inputs would be changed. Exit 0 if clean, 1
+                        if dirty.
+  -q, --quiet           Suppress summary statistics on stderr.
+  --keep-dividers       Preserve horizontal rule dividers ('---'). Stripped by
+                        default.
+
+Examples:
+  # Clean clipboard content via stdin/stdout pipe:
+  pbpaste | markdown-clean | pbcopy
+
+  # Clean a Markdown file in place:
+  markdown-clean document.md
+
+  # Clean to a separate output file:
+  markdown-clean -o clean.md document.md
+
+  # Check if a file contains unclean artifacts (exit 1 if dirty):
+  markdown-clean --check document.md
+
+  # Preview changes without modifying files:
+  markdown-clean --dry-run document.md
+```
+
+<!-- /generated -->
+
+______________________________________________________________________
+
+## markdown-embed-images
+
+Resolves local relative Markdown images and rewrites them as reference-style
+Base64 Data URIs with automatic budget scaling.
+
+### Help
+
+<!-- generated: ../scripts/markdown-embed-images --help -->
+
+```text
+usage: markdown-embed-images [-h] [-o OUT_FILE] [--max-size-kb KB] [-n]
+                             FILE [FILE ...]
+
+Resolves relative Markdown images and rewrites them as reference-style Base64 Data URIs.
+
+positional arguments:
+  FILE                  Path to Markdown file(s) to process.
+
+options:
+  -h, --help            show this help message and exit
+  -o, --output OUT_FILE
+                        Path to write output file (default: in-place rewrite).
+                        Only valid when specifying a single input FILE.
+  --max-size-kb KB      Maximum total Base64 image payload in kilobytes
+                        (default: 300).
+  -n, --dry-run         Preview actions without modifying or creating files.
+
+Examples:
+  # Embed images in place with default 300KB budget:
+  markdown-embed-images document.md
+
+  # Embed images with a 500KB total budget to a separate file:
+  markdown-embed-images --max-size-kb 500 -o out.md document.md
+
+  # Preview changes without modifying files:
+  markdown-embed-images --dry-run document.md
+```
+
+<!-- /generated -->
 
 ______________________________________________________________________
 

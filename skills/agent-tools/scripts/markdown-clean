@@ -1,0 +1,282 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Sanitize Markdown by stripping bloat, LLM citations, and Base64 data URIs."""
+
+import argparse
+import os
+import re
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        prog="markdown-clean",
+        description=(
+            "Sanitizes Markdown text by stripping Base64 data URIs, LLM citation tags,\n"
+            "non-breaking spaces, and copy-paste artifacts."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  # Clean clipboard content via stdin/stdout pipe:\n"
+            "  pbpaste | markdown-clean | pbcopy\n\n"
+            "  # Clean a Markdown file in place:\n"
+            "  markdown-clean document.md\n\n"
+            "  # Clean to a separate output file:\n"
+            "  markdown-clean -o clean.md document.md\n\n"
+            "  # Check if a file contains unclean artifacts (exit 1 if dirty):\n"
+            "  markdown-clean --check document.md\n\n"
+            "  # Preview changes without modifying files:\n"
+            "  markdown-clean --dry-run document.md\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "files",
+        metavar="FILE",
+        nargs="*",
+        help="Path to Markdown file(s) to process. Reads stdin if omitted or '-'.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        metavar="OUT_FILE",
+        default=None,
+        help="Path to write output. Only valid when processing a single input.",
+    )
+    parser.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Preview actions without modifying or creating files.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check if inputs would be changed. Exit 0 if clean, 1 if dirty.",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress summary statistics on stderr.",
+    )
+    parser.add_argument(
+        "--keep-dividers",
+        action="store_true",
+        help="Preserve horizontal rule dividers ('---'). Stripped by default.",
+    )
+    return parser.parse_args(argv)
+
+
+def clean_markdown_text(text: str, keep_dividers: bool = False) -> str:
+    """Clean and sanitize Markdown content."""
+    if not text:
+        return text
+
+    # 1. Preserve YAML frontmatter if present at the very top of the document
+    frontmatter = ""
+    body = text
+    fm_match = re.match(r"^(---\r?\n.*?\r?\n(?:---|\.\.\.)\r?\n)", text, re.DOTALL)
+    if fm_match:
+        frontmatter = fm_match.group(1)
+        body = text[len(frontmatter) :]
+
+    # 2. Strip reference definitions whose target is a Data URI
+    # Matches: [image1]: <data:image/png;base64,...> or [ref]: data:image/...
+    body = re.sub(
+        r"^[ \t]*\[[^\]]+\]:[ \t]*<?data:image/[^\s>]+>?[^\n]*\n?",
+        "",
+        body,
+        flags=re.MULTILINE,
+    )
+
+    # 3. Strip inline data URI image payloads: ![alt](data:image/...) -> ![alt]()
+    body = re.sub(
+        r"!\[(?P<alt>[^\]]*)\]\(<?data:image/[^)>]+>?(?:\s+[\"'][^\"']*[\"'])?\)",
+        r"![\g<alt>]()",
+        body,
+    )
+
+    # 4. Strip quoted or bracketed data: URIs in remaining attributes/HTML
+    body = re.sub(r'"data:[^"]*"', '""', body)
+    body = re.sub(r"<data:[^>]*>", "<>", body)
+
+    # 5. Unicode space & zero-width normalization
+    # U+00A0: non-breaking space -> regular space
+    body = body.replace("\u00a0", " ")
+    # Strip zero-width spaces and BOM (U+200B, U+200C, U+200D, U+FEFF)
+    body = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", body)
+
+    # 6. Strip LLM citation tags and search source annotations
+    # e.g., [cite: 1], [cite/source], [cite: 1, 2]
+    body = re.sub(r"\[cite[^\]]*\]", "", body)
+    # e.g., ([source](http...)) or [source](http...)
+    body = re.sub(r" ?\(\[source\]\(https?://[^)]+\)\)", "", body)
+    body = re.sub(r"\[source\]\(https?://[^)]+\)", "", body)
+
+    # 7. Strip isolated horizontal rule dividers (unless requested to keep)
+    if not keep_dividers:
+        body = re.sub(r"^[ \t]*(?:---|\*\*\*|___)[ \t]*$", "", body, flags=re.MULTILINE)
+
+    # 8. Clean trailing whitespace per line
+    lines = [line.rstrip(" \t") for line in body.splitlines()]
+    body = "\n".join(lines)
+
+    # 9. Collapse 3+ consecutive newlines to 2
+    body = re.sub(r"\n{3,}", "\n\n", body)
+
+    result = frontmatter + body
+    if result and not result.endswith("\n"):
+        result += "\n"
+
+    return result
+
+
+def report_diff(size_in: int, size_out: int, label: str = "") -> None:
+    """Print byte reduction statistics to stderr."""
+    prefix = f"markdown-clean: {label}: " if label else "markdown-clean: "
+    if size_in == size_out:
+        return
+    diff = size_in - size_out
+    if size_in > 0:
+        pct = (diff / size_in) * 100.0
+        if diff >= 0:
+            sys.stderr.write(f"{prefix}Reduced by {diff} bytes ({pct:.1f}%)\n")
+        else:
+            sys.stderr.write(f"{prefix}Expanded by {-diff} bytes ({-pct:.1f}%)\n")
+    else:
+        sys.stderr.write(f"{prefix}{size_out} bytes written\n")
+
+
+def process_file(
+    path: Path,
+    output_path: Path | None,
+    keep_dividers: bool,
+    dry_run: bool,
+    check: bool,
+    quiet: bool,
+) -> bool:
+    """Process a single file on disk. Returns True if clean/successful, False if dirty/error."""
+    if not path.is_file():
+        sys.stderr.write(f"markdown-clean: file not found: {path}\n")
+        return False
+
+    try:
+        content_in = path.read_text(encoding="utf-8")
+    except Exception as err:
+        sys.stderr.write(f"markdown-clean: error reading {path}: {err}\n")
+        return False
+
+    content_out = clean_markdown_text(content_in, keep_dividers=keep_dividers)
+    is_modified = content_in != content_out
+
+    if check:
+        if is_modified:
+            sys.stderr.write(f"markdown-clean: dirty: {path}\n")
+            return False
+        return True
+
+    size_in = len(content_in.encode("utf-8"))
+    size_out = len(content_out.encode("utf-8"))
+
+    if not quiet and is_modified:
+        report_diff(size_in, size_out, label=str(path))
+
+    if dry_run or not is_modified:
+        return True
+
+    target = output_path or path
+    try:
+        target.write_text(content_out, encoding="utf-8")
+        return True
+    except Exception as err:
+        sys.stderr.write(f"markdown-clean: error writing {target}: {err}\n")
+        return False
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Main CLI entrypoint."""
+    args = parse_args(argv)
+
+    # Stdin mode
+    if not args.files or args.files == ["-"]:
+        try:
+            content_in = sys.stdin.read()
+        except KeyboardInterrupt:
+            sys.exit(130)
+        except Exception as err:
+            sys.stderr.write(f"markdown-clean: error reading stdin: {err}\n")
+            sys.exit(1)
+
+        content_out = clean_markdown_text(content_in, keep_dividers=args.keep_dividers)
+        is_modified = content_in != content_out
+
+        if args.check:
+            sys.exit(1 if is_modified else 0)
+
+        size_in = len(content_in.encode("utf-8"))
+        size_out = len(content_out.encode("utf-8"))
+
+        if not args.quiet and is_modified:
+            report_diff(size_in, size_out)
+
+        if not args.dry_run:
+            if args.output:
+                out_path = Path(args.output).resolve()
+                try:
+                    out_path.write_text(content_out, encoding="utf-8")
+                except Exception as err:
+                    sys.stderr.write(
+                        f"markdown-clean: error writing {out_path}: {err}\n"
+                    )
+                    sys.exit(1)
+            else:
+                sys.stdout.write(content_out)
+                sys.stdout.flush()
+
+        sys.exit(0)
+
+    # File mode
+    if args.output and len(args.files) > 1:
+        sys.stderr.write(
+            "markdown-clean: --output can only be used with a single input\n"
+        )
+        sys.exit(1)
+
+    out_path = Path(args.output).resolve() if args.output else None
+    all_clean = True
+
+    for file_str in args.files:
+        p = Path(file_str).resolve()
+        if not process_file(
+            p,
+            output_path=out_path,
+            keep_dividers=args.keep_dividers,
+            dry_run=args.dry_run,
+            check=args.check,
+            quiet=args.quiet,
+        ):
+            all_clean = False
+
+    sys.exit(0 if all_clean else 1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
