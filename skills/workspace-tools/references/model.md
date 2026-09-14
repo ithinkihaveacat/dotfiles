@@ -1,4 +1,4 @@
-# The workspace-config model
+# The workspace-tools model
 
 <!-- markdownlint-disable MD013 -->
 

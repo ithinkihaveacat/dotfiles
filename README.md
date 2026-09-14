@@ -54,7 +54,7 @@ coding standards, planning award flights, and more.
 More specialised skills: [`android-testing`](skills/android-testing/) (system
 state and connectivity testing on phone and Wear OS),
 [`wear-widget`](skills/wear-widget/) (reverse-engineering widgets), and
-[`workspace-config`](skills/workspace-config/) (skill selection and agent tool
+[`workspace-tools`](skills/workspace-tools/) (skill selection and agent tool
 permissions). Personal-workflow skills live here too:
 [`agent-review`](skills/agent-review/), [`taskgo`](skills/taskgo/),
 [`technical-writing`](skills/technical-writing/), and

@@ -1,5 +1,5 @@
 ---
-name: workspace-config
+name: workspace-tools
 description: >-
   Configures workspaces for agent-assisted development. Manages agent skills (untracked
   symlinks), workspace tool permissions (allow/deny/ask rules for Claude Code and
@@ -12,10 +12,10 @@ compatibility: >-
   Requires git. Optional: python3, uv, direnv, claude, or agy.
 ---
 
-# Workspace Configuration
+# Workspace Tools
 
 This skill configures a workspace for agent-assisted development without version
-control ever seeing the configuration. It consists of three tools:
+control ever seeing the configuration. It consists of four tools:
 
 1. **`hook`**: The git hook manager. Synchronizes git hooks to match
    `AGENT_REQUIRED_HOOKS` (profiles `agent`, `node`, `gerrit`), managing them
@@ -142,7 +142,7 @@ human sets (what agents should do in this workspace); `SKILL_*` variables are
 
 For the underlying model — what `apply` touches, the invariants `doctor` audits,
 and the one place `doctor` and `preflight` deliberately differ — see
-[The workspace-config model](references/model.md).
+[The workspace-tools model](references/model.md).
 
 ______________________________________________________________________
 

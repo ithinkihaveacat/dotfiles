@@ -63,7 +63,7 @@ usage rules are defined in `skills/coding-standards/references/shell.md`
 directory for local agents by default. When adding or modifying a script (or
 subcommand) with destructive, irreversible, or otherwise prompt-worthy behavior,
 list it in that skill's `permissions/unsafe` file. The file format and semantics
-are documented in `skills/workspace-config/SKILL.md` ("Safe-Command
+are documented in `skills/workspace-tools/SKILL.md` ("Safe-Command
 Declarations").
 
 #### File Output

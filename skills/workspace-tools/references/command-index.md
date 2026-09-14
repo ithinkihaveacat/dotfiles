@@ -11,10 +11,10 @@
 
 ## hook
 
-The block below is `../../../bin/hook --help`, kept in sync by
+The block below is `../scripts/hook --help`, kept in sync by
 `command-index-format`.
 
-<!-- generated: ../../../bin/hook --help -->
+<!-- generated: ../scripts/hook --help -->
 
 ```text
 Usage: hook <command> [arguments]

@@ -22,19 +22,28 @@ def register(api):
             Path("~/.gemini/jetski/skills").expanduser(),
         ]
 
-    seen_realpaths = set()
+    seen = set()
     for d in source_dirs:
         if not d.is_dir():
             continue
         try:
-            for item in d.iterdir():
+            # Scan real directories first so canonical skills take precedence over alias symlinks
+            for item in sorted(d.iterdir(), key=lambda p: (p.is_symlink(), p.name)):
                 if item.name.startswith(".") or not item.is_dir():
                     continue
                 if (item / "SKILL.md").is_file():
+                    # COMPAT: When can this code be removed?
+                    # Keying on (item.name, realpath) allows the 'skills/workspace-config'
+                    # compatibility symlink to register alongside 'workspace-tools' without
+                    # colliding, while still deduplicating identical skills across overlay
+                    # directories (e.g. ~/.agents/skills -> ~/.dotfiles/skills).
+                    # This can be reverted to seen_realpaths once all workspaces migrate
+                    # and the 'skills/workspace-config' compatibility symlink is deleted.
                     realpath = str(os.path.realpath(item))
-                    if realpath in seen_realpaths:
+                    key = (item.name, realpath)
+                    if key in seen:
                         continue
-                    seen_realpaths.add(realpath)
+                    seen.add(key)
                     # Register under the 'local' namespace
                     api.register_skill(
                         f"local:{item.name}",
