@@ -151,13 +151,22 @@ ______________________________________________________________________
 ## Managing Git Hooks (`hook`)
 
 The `hook` tool (symlinked in `bin/`) manages Git hooks in your repository as
-lightweight trampolines pointing into source scripts under `etc/git/hooks/`,
-allowing hook updates in the dotfiles repository to propagate instantly to all
-configured workspaces.
+lightweight trampolines pointing into bundled source scripts under
+`resources/hooks/`, allowing hook updates to propagate instantly to all
+configured workspaces without external repository dependencies.
 
 ```bash
-hook <command> [arguments]
+hook [options] <command> [arguments]
 ```
+
+### Options
+
+- **`--source-dir DIR`** (alias: **`-S DIR`**): Override the hook source
+  directory (default: bundled `resources/hooks/` or `$HOOK_SOURCE_DIR`).
+- **`--copy`**: Copy hook sources rather than installing trampolines (for
+  machines with no persistent dotfiles/skill tree).
+- **`--all`**: Delete all hooks during `clean` (requires `--force`).
+- **`--force`**: Confirm deletion for `clean --all`.
 
 ### Profiles
 
@@ -190,6 +199,8 @@ hook <command> [arguments]
 
 - `AGENT_REQUIRED_HOOKS`: Space-separated hook profile names required by this
   workspace (default: `agent`).
+- `HOOK_SOURCE_DIR` (alias: `AGENT_HOOKS_DIR`): Directory containing hook
+  profile sources (default: bundled `resources/hooks/`).
 
 ______________________________________________________________________
 

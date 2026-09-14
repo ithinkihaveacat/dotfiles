@@ -47,6 +47,9 @@ Commands:
                     third-party hooks and 00-legacy in place
 
 Options:
+  --source-dir DIR, -S DIR
+                    Source directory containing hook profiles
+                    (default: bundled resources/hooks, or $HOOK_SOURCE_DIR)
   --copy            add/apply: copy the hook source instead of installing a
                     trampoline to it, for a machine with no dotfiles tree
   --all             clean: delete the entire hooks directory, including
@@ -55,6 +58,8 @@ Options:
   --help, -h        Display this help message and exit
 
 Environment:
+  HOOK_SOURCE_DIR       Directory containing hook profile sources
+                        (alias: AGENT_HOOKS_DIR)
   AGENT_REQUIRED_HOOKS  Whitespace-separated profiles 'apply' installs
                         (default: agent). Profiles it does not name are
                         removed, the way 'skill apply' synchronizes skills.

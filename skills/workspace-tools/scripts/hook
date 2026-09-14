@@ -53,6 +53,9 @@ Commands:
                     third-party hooks and 00-legacy in place
 
 Options:
+  --source-dir DIR, -S DIR
+                    Source directory containing hook profiles
+                    (default: bundled resources/hooks, or \$HOOK_SOURCE_DIR)
   --copy            add/apply: copy the hook source instead of installing a
                     trampoline to it, for a machine with no dotfiles tree
   --all             clean: delete the entire hooks directory, including
@@ -61,6 +64,8 @@ Options:
   --help, -h        Display this help message and exit
 
 Environment:
+  HOOK_SOURCE_DIR       Directory containing hook profile sources
+                        (alias: AGENT_HOOKS_DIR)
   AGENT_REQUIRED_HOOKS  Whitespace-separated profiles 'apply' installs
                         (default: agent). Profiles it does not name are
                         removed, the way 'skill apply' synchronizes skills.
@@ -95,36 +100,58 @@ require() {
 }
 
 die() {
-  echo "$SCRIPT_NAME $cmd: $*" >&2
+  echo "$SCRIPT_NAME ${cmd:+$cmd: }$*" >&2
   exit 1
 }
 
-# Hook sources live alongside the dotfiles tree:
-# - When invoked via bin/hook: bin/hook -> ../etc/git/hooks/
-# - When invoked via skills/*/scripts/hook: scripts/hook -> ../../../etc/git/hooks/
-# - When invoked via .agents/skills/...: resolve through skill symlink to dotfiles root
-TARGET_FILE="${BASH_SOURCE[0]}"
-while [ -L "$TARGET_FILE" ]; do
-  TARGET_DIR=$(cd "$(dirname "$TARGET_FILE")" >/dev/null && pwd)
-  TARGET_FILE=$(readlink "$TARGET_FILE")
-  [[ $TARGET_FILE != /* ]] && TARGET_FILE="$TARGET_DIR/$TARGET_FILE"
-done
-SCRIPT_DIR=$(cd "$(dirname "$TARGET_FILE")" >/dev/null && pwd)
+SOURCE_DIR_OVERRIDE=""
+SOURCE_ROOT=""
 
-if [ -d "$SCRIPT_DIR/../etc/git/hooks" ]; then
-  SOURCE_ROOT="$SCRIPT_DIR/../etc/git/hooks"
-elif [ -d "$SCRIPT_DIR/../../../etc/git/hooks" ]; then
-  SOURCE_ROOT=$(cd "$SCRIPT_DIR/../../../etc/git/hooks" >/dev/null && pwd)
-else
-  PHYS_DIR=$(cd -P "$(dirname "$TARGET_FILE")" >/dev/null && pwd)
-  if [ -d "$PHYS_DIR/../../../etc/git/hooks" ]; then
-    SOURCE_ROOT=$(cd "$PHYS_DIR/../../../etc/git/hooks" >/dev/null && pwd)
-  elif [ -d "$PHYS_DIR/../etc/git/hooks" ]; then
-    SOURCE_ROOT="$PHYS_DIR/../etc/git/hooks"
-  else
-    SOURCE_ROOT="$SCRIPT_DIR/../etc/git/hooks"
+resolve_source_root() {
+  if [ -n "$SOURCE_DIR_OVERRIDE" ]; then
+    [ -d "$SOURCE_DIR_OVERRIDE" ] || die "hook source directory not found: $SOURCE_DIR_OVERRIDE"
+    SOURCE_ROOT="$SOURCE_DIR_OVERRIDE"
+    return 0
   fi
-fi
+
+  if [ -n "${HOOK_SOURCE_DIR:-}" ]; then
+    [ -d "$HOOK_SOURCE_DIR" ] || die "hook source directory not found (HOOK_SOURCE_DIR): $HOOK_SOURCE_DIR"
+    SOURCE_ROOT="$HOOK_SOURCE_DIR"
+    return 0
+  fi
+
+  if [ -n "${AGENT_HOOKS_DIR:-}" ]; then
+    [ -d "$AGENT_HOOKS_DIR" ] || die "hook source directory not found (AGENT_HOOKS_DIR): $AGENT_HOOKS_DIR"
+    SOURCE_ROOT="$AGENT_HOOKS_DIR"
+    return 0
+  fi
+
+  local target="${BASH_SOURCE[0]}"
+  while [ -L "$target" ]; do
+    local target_dir
+    target_dir=$(cd "$(dirname "$target")" >/dev/null && pwd)
+    target=$(readlink "$target")
+    [[ $target != /* ]] && target="$target_dir/$target"
+  done
+  local phys_dir
+  phys_dir=$(cd -P "$(dirname "$target")" >/dev/null && pwd)
+  local script_dir
+  script_dir=$(cd "$(dirname "$target")" >/dev/null && pwd)
+
+  # Check bundled skill resources first (resolving to physical canonical path
+  # so trampolines do not embed ephemeral project workspace paths)
+  if [ -d "$phys_dir/../resources/hooks" ]; then
+    SOURCE_ROOT=$(cd "$phys_dir/../resources/hooks" >/dev/null && pwd)
+  elif [ -d "$script_dir/../resources/hooks" ]; then
+    SOURCE_ROOT="$script_dir/../resources/hooks"
+  elif [ -d "$script_dir/../etc/git/hooks" ]; then
+    SOURCE_ROOT="$script_dir/../etc/git/hooks"
+  elif [ -d "$phys_dir/../../../etc/git/hooks" ]; then
+    SOURCE_ROOT=$(cd "$phys_dir/../../../etc/git/hooks" >/dev/null && pwd)
+  else
+    SOURCE_ROOT="$script_dir/../resources/hooks"
+  fi
+}
 
 GERRIT_HOOK_URL=https://gerrit-review.googlesource.com/tools/hooks/commit-msg
 
@@ -752,6 +779,39 @@ cmd_clean() {
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+# Parse leading global options before command, if any
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help | -h) usage ;;
+    --source-dir)
+      shift
+      [ "$#" -gt 0 ] || die "missing argument for --source-dir"
+      SOURCE_DIR_OVERRIDE="$1"
+      shift
+      ;;
+    --source-dir=*)
+      SOURCE_DIR_OVERRIDE="${1#*=}"
+      shift
+      ;;
+    -S)
+      shift
+      [ "$#" -gt 0 ] || die "missing argument for -S"
+      SOURCE_DIR_OVERRIDE="$1"
+      shift
+      ;;
+    -S*)
+      SOURCE_DIR_OVERRIDE="${1#-S}"
+      shift
+      ;;
+    -*)
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 if [ "$#" -eq 0 ]; then
   usage
 fi
@@ -767,18 +827,50 @@ copy_mode=no
 all_mode=no
 force_mode=no
 args=()
-for arg in "$@"; do
-  case "$arg" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --help | -h) usage ;;
-    --copy) copy_mode=yes ;;
-    --all) all_mode=yes ;;
-    --force) force_mode=yes ;;
+    --copy)
+      copy_mode=yes
+      shift
+      ;;
+    --all)
+      all_mode=yes
+      shift
+      ;;
+    --force)
+      force_mode=yes
+      shift
+      ;;
+    --source-dir)
+      shift
+      [ "$#" -gt 0 ] || die "missing argument for --source-dir"
+      SOURCE_DIR_OVERRIDE="$1"
+      shift
+      ;;
+    --source-dir=*)
+      SOURCE_DIR_OVERRIDE="${1#*=}"
+      shift
+      ;;
+    -S)
+      shift
+      [ "$#" -gt 0 ] || die "missing argument for -S"
+      SOURCE_DIR_OVERRIDE="$1"
+      shift
+      ;;
+    -S*)
+      SOURCE_DIR_OVERRIDE="${1#-S}"
+      shift
+      ;;
     -*)
-      echo "$SCRIPT_NAME $cmd: unknown option: $arg" >&2
+      echo "$SCRIPT_NAME $cmd: unknown option: $1" >&2
       echo "Try '$SCRIPT_NAME --help' for more information." >&2
       exit 1
       ;;
-    *) args+=("$arg") ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
   esac
 done
 
@@ -798,6 +890,8 @@ case "$cmd" in
     [ "$force_mode" = no ] || die "does not accept --force"
     ;;
 esac
+
+resolve_source_root
 
 require git
 
