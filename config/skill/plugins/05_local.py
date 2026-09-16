@@ -17,9 +17,6 @@ def register(api):
             Path("~/.dotfiles/skills").expanduser(),
             Path("~/.private/skills").expanduser(),
             Path("~/.corp/skills").expanduser(),
-            Path("~/.agents/skills").expanduser(),
-            Path("~/.gemini/config/skills").expanduser(),
-            Path("~/.gemini/jetski/skills").expanduser(),
         ]
 
     seen = set()
