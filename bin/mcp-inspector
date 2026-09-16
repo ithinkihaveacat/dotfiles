@@ -2,17 +2,22 @@
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") COMMAND|FILE [ARGS...]
+Usage: $(basename "$0") COMMAND|FILE|URL [ARGS...]
 
 Interactive inspector for Model Context Protocol (MCP) servers.
 
 If the first argument is an executable command, it runs the inspector for that command.
 If the first argument is a JSON configuration file, it lists available servers or
 runs the inspector for a specific server if a second argument is provided.
+If the first argument is an http:// or https:// URL, it runs the inspector against
+that URL as an HTTP/SSE MCP server.
 
 Arguments:
-  COMMAND|FILE  The command to run or path to an MCP config JSON file.
-  ARGS...       Arguments for the command or the name of the server in the config file.
+  COMMAND|FILE|URL  The command to run, path to an MCP config JSON file, or the
+                    URL of an HTTP/SSE MCP server.
+  ARGS...           Arguments for the command, the name of the server in the
+                    config file, or extra flags forwarded to the inspector
+                    (e.g. --cli, --header, --use-stored-auth) for a URL target.
 
 Options:
   --help        Display this help message and exit
@@ -26,13 +31,21 @@ Examples:
 
   # Run inspector for a specific server from a config file
   $(basename "$0") mcp-config.json my-server
+
+  # Run inspector against a remote HTTP server, e.g. one behind OAuth; the web
+  # UI's own OAuth panel is where you enter a Client ID/Secret, so neither
+  # touches the command line
+  $(basename "$0") https://example.com/mcp
+
+  # Re-run non-interactively after authenticating once via the web UI above
+  $(basename "$0") https://example.com/mcp --cli --use-stored-auth --method tools/list
 EOF
   exit 0
 }
 
 usage_short() {
   cat <<EOF >&2
-Usage: $(basename "$0") COMMAND|FILE [ARGS...]
+Usage: $(basename "$0") COMMAND|FILE|URL [ARGS...]
 
 Interactive inspector for Model Context Protocol (MCP) servers.
 
@@ -61,6 +74,36 @@ require() {
 
 require npx
 require jq
+
+# If the first argument is an http(s) URL, run the inspector against it as an
+# HTTP/SSE MCP server. Checked before the executable/file branches below so a
+# URL never falls through to the "not found, and is not a file" error.
+if [[ "$1" =~ ^https?:// ]]; then
+
+  URL="$1"
+  shift
+
+  # Default to web mode: its OAuth panel takes a Client ID/Secret typed into
+  # the browser, so a confidential client's secret never touches argv, shell
+  # history, or `ps`. Skip the default if the caller already picked a mode.
+  MODE=(--web)
+  for arg in "$@"; do
+    case "$arg" in
+      --web | --cli | --tui) MODE=() ;;
+    esac
+  done
+
+  for arg in "$@"; do
+    if [[ "$arg" == "--client-secret" ]]; then
+      echo "$(basename "$0"): warning: --client-secret puts the secret in argv/shell history; prefer running without a mode flag once to authenticate via the web UI, then '--cli --use-stored-auth' afterwards" >&2
+      break
+    fi
+  done
+
+  npx @modelcontextprotocol/inspector "${MODE[@]}" --transport http --server-url "$URL" "$@"
+  exit $?
+
+fi
 
 # If the first argument is an executable, run it with the inspector.
 if command -v "$1" >/dev/null 2>&1; then
