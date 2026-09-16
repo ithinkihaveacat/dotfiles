@@ -733,7 +733,7 @@ Catalog Entries:
   homeassistant          Home Assistant integration, automation, API and CLI documentation
   inkyframe              Pimoroni Inky Frame documentation
   kamal                  Kamal deployment documentation
-  mcp-server             MCP server documentation and specification
+  mcp                    MCP server documentation and specification
   meshtastic             Meshtastic documentation
   prompting              Prompt engineering guides for Claude, Gemini, and OpenAI
   rpi                    Raspberry Pi documentation
@@ -765,7 +765,7 @@ scripts/context gemini-api > gemini-context.xml
 scripts/context gemini-cli | scripts/emerson "How do commands work?"
 
 # Combine with other tools
-scripts/context mcp-server | grep "protocol"
+scripts/context mcp | grep "protocol"
 ```
 
 ### Exit Codes
