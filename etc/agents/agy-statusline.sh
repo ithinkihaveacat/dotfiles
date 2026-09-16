@@ -131,18 +131,18 @@ fi
 case "$STATE" in
   idle) STATE_BADGE="${C_GREEN}● READY${C_RESET}" ;;
   thinking) STATE_BADGE="${C_YELLOW}◆ THINKING${C_RESET}" ;;
-  working) STATE_BADGE="${C_CYAN}⚙ WORKING${C_RESET}" ;;
-  tool_use) STATE_BADGE="${C_MAGENTA}🛠 TOOL USE${C_RESET}" ;;
-  reviewing) STATE_BADGE="${C_MAGENTA}👀 REVIEWING${C_RESET}" ;;
-  authenticating) STATE_BADGE="${C_YELLOW}🔐 AUTH${C_RESET}" ;;
-  initializing) STATE_BADGE="${C_BLUE}⏳ INIT${C_RESET}" ;;
-  error) STATE_BADGE="${C_RED}❌ ERROR${C_RESET}" ;;
+  working) STATE_BADGE="${C_CYAN}WORKING${C_RESET}" ;;
+  tool_use) STATE_BADGE="${C_MAGENTA}TOOL USE${C_RESET}" ;;
+  reviewing) STATE_BADGE="${C_MAGENTA}REVIEWING${C_RESET}" ;;
+  authenticating) STATE_BADGE="${C_YELLOW}AUTH${C_RESET}" ;;
+  initializing) STATE_BADGE="${C_BLUE}INIT${C_RESET}" ;;
+  error) STATE_BADGE="${C_RED}ERROR${C_RESET}" ;;
   *) STATE_BADGE="${C_WHITE}● ${STATE}${C_RESET}" ;;
 esac
 
 # 2. Host segment
 HOST=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "localhost")
-HOST_SEGMENT="💻 ${C_BLUE}${HOST}${C_RESET}"
+HOST_SEGMENT="${C_BLUE}${HOST}${C_RESET}"
 
 # 3. Conversation summary / title segment
 TITLE_SEGMENT=""
@@ -151,7 +151,7 @@ if [[ -n "$TITLE" ]]; then
   if [[ ${#TITLE} -gt $MAX_TITLE_LEN ]]; then
     TITLE="${TITLE:0:$((MAX_TITLE_LEN - 1))}…"
   fi
-  TITLE_SEGMENT="💬 ${C_WHITE}${TITLE}${C_RESET}"
+  TITLE_SEGMENT="${C_WHITE}${TITLE}${C_RESET}"
 fi
 
 # 4. Context window remaining segment
@@ -164,7 +164,7 @@ elif [[ "${REMAINING_INT:-100}" -lt 50 ]]; then
 else
   CTX_COLOR="$C_GREEN"
 fi
-CTX_SEGMENT="🪟 ${CTX_COLOR}${REMAINING_FMT}% left${C_RESET}"
+CTX_SEGMENT="${CTX_COLOR}${REMAINING_FMT}% left${C_RESET}"
 
 # 5. Model segment
 MODEL_SEGMENT=""
@@ -188,13 +188,17 @@ if [[ $TOTAL_BG -gt 0 ]]; then
     BG_PARTS+=("${SUBAGENTS} agents")
   fi
   BG_TEXT=$(printf ", %s" "${BG_PARTS[@]}")
-  BG_SEGMENT="${C_CYAN}⚡ ${BG_TEXT:2}${C_RESET}"
+  BG_SEGMENT="${C_CYAN}${BG_TEXT:2}${C_RESET}"
 fi
 
-# 7. VCS client / branch segment
-VCS_SEGMENT=""
-if [[ -n "$CLIENT" ]]; then
-  VCS_SEGMENT="📁 ${C_CYAN}${CLIENT}${C_RESET}"
+# 7. Repository / CitC workspace segment (mirrors fish_right_prompt)
+REPO_SEGMENT=""
+# If in a non-default CitC client, display it
+if [[ -n "$CLIENT" && ! "$CLIENT" =~ ^.+-[a-z0-9]+-defaultclient$ ]]; then
+  REPO_SEGMENT="${C_CYAN}${CLIENT}${C_RESET}"
+elif GIT_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null); then
+  REPO_NAME="${GIT_TOPLEVEL##*/}"
+  REPO_SEGMENT="${C_YELLOW}${REPO_NAME}${C_RESET}"
 fi
 
 # Delimiter
@@ -217,8 +221,8 @@ if [[ "${COLS:-80}" -ge 100 ]]; then
   if [[ -n "$BG_SEGMENT" ]]; then
     PARTS+=("$BG_SEGMENT")
   fi
-  if [[ -n "$VCS_SEGMENT" ]]; then
-    PARTS+=("$VCS_SEGMENT")
+  if [[ -n "$REPO_SEGMENT" ]]; then
+    PARTS+=("$REPO_SEGMENT")
   fi
 elif [[ "${COLS:-80}" -ge 80 ]]; then
   if [[ -n "$MODEL_SEGMENT" ]]; then
