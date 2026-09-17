@@ -961,6 +961,7 @@ if exists android || exists compose-preview || [ "$INSTALL_TIER" = "optional" ] 
     heading "android"
     if exists android; then
       x android update || echo "warning: android update failed" >&2
+      x android skills update || echo "warning: android skills update failed" >&2
     fi
     if exists compose-preview; then
       x env CLI_ONLY=1 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
