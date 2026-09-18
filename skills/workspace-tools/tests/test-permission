@@ -7,7 +7,7 @@ TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/permission"
 SKILL_SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..20"
+echo "1..23"
 
 # Temporary directory for configuration simulations
 TMPDIR=$(mktemp -d)
@@ -116,7 +116,7 @@ else
 fi
 
 # Test 8: rules are stored in antigravity permissions syntax
-if grep -qF '"command(git show)"' "${AGY_CONFIG_HOME}/antigravity-cli/settings.json" 2>/dev/null; then
+if grep -qF '"command(regex:(?:.*/)?git show)"' "${AGY_CONFIG_HOME}/antigravity-cli/settings.json" 2>/dev/null; then
   echo "ok 8 - [agy] stores translated rule"
 else
   echo "not ok 8 - [agy] translated rule not found"
@@ -173,7 +173,7 @@ fi
 # Test 14: --ask lands in ask list for both claude and agy
 if out=$(uv run "${SCRIPT}" add --ask "foo bar" 2>&1) &&
   grep -qF 'Bash(foo bar:*)' "$SETTINGS" &&
-  grep -qF '"command(foo bar)"' "${AGY_CONFIG_HOME}/antigravity-cli/settings.json"; then
+  grep -qF '"command(regex:(?:.*/)?foo bar)"' "${AGY_CONFIG_HOME}/antigravity-cli/settings.json"; then
   echo "ok 14 - [add --ask] claude and agy ask lists updated"
 else
   echo "not ok 14 - [add --ask] failed: $out"
@@ -249,7 +249,7 @@ mkdir -p "${MOCK_HOME}/.gemini/jetski/cli"
 
 # Test 19: add with --agent jetski writes to jetski settings file
 if out=$(uv run "${SCRIPT}" add --agent jetski "gcertstatus" 2>&1) &&
-  grep -qF '"command(gcertstatus)"' "$JETSKI_SETTINGS" 2>/dev/null; then
+  grep -qF '"command(regex:(?:.*/)?gcertstatus)"' "$JETSKI_SETTINGS" 2>/dev/null; then
   echo "ok 19 - [--agent jetski add] wrote to ~/.gemini/jetski/cli/settings.json"
 else
   echo "not ok 19 - [--agent jetski add] failed: $out"
@@ -260,4 +260,51 @@ if out=$(uv run "${SCRIPT}" list --agent jetski 2>/dev/null) && printf '%s' "$ou
   echo "ok 20 - [--agent jetski list] lists clean patterns"
 else
   echo "not ok 20 - [--agent jetski list] failed: $out"
+fi
+
+# Test 21: legacy command(...) rules are untranslated by list and removed by remove
+python3 -c "
+import json
+with open('${JETSKI_SETTINGS}', 'r+') as f:
+    d = json.load(f)
+    d.setdefault('permissions', {}).setdefault('allow', []).append('command(legacy-tool)')
+    f.seek(0)
+    json.dump(d, f)
+    f.truncate()
+"
+if uv run "${SCRIPT}" list --agent jetski 2>/dev/null | grep -q '^    legacy-tool$' &&
+  uv run "${SCRIPT}" remove --agent jetski "legacy-tool" >/dev/null 2>&1 &&
+  ! grep -q 'legacy-tool' "$JETSKI_SETTINGS"; then
+  echo "ok 21 - [jetski legacy] untranslates and removes legacy command(...) rules"
+else
+  echo "not ok 21 - [jetski legacy] failed to untranslate or remove legacy rule"
+fi
+
+# Test 22: apply upgrades legacy rules to regex format
+python3 -c "
+import json
+with open('${JETSKI_SETTINGS}', 'r+') as f:
+    d = json.load(f)
+    d.setdefault('permissions', {}).setdefault('allow', []).append('command(safe-tool)')
+    f.seek(0)
+    json.dump(d, f)
+    f.truncate()
+"
+if uv run "${SCRIPT}" apply --agent jetski >/dev/null 2>&1 &&
+  grep -qF '"command(regex:(?:.*/)?safe-tool)"' "$JETSKI_SETTINGS" &&
+  ! grep -qFx '      "command(safe-tool)"' "$JETSKI_SETTINGS"; then
+  echo "ok 22 - [jetski upgrade] upgrades legacy rules to regex format on apply"
+else
+  echo "not ok 22 - [jetski upgrade] failed to upgrade legacy rule: $(cat "$JETSKI_SETTINGS")"
+fi
+
+# Test 23: auto-detects jetski settings path when ~/.gemini/jetski exists
+TEST23_HOME="${TMPDIR}/home23"
+mkdir -p "${TEST23_HOME}/.gemini/jetski"
+if HOME="${TEST23_HOME}" AGY_CONFIG_HOME="" uv run "${SCRIPT}" add --agent jetski "foo-bar" >/dev/null 2>&1 &&
+  [ -f "${TEST23_HOME}/.gemini/jetski/cli/settings.json" ] &&
+  grep -qF '"command(regex:(?:.*/)?foo-bar)"' "${TEST23_HOME}/.gemini/jetski/cli/settings.json"; then
+  echo "ok 23 - [jetski auto-detect] provisions ~/.gemini/jetski/cli/settings.json"
+else
+  echo "not ok 23 - [jetski auto-detect] failed to provision jetski settings"
 fi
