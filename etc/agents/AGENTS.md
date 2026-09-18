@@ -64,6 +64,20 @@ timeout 30s find ./skills -name "zipline"
 rg --files ./skills | grep zipline
 ```
 
+## External Notifications & Review Requests
+
+- **Stage First, Notify Later**: Separate creating/uploading work from actions
+  that notify other people (e.g., push a branch or open a **draft** GitHub Pull
+  Request first; treat marking ready-for-review, publishing, or requesting
+  reviewers as a separate step after user verification).
+- **Unbundled Proposals**: When suggesting next steps, **never** bundle silent
+  staging (uploading, drafting, running checks) and external notification
+  (requesting review, publishing) into a single proposed option.
+- **High Bar of Certainty (Echoes Are Not Authorization)**: Very rarely combine
+  staging and notifying in one step. Never treat an echoed summary, pasted task
+  plan, or blanket "yes" to a multi-step proposal as authorization to notify;
+  require an unmistakable, user-originated command naming who to notify.
+
 ## Mid-Task User Interruptions
 
 - **Interruption Invariant**: When the user interrupts an ongoing task or
@@ -77,5 +91,6 @@ rg --files ./skills | grep zipline
 ## Summary
 
 Treat available skills as your primary source of truth for workflows, strictly
-apply bounded search constraints on all command executions, and halt tool calls
-immediately when interrupted by the user.
+apply bounded search constraints on all command executions, separate silent
+staging from external human notifications, and halt tool calls immediately when
+interrupted by the user.
