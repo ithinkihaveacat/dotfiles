@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Tests: tests/test-github-download
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] URL [DEST]
+
+Download a repository or subdirectory from GitHub without a full clone.
+
+Uses Git blobless partial clone and sparse checkout to download only the
+requested tree or files, then severs all Git history.
+
+Arguments:
+  URL               GitHub URL (tree, branch, or repository URL)
+  DEST              Destination path (default: basename of the target tree)
+
+Options:
+  -o, --output DIR  Path to the output directory
+  -f, --force       Overwrite existing destination if it already exists
+  -h, --help        Display this help message and exit
+
+Examples:
+  # Download a skill into ./openui
+  $(basename "$0") https://github.com/thesysdev/skills/tree/main/skills/openui
+
+  # Download into a specific directory
+  $(basename "$0") https://github.com/thesysdev/skills/tree/main/skills/openui .agents/skills/openui
+
+  # Download using the -o option
+  $(basename "$0") -o ~/.local/share/fonts/go https://github.com/golang/image/tree/master/font/gofont/ttfs
+EOF
+  exit 0
+}
+
+usage_short() {
+  cat <<EOF >&2
+Usage: $(basename "$0") [OPTIONS] URL [DEST]
+
+Download a repository or subdirectory from GitHub without a full clone.
+
+Examples:
+  $(basename "$0") https://github.com/thesysdev/skills/tree/main/skills/openui
+
+Try '$(basename "$0") --help' for more information.
+EOF
+  exit 1
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require git
+
+output_dir=""
+force=0
+url=""
+dest=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      ;;
+    -f | --force)
+      force=1
+      shift
+      ;;
+    -o | --output)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "$(basename "$0"): option '$1' requires an argument" >&2
+        exit 1
+      fi
+      output_dir="$2"
+      shift 2
+      ;;
+    --output=*)
+      output_dir="${1#*=}"
+      shift
+      ;;
+    -o*)
+      output_dir="${1#-o}"
+      shift
+      ;;
+    -*)
+      echo "$(basename "$0"): unrecognized option '$1'" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$url" ]]; then
+        url="$1"
+      elif [[ -z "$dest" ]]; then
+        dest="$1"
+      else
+        echo "$(basename "$0"): unexpected argument '$1'" >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$url" ]]; then
+  usage_short
+fi
+
+clean_url="${url#http://}"
+clean_url="${clean_url#https://}"
+
+if [[ "$url" =~ ^https?:// ]] && [[ "$clean_url" != github.com && "$clean_url" != github.com/* ]]; then
+  echo "$(basename "$0"): unsupported host (only github.com is supported): $url" >&2
+  exit 1
+fi
+
+clean_url="${clean_url#github.com}"
+clean_url="${clean_url#/}"
+clean_url="${clean_url%/}"
+
+IFS='/' read -r -a parts <<<"$clean_url"
+
+if [[ ${#parts[@]} -lt 2 || -z "${parts[0]}" || -z "${parts[1]}" ]]; then
+  echo "$(basename "$0"): cannot parse GitHub URL: $url" >&2
+  exit 1
+fi
+
+owner="${parts[0]}"
+repo="${parts[1]%.git}"
+
+if [[ -z "$owner" || -z "$repo" ]]; then
+  echo "$(basename "$0"): cannot parse GitHub URL: $url" >&2
+  exit 1
+fi
+
+ref=""
+subpath=""
+
+if [[ ${#parts[@]} -ge 4 && ("${parts[2]}" == "tree" || "${parts[2]}" == "blob") ]]; then
+  ref="${parts[3]}"
+  if [[ ${#parts[@]} -gt 4 ]]; then
+    subpath=$(
+      IFS=/
+      echo "${parts[*]:4}"
+    )
+  fi
+elif [[ ${#parts[@]} -eq 3 && ("${parts[2]}" == "tree" || "${parts[2]}" == "blob") ]]; then
+  echo "$(basename "$0"): URL is missing ref after '${parts[2]}': $url" >&2
+  exit 1
+elif [[ ${#parts[@]} -eq 2 ]]; then
+  ref=""
+  subpath=""
+else
+  echo "$(basename "$0"): cannot parse GitHub URL: $url" >&2
+  exit 1
+fi
+
+if [[ -n "$subpath" ]]; then
+  target_name="${subpath##*/}"
+else
+  target_name="$repo"
+fi
+
+if [[ -n "$output_dir" ]]; then
+  final_dest="$output_dir"
+elif [[ -n "$dest" ]]; then
+  if [[ "$dest" == */ || "$dest" == "." || "$dest" == ".." ]]; then
+    final_dest="${dest%/}/$target_name"
+  else
+    final_dest="$dest"
+  fi
+else
+  final_dest="./$target_name"
+fi
+
+if [[ -e "$final_dest" && "$force" -eq 0 ]]; then
+  echo "$(basename "$0"): destination '$final_dest' already exists (use --force to overwrite)" >&2
+  exit 1
+fi
+
+if [[ "${AGENT_OFFLINE:-0}" == "1" && -z "${_GITHUB_DOWNLOAD_TEST_REMOTE:-}" ]]; then
+  echo "$(basename "$0"): offline (AGENT_OFFLINE=1); cannot download from network" >&2
+  exit 1
+fi
+
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/github-download.XXXXXX")
+trap 'rm -rf "$tmpdir"' EXIT INT TERM
+
+repo_url="${_GITHUB_DOWNLOAD_TEST_REMOTE:-https://github.com/${owner}/${repo}.git}"
+
+if [[ -n "$subpath" ]]; then
+  clone_ok=0
+  if [[ -n "$ref" ]]; then
+    if git clone --depth 1 --filter=blob:none --sparse --no-checkout --branch "$ref" "$repo_url" "$tmpdir/repo" >/dev/null 2>&1; then
+      clone_ok=1
+    fi
+  fi
+  if [[ "$clone_ok" -eq 0 ]]; then
+    if ! git clone --depth 1 --filter=blob:none --sparse --no-checkout "$repo_url" "$tmpdir/repo" >/dev/null 2>&1; then
+      echo "$(basename "$0"): failed to clone $repo_url" >&2
+      exit 1
+    fi
+  fi
+
+  git -C "$tmpdir/repo" sparse-checkout set "$subpath" >/dev/null 2>&1 || {
+    echo "$(basename "$0"): failed to configure sparse checkout for '$subpath'" >&2
+    exit 1
+  }
+
+  if [[ -n "$ref" ]]; then
+    if ! git -C "$tmpdir/repo" checkout "$ref" >/dev/null 2>&1; then
+      echo "$(basename "$0"): ref '$ref' not found in $owner/$repo" >&2
+      exit 1
+    fi
+  else
+    if ! git -C "$tmpdir/repo" checkout >/dev/null 2>&1; then
+      echo "$(basename "$0"): failed to checkout default branch in $owner/$repo" >&2
+      exit 1
+    fi
+  fi
+
+  if [[ ! -e "$tmpdir/repo/$subpath" ]]; then
+    echo "$(basename "$0"): path '$subpath' not found in $owner/$repo${ref:+ at $ref}" >&2
+    exit 1
+  fi
+  src_path="$tmpdir/repo/$subpath"
+else
+  clone_ok=0
+  if [[ -n "$ref" ]]; then
+    if git clone --depth 1 --filter=blob:none --branch "$ref" "$repo_url" "$tmpdir/repo" >/dev/null 2>&1; then
+      clone_ok=1
+    fi
+  fi
+  if [[ "$clone_ok" -eq 0 ]]; then
+    if ! git clone --depth 1 --filter=blob:none "$repo_url" "$tmpdir/repo" >/dev/null 2>&1; then
+      echo "$(basename "$0"): failed to clone $repo_url" >&2
+      exit 1
+    fi
+    if [[ -n "$ref" ]]; then
+      if ! git -C "$tmpdir/repo" checkout "$ref" >/dev/null 2>&1; then
+        echo "$(basename "$0"): ref '$ref' not found in $owner/$repo" >&2
+        exit 1
+      fi
+    fi
+  fi
+  rm -rf "$tmpdir/repo/.git"
+  src_path="$tmpdir/repo"
+fi
+
+if [[ -e "$final_dest" && "$force" -eq 1 ]]; then
+  rm -rf "$final_dest"
+fi
+
+if [[ -d "$src_path" ]]; then
+  mkdir -p "$final_dest"
+  cp -R "$src_path/." "$final_dest/"
+else
+  mkdir -p "$(dirname "$final_dest")"
+  cp "$src_path" "$final_dest"
+fi
+
+echo "$(basename "$0"): downloaded ${subpath:-$repo}${ref:+ ($ref)} -> $final_dest" >&2

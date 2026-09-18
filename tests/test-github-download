@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Tests: tests/test-github-download
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../bin/github-download"
+
+# Isolate from global git config and global offline flag
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+unset AGENT_OFFLINE
+
+echo "1..14"
+
+# Test 1: --help exits 0 and prints usage, arguments, options, and examples
+if out=$("$BIN" --help 2>&1) &&
+  printf '%s' "$out" | grep -q 'Usage:' &&
+  printf '%s' "$out" | grep -q 'Arguments:' &&
+  printf '%s' "$out" | grep -q 'Options:' &&
+  printf '%s' "$out" | grep -q 'Examples:'; then
+  echo "ok 1 - --help displays complete usage and sections"
+else
+  echo "not ok 1 - --help output incomplete or failed"
+fi
+
+# Test 2: -h alias works and exits 0
+if "$BIN" -h >/dev/null 2>&1; then
+  echo "ok 2 - -h alias works"
+else
+  echo "not ok 2 - -h alias failed"
+fi
+
+# Test 3: zero arguments prints usage_short to stderr and exits 1
+err_out=$("$BIN" 2>&1 || true)
+rc=0
+"$BIN" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q 'Usage:' && printf '%s' "$err_out" | grep -q -- '--help'; then
+  echo "ok 3 - missing arguments prints usage_short and exits 1"
+else
+  echo "not ok 3 - missing arguments behavior wrong (rc=$rc)"
+fi
+
+# Test 4: option errors (missing -o arg, unrecognized option)
+rc_o=0
+"$BIN" -o >/dev/null 2>&1 || rc_o=$?
+rc_unrec=0
+"$BIN" --invalid-option >/dev/null 2>&1 || rc_unrec=$?
+if [ "$rc_o" -eq 1 ] && [ "$rc_unrec" -eq 1 ]; then
+  echo "ok 4 - option errors exit 1"
+else
+  echo "not ok 4 - option errors wrong (rc_o=$rc_o, rc_unrec=$rc_unrec)"
+fi
+
+# Test 5: unsupported host fails with descriptive error
+err_out=$("$BIN" https://gitlab.com/user/repo 2>&1 || true)
+rc=0
+"$BIN" https://gitlab.com/user/repo >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q 'unsupported host'; then
+  echo "ok 5 - unsupported host rejected"
+else
+  echo "not ok 5 - unsupported host handling wrong (rc=$rc, out=$err_out)"
+fi
+
+# Test 6: malformed URL fails with parse error
+err_out=$("$BIN" https://github.com 2>&1 || true)
+rc=0
+"$BIN" https://github.com >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q 'cannot parse GitHub URL'; then
+  echo "ok 6 - malformed URL rejected"
+else
+  echo "not ok 6 - malformed URL handling wrong (rc=$rc, out=$err_out)"
+fi
+
+# Test 7: AGENT_OFFLINE=1 exits 1 without making network calls
+err_out=$(AGENT_OFFLINE=1 "$BIN" https://github.com/owner/repo 2>&1 || true)
+rc=0
+AGENT_OFFLINE=1 "$BIN" https://github.com/owner/repo >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q 'offline (AGENT_OFFLINE=1)'; then
+  echo "ok 7 - AGENT_OFFLINE=1 rejected"
+else
+  echo "not ok 7 - AGENT_OFFLINE handling wrong (rc=$rc, out=$err_out)"
+fi
+
+# Set up a fixture Git repository for hermetic offline integration testing
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/test-github-download.XXXXXX")
+trap 'rm -rf "$TEST_DIR"' EXIT
+
+FIXTURE_REPO="$TEST_DIR/fixture-repo"
+mkdir -p "$FIXTURE_REPO/skills/openui/scripts" "$FIXTURE_REPO/skills/other" "$FIXTURE_REPO/docs"
+git -C "$FIXTURE_REPO" init -b main >/dev/null 2>&1
+echo "name: openui" >"$FIXTURE_REPO/skills/openui/SKILL.md"
+echo '#!/bin/sh' >"$FIXTURE_REPO/skills/openui/scripts/openui-cli"
+echo 'echo run' >>"$FIXTURE_REPO/skills/openui/scripts/openui-cli"
+chmod +x "$FIXTURE_REPO/skills/openui/scripts/openui-cli"
+echo "other skill" >"$FIXTURE_REPO/skills/other/README.md"
+echo "documentation" >"$FIXTURE_REPO/docs/intro.md"
+git -C "$FIXTURE_REPO" add . >/dev/null 2>&1
+git -C "$FIXTURE_REPO" -c user.name="Tester" -c user.email="tester@test.local" commit -m "initial commit" >/dev/null 2>&1
+
+# Test 8: Subtree download extracts only the target directory
+WORK_DIR="$TEST_DIR/work"
+mkdir -p "$WORK_DIR"
+cd "$WORK_DIR" || exit 1
+
+if _GITHUB_DOWNLOAD_TEST_REMOTE="file://$FIXTURE_REPO" "$BIN" "https://github.com/thesysdev/skills/tree/main/skills/openui" >/dev/null 2>&1 &&
+  [ -f "$WORK_DIR/openui/SKILL.md" ] &&
+  [ -x "$WORK_DIR/openui/scripts/openui-cli" ] &&
+  [ ! -e "$WORK_DIR/openui/skills" ] &&
+  [ ! -e "$WORK_DIR/openui/docs" ]; then
+  echo "ok 8 - subtree download extracts only target directory and preserves permissions"
+else
+  echo "not ok 8 - subtree download failed or had unexpected files"
+fi
+
+# Test 9: Positional DEST downloads to specified target
+if _GITHUB_DOWNLOAD_TEST_REMOTE="file://$FIXTURE_REPO" "$BIN" "https://github.com/thesysdev/skills/tree/main/skills/openui" "$WORK_DIR/custom-openui" >/dev/null 2>&1 &&
+  [ -f "$WORK_DIR/custom-openui/SKILL.md" ]; then
+  echo "ok 9 - positional DEST downloads to specified target path"
+else
+  echo "not ok 9 - positional DEST failed"
+fi
+
+# Test 10: -o/--output downloads directly into output directory
+if _GITHUB_DOWNLOAD_TEST_REMOTE="file://$FIXTURE_REPO" "$BIN" -o "$WORK_DIR/output-dest" "https://github.com/thesysdev/skills/tree/main/skills/openui" >/dev/null 2>&1 &&
+  [ -f "$WORK_DIR/output-dest/SKILL.md" ]; then
+  echo "ok 10 - -o/--output option downloads directly to destination"
+else
+  echo "not ok 10 - -o/--output option failed"
+fi
+
+# Test 11: Destination already exists fails without --force
+rc=0
+_GITHUB_DOWNLOAD_TEST_REMOTE="file://$FIXTURE_REPO" "$BIN" "https://github.com/thesysdev/skills/tree/main/skills/openui" "$WORK_DIR/custom-openui" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  echo "ok 11 - existing destination refused without --force"
+else
+  echo "not ok 11 - existing destination unexpectedly succeeded without --force"
+fi
+
+# Test 12: Destination already exists succeeds with --force
+if _GITHUB_DOWNLOAD_TEST_REMOTE="file://$FIXTURE_REPO" "$BIN" --force "https://github.com/thesysdev/skills/tree/main/skills/openui" "$WORK_DIR/custom-openui" >/dev/null 2>&1 &&
+  [ -f "$WORK_DIR/custom-openui/SKILL.md" ]; then
+  echo "ok 12 - existing destination succeeds with --force"
+else
+  echo "not ok 12 - --force failed"
+fi
+
+# Test 13: Non-existent subpath fails with error
+rc=0
+err_out=$(_GITHUB_DOWNLOAD_TEST_REMOTE="file://$FIXTURE_REPO" "$BIN" "https://github.com/thesysdev/skills/tree/main/skills/nonexistent" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$err_out" | grep -q 'not found'; then
+  echo "ok 13 - non-existent subpath reports error and exits 1"
+else
+  echo "not ok 13 - non-existent subpath wrong (rc=$rc, out=$err_out)"
+fi
+
+# Test 14: Root repository download (without .git directory)
+if _GITHUB_DOWNLOAD_TEST_REMOTE="file://$FIXTURE_REPO" "$BIN" -o "$WORK_DIR/whole-repo" "https://github.com/thesysdev/skills" >/dev/null 2>&1 &&
+  [ -f "$WORK_DIR/whole-repo/docs/intro.md" ] &&
+  [ -f "$WORK_DIR/whole-repo/skills/openui/SKILL.md" ] &&
+  [ ! -d "$WORK_DIR/whole-repo/.git" ]; then
+  echo "ok 14 - root repository download extracts all files without .git metadata"
+else
+  echo "not ok 14 - root repository download failed"
+fi
