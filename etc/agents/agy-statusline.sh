@@ -57,6 +57,9 @@ Documentation:
 Examples:
   # Test with mock session JSON
   echo '{"agent_state": "idle", "context_window": {"remaining_percentage": 94.2}}' | $(basename "$0")
+
+  # Test with mock session JSON and conversation title
+  echo '{"agent_state": "idle", "conversation_title": "Fix statusline", "context_window": {"remaining_percentage": 94.2}}' | $(basename "$0")
 EOF
   exit 0
 }
@@ -100,14 +103,12 @@ fi
 # Fallback values
 STATE="idle"
 TITLE=""
+TRANSCRIPT_PATH=""
+CONVERSATION_ID=""
 CTX_REMAINING="100"
 CTX_SIZE=""
 TOTAL_IN=""
 TOTAL_OUT=""
-LAST_IN=""
-LAST_OUT=""
-LAST_CACHE_READ="0"
-LAST_CACHE_WRITE="0"
 TOTAL_USD="0"
 MODEL=""
 TASKS="0"
@@ -130,20 +131,15 @@ if [[ ! -t 0 ]]; then
       end;
 
     .context_window as $cw |
-    ($cw.current_usage // null) as $cu |
-    ($cu.cache_read_input_tokens // 0) as $cr |
-    ($cu.cache_creation_input_tokens // 0) as $cc |
     [
       "STATE=" + ((.agent_state // "idle") | @sh),
-      "TITLE=" + (((.conversation_title // "") | gsub("[\\r\\n]+"; " ")) | @sh),
+      "TITLE=" + (((.conversation_title // .title // "") | gsub("[\\r\\n]+"; " ")) | @sh),
+      "TRANSCRIPT_PATH=" + ((.transcript_path // "") | @sh),
+      "CONVERSATION_ID=" + ((.conversation_id // .session_id // "") | @sh),
       "CTX_REMAINING=" + (((.context_window?.remaining_percentage // 100) | tostring) | @sh),
       "CTX_SIZE=" + (($cw.context_window_size | fmt_k) | @sh),
       "TOTAL_IN=" + (($cw.total_input_tokens | fmt_k) | @sh),
       "TOTAL_OUT=" + (($cw.total_output_tokens | fmt_k) | @sh),
-      "LAST_IN=" + (($cu.input_tokens | fmt_k) | @sh),
-      "LAST_OUT=" + (($cu.output_tokens | fmt_k) | @sh),
-      "LAST_CACHE_READ=" + ($cr | tostring | @sh),
-      "LAST_CACHE_WRITE=" + ($cc | tostring | @sh),
       "TOTAL_USD=" + (((.cost?.total_usd // 0) | tostring) | @sh),
       "MODEL=" + ((.model?.display_name // .model?.id // "") | @sh),
       "TASKS=" + (((.task_count // 0) | tostring) | @sh),
@@ -176,6 +172,31 @@ HOST=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "localhost")
 HOST_SEGMENT="${C_BLUE}${HOST}${C_RESET}"
 
 # 3. Conversation summary / title segment
+# Fall back to resolving the session prompt from the transcript if title is not directly provided in the payload
+if [[ -z "$TITLE" ]]; then
+  if [[ -z "$TRANSCRIPT_PATH" && -n "$CONVERSATION_ID" ]]; then
+    for candidate in \
+      "$HOME/.gemini/jetski/brain/${CONVERSATION_ID}/.system_generated/logs/transcript.jsonl" \
+      "$HOME/.gemini/antigravity/brain/${CONVERSATION_ID}/.system_generated/logs/transcript.jsonl"; do
+      if [[ -r "$candidate" ]]; then
+        TRANSCRIPT_PATH="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ -n "$TRANSCRIPT_PATH" && -r "$TRANSCRIPT_PATH" ]]; then
+    TITLE=$(head -n 5 "$TRANSCRIPT_PATH" 2>/dev/null | jq -s -r '
+      map(select(.type == "USER_INPUT") | .content // "") | first // "" |
+      gsub("<[^>]*>"; "") |
+      split("\n") |
+      map(gsub("^[[:space:]]+|[[:space:]]+$"; "") | gsub("[[:space:]]+"; " ")) |
+      map(select(length > 0)) |
+      first // ""
+    ' 2>/dev/null || true)
+  fi
+fi
+
 TITLE_SEGMENT=""
 if [[ -n "$TITLE" ]]; then
   MAX_TITLE_LEN=32
@@ -219,32 +240,13 @@ fi
 
 CTX_SEGMENT="${CTX_COLOR}${CTX_TEXT}${C_DIM}${TOTAL_TOKENS}${C_RESET}${COST_PART}"
 
-# 5. Last turn segment: [last: LAST_IN↑ LAST_OUT↓ · CACHE%]
-TURN_SEGMENT=""
-if [[ -n "$LAST_IN" || -n "$LAST_OUT" ]]; then
-  TURN_PARTS=""
-  if [[ -n "$LAST_IN" && -n "$LAST_OUT" ]]; then
-    TURN_PARTS="${LAST_IN}↑ ${LAST_OUT}↓"
-  elif [[ -n "$LAST_IN" ]]; then
-    TURN_PARTS="${LAST_IN}↑"
-  elif [[ -n "$LAST_OUT" ]]; then
-    TURN_PARTS="${LAST_OUT}↓"
-  fi
-
-  CACHE_PART=""
-  if [[ "$LAST_CACHE_READ" -eq 0 && "$LAST_CACHE_WRITE" -gt 0 ]]; then
-    CACHE_PART=" · ${C_RED}cache miss${C_RESET}"
-  fi
-  TURN_SEGMENT="${C_DIM}last: ${C_RESET}${TURN_PARTS}${CACHE_PART}"
-fi
-
-# 6. Model segment
+# 5. Model segment
 MODEL_SEGMENT=""
 if [[ -n "$MODEL" ]]; then
   MODEL_SEGMENT="${C_MAGENTA}${MODEL}${C_RESET}"
 fi
 
-# 7. Background tasks / subagents badge
+# 6. Background tasks / subagents badge
 BG_SEGMENT=""
 TOTAL_BG=$((TASKS + SUBAGENTS))
 if [[ $TOTAL_BG -gt 0 ]]; then
@@ -263,7 +265,7 @@ if [[ $TOTAL_BG -gt 0 ]]; then
   BG_SEGMENT="${C_CYAN}${BG_TEXT:2}${C_RESET}"
 fi
 
-# 8. Repository / CitC workspace segment (mirrors fish_right_prompt)
+# 7. Repository / CitC workspace segment (mirrors fish_right_prompt)
 REPO_SEGMENT=""
 # If in a non-default CitC client, display it
 if [[ -n "$CLIENT" && ! "$CLIENT" =~ ^.+-[a-z0-9]+-defaultclient$ ]]; then
@@ -285,11 +287,8 @@ fi
 
 PARTS+=("$CTX_SEGMENT")
 
-# On wider terminals (>= 110 columns), show all details including turn stats
+# On wider terminals (>= 110 columns), show all details
 if [[ "${COLS:-80}" -ge 110 ]]; then
-  if [[ -n "$TURN_SEGMENT" ]]; then
-    PARTS+=("$TURN_SEGMENT")
-  fi
   if [[ -n "$MODEL_SEGMENT" ]]; then
     PARTS+=("$MODEL_SEGMENT")
   fi
@@ -300,9 +299,6 @@ if [[ "${COLS:-80}" -ge 110 ]]; then
     PARTS+=("$REPO_SEGMENT")
   fi
 elif [[ "${COLS:-80}" -ge 90 ]]; then
-  if [[ -n "$TURN_SEGMENT" ]]; then
-    PARTS+=("$TURN_SEGMENT")
-  fi
   if [[ -n "$MODEL_SEGMENT" ]]; then
     PARTS+=("$MODEL_SEGMENT")
   fi
