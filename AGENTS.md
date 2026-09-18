@@ -6,56 +6,25 @@ documentation, tests, commit messages, and other repository metadata.
 
 ## Engineering Approach
 
-Optimize for dependable tools that remain understandable and useful over time.
-In this repository, stability and predictability are more important than novelty
-or peak performance.
+Favor stable, predictable, and understandable tools over novelty or peak
+performance. Keep scripts focused, but handle real boundaries—arguments, files,
+subprocesses, cleanup, signals, and network failures—carefully. Prefer clear,
+established solutions and sequential control flow; add dependencies,
+abstractions, concurrency, or optimizations only for a concrete need. Preserve
+deterministic interfaces and test in proportion to the risk of the change.
 
-- **Prefer established, boring solutions.** Use platform facilities and mature
-  dependencies with well-understood behavior. Do not adopt a new framework,
-  dependency, language feature, or optimization without a concrete benefit.
-- **Keep focused tools focused.** A script may be thorough without becoming a
-  framework. Extend an existing command when the new behavior belongs to its
-  domain; otherwise create a small, cohesive tool with a clear interface.
-- **Be robust at real boundaries.** Treat arguments, files, subprocesses,
-  signals, temporary resources, network failures, and machine-readable output
-  deliberately. Handle plausible failure modes and preserve useful diagnostics,
-  but do not add complexity for purely hypothetical cases.
-- **Choose clarity over cleverness.** Prefer explicit control flow, standard
-  library features, and small local helpers. Optimize only after identifying a
-  meaningful bottleneck; avoid concurrency or intricate job control when a
-  sequential implementation is sufficiently reliable.
-- **Preserve compatibility and behavior.** Existing scripts are personal tools
-  as well as agent interfaces. Keep output, exit status, ordering, and side
-  effects deterministic. Treat interface changes as compatibility changes and
-  update documentation, completions, generated indexes, and tests together.
-- **Test in proportion to risk.** Add targeted regression coverage for parsing,
-  destructive operations, cleanup, process lifecycle, and previously observed
-  failures. Prefer hermetic tests and fixtures over live services, timing
-  assumptions, or host-specific state.
-
-Before adding a capability, search `bin/`, `skills/*/scripts/`, and existing
-references. There should normally be one canonical implementation of a user
-capability. Small, transparent duplication can be preferable to a premature
-shared abstraction, but do not create competing commands that solve the same
-problem.
+Before adding a capability, search for an existing canonical implementation.
+Avoid competing tools, while preferring small local helpers over premature
+shared abstractions.
 
 ## Standards and Sources of Truth
 
-This file states repository-specific priorities and workflow requirements. The
-guides in `skills/coding-standards/references/` define the detailed,
-language-specific rules and are the source of truth for implementation style:
-
-- `shell.md` for shell compatibility, error handling, dependencies, and help
-- `python.md` for standalone Python scripts, typing, and process handling
-- `cli-tools.md` for command shape, output streams, exit codes, and help text
-- `caching.md` for network access, caches, and offline behavior
-- `markdown.md` and `git.md` for documentation and commit conventions
-
-Read the applicable guides before making a substantive change. Use the
-formatting scripts in `skills/coding-standards/scripts/` rather than invoking
-their underlying formatters directly. When this file is more opinionated than a
-general coding guide, follow this file; do not copy general guidance here merely
-to make it more visible.
+This file contains repository-specific priorities. The detailed implementation
+rules remain in the applicable guides under
+`skills/coding-standards/references/`, including `shell.md`, `python.md`,
+`cli-tools.md`, and `caching.md`. Read them before substantive changes and use
+the formatting scripts in `skills/coding-standards/scripts/` rather than their
+underlying tools directly. Where this file is more opinionated, follow it.
 
 ## Privacy and Information Control
 
