@@ -30,6 +30,42 @@ def die(msg):
     sys.exit(1)
 
 
+def colorize(text: str, color_name: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    codes = {
+        "green": "\033[32m",
+        "yellow": "\033[33m",
+        "red": "\033[31m",
+        "bold": "\033[1m",
+        "reset": "\033[0m",
+    }
+    return f"{codes.get(color_name, '')}{text}{codes['reset']}"
+
+
+def use_color_for(stream) -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    force = os.environ.get("FORCE_COLOR")
+    if force and force != "0":
+        return True
+    return stream.isatty() if hasattr(stream, "isatty") else False
+
+
+def clean_p(path: Path | str) -> str:
+    """Formats a path for display, abbreviating $HOME as '~'."""
+    try:
+        p = Path(path).resolve()
+        home = Path.home().resolve()
+        try:
+            rel = p.relative_to(home)
+            return f"~/{rel}" if str(rel) != "." else "~"
+        except ValueError:
+            return str(p)
+    except Exception:
+        return str(path)
+
+
 # ==============================================================================
 # Plugins & Workspace Root Detection
 # ==============================================================================
@@ -148,6 +184,8 @@ class AgySettingsAdapter(PermissionAdapter):
 
     def __init__(self, target_agent: str | None = None):
         self.target_agent = target_agent
+        if target_agent:
+            self.name = target_agent
 
     def _settings_paths(self) -> list[Path]:
         import shutil
@@ -723,48 +761,303 @@ def cmd_apply(agent: str | None):
         )
 
 
-def cmd_doctor(agent: str | None):
+def cmd_doctor(agent: str | None, stream=sys.stdout):
     ws = get_workspace_root()
+    use_color = use_color_for(stream)
+
+    def format_status(status: str) -> str:
+        if status == "OK":
+            return colorize("[PASS]", "green", use_color)
+        if status == "WARN":
+            return colorize("[WARN]", "yellow", use_color)
+        return colorize("[FAIL]", "red", use_color)
+
+    checks = []
+
+    # 1. Workspace
+    is_git = (ws / ".git").exists()
+    ws_type = "Git repository" if is_git else "Non-VCS directory"
+    checks.append(
+        {
+            "name": "Workspace",
+            "status": "OK",
+            "summary": ws_type,
+            "details": [f"Root: {clean_p(ws)}"],
+        }
+    )
+
+    # 2. Plugin Loading
+    load_failures = load_plugins().load_failures
+    if load_failures:
+        checks.append(
+            {
+                "name": "Plugin Loading",
+                "status": "FAIL",
+                "summary": f"Found {len(load_failures)} plugin(s) that failed to load",
+                "details": [
+                    f"Failed to load {name}: {err}" for name, err in load_failures
+                ]
+                + ["To resolve: fix or remove the failing plugin file(s)"],
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Plugin Loading",
+                "status": "OK",
+                "summary": "All plugins loaded successfully",
+                "details": [],
+            }
+        )
+
+    # 3. Agent Detection & Selection
     adapters = select_adapters(agent, ws)
     if not adapters:
-        return
-    allow, guard = compute_workspace_rules()
-    issues = []
-    load_failures = load_plugins().load_failures
-    for name, error in load_failures:
-        issues.append(f"  [plugin] failed to load {name}: {error}")
-    rule_issues = []
-    for adapter in adapters:
-        current = adapter.rules(ws)
-        current_allow = set(current.get("allow") or [])
-        guarded = set(current.get("deny") or []) | set(current.get("ask") or [])
-        missing_allow = [p for p in allow if p not in current_allow]
-        missing_guard = [p for p in guard if p not in guarded]
-        if not adapter.is_initialized(ws) and (allow or guard):
-            rule_issues.append(f"  [{adapter.name} ({adapter.scope})] not initialized")
-        for p in missing_allow:
-            rule_issues.append(
-                f"  [{adapter.name} ({adapter.scope})] missing allow: {p}"
-            )
-        for p in missing_guard:
-            rule_issues.append(
-                f"  [{adapter.name} ({adapter.scope})] missing {adapter.guard_mode}: {p}"
-            )
-    issues += rule_issues
+        checks.append(
+            {
+                "name": "Agent Configuration",
+                "status": "WARN",
+                "summary": "No supported agent configuration found",
+                "details": [
+                    f"Looked for: {clean_p(AGY_CONFIG_DIR)} and {clean_p(CLAUDE_CONFIG_DIR)}",
+                    "To resolve: install an agent CLI or use '--agent NAME' to force one",
+                ],
+            }
+        )
+    else:
+        agent_names = ", ".join(f"{a.name} ({a.scope})" for a in adapters)
+        checks.append(
+            {
+                "name": "Agent Configuration",
+                "status": "OK",
+                "summary": f"Active backend(s): {agent_names}",
+                "details": [],
+            }
+        )
 
-    if issues:
-        print("Agent Permissions:", file=sys.stderr)
-        for line in issues:
-            print(line, file=sys.stderr)
-        if load_failures:
-            print(
-                "\n  hint: fix or remove the failing plugin file(s) above",
-                file=sys.stderr,
+    # 4. Installed Skills & Declared Rules
+    allow, guard = compute_workspace_rules()
+    total_declared = len(allow) + len(guard)
+    checks.append(
+        {
+            "name": "Installed Skills",
+            "status": "OK",
+            "summary": f"Found {total_declared} declared command(s) across installed skills",
+            "details": [f"Declared: {len(allow)} allow, {len(guard)} guard (ask)"],
+        }
+    )
+
+    # 5. Check permissions for each adapter
+    for adapter in adapters:
+        if isinstance(adapter, AgySettingsAdapter):
+            settings_paths = adapter._settings_paths()
+        elif isinstance(adapter, ClaudeSettingsAdapter):
+            settings_paths = [adapter._settings_path(ws)]
+        else:
+            settings_paths = []
+
+        is_init = adapter.is_initialized(ws)
+        if not is_init and (allow or guard):
+            target_path = clean_p(settings_paths[0]) if settings_paths else "settings"
+            checks.append(
+                {
+                    "name": f"Permissions ({adapter.name})",
+                    "status": "FAIL",
+                    "summary": f"Not initialized in {target_path}",
+                    "details": [
+                        f"Resolved: {clean_p(p)} (missing)" for p in settings_paths
+                    ]
+                    + [f"missing allow: {p}" for p in allow]
+                    + [f"missing {adapter.guard_mode}: {p}" for p in guard]
+                    + ["To resolve: run 'permission apply'"],
+                }
             )
-        if rule_issues:
-            print("\n  hint: run 'permission apply'", file=sys.stderr)
-        print(file=sys.stderr)
+            continue
+
+        for p in settings_paths:
+            p_display = clean_p(p)
+            if not p.is_file():
+                if allow or guard:
+                    checks.append(
+                        {
+                            "name": f"Permissions ({adapter.name})",
+                            "status": "FAIL",
+                            "summary": f"Settings file not created: {p_display}",
+                            "details": [
+                                f"Resolved: {p_display} (missing)",
+                                "To resolve: run 'permission apply'",
+                            ],
+                        }
+                    )
+                continue
+
+            data = adapter._load(p)
+            perms = data.get("permissions") or {}
+            p_allow = {adapter.untranslate(r) for r in perms.get("allow") or []}
+            p_guarded = {
+                adapter.untranslate(r)
+                for r in (perms.get("deny") or []) + (perms.get("ask") or [])
+            }
+            p_missing_allow = [x for x in allow if x not in p_allow]
+            p_missing_guard = [x for x in guard if x not in p_guarded]
+
+            a_count = len(perms.get("allow") or [])
+            ask_count = len(perms.get("ask") or [])
+            deny_count = len(perms.get("deny") or [])
+
+            if p_missing_allow or p_missing_guard:
+                checks.append(
+                    {
+                        "name": f"Permissions ({adapter.name})",
+                        "status": "FAIL",
+                        "summary": f"Missing {len(p_missing_allow) + len(p_missing_guard)} rule(s) in {p_display}",
+                        "details": [
+                            f"Settings: {p_display} ({a_count} allow, {ask_count} ask, {deny_count} deny)"
+                        ]
+                        + [f"missing allow: {x}" for x in p_missing_allow]
+                        + [
+                            f"missing {adapter.guard_mode}: {x}"
+                            for x in p_missing_guard
+                        ]
+                        + ["To resolve: run 'permission apply'"],
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "name": f"Permissions ({adapter.name})",
+                        "status": "OK",
+                        "summary": f"All {total_declared} expected rules configured in {p_display}",
+                        "details": [
+                            f"Settings: {p_display} ({a_count} allow, {ask_count} ask, {deny_count} deny)"
+                        ],
+                    }
+                )
+
+        # 6. Syntax check for Agy/Jetski: legacy literal rules vs regex
+        if isinstance(adapter, AgySettingsAdapter):
+            declared_set = set(allow) | set(guard)
+            for p in settings_paths:
+                if not p.is_file():
+                    continue
+                data = adapter._load(p)
+                declared_legacy = []
+                other_legacy = []
+                for mode in MODES:
+                    for r in (data.get("permissions") or {}).get(mode) or []:
+                        if r.startswith("command(") and not r.startswith(
+                            "command(regex:"
+                        ):
+                            untranslated = adapter.untranslate(r)
+                            if untranslated in declared_set:
+                                declared_legacy.append(r)
+                            else:
+                                other_legacy.append(r)
+
+                p_display = clean_p(p)
+                if declared_legacy:
+                    checks.append(
+                        {
+                            "name": f"Rule Syntax ({adapter.name})",
+                            "status": "WARN",
+                            "summary": f"Found {len(declared_legacy)} declared rule(s) using legacy literal syntax in {p_display}",
+                            "details": [f"Legacy: {r}" for r in declared_legacy[:5]]
+                            + (
+                                [f"... and {len(declared_legacy) - 5} more"]
+                                if len(declared_legacy) > 5
+                                else []
+                            )
+                            + [
+                                "To resolve: run 'permission apply' to upgrade rules to regex format"
+                            ],
+                        }
+                    )
+                else:
+                    details = (
+                        [
+                            f"External rules: {len(other_legacy)} non-workspace rule(s) using literal syntax in {p_display}"
+                        ]
+                        if other_legacy
+                        else []
+                    )
+                    checks.append(
+                        {
+                            "name": f"Rule Syntax ({adapter.name})",
+                            "status": "OK",
+                            "summary": f"All declared rules use path-independent regex format in {p_display}",
+                            "details": details,
+                        }
+                    )
+
+        # 7. Workspace exclusions check for Claude
+        if isinstance(adapter, ClaudeSettingsAdapter) and is_init:
+            is_ignored = False
+            try:
+                res = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(ws),
+                        "check-ignore",
+                        "-q",
+                        ".claude/settings.local.json",
+                    ],
+                    capture_output=True,
+                    check=False,
+                )
+                is_ignored = res.returncode == 0
+            except Exception:
+                pass
+            if is_ignored:
+                checks.append(
+                    {
+                        "name": "Workspace Exclusions",
+                        "status": "OK",
+                        "summary": ".claude/settings.local.json is git-ignored",
+                        "details": [],
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "name": "Workspace Exclusions",
+                        "status": "WARN",
+                        "summary": ".claude/settings.local.json is not git-ignored",
+                        "details": [
+                            "To resolve: run 'permission apply' to update .git/info/exclude"
+                        ],
+                    }
+                )
+
+    fail = any(c["status"] == "FAIL" for c in checks)
+    warn = any(c["status"] == "WARN" for c in checks)
+
+    for check in checks:
+        print(
+            f"{format_status(check['status'])} {check['name']}: {check['summary']}",
+            file=stream,
+        )
+        for line in check["details"]:
+            print(f"    {line}", file=stream)
+
+    print(file=stream)
+    if fail:
+        print(
+            f"{format_status('FAIL')}  Workspace permissions have issues. Run 'permission apply' to synchronize.",
+            file=stream,
+        )
         sys.exit(1)
+    elif warn:
+        print(
+            f"{format_status('WARN')}  Workspace permissions have warnings. Run 'permission apply' to synchronize.",
+            file=stream,
+        )
+        sys.exit(1)
+    else:
+        print(
+            f"{format_status('OK')}  Workspace permissions are healthy and fully synchronized.",
+            file=stream,
+        )
 
 
 # ==============================================================================
