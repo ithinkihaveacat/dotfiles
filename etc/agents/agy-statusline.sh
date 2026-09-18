@@ -276,7 +276,7 @@ elif GIT_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null); then
 fi
 
 # Delimiter
-SEP="${C_DIM}│${C_RESET}"
+SEP="${C_DIM}·${C_RESET}"
 
 # Assemble segments based on available terminal width
 PARTS=("$STATE_BADGE" "$HOST_SEGMENT")
