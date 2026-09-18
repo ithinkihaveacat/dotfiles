@@ -1,8 +1,61 @@
 # Development Guidelines
 
-This document provides development guidelines for this repository, covering
-privacy, information control, and script quality. These rules apply to all
-commits, including code, configurations, and documentation.
+This is a public collection of dotfiles, agent skills, and focused command-line
+tools. These rules apply to all changes, including code, configuration,
+documentation, tests, commit messages, and other repository metadata.
+
+## Engineering Approach
+
+Optimize for dependable tools that remain understandable and useful over time.
+In this repository, stability and predictability are more important than novelty
+or peak performance.
+
+- **Prefer established, boring solutions.** Use platform facilities and mature
+  dependencies with well-understood behavior. Do not adopt a new framework,
+  dependency, language feature, or optimization without a concrete benefit.
+- **Keep focused tools focused.** A script may be thorough without becoming a
+  framework. Extend an existing command when the new behavior belongs to its
+  domain; otherwise create a small, cohesive tool with a clear interface.
+- **Be robust at real boundaries.** Treat arguments, files, subprocesses,
+  signals, temporary resources, network failures, and machine-readable output
+  deliberately. Handle plausible failure modes and preserve useful diagnostics,
+  but do not add complexity for purely hypothetical cases.
+- **Choose clarity over cleverness.** Prefer explicit control flow, standard
+  library features, and small local helpers. Optimize only after identifying a
+  meaningful bottleneck; avoid concurrency or intricate job control when a
+  sequential implementation is sufficiently reliable.
+- **Preserve compatibility and behavior.** Existing scripts are personal tools
+  as well as agent interfaces. Keep output, exit status, ordering, and side
+  effects deterministic. Treat interface changes as compatibility changes and
+  update documentation, completions, generated indexes, and tests together.
+- **Test in proportion to risk.** Add targeted regression coverage for parsing,
+  destructive operations, cleanup, process lifecycle, and previously observed
+  failures. Prefer hermetic tests and fixtures over live services, timing
+  assumptions, or host-specific state.
+
+Before adding a capability, search `bin/`, `skills/*/scripts/`, and existing
+references. There should normally be one canonical implementation of a user
+capability. Small, transparent duplication can be preferable to a premature
+shared abstraction, but do not create competing commands that solve the same
+problem.
+
+## Standards and Sources of Truth
+
+This file states repository-specific priorities and workflow requirements. The
+guides in `skills/coding-standards/references/` define the detailed,
+language-specific rules and are the source of truth for implementation style:
+
+- `shell.md` for shell compatibility, error handling, dependencies, and help
+- `python.md` for standalone Python scripts, typing, and process handling
+- `cli-tools.md` for command shape, output streams, exit codes, and help text
+- `caching.md` for network access, caches, and offline behavior
+- `markdown.md` and `git.md` for documentation and commit conventions
+
+Read the applicable guides before making a substantive change. Use the
+formatting scripts in `skills/coding-standards/scripts/` rather than invoking
+their underlying formatters directly. When this file is more opinionated than a
+general coding guide, follow this file; do not copy general guidance here merely
+to make it more visible.
 
 ## Privacy and Information Control
 
@@ -52,10 +105,12 @@ script sources in `skills/*/scripts/`, as well as the `./install.sh` script.
 
 #### Dependency Checking
 
-All scripts must declare their command-line dependencies using the `require()`
-helper, which exits `127` when a command is missing. The implementation and
-usage rules are defined in `skills/coding-standards/references/shell.md`
-("Dependency Checking").
+Shell scripts must check non-trivial command-line dependencies before doing
+substantive work, using the `require()` helper and exit status `127`. The
+implementation and usage rules are defined in
+`skills/coding-standards/references/shell.md` ("Dependency Checking"). Python
+scripts must declare third-party packages in their PEP 723 metadata as described
+in `skills/coding-standards/references/python.md`.
 
 #### Safe-Command Declarations
 
@@ -82,34 +137,11 @@ version guard) — are defined in `skills/coding-standards/references/shell.md`
 
 #### Handling APK Archives
 
-Many scripts in this repository need to operate on a base APK. This base APK may
-be provided as a standalone `.apk` file or may be contained within a `.zip`
-archive as a `*-base-split.apk` file.
-
-To ensure consistency and robustness, all scripts that need to perform this
-extraction must use the following exact code block. This logic correctly handles
-both cases and ensures that temporary files are cleaned up properly.
-
-**Standard Code for Base APK Extraction:**
-
-```bash
-if [[ $1 == *.zip ]]; then
-  TMPDIR=$(mktemp -d)
-  trap 'rm -rf -- "$TMPDIR"' EXIT
-  unzip -q -j "$1" '*-base-split.apk' -d "$TMPDIR"
-  BASEAPKS=("$TMPDIR"/*-base-split.apk)
-  BASEAPK="${BASEAPKS[0]}"
-  if [ ! -f "$BASEAPK" ]; then
-    echo "$(basename "$0"): *-base-split.apk not found in zip, aborting" >&2
-    exit 1
-  fi
-else
-  BASEAPK="$1"
-fi
-```
-
-This block assumes that the input file path is in `$1`. If your script uses a
-different variable for the input path, you must adapt the code accordingly.
+APK tools that operate on a base APK must accept both a standalone `.apk` and a
+`.zip` containing a `*-base-split.apk`. Preserve the established extraction,
+validation, and temporary-directory cleanup behavior in `skills/apk/scripts/`;
+adapt it to the script's structure rather than maintaining a separately copied
+"standard" block in this document.
 
 ### CLI Design and Documentation
 
@@ -189,20 +221,25 @@ When modifying a script with tests, review whether the tests need updating.
 
 ### Examples from This Repository
 
-See these scripts for reference implementations:
+See these canonical sources for reference implementations:
 
-- `bin/jetpack` - Multiple arguments, optional version and repo URL
-- `bin/apk-unzip` - Single argument with an optional `--output`, simple and
-  clean
-- `bin/packagename` - Subcommand-style manager, Android-specific
-- `bin/macos-finder-reveal` - Multiple files, macOS-specific
+- `skills/jetpack/scripts/jetpack` - a large Bash CLI with caching, offline
+  behavior, temporary-resource cleanup, and targeted tests
+- `skills/emumanager/scripts/emumanager` - a stateful Bash manager with explicit
+  compatibility and process handling
+- `skills/workspace-tools/scripts/skill` - a substantial standalone Python CLI
+  with filesystem and network boundaries
+- `skills/apk/scripts/apk-unzip` - a small utility with an optional `--output`
+- `bin/macos-finder-reveal` - a focused, macOS-specific utility
 
-Each demonstrates proper GNU coreutils style documentation.
+The `bin/` entries for skill scripts are convenience symlinks; edit the
+canonical source under `skills/*/scripts/`. Examples illustrate useful patterns,
+not a requirement to copy every implementation choice into a simpler command.
 
-### Skill Development and Zero-Duplication
+### Skill Design and Capability Ownership
 
-When creating or modifying agent skills under `skills/`, adhere to a strict
-**zero-duplication policy** for helper scripts and CLI tools.
+When creating or modifying agent skills under `skills/`, keep user-facing
+capabilities centralized and avoid overlapping tools.
 
 - **Prefer General Capabilities**: Do not package generic scripts (e.g., for
   capturing screenshots, recording video, managing Wear OS Tiles, or setting
@@ -213,6 +250,9 @@ When creating or modifying agent skills under `skills/`, adhere to a strict
   *general capability* (e.g., "To dynamically add a Tile on the watch...") and
   explicitly direct the reader/agent to search other active skills (like `adb`)
   for the automation scripts that implement it.
+- **Distinguish overlap from local code**: This rule prevents duplicate tools,
+  not every repeated implementation detail. A short local helper can be clearer
+  and more stable than coupling unrelated scripts through a shared library.
 - **Centralize Development Guidelines**: Do not write meta-guidelines (such as
   "do not duplicate scripts") inside a skill's main `SKILL.md`. Keep the
   `SKILL.md` focused entirely on user-facing and agent-facing usage. Place all
