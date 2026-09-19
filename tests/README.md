@@ -7,7 +7,7 @@ respective scopes to keep them together in the directory structure.
   skill's `tests/` folder as a flat executable file (e.g.,
   `skills/bar/tests/test-foo`).
 - Tests for global utilities (scripts in `bin/`) live directly under the global
-  `tests/` folder as a flat executable file (e.g., `tests/test-hook`).
+  `tests/` folder as a flat executable file (e.g., `tests/test-git-sync`).
 - Test data and resources are stored in a `fixtures/` subdirectory under the
   corresponding `tests/` folder (e.g.,
   `skills/agent-tools/tests/fixtures/pacioli/`).
