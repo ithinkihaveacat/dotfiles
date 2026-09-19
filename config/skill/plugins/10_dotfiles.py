@@ -49,3 +49,8 @@ def register(api):
         "remote:skill-cleaner",
         "https://github.com/steipete/agent-scripts/tree/main/skills/skill-cleaner",
     )
+
+    api.register_skill(
+        "remote:typesafe-ai",
+        "https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai",
+    )
