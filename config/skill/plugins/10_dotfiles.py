@@ -54,3 +54,8 @@ def register(api):
         "remote:typesafe-ai",
         "https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai",
     )
+
+    api.register_skill(
+        "remote:cloudflare",
+        "https://github.com/cloudflare/skills/tree/main/skills/cloudflare",
+    )
