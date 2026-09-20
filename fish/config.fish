@@ -83,7 +83,9 @@ if count $ANDROID_HOME/build-tools/* >/dev/null
     add_path (printf '%s\n' $ANDROID_HOME/build-tools/* | sort -rV | head -1)
 end
 
-test -d $ANDROID_HOME; and set -x ANDROID_JAR (printf '%s\n' $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
+if count $ANDROID_HOME/platforms/android-*/android.jar >/dev/null
+    set -x ANDROID_JAR (printf '%s\n' $ANDROID_HOME/platforms/android-*/android.jar | sort -rV | head -1)
+end
 
 # binaries
 
