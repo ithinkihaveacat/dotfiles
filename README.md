@@ -238,7 +238,9 @@ against). The fix is to rebuild that version: `ruby-install 3.4`.
 
 ### Python
 
-Python environments use [uv](https://github.com/astral-sh/uv). Add to `.envrc`:
+Python environments use [uv](https://github.com/astral-sh/uv). Install it with
+`bin/python-install` (which installs `uv` into `~/.local/bin`), then add to
+`.envrc`:
 
 ```sh
 layout uv              # creates .venv if absent, activates it
@@ -296,7 +298,7 @@ again so the overlay is applied.
 
 On **Debian 13** and **macOS**, `install.sh` installs fish for you, so you can
 skip this step. Debian's packaged fish is out of date, so on Debian 13 it pulls
-fish 4 from the OpenSUSE Build Service; on macOS it uses Homebrew. If fish is
+fish 4.2+ from the OpenSUSE Build Service; on macOS it uses Homebrew. If fish is
 already installed at a version older than 4.2, `install.sh` warns rather than
 replacing it. On other systems, install it first:
 
@@ -339,16 +341,6 @@ replacing it. On other systems, install it first:
 - **iA Writer theme:** <https://ia.net/writer/templates/>
 - **Network Link Conditioner** (for simulating degraded network conditions):
   <https://developer.apple.com/download/more/?q=Additional%20Tools>
-
-### Ubuntu
-
-```sh
-# Emacs keybindings across GTK apps
-gsettings set org.gnome.desktop.interface gtk-key-theme "Emacs"
-```
-
-**Compose key:** Set to Caps Lock via Settings > Keyboard. Enables e.g. Caps
-Lock + `---` → em dash.
 
 ### Raspberry Pi
 
