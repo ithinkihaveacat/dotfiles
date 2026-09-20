@@ -171,8 +171,9 @@ hook [options] <command> [arguments]
 ### Profiles
 
 - **`agent`**: Re-wraps commit message body text, bullet lists, and blockquotes
-  to fit 72 characters, strips dropped trailers (`Co-Authored-By:`, `TAG=`,
-  `CONV=`), and enforces Conventional Commits formatting rules (`commit-msg`).
+  to fit 72 characters, strips dropped trailers (`Co-Authored-By:`,
+  `Assisted-by:`, `TAG=`, `CONV=`), and enforces Conventional Commits formatting
+  rules (`commit-msg`).
 - **`markdown`**: Verifies that staged Markdown files are formatted according to
   `markdown-format` in `--check` mode, rejecting commits if formatting errors
   are found (`pre-commit`).
