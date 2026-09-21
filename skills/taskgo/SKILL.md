@@ -118,11 +118,16 @@ Immediate follow-up actions.
 
 ## Decisions & STATUS.md
 
-- **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`).
+- **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`). Newer ADRs
+  record `supersedes: [<old-adr>]` in YAML frontmatter to retire older ADRs
+  without editing accepted historical records, and may list `files: [...]` to
+  bind architectural invariants to repo paths.
 - **STATUS.md:** The self-contained operational projection.
   - `## Summary`: Human/agent prose for current situation and active session
     citation (`[<conversation-id>](<agent>://<conversation-id>)`).
-  - `<!-- taskgo:begin/end -->`: Mechanically maintained via `taskgo sync`.
+  - `<!-- taskgo:begin/end -->`: Mechanically maintained via `taskgo sync`
+    (projects `In progress`, `Blocked`, active `Decisions` when `decisions/*.md`
+    exist, and task state counts).
   - `## Next`: Immediate next actions.
 
 ## Agent Workflow

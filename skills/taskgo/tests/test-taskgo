@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..122'
+echo '1..128'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -2288,4 +2288,240 @@ if [[ "$DISPATCH_HELP" == Usage:* ]] &&
   echo 'ok 122 - dispatch help follows the CLI house structure'
 else
   echo 'not ok 122 - dispatch help follows the CLI house structure'
+fi
+
+# ===========================================================================
+# ADR supersedes edges, active projection, and stale-reference pruning
+# ===========================================================================
+
+ADR_REPO="$TEST_ROOT/adr-repo"
+mkdir -p "$ADR_REPO/proj/tasks" "$ADR_REPO/proj/decisions" "$ADR_REPO/proj/src"
+git -C "$ADR_REPO" init -q
+git -C "$ADR_REPO" config user.name 'Taskgo Test'
+git -C "$ADR_REPO" config user.email 'taskgo@example.invalid'
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$ADR_REPO/AGENTS.md"
+printf '# Inbox\n' >"$ADR_REPO/INBOX.md"
+printf '# Project\n' >"$ADR_REPO/proj/README.md"
+printf 'print("ok")\n' >"$ADR_REPO/proj/src/live.py"
+
+cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
+---
+files:
+  - src/live.py
+---
+
+# 001: Initial Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Initial design relies on `src/live.py`.
+
+## Decision
+
+Use the initial module.
+
+## Consequences
+
+Simple baseline.
+EOF
+
+# Test 123: sync projects active ADRs under ### Decisions in STATUS.md
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+if grep -q '^### Decisions$' "$ADR_REPO/proj/STATUS.md" &&
+  grep -q '001-initial-arch.md.*001: Initial Architecture' "$ADR_REPO/proj/STATUS.md" &&
+  ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
+  echo 'ok 123 - sync projects active ADRs in STATUS.md and doctor passes'
+else
+  echo 'not ok 123 - sync projects active ADRs in STATUS.md and doctor passes'
+fi
+
+# Test 124: supersedes on newer ADR retires older ADR without editing the older file
+cat <<'EOF' >"$ADR_REPO/proj/decisions/002-new-arch.md"
+---
+supersedes:
+  - 001-initial-arch.md
+---
+
+# 002: New Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Replaces 001-initial-arch.md with a streaming pipeline.
+
+## Decision
+
+Adopt the streaming pipeline.
+
+## Consequences
+
+Higher throughput.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+if grep -q '002-new-arch.md.*002: New Architecture' "$ADR_REPO/proj/STATUS.md" &&
+  ! grep -q '001-initial-arch.md' "$ADR_REPO/proj/STATUS.md" &&
+  grep -q '^Accepted$' "$ADR_REPO/proj/decisions/001-initial-arch.md" &&
+  ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
+  echo 'ok 124 - supersedes edge retires older ADR from STATUS.md without modifying older file'
+else
+  echo 'not ok 124 - supersedes edge retires older ADR from STATUS.md without modifying older file'
+fi
+
+# Test 125: doctor warns when supersedes names an unknown ADR
+cat <<'EOF' >"$ADR_REPO/proj/decisions/003-unknown-target.md"
+---
+supersedes:
+  - 999-missing.md
+---
+
+# 003: Unknown Target
+
+## Status
+
+Accepted
+
+## Context
+
+Tests unknown supersedes target detection.
+
+## Decision
+
+None.
+
+## Consequences
+
+Doctor warns.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+set +e
+ADR_UNKNOWN_OUT="$("$BIN" --root "$ADR_REPO" doctor proj 2>&1)"
+ADR_UNKNOWN_EXIT=$?
+set -e
+rm -f "$ADR_REPO/proj/decisions/003-unknown-target.md"
+if [ "$ADR_UNKNOWN_EXIT" -ne 0 ] &&
+  [[ "$ADR_UNKNOWN_OUT" == *"supersedes names unknown ADR(s): 999-missing.md"* ]]; then
+  echo 'ok 125 - doctor warns when supersedes names an unknown ADR target'
+else
+  echo 'not ok 125 - doctor warns when supersedes names an unknown ADR target'
+fi
+
+# Test 126: doctor warns on ADR supersedes cycles
+cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
+---
+supersedes:
+  - 002-new-arch.md
+---
+
+# 001: Initial Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Cycle test.
+
+## Decision
+
+Cycle.
+
+## Consequences
+
+Doctor warns.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+set +e
+ADR_CYCLE_OUT="$("$BIN" --root "$ADR_REPO" doctor proj 2>&1)"
+ADR_CYCLE_EXIT=$?
+set -e
+if [ "$ADR_CYCLE_EXIT" -ne 0 ] &&
+  [[ "$ADR_CYCLE_OUT" == *"ADR supersedes cycle:"* ]]; then
+  echo 'ok 126 - doctor detects ADR supersedes cycles'
+else
+  echo 'not ok 126 - doctor detects ADR supersedes cycles'
+fi
+
+# Restore 001 without cycle and test 127: active ADR referencing a superseded ADR or stale file
+cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
+---
+files:
+  - src/deleted_module.py
+---
+
+# 001: Initial Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+References `src/deleted_module.py`.
+
+## Decision
+
+Use deleted module.
+
+## Consequences
+
+Stale once deleted.
+EOF
+
+cat <<'EOF' >"$ADR_REPO/proj/decisions/003-cites-superseded.md"
+# 003: Dependent Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Still depends on 001-initial-arch.md and `src/nonexistent.py`.
+
+## Decision
+
+Follow 001-initial-arch.md.
+
+## Consequences
+
+Warned because 001-initial-arch.md is superseded and src/nonexistent.py is missing.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+set +e
+ADR_STALE_OUT="$("$BIN" --root "$ADR_REPO" doctor proj 2>&1)"
+ADR_STALE_EXIT=$?
+set -e
+if [ "$ADR_STALE_EXIT" -ne 0 ] &&
+  [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: active ADR references superseded ADR '001-initial-arch.md'"* ]] &&
+  [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: stale file reference 'src/nonexistent.py'"* ]]; then
+  echo 'ok 127 - doctor warns when an active ADR references a superseded ADR or stale file'
+else
+  echo 'not ok 127 - doctor warns when an active ADR references a superseded ADR or stale file'
+fi
+
+# Test 128: superseded ADR (001-initial-arch.md) is exempt from stale file warnings
+rm -f "$ADR_REPO/proj/decisions/003-cites-superseded.md"
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+if ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
+  echo 'ok 128 - doctor exempts superseded ADRs from stale file reference warnings'
+else
+  echo 'not ok 128 - doctor exempts superseded ADRs from stale file reference warnings'
 fi

@@ -85,6 +85,31 @@ Context boundedness is achieved through `STATUS.md`:
 - If a task record is ever archived or deleted from the working tree,
   `taskgo history` falls back to querying Git history blobs seamlessly.
 
+## Architecture Decision Records (ADRs) & Supersedes Lifecycle
+
+Projects with durable architectural invariants store Nygard-style ADRs in
+`<project>/decisions/NNN-slug.md` with `## Status`, `## Context`, `## Decision`,
+and `## Consequences` sections.
+
+To keep accepted ADRs immutable while preventing obsolete decisions from
+polluting active agent context:
+
+- **Declarative `supersedes` Edges:** When a newer ADR replaces an earlier
+  decision, record `supersedes: [001-old-decision.md]` (matching by filename,
+  stem, or numeric prefix like `001`) in the *newer* ADR's YAML frontmatter
+  rather than rewriting the older file.
+- **Active ADR Projection (`STATUS.md`):** When `<project>/decisions/*.md` is
+  non-empty, `taskgo sync` projects a `### Decisions` list inside the generated
+  `<!-- taskgo:begin --> ... <!-- taskgo:end -->` snapshot containing only
+  *active* (non-superseded) ADRs.
+- **Stale-Reference & Graph Auditing (`taskgo doctor`):** The shared
+  `AuditEngine` verifies `supersedes` targets and checks for cycles. For active
+  ADRs, it warns (`[WARN]`) if an ADR cites a superseded ADR or references
+  deleted/non-existent files (via optional `files: [...]` YAML frontmatter,
+  relative Markdown links, or backticked repo file paths). Once an ADR is
+  superseded, its historical file and ADR references are exempt from staleness
+  warnings.
+
 ## Telemetry & Dual-Representation
 
 Taskgo deliberately records agent session identifiers (`<agent>://<id>`) in two

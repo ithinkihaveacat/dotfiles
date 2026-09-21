@@ -996,6 +996,151 @@ def generate_task_id(root: Path) -> str:
     die("could not allocate unique task ID")
 
 
+@dataclass(slots=True, frozen=True)
+class AdrRow:
+    project: str
+    filename: str
+    title: str
+    abs_path: Path
+    raw_supersedes: tuple[str, ...] = ()
+    supersedes: tuple[str, ...] = ()
+    unknown_supersedes: tuple[str, ...] = ()
+    superseded_by: tuple[str, ...] = ()
+    self_marked_superseded: bool = False
+    files: tuple[str, ...] = ()
+
+    @property
+    def is_superseded(self) -> bool:
+        return bool(self.superseded_by) or self.self_marked_superseded
+
+
+def parse_adr_list_field(fm: dict[str, Any], key: str) -> tuple[str, ...]:
+    """Reads an optional scalar or list frontmatter field on an ADR."""
+    raw = fm.get(key)
+    if not raw:
+        return ()
+    items = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw))
+    cleaned = (str(item).strip().strip("'\"") for item in items)
+    return tuple(dict.fromkeys(c for c in cleaned if c))
+
+
+def resolve_adr_token(token: str, filenames: list[str]) -> str | None:
+    """Resolves a supersedes token (filename, stem, or numeric prefix) to a filename."""
+    t = token.strip().strip("'\"")
+    if not t:
+        return None
+    t_lower = t.lower()
+    for fn in filenames:
+        if fn.lower() == t_lower or Path(fn).stem.lower() == t_lower:
+            return fn
+    m = re.match(r"^(?:adr[-_]?)?0*(\d+)$", t, re.IGNORECASE)
+    if m:
+        num = int(m.group(1))
+        matches = [fn for fn in filenames if re.match(rf"^0*{num}(?:[-_.]|$)", fn)]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def is_adr_self_superseded(fm: dict[str, Any], body: str) -> bool:
+    """Returns True if frontmatter status or ## Status prose marks the ADR superseded."""
+    fm_status = str(fm.get("status", "")).strip().lower()
+    if "superseded" in fm_status:
+        return True
+    m = re.search(
+        r"^##\s+Status\s*$\n(.*?)(?=^##\s+|\Z)",
+        body,
+        re.MULTILINE | re.IGNORECASE | re.DOTALL,
+    )
+    return bool(m and re.search(r"\bsuperseded\b", m.group(1), re.IGNORECASE))
+
+
+def get_adr_rows(root: Path, project_name: str) -> list[AdrRow]:
+    """Loads all ADR rows under <project>/decisions/*.md and resolves supersedes edges."""
+    decisions_dir = root / project_name / "decisions"
+    if not decisions_dir.is_dir():
+        return []
+    adr_files = [df for df in sorted(decisions_dir.glob("*.md")) if df.is_file()]
+    if not adr_files:
+        return []
+    filenames = [df.name for df in adr_files]
+
+    prelim: list[
+        tuple[Path, str, dict[str, Any], str, tuple[str, ...], tuple[str, ...]]
+    ] = []
+    superseded_by_map: dict[str, list[str]] = {fn: [] for fn in filenames}
+
+    for df in adr_files:
+        try:
+            content = df.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm, body = parse_frontmatter(content)
+        title = extract_title(content) or df.stem
+        raw_sup = parse_adr_list_field(fm, "supersedes")
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for tok in raw_sup:
+            target = resolve_adr_token(tok, filenames)
+            if target is not None:
+                if target not in resolved:
+                    resolved.append(target)
+                if df.name not in superseded_by_map[target]:
+                    superseded_by_map[target].append(df.name)
+            else:
+                unknown.append(tok)
+        prelim.append((df, title, fm, body, raw_sup, (tuple(resolved), tuple(unknown))))
+
+    rows: list[AdrRow] = []
+    for df, title, fm, body, raw_sup, (resolved_tup, unknown_tup) in prelim:
+        rows.append(
+            AdrRow(
+                project=project_name,
+                filename=df.name,
+                title=title,
+                abs_path=df.resolve(),
+                raw_supersedes=raw_sup,
+                supersedes=resolved_tup,
+                unknown_supersedes=unknown_tup,
+                superseded_by=tuple(superseded_by_map.get(df.name, ())),
+                self_marked_superseded=is_adr_self_superseded(fm, body),
+                files=parse_adr_list_field(fm, "files"),
+            )
+        )
+    return rows
+
+
+def find_adr_cycles(rows: list[AdrRow]) -> list[list[str]]:
+    """Returns each ADR supersedes cycle once, as a list of ADR filenames."""
+    edges = {r.filename: r.supersedes for r in rows}
+    cycles: list[list[str]] = []
+    seen_keys: set[frozenset[str]] = set()
+    state: dict[str, int] = {}
+    stack: list[str] = []
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        stack.append(node)
+        for dep in edges.get(node, ()):
+            if dep not in edges:
+                continue
+            if state.get(dep) == 1:
+                cycle = stack[stack.index(dep) :]
+                key = frozenset(cycle)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    cycles.append(cycle)
+            elif state.get(dep, 0) == 0:
+                visit(dep)
+        stack.pop()
+        state[node] = 2
+
+    for fn in edges:
+        if state.get(fn, 0) == 0:
+            visit(fn)
+    return cycles
+
+
 def build_status_block(root: Path, project_name: str) -> str:
     rows = get_task_rows(root, project_name)
     index = status_index(root)
@@ -1044,6 +1189,22 @@ def build_status_block(root: Path, project_name: str) -> str:
             lines.append(f"- `{r.task_id}` — {r.title}{suffix}")
     else:
         lines.append("- None")
+
+    adr_rows = get_adr_rows(root, project_name)
+    if adr_rows:
+        active_adrs = [a for a in adr_rows if not a.is_superseded]
+        lines.extend(
+            [
+                "",
+                "### Decisions",
+                "",
+            ]
+        )
+        if active_adrs:
+            for a in active_adrs:
+                lines.append(f"- `{a.filename}` — {a.title}")
+        else:
+            lines.append("- None")
 
     counts = f"\nTodo: {todo_count} Done: {done_count}"
     if unclassified_count > 0:
@@ -1162,6 +1323,170 @@ class Finding:
     remediation: Callable[[], list[Path] | None] | None = (
         None  # None if requires human review
     )
+
+
+def resolve_project_artifact_roots(project_dir: Path) -> list[Path]:
+    """Extracts existing local artifact repository roots referenced in README.md or PROJECT.md."""
+    roots: list[Path] = []
+    for doc_name in ("README.md", "PROJECT.md"):
+        doc_path = project_dir / doc_name
+        if not doc_path.is_file():
+            continue
+        try:
+            text = doc_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for m in re.finditer(r"`((?:~/|/)[^`\s]+)`", text):
+            candidate = Path(m.group(1)).expanduser()
+            if candidate.is_dir() and candidate not in roots:
+                roots.append(candidate)
+    return roots
+
+
+def audit_project_adrs(
+    root: Path, project_dir: Path, name: str, findings: list[Finding]
+) -> None:
+    """Validates ADR sections, supersedes edges, cycles, and stale references on active ADRs."""
+    decisions_dir = project_dir / "decisions"
+    if not decisions_dir.is_dir():
+        return
+
+    for df in sorted(decisions_dir.glob("*.md")):
+        if not df.is_file():
+            continue
+        try:
+            dcontent = df.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for sec in ["Status", "Context", "Decision", "Consequences"]:
+            if not re.search(
+                rf"^##\s+{sec}\s*$", dcontent, re.MULTILINE | re.IGNORECASE
+            ):
+                findings.append(
+                    Finding(
+                        category="adr",
+                        severity="WARN",
+                        message=f"{name}/{df.name}: ADR missing ## {sec}",
+                        file_path=df,
+                        remediation=None,
+                    )
+                )
+
+    adr_rows = get_adr_rows(root, name)
+    if not adr_rows:
+        return
+
+    for row in adr_rows:
+        if row.unknown_supersedes:
+            findings.append(
+                Finding(
+                    category="adr",
+                    severity="WARN",
+                    message=(
+                        f"{name}/decisions/{row.filename}: supersedes names unknown "
+                        f"ADR(s): {', '.join(row.unknown_supersedes)}"
+                    ),
+                    file_path=row.abs_path,
+                    remediation=None,
+                )
+            )
+
+    for cycle in find_adr_cycles(adr_rows):
+        chain = " -> ".join([*cycle, cycle[0]])
+        findings.append(
+            Finding(
+                category="adr",
+                severity="WARN",
+                message=f"{name}: ADR supersedes cycle: {chain}",
+                file_path=decisions_dir,
+                remediation=None,
+            )
+        )
+
+    artifact_roots = resolve_project_artifact_roots(project_dir)
+    search_roots = [project_dir, root, *artifact_roots]
+    top_code_dirs: set[str] = set()
+    for base in [project_dir, *artifact_roots]:
+        if base.is_dir():
+            for child in base.iterdir():
+                if (
+                    child.is_dir()
+                    and not child.name.startswith(".")
+                    and child.name not in {"tasks", "decisions"}
+                ):
+                    top_code_dirs.add(child.name)
+
+    for row in adr_rows:
+        if row.is_superseded:
+            continue
+        try:
+            raw_content = row.abs_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        _, body = parse_frontmatter(raw_content)
+
+        for other in adr_rows:
+            if (
+                not other.is_superseded
+                or other.filename == row.filename
+                or other.filename in row.supersedes
+            ):
+                continue
+            stem = Path(other.filename).stem
+            if re.search(
+                rf"(?<![\w/-])(?:{re.escape(other.filename)}|{re.escape(stem)})(?![\w.-])",
+                body,
+            ):
+                findings.append(
+                    Finding(
+                        category="adr",
+                        severity="WARN",
+                        message=(
+                            f"{name}/decisions/{row.filename}: active ADR references "
+                            f"superseded ADR '{other.filename}'"
+                        ),
+                        file_path=row.abs_path,
+                        remediation=None,
+                    )
+                )
+
+        stale_refs: list[str] = []
+        for ref in row.files:
+            if not any((base / ref).exists() for base in search_roots):
+                stale_refs.append(ref)
+
+        for m in re.finditer(r"\[[^\]]+\]\(([^)\s]+)\)", body):
+            target = m.group(1).split("#", 1)[0].strip()
+            if (
+                not target
+                or re.match(r"^(?:https?|mailto|conversation|file):", target)
+                or target.startswith("/")
+            ):
+                continue
+            if not (decisions_dir / target).exists() and not any(
+                (base / target).exists() for base in search_roots
+            ):
+                stale_refs.append(target)
+
+        if top_code_dirs:
+            for m in re.finditer(r"`([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)`", body):
+                ref = m.group(1)
+                top_seg = ref.split("/", 1)[0]
+                if top_seg in top_code_dirs and not any(
+                    (base / ref).exists() for base in [project_dir, *artifact_roots]
+                ):
+                    stale_refs.append(ref)
+
+        for ref in dict.fromkeys(stale_refs):
+            findings.append(
+                Finding(
+                    category="adr",
+                    severity="WARN",
+                    message=f"{name}/decisions/{row.filename}: stale file reference '{ref}'",
+                    file_path=row.abs_path,
+                    remediation=None,
+                )
+            )
 
 
 def audit_workspace(root: Path, target_project: str | None = None) -> list[Finding]:
@@ -1553,29 +1878,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 )
 
         # Check decisions ADRs
-        decisions_dir = p / "decisions"
-        if decisions_dir.is_dir():
-            for df in sorted(decisions_dir.glob("*.md")):
-                if df.is_file():
-                    dcontent = df.read_text(encoding="utf-8")
-                    for sec in [
-                        "Status",
-                        "Context",
-                        "Decision",
-                        "Consequences",
-                    ]:
-                        if not re.search(
-                            rf"^##\s+{sec}\s*$", dcontent, re.MULTILINE | re.IGNORECASE
-                        ):
-                            findings.append(
-                                Finding(
-                                    category="adr",
-                                    severity="WARN",
-                                    message=f"{name}/{df.name}: ADR missing ## {sec}",
-                                    file_path=df,
-                                    remediation=None,  # Manual ADR structure repair
-                                )
-                            )
+        audit_project_adrs(root, p, name, findings)
 
         # Check Markdown formatting for all markdown files in project
         for mf in sorted(p.rglob("*.md")):
