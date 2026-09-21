@@ -1007,7 +1007,6 @@ class AdrRow:
     unknown_supersedes: tuple[str, ...] = ()
     superseded_by: tuple[str, ...] = ()
     self_marked_superseded: bool = False
-    files: tuple[str, ...] = ()
 
     @property
     def is_superseded(self) -> bool:
@@ -1104,7 +1103,6 @@ def get_adr_rows(root: Path, project_name: str) -> list[AdrRow]:
                 unknown_supersedes=unknown_tup,
                 superseded_by=tuple(superseded_by_map.get(df.name, ())),
                 self_marked_superseded=is_adr_self_superseded(fm, body),
-                files=parse_adr_list_field(fm, "files"),
             )
         )
     return rows
@@ -1325,28 +1323,10 @@ class Finding:
     )
 
 
-def resolve_project_artifact_roots(project_dir: Path) -> list[Path]:
-    """Extracts existing local artifact repository roots referenced in README.md or PROJECT.md."""
-    roots: list[Path] = []
-    for doc_name in ("README.md", "PROJECT.md"):
-        doc_path = project_dir / doc_name
-        if not doc_path.is_file():
-            continue
-        try:
-            text = doc_path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for m in re.finditer(r"`((?:~/|/)[^`\s]+)`", text):
-            candidate = Path(m.group(1)).expanduser()
-            if candidate.is_dir() and candidate not in roots:
-                roots.append(candidate)
-    return roots
-
-
 def audit_project_adrs(
     root: Path, project_dir: Path, name: str, findings: list[Finding]
 ) -> None:
-    """Validates ADR sections, supersedes edges, cycles, and stale references on active ADRs."""
+    """Validates ADR sections, supersedes edges, cycles, and relative links on active ADRs."""
     decisions_dir = project_dir / "decisions"
     if not decisions_dir.is_dir():
         return
@@ -1403,18 +1383,8 @@ def audit_project_adrs(
             )
         )
 
-    artifact_roots = resolve_project_artifact_roots(project_dir)
-    search_roots = [project_dir, root, *artifact_roots]
-    top_code_dirs: set[str] = set()
-    for base in [project_dir, *artifact_roots]:
-        if base.is_dir():
-            for child in base.iterdir():
-                if (
-                    child.is_dir()
-                    and not child.name.startswith(".")
-                    and child.name not in {"tasks", "decisions"}
-                ):
-                    top_code_dirs.add(child.name)
+    root_resolved = root.resolve()
+    candidate_bases = [decisions_dir, project_dir, root]
 
     for row in adr_rows:
         if row.is_superseded:
@@ -1451,10 +1421,6 @@ def audit_project_adrs(
                 )
 
         stale_refs: list[str] = []
-        for ref in row.files:
-            if not any((base / ref).exists() for base in search_roots):
-                stale_refs.append(ref)
-
         for m in re.finditer(r"\[[^\]]+\]\(([^)\s]+)\)", body):
             target = m.group(1).split("#", 1)[0].strip()
             if (
@@ -1463,19 +1429,20 @@ def audit_project_adrs(
                 or target.startswith("/")
             ):
                 continue
-            if not (decisions_dir / target).exists() and not any(
-                (base / target).exists() for base in search_roots
-            ):
+            valid_link = False
+            for base in candidate_bases:
+                try:
+                    resolved_target = (base / target).resolve()
+                    if (
+                        resolved_target.is_relative_to(root_resolved)
+                        and resolved_target.exists()
+                    ):
+                        valid_link = True
+                        break
+                except (OSError, ValueError):
+                    continue
+            if not valid_link:
                 stale_refs.append(target)
-
-        if top_code_dirs:
-            for m in re.finditer(r"`([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)`", body):
-                ref = m.group(1)
-                top_seg = ref.split("/", 1)[0]
-                if top_seg in top_code_dirs and not any(
-                    (base / ref).exists() for base in [project_dir, *artifact_roots]
-                ):
-                    stale_refs.append(ref)
 
         for ref in dict.fromkeys(stale_refs):
             findings.append(

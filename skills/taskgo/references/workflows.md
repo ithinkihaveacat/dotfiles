@@ -8,7 +8,9 @@ checks, session attribution, and task handoff protocols for `taskgo`.
 Before starting work, an agent must:
 
 1. Read the root `AGENTS.md`, then project `README.md` (or `PROJECT.md`),
-   `STATUS.md`, relevant tasks/ADRs, and `PLAN.md` when direction matters.
+   `STATUS.md` (using its generated `### Decisions` block to identify active,
+   non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
+   direction matters.
 1. Inspect linked artifact repos under their own instructions.
 
 ### Commit Authority

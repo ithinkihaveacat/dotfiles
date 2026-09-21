@@ -104,10 +104,9 @@ polluting active agent context:
   *active* (non-superseded) ADRs.
 - **Stale-Reference & Graph Auditing (`taskgo doctor`):** The shared
   `AuditEngine` verifies `supersedes` targets and checks for cycles. For active
-  ADRs, it warns (`[WARN]`) if an ADR cites a superseded ADR or references
-  deleted/non-existent files (via optional `files: [...]` YAML frontmatter,
-  relative Markdown links, or backticked repo file paths). Once an ADR is
-  superseded, its historical file and ADR references are exempt from staleness
+  ADRs, it warns (`[WARN]`) if an ADR cites a superseded ADR or contains broken
+  relative Markdown links within the control repository. Once an ADR is
+  superseded, its historical links and ADR references are exempt from staleness
   warnings.
 
 ## Telemetry & Dual-Representation

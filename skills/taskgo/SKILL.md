@@ -120,8 +120,7 @@ Immediate follow-up actions.
 
 - **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`). Newer ADRs
   record `supersedes: [<old-adr>]` in YAML frontmatter to retire older ADRs
-  without editing accepted historical records, and may list `files: [...]` to
-  bind architectural invariants to repo paths.
+  without editing accepted historical records.
 - **STATUS.md:** The self-contained operational projection.
   - `## Summary`: Human/agent prose for current situation and active session
     citation (`[<conversation-id>](<agent>://<conversation-id>)`).
