@@ -22,7 +22,8 @@ project scale:
   zero-ceremony capture of unclassified notes, thoughts, and ideas without
   schemas.
 - **Scale 1 (Lightweight Project):** A project directory containing `README.md`
-  (serving as project manifest, optionally declaring
+  (serving as project manifest, optionally declaring YAML frontmatter such as
+  `skills: [...]` for per-project agent skills, and
   `**Domain / Stakeholders:** [Entity]` to anchor thematic grouping for activity
   reporting), `STATUS.md` (operational projection), and `tasks/` containing
   granular task records. `PLAN.md`, `decisions/`, `references/`, `scripts/`, and
@@ -57,7 +58,7 @@ repositories**:
 AGENTS.md                 # taskgo declaration + repository instructions
 INBOX.md                  # zero-ceremony capture; no schema
 <id>/
-  README.md               # identity, scope, domain/stakeholders, constraints, artifacts (or PROJECT.md)
+  README.md               # project manifest (optional YAML frontmatter: skills, etc.) + scope/constraints (or PROJECT.md)
   STATUS.md               # current human view + generated task block
   PLAN.md                 # intended route forward (optional)
   tasks/*.md              # stable task records

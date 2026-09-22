@@ -116,8 +116,23 @@ Key technical discoveries, trade-offs, reproduction steps, downstream momentum.
 Immediate follow-up actions.
 ```
 
-## Decisions & STATUS.md
+## Project Manifest (`README.md`) & Decisions
 
+- **Project Manifest (`<project>/README.md`):** Defines project identity, scope,
+  and optional YAML frontmatter for project-level configuration (such as
+  `skills` loaded automatically when launching an agent with
+  `jetski-cli --project <project>`):
+  ```markdown
+  ---
+  skills:
+    - wear-widget-bundle
+  ---
+
+  # Project Name
+  ```
+  To add or update required skills for a project in the control repository, add
+  or edit the `skills:` list in `<project>/README.md`'s YAML frontmatter and
+  verify with `taskgo info <project>`.
 - **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`). Newer ADRs
   record `supersedes: [<old-adr>]` in YAML frontmatter to retire older ADRs
   without editing accepted historical records.
@@ -164,6 +179,7 @@ taskgo root
 taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
 taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
+taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]
 taskgo dispatch TASK_ID
 taskgo sync [PROJECT]

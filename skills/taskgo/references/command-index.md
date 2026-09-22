@@ -8,6 +8,7 @@
 - [create](#create)
 - [update](#update)
 - [list](#list)
+- [info](#info)
 - [status](#status)
 - [dispatch](#dispatch)
 - [sync](#sync)
@@ -38,6 +39,7 @@ Commands:
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
+  info PROJECT [--json]            Show project metadata from README.md frontmatter
   status [PROJECT] [--json]        Show project status
   dispatch TASK_ID                 Print agent instructions for a selected task
   sync [PROJECT]                   Update STATUS.md snapshot
@@ -185,6 +187,25 @@ options:
                         Filter tasks by state (e.g. in-progress, done, or
                         ready)
   --json, -j            Output machine-readable JSON
+```
+
+<!-- /generated -->
+
+## info
+
+<!-- generated: ../scripts/taskgo info --help -->
+
+```text
+usage: taskgo info [-h] [--json] PROJECT
+
+Show project metadata from README.md YAML frontmatter.
+
+positional arguments:
+  PROJECT     Target project name
+
+options:
+  -h, --help  show this help message and exit
+  --json, -j  Output machine-readable JSON
 ```
 
 <!-- /generated -->
