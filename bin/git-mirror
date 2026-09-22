@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Tests: tests/test-git-sync
+# Tests: tests/test-git-mirror
 
 set -euo pipefail
 
@@ -18,63 +18,64 @@ require rsync
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS] [COMMAND | TARGET]
+Usage: $(basename "$0") [OPTIONS] COMMAND
 
 Mirror the current Git repository working tree to pre-registered targets.
 
-Synchronizes working tree files using rsync, respecting .gitignore rules and
+Mirrors working tree files using rsync, respecting .gitignore rules and
 global/local exclude files, excluding Git metadata (.git), preserving
 attributes and deleting removed files. Targets are stored locally in
 .git/config.
 
 Commands:
-  add NAME PATH     Register a named sync target destination
-  remove, rm NAME   Unregister a sync target
-  list              List all registered sync targets
-  all               Sync to all registered targets (default action)
-  TARGET            Sync to a specific registered target
+  add NAME PATH     Register a named mirror target destination
+  remove, rm NAME   Unregister a mirror target
+  list              List all registered mirror targets
+  update NAME       Update a specific registered mirror
 
 Options:
   -n, --dry-run     Perform a trial run with no changes made
+  --all             Update all registered mirrors (with 'update')
   --help, -h        Display this help message and exit
 
 Examples:
-  # Register a sync target destination
+  # Register a mirror target destination
   $(basename "$0") add backup /Volumes/Backup/my-repo
 
-  # List registered sync targets
+  # List registered mirror targets
   $(basename "$0") list
 
-  # Sync to all registered targets
-  $(basename "$0")
+  # Update all registered mirrors
+  $(basename "$0") update --all
 
-  # Sync to a specific target
-  $(basename "$0") backup
+  # Update a specific mirror
+  $(basename "$0") update backup
 
-  # Preview sync to all targets without making changes
-  $(basename "$0") --dry-run
+  # Preview an update without making changes
+  $(basename "$0") update backup --dry-run
 
 Notes:
-  Which files are synchronized is decided by Git, not by re-interpreting
+  Which files are mirrored is decided by Git, not by re-interpreting
   .gitignore: the working tree is whatever 'git ls-files --cached --others
   --exclude-standard' reports, so negated (!) rules and tracked-but-ignored
   files are mirrored the same way Git treats them.
 
   Symbolic links pointing outside the repository are skipped, silently and
-  without failing the sync. Links pointing within the repository are
+  without failing the mirror update. Links pointing within the repository are
   preserved as links.
 
   The destination is treated as raw files: anything not present in the
   working tree is deleted, including files a .gitignore at the destination
   would otherwise match. A .git directory at the destination is preserved.
 
-  When invoked via 'git sync', note that 'git sync --help' is intercepted by
-  Git; use 'git sync -h' or 'git-sync --help' for command-line help.
+  When invoked via 'git mirror', note that 'git mirror --help' is intercepted
+  by Git; use 'git mirror -h' or 'git-mirror --help' for command-line help.
 EOF
   exit 0
 }
 
 DRY_RUN=false
+ALL=false
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -84,6 +85,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -n | --dry-run)
       DRY_RUN=true
+      shift
+      ;;
+    --all)
+      ALL=true
       shift
       ;;
     --)
@@ -125,14 +130,14 @@ trap cleanup EXIT
 # rsync include rules. Git owns the ignore semantics; rsync's ':- ' merge
 # cannot express negated (!) rules or tracked-but-ignored files, so placing
 # this ahead of the merge (first match wins) keeps both in step. Memoized so
-# 'all' pays for it once.
+# 'update --all' pays for it once.
 ensure_keeplist() {
   if [[ -n "$KEEPLIST" ]]; then
     return 0
   fi
 
   if [[ -z "$WORKDIR" ]]; then
-    WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/git-sync.XXXXXX")
+    WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/git-mirror.XXXXXX")
   fi
 
   local list="$WORKDIR/keep.rules"
@@ -199,7 +204,7 @@ cmd_add() {
   fi
 
   case "$name" in
-    add | remove | rm | list | ls | all | help)
+    add | remove | rm | list | ls | update | help)
       echo "$(basename "$0") add: '$name' is a reserved command name" >&2
       exit 1
       ;;
@@ -220,8 +225,8 @@ cmd_add() {
     exit 1
   fi
 
-  git config --local "sync.target.$name" "$dest_abs"
-  echo "Registered sync target '$name' -> $dest_abs"
+  git config --local "mirror.target.$name" "$dest_abs"
+  echo "Registered mirror target '$name' -> $dest_abs"
 }
 
 cmd_remove() {
@@ -233,21 +238,21 @@ cmd_remove() {
     exit 1
   fi
 
-  if ! git config --local --get "sync.target.$name" >/dev/null 2>&1; then
+  if ! git config --local --get "mirror.target.$name" >/dev/null 2>&1; then
     echo "$(basename "$0") remove: target '$name' not found" >&2
     exit 1
   fi
 
-  git config --local --unset "sync.target.$name"
-  echo "Removed sync target '$name'"
+  git config --local --unset "mirror.target.$name"
+  echo "Removed mirror target '$name'"
 }
 
 cmd_list() {
   local targets
-  targets=$(git config --local --get-regexp '^sync\.target\.' 2>/dev/null | sort || true)
+  targets=$(git config --local --get-regexp '^mirror\.target\.' 2>/dev/null | sort || true)
 
   if [[ -z "$targets" ]]; then
-    echo "No sync targets registered."
+    echo "No mirror targets registered."
     echo "Use '$(basename "$0") add <name> <path>' to register one."
     exit 0
   fi
@@ -257,24 +262,24 @@ cmd_list() {
     [[ -z "$line" ]] && continue
     local key name
     key="${line%% *}"
-    name="${key#sync.target.}"
+    name="${key#mirror.target.}"
     if [[ "${#name}" -gt "$width" ]]; then
       width="${#name}"
     fi
   done <<<"$targets"
 
-  echo "Registered sync targets:"
+  echo "Registered mirror targets:"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     local key value name
     key="${line%% *}"
     value="${line#* }"
-    name="${key#sync.target.}"
+    name="${key#mirror.target.}"
     printf "  %-*s %s\n" "$width" "$name" "$value"
   done <<<"$targets"
 }
 
-run_sync() {
+run_mirror() {
   local target_name="$1"
   local target_path="$2"
 
@@ -287,9 +292,9 @@ run_sync() {
   fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    echo "Syncing '$target_name' -> $dest_abs (dry-run)"
+    echo "Mirroring '$target_name' -> $dest_abs (dry-run)"
   else
-    echo "Syncing '$target_name' -> $dest_abs"
+    echo "Mirroring '$target_name' -> $dest_abs"
   fi
 
   if [[ "$DRY_RUN" == "false" ]]; then
@@ -327,8 +332,8 @@ run_sync() {
 
   # ':s-' keeps the merge sender-side. A two-sided rule would make rsync read
   # the destination's own .gitignore and protect matching files from
-  # --delete, so the first sync into a directory and every later one would
-  # behave differently. The destination is raw files.
+  # --delete, so the first mirror update into a directory and every later one
+  # would behave differently. The destination is raw files.
   rsync_args+=(--filter=':s- .gitignore' --exclude='.git')
 
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -345,12 +350,12 @@ run_sync() {
   return 0
 }
 
-cmd_all() {
+cmd_update_all() {
   local targets
-  targets=$(git config --local --get-regexp '^sync\.target\.' 2>/dev/null | sort || true)
+  targets=$(git config --local --get-regexp '^mirror\.target\.' 2>/dev/null | sort || true)
 
   if [[ -z "$targets" ]]; then
-    echo "$(basename "$0"): no sync targets registered. Use '$(basename "$0") add <name> <path>' to add one." >&2
+    echo "$(basename "$0"): no mirror targets registered. Use '$(basename "$0") add <name> <path>' to add one." >&2
     exit 1
   fi
 
@@ -360,8 +365,8 @@ cmd_all() {
     local key target_path target_name
     key="${line%% *}"
     target_path="${line#* }"
-    target_name="${key#sync.target.}"
-    run_sync "$target_name" "$target_path" || failed=1
+    target_name="${key#mirror.target.}"
+    run_mirror "$target_name" "$target_path" || failed=1
   done <<<"$targets"
 
   if [[ "$failed" -ne 0 ]]; then
@@ -369,25 +374,30 @@ cmd_all() {
   fi
 }
 
-cmd_target() {
+cmd_update() {
   local target_name="$1"
   local target_path
-  target_path=$(git config --local --get "sync.target.$target_name" 2>/dev/null || true)
+  target_path=$(git config --local --get "mirror.target.$target_name" 2>/dev/null || true)
 
   if [[ -z "$target_path" ]]; then
-    echo "$(basename "$0"): unknown command or target '$target_name'" >&2
+    echo "$(basename "$0") update: target '$target_name' not found" >&2
     echo "Run '$(basename "$0") list' to see registered targets, or '$(basename "$0") --help' for more information." >&2
     exit 1
   fi
 
-  run_sync "$target_name" "$target_path"
+  run_mirror "$target_name" "$target_path"
 }
 
-# Guard --dry-run against non-sync subcommands
-if [[ "$DRY_RUN" == "true" ]]; then
+# Guard update-only options against other subcommands.
+if [[ "$DRY_RUN" == "true" || "$ALL" == "true" ]]; then
   case "${POSITIONAL[0]:-}" in
+    "")
+      echo "$(basename "$0"): update options require the 'update' command" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
     add | remove | rm | list | ls)
-      echo "$(basename "$0") ${POSITIONAL[0]}: --dry-run option not supported" >&2
+      echo "$(basename "$0") ${POSITIONAL[0]}: update options are not supported" >&2
       echo "Try '$(basename "$0") --help' for more information." >&2
       exit 1
       ;;
@@ -399,7 +409,7 @@ num_args="${#POSITIONAL[@]}"
 
 case "${POSITIONAL[0]:-}" in
   "")
-    cmd_all
+    usage
     ;;
   list | ls)
     if [[ "$num_args" -gt 1 ]]; then
@@ -409,13 +419,24 @@ case "${POSITIONAL[0]:-}" in
     fi
     cmd_list
     ;;
-  all)
-    if [[ "$num_args" -gt 1 ]]; then
-      echo "$(basename "$0") all: extra operand '${POSITIONAL[1]}'" >&2
+  update)
+    if [[ "$ALL" == "true" && "$num_args" -gt 1 ]]; then
+      echo "$(basename "$0") update: NAME and --all are mutually exclusive" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    elif [[ "$ALL" == "true" ]]; then
+      cmd_update_all
+    elif [[ "$num_args" -eq 1 ]]; then
+      echo "$(basename "$0") update: target NAME required" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+    elif [[ "$num_args" -eq 2 ]]; then
+      cmd_update "${POSITIONAL[1]}"
+    else
+      echo "$(basename "$0") update: extra operand '${POSITIONAL[2]}'" >&2
       echo "Try '$(basename "$0") --help' for more information." >&2
       exit 1
     fi
-    cmd_all
     ;;
   add)
     if [[ "$num_args" -eq 1 ]]; then
@@ -448,12 +469,8 @@ case "${POSITIONAL[0]:-}" in
     fi
     ;;
   *)
-    if [[ "$num_args" -eq 1 ]]; then
-      cmd_target "${POSITIONAL[0]}"
-    else
-      echo "$(basename "$0"): extra operand '${POSITIONAL[1]}'" >&2
-      echo "Try '$(basename "$0") --help' for more information." >&2
-      exit 1
-    fi
+    echo "$(basename "$0"): unknown command '${POSITIONAL[0]}'" >&2
+    echo "Try '$(basename "$0") --help' for more information." >&2
+    exit 1
     ;;
 esac
