@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-git-sync
+
+set -euo pipefail
+
+trap 'echo >&2 || true; exit 130' INT TERM
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require git
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Synchronize a flat, single-branch Git repository with its upstream remote.
+
+Fetches with prune, stashes uncommitted changes, rebases onto upstream,
+and pushes the current branch. Requires explicit opt-in via 'sync.enabled'.
+
+Options:
+      --enable       Enable git-sync for this repository and run sync
+      --disable      Disable git-sync for this repository
+  -f, --force        Sync once without requiring 'sync.enabled'
+  -n, --dry-run      Perform a trial run with no changes made
+  --help, -h         Display this help message and exit
+
+Examples:
+  # Synchronize an enabled repository
+  $(basename "$0")
+
+  # Enable git-sync for this repository and sync immediately
+  $(basename "$0") --enable
+
+  # Preview synchronization without making changes
+  $(basename "$0") --dry-run
+
+  # Perform a one-off sync on an unconfigured repository
+  $(basename "$0") --force
+
+  # Disable git-sync for this repository
+  $(basename "$0") --disable
+
+Notes:
+  git-sync is intended for flat, single-branch repositories (e.g. notes or
+  configuration repositories) where local changes sync directly to a central
+  source of truth without branches or pull requests.
+
+  Repositories using pull requests or feature branches should use 'git pull'
+  to update and 'git push' to push branches.
+
+  When invoked via 'git sync', note that 'git sync --help' is intercepted by
+  Git; use 'git sync -h' or 'git-sync --help' for command-line help.
+EOF
+  exit 0
+}
+
+ENABLE=false
+DISABLE=false
+FORCE=false
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help | -h | help)
+      usage
+      ;;
+    --enable)
+      ENABLE=true
+      shift
+      ;;
+    --disable)
+      DISABLE=true
+      shift
+      ;;
+    -f | --force)
+      FORCE=true
+      shift
+      ;;
+    -n | --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --)
+      shift
+      if [[ $# -gt 0 ]]; then
+        echo "$(basename "$0"): extra operand '$1'" >&2
+        exit 1
+      fi
+      break
+      ;;
+    -*)
+      echo "$(basename "$0"): unrecognized option '$1'" >&2
+      exit 1
+      ;;
+    *)
+      echo "$(basename "$0"): extra operand '$1'" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$ENABLE" == "true" && "$DISABLE" == "true" ]]; then
+  echo "$(basename "$0"): cannot specify both --enable and --disable" >&2
+  exit 1
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "$(basename "$0"): not a git repository (or any of the parent directories)" >&2
+  exit 1
+fi
+
+if [[ "$DISABLE" == "true" ]]; then
+  if git config --local --bool sync.enabled >/dev/null 2>&1; then
+    git config --local --unset sync.enabled
+    echo "$(basename "$0"): disabled sync for this repository"
+  else
+    echo "$(basename "$0"): sync is not enabled for this repository"
+  fi
+  exit 0
+fi
+
+if [[ "$ENABLE" == "true" ]]; then
+  git config --local sync.enabled true
+  echo "$(basename "$0"): enabled sync for this repository (sync.enabled=true)"
+fi
+
+if [[ "$FORCE" == "false" ]]; then
+  is_enabled=$(git config --local --bool sync.enabled 2>/dev/null || true)
+  if [[ "$is_enabled" != "true" ]]; then
+    echo "$(basename "$0"): sync is not enabled for this repository" >&2
+    echo "To enable, run '$(basename "$0") --enable' (or 'git config --local sync.enabled true')." >&2
+    exit 1
+  fi
+fi
+
+if [[ -z "$(git remote)" ]]; then
+  echo "$(basename "$0"): no remote repositories configured" >&2
+  exit 1
+fi
+
+current_branch=$(git branch --show-current 2>/dev/null || true)
+if [[ -z "$current_branch" ]]; then
+  echo "$(basename "$0"): cannot sync in detached HEAD state" >&2
+  exit 1
+fi
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "$(basename "$0"): dry-run: fetching with prune"
+  git fetch --dry-run --prune
+  echo "$(basename "$0"): dry-run: would pull with --prune --rebase --autostash"
+  echo "$(basename "$0"): dry-run: would push current branch '$current_branch'"
+  git -c push.default=simple -c push.autoSetupRemote=true push --dry-run
+  exit 0
+fi
+
+git pull --prune --rebase --autostash && git -c push.default=simple -c push.autoSetupRemote=true push

@@ -1,0 +1,5 @@
+complete -c git-sync -s h -l help -d "Display help message and exit"
+complete -c git-sync -s n -l dry-run -d "Perform a trial run with no changes made"
+complete -c git-sync -s f -l force -d "Sync once without requiring sync.enabled"
+complete -c git-sync -l enable -d "Enable git-sync for this repository and run sync"
+complete -c git-sync -l disable -d "Disable git-sync for this repository"
