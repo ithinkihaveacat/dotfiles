@@ -14,7 +14,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..20"
+echo "1..26"
 
 # ==============================================================================
 # Unmanaged (default) workspace mode
@@ -309,4 +309,97 @@ else
   echo "not ok 20 - [Output] missing or wrong workspace-root announcement: ${root_note_out:-}"
 fi
 "${SCRIPT}" clean >/dev/null 2>&1 || true
+cd "$TMPDIR"
+
+# ==============================================================================
+# -C / --directory, --from=<env|cli>, and AgyBrainWorkspace
+# ==============================================================================
+BRAIN_DIR="${TMPDIR}/antigravity/brain/test-conv-123"
+mkdir -p "${BRAIN_DIR}/.system_generated" "${BRAIN_DIR}/scratch"
+
+# Set a noisy caller AGENT_REQUIRED_SKILLS to prove -C defaults to --from=cli
+export AGENT_REQUIRED_SKILLS="nonexistent-caller-env-skill"
+
+# Test 21: skill -C <artifactDir> add/list/doctor configures scratch/skills + .agents/skills.json
+if "${SCRIPT}" -C "$BRAIN_DIR" add coding-standards emumanager >/dev/null 2>&1 &&
+  [ -L "${BRAIN_DIR}/scratch/skills/coding-standards" ] &&
+  [ -L "${BRAIN_DIR}/scratch/skills/emumanager" ] &&
+  [ ! -d "${BRAIN_DIR}/.claude" ] &&
+  [ -f "${BRAIN_DIR}/.agents/skills.json" ] &&
+  [ -f "${BRAIN_DIR}/.agents/skills.json.metadata.json" ] &&
+  grep -q '"userFacing": false' "${BRAIN_DIR}/.agents/skills.json.metadata.json" &&
+  bdj=$("${SCRIPT}" -C "$BRAIN_DIR" doctor --json 2>/dev/null) &&
+  [ "$(json_get "$bdj" 'd["healthy"]')" = "true" ]; then
+  echo "ok 21 - [AgyBrain] -C <artifactDir> links scratch/skills, writes skills.json, and passes doctor"
+else
+  echo "not ok 21 - [AgyBrain] -C <artifactDir> setup or doctor failed"
+fi
+
+# Test 22: doctor flags .agents/skills.json drift; apply <skill> repairs it and prunes extras
+printf '{"directories": []}\n' >"${BRAIN_DIR}/.agents/skills.json"
+drift_json=$("${SCRIPT}" -C "$BRAIN_DIR" doctor --json 2>/dev/null) || true
+if [ "$(check_status "$drift_json" "Workspace Exclusions")" = "ERROR" ] &&
+  "${SCRIPT}" -C "$BRAIN_DIR" apply coding-standards >/dev/null 2>&1 &&
+  [ -L "${BRAIN_DIR}/scratch/skills/coding-standards" ] &&
+  [ ! -e "${BRAIN_DIR}/scratch/skills/emumanager" ] &&
+  repaired_json=$("${SCRIPT}" -C "$BRAIN_DIR" doctor --json 2>/dev/null) &&
+  [ "$(json_get "$repaired_json" 'd["healthy"]')" = "true" ]; then
+  echo "ok 22 - [AgyBrain] doctor flags skills.json drift; apply <skill> repairs and prunes extras"
+else
+  echo "not ok 22 - [AgyBrain] drift detection or apply repair failed"
+fi
+
+# Test 23: apply with 0 args under -C (--from=cli) prunes all skills, removes skills.json, and preserves scratch/
+if "${SCRIPT}" -C "$BRAIN_DIR" apply >/dev/null 2>&1 &&
+  [ ! -d "${BRAIN_DIR}/scratch/skills" ] &&
+  [ -d "${BRAIN_DIR}/scratch" ] &&
+  [ ! -f "${BRAIN_DIR}/.agents/skills.json" ] &&
+  [ ! -f "${BRAIN_DIR}/.agents/skills.json.metadata.json" ]; then
+  echo "ok 23 - [AgyBrain] empty apply prunes all skills, cleans skills.json, and preserves scratch/"
+else
+  echo "not ok 23 - [AgyBrain] empty apply did not clean up or deleted scratch/"
+fi
+
+# Test 24: skill -C <git-subdir> binds to repo anchor, defaults to --from=cli, and empty apply prunes all
+C_GIT_DIR="${TMPDIR}/c-git-repo"
+mkdir -p "${C_GIT_DIR}/sub/deep" "${C_GIT_DIR}/.claude/skills" "${C_GIT_DIR}/.agents/skills"
+git -C "$C_GIT_DIR" init -q
+if "${SCRIPT}" -C "${C_GIT_DIR}/sub/deep" apply coding-standards emumanager >/dev/null 2>&1 &&
+  [ -L "${C_GIT_DIR}/.agents/skills/coding-standards" ] &&
+  [ -L "${C_GIT_DIR}/.agents/skills/emumanager" ] &&
+  "${SCRIPT}" -C "${C_GIT_DIR}/sub/deep" apply >/dev/null 2>&1 &&
+  [ ! -e "${C_GIT_DIR}/.agents/skills/coding-standards" ] &&
+  [ ! -e "${C_GIT_DIR}/.agents/skills/emumanager" ]; then
+  echo "ok 24 - [-C Git] subdirectory -C binds to repo anchor and empty apply prunes all skills"
+else
+  echo "not ok 24 - [-C Git] subdirectory -C or empty apply failed"
+fi
+
+# Test 25: --from=env with -C applies caller's AGENT_REQUIRED_SKILLS and rejects CLI skill args
+mkdir -p "${C_GIT_DIR}/.claude/skills" "${C_GIT_DIR}/.agents/skills"
+export AGENT_REQUIRED_SKILLS="coding-standards"
+conflict_env_rc=0
+"${SCRIPT}" -C "$C_GIT_DIR" --from=env apply emumanager >/dev/null 2>&1 || conflict_env_rc=$?
+if [ "$conflict_env_rc" -eq 2 ] &&
+  "${SCRIPT}" -C "$C_GIT_DIR" --from=env apply >/dev/null 2>&1 &&
+  [ -L "${C_GIT_DIR}/.agents/skills/coding-standards" ]; then
+  echo "ok 25 - [--from=env] -C --from=env applies AGENT_REQUIRED_SKILLS and rejects CLI skill args"
+else
+  echo "not ok 25 - [--from=env] -C --from=env behavior failed (rc=$conflict_env_rc)"
+fi
+
+# Test 26: --from=cli without -C applies CLI skills in CWD, ignores AGENT_REQUIRED_SKILLS, and supports bundle -w
+cd "$C_GIT_DIR"
+export AGENT_REQUIRED_SKILLS="nonexistent-caller-env-skill"
+BUNDLE_OUT="${TMPDIR}/bundle-cli-out"
+if "${SCRIPT}" --from=cli apply emumanager >/dev/null 2>&1 &&
+  [ -L "${C_GIT_DIR}/.agents/skills/emumanager" ] &&
+  [ ! -e "${C_GIT_DIR}/.agents/skills/coding-standards" ] &&
+  "${SCRIPT}" -C "$C_GIT_DIR" bundle -w -o "$BUNDLE_OUT" >/dev/null 2>&1 &&
+  [ -f "${BUNDLE_OUT}/emumanager/SKILL.md" ]; then
+  echo "ok 26 - [--from=cli] --from=cli without -C applies CLI skills, ignores AGENT_REQUIRED_SKILLS, and bundles workspace"
+else
+  echo "not ok 26 - [--from=cli] --from=cli without -C or bundle -w failed"
+fi
+export AGENT_REQUIRED_SKILLS=""
 cd "$TMPDIR"

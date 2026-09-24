@@ -26,9 +26,9 @@ def die(msg):
     sys.exit(1)
 
 
-def cmderr(cmd, msg):
+def cmderr(cmd, msg, code=1):
     print(f"skill {cmd}: {msg}", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(code)
 
 
 def clean_p(p):
@@ -58,13 +58,21 @@ def age_human(path: Path) -> str:
     return "unknown age"
 
 
+_INTENT_SOURCE: str = "env"
+_CLI_SKILL_TOKENS: list[str] | None = None
+
+
 def prune_dirs(dest_dirs):
     for d in dest_dirs:
         try:
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
             parent = d.parent
-            if parent.is_dir() and not any(parent.iterdir()):
+            if (
+                parent.name in (".agents", ".claude")
+                and parent.is_dir()
+                and not any(parent.iterdir())
+            ):
                 parent.rmdir()
         except Exception:
             pass
@@ -196,7 +204,46 @@ class Workspace:
                     tracked.append(item)
         return sorted(tracked, key=lambda p: p.name)
 
+    def _infer_installed_specs(self) -> list[str]:
+        """Infer resolvable catalog specs for live symlinks when _INTENT_SOURCE == 'cli'."""
+        actual_skills, _, dangling = self.get_actual_skills()
+        dangling_set = set(dangling)
+        try:
+            dest_dirs = self.get_dest_dirs()
+        except RuntimeError:
+            return sorted(actual_skills)
+
+        api = get_api()
+        specs = []
+        for name in sorted(actual_skills):
+            r = resolve_reconcile_skill(name)
+            if r.resolved and r.link_name == name:
+                specs.append(name)
+                continue
+            matched_spec = None
+            for d in dest_dirs:
+                p = d / name
+                if not p.is_symlink() or p in dangling_set:
+                    continue
+                for key, entry in api.plugin_catalog.items():
+                    if "path" in entry:
+                        cand_path = Path(entry["path"]).expanduser()
+                        if cand_path.name == name and is_target_match(p, cand_path):
+                            matched_spec = key
+                            break
+                if matched_spec:
+                    break
+            specs.append(matched_spec or name)
+        return specs
+
     def get_expected_skills(self) -> list[str]:
+        if _INTENT_SOURCE == "cli":
+            if _CLI_SKILL_TOKENS is not None:
+                required, _ = parse_skill_tokens(_CLI_SKILL_TOKENS)
+                return required
+            if hasattr(self, "get_managed_skills"):
+                return self.get_managed_skills()
+            return self._infer_installed_specs()
         if hasattr(self, "get_managed_skills"):
             return self.get_managed_skills()
         required, _ = get_parsed_skills()
@@ -497,6 +544,132 @@ class GitWorkspace(Workspace):
             issues.append(
                 f"{clean_p(self.exclude_file)} managed block does not match the installed skills"
             )
+        return issues
+
+
+class AgyBrainWorkspace(Workspace):
+    """Antigravity (Agy) session artifact directory (.../brain/<id>).
+
+    Links skills into 'scratch/skills/<name>' (skipped by the artifact UI
+    scanner and auto-allowed for view_file reads) and registers them in
+    '.agents/skills.json' (with '.agents/skills.json.metadata.json' marking
+    userFacing: false).
+    """
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.dest_dir = self.root / "scratch" / "skills"
+        self.skills_json = self.root / ".agents" / "skills.json"
+        self.skills_meta = self.root / ".agents" / "skills.json.metadata.json"
+
+    @classmethod
+    def detect(cls):
+        curr = Path.cwd().resolve()
+        for p in (curr, *curr.parents):
+            if (p / ".system_generated").is_dir():
+                return cls(p)
+            if p.parent.name == "brain" and (
+                p.parent.parent.name
+                in ("antigravity", "antigravity-cli", "agy", "jetski")
+                or (p.parent.parent / "cli").is_dir()
+            ):
+                return cls(p)
+        return None
+
+    @classmethod
+    def get_supported_configs(cls) -> dict[str, list[Path]]:
+        return {}
+
+    def get_dest_dirs(self) -> list[Path]:
+        if "SKILL_DEST_DIRS" in os.environ:
+            return [
+                self.root / d for d in os.environ["SKILL_DEST_DIRS"].split(":") if d
+            ]
+        return [self.dest_dir]
+
+    def _read_skills_json_names(self) -> list[str] | None:
+        if not self.skills_json.is_file():
+            return None
+        try:
+            data = json.loads(self.skills_json.read_text(encoding="utf-8"))
+            for d in data.get("directories", []):
+                if d.get("path") == "../scratch/skills" and isinstance(
+                    d.get("include_only"), list
+                ):
+                    return sorted({str(s) for s in d["include_only"] if s})
+        except Exception:
+            return None
+        return None
+
+    def save_exclude_block(self, skills) -> None:
+        names = sorted(set(skills))
+        if not names:
+            self.skills_json.unlink(missing_ok=True)
+            self.skills_meta.unlink(missing_ok=True)
+            agents_dir = self.root / ".agents"
+            try:
+                if agents_dir.is_dir() and not any(agents_dir.iterdir()):
+                    agents_dir.rmdir()
+            except OSError:
+                pass
+            return
+
+        self.skills_json.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "directories": [
+                {
+                    "path": "../scratch/skills",
+                    "include_only": names,
+                }
+            ]
+        }
+        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(self.skills_json.parent))
+        temp_path = Path(temp_path_str)
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+                f.write("\n")
+            os.replace(temp_path, self.skills_json)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+        meta_fd, meta_path_str = tempfile.mkstemp(dir=str(self.skills_meta.parent))
+        meta_path = Path(meta_path_str)
+        try:
+            with os.fdopen(meta_fd, "w", encoding="utf-8") as f:
+                json.dump({"userFacing": False}, f)
+                f.write("\n")
+            os.replace(meta_path, self.skills_meta)
+        except Exception:
+            meta_path.unlink(missing_ok=True)
+            raise
+
+    def doctor_issues(self, plan=None) -> list[str]:
+        issues = []
+        if plan is not None:
+            actual_skills = sorted(
+                {e.link_name for e in plan.disk_entries if e.kind == "live"}
+            )
+        else:
+            actual_set, _, _ = self.get_actual_skills()
+            actual_skills = sorted(actual_set)
+
+        recorded = self._read_skills_json_names()
+        if not actual_skills:
+            if self.skills_json.exists():
+                issues.append(
+                    f"{clean_p(self.skills_json)} exists but no skills are installed in {clean_p(self.dest_dir)}"
+                )
+        else:
+            if recorded != actual_skills:
+                issues.append(
+                    f"{clean_p(self.skills_json)} include_only list does not match installed skills in {clean_p(self.dest_dir)}"
+                )
+            if not self.skills_meta.is_file():
+                issues.append(
+                    f"{clean_p(self.skills_meta)} is missing (required to hide skills.json from artifact UI)"
+                )
         return issues
 
 
@@ -941,7 +1114,7 @@ def load_plugins() -> SkillAPI:
 
 def get_workspace() -> Workspace:
     api = get_api()
-    for cls in [*api.workspace_classes, GitWorkspace]:
+    for cls in [AgyBrainWorkspace, *api.workspace_classes, GitWorkspace]:
         try:
             ws = cls.detect()
         except Exception as e:
@@ -1624,7 +1797,12 @@ def cmd_add(specs, is_apply=False):
                 raise
         print(f"added {name} -> {src}", file=sys.stderr)
 
-    if resolved_skills and not is_apply:
+    if (
+        resolved_skills
+        and not is_apply
+        and _INTENT_SOURCE == "env"
+        and not isinstance(ws, AgyBrainWorkspace)
+    ):
         names = " ".join(name for _, name in resolved_skills)
         print(
             f"skill: note: to make this permanent, run: "
@@ -1896,9 +2074,10 @@ def cmd_bundle(args: list[str]) -> None:
         specs.extend(stdin_content.split())
 
     if use_workspace:
-        required_skills, _ = get_parsed_skills()
+        required_skills = get_workspace().get_expected_skills()
         if not required_skills and not specs:
-            cmderr("bundle", "no required skills found in AGENT_REQUIRED_SKILLS")
+            source = "workspace" if _INTENT_SOURCE == "cli" else "AGENT_REQUIRED_SKILLS"
+            cmderr("bundle", f"no required skills found in {source}")
         for s in sorted(required_skills):
             if s not in specs:
                 specs.append(s)
@@ -2116,9 +2295,13 @@ def parse_skill_tokens(tokens):
 
 def get_parsed_skills():
     """
-    Parses AGENT_REQUIRED_SKILLS from environment.
+    Parses desired skill tokens from the active intent source:
+    - 'env': AGENT_REQUIRED_SKILLS environment variable
+    - 'cli': positional CLI tokens (_CLI_SKILL_TOKENS) if provided, else []
     Returns a tuple: (required_set, negated_set)
     """
+    if _INTENT_SOURCE == "cli":
+        return parse_skill_tokens(_CLI_SKILL_TOKENS or [])
     return parse_skill_tokens(os.environ.get("AGENT_REQUIRED_SKILLS", "").split())
 
 
@@ -2188,6 +2371,8 @@ def check_env_freshness(ws):
     advisory only — callers may warn or decline destructive work, but must
     never merge it into the desired set.
     """
+    if _INTENT_SOURCE != "env":
+        return None
     tokens = read_envrc_declared_skills(ws)
     if tokens is None:
         return None
@@ -2203,6 +2388,22 @@ def check_env_freshness(ws):
 
 
 def cmd_apply(args):
+    global _CLI_SKILL_TOKENS
+
+    if len(args) == 1 and args[0] == "-":
+        args = sys.stdin.read().split()
+
+    if args:
+        if _INTENT_SOURCE == "env":
+            cmderr(
+                "apply",
+                "cannot combine skill arguments with --from=env; pass --from=cli or use -C",
+                code=2,
+            )
+        _CLI_SKILL_TOKENS = list(args)
+    elif _INTENT_SOURCE == "cli":
+        _CLI_SKILL_TOKENS = []
+
     ws = get_workspace()
     print_workspace_root(ws)
 
@@ -2210,10 +2411,13 @@ def cmd_apply(args):
     # plan read-only, so any condition doctor reports is one apply acts on here.
     plan = build_reconcile_plan(ws)
     expected_skills = plan.expected_skills
+    source_label = (
+        "command line" if _INTENT_SOURCE == "cli" else "AGENT_REQUIRED_SKILLS"
+    )
 
     if plan.collisions:
         print(
-            "skill: error: conflicting skill declarations in AGENT_REQUIRED_SKILLS:",
+            f"skill: error: conflicting skill declarations in {source_label}:",
             file=sys.stderr,
         )
         for c in plan.collisions:
@@ -2236,33 +2440,45 @@ def cmd_apply(args):
         )
         item.unlink(missing_ok=True)
 
+    extra_skills = plan.prune_names
+    unresolved_specs = [r.spec for r in plan.unresolved]
+
     if not expected_skills:
+        if _INTENT_SOURCE == "env":
+            print(
+                "skill: AGENT_REQUIRED_SKILLS is empty. No skills to apply.",
+                file=sys.stderr,
+            )
+            print(
+                "To review what is installable here, run 'skill catalog' "
+                "(add --json for each skill's description and structure).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "skill: desired skill set is empty. No skills to add.",
+                file=sys.stderr,
+            )
+        if not extra_skills and not unresolved_specs:
+            actual_skills, _, _ = ws.get_actual_skills()
+            if hasattr(ws, "save_exclude_block"):
+                ws.save_exclude_block(actual_skills)
+            if hasattr(ws, "save_managed_skills"):
+                ws.save_managed_skills(list(actual_skills))
+            return
+        add_ok = not bool(unresolved_specs)
+    else:
         print(
-            "skill: AGENT_REQUIRED_SKILLS is empty. No skills to apply.",
+            f"skill: synchronizing workspace skills to match {source_label}: {' '.join(expected_skills)}",
             file=sys.stderr,
         )
-        print(
-            "To review what is installable here, run 'skill catalog' "
-            "(add --json for each skill's description and structure).",
-            file=sys.stderr,
-        )
-        return
-
-    print(
-        f"skill: synchronizing workspace skills to match AGENT_REQUIRED_SKILLS: {' '.join(expected_skills)}",
-        file=sys.stderr,
-    )
-
-    # Deterministic Local Sync:
-    # 1. Resolve and add/symlink all expected skills
-    add_ok = cmd_add(expected_skills, is_apply=True)
+        # Deterministic Local Sync:
+        # 1. Resolve and add/symlink all expected skills
+        add_ok = cmd_add(expected_skills, is_apply=True)
 
     # 2. Prune any actual symlinks on disk that are NOT expected target paths.
     if not plan.dest_dirs:
         sys.exit(0 if add_ok else 1)
-
-    extra_skills = plan.prune_names
-    unresolved_specs = [r.spec for r in plan.unresolved]
 
     # cmd_add() re-resolves every spec, so add_ok is a fresher signal than the
     # plan built before it: if a source vanished or a resolver changed between
@@ -2322,15 +2538,16 @@ def cmd_apply(args):
         else:
             for s in extra_skills:
                 print(
-                    f"skill: pruning extra symlink not in AGENT_REQUIRED_SKILLS: '{s}'",
+                    f"skill: pruning extra symlink not in {source_label}: '{s}'",
                     file=sys.stderr,
                 )
-            names = " ".join(extra_skills)
-            print(
-                f"skill: to keep any of them, run: "
-                f"envrc add skills {names} && direnv reload",
-                file=sys.stderr,
-            )
+            if _INTENT_SOURCE == "env" and not isinstance(ws, AgyBrainWorkspace):
+                names = " ".join(extra_skills)
+                print(
+                    f"skill: to keep any of them, run: "
+                    f"envrc add skills {names} && direnv reload",
+                    file=sys.stderr,
+                )
             cmd_remove_entries(plan.prune_entries, plan=plan, ws=ws, announce=False)
 
     if not add_ok:
@@ -2740,7 +2957,12 @@ def cmd_doctor(
     # The workspace root is the most critical path in the report: every skill
     # symlink and exclude entry is relative to it, and the anchor walk can
     # resolve it above the current directory. Lead with it and label it plainly.
-    ws_type = "Git repository" if isinstance(ws, GitWorkspace) else "Non-VCS directory"
+    if isinstance(ws, AgyBrainWorkspace):
+        ws_type = "Agy session directory"
+    elif isinstance(ws, GitWorkspace):
+        ws_type = "Git repository"
+    else:
+        ws_type = "Non-VCS directory"
     cwd = Path.cwd().resolve()
     ws_details = [f"Root: {clean_p(ws.root)}"]
     if ws.root != cwd:
@@ -3253,6 +3475,15 @@ def cmd_doctor(
                 "details": [],
             }
         )
+    elif isinstance(ws, AgyBrainWorkspace):
+        checks.append(
+            {
+                "name": "Workspace Exclusions",
+                "status": "OK",
+                "summary": f"{clean_p(ws.skills_json)} is fully synchronized",
+                "details": [],
+            }
+        )
 
     # Catalog-specific checks
     unresolvable_local = False
@@ -3530,15 +3761,16 @@ def cmd_doctor_all(as_json: bool = False):
 
 def usage():
     print(
-        """Usage: skill <command> [skill...]
+        """Usage: skill [-C DIR] [--from SOURCE] <command> [skill...]
 
 Manage per-workspace agent skills as untracked symlinks. Automatically detects
 which agent is installed on PATH and applies symlinks and local git ignores:
-  - Claude          -> .claude/skills
+  - Claude           -> .claude/skills
   - Codex/Agy/Jetski -> .agents/skills
+  - Agy session      -> scratch/skills + .agents/skills.json
 
 Commands:
-  apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
+  apply [SPEC...] Synchronize workspace symlinks to match desired skills
   bundle [SPEC...] Package skills into an archive or directory without installing
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
@@ -3556,8 +3788,13 @@ Commands:
   show/info NAME  Show details and metadata of a skill
 
 Options:
-  --help             Display this help message and exit
-  --plugin-template  Output a template/documentation for creating a Workspace plugin
+  -C, --directory DIR  Run as if started in DIR instead of the current directory
+                       (defaults --from to 'cli' unless --from is specified)
+  --from SOURCE        Desired skill source: 'env' (AGENT_REQUIRED_SKILLS,
+                       default without -C) or 'cli' (command-line arguments /
+                       on-disk state, default with -C)
+  --help, -h           Display this help message and exit
+  --plugin-template    Output a template/documentation for creating a Workspace plugin
 
 Environment:
   AGENT_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
@@ -3570,6 +3807,8 @@ Environment:
 
 
 def main():
+    global _INTENT_SOURCE, _CLI_SKILL_TOKENS
+
     if "--plugin-template" in sys.argv:
         print('''"""
 Example Plugin for the skill script.
@@ -3605,17 +3844,96 @@ def register(api):
 ''')
         sys.exit(0)
 
-    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
+    target_dir_str = None
+    explicit_from = None
+    filtered_argv = []
+    raw_argv = sys.argv[1:]
+    idx = 0
+    after_double_dash = False
+
+    while idx < len(raw_argv):
+        arg = raw_argv[idx]
+        if after_double_dash:
+            filtered_argv.append(arg)
+            idx += 1
+            continue
+        if arg == "--":
+            after_double_dash = True
+            filtered_argv.append(arg)
+            idx += 1
+        elif arg in ("-C", "--directory"):
+            idx += 1
+            if idx >= len(raw_argv):
+                print(f"skill: option '{arg}' requires an argument", file=sys.stderr)
+                sys.exit(2)
+            target_dir_str = raw_argv[idx]
+            idx += 1
+        elif arg.startswith("-C="):
+            target_dir_str = arg[3:]
+            idx += 1
+        elif arg.startswith("--directory="):
+            target_dir_str = arg[len("--directory=") :]
+            idx += 1
+        elif arg == "--from":
+            idx += 1
+            if idx >= len(raw_argv):
+                print(
+                    "skill: option '--from' requires an argument ('env' or 'cli')",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            explicit_from = raw_argv[idx].lower()
+            idx += 1
+        elif arg.startswith("--from="):
+            explicit_from = arg[len("--from=") :].lower()
+            idx += 1
+        else:
+            filtered_argv.append(arg)
+            idx += 1
+
+    if (
+        not filtered_argv
+        or filtered_argv[0] in ("--help", "-h", "help")
+        or "--help" in filtered_argv
+        or "-h" in filtered_argv
+    ):
         usage()
 
-    cmd = sys.argv[1]
-    args = sys.argv[2:]
+    if explicit_from is not None:
+        if explicit_from not in ("env", "cli"):
+            print(
+                f"skill: invalid --from value '{explicit_from}'; expected 'env' or 'cli'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _INTENT_SOURCE = explicit_from
+    elif target_dir_str is not None:
+        _INTENT_SOURCE = "cli"
+    else:
+        _INTENT_SOURCE = "env"
 
-    if "--help" in args or "-h" in args:
-        usage()
+    if target_dir_str is not None:
+        target_dir = Path(target_dir_str).expanduser()
+        try:
+            os.chdir(target_dir)
+        except OSError as e:
+            die(f"cannot change directory to '{target_dir_str}': {e.strerror or e}")
+
+    cmd = filtered_argv[0]
+    args = filtered_argv[1:]
 
     if cmd == "doctor":
-        cmd_doctor_all(as_json="--json" in args)
+        as_json = "--json" in args
+        doctor_specs = [a for a in args if a != "--json"]
+        if doctor_specs:
+            if _INTENT_SOURCE == "env":
+                cmderr(
+                    "doctor",
+                    "cannot combine skill arguments with --from=env; pass --from=cli or use -C",
+                    code=2,
+                )
+            _CLI_SKILL_TOKENS = doctor_specs
+        cmd_doctor_all(as_json=as_json)
     elif cmd == "catalog":
         as_json = "--json" in args
         cmd_catalog(as_json=as_json)

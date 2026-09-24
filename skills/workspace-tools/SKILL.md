@@ -56,6 +56,13 @@ skill <command> [arguments]
   generated to keep `git status` clean without dirtying the shared `.gitignore`.
   If another tool rewrites the exclude file, `skill doctor` detects the drift,
   and running `skill apply` resolves it.
+- **Antigravity (Agy) Session Directories**: When targeting an Antigravity (or
+  Jetski) session artifact directory (`~/.gemini/antigravity/brain/<id>` or
+  `~/.gemini/jetski/brain/<id>`, e.g., via `skill -C <artifactDir> add <skill>`),
+  `skill` links skills under `scratch/skills/` (hidden from the artifact UI
+  watcher and auto-allowed for `view_file` reads) and writes
+  `.agents/skills.json` + `.agents/skills.json.metadata.json`
+  (`userFacing: false`) so the agent loads the skills on the next turn.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
   skills under local destination folders.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
@@ -64,10 +71,23 @@ skill <command> [arguments]
   `api.FileStateMixin`) implementing a `detect()` classmethod. Plugin detectors
   run before the built-in ones, in sorted filename order.
 
+### Global Options
+
+- **`-C, --directory DIR`**: Run as if started in `DIR` instead of the current
+  working directory. Automatically defaults `--from` to `cli` (so the caller
+  directory's `AGENT_REQUIRED_SKILLS` never leaks into `DIR`).
+- **`--from SOURCE`**: Select where desired skill intent is read from:
+  - `env` *(default without `-C`)*: Read `AGENT_REQUIRED_SKILLS` from the
+    process environment and check `.envrc` freshness.
+  - `cli` *(default with `-C`)*: Read desired skills strictly from command-line
+    arguments (`apply [SPEC...]`, `doctor [SPEC...]`) or on-disk state, ignoring
+    `AGENT_REQUIRED_SKILLS`.
+
 ### Commands
 
-- **`apply`**: Synchronize workspace symlinks to match `AGENT_REQUIRED_SKILLS`
-  (local-only, fast, and deterministic).
+- **`apply [SPEC...]`**: Synchronize workspace symlinks to match desired skills
+  (`AGENT_REQUIRED_SKILLS` under `--from=env`, or positional `SPEC...` arguments
+  under `--from=cli`).
 - **`bundle [SPEC...]`**: Package skills into an archive (`.zip`, `.tar.gz`) or
   directory without installing them (`-w`/`--workspace` for workspace skills).
 - **`add SPEC...`**: Add a skill (a local path or a plugin-provided catalog
@@ -77,11 +97,11 @@ skill <command> [arguments]
 - **`update SPEC...`**: Re-fetch a plugin-provided catalog entry (`--all` for
   all, `--catalog` for the catalog index).
 - **`clean`**: Remove all managed skills and clear tracking records.
-- **`doctor`**: Diagnose mismatch between desired and on-disk skills
-  (read-only). Shares a unified reconciliation planner with `apply` to audit
-  symlinks, exclusions, and catalog specs, and warns when
-  `AGENT_REQUIRED_SKILLS` looks stale relative to `.envrc` (fix:
-  `direnv reload`).
+- **`doctor [--json] [SPEC...]`**: Diagnose mismatch between desired and on-disk
+  skills (read-only). Shares a unified reconciliation planner with `apply` to
+  audit symlinks, exclusions, and catalog specs, and warns when
+  `AGENT_REQUIRED_SKILLS` looks stale relative to `.envrc` under `--from=env`
+  (fix: `direnv reload`).
 - **`catalog [--json]`**: List all plugin-provided skills and their sources.
   `--json` emits one object per skill with its description and structural
   profile — the discovery primitive described in

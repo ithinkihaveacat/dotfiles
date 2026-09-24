@@ -94,15 +94,16 @@ The block below is `scripts/skill --help`, kept in sync by
 <!-- generated: ../scripts/skill --help -->
 
 ```text
-Usage: skill <command> [skill...]
+Usage: skill [-C DIR] [--from SOURCE] <command> [skill...]
 
 Manage per-workspace agent skills as untracked symlinks. Automatically detects
 which agent is installed on PATH and applies symlinks and local git ignores:
-  - Claude          -> .claude/skills
+  - Claude           -> .claude/skills
   - Codex/Agy/Jetski -> .agents/skills
+  - Agy session      -> scratch/skills + .agents/skills.json
 
 Commands:
-  apply           Synchronize workspace symlinks to match AGENT_REQUIRED_SKILLS
+  apply [SPEC...] Synchronize workspace symlinks to match desired skills
   bundle [SPEC...] Package skills into an archive or directory without installing
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
@@ -120,8 +121,13 @@ Commands:
   show/info NAME  Show details and metadata of a skill
 
 Options:
-  --help             Display this help message and exit
-  --plugin-template  Output a template/documentation for creating a Workspace plugin
+  -C, --directory DIR  Run as if started in DIR instead of the current directory
+                       (defaults --from to 'cli' unless --from is specified)
+  --from SOURCE        Desired skill source: 'env' (AGENT_REQUIRED_SKILLS,
+                       default without -C) or 'cli' (command-line arguments /
+                       on-disk state, default with -C)
+  --help, -h           Display this help message and exit
+  --plugin-template    Output a template/documentation for creating a Workspace plugin
 
 Environment:
   AGENT_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
