@@ -120,8 +120,7 @@ Immediate follow-up actions.
 
 - **Project Manifest (`<project>/README.md`):** Defines project identity, scope,
   and optional YAML frontmatter for project-level configuration (such as
-  `skills` loaded automatically when launching an agent with
-  `jetski-cli --project <project>`):
+  `skills` required when working on the project):
   ```markdown
   ---
   skills:
@@ -150,8 +149,15 @@ See **[Agent Workflows & Handoff](references/workflows.md)** for detailed
 protocols on commit authority, session attribution, External Agent Handoff, and
 Agent Dispatch.
 
-- **Before work:** read `AGENTS.md`, project `README.md`, `STATUS.md`, and
-  `PLAN.md`.
+- **Before work:**
+  1. Read `AGENTS.md`, project `README.md`, `STATUS.md`, and `PLAN.md`.
+  1. **Activate project skills:** If `<project>/README.md` declares `skills:` in
+     its YAML frontmatter that are not yet in your active `<skills>` list and
+     your session provides an `Artifact Directory Path` (`.../brain/<id>`), run
+     `skill -C <artifactDir> add <skill>...` (additive) to link them into the
+     session. Read `<artifactDir>/scratch/skills/<skill>/SKILL.md` via
+     `view_file` if needed in the current turn; the harness will inject them
+     into `<skills>` automatically on subsequent turns.
 - **After work:** update files, task frontmatter (`conversations`), and
   `STATUS.md` prose (`Summary` & `Next`). Run `taskgo sync` and `taskgo doctor`.
   Optionally commit using `taskgo checkpoint`. Ensure the project is left in a
