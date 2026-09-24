@@ -58,11 +58,12 @@ skill <command> [arguments]
   and running `skill apply` resolves it.
 - **Antigravity (Agy) Session Directories**: When targeting an Antigravity (or
   Jetski) session artifact directory (`~/.gemini/antigravity/brain/<id>` or
-  `~/.gemini/jetski/brain/<id>`, e.g., via `skill -C <artifactDir> add <skill>`),
-  `skill` links skills under `scratch/skills/` (hidden from the artifact UI
-  watcher and auto-allowed for `view_file` reads) and writes
-  `.agents/skills.json` + `.agents/skills.json.metadata.json`
-  (`userFacing: false`) so the agent loads the skills on the next turn.
+  `~/.gemini/jetski/brain/<id>`, e.g., via
+  `skill -C <artifactDir> add <skill>`), `skill` links skills under
+  `scratch/skills/` (hidden from the artifact UI watcher and auto-allowed for
+  `view_file` reads) and writes `.agents/skills.json` +
+  `.agents/skills.json.metadata.json` (`userFacing: false`) so the agent loads
+  the skills on the next turn.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
   skills under local destination folders.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
