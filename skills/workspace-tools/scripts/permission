@@ -69,6 +69,19 @@ def clean_p(path: Path | str) -> str:
         return str(path)
 
 
+def workspace_permission_paths(workspace_root: Path) -> list[str]:
+    """Return existing workspace-local permission files for Git exclusion."""
+    candidates = (
+        ("/.claude/settings.local.json", ".claude/settings.local.json"),
+        ("/.codex/rules/permission.rules", ".codex/rules/permission.rules"),
+    )
+    return [
+        display
+        for display, relative in candidates
+        if (workspace_root / relative).is_file()
+    ]
+
+
 # ==============================================================================
 # Plugins & Workspace Root Detection
 # ==============================================================================
@@ -175,6 +188,10 @@ class PermissionAdapter:
 
     def rules(self, workspace_root: Path) -> dict[str, list[str]]:
         """Returns {mode: [clean patterns]} for the workspace."""
+        return {}
+
+    def rules_in(self, path: Path) -> dict[str, list[str]]:
+        """Returns clean rules from one configuration file."""
         return {}
 
     def clean(self, workspace_root: Path) -> None:
@@ -435,6 +452,16 @@ class AgySettingsAdapter(PermissionAdapter):
                         result[mode].append(untranslated)
         return result
 
+    def rules_in(self, path: Path) -> dict[str, list[str]]:
+        if not path.is_file():
+            return {}
+        data = self._load(path)
+        perms = self._perms(data)
+        return {
+            mode: [self.untranslate(rule) for rule in perms.get(mode) or []]
+            for mode in MODES
+        }
+
     def clean(self, workspace_root: Path) -> None:
         if not self.is_initialized(workspace_root):
             return
@@ -575,10 +602,9 @@ class ClaudeSettingsAdapter(PermissionAdapter):
                 f"[{self.name} ({self.scope})] initialized {settings_path}",
                 file=sys.stderr,
             )
-        paths = ["/.claude/settings.local.json"]
-        if (workspace_root / ".codex/rules/permission.rules").is_file():
-            paths.append("/.codex/rules/permission.rules")
-        self._sync_exclude_block(workspace_root, paths)
+        self._sync_exclude_block(
+            workspace_root, workspace_permission_paths(workspace_root)
+        )
 
     def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
         rule = self.translate(pattern)
@@ -616,6 +642,16 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         perms = data.get("permissions", {})
         return {
             mode: [self.untranslate(r) for r in perms.get(mode) or []] for mode in MODES
+        }
+
+    def rules_in(self, path: Path) -> dict[str, list[str]]:
+        if not path.is_file():
+            return {}
+        data = self._load(path)
+        perms = data.get("permissions", {})
+        return {
+            mode: [self.untranslate(rule) for rule in perms.get(mode) or []]
+            for mode in MODES
         }
 
     def clean(self, workspace_root: Path) -> None:
@@ -661,9 +697,25 @@ class CodexRulesAdapter(PermissionAdapter):
                 config = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError) as e:
             return False, str(e)
-        project = (config.get("projects") or {}).get(
-            str(workspace_root.resolve())
-        ) or {}
+        trust_root = workspace_root.resolve()
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace_root),
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            trust_root = Path(result.stdout.strip()).resolve().parent
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+        project = (config.get("projects") or {}).get(str(trust_root)) or {}
         return project.get("trust_level") == "trusted", None
 
     def is_available(self, workspace_root: Path) -> bool:
@@ -740,10 +792,9 @@ class CodexRulesAdapter(PermissionAdapter):
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
-        paths = ["/.codex/rules/permission.rules"]
-        if (workspace_root / ".claude/settings.local.json").is_file():
-            paths.append("/.claude/settings.local.json")
-        ClaudeSettingsAdapter()._sync_exclude_block(workspace_root, paths)
+        ClaudeSettingsAdapter()._sync_exclude_block(
+            workspace_root, workspace_permission_paths(workspace_root)
+        )
 
     def _parse_pattern(self, pattern: str) -> tuple[list[str], str]:
         try:
@@ -785,6 +836,11 @@ class CodexRulesAdapter(PermissionAdapter):
             else {}
         )
 
+    def rules_in(self, path: Path) -> dict[str, list[str]]:
+        if not path.is_file():
+            return {}
+        return self._load_rules(path.parents[2])
+
     def clean(self, workspace_root: Path) -> None:
         path = self._rules_path(workspace_root)
         if not path.is_file():
@@ -794,12 +850,9 @@ class CodexRulesAdapter(PermissionAdapter):
             path.parent.rmdir()
         except OSError:
             pass
-        paths = (
-            ["/.claude/settings.local.json"]
-            if (workspace_root / ".claude/settings.local.json").is_file()
-            else []
+        ClaudeSettingsAdapter()._sync_exclude_block(
+            workspace_root, workspace_permission_paths(workspace_root)
         )
-        ClaudeSettingsAdapter()._sync_exclude_block(workspace_root, paths)
         print(
             f"[{self.name} ({self.scope})] cleared all permission rules",
             file=sys.stderr,
@@ -1075,7 +1128,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     )
                 continue
 
-            perms = adapter.rules(ws)
+            perms = adapter.rules_in(p)
             p_allow = set(perms.get("allow") or [])
             p_guarded = set((perms.get("deny") or []) + (perms.get("ask") or []))
             p_missing_allow = [x for x in allow if x not in p_allow]
