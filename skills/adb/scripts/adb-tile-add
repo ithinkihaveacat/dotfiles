@@ -200,10 +200,80 @@ if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}
   exit 1
 fi
 
+# -----------------------------------------------------------------------------
+# REMOTE COMPOSE VISIBILITY & FAILURE DETECTION
+# -----------------------------------------------------------------------------
+# Wear Widgets use a remote rendering architecture (Remote Compose).
+# The app generates a document and serializes it over a Binder IPC connection.
+# SysUI or WidgetTrayActivity (via ProtoTilesTileRendererImpl) receives,
+# deserializes, and renders it.
+#
+# Because of this IPC boundary, we cannot rely on app-level logs or just "sleep".
+# Failures happen asynchronously AFTER the initial 'add-tile' or 'ADD_WIDGET'
+# broadcast. We explicitly detect known failure modes to fail fast and prevent
+# false positives:
+#
+#   1. Binder Overload: Sending large unscaled images exceeds
+#      the ~1MB Binder IPC limit. (b/488353353)
+#      Result: 'FATAL EXCEPTION' in AndroidRuntime (TransactionTooLargeException)
+#
+#   2. Unsupported Modifiers: e.g., using alpha or blur effects. (b/473745800)
+#      Result: 'Failed to render and attach the tile' in the renderer.
+#
+#   3. Renderer Timeouts: The provider hung or crashed silently before responding.
+#      Result: 'Error getting tile response' in the renderer.
+#
+# Visibility Heuristics:
+# SysUI provides two distinct signals for a successful addition:
+#   - Signal 1 (Container): SysUI allocates the carousel slot and shifts focus.
+#     (e.g., "Visible tile added", "Jumped to the tile")
+#   - Signal 2 (Content): The renderer has received and parsed the app's data.
+#     (e.g., "Received tile content", "Rendering tile")
+#
+# We wait for Signal 2 to ensure that automated tools (like screenshots) don't
+# capture the tile in its transient "loading" state (generic app icon or blank
+# tray slot).
+#
+# Robustness: Signal 2 logs can be inconsistent across OS versions. If Signal 1
+# is confirmed, we only wait a short grace period (~3s) for Signal 2 before
+# assuming success, preventing a full timeout if the rendering log was missed.
+# -----------------------------------------------------------------------------
+
+LOG_FILE=""
+LOG_PID=""
+if [ "$WAIT" = true ] && { [ "$SHOW" = true ] || [ "$TRAY" = true ]; }; then
+  LOG_FILE=$(mktemp)
+  if [ ! -w "$LOG_FILE" ]; then
+    echo "Error: Could not create writable temporary file for logcat monitoring." >&2
+    exit 1
+  fi
+
+  # Clear buffer to avoid reading old logs from previous runs
+  adb logcat -c
+
+  # Monitor relevant tags in the background. We filter specifically for errors
+  # from the renderer and runtime to catch async crashes.
+  adb logcat -v time SysUI:D ProtoTilesTileRendererImpl:D AndroidRuntime:E "*:S" >"$LOG_FILE" &
+  LOG_PID=$!
+
+  # Robust cleanup trap: Handles normal exits, INT (Ctrl+C), and TERM signals.
+  trap '
+    EXIT_CODE=$?
+    [ -n "$LOG_PID" ] && kill "$LOG_PID" 2>/dev/null
+    [ -n "$LOG_FILE" ] && rm -f "$LOG_FILE"
+    if [ $EXIT_CODE -eq 130 ]; then
+       echo -e "\nWarning: Script interrupted by user. Background logcat killed."
+    fi
+    exit $EXIT_CODE
+  ' EXIT INT TERM
+fi
+
+# Workaround for a bug: force-stop the package to ensure a fresh bind
+adb shell am force-stop "$PACKAGE_NAME"
+
 if [[ "$TRAY" == true ]]; then
-  adb shell am force-stop "$PACKAGE_NAME"
   if [[ "$SHOW" == true ]]; then
-    adb shell am start -n "$TRAY_ACTIVITY" >/dev/null
+    adb shell am start -n "$TRAY_ACTIVITY" >/dev/null 2>&1
   fi
 
   WIDGET_ID=""
@@ -233,7 +303,7 @@ if [[ "$TRAY" == true ]]; then
     fi
 
     if [[ "$STARTED_TRAY" == false ]]; then
-      adb shell am start -n "$TRAY_ACTIVITY" >/dev/null
+      adb shell am start -n "$TRAY_ACTIVITY" >/dev/null 2>&1
       STARTED_TRAY=true
     fi
 
@@ -247,76 +317,50 @@ if [[ "$TRAY" == true ]]; then
   fi
 
   echo "Added/activated widget ID: $WIDGET_ID"
-  exit 0
-fi
 
-# -----------------------------------------------------------------------------
-# REMOTE COMPOSE VISIBILITY & FAILURE DETECTION
-# -----------------------------------------------------------------------------
-# Wear Widgets use a remote rendering architecture (Remote Compose).
-# The app generates a document and serializes it over a Binder IPC connection.
-# SysUI (via ProtoTilesTileRendererImpl) receives, deserializes, and renders it.
-#
-# Because of this IPC boundary, we cannot rely on app-level logs or just "sleep".
-# Failures happen asynchronously AFTER the initial 'add-tile' broadcast.
-# We explicitly detect known failure modes to fail fast and prevent false positives:
-#
-#   1. Binder Overload: Sending large unscaled images exceeds
-#      the ~1MB Binder IPC limit. (b/488353353)
-#      Result: 'FATAL EXCEPTION' in AndroidRuntime (TransactionTooLargeException)
-#
-#   2. Unsupported Modifiers: e.g., using alpha or blur effects. (b/473745800)
-#      Result: 'Failed to render and attach the tile' in the renderer.
-#
-#   3. Renderer Timeouts: The provider hung or crashed silently before responding.
-#      Result: 'Error getting tile response' in the renderer.
-#
-# Visibility Heuristics:
-# SysUI provides two distinct signals for a successful addition:
-#   - Signal 1 (Container): SysUI allocates the carousel slot and shifts focus.
-#     (e.g., "Visible tile added", "Jumped to the tile")
-#   - Signal 2 (Content): The renderer has received and parsed the app's data.
-#     (e.g., "Received tile content", "Rendering tile")
-#
-# We wait for Signal 2 to ensure that automated tools (like screenshots) don't
-# capture the tile in its transient "loading" state (generic app icon).
-#
-# Robustness: Signal 2 logs can be inconsistent across OS versions. If Signal 1
-# is confirmed, we only wait a short grace period (~3s) for Signal 2 before
-# assuming success, preventing a full timeout if the rendering log was missed.
-# -----------------------------------------------------------------------------
+  if [[ "$WAIT" == true ]]; then
+    START_TIME=$(date +%s)
+    TIMEOUT=15
+    while true; do
+      CURRENT_TIME=$(date +%s)
+      ELAPSED=$((CURRENT_TIME - START_TIME))
 
-LOG_FILE=""
-LOG_PID=""
-if [ "$WAIT" = true ] && [ "$SHOW" = true ]; then
-  LOG_FILE=$(mktemp)
-  if [ ! -w "$LOG_FILE" ]; then
-    echo "Error: Could not create writable temporary file for logcat monitoring." >&2
-    exit 1
+      if ! kill -0 "$LOG_PID" 2>/dev/null; then
+        break
+      fi
+
+      if grep -Eq "(Received tile content|Rendering tile).*$PACKAGE_NAME" "$LOG_FILE"; then
+        sleep "${ADB_TILE_RENDER_DELAY:-0.8}"
+        break
+      fi
+
+      if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
+        echo "Error: Remote Compose App Crash detected!" >&2
+        grep -A 5 "FATAL EXCEPTION" "$LOG_FILE" >&2
+        exit 1
+      fi
+      if grep -q "Error getting tile response" "$LOG_FILE"; then
+        echo "Error: Renderer timed out getting the tile response." >&2
+        grep "Error getting tile response" "$LOG_FILE" >&2
+        exit 1
+      fi
+      if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
+        echo "Error: Renderer failed to parse or attach the document." >&2
+        grep -A 2 "Failed to render and attach the tile" "$LOG_FILE" >&2
+        exit 1
+      fi
+
+      if ((ELAPSED >= TIMEOUT)); then
+        echo "Warning: Timeout waiting for widget render ($TIMEOUT s)." >&2
+        break
+      fi
+
+      sleep "${ADB_TILE_RETRY_DELAY:-0.2}"
+    done
   fi
 
-  # Clear buffer to avoid reading old logs from previous runs
-  adb logcat -c
-
-  # Monitor relevant tags in the background. We filter specifically for errors
-  # from the renderer and runtime to catch async crashes.
-  adb logcat -v time SysUI:D ProtoTilesTileRendererImpl:D AndroidRuntime:E "*:S" >"$LOG_FILE" &
-  LOG_PID=$!
-
-  # Robust cleanup trap: Handles normal exits, INT (Ctrl+C), and TERM signals.
-  trap '
-    EXIT_CODE=$?
-    [ -n "$LOG_PID" ] && kill "$LOG_PID" 2>/dev/null
-    [ -n "$LOG_FILE" ] && rm -f "$LOG_FILE"
-    if [ $EXIT_CODE -eq 130 ]; then
-       echo -e "\nWarning: Script interrupted by user. Background logcat killed."
-    fi
-    exit $EXIT_CODE
-  ' EXIT INT TERM
+  exit 0
 fi
-
-# Workaround for a bug: force-stop the package to ensure a fresh bind
-adb shell am force-stop "$PACKAGE_NAME"
 
 # Add the tile and capture output
 OUTPUT=$(adb shell am broadcast \
