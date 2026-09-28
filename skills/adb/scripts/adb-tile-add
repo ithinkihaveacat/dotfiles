@@ -223,20 +223,28 @@ fi
 #   3. Renderer Timeouts: The provider hung or crashed silently before responding.
 #      Result: 'Error getting tile response' in the renderer.
 #
-# Visibility Heuristics:
-# SysUI provides two distinct signals for a successful addition:
-#   - Signal 1 (Container): SysUI allocates the carousel slot and shifts focus.
-#     (e.g., "Visible tile added", "Jumped to the tile")
-#   - Signal 2 (Content): The renderer has received and parsed the app's data.
-#     (e.g., "Received tile content", "Rendering tile")
+# Visibility Heuristics (Two-Signal State Machine):
+# Both SysUI and WidgetTrayActivity (--tray) emit two distinct signals:
+#   - Signal 1 (Container):
+#     * SysUI allocates the carousel slot and shifts focus
+#       ("Visible tile added", "onVisibleTileAdded", "Jumped to the tile").
+#     * WidgetTrayActivity attaches the Compose AndroidView container to
+#       ProtoTilesTileRendererImpl ("Attaching Tile to a container").
+#   - Signal 2 (Content & Inflation):
+#     * ProtoTilesTileRendererImpl receives the provider's RemoteCompose
+#       payload ("Received tile content") and inflates it into the attached
+#       container ("Rendering tile"). In TileRendererImpl.java, "Rendering tile"
+#       is only logged inside inflateIfNeededAndAttach() when BOTH a container
+#       is attached AND valid tile data has been set.
 #
-# We wait for Signal 2 to ensure that automated tools (like screenshots) don't
-# capture the tile in its transient "loading" state (generic app icon or blank
-# tray slot).
+# We wait for Signal 2 (followed by a post-render failure check) so automated
+# tools (like screenshots) never capture a blank slot or loading icon, and so
+# synchronous inflation exceptions ("Failed to render and attach the tile")
+# thrown right after "Rendering tile" are caught reliably.
 #
-# Robustness: Signal 2 logs can be inconsistent across OS versions. If Signal 1
-# is confirmed, we only wait a short grace period (~3s) for Signal 2 before
-# assuming success, preventing a full timeout if the rendering log was missed.
+# Robustness: If Signal 1 is confirmed, we bound the additional wait for
+# Signal 2 to a short grace period (~3s) before proceeding to the post-render
+# check, preventing a full 15s timeout if a rendering log line was suppressed.
 # -----------------------------------------------------------------------------
 
 LOG_FILE=""
@@ -268,12 +276,121 @@ if [ "$WAIT" = true ] && { [ "$SHOW" = true ] || [ "$TRAY" = true ]; }; then
   ' EXIT INT TERM
 fi
 
+check_render_failures() {
+  local phase="$1"
+  if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
+    # b/488353353
+    echo "Error: Remote Compose App Crash detected (${phase})!" >&2
+    echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException) or a local runtime crash." >&2
+    grep -A 5 "FATAL EXCEPTION" "$LOG_FILE" >&2
+    exit 1
+  fi
+  if grep -q "Error getting tile response" "$LOG_FILE"; then
+    echo "Error: Renderer timed out getting the tile response (${phase})." >&2
+    echo "The provider may have hung or crashed silently before responding." >&2
+    grep "Error getting tile response" "$LOG_FILE" >&2
+    exit 1
+  fi
+  if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
+    # b/473745800
+    echo "Error: Renderer failed to parse or attach the document (${phase})." >&2
+    echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)." >&2
+    grep -A 2 "Failed to render and attach the tile" "$LOG_FILE" >&2
+    exit 1
+  fi
+}
+
+wait_for_tile_visibility() {
+  echo "Waiting for tile visibility..."
+  local start_time
+  start_time=$(date +%s)
+  local timeout=15
+  local visible=false
+  local visible_time=0
+
+  while true; do
+    local current_time
+    current_time=$(date +%s)
+    local elapsed=$((current_time - start_time))
+
+    # Check if logcat background process died unexpectedly
+    if ! kill -0 "$LOG_PID" 2>/dev/null; then
+      echo "Error: Background logcat process died unexpectedly. Cannot verify visibility." >&2
+      exit 1
+    fi
+
+    # Check if device disconnected
+    if ! adb get-state >/dev/null 2>&1; then
+      echo "Error: Device disconnected during visibility check." >&2
+      exit 1
+    fi
+
+    # Check for Container Visibility (Success Signal 1)
+    if [ "$visible" = false ]; then
+      if [ "$TRAY" = true ]; then
+        if grep -Eq "(Attaching Tile to a container|Rendering tile).*$PACKAGE_NAME" "$LOG_FILE"; then
+          visible=true
+          visible_time=$current_time
+        fi
+      elif grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile|Index=\[|show-tile" "$LOG_FILE"; then
+        visible=true
+        visible_time=$current_time
+      fi
+    fi
+
+    # Check for Content Rendering (Success Signal 2)
+    if [ "$visible" = true ]; then
+      if [ "$TRAY" = true ]; then
+        # In TileRendererImpl.java, "Rendering tile" is logged only when both
+        # the container is attached and valid tile content has been received.
+        if grep -Eq "Rendering tile.*$PACKAGE_NAME" "$LOG_FILE"; then
+          break
+        fi
+      elif grep -Eq "(Received tile content|Rendering tile|provideWidgetData|ProtoTiles).*$PACKAGE_NAME" "$LOG_FILE"; then
+        break
+      fi
+
+      # Robustness: If the container is attached/visible, don't wait more than
+      # 3 seconds for the specific rendering log.
+      if [ $((current_time - visible_time)) -ge 3 ]; then
+        break
+      fi
+    fi
+
+    # --- Failure Detection (Pre-Visibility) ---
+    check_render_failures "pre-visibility"
+
+    # Global timeout
+    if [ $elapsed -ge $timeout ]; then
+      if [ "$visible" = false ]; then
+        echo "Warning: Timeout waiting for tile visibility ($timeout s)." >&2
+        echo "The tile may be visible, but the success log was missed, or it's stuck loading." >&2
+      fi
+      break
+    fi
+
+    sleep "${ADB_TILE_RETRY_DELAY:-0.2}"
+  done
+
+  if [ "$visible" = true ]; then
+    # Continue monitoring briefly after "Rendering tile" / container visibility:
+    # TileRendererImpl logs "Rendering tile" right before calling
+    # RcTileViewInstance.renderAndAttach(), which may throw
+    # "Failed to render and attach the tile" or trigger an async crash.
+    sleep "${ADB_TILE_RENDER_DELAY:-0.8}"
+
+    # --- Failure Detection (Post-Visibility Buffer) ---
+    check_render_failures "post-visibility"
+    echo "Success: Tile is visible."
+  fi
+}
+
 # Workaround for a bug: force-stop the package to ensure a fresh bind
 adb shell am force-stop "$PACKAGE_NAME"
 
 if [[ "$TRAY" == true ]]; then
   if [[ "$SHOW" == true ]]; then
-    adb shell am start -n "$TRAY_ACTIVITY" >/dev/null 2>&1
+    adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
   fi
 
   WIDGET_ID=""
@@ -303,8 +420,9 @@ if [[ "$TRAY" == true ]]; then
     fi
 
     if [[ "$STARTED_TRAY" == false ]]; then
-      adb shell am start -n "$TRAY_ACTIVITY" >/dev/null 2>&1
+      adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
       STARTED_TRAY=true
+      continue
     fi
 
     sleep "${ADB_TILE_RETRY_DELAY:-0.5}"
@@ -319,44 +437,7 @@ if [[ "$TRAY" == true ]]; then
   echo "Added/activated widget ID: $WIDGET_ID"
 
   if [[ "$WAIT" == true ]]; then
-    START_TIME=$(date +%s)
-    TIMEOUT=15
-    while true; do
-      CURRENT_TIME=$(date +%s)
-      ELAPSED=$((CURRENT_TIME - START_TIME))
-
-      if ! kill -0 "$LOG_PID" 2>/dev/null; then
-        break
-      fi
-
-      if grep -Eq "(Received tile content|Rendering tile).*$PACKAGE_NAME" "$LOG_FILE"; then
-        sleep "${ADB_TILE_RENDER_DELAY:-0.8}"
-        break
-      fi
-
-      if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
-        echo "Error: Remote Compose App Crash detected!" >&2
-        grep -A 5 "FATAL EXCEPTION" "$LOG_FILE" >&2
-        exit 1
-      fi
-      if grep -q "Error getting tile response" "$LOG_FILE"; then
-        echo "Error: Renderer timed out getting the tile response." >&2
-        grep "Error getting tile response" "$LOG_FILE" >&2
-        exit 1
-      fi
-      if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
-        echo "Error: Renderer failed to parse or attach the document." >&2
-        grep -A 2 "Failed to render and attach the tile" "$LOG_FILE" >&2
-        exit 1
-      fi
-
-      if ((ELAPSED >= TIMEOUT)); then
-        echo "Warning: Timeout waiting for widget render ($TIMEOUT s)." >&2
-        break
-      fi
-
-      sleep "${ADB_TILE_RETRY_DELAY:-0.2}"
-    done
+    wait_for_tile_visibility
   fi
 
   exit 0
@@ -392,112 +473,8 @@ if [ -n "$INDEX" ]; then
       --es operation show-tile \
       --ei index "$INDEX" >/dev/null
 
-    # Wait logic
     if [ "$WAIT" = true ]; then
-      echo "Waiting for tile visibility..."
-      START_TIME=$(date +%s)
-      TIMEOUT=15
-      VISIBLE=false
-      VISIBLE_TIME=0
-
-      while true; do
-        CURRENT_TIME=$(date +%s)
-        ELAPSED=$((CURRENT_TIME - START_TIME))
-
-        # Check if logcat background process died unexpectedly
-        if ! kill -0 "$LOG_PID" 2>/dev/null; then
-          echo "Error: Background logcat process died unexpectedly. Cannot verify visibility."
-          exit 1
-        fi
-
-        # Check if device disconnected
-        if ! adb get-state >/dev/null 2>&1; then
-          echo "Error: Device disconnected during visibility check."
-          exit 1
-        fi
-
-        # Check for Container Visibility (Success Signal 1)
-        if [ "$VISIBLE" = false ] && grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile|Index=\[|show-tile" "$LOG_FILE"; then
-          VISIBLE=true
-          VISIBLE_TIME=$CURRENT_TIME
-        fi
-
-        # Check for Content Rendering (Success Signal 2)
-        if [ "$VISIBLE" = true ]; then
-          # If we find evidence of rendering, we are done.
-          if grep -Eq "(Received tile content|Rendering tile|provideWidgetData|ProtoTiles).*$PACKAGE_NAME" "$LOG_FILE"; then
-            break
-          fi
-
-          # Robustness: If the container is visible, don't wait more than 3 seconds for
-          # the specific rendering log. Some devices or tile types might not emit it.
-          if [ $((CURRENT_TIME - VISIBLE_TIME)) -ge 3 ]; then
-            break
-          fi
-        fi
-
-        # Global timeout
-        if [ $ELAPSED -ge $TIMEOUT ]; then
-          if [ "$VISIBLE" = false ]; then
-            echo "Warning: Timeout waiting for tile visibility ($TIMEOUT s)."
-            echo "The tile may be visible, but the success log was missed, or it's stuck loading."
-          fi
-          break
-        fi
-
-        # --- Failure Detection (Pre-Visibility) ---
-        if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
-          # b/488353353
-          echo "Error: Remote Compose App Crash detected!"
-          echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException) or a local runtime crash."
-          grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Error getting tile response" "$LOG_FILE"; then
-          echo "Error: Renderer timed out getting the tile response."
-          echo "The provider may have hung or crashed silently before responding."
-          grep "Error getting tile response" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
-          # b/473745800
-          echo "Error: Renderer failed to parse or attach the document."
-          echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)."
-          grep -A 2 "Failed to render and attach the tile" "$LOG_FILE"
-          exit 1
-        fi
-
-        sleep 0.2
-      done
-
-      if [ "$VISIBLE" = true ]; then
-        # Continue monitoring for a short buffer. SysUI says the container is
-        # visible, but the renderer might still throw an async parsing exception
-        # a few hundred milliseconds later.
-        sleep 1.5
-
-        # --- Failure Detection (Post-Visibility Buffer) ---
-        if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
-          # b/488353353
-          echo "Error: Remote Compose App Crash detected immediately after visibility!"
-          echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException)."
-          grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Error getting tile response" "$LOG_FILE"; then
-          echo "Error: Renderer timed out getting the tile response after visibility."
-          grep "Error getting tile response" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
-          # b/473745800
-          echo "Error: Renderer rejected the document after visibility."
-          echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)."
-          grep -A 2 "Failed to render and attach the tile" "$LOG_FILE"
-          exit 1
-        fi
-        echo "Success: Tile is visible."
-      fi
+      wait_for_tile_visibility
     fi
   fi
 else
