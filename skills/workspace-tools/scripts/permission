@@ -6,6 +6,7 @@
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -160,6 +161,10 @@ class PermissionAdapter:
     def is_initialized(self, workspace_root: Path) -> bool:
         return False
 
+    def config_paths(self, workspace_root: Path) -> list[Path]:
+        """Returns the configuration files managed by this adapter."""
+        return []
+
     def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
         """Adds a rule; returns True if newly added, False if already present."""
         raise NotImplementedError
@@ -306,6 +311,9 @@ class AgySettingsAdapter(PermissionAdapter):
 
     def is_initialized(self, workspace_root: Path) -> bool:
         return any(p.is_file() for p in self._settings_paths())
+
+    def config_paths(self, workspace_root: Path) -> list[Path]:
+        return self._settings_paths()
 
     def translate(self, pattern: str) -> str:
         p = pattern.strip()
@@ -469,6 +477,9 @@ class ClaudeSettingsAdapter(PermissionAdapter):
     def is_initialized(self, workspace_root: Path) -> bool:
         return self._settings_path(workspace_root).is_file()
 
+    def config_paths(self, workspace_root: Path) -> list[Path]:
+        return [self._settings_path(workspace_root)]
+
     def translate(self, pattern: str) -> str:
         return f"Bash({pattern.strip()}:*)"
 
@@ -564,7 +575,10 @@ class ClaudeSettingsAdapter(PermissionAdapter):
                 f"[{self.name} ({self.scope})] initialized {settings_path}",
                 file=sys.stderr,
             )
-        self._sync_exclude_block(workspace_root, ["/.claude/settings.local.json"])
+        paths = ["/.claude/settings.local.json"]
+        if (workspace_root / ".codex/rules/permission.rules").is_file():
+            paths.append("/.codex/rules/permission.rules")
+        self._sync_exclude_block(workspace_root, paths)
 
     def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
         rule = self.translate(pattern)
@@ -621,14 +635,36 @@ class ClaudeSettingsAdapter(PermissionAdapter):
 
 
 class CodexRulesAdapter(PermissionAdapter):
-    """Codex CLI: managed execution-policy rules in $CODEX_HOME/rules."""
+    """Codex CLI: workspace execution-policy rules in .codex/rules."""
 
     name = "codex"
-    scope = "user"
+    scope = "workspace"
     guard_mode = "ask"
+    RULE_RE = re.compile(
+        r'^prefix_rule\(pattern=(\[.*\]), decision=("(?:[^"\\]|\\.)*")\)$'
+    )
 
-    def _rules_path(self) -> Path:
-        return CODEX_HOME / "rules" / "permission.rules"
+    def _rules_path(self, workspace_root: Path) -> Path:
+        return workspace_root / ".codex" / "rules" / "permission.rules"
+
+    def config_paths(self, workspace_root: Path) -> list[Path]:
+        return [self._rules_path(workspace_root)]
+
+    def workspace_trust(self, workspace_root: Path) -> tuple[bool, str | None]:
+        import tomllib
+
+        config_path = CODEX_HOME / "config.toml"
+        if not config_path.is_file():
+            return False, None
+        try:
+            with open(config_path, "rb") as f:
+                config = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            return False, str(e)
+        project = (config.get("projects") or {}).get(
+            str(workspace_root.resolve())
+        ) or {}
+        return project.get("trust_level") == "trusted", None
 
     def is_available(self, workspace_root: Path) -> bool:
         import shutil
@@ -639,7 +675,7 @@ class CodexRulesAdapter(PermissionAdapter):
         )
 
     def is_initialized(self, workspace_root: Path) -> bool:
-        return self._rules_path().is_file()
+        return self._rules_path(workspace_root).is_file()
 
     @staticmethod
     def _decision(mode: str) -> str:
@@ -649,76 +685,108 @@ class CodexRulesAdapter(PermissionAdapter):
     def _mode(decision: str) -> str:
         return {"allow": "allow", "prompt": "ask", "forbidden": "deny"}[decision]
 
-    def _load_rules(self) -> dict[str, list[str]]:
+    def _parse_rule_line(self, line: str) -> tuple[list[str], str]:
+        match = self.RULE_RE.fullmatch(line)
+        if not match:
+            raise ValueError(f"unrecognized managed rule: {line}")
+        tokens = json.loads(match.group(1))
+        decision = json.loads(match.group(2))
+        if (
+            not isinstance(tokens, list)
+            or not tokens
+            or not all(isinstance(token, str) for token in tokens)
+        ):
+            raise ValueError("prefix_rule pattern must be a non-empty string list")
+        return tokens, decision
+
+    def _load_rules(self, workspace_root: Path) -> dict[str, list[str]]:
         result = {mode: [] for mode in MODES}
-        path = self._rules_path()
+        path = self._rules_path(workspace_root)
         if not path.is_file():
             return result
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.startswith("# permission: "):
+                line = line.strip()
+                if not line or line.startswith("#"):
                     continue
-                payload = json.loads(line.removeprefix("# permission: "))
-                mode = self._mode(payload["decision"])
-                result[mode].append(shlex.join(payload["pattern"]))
+                tokens, decision = self._parse_rule_line(line)
+                mode = self._mode(decision)
+                result[mode].append(shlex.join(tokens))
         except (OSError, ValueError, KeyError, TypeError) as e:
             die(f"[{self.name}] error reading {path}: {e}")
         return result
 
-    def _save_rules(self, rules: dict[str, list[str]]) -> None:
-        path = self._rules_path()
+    def _save_rules(self, workspace_root: Path, rules: dict[str, list[str]]) -> None:
+        path = self._rules_path(workspace_root)
         entries = [
             (mode, pattern)
             for mode in MODES
             for pattern in sorted(set(rules.get(mode) or []))
         ]
         path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
-            "# Managed by 'permission'. Edit rules with the permission command.",
-            "# Each metadata line makes the generated prefix_rule reversible.",
-        ]
+        lines = ["# Managed by 'permission'. Edit rules with the permission command."]
         for mode, pattern in entries:
-            try:
-                tokens = shlex.split(pattern)
-            except ValueError as e:
-                die(f"[{self.name}] invalid command pattern {pattern!r}: {e}")
-            payload = {"pattern": tokens, "decision": self._decision(mode)}
-            lines.append(f"# permission: {json.dumps(payload, separators=(',', ':'))}")
+            tokens = shlex.split(pattern)
             lines.append(
                 "prefix_rule(pattern="
-                f"{json.dumps(tokens)}, decision={json.dumps(payload['decision'])})"
+                f"{json.dumps(tokens)}, decision={json.dumps(self._decision(mode))})"
             )
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        fd, temp_path_str = tempfile.mkstemp(dir=str(path.parent))
+        temp_path = Path(temp_path_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(temp_path, path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        paths = ["/.codex/rules/permission.rules"]
+        if (workspace_root / ".claude/settings.local.json").is_file():
+            paths.append("/.claude/settings.local.json")
+        ClaudeSettingsAdapter()._sync_exclude_block(workspace_root, paths)
+
+    def _parse_pattern(self, pattern: str) -> tuple[list[str], str]:
+        try:
+            tokens = shlex.split(pattern.strip())
+        except ValueError as e:
+            die(f"[{self.name}] invalid command pattern {pattern!r}: {e}")
+        return tokens, shlex.join(tokens)
 
     def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
-        clean = shlex.join(shlex.split(pattern.strip()))
-        rules = self._load_rules()
+        tokens, clean = self._parse_pattern(pattern)
+        if not tokens:
+            return False
+        rules = self._load_rules(workspace_root)
         if clean in rules[mode]:
             return False
         for other_mode in MODES:
             if clean in rules[other_mode]:
                 rules[other_mode].remove(clean)
         rules[mode].append(clean)
-        self._save_rules(rules)
+        self._save_rules(workspace_root, rules)
         return True
 
     def remove(self, workspace_root: Path, pattern: str) -> list[str]:
-        clean = shlex.join(shlex.split(pattern.strip()))
-        rules = self._load_rules()
+        _, clean = self._parse_pattern(pattern)
+        rules = self._load_rules(workspace_root)
         removed = []
         for mode in MODES:
             if clean in rules[mode]:
                 rules[mode].remove(clean)
                 removed.append(mode)
         if removed:
-            self._save_rules(rules)
+            self._save_rules(workspace_root, rules)
         return removed
 
     def rules(self, workspace_root: Path) -> dict[str, list[str]]:
-        return self._load_rules() if self.is_initialized(workspace_root) else {}
+        return (
+            self._load_rules(workspace_root)
+            if self.is_initialized(workspace_root)
+            else {}
+        )
 
     def clean(self, workspace_root: Path) -> None:
-        path = self._rules_path()
+        path = self._rules_path(workspace_root)
         if not path.is_file():
             return
         path.unlink()
@@ -726,6 +794,12 @@ class CodexRulesAdapter(PermissionAdapter):
             path.parent.rmdir()
         except OSError:
             pass
+        paths = (
+            ["/.claude/settings.local.json"]
+            if (workspace_root / ".claude/settings.local.json").is_file()
+            else []
+        )
+        ClaudeSettingsAdapter()._sync_exclude_block(workspace_root, paths)
         print(
             f"[{self.name} ({self.scope})] cleared all permission rules",
             file=sys.stderr,
@@ -964,14 +1038,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
 
     # 5. Check permissions for each adapter
     for adapter in adapters:
-        if isinstance(adapter, AgySettingsAdapter):
-            settings_paths = adapter._settings_paths()
-        elif isinstance(adapter, ClaudeSettingsAdapter):
-            settings_paths = [adapter._settings_path(ws)]
-        elif isinstance(adapter, CodexRulesAdapter):
-            settings_paths = [adapter._rules_path()]
-        else:
-            settings_paths = []
+        settings_paths = adapter.config_paths(ws)
 
         is_init = adapter.is_initialized(ws)
         if not is_init and (allow or guard):
@@ -1008,18 +1075,9 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     )
                 continue
 
-            if isinstance(adapter, CodexRulesAdapter):
-                perms = adapter.rules(ws)
-                p_allow = set(perms.get("allow") or [])
-                p_guarded = set((perms.get("deny") or []) + (perms.get("ask") or []))
-            else:
-                data = adapter._load(p)
-                perms = data.get("permissions") or {}
-                p_allow = {adapter.untranslate(r) for r in perms.get("allow") or []}
-                p_guarded = {
-                    adapter.untranslate(r)
-                    for r in (perms.get("deny") or []) + (perms.get("ask") or [])
-                }
+            perms = adapter.rules(ws)
+            p_allow = set(perms.get("allow") or [])
+            p_guarded = set((perms.get("deny") or []) + (perms.get("ask") or []))
             p_missing_allow = [x for x in allow if x not in p_allow]
             p_missing_guard = [x for x in guard if x not in p_guarded]
 
@@ -1111,8 +1169,41 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                         }
                     )
 
-        # 7. Workspace exclusions check for Claude
-        if isinstance(adapter, ClaudeSettingsAdapter) and is_init:
+        # 7. Codex only loads project rules for trusted workspaces.
+        if isinstance(adapter, CodexRulesAdapter) and is_init:
+            trusted, trust_error = adapter.workspace_trust(ws)
+            if trusted:
+                checks.append(
+                    {
+                        "name": "Codex Project Trust",
+                        "status": "OK",
+                        "summary": "Workspace is trusted",
+                        "details": [],
+                    }
+                )
+            else:
+                details = []
+                if trust_error:
+                    details.append(
+                        f"Could not read {clean_p(CODEX_HOME / 'config.toml')}: {trust_error}"
+                    )
+                details.append("To resolve: trust this project in Codex")
+                checks.append(
+                    {
+                        "name": "Codex Project Trust",
+                        "status": "WARN",
+                        "summary": "Workspace rules will not load until the project is trusted",
+                        "details": details,
+                    }
+                )
+
+        # 8. Workspace exclusions check for workspace-local adapters
+        if isinstance(adapter, (ClaudeSettingsAdapter, CodexRulesAdapter)) and is_init:
+            relative_path = (
+                ".claude/settings.local.json"
+                if isinstance(adapter, ClaudeSettingsAdapter)
+                else ".codex/rules/permission.rules"
+            )
             is_ignored = False
             try:
                 res = subprocess.run(
@@ -1122,7 +1213,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                         str(ws),
                         "check-ignore",
                         "-q",
-                        ".claude/settings.local.json",
+                        relative_path,
                     ],
                     capture_output=True,
                     check=False,
@@ -1135,7 +1226,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     {
                         "name": "Workspace Exclusions",
                         "status": "OK",
-                        "summary": ".claude/settings.local.json is git-ignored",
+                        "summary": f"{relative_path} is git-ignored",
                         "details": [],
                     }
                 )
@@ -1144,7 +1235,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     {
                         "name": "Workspace Exclusions",
                         "status": "WARN",
-                        "summary": ".claude/settings.local.json is not git-ignored",
+                        "summary": f"{relative_path} is not git-ignored",
                         "details": [
                             "To resolve: run 'permission apply' to update .git/info/exclude"
                         ],
@@ -1294,7 +1385,7 @@ Options:
 Agents:
   agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
   claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
-  codex              Codex CLI (user-wide: $CODEX_HOME/rules/permission.rules)"""
+  codex              Codex CLI (workspace-local: .codex/rules/permission.rules, untracked)"""
 
 HELP_ADD = """Usage: permission add [options] PATTERN...
 
@@ -1333,8 +1424,8 @@ directory is allowed, except entries in the skill's permissions/unsafe
 file: whole-script entries are skipped entirely (they prompt normally),
 and subcommand entries (e.g. "packagename uninstall") are guarded with
 an 'ask' rule. Note: Antigravity pre-approvals are applied user-wide;
-Claude Code pre-approvals are applied to the local workspace; Codex rules are
-applied user-wide in a dedicated managed rule file.
+Claude Code and Codex pre-approvals are applied to the local workspace. A Codex
+allow rule runs its matching command outside the sandbox without prompting.
 
 Options:
   --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
@@ -1342,8 +1433,8 @@ Options:
 
 HELP_CLEAN = """Usage: permission clean
 
-Clear all permission rules for detected agents (workspace-local for
-Claude Code, user-wide for Antigravity and Codex).
+Clear all permission rules for detected agents (workspace-local for Claude Code
+and Codex, user-wide for Antigravity).
 
 Options:
   --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)

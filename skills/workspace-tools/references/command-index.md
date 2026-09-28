@@ -173,7 +173,7 @@ Options:
 Agents:
   agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
   claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
-  codex              Codex CLI (user-wide: $CODEX_HOME/rules/permission.rules)
+  codex              Codex CLI (workspace-local: .codex/rules/permission.rules, untracked)
 ```
 
 <!-- /generated -->
