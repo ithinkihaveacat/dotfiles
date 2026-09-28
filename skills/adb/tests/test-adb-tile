@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+
+# Tests: skills/adb/tests/test-adb-tile
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+ADD_BIN="$DIR/../scripts/adb-tile-add"
+REMOVE_BIN="$DIR/../scripts/adb-tile-remove"
+
+echo "1..10"
+
+TMPDIR_TEST=$(mktemp -d)
+OUTPUT="$TMPDIR_TEST/output"
+ADB_LOG="$TMPDIR_TEST/adb.log"
+MOCK_BIN="$TMPDIR_TEST/bin"
+mkdir -p "$MOCK_BIN"
+trap 'rm -rf "$TMPDIR_TEST"' EXIT
+
+cat <<'EOF' >"$MOCK_BIN/adb"
+#!/usr/bin/env bash
+echo "$*" >>"$MOCK_ADB_LOG"
+
+case "$*" in
+  "get-state")
+    exit 0
+    ;;
+  *"pm list packages"*)
+    printf 'package:com.example\r\npackage:com.google.example.wear_widget\r\n'
+    exit 0
+    ;;
+  *"cmd package resolve-activity --brief -n"*)
+    if [[ "${MOCK_TRAY_SUPPORTED:-1}" == "1" ]]; then
+      printf 'priority=0 preferredOrder=0 match=0x0 specificIndex=-1 isDefault=false\r\n'
+      printf 'com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity\r\n'
+    else
+      printf 'No activity found\r\n'
+    fi
+    exit 0
+    ;;
+  *"am start -n"*)
+    echo "Starting: Intent { cmp=com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity }"
+    exit 0
+    ;;
+  *"am force-stop"*)
+    exit 0
+    ;;
+  *"com.google.android.clockwork.prototiles.action.ADD_WIDGET"*)
+    count_file="${MOCK_ADB_LOG}.add_count"
+    count=0
+    if [[ -f "$count_file" ]]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    echo "$count" >"$count_file"
+
+    if [[ "${MOCK_ADD_ERROR:-0}" == "1" ]]; then
+      echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.ADD_WIDGET }'
+      echo 'Broadcast completed: result=0, data="{"status":"ERROR","message":"Missing or unresolved component extra"}"'
+      exit 0
+    fi
+
+    if ((count < ${MOCK_TRAY_READY_ATTEMPT:-1})); then
+      echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.ADD_WIDGET }'
+      echo 'Broadcast completed: result=0'
+      exit 0
+    fi
+
+    echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.ADD_WIDGET }'
+    echo 'Broadcast completed: result=-1, data="{"status":"OK","action":"ADD_WIDGET","widgetId":10001,"component":"com.example/.MyWidget","containerType":2,"containerTypeString":"SMALL"}"'
+    exit 0
+    ;;
+  *"com.google.android.clockwork.prototiles.action.REMOVE_WIDGET"*)
+    echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.REMOVE_WIDGET }'
+    echo 'Broadcast completed: result=-1, data="{"status":"OK","action":"REMOVE_WIDGET","removed":true}"'
+    exit 0
+    ;;
+  *"com.google.android.wearable.app.DEBUG_SURFACE"*"add-tile"*)
+    echo 'Broadcasting: Intent { act=com.google.android.wearable.app.DEBUG_SURFACE }'
+    echo 'Broadcast completed: result=1, data="Index=[0]"'
+    exit 0
+    ;;
+  *"com.google.android.wearable.app.DEBUG_SURFACE"*"remove-tile"*)
+    echo 'Broadcasting: Intent { act=com.google.android.wearable.app.DEBUG_SURFACE }'
+    echo 'Broadcast completed: result=1, data="Removed"'
+    exit 0
+    ;;
+esac
+exit 0
+EOF
+chmod +x "$MOCK_BIN/adb"
+
+run_mock() {
+  : >"$ADB_LOG"
+  rm -f "${ADB_LOG}.add_count"
+  PATH="$MOCK_BIN:$PATH" MOCK_ADB_LOG="$ADB_LOG" ADB_TILE_RETRY_DELAY="0.01" "$@"
+}
+
+# Test 1: adb-tile-add --help and -h include --tray
+if "$ADD_BIN" --help >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--tray"* ]] && "$ADD_BIN" -h >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--tray"* ]]; then
+  echo "ok 1 - adb-tile-add help documents --tray"
+else
+  echo "not ok 1 - adb-tile-add help missing --tray"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 2: adb-tile-remove --help and -h include --tray
+if "$REMOVE_BIN" --help >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--tray"* ]] && "$REMOVE_BIN" -h >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--tray"* ]]; then
+  echo "ok 2 - adb-tile-remove help documents --tray"
+else
+  echo "not ok 2 - adb-tile-remove help missing --tray"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 3: Rejects FULLSCREEN with --tray
+if ! run_mock "$ADD_BIN" --tray --type FULLSCREEN com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"FULLSCREEN is not supported with --tray"* ]]; then
+  echo "ok 3 - adb-tile-add rejects --type FULLSCREEN with --tray"
+else
+  echo "not ok 3 - adb-tile-add did not reject --type FULLSCREEN with --tray"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 4: Release renderer (no WidgetTrayActivity) fails with flavor guidance on add
+if ! MOCK_TRAY_SUPPORTED=0 run_mock "$ADD_BIN" --tray com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"lacks WidgetTrayActivity"* ]] &&
+  [[ "$(<"$OUTPUT")" == *".emu, .exp, or .dev"* ]]; then
+  echo "ok 4 - adb-tile-add --tray fails clearly when renderer lacks WidgetTrayActivity"
+else
+  echo "not ok 4 - adb-tile-add --tray did not report missing WidgetTrayActivity"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 5: Release renderer (no WidgetTrayActivity) fails with flavor guidance on remove
+if ! MOCK_TRAY_SUPPORTED=0 run_mock "$REMOVE_BIN" --tray com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"lacks WidgetTrayActivity"* ]] &&
+  [[ "$(<"$OUTPUT")" == *".emu, .exp, or .dev"* ]]; then
+  echo "ok 5 - adb-tile-remove --tray fails clearly when renderer lacks WidgetTrayActivity"
+else
+  echo "not ok 5 - adb-tile-remove --tray did not report missing WidgetTrayActivity"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 6: Tray mode retries while receiver registers, scopes broadcast with -p, and prints widgetId
+if MOCK_TRAY_READY_ATTEMPT=3 run_mock "$ADD_BIN" --tray --type SMALL com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"Added/activated widget ID: 10001"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"am start -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.ADD_WIDGET --es component com.example/.MyWidget --es container_type SMALL"* ]] &&
+  [[ "$(cat "${ADB_LOG}.add_count")" == "3" ]]; then
+  echo "ok 6 - adb-tile-add --tray opens tray, retries until receiver is ready, and prints widgetId"
+else
+  echo "not ok 6 - adb-tile-add --tray retry and widgetId flow failed"
+  sed 's/^/# /' "$OUTPUT"
+  sed 's/^/# adb: /' "$ADB_LOG"
+fi
+
+# Test 7: Tray mode fails fast on receiver ERROR payload without retrying 15 times
+if ! MOCK_ADD_ERROR=1 run_mock "$ADD_BIN" --tray com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"Missing or unresolved component extra"* ]] &&
+  [[ "$(cat "${ADB_LOG}.add_count")" == "1" ]]; then
+  echo "ok 7 - adb-tile-add --tray fails fast on receiver ERROR response"
+else
+  echo "not ok 7 - adb-tile-add --tray did not fail fast on ERROR response"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 8: Default (SysUI carousel) mode is unchanged
+if run_mock "$ADD_BIN" --no-show --type LARGE com.example/.MyTile >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"Added/activated tile ID: 0"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"com.google.android.wearable.app.DEBUG_SURFACE --es operation add-tile --ecn component com.example/.MyTile --ei type 1"* ]] &&
+  [[ "$(<"$ADB_LOG")" != *"WidgetTrayActivity"* ]]; then
+  echo "ok 8 - default SysUI carousel mode in adb-tile-add is unchanged"
+else
+  echo "not ok 8 - default SysUI carousel mode in adb-tile-add regressed"
+  sed 's/^/# /' "$OUTPUT"
+  sed 's/^/# adb: /' "$ADB_LOG"
+fi
+
+# Test 9: adb-tile-remove --tray supports numeric widgetId and component name
+if run_mock "$REMOVE_BIN" --tray 10001 >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.REMOVE_WIDGET --ei widget_id 10001"* ]] &&
+  run_mock "$REMOVE_BIN" --tray com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.REMOVE_WIDGET --es component com.example/.MyWidget"* ]]; then
+  echo "ok 9 - adb-tile-remove --tray removes by widgetId or component"
+else
+  echo "not ok 9 - adb-tile-remove --tray failed"
+  sed 's/^/# /' "$OUTPUT"
+  sed 's/^/# adb: /' "$ADB_LOG"
+fi
+
+# Test 10: Default adb-tile-remove (SysUI carousel) is unchanged
+if run_mock "$REMOVE_BIN" com.example/.MyTile >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$ADB_LOG")" == *"com.google.android.wearable.app.DEBUG_SURFACE --es operation remove-tile --ecn component com.example/.MyTile"* ]]; then
+  echo "ok 10 - default SysUI carousel mode in adb-tile-remove is unchanged"
+else
+  echo "not ok 10 - default SysUI carousel mode in adb-tile-remove regressed"
+  sed 's/^/# /' "$OUTPUT"
+  sed 's/^/# adb: /' "$ADB_LOG"
+fi

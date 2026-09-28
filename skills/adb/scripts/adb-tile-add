@@ -9,10 +9,14 @@ shows the tile after it has been added (no separate call to adb-tile-switch is
 needed).
 
 Note on Output:
-  The script extracts the tile index from the system broadcast output (e.g., 'Index=[0]').
-  'Index=[0]' means the tile was added to the first position in the carousel,
-  pushing others down. It does not mean it overwrote previous tiles.
-  Use 'adb-tiles' to list all installed tiles and see which are in the carousel.
+  In default SysUI carousel mode, the script extracts the tile index from the
+  system broadcast output (e.g., 'Index=[0]'). 'Index=[0]' means the tile was
+  added to the first position in the carousel, pushing others down. It does not
+  mean it overwrote previous tiles. Use 'adb-tiles' to list all installed tiles
+  and see which are in the carousel.
+  In --tray mode, the script opens WidgetTrayActivity if needed, sends
+  ADD_WIDGET to com.google.android.wearable.protolayout.renderer, and prints the
+  assigned widgetId (e.g., 'Added/activated widget ID: 10001').
 
 Arguments:
   COMPONENT_NAME  A string composed of the package name and a class in that
@@ -22,9 +26,13 @@ Arguments:
 Options:
   -s, --serial SERIAL
                   Target device serial; must precede arguments or commands.
+  --tray          Add the widget to the standalone renderer's vertical carousel
+                  (WidgetTrayActivity) instead of the SysUI horizontal carousel.
+                  Requires the .emu, .exp, or .dev renderer flavor.
   --type TYPE     Tile type: FULLSCREEN, LARGE (default), or SMALL. Only applies
                   to tiles supporting the BIND_WIDGET_PROVIDER intent (e.g.,
-                  Glance-based tiles).
+                  Glance-based tiles). With --tray, only LARGE and SMALL are
+                  supported.
   --no-show       Do not show the tile after adding it
   --wait          Wait for the tile to be visible (default)
   --no-wait       Do not wait for visibility (return immediately)
@@ -37,6 +45,7 @@ Environment:
 Examples:
   $(basename "$0") com.google.android.wearable.shell/.weather.WeatherTileService
   $(basename "$0") --type LARGE com.google.example.wear_widget/.HelloWidgetService
+  $(basename "$0") --tray --type SMALL com.google.example.wear_widget/.HelloWidgetService
   $(basename "$0") --no-show com.google.example.wear_widget/.HelloWidgetService
 EOF
   exit 0
@@ -62,7 +71,10 @@ fi
 
 SHOW=true
 WAIT=true
+TRAY=false
+TYPE_STR="LARGE"
 TYPE_INT=1 # Default to LARGE
+COMPONENT_NAME=""
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -78,6 +90,10 @@ while [[ "$#" -gt 0 ]]; do
       export ANDROID_SERIAL="$2"
       shift 2
       ;;
+    --tray)
+      TRAY=true
+      shift
+      ;;
     --no-show)
       SHOW=false
       shift
@@ -92,14 +108,23 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --type)
       shift
-      if [[ -z "$1" ]]; then
+      if [[ -z "${1:-}" ]]; then
         echo "Error: --type requires an argument (FULLSCREEN, LARGE, SMALL)" >&2
         exit 1
       fi
       case "$1" in
-        FULLSCREEN) TYPE_INT=0 ;;
-        LARGE) TYPE_INT=1 ;;
-        SMALL) TYPE_INT=2 ;;
+        FULLSCREEN)
+          TYPE_STR="FULLSCREEN"
+          TYPE_INT=0
+          ;;
+        LARGE)
+          TYPE_STR="LARGE"
+          TYPE_INT=1
+          ;;
+        SMALL)
+          TYPE_STR="SMALL"
+          TYPE_INT=2
+          ;;
         *)
           echo "Error: Invalid type '$1'. Must be FULLSCREEN, LARGE, or SMALL." >&2
           exit 1
@@ -131,6 +156,11 @@ if [ -z "$COMPONENT_NAME" ]; then
   exit 1
 fi
 
+if [[ "$TRAY" == true && "$TYPE_STR" == "FULLSCREEN" ]]; then
+  echo "$(basename "$0"): FULLSCREEN is not supported with --tray (use LARGE or SMALL)" >&2
+  exit 1
+fi
+
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     echo >&2 "$(basename "$0"): $1 not found"
@@ -142,7 +172,7 @@ require adb
 
 # Check device availability
 if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "$ANDROID_SERIAL" ]]; then
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
@@ -150,12 +180,74 @@ if ! adb get-state >/dev/null 2>&1; then
   exit 1
 fi
 
+RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
+TRAY_ACTIVITY="${RENDERER_PACKAGE}/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"
+TRAY_ACTION_ADD="com.google.android.clockwork.prototiles.action.ADD_WIDGET"
+
+if [[ "$TRAY" == true ]]; then
+  RESOLVE_OUT=$(adb shell cmd package resolve-activity --brief -n "$TRAY_ACTIVITY" 2>/dev/null | tr -d '\r')
+  if [[ "$RESOLVE_OUT" != *"$TRAY_ACTIVITY"* ]]; then
+    echo "$(basename "$0"): installed renderer ($RENDERER_PACKAGE) lacks WidgetTrayActivity; --tray requires the .emu, .exp, or .dev renderer flavor" >&2
+    exit 1
+  fi
+fi
+
 PACKAGE_NAME="${COMPONENT_NAME%%/*}"
 
 # Check if the package is installed
-if ! adb shell pm list packages | grep -q "^package:${PACKAGE_NAME}$"; then
+if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}$"; then
   echo "Error: Package '$PACKAGE_NAME' not found. Is the app installed?" >&2
   exit 1
+fi
+
+if [[ "$TRAY" == true ]]; then
+  adb shell am force-stop "$PACKAGE_NAME"
+  if [[ "$SHOW" == true ]]; then
+    adb shell am start -n "$TRAY_ACTIVITY" >/dev/null
+  fi
+
+  WIDGET_ID=""
+  WIDGET_ID_RE='"widgetId":[[:space:]]*([0-9]+)'
+  ERROR_MSG_RE='"message":"([^"]+)"'
+  STARTED_TRAY="$SHOW"
+
+  for _ in {1..15}; do
+    OUTPUT=$(adb shell am broadcast \
+      -p "$RENDERER_PACKAGE" \
+      -a "$TRAY_ACTION_ADD" \
+      --es component "$COMPONENT_NAME" \
+      --es container_type "$TYPE_STR" | tr -d '\r')
+
+    if [[ "$OUTPUT" == *"result=-1"* && "$OUTPUT" =~ $WIDGET_ID_RE ]]; then
+      WIDGET_ID="${BASH_REMATCH[1]}"
+      break
+    fi
+
+    if [[ "$OUTPUT" == *'"status":"ERROR"'* ]]; then
+      if [[ "$OUTPUT" =~ $ERROR_MSG_RE ]]; then
+        echo "$(basename "$0"): ${BASH_REMATCH[1]}" >&2
+      else
+        echo "$(basename "$0"): ADD_WIDGET failed: $OUTPUT" >&2
+      fi
+      exit 1
+    fi
+
+    if [[ "$STARTED_TRAY" == false ]]; then
+      adb shell am start -n "$TRAY_ACTIVITY" >/dev/null
+      STARTED_TRAY=true
+    fi
+
+    sleep "${ADB_TILE_RETRY_DELAY:-0.5}"
+  done
+
+  if [[ -z "$WIDGET_ID" ]]; then
+    echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle ADD_WIDGET:" >&2
+    echo "$OUTPUT" >&2
+    exit 1
+  fi
+
+  echo "Added/activated widget ID: $WIDGET_ID"
+  exit 0
 fi
 
 # -----------------------------------------------------------------------------
