@@ -7,7 +7,7 @@ TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/permission"
 SKILL_SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..24"
+echo "1..29"
 
 # Temporary directory for configuration simulations
 TMPDIR=$(mktemp -d)
@@ -40,6 +40,7 @@ mkdir -p "$MOCK_HOME"
 export HOME="$MOCK_HOME"
 export AGY_CONFIG_HOME="${TMPDIR}/gemini"
 export CLAUDE_CONFIG_DIR="${TMPDIR}/claude"
+export CODEX_HOME="${TMPDIR}/codex"
 export XDG_CONFIG_HOME="${TMPDIR}/.config"
 mkdir -p "${XDG_CONFIG_HOME}/skill/plugins"
 cp "${TEST_DIR}/../../../config/skill/plugins/05_local.py" "${XDG_CONFIG_HOME}/skill/plugins/05_local.py"
@@ -319,4 +320,56 @@ if out=$(uv run "${SCRIPT}" doctor --agent jetski 2>&1) &&
   echo "ok 24 - [doctor structured] emits formatted report and resolved settings path"
 else
   echo "not ok 24 - [doctor structured] unexpected output: $out"
+fi
+
+# --- codex adapter ---
+touch "$MOCK_BIN/codex"
+chmod +x "$MOCK_BIN/codex"
+mkdir -p "$CODEX_HOME"
+CODEX_RULES="$CODEX_HOME/rules/permission.rules"
+
+# Test 25: add writes a native Codex prefix rule to its dedicated rule file
+if out=$(uv run "${SCRIPT}" add --agent codex "git show" 2>&1) &&
+  grep -qF 'prefix_rule(pattern=["git", "show"], decision="allow")' "$CODEX_RULES"; then
+  echo "ok 25 - [codex add] writes an allow prefix_rule"
+else
+  echo "not ok 25 - [codex add] failed: $out"
+fi
+
+# Test 26: prompt and forbidden modes map back to clean permission modes
+if uv run "${SCRIPT}" add --agent codex --ask "safe-tool nuke" >/dev/null 2>&1 &&
+  uv run "${SCRIPT}" add --agent codex --deny "rm -rf" >/dev/null 2>&1 &&
+  grep -qF 'decision="prompt"' "$CODEX_RULES" &&
+  grep -qF 'decision="forbidden"' "$CODEX_RULES" &&
+  uv run "${SCRIPT}" list --agent codex 2>/dev/null | grep -A3 'ask:' | grep -q 'safe-tool nuke'; then
+  echo "ok 26 - [codex modes] translates allow, ask, and deny decisions"
+else
+  echo "not ok 26 - [codex modes] failed: $(cat "$CODEX_RULES")"
+fi
+
+# Test 27: remove rewrites only the dedicated managed rule file
+if uv run "${SCRIPT}" remove --agent codex "git show" >/dev/null 2>&1 &&
+  ! grep -qF '["git", "show"]' "$CODEX_RULES"; then
+  echo "ok 27 - [codex remove] removes a managed rule"
+else
+  echo "not ok 27 - [codex remove] rule remains"
+fi
+
+# Test 28: apply and doctor use Codex rules for installed skill commands
+if uv run "${SCRIPT}" apply --agent codex >/dev/null 2>&1 &&
+  grep -qF 'prefix_rule(pattern=["safe-tool"], decision="allow")' "$CODEX_RULES" &&
+  grep -qF 'prefix_rule(pattern=["safe-tool", "nuke"], decision="prompt")' "$CODEX_RULES" &&
+  uv run "${SCRIPT}" doctor --agent codex >/dev/null 2>&1; then
+  echo "ok 28 - [codex apply] synchronizes and audits skill commands"
+else
+  echo "not ok 28 - [codex apply] failed: $(cat "$CODEX_RULES")"
+fi
+
+# Test 29: clean removes only permission's dedicated Codex rule file
+printf 'prefix_rule(pattern=["external"], decision="allow")\n' >"$CODEX_HOME/rules/external.rules"
+if uv run "${SCRIPT}" clean --agent codex >/dev/null 2>&1 &&
+  [ ! -e "$CODEX_RULES" ] && [ -f "$CODEX_HOME/rules/external.rules" ]; then
+  echo "ok 29 - [codex clean] preserves unrelated Codex rule files"
+else
+  echo "not ok 29 - [codex clean] did not isolate managed rules"
 fi

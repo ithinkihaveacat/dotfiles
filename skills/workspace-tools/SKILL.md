@@ -2,14 +2,14 @@
 name: workspace-tools
 description: >-
   Configures workspaces for agent-assisted development. Manages agent skills (untracked
-  symlinks), workspace tool permissions (allow/deny/ask rules for Claude Code and
-  Antigravity),
+  symlinks), workspace tool permissions (allow/deny/ask rules for Claude Code,
+  Codex, and Antigravity),
   git hook profiles, and .envrc configurations. Use when configuring a workspace,
   discovering or installing skills, setting tool permissions, managing git hooks,
   or
   updating .envrc configuration blocks.
 compatibility: >-
-  Requires git. Optional: python3, uv, direnv, claude, or agy.
+  Requires git. Optional: python3, uv, direnv, claude, codex, or agy.
 ---
 
 # Workspace Tools
@@ -29,8 +29,8 @@ control ever seeing the configuration. It consists of four tools:
    [Choosing Skills for a Workspace](#choosing-skills-for-a-workspace).
 1. **`permission`**: The permission manager. Maintains allow/deny/ask rules for
    every detected local agent (workspace-local for Claude Code, user-wide for
-   Antigravity), including pre-approving the safe commands declared by installed
-   skills.
+   Codex and Antigravity), including pre-approving the safe commands declared by
+   installed skills.
 1. **`envrc`**: The configuration manager. Manages marker-delimited blocks in
    `.envrc` files for direnv integration.
 
@@ -239,6 +239,11 @@ backend translates them to its native syntax and scope:
 - **`agy`** (Antigravity CLI): `command(...)` rules in
   `~/.gemini/antigravity-cli/settings.json` (user-wide configuration;
   Antigravity CLI evaluates permissions from global settings).
+- **`codex`** (Codex CLI): `prefix_rule(...)` entries in the dedicated
+  `$CODEX_HOME/rules/permission.rules` file (user-wide configuration). Clean
+  `allow`/`ask`/`deny` modes map to Codex's `allow`/`prompt`/`forbidden`
+  decisions. The dedicated file lets `clean` avoid touching hand-authored or
+  organization-managed rules in neighboring `.rules` files.
 
 By default every command operates on all detected agents; use `--agent NAME` to
 scope to one.
@@ -276,6 +281,29 @@ New scripts added to a skill are therefore pre-approved by default; only the
 exceptions need maintaining. The `permission` tool's own mutating subcommands
 (`add`, `remove`, `clean`) are declared unsafe so an agent can never edit its
 own allowlist unprompted.
+
+### Codex support and remaining boundaries
+
+Codex skill discovery did not require a third installation format: Codex and
+Antigravity both consume the portable `.agents/skills/` destination already
+managed by `skill`; Claude's additional `.claude/skills/` destination remains
+agent-specific. The previous Codex gap was detection/documentation rather than
+link creation.
+
+Permissions did have a functional gap: `permission` had no Codex adapter, so
+`add`, `apply`, `list`, `remove`, `clean`, and `doctor` silently omitted Codex.
+The Codex adapter now follows the same small adapter contract as Claude and
+Antigravity and generates native execution-policy rules rather than attempting
+to translate them through another agent's settings.
+
+Codex execution rules are user-scoped, not repository-scoped. Consequently a
+workspace's skill commands are pre-approved for that user wherever the same
+command prefix is used, just as Antigravity's rules are user-wide. The tool does
+not change Codex sandbox policy, approval policy, managed organization policy,
+or whether a command is available inside a sandbox; those are separate controls
+and can still require or prohibit execution. Codex rules match token prefixes,
+so shell operators, redirections, and arbitrary argument semantics are
+intentionally outside this tool's clean command-pattern abstraction.
 
 ### Plugins
 

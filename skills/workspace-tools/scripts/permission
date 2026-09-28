@@ -6,6 +6,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ AGY_CONFIG_DIR = Path(
     or Path.home() / ".gemini/antigravity-cli"
 )
 CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 MODES = ("allow", "deny", "ask")
 
@@ -618,9 +620,122 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         )
 
 
+class CodexRulesAdapter(PermissionAdapter):
+    """Codex CLI: managed execution-policy rules in $CODEX_HOME/rules."""
+
+    name = "codex"
+    scope = "user"
+    guard_mode = "ask"
+
+    def _rules_path(self) -> Path:
+        return CODEX_HOME / "rules" / "permission.rules"
+
+    def is_available(self, workspace_root: Path) -> bool:
+        import shutil
+
+        return bool(
+            (shutil.which("codex") and CODEX_HOME.is_dir())
+            or self.is_initialized(workspace_root)
+        )
+
+    def is_initialized(self, workspace_root: Path) -> bool:
+        return self._rules_path().is_file()
+
+    @staticmethod
+    def _decision(mode: str) -> str:
+        return {"allow": "allow", "ask": "prompt", "deny": "forbidden"}[mode]
+
+    @staticmethod
+    def _mode(decision: str) -> str:
+        return {"allow": "allow", "prompt": "ask", "forbidden": "deny"}[decision]
+
+    def _load_rules(self) -> dict[str, list[str]]:
+        result = {mode: [] for mode in MODES}
+        path = self._rules_path()
+        if not path.is_file():
+            return result
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.startswith("# permission: "):
+                    continue
+                payload = json.loads(line.removeprefix("# permission: "))
+                mode = self._mode(payload["decision"])
+                result[mode].append(shlex.join(payload["pattern"]))
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            die(f"[{self.name}] error reading {path}: {e}")
+        return result
+
+    def _save_rules(self, rules: dict[str, list[str]]) -> None:
+        path = self._rules_path()
+        entries = [
+            (mode, pattern)
+            for mode in MODES
+            for pattern in sorted(set(rules.get(mode) or []))
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "# Managed by 'permission'. Edit rules with the permission command.",
+            "# Each metadata line makes the generated prefix_rule reversible.",
+        ]
+        for mode, pattern in entries:
+            try:
+                tokens = shlex.split(pattern)
+            except ValueError as e:
+                die(f"[{self.name}] invalid command pattern {pattern!r}: {e}")
+            payload = {"pattern": tokens, "decision": self._decision(mode)}
+            lines.append(f"# permission: {json.dumps(payload, separators=(',', ':'))}")
+            lines.append(
+                "prefix_rule(pattern="
+                f"{json.dumps(tokens)}, decision={json.dumps(payload['decision'])})"
+            )
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
+        clean = shlex.join(shlex.split(pattern.strip()))
+        rules = self._load_rules()
+        if clean in rules[mode]:
+            return False
+        for other_mode in MODES:
+            if clean in rules[other_mode]:
+                rules[other_mode].remove(clean)
+        rules[mode].append(clean)
+        self._save_rules(rules)
+        return True
+
+    def remove(self, workspace_root: Path, pattern: str) -> list[str]:
+        clean = shlex.join(shlex.split(pattern.strip()))
+        rules = self._load_rules()
+        removed = []
+        for mode in MODES:
+            if clean in rules[mode]:
+                rules[mode].remove(clean)
+                removed.append(mode)
+        if removed:
+            self._save_rules(rules)
+        return removed
+
+    def rules(self, workspace_root: Path) -> dict[str, list[str]]:
+        return self._load_rules() if self.is_initialized(workspace_root) else {}
+
+    def clean(self, workspace_root: Path) -> None:
+        path = self._rules_path()
+        if not path.is_file():
+            return
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+        print(
+            f"[{self.name} ({self.scope})] cleared all permission rules",
+            file=sys.stderr,
+        )
+
+
 ADAPTERS: list[PermissionAdapter] = [
     AgySettingsAdapter(),
     ClaudeSettingsAdapter(),
+    CodexRulesAdapter(),
 ]
 
 
@@ -647,7 +762,7 @@ def require_adapters(
     if not adapters:
         die(
             "no supported agent configuration found "
-            f"(looked for {AGY_CONFIG_DIR} and {CLAUDE_CONFIG_DIR}); "
+            f"(looked for {AGY_CONFIG_DIR}, {CLAUDE_CONFIG_DIR}, and {CODEX_HOME}); "
             "use --agent to force one"
         )
     return adapters
@@ -819,7 +934,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                 "status": "WARN",
                 "summary": "No supported agent configuration found",
                 "details": [
-                    f"Looked for: {clean_p(AGY_CONFIG_DIR)} and {clean_p(CLAUDE_CONFIG_DIR)}",
+                    f"Looked for: {clean_p(AGY_CONFIG_DIR)}, {clean_p(CLAUDE_CONFIG_DIR)}, and {clean_p(CODEX_HOME)}",
                     "To resolve: install an agent CLI or use '--agent NAME' to force one",
                 ],
             }
@@ -853,6 +968,8 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
             settings_paths = adapter._settings_paths()
         elif isinstance(adapter, ClaudeSettingsAdapter):
             settings_paths = [adapter._settings_path(ws)]
+        elif isinstance(adapter, CodexRulesAdapter):
+            settings_paths = [adapter._rules_path()]
         else:
             settings_paths = []
 
@@ -891,13 +1008,18 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     )
                 continue
 
-            data = adapter._load(p)
-            perms = data.get("permissions") or {}
-            p_allow = {adapter.untranslate(r) for r in perms.get("allow") or []}
-            p_guarded = {
-                adapter.untranslate(r)
-                for r in (perms.get("deny") or []) + (perms.get("ask") or [])
-            }
+            if isinstance(adapter, CodexRulesAdapter):
+                perms = adapter.rules(ws)
+                p_allow = set(perms.get("allow") or [])
+                p_guarded = set((perms.get("deny") or []) + (perms.get("ask") or []))
+            else:
+                data = adapter._load(p)
+                perms = data.get("permissions") or {}
+                p_allow = {adapter.untranslate(r) for r in perms.get("allow") or []}
+                p_guarded = {
+                    adapter.untranslate(r)
+                    for r in (perms.get("deny") or []) + (perms.get("ask") or [])
+                }
             p_missing_allow = [x for x in allow if x not in p_allow]
             p_missing_guard = [x for x in guard if x not in p_guarded]
 
@@ -1165,13 +1287,14 @@ Commands:
   doctor             Report missing or drifted rules (read-only)
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
   agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
-  claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)"""
+  claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
+  codex              Codex CLI (user-wide: $CODEX_HOME/rules/permission.rules)"""
 
 HELP_ADD = """Usage: permission add [options] PATTERN...
 
@@ -1183,7 +1306,7 @@ from stdin.
 Options:
   --deny             Add to the denylist (blocked) instead of the allowlist
   --ask              Add to the ask list (always prompt)
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_REMOVE = """Usage: permission remove PATTERN...
@@ -1191,7 +1314,7 @@ HELP_REMOVE = """Usage: permission remove PATTERN...
 Remove tool permission rules from all lists (alias: rm).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_LIST = """Usage: permission list
@@ -1199,7 +1322,7 @@ HELP_LIST = """Usage: permission list
 List permission rules per agent (alias: ls).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_APPLY = """Usage: permission apply
@@ -1210,19 +1333,20 @@ directory is allowed, except entries in the skill's permissions/unsafe
 file: whole-script entries are skipped entirely (they prompt normally),
 and subcommand entries (e.g. "packagename uninstall") are guarded with
 an 'ask' rule. Note: Antigravity pre-approvals are applied user-wide;
-Claude Code pre-approvals are applied to the local workspace.
+Claude Code pre-approvals are applied to the local workspace; Codex rules are
+applied user-wide in a dedicated managed rule file.
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_CLEAN = """Usage: permission clean
 
 Clear all permission rules for detected agents (workspace-local for
-Claude Code, user-wide for Antigravity).
+Claude Code, user-wide for Antigravity and Codex).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_DOCTOR = """Usage: permission doctor
@@ -1232,7 +1356,7 @@ configure and report anything missing (read-only). Exits non-zero if
 problems are found.
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 SUBCOMMAND_HELP = {
