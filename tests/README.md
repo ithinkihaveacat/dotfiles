@@ -78,7 +78,8 @@ errors.
   UV_OFFLINE=1 prove tests/test-* skills/*/tests/test-*
   ```
 - **Warming the cache**: Offline resolution only works if the packages have been
-  downloaded at least once, so run the tool (or its tests) outside the isolated
+  downloaded at least once, so run `./install.sh --only uv` (which fetches the
+  dependencies of every uv-managed tool in this repository) outside the isolated
   environment first. Test suites that override `HOME` or `XDG_CONFIG_HOME` for
   hermeticity hide the host cache; share it by also exporting
   `UV_CACHE_DIR=~/.cache/uv`.

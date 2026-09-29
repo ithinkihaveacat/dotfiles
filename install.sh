@@ -81,16 +81,32 @@ OPTIONS:
   --install-optional
                 Install the core and optional package sets
   --install-all Install the core, optional, and full package sets
-  --prune       Remove installed packages not in any tier (brew only; prompts
-                first and is skipped when non-interactive). Default: warn only
+  --prune       Remove installed packages not in any tier (brew), and apt
+                packages this script has retired. Prompts first when
+                interactive; removes without asking when non-interactive.
+                Default: warn only
   --non-interactive
                 Run without prompting or interactive terminal-session validation
+  --only PART   Run only the named part of the script, then exit: no git pull,
+                no symlinks, no sudo, no other packages. Parts: uv (install uv
+                and fetch everything this repository's uv-based
+                scripts download on first use, so they then work offline).
+                For preparing CI jobs and cloud agent environments
+
+ENVIRONMENT:
+  UV_OFFLINE    With --only uv, set to 1 to check offline readiness without
+                the network: nothing is downloaded or put on PATH, but each
+                script's environment is (re)built inside uv's cache from
+                packages already there, which is what proves it works.
+                Exits non-zero, naming each item, if any package is missing
 
 EXAMPLES:
   $(basename "$0")                   # Install or update; core packages only
   $(basename "$0") --trace           # Same, but log each wrapped command
   $(basename "$0") --install-optional  # Also install the optional package set
   $(basename "$0") --install-all --prune  # Full set; offer to remove extras
+  $(basename "$0") --only uv         # Prepare a CI/cloud environment for offline use
+  UV_OFFLINE=1 $(basename "$0") --only uv  # Check it is ready, without the network
 
   # Install/update over the network, passing flags after '-s --':
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --force
@@ -106,6 +122,7 @@ REBOOT_REQUIRED=0
 NON_INTERACTIVE=0
 INSTALL_TIER=core
 PRUNE=0
+ONLY=""
 
 # XDG Base Directory specification defaults
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -151,6 +168,18 @@ while [[ $# -gt 0 ]]; do
       NON_INTERACTIVE=1
       shift
       ;;
+    --only)
+      if [ $# -lt 2 ]; then
+        echo "$(basename "$0"): --only requires an argument" >&2
+        usage 1 >&2
+      fi
+      ONLY=$2
+      shift 2
+      ;;
+    --only=*)
+      ONLY=${1#--only=}
+      shift
+      ;;
     -*)
       echo "$(basename "$0"): unknown option: $1" >&2
       usage 1 >&2
@@ -161,6 +190,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+case "$ONLY" in
+  "" | uv) ;;
+  *)
+    echo "$(basename "$0"): --only: unknown part '$ONLY' (supported: uv)" >&2
+    exit 1
+    ;;
+esac
 
 # Auto-detect non-interactive mode if stdin is not a TTY
 if [ ! -t 0 ]; then
@@ -176,8 +213,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Ask for sudo upfront if we're likely to need it
-if [ "$PLATFORM" = "linux" ]; then
+# Ask for sudo upfront if we're likely to need it (no --only part needs it)
+if [ "$PLATFORM" = "linux" ] && [ -z "$ONLY" ]; then
   export DEBIAN_FRONTEND="noninteractive"
   # Check if sudo requires a password first
   if sudo -n true 2>/dev/null; then
@@ -256,8 +293,8 @@ function install_set_for_tier {
 }
 
 # Report brew leaves that are not in the allowlist ($1, space-separated). With
-# --prune, offer to remove them (interactive only; never removes when
-# non-interactive). Without --prune, warn and leave them in place.
+# --prune, remove them: after a confirmation prompt when interactive, without
+# one when non-interactive. Without --prune, warn and leave them in place.
 function prune_brew_extras {
   local allowlist=$1
   local extras indented
@@ -295,6 +332,50 @@ function prune_brew_extras {
   esac
 }
 
+# Report retired apt packages ($1, space-separated) that are still installed:
+# packages this script used to install and no longer does. Unlike brew, apt
+# cannot be pruned against an allowlist (it also manages the OS itself), so
+# only these explicitly retired names are ever candidates. With --prune, remove
+# them, prompting first only when interactive (like prune_brew_extras);
+# without it, warn.
+function prune_apt_retired {
+  local retired=$1
+  local installed_retired indented
+  installed_retired=$(comm -12 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$retired" | tr ' ' '\n' | sort))
+  [ -n "$installed_retired" ] || return 0
+  # shellcheck disable=SC2001 # sed prefixes every line, including the first
+  indented=$(echo "$installed_retired" | sed 's/^/  /')
+
+  if [ "$PRUNE" != 1 ]; then
+    echo "warning: retired apt packages present (no longer managed by this script):" >&2
+    echo "$indented" >&2
+    echo "hint: remove with 'sudo apt-get remove --purge <pkg>', or re-run with --prune" >&2
+    return 0
+  fi
+
+  if [ "$NON_INTERACTIVE" != 1 ]; then
+    echo "The following retired apt packages will be removed:" >&2
+    echo "$indented" >&2
+    printf 'Remove these packages? [y/N] ' >&2
+    local reply=""
+    read -r reply || reply=""
+    case "$reply" in
+      [yY] | [yY][eE][sS]) ;;
+      *)
+        echo "Skipping removal." >&2
+        return 0
+        ;;
+    esac
+  else
+    echo "Removing retired apt packages (--prune specified):" >&2
+    echo "$indented" >&2
+  fi
+  # Package names contain no whitespace, so word splitting is intended here.
+  # shellcheck disable=SC2086
+  x sudo apt-get -y remove --purge $installed_retired ||
+    echo "warning: apt-get remove of retired packages failed" >&2
+}
+
 # SRCDIR is the root of the git repo
 # From http://stackoverflow.com/a/246128/11543
 SRCDIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -312,6 +393,138 @@ if [ -d "$DSTDIR/.private" ]; then
 fi
 if [ -d "$DSTDIR/.corp" ]; then
   SRCDIRS+=("$DSTDIR/.corp")
+fi
+
+# uv: installs uv itself, then fetches everything this repository's uv-based
+# scripts download on first use, so they keep working once the network is gone
+# (CI jobs, sandboxed cloud agents, planes).
+#
+# Architecture note: uv is the preferred way to get tools, because it works the
+# same on macOS, Debian, CI runners, and cloud containers where brew and apt
+# often do not. Skills stay self-contained: a skill's scripts need only uv, and
+# fetch their own pinned tools through uvx (or `uv run --script` metadata) on
+# first use, so each tool version is pinned in exactly one place. install.sh
+# does not duplicate those installs; its uv part only makes sure uv exists and
+# warms uv's cache ahead of time. The longer-term aim is to split this script
+# into parts that can run on their own; --only is the first step, with a stanza
+# becoming a function, selectable with --only, once there is a reason to run it
+# alone.
+
+# Bash wrappers that run pinned tools via uvx, each paired (after "|") with a
+# small valid input in printf %b notation. A wrapper is warmed by checking that
+# input, so it fetches exactly the versions it pins and the pins stay in the
+# wrapper; the input must pass, or later tools in the wrapper never run. Add a
+# wrapper here when it starts calling uvx. Scripts with a `uv run --script`
+# shebang need no entry: they are discovered below.
+UVX_WRAPPERS=(
+  'skills/coding-standards/scripts/python-format|x = 1'
+  'skills/coding-standards/scripts/shell-format|#!/bin/sh\ntrue'
+)
+
+# Run a uv command quietly, reporting one git-style status line and, on
+# failure, the command's output (indented) so the cause is visible.
+function uv_item {
+  local ok=$1 bad=$2 label=$3 out
+  shift 3
+  if [ "$TRACE" = 1 ]; then
+    printf '+ %s\n' "$(printf '%q ' "$@")" >&2
+  fi
+  if out=$("$@" 2>&1); then
+    printf '%s  %s\n' "$ok" "$label"
+    return 0
+  fi
+  printf '%s  %s\n' "$bad" "$label" >&2
+  # shellcheck disable=SC2001 # sed prefixes every line, including the first
+  echo "$out" | sed 's/^/    /' >&2
+  return 1
+}
+
+# Returns non-zero if anything failed (or, with UV_OFFLINE, is not cached), so
+# `--only uv` exits non-zero; a full run only warns.
+function stanza_uv {
+  heading "uv"
+
+  local offline=0 ok bad failed=0
+  case "$(echo "${UV_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) offline=1 ;;
+  esac
+  if [ "$offline" = 1 ]; then
+    ok="cached " bad="missing"
+  else
+    ok="fetched" bad="failed "
+  fi
+
+  # The standalone installer puts uv in ~/.local/bin; a full run has already
+  # put that on PATH, --only has not.
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+  esac
+
+  # uv is installed via the standalone astral installer on every platform (it
+  # is not a brew/apt package here) because many scripts use `uv run` shebangs.
+  if ! exists uv; then
+    if [ "$offline" = 1 ]; then
+      echo "$(basename "$0"): uv not found" >&2
+      return 1
+    fi
+    echo "Installing uv..."
+    if ! curl -LsSf https://astral.sh/uv/install.sh | sh || ! exists uv; then
+      echo "warning: uv installation failed" >&2
+      return 1
+    fi
+  elif [ -z "$ONLY" ] && ! is_fresh "$PACKAGE_STAMP"; then
+    # Periodic upgrades belong to full runs; --only only fills in what is
+    # missing, and leaves a uv it did not install (e.g. CI's) alone.
+    echo "Updating uv..."
+    # `uv self update` only works for the standalone installer; a uv provided
+    # by a package manager (e.g. a leftover brew uv mid-migration) will refuse,
+    # so warn rather than abort.
+    uv self update || echo "warning: uv self update failed (uv may be package-managed)"
+    echo "Upgrading uv tools..."
+    uv tool upgrade --all || echo "warning: uv tool upgrade failed"
+  fi
+
+  # Tools such as shellcheck and shfmt are deliberately not installed on PATH
+  # here: the scripts that need them run their own pinned versions via uvx, so
+  # a skill needs nothing but uv, and each tool version is pinned in exactly
+  # one place (the script). This part only warms uv's cache for those scripts.
+  # For an ad-hoc run, use e.g. `uvx --from shellcheck-py==<pin> shellcheck`.
+
+  # Fetch what the repository's scripts need. With UV_OFFLINE, uv builds the
+  # same environments from its cache alone, which checks offline readiness
+  # (it writes to uv's cache, so it is not read-only).
+  local entry rel f first_line
+  for entry in "${UVX_WRAPPERS[@]}"; do
+    rel=${entry%%|*}
+    uv_item "$ok" "$bad" "$rel" "$SRCDIR/$rel" --check \
+      <<<"$(printf '%b' "${entry#*|}")" || failed=1
+  done
+  # bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
+  for f in "$SRCDIR"/bin/* "$SRCDIR"/skills/*/scripts/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    first_line=""
+    read -r first_line <"$f" 2>/dev/null || true
+    case "$first_line" in
+      '#!/usr/bin/env -S uv run'*)
+        uv_item "$ok" "$bad" "${f#"$SRCDIR"/}" uv sync --script "$f" </dev/null || failed=1
+        ;;
+    esac
+  done
+
+  if [ "$failed" != 0 ]; then
+    if [ "$offline" = 1 ]; then
+      echo "warning: some uv items are not available offline; re-run '$(basename "$0") --only uv' with network access" >&2
+    else
+      echo "warning: some uv items failed to install or fetch" >&2
+    fi
+    return 1
+  fi
+}
+
+if [ -n "$ONLY" ]; then
+  "stanza_$ONLY"
+  exit $?
 fi
 
 # Pull each source repo to its upstream before applying. Mirrors the `git up`
@@ -616,7 +829,7 @@ if exists brew; then
   fi
 
   # Core packages: always installed, on every run.
-  core="fish coreutils wget direnv jq mtr htop shellcheck shfmt sevenzip ripgrep chafa node bat"
+  core="fish coreutils wget direnv jq mtr htop sevenzip ripgrep chafa node bat"
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
@@ -682,7 +895,7 @@ if [ "$PLATFORM" = "linux" ]; then
     fi
 
     # Core packages: always installed, on every run.
-    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep shfmt shellcheck chafa bat"
+    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep chafa bat"
     # Optional packages: installed only with --install-optional or --install-all.
     # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
     # ruby-build binary itself is bootstrapped from git below, as the apt package
@@ -701,13 +914,14 @@ if [ "$PLATFORM" = "linux" ]; then
     # base system and infrastructure packages beyond dotfiles. Orphaned dependency
     # packages are purged via apt-get autoremove --purge below.
 
-    # sysstat was removed from this script (it recommends pcp, which installs 6
-    # heavyweight daemon services). Warn so it can be purged on existing machines.
-    if dpkg-query -W -f='${Status}' sysstat 2>/dev/null | grep -q "install ok installed"; then
-      echo "⚠️  warning: sysstat is installed but no longer managed by this script."
-      echo "   It pulls in pcp (6 daemon services). Remove with:"
-      echo "   sudo apt-get remove --purge sysstat pcp"
-    fi
+    # Retired packages: ones this script used to install and no longer does.
+    # Reported on every run and removed with --prune (see prune_apt_retired).
+    #   sysstat, pcp: sysstat recommends pcp, which installs 6 heavyweight
+    #     daemon services.
+    #   shfmt, shellcheck: now run by the formatter scripts via pinned uvx
+    #     (see stanza_uv).
+    retired="sysstat pcp shellcheck shfmt"
+    prune_apt_retired "$retired"
 
     # ruby-build: the engine behind ruby-install. Installed alongside the Ruby
     # build deps above whenever the optional/all tier is selected, so the two
@@ -822,21 +1036,9 @@ else
   echo "warning: fish not installed; install it (e.g. 'brew install fish', see README)" >&2
 fi
 
-# uv is installed via the standalone astral installer on every platform (it is
-# not a brew/apt package here) because many scripts use `uv run` shebangs.
-heading "uv"
-if ! exists uv; then
-  echo "Installing uv..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh || echo "warning: uv installation failed" >&2
-elif ! is_fresh "$PACKAGE_STAMP"; then
-  echo "Updating uv..."
-  # `uv self update` only works for the standalone installer; a uv provided by a
-  # package manager (e.g. a leftover brew uv mid-migration) will refuse, so warn
-  # rather than abort.
-  uv self update || echo "warning: uv self update failed (uv may be package-managed)"
-  echo "Upgrading uv tools..."
-  uv tool upgrade --all || echo "warning: uv tool upgrade failed"
-fi
+# Defined above, next to --only; failures are reported there and do not stop
+# the rest of the run.
+stanza_uv || true
 
 heading "git"
 

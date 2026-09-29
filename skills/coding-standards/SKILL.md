@@ -6,7 +6,9 @@ description: >-
   scripts for formatting Python, shell, Markdown, Kotlin, JSON, and XML. Use when
   writing, reviewing, formatting, or linting code, verifying CLI ergonomics,
   implementing caching and offline modes, or formatting git commit messages.
-compatibility: Requires ruff, shfmt, shellcheck, mdformat, jq, xmllint, ktfmt, or uv/uvx.
+compatibility: >-
+  Requires uv/uvx (runs pinned ruff, shfmt, shellcheck, and mdformat), plus jq,
+  xmllint, or java for the JSON, XML, and Kotlin formatters.
 ---
 
 # Coding Standards
