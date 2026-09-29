@@ -799,14 +799,24 @@ def extract_frontmatter_field(content: str, key: str) -> str:
     return str(val)
 
 
-def extract_title(content: str) -> str:
+def extract_body(content: str) -> str:
+    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+    return content[match.end() :] if match else content
+
+
+def extract_title_from_body(body: str) -> str:
     """Extracts H1 title from task body (ATX-style '# Title' headings only; Setext not supported)."""
-    _, body = parse_frontmatter(content)
     body_no_code = re.sub(r"```.*?```", "", body, flags=re.DOTALL)
     for line in body_no_code.splitlines():
         if line.startswith("# "):
             return line[2:].strip()
     return ""
+
+
+def extract_title(content: str) -> str:
+    """Extracts H1 title from task body (ATX-style '# Title' headings only; Setext not supported)."""
+    body = extract_body(content)
+    return extract_title_from_body(body)
 
 
 def extract_runin(content: str, label: str) -> str:
@@ -815,7 +825,7 @@ def extract_runin(content: str, label: str) -> str:
     Returns the label's prose with internal newlines collapsed, or '' when the
     label is absent. Mirrors the run-in layout written by 'create'/'update'.
     """
-    _, body = parse_frontmatter(content)
+    body = extract_body(content)
     body = re.sub(r"```.*?```", "", body, flags=re.DOTALL)
     m = re.search(
         rf"\*\*{re.escape(label)}:\*\*(.*?)(?=(\n\n\*\*|\n\n#|\Z))",
@@ -916,12 +926,20 @@ def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
             content = f.read_text(encoding="utf-8")
         except OSError:
             continue
-        task_id = extract_frontmatter_field(content, "id")
-        status = extract_frontmatter_field(content, "status")
-        title = extract_title(content)
+        fm, body = parse_frontmatter(content)
+        task_id = str(fm.get("id", ""))
+        if not task_id:
+            m = re.search(r"^id:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
+            if m:
+                task_id = m.group(1).strip().strip("'\"")
+        status = str(fm.get("status", ""))
+        if not status:
+            m = re.search(r"^status:\s*(.+)$", content, re.MULTILINE | re.IGNORECASE)
+            if m:
+                status = m.group(1).strip().strip("'\"")
+        title = extract_title_from_body(body)
         rel_path = str(f.relative_to(root))
         project = Path(rel_path).as_posix().split("/")[0]
-        fm, _ = parse_frontmatter(content)
         rows.append(
             TaskRow(
                 project,
@@ -1139,9 +1157,21 @@ def find_adr_cycles(rows: list[AdrRow]) -> list[list[str]]:
     return cycles
 
 
-def build_status_block(root: Path, project_name: str) -> str:
-    rows = get_task_rows(root, project_name)
-    index = status_index(root)
+def build_status_block(
+    root: Path,
+    project_name: str,
+    all_rows: list[TaskRow] | None = None,
+    index: dict[str, str] | None = None,
+) -> str:
+    if all_rows is not None:
+        rows = [r for r in all_rows if r.project == project_name]
+    else:
+        rows = get_task_rows(root, project_name)
+    if index is None:
+        if all_rows is not None:
+            index = {r.task_id: r.status for r in all_rows if r.task_id}
+        else:
+            index = status_index(root)
     in_progress = [r for r in rows if r.status == "in-progress"]
     # Declared blocked, or held by an unresolved edge. In-progress wins the
     # row so the two sections stay disjoint; doctor reports the contradiction.
@@ -1226,10 +1256,15 @@ def has_commit_auth(root: Path) -> bool:
     )
 
 
-def render_status_file(root: Path, project_name: str) -> str:
+def render_status_file(
+    root: Path,
+    project_name: str,
+    all_rows: list[TaskRow] | None = None,
+    index: dict[str, str] | None = None,
+) -> str:
     proj_dir = root / project_name
     status_file = proj_dir / "STATUS.md"
-    new_block = build_status_block(root, project_name)
+    new_block = build_status_block(root, project_name, all_rows=all_rows, index=index)
 
     if not status_file.is_file():
         return f"# Status\n\n## Summary\n\n{new_block}\n\n## Next\n"
@@ -1241,11 +1276,16 @@ def render_status_file(root: Path, project_name: str) -> str:
     return content.rstrip() + f"\n\n{new_block}\n"
 
 
-def sync_status(root: Path, project_name: str) -> bool:
+def sync_status(
+    root: Path,
+    project_name: str,
+    all_rows: list[TaskRow] | None = None,
+    index: dict[str, str] | None = None,
+) -> bool:
     """Returns True if file was updated/created, False if already identical."""
     proj_dir = root / project_name
     status_file = proj_dir / "STATUS.md"
-    rendered = render_status_file(root, project_name)
+    rendered = render_status_file(root, project_name, all_rows=all_rows, index=index)
     try:
         rendered = format_markdown(rendered)
     except Exception:
@@ -1578,6 +1618,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
     # 4. Duplicate global task IDs
     all_rows = get_task_rows(root)
+    status_idx = {r.task_id: r.status for r in all_rows if r.task_id}
     seen_ids: dict[str, int] = {}
     for r in all_rows:
         if r.task_id:
@@ -1797,7 +1838,9 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
         # Check STATUS.md snapshot drift
         if status_file.is_file():
             current_status = status_file.read_text(encoding="utf-8")
-            rendered = render_status_file(root, name)
+            rendered = render_status_file(
+                root, name, all_rows=all_rows, index=status_idx
+            )
             try:
                 rendered = format_markdown(rendered)
             except Exception:
@@ -1821,7 +1864,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     )
                 )
 
-            rows = get_task_rows(root, name)
+            rows = [r for r in all_rows if r.project == name]
             active = sum(1 for r in rows if r.status == "in-progress")
             prose = re.sub(
                 re.escape(BEGIN) + r".*?" + re.escape(END),
@@ -1941,8 +1984,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
     # Dependency edges. Never auto-remediated: an invented or removed edge is
     # worse than an absent one, so every finding here needs human review.
-    all_rows = get_task_rows(root)
-    index = {r.task_id: r.status for r in all_rows if r.task_id}
+    index = status_idx
     scoped_rows = [
         r for r in all_rows if not target_project or r.project == target_project
     ]
@@ -2723,9 +2765,11 @@ def cmd_sync(
         return
 
     projects = list_projects(root)
+    all_rows = get_task_rows(root)
+    index = {r.task_id: r.status for r in all_rows if r.task_id}
     any_updated = False
     for p in projects:
-        if sync_status(root, p):
+        if sync_status(root, p, all_rows=all_rows, index=index):
             any_updated = True
     if any_updated:
         print("updated")
