@@ -231,28 +231,107 @@ adb shell screencap -p /sdcard/preview.png && adb pull /sdcard/preview.png previ
 
 ### Method 3: Standalone Developer Renderer (Widget Tray Viewer)
 
-A preview helper app enabled exclusively on internal/developer builds of the
-`com.google.android.wearable.protolayout.renderer` package.
+`WidgetTrayActivity` is a vertical widget carousel ("tray") inside the
+standalone renderer package `com.google.android.wearable.protolayout.renderer`.
+While it runs, it registers `WidgetTrayReceiver`, which accepts ADB broadcasts
+to add, update, remove, list, and export widgets. This removes the need for UI
+automation.
 
-- **Verify Capability**: Check if `versionName` ends in `.exp` (e.g.,
-  `1.6.4.2.944934794.exp`) or verify activity presence via
-  `adb shell pm resolve-activity -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity`.
-- **Launch Command**:
+- **Renderer flavors**: The tray ships only in the emulator (`.emu`),
+  experimental (`.exp`), and developer (`.dev`) flavors (check the `versionName`
+  suffix). Release and `.dogfood` renderers do not have it. Probe for it with:
   ```bash
-  adb shell am start -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+  adb shell cmd package resolve-activity --brief \
+    -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+  # Prints the component name if present, or "No activity found"
   ```
-- **Widget Centering via Spacer Widgets**: Inside `WidgetTrayActivity`, widget
-  cards placed at the top of the `ScalingLazyColumn` can be pushed into the
-  upper half of the display above the circular center. To center the target
-  widget cleanly for screen captures, add a separate dummy or "spacer" widget
-  (such as one of the reference widgets from
-  `/usr/local/google/home/stillers/workspace/wear-os-samples/WearWidget`) above
-  the target widget to shift it down into the vertical center of the round
-  screen.
-- **Screenshot Invariant**: Always use `adb-screenshot` (which verifies awake
+- **Add and remove widgets**: Prefer the helpers when they are available in your
+  workspace. They launch the tray if needed, check for the tray first, retry
+  until the receiver registers, and wait until the widget is rendered:
+  ```bash
+  adb-tile-add --vertical --type LARGE <PACKAGE>/<SERVICE_CLASS>
+  # => Added/activated widget ID: 10001
+  adb-tile-remove --vertical 10001            # by widget ID
+  adb-tile-remove --vertical <PACKAGE>/<SERVICE_CLASS>   # all instances
+  ```
+- **Raw broadcasts**: Use raw broadcasts for actions the helpers do not cover.
+  Always scope them with `-p` to the renderer package. Results are compact JSON
+  in the ordered-broadcast `data`: `result=-1` for success, `result=0` for
+  errors. A broadcast sent right after `am start` can return `result=0` with no
+  data because the receiver is not registered yet, so retry for a few seconds.
+  ```bash
+  R=com.google.android.wearable.protolayout.renderer
+  A=com.google.android.clockwork.prototiles.action
+  adb shell am start -W -n $R/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+
+  # Request fresh content from a widget's provider (by ID or component)
+  adb shell am broadcast -p $R -a $A.UPDATE_WIDGET --ei widget_id 10001
+
+  # Render a raw .rc document without installing its app (base64 payload)
+  adb shell am broadcast -p $R -a $A.UPLOAD_DOC_WIDGET \
+    --es doc_b64 "$(base64 -w0 widget.rc)" --es container_type LARGE
+  ```
+  Pass widget IDs as integers (`--ei widget_id`). Component names with a `/`
+  must match exactly. Short names such as `WeatherWidgetService` are matched
+  case-insensitively against installed widget providers.
+- **List tray widgets (`GET_WIDGETS`)**: Returns every widget currently in the
+  tray. Use it to reset the tray before a capture instead of guessing which
+  widgets are left over from earlier sessions:
+  ```bash
+  adb shell am broadcast -p $R -a $A.GET_WIDGETS
+  # => result=-1, data="{"status":"OK","action":"GET_WIDGETS","widgets":[
+  #      {"widgetId":10001,"component":"<PACKAGE>/<SERVICE_CLASS>",
+  #       "containerType":1,"containerTypeString":"LARGE"}]}"
+  ```
+  Older tray builds do not support `GET_WIDGETS` or `DUMP_RC_DOC`. They keep
+  answering `result=0` with no data even after the retry window, so treat that
+  as "unsupported renderer" and update the renderer.
+- **Export a rendered widget as `.rc` (`DUMP_RC_DOC`)**: Writes the Remote
+  Compose document that the tray is currently rendering to the renderer's cache
+  directory. It returns the rendering context alongside: screen size and
+  density, container and content box sizes in dp and px, corner radius, font
+  scale, time zone, and the dynamic Material 3 theme colors (`theme`, a map of
+  `WearM3.*` to `#AARRGGBB`). Use it to replay a widget exactly as the device
+  rendered it, or to diff documents between app versions:
+  ```bash
+  adb shell am broadcast -p $R -a $A.DUMP_RC_DOC --ei widget_id 10001
+  # => result=-1, data="{"package_name":"...","container_type":"LARGE",
+  #      "content_width_px":334,"content_height_px":192,...,"doc_size_bytes":495,
+  #      "file":"/data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc",
+  #      "theme":{...},"status":"OK","action":"DUMP_RC_DOC","widgetId":10001}"
+  ```
+  - Dumping by component (`--es component <name>`) returns
+    `"status":"MULTIPLE_WIDGETS"` and a `widgets` list when several instances
+    match. Pick one and repeat with `--ei widget_id`.
+  - Documents added with `UPLOAD_DOC_WIDGET` show up in `GET_WIDGETS` as
+    `.../com.google.android.clockwork.prototiles.renderer.experimental.UploadedDocWidget`
+    and can be dumped by ID. An exported `.rc` file re-uploads and dumps back
+    byte-identical, so a document captured on one device can be replayed on
+    another.
+  - Errors return `result=0` and `{"status":"ERROR","message":...}`, for example
+    `No active widget found for widgetId N`.
+    `Tile N is not a Remote Compose tile.` also appears while the provider has
+    not delivered content yet.
+  - **Pulling the file requires root.** The `pull_command` in the result uses
+    `run-as`, which fails for this privileged app. Use `adb root` on emulator
+    images that allow it, or `su` on userdebug devices. User builds cannot pull
+    the file. Check the byte count against `doc_size_bytes`:
+    ```bash
+    adb root   # emulator
+    adb exec-out cat /data/user/0/$R/cache/10001_rc_doc.rc > widget.rc
+    # userdebug device instead:
+    adb exec-out su 0 cat /data/user/0/$R/cache/10001_rc_doc.rc > widget.rc
+    ```
+- **Logs**: `adb logcat -s WidgetTrayReceiver`. Emulator (`.emu`) builds strip
+  info and debug logs, so read results from the broadcast `data` instead.
+- **Widget centering**: A single widget at the top of the tray sits above the
+  circular center and its top corners can clip against the bezel. Before
+  capturing, either swipe down slightly
+  (`adb shell input swipe 204 150 204 250 300` on a 408x408 display) or add a
+  spacer widget above the target.
+- **Screenshot invariant**: Always use `adb-screenshot` (which verifies awake
   state and applies circular masking) rather than raw `screencap` when capturing
   assets for reports or audits.
-- Use UI automation tools for automated interaction inside the renderer list.
 
 ______________________________________________________________________
 

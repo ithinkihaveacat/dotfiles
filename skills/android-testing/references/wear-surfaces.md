@@ -32,6 +32,17 @@ To automate Tile testing, do not write custom scripts or send raw SysUI intents.
   - Bringing a specific Tile to the foreground.
   - Listing all currently active Tiles on the device.
 
+### Widgets in the Standalone Renderer Tray
+
+Emulator (`.emu`), experimental (`.exp`), and developer (`.dev`) builds of the
+`com.google.android.wearable.protolayout.renderer` package include
+`WidgetTrayActivity`, a vertical widget carousel. You can drive it entirely over
+ADB broadcasts, so there is no need for UI automation: add, update, and remove
+widgets, list them (`GET_WIDGETS`), upload a raw `.rc` document, and export a
+rendered widget as `.rc` with its rendering context (`DUMP_RC_DOC`). Use the
+`wear-widget` skill (Method 3) for the commands, and `adb-tile-add --vertical` /
+`adb-tile-remove --vertical` where available.
+
 ______________________________________________________________________
 
 ## Complications & Watch Faces
