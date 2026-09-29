@@ -151,9 +151,9 @@ Usage: permission <command> [arguments]
 
 Manage agent tool permissions (allow/deny/ask rules) across all detected
 local agents. Rules are written as clean command patterns (e.g. "git show");
-each agent backend translates to its native syntax. Note: rules are
-workspace-local for Claude Code and user-wide for Antigravity (as defined
-by each agent's configuration model).
+each agent backend translates them to its native syntax. Scope and meaning
+follow each agent's own configuration model, so the same rule can grant
+different things to different agents (see Agents below).
 
 Commands:
   add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
@@ -171,9 +171,26 @@ Options:
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
-  agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
-  claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
-  codex              Codex CLI (workspace-local: .codex/rules/permission.rules, untracked)
+  agy, jetski        Antigravity / Jetski CLI. User-wide: rules live in
+                     ~/.gemini/antigravity-cli/settings.json (agy) or
+                     ~/.gemini/jetski/cli/settings.json (jetski) and apply to
+                     every workspace. Patterns become command(regex:...) rules
+                     that also match the command when invoked by path.
+  claude             Claude Code. Workspace-local: rules live in the untracked
+                     .claude/settings.local.json. Patterns become
+                     Bash(PATTERN:*) prefix rules; deny beats ask beats allow.
+                     'allow' only skips the approval prompt and leaves Claude
+                     Code's sandbox settings unchanged.
+  codex              Codex CLI. Workspace-local: rules live in the untracked
+                     .codex/rules/permission.rules, which Codex loads only for
+                     trusted projects. Patterns become prefix_rule() token
+                     prefixes; ask and deny map to Codex's prompt and
+                     forbidden, and the most restrictive match wins. 'allow'
+                     also runs the command outside the Codex sandbox without
+                     prompting, a stronger grant than the other agents give.
+
+Claude Code and Codex match the command name as typed, so a rule for "tool"
+does not cover an invocation of /path/to/tool.
 ```
 
 <!-- /generated -->
