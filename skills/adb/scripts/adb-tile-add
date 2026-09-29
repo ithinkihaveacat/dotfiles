@@ -9,10 +9,14 @@ shows the tile after it has been added (no separate call to adb-tile-switch is
 needed).
 
 Note on Output:
-  The script extracts the tile index from the system broadcast output (e.g., 'Index=[0]').
-  'Index=[0]' means the tile was added to the first position in the carousel,
-  pushing others down. It does not mean it overwrote previous tiles.
-  Use 'adb-tiles' to list all installed tiles and see which are in the carousel.
+  In default SysUI carousel mode, the script extracts the tile index from the
+  system broadcast output (e.g., 'Index=[0]'). 'Index=[0]' means the tile was
+  added to the first position in the carousel, pushing others down. It does not
+  mean it overwrote previous tiles. Use 'adb-tiles' to list all installed tiles
+  and see which are in the carousel.
+  In --vertical mode, the script opens WidgetTrayActivity if needed, sends
+  ADD_WIDGET to com.google.android.wearable.protolayout.renderer, and prints the
+  assigned widgetId (e.g., 'Added/activated widget ID: 10001').
 
 Arguments:
   COMPONENT_NAME  A string composed of the package name and a class in that
@@ -22,9 +26,13 @@ Arguments:
 Options:
   -s, --serial SERIAL
                   Target device serial; must precede arguments or commands.
+  --vertical      Add the widget to the standalone renderer's vertical carousel
+                  (WidgetTrayActivity) instead of the SysUI horizontal carousel.
+                  Requires the .emu, .exp, or .dev renderer flavor.
   --type TYPE     Tile type: FULLSCREEN, LARGE (default), or SMALL. Only applies
                   to tiles supporting the BIND_WIDGET_PROVIDER intent (e.g.,
-                  Glance-based tiles).
+                  Glance-based tiles). With --vertical, only LARGE and SMALL are
+                  supported.
   --no-show       Do not show the tile after adding it
   --wait          Wait for the tile to be visible (default)
   --no-wait       Do not wait for visibility (return immediately)
@@ -37,6 +45,7 @@ Environment:
 Examples:
   $(basename "$0") com.google.android.wearable.shell/.weather.WeatherTileService
   $(basename "$0") --type LARGE com.google.example.wear_widget/.HelloWidgetService
+  $(basename "$0") --vertical --type SMALL com.google.example.wear_widget/.HelloWidgetService
   $(basename "$0") --no-show com.google.example.wear_widget/.HelloWidgetService
 EOF
   exit 0
@@ -62,7 +71,10 @@ fi
 
 SHOW=true
 WAIT=true
+VERTICAL=false
+TYPE_STR="LARGE"
 TYPE_INT=1 # Default to LARGE
+COMPONENT_NAME=""
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -78,6 +90,10 @@ while [[ "$#" -gt 0 ]]; do
       export ANDROID_SERIAL="$2"
       shift 2
       ;;
+    --vertical)
+      VERTICAL=true
+      shift
+      ;;
     --no-show)
       SHOW=false
       shift
@@ -92,14 +108,23 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --type)
       shift
-      if [[ -z "$1" ]]; then
+      if [[ -z "${1:-}" ]]; then
         echo "Error: --type requires an argument (FULLSCREEN, LARGE, SMALL)" >&2
         exit 1
       fi
       case "$1" in
-        FULLSCREEN) TYPE_INT=0 ;;
-        LARGE) TYPE_INT=1 ;;
-        SMALL) TYPE_INT=2 ;;
+        FULLSCREEN)
+          TYPE_STR="FULLSCREEN"
+          TYPE_INT=0
+          ;;
+        LARGE)
+          TYPE_STR="LARGE"
+          TYPE_INT=1
+          ;;
+        SMALL)
+          TYPE_STR="SMALL"
+          TYPE_INT=2
+          ;;
         *)
           echo "Error: Invalid type '$1'. Must be FULLSCREEN, LARGE, or SMALL." >&2
           exit 1
@@ -131,6 +156,11 @@ if [ -z "$COMPONENT_NAME" ]; then
   exit 1
 fi
 
+if [[ "$VERTICAL" == true && "$TYPE_STR" == "FULLSCREEN" ]]; then
+  echo "$(basename "$0"): FULLSCREEN is not supported with --vertical (use LARGE or SMALL)" >&2
+  exit 1
+fi
+
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     echo >&2 "$(basename "$0"): $1 not found"
@@ -142,7 +172,7 @@ require adb
 
 # Check device availability
 if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "$ANDROID_SERIAL" ]]; then
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
@@ -150,10 +180,24 @@ if ! adb get-state >/dev/null 2>&1; then
   exit 1
 fi
 
+RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
+TRAY_ACTIVITY="${RENDERER_PACKAGE}/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"
+TRAY_ACTION_ADD="com.google.android.clockwork.prototiles.action.ADD_WIDGET"
+
+if [[ "$VERTICAL" == true ]]; then
+  RESOLVE_OUT=$(adb shell cmd package resolve-activity --brief -n "$TRAY_ACTIVITY" 2>/dev/null | tr -d '\r')
+  if [[ "$RESOLVE_OUT" != *"$TRAY_ACTIVITY"* ]]; then
+    RENDERER_VER=$(adb shell dumpsys package "$RENDERER_PACKAGE" 2>/dev/null | tr -d '\r' | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
+    RENDERER_DESC="${RENDERER_PACKAGE}${RENDERER_VER:+ $RENDERER_VER}"
+    echo "$(basename "$0"): installed renderer ($RENDERER_DESC) lacks WidgetTrayActivity; --vertical requires the .emu, .exp, or .dev renderer flavor" >&2
+    exit 1
+  fi
+fi
+
 PACKAGE_NAME="${COMPONENT_NAME%%/*}"
 
 # Check if the package is installed
-if ! adb shell pm list packages | grep -q "^package:${PACKAGE_NAME}$"; then
+if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}$"; then
   echo "Error: Package '$PACKAGE_NAME' not found. Is the app installed?" >&2
   exit 1
 fi
@@ -163,11 +207,13 @@ fi
 # -----------------------------------------------------------------------------
 # Wear Widgets use a remote rendering architecture (Remote Compose).
 # The app generates a document and serializes it over a Binder IPC connection.
-# SysUI (via ProtoTilesTileRendererImpl) receives, deserializes, and renders it.
+# SysUI or WidgetTrayActivity (via ProtoTilesTileRendererImpl) receives,
+# deserializes, and renders it.
 #
 # Because of this IPC boundary, we cannot rely on app-level logs or just "sleep".
-# Failures happen asynchronously AFTER the initial 'add-tile' broadcast.
-# We explicitly detect known failure modes to fail fast and prevent false positives:
+# Failures happen asynchronously AFTER the initial 'add-tile' or 'ADD_WIDGET'
+# broadcast. We explicitly detect known failure modes to fail fast and prevent
+# false positives:
 #
 #   1. Binder Overload: Sending large unscaled images exceeds
 #      the ~1MB Binder IPC limit. (b/488353353)
@@ -179,24 +225,33 @@ fi
 #   3. Renderer Timeouts: The provider hung or crashed silently before responding.
 #      Result: 'Error getting tile response' in the renderer.
 #
-# Visibility Heuristics:
-# SysUI provides two distinct signals for a successful addition:
-#   - Signal 1 (Container): SysUI allocates the carousel slot and shifts focus.
-#     (e.g., "Visible tile added", "Jumped to the tile")
-#   - Signal 2 (Content): The renderer has received and parsed the app's data.
-#     (e.g., "Received tile content", "Rendering tile")
+# Visibility Heuristics (Two-Signal State Machine):
+# Both SysUI and WidgetTrayActivity (--vertical) emit two distinct signals:
+#   - Signal 1 (Container):
+#     * SysUI allocates the carousel slot and shifts focus
+#       ("Visible tile added", "onVisibleTileAdded", "Jumped to the tile").
+#     * WidgetTrayActivity attaches the Compose AndroidView container to
+#       ProtoTilesTileRendererImpl ("Attaching Tile to a container").
+#   - Signal 2 (Content & Inflation):
+#     * ProtoTilesTileRendererImpl receives the provider's RemoteCompose
+#       payload ("Received tile content") and inflates it into the attached
+#       container ("Rendering tile"). In TileRendererImpl.java, "Rendering tile"
+#       is only logged inside inflateIfNeededAndAttach() when BOTH a container
+#       is attached AND valid tile data has been set.
 #
-# We wait for Signal 2 to ensure that automated tools (like screenshots) don't
-# capture the tile in its transient "loading" state (generic app icon).
+# We wait for Signal 2 (followed by a post-render failure check) so automated
+# tools (like screenshots) never capture a blank slot or loading icon, and so
+# synchronous inflation exceptions ("Failed to render and attach the tile")
+# thrown right after "Rendering tile" are caught reliably.
 #
-# Robustness: Signal 2 logs can be inconsistent across OS versions. If Signal 1
-# is confirmed, we only wait a short grace period (~3s) for Signal 2 before
-# assuming success, preventing a full timeout if the rendering log was missed.
+# Robustness: If Signal 1 is confirmed, we bound the additional wait for
+# Signal 2 to a short grace period (~3s) before proceeding to the post-render
+# check, preventing a full 15s timeout if a rendering log line was suppressed.
 # -----------------------------------------------------------------------------
 
 LOG_FILE=""
 LOG_PID=""
-if [ "$WAIT" = true ] && [ "$SHOW" = true ]; then
+if [ "$WAIT" = true ] && { [ "$SHOW" = true ] || [ "$VERTICAL" = true ]; }; then
   LOG_FILE=$(mktemp)
   if [ ! -w "$LOG_FILE" ]; then
     echo "Error: Could not create writable temporary file for logcat monitoring." >&2
@@ -223,8 +278,172 @@ if [ "$WAIT" = true ] && [ "$SHOW" = true ]; then
   ' EXIT INT TERM
 fi
 
+check_render_failures() {
+  local phase="$1"
+  if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
+    # b/488353353
+    echo "Error: Remote Compose App Crash detected (${phase})!" >&2
+    echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException) or a local runtime crash." >&2
+    grep -A 5 "FATAL EXCEPTION" "$LOG_FILE" >&2
+    exit 1
+  fi
+  if grep -q "Error getting tile response" "$LOG_FILE"; then
+    echo "Error: Renderer timed out getting the tile response (${phase})." >&2
+    echo "The provider may have hung or crashed silently before responding." >&2
+    grep "Error getting tile response" "$LOG_FILE" >&2
+    exit 1
+  fi
+  if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
+    # b/473745800
+    echo "Error: Renderer failed to parse or attach the document (${phase})." >&2
+    echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)." >&2
+    grep -A 2 "Failed to render and attach the tile" "$LOG_FILE" >&2
+    exit 1
+  fi
+}
+
+wait_for_tile_visibility() {
+  echo "Waiting for tile visibility..."
+  local start_time
+  start_time=$(date +%s)
+  local timeout=15
+  local visible=false
+  local visible_time=0
+
+  while true; do
+    local current_time
+    current_time=$(date +%s)
+    local elapsed=$((current_time - start_time))
+
+    # Check if logcat background process died unexpectedly
+    if ! kill -0 "$LOG_PID" 2>/dev/null; then
+      echo "Error: Background logcat process died unexpectedly. Cannot verify visibility." >&2
+      exit 1
+    fi
+
+    # Check if device disconnected
+    if ! adb get-state >/dev/null 2>&1; then
+      echo "Error: Device disconnected during visibility check." >&2
+      exit 1
+    fi
+
+    # Check for Container Visibility (Success Signal 1)
+    if [ "$visible" = false ]; then
+      if [ "$VERTICAL" = true ]; then
+        if grep -Eq "(Attaching Tile to a container|Rendering tile).*$PACKAGE_NAME" "$LOG_FILE"; then
+          visible=true
+          visible_time=$current_time
+        fi
+      elif grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile|Index=\[|show-tile" "$LOG_FILE"; then
+        visible=true
+        visible_time=$current_time
+      fi
+    fi
+
+    # Check for Content Rendering (Success Signal 2)
+    if [ "$visible" = true ]; then
+      if [ "$VERTICAL" = true ]; then
+        # In TileRendererImpl.java, "Rendering tile" is logged only when both
+        # the container is attached and valid tile content has been received.
+        if grep -Eq "Rendering tile.*$PACKAGE_NAME" "$LOG_FILE"; then
+          break
+        fi
+      elif grep -Eq "(Received tile content|Rendering tile|provideWidgetData|ProtoTiles).*$PACKAGE_NAME" "$LOG_FILE"; then
+        break
+      fi
+
+      # Robustness: If the container is attached/visible, don't wait more than
+      # 3 seconds for the specific rendering log.
+      if [ $((current_time - visible_time)) -ge 3 ]; then
+        break
+      fi
+    fi
+
+    # --- Failure Detection (Pre-Visibility) ---
+    check_render_failures "pre-visibility"
+
+    # Global timeout
+    if [ $elapsed -ge $timeout ]; then
+      if [ "$visible" = false ]; then
+        echo "Warning: Timeout waiting for tile visibility ($timeout s)." >&2
+        echo "The tile may be visible, but the success log was missed, or it's stuck loading." >&2
+      fi
+      break
+    fi
+
+    sleep "${ADB_TILE_RETRY_DELAY:-0.2}"
+  done
+
+  if [ "$visible" = true ]; then
+    # Continue monitoring briefly after "Rendering tile" / container visibility:
+    # TileRendererImpl logs "Rendering tile" right before calling
+    # RcTileViewInstance.renderAndAttach(), which may throw
+    # "Failed to render and attach the tile" or trigger an async crash.
+    sleep "${ADB_TILE_RENDER_DELAY:-0.8}"
+
+    # --- Failure Detection (Post-Visibility Buffer) ---
+    check_render_failures "post-visibility"
+    echo "Success: Tile is visible."
+  fi
+}
+
 # Workaround for a bug: force-stop the package to ensure a fresh bind
 adb shell am force-stop "$PACKAGE_NAME"
+
+if [[ "$VERTICAL" == true ]]; then
+  if [[ "$SHOW" == true ]]; then
+    adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
+  fi
+
+  WIDGET_ID=""
+  WIDGET_ID_RE='"widgetId":[[:space:]]*([0-9]+)'
+  ERROR_MSG_RE='"message":"([^"]+)"'
+  STARTED_TRAY="$SHOW"
+
+  for _ in {1..15}; do
+    OUTPUT=$(adb shell am broadcast \
+      -p "$RENDERER_PACKAGE" \
+      -a "$TRAY_ACTION_ADD" \
+      --es component "$COMPONENT_NAME" \
+      --es container_type "$TYPE_STR" | tr -d '\r')
+
+    if [[ "$OUTPUT" == *"result=-1"* && "$OUTPUT" =~ $WIDGET_ID_RE ]]; then
+      WIDGET_ID="${BASH_REMATCH[1]}"
+      break
+    fi
+
+    if [[ "$OUTPUT" == *'"status":"ERROR"'* ]]; then
+      if [[ "$OUTPUT" =~ $ERROR_MSG_RE ]]; then
+        echo "$(basename "$0"): ${BASH_REMATCH[1]}" >&2
+      else
+        echo "$(basename "$0"): ADD_WIDGET failed: $OUTPUT" >&2
+      fi
+      exit 1
+    fi
+
+    if [[ "$STARTED_TRAY" == false ]]; then
+      adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
+      STARTED_TRAY=true
+      continue
+    fi
+
+    sleep "${ADB_TILE_RETRY_DELAY:-0.5}"
+  done
+
+  if [[ -z "$WIDGET_ID" ]]; then
+    echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle ADD_WIDGET:" >&2
+    echo "$OUTPUT" >&2
+    exit 1
+  fi
+
+  echo "Added/activated widget ID: $WIDGET_ID"
+
+  if [[ "$WAIT" == true ]]; then
+    wait_for_tile_visibility
+  fi
+
+  exit 0
+fi
 
 # Add the tile and capture output
 OUTPUT=$(adb shell am broadcast \
@@ -256,112 +475,8 @@ if [ -n "$INDEX" ]; then
       --es operation show-tile \
       --ei index "$INDEX" >/dev/null
 
-    # Wait logic
     if [ "$WAIT" = true ]; then
-      echo "Waiting for tile visibility..."
-      START_TIME=$(date +%s)
-      TIMEOUT=15
-      VISIBLE=false
-      VISIBLE_TIME=0
-
-      while true; do
-        CURRENT_TIME=$(date +%s)
-        ELAPSED=$((CURRENT_TIME - START_TIME))
-
-        # Check if logcat background process died unexpectedly
-        if ! kill -0 "$LOG_PID" 2>/dev/null; then
-          echo "Error: Background logcat process died unexpectedly. Cannot verify visibility."
-          exit 1
-        fi
-
-        # Check if device disconnected
-        if ! adb get-state >/dev/null 2>&1; then
-          echo "Error: Device disconnected during visibility check."
-          exit 1
-        fi
-
-        # Check for Container Visibility (Success Signal 1)
-        if [ "$VISIBLE" = false ] && grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile|Index=\[|show-tile" "$LOG_FILE"; then
-          VISIBLE=true
-          VISIBLE_TIME=$CURRENT_TIME
-        fi
-
-        # Check for Content Rendering (Success Signal 2)
-        if [ "$VISIBLE" = true ]; then
-          # If we find evidence of rendering, we are done.
-          if grep -Eq "(Received tile content|Rendering tile|provideWidgetData|ProtoTiles).*$PACKAGE_NAME" "$LOG_FILE"; then
-            break
-          fi
-
-          # Robustness: If the container is visible, don't wait more than 3 seconds for
-          # the specific rendering log. Some devices or tile types might not emit it.
-          if [ $((CURRENT_TIME - VISIBLE_TIME)) -ge 3 ]; then
-            break
-          fi
-        fi
-
-        # Global timeout
-        if [ $ELAPSED -ge $TIMEOUT ]; then
-          if [ "$VISIBLE" = false ]; then
-            echo "Warning: Timeout waiting for tile visibility ($TIMEOUT s)."
-            echo "The tile may be visible, but the success log was missed, or it's stuck loading."
-          fi
-          break
-        fi
-
-        # --- Failure Detection (Pre-Visibility) ---
-        if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
-          # b/488353353
-          echo "Error: Remote Compose App Crash detected!"
-          echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException) or a local runtime crash."
-          grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Error getting tile response" "$LOG_FILE"; then
-          echo "Error: Renderer timed out getting the tile response."
-          echo "The provider may have hung or crashed silently before responding."
-          grep "Error getting tile response" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
-          # b/473745800
-          echo "Error: Renderer failed to parse or attach the document."
-          echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)."
-          grep -A 2 "Failed to render and attach the tile" "$LOG_FILE"
-          exit 1
-        fi
-
-        sleep 0.2
-      done
-
-      if [ "$VISIBLE" = true ]; then
-        # Continue monitoring for a short buffer. SysUI says the container is
-        # visible, but the renderer might still throw an async parsing exception
-        # a few hundred milliseconds later.
-        sleep 1.5
-
-        # --- Failure Detection (Post-Visibility Buffer) ---
-        if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
-          # b/488353353
-          echo "Error: Remote Compose App Crash detected immediately after visibility!"
-          echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException)."
-          grep -A 5 "FATAL EXCEPTION" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Error getting tile response" "$LOG_FILE"; then
-          echo "Error: Renderer timed out getting the tile response after visibility."
-          grep "Error getting tile response" "$LOG_FILE"
-          exit 1
-        fi
-        if grep -q "Failed to render and attach the tile" "$LOG_FILE"; then
-          # b/473745800
-          echo "Error: Renderer rejected the document after visibility."
-          echo "This is typically caused by unsupported Remote Compose modifiers (e.g., alpha, blur)."
-          grep -A 2 "Failed to render and attach the tile" "$LOG_FILE"
-          exit 1
-        fi
-        echo "Success: Tile is visible."
-      fi
+      wait_for_tile_visibility
     fi
   fi
 else

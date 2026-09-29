@@ -5,15 +5,21 @@ usage() {
 Usage: $(basename "$0") [OPTIONS] COMPONENT_NAME
 
 Removes all tile instances on the carousel associated with COMPONENT_NAME.
+With --vertical, removes widgets from the standalone renderer's vertical carousel
+(WidgetTrayActivity) by component name or numeric widgetId.
 
 Arguments:
   COMPONENT_NAME  A string composed of the package name and a class in that
-                  package, for example:
+                  package (or a numeric widgetId when --vertical is used), for
+                  example:
                   com.example.wear.tiles/com.example.wear.tiles.PreviewTileService
 
 Options:
   -s, --serial SERIAL
                   Target device serial; must precede arguments or commands.
+  --vertical      Remove the widget from the standalone renderer's vertical
+                  carousel (WidgetTrayActivity) instead of the SysUI horizontal
+                  carousel. Requires the .emu, .exp, or .dev renderer flavor.
   --help          Display this help message and exit
 
 Environment:
@@ -22,6 +28,8 @@ Environment:
 
 Examples:
   $(basename "$0") com.google.android.wearable.shell/.weather.WeatherTileService
+  $(basename "$0") --vertical com.google.example.wear_widget/.HelloWidgetService
+  $(basename "$0") --vertical 10001
 EOF
   exit 0
 }
@@ -40,9 +48,20 @@ EOF
   exit 1
 }
 
+if [[ $# -eq 0 ]]; then
+  usage_short
+fi
+
+VERTICAL=false
+COMPONENT_NAME=""
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -s | --serial)
+      if [[ -n "${COMPONENT_NAME:-}" ]]; then
+        echo "$(basename "$0"): $1 must precede arguments or commands" >&2
+        exit 1
+      fi
       if [[ -z "${2:-}" ]]; then
         echo "$(basename "$0"): $1 option requires an argument" >&2
         exit 1
@@ -50,25 +69,30 @@ while [[ $# -gt 0 ]]; do
       export ANDROID_SERIAL="$2"
       shift 2
       ;;
+    --vertical)
+      VERTICAL=true
+      shift
+      ;;
     --help | -h)
       usage
       ;;
-    *)
-      break
-      ;;
-  esac
-done
-
-for arg in "${@:2}"; do
-  case "$arg" in
-    -s | --serial)
-      echo "$(basename "$0"): $arg must precede arguments or commands" >&2
+    -*)
+      echo "$(basename "$0"): unknown option '$1'" >&2
       exit 1
       ;;
+    *)
+      if [[ -z "$COMPONENT_NAME" ]]; then
+        COMPONENT_NAME="$1"
+      else
+        echo "$(basename "$0"): unexpected argument '$1'" >&2
+        exit 1
+      fi
+      shift
+      ;;
   esac
 done
 
-if [ -z "$1" ]; then
+if [[ -z "$COMPONENT_NAME" ]]; then
   usage_short
 fi
 
@@ -83,7 +107,7 @@ require adb
 
 # Check device availability
 if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "$ANDROID_SERIAL" ]]; then
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
@@ -91,11 +115,56 @@ if ! adb get-state >/dev/null 2>&1; then
   exit 1
 fi
 
-COMPONENT_NAME="$1"
+if [[ "$VERTICAL" == true ]]; then
+  RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
+  TRAY_ACTIVITY="${RENDERER_PACKAGE}/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"
+  TRAY_ACTION_REMOVE="com.google.android.clockwork.prototiles.action.REMOVE_WIDGET"
+
+  RESOLVE_OUT=$(adb shell cmd package resolve-activity --brief -n "$TRAY_ACTIVITY" 2>/dev/null | tr -d '\r')
+  if [[ "$RESOLVE_OUT" != *"$TRAY_ACTIVITY"* ]]; then
+    RENDERER_VER=$(adb shell dumpsys package "$RENDERER_PACKAGE" 2>/dev/null | tr -d '\r' | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
+    RENDERER_DESC="${RENDERER_PACKAGE}${RENDERER_VER:+ $RENDERER_VER}"
+    echo "$(basename "$0"): installed renderer ($RENDERER_DESC) lacks WidgetTrayActivity; --vertical requires the .emu, .exp, or .dev renderer flavor" >&2
+    exit 1
+  fi
+
+  if [[ "$COMPONENT_NAME" =~ ^[0-9]+$ ]]; then
+    OUTPUT=$(adb shell am broadcast \
+      -p "$RENDERER_PACKAGE" \
+      -a "$TRAY_ACTION_REMOVE" \
+      --ei widget_id "$COMPONENT_NAME" | tr -d '\r')
+  else
+    if [[ "$COMPONENT_NAME" == */* ]]; then
+      PACKAGE_NAME="${COMPONENT_NAME%%/*}"
+      if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}$"; then
+        echo "Error: Package '$PACKAGE_NAME' not found. Is the app installed?" >&2
+        exit 1
+      fi
+    fi
+    OUTPUT=$(adb shell am broadcast \
+      -p "$RENDERER_PACKAGE" \
+      -a "$TRAY_ACTION_REMOVE" \
+      --es component "$COMPONENT_NAME" | tr -d '\r')
+  fi
+
+  if [[ "$OUTPUT" == *'"status":"ERROR"'* ]]; then
+    ERROR_MSG_RE='"message":"([^"]+)"'
+    if [[ "$OUTPUT" =~ $ERROR_MSG_RE ]]; then
+      echo "$(basename "$0"): ${BASH_REMATCH[1]}" >&2
+    else
+      echo "$(basename "$0"): REMOVE_WIDGET failed: $OUTPUT" >&2
+    fi
+    exit 1
+  fi
+
+  echo "$OUTPUT"
+  exit 0
+fi
+
 PACKAGE_NAME="${COMPONENT_NAME%%/*}"
 
 # Check if the package is installed
-if ! adb shell pm list packages | grep -q "^package:${PACKAGE_NAME}$"; then
+if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}$"; then
   echo "Error: Package '$PACKAGE_NAME' not found. Is the app installed?" >&2
   exit 1
 fi

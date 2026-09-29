@@ -16,6 +16,10 @@ set -x TZ Europe/London
 # See ~/.gradle/init.d/compose-ai-tools.gradle for details.
 set -gx COMPOSE_AI_TOOLS true
 
+# Prevent compose-preview installer from modifying shell startup files
+# (https://github.com/yschimke/skills/issues/108). Revert once fixed upstream.
+set -gx MODIFY_PATH 0
+
 # personal config
 
 set -x GITROOT "git@github.com:ithinkihaveacat"

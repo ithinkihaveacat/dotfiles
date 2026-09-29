@@ -78,14 +78,79 @@ adb exec-out screenrecord --output-format=raw-frames --size SIZE --bit-rate BITR
 
 ### `scripts/adb-tile-add`
 
-**Purpose**: Add a tile component for debugging. **Dependencies**: `adb`
-**Usage**: `scripts/adb-tile-add com.example/.MyTileService` **Raw Command**:
+**Purpose**: Add a tile or widget component for debugging (SysUI horizontal
+carousel by default, or standalone renderer `WidgetTrayActivity` with
+`--vertical`). **Dependencies**: `adb`
+
+<!-- generated: ../scripts/adb-tile-add --help -->
+
+```text
+Usage: adb-tile-add [OPTIONS] COMPONENT_NAME
+
+Adds a tile provided by COMPONENT_NAME to the carousel. The script automatically
+shows the tile after it has been added (no separate call to adb-tile-switch is
+needed).
+
+Note on Output:
+  In default SysUI carousel mode, the script extracts the tile index from the
+  system broadcast output (e.g., 'Index=[0]'). 'Index=[0]' means the tile was
+  added to the first position in the carousel, pushing others down. It does not
+  mean it overwrote previous tiles. Use 'adb-tiles' to list all installed tiles
+  and see which are in the carousel.
+  In --vertical mode, the script opens WidgetTrayActivity if needed, sends
+  ADD_WIDGET to com.google.android.wearable.protolayout.renderer, and prints the
+  assigned widgetId (e.g., 'Added/activated widget ID: 10001').
+
+Arguments:
+  COMPONENT_NAME  A string composed of the package name and a class in that
+                  package, for example:
+                  com.example.wear.tiles/com.example.wear.tiles.PreviewTileService
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --vertical      Add the widget to the standalone renderer's vertical carousel
+                  (WidgetTrayActivity) instead of the SysUI horizontal carousel.
+                  Requires the .emu, .exp, or .dev renderer flavor.
+  --type TYPE     Tile type: FULLSCREEN, LARGE (default), or SMALL. Only applies
+                  to tiles supporting the BIND_WIDGET_PROVIDER intent (e.g.,
+                  Glance-based tiles). With --vertical, only LARGE and SMALL are
+                  supported.
+  --no-show       Do not show the tile after adding it
+  --wait          Wait for the tile to be visible (default)
+  --no-wait       Do not wait for visibility (return immediately)
+  --help          Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-tile-add com.google.android.wearable.shell/.weather.WeatherTileService
+  adb-tile-add --type LARGE com.google.example.wear_widget/.HelloWidgetService
+  adb-tile-add --vertical --type SMALL com.google.example.wear_widget/.HelloWidgetService
+  adb-tile-add --no-show com.google.example.wear_widget/.HelloWidgetService
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
+# Default (SysUI horizontal carousel)
 adb shell am broadcast \
   -a com.google.android.wearable.app.DEBUG_SURFACE \
   --es operation add-tile \
-  --ecn component "com.example/.MyTileService"
+  --ecn component "com.example/.MyTileService" \
+  --ei type 1
+
+# Vertical carousel (--vertical, requires .emu/.exp/.dev renderer)
+adb shell am start -W -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+adb shell am broadcast \
+  -p com.google.android.wearable.protolayout.renderer \
+  -a com.google.android.clockwork.prototiles.action.ADD_WIDGET \
+  --es component "com.example/.MyWidgetService" \
+  --es container_type "LARGE"
 ```
 
 ### `scripts/adb-tile-switch`
@@ -102,14 +167,58 @@ adb shell am broadcast \
 
 ### `scripts/adb-tile-remove`
 
-**Purpose**: Remove a tile. **Dependencies**: `adb` **Usage**:
-`scripts/adb-tile-remove INDEX` **Raw Command**:
+**Purpose**: Remove a tile from the SysUI carousel or a widget from
+`WidgetTrayActivity` (`--vertical`). **Dependencies**: `adb`
+
+<!-- generated: ../scripts/adb-tile-remove --help -->
+
+```text
+Usage: adb-tile-remove [OPTIONS] COMPONENT_NAME
+
+Removes all tile instances on the carousel associated with COMPONENT_NAME.
+With --vertical, removes widgets from the standalone renderer's vertical carousel
+(WidgetTrayActivity) by component name or numeric widgetId.
+
+Arguments:
+  COMPONENT_NAME  A string composed of the package name and a class in that
+                  package (or a numeric widgetId when --vertical is used), for
+                  example:
+                  com.example.wear.tiles/com.example.wear.tiles.PreviewTileService
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --vertical      Remove the widget from the standalone renderer's vertical
+                  carousel (WidgetTrayActivity) instead of the SysUI horizontal
+                  carousel. Requires the .emu, .exp, or .dev renderer flavor.
+  --help          Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-tile-remove com.google.android.wearable.shell/.weather.WeatherTileService
+  adb-tile-remove --vertical com.google.example.wear_widget/.HelloWidgetService
+  adb-tile-remove --vertical 10001
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
+# Default (SysUI horizontal carousel)
 adb shell am broadcast \
   -a com.google.android.wearable.app.DEBUG_SURFACE \
   --es operation remove-tile \
-  --ei index INDEX
+  --ecn component "com.example/.MyTileService"
+
+# Vertical carousel (--vertical, by component or widgetId)
+adb shell am broadcast \
+  -p com.google.android.wearable.protolayout.renderer \
+  -a com.google.android.clockwork.prototiles.action.REMOVE_WIDGET \
+  --es component "com.example/.MyWidgetService"
 ```
 
 ### `scripts/adb-tiles`

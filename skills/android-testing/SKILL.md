@@ -61,22 +61,28 @@ adb shell 'cmd wifi connect-network "<SSID>" wpa2 <PASSWORD>'
 > seconds after Bluetooth disconnection to conserve power. Wait at least 60
 > seconds before evaluating Wi-Fi fallback.
 
-### 3. Headless Emulator Setup & Tutorial Bypass
+### 3. Standalone Watch Setup & Tutorial Bypass
 
-Bootstrap fresh or headless emulators to ensure tests run without blocking
-overlays or keyguard locks:
+Bootstrap fresh watches or emulators into a usable standalone state for APK
+sideloading and testing without pairing a companion phone (requires `adb root`):
 
 ```bash
-# Wake up and dismiss keyguard
+# 1. Mark device provisioned and user setup complete (AOSP platform flags)
+adb shell settings put global device_provisioned 1
+adb shell settings put secure user_setup_complete 1
+
+# 2. Disable OEM Setup Wizard (bypasses pairing lock screen)
+# Wear OS / Pixel Watch:
+adb shell pm disable com.google.android.wearable.setupwizard
+# Samsung Galaxy Watch:
+adb shell pm disable com.samsung.android.wearable.setupwizard
+
+# 3. Wake up, dismiss keyguard, and bypass tutorial overlays
 adb shell input keyevent KEYCODE_WAKEUP
 adb shell wm dismiss-keyguard
-
-# Dismiss charging animation overlay (if present)
-adb shell dumpsys battery unplug
-
-# Bypass Wear OS tutorial and initial setup overlays
 adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE
 adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
+adb shell input keyevent KEYCODE_HOME
 ```
 
 ### 4. Wear OS Surface Interaction
