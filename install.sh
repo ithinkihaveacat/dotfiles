@@ -89,7 +89,7 @@ OPTIONS:
                 Run without prompting or interactive terminal-session validation
   --only PART   Run only the named part of the script, then exit: no git pull,
                 no symlinks, no sudo, no other packages. Parts: uv (install uv
-                and uv tools, and fetch everything this repository's uv-based
+                and fetch everything this repository's uv-based
                 scripts download on first use, so they then work offline).
                 For preparing CI jobs and cloud agent environments
 
@@ -392,19 +392,20 @@ if [ -d "$DSTDIR/.corp" ]; then
   SRCDIRS+=("$DSTDIR/.corp")
 fi
 
-# uv: installs uv itself and the uv tool tiers, then fetches everything this
-# repository's uv-based scripts download on first use, so they keep working
-# once the network is gone (CI jobs, sandboxed cloud agents, planes).
+# uv: installs uv itself, then fetches everything this repository's uv-based
+# scripts download on first use, so they keep working once the network is gone
+# (CI jobs, sandboxed cloud agents, planes).
 #
-# Architecture note: for now install.sh is deliberately the only program
-# concerned with installing and setting up tools, and this is its "uv" mode of
-# installation alongside the brew, apt, and curl-installer stanzas. The
-# direction of travel is (1) to install everything agents rely on via uv,
-# since uv works the same on macOS, Debian, CI runners, and cloud containers,
-# and (2) to split this script into parts that can run on their own. --only is
-# the first step towards (2): a stanza becomes a function, selectable with
-# --only, once there is a reason to run it alone. Expect this stanza to move
-# once that architecture settles.
+# Architecture note: uv is the preferred way to get tools, because it works the
+# same on macOS, Debian, CI runners, and cloud containers where brew and apt
+# often do not. Skills stay self-contained: a skill's scripts need only uv, and
+# fetch their own pinned tools through uvx (or `uv run --script` metadata) on
+# first use, so each tool version is pinned in exactly one place. install.sh
+# does not duplicate those installs; its uv part only makes sure uv exists and
+# warms uv's cache ahead of time. The longer-term aim is to split this script
+# into parts that can run on their own; --only is the first step, with a stanza
+# becoming a function, selectable with --only, once there is a reason to run it
+# alone.
 
 # Bash wrappers that run pinned tools via uvx, each paired (after "|") with a
 # small valid input in printf %b notation. A wrapper is warmed by checking that
@@ -450,8 +451,8 @@ function stanza_uv {
     ok="fetched" bad="failed "
   fi
 
-  # The standalone installer, `uv tool install`, and this script all use
-  # ~/.local/bin; a full run has already put it on PATH, --only has not.
+  # The standalone installer puts uv in ~/.local/bin; a full run has already
+  # put that on PATH, --only has not.
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) export PATH="$HOME/.local/bin:$PATH" ;;
@@ -481,24 +482,11 @@ function stanza_uv {
     uv tool upgrade --all || echo "warning: uv tool upgrade failed"
   fi
 
-  # Tools on PATH, for people and editors. Core: always installed. The PyPI
-  # packages below only repackage the official native binaries. Scripts in this
-  # repository do not use these copies: they run their own pinned versions via
-  # uvx (see UVX_WRAPPERS).
-  local core="shellcheck-py shfmt-py"
-  # Optional packages: installed only with --install-optional or --install-all.
-  local optional=""
-  # Full packages: installed only with --install-all.
-  local full=""
-
-  # `uv tool list` prints "<package> v<version>" lines, each followed by
-  # "- <executable>" lines.
-  local install_set installed pkg
-  install_set=$(install_set_for_tier "$core" "$optional" "$full")
-  installed=$(uv tool list 2>/dev/null | awk '$1 != "-" && NF >= 2 {print $1}' | sort)
-  for pkg in $(comm -13 <(echo "$installed") <(echo "$install_set" | tr ' ' '\n' | sort)); do
-    uv_item "$ok" "$bad" "uv tool $pkg" uv tool install "$pkg" || failed=1
-  done
+  # Tools such as shellcheck and shfmt are deliberately not installed on PATH
+  # here: the scripts that need them run their own pinned versions via uvx, so
+  # a skill needs nothing but uv, and each tool version is pinned in exactly
+  # one place (the script). This part only warms uv's cache for those scripts.
+  # For an ad-hoc run, use e.g. `uvx --from shellcheck-py==<pin> shellcheck`.
 
   # Fetch (or, offline, verify) what the repository's scripts need.
   local entry rel f first_line
@@ -925,7 +913,8 @@ if [ "$PLATFORM" = "linux" ]; then
     # Reported on every run and removed with --prune (see prune_apt_retired).
     #   sysstat, pcp: sysstat recommends pcp, which installs 6 heavyweight
     #     daemon services.
-    #   shfmt, shellcheck: now installed as uv tools (see stanza_uv).
+    #   shfmt, shellcheck: now run by the formatter scripts via pinned uvx
+    #     (see stanza_uv).
     retired="sysstat pcp shellcheck shfmt"
     prune_apt_retired "$retired"
 

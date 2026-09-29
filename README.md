@@ -431,7 +431,7 @@ prepare a CI job or cloud agent environment that will later lose network access,
 run this once while online, e.g. from the environment's setup script:
 
 ```sh
-./install.sh --only uv               # install uv and uv tools; fetch everything into uv's cache
+./install.sh --only uv               # install uv; fetch everything into uv's cache
 UV_OFFLINE=1 ./install.sh --only uv  # confirm, without the network, that nothing is missing
 ```
 
