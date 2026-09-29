@@ -152,8 +152,8 @@ Usage: permission <command> [arguments]
 Manage agent tool permissions (allow/deny/ask rules) across all detected
 local agents. Rules are written as clean command patterns (e.g. "git show");
 each agent backend translates to its native syntax. Note: rules are
-workspace-local for Claude Code and user-wide for Antigravity (as defined
-by each agent's configuration model).
+workspace-local for Claude Code and Codex, and user-wide for Antigravity
+(as defined by each agent's configuration model).
 
 Commands:
   add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
@@ -166,13 +166,14 @@ Commands:
   doctor             Report missing or drifted rules (read-only)
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
   agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
   claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
+  codex              Codex CLI (workspace-local: .codex/rules/permission.rules, untracked)
 ```
 
 <!-- /generated -->

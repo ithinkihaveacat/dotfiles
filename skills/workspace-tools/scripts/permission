@@ -6,10 +6,14 @@
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import tomllib
 
 SKILL_BIN = str(Path(__file__).resolve().parent / "skill")
 
@@ -21,6 +25,7 @@ AGY_CONFIG_DIR = Path(
     or Path.home() / ".gemini/antigravity-cli"
 )
 CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 MODES = ("allow", "deny", "ask")
 
@@ -130,6 +135,65 @@ def get_workspace_root() -> Path:
         if any((parent / m).exists() for m in markers):
             return parent
     return curr
+
+
+def sync_git_exclude(workspace_root: Path, paths: list[str]) -> None:
+    """Replace permission's marker block in the workspace's Git exclude file."""
+    try:
+        res = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workspace_root),
+                "rev-parse",
+                "--git-path",
+                "info/exclude",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        exclude_file = (workspace_root / res.stdout.strip()).resolve()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+
+    mark_begin = "# >>> permission >>>"
+    mark_end = "# <<< permission <<<"
+    other_lines: list[str] = []
+    if exclude_file.is_file():
+        in_block = False
+        with open(exclude_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped == mark_begin:
+                    in_block = True
+                    continue
+                if stripped == mark_end:
+                    in_block = False
+                    continue
+                if not in_block:
+                    other_lines.append(line)
+
+    exclude_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_fd, temp_path_str = tempfile.mkstemp(dir=str(exclude_file.parent))
+    temp_path = Path(temp_path_str)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+            f.writelines(other_lines)
+            if other_lines and not other_lines[-1].endswith("\n"):
+                f.write("\n")
+            if paths:
+                f.write(mark_begin + "\n")
+                f.write("# managed by 'permission'\n")
+                for path in sorted(paths):
+                    f.write(path + "\n")
+                f.write(mark_end + "\n")
+        os.replace(temp_path, exclude_file)
+    except Exception as e:
+        temp_path.unlink(missing_ok=True)
+        print(
+            f"permission: warning: could not update info/exclude: {e}", file=sys.stderr
+        )
 
 
 # ==============================================================================
@@ -477,67 +541,6 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         inner = inner.removesuffix(":*")
         return inner
 
-    def _sync_exclude_block(self, workspace_root: Path, paths: list[str]) -> None:
-        """Manages a '# >>> permission >>>' block in .git/info/exclude."""
-        try:
-            res = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(workspace_root),
-                    "rev-parse",
-                    "--git-path",
-                    "info/exclude",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            exclude_file = (workspace_root / res.stdout.strip()).resolve()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return
-
-        mark_begin = "# >>> permission >>>"
-        mark_end = "# <<< permission <<<"
-
-        other_lines: list[str] = []
-        if exclude_file.is_file():
-            in_block = False
-            with open(exclude_file, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if stripped == mark_begin:
-                        in_block = True
-                        continue
-                    if stripped == mark_end:
-                        in_block = False
-                        continue
-                    if not in_block:
-                        other_lines.append(line)
-
-        exclude_file.parent.mkdir(parents=True, exist_ok=True)
-        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(exclude_file.parent))
-        temp_path = Path(temp_path_str)
-        try:
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-                for line in other_lines:
-                    f.write(line)
-                if other_lines and not other_lines[-1].endswith("\n"):
-                    f.write("\n")
-                if paths:
-                    f.write(mark_begin + "\n")
-                    f.write("# managed by 'permission'\n")
-                    for p in sorted(paths):
-                        f.write(p + "\n")
-                    f.write(mark_end + "\n")
-            os.replace(temp_path, exclude_file)
-        except Exception as e:
-            temp_path.unlink(missing_ok=True)
-            print(
-                f"[{self.name}] warning: could not update info/exclude: {e}",
-                file=sys.stderr,
-            )
-
     def _load(self, settings_path: Path) -> dict:
         if not settings_path.is_file():
             return {}
@@ -562,7 +565,10 @@ class ClaudeSettingsAdapter(PermissionAdapter):
                 f"[{self.name} ({self.scope})] initialized {settings_path}",
                 file=sys.stderr,
             )
-        self._sync_exclude_block(workspace_root, ["/.claude/settings.local.json"])
+        paths = ["/.claude/settings.local.json"]
+        if (workspace_root / ".codex/rules/permission.rules").is_file():
+            paths.append("/.codex/rules/permission.rules")
+        sync_git_exclude(workspace_root, paths)
 
     def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
         rule = self.translate(pattern)
@@ -618,9 +624,186 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         )
 
 
+class CodexRulesAdapter(PermissionAdapter):
+    """Codex CLI: workspace execution-policy rules under .codex/rules/."""
+
+    name = "codex"
+    scope = "workspace"
+    guard_mode = "ask"
+
+    def _rules_path(self, workspace_root: Path) -> Path:
+        return workspace_root / ".codex" / "rules" / "permission.rules"
+
+    def is_available(self, workspace_root: Path) -> bool:
+        import shutil
+
+        return bool(
+            (shutil.which("codex") and CODEX_HOME.is_dir())
+            or self.is_initialized(workspace_root)
+        )
+
+    def is_initialized(self, workspace_root: Path) -> bool:
+        return self._rules_path(workspace_root).is_file()
+
+    @staticmethod
+    def _decision(mode: str) -> str:
+        return {"allow": "allow", "ask": "prompt", "deny": "forbidden"}[mode]
+
+    @staticmethod
+    def _mode(decision: str) -> str:
+        return {"allow": "allow", "prompt": "ask", "forbidden": "deny"}[decision]
+
+    def _load_rules(self, path: Path) -> dict[str, list[str]]:
+        result = {mode: [] for mode in MODES}
+        if not path.is_file():
+            return result
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                match = re.fullmatch(
+                    r'\s*prefix_rule\(pattern=(\[.*\]),\s*decision="(allow|prompt|forbidden)"\)\s*',
+                    line,
+                )
+                if not match:
+                    continue
+                tokens = json.loads(match.group(1))
+                if not isinstance(tokens, list) or not all(
+                    isinstance(token, str) for token in tokens
+                ):
+                    die(
+                        f"[{self.name}] error reading {path}: "
+                        "prefix_rule pattern must be a list of strings"
+                    )
+                result[self._mode(match.group(2))].append(shlex.join(tokens))
+        except (OSError, ValueError, TypeError) as e:
+            die(f"[{self.name}] error reading {path}: {e}")
+        return result
+
+    def _save_rules(self, workspace_root: Path, rules: dict[str, list[str]]) -> None:
+        path = self._rules_path(workspace_root)
+        entries = [
+            (mode, pattern)
+            for mode in MODES
+            for pattern in sorted(set(rules.get(mode) or []))
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["# Managed by 'permission'. Edit rules with the permission command."]
+        for mode, pattern in entries:
+            try:
+                tokens = shlex.split(pattern)
+            except ValueError as e:
+                die(f"[{self.name}] invalid command pattern {pattern!r}: {e}")
+            lines.append(
+                "prefix_rule(pattern="
+                f"{json.dumps(tokens)}, decision={json.dumps(self._decision(mode))})"
+            )
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        paths = ["/.codex/rules/permission.rules"]
+        if (workspace_root / ".claude/settings.local.json").is_file():
+            paths.append("/.claude/settings.local.json")
+        sync_git_exclude(workspace_root, paths)
+
+    def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
+        clean = shlex.join(shlex.split(pattern.strip()))
+        rules = self._load_rules(self._rules_path(workspace_root))
+        if clean in rules[mode]:
+            return False
+        for other_mode in MODES:
+            if clean in rules[other_mode]:
+                rules[other_mode].remove(clean)
+        rules[mode].append(clean)
+        self._save_rules(workspace_root, rules)
+        return True
+
+    def remove(self, workspace_root: Path, pattern: str) -> list[str]:
+        clean = shlex.join(shlex.split(pattern.strip()))
+        rules = self._load_rules(self._rules_path(workspace_root))
+        removed = []
+        for mode in MODES:
+            if clean in rules[mode]:
+                rules[mode].remove(clean)
+                removed.append(mode)
+        if removed:
+            self._save_rules(workspace_root, rules)
+        return removed
+
+    def rules(self, workspace_root: Path) -> dict[str, list[str]]:
+        return self._load_rules(self._rules_path(workspace_root))
+
+    def rules_in(self, path: Path) -> dict[str, list[str]]:
+        return self._load_rules(path)
+
+    def clean(self, workspace_root: Path) -> None:
+        path = self._rules_path(workspace_root)
+        if not path.is_file():
+            return
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+        paths = []
+        if (workspace_root / ".claude/settings.local.json").is_file():
+            paths.append("/.claude/settings.local.json")
+        sync_git_exclude(workspace_root, paths)
+        print(
+            f"[{self.name} ({self.scope})] cleared all permission rules",
+            file=sys.stderr,
+        )
+
+
+def git_main_worktree(workspace_root: Path) -> Path | None:
+    """Return a linked worktree's main checkout, but not a submodule git dir."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_root), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        common_dir = Path(result.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = workspace_root / common_dir
+        candidate = common_dir.parent
+        if (candidate / ".git").is_dir():
+            return candidate
+
+        result = subprocess.run(
+            ["git", "-C", str(workspace_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def workspace_trust(workspace_root: Path) -> str | None:
+    """Return Codex's trust level for this checkout or its main worktree."""
+    config_path = CODEX_HOME / "config.toml"
+    if not config_path.is_file():
+        return None
+    try:
+        with open(config_path, "rb") as f:
+            projects = tomllib.load(f).get("projects") or {}
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        die(f"[codex] error reading {config_path}: {e}")
+
+    paths = [workspace_root, workspace_root.resolve()]
+    main = git_main_worktree(workspace_root)
+    if main is not None:
+        paths.extend((main, main.resolve()))
+    for path in paths:
+        entry = projects.get(str(path))
+        if isinstance(entry, dict) and isinstance(entry.get("trust_level"), str):
+            return entry["trust_level"]
+    return None
+
+
 ADAPTERS: list[PermissionAdapter] = [
     AgySettingsAdapter(),
     ClaudeSettingsAdapter(),
+    CodexRulesAdapter(),
 ]
 
 
@@ -647,7 +830,7 @@ def require_adapters(
     if not adapters:
         die(
             "no supported agent configuration found "
-            f"(looked for {AGY_CONFIG_DIR} and {CLAUDE_CONFIG_DIR}); "
+            f"(looked for {AGY_CONFIG_DIR}, {CLAUDE_CONFIG_DIR}, and {CODEX_HOME}); "
             "use --agent to force one"
         )
     return adapters
@@ -819,7 +1002,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                 "status": "WARN",
                 "summary": "No supported agent configuration found",
                 "details": [
-                    f"Looked for: {clean_p(AGY_CONFIG_DIR)} and {clean_p(CLAUDE_CONFIG_DIR)}",
+                    f"Looked for: {clean_p(AGY_CONFIG_DIR)}, {clean_p(CLAUDE_CONFIG_DIR)}, and {clean_p(CODEX_HOME)}",
                     "To resolve: install an agent CLI or use '--agent NAME' to force one",
                 ],
             }
@@ -853,6 +1036,8 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
             settings_paths = adapter._settings_paths()
         elif isinstance(adapter, ClaudeSettingsAdapter):
             settings_paths = [adapter._settings_path(ws)]
+        elif isinstance(adapter, CodexRulesAdapter):
+            settings_paths = [adapter._rules_path(ws)]
         else:
             settings_paths = []
 
@@ -891,13 +1076,18 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     )
                 continue
 
-            data = adapter._load(p)
-            perms = data.get("permissions") or {}
-            p_allow = {adapter.untranslate(r) for r in perms.get("allow") or []}
-            p_guarded = {
-                adapter.untranslate(r)
-                for r in (perms.get("deny") or []) + (perms.get("ask") or [])
-            }
+            if isinstance(adapter, CodexRulesAdapter):
+                perms = adapter.rules(ws)
+                p_allow = set(perms.get("allow") or [])
+                p_guarded = set((perms.get("deny") or []) + (perms.get("ask") or []))
+            else:
+                data = adapter._load(p)
+                perms = data.get("permissions") or {}
+                p_allow = {adapter.untranslate(r) for r in perms.get("allow") or []}
+                p_guarded = {
+                    adapter.untranslate(r)
+                    for r in (perms.get("deny") or []) + (perms.get("ask") or [])
+                }
             p_missing_allow = [x for x in allow if x not in p_allow]
             p_missing_guard = [x for x in guard if x not in p_guarded]
 
@@ -989,8 +1179,40 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                         }
                     )
 
-        # 7. Workspace exclusions check for Claude
-        if isinstance(adapter, ClaudeSettingsAdapter) and is_init:
+        # 7. Codex only loads workspace rules for trusted projects. An allow
+        # rule also permits execution outside the sandbox, so surface trust
+        # independently from whether the generated rule file is complete.
+        if isinstance(adapter, CodexRulesAdapter) and is_init:
+            trust = workspace_trust(ws)
+            if trust == "trusted":
+                checks.append(
+                    {
+                        "name": "Workspace Trust (codex)",
+                        "status": "OK",
+                        "summary": "Workspace is trusted by Codex",
+                        "details": [],
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "name": "Workspace Trust (codex)",
+                        "status": "WARN",
+                        "summary": "Workspace is not trusted by Codex",
+                        "details": [
+                            f"Trust level: {trust or 'not configured'}",
+                            f"To resolve: trust {clean_p(ws)} in Codex before relying on workspace rules",
+                        ],
+                    }
+                )
+
+        # 8. Workspace-local permission files must stay untracked.
+        if isinstance(adapter, (ClaudeSettingsAdapter, CodexRulesAdapter)) and is_init:
+            relative_path = (
+                ".claude/settings.local.json"
+                if isinstance(adapter, ClaudeSettingsAdapter)
+                else ".codex/rules/permission.rules"
+            )
             is_ignored = False
             try:
                 res = subprocess.run(
@@ -1000,7 +1222,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                         str(ws),
                         "check-ignore",
                         "-q",
-                        ".claude/settings.local.json",
+                        relative_path,
                     ],
                     capture_output=True,
                     check=False,
@@ -1013,7 +1235,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     {
                         "name": "Workspace Exclusions",
                         "status": "OK",
-                        "summary": ".claude/settings.local.json is git-ignored",
+                        "summary": f"{relative_path} is git-ignored",
                         "details": [],
                     }
                 )
@@ -1022,7 +1244,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                     {
                         "name": "Workspace Exclusions",
                         "status": "WARN",
-                        "summary": ".claude/settings.local.json is not git-ignored",
+                        "summary": f"{relative_path} is not git-ignored",
                         "details": [
                             "To resolve: run 'permission apply' to update .git/info/exclude"
                         ],
@@ -1151,8 +1373,8 @@ HELP_MAIN = """Usage: permission <command> [arguments]
 Manage agent tool permissions (allow/deny/ask rules) across all detected
 local agents. Rules are written as clean command patterns (e.g. "git show");
 each agent backend translates to its native syntax. Note: rules are
-workspace-local for Claude Code and user-wide for Antigravity (as defined
-by each agent's configuration model).
+workspace-local for Claude Code and Codex, and user-wide for Antigravity
+(as defined by each agent's configuration model).
 
 Commands:
   add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
@@ -1165,13 +1387,14 @@ Commands:
   doctor             Report missing or drifted rules (read-only)
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
   agy, jetski        Antigravity / Jetski CLI (user-wide: ~/.gemini/jetski/cli/settings.json or ~/.gemini/antigravity-cli/settings.json)
-  claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)"""
+  claude             Claude Code (workspace-local: .claude/settings.local.json, untracked)
+  codex              Codex CLI (workspace-local: .codex/rules/permission.rules, untracked)"""
 
 HELP_ADD = """Usage: permission add [options] PATTERN...
 
@@ -1183,7 +1406,7 @@ from stdin.
 Options:
   --deny             Add to the denylist (blocked) instead of the allowlist
   --ask              Add to the ask list (always prompt)
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_REMOVE = """Usage: permission remove PATTERN...
@@ -1191,7 +1414,7 @@ HELP_REMOVE = """Usage: permission remove PATTERN...
 Remove tool permission rules from all lists (alias: rm).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_LIST = """Usage: permission list
@@ -1199,7 +1422,7 @@ HELP_LIST = """Usage: permission list
 List permission rules per agent (alias: ls).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_APPLY = """Usage: permission apply
@@ -1210,19 +1433,20 @@ directory is allowed, except entries in the skill's permissions/unsafe
 file: whole-script entries are skipped entirely (they prompt normally),
 and subcommand entries (e.g. "packagename uninstall") are guarded with
 an 'ask' rule. Note: Antigravity pre-approvals are applied user-wide;
-Claude Code pre-approvals are applied to the local workspace.
+Claude Code and Codex pre-approvals are applied to the local workspace. A Codex
+'allow' decision authorizes matching commands to run unsandboxed.
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_CLEAN = """Usage: permission clean
 
-Clear all permission rules for detected agents (workspace-local for
-Claude Code, user-wide for Antigravity).
+Clear all permission rules for detected agents (workspace-local for Claude Code
+and Codex, user-wide for Antigravity).
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 HELP_DOCTOR = """Usage: permission doctor
@@ -1232,7 +1456,7 @@ configure and report anything missing (read-only). Exits non-zero if
 problems are found.
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude)
+  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
   --help             Display this help message and exit"""
 
 SUBCOMMAND_HELP = {

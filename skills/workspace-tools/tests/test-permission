@@ -7,7 +7,7 @@ TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/permission"
 SKILL_SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..24"
+echo "1..37"
 
 # Temporary directory for configuration simulations
 TMPDIR=$(mktemp -d)
@@ -40,6 +40,7 @@ mkdir -p "$MOCK_HOME"
 export HOME="$MOCK_HOME"
 export AGY_CONFIG_HOME="${TMPDIR}/gemini"
 export CLAUDE_CONFIG_DIR="${TMPDIR}/claude"
+export CODEX_HOME="${TMPDIR}/codex"
 export XDG_CONFIG_HOME="${TMPDIR}/.config"
 mkdir -p "${XDG_CONFIG_HOME}/skill/plugins"
 cp "${TEST_DIR}/../../../config/skill/plugins/05_local.py" "${XDG_CONFIG_HOME}/skill/plugins/05_local.py"
@@ -319,4 +320,152 @@ if out=$(uv run "${SCRIPT}" doctor --agent jetski 2>&1) &&
   echo "ok 24 - [doctor structured] emits formatted report and resolved settings path"
 else
   echo "not ok 24 - [doctor structured] unexpected output: $out"
+fi
+
+# --- codex adapter ---
+touch "$MOCK_BIN/codex"
+chmod +x "$MOCK_BIN/codex"
+mkdir -p "$CODEX_HOME"
+CODEX_RULES="$WS/.codex/rules/permission.rules"
+
+# Test 25: add writes a native Codex prefix rule to its dedicated rule file
+if out=$(uv run "${SCRIPT}" add --agent codex "git show" 2>&1) &&
+  grep -qF 'prefix_rule(pattern=["git", "show"], decision="allow")' "$CODEX_RULES"; then
+  echo "ok 25 - [codex add] writes an allow prefix_rule"
+else
+  echo "not ok 25 - [codex add] failed: $out"
+fi
+
+# Test 26: prompt and forbidden modes map back to clean permission modes
+if uv run "${SCRIPT}" add --agent codex --ask "safe-tool nuke" >/dev/null 2>&1 &&
+  uv run "${SCRIPT}" add --agent codex --deny "rm -rf" >/dev/null 2>&1 &&
+  grep -qF 'decision="prompt"' "$CODEX_RULES" &&
+  grep -qF 'decision="forbidden"' "$CODEX_RULES" &&
+  uv run "${SCRIPT}" list --agent codex 2>/dev/null | grep -A3 'ask:' | grep -q 'safe-tool nuke'; then
+  echo "ok 26 - [codex modes] translates allow, ask, and deny decisions"
+else
+  echo "not ok 26 - [codex modes] failed: $(cat "$CODEX_RULES")"
+fi
+
+# Test 27: remove rewrites only the dedicated managed rule file
+if uv run "${SCRIPT}" remove --agent codex "git show" >/dev/null 2>&1 &&
+  ! grep -qF '["git", "show"]' "$CODEX_RULES"; then
+  echo "ok 27 - [codex remove] removes a managed rule"
+else
+  echo "not ok 27 - [codex remove] rule remains"
+fi
+
+# Test 28: apply and doctor use Codex rules for installed skill commands
+WS_RESOLVED=$(cd "$WS" && pwd -P)
+cat >"$CODEX_HOME/config.toml" <<EOF
+[projects."$WS_RESOLVED"]
+trust_level = "trusted"
+EOF
+if uv run "${SCRIPT}" apply --agent codex >/dev/null 2>&1 &&
+  grep -qF 'prefix_rule(pattern=["safe-tool"], decision="allow")' "$CODEX_RULES" &&
+  grep -qF 'prefix_rule(pattern=["safe-tool", "nuke"], decision="prompt")' "$CODEX_RULES" &&
+  uv run "${SCRIPT}" doctor --agent codex >/dev/null 2>&1; then
+  echo "ok 28 - [codex apply] synchronizes and audits skill commands"
+else
+  echo "not ok 28 - [codex apply] failed: $(cat "$CODEX_RULES")"
+fi
+
+# Test 29: clean removes only permission's dedicated Codex rule file
+printf 'prefix_rule(pattern=["external"], decision="allow")\n' >"$WS/.codex/rules/external.rules"
+if uv run "${SCRIPT}" clean --agent codex >/dev/null 2>&1 &&
+  [ ! -e "$CODEX_RULES" ] && [ -f "$WS/.codex/rules/external.rules" ]; then
+  echo "ok 29 - [codex clean] preserves unrelated Codex rule files"
+else
+  echo "not ok 29 - [codex clean] did not isolate managed rules"
+fi
+
+# Test 30: generated Codex rules contain no private metadata comments
+uv run "${SCRIPT}" add --agent codex "git show" >/dev/null 2>&1
+if ! grep -q '^# permission:' "$CODEX_RULES"; then
+  echo "ok 30 - [codex format] uses native rules without metadata"
+else
+  echo "not ok 30 - [codex format] contains metadata"
+fi
+
+# Test 31: the workspace-local Codex rules file is git-ignored
+if git -C "$WS" check-ignore -q .codex/rules/permission.rules; then
+  echo "ok 31 - [codex exclude] workspace rules are ignored"
+else
+  echo "not ok 31 - [codex exclude] workspace rules are not ignored"
+fi
+
+# Test 32: doctor warns when Codex has not trusted the workspace
+rm -f "$CODEX_HOME/config.toml"
+if out=$(uv run "${SCRIPT}" doctor --agent codex 2>&1); then
+  echo "not ok 32 - [codex trust] doctor should warn and exit non-zero"
+elif printf '%s' "$out" | grep -q 'Workspace is not trusted by Codex'; then
+  echo "ok 32 - [codex trust] doctor reports missing trust"
+else
+  echo "not ok 32 - [codex trust] unexpected output: $out"
+fi
+
+# Test 33: doctor accepts trust stored under the resolved workspace path
+cat >"$CODEX_HOME/config.toml" <<EOF
+[projects."$WS_RESOLVED"]
+trust_level = "trusted"
+EOF
+uv run "${SCRIPT}" apply --agent codex >/dev/null 2>&1
+if uv run "${SCRIPT}" doctor --agent codex >/dev/null 2>&1; then
+  echo "ok 33 - [codex trust] accepts resolved workspace path"
+else
+  echo "not ok 33 - [codex trust] rejected resolved workspace path"
+fi
+
+# Test 34: list recovers clean patterns directly from native prefix_rule lines
+if uv run "${SCRIPT}" list --agent codex 2>/dev/null | grep -q '^    git show$'; then
+  echo "ok 34 - [codex parser] reads native prefix_rule lines"
+else
+  echo "not ok 34 - [codex parser] failed to read native rules"
+fi
+
+# Test 35: changing a rule mode replaces rather than duplicates it
+uv run "${SCRIPT}" add --agent codex --ask "git show" >/dev/null 2>&1
+if [ "$(grep -c 'pattern=\["git", "show"\]' "$CODEX_RULES")" -eq 1 ] &&
+  grep -q 'pattern=\["git", "show"\], decision="prompt"' "$CODEX_RULES"; then
+  echo "ok 35 - [codex modes] replaces an existing decision"
+else
+  echo "not ok 35 - [codex modes] duplicated the rule"
+fi
+
+# Test 36: a submodule uses its own top-level path for trust fallback
+SUPER="$TMPDIR/super"
+SUB_SOURCE="$TMPDIR/sub-source"
+mkdir -p "$SUPER" "$SUB_SOURCE"
+git -C "$SUPER" init -q
+git -C "$SUB_SOURCE" init -q
+git -C "$SUB_SOURCE" -c user.name=test -c user.email=test@example.invalid commit --allow-empty -qm init
+git -C "$SUPER" -c protocol.file.allow=always submodule add -q "$SUB_SOURCE" module
+SUB_RESOLVED=$(cd "$SUPER/module" && pwd -P)
+cat >"$CODEX_HOME/config.toml" <<EOF
+[projects."$SUB_RESOLVED"]
+trust_level = "trusted"
+EOF
+(cd "$SUPER/module" && uv run "${SCRIPT}" add --agent codex "git show" >/dev/null 2>&1)
+if (cd "$SUPER/module" && uv run "${SCRIPT}" doctor --agent codex >/dev/null 2>&1); then
+  echo "ok 36 - [codex submodule] trusts the submodule top level"
+else
+  echo "not ok 36 - [codex submodule] trust lookup used the modules directory"
+fi
+
+# Test 37: a linked worktree accepts trust recorded for its resolved main repo
+MAIN_REPO="$TMPDIR/main-repo"
+WORKTREE="$TMPDIR/worktree"
+git init -q "$MAIN_REPO"
+git -C "$MAIN_REPO" -c user.name=test -c user.email=test@example.invalid commit --allow-empty -qm init
+git -C "$MAIN_REPO" worktree add -q "$WORKTREE"
+MAIN_RESOLVED=$(cd "$MAIN_REPO" && pwd -P)
+cat >"$CODEX_HOME/config.toml" <<EOF
+[projects."$MAIN_RESOLVED"]
+trust_level = "trusted"
+EOF
+(cd "$WORKTREE" && uv run "${SCRIPT}" add --agent codex "git show" >/dev/null 2>&1)
+if (cd "$WORKTREE" && uv run "${SCRIPT}" doctor --agent codex >/dev/null 2>&1); then
+  echo "ok 37 - [codex worktree] accepts resolved main-repo trust"
+else
+  echo "not ok 37 - [codex worktree] rejected main-repo trust"
 fi
