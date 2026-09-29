@@ -417,9 +417,28 @@ See [tests/README.md](tests/README.md) for details, including how to run tests
 offline and in isolated environments.
 
 A GitHub Actions workflow (`.github/workflows/lint.yml`) runs on every push:
-`shellcheck` and `shfmt` over all Bash scripts (`bin/`, `skills/*/scripts/`,
-`install.sh`), `ruff` via `skills/coding-standards/scripts/python-format` over
-all Python scripts, plus the full test suite.
+`shellcheck` and `shfmt` via `skills/coding-standards/scripts/shell-format` over
+all Bash scripts (`bin/`, `skills/*/scripts/`, `install.sh`), `ruff` via
+`skills/coding-standards/scripts/python-format` over all Python scripts, plus
+the full test suite.
+
+## Offline environments
+
+Tools managed by [uv](https://github.com/astral-sh/uv), meaning scripts with a
+`uv run --script` shebang and the formatters that run pinned tools via `uvx`
+(`ruff`, `shfmt`, `shellcheck`), download their dependencies on first use. To
+prepare a CI job or cloud agent environment that will later lose network access,
+run this once while online, e.g. from the environment's setup script:
+
+```sh
+bin/prefetch-tools          # fetch everything into uv's cache
+bin/prefetch-tools --check  # confirm, without the network, that nothing is missing
+```
+
+Afterwards, run with `UV_OFFLINE=1` and `AGENT_OFFLINE=1` (see
+[tests/README.md](tests/README.md)). CI does exactly this before running the
+tests. Dependencies installed outside uv (e.g. `fish`, `xmllint`, `java`) are
+not covered.
 
 ## Author
 

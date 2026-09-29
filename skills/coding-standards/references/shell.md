@@ -31,10 +31,13 @@ echo $VAR
 ### Implementation Details
 
 Under the hood, `shell-format` runs `shfmt -w -i 2 -ci` (in-place, 2-space
-indent, vertically aligned case statements) followed by `shellcheck`. If you
+indent, vertically aligned case statements) followed by `shellcheck`. Both are
+run via `uvx` at exact versions pinned in the script (`SHFMT_PY_VERSION`,
+`SHELLCHECK_PY_VERSION`), so the only prerequisite is `uv`; the `shfmt-py` and
+`shellcheck-py` packages merely repackage the official upstream binaries. If you
 need to run the tools manually or configure editor integration, use those
-invocations — but prefer `scripts/shell-format` so the same settings apply
-across the repository.
+invocations — but prefer `scripts/shell-format` so the same versions and
+settings apply across the repository.
 
 ## Fish Script Formatting
 

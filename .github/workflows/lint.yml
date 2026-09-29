@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
 
+env:
+  # Supply-chain cooldown: uv and uvx ignore packages published in the last
+  # week. Exact pins (e.g. in shell-format and python-format) must be at least
+  # this old, or resolving them fails.
+  UV_EXCLUDE_NEWER: "7 days"
+
 jobs:
   lint:
     # Same-repo PRs are already covered by the push event; only fork PRs
@@ -18,16 +24,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install shfmt and shellcheck
-        run: |
-          SHFMT_VERSION="v3.14.1"
-          sudo curl -sSLo /usr/local/bin/shfmt "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
-          sudo chmod +x /usr/local/bin/shfmt
-
-          SC_VERSION="v0.11.0"
-          curl -sSL "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" | tar -xJ -C /tmp
-          sudo cp "/tmp/shellcheck-${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
-
       - name: ruff
         run: |
           grep -rlE '^#!.*python|^#!/usr/bin/env -S uv run' bin/ skills/*/scripts/ tests/ skills/*/tests/ \
@@ -36,21 +32,13 @@ jobs:
             | sort \
             | xargs -r skills/coding-standards/scripts/python-format --check
 
-      - name: shellcheck
+      - name: shell-format
         run: |
           grep -rlE '^#!.*\bba?sh\b' bin/ skills/*/scripts/ tests/ skills/*/tests/ etc/macos/apply-defaults install.sh \
             | grep -v '__pycache__' \
             | grep -v 'fixtures/' \
             | sort \
-            | xargs shellcheck
-
-      - name: shfmt
-        run: |
-          grep -rlE '^#!.*\bba?sh\b' bin/ skills/*/scripts/ tests/ skills/*/tests/ etc/macos/apply-defaults install.sh \
-            | grep -v '__pycache__' \
-            | grep -v 'fixtures/' \
-            | sort \
-            | xargs shfmt -d -i 2 -ci
+            | xargs -r skills/coding-standards/scripts/shell-format --check
 
       - name: markdown-format
         run: |
@@ -80,16 +68,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libxml2-utils fish
 
-          SHFMT_VERSION="v3.14.1"
-          sudo curl -sSLo /usr/local/bin/shfmt "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
-          sudo chmod +x /usr/local/bin/shfmt
-
-          SC_VERSION="v0.11.0"
-          curl -sSL "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" | tar -xJ -C /tmp
-          sudo cp "/tmp/shellcheck-${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
-
-          # Pre-warm uv dependencies before parallel test execution
-          skills/workspace-tools/scripts/skill --help >/dev/null 2>&1 || true
+      - name: Prefetch uv-managed tools
+        # Warms every uv dependency the tests need, so they can run with
+        # UV_OFFLINE below; a test that needs something not prefetched fails.
+        run: bin/prefetch-tools
 
       - name: Run tests
         env:
@@ -97,4 +79,6 @@ jobs:
           GEMINI_API_KEY: ""
           # Enforce hermetic offline execution across all cached repo tools.
           AGENT_OFFLINE: "1"
+          # uv resolves and installs from the prefetched cache only.
+          UV_OFFLINE: "1"
         run: prove -j 4 tests/test-* skills/*/tests/test-*

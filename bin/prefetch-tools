@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# bash 3.2+ compatible (macOS default). Do not use bash 4+ features
+# (declare -A, readarray, ${var,,}, |&).
+
+# Tests: tests/test-prefetch-tools
+
+set -euo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)
+
+# Bash wrappers that run pinned tools via uvx, each paired (after "|") with a
+# small valid input in printf %b notation. A wrapper is warmed by checking that
+# input, so it fetches exactly the versions it pins and the pins stay in one
+# place; the input must pass, or later tools in the wrapper never run. Add a
+# wrapper here when it starts calling uvx. (Scripts with a `uv run --script`
+# shebang are discovered automatically; see below.)
+UVX_WRAPPERS=(
+  'skills/coding-standards/scripts/python-format|x = 1'
+  'skills/coding-standards/scripts/shell-format|#!/bin/sh\ntrue'
+)
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$SCRIPT_NAME: $1 not found"
+    exit 127
+  }
+}
+
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME [OPTION]
+
+Fetch and cache everything this repository's uv-based tools download on first
+use, so they keep working after network access is turned off.
+
+Covers the Python dependencies (and interpreter) of every script with a
+'uv run --script' shebang in bin/ and skills/*/scripts/, plus the pinned tools
+that the formatter wrappers run via uvx (ruff, shfmt, shellcheck). Reports one
+line per item on stderr and exits non-zero if any item failed.
+
+Options:
+  --check           Verify from the cache alone, without the network, that
+                    every item is ready for offline use
+  -h, --help        Display this help message and exit
+
+Environment:
+  AGENT_OFFLINE     Set to 1 to never use the network; implies --check.
+  UV_CACHE_DIR      uv's cache directory, where everything is stored
+                    (default: \${XDG_CACHE_HOME:-\$HOME/.cache}/uv)
+
+Examples:
+  # Prepare a CI job or cloud agent environment, then disable the network
+  $SCRIPT_NAME
+
+  # Confirm nothing is missing before going offline
+  $SCRIPT_NAME --check
+
+  # Warm a cache directory that a sandbox will later mount
+  UV_CACHE_DIR=/srv/uv-cache $SCRIPT_NAME
+EOF
+}
+
+CHECK_MODE=0
+for arg in "$@"; do
+  case "$arg" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --check)
+      CHECK_MODE=1
+      ;;
+    *)
+      echo "$SCRIPT_NAME: unknown option: $arg" >&2
+      echo "Try '$SCRIPT_NAME --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "$(echo "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
+  1 | true | yes | on) CHECK_MODE=1 ;;
+esac
+
+require uv
+require uvx
+
+if [ "$CHECK_MODE" -eq 1 ]; then
+  # uv (and uvx) then resolve and install from the cache only.
+  export UV_OFFLINE=1
+  OK_WORD="cached "
+  BAD_WORD="missing"
+else
+  OK_WORD="fetched"
+  BAD_WORD="failed "
+fi
+
+LOG=$(mktemp "${TMPDIR:-/tmp}/prefetch-tools.XXXXXX")
+trap 'rm -f "$LOG"' EXIT
+trap 'echo >&2; exit 130' INT
+trap 'echo >&2; exit 143' TERM
+
+FAILED=0
+
+# Run a command (stdin is the caller's) with its output captured; report one
+# status line, followed on failure by the captured output (indented) so the
+# cause is visible.
+run_item() {
+  local label="$1"
+  shift
+  if "$@" >"$LOG" 2>&1; then
+    echo "$OK_WORD  $label" >&2
+  else
+    echo "$BAD_WORD  $label" >&2
+    sed 's/^/    /' "$LOG" >&2
+    FAILED=$((FAILED + 1))
+  fi
+}
+
+for entry in "${UVX_WRAPPERS[@]}"; do
+  rel=${entry%%|*}
+  run_item "$rel" "$ROOT/$rel" --check <<<"$(printf '%b' "${entry#*|}")"
+done
+
+# bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
+for f in "$ROOT"/bin/* "$ROOT"/skills/*/scripts/*; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  first_line=""
+  read -r first_line <"$f" 2>/dev/null || true
+  case "$first_line" in
+    '#!/usr/bin/env -S uv run'*)
+      run_item "${f#"$ROOT"/}" uv sync --script "$f" </dev/null
+      ;;
+  esac
+done
+
+if [ "$FAILED" -gt 0 ]; then
+  if [ "$CHECK_MODE" -eq 1 ]; then
+    echo "$SCRIPT_NAME: $FAILED item(s) not available offline; run '$SCRIPT_NAME' with network access to fetch them" >&2
+  else
+    echo "$SCRIPT_NAME: $FAILED item(s) failed to fetch" >&2
+  fi
+  exit 1
+fi
