@@ -15,7 +15,7 @@ set -euo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skill_test_init
 
-echo "1..25"
+echo "1..28"
 
 # Test 1: add bogus-skill-name reports unknown skill (non-zero exit).
 cd "$TMPDIR"
@@ -485,3 +485,102 @@ if out=$(_SKILL_TEST_REMOTE="file://${FIXTURE_REPO}" SKILL_CACHE_DIR="$FETCH_CAC
 else
   echo "not ok 25 - [Fetch] unexpected fetch result: ${out:-}"
 fi
+
+# Test 26: catalog --json reads metadata and structure from scan_path (a
+# cheaper view of the same content) while 'source' still reports 'path'.
+SCAN_DIR="${TMPDIR}/scan-vfs"
+mkdir -p "${SCAN_DIR}/head/scan-skill" "${SCAN_DIR}/snapA/scan-skill/scripts" \
+  "${SCAN_DIR}/snapB/scan-skill/scripts"
+printf -- '---\nname: scan-skill\ndescription: Head copy\n---\nbody\n' \
+  >"${SCAN_DIR}/head/scan-skill/SKILL.md"
+printf -- '---\nname: scan-skill\ndescription: Snapshot A\n---\nbody\n' \
+  >"${SCAN_DIR}/snapA/scan-skill/SKILL.md"
+printf '#!/bin/sh\n' >"${SCAN_DIR}/snapA/scan-skill/scripts/one"
+printf -- '---\nname: scan-skill\ndescription: Snapshot B\n---\nbody\n' \
+  >"${SCAN_DIR}/snapB/scan-skill/SKILL.md"
+printf '#!/bin/sh\n' >"${SCAN_DIR}/snapB/scan-skill/scripts/one"
+printf '#!/bin/sh\n' >"${SCAN_DIR}/snapB/scan-skill/scripts/two"
+
+# The scan view is chosen per run, as a plugin pinning a moving mount would.
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_scan.py"
+import os
+def register(api):
+    api.register_skill(
+        "scan:scan-skill",
+        {
+            "path": "${SCAN_DIR}/head/scan-skill",
+            "scan_path": "${SCAN_DIR}/" + os.environ.get("SCAN_SNAP", "snapA") + "/scan-skill",
+            "resolve": False,
+        },
+    )
+EOF
+cj=$(SCAN_SNAP=snapA AGENT_OFFLINE=1 "${SCRIPT}" catalog --json 2>/dev/null)
+if [ "$(catalog_field "$cj" scan:scan-skill description)" = "Snapshot A" ] &&
+  [ "$(catalog_field "$cj" scan:scan-skill scripts)" = "1" ] &&
+  [ "$(catalog_field "$cj" scan:scan-skill status)" = "local" ] &&
+  [[ "$(catalog_field "$cj" scan:scan-skill source)" == *"/head/scan-skill" ]]; then
+  echo "ok 26 - [Catalog JSON] scan_path is read for metadata; source stays path"
+else
+  echo "not ok 26 - [Catalog JSON] scan_path not honoured: $cj"
+fi
+
+# Test 27: a scan_path that changes between runs (a snapshot rolling forward)
+# never reaches link targets, so apply, doctor, and preflight agree and do not
+# fight; the catalog stub keeps pointing at 'path', and a stub pointing
+# elsewhere is rewritten rather than left stale.
+WS_SCAN="${TMPDIR}/scan-ws"
+mkdir -p "$WS_SCAN/.claude/skills" "$WS_SCAN/.agents/skills"
+cd "$WS_SCAN"
+git init -q
+SCAN_SNAP=snapA AGENT_REQUIRED_SKILLS="scan-skill" "${SCRIPT}" apply >/dev/null 2>&1
+dj=$(SCAN_SNAP=snapB AGENT_REQUIRED_SKILLS="scan-skill" doctor_json)
+pre_rc=0
+pre_out=$(SCAN_SNAP=snapB AGENT_REQUIRED_SKILLS="scan-skill" "${SCRIPT}" preflight agent 2>&1) ||
+  pre_rc=$?
+SCAN_SNAP=snapB AGENT_REQUIRED_SKILLS="scan-skill" "${SCRIPT}" apply >/dev/null 2>&1
+STUB_LINK="${XDG_CACHE_HOME}/skill/catalog/scan:scan-skill/SKILL.md"
+ln -sfn "${SCAN_DIR}/snapA/scan-skill/SKILL.md" "$STUB_LINK"
+SCAN_SNAP=snapB AGENT_OFFLINE=1 "${SCRIPT}" catalog >/dev/null 2>&1
+if [ "$(check_status "$dj" "Required Skills")" = "OK" ] &&
+  [ -z "$(json_get "$dj" 'd["plan"]["mismatched"]')" ] &&
+  [ "$(json_get "$dj" 'd["healthy"]')" = "true" ] &&
+  [ "$pre_rc" -eq 0 ] && [ -z "$pre_out" ] &&
+  [ "$(readlink .claude/skills/scan-skill)" = "${SCAN_DIR}/head/scan-skill" ] &&
+  [ "$(readlink .agents/skills/scan-skill)" = "${SCAN_DIR}/head/scan-skill" ] &&
+  [ "$(readlink "$STUB_LINK")" = "${SCAN_DIR}/head/scan-skill/SKILL.md" ]; then
+  echo "ok 27 - [Plugins] changing scan_path leaves links, doctor, and preflight stable"
+else
+  echo "not ok 27 - [Plugins] scan_path leaked into link state (rc=$pre_rc): $pre_out / $dj"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_scan.py"
+cd "$TMPDIR"
+
+# Test 28: existence checks (resolution and link liveness) go through scan_path
+# rather than following 'path' -- proven by hiding the head directory while the
+# scan view remains -- yet resolution still answers with 'path'.
+cat <<EOF >"${XDG_CONFIG_HOME}/skill/plugins/mock_scan.py"
+def register(api):
+    api.register_skill(
+        "scan:scan-skill",
+        {
+            "path": "${SCAN_DIR}/head/scan-skill",
+            "scan_path": "${SCAN_DIR}/snapB/scan-skill",
+            "resolve": False,
+        },
+    )
+EOF
+mv "${SCAN_DIR}/head" "${SCAN_DIR}/head.hidden"
+cd "$WS_SCAN"
+res_out=$("${SCRIPT}" resolve scan:scan-skill 2>&1) || true
+dj=$(AGENT_REQUIRED_SKILLS="scan-skill" doctor_json)
+mv "${SCAN_DIR}/head.hidden" "${SCAN_DIR}/head"
+if [[ "$res_out" == *"${SCAN_DIR}/head/scan-skill"* ]] &&
+  [ "$(check_status "$dj" "Required Skills")" = "OK" ] &&
+  [ "$(check_status "$dj" "Plugin Local Paths")" != "ERROR" ] &&
+  [ -z "$(json_get "$dj" 'd["plan"]["stray_dangling"]')" ]; then
+  echo "ok 28 - [Plugins] existence checks use scan_path; resolution returns path"
+else
+  echo "not ok 28 - [Plugins] existence checks bypassed scan_path: $res_out / $dj"
+fi
+rm -f "${XDG_CONFIG_HOME}/skill/plugins/mock_scan.py"
+cd "$TMPDIR"

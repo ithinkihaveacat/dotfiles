@@ -269,7 +269,7 @@ class Workspace:
                     continue
                 if item.is_symlink():
                     try:
-                        target_exists = item.exists()
+                        target_exists = link_target_exists(item)
                     except OSError:
                         target_exists = False
                     if target_exists:
@@ -990,17 +990,21 @@ def ensure_catalog_stub(name: str, entry: dict, force: bool = False) -> None:
         stub_md = stub_dir / "SKILL.md"
         src_path = Path(entry["path"]).expanduser()
         src_md = src_path / "SKILL.md"
+        # Compare the link text, never its dereferenced target: resolving a
+        # link into a network-backed mount costs a remote round trip per path
+        # component, on every invocation. The link is written from str(src_md),
+        # so a lexical match is exact, and any mismatch is simply rewritten.
+        if not force and stub_md.is_symlink():
+            try:
+                if os.readlink(stub_md) == str(src_md):
+                    return
+            except OSError:
+                pass
         if src_md.is_file():
             if not stub_dir.is_dir():
                 stub_dir.mkdir(parents=True, exist_ok=True)
-            if not stub_md.is_symlink() and not stub_md.exists():
-                try:
-                    stub_md.symlink_to(src_md)
-                except Exception:
-                    pass
-            elif force or (
-                stub_md.is_symlink() and stub_md.resolve() != src_md.resolve()
-            ):
+            # A regular file here (not a link) is left alone unless forced.
+            if force or stub_md.is_symlink() or not stub_md.exists():
                 stub_md.unlink(missing_ok=True)
                 try:
                     stub_md.symlink_to(src_md)
@@ -1025,6 +1029,8 @@ class SkillAPI:
         self.plugin_catalog = {}
         self.all_registrations = []
         self.load_failures = []
+        # normpath(path) -> scan_path, for probing existence cheaply
+        self.scan_paths: dict[str, str] = {}
 
     def register_workspace(self, cls):
         self.workspace_classes.append(cls)
@@ -1052,6 +1058,9 @@ class SkillAPI:
                     f"Skill '{name}': 'path' cannot be mixed with GitHub parameters."
                 )
             spec["path"] = os.path.expanduser(spec["path"])
+            if spec.get("scan_path"):
+                spec["scan_path"] = os.path.expanduser(spec["scan_path"])
+                self.scan_paths[os.path.normpath(spec["path"])] = spec["scan_path"]
         elif "repo" in spec and "ref" in spec:
             spec.setdefault("subpath", None)
         else:
@@ -1073,6 +1082,21 @@ def get_api() -> SkillAPI:
     if _LOADED_API is None:
         _LOADED_API = load_plugins()
     return _LOADED_API
+
+
+def link_target_exists(link: Path) -> bool:
+    """Whether a skill symlink's target exists, without always following it.
+
+    A link to a registered skill path that has a scan_path is checked through
+    the scan_path: the same content via a cheaper view (following the link
+    itself may cost a remote round trip per path component). Any other link
+    is followed as usual. Raises OSError if the link cannot be read.
+    """
+    target = os.readlink(link)
+    if not os.path.isabs(target):
+        target = os.path.join(link.parent, target)
+    scan_path = get_api().scan_paths.get(os.path.normpath(target))
+    return Path(scan_path).is_dir() if scan_path else link.exists()
 
 
 def load_plugins() -> SkillAPI:
@@ -1158,7 +1182,9 @@ def resolve_skill_spec(spec: str) -> tuple[Path, str]:
         if short_name.lower() == req_name.lower():
             if "path" in entry:
                 target_path = Path(entry["path"]).expanduser()
-                if target_path.is_dir():
+                # Probe through scan_path when registered (same content, a
+                # cheaper view); the candidate path is always 'path'.
+                if Path(entry.get("scan_path") or target_path).is_dir():
                     should_resolve = entry.get("resolve", True)
                     resolved_path = (
                         Path(os.path.realpath(target_path))
@@ -2813,29 +2839,39 @@ def cmd_catalog(as_json=False):
     # remote repository previously downloaded into the cache. A remote skill
     # that has never been downloaded is reported from its cached SKILL.md
     # frontmatter alone and marked "remote": listing a catalog must never pull
-    # a repository over the network.
+    # a repository over the network. Only the JSON form reports metadata and
+    # structure, so the human listing skips those reads entirely.
     for name, entry in api.all_registrations:
         ns = name.split(":")[0] if ":" in name else "default"
         if "path" in entry:
-            src_dir = Path(entry["path"]).expanduser()
-            on_disk = src_dir.is_dir()
-            meta = get_skill_metadata(src_dir, name)
-            obj = {
-                "name": name,
-                "description": meta["description"],
-                "source": clean_p(entry["path"]),
-                "namespace": ns,
-                "status": "local" if on_disk else "missing",
-            }
-            obj.update(
-                structure_fields(collect_skill_stats(src_dir) if on_disk else None)
-            )
+            if as_json:
+                # A plugin may name a faster, read-only view of the same
+                # content (scan_path); it is only ever read here, while the
+                # reported source -- like every link target -- stays 'path'.
+                src_dir = Path(entry.get("scan_path") or entry["path"]).expanduser()
+                on_disk = src_dir.is_dir()
+                meta = get_skill_metadata(src_dir, name)
+                obj = {
+                    "name": name,
+                    "description": meta["description"],
+                    "source": clean_p(entry["path"]),
+                    "namespace": ns,
+                    "status": "local" if on_disk else "missing",
+                }
+                obj.update(
+                    structure_fields(collect_skill_stats(src_dir) if on_disk else None)
+                )
+            else:
+                obj = {
+                    "name": name,
+                    "source": clean_p(entry["path"]),
+                    "namespace": ns,
+                }
             if entry.get("plugin_file"):
                 obj["plugin"] = entry["plugin_file"]
             skills_info.append(obj)
         elif "repo" in entry:
             stub_dir = get_catalog_dir() / name
-            meta = get_skill_metadata(stub_dir, name)
             subpath = entry.get("subpath")
             if subpath:
                 src_str = (
@@ -2845,19 +2881,27 @@ def cmd_catalog(as_json=False):
                 src_str = f"https://github.com/{entry['repo']}/tree/{entry['ref']}"
             else:
                 src_str = f"https://github.com/{entry['repo']}"
-            cached_dir = cached_remote_dir(entry)
-            obj = {
-                "name": name,
-                "description": meta["description"],
-                "source": src_str,
-                "namespace": ns,
-                "status": "cached" if cached_dir else "remote",
-            }
-            obj.update(
-                structure_fields(
-                    collect_skill_stats(cached_dir) if cached_dir else None
+            if as_json:
+                meta = get_skill_metadata(stub_dir, name)
+                cached_dir = cached_remote_dir(entry)
+                obj = {
+                    "name": name,
+                    "description": meta["description"],
+                    "source": src_str,
+                    "namespace": ns,
+                    "status": "cached" if cached_dir else "remote",
+                }
+                obj.update(
+                    structure_fields(
+                        collect_skill_stats(cached_dir) if cached_dir else None
+                    )
                 )
-            )
+            else:
+                obj = {
+                    "name": name,
+                    "source": src_str,
+                    "namespace": ns,
+                }
             if entry.get("plugin_file"):
                 obj["plugin"] = entry["plugin_file"]
             skills_info.append(obj)
@@ -3504,7 +3548,7 @@ def cmd_doctor(
 
             if "path" in entry:
                 target_path = Path(entry["path"]).expanduser()
-                if not target_path.is_dir():
+                if not Path(entry.get("scan_path") or target_path).is_dir():
                     plugin_path_issues.append(
                         f"  - {name} (path does not exist: {clean_p(target_path)})"
                     )
@@ -3841,6 +3885,17 @@ def register(api):
 
         def get_expected_skills(self) -> list[str]:
             return []
+
+    # Skills can be added to the catalog as a GitHub tree URL, or as a dict:
+    #   path       Directory holding SKILL.md; installed links point here.
+    #   resolve    False keeps 'path' literal (no realpath), for virtual
+    #              mounts whose resolved form changes over time.
+    #   scan_path  Optional read-only view of the same content that is cheaper
+    #              to read (e.g. a pinned snapshot of a moving mount). Used to
+    #              check the skill exists and to read metadata and structure;
+    #              never a link target or compared against links, so it may
+    #              change between runs.
+    # api.register_skill("example:my-skill", {"path": "~/src/skills/my-skill"})
 ''')
         sys.exit(0)
 
