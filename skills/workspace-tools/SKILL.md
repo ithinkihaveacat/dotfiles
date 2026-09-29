@@ -2,14 +2,14 @@
 name: workspace-tools
 description: >-
   Configures workspaces for agent-assisted development. Manages agent skills (untracked
-  symlinks), workspace tool permissions (allow/deny/ask rules for Claude Code and
-  Antigravity),
+  symlinks), workspace tool permissions (allow/deny/ask rules for Claude Code,
+  Codex, and Antigravity),
   git hook profiles, and .envrc configurations. Use when configuring a workspace,
   discovering or installing skills, setting tool permissions, managing git hooks,
   or
   updating .envrc configuration blocks.
 compatibility: >-
-  Requires git. Optional: python3, uv, direnv, claude, or agy.
+  Requires git. Optional: python3, uv, direnv, claude, codex, or agy.
 ---
 
 # Workspace Tools
@@ -28,9 +28,9 @@ control ever seeing the configuration. It consists of four tools:
    workspace needs — see
    [Choosing Skills for a Workspace](#choosing-skills-for-a-workspace).
 1. **`permission`**: The permission manager. Maintains allow/deny/ask rules for
-   every detected local agent (workspace-local for Claude Code, user-wide for
-   Antigravity), including pre-approving the safe commands declared by installed
-   skills.
+   every detected local agent (workspace-local for Claude Code and Codex,
+   user-wide for Antigravity), including pre-approving the safe commands
+   declared by installed skills.
 1. **`envrc`**: The configuration manager. Manages marker-delimited blocks in
    `.envrc` files for direnv integration.
 
@@ -239,6 +239,12 @@ backend translates them to its native syntax and scope:
 - **`agy`** (Antigravity CLI): `command(...)` rules in
   `~/.gemini/antigravity-cli/settings.json` (user-wide configuration;
   Antigravity CLI evaluates permissions from global settings).
+- **`codex`** (Codex CLI): `prefix_rule(...)` entries in the dedicated
+  `.codex/rules/permission.rules` file (workspace-local configuration). Clean
+  `allow`/`ask`/`deny` modes map to Codex's `allow`/`prompt`/`forbidden`
+  decisions. The dedicated file lets `clean` avoid touching hand-authored or
+  organization-managed rules in neighboring `.rules` files. Codex loads project
+  rules only after the workspace is trusted.
 
 By default every command operates on all detected agents; use `--agent NAME` to
 scope to one.
@@ -276,6 +282,16 @@ New scripts added to a skill are therefore pre-approved by default; only the
 exceptions need maintaining. The `permission` tool's own mutating subcommands
 (`add`, `remove`, `clean`) are declared unsafe so an agent can never edit its
 own allowlist unprompted.
+
+### Codex permission behavior
+
+Codex rules are written to the untracked workspace file
+`.codex/rules/permission.rules`. In Codex, an `allow` decision runs the matching
+command **outside the sandbox without prompting**; this is stronger than the
+corresponding Claude Code and Antigravity allow rules. Review each skill's
+`permissions/unsafe` declarations before applying its rules. Rules match token
+prefixes, so shell operators and redirections are not covered, and a bare
+command pattern does not match an invocation written with an absolute path.
 
 ### Plugins
 
