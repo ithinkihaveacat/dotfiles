@@ -82,8 +82,9 @@ OPTIONS:
                 Install the core and optional package sets
   --install-all Install the core, optional, and full package sets
   --prune       Remove installed packages not in any tier (brew), and apt
-                packages this script has retired (prompts first and is skipped
-                when non-interactive). Default: warn only
+                packages this script has retired. Prompts first when
+                interactive; removes without asking when non-interactive.
+                Default: warn only
   --non-interactive
                 Run without prompting or interactive terminal-session validation
   --only PART   Run only the named part of the script, then exit: no git pull,
@@ -289,8 +290,8 @@ function install_set_for_tier {
 }
 
 # Report brew leaves that are not in the allowlist ($1, space-separated). With
-# --prune, offer to remove them (interactive only; never removes when
-# non-interactive). Without --prune, warn and leave them in place.
+# --prune, remove them: after a confirmation prompt when interactive, without
+# one when non-interactive. Without --prune, warn and leave them in place.
 function prune_brew_extras {
   local allowlist=$1
   local extras indented
@@ -331,8 +332,9 @@ function prune_brew_extras {
 # Report retired apt packages ($1, space-separated) that are still installed:
 # packages this script used to install and no longer does. Unlike brew, apt
 # cannot be pruned against an allowlist (it also manages the OS itself), so
-# only these explicitly retired names are ever candidates. With --prune, offer
-# to remove them (behaving like prune_brew_extras); without it, warn.
+# only these explicitly retired names are ever candidates. With --prune, remove
+# them, prompting first only when interactive (like prune_brew_extras);
+# without it, warn.
 function prune_apt_retired {
   local retired=$1
   local installed_retired indented
