@@ -82,6 +82,70 @@ def workspace_permission_paths(workspace_root: Path) -> list[str]:
     ]
 
 
+def sync_git_exclude(workspace_root: Path) -> None:
+    """Manages a '# >>> permission >>>' block in .git/info/exclude listing
+    the workspace-local permission files that currently exist."""
+    paths = workspace_permission_paths(workspace_root)
+    try:
+        res = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workspace_root),
+                "rev-parse",
+                "--git-path",
+                "info/exclude",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        exclude_file = (workspace_root / res.stdout.strip()).resolve()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+
+    mark_begin = "# >>> permission >>>"
+    mark_end = "# <<< permission <<<"
+
+    other_lines: list[str] = []
+    if exclude_file.is_file():
+        in_block = False
+        with open(exclude_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped == mark_begin:
+                    in_block = True
+                    continue
+                if stripped == mark_end:
+                    in_block = False
+                    continue
+                if not in_block:
+                    other_lines.append(line)
+
+    exclude_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_fd, temp_path_str = tempfile.mkstemp(dir=str(exclude_file.parent))
+    temp_path = Path(temp_path_str)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+            for line in other_lines:
+                f.write(line)
+            if other_lines and not other_lines[-1].endswith("\n"):
+                f.write("\n")
+            if paths:
+                f.write(mark_begin + "\n")
+                f.write("# managed by 'permission'\n")
+                for p in sorted(paths):
+                    f.write(p + "\n")
+                f.write(mark_end + "\n")
+        os.replace(temp_path, exclude_file)
+    except Exception as e:
+        temp_path.unlink(missing_ok=True)
+        print(
+            f"permission: warning: could not update info/exclude: {e}",
+            file=sys.stderr,
+        )
+
+
 # ==============================================================================
 # Plugins & Workspace Root Detection
 # ==============================================================================
@@ -517,67 +581,6 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         inner = inner.removesuffix(":*")
         return inner
 
-    def _sync_exclude_block(self, workspace_root: Path, paths: list[str]) -> None:
-        """Manages a '# >>> permission >>>' block in .git/info/exclude."""
-        try:
-            res = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(workspace_root),
-                    "rev-parse",
-                    "--git-path",
-                    "info/exclude",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            exclude_file = (workspace_root / res.stdout.strip()).resolve()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return
-
-        mark_begin = "# >>> permission >>>"
-        mark_end = "# <<< permission <<<"
-
-        other_lines: list[str] = []
-        if exclude_file.is_file():
-            in_block = False
-            with open(exclude_file, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if stripped == mark_begin:
-                        in_block = True
-                        continue
-                    if stripped == mark_end:
-                        in_block = False
-                        continue
-                    if not in_block:
-                        other_lines.append(line)
-
-        exclude_file.parent.mkdir(parents=True, exist_ok=True)
-        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(exclude_file.parent))
-        temp_path = Path(temp_path_str)
-        try:
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-                for line in other_lines:
-                    f.write(line)
-                if other_lines and not other_lines[-1].endswith("\n"):
-                    f.write("\n")
-                if paths:
-                    f.write(mark_begin + "\n")
-                    f.write("# managed by 'permission'\n")
-                    for p in sorted(paths):
-                        f.write(p + "\n")
-                    f.write(mark_end + "\n")
-            os.replace(temp_path, exclude_file)
-        except Exception as e:
-            temp_path.unlink(missing_ok=True)
-            print(
-                f"[{self.name}] warning: could not update info/exclude: {e}",
-                file=sys.stderr,
-            )
-
     def _load(self, settings_path: Path) -> dict:
         if not settings_path.is_file():
             return {}
@@ -602,9 +605,7 @@ class ClaudeSettingsAdapter(PermissionAdapter):
                 f"[{self.name} ({self.scope})] initialized {settings_path}",
                 file=sys.stderr,
             )
-        self._sync_exclude_block(
-            workspace_root, workspace_permission_paths(workspace_root)
-        )
+        sync_git_exclude(workspace_root)
 
     def add(self, workspace_root: Path, pattern: str, mode: str) -> bool:
         rule = self.translate(pattern)
@@ -697,6 +698,8 @@ class CodexRulesAdapter(PermissionAdapter):
                 config = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError) as e:
             return False, str(e)
+        # Codex keys trust by the main checkout, so a linked worktree inherits
+        # it through the common Git directory.
         trust_root = workspace_root.resolve()
         try:
             result = subprocess.run(
@@ -715,7 +718,9 @@ class CodexRulesAdapter(PermissionAdapter):
             trust_root = Path(result.stdout.strip()).resolve().parent
         except (FileNotFoundError, subprocess.CalledProcessError):
             pass
-        project = (config.get("projects") or {}).get(str(trust_root)) or {}
+        project = (config.get("projects") or {}).get(str(trust_root))
+        if not isinstance(project, dict):
+            return False, None
         return project.get("trust_level") == "trusted", None
 
     def is_available(self, workspace_root: Path) -> bool:
@@ -751,9 +756,8 @@ class CodexRulesAdapter(PermissionAdapter):
             raise ValueError("prefix_rule pattern must be a non-empty string list")
         return tokens, decision
 
-    def _load_rules(self, workspace_root: Path) -> dict[str, list[str]]:
+    def _load_rules(self, path: Path) -> dict[str, list[str]]:
         result = {mode: [] for mode in MODES}
-        path = self._rules_path(workspace_root)
         if not path.is_file():
             return result
         try:
@@ -792,9 +796,7 @@ class CodexRulesAdapter(PermissionAdapter):
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
-        ClaudeSettingsAdapter()._sync_exclude_block(
-            workspace_root, workspace_permission_paths(workspace_root)
-        )
+        sync_git_exclude(workspace_root)
 
     def _parse_pattern(self, pattern: str) -> tuple[list[str], str]:
         try:
@@ -807,7 +809,7 @@ class CodexRulesAdapter(PermissionAdapter):
         tokens, clean = self._parse_pattern(pattern)
         if not tokens:
             return False
-        rules = self._load_rules(workspace_root)
+        rules = self._load_rules(self._rules_path(workspace_root))
         if clean in rules[mode]:
             return False
         for other_mode in MODES:
@@ -819,7 +821,7 @@ class CodexRulesAdapter(PermissionAdapter):
 
     def remove(self, workspace_root: Path, pattern: str) -> list[str]:
         _, clean = self._parse_pattern(pattern)
-        rules = self._load_rules(workspace_root)
+        rules = self._load_rules(self._rules_path(workspace_root))
         removed = []
         for mode in MODES:
             if clean in rules[mode]:
@@ -831,15 +833,13 @@ class CodexRulesAdapter(PermissionAdapter):
 
     def rules(self, workspace_root: Path) -> dict[str, list[str]]:
         return (
-            self._load_rules(workspace_root)
+            self._load_rules(self._rules_path(workspace_root))
             if self.is_initialized(workspace_root)
             else {}
         )
 
     def rules_in(self, path: Path) -> dict[str, list[str]]:
-        if not path.is_file():
-            return {}
-        return self._load_rules(path.parents[2])
+        return self._load_rules(path) if path.is_file() else {}
 
     def clean(self, workspace_root: Path) -> None:
         path = self._rules_path(workspace_root)
@@ -850,9 +850,7 @@ class CodexRulesAdapter(PermissionAdapter):
             path.parent.rmdir()
         except OSError:
             pass
-        ClaudeSettingsAdapter()._sync_exclude_block(
-            workspace_root, workspace_permission_paths(workspace_root)
-        )
+        sync_git_exclude(workspace_root)
         print(
             f"[{self.name} ({self.scope})] cleared all permission rules",
             file=sys.stderr,
@@ -1228,7 +1226,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
             if trusted:
                 checks.append(
                     {
-                        "name": "Codex Project Trust",
+                        "name": "Workspace Trust (codex)",
                         "status": "OK",
                         "summary": "Workspace is trusted",
                         "details": [],
@@ -1243,7 +1241,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                 details.append("To resolve: trust this project in Codex")
                 checks.append(
                     {
-                        "name": "Codex Project Trust",
+                        "name": "Workspace Trust (codex)",
                         "status": "WARN",
                         "summary": "Workspace rules will not load until the project is trusted",
                         "details": details,
