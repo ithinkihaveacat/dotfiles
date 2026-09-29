@@ -81,8 +81,9 @@ OPTIONS:
   --install-optional
                 Install the core and optional package sets
   --install-all Install the core, optional, and full package sets
-  --prune       Remove installed packages not in any tier (brew only; prompts
-                first and is skipped when non-interactive). Default: warn only
+  --prune       Remove installed packages not in any tier (brew), and apt
+                packages this script has retired (prompts first and is skipped
+                when non-interactive). Default: warn only
   --non-interactive
                 Run without prompting or interactive terminal-session validation
   --only PART   Run only the named part of the script, then exit: no git pull,
@@ -325,6 +326,49 @@ function prune_brew_extras {
       echo "Skipping removal." >&2
       ;;
   esac
+}
+
+# Report retired apt packages ($1, space-separated) that are still installed:
+# packages this script used to install and no longer does. Unlike brew, apt
+# cannot be pruned against an allowlist (it also manages the OS itself), so
+# only these explicitly retired names are ever candidates. With --prune, offer
+# to remove them (behaving like prune_brew_extras); without it, warn.
+function prune_apt_retired {
+  local retired=$1
+  local installed_retired indented
+  installed_retired=$(comm -12 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$retired" | tr ' ' '\n' | sort))
+  [ -n "$installed_retired" ] || return 0
+  # shellcheck disable=SC2001 # sed prefixes every line, including the first
+  indented=$(echo "$installed_retired" | sed 's/^/  /')
+
+  if [ "$PRUNE" != 1 ]; then
+    echo "warning: retired apt packages present (no longer managed by this script):" >&2
+    echo "$indented" >&2
+    echo "hint: remove with 'sudo apt-get remove --purge <pkg>', or re-run with --prune" >&2
+    return 0
+  fi
+
+  if [ "$NON_INTERACTIVE" != 1 ]; then
+    echo "The following retired apt packages will be removed:" >&2
+    echo "$indented" >&2
+    printf 'Remove these packages? [y/N] ' >&2
+    local reply=""
+    read -r reply || reply=""
+    case "$reply" in
+      [yY] | [yY][eE][sS]) ;;
+      *)
+        echo "Skipping removal." >&2
+        return 0
+        ;;
+    esac
+  else
+    echo "Removing retired apt packages (--prune specified):" >&2
+    echo "$indented" >&2
+  fi
+  # Package names contain no whitespace, so word splitting is intended here.
+  # shellcheck disable=SC2086
+  x sudo apt-get -y remove --purge $installed_retired ||
+    echo "warning: apt-get remove of retired packages failed" >&2
 }
 
 # SRCDIR is the root of the git repo
@@ -875,13 +919,13 @@ if [ "$PLATFORM" = "linux" ]; then
     # base system and infrastructure packages beyond dotfiles. Orphaned dependency
     # packages are purged via apt-get autoremove --purge below.
 
-    # sysstat was removed from this script (it recommends pcp, which installs 6
-    # heavyweight daemon services). Warn so it can be purged on existing machines.
-    if dpkg-query -W -f='${Status}' sysstat 2>/dev/null | grep -q "install ok installed"; then
-      echo "⚠️  warning: sysstat is installed but no longer managed by this script."
-      echo "   It pulls in pcp (6 daemon services). Remove with:"
-      echo "   sudo apt-get remove --purge sysstat pcp"
-    fi
+    # Retired packages: ones this script used to install and no longer does.
+    # Reported on every run and removed with --prune (see prune_apt_retired).
+    #   sysstat, pcp: sysstat recommends pcp, which installs 6 heavyweight
+    #     daemon services.
+    #   shfmt, shellcheck: now installed as uv tools (see stanza_uv).
+    retired="sysstat pcp shellcheck shfmt"
+    prune_apt_retired "$retired"
 
     # ruby-build: the engine behind ruby-install. Installed alongside the Ruby
     # build deps above whenever the optional/all tier is selected, so the two
