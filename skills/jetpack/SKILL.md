@@ -79,6 +79,8 @@ re-run where there is network; it is never a reason to answer from memory.
   `scripts/jetpack source androidx.compose.ui:ui SNAPSHOT`
 - **Download reference sample code:**
   `scripts/jetpack-samples androidx.compose.remote:remote-creation-compose`
+- **Download version-specific reference sample code:**
+  `scripts/jetpack-samples androidx.wear.compose:compose-material3 1.7.0-rc01`
 
 ## Subcommand Overview
 
@@ -139,9 +141,11 @@ attention.
 ### `scripts/jetpack-samples`
 
 **Purpose**: Download non-published reference samples and integration tests.
-**Usage**: `scripts/jetpack-samples ARTIFACT [--output DIR]` **Details**:
-Locates files from the AOSP source structure and aggregates into readable
-components locally.
+**Usage**: `scripts/jetpack-samples ARTIFACT [VERSION] [--output DIR]`
+**Details**: Extracts sample modules from the AOSP source structure. When
+`VERSION` (or release tier like `STABLE`, `RC`, `BETA`, `ALPHA`) is specified,
+it resolves the exact Git commit SHA from AndroidX release notes to match the
+released artifact. If omitted, extracts samples from `androidx-main` (HEAD).
 
 ## Version Types
 

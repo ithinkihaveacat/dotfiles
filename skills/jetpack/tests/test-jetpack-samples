@@ -8,7 +8,7 @@ SCRIPT_DIR=$(dirname "$0")
 ROOT_DIR="$SCRIPT_DIR/.."
 BIN_JETPACK_SAMPLES="$ROOT_DIR/scripts/jetpack-samples"
 
-TOTAL_TESTS=7
+TOTAL_TESTS=10
 TEST_NUM=0
 
 echo "1..$TOTAL_TESTS"
@@ -171,3 +171,93 @@ else
   sed 's/^/# /' "$log_file"
 fi
 rm -f "$log_file"
+
+# 6. Version specified both in artifact coordinate and argument fails.
+TEST_NUM=$((TEST_NUM + 1))
+log_file=$(mktemp)
+if ! "$BIN_JETPACK_SAMPLES" "androidx.wear.tiles:tiles:1.0.0" "1.0.0" >"$log_file" 2>&1; then
+  if grep -q "version specified both in artifact coordinate and as argument" "$log_file"; then
+    echo "ok $TEST_NUM - version specified in both formats is rejected"
+  else
+    echo "not ok $TEST_NUM - rejected duplicate version with unexpected message"
+    sed 's/^/# /' "$log_file"
+  fi
+else
+  echo "not ok $TEST_NUM - accepted version specified in both formats"
+  sed 's/^/# /' "$log_file"
+fi
+rm -f "$log_file"
+
+# 7. Unparseable release notes error immediately and advise omitting version.
+TEST_NUM=$((TEST_NUM + 1))
+# shellcheck disable=SC2016
+make_curl_shim '
+for a in "$@"; do case "$prev" in -o) out="$a";; esac; prev="$a"; url="$a"; done
+if [[ "$url" =~ \.pom$ ]]; then
+  echo "<project><url>https://developer.android.com/jetpack/androidx/releases/tiles</url></project>" > "$out"
+  printf 200
+elif [[ "$url" =~ releases/tiles ]]; then
+  echo "<html><body><h1>Tiles Release</h1><p>No commits link here</p></body></html>" > "$out"
+  printf 200
+else
+  : > "$out"
+  printf 404
+fi'
+log_file=$(mktemp)
+PATH="$SHIM_DIR:$PATH" "$BIN_JETPACK_SAMPLES" androidx.wear.tiles:tiles 1.0.0 \
+  >"$log_file" 2>&1 || true
+if grep -q "could not resolve commit SHA for version 1.0.0" "$log_file" &&
+  grep -q "fetching 'latest' samples" "$log_file"; then
+  echo "ok $TEST_NUM - unparseable release notes fail fast and suggest omitting version"
+else
+  echo "not ok $TEST_NUM - unparseable release notes error misreported"
+  sed 's/^/# /' "$log_file"
+fi
+rm -f "$log_file"
+
+# 8. Successful versioned SHA resolution and sample download via direct probe.
+TEST_NUM=$((TEST_NUM + 1))
+MOCK_TAR=$(mktemp)
+(
+  MOCK_SRC=$(mktemp -d)
+  mkdir -p "$MOCK_SRC/src"
+  touch "$MOCK_SRC/build.gradle"
+  tar -czf "$MOCK_TAR" -C "$MOCK_SRC" .
+  rm -rf "$MOCK_SRC"
+)
+# shellcheck disable=SC2016
+make_curl_shim '
+for a in "$@"; do case "$prev" in -o) out="$a";; esac; prev="$a"; url="$a"; done
+if [[ "$url" =~ \.pom$ ]]; then
+  echo "<project><url>https://developer.android.com/jetpack/androidx/releases/tiles</url></project>" > "$out"
+  printf 200
+elif [[ "$url" =~ releases/tiles ]]; then
+  echo "Version 1.0.0 contains [these commits](https://android.googlesource.com/platform/frameworks/support/+log/111111..abcdef1234567890abcdef1234567890abcdef12/tiles)." > "$out"
+  printf 200
+elif [[ "$url" =~ \?format=JSON$ ]]; then
+  echo "{}" > "$out"
+  printf 200
+elif [[ "$url" =~ \.tar\.gz$ ]]; then
+  cat '"$MOCK_TAR"' > "$out"
+  printf 200
+else
+  : > "$out"
+  printf 404
+fi'
+log_file=$(mktemp)
+MOCK_OUT=$(mktemp -d)
+if PATH="$SHIM_DIR:$PATH" "$BIN_JETPACK_SAMPLES" androidx.wear.tiles:tiles 1.0.0 --output "$MOCK_OUT" \
+  >"$log_file" 2>&1; then
+  if grep -q "Resolved androidx.wear.tiles:tiles 1.0.0 -> commit abcdef1234567890abcdef1234567890abcdef12" "$log_file" &&
+    [ -d "$MOCK_OUT/wear/tiles/tiles/samples/src" ] && [ -f "$MOCK_OUT/wear/tiles/tiles/samples/build.gradle" ]; then
+    echo "ok $TEST_NUM - successfully resolved version SHA and extracted samples via probe"
+  else
+    echo "not ok $TEST_NUM - versioned extraction missing files or commit log"
+    sed 's/^/# /' "$log_file"
+  fi
+else
+  echo "not ok $TEST_NUM - versioned extraction failed"
+  sed 's/^/# /' "$log_file"
+fi
+rm -f "$log_file" "$MOCK_TAR"
+rm -rf "$MOCK_OUT"

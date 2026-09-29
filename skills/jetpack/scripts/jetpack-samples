@@ -23,17 +23,22 @@ require() {
 check_deps() {
   require curl
   require jq
+  require perl
 }
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") ARTIFACT [OPTIONS]
+Usage: $(basename "$0") ARTIFACT [VERSION] [OPTIONS]
 
 Extract reference files (samples and integration tests) from the AndroidX 
 source repository for inspection.
 
 Arguments:
   ARTIFACT       The Maven coordinate of the Jetpack library (e.g., androidx.compose.remote:remote-creation-compose).
+                 Can also include version (e.g., androidx.wear.compose:compose-material3:1.7.0).
+  VERSION        Optional version or release tier to extract (e.g., 1.7.0, 1.7.0-rc01,
+                 STABLE, RC, BETA, ALPHA). If omitted, samples are extracted from
+                 the latest development tree (androidx-main).
 
 Options:
   --output DIR   Directory where extracted files will be downloaded.
@@ -47,7 +52,8 @@ Environment:
 
 Examples:
   $(basename "$0") androidx.compose.remote:remote-creation-compose
-  $(basename "$0") androidx.compose.remote:remote-creation-compose --output ./my-samples
+  $(basename "$0") androidx.wear.compose:compose-material3 1.7.0-rc01
+  $(basename "$0") androidx.wear.compose:compose-material3 STABLE --output ./my-samples
 EOF
   exit 0
 }
@@ -59,6 +65,7 @@ fi
 check_deps
 
 ARTIFACT=""
+VERSION=""
 OUTPUT_DIR=""
 
 while [[ $# -gt 0 ]]; do
@@ -80,6 +87,8 @@ while [[ $# -gt 0 ]]; do
     *)
       if [[ -z "$ARTIFACT" ]]; then
         ARTIFACT="$1"
+      elif [[ -z "$VERSION" ]]; then
+        VERSION="$1"
       else
         echo "$(basename "$0"): too many arguments" >&2
         echo "Try '$(basename "$0") --help' for more information." >&2
@@ -96,6 +105,16 @@ if [[ -z "$ARTIFACT" ]]; then
   exit 1
 fi
 
+if [[ "$ARTIFACT" =~ ^([^:]+):([^:]+):([^:]+)$ ]]; then
+  if [[ -n "$VERSION" ]]; then
+    echo "$(basename "$0"): version specified both in artifact coordinate and as argument" >&2
+    echo "Try '$(basename "$0") --help' for more information." >&2
+    exit 1
+  fi
+  VERSION="${BASH_REMATCH[3]}"
+  ARTIFACT="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+fi
+
 if [[ ! "$ARTIFACT" =~ ^[^:]+:[^:]+$ ]]; then
   echo "$(basename "$0"): invalid artifact format '$ARTIFACT' (expected GROUP_ID:ARTIFACT_ID)" >&2
   echo "Try '$(basename "$0") --help' for more information." >&2
@@ -103,6 +122,7 @@ if [[ ! "$ARTIFACT" =~ ^[^:]+:[^:]+$ ]]; then
 fi
 
 GROUP_ID=$(echo "$ARTIFACT" | cut -d: -f1)
+ARTIFACT_ID=$(echo "$ARTIFACT" | cut -d: -f2)
 DERIVED_PATH=$(echo "$GROUP_ID" | sed 's/^androidx\.//' | sed 's/\./\//g')
 
 is_offline() {
@@ -198,80 +218,200 @@ http_get() {
   return 0
 }
 
-# Gitiles (the browser behind android.googlesource.com, the same host used
-# below to download matched directories) can list a directory's full
-# recursive file tree as JSON in a single request, scoped to just the
-# derived path. This replaces an older approach that scraped an API key out
-# of cs.android.com's HTML to query Google's internal, undocumented Code
-# Search backend.
-GITILES_URL="https://android.googlesource.com/platform/frameworks/support/+/refs/heads/androidx-main/${DERIVED_PATH}?format=JSON&recursive=1"
+SCRIPT_DIR=$(dirname "$0")
 
-RESPONSE_FILE="$OUTPUT_DIR/.gitiles.json"
-GITILES_STATUS=0
-http_get "$GITILES_URL" "$RESPONSE_FILE" || GITILES_STATUS=$?
+resolve_version_to_sha() {
+  local artifact="$1" version="$2"
+  local group_id artifact_id
+  group_id=$(echo "$artifact" | cut -d: -f1)
+  artifact_id=$(echo "$artifact" | cut -d: -f2)
 
-# Only a 404 is evidence the artifact has no such path in the tree. A transport
-# failure or a 5xx means we never learned whether it does, and reporting either
-# as "no files found" is the one failure mode this must not have -- a caller
-# cannot tell an empty result from a broken lookup, and will believe the former.
-if [[ $GITILES_STATUS -eq 1 ]]; then
-  echo "$(basename "$0"): no files found for path $DERIVED_PATH ($HTTP_ERROR)" >&2
-  exit 1
-elif [[ $GITILES_STATUS -ne 0 ]]; then
-  echo "$(basename "$0"): $HTTP_ERROR" >&2
-  exit 1
+  # 1. Resolve symbolic release tiers (STABLE, RC, BETA, ALPHA)
+  if [[ "$version" =~ ^(ALPHA|BETA|RC|STABLE)$ ]]; then
+    local resolved=""
+    if [[ -x "$SCRIPT_DIR/jetpack" ]]; then
+      resolved=$("$SCRIPT_DIR/jetpack" version "$artifact" "$version" 2>/dev/null || true)
+    elif command -v jetpack >/dev/null 2>&1; then
+      resolved=$(jetpack version "$artifact" "$version" 2>/dev/null || true)
+    fi
+    if [[ -n "$resolved" ]]; then
+      version="$resolved"
+    fi
+  fi
+
+  # 2. Fetch Maven POM to locate canonical DAC release notes URL
+  local group_path
+  group_path=$(echo "$group_id" | tr '.' '/')
+  local pom_url="https://dl.google.com/android/maven2/${group_path}/${artifact_id}/${version}/${artifact_id}-${version}.pom"
+  local pom_file="$OUTPUT_DIR/.pom.xml"
+  local pom_status=0
+
+  http_get "$pom_url" "$pom_file" || pom_status=$?
+  if [[ $pom_status -eq 1 ]]; then
+    echo "$(basename "$0"): error: artifact $artifact version $version not found on Google Maven (HTTP 404)" >&2
+    echo "$(basename "$0"): fetching 'latest' samples (by omitting the version) might succeed" >&2
+    exit 1
+  elif [[ $pom_status -ne 0 ]]; then
+    echo "$(basename "$0"): $HTTP_ERROR" >&2
+    exit 1
+  fi
+
+  local dac_url_raw dac_url
+  dac_url_raw=$(grep -o '<url>[^<]*' "$pom_file" | head -n 1 | sed 's/<url>//' || true)
+  rm -f "$pom_file"
+
+  if [[ -z "$dac_url_raw" || ! "$dac_url_raw" =~ developer\.android\.com ]]; then
+    local slug
+    slug=$(echo "$group_id" | sed 's/^androidx\.//' | tr '.' '-')
+    dac_url="https://developer.android.com/jetpack/androidx/releases/${slug}"
+  else
+    dac_url="${dac_url_raw%%#*}"
+  fi
+
+  # 3. Fetch DAC release notes
+  local dac_file="$OUTPUT_DIR/.dac.html"
+  local dac_status=0
+  http_get "$dac_url" "$dac_file" || dac_status=$?
+  if [[ $dac_status -ne 0 ]]; then
+    echo "$(basename "$0"): error: could not fetch release notes from $dac_url" >&2
+    if [[ -n "$HTTP_ERROR" ]]; then
+      echo "$(basename "$0"): $HTTP_ERROR" >&2
+    fi
+    echo "$(basename "$0"): fetching 'latest' samples (by omitting the version) might succeed" >&2
+    exit 1
+  fi
+
+  # 4. Extract release commit SHA
+  local release_sha=""
+  release_sha=$(TARGET_VERSION="$version" perl -0777 -ne '
+    my $ver = $ENV{"TARGET_VERSION"};
+    my $ver_short = $ver;
+    $ver_short =~ s/\.0$//;
+    if (/(?:Version\s+\Q$ver\E|Version\s+\Q$ver_short\E)\b.*?\+log\/[0-9a-fA-F]+\.\.([0-9a-fA-F]+)/s) {
+      print "$1\n";
+    }
+  ' <"$dac_file" || true)
+  rm -f "$dac_file"
+
+  if [[ -z "$release_sha" ]]; then
+    echo "$(basename "$0"): error: could not resolve commit SHA for version $version from release notes" >&2
+    echo "$(basename "$0"): the release notes format was not as expected or the version has not been published yet" >&2
+    echo "$(basename "$0"): fetching 'latest' samples (by omitting the version) might succeed" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$release_sha"
+}
+
+TARGET_REF="refs/heads/androidx-main"
+if [[ -n "$VERSION" && "$VERSION" != "latest" && "$VERSION" != "LATEST" && "$VERSION" != "HEAD" && "$VERSION" != "SNAPSHOT" ]]; then
+  echo "info: Resolving version $VERSION to Git commit SHA..." >&2
+  RELEASE_SHA=$(resolve_version_to_sha "$ARTIFACT" "$VERSION")
+  TARGET_REF="$RELEASE_SHA"
+  echo "info: Resolved $ARTIFACT $VERSION -> commit $RELEASE_SHA" >&2
 fi
 
-RESPONSE=$(cat "$RESPONSE_FILE")
-rm -f "$RESPONSE_FILE"
-
-# Gitiles prefixes JSON responses with an anti-XSSI line ()]}'); strip it
-# before parsing, then reconstruct each entry's path relative to the repo
-# root (the API returns paths relative to the requested directory).
-PATHS=$(echo "$RESPONSE" | tail -n +2 | jq -r --arg prefix "$DERIVED_PATH" \
-  '.entries[]? | select(.type == "blob") | "\($prefix)/\(.name)"' | sort -u)
-
-if [[ -z "$PATHS" ]]; then
-  echo "$(basename "$0"): no files found for path $DERIVED_PATH" >&2
-  exit 1
-fi
-
-# Extract unique module directories containing a 'src' folder
-MODULE_DIRS=$(echo "$PATHS" | grep "/src/" | sed -E 's|/src/.*||' | sort -u)
+# Prioritized AndroidX direct sample module paths. Probing avoids heavy
+# recursive git tree traversals (recursive=1) on parent directories that
+# frequently trigger Gitiles HTTP 503 load-shedding timeouts.
+PROBE_PATHS=(
+  "${DERIVED_PATH}/${ARTIFACT_ID}/samples"
+  "${DERIVED_PATH}/samples"
+  "${DERIVED_PATH}/${ARTIFACT_ID}-samples"
+)
 
 FOUND_SAMPLES=0
-if [[ -n "$MODULE_DIRS" ]]; then
-  while IFS= read -r mod_dir; do
-    if [[ "$mod_dir" =~ /samples || "$mod_dir" =~ /integration-tests ]]; then
-      TARGET_PATH="$OUTPUT_DIR/$mod_dir"
-      mkdir -p "$TARGET_PATH"
 
-      echo "info: Downloading optimized archive for $mod_dir..." >&2
-      TAR_URL="https://android.googlesource.com/platform/frameworks/support/+archive/refs/heads/androidx-main/${mod_dir}.tar.gz"
+for probe_dir in "${PROBE_PATHS[@]}"; do
+  probe_url="https://android.googlesource.com/platform/frameworks/support/+/${TARGET_REF}/${probe_dir}?format=JSON"
+  probe_file="$OUTPUT_DIR/.probe.json"
+  probe_status=0
+  http_get "$probe_url" "$probe_file" || probe_status=$?
 
-      # Fetch to a file rather than straight into tar so the HTTP status is
-      # readable: a module that 404s is a real gap in this artifact's tree and
-      # the remaining modules are still worth having, but a transport failure or
-      # a 5xx makes the count below meaningless -- some modules simply were not
-      # asked about successfully -- so those stop the run rather than shrinking
-      # the result silently.
-      ARCHIVE="$TARGET_PATH/.archive.tar.gz"
-      TAR_STATUS=0
-      http_get "$TAR_URL" "$ARCHIVE" || TAR_STATUS=$?
+  if [[ $probe_status -eq 0 ]]; then
+    rm -f "$probe_file"
+    target_path="$OUTPUT_DIR/$probe_dir"
+    mkdir -p "$target_path"
 
-      if [[ $TAR_STATUS -eq 1 ]]; then
-        echo "$(basename "$0"): warning: skipping $mod_dir ($HTTP_ERROR)" >&2
-      elif [[ $TAR_STATUS -ne 0 ]]; then
-        echo "$(basename "$0"): $HTTP_ERROR" >&2
-        exit 1
-      elif tar -xz -C "$TARGET_PATH" -f "$ARCHIVE"; then
-        FOUND_SAMPLES=$((FOUND_SAMPLES + 1))
-      else
-        echo "$(basename "$0"): warning: skipping $mod_dir (archive could not be extracted)" >&2
-      fi
-      rm -f "$ARCHIVE"
+    echo "info: Downloading optimized archive for $probe_dir..." >&2
+    tar_url="https://android.googlesource.com/platform/frameworks/support/+archive/${TARGET_REF}/${probe_dir}.tar.gz"
+    archive="$target_path/.archive.tar.gz"
+    tar_status=0
+    http_get "$tar_url" "$archive" || tar_status=$?
+
+    if [[ $tar_status -eq 0 ]] && tar -xz -C "$target_path" -f "$archive"; then
+      FOUND_SAMPLES=$((FOUND_SAMPLES + 1))
+      rm -f "$archive"
+      break
+    elif [[ $tar_status -ne 0 && $tar_status -ne 1 ]]; then
+      echo "$(basename "$0"): $HTTP_ERROR" >&2
+      rm -f "$archive"
+      exit 1
     fi
-  done <<<"$MODULE_DIRS"
+    rm -f "$archive"
+  elif [[ $probe_status -ne 1 ]]; then
+    # Server declined to answer (429, 5xx) or transport failure
+    rm -f "$probe_file"
+    echo "$(basename "$0"): $HTTP_ERROR" >&2
+    exit 1
+  fi
+  rm -f "$probe_file"
+done
+
+# Fallback to broader group search if direct probing found no samples
+if [[ $FOUND_SAMPLES -eq 0 ]]; then
+  gitiles_url="https://android.googlesource.com/platform/frameworks/support/+/${TARGET_REF}/${DERIVED_PATH}?format=JSON&recursive=1"
+  response_file="$OUTPUT_DIR/.gitiles.json"
+  gitiles_status=0
+  http_get "$gitiles_url" "$response_file" || gitiles_status=$?
+
+  if [[ $gitiles_status -eq 1 ]]; then
+    echo "$(basename "$0"): no files found for path $DERIVED_PATH ($HTTP_ERROR)" >&2
+    exit 1
+  elif [[ $gitiles_status -ne 0 ]]; then
+    echo "$(basename "$0"): $HTTP_ERROR" >&2
+    exit 1
+  fi
+
+  response=$(cat "$response_file")
+  rm -f "$response_file"
+
+  paths=$(echo "$response" | tail -n +2 | jq -r --arg prefix "$DERIVED_PATH" \
+    '.entries[]? | select(.type == "blob") | "\($prefix)/\(.name)"' | sort -u)
+
+  if [[ -z "$paths" ]]; then
+    echo "$(basename "$0"): no files found for path $DERIVED_PATH" >&2
+    exit 1
+  fi
+
+  module_dirs=$(echo "$paths" | grep "/src/" | sed -E 's|/src/.*||' | sort -u)
+
+  if [[ -n "$module_dirs" ]]; then
+    while IFS= read -r mod_dir; do
+      if [[ "$mod_dir" =~ /samples || "$mod_dir" =~ /integration-tests ]]; then
+        target_path="$OUTPUT_DIR/$mod_dir"
+        mkdir -p "$target_path"
+
+        echo "info: Downloading optimized archive for $mod_dir..." >&2
+        tar_url="https://android.googlesource.com/platform/frameworks/support/+archive/${TARGET_REF}/${mod_dir}.tar.gz"
+        archive="$target_path/.archive.tar.gz"
+        tar_status=0
+        http_get "$tar_url" "$archive" || tar_status=$?
+
+        if [[ $tar_status -eq 1 ]]; then
+          echo "$(basename "$0"): warning: skipping $mod_dir ($HTTP_ERROR)" >&2
+        elif [[ $tar_status -ne 0 ]]; then
+          echo "$(basename "$0"): $HTTP_ERROR" >&2
+          exit 1
+        elif tar -xz -C "$target_path" -f "$archive"; then
+          FOUND_SAMPLES=$((FOUND_SAMPLES + 1))
+        else
+          echo "$(basename "$0"): warning: skipping $mod_dir (archive could not be extracted)" >&2
+        fi
+        rm -f "$archive"
+      fi
+    done <<<"$module_dirs"
+  fi
 fi
 
 if [[ $FOUND_SAMPLES -eq 0 ]]; then
