@@ -432,8 +432,12 @@ run this once while online, e.g. from the environment's setup script:
 
 ```sh
 ./install.sh --only uv               # install uv; fetch everything into uv's cache
-UV_OFFLINE=1 ./install.sh --only uv  # confirm, without the network, that nothing is missing
+UV_OFFLINE=1 ./install.sh --only uv  # check, without the network, that nothing is missing
 ```
+
+The check downloads nothing and puts nothing on `PATH`, but it is not read-only:
+it builds each script's environment inside uv's cache from the packages already
+there, which is how it proves they work offline.
 
 `--only uv` runs just that part of `install.sh`: no `git pull`, no symlinks into
 `$HOME`, no `sudo`, and no other packages.

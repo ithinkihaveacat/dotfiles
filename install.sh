@@ -94,8 +94,11 @@ OPTIONS:
                 For preparing CI jobs and cloud agent environments
 
 ENVIRONMENT:
-  UV_OFFLINE    With --only uv, set to 1 to install nothing and only verify,
-                from uv's cache alone, that everything is ready for offline use
+  UV_OFFLINE    With --only uv, set to 1 to check offline readiness without
+                the network: nothing is downloaded or put on PATH, but each
+                script's environment is (re)built inside uv's cache from
+                packages already there, which is what proves it works.
+                Exits non-zero, naming each item, if any package is missing
 
 EXAMPLES:
   $(basename "$0")                   # Install or update; core packages only
@@ -103,7 +106,7 @@ EXAMPLES:
   $(basename "$0") --install-optional  # Also install the optional package set
   $(basename "$0") --install-all --prune  # Full set; offer to remove extras
   $(basename "$0") --only uv         # Prepare a CI/cloud environment for offline use
-  UV_OFFLINE=1 $(basename "$0") --only uv  # Verify it is ready, without the network
+  UV_OFFLINE=1 $(basename "$0") --only uv  # Check it is ready, without the network
 
   # Install/update over the network, passing flags after '-s --':
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --force
@@ -488,7 +491,9 @@ function stanza_uv {
   # one place (the script). This part only warms uv's cache for those scripts.
   # For an ad-hoc run, use e.g. `uvx --from shellcheck-py==<pin> shellcheck`.
 
-  # Fetch (or, offline, verify) what the repository's scripts need.
+  # Fetch what the repository's scripts need. With UV_OFFLINE, uv builds the
+  # same environments from its cache alone, which checks offline readiness
+  # (it writes to uv's cache, so it is not read-only).
   local entry rel f first_line
   for entry in "${UVX_WRAPPERS[@]}"; do
     rel=${entry%%|*}
