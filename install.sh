@@ -85,12 +85,23 @@ OPTIONS:
                 first and is skipped when non-interactive). Default: warn only
   --non-interactive
                 Run without prompting or interactive terminal-session validation
+  --only PART   Run only the named part of the script, then exit: no git pull,
+                no symlinks, no sudo, no other packages. Parts: uv (install uv
+                and uv tools, and fetch everything this repository's uv-based
+                scripts download on first use, so they then work offline).
+                For preparing CI jobs and cloud agent environments
+
+ENVIRONMENT:
+  UV_OFFLINE    With --only uv, set to 1 to install nothing and only verify,
+                from uv's cache alone, that everything is ready for offline use
 
 EXAMPLES:
   $(basename "$0")                   # Install or update; core packages only
   $(basename "$0") --trace           # Same, but log each wrapped command
   $(basename "$0") --install-optional  # Also install the optional package set
   $(basename "$0") --install-all --prune  # Full set; offer to remove extras
+  $(basename "$0") --only uv         # Prepare a CI/cloud environment for offline use
+  UV_OFFLINE=1 $(basename "$0") --only uv  # Verify it is ready, without the network
 
   # Install/update over the network, passing flags after '-s --':
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --force
@@ -106,6 +117,7 @@ REBOOT_REQUIRED=0
 NON_INTERACTIVE=0
 INSTALL_TIER=core
 PRUNE=0
+ONLY=""
 
 # XDG Base Directory specification defaults
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -151,6 +163,18 @@ while [[ $# -gt 0 ]]; do
       NON_INTERACTIVE=1
       shift
       ;;
+    --only)
+      if [ $# -lt 2 ]; then
+        echo "$(basename "$0"): --only requires an argument" >&2
+        usage 1 >&2
+      fi
+      ONLY=$2
+      shift 2
+      ;;
+    --only=*)
+      ONLY=${1#--only=}
+      shift
+      ;;
     -*)
       echo "$(basename "$0"): unknown option: $1" >&2
       usage 1 >&2
@@ -161,6 +185,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+case "$ONLY" in
+  "" | uv) ;;
+  *)
+    echo "$(basename "$0"): --only: unknown part '$ONLY' (supported: uv)" >&2
+    exit 1
+    ;;
+esac
 
 # Auto-detect non-interactive mode if stdin is not a TTY
 if [ ! -t 0 ]; then
@@ -176,8 +208,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Ask for sudo upfront if we're likely to need it
-if [ "$PLATFORM" = "linux" ]; then
+# Ask for sudo upfront if we're likely to need it (no --only part needs it)
+if [ "$PLATFORM" = "linux" ] && [ -z "$ONLY" ]; then
   export DEBIAN_FRONTEND="noninteractive"
   # Check if sudo requires a password first
   if sudo -n true 2>/dev/null; then
@@ -312,6 +344,148 @@ if [ -d "$DSTDIR/.private" ]; then
 fi
 if [ -d "$DSTDIR/.corp" ]; then
   SRCDIRS+=("$DSTDIR/.corp")
+fi
+
+# uv: installs uv itself and the uv tool tiers, then fetches everything this
+# repository's uv-based scripts download on first use, so they keep working
+# once the network is gone (CI jobs, sandboxed cloud agents, planes).
+#
+# Architecture note: for now install.sh is deliberately the only program
+# concerned with installing and setting up tools, and this is its "uv" mode of
+# installation alongside the brew, apt, and curl-installer stanzas. The
+# direction of travel is (1) to install everything agents rely on via uv,
+# since uv works the same on macOS, Debian, CI runners, and cloud containers,
+# and (2) to split this script into parts that can run on their own. --only is
+# the first step towards (2): a stanza becomes a function, selectable with
+# --only, once there is a reason to run it alone. Expect this stanza to move
+# once that architecture settles.
+
+# Bash wrappers that run pinned tools via uvx, each paired (after "|") with a
+# small valid input in printf %b notation. A wrapper is warmed by checking that
+# input, so it fetches exactly the versions it pins and the pins stay in the
+# wrapper; the input must pass, or later tools in the wrapper never run. Add a
+# wrapper here when it starts calling uvx. Scripts with a `uv run --script`
+# shebang need no entry: they are discovered below.
+UVX_WRAPPERS=(
+  'skills/coding-standards/scripts/python-format|x = 1'
+  'skills/coding-standards/scripts/shell-format|#!/bin/sh\ntrue'
+)
+
+# Run a uv command quietly, reporting one git-style status line and, on
+# failure, the command's output (indented) so the cause is visible.
+function uv_item {
+  local ok=$1 bad=$2 label=$3 out
+  shift 3
+  if [ "$TRACE" = 1 ]; then
+    printf '+ %s\n' "$(printf '%q ' "$@")" >&2
+  fi
+  if out=$("$@" 2>&1); then
+    printf '%s  %s\n' "$ok" "$label"
+    return 0
+  fi
+  printf '%s  %s\n' "$bad" "$label" >&2
+  # shellcheck disable=SC2001 # sed prefixes every line, including the first
+  echo "$out" | sed 's/^/    /' >&2
+  return 1
+}
+
+# Returns non-zero if anything failed (or, with UV_OFFLINE, is not cached), so
+# `--only uv` exits non-zero; a full run only warns.
+function stanza_uv {
+  heading "uv"
+
+  local offline=0 ok bad failed=0
+  case "$(echo "${UV_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) offline=1 ;;
+  esac
+  if [ "$offline" = 1 ]; then
+    ok="cached " bad="missing"
+  else
+    ok="fetched" bad="failed "
+  fi
+
+  # The standalone installer, `uv tool install`, and this script all use
+  # ~/.local/bin; a full run has already put it on PATH, --only has not.
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+  esac
+
+  # uv is installed via the standalone astral installer on every platform (it
+  # is not a brew/apt package here) because many scripts use `uv run` shebangs.
+  if ! exists uv; then
+    if [ "$offline" = 1 ]; then
+      echo "$(basename "$0"): uv not found" >&2
+      return 1
+    fi
+    echo "Installing uv..."
+    if ! curl -LsSf https://astral.sh/uv/install.sh | sh || ! exists uv; then
+      echo "warning: uv installation failed" >&2
+      return 1
+    fi
+  elif [ -z "$ONLY" ] && ! is_fresh "$PACKAGE_STAMP"; then
+    # Periodic upgrades belong to full runs; --only only fills in what is
+    # missing, and leaves a uv it did not install (e.g. CI's) alone.
+    echo "Updating uv..."
+    # `uv self update` only works for the standalone installer; a uv provided
+    # by a package manager (e.g. a leftover brew uv mid-migration) will refuse,
+    # so warn rather than abort.
+    uv self update || echo "warning: uv self update failed (uv may be package-managed)"
+    echo "Upgrading uv tools..."
+    uv tool upgrade --all || echo "warning: uv tool upgrade failed"
+  fi
+
+  # Tools on PATH, for people and editors. Core: always installed. The PyPI
+  # packages below only repackage the official native binaries. Scripts in this
+  # repository do not use these copies: they run their own pinned versions via
+  # uvx (see UVX_WRAPPERS).
+  local core="shellcheck-py shfmt-py"
+  # Optional packages: installed only with --install-optional or --install-all.
+  local optional=""
+  # Full packages: installed only with --install-all.
+  local full=""
+
+  # `uv tool list` prints "<package> v<version>" lines, each followed by
+  # "- <executable>" lines.
+  local install_set installed pkg
+  install_set=$(install_set_for_tier "$core" "$optional" "$full")
+  installed=$(uv tool list 2>/dev/null | awk '$1 != "-" && NF >= 2 {print $1}' | sort)
+  for pkg in $(comm -13 <(echo "$installed") <(echo "$install_set" | tr ' ' '\n' | sort)); do
+    uv_item "$ok" "$bad" "uv tool $pkg" uv tool install "$pkg" || failed=1
+  done
+
+  # Fetch (or, offline, verify) what the repository's scripts need.
+  local entry rel f first_line
+  for entry in "${UVX_WRAPPERS[@]}"; do
+    rel=${entry%%|*}
+    uv_item "$ok" "$bad" "$rel" "$SRCDIR/$rel" --check \
+      <<<"$(printf '%b' "${entry#*|}")" || failed=1
+  done
+  # bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
+  for f in "$SRCDIR"/bin/* "$SRCDIR"/skills/*/scripts/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    first_line=""
+    read -r first_line <"$f" 2>/dev/null || true
+    case "$first_line" in
+      '#!/usr/bin/env -S uv run'*)
+        uv_item "$ok" "$bad" "${f#"$SRCDIR"/}" uv sync --script "$f" </dev/null || failed=1
+        ;;
+    esac
+  done
+
+  if [ "$failed" != 0 ]; then
+    if [ "$offline" = 1 ]; then
+      echo "warning: some uv items are not available offline; re-run '$(basename "$0") --only uv' with network access" >&2
+    else
+      echo "warning: some uv items failed to install or fetch" >&2
+    fi
+    return 1
+  fi
+}
+
+if [ -n "$ONLY" ]; then
+  "stanza_$ONLY"
+  exit $?
 fi
 
 # Pull each source repo to its upstream before applying. Mirrors the `git up`
@@ -616,7 +790,7 @@ if exists brew; then
   fi
 
   # Core packages: always installed, on every run.
-  core="fish coreutils wget direnv jq mtr htop shellcheck shfmt sevenzip ripgrep chafa node bat"
+  core="fish coreutils wget direnv jq mtr htop sevenzip ripgrep chafa node bat"
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
@@ -682,7 +856,7 @@ if [ "$PLATFORM" = "linux" ]; then
     fi
 
     # Core packages: always installed, on every run.
-    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep shfmt shellcheck chafa bat"
+    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep chafa bat"
     # Optional packages: installed only with --install-optional or --install-all.
     # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
     # ruby-build binary itself is bootstrapped from git below, as the apt package
@@ -822,21 +996,9 @@ else
   echo "warning: fish not installed; install it (e.g. 'brew install fish', see README)" >&2
 fi
 
-# uv is installed via the standalone astral installer on every platform (it is
-# not a brew/apt package here) because many scripts use `uv run` shebangs.
-heading "uv"
-if ! exists uv; then
-  echo "Installing uv..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh || echo "warning: uv installation failed" >&2
-elif ! is_fresh "$PACKAGE_STAMP"; then
-  echo "Updating uv..."
-  # `uv self update` only works for the standalone installer; a uv provided by a
-  # package manager (e.g. a leftover brew uv mid-migration) will refuse, so warn
-  # rather than abort.
-  uv self update || echo "warning: uv self update failed (uv may be package-managed)"
-  echo "Upgrading uv tools..."
-  uv tool upgrade --all || echo "warning: uv tool upgrade failed"
-fi
+# Defined above, next to --only; failures are reported there and do not stop
+# the rest of the run.
+stanza_uv || true
 
 heading "git"
 

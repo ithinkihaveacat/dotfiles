@@ -431,9 +431,12 @@ prepare a CI job or cloud agent environment that will later lose network access,
 run this once while online, e.g. from the environment's setup script:
 
 ```sh
-bin/prefetch-tools          # fetch everything into uv's cache
-bin/prefetch-tools --check  # confirm, without the network, that nothing is missing
+./install.sh --only uv               # install uv and uv tools; fetch everything into uv's cache
+UV_OFFLINE=1 ./install.sh --only uv  # confirm, without the network, that nothing is missing
 ```
+
+`--only uv` runs just that part of `install.sh`: no `git pull`, no symlinks into
+`$HOME`, no `sudo`, and no other packages.
 
 Afterwards, run with `UV_OFFLINE=1` and `AGENT_OFFLINE=1` (see
 [tests/README.md](tests/README.md)). CI does exactly this before running the
