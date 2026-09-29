@@ -698,9 +698,11 @@ class CodexRulesAdapter(PermissionAdapter):
                 config = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError) as e:
             return False, str(e)
-        # Codex keys trust by the main checkout, so a linked worktree inherits
-        # it through the common Git directory.
-        trust_root = workspace_root.resolve()
+        # Like Codex, consult the workspace's own entry first, then (for a
+        # linked worktree only) the main checkout's; the first entry found
+        # decides. A submodule's Git directory lives under .git/modules rather
+        # than .git/worktrees, so it inherits nothing from its superproject.
+        trust_roots = [workspace_root.resolve()]
         try:
             result = subprocess.run(
                 [
@@ -709,19 +711,26 @@ class CodexRulesAdapter(PermissionAdapter):
                     str(workspace_root),
                     "rev-parse",
                     "--path-format=absolute",
+                    "--git-dir",
                     "--git-common-dir",
                 ],
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            trust_root = Path(result.stdout.strip()).resolve().parent
-        except (FileNotFoundError, subprocess.CalledProcessError):
+            git_dir, common_dir = (
+                Path(line).resolve() for line in result.stdout.splitlines()[:2]
+            )
+            if git_dir != common_dir and git_dir.parent.name == "worktrees":
+                trust_roots.append(common_dir.parent)
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
             pass
-        project = (config.get("projects") or {}).get(str(trust_root))
-        if not isinstance(project, dict):
-            return False, None
-        return project.get("trust_level") == "trusted", None
+        projects = config.get("projects") or {}
+        for root in trust_roots:
+            project = projects.get(str(root))
+            if isinstance(project, dict) and "trust_level" in project:
+                return project["trust_level"] == "trusted", None
+        return False, None
 
     def is_available(self, workspace_root: Path) -> bool:
         import shutil

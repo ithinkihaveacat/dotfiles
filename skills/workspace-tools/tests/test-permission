@@ -7,7 +7,7 @@ TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${TEST_DIR}/../scripts/permission"
 SKILL_SCRIPT="${TEST_DIR}/../scripts/skill"
 
-echo "1..40"
+echo "1..45"
 
 # Temporary directory for configuration simulations
 TMPDIR=$(mktemp -d)
@@ -514,4 +514,73 @@ if out=$(uv run "${SCRIPT}" --help 2>/dev/null) &&
   echo "ok 40 - [--help] documents per-agent permission semantics"
 else
   echo "not ok 40 - [--help] missing per-agent semantics: $out"
+fi
+
+# Codex trust helpers for the submodule and worktree tests below.
+codex_trust() {
+  : >"$CODEX_HOME/config.toml"
+  while [ $# -gt 0 ]; do
+    printf '[projects."%s"]\ntrust_level = "%s"\n' "$1" "$2" >>"$CODEX_HOME/config.toml"
+    shift 2
+  done
+}
+codex_trust_warns() {
+  local out
+  if out=$(cd "$1" && uv run "${SCRIPT}" doctor --agent codex 2>&1); then
+    return 1
+  fi
+  [[ "$out" == *"[WARN] Workspace Trust (codex)"* ]]
+}
+
+SUPER="$TMPDIR/super"
+SUB_SOURCE="$TMPDIR/sub-source"
+git init -q "$SUB_SOURCE"
+git -C "$SUB_SOURCE" -c user.name=Test -c user.email=test@example.invalid commit -q --allow-empty -m initial
+git init -q "$SUPER"
+git -C "$SUPER" -c protocol.file.allow=always submodule add -q "$SUB_SOURCE" module >/dev/null 2>&1
+SUPER_RESOLVED=$(cd "$SUPER" && pwd -P)
+SUB_RESOLVED=$(cd "$SUPER/module" && pwd -P)
+(cd "$SUPER/module" && uv run "${SCRIPT}" add --agent codex "git show" >/dev/null 2>&1)
+
+# Test 41: a submodule does not treat .git/modules as its trust root
+codex_trust "$SUPER_RESOLVED/.git/modules" trusted
+if codex_trust_warns "$SUPER/module"; then
+  echo "ok 41 - [codex submodule] ignores trust recorded for .git/modules"
+else
+  echo "not ok 41 - [codex submodule] accepted .git/modules as the trust root"
+fi
+
+# Test 42: a submodule does not inherit its superproject's trust
+codex_trust "$SUPER_RESOLVED" trusted
+if codex_trust_warns "$SUPER/module"; then
+  echo "ok 42 - [codex submodule] does not inherit superproject trust"
+else
+  echo "not ok 42 - [codex submodule] inherited superproject trust"
+fi
+
+# Test 43: a submodule is trusted through its own top-level directory
+codex_trust "$SUB_RESOLVED" trusted
+if (cd "$SUPER/module" && uv run "${SCRIPT}" doctor --agent codex >/dev/null 2>&1); then
+  echo "ok 43 - [codex submodule] accepts trust for the submodule top level"
+else
+  echo "not ok 43 - [codex submodule] rejected trust for the submodule top level"
+fi
+
+MAIN_RESOLVED=$(cd "$MAIN_REPO" && pwd -P)
+WORKTREE_RESOLVED=$(cd "$WORKTREE" && pwd -P)
+
+# Test 44: a linked worktree's own trust entry counts without the main checkout's
+codex_trust "$WORKTREE_RESOLVED" trusted
+if (cd "$WORKTREE" && uv run "${SCRIPT}" doctor --agent codex >/dev/null 2>&1); then
+  echo "ok 44 - [codex worktree] accepts trust recorded for the worktree itself"
+else
+  echo "not ok 44 - [codex worktree] ignored the worktree's own trust entry"
+fi
+
+# Test 45: the worktree's own entry takes precedence over the main checkout's
+codex_trust "$WORKTREE_RESOLVED" untrusted "$MAIN_RESOLVED" trusted
+if codex_trust_warns "$WORKTREE"; then
+  echo "ok 45 - [codex worktree] its own untrusted entry overrides main checkout trust"
+else
+  echo "not ok 45 - [codex worktree] main checkout trust overrode the worktree's entry"
 fi
