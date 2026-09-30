@@ -82,7 +82,8 @@ OPTIONS:
                 Install the core and optional package sets
   --install-all Install the core, optional, and full package sets
   --prune       Remove installed packages not in any tier (brew), and apt
-                packages this script has retired. Prompts first when
+                packages this script has retired (keeping any that other
+                installed packages depend on). Prompts first when
                 interactive; removes without asking when non-interactive.
                 Default: warn only
   --non-interactive
@@ -335,21 +336,40 @@ function prune_brew_extras {
 # Report retired apt packages ($1, space-separated) that are still installed:
 # packages this script used to install and no longer does. Unlike brew, apt
 # cannot be pruned against an allowlist (it also manages the OS itself), so
-# only these explicitly retired names are ever candidates. With --prune, remove
-# them, prompting first only when interactive (like prune_brew_extras);
-# without it, warn.
+# only these explicitly retired names are ever candidates, and only those that
+# can go on their own: another installed package may still depend on a retired
+# one (e.g. a distribution metapackage that depends on sysstat), and such
+# packages are kept. With --prune, remove them, prompting first only when
+# interactive (like prune_brew_extras); without it, warn.
 function prune_apt_retired {
   local retired=$1
-  local installed_retired indented
-  installed_retired=$(comm -12 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$retired" | tr ' ' '\n' | sort))
-  [ -n "$installed_retired" ] || return 0
-  # shellcheck disable=SC2001 # sed prefixes every line, including the first
-  indented=$(echo "$installed_retired" | sed 's/^/  /')
+  local candidates pkg changes collateral removable="" indented
+  candidates=$(comm -12 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$retired" | tr ' ' '\n' | sort))
+  [ -n "$candidates" ] || return 0
+
+  # apt-get satisfies a removal by also removing everything that depends on
+  # the package (or installing an alternative for an `a | b` dependency), so
+  # simulate each removal (no root needed) and keep any package whose removal
+  # would change anything outside the retired list.
+  for pkg in $candidates; do
+    if ! changes=$(LC_ALL=C apt-get -s remove --purge "$pkg" 2>/dev/null | awk '/^(Purg|Remv|Inst|Conf) / {print $2}'); then
+      [ "$PRUNE" != 1 ] || echo "note: keeping $pkg: could not simulate its removal" >&2
+      continue
+    fi
+    collateral=$(comm -23 <(printf '%s\n' "$changes" | sort -u) <(printf '%s\n' "$retired" | tr ' ' '\n' | sort) | paste -sd ' ' -)
+    if [ -n "$collateral" ]; then
+      [ "$PRUNE" != 1 ] || echo "note: keeping $pkg: other installed packages depend on it (removing it would also remove or install: $collateral)" >&2
+      continue
+    fi
+    removable="${removable:+$removable }$pkg"
+  done
+  [ -n "$removable" ] || return 0
+  indented=$(echo "$removable" | tr ' ' '\n' | sed 's/^/  /')
 
   if [ "$PRUNE" != 1 ]; then
     echo "warning: retired apt packages present (no longer managed by this script):" >&2
     echo "$indented" >&2
-    echo "hint: remove with 'sudo apt-get remove --purge <pkg>', or re-run with --prune" >&2
+    echo "hint: remove with 'sudo dpkg --purge <pkg>', or re-run with --prune" >&2
     return 0
   fi
 
@@ -370,10 +390,13 @@ function prune_apt_retired {
     echo "Removing retired apt packages (--prune specified):" >&2
     echo "$indented" >&2
   fi
+  # dpkg, unlike apt-get, refuses to remove a package that another installed
+  # package depends on, so exactly the confirmed packages are removed, never
+  # more, even if the system changed since the simulation above.
   # Package names contain no whitespace, so word splitting is intended here.
   # shellcheck disable=SC2086
-  x sudo apt-get -y remove --purge $installed_retired ||
-    echo "warning: apt-get remove of retired packages failed" >&2
+  x sudo dpkg --purge $removable ||
+    echo "warning: dpkg --purge of retired packages failed" >&2
 }
 
 # SRCDIR is the root of the git repo
