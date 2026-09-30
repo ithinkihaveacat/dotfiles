@@ -87,7 +87,10 @@ the exact invocations, including non-obvious flags.
 
 ### Tile Management (Wear OS)
 
-- `scripts/adb-tile-add`: Add a tile component for debugging.
+- `scripts/adb-tile-add`: Add a tile component for debugging. Supports
+  `--type FULLSCREEN|LARGE|SMALL` (default `LARGE`) for services declaring
+  `BIND_WIDGET_PROVIDER` (Glance widgets); `FULLSCREEN` produces a full-screen
+  tile.
 - `scripts/adb-tile-switch`: Switch the active tile.
 - `scripts/adb-tile-remove`: Remove a tile.
 - `scripts/adb-tiles`: List installed tiles and indicate which are in the
@@ -98,8 +101,9 @@ the exact invocations, including non-obvious flags.
 
 With `--vertical`, `adb-tile-add`, `adb-tile-remove`, and `adb-tiles` target the
 standalone renderer's vertical carousel (`WidgetTrayActivity`, `.emu`, `.exp`,
-and `.dev` renderer flavors) instead of the SysUI carousel. Tray widgets are
-addressed by numeric widget ID:
+and `.dev` renderer flavors) instead of the SysUI carousel (`--vertical`
+supports only `LARGE` and `SMALL` container types). Tray widgets are addressed
+by numeric widget ID:
 
 ```bash
 scripts/adb-tiles --vertical            # => 10001 LARGE com.example/.MyWidgetService
