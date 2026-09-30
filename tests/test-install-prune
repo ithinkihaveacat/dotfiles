@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-install-prune (install.sh prune_apt_retired)
+#
+# Runs prune_apt_retired, extracted from install.sh, against fake dpkg-query
+# and apt-get commands, with the `x` command wrapper stubbed to record the
+# removal command instead of running it. Nothing on the host is touched.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../install.sh"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+func_src=$(awk '/^function prune_apt_retired \{/,/^}/' "$BIN")
+if [[ -z "$func_src" ]]; then
+  echo "Bail out! prune_apt_retired not found in install.sh"
+  exit 1
+fi
+eval "$func_src"
+
+# Record the command install.sh would run, rather than running it.
+x() {
+  printf 'RUN:'
+  printf ' %s' "$@"
+  printf '\n'
+}
+
+# Fake dpkg-query: prints $FAKE_INSTALLED ("name<TAB>status" lines).
+# Fake apt-get: for `apt-get -s remove --purge PKG`, prints $FAKE_SIM/PKG, and
+# fails if that file is missing or $FAKE_SIM/PKG.fail exists.
+mkdir -p "$TMP/bin"
+cat >"$TMP/bin/dpkg-query" <<'EOF'
+#!/usr/bin/env bash
+cat "$FAKE_INSTALLED"
+EOF
+cat >"$TMP/bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+[ "$1 $2 $3" = "-s remove --purge" ] || exit 99
+pkg=${!#}
+echo "$pkg" >>"$FAKE_SIM/log"
+[ -f "$FAKE_SIM/$pkg" ] || exit 100
+echo "NOTE: This is only a simulation!"
+cat "$FAKE_SIM/$pkg"
+[ ! -f "$FAKE_SIM/$pkg.fail" ] || exit 100
+EOF
+chmod +x "$TMP/bin/dpkg-query" "$TMP/bin/apt-get"
+export PATH="$TMP/bin:$PATH"
+export FAKE_INSTALLED="$TMP/installed" FAKE_SIM="$TMP/sim"
+
+RETIRED="sysstat pcp shellcheck shfmt"
+
+# Baseline system: sysstat is required by a distribution metapackage;
+# the shellcheck and shfmt packages are leaves; pcp was removed but left
+# config files.
+reset_fixture() {
+  rm -rf "$FAKE_SIM"
+  mkdir -p "$FAKE_SIM"
+  printf '%s\t%s\n' \
+    curl "install ok installed" \
+    distro-minimal "install ok installed" \
+    pcp "deinstall ok config-files" \
+    shellcheck "install ok installed" \
+    shfmt "install ok installed" \
+    sysstat "install ok installed" >"$FAKE_INSTALLED"
+  printf 'Purg distro-minimal [1]\nPurg sysstat [12.7.5-2]\n' >"$FAKE_SIM/sysstat"
+  printf 'Purg shellcheck [0.11.0-2]\n' >"$FAKE_SIM/shellcheck"
+  printf 'Purg shfmt [3.12.0-1]\n' >"$FAKE_SIM/shfmt"
+}
+
+# run PRUNE NON_INTERACTIVE [REPLY]: output (stdout and stderr) in $output.
+run() {
+  local reply=${3:-}
+  output=$(PRUNE=$1 NON_INTERACTIVE=$2 prune_apt_retired "$RETIRED" 2>&1 <<<"$reply")
+}
+
+n=0
+check() {
+  local desc=$1
+  shift
+  n=$((n + 1))
+  if "$@"; then
+    echo "ok $n - $desc"
+  else
+    echo "not ok $n - $desc"
+    printf '%s\n' "$output" | sed 's/^/# /'
+  fi
+}
+has() { [[ "$output" == *"$1"* ]]; }
+lacks() { [[ "$output" != *"$1"* ]]; }
+line() { printf '%s\n' "$output" | grep -qxF -- "$1"; }
+
+echo "1..14"
+
+# Without --prune: warn only about packages that can go on their own.
+reset_fixture
+run 0 0
+check "warns about removable retired packages" has $'  shellcheck\n  shfmt\n'
+check "does not mention a package others depend on" lacks sysstat
+check "removes nothing without --prune" lacks "RUN:"
+
+# --prune, non-interactive: keep sysstat, say why, remove the rest with dpkg.
+reset_fixture
+run 1 1
+check "keeps a package others depend on, naming them" \
+  has "note: keeping sysstat: other installed packages depend on it (removing it would also remove or install: distro-minimal)"
+check "removes only the leaves, with dpkg" line "RUN: sudo dpkg --purge shellcheck shfmt"
+check "never removes with apt-get" lacks "apt-get -y"
+check "ignores packages that are not fully installed" lacks pcp
+
+# --prune, interactive: the prompt lists only the removable packages.
+reset_fixture
+run 1 0 n
+check "prompt lists only removable packages" \
+  has $'The following retired apt packages will be removed:\n  shellcheck\n  shfmt\nRemove these packages?'
+check "answering no removes nothing" lacks "RUN:"
+run 1 0 y
+check "answering yes removes the listed packages" has "RUN: sudo dpkg --purge shellcheck shfmt"
+
+# Removal would install an alternative (Depends: sysstat | other-monitor).
+reset_fixture
+printf 'Inst other-monitor (1.0 Debian:13/stable [amd64])\nPurg sysstat [12.7.5-2]\nConf other-monitor (1.0 Debian:13/stable [amd64])\n' >"$FAKE_SIM/sysstat"
+run 1 1
+check "keeps a package whose removal installs a replacement" \
+  has "(removing it would also remove or install: other-monitor)"
+
+# A failed simulation keeps the package.
+reset_fixture
+touch "$FAKE_SIM/shfmt.fail"
+run 1 1
+check "keeps a package whose simulation fails" \
+  has "note: keeping shfmt: could not simulate its removal"
+check "still removes the others" line "RUN: sudo dpkg --purge shellcheck"
+
+# Retired packages that depend on each other can be removed together, and
+# nothing is printed when no retired package is installed.
+reset_fixture
+printf '%s\t%s\n' pcp "install ok installed" sysstat "install ok installed" >"$FAKE_INSTALLED"
+printf 'Purg pcp [6.0]\nPurg sysstat [12.7.5-2]\n' >"$FAKE_SIM/sysstat"
+printf 'Purg pcp [6.0]\n' >"$FAKE_SIM/pcp"
+run 1 1
+removed_together=$output
+printf '%s\t%s\n' curl "install ok installed" >"$FAKE_INSTALLED"
+run 1 1
+output="$removed_together"$'\n'"---"$'\n'"$output"
+check "removes interdependent retired packages together; silent when none installed" \
+  [ "$output" = $'Removing retired apt packages (--prune specified):\n  pcp\n  sysstat\nRUN: sudo dpkg --purge pcp sysstat\n---\n' ]

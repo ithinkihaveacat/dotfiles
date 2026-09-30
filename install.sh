@@ -2,6 +2,8 @@
 # bash 3.2+ compatible (macOS default). Do not use bash 4+ features
 # (declare -A, readarray, ${var,,}, |&).
 
+# Tests: tests/test-install-only (--only), tests/test-install-prune (--prune)
+
 # When piped from the network the caller picks the interpreter
 # (`curl ... | bash`), so the shebang above is bypassed. The body of this script
 # is bash (arrays, [[ ]], process substitution, printf %q), so fail fast with a
