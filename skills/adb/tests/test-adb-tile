@@ -27,13 +27,18 @@ trap 'rm -rf "$TMPDIR_TEST"' EXIT
 # it. MOCK_TRAY_V2=0 models a renderer without GET_WIDGETS / DUMP_RC_DOC.
 cat <<'EOF' >"$MOCK_BIN/adb"
 #!/usr/bin/env bash
-# Model how adb hands commands to the device shell: adb shell joins its
-# arguments unescaped, and recent adb exec-out escapes each argument when given
-# several; a single argument is passed verbatim. Re-parse accordingly so that
-# quoting bugs show up here.
-if [[ "${1:-}" == "shell" ]] || [[ "${1:-}" == "exec-out" && $# -eq 2 ]]; then
-  eval "set -- $*"
-fi
+# adb shell joins its arguments with spaces and the device shell re-parses the
+# line; do the same so that quoting bugs show up here. With the shell protocol,
+# device errors go to stderr and the remote exit status is returned, as below.
+# exec-out (which merges stderr into stdout and hides the exit status) is not
+# used by the scripts.
+case "${1:-}" in
+  shell) eval "set -- $*" ;;
+  exec-out | exec-in)
+    echo "mock adb: unexpected $1" >&2
+    exit 1
+    ;;
+esac
 echo "$*" >>"$MOCK_ADB_LOG"
 
 RC_DOC="RCDOC-0123456789"
@@ -145,25 +150,22 @@ case "$*" in
     fi
     exit 0
     ;;
-  "exec-out cat "* | "exec-out su 0 cat "*)
+  "shell cat "* | "shell su 0 cat "*)
     path="${!#}"
-    if [[ "$path" == *"'"* ]]; then
-      echo "cat: $path: No such file or directory"
-      exit 0
+    if [[ "$path" == *"'"* || "${MOCK_PULL_ERROR:-0}" == "1" ]]; then
+      echo "cat: $path: No such file or directory" >&2
+      exit 1
     fi
     if [[ "${MOCK_PULL_SHORT:-0}" == "1" ]]; then
       printf '%s' "${RC_DOC:0:5}"
-    elif [[ "${MOCK_PULL_ERROR:-0}" == "1" ]]; then
-      # Same length as RC_DOC, so only the content check can catch it.
-      printf '%s' "cat: nope: gone!"
     else
       printf '%s' "$RC_DOC"
     fi
     exit 0
     ;;
-  "exec-out run-as "*)
-    echo "run-as: couldn't stat /data/user/0/com.google.android.wearable.protolayout.renderer: Permission denied"
-    exit 0
+  "shell run-as "*)
+    echo "run-as: couldn't stat /data/user/0/com.google.android.wearable.protolayout.renderer: Permission denied" >&2
+    exit 1
     ;;
   *"com.google.android.clockwork.prototiles.action.ADD_WIDGET"*)
     count=$(next_count add)
@@ -518,7 +520,7 @@ if run_mock "$DUMP_BIN" -o "$WORK/new/dir/w.rc" 10001 >"$STDOUT" 2>"$OUTPUT" &&
   [[ "$(jq -r '[.widgetId, .doc_size_bytes, .file, has("status"), has("action")] | map(tostring) | join(" ")' "$STDOUT")" == "10001 16 /data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc false false" ]] &&
   [[ "$(<"$OUTPUT")" == *"Saved 16 bytes to $WORK/new/dir/w.rc"* ]] &&
   [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.DUMP_RC_DOC --ei widget_id 10001"* ]] &&
-  [[ "$(<"$ADB_LOG")" == *"exec-out su 0 cat /data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"shell su 0 cat /data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc"* ]] &&
   [[ -z "$(find "$WORK/new/dir" -name '.*' -type f)" ]]; then
   echo "ok 23 - adb-tile-dump exports by ID via su and prints metadata JSON"
 else
@@ -531,7 +533,7 @@ fi
 if (cd "$WORK" && MOCK_ADB_UID=0 run_mock "$DUMP_BIN" com.example/.MyWidget >"$STDOUT" 2>"$OUTPUT") &&
   [[ "$(<"$WORK/widget-10001.rc")" == "RCDOC-0123456789" ]] &&
   [[ "$(<"$ADB_LOG")" == *"--es component com.example/.MyWidget"* ]] &&
-  [[ "$(<"$ADB_LOG")" == *"exec-out cat /data/user/0/"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"shell cat /data/user/0/"* ]] &&
   [[ "$(<"$ADB_LOG")" != *"su 0"* ]]; then
   echo "ok 24 - adb-tile-dump uses adb root when available and defaults to widget-ID.rc"
 else
@@ -660,13 +662,14 @@ else
   report
 fi
 
-# Test 36: adb-tile-dump rejects device error text even when its length matches
+# Test 36: adb-tile-dump reports a failed device read with the device's message and saves nothing
 if ! MOCK_PULL_ERROR=1 run_mock "$DUMP_BIN" -o "$WORK/err.rc" 10001 >"$STDOUT" 2>"$OUTPUT" &&
-  [[ "$(<"$OUTPUT")" == *"returned an error: cat: nope: gone!"* ]] &&
-  [[ ! -e "$WORK/err.rc" ]] && [[ ! -s "$STDOUT" ]]; then
-  echo "ok 36 - adb-tile-dump rejects error text of the expected length"
+  [[ "$(<"$OUTPUT")" == *"reading /data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc via su failed: cat: "*"No such file or directory"* ]] &&
+  [[ ! -e "$WORK/err.rc" ]] && [[ ! -s "$STDOUT" ]] &&
+  [[ -z "$(find "$WORK" -maxdepth 1 -name '.err.rc.*')" ]]; then
+  echo "ok 36 - adb-tile-dump reports failed device reads by exit status"
 else
-  echo "not ok 36 - adb-tile-dump saved device error text as a document"
+  echo "not ok 36 - adb-tile-dump mishandled a failed device read"
   report
 fi
 

@@ -149,12 +149,12 @@ renderer_desc() {
   echo "${RENDERER_PACKAGE}${version:+ $version}"
 }
 
-# Quotes a value for the device shell. Commands carrying arbitrary values go to
-# adb as one pre-quoted string: adb shell joins several arguments unescaped,
-# while recent adb exec-out escapes each one, but a single argument reaches the
-# device shell verbatim with every adb version.
+# adb shell joins its arguments with spaces and the device shell re-parses the
+# result, so commands carrying arbitrary values (a '$' in a nested class name)
+# are sent as one string with each value single-quoted.
 device_quote() {
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+  local escaped="'\\''"
+  printf "'%s'" "${1//\'/$escaped}"
 }
 
 # Sends a WidgetTrayReceiver action and prints its JSON result. The receiver is
@@ -270,32 +270,35 @@ file_size() {
 }
 
 # The renderer is a privileged app, so run-as (the result's pull_command) is
-# usually denied; read the file as root instead. adb exec-out does not report
-# the remote exit status, so every attempt is judged by what arrived.
+# usually denied; read the file as root instead. adb shell keeps the device's
+# stderr off stdout and reports the remote exit status, and its output is
+# binary-safe without a terminal; the byte count is checked as well.
 if [[ "$(adb shell id -u 2>/dev/null | tr -d '\r')" == "0" ]]; then
   PULL_METHOD="adb root"
-  adb exec-out "cat $(device_quote "$DEVICE_FILE")" >"$TMP_FILE"
+  READ_COMMAND="cat $(device_quote "$DEVICE_FILE")"
 elif [[ "$(adb shell su 0 id -u 2>/dev/null | tr -d '\r')" == "0" ]]; then
   PULL_METHOD="su"
-  adb exec-out "su 0 cat $(device_quote "$DEVICE_FILE")" >"$TMP_FILE"
+  READ_COMMAND="su 0 cat $(device_quote "$DEVICE_FILE")"
 else
   PULL_METHOD="run-as"
-  adb exec-out "run-as $RENDERER_PACKAGE cat $(device_quote "cache/${DEVICE_FILE##*/}")" >"$TMP_FILE"
+  READ_COMMAND="run-as $RENDERER_PACKAGE cat $(device_quote "cache/${DEVICE_FILE##*/}")"
+fi
+READ_ERROR=$({ adb shell "$READ_COMMAND" >"$TMP_FILE"; } 2>&1)
+READ_STATUS=$?
+READ_ERROR=$(printf '%s' "$READ_ERROR" | tr -d '\r' | head -n 1)
+
+if ((READ_STATUS != 0)); then
+  if [[ "$PULL_METHOD" == "run-as" ]]; then
+    echo "$(basename "$0"): cannot read $DEVICE_FILE: exporting requires 'adb root' (emulator images) or su (userdebug builds); user builds cannot export documents${READ_ERROR:+ ($READ_ERROR)}" >&2
+  else
+    echo "$(basename "$0"): reading $DEVICE_FILE via $PULL_METHOD failed${READ_ERROR:+: $READ_ERROR}" >&2
+  fi
+  exit 1
 fi
 
 ACTUAL_SIZE=$(file_size "$TMP_FILE")
 if [[ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]]; then
-  if [[ "$PULL_METHOD" == "run-as" ]]; then
-    echo "$(basename "$0"): cannot read $DEVICE_FILE: exporting requires 'adb root' (emulator images) or su (userdebug builds); user builds cannot export documents" >&2
-  else
-    echo "$(basename "$0"): pulled $ACTUAL_SIZE bytes of $DEVICE_FILE via $PULL_METHOD, expected $EXPECTED_SIZE (doc_size_bytes)" >&2
-  fi
-  exit 1
-fi
-# Error text from the device lands in the file too; reject it even if its
-# length happens to match.
-if head -c 64 "$TMP_FILE" | LC_ALL=C grep -aqE '^(run-as|cat|su|/system/bin/sh): '; then
-  echo "$(basename "$0"): reading $DEVICE_FILE via $PULL_METHOD returned an error: $(head -n 1 "$TMP_FILE")" >&2
+  echo "$(basename "$0"): pulled $ACTUAL_SIZE bytes of $DEVICE_FILE via $PULL_METHOD, expected $EXPECTED_SIZE (doc_size_bytes)" >&2
   exit 1
 fi
 
