@@ -601,6 +601,10 @@ these specific packages/components are very useful to know:
   `com.google.android.wearable.healthservices/.background.service.RecordingService`
 - **WearableService (Data Layer):** `WearableService` (e.g.
   `adb exec-out dumpsys activity service WearableService`)
+- **Standalone ProtoLayout Renderer / Widget Tray Activity:**
+  `com.google.android.wearable.protolayout.renderer/.WidgetTrayActivity`
+  (renderer package `com.google.android.wearable.protolayout.renderer`,
+  supporting vertical tray widgets and `GET_WIDGETS` queries)
 
 ## System & Dumpsys
 
