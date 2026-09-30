@@ -91,16 +91,6 @@ Adds a tile provided by COMPONENT_NAME to the carousel. The script automatically
 shows the tile after it has been added (no separate call to adb-tile-switch is
 needed).
 
-Note on Output:
-  In default SysUI carousel mode, the script extracts the tile index from the
-  system broadcast output (e.g., 'Index=[0]'). 'Index=[0]' means the tile was
-  added to the first position in the carousel, pushing others down. It does not
-  mean it overwrote previous tiles. Use 'adb-tiles' to list all installed tiles
-  and see which are in the carousel.
-  In --vertical mode, the script opens WidgetTrayActivity if needed, sends
-  ADD_WIDGET to com.google.android.wearable.protolayout.renderer, and prints the
-  assigned widgetId (e.g., 'Added/activated widget ID: 10001').
-
 Arguments:
   COMPONENT_NAME  A string composed of the package name and a class in that
                   package, for example:
@@ -130,6 +120,16 @@ Examples:
   adb-tile-add --type LARGE com.google.example.wear_widget/.HelloWidgetService
   adb-tile-add --vertical --type SMALL com.google.example.wear_widget/.HelloWidgetService
   adb-tile-add --no-show com.google.example.wear_widget/.HelloWidgetService
+
+Note on Output:
+  In default SysUI carousel mode, the script extracts the tile index from the
+  system broadcast output (e.g., 'Index=[0]'). 'Index=[0]' means the tile was
+  added to the first position in the carousel, pushing others down. It does not
+  mean it overwrote previous tiles. Use 'adb-tiles' to list all installed tiles
+  and see which are in the carousel.
+  In --vertical mode, the script opens WidgetTrayActivity if needed, sends
+  ADD_WIDGET to com.google.android.wearable.protolayout.renderer, and prints the
+  assigned widgetId (e.g., 'Added/activated widget ID: 10001').
 ```
 
 <!-- /generated -->
