@@ -3,10 +3,11 @@ name: apk
 description: >-
   Performs offline binary analysis, extraction, decoding, decompilation, and inspection
   of Android APKs and split-APK ZIP archives. Provides tools for reading manifests,
-  extracting launcher icons, inspecting Wear OS tiles/complications, and decoding
-  resources.
+  extracting launcher icons, inspecting Wear OS tiles/widgets/complications, decoding
+  resources, and rasterizing vector drawables.
   Use when inspecting APK metadata, decompiling resources, analyzing binary manifests,
-  extracting icons, or installing local APK packages on a device.
+  extracting icons, rasterizing vector drawables to PNG, or installing local APK
+  packages on a device.
 compatibility: >-
   Requires apkanalyzer, unzip, and xmllint. Some scripts require xpath, aapt, or apktool.
   Designed for filesystem-based agents with bash access.
@@ -43,6 +44,8 @@ See `references/command-index.md` for detailed usage.
 - `scripts/apk-launcher-icon-extract`: Decompile and extract the launcher and
   round launcher icons as files.
 - `scripts/apk-unzip`: Unzip ZIP archives, split APK bundles, or app bundles.
+- `scripts/avd-to-png`: Convert Android Vector Drawable (AVD) XML files to SVG
+  and render them to PNG.
 
 ### Device Interaction
 
