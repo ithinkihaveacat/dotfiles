@@ -7,19 +7,66 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ADD_BIN="$DIR/../scripts/adb-tile-add"
 REMOVE_BIN="$DIR/../scripts/adb-tile-remove"
+LIST_BIN="$DIR/../scripts/adb-tiles"
+DUMP_BIN="$DIR/../scripts/adb-tile-dump"
 
-echo "1..11"
+echo "1..29"
 
 TMPDIR_TEST=$(mktemp -d)
 OUTPUT="$TMPDIR_TEST/output"
+STDOUT="$TMPDIR_TEST/stdout"
 ADB_LOG="$TMPDIR_TEST/adb.log"
+TRAY_STATE="$TMPDIR_TEST/tray"
 MOCK_BIN="$TMPDIR_TEST/bin"
-mkdir -p "$MOCK_BIN"
+WORK="$TMPDIR_TEST/work"
+mkdir -p "$MOCK_BIN" "$WORK"
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
 
+# Mock adb. The tray is modelled as a state file with one "ID TYPE COMPONENT"
+# line per widget; GET_WIDGETS, REMOVE_WIDGET, and DUMP_RC_DOC read and update
+# it. MOCK_TRAY_V2=0 models a renderer without GET_WIDGETS / DUMP_RC_DOC.
 cat <<'EOF' >"$MOCK_BIN/adb"
 #!/usr/bin/env bash
 echo "$*" >>"$MOCK_ADB_LOG"
+
+RC_DOC="RCDOC-0123456789"
+
+next_count() {
+  local file="${MOCK_ADB_LOG}.$1_count" count=0
+  [[ -f "$file" ]] && count=$(cat "$file")
+  count=$((count + 1))
+  echo "$count" >"$file"
+  echo "$count"
+}
+
+widget_json() {
+  local id="$1" type="$2" component="$3" type_int=1
+  [[ "$type" == "SMALL" ]] && type_int=2
+  printf '{"widgetId":%s,"component":"%s","containerType":%s,"containerTypeString":"%s"}' \
+    "$id" "${component//\//\\/}" "$type_int" "$type"
+}
+
+widgets_json() {
+  local sep="" id type component
+  printf '['
+  while read -r id type component; do
+    [[ -z "$id" ]] && continue
+    [[ -n "${1:-}" && "$component" != "$1" ]] && continue
+    printf '%s' "$sep"
+    widget_json "$id" "$type" "$component"
+    sep=","
+  done <"$MOCK_TRAY_STATE"
+  printf ']'
+}
+
+unanswered() {
+  echo "Broadcasting: Intent { act=$1 }"
+  echo "Broadcast completed: result=0"
+  exit 0
+}
+
+WIDGET_ID_RE='widget_id ([0-9]+)'
+COMPONENT_RE='component ([^ ]+)'
 
 case "$*" in
   "get-state")
@@ -63,14 +110,32 @@ case "$*" in
   *"am force-stop"*)
     exit 0
     ;;
-  *"com.google.android.clockwork.prototiles.action.ADD_WIDGET"*)
-    count_file="${MOCK_ADB_LOG}.add_count"
-    count=0
-    if [[ -f "$count_file" ]]; then
-      count=$(cat "$count_file")
+  "shell id -u")
+    printf '%s\r\n' "${MOCK_ADB_UID:-2000}"
+    exit 0
+    ;;
+  "shell su 0 id -u")
+    if [[ "${MOCK_SU:-1}" == "1" ]]; then
+      printf '0\r\n'
+    else
+      echo "/system/bin/sh: su: inaccessible or not found" >&2
     fi
-    count=$((count + 1))
-    echo "$count" >"$count_file"
+    exit 0
+    ;;
+  "exec-out cat "* | "exec-out su 0 cat "*)
+    if [[ "${MOCK_PULL_SHORT:-0}" == "1" ]]; then
+      printf '%s' "${RC_DOC:0:5}"
+    else
+      printf '%s' "$RC_DOC"
+    fi
+    exit 0
+    ;;
+  "exec-out run-as "*)
+    echo "run-as: couldn't stat /data/user/0/com.google.android.wearable.protolayout.renderer: Permission denied"
+    exit 0
+    ;;
+  *"com.google.android.clockwork.prototiles.action.ADD_WIDGET"*)
+    count=$(next_count add)
 
     if [[ "${MOCK_ADD_ERROR:-0}" == "1" ]]; then
       echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.ADD_WIDGET }'
@@ -79,18 +144,71 @@ case "$*" in
     fi
 
     if ((count < ${MOCK_TRAY_READY_ATTEMPT:-1})); then
-      echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.ADD_WIDGET }'
-      echo 'Broadcast completed: result=0'
-      exit 0
+      unanswered ADD_WIDGET
     fi
 
     echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.ADD_WIDGET }'
     echo 'Broadcast completed: result=-1, data="{"status":"OK","action":"ADD_WIDGET","widgetId":10001,"component":"com.example/.MyWidget","containerType":2,"containerTypeString":"SMALL"}"'
     exit 0
     ;;
+  *"com.google.android.clockwork.prototiles.action.GET_WIDGETS"*)
+    count=$(next_count get)
+    if [[ "${MOCK_TRAY_V2:-1}" != "1" ]] || ((count < ${MOCK_TRAY_READY_ATTEMPT:-1})); then
+      unanswered GET_WIDGETS
+    fi
+    echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.GET_WIDGETS }'
+    echo "Broadcast completed: result=-1, data=\"{\"status\":\"OK\",\"action\":\"GET_WIDGETS\",\"widgets\":$(widgets_json)}\""
+    exit 0
+    ;;
   *"com.google.android.clockwork.prototiles.action.REMOVE_WIDGET"*)
     echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.REMOVE_WIDGET }'
-    echo 'Broadcast completed: result=-1, data="{"status":"OK","action":"REMOVE_WIDGET","removed":true}"'
+    if [[ "$*" =~ $WIDGET_ID_RE ]]; then
+      id="${BASH_REMATCH[1]}"
+      if grep -q "^$id " "$MOCK_TRAY_STATE"; then
+        grep -v "^$id " "$MOCK_TRAY_STATE" >"$MOCK_TRAY_STATE.new" || true
+        mv "$MOCK_TRAY_STATE.new" "$MOCK_TRAY_STATE"
+        echo "Broadcast completed: result=-1, data=\"{\"status\":\"OK\",\"action\":\"REMOVE_WIDGET\",\"widgetId\":$id,\"removed\":true}\""
+      else
+        echo "Broadcast completed: result=0, data=\"{\"status\":\"ERROR\",\"action\":\"REMOVE_WIDGET\",\"widgetId\":$id,\"removed\":false}\""
+      fi
+    elif [[ "$*" =~ $COMPONENT_RE ]]; then
+      component="${BASH_REMATCH[1]}"
+      if [[ "${MOCK_REMOVE_LEGACY:-0}" == "1" ]]; then
+        echo 'Broadcast completed: result=-1, data="{"status":"OK","action":"REMOVE_WIDGET","removed":true}"'
+        exit 0
+      fi
+      removed=$(awk -v c="$component" '$3 == c' "$MOCK_TRAY_STATE" | wc -l | tr -d ' ')
+      awk -v c="$component" '$3 != c' "$MOCK_TRAY_STATE" >"$MOCK_TRAY_STATE.new"
+      mv "$MOCK_TRAY_STATE.new" "$MOCK_TRAY_STATE"
+      echo "Broadcast completed: result=-1, data=\"{\"status\":\"OK\",\"action\":\"REMOVE_WIDGET\",\"component\":\"${component//\//\\/}\",\"removedCount\":$removed}\""
+    fi
+    exit 0
+    ;;
+  *"com.google.android.clockwork.prototiles.action.DUMP_RC_DOC"*)
+    if [[ "${MOCK_TRAY_V2:-1}" != "1" ]]; then
+      unanswered DUMP_RC_DOC
+    fi
+    echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.DUMP_RC_DOC }'
+    match=""
+    if [[ "$*" =~ $WIDGET_ID_RE ]]; then
+      match=$(awk -v id="${BASH_REMATCH[1]}" '$1 == id' "$MOCK_TRAY_STATE")
+      missing="No active widget found for widgetId ${BASH_REMATCH[1]}"
+    elif [[ "$*" =~ $COMPONENT_RE ]]; then
+      component="${BASH_REMATCH[1]}"
+      match=$(awk -v c="$component" '$3 == c' "$MOCK_TRAY_STATE")
+      missing="No active widget found for component ${component//\//\\/}"
+      if (($(printf '%s\n' "$match" | grep -c .) > 1)); then
+        echo "Broadcast completed: result=-1, data=\"{\"status\":\"MULTIPLE_WIDGETS\",\"action\":\"DUMP_RC_DOC\",\"message\":\"Multiple active widgets found\",\"widgets\":$(widgets_json "$component")}\""
+        exit 0
+      fi
+    fi
+    if [[ -z "$match" ]]; then
+      echo "Broadcast completed: result=0, data=\"{\"status\":\"ERROR\",\"message\":\"$missing\"}\""
+      exit 0
+    fi
+    read -r id type component <<<"$match"
+    file="\\/data\\/user\\/0\\/com.google.android.wearable.protolayout.renderer\\/cache\\/${id}_rc_doc.rc"
+    echo "Broadcast completed: result=-1, data=\"{\"package_name\":\"${component%%/*}\",\"container_type\":\"$type\",\"content_width_px\":334,\"doc_size_bytes\":${#RC_DOC},\"file\":\"$file\",\"pull_command\":\"adb exec-out run-as com.google.android.wearable.protolayout.renderer cat cache\\/${id}_rc_doc.rc > rc_doc.rc\",\"theme\":{\"WearM3.primary\":\"#FFD2ECA9\"},\"status\":\"OK\",\"action\":\"DUMP_RC_DOC\",\"widgetId\":$id}\""
     exit 0
     ;;
   *"com.google.android.wearable.app.DEBUG_SURFACE"*"add-tile"*)
@@ -108,10 +226,21 @@ exit 0
 EOF
 chmod +x "$MOCK_BIN/adb"
 
+DEFAULT_TRAY="10001 SMALL com.example/.MyWidget"
+
+# Runs a command against the mock. MOCK_TRAY sets the initial tray contents.
 run_mock() {
   : >"$ADB_LOG"
-  rm -f "${ADB_LOG}.add_count"
-  PATH="$MOCK_BIN:$PATH" MOCK_ADB_LOG="$ADB_LOG" ADB_TILE_RETRY_DELAY="0.01" ADB_TILE_RENDER_DELAY="0.01" "$@"
+  rm -f "${ADB_LOG}".*_count
+  printf '%s\n' "${MOCK_TRAY-$DEFAULT_TRAY}" >"$TRAY_STATE"
+  PATH="$MOCK_BIN:$PATH" MOCK_ADB_LOG="$ADB_LOG" MOCK_TRAY_STATE="$TRAY_STATE" \
+    ADB_TILE_RETRY_DELAY="0.01" ADB_TILE_RENDER_DELAY="0.01" "$@"
+}
+
+report() {
+  sed 's/^/# /' "$OUTPUT"
+  [[ -s "$ADB_LOG" ]] && sed 's/^/# adb: /' "$ADB_LOG"
+  return 0
 }
 
 # Test 1: adb-tile-add --help and -h include --vertical
@@ -122,11 +251,12 @@ else
   sed 's/^/# /' "$OUTPUT"
 fi
 
-# Test 2: adb-tile-remove --help and -h include --vertical
-if "$REMOVE_BIN" --help >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--vertical"* ]] && "$REMOVE_BIN" -h >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--vertical"* ]]; then
-  echo "ok 2 - adb-tile-remove help documents --vertical"
+# Test 2: adb-tile-remove --help and -h include --vertical and --all
+if "$REMOVE_BIN" --help >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--vertical"* ]] && [[ "$(<"$OUTPUT")" == *"--all"* ]] &&
+  "$REMOVE_BIN" -h >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--vertical"* ]]; then
+  echo "ok 2 - adb-tile-remove help documents --vertical and --all"
 else
-  echo "not ok 2 - adb-tile-remove help missing --vertical"
+  echo "not ok 2 - adb-tile-remove help missing --vertical or --all"
   sed 's/^/# /' "$OUTPUT"
 fi
 
@@ -136,7 +266,7 @@ if ! run_mock "$ADD_BIN" --vertical --type FULLSCREEN com.example/.MyWidget >"$O
   echo "ok 3 - adb-tile-add rejects --type FULLSCREEN with --vertical"
 else
   echo "not ok 3 - adb-tile-add did not reject --type FULLSCREEN with --vertical"
-  sed 's/^/# /' "$OUTPUT"
+  report
 fi
 
 # Test 4: Release renderer (no WidgetTrayActivity) fails with versionName and flavor guidance on add
@@ -147,7 +277,7 @@ if ! MOCK_TRAY_SUPPORTED=0 run_mock "$ADD_BIN" --vertical com.example/.MyWidget 
   echo "ok 4 - adb-tile-add --vertical fails clearly with versionName when renderer lacks WidgetTrayActivity"
 else
   echo "not ok 4 - adb-tile-add --vertical did not report missing WidgetTrayActivity with versionName"
-  sed 's/^/# /' "$OUTPUT"
+  report
 fi
 
 # Test 5: Release renderer (no WidgetTrayActivity) fails with versionName and flavor guidance on remove
@@ -158,7 +288,7 @@ if ! MOCK_TRAY_SUPPORTED=0 run_mock "$REMOVE_BIN" --vertical com.example/.MyWidg
   echo "ok 5 - adb-tile-remove --vertical fails clearly with versionName when renderer lacks WidgetTrayActivity"
 else
   echo "not ok 5 - adb-tile-remove --vertical did not report missing WidgetTrayActivity with versionName"
-  sed 's/^/# /' "$OUTPUT"
+  report
 fi
 
 # Test 6: Vertical mode retries while receiver registers, scopes broadcast with -p, and prints widgetId + visibility
@@ -171,8 +301,7 @@ if MOCK_TRAY_READY_ATTEMPT=3 run_mock "$ADD_BIN" --vertical --type SMALL com.exa
   echo "ok 6 - adb-tile-add --vertical opens tray with -W, retries until receiver is ready, and verifies visibility"
 else
   echo "not ok 6 - adb-tile-add --vertical retry and widgetId flow failed"
-  sed 's/^/# /' "$OUTPUT"
-  sed 's/^/# adb: /' "$ADB_LOG"
+  report
 fi
 
 # Test 7: Vertical mode fails fast on receiver ERROR payload without retrying 15 times
@@ -182,7 +311,7 @@ if ! MOCK_ADD_ERROR=1 run_mock "$ADD_BIN" --vertical com.example/.MyWidget >"$OU
   echo "ok 7 - adb-tile-add --vertical fails fast on receiver ERROR response"
 else
   echo "not ok 7 - adb-tile-add --vertical did not fail fast on ERROR response"
-  sed 's/^/# /' "$OUTPUT"
+  report
 fi
 
 # Test 8: Default (SysUI carousel) mode is unchanged
@@ -193,20 +322,20 @@ if run_mock "$ADD_BIN" --no-show --type LARGE com.example/.MyTile >"$OUTPUT" 2>&
   echo "ok 8 - default SysUI carousel mode in adb-tile-add is unchanged"
 else
   echo "not ok 8 - default SysUI carousel mode in adb-tile-add regressed"
-  sed 's/^/# /' "$OUTPUT"
-  sed 's/^/# adb: /' "$ADB_LOG"
+  report
 fi
 
-# Test 9: adb-tile-remove --vertical supports numeric widgetId and component name
-if run_mock "$REMOVE_BIN" --vertical 10001 >"$OUTPUT" 2>&1 &&
+# Test 9: adb-tile-remove --vertical supports numeric widgetId and component name, reporting on stderr
+if run_mock "$REMOVE_BIN" --vertical 10001 >"$STDOUT" 2>"$OUTPUT" &&
+  [[ "$(<"$OUTPUT")" == "Removed widget ID: 10001" ]] && [[ ! -s "$STDOUT" ]] &&
   [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.REMOVE_WIDGET --ei widget_id 10001"* ]] &&
   run_mock "$REMOVE_BIN" --vertical com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == "Removed 1 widget: com.example/.MyWidget" ]] &&
   [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.REMOVE_WIDGET --es component com.example/.MyWidget"* ]]; then
   echo "ok 9 - adb-tile-remove --vertical removes by widgetId or component"
 else
   echo "not ok 9 - adb-tile-remove --vertical failed"
-  sed 's/^/# /' "$OUTPUT"
-  sed 's/^/# adb: /' "$ADB_LOG"
+  report
 fi
 
 # Test 10: Default adb-tile-remove (SysUI carousel) is unchanged
@@ -215,8 +344,7 @@ if run_mock "$REMOVE_BIN" com.example/.MyTile >"$OUTPUT" 2>&1 &&
   echo "ok 10 - default SysUI carousel mode in adb-tile-remove is unchanged"
 else
   echo "not ok 10 - default SysUI carousel mode in adb-tile-remove regressed"
-  sed 's/^/# /' "$OUTPUT"
-  sed 's/^/# adb: /' "$ADB_LOG"
+  report
 fi
 
 # Test 11: Vertical mode catches post-render document inflation failures (b/473745800)
@@ -226,5 +354,195 @@ if ! MOCK_RENDER_FAIL=1 run_mock "$ADD_BIN" --vertical com.example/.MyWidget >"$
   echo "ok 11 - adb-tile-add --vertical fails when renderer rejects document after Rendering tile"
 else
   echo "not ok 11 - adb-tile-add --vertical missed post-render inflation failure"
+  report
+fi
+
+TWO_WIDGETS=$'10001 LARGE com.example/.MyWidget\n10002 SMALL com.example/.MyWidget\n10003 LARGE com.example/.Other'
+
+# Test 12: adb-tiles --help documents --vertical and its output format
+if "$LIST_BIN" --help >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--vertical"* ]] &&
+  [[ "$(<"$OUTPUT")" == *"WIDGET_ID TYPE COMPONENT"* ]]; then
+  echo "ok 12 - adb-tiles help documents --vertical output format"
+else
+  echo "not ok 12 - adb-tiles help missing --vertical"
   sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 13: adb-tiles --vertical opens the tray, retries until GET_WIDGETS is answered, and prints ID TYPE COMPONENT
+if MOCK_TRAY="$TWO_WIDGETS" MOCK_TRAY_READY_ATTEMPT=3 run_mock "$LIST_BIN" --vertical >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == $'10001 LARGE com.example/.MyWidget\n10002 SMALL com.example/.MyWidget\n10003 LARGE com.example/.Other' ]] &&
+  [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.GET_WIDGETS"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"am start -W -n com.google.android.wearable.protolayout.renderer/"* ]] &&
+  [[ "$(cat "${ADB_LOG}.get_count")" == "3" ]]; then
+  echo "ok 13 - adb-tiles --vertical lists tray widgets after the receiver registers"
+else
+  echo "not ok 13 - adb-tiles --vertical listing failed"
+  report
+fi
+
+# Test 14: adb-tiles --vertical on an empty tray prints nothing and succeeds
+if MOCK_TRAY="" run_mock "$LIST_BIN" --vertical >"$OUTPUT" 2>&1 && [[ ! -s "$OUTPUT" ]]; then
+  echo "ok 14 - adb-tiles --vertical prints nothing for an empty tray"
+else
+  echo "not ok 14 - adb-tiles --vertical mishandled an empty tray"
+  report
+fi
+
+# Test 15: adb-tiles --vertical fails clearly on a renderer without GET_WIDGETS
+if ! MOCK_TRAY_V2=0 ADB_TILE_TRAY_ATTEMPTS=3 run_mock "$LIST_BIN" --vertical >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"renderer (com.google.android.wearable.protolayout.renderer 1.6.1.87.924797699) did not answer GET_WIDGETS"* ]]; then
+  echo "ok 15 - adb-tiles --vertical fails clearly when GET_WIDGETS is unsupported"
+else
+  echo "not ok 15 - adb-tiles --vertical did not report unsupported GET_WIDGETS"
+  report
+fi
+
+# Test 16: adb-tiles rejects --vertical combined with filters
+if ! run_mock "$LIST_BIN" --vertical --user-only >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"--vertical cannot be combined with filter options"* ]]; then
+  echo "ok 16 - adb-tiles rejects --vertical with filter options"
+else
+  echo "not ok 16 - adb-tiles accepted --vertical with filter options"
+  report
+fi
+
+# Test 17: adb-tile-remove --vertical --all removes every widget by ID and verifies the tray is empty
+if MOCK_TRAY="$TWO_WIDGETS" run_mock "$REMOVE_BIN" --vertical --all >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == $'Removed widget ID: 10001\nRemoved widget ID: 10002\nRemoved widget ID: 10003' ]] &&
+  [[ ! -s "$TRAY_STATE" || -z "$(tr -d '[:space:]' <"$TRAY_STATE")" ]] &&
+  [[ "$(cat "${ADB_LOG}.get_count")" == "2" ]]; then
+  echo "ok 17 - adb-tile-remove --vertical --all clears the tray and verifies it"
+else
+  echo "not ok 17 - adb-tile-remove --vertical --all failed"
+  report
+fi
+
+# Test 18: adb-tile-remove --all validates its companions
+if ! run_mock "$REMOVE_BIN" --all >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"--all requires --vertical"* ]] &&
+  ! run_mock "$REMOVE_BIN" --vertical --all com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"--all cannot be combined"* ]]; then
+  echo "ok 18 - adb-tile-remove --all requires --vertical and no component"
+else
+  echo "not ok 18 - adb-tile-remove --all argument validation failed"
+  report
+fi
+
+# Test 19: adb-tile-remove --vertical --all fails clearly on a renderer without GET_WIDGETS
+if ! MOCK_TRAY_V2=0 ADB_TILE_TRAY_ATTEMPTS=3 run_mock "$REMOVE_BIN" --vertical --all >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"did not answer GET_WIDGETS; --all requires a newer"* ]] &&
+  [[ "$(<"$ADB_LOG")" != *"REMOVE_WIDGET"* ]]; then
+  echo "ok 19 - adb-tile-remove --vertical --all fails clearly when GET_WIDGETS is unsupported"
+else
+  echo "not ok 19 - adb-tile-remove --vertical --all did not report unsupported GET_WIDGETS"
+  report
+fi
+
+# Test 20: removing a component with several instances reports the count; no match exits 1
+if MOCK_TRAY="$TWO_WIDGETS" run_mock "$REMOVE_BIN" --vertical com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == "Removed 2 widgets: com.example/.MyWidget" ]] &&
+  [[ "$(<"$TRAY_STATE")" == "10003 LARGE com.example/.Other" ]] &&
+  ! MOCK_TRAY="" run_mock "$REMOVE_BIN" --vertical com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"no tray widget matches com.example/.MyWidget"* ]]; then
+  echo "ok 20 - adb-tile-remove --vertical COMPONENT reports removed instances and fails on no match"
+else
+  echo "not ok 20 - adb-tile-remove --vertical COMPONENT reporting failed"
+  report
+fi
+
+# Test 21: removing an unknown widget ID exits 1; legacy REMOVE_WIDGET responses still succeed
+if ! run_mock "$REMOVE_BIN" --vertical 19999 >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"no widget with ID 19999 in the tray"* ]] &&
+  MOCK_REMOVE_LEGACY=1 run_mock "$REMOVE_BIN" --vertical com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == "Removed widgets: com.example/.MyWidget" ]]; then
+  echo "ok 21 - adb-tile-remove --vertical handles unknown IDs and legacy responses"
+else
+  echo "not ok 21 - adb-tile-remove --vertical unknown ID or legacy response handling failed"
+  report
+fi
+
+# Test 22: adb-tile-dump --help documents --output/-o; no arguments prints concise usage
+if "$DUMP_BIN" --help >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"-o, --output FILE"* ]] &&
+  ! "$DUMP_BIN" >"$OUTPUT" 2>&1 && [[ "$(<"$OUTPUT")" == *"Try 'adb-tile-dump --help'"* ]]; then
+  echo "ok 22 - adb-tile-dump help documents --output and missing arguments print concise usage"
+else
+  echo "not ok 22 - adb-tile-dump help or concise usage missing"
+  sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 23: adb-tile-dump by ID pulls via su into a new directory and prints metadata without the envelope
+if run_mock "$DUMP_BIN" -o "$WORK/new/dir/w.rc" 10001 >"$STDOUT" 2>"$OUTPUT" &&
+  [[ "$(<"$WORK/new/dir/w.rc")" == "RCDOC-0123456789" ]] &&
+  [[ "$(jq -r '[.widgetId, .doc_size_bytes, .file, has("status"), has("action")] | map(tostring) | join(" ")' "$STDOUT")" == "10001 16 /data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc false false" ]] &&
+  [[ "$(<"$OUTPUT")" == *"Saved 16 bytes to $WORK/new/dir/w.rc"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"am broadcast -p com.google.android.wearable.protolayout.renderer -a com.google.android.clockwork.prototiles.action.DUMP_RC_DOC --ei widget_id 10001"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"exec-out su 0 cat /data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc"* ]] &&
+  [[ -z "$(find "$WORK/new/dir" -name '.*' -type f)" ]]; then
+  echo "ok 23 - adb-tile-dump exports by ID via su and prints metadata JSON"
+else
+  echo "not ok 23 - adb-tile-dump by ID failed"
+  sed 's/^/# stdout: /' "$STDOUT"
+  report
+fi
+
+# Test 24: adb-tile-dump reads directly when adbd runs as root and defaults to widget-ID.rc
+if (cd "$WORK" && MOCK_ADB_UID=0 run_mock "$DUMP_BIN" com.example/.MyWidget >"$STDOUT" 2>"$OUTPUT") &&
+  [[ "$(<"$WORK/widget-10001.rc")" == "RCDOC-0123456789" ]] &&
+  [[ "$(<"$ADB_LOG")" == *"--es component com.example/.MyWidget"* ]] &&
+  [[ "$(<"$ADB_LOG")" == *"exec-out cat /data/user/0/"* ]] &&
+  [[ "$(<"$ADB_LOG")" != *"su 0"* ]]; then
+  echo "ok 24 - adb-tile-dump uses adb root when available and defaults to widget-ID.rc"
+else
+  echo "not ok 24 - adb-tile-dump adb root path or default filename failed"
+  report
+fi
+
+# Test 25: adb-tile-dump on a user build (no root, no su) fails clearly and leaves no file
+if ! MOCK_SU=0 run_mock "$DUMP_BIN" -o "$WORK/user.rc" 10001 >"$STDOUT" 2>"$OUTPUT" &&
+  [[ "$(<"$OUTPUT")" == *"requires 'adb root' (emulator images) or su (userdebug builds); user builds cannot export"* ]] &&
+  [[ ! -e "$WORK/user.rc" ]] && [[ ! -s "$STDOUT" ]] &&
+  [[ -z "$(find "$WORK" -maxdepth 1 -name '.user.rc.*')" ]]; then
+  echo "ok 25 - adb-tile-dump fails clearly when the document cannot be read"
+else
+  echo "not ok 25 - adb-tile-dump user-build failure handling failed"
+  report
+fi
+
+# Test 26: adb-tile-dump by an ambiguous component lists the matching widget IDs
+if ! MOCK_TRAY="$TWO_WIDGETS" run_mock "$DUMP_BIN" -o "$WORK/multi.rc" com.example/.MyWidget >"$STDOUT" 2>"$OUTPUT" &&
+  [[ "$(<"$OUTPUT")" == *"matches several tray widgets"* ]] &&
+  [[ "$(<"$OUTPUT")" == *"  10001 LARGE com.example/.MyWidget"* ]] &&
+  [[ "$(<"$OUTPUT")" == *"  10002 SMALL com.example/.MyWidget"* ]] &&
+  [[ ! -e "$WORK/multi.rc" ]]; then
+  echo "ok 26 - adb-tile-dump reports MULTIPLE_WIDGETS with widget IDs"
+else
+  echo "not ok 26 - adb-tile-dump MULTIPLE_WIDGETS handling failed"
+  report
+fi
+
+# Test 27: adb-tile-dump rejects a pull whose size differs from doc_size_bytes
+if ! MOCK_PULL_SHORT=1 run_mock "$DUMP_BIN" -o "$WORK/short.rc" 10001 >"$STDOUT" 2>"$OUTPUT" &&
+  [[ "$(<"$OUTPUT")" == *"pulled 5 bytes"*"expected 16 (doc_size_bytes)"* ]] &&
+  [[ ! -e "$WORK/short.rc" ]]; then
+  echo "ok 27 - adb-tile-dump verifies the byte count against doc_size_bytes"
+else
+  echo "not ok 27 - adb-tile-dump size verification failed"
+  report
+fi
+
+# Test 28: adb-tile-dump surfaces receiver errors
+if ! run_mock "$DUMP_BIN" 19999 >"$STDOUT" 2>"$OUTPUT" &&
+  [[ "$(<"$OUTPUT")" == *"No active widget found for widgetId 19999"* ]]; then
+  echo "ok 28 - adb-tile-dump surfaces DUMP_RC_DOC errors"
+else
+  echo "not ok 28 - adb-tile-dump did not surface DUMP_RC_DOC error"
+  report
+fi
+
+# Test 29: adb-tile-dump fails clearly on a renderer without DUMP_RC_DOC
+if ! MOCK_TRAY_V2=0 ADB_TILE_TRAY_ATTEMPTS=3 run_mock "$DUMP_BIN" 10001 >"$STDOUT" 2>"$OUTPUT" &&
+  [[ "$(<"$OUTPUT")" == *"renderer (com.google.android.wearable.protolayout.renderer 1.6.1.87.924797699) did not answer DUMP_RC_DOC"* ]]; then
+  echo "ok 29 - adb-tile-dump fails clearly when DUMP_RC_DOC is unsupported"
+else
+  echo "not ok 29 - adb-tile-dump did not report unsupported DUMP_RC_DOC"
+  report
 fi

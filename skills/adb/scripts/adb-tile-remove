@@ -1,25 +1,36 @@
 #!/usr/bin/env bash
 
+# Tests: skills/adb/tests/test-adb-tile
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] COMPONENT_NAME
+       $(basename "$0") --vertical WIDGET_ID
+       $(basename "$0") --vertical --all
 
-Removes all tile instances on the carousel associated with COMPONENT_NAME.
-With --vertical, removes widgets from the standalone renderer's vertical carousel
-(WidgetTrayActivity) by component name or numeric widgetId.
+Removes a tile from the SysUI carousel, or widgets from the standalone
+renderer's vertical carousel (--vertical).
 
 Arguments:
   COMPONENT_NAME  A string composed of the package name and a class in that
-                  package (or a numeric widgetId when --vertical is used), for
-                  example:
+                  package, for example:
                   com.example.wear.tiles/com.example.wear.tiles.PreviewTileService
+                  Every instance of the component is removed. With --vertical, a
+                  short class name (e.g. WeatherWidgetService) is matched
+                  case-insensitively against installed providers.
+  WIDGET_ID       A numeric tray widget ID, as printed by 'adb-tiles --vertical'
+                  or 'adb-tile-add --vertical'. Use it to remove one instance
+                  when a provider has several.
 
 Options:
   -s, --serial SERIAL
                   Target device serial; must precede arguments or commands.
-  --vertical      Remove the widget from the standalone renderer's vertical
-                  carousel (WidgetTrayActivity) instead of the SysUI horizontal
-                  carousel. Requires the .emu, .exp, or .dev renderer flavor.
+  --vertical      Remove from the standalone renderer's vertical carousel
+                  (WidgetTrayActivity) instead of the SysUI horizontal carousel,
+                  opening it if needed. Requires the .emu, .exp, or .dev renderer
+                  flavor.
+  --all           With --vertical, remove every widget in the tray. Requires a
+                  recent renderer.
   --help          Display this help message and exit
 
 Environment:
@@ -30,18 +41,24 @@ Examples:
   $(basename "$0") com.google.android.wearable.shell/.weather.WeatherTileService
   $(basename "$0") --vertical com.google.example.wear_widget/.HelloWidgetService
   $(basename "$0") --vertical 10001
+  $(basename "$0") --vertical --all
+
+With --vertical, each removal is reported on stderr (e.g. 'Removed widget ID:
+10001' or 'Removed 2 widgets: COMPONENT'), and the exit status is 1 if no tray
+widget matched.
 EOF
   exit 0
 }
 
 usage_short() {
   cat <<EOF >&2
-Usage: $(basename "$0") COMPONENT
+Usage: $(basename "$0") [OPTIONS] COMPONENT_NAME
 
-Remove a Wear OS tile from the active tile carousel on an adb-connected watch.
+Remove a Wear OS tile, or a tray widget with --vertical, on an adb-connected watch.
 
 Examples:
   $(basename "$0") com.google.android.wearable.shell/.weather.WeatherTileService
+  $(basename "$0") --vertical --all
 
 Try '$(basename "$0") --help' for more information.
 EOF
@@ -53,6 +70,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 VERTICAL=false
+ALL=false
 COMPONENT_NAME=""
 
 while [[ $# -gt 0 ]]; do
@@ -71,6 +89,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --vertical)
       VERTICAL=true
+      shift
+      ;;
+    --all)
+      ALL=true
       shift
       ;;
     --help | -h)
@@ -92,7 +114,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$COMPONENT_NAME" ]]; then
+if [[ "$ALL" == true ]]; then
+  if [[ "$VERTICAL" != true ]]; then
+    echo "$(basename "$0"): --all requires --vertical" >&2
+    exit 1
+  fi
+  if [[ -n "$COMPONENT_NAME" ]]; then
+    echo "$(basename "$0"): --all cannot be combined with '$COMPONENT_NAME'" >&2
+    exit 1
+  fi
+elif [[ -z "$COMPONENT_NAME" ]]; then
   usage_short
 fi
 
@@ -104,6 +135,10 @@ require() {
 }
 
 require adb
+trap '{ echo >&2; } 2>/dev/null; exit 130' INT TERM
+if [[ "$VERTICAL" == true ]]; then
+  require jq
+fi
 
 # Check device availability
 if ! adb get-state >/dev/null 2>&1; then
@@ -118,46 +153,133 @@ fi
 if [[ "$VERTICAL" == true ]]; then
   RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
   TRAY_ACTIVITY="${RENDERER_PACKAGE}/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"
-  TRAY_ACTION_REMOVE="com.google.android.clockwork.prototiles.action.REMOVE_WIDGET"
+  TRAY_ACTION_PREFIX="com.google.android.clockwork.prototiles.action."
+  TRAY_DATA_RE='data="(.*)"'
+
+  renderer_desc() {
+    local version
+    version=$(adb shell dumpsys package "$RENDERER_PACKAGE" 2>/dev/null | tr -d '\r' | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
+    echo "${RENDERER_PACKAGE}${version:+ $version}"
+  }
+
+  # Sends a WidgetTrayReceiver action and prints its JSON result. The receiver
+  # is registered only while WidgetTrayActivity is alive, so an unanswered
+  # broadcast (result=0, no data) opens the tray and retries. Returns 1 if the
+  # receiver never answers, which is also how renderers without the action
+  # respond.
+  tray_broadcast() {
+    local action="$1" output attempt started=false
+    shift
+    for ((attempt = 1; attempt <= ${ADB_TILE_TRAY_ATTEMPTS:-10}; attempt++)); do
+      output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" | tr -d '\r')
+      if [[ "$output" =~ $TRAY_DATA_RE ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+      fi
+      if [[ "$started" == false ]]; then
+        adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
+        started=true
+        continue
+      fi
+      sleep "${ADB_TILE_RETRY_DELAY:-0.5}"
+    done
+    return 1
+  }
+
+  # Removes one widget by ID; prints the result line or an error.
+  remove_widget_id() {
+    local widget_id="$1" result
+    if ! result=$(tray_broadcast REMOVE_WIDGET --ei widget_id "$widget_id"); then
+      echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle REMOVE_WIDGET" >&2
+      return 1
+    fi
+    if [[ "$(jq -r '.status // empty' <<<"$result")" == "OK" ]]; then
+      echo "Removed widget ID: $widget_id" >&2
+      return 0
+    fi
+    local message
+    message=$(jq -r '.message // empty' <<<"$result")
+    if [[ -n "$message" ]]; then
+      echo "$(basename "$0"): $message" >&2
+    else
+      echo "$(basename "$0"): no widget with ID $widget_id in the tray (see 'adb-tiles --vertical')" >&2
+    fi
+    return 1
+  }
 
   RESOLVE_OUT=$(adb shell cmd package resolve-activity --brief -n "$TRAY_ACTIVITY" 2>/dev/null | tr -d '\r')
   if [[ "$RESOLVE_OUT" != *"$TRAY_ACTIVITY"* ]]; then
-    RENDERER_VER=$(adb shell dumpsys package "$RENDERER_PACKAGE" 2>/dev/null | tr -d '\r' | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
-    RENDERER_DESC="${RENDERER_PACKAGE}${RENDERER_VER:+ $RENDERER_VER}"
-    echo "$(basename "$0"): installed renderer ($RENDERER_DESC) lacks WidgetTrayActivity; --vertical requires the .emu, .exp, or .dev renderer flavor" >&2
+    echo "$(basename "$0"): installed renderer ($(renderer_desc)) lacks WidgetTrayActivity; --vertical requires the .emu, .exp, or .dev renderer flavor" >&2
     exit 1
+  fi
+
+  if [[ "$ALL" == true ]]; then
+    if ! RESULT=$(tray_broadcast GET_WIDGETS); then
+      echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer GET_WIDGETS; --all requires a newer .emu, .exp, or .dev renderer" >&2
+      exit 1
+    fi
+    if [[ "$(jq -r '.status // empty' <<<"$RESULT")" != "OK" ]]; then
+      echo "$(basename "$0"): GET_WIDGETS failed: $RESULT" >&2
+      exit 1
+    fi
+    WIDGET_IDS=$(jq -r '.widgets[]?.widgetId' <<<"$RESULT")
+    if [[ -z "$WIDGET_IDS" ]]; then
+      echo "$(basename "$0"): tray is already empty" >&2
+      exit 0
+    fi
+    for widget_id in $WIDGET_IDS; do
+      remove_widget_id "$widget_id" || exit 1
+    done
+    if ! RESULT=$(tray_broadcast GET_WIDGETS) ||
+      [[ -n "$(jq -r '.widgets[]?.widgetId' <<<"$RESULT")" ]]; then
+      echo "$(basename "$0"): tray not empty after removing all widgets: ${RESULT:-no answer}" >&2
+      exit 1
+    fi
+    exit 0
   fi
 
   if [[ "$COMPONENT_NAME" =~ ^[0-9]+$ ]]; then
-    OUTPUT=$(adb shell am broadcast \
-      -p "$RENDERER_PACKAGE" \
-      -a "$TRAY_ACTION_REMOVE" \
-      --ei widget_id "$COMPONENT_NAME" | tr -d '\r')
-  else
-    if [[ "$COMPONENT_NAME" == */* ]]; then
-      PACKAGE_NAME="${COMPONENT_NAME%%/*}"
-      if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}$"; then
-        echo "$(basename "$0"): package '$PACKAGE_NAME' not found; is the app installed?" >&2
-        exit 1
-      fi
-    fi
-    OUTPUT=$(adb shell am broadcast \
-      -p "$RENDERER_PACKAGE" \
-      -a "$TRAY_ACTION_REMOVE" \
-      --es component "$COMPONENT_NAME" | tr -d '\r')
+    remove_widget_id "$COMPONENT_NAME"
+    exit $?
   fi
 
-  if [[ "$OUTPUT" == *'"status":"ERROR"'* ]]; then
-    ERROR_MSG_RE='"message":"([^"]+)"'
-    if [[ "$OUTPUT" =~ $ERROR_MSG_RE ]]; then
-      echo "$(basename "$0"): ${BASH_REMATCH[1]}" >&2
-    else
-      echo "$(basename "$0"): REMOVE_WIDGET failed: $OUTPUT" >&2
+  if [[ "$COMPONENT_NAME" == */* ]]; then
+    PACKAGE_NAME="${COMPONENT_NAME%%/*}"
+    if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}$"; then
+      echo "$(basename "$0"): package '$PACKAGE_NAME' not found; is the app installed?" >&2
+      exit 1
     fi
+  fi
+
+  if ! RESULT=$(tray_broadcast REMOVE_WIDGET --es component "$COMPONENT_NAME"); then
+    echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle REMOVE_WIDGET" >&2
     exit 1
   fi
 
-  echo "$OUTPUT"
+  if [[ "$(jq -r '.status // empty' <<<"$RESULT")" != "OK" ]]; then
+    MESSAGE=$(jq -r '.message // empty' <<<"$RESULT")
+    echo "$(basename "$0"): ${MESSAGE:-REMOVE_WIDGET failed: $RESULT}" >&2
+    exit 1
+  fi
+
+  # Current renderers report removedCount; older ones only a removed flag.
+  REMOVED=$(jq -r 'if has("removedCount") then .removedCount elif .removed == true then "some" else 0 end' <<<"$RESULT")
+  RESOLVED=$(jq -r --arg c "$COMPONENT_NAME" '.component // $c' <<<"$RESULT")
+  case "$REMOVED" in
+    0)
+      echo "$(basename "$0"): no tray widget matches $COMPONENT_NAME (see 'adb-tiles --vertical')" >&2
+      exit 1
+      ;;
+    1)
+      echo "Removed 1 widget: $RESOLVED" >&2
+      ;;
+    some)
+      echo "Removed widgets: $RESOLVED" >&2
+      ;;
+    *)
+      echo "Removed $REMOVED widgets: $RESOLVED" >&2
+      ;;
+  esac
   exit 0
 fi
 

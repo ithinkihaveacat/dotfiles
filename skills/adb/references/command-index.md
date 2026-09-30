@@ -167,30 +167,40 @@ adb shell am broadcast \
 
 ### `scripts/adb-tile-remove`
 
-**Purpose**: Remove a tile from the SysUI carousel or a widget from
-`WidgetTrayActivity` (`--vertical`). **Dependencies**: `adb`
+**Purpose**: Remove a tile from the SysUI carousel, or widgets from
+`WidgetTrayActivity` by ID, component, or all (`--vertical`). **Dependencies**:
+`adb`; `jq` for `--vertical`
 
 <!-- generated: ../scripts/adb-tile-remove --help -->
 
 ```text
 Usage: adb-tile-remove [OPTIONS] COMPONENT_NAME
+       adb-tile-remove --vertical WIDGET_ID
+       adb-tile-remove --vertical --all
 
-Removes all tile instances on the carousel associated with COMPONENT_NAME.
-With --vertical, removes widgets from the standalone renderer's vertical carousel
-(WidgetTrayActivity) by component name or numeric widgetId.
+Removes a tile from the SysUI carousel, or widgets from the standalone
+renderer's vertical carousel (--vertical).
 
 Arguments:
   COMPONENT_NAME  A string composed of the package name and a class in that
-                  package (or a numeric widgetId when --vertical is used), for
-                  example:
+                  package, for example:
                   com.example.wear.tiles/com.example.wear.tiles.PreviewTileService
+                  Every instance of the component is removed. With --vertical, a
+                  short class name (e.g. WeatherWidgetService) is matched
+                  case-insensitively against installed providers.
+  WIDGET_ID       A numeric tray widget ID, as printed by 'adb-tiles --vertical'
+                  or 'adb-tile-add --vertical'. Use it to remove one instance
+                  when a provider has several.
 
 Options:
   -s, --serial SERIAL
                   Target device serial; must precede arguments or commands.
-  --vertical      Remove the widget from the standalone renderer's vertical
-                  carousel (WidgetTrayActivity) instead of the SysUI horizontal
-                  carousel. Requires the .emu, .exp, or .dev renderer flavor.
+  --vertical      Remove from the standalone renderer's vertical carousel
+                  (WidgetTrayActivity) instead of the SysUI horizontal carousel,
+                  opening it if needed. Requires the .emu, .exp, or .dev renderer
+                  flavor.
+  --all           With --vertical, remove every widget in the tray. Requires a
+                  recent renderer.
   --help          Display this help message and exit
 
 Environment:
@@ -201,6 +211,11 @@ Examples:
   adb-tile-remove com.google.android.wearable.shell/.weather.WeatherTileService
   adb-tile-remove --vertical com.google.example.wear_widget/.HelloWidgetService
   adb-tile-remove --vertical 10001
+  adb-tile-remove --vertical --all
+
+With --vertical, each removal is reported on stderr (e.g. 'Removed widget ID:
+10001' or 'Removed 2 widgets: COMPONENT'), and the exit status is 1 if no tray
+widget matched.
 ```
 
 <!-- /generated -->
@@ -219,16 +234,147 @@ adb shell am broadcast \
   -p com.google.android.wearable.protolayout.renderer \
   -a com.google.android.clockwork.prototiles.action.REMOVE_WIDGET \
   --es component "com.example/.MyWidgetService"
+
+# --vertical --all: list the tray, then remove each widgetId
+adb shell am broadcast \
+  -p com.google.android.wearable.protolayout.renderer \
+  -a com.google.android.clockwork.prototiles.action.GET_WIDGETS
+adb shell am broadcast \
+  -p com.google.android.wearable.protolayout.renderer \
+  -a com.google.android.clockwork.prototiles.action.REMOVE_WIDGET \
+  --ei widget_id 10001
+```
+
+### `scripts/adb-tile-dump`
+
+**Purpose**: Export the Remote Compose document (`.rc`) that
+`WidgetTrayActivity` is rendering for a tray widget, and print its rendering
+context (screen, container, theme) as JSON. **Dependencies**: `adb`, `jq`
+
+<!-- generated: ../scripts/adb-tile-dump --help -->
+
+```text
+Usage: adb-tile-dump [OPTIONS] WIDGET
+
+Exports a tray widget's Remote Compose document (.rc) and prints its rendering
+context as JSON.
+
+Arguments:
+  WIDGET          A widget in the standalone renderer's vertical carousel
+                  (WidgetTrayActivity): a numeric widget ID (see
+                  'adb-tiles --vertical') or a component name. A component must
+                  match exactly one tray widget; otherwise the matching widget
+                  IDs are listed.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  -o, --output FILE
+                  Write the document to FILE (default: widget-WIDGET_ID.rc in
+                  the current directory). Parent directories are created.
+  --help          Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-tile-dump 10001
+  adb-tile-dump -o weather.rc com.google.example.wear_widget/.WeatherWidgetService > weather.meta.json
+  adb-tile-dump -o /tmp/w.rc 10001 | jq '.theme["WearM3.primary"]'
+
+The JSON on stdout describes how the document was rendered: screen size and
+density, container and content box sizes in dp and px, corner radius, font
+scale, time zone offset, the dynamic Material 3 theme colors (theme), and
+doc_size_bytes, which the saved file is checked against.
+
+Requires a recent .emu, .exp, or .dev renderer; the tray is opened if needed.
+Reading the document off the device requires root: 'adb root' on emulator
+images that allow it, or su on userdebug builds. User builds cannot export
+documents.
+```
+
+<!-- /generated -->
+
+**Raw Command**:
+
+```bash
+adb shell am broadcast \
+  -p com.google.android.wearable.protolayout.renderer \
+  -a com.google.android.clockwork.prototiles.action.DUMP_RC_DOC \
+  --ei widget_id 10001
+# Reading the file needs root: `adb root` (emulator) or `su 0` (userdebug)
+adb exec-out su 0 cat \
+  /data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc > widget-10001.rc
 ```
 
 ### `scripts/adb-tiles`
 
-**Purpose**: List currently added tiles. **Dependencies**: `adb` **Usage**:
-`scripts/adb-tiles` **Raw Command**:
+**Purpose**: List tile and widget services and mark those in the SysUI carousel,
+or list the widgets in `WidgetTrayActivity` (`--vertical`). **Dependencies**:
+`adb`; `jq` for `--vertical`
+
+<!-- generated: ../scripts/adb-tiles --help -->
+
+```text
+Usage: adb-tiles [OPTIONS]
+
+Lists the tile and widget services installed on the connected device, or the
+widgets in the standalone renderer's vertical carousel (--vertical).
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  --vertical       List widgets in the standalone renderer's vertical carousel
+                   (WidgetTrayActivity) instead, opening it if needed. Requires
+                   a recent .emu, .exp, or .dev renderer. Cannot be combined
+                   with the filter options below.
+  --tiles-only     List only tile services
+  --widgets-only   List only widget services
+  --user-only      List only services from user-installed apps
+  --system-only    List only services from system apps
+  --carousel-only  List only services currently in the carousel
+  --help           Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  adb-tiles
+  adb-tiles --tiles-only
+  adb-tiles --carousel-only
+  adb-tiles --vertical
+  adb-tiles --vertical | awk '$2 == "SMALL" { print $1 }'
+
+Output format:
+  [Source][Tile][Widget][Carousel] Component
+
+  Source:   S (System) or U (User)
+  Tile:     T or space
+  Widget:   W or space
+  Carousel: C or space
+
+Output format (--vertical):
+  WIDGET_ID TYPE COMPONENT
+
+  WIDGET_ID is the ID accepted by 'adb-tile-remove --vertical' and
+  'adb-tile-dump'; TYPE is LARGE or SMALL. Documents uploaded as raw .rc
+  files appear with the UploadedDocWidget component.
+```
+
+<!-- /generated -->
+
+**Raw Command**:
 
 ```bash
-adb shell dumpsys activity service com.google.android.wearable.app.tiles.TileService
+adb shell dumpsys wear_service
 # (Requires parsing output)
+
+# Vertical carousel (--vertical)
+adb shell am broadcast \
+  -p com.google.android.wearable.protolayout.renderer \
+  -a com.google.android.clockwork.prototiles.action.GET_WIDGETS
 ```
 
 ### `scripts/adb-watchface-set`

@@ -9,20 +9,16 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Lists all available tile and widget services on the connected device.
-By default, lists services from all packages (system and user).
-
-Output format:
-  [Source][Tile][Widget][Carousel] Component
-  
-  Source:   S (System) or U (User)
-  Tile:     T or space
-  Widget:   W or space
-  Carousel: C or space
+Lists the tile and widget services installed on the connected device, or the
+widgets in the standalone renderer's vertical carousel (--vertical).
 
 Options:
   -s, --serial SERIAL
                   Target device serial; must precede arguments or commands.
+  --vertical       List widgets in the standalone renderer's vertical carousel
+                   (WidgetTrayActivity) instead, opening it if needed. Requires
+                   a recent .emu, .exp, or .dev renderer. Cannot be combined
+                   with the filter options below.
   --tiles-only     List only tile services
   --widgets-only   List only widget services
   --user-only      List only services from user-installed apps
@@ -38,6 +34,23 @@ Examples:
   $(basename "$0")
   $(basename "$0") --tiles-only
   $(basename "$0") --carousel-only
+  $(basename "$0") --vertical
+  $(basename "$0") --vertical | awk '\$2 == "SMALL" { print \$1 }'
+
+Output format:
+  [Source][Tile][Widget][Carousel] Component
+
+  Source:   S (System) or U (User)
+  Tile:     T or space
+  Widget:   W or space
+  Carousel: C or space
+
+Output format (--vertical):
+  WIDGET_ID TYPE COMPONENT
+
+  WIDGET_ID is the ID accepted by 'adb-tile-remove --vertical' and
+  'adb-tile-dump'; TYPE is LARGE or SMALL. Documents uploaded as raw .rc
+  files appear with the UploadedDocWidget component.
 EOF
   exit 0
 }
@@ -48,6 +61,7 @@ widgets_only=0
 user_only=0
 system_only=0
 carousel_only=0
+vertical=0
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -60,6 +74,7 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       continue
       ;;
+    --vertical) vertical=1 ;;
     --tiles-only) tiles_only=1 ;;
     --widgets-only) widgets_only=1 ;;
     --user-only) user_only=1 ;;
@@ -79,6 +94,11 @@ if ((tiles_only && widgets_only)); then
   exit 1
 fi
 
+if ((vertical && (tiles_only || widgets_only || user_only || system_only || carousel_only))); then
+  echo "$(basename "$0"): --vertical cannot be combined with filter options" >&2
+  exit 1
+fi
+
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     echo >&2 "$(basename "$0"): $1 not found"
@@ -87,6 +107,10 @@ require() {
 }
 
 require adb
+trap '{ echo >&2; } 2>/dev/null; exit 130' INT TERM
+if ((vertical)); then
+  require jq
+fi
 
 # Check device availability
 if ! adb get-state >/dev/null 2>&1; then
@@ -96,6 +120,61 @@ if ! adb get-state >/dev/null 2>&1; then
     echo "$(basename "$0"): no device connected" >&2
   fi
   exit 1
+fi
+
+RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
+TRAY_ACTIVITY="${RENDERER_PACKAGE}/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"
+TRAY_ACTION_PREFIX="com.google.android.clockwork.prototiles.action."
+TRAY_DATA_RE='data="(.*)"'
+
+renderer_desc() {
+  local version
+  version=$(adb shell dumpsys package "$RENDERER_PACKAGE" 2>/dev/null | tr -d '\r' | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
+  echo "${RENDERER_PACKAGE}${version:+ $version}"
+}
+
+# Sends a WidgetTrayReceiver action and prints its JSON result. The receiver is
+# registered only while WidgetTrayActivity is alive, so an unanswered broadcast
+# (result=0, no data) opens the tray and retries. Returns 1 if the receiver
+# never answers, which is also how renderers without the action respond.
+tray_broadcast() {
+  local action="$1" output attempt started=false
+  shift
+  for ((attempt = 1; attempt <= ${ADB_TILE_TRAY_ATTEMPTS:-10}; attempt++)); do
+    output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" | tr -d '\r')
+    if [[ "$output" =~ $TRAY_DATA_RE ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ "$started" == false ]]; then
+      adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
+      started=true
+      continue
+    fi
+    sleep "${ADB_TILE_RETRY_DELAY:-0.5}"
+  done
+  return 1
+}
+
+if ((vertical)); then
+  RESOLVE_OUT=$(adb shell cmd package resolve-activity --brief -n "$TRAY_ACTIVITY" 2>/dev/null | tr -d '\r')
+  if [[ "$RESOLVE_OUT" != *"$TRAY_ACTIVITY"* ]]; then
+    echo "$(basename "$0"): installed renderer ($(renderer_desc)) lacks WidgetTrayActivity; --vertical requires the .emu, .exp, or .dev renderer flavor" >&2
+    exit 1
+  fi
+
+  if ! RESULT=$(tray_broadcast GET_WIDGETS); then
+    echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer GET_WIDGETS; listing tray widgets requires a newer .emu, .exp, or .dev renderer" >&2
+    exit 1
+  fi
+
+  if [[ "$(jq -r '.status // empty' <<<"$RESULT")" != "OK" ]]; then
+    echo "$(basename "$0"): GET_WIDGETS failed: $RESULT" >&2
+    exit 1
+  fi
+
+  jq -r '.widgets[]? | "\(.widgetId) \(.containerTypeString) \(.component)"' <<<"$RESULT"
+  exit 0
 fi
 
 # Fetch user packages to distinguish system vs user apps

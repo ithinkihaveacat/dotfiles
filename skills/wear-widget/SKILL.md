@@ -245,14 +245,19 @@ automation.
     -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
   # Prints the component name if present, or "No activity found"
   ```
-- **Add and remove widgets**: Prefer the helpers when they are available in your
-  workspace. They launch the tray if needed, check for the tray first, retry
-  until the receiver registers, and wait until the widget is rendered:
+- **List, add, remove, and export widgets**: Prefer the `adb` skill helpers when
+  they are available in your workspace. They launch the tray if needed, check
+  for the tray first, retry until the receiver registers, fail clearly on
+  renderers that lack an action, and (for `adb-tile-add`) wait until the widget
+  is rendered:
   ```bash
   adb-tile-add --vertical --type LARGE <PACKAGE>/<SERVICE_CLASS>
   # => Added/activated widget ID: 10001
+  adb-tiles --vertical                        # list: WIDGET_ID TYPE COMPONENT
   adb-tile-remove --vertical 10001            # by widget ID
   adb-tile-remove --vertical <PACKAGE>/<SERVICE_CLASS>   # all instances
+  adb-tile-remove --vertical --all            # empty the tray
+  adb-tile-dump -o widget.rc 10001 > widget.meta.json    # export .rc
   ```
 - **Raw broadcasts**: Use raw broadcasts for actions the helpers do not cover.
   Always scope them with `-p` to the renderer package. Results are compact JSON
@@ -274,54 +279,34 @@ automation.
   Pass widget IDs as integers (`--ei widget_id`). Component names with a `/`
   must match exactly. Short names such as `WeatherWidgetService` are matched
   case-insensitively against installed widget providers.
-- **List tray widgets (`GET_WIDGETS`)**: Returns every widget currently in the
-  tray. Use it to reset the tray before a capture instead of guessing which
-  widgets are left over from earlier sessions:
-  ```bash
-  adb shell am broadcast -p $R -a $A.GET_WIDGETS
-  # => result=-1, data="{"status":"OK","action":"GET_WIDGETS","widgets":[
-  #      {"widgetId":10001,"component":"<PACKAGE>/<SERVICE_CLASS>",
-  #       "containerType":1,"containerTypeString":"LARGE"}]}"
-  ```
-  Older tray builds do not support `GET_WIDGETS` or `DUMP_RC_DOC`. They keep
-  answering `result=0` with no data even after the retry window, so treat that
-  as "unsupported renderer" and update the renderer.
-- **Export a rendered widget as `.rc` (`DUMP_RC_DOC`)**: Writes the Remote
-  Compose document that the tray is currently rendering to the renderer's cache
-  directory. It returns the rendering context alongside: screen size and
-  density, container and content box sizes in dp and px, corner radius, font
-  scale, time zone, and the dynamic Material 3 theme colors (`theme`, a map of
-  `WearM3.*` to `#AARRGGBB`). Use it to replay a widget exactly as the device
-  rendered it, or to diff documents between app versions:
-  ```bash
-  adb shell am broadcast -p $R -a $A.DUMP_RC_DOC --ei widget_id 10001
-  # => result=-1, data="{"package_name":"...","container_type":"LARGE",
-  #      "content_width_px":334,"content_height_px":192,...,"doc_size_bytes":495,
-  #      "file":"/data/user/0/com.google.android.wearable.protolayout.renderer/cache/10001_rc_doc.rc",
-  #      "theme":{...},"status":"OK","action":"DUMP_RC_DOC","widgetId":10001}"
-  ```
-  - Dumping by component (`--es component <name>`) returns
-    `"status":"MULTIPLE_WIDGETS"` and a `widgets` list when several instances
-    match. Pick one and repeat with `--ei widget_id`.
-  - Documents added with `UPLOAD_DOC_WIDGET` show up in `GET_WIDGETS` as
+- **List tray widgets (`GET_WIDGETS`)**: `adb-tiles --vertical` returns every
+  widget currently in the tray. Use it (or `adb-tile-remove --vertical --all`)
+  to reset the tray before a capture instead of guessing which widgets are left
+  over from earlier sessions. Older tray builds do not support `GET_WIDGETS` or
+  `DUMP_RC_DOC`; they never answer, and the helpers report that the installed
+  renderer needs updating.
+- **Export a rendered widget as `.rc` (`DUMP_RC_DOC`)**: `adb-tile-dump` saves
+  the Remote Compose document that the tray is currently rendering and prints
+  the rendering context as JSON: screen size and density, container and content
+  box sizes in dp and px, corner radius, font scale, time zone, and the dynamic
+  Material 3 theme colors (`theme`, a map of `WearM3.*` to `#AARRGGBB`). Use it
+  to replay a widget exactly as the device rendered it, or to diff documents
+  between app versions.
+  - A component that matches several tray widgets is rejected with the list of
+    matching widget IDs. Pick one and pass the ID.
+  - Documents added with `UPLOAD_DOC_WIDGET` show up in `adb-tiles --vertical`
+    as
     `.../com.google.android.clockwork.prototiles.renderer.experimental.UploadedDocWidget`
-    and can be dumped by ID. An exported `.rc` file re-uploads and dumps back
-    byte-identical, so a document captured on one device can be replayed on
+    and can be exported by ID. An exported `.rc` file re-uploads and exports
+    back byte-identical, so a document captured on one device can be replayed on
     another.
-  - Errors return `result=0` and `{"status":"ERROR","message":...}`, for example
-    `No active widget found for widgetId N`.
+  - `No active widget found for widgetId N` means the ID is not in the tray.
     `Tile N is not a Remote Compose tile.` also appears while the provider has
     not delivered content yet.
-  - **Pulling the file requires root.** The `pull_command` in the result uses
-    `run-as`, which fails for this privileged app. Use `adb root` on emulator
-    images that allow it, or `su` on userdebug devices. User builds cannot pull
-    the file. Check the byte count against `doc_size_bytes`:
-    ```bash
-    adb root   # emulator
-    adb exec-out cat /data/user/0/$R/cache/10001_rc_doc.rc > widget.rc
-    # userdebug device instead:
-    adb exec-out su 0 cat /data/user/0/$R/cache/10001_rc_doc.rc > widget.rc
-    ```
+  - **Exporting requires root.** The renderer is a privileged app, so the file
+    cannot be read with `run-as`. `adb-tile-dump` uses `adb root` when adbd runs
+    as root (emulator images that allow it) or `su` on userdebug devices, and
+    checks the byte count against `doc_size_bytes`. User builds cannot export.
 - **Logs**: `adb logcat -s WidgetTrayReceiver`. Emulator (`.emu`) builds strip
   info and debug logs, so read results from the broadcast `data` instead.
 - **Widget centering**: A single widget at the top of the tray sits above the

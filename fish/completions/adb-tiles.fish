@@ -3,6 +3,7 @@
 complete -c adb-tiles -f
 complete -c adb-tiles -s s -l serial -x -a '(__fish_android_devices)' -d 'Target device serial'
 complete -c adb-tiles -s h -l help -d "Display help message"
+complete -c adb-tiles -l vertical -d "List widgets in the standalone renderer vertical carousel (WidgetTrayActivity)"
 complete -c adb-tiles -l tiles-only -d "List only tile services"
 complete -c adb-tiles -l widgets-only -d "List only widget services"
 complete -c adb-tiles -l user-only -d "List only services from user-installed apps"

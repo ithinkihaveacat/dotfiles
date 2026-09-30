@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+
+# Tests: skills/adb/tests/test-adb-tile
+
+set -u
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] WIDGET
+
+Exports a tray widget's Remote Compose document (.rc) and prints its rendering
+context as JSON.
+
+Arguments:
+  WIDGET          A widget in the standalone renderer's vertical carousel
+                  (WidgetTrayActivity): a numeric widget ID (see
+                  'adb-tiles --vertical') or a component name. A component must
+                  match exactly one tray widget; otherwise the matching widget
+                  IDs are listed.
+
+Options:
+  -s, --serial SERIAL
+                  Target device serial; must precede arguments or commands.
+  -o, --output FILE
+                  Write the document to FILE (default: widget-WIDGET_ID.rc in
+                  the current directory). Parent directories are created.
+  --help          Display this help message and exit
+
+Environment:
+  ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
+                  The --serial option takes precedence when both are set.
+
+Examples:
+  $(basename "$0") 10001
+  $(basename "$0") -o weather.rc com.google.example.wear_widget/.WeatherWidgetService > weather.meta.json
+  $(basename "$0") -o /tmp/w.rc 10001 | jq '.theme["WearM3.primary"]'
+
+The JSON on stdout describes how the document was rendered: screen size and
+density, container and content box sizes in dp and px, corner radius, font
+scale, time zone offset, the dynamic Material 3 theme colors (theme), and
+doc_size_bytes, which the saved file is checked against.
+
+Requires a recent .emu, .exp, or .dev renderer; the tray is opened if needed.
+Reading the document off the device requires root: 'adb root' on emulator
+images that allow it, or su on userdebug builds. User builds cannot export
+documents.
+EOF
+  exit 0
+}
+
+usage_short() {
+  cat <<EOF >&2
+Usage: $(basename "$0") [OPTIONS] WIDGET
+
+Export a tray widget's Remote Compose document (.rc) and print its rendering
+context as JSON.
+
+Examples:
+  $(basename "$0") 10001
+  $(basename "$0") -o weather.rc com.google.example.wear_widget/.WeatherWidgetService
+
+Try '$(basename "$0") --help' for more information.
+EOF
+  exit 1
+}
+
+if [[ $# -eq 0 ]]; then
+  usage_short
+fi
+
+WIDGET=""
+OUTPUT_FILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s | --serial)
+      if [[ -n "$WIDGET" ]]; then
+        echo "$(basename "$0"): $1 must precede arguments or commands" >&2
+        exit 1
+      fi
+      if [[ -z "${2:-}" ]]; then
+        echo "$(basename "$0"): $1 option requires an argument" >&2
+        exit 1
+      fi
+      export ANDROID_SERIAL="$2"
+      shift 2
+      ;;
+    -o | --output)
+      if [[ -z "${2:-}" ]]; then
+        echo "$(basename "$0"): $1 option requires an argument" >&2
+        exit 1
+      fi
+      OUTPUT_FILE="$2"
+      shift 2
+      ;;
+    --help | -h)
+      usage
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option '$1'" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$WIDGET" ]]; then
+        WIDGET="$1"
+      else
+        echo "$(basename "$0"): unexpected argument '$1'" >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$WIDGET" ]]; then
+  usage_short
+fi
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require adb
+require jq
+trap '{ echo >&2; } 2>/dev/null; exit 130' INT TERM
+
+if ! adb get-state >/dev/null 2>&1; then
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
+  else
+    echo "$(basename "$0"): no device connected" >&2
+  fi
+  exit 1
+fi
+
+RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
+TRAY_ACTIVITY="${RENDERER_PACKAGE}/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"
+TRAY_ACTION_PREFIX="com.google.android.clockwork.prototiles.action."
+TRAY_DATA_RE='data="(.*)"'
+
+renderer_desc() {
+  local version
+  version=$(adb shell dumpsys package "$RENDERER_PACKAGE" 2>/dev/null | tr -d '\r' | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
+  echo "${RENDERER_PACKAGE}${version:+ $version}"
+}
+
+# Sends a WidgetTrayReceiver action and prints its JSON result. The receiver is
+# registered only while WidgetTrayActivity is alive, so an unanswered broadcast
+# (result=0, no data) opens the tray and retries. Returns 1 if the receiver
+# never answers, which is also how renderers without the action respond.
+tray_broadcast() {
+  local action="$1" output attempt started=false
+  shift
+  for ((attempt = 1; attempt <= ${ADB_TILE_TRAY_ATTEMPTS:-10}; attempt++)); do
+    output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" | tr -d '\r')
+    if [[ "$output" =~ $TRAY_DATA_RE ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ "$started" == false ]]; then
+      adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
+      started=true
+      continue
+    fi
+    sleep "${ADB_TILE_RETRY_DELAY:-0.5}"
+  done
+  return 1
+}
+
+RESOLVE_OUT=$(adb shell cmd package resolve-activity --brief -n "$TRAY_ACTIVITY" 2>/dev/null | tr -d '\r')
+if [[ "$RESOLVE_OUT" != *"$TRAY_ACTIVITY"* ]]; then
+  echo "$(basename "$0"): installed renderer ($(renderer_desc)) lacks WidgetTrayActivity; exporting requires the .emu, .exp, or .dev renderer flavor" >&2
+  exit 1
+fi
+
+if [[ "$WIDGET" =~ ^[0-9]+$ ]]; then
+  SELECTOR=(--ei widget_id "$WIDGET")
+else
+  SELECTOR=(--es component "$WIDGET")
+fi
+
+if ! RESULT=$(tray_broadcast DUMP_RC_DOC "${SELECTOR[@]}"); then
+  echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer DUMP_RC_DOC; exporting requires a newer .emu, .exp, or .dev renderer" >&2
+  exit 1
+fi
+
+STATUS=$(jq -r '.status // empty' <<<"$RESULT")
+case "$STATUS" in
+  OK) ;;
+  MULTIPLE_WIDGETS)
+    echo "$(basename "$0"): $WIDGET matches several tray widgets; pass one of these widget IDs:" >&2
+    jq -r '.widgets[]? | "  \(.widgetId) \(.containerTypeString) \(.component)"' <<<"$RESULT" >&2
+    exit 1
+    ;;
+  *)
+    MESSAGE=$(jq -r '.message // empty' <<<"$RESULT")
+    echo "$(basename "$0"): ${MESSAGE:-DUMP_RC_DOC failed: $RESULT}" >&2
+    if [[ "$MESSAGE" == *"not a Remote Compose tile"* ]]; then
+      echo "$(basename "$0"): the provider may not have delivered content yet; retry once the widget has rendered" >&2
+    fi
+    exit 1
+    ;;
+esac
+
+WIDGET_ID=$(jq -r '.widgetId // empty' <<<"$RESULT")
+DEVICE_FILE=$(jq -r '.file // empty' <<<"$RESULT")
+EXPECTED_SIZE=$(jq -r '.doc_size_bytes // empty' <<<"$RESULT")
+if [[ -z "$DEVICE_FILE" || ! "$EXPECTED_SIZE" =~ ^[0-9]+$ ]]; then
+  echo "$(basename "$0"): DUMP_RC_DOC result lacks file or doc_size_bytes: $RESULT" >&2
+  exit 1
+fi
+
+OUTPUT_FILE="${OUTPUT_FILE:-widget-${WIDGET_ID:-$WIDGET}.rc}"
+OUTPUT_DIR=$(dirname "$OUTPUT_FILE")
+if ! mkdir -p "$OUTPUT_DIR"; then
+  echo "$(basename "$0"): cannot create directory '$OUTPUT_DIR'" >&2
+  exit 1
+fi
+
+TMP_FILE=$(mktemp "${OUTPUT_DIR}/.$(basename "$OUTPUT_FILE").XXXXXX") || {
+  echo "$(basename "$0"): cannot create temporary file in '$OUTPUT_DIR'" >&2
+  exit 1
+}
+trap 'rm -f "$TMP_FILE"' EXIT
+
+file_size() {
+  wc -c <"$1" | tr -d '[:space:]'
+}
+
+# The renderer is a privileged app, so run-as (the result's pull_command) is
+# usually denied; read the file as root instead. adb exec-out does not report
+# the remote exit status, so every attempt is judged by the byte count.
+if [[ "$(adb shell id -u 2>/dev/null | tr -d '\r')" == "0" ]]; then
+  PULL_METHOD="adb root"
+  adb exec-out cat "$DEVICE_FILE" >"$TMP_FILE"
+elif [[ "$(adb shell su 0 id -u 2>/dev/null | tr -d '\r')" == "0" ]]; then
+  PULL_METHOD="su"
+  adb exec-out su 0 cat "$DEVICE_FILE" >"$TMP_FILE"
+else
+  PULL_METHOD="run-as"
+  adb exec-out run-as "$RENDERER_PACKAGE" cat "cache/${DEVICE_FILE##*/}" >"$TMP_FILE"
+fi
+
+ACTUAL_SIZE=$(file_size "$TMP_FILE")
+if [[ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]]; then
+  if [[ "$PULL_METHOD" == "run-as" ]]; then
+    echo "$(basename "$0"): cannot read $DEVICE_FILE: exporting requires 'adb root' (emulator images) or su (userdebug builds); user builds cannot export documents" >&2
+  else
+    echo "$(basename "$0"): pulled $ACTUAL_SIZE bytes of $DEVICE_FILE via $PULL_METHOD, expected $EXPECTED_SIZE (doc_size_bytes)" >&2
+  fi
+  exit 1
+fi
+
+chmod "$(printf '%o' $((0666 & ~0$(umask))))" "$TMP_FILE" 2>/dev/null
+if ! mv -f "$TMP_FILE" "$OUTPUT_FILE"; then
+  echo "$(basename "$0"): cannot write '$OUTPUT_FILE'" >&2
+  exit 1
+fi
+
+echo "Saved $ACTUAL_SIZE bytes to $OUTPUT_FILE (widget ID $WIDGET_ID)" >&2
+jq 'del(.status, .action)' <<<"$RESULT"

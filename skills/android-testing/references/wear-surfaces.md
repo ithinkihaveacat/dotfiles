@@ -40,8 +40,9 @@ Emulator (`.emu`), experimental (`.exp`), and developer (`.dev`) builds of the
 ADB broadcasts, so there is no need for UI automation: add, update, and remove
 widgets, list them (`GET_WIDGETS`), upload a raw `.rc` document, and export a
 rendered widget as `.rc` with its rendering context (`DUMP_RC_DOC`). Use the
-`wear-widget` skill (Method 3) for the commands, and `adb-tile-add --vertical` /
-`adb-tile-remove --vertical` where available.
+`wear-widget` skill (Method 3) for the commands, and the `adb` skill helpers
+(`adb-tile-add`, `adb-tile-remove`, and `adb-tiles` with `--vertical`, plus
+`adb-tile-dump`) where available.
 
 ______________________________________________________________________
 

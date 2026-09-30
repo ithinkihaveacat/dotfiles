@@ -3,9 +3,11 @@ name: adb
 description: >-
   Manipulates Android devices via ADB with emphasis on Wear OS and device automation.
   Provides scripts for screenshots with circular masking, screen recording, tile
-  management, WearableService inspection, package operations, and device configuration.
+  management, Wear widget tray control (list, clear, .rc document export),
+  WearableService inspection, package operations, and device configuration.
   Use when automating Android devices, debugging Wear OS watches, capturing screenshots
-  or recordings, managing tiles, inspecting dumpsys, or streaming logcat.
+  or recordings, managing tiles or tray widgets, inspecting dumpsys, or streaming
+  logcat.
 compatibility: >-
   Requires adb. Some scripts require magick (ImageMagick), scrcpy, ffmpeg, or jq.
   Designed for filesystem-based agents with bash access.
@@ -88,16 +90,32 @@ the exact invocations, including non-obvious flags.
 - `scripts/adb-tile-add`: Add a tile component for debugging.
 - `scripts/adb-tile-switch`: Switch the active tile.
 - `scripts/adb-tile-remove`: Remove a tile.
-- `scripts/adb-tiles`: List available tiles and indicate which are in the
+- `scripts/adb-tiles`: List installed tiles and indicate which are in the
   carousel.
+- `scripts/adb-tile-dump`: Export a tray widget's Remote Compose document
+  (`.rc`) and print its rendering context as JSON.
 - `scripts/adb-watchface-set`: Set the current watch face.
+
+With `--vertical`, `adb-tile-add`, `adb-tile-remove`, and `adb-tiles` target the
+standalone renderer's vertical carousel (`WidgetTrayActivity`, `.emu`, `.exp`,
+and `.dev` renderer flavors) instead of the SysUI carousel. Tray widgets are
+addressed by numeric widget ID:
+
+```bash
+scripts/adb-tiles --vertical            # => 10001 LARGE com.example/.MyWidgetService
+scripts/adb-tile-remove --vertical --all  # reset the tray before a capture
+scripts/adb-tile-dump -o widget.rc 10001 > widget.meta.json
+```
+
+`adb-tile-dump` needs root to read the document (`adb root` on emulators, `su`
+on userdebug builds); user builds cannot export.
 
 > [!NOTE] **Tile Indexing (`Index=[0]`)**: When adding a new tile using
 > `scripts/adb-tile-add`, the output often indicates `Index=[0]`. This means the
 > tile was added to the **first position** in the carousel, pushing existing
 > tiles down. It does _not_ mean it has overwritten previous tiles.
 >
-> **Verifying Installed Tiles**: Use `scripts/adb-tiles` to list all available
+> **Verifying Installed Tiles**: Use `scripts/adb-tiles` to list all installed
 > tiles and see which ones are currently in the carousel. The output uses
 > prefixes like `UTWC` where `C` indicates it is in the carousel.
 
@@ -137,8 +155,9 @@ the exact invocations, including non-obvious flags.
   (`com.google.android.wearable.app.DEBUG_SURFACE`) which may not work on
   production builds without developer options or specific system images.
 - **USB Debugging**: Requires `adb` authorization.
-- **Destructive Actions**: Scripts like `adb-tile-remove` or
-  `packagename uninstall` modify device state.
+- **Destructive Actions**: Scripts like `adb-tile-remove` (including
+  `--vertical --all`, which empties the widget tray) or `packagename uninstall`
+  modify device state.
 
 ## Reference Material
 
