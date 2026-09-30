@@ -306,7 +306,7 @@ Commands:
     services             List the services of a package
     services-dumpsys     Display detailed dumpsys for all services
     jobscheduler         Display jobscheduler information
-    tiles                List tiles provided by a package (Wear OS)
+    tiles                List tiles and widgets provided by a package (Wear OS)
 
   Profile/Optimization:
     profile-status       Display dex optimization status
