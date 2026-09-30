@@ -4,14 +4,15 @@
 complete -c apk-info -f
 
 # Subcommands list
-set -l subcommands package manifest version libraries tiles complications launcher file
+set -l subcommands package manifest version libraries tiles widgets complications launcher file
 
 # Complete subcommands
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a package -d "Print package name (application ID)"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a manifest -d "Display formatted AndroidManifest.xml"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a version -d "Print package version name/code details"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a libraries -d "List/query embedded library versions"
-complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a tiles -d "List Wear OS tiles services"
+complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a tiles -d "List Wear OS tiles and widget providers"
+complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a widgets -d "List Wear OS widget and tile providers"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a complications -d "List Wear OS complications providers"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a launcher -d "Print launcher icon resource path"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a file -d "Extract and print a specific file"

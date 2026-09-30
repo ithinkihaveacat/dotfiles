@@ -56,7 +56,8 @@ Commands:
   manifest             Display the formatted AndroidManifest.xml.
   version              Print package version details (name and code).
   libraries            List or query embedded Jetpack/Kotlinx library versions.
-  tiles                List Wear OS tiles services declared in the manifest.
+  tiles                List Wear OS tiles and widget providers declared in the manifest.
+  widgets              List Wear OS widget and tile providers (alias for tiles).
   complications        List Wear OS complications data providers.
   launcher             Print the path of the launcher icon resource.
   file                 Extract and print the contents of a specific file from the APK.
@@ -69,6 +70,7 @@ Examples:
   apk-info version app.apk
   apk-info libraries --json app.zip
   apk-info libraries --only androidx.wear.compose_compose-foundation app.apk
+  apk-info tiles app.apk
   apk-info file app.apk res/xml/watch_face_info.xml
 ```
 
