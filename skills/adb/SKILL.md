@@ -98,6 +98,8 @@ the exact invocations, including non-obvious flags.
 - `scripts/adb-tile-dump`: Export a tray widget's Remote Compose document
   (`.rc`) and print its rendering context as JSON.
 - `scripts/adb-watchface-set`: Set the current watch face.
+- `scripts/adb-complication-update`: Trigger a complication update on Wear OS
+  via `DEBUG_SYSUI`.
 
 With `--vertical`, `adb-tile-add`, `adb-tile-remove`, and `adb-tiles` target the
 standalone renderer's vertical carousel (`WidgetTrayActivity`, `.emu`, `.exp`,

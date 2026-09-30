@@ -320,8 +320,8 @@ or list the widgets in `WidgetTrayActivity` (`--vertical`). **Dependencies**:
 ```text
 Usage: adb-tiles [OPTIONS]
 
-Lists the tile and widget services installed on the connected device, or the
-widgets in the standalone renderer's vertical carousel (--vertical).
+Lists the tile and widget services/receivers installed on the connected device,
+or the widgets in the standalone renderer's vertical carousel (--vertical).
 
 Options:
   -s, --serial SERIAL
@@ -385,6 +385,16 @@ adb shell am broadcast \
 
 ```bash
 adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation set-watchface --es watchFaceId COMPONENT_NAME
+```
+
+### `scripts/adb-complication-update`
+
+**Purpose**: Trigger an update for a complication on a Wear OS device.
+**Dependencies**: `adb` **Usage**:
+`scripts/adb-complication-update COMPLICATION_ID` **Raw Command**:
+
+```bash
+adb exec-out am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI --es operation complication_update --ei complication_id COMPLICATION_ID
 ```
 
 ## Activity Discovery

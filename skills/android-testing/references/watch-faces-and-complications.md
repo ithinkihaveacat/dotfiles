@@ -11,18 +11,14 @@ ______________________________________________________________________
 Complications are modular data fields on a Watch Face. Testing complications
 involves simulating data updates and tapping actions.
 
-### Triggering Complication Updates (DEBUG_SYSUI)
+### Triggering Complication Updates
 
-You can force the system to update a complication's data feed or simulate
-various complication types (e.g. RANGED_VALUE, LONG_TEXT) via ADB intents:
+Force the system to update a complication's data feed using the
+`adb-complication-update` helper from the `adb` skill:
 
-- **Force Complication Update**:
-  ```bash
-  adb shell am broadcast \
-    -a "com.google.android.wearable.app.DEBUG_SYSUI" \
-    --es "operation" "complication_update" \
-    --ei "complication_id" <ID>
-  ```
+```bash
+adb-complication-update <ID>
+```
 
 ### Simulating Watch Face Environments (Wear OS 4+)
 
