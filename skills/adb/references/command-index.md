@@ -107,7 +107,8 @@ Options:
                   Glance-based tiles). With --vertical, only LARGE and SMALL are
                   supported.
   --no-show       Do not show the tile after adding it
-  --wait          Wait for the tile to be visible (default)
+  --wait          Wait for the tile to be visible (default); exit 1 if that is
+                  not confirmed within 15 seconds
   --no-wait       Do not wait for visibility (return immediately)
   --help          Display this help message and exit
 

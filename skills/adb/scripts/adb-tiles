@@ -113,8 +113,10 @@ if ((vertical)); then
 fi
 
 # Check device availability
-if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "$ANDROID_SERIAL" ]]; then
+if ! DEVICE_ERROR=$(adb get-state 2>&1 >/dev/null); then
+  if [[ "$DEVICE_ERROR" == *"more than one"* ]]; then
+    echo "$(basename "$0"): more than one device connected; use --serial or set ANDROID_SERIAL" >&2
+  elif [[ -n "$ANDROID_SERIAL" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
@@ -136,15 +138,20 @@ renderer_desc() {
 # Sends a WidgetTrayReceiver action and prints its JSON result. The receiver is
 # registered only while WidgetTrayActivity is alive, so an unanswered broadcast
 # (result=0, no data) opens the tray and retries. Returns 1 if the receiver
-# never answers, which is also how renderers without the action respond.
+# never answers, which is also how renderers without the action respond, and 2
+# (after reporting it) if am broadcast itself fails, e.g. the device went away.
 tray_broadcast() {
   local action="$1" output attempt started=false
   shift
   for ((attempt = 1; attempt <= ${ADB_TILE_TRAY_ATTEMPTS:-10}; attempt++)); do
-    output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" | tr -d '\r')
+    output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" 2>&1 | tr -d '\r')
     if [[ "$output" =~ $TRAY_DATA_RE ]]; then
       printf '%s\n' "${BASH_REMATCH[1]}"
       return 0
+    fi
+    if [[ "$output" != *"Broadcast completed: result="* ]]; then
+      echo "$(basename "$0"): am broadcast $action failed: ${output:-no output from adb}" >&2
+      return 2
     fi
     if [[ "$started" == false ]]; then
       adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
@@ -163,17 +170,23 @@ if ((vertical)); then
     exit 1
   fi
 
-  if ! RESULT=$(tray_broadcast GET_WIDGETS); then
-    echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer GET_WIDGETS; listing tray widgets requires a newer .emu, .exp, or .dev renderer" >&2
+  RESULT=$(tray_broadcast GET_WIDGETS)
+  case $? in
+    0) ;;
+    1)
+      echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer GET_WIDGETS; listing tray widgets requires a newer .emu, .exp, or .dev renderer" >&2
+      exit 1
+      ;;
+    *) exit 1 ;;
+  esac
+
+  # An empty list must mean an empty tray, never an answer that was not read.
+  if ! jq -e '.status == "OK" and (.widgets | type == "array")' <<<"$RESULT" >/dev/null 2>&1; then
+    echo "$(basename "$0"): unexpected GET_WIDGETS answer: $RESULT" >&2
     exit 1
   fi
 
-  if [[ "$(jq -r '.status // empty' <<<"$RESULT")" != "OK" ]]; then
-    echo "$(basename "$0"): GET_WIDGETS failed: $RESULT" >&2
-    exit 1
-  fi
-
-  jq -r '.widgets[]? | "\(.widgetId) \(.containerTypeString) \(.component)"' <<<"$RESULT"
+  jq -r '.widgets[] | "\(.widgetId) \(.containerTypeString) \(.component)"' <<<"$RESULT" || exit 1
   exit 0
 fi
 

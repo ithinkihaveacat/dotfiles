@@ -24,7 +24,8 @@ Options:
                   Glance-based tiles). With --vertical, only LARGE and SMALL are
                   supported.
   --no-show       Do not show the tile after adding it
-  --wait          Wait for the tile to be visible (default)
+  --wait          Wait for the tile to be visible (default); exit 1 if that is
+                  not confirmed within 15 seconds
   --no-wait       Do not wait for visibility (return immediately)
   --help          Display this help message and exit
 
@@ -171,14 +172,22 @@ require() {
 require adb
 
 # Check device availability
-if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+if ! DEVICE_ERROR=$(adb get-state 2>&1 >/dev/null); then
+  if [[ "$DEVICE_ERROR" == *"more than one"* ]]; then
+    echo "$(basename "$0"): more than one device connected; use --serial or set ANDROID_SERIAL" >&2
+  elif [[ -n "${ANDROID_SERIAL:-}" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
   fi
   exit 1
 fi
+
+# adb shell joins its arguments into one command line for the device shell, so
+# quote values that may contain shell metacharacters ('$' in nested classes).
+device_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
 TRAY_ACTIVITY="${RENDERER_PACKAGE}/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity"
@@ -266,21 +275,22 @@ if [ "$WAIT" = true ] && { [ "$SHOW" = true ] || [ "$VERTICAL" = true ]; }; then
   adb logcat -v time SysUI:D ProtoTilesTileRendererImpl:D AndroidRuntime:E "*:S" >"$LOG_FILE" &
   LOG_PID=$!
 
-  # Robust cleanup trap: Handles normal exits, INT (Ctrl+C), and TERM signals.
+  # Cleanup runs on every exit; an interrupt exits 130, which triggers it.
   trap '
-    EXIT_CODE=$?
     [ -n "$LOG_PID" ] && kill "$LOG_PID" 2>/dev/null
     [ -n "$LOG_FILE" ] && rm -f "$LOG_FILE"
-    if [ $EXIT_CODE -eq 130 ]; then
-       echo -e "\nWarning: Script interrupted by user. Background logcat killed."
-    fi
-    exit $EXIT_CODE
-  ' EXIT INT TERM
+  ' EXIT
+  trap '{ echo >&2; } 2>/dev/null; exit 130' INT TERM
 fi
 
 check_render_failures() {
   local phase="$1"
-  if grep -q "FATAL EXCEPTION" "$LOG_FILE"; then
+  # AndroidRuntime logs crashes from every process; only the provider, the
+  # renderer, and SysUI are relevant. The "Process:" line follows the
+  # "FATAL EXCEPTION" line.
+  if grep -A 1 "FATAL EXCEPTION" "$LOG_FILE" | grep -F "Process: " |
+    grep -qF -e "Process: $PACKAGE_NAME," -e "Process: $PACKAGE_NAME:" \
+      -e "Process: $RENDERER_PACKAGE," -e "Process: $RENDERER_PACKAGE:" -e "sysui"; then
     # b/488353353
     echo "Error: Remote Compose App Crash detected (${phase})!" >&2
     echo "This usually indicates an IPC payload limit was exceeded (TransactionTooLargeException) or a local runtime crash." >&2
@@ -306,7 +316,7 @@ wait_for_tile_visibility() {
   echo "Waiting for tile visibility..."
   local start_time
   start_time=$(date +%s)
-  local timeout=15
+  local timeout="${ADB_TILE_VISIBILITY_TIMEOUT:-15}"
   local visible=false
   local visible_time=0
 
@@ -362,11 +372,12 @@ wait_for_tile_visibility() {
     # --- Failure Detection (Pre-Visibility) ---
     check_render_failures "pre-visibility"
 
-    # Global timeout
-    if [ $elapsed -ge $timeout ]; then
+    # Global timeout: the add succeeded, but visibility was not confirmed, which
+    # is what --wait promises; report that rather than exit 0.
+    if [ "$elapsed" -ge "$timeout" ]; then
       if [ "$visible" = false ]; then
-        echo "Warning: Timeout waiting for tile visibility ($timeout s)." >&2
-        echo "The tile may be visible, but the success log was missed, or it's stuck loading." >&2
+        echo "$(basename "$0"): added, but the tile did not become visible within $timeout s; it may still be loading, or its log lines were missed (retry with --no-wait to skip this check)" >&2
+        exit 1
       fi
       break
     fi
@@ -404,8 +415,8 @@ if [[ "$VERTICAL" == true ]]; then
     OUTPUT=$(adb shell am broadcast \
       -p "$RENDERER_PACKAGE" \
       -a "$TRAY_ACTION_ADD" \
-      --es component "$COMPONENT_NAME" \
-      --es container_type "$TYPE_STR" | tr -d '\r')
+      --es component "$(device_quote "$COMPONENT_NAME")" \
+      --es container_type "$TYPE_STR" 2>&1 | tr -d '\r')
 
     if [[ "$OUTPUT" == *"result=-1"* && "$OUTPUT" =~ $WIDGET_ID_RE ]]; then
       WIDGET_ID="${BASH_REMATCH[1]}"
@@ -418,6 +429,13 @@ if [[ "$VERTICAL" == true ]]; then
       else
         echo "$(basename "$0"): ADD_WIDGET failed: $OUTPUT" >&2
       fi
+      exit 1
+    fi
+
+    # Only an unanswered broadcast is safe to resend; anything else (adb or am
+    # failing) might have added the widget already.
+    if [[ "$OUTPUT" != *"Broadcast completed: result="* ]]; then
+      echo "$(basename "$0"): am broadcast ADD_WIDGET failed: ${OUTPUT:-no output from adb}" >&2
       exit 1
     fi
 
@@ -449,7 +467,7 @@ fi
 OUTPUT=$(adb shell am broadcast \
   -a com.google.android.wearable.app.DEBUG_SURFACE \
   --es operation add-tile \
-  --ecn component "$COMPONENT_NAME" \
+  --ecn component "$(device_quote "$COMPONENT_NAME")" \
   --ei type "$TYPE_INT")
 
 # Check for "Requested tile provider does not exist" error (result=2)

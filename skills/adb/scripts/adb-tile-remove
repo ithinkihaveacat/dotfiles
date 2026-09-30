@@ -141,14 +141,22 @@ if [[ "$VERTICAL" == true ]]; then
 fi
 
 # Check device availability
-if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+if ! DEVICE_ERROR=$(adb get-state 2>&1 >/dev/null); then
+  if [[ "$DEVICE_ERROR" == *"more than one"* ]]; then
+    echo "$(basename "$0"): more than one device connected; use --serial or set ANDROID_SERIAL" >&2
+  elif [[ -n "${ANDROID_SERIAL:-}" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
   fi
   exit 1
 fi
+
+# adb shell joins its arguments into one command line for the device shell, so
+# quote values that may contain shell metacharacters ('$' in nested classes).
+device_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 if [[ "$VERTICAL" == true ]]; then
   RENDERER_PACKAGE="com.google.android.wearable.protolayout.renderer"
@@ -166,15 +174,21 @@ if [[ "$VERTICAL" == true ]]; then
   # is registered only while WidgetTrayActivity is alive, so an unanswered
   # broadcast (result=0, no data) opens the tray and retries. Returns 1 if the
   # receiver never answers, which is also how renderers without the action
-  # respond.
+  # respond, and 2 (after reporting it) if am broadcast itself fails, e.g. the
+  # device went away. An unanswered broadcast was not handled, so retrying a
+  # removal cannot remove twice.
   tray_broadcast() {
     local action="$1" output attempt started=false
     shift
     for ((attempt = 1; attempt <= ${ADB_TILE_TRAY_ATTEMPTS:-10}; attempt++)); do
-      output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" | tr -d '\r')
+      output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" 2>&1 | tr -d '\r')
       if [[ "$output" =~ $TRAY_DATA_RE ]]; then
         printf '%s\n' "${BASH_REMATCH[1]}"
         return 0
+      fi
+      if [[ "$output" != *"Broadcast completed: result="* ]]; then
+        echo "$(basename "$0"): am broadcast $action failed: ${output:-no output from adb}" >&2
+        return 2
       fi
       if [[ "$started" == false ]]; then
         adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
@@ -186,24 +200,43 @@ if [[ "$VERTICAL" == true ]]; then
     return 1
   }
 
-  # Removes one widget by ID; prints the result line or an error.
+  # Prints the widget IDs in a GET_WIDGETS answer, one per line. Fails unless
+  # the answer is a well-formed OK response, so that no output reliably means
+  # an empty tray.
+  tray_widget_ids() {
+    jq -r 'if .status == "OK" and (.widgets | type == "array")
+      then .widgets[] | (.widgetId | numbers) // error("bad widgetId")
+      else error("unexpected answer") end' <<<"$1" 2>/dev/null
+  }
+
+  # Removes one widget by ID; reports the outcome on stderr.
   remove_widget_id() {
-    local widget_id="$1" result
-    if ! result=$(tray_broadcast REMOVE_WIDGET --ei widget_id "$widget_id"); then
-      echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle REMOVE_WIDGET" >&2
-      return 1
-    fi
-    if [[ "$(jq -r '.status // empty' <<<"$result")" == "OK" ]]; then
-      echo "Removed widget ID: $widget_id" >&2
-      return 0
-    fi
-    local message
-    message=$(jq -r '.message // empty' <<<"$result")
-    if [[ -n "$message" ]]; then
-      echo "$(basename "$0"): $message" >&2
-    else
-      echo "$(basename "$0"): no widget with ID $widget_id in the tray (see 'adb-tiles --vertical')" >&2
-    fi
+    local widget_id="$1" result outcome message
+    result=$(tray_broadcast REMOVE_WIDGET --ei widget_id "$widget_id")
+    case $? in
+      0) ;;
+      1)
+        echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle REMOVE_WIDGET for widget ID $widget_id" >&2
+        return 1
+        ;;
+      *) return 1 ;;
+    esac
+    outcome=$(jq -r 'if .status == "OK" and .removed != false then "removed"
+      elif .status == "ERROR" and .removed == false then "missing"
+      else "other" end' <<<"$result" 2>/dev/null)
+    case "$outcome" in
+      removed)
+        echo "Removed widget ID: $widget_id" >&2
+        return 0
+        ;;
+      missing)
+        echo "$(basename "$0"): no widget with ID $widget_id in the tray (see 'adb-tiles --vertical')" >&2
+        ;;
+      *)
+        message=$(jq -r '.message // empty' <<<"$result" 2>/dev/null)
+        echo "$(basename "$0"): ${message:-unexpected REMOVE_WIDGET answer: $result}" >&2
+        ;;
+    esac
     return 1
   }
 
@@ -214,26 +247,49 @@ if [[ "$VERTICAL" == true ]]; then
   fi
 
   if [[ "$ALL" == true ]]; then
-    if ! RESULT=$(tray_broadcast GET_WIDGETS); then
-      echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer GET_WIDGETS; --all requires a newer .emu, .exp, or .dev renderer" >&2
+    RESULT=$(tray_broadcast GET_WIDGETS)
+    case $? in
+      0) ;;
+      1)
+        echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer GET_WIDGETS; --all requires a newer .emu, .exp, or .dev renderer" >&2
+        exit 1
+        ;;
+      *) exit 1 ;;
+    esac
+    if ! WIDGET_IDS=$(tray_widget_ids "$RESULT"); then
+      echo "$(basename "$0"): unexpected GET_WIDGETS answer: $RESULT" >&2
       exit 1
     fi
-    if [[ "$(jq -r '.status // empty' <<<"$RESULT")" != "OK" ]]; then
-      echo "$(basename "$0"): GET_WIDGETS failed: $RESULT" >&2
-      exit 1
-    fi
-    WIDGET_IDS=$(jq -r '.widgets[]?.widgetId' <<<"$RESULT")
     if [[ -z "$WIDGET_IDS" ]]; then
       echo "$(basename "$0"): tray is already empty" >&2
       exit 0
     fi
+
+    # Keep going after a failed removal; the final listing decides the outcome.
+    FAILED=0
     for widget_id in $WIDGET_IDS; do
-      remove_widget_id "$widget_id" || exit 1
+      remove_widget_id "$widget_id" || FAILED=$((FAILED + 1))
     done
-    if ! RESULT=$(tray_broadcast GET_WIDGETS) ||
-      [[ -n "$(jq -r '.widgets[]?.widgetId' <<<"$RESULT")" ]]; then
-      echo "$(basename "$0"): tray not empty after removing all widgets: ${RESULT:-no answer}" >&2
+
+    RESULT=$(tray_broadcast GET_WIDGETS)
+    case $? in
+      0) ;;
+      1)
+        echo "$(basename "$0"): cannot verify the tray is empty: GET_WIDGETS was not answered" >&2
+        exit 1
+        ;;
+      *) exit 1 ;;
+    esac
+    if ! REMAINING=$(tray_widget_ids "$RESULT"); then
+      echo "$(basename "$0"): cannot verify the tray is empty: unexpected GET_WIDGETS answer: $RESULT" >&2
       exit 1
+    fi
+    if [[ -n "$REMAINING" ]]; then
+      echo "$(basename "$0"): tray still contains widget IDs: $(printf '%s\n' "$REMAINING" | paste -sd ' ' -)" >&2
+      exit 1
+    fi
+    if ((FAILED > 0)); then
+      echo "$(basename "$0"): tray is now empty, although $FAILED removal(s) above reported an error" >&2
     fi
     exit 0
   fi
@@ -251,33 +307,43 @@ if [[ "$VERTICAL" == true ]]; then
     fi
   fi
 
-  if ! RESULT=$(tray_broadcast REMOVE_WIDGET --es component "$COMPONENT_NAME"); then
-    echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle REMOVE_WIDGET" >&2
-    exit 1
-  fi
+  RESULT=$(tray_broadcast REMOVE_WIDGET --es component "$(device_quote "$COMPONENT_NAME")")
+  case $? in
+    0) ;;
+    1)
+      echo "$(basename "$0"): timed out waiting for WidgetTrayReceiver to handle REMOVE_WIDGET" >&2
+      exit 1
+      ;;
+    *) exit 1 ;;
+  esac
 
-  if [[ "$(jq -r '.status // empty' <<<"$RESULT")" != "OK" ]]; then
-    MESSAGE=$(jq -r '.message // empty' <<<"$RESULT")
+  if [[ "$(jq -r '.status // empty' <<<"$RESULT" 2>/dev/null)" != "OK" ]]; then
+    MESSAGE=$(jq -r '.message // empty' <<<"$RESULT" 2>/dev/null)
     echo "$(basename "$0"): ${MESSAGE:-REMOVE_WIDGET failed: $RESULT}" >&2
     exit 1
   fi
 
   # Current renderers report removedCount; older ones only a removed flag.
-  REMOVED=$(jq -r 'if has("removedCount") then .removedCount elif .removed == true then "some" else 0 end' <<<"$RESULT")
-  RESOLVED=$(jq -r --arg c "$COMPONENT_NAME" '.component // $c' <<<"$RESULT")
+  REMOVED=$(jq -r 'if (.removedCount | type) == "number" then .removedCount
+    elif .removed == true then "some" else "unknown" end' <<<"$RESULT" 2>/dev/null)
+  RESOLVED=$(jq -r --arg c "$COMPONENT_NAME" '.component // $c' <<<"$RESULT" 2>/dev/null)
   case "$REMOVED" in
     0)
       echo "$(basename "$0"): no tray widget matches $COMPONENT_NAME (see 'adb-tiles --vertical')" >&2
       exit 1
       ;;
     1)
-      echo "Removed 1 widget: $RESOLVED" >&2
+      echo "Removed 1 widget: ${RESOLVED:-$COMPONENT_NAME}" >&2
       ;;
     some)
-      echo "Removed widgets: $RESOLVED" >&2
+      echo "Removed widgets: ${RESOLVED:-$COMPONENT_NAME}" >&2
+      ;;
+    '' | unknown | *[!0-9]*)
+      echo "$(basename "$0"): unexpected REMOVE_WIDGET answer: $RESULT" >&2
+      exit 1
       ;;
     *)
-      echo "Removed $REMOVED widgets: $RESOLVED" >&2
+      echo "Removed $REMOVED widgets: ${RESOLVED:-$COMPONENT_NAME}" >&2
       ;;
   esac
   exit 0
@@ -291,4 +357,4 @@ if ! adb shell pm list packages | tr -d '\r' | grep -q "^package:${PACKAGE_NAME}
   exit 1
 fi
 
-adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation remove-tile --ecn component "$COMPONENT_NAME"
+adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE --es operation remove-tile --ecn component "$(device_quote "$COMPONENT_NAME")"

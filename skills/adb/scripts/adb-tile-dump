@@ -127,8 +127,10 @@ require adb
 require jq
 trap '{ echo >&2; } 2>/dev/null; exit 130' INT TERM
 
-if ! adb get-state >/dev/null 2>&1; then
-  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+if ! DEVICE_ERROR=$(adb get-state 2>&1 >/dev/null); then
+  if [[ "$DEVICE_ERROR" == *"more than one"* ]]; then
+    echo "$(basename "$0"): more than one device connected; use --serial or set ANDROID_SERIAL" >&2
+  elif [[ -n "${ANDROID_SERIAL:-}" ]]; then
     echo "$(basename "$0"): device '$ANDROID_SERIAL' not available" >&2
   else
     echo "$(basename "$0"): no device connected" >&2
@@ -147,18 +149,29 @@ renderer_desc() {
   echo "${RENDERER_PACKAGE}${version:+ $version}"
 }
 
+# adb shell joins its arguments into one command line for the device shell, so
+# quote values that may contain shell metacharacters ('$' in nested classes).
+device_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 # Sends a WidgetTrayReceiver action and prints its JSON result. The receiver is
 # registered only while WidgetTrayActivity is alive, so an unanswered broadcast
 # (result=0, no data) opens the tray and retries. Returns 1 if the receiver
-# never answers, which is also how renderers without the action respond.
+# never answers, which is also how renderers without the action respond, and 2
+# (after reporting it) if am broadcast itself fails, e.g. the device went away.
 tray_broadcast() {
   local action="$1" output attempt started=false
   shift
   for ((attempt = 1; attempt <= ${ADB_TILE_TRAY_ATTEMPTS:-10}; attempt++)); do
-    output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" | tr -d '\r')
+    output=$(adb shell am broadcast -p "$RENDERER_PACKAGE" -a "${TRAY_ACTION_PREFIX}${action}" "$@" 2>&1 | tr -d '\r')
     if [[ "$output" =~ $TRAY_DATA_RE ]]; then
       printf '%s\n' "${BASH_REMATCH[1]}"
       return 0
+    fi
+    if [[ "$output" != *"Broadcast completed: result="* ]]; then
+      echo "$(basename "$0"): am broadcast $action failed: ${output:-no output from adb}" >&2
+      return 2
     fi
     if [[ "$started" == false ]]; then
       adb shell am start -W -n "$TRAY_ACTIVITY" >/dev/null 2>&1
@@ -170,6 +183,11 @@ tray_broadcast() {
   return 1
 }
 
+if [[ -n "$OUTPUT_FILE" && (-d "$OUTPUT_FILE" || "$OUTPUT_FILE" == */) ]]; then
+  echo "$(basename "$0"): '$OUTPUT_FILE' is a directory; pass a file name to --output" >&2
+  exit 1
+fi
+
 RESOLVE_OUT=$(adb shell cmd package resolve-activity --brief -n "$TRAY_ACTIVITY" 2>/dev/null | tr -d '\r')
 if [[ "$RESOLVE_OUT" != *"$TRAY_ACTIVITY"* ]]; then
   echo "$(basename "$0"): installed renderer ($(renderer_desc)) lacks WidgetTrayActivity; exporting requires the .emu, .exp, or .dev renderer flavor" >&2
@@ -179,15 +197,20 @@ fi
 if [[ "$WIDGET" =~ ^[0-9]+$ ]]; then
   SELECTOR=(--ei widget_id "$WIDGET")
 else
-  SELECTOR=(--es component "$WIDGET")
+  SELECTOR=(--es component "$(device_quote "$WIDGET")")
 fi
 
-if ! RESULT=$(tray_broadcast DUMP_RC_DOC "${SELECTOR[@]}"); then
-  echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer DUMP_RC_DOC; exporting requires a newer .emu, .exp, or .dev renderer" >&2
-  exit 1
-fi
+RESULT=$(tray_broadcast DUMP_RC_DOC "${SELECTOR[@]}")
+case $? in
+  0) ;;
+  1)
+    echo "$(basename "$0"): installed renderer ($(renderer_desc)) did not answer DUMP_RC_DOC; exporting requires a newer .emu, .exp, or .dev renderer" >&2
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
 
-STATUS=$(jq -r '.status // empty' <<<"$RESULT")
+STATUS=$(jq -r '.status // empty' <<<"$RESULT" 2>/dev/null)
 case "$STATUS" in
   OK) ;;
   MULTIPLE_WIDGETS)
@@ -196,7 +219,7 @@ case "$STATUS" in
     exit 1
     ;;
   *)
-    MESSAGE=$(jq -r '.message // empty' <<<"$RESULT")
+    MESSAGE=$(jq -r '.message // empty' <<<"$RESULT" 2>/dev/null)
     echo "$(basename "$0"): ${MESSAGE:-DUMP_RC_DOC failed: $RESULT}" >&2
     if [[ "$MESSAGE" == *"not a Remote Compose tile"* ]]; then
       echo "$(basename "$0"): the provider may not have delivered content yet; retry once the widget has rendered" >&2
@@ -212,8 +235,18 @@ if [[ -z "$DEVICE_FILE" || ! "$EXPECTED_SIZE" =~ ^[0-9]+$ ]]; then
   echo "$(basename "$0"): DUMP_RC_DOC result lacks file or doc_size_bytes: $RESULT" >&2
   exit 1
 fi
+# A failed pull can also produce zero bytes, so an empty document cannot be
+# verified.
+if [[ "$EXPECTED_SIZE" == 0 ]]; then
+  echo "$(basename "$0"): DUMP_RC_DOC reported an empty document (doc_size_bytes 0) for widget ${WIDGET_ID:-$WIDGET}" >&2
+  exit 1
+fi
 
 OUTPUT_FILE="${OUTPUT_FILE:-widget-${WIDGET_ID:-$WIDGET}.rc}"
+if [[ -d "$OUTPUT_FILE" ]]; then
+  echo "$(basename "$0"): '$OUTPUT_FILE' is a directory; pass a file name to --output" >&2
+  exit 1
+fi
 OUTPUT_DIR=$(dirname "$OUTPUT_FILE")
 if ! mkdir -p "$OUTPUT_DIR"; then
   echo "$(basename "$0"): cannot create directory '$OUTPUT_DIR'" >&2
@@ -232,16 +265,16 @@ file_size() {
 
 # The renderer is a privileged app, so run-as (the result's pull_command) is
 # usually denied; read the file as root instead. adb exec-out does not report
-# the remote exit status, so every attempt is judged by the byte count.
+# the remote exit status, so every attempt is judged by what arrived.
 if [[ "$(adb shell id -u 2>/dev/null | tr -d '\r')" == "0" ]]; then
   PULL_METHOD="adb root"
-  adb exec-out cat "$DEVICE_FILE" >"$TMP_FILE"
+  adb exec-out cat "$(device_quote "$DEVICE_FILE")" >"$TMP_FILE"
 elif [[ "$(adb shell su 0 id -u 2>/dev/null | tr -d '\r')" == "0" ]]; then
   PULL_METHOD="su"
-  adb exec-out su 0 cat "$DEVICE_FILE" >"$TMP_FILE"
+  adb exec-out su 0 cat "$(device_quote "$DEVICE_FILE")" >"$TMP_FILE"
 else
   PULL_METHOD="run-as"
-  adb exec-out run-as "$RENDERER_PACKAGE" cat "cache/${DEVICE_FILE##*/}" >"$TMP_FILE"
+  adb exec-out run-as "$RENDERER_PACKAGE" cat "$(device_quote "cache/${DEVICE_FILE##*/}")" >"$TMP_FILE"
 fi
 
 ACTUAL_SIZE=$(file_size "$TMP_FILE")
@@ -253,6 +286,12 @@ if [[ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]]; then
   fi
   exit 1
 fi
+# Error text from the device lands in the file too; reject it even if its
+# length happens to match.
+if head -c 64 "$TMP_FILE" | LC_ALL=C grep -aqE '^(run-as|cat|su|/system/bin/sh): '; then
+  echo "$(basename "$0"): reading $DEVICE_FILE via $PULL_METHOD returned an error: $(head -n 1 "$TMP_FILE")" >&2
+  exit 1
+fi
 
 chmod "$(printf '%o' $((0666 & ~0$(umask))))" "$TMP_FILE" 2>/dev/null
 if ! mv -f "$TMP_FILE" "$OUTPUT_FILE"; then
@@ -260,5 +299,5 @@ if ! mv -f "$TMP_FILE" "$OUTPUT_FILE"; then
   exit 1
 fi
 
-echo "Saved $ACTUAL_SIZE bytes to $OUTPUT_FILE (widget ID $WIDGET_ID)" >&2
+echo "Saved $ACTUAL_SIZE bytes to $OUTPUT_FILE (widget ID ${WIDGET_ID:-unknown})" >&2
 jq 'del(.status, .action)' <<<"$RESULT"
