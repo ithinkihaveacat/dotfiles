@@ -255,9 +255,14 @@ fi
 # synchronous inflation exceptions ("Failed to render and attach the tile")
 # thrown right after "Rendering tile" are caught reliably.
 #
-# Robustness: If Signal 1 is confirmed, we bound the additional wait for
-# Signal 2 to a short grace period (~3s) before proceeding to the post-render
-# check, preventing a full 15s timeout if a rendering log line was suppressed.
+# SysUI: if Signal 1 is confirmed, we bound the additional wait for Signal 2 to
+# a short grace period (~3s) before proceeding to the post-render check.
+#
+# WidgetTrayActivity: only "Rendering tile" confirms visibility. The tray
+# appends a new widget without scrolling to it, and the renderer attaches and
+# renders only widgets on screen. A widget added below the fold logs "Received
+# tile content" but is not rendered until it is scrolled into view, so render
+# errors cannot be checked; the timeout message says which stage was reached.
 # -----------------------------------------------------------------------------
 
 LOG_FILE=""
@@ -314,6 +319,29 @@ check_render_failures() {
   fi
 }
 
+# Explains a visibility timeout by the last stage the logs reached, so a
+# widget waiting off-screen is not mistaken for one still loading. The add
+# itself succeeded; what is unknown is whether the document renders.
+report_unconfirmed() {
+  local timeout="$1" prog
+  prog=$(basename "$0")
+  if [ "$VERTICAL" = true ] &&
+    grep -Eq "Attaching Tile to a container.*$PACKAGE_NAME" "$LOG_FILE"; then
+    echo "$prog: added and attached to the tray, but not rendered within $timeout s; render errors were not checked" >&2
+  elif [ "$VERTICAL" = true ] &&
+    grep -Eq "Received tile content.*$PACKAGE_NAME" "$LOG_FILE"; then
+    echo "$prog: added, and the renderer received its content, but did not render it within $timeout s, probably because it is off-screen in the tray (scroll to it to render it); render errors were not checked" >&2
+  else
+    echo "$prog: added, but the tile did not become visible within $timeout s; it may still be loading, or its log lines were missed (retry with --no-wait to skip this check)" >&2
+  fi
+  if grep -qF "$PACKAGE_NAME" "$LOG_FILE"; then
+    echo "$prog: last log lines mentioning $PACKAGE_NAME:" >&2
+    grep -F "$PACKAGE_NAME" "$LOG_FILE" | tail -n 5 >&2
+  else
+    echo "$prog: no log lines mentioning $PACKAGE_NAME were seen" >&2
+  fi
+}
+
 wait_for_tile_visibility() {
   echo "Waiting for tile visibility..."
   local start_time
@@ -339,35 +367,33 @@ wait_for_tile_visibility() {
       exit 1
     fi
 
-    # Check for Container Visibility (Success Signal 1)
-    if [ "$visible" = false ]; then
-      if [ "$VERTICAL" = true ]; then
-        if grep -Eq "(Attaching Tile to a container|Rendering tile).*$PACKAGE_NAME" "$LOG_FILE"; then
-          visible=true
-          visible_time=$current_time
-        fi
-      elif grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile|Index=\[|show-tile" "$LOG_FILE"; then
+    if [ "$VERTICAL" = true ]; then
+      # In TileRendererImpl.java, "Rendering tile" is logged only when both
+      # the container is attached and valid tile content has been received.
+      # Attaching alone proves nothing: content can arrive seconds later.
+      if grep -Eq "Rendering tile.*$PACKAGE_NAME" "$LOG_FILE"; then
+        visible=true
+        break
+      fi
+    else
+      # Check for Container Visibility (Success Signal 1)
+      if [ "$visible" = false ] &&
+        grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile|Index=\[|show-tile" "$LOG_FILE"; then
         visible=true
         visible_time=$current_time
       fi
-    fi
 
-    # Check for Content Rendering (Success Signal 2)
-    if [ "$visible" = true ]; then
-      if [ "$VERTICAL" = true ]; then
-        # In TileRendererImpl.java, "Rendering tile" is logged only when both
-        # the container is attached and valid tile content has been received.
-        if grep -Eq "Rendering tile.*$PACKAGE_NAME" "$LOG_FILE"; then
+      # Check for Content Rendering (Success Signal 2)
+      if [ "$visible" = true ]; then
+        if grep -Eq "(Received tile content|Rendering tile|provideWidgetData|ProtoTiles).*$PACKAGE_NAME" "$LOG_FILE"; then
           break
         fi
-      elif grep -Eq "(Received tile content|Rendering tile|provideWidgetData|ProtoTiles).*$PACKAGE_NAME" "$LOG_FILE"; then
-        break
-      fi
 
-      # Robustness: If the container is attached/visible, don't wait more than
-      # 3 seconds for the specific rendering log.
-      if [ $((current_time - visible_time)) -ge 3 ]; then
-        break
+        # Robustness: If the container is visible, don't wait more than
+        # 3 seconds for the specific rendering log.
+        if [ $((current_time - visible_time)) -ge 3 ]; then
+          break
+        fi
       fi
     fi
 
@@ -378,13 +404,7 @@ wait_for_tile_visibility() {
     # is what --wait promises; report that rather than exit 0.
     if [ "$elapsed" -ge "$timeout" ]; then
       if [ "$visible" = false ]; then
-        echo "$(basename "$0"): added, but the tile did not become visible within $timeout s; it may still be loading, or its log lines were missed (retry with --no-wait to skip this check)" >&2
-        if grep -qF "$PACKAGE_NAME" "$LOG_FILE"; then
-          echo "$(basename "$0"): last log lines mentioning $PACKAGE_NAME:" >&2
-          grep -F "$PACKAGE_NAME" "$LOG_FILE" | tail -n 5 >&2
-        else
-          echo "$(basename "$0"): no log lines mentioning $PACKAGE_NAME were seen" >&2
-        fi
+        report_unconfirmed "$timeout"
         exit 1
       fi
       break
