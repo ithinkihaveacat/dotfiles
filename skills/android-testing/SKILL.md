@@ -4,9 +4,9 @@ description: >-
   Workflows and ADB commands for testing Android and Wear OS applications. Covers
   system state simulation (Doze mode, battery levels, network failover, Bluetooth
   proxy), location and sensor spoofing, health permissions, UI automation guidelines,
-  and Wear OS surfaces (tiles, complications, watch faces). Use when testing Android
-  or Wear OS apps, simulating edge cases, debugging device connectivity, or
-  automating UI test procedures.
+  and Wear OS surfaces (watch faces and complications; for tiles and widgets, see
+  wear-widget). Use when testing Android or Wear OS apps, simulating edge cases,
+  debugging device connectivity, or automating UI test procedures.
 compatibility: Requires adb and a connected Android phone or Wear OS device/emulator.
 ---
 
@@ -17,6 +17,8 @@ test Android applications reliably across mobile phones and Wear OS devices. It
 focuses on triggering system state changes, validating real-time
 synchronization, implementing robust UI automation, and simulating complex edge
 cases (Doze mode, data layer disconnection, and Fused Location spoofing limits).
+
+For Wear OS Tiles and Glance/AppWidget widgets, see the `wear-widget` skill.
 
 ## Procedural Workflows & Testing Recipes
 
@@ -64,7 +66,10 @@ adb shell 'cmd wifi connect-network "<SSID>" wpa2 <PASSWORD>'
 ### 3. Standalone Watch Setup & Tutorial Bypass
 
 Bootstrap fresh watches or emulators into a usable standalone state for APK
-sideloading and testing without pairing a companion phone (requires `adb root`):
+sideloading and testing without pairing a companion phone (requires `adb root`;
+see
+**[Watch Faces & Complications](references/watch-faces-and-complications.md#standalone-watch-bootstrapping--setup-bypass)**
+for background):
 
 ```bash
 # 1. Mark device provisioned and user setup complete (AOSP platform flags)
@@ -83,24 +88,6 @@ adb shell wm dismiss-keyguard
 adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE
 adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
 adb shell input keyevent KEYCODE_HOME
-```
-
-### 4. Wear OS Surface Interaction
-
-Trigger debug broadcasts to update or inspect Wear OS Tiles and Complications:
-
-```bash
-# Add a Tile component to the carousel
-adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE \
-  --es operation add-tile --ecn component "<PACKAGE>/<TILE_SERVICE>" --ei type 0
-
-# Switch active Tile by index
-adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI \
-  --es operation show-tile --ei index 0
-
-# Trigger a Complication update
-adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI \
-  --es operation complication_update --ei complication_id <ID>
 ```
 
 ## How to Approach Testing
@@ -126,8 +113,9 @@ adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI \
 - **[Permissions & OS Behavior](references/permissions-and-os-behavior.md)** —
   Foreground Service types, API 30–36 changes, and Wear OS granular health
   permissions.
-- **[Wear Surfaces](references/wear-surfaces.md)** — Interacting with Tiles,
-  Watch Faces, and Complications via `DEBUG_SURFACE`/`DEBUG_SYSUI`; includes
-  headless setup and GMS capability sync workarounds.
+- **[Watch Faces & Complications](references/watch-faces-and-complications.md)**
+  — Watch face and complication updates via `DEBUG_SYSUI`, ambient mode
+  simulation, and standalone watch bootstrapping. (For tiles and widgets, see
+  `wear-widget`.)
 - **[Testability Patterns](references/testability-patterns.md)** — App-side
   debug receivers, data seeding, OOBE race conditions, and standby buckets.

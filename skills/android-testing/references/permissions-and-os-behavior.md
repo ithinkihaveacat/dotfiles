@@ -93,3 +93,20 @@ If building a marketplace app that pushes watch faces directly to the watch:
 - **Testing Goal**: Deny this prompt *once*. The application is permanently
   barred from requesting it again via the standard dialog. Ensure your app
   handles this by deep-linking the user into system settings.
+
+______________________________________________________________________
+
+## Package De-isolation & Stopped State (FLAG_STOPPED)
+
+### Emulator & Device Stopped State (API 36 and Lower)
+
+On Android API 36 and lower, packages installed via `adb install` remain in the
+`FLAG_STOPPED` state until explicitly launched by the user or an explicit
+intent. While in `FLAG_STOPPED`, background broadcasts, tile/widget bindings,
+and Binder IPC calls to the package are blocked by the OS. Clear this stopped
+state by explicitly launching a main activity before evaluating services or
+widgets:
+
+```bash
+adb shell monkey -p <package_name> -c android.intent.category.LAUNCHER 1
+```

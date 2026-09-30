@@ -114,6 +114,13 @@ Apps must respect battery constraints and handle Doze mode cleanly.
   adb shell dumpsys battery reset
   ```
 
+### Samsung Galaxy Watch (One UI Watch) Doze Timeout
+
+Samsung Galaxy Watches transition to ambient/dim mode aggressively (typically
+within 5–10 seconds of user inactivity). When performing manual UI verifications
+or capturing visual assets, capture validation media immediately after
+rendering, or wake the device beforehand using `input keyevent KEYCODE_WAKEUP`.
+
 ______________________________________________________________________
 
 ## UI, Accessibility & Display

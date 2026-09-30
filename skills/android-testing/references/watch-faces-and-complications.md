@@ -1,48 +1,8 @@
-# Wear OS Surfaces
+# Watch Faces & Complications
 
-Testing Wear OS applications requires validating interactions with Wear-specific
-UI surfaces that live outside the main application container, such as **Tiles**,
-**Complications**, and **Watch Faces**.
-
-______________________________________________________________________
-
-## Active Tiles Carousel
-
-Tiles provide quick, swipeable access to information and actions. Testing Tiles
-requires simulating how the system adds, removes, and brings them to the
-foreground.
-
-### General Tile Capabilities
-
-- **Deploying a Tile**: Test how your Tile renders and initializes when added to
-  the active carousel.
-- **Removing a Tile**: Validate that the app cleans up Tile-specific resources
-  when removed.
-- **Tapping/Launching from a Tile**: Verify that tapping a Tile action
-  successfully launches the correct activity or Foreground Service.
-
-### Automation Tooling (Leverage Active Skills)
-
-To automate Tile testing, do not write custom scripts or send raw SysUI intents.
-
-- **Guideline**: Search your active skills for pre-approved automation scripts
-  capable of:
-  - Deploying or refreshing a specific Tile on the device.
-  - Removing a Tile from the active carousel.
-  - Bringing a specific Tile to the foreground.
-  - Listing all currently active Tiles on the device.
-
-### Widgets in the Standalone Renderer Tray
-
-Emulator (`.emu`), experimental (`.exp`), and developer (`.dev`) builds of the
-`com.google.android.wearable.protolayout.renderer` package include
-`WidgetTrayActivity`, a vertical widget carousel. You can drive it entirely over
-ADB broadcasts, so there is no need for UI automation: add, update, and remove
-widgets, list them (`GET_WIDGETS`), upload a raw `.rc` document, and export a
-rendered widget as `.rc` with its rendering context (`DUMP_RC_DOC`). Use the
-`wear-widget` skill (Method 3) for the commands, and the `adb` skill helpers
-(`adb-tile-add`, `adb-tile-remove`, and `adb-tiles` with `--vertical`, plus
-`adb-tile-dump`) where available.
+Testing Wear OS applications includes validating interactions with watch faces
+and modular complication data fields. (For Wear OS Tiles and Glance/AppWidget
+widgets, see the `wear-widget` skill.)
 
 ______________________________________________________________________
 
@@ -152,16 +112,3 @@ adb shell input keyevent KEYCODE_HOME
 *(If a "Skip" dialog remains on screen, send
 `adb shell input keyevent KEYCODE_BACK` or tap the screen coordinate to dismiss
 it).*
-
-### GMS Core Capability Sync Workaround (for Tiles/Widgets)
-
-If the System UI fails to sync capabilities with GMS Core, it may assume
-widgets/tiles are unsupported and render a default watch face instead of binding
-your service. Force a sync by restarting GMS Core, WearServices, and System UI:
-
-```bash
-adb shell am force-stop com.google.android.gms
-adb shell am force-stop com.google.android.wearable.app
-adb shell am force-stop com.google.android.wearable.sysui
-# Allow 15-20 seconds for the System UI to reboot and re-query capabilities.
-```

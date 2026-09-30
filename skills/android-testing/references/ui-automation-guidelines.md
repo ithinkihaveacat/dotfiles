@@ -59,6 +59,12 @@ State validation is designed to be observable, chronological, and verifiable.
     semantic elements (IDs, text labels, content descriptions) to ensure tests
     do not flake across different screen densities, aspect ratios, or form
     factors.
+- **UI-Driven Recording over Background Broadcasts**: When capturing video
+  recordings or verifying user flows for audits and deliverables, record the
+  visual UI journey on-screen using `adb-screenrecord` rather than relying
+  solely on silent background broadcast commands. Enable visual touch feedback
+  (`adb shell settings put system show_touches 1` or via `adb-demo`) so viewers
+  can trace user interactions directly.
 
 ______________________________________________________________________
 
@@ -99,28 +105,34 @@ dismissed:
 
 When capturing screenshots for a visual timeline, background notifications,
 changing clocks, or low battery warnings can cause visual clutter and make
-screenshot comparisons fail. Enable **SystemUI Demo Mode** to display a clean,
-static status bar:
+screenshot comparisons fail. Use the `adb-demo` helper from the `adb` skill to
+toggle a clean, static status bar (fixed clock at 10:08, 100% battery, hidden
+notifications, show-touches enabled):
 
-- **Enable Demo Mode**:
-  ```bash
-  adb shell settings put global sysui_demo_allowed 1
-  ```
-- **Configure Clean Status Bar**:
-  ```bash
-  # Enter demo mode
-  adb shell am broadcast -a com.android.systemui.demo --es command enter
-  # Set clock to a fixed time (e.g. 10:08)
-  adb shell am broadcast -a com.android.systemui.demo --es command clock --es hhmm 1008
-  # Force battery to 100% (unplugged)
-  adb shell am broadcast -a com.android.systemui.demo --es command battery --es level 100 --es plugged false
-  # Hide all notification icons
-  adb shell am broadcast -a com.android.systemui.demo --es command notifications --es visible false
-  ```
-- **Exit Demo Mode (Restore Normal UI)**:
-  ```bash
-  adb shell am broadcast -a com.android.systemui.demo --es command exit
-  ```
+```bash
+# Enter demo mode with a clean status bar
+adb-demo on
+
+# Exit demo mode and restore default status bar
+adb-demo off
+```
+
+______________________________________________________________________
+
+## Companion Phone App Installation & Onboarding
+
+When testing a Wear OS companion feature requiring active backend state, install
+and configure the corresponding mobile app in a clean, logged-in state:
+
+1. **Install Mobile App**: Open the Play Store page directly on the phone using
+   `adb shell am start -a android.intent.action.VIEW -d "market://details?id=<package_name>"`
+   or navigate the Play Store using UI automation tools.
+1. **Verify Wear OS Companion App**: Check if installed on the watch via
+   `adb -s <watch_serial> shell pm list packages`. If missing, sideload the Wear
+   OS APK directly.
+1. **Onboard & Log In**: Launch the app and automate onboarding using UI
+   automation tools (like `popper`). Prompt the user for manual help if
+   2FA/CAPTCHAs block automation.
 
 ______________________________________________________________________
 
