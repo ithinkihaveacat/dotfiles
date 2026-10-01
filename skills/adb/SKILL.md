@@ -35,9 +35,9 @@ the underlying `dumpsys` or `input` sequence and adapt it.
 ## Quick Start
 
 When multiple devices are connected, pass `-s SERIAL` or `--serial SERIAL`
-before other arguments to any skill script except `adb-screenrecord`. The flag
-overrides `ANDROID_SERIAL`; the environment variable remains available for
-persistent or inherited device selection.
+before other arguments to any skill script. The flag overrides `ANDROID_SERIAL`;
+the environment variable remains available for persistent or inherited device
+selection.
 
 ### Highest-Value Commands
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests: tests/test-adb-screenrecord
+# Tests: skills/adb/tests/test-adb-screenrecord
 set -euo pipefail
 
 usage() {
@@ -19,7 +19,7 @@ Arguments:
                           (defaults to 'adb-screenrecord-YYYYMMDDHHMMSS.mp4')
 
 Options:
-  -s, --serial SERIAL     Serial number of device to connect to.
+  -s, --serial SERIAL     Target device serial; must precede FILE.
   -o, --output FILE       The path to save the screen recording to.
   -t, --duration SECONDS  Max recording duration in seconds.
   --time-limit SECONDS    Alias for --duration.
@@ -29,8 +29,7 @@ Options:
 
 Environment:
   ANDROID_SERIAL  Serial number of device to connect to (see 'adb devices -l').
-                  To target a specific device, use:
-                    env ANDROID_SERIAL=<serial> $(basename "$0")
+                  The --serial option takes precedence when both are set.
 
 Examples:
   # Save screen recording to a timestamped file in the current directory
@@ -41,6 +40,9 @@ Examples:
 
   # Force raw frame capture on any device
   $(basename "$0") --raw --duration 10 /tmp/my-screen-recording.mp4
+
+  # Record from one of several connected devices
+  $(basename "$0") -s emulator-5554 /tmp/emulator.mp4
 EOF
   exit 0
 }
@@ -53,6 +55,7 @@ OUTPUT_FILE=""
 FORCE_RAW=""
 DURATION=""
 SERIAL_ARG=""
+ARGUMENT_SEEN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,8 +63,12 @@ while [[ $# -gt 0 ]]; do
       usage
       ;;
     -s | --serial)
+      if $ARGUMENT_SEEN; then
+        echo "$(basename "$0"): $1 must precede FILE" >&2
+        exit 1
+      fi
       if [ -z "${2:-}" ]; then
-        echo "$(basename "$0"): --serial option requires an argument" >&2
+        echo "$(basename "$0"): $1 option requires an argument" >&2
         exit 1
       fi
       SERIAL_ARG="$2"
@@ -73,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       OUTPUT_FILE="$2"
+      ARGUMENT_SEEN=true
       shift 2
       ;;
     -t | --duration | --time-limit)
@@ -98,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     *)
       if [ -z "$OUTPUT_FILE" ]; then
         OUTPUT_FILE="$1"
+        ARGUMENT_SEEN=true
       else
         echo "$(basename "$0"): unrecognized argument '$1'" >&2
         exit 1
@@ -128,7 +137,7 @@ require adb
 
 # Check if device is available and targetable
 if ! "${ADB_CMD[@]}" shell true >/dev/null 2>&1; then
-  echo "$(basename "$0"): error: no device connected, unauthorized, or multiple devices connected without ANDROID_SERIAL." >&2
+  echo "$(basename "$0"): error: no device connected, unauthorized, or multiple devices connected without --serial or ANDROID_SERIAL." >&2
   exit 1
 fi
 
@@ -226,17 +235,17 @@ cleanup() {
 
   # 3. Terminate on-device capture/server processes
   if [ "$USE_RAW" -eq 1 ]; then
-    "${adb_timeout[@]}" "${ADB_CMD[@]}" shell pkill -2 -f screenrecord >/dev/null 2>&1 ||
-      "${adb_timeout[@]}" "${ADB_CMD[@]}" shell killall -2 screenrecord >/dev/null 2>&1 || true
+    ${adb_timeout[@]+"${adb_timeout[@]}"} "${ADB_CMD[@]}" shell pkill -2 -f screenrecord >/dev/null 2>&1 ||
+      ${adb_timeout[@]+"${adb_timeout[@]}"} "${ADB_CMD[@]}" shell killall -2 screenrecord >/dev/null 2>&1 || true
   else
-    "${adb_timeout[@]}" "${ADB_CMD[@]}" shell pkill -f scrcpy >/dev/null 2>&1 || true
+    ${adb_timeout[@]+"${adb_timeout[@]}"} "${ADB_CMD[@]}" shell pkill -f scrcpy >/dev/null 2>&1 || true
   fi
 
   if [ -n "${FIFO_DIR:-}" ] && [ -d "$FIFO_DIR" ]; then
     rm -rf "$FIFO_DIR"
   fi
 
-  "${adb_timeout[@]}" "${ADB_CMD[@]}" exec-out settings put system show_touches "$TOUCH_ORIGINAL" >/dev/null 2>&1 || true
+  ${adb_timeout[@]+"${adb_timeout[@]}"} "${ADB_CMD[@]}" exec-out settings put system show_touches "$TOUCH_ORIGINAL" >/dev/null 2>&1 || true
   ensure_faststart
 }
 
@@ -290,7 +299,7 @@ if [ "$USE_RAW" -eq 1 ]; then
   fi
   ADB_PID=$!
 
-  ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -i "$FIFO" -an "${FFMPEG_VF[@]}" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p -movflags +faststart -y "$OUTPUT_FILE" &
+  ffmpeg -f rawvideo -vcodec rawvideo -s "$SIZE" -pix_fmt rgb24 -use_wallclock_as_timestamps 1 -i "$FIFO" -an ${FFMPEG_VF[@]+"${FFMPEG_VF[@]}"} -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p -movflags +faststart -y "$OUTPUT_FILE" &
   RECORD_PID=$!
   wait $RECORD_PID 2>/dev/null || true
 elif command -v scrcpy >/dev/null 2>&1; then

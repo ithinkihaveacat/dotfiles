@@ -99,8 +99,91 @@ def validate_mp4(file_path: str) -> tuple[bool, str]:
     return True, f"Valid MP4 (duration: {duration}s)"
 
 
+MOCK_ADB = r"""#!/bin/bash
+echo "$*" >>"$MOCK_ADB_LOG"
+[[ "${1:-}" == "-s" ]] && shift 2
+case "$*" in
+  "exec-out getprop ro.build.characteristics") echo "${MOCK_CHARS:-phone}" ;;
+  "exec-out wm size") echo "Physical size: 454x454" ;;
+  "exec-out settings get system show_touches") echo 0 ;;
+esac
+exit 0
+"""
+
+MOCK_SCRCPY = r"""#!/bin/bash
+echo "$*" >>"$MOCK_SCRCPY_LOG"
+while [[ $# -gt 0 ]]; do
+  [[ "$1" == "-r" ]] && echo data >"$2"
+  shift
+done
+"""
+
+MOCK_FFMPEG = r"""#!/bin/bash
+echo "$*" >>"$MOCK_FFMPEG_LOG"
+for ((i = 1; i <= $#; i++)); do
+  if [[ "${!i}" == "-i" ]]; then
+    j=$((i + 1))
+    [[ -p "${!j}" ]] && cat "${!j}" >/dev/null
+  fi
+done
+echo data >"${!#}"
+"""
+
+
+def run_mocked(
+    args: list[str], env_extra: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess, dict[str, list[str]]]:
+    """Run adb-screenrecord against mock adb, scrcpy, and ffmpeg binaries.
+
+    Returns the completed process and the argument lines each mock logged.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        mock_bin = Path(temp_dir) / "bin"
+        mock_bin.mkdir()
+        for name, body in (
+            ("adb", MOCK_ADB),
+            ("scrcpy", MOCK_SCRCPY),
+            ("ffmpeg", MOCK_FFMPEG),
+        ):
+            path = mock_bin / name
+            path.write_text(body)
+            path.chmod(0o755)
+        logs = {
+            name: Path(temp_dir) / f"{name}.log" for name in ("adb", "scrcpy", "ffmpeg")
+        }
+        env = {
+            "PATH": f"{mock_bin}:/usr/bin:/bin",
+            "HOME": temp_dir,
+            "TMPDIR": temp_dir,
+            "MOCK_ADB_LOG": str(logs["adb"]),
+            "MOCK_SCRCPY_LOG": str(logs["scrcpy"]),
+            "MOCK_FFMPEG_LOG": str(logs["ffmpeg"]),
+        }
+        env.update(env_extra or {})
+        res = subprocess.run(
+            [SCREENRECORD_BIN, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=temp_dir,
+            env=env,
+            timeout=30,
+        )
+        lines = {
+            name: log.read_text().splitlines() if log.exists() else []
+            for name, log in logs.items()
+        }
+        return res, lines
+
+
+def all_adb_targeted(adb_lines: list[str], serial: str) -> bool:
+    return bool(adb_lines) and all(
+        line.startswith(f"-s {serial} ") for line in adb_lines
+    )
+
+
 def main() -> int:
-    tap = TapRunner(plan_count=6)
+    tap = TapRunner(plan_count=11)
     device_available = is_device_connected()
 
     # Test 1: Help and usage
@@ -278,7 +361,81 @@ def main() -> int:
                     f"exit: {ret}, {msg}\nstderr: {stderr}",
                 )
 
-    return tap.finish(total=6)
+    # Test 7: --serial targets the scrcpy path and overrides ANDROID_SERIAL
+    res, logs = run_mocked(
+        ["-s", "SERIAL-A", "out.mp4"], {"ANDROID_SERIAL": "SERIAL-B"}
+    )
+    if (
+        res.returncode == 0
+        and logs["scrcpy"]
+        and "--serial=SERIAL-A" in logs["scrcpy"][0].split()
+        and all_adb_targeted(logs["adb"], "SERIAL-A")
+    ):
+        tap.ok("--serial is passed to scrcpy and every adb call")
+    else:
+        tap.not_ok(
+            "--serial not applied on scrcpy path",
+            f"exit: {res.returncode}\nlogs: {logs}\nstderr: {res.stderr}",
+        )
+
+    # Test 8: --serial targets the raw ffmpeg path
+    res, logs = run_mocked(["--serial", "SERIAL-A", "--raw", "out.mp4"])
+    if (
+        res.returncode == 0
+        and not logs["scrcpy"]
+        and logs["ffmpeg"]
+        and any("exec-out screenrecord" in line for line in logs["adb"])
+        and all_adb_targeted(logs["adb"], "SERIAL-A")
+    ):
+        tap.ok("--serial is passed to every adb call on raw path")
+    else:
+        tap.not_ok(
+            "--serial not applied on raw path",
+            f"exit: {res.returncode}\nlogs: {logs}\nstderr: {res.stderr}",
+        )
+
+    # Test 9: without --serial or ANDROID_SERIAL, no device is pinned
+    res, logs = run_mocked(["out.mp4"])
+    if (
+        res.returncode == 0
+        and logs["scrcpy"]
+        and "--serial" not in logs["scrcpy"][0]
+        and logs["adb"]
+        and not any(line.startswith("-s ") for line in logs["adb"])
+    ):
+        tap.ok("no serial is pinned by default")
+    else:
+        tap.not_ok(
+            "unexpected serial pinning by default",
+            f"exit: {res.returncode}\nlogs: {logs}\nstderr: {res.stderr}",
+        )
+
+    # Test 10: --serial must precede FILE (positional or --output form)
+    res_pos, logs_pos = run_mocked(["out.mp4", "-s", "SERIAL-A"])
+    res_out, logs_out = run_mocked(["-o", "out.mp4", "--serial", "SERIAL-A"])
+    if (
+        res_pos.returncode == 1
+        and res_out.returncode == 1
+        and "must precede FILE" in res_pos.stderr
+        and "must precede FILE" in res_out.stderr
+        and not logs_pos["adb"]
+        and not logs_out["adb"]
+    ):
+        tap.ok("rejects --serial after FILE")
+    else:
+        tap.not_ok(
+            "accepted --serial after FILE",
+            f"stderr: {res_pos.stderr}\n{res_out.stderr}",
+        )
+
+    # Test 11: --serial requires an argument
+    res, logs = run_mocked(["-s"])
+    if res.returncode == 1 and "requires an argument" in res.stderr:
+        tap.ok("rejects --serial without an argument")
+    else:
+        tap.not_ok("accepted --serial without an argument", res.stderr)
+
+    return tap.finish(total=11)
 
 
 if __name__ == "__main__":
