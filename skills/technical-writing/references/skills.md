@@ -19,9 +19,9 @@ in specific domains or codebases.
 ## Core Principles & Decoupling Rule
 
 To ensure skills remain modular, portable, and maintainable across diverse
-environments (local Git repositories, CitC workspaces, cloud runtimes, Skill Hub
-marketplace), **design every skill as an independent, self-contained unit of
-capability**.
+environments, **design every reusable skill so a user can pick and install it
+independently without needing to track down other skills from your personal
+collection**.
 
 ### Skill Independence & Degrees of Freedom
 
@@ -30,16 +30,24 @@ capability**.
   destructive operations (e.g. database migrations, security boundaries). For
   heuristics, reviews, and workflows, provide clear guidelines and rely on the
   model's context-aware reasoning.
-- **No Hard Skill Dependencies:** Avoid mandating specific external skills as
-  strict prerequisites or instructing agents to "activate the X skill".
-- **No Relative Skill Paths:** Do not link across skill directories using
-  relative Markdown paths (e.g., `../other-skill/SKILL.md` or
+- **No Sibling Skill Dependencies:** Do not mandate or cross-reference other
+  skills from your own personal repository, or assume their `scripts/` are
+  installed.
+  - **Shared Catalog Exception:** Public skills may reference widely available
+    public or third-party skills, and organization-internal skills may reference
+    shared, organization-wide skills (e.g., via canonical registry names or
+    shared monorepo paths) that any colleague in that environment can resolve.
+  - **Strictly Personal Skills:** Bespoke skills intended solely for the
+    author's own workstation (that others will never pick and install on their
+    own) are exempt from standalone portability rules.
+- **No Relative Skill Paths:** In reusable skills, do not link across skill
+  directories using relative Markdown paths (e.g., `../other-skill/SKILL.md` or
   `skills/other-skill/SKILL.md`). When skills are distributed individually or
   loaded in different catalog layouts, these links break.
 - **No Path Assumptions:** Never assume that another skill's `scripts/`
   directory is present in the current working directory, relative path, or
   `PATH` (e.g., calling `scripts/adb-tile-add` from inside a different skill).
-- **No Hardcoded Overlay Paths:** Never hardcode paths to specific repository
+- **No Hardcoded Overlay Paths:** Never hardcode paths to personal repository
   overlay structures (e.g., `~/.dotfiles/skills/...`, `~/.corp/skills/...`, or
   `~/.private/skills/...`). Always resolve skill resources dynamically relative
   to `SKILL.md` or the script's own location.
@@ -223,8 +231,8 @@ When a skill bundles executable utilities or helper tools in `scripts/`:
    ```
 
 1. **Synchronize via `command-index-format`:** Never edit content between
-   markers by hand. Run `bin/command-index-format` (from `coding-standards`) to
-   refresh blocks directly from script `usage()` text.
+   markers by hand. Run `bin/command-index-format` to refresh blocks directly
+   from script `usage()` text.
 
 1. **Link from `SKILL.md`:** In `SKILL.md`, link to
    `[Command Index](references/command-index.md)` both near the tooling overview
@@ -232,10 +240,11 @@ When a skill bundles executable utilities or helper tools in `scripts/`:
 
 ## Summary Checklist
 
-Before publishing or committing a skill, verify that:
+Before publishing or committing a reusable skill, verify that:
 
-- [ ] No explicit mentions of "activate skill X" or hard mandates for other
-  skills exist.
+- [ ] No hard mandates or cross-references to sibling skills in your personal
+  collection exist (referencing shared public or organization-wide skills is
+  acceptable).
 - [ ] No relative Markdown links point outside the skill's own folder tree
   (`../`).
 - [ ] No shell code blocks execute scripts belonging to another skill unless the
