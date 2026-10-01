@@ -1198,12 +1198,19 @@ if exists android || exists compose-preview || [ "$INSTALL_TIER" = "optional" ] 
         compose-preview update || echo "warning: compose-preview update failed" >&2
     fi
   fi
-  if ! exists compose-preview && { [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; }; then
+  if { ! exists android || ! exists compose-preview; } && { [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; }; then
     heading "android"
-    # MODIFY_PATH=0 and --no-modify-path work around upstream issue #108.
-    x env MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
-      bash <(curl -fsSL https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh) \
-      --cli-only --no-modify-path || echo "warning: compose-preview install failed" >&2
+    if ! exists android; then
+      x bash <(curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh) &&
+        x android skills list --long=false >/dev/null ||
+        echo "warning: android install failed" >&2
+    fi
+    if ! exists compose-preview; then
+      # MODIFY_PATH=0 and --no-modify-path work around upstream issue #108.
+      x env MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
+        bash <(curl -fsSL https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh) \
+        --cli-only --no-modify-path || echo "warning: compose-preview install failed" >&2
+    fi
   fi
 fi
 
