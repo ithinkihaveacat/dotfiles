@@ -1188,7 +1188,8 @@ if exists android || exists compose-preview || [ "$INSTALL_TIER" = "optional" ] 
     heading "android"
     if exists android; then
       x android update || echo "warning: android update failed" >&2
-      x android skills update --all || echo "warning: android skills update failed" >&2
+      # Populate/refresh ~/.android/cli/skills without writing to agent skill directories.
+      x android skills list --long=false >/dev/null || echo "warning: android skills update failed" >&2
     fi
     if exists compose-preview; then
       # MODIFY_PATH=0 suppresses silent PATH modification of shell configs
