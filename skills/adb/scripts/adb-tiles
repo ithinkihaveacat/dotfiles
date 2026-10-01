@@ -206,21 +206,56 @@ fi
 declare -A user_pkgs
 while read -r line; do
   pkg=${line#package:}
+  [[ -z "$pkg" ]] && continue
   user_pkgs["$pkg"]=1
 done < <(adb shell pm list packages -3 | tr -d '\r')
 
-# Fetch visible tiles in carousel
+# Fetch visible tiles and widgets in carousel (Visible Tiles and DB Visible Tiles)
 declare -A visible_tiles
 while read -r comp; do
   [[ -z "$comp" ]] && continue
   visible_tiles["$comp"]=1
-done < <(adb shell dumpsys wear_service | awk '/Visible Tiles/ { in_visible = 1; next } in_visible && /TileInstance/ { if (match($0, /componentName=ComponentInfo\{[^}]+\}/)) { print substr($0, RSTART + 28, RLENGTH - 29) }; next } in_visible && /^[ ]{0,4}[^ ]/ { in_visible = 0 }' | tr -d '\r')
-
-# Also fetch from DB Visible Tiles to include widgets
-while read -r comp; do
-  [[ -z "$comp" ]] && continue
-  visible_tiles["$comp"]=1
-done < <(adb shell dumpsys wear_service | awk '/DB Visible Tiles/ { in_db = 1; next } in_db && /id=/ { match($0, /packageName=[^ ]+/); pkg = substr($0, RSTART + 12, RLENGTH - 12); match($0, /className=[^ ]+/); cls = substr($0, RSTART + 10, RLENGTH - 10); print pkg "/" cls; next } in_db && /^[ ]{0,4}[^ ]/ { in_db = 0 }' | tr -d '\r')
+done < <(
+  adb shell dumpsys wear_service | tr -d '\r' | awk '
+    function normalize(c,    slash, pkg, cls) {
+      gsub(/^[ \t]+|[ \t]+$/, "", c)
+      slash = index(c, "/")
+      if (slash > 0 && substr(c, slash + 1, 1) == ".") {
+        pkg = substr(c, 1, slash - 1)
+        cls = substr(c, slash + 1)
+        c = pkg "/" pkg cls
+      }
+      return c
+    }
+    /DB Visible Tiles/ { in_db = 1; in_visible = 0; next }
+    /Visible Tiles/ { in_visible = 1; in_db = 0; next }
+    (in_visible || in_db) && /^[ ]{0,4}[^ ]/ { in_visible = 0; in_db = 0 }
+    in_visible && /TileInstance/ && /componentName=ComponentInfo\{/ {
+      s = $0
+      sub(/^.*componentName=ComponentInfo\{/, "", s)
+      sub(/\}.*$/, "", s)
+      print normalize(s)
+      next
+    }
+    in_db && /id=/ {
+      pkg = ""
+      cls = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^packageName=/) {
+          pkg = $i
+          sub(/^packageName=/, "", pkg)
+        } else if ($i ~ /^className=/) {
+          cls = $i
+          sub(/^className=/, "", cls)
+        }
+      }
+      if (pkg != "" && cls != "") {
+        print normalize(pkg "/" cls)
+      }
+      next
+    }
+  '
+)
 
 # Define constants
 TILE_PERM="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
@@ -231,11 +266,11 @@ APPWIDGET_ACTION="android.appwidget.action.APPWIDGET_UPDATE"
 # Awk script to parse 'cmd package query-services' and 'cmd package query-receivers' output
 # Extract package/class from ServiceInfo or ActivityInfo blocks, ignoring ApplicationInfo
 # shellcheck disable=SC2016
-PARSE_CMD_OUTPUT_AWK=' 
+PARSE_CMD_OUTPUT_AWK='
   /ServiceInfo:/ || /ActivityInfo:/ { in_comp = 1; next }
   /ApplicationInfo:/ { in_comp = 0; next }
-  in_comp && /name=/ { sub("name=", "", $1); comp_name = $1 }
-  in_comp && /packageName=/ { sub("packageName=", "", $1); pkg_name = $1; print pkg_name "/" comp_name }
+  in_comp && $1 ~ /^name=/ { sub(/^name=/, "", $1); comp_name = $1 }
+  in_comp && $1 ~ /^packageName=/ { sub(/^packageName=/, "", $1); pkg_name = $1; print pkg_name "/" comp_name }
 '
 
 # 1. Get Tiles via Permission (Legacy/Standard method)
@@ -265,12 +300,18 @@ action_appwidgets=$(adb shell cmd package query-receivers -a "${APPWIDGET_ACTION
   tr -d '\r')
 
 # Process and Merge using awk
-# We pass the three lists as separate input streams (process substitution)
+# Emit whitespace-delimited "IS_TILE IS_WIDGET COMPONENT" (0/1 flags) so
+# downstream read never relies on significant leading spaces or string offsets.
 awk '
-  # Helper to clean component names
-  function clean(c) {
-    # Remove whitespace
+  # Helper to clean and normalize component names (pkg/.Class -> pkg/pkg.Class)
+  function normalize(c,    slash, pkg, cls) {
     gsub(/^[ \t]+|[ \t]+$/, "", c)
+    slash = index(c, "/")
+    if (slash > 0 && substr(c, slash + 1, 1) == ".") {
+      pkg = substr(c, 1, slash - 1)
+      cls = substr(c, slash + 1)
+      c = pkg "/" pkg cls
+    }
     return c
   }
 
@@ -278,8 +319,8 @@ awk '
     type = $1
     # Component is the rest of the line (fields 2+)
     $1 = ""
-    comp = clean($0)
-    
+    comp = normalize($0)
+
     if (comp == "") next
 
     if (type == "TILE:") {
@@ -295,13 +336,7 @@ awk '
     for (c in widgets) all[c] = 1
 
     for (c in all) {
-      is_t = (c in tiles)
-      is_w = (c in widgets)
-      
-      t_mark = is_t ? "T" : " "
-      w_mark = is_w ? "W" : " "
-      # Print with TW indicators
-      printf "%s%s %s\n", t_mark, w_mark, c
+      printf "%d %d %s\n", (c in tiles), (c in widgets), c
     }
   }
 ' <(
@@ -310,10 +345,8 @@ awk '
   echo "$action_tiles" | awk '{print "TILE: " $0}'
   echo "$action_widgets" | awk '{print "WIDGET: " $0}'
   echo "$action_appwidgets" | awk '{print "WIDGET: " $0}'
-) | sort | uniq | while read -r line; do
-  # line is "TW com.pkg/Svc"
-  type_str="${line:0:2}"
-  comp="${line:3}"
+) | LC_ALL=C sort -u | while read -r is_tile is_widget comp; do
+  [[ -z "$comp" ]] && continue
 
   pkg=${comp%%/*}
   if [[ -n "${user_pkgs[$pkg]+_}" ]]; then
@@ -322,18 +355,22 @@ awk '
     source_str="S"
   fi
 
+  tile_str=" "
+  ((is_tile)) && tile_str="T"
+
+  widget_str=" "
+  ((is_widget)) && widget_str="W"
+
   carousel_str=" "
   if [[ -n "${visible_tiles[$comp]+_}" ]]; then
     carousel_str="C"
   fi
 
-  tags="${source_str}${type_str}${carousel_str}"
-
   # Apply filters
-  if ((tiles_only)) && [[ "${type_str:0:1}" != "T" ]]; then
+  if ((tiles_only && ! is_tile)); then
     continue
   fi
-  if ((widgets_only)) && [[ "${type_str:1:1}" != "W" ]]; then
+  if ((widgets_only && ! is_widget)); then
     continue
   fi
   if ((user_only)) && [[ "$source_str" != "U" ]]; then
@@ -346,5 +383,5 @@ awk '
     continue
   fi
 
-  echo "${tags} ${comp}"
+  echo "${source_str}${tile_str}${widget_str}${carousel_str} ${comp}"
 done
