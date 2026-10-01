@@ -63,6 +63,34 @@ CLI primitives, and functional requirements**.
    flexible/conditional language so the agent recognizes them if available in
    its loaded workspace context.
 
+## Generalizing from Tasks & Evaluations (Anti-Overfitting)
+
+Skills are frequently extracted from hands-on tasks or refined against benchmark
+evaluations. A skill must teach how to approach a *class of problems* across any
+repository, not how to pass a specific test case:
+
+- **Never Leak Task Framing, Grader Mechanics, or Fixture Literals:** Write for
+  ongoing development in any codebase, not for finishing an assignment. Omit
+  *"before completing the task"* cleanup steps, grader heuristics
+  (`stddev > 0`), sandbox quirks (`Container $HOME is read-only`), and
+  fixture-specific literals (hardcoded hex colors, initials, or bespoke asset
+  scripts).
+- **Keep Project Quirks Conditional & Avoid Cherry-Picked API Lists:** Frame
+  unusual fixture configurations (`android.builtInKotlin=false`, `src/debug/`
+  file moves) conditionally (`If a project configures X...`) or in
+  Troubleshooting rather than as mandatory workflow steps, and state
+  package-level API rules rather than labeling the few symbols used by benchmark
+  tasks as "Essential".
+- **Explain the "Why" Once Instead of Repeating Rigid `ALWAYS`/`NEVER` Bans:**
+  Repeating all-caps `NEVER` or `MUST` warnings across multiple sections is a
+  yellow flag that crowds out context. When models repeatedly hallucinate an API
+  call or import, explain the underlying API design or asymmetry once in the
+  relevant reference section so the model understands *why*.
+- **Fix Flawed Evaluations Rather Than Polluting the Skill:** Keep the skill
+  general even if narrow, overfitted hints score higher on a benchmark. If
+  removing a task-specific hint causes a severe regression, clarify the general
+  domain concept or fix the benchmark task/assertion itself.
+
 ## Anti-Patterns & Corrected Examples
 
 ### Example 1: Direct Skill Mandate vs. Capability-First with Exemplar
@@ -158,6 +186,24 @@ workspace's preferred web hosting utility or static file server (such as
 `zipline upload` or local HTTP preview).
 ```
 
+### Example 5: Benchmark Overfitting vs. General Domain Guidance
+
+**DON'T (Teaching to the Test / Leaking Eval Mechanics):**
+
+```markdown
+Generate a 400x400 PNG with `#2B2930` background and `'JD'` initials so the
+grader's pixel variance check (`stddev > 0`) passes. Before completing the task,
+delete any temporary Python scripts so `git status` is clean.
+```
+
+**DO (General Domain Rule):**
+
+```markdown
+Provide a representative `@drawable/widget_preview` PNG that depicts the
+widget's layout (cards, icons, or progress indicators) rather than a blank or
+solid-color placeholder.
+```
+
 ## Bundled Scripts & Generated Command Indexes
 
 When a skill bundles executable utilities or helper tools in `scripts/`:
@@ -198,6 +244,10 @@ Before publishing or committing a skill, verify that:
   own root directory.
 - [ ] Secondary actions describe the required *capability* first, offering
   specific tool names only as non-binding examples.
+- [ ] Instructions teach general domain procedures rather than overfitting to
+  benchmark tasks (no leaked grader metrics, container quirks, or fixture
+  literals) and explain API asymmetries once with their *why* instead of
+  repeating `NEVER`/`MUST` bans.
 - [ ] If the skill bundles helper tools in `scripts/`, an auto-generated
   `references/command-index.md` is provided, refreshed via
   `command-index-format`, and linked from `SKILL.md`.
