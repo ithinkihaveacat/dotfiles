@@ -16,8 +16,9 @@
 > 1. **Dimension 2 (Surface Form & Container Size):** Iterate through all
 >    supported surface forms and container sizes:
 >    - **Full-Screen Widget (Tile Compatibility Mode):** Standalone full-screen
->      tile translation (on Wear OS $\\le$ 6 or via
->      `adb-tile-add --type FULLSCREEN`).
+>      tile translation (on Wear OS $\\le$ 6 or via a FULLSCREEN `DEBUG_SURFACE`
+>      `add-tile` broadcast, such as `adb-tile-add --type FULLSCREEN` if
+>      available).
 >    - **Modular "Real" Widgets:** Partial-height modular containers on Wear OS
 >      7+, iterating through `LARGE (2x1)` and `SMALL (1x1)` (with explicit
 >      `[NOT DECLARED BY APK]` cards if unsupported).
@@ -225,7 +226,7 @@ ______________________________________________________________________
   2. Second-Level Dimension (Surface Form & Container Size Permutations):
      Widgets can appear across multiple distinct presentation forms, and audits must capture all permutations:
      - Form A: Full-Screen Standalone Tile (Tile Compatibility Mode)
-       Enforced on Wear OS <= 6 or verified on Wear OS 7+ via `adb-tile-add --type FULLSCREEN` (type 0).
+       Enforced on Wear OS <= 6 or verified on Wear OS 7+ via a FULLSCREEN (type 0) `DEBUG_SURFACE` `add-tile` broadcast (or `adb-tile-add --type FULLSCREEN` if available).
        Audits whether the glanceable layout gracefully scales to a full display canvas.
      - Form B: Modular "Real" Widgets
        On Wear OS 7+, iterate across every supported container size declared in the provider XML:
@@ -252,7 +253,7 @@ ______________________________________________________________________
              - Mode A: Unauthenticated / Logged Out / Fallback (empty onboarding state).
              - Mode B: Authenticated / Logged In / Content (active data state).
              For each mode, provide:
-             - (a) Live In-Use Screenshot: Active widget in carousel on watch face (always captured with `adb-screenshot`).
+             - (a) Live In-Use Screenshot: Active widget in carousel on watch face (captured with awake verification and circular display masking, e.g., via `adb-screenshot` if available).
              - (b) Live Screencast (Context Video): Screen recording showing interaction, scrolling context, or border behavior.
 
   5. Layout Adaptability & Centering Invariant (WidgetTrayActivity Spacer Pattern):
@@ -260,8 +261,8 @@ ______________________________________________________________________
        top of the list are pushed into the top half of the display above the circular center line.
      - Centering Technique: Add a separate "spacer" widget (e.g., from `wear-os-samples/WearWidget`, such as
        `SampleWidgetService`) above the target widget to shift it down into the vertical center slot of the
-       round screen before taking the screenshot with `adb-screenshot`.
-     - Alternatively, deploy the surface directly to the carousel via `adb-tile-add --type LARGE` to capture
+       round screen before taking a circular-masked screenshot (e.g., with `adb-screenshot` if available).
+     - Alternatively, deploy the surface directly to the carousel via a `DEBUG_SURFACE` `add-tile` broadcast (or `adb-tile-add --type LARGE` if available) to capture
        the native OEM presentation.
 
   6. Placeholders & Missing Media Invariant:
@@ -273,7 +274,7 @@ ______________________________________________________________________
 ##### Surface Form: Full-Screen Standalone Tile (Tile Compatibility Mode)
 
 <!-- GUIDANCE: 
-  Audit the full-screen presentation mode enforced on Wear OS <= 6 or tested via `adb-tile-add --type FULLSCREEN` (type 0).
+  Audit the full-screen presentation mode enforced on Wear OS <= 6 or tested via a FULLSCREEN (type 0) `DEBUG_SURFACE` `add-tile` broadcast (or `adb-tile-add --type FULLSCREEN` if available).
   Verify whether glanceable layouts, margins, and curved text elements adapt properly to the full 400x400 / 408x408 canvas.
 -->
 

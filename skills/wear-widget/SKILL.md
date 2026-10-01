@@ -38,22 +38,19 @@ analysis and ADB device management tools where applicable.
 ### Decompile the APK
 
 Decompile the APK to decode binary manifests, layouts, and resource values into
-readable plain-text formats using `apk-decode` (from the `apk` skill):
+readable plain-text formats using `apktool` (or a workspace APK decoding helper
+such as `apk-decode` if available):
 
 ```bash
-apk-decode <app_name>.apk
+apktool d <app_name>.apk -o <output_dir>
+# (Or run `apk-decode <app_name>.apk` if available in your workspace)
 ```
 
 ### Identify Tile & Widget Services in the Manifest
 
-Discover tile and widget services or receivers declared in the manifest using
-`apk-info tiles` (from the `apk` skill):
-
-```bash
-apk-info tiles <app_name>.apk
-```
-
-Or inspect the decompiled `AndroidManifest.xml` for specific action filters:
+Inspect the decompiled `AndroidManifest.xml` (or run
+`apkanalyzer manifest print <app_name>.apk`, or a workspace manifest helper such
+as `apk-info tiles <app_name>.apk` if available) for specific action filters:
 
 - **Glance / Wear OS Widgets**:
   `<action android:name="androidx.glance.wear.action.BIND_WIDGET_PROVIDER" />`
@@ -83,11 +80,11 @@ Open the resolved XML file in `res/xml/` to extract metadata:
 - For each referenced `previewImage` and `icon` drawable:
   - **If Raster (PNG, WebP, JPEG)**: Copy the highest density version (usually
     in `drawable-xxhdpi/` or `drawable-nodpi/`).
-  - **If Vector (XML)**: Translate the Android Vector Drawable (AVD) to SVG and
-    render it to PNG using `avd-to-png` (from the `apk` skill):
-    ```bash
-    avd-to-png -o preview.png res/drawable/my_preview.xml res
-    ```
+  - **If Vector (XML)**: Translate the Android Vector Drawable (AVD) `<vector>`
+    and `<path>` elements (resolving any `@color/...` references against
+    `res/values/colors.xml`) to standard SVG and rasterize to PNG (for example,
+    using `rsvg-convert` / `resvg`, or a workspace AVD conversion helper such as
+    `avd-to-png -o preview.png res/drawable/my_preview.xml res` if available).
 
 ______________________________________________________________________
 
@@ -167,43 +164,48 @@ preview image assets embedded in the APK metadata.
 
 ### Method 1: Local Code-Based Rendering (Glance/Compose)
 
-If you have a tool that can generate PNGs directly from `@Preview` annotations
-without deploying to a device or emulator (such as `compose-preview`):
+If your environment provides a host-side `@Preview` rendering tool that
+generates PNGs without deploying to a device or emulator (such as
+`compose-preview` or Gradle screenshot testing):
 
 1. **Define Previews**: Use `@Preview` annotations. For Glance, use
    `RectangularAllWidgetPreviewParams` to generate renders for both sizes, or
    `RectangularSmallWidgetPreviewParams` / `RectangularLargeWidgetPreviewParams`
    for specific sizes.
-1. **Render Previews**: Use the `compose-preview` skill to render the previews.
-   `compose-preview` auto-detects Glance Wear widget previews (such as
-   `RectangularSmallWidgetPreviewParams` and
-   `RectangularLargeWidgetPreviewParams`) and crops them to the widget bounding
-   box without watch canvas padding. If rendering a custom or non-standard
-   widget preview that compose-preview does not auto-detect, disable canvas
-   retargeting via `retargetWearPreviews = false` in the preview extension or
-   pass `-PcomposePreview.retargetWearPreviews=false`.
-1. **Copy Assets**: Copy the generated cropped files from
-   `build/compose-previews/renders/` to `res/drawable-nodpi/`.
+1. **Render Previews**: Render the preview functions to PNG using your host-side
+   preview renderer, ensuring the output is cropped to the widget bounding box
+   rather than a full watch canvas. (For example, if using `compose-preview`, it
+   auto-detects `RectangularSmallWidgetPreviewParams` and
+   `RectangularLargeWidgetPreviewParams` and crops them automatically; for
+   custom or non-standard widget previews that are not auto-detected, disable
+   canvas retargeting via `retargetWearPreviews = false` in the preview
+   extension or pass `-PcomposePreview.retargetWearPreviews=false`.)
+1. **Copy Assets**: Copy the generated cropped files (e.g., from
+   `build/compose-previews/renders/`) to `res/drawable-nodpi/`.
 
 ### Method 2: Live Device Capture (Tile Carousel)
 
-Capture the active Tile UI directly from a live emulator or physical device. Use
-the `adb` skill helpers (`adb-tile-add`, `adb-tile-switch`, and
-`adb-screenshot`):
+Capture the active Tile UI directly from a live emulator or physical device by
+adding the component to the carousel, focusing its slot, waking the screen, and
+capturing the display via ADB (or using workspace ADB tile and screenshot
+helpers if available):
 
 ```bash
-# 1. Deploy component enforcing FULLSCREEN translation (automatically shown)
-adb-tile-add --type FULLSCREEN "<PACKAGE>/<SERVICE_CLASS>"
+# 1. Deploy component enforcing FULLSCREEN translation (type 0) and focus its slot
+adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SURFACE \
+  --es operation add-tile --ecn component "<PACKAGE>/<SERVICE_CLASS>" --ei type 0
+adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI \
+  --es operation show-tile --ei index 0
+# (Or run workspace helpers such as `adb-tile-add --type FULLSCREEN "<PACKAGE>/<SERVICE_CLASS>"`
+# and `adb-tile-switch 0` if available)
 
-# (Optional: switch active display to a specific tile index if needed)
-# adb-tile-switch 0
-
-# If display is in ambient/dim mode, wake screen before capture.
+# 2. If display is in ambient/dim mode, wake screen before capture.
 # (Do NOT send coordinate taps to an active display; touches trigger click handlers!)
 adb shell input keyevent KEYCODE_WAKEUP
 
-# 2. Capture screenshot with circular masking and awake verification
-adb-screenshot -o preview.png
+# 3. Capture screenshot (use an awake-verifying, circular-masking helper such as
+# `adb-screenshot -o preview.png` if available, or standard `screencap`)
+adb exec-out screencap -p > preview.png
 ```
 
 > [!WARNING] Avoid sending unneeded manual input taps to an active display
@@ -226,11 +228,44 @@ automation.
     -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
   # Prints the component name if present, or "No activity found"
   ```
-- **List, add, remove, and export widgets**: Prefer the `adb` skill helpers when
-  they are available in your workspace. They launch the tray if needed, check
-  for the tray first, retry until the receiver registers, fail clearly on
-  renderers that lack an action, and (for `adb-tile-add`) wait until the widget
-  is rendered:
+- **Tray broadcasts**: Launch `WidgetTrayActivity` and send ordered broadcasts
+  scoped with `-p` to the renderer package. Results are compact JSON in the
+  ordered-broadcast `data`: `result=-1` for success, `result=0` for errors. A
+  broadcast sent right after `am start` can return `result=0` with no data
+  because the receiver is not registered yet, so retry for a few seconds:
+  ```bash
+  R=com.google.android.wearable.protolayout.renderer
+  A=com.google.android.clockwork.prototiles.action
+  adb shell am start -W -n $R/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
+
+  # Add a widget to the tray (container_type: LARGE or SMALL)
+  adb shell am broadcast -p $R -a $A.ADD_WIDGET \
+    --es component "<PACKAGE>/<SERVICE_CLASS>" --es container_type LARGE
+
+  # List active widgets in the tray
+  adb shell am broadcast -p $R -a $A.GET_WIDGETS
+
+  # Request fresh content from a widget's provider (by ID or component)
+  adb shell am broadcast -p $R -a $A.UPDATE_WIDGET --ei widget_id 10001
+
+  # Remove a widget by ID or component
+  adb shell am broadcast -p $R -a $A.REMOVE_WIDGET --ei widget_id 10001
+
+  # Export a rendered widget's Remote Compose document (.rc) to device storage
+  adb shell am broadcast -p $R -a $A.DUMP_RC_DOC --ei widget_id 10001
+
+  # Render a raw .rc document without installing its app (base64 payload)
+  adb shell am broadcast -p $R -a $A.UPLOAD_DOC_WIDGET \
+    --es doc_b64 "$(base64 -w0 widget.rc)" --es container_type LARGE
+  ```
+  Pass widget IDs as integers (`--ei widget_id`). Component names with a `/`
+  must match exactly. Short names such as `WeatherWidgetService` are matched
+  case-insensitively against installed widget providers.
+- **Workspace tray helpers (optional)**: If high-level ADB tile helpers are
+  available in your workspace (such as `adb-tile-add`, `adb-tiles`,
+  `adb-tile-remove`, and `adb-tile-dump`), they wrap these broadcasts—launching
+  the tray if needed, retrying until the receiver registers, and waiting until
+  the widget is rendered:
   ```bash
   adb-tile-add --vertical --type LARGE <PACKAGE>/<SERVICE_CLASS>
   # => Added/activated widget ID: 10001
@@ -240,43 +275,23 @@ automation.
   adb-tile-remove --vertical --all            # empty the tray
   adb-tile-dump -o widget.rc 10001 > widget.meta.json    # export .rc
   ```
-- **Raw broadcasts**: Use raw broadcasts for actions the helpers do not cover.
-  Always scope them with `-p` to the renderer package. Results are compact JSON
-  in the ordered-broadcast `data`: `result=-1` for success, `result=0` for
-  errors. A broadcast sent right after `am start` can return `result=0` with no
-  data because the receiver is not registered yet, so retry for a few seconds.
-  ```bash
-  R=com.google.android.wearable.protolayout.renderer
-  A=com.google.android.clockwork.prototiles.action
-  adb shell am start -W -n $R/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
-
-  # Request fresh content from a widget's provider (by ID or component)
-  adb shell am broadcast -p $R -a $A.UPDATE_WIDGET --ei widget_id 10001
-
-  # Render a raw .rc document without installing its app (base64 payload)
-  adb shell am broadcast -p $R -a $A.UPLOAD_DOC_WIDGET \
-    --es doc_b64 "$(base64 -w0 widget.rc)" --es container_type LARGE
-  ```
-  Pass widget IDs as integers (`--ei widget_id`). Component names with a `/`
-  must match exactly. Short names such as `WeatherWidgetService` are matched
-  case-insensitively against installed widget providers.
-- **List tray widgets (`GET_WIDGETS`)**: `adb-tiles --vertical` returns every
-  widget currently in the tray. Use it (or `adb-tile-remove --vertical --all`)
-  to reset the tray before a capture instead of guessing which widgets are left
-  over from earlier sessions. Older tray builds do not support `GET_WIDGETS` or
-  `DUMP_RC_DOC`; they never answer, and the helpers report that the installed
-  renderer needs updating.
-- **Export a rendered widget as `.rc` (`DUMP_RC_DOC`)**: `adb-tile-dump` saves
-  the Remote Compose document that the tray is currently rendering and prints
-  the rendering context as JSON: screen size and density, container and content
+- **List tray widgets (`GET_WIDGETS`)**: `GET_WIDGETS` (or
+  `adb-tiles --vertical`) returns every widget currently in the tray. Use it to
+  inspect or reset the tray before a capture instead of guessing which widgets
+  are left over from earlier sessions. Older tray builds do not support
+  `GET_WIDGETS` or `DUMP_RC_DOC` and return `result=0` with no data.
+- **Export a rendered widget as `.rc` (`DUMP_RC_DOC`)**: `DUMP_RC_DOC` (or
+  `adb-tile-dump`) writes the Remote Compose document that the tray is currently
+  rendering to a file on device storage and returns the rendering context as
+  JSON in the broadcast `data`: screen size and density, container and content
   box sizes in dp and px, corner radius, font scale, time zone, and the dynamic
   Material 3 theme colors (`theme`, a map of `WearM3.*` to `#AARRGGBB`). Use it
   to replay a widget exactly as the device rendered it, or to diff documents
   between app versions.
-  - A component that matches several tray widgets is rejected with the list of
-    matching widget IDs. Pick one and pass the ID.
-  - Documents added with `UPLOAD_DOC_WIDGET` show up in `adb-tiles --vertical`
-    as
+  - A component that matches several tray widgets returns
+    `status="MULTIPLE_WIDGETS"` with the list of matching widget IDs. Pick one
+    and pass `--ei widget_id`.
+  - Documents added with `UPLOAD_DOC_WIDGET` show up in `GET_WIDGETS` as
     `.../com.google.android.clockwork.prototiles.renderer.experimental.UploadedDocWidget`
     and can be exported by ID. An exported `.rc` file re-uploads and exports
     back byte-identical, so a document captured on one device can be replayed on
@@ -284,10 +299,11 @@ automation.
   - `No active widget found for widgetId N` means the ID is not in the tray.
     `Tile N is not a Remote Compose tile.` also appears while the provider has
     not delivered content yet.
-  - **Exporting requires root.** The renderer is a privileged app, so the file
-    cannot be read with `run-as`. `adb-tile-dump` uses `adb root` when adbd runs
-    as root (emulator images that allow it) or `su` on userdebug devices, and
-    checks the byte count against `doc_size_bytes`. User builds cannot export.
+  - **Exporting requires root.** The renderer is a privileged app, so the dumped
+    file cannot be read with `run-as`. Pull the file reported in the JSON `file`
+    field using `adb root` (on emulator images that allow it) or `su` on
+    userdebug devices, and verify the byte count against `doc_size_bytes`. User
+    builds cannot export.
 - **Logs**: `adb logcat -s WidgetTrayReceiver`. Emulator (`.emu`) builds strip
   info and debug logs, so read results from the broadcast `data` instead.
 - **Widget centering**: A single widget at the top of the tray sits above the
@@ -295,9 +311,10 @@ automation.
   capturing, either swipe down slightly
   (`adb shell input swipe 204 150 204 250 300` on a 408x408 display) or add a
   spacer widget above the target.
-- **Screenshot invariant**: Always use `adb-screenshot` (which verifies awake
-  state and applies circular masking) rather than raw `screencap` when capturing
-  assets for reports or audits.
+- **Screenshot invariant**: When capturing assets for reports or audits, verify
+  that the display is awake (not in ambient mode) and apply circular display
+  masking (for example, using `adb-screenshot` if available in your workspace,
+  or post-processing `adb exec-out screencap -p`).
 
 ______________________________________________________________________
 
