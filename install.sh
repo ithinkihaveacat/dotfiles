@@ -401,6 +401,54 @@ function prune_apt_retired {
     echo "warning: dpkg --purge of retired packages failed" >&2
 }
 
+# Point apt at fish's own release-4 repository, since distributions package an
+# out-of-date fish (trixie ships 4.0.2; the transient prompt needs 4.1+): the
+# OpenSUSE Build Service on Debian 13, the Launchpad PPA on Ubuntu. Elsewhere
+# the distribution's fish is used. Returns success only if the repository was
+# just configured, in which case the caller must refresh the package lists and
+# reinstall fish.
+function configure_fish_apt_repo {
+  local os_id os_ver
+  # shellcheck disable=SC1091 # /etc/os-release is provided by the host, not the repo
+  read -r os_id os_ver < <(
+    . /etc/os-release 2>/dev/null
+    printf '%s %s\n' "${ID:-}" "${VERSION_ID:-}"
+  )
+  if [ "$os_id" = debian ] && [ "$os_ver" = 13 ]; then
+    # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
+    local url="https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/"
+    local key=/usr/share/keyrings/fish-shell.asc
+    local list=/etc/apt/sources.list.d/fish-shell.list
+    local line="deb [signed-by=$key] $url /"
+    if [ -f "$key" ] && [ "$(cat "$list" 2>/dev/null)" = "$line" ]; then
+      return 1
+    fi
+    echo "Configuring the fish apt repository (OpenSUSE Build Service)..."
+    local tmp_key status=0
+    tmp_key=$(mktemp)
+    { curl -fsSL -o "$tmp_key" "${url}Release.key" &&
+      x sudo install -m 644 "$tmp_key" "$key" &&
+      echo "$line" | x sudo tee "$list" >/dev/null; } || status=$?
+    rm -f "$tmp_key"
+    if [ "$status" -ne 0 ]; then
+      echo "warning: failed to configure the fish apt repository from $url" >&2
+      return 1
+    fi
+  elif [ "$os_id" = ubuntu ]; then
+    if grep -rqs 'fish-shell/release-4' /etc/apt/sources.list.d; then
+      return 1
+    fi
+    echo "Configuring the fish apt repository (ppa:fish-shell/release-4)..."
+    if ! { exists add-apt-repository || x sudo apt-get -y install software-properties-common; } ||
+      ! x sudo add-apt-repository -y ppa:fish-shell/release-4; then
+      echo "warning: failed to add ppa:fish-shell/release-4" >&2
+      return 1
+    fi
+  else
+    return 1
+  fi
+}
+
 # SRCDIR is the root of the git repo
 # From http://stackoverflow.com/a/246128/11543
 SRCDIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -920,7 +968,7 @@ if [ "$PLATFORM" = "linux" ]; then
     fi
 
     # Core packages: always installed, on every run.
-    core="apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep chafa bat"
+    core="fish apt-file direnv command-not-found dnsutils htop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep chafa bat"
     # Optional packages: installed only with --install-optional or --install-all.
     # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
     # ruby-build binary itself is bootstrapped from git below, as the apt package
@@ -938,6 +986,13 @@ if [ "$PLATFORM" = "linux" ]; then
     # Full unmanaged package removal is unsafe on Debian/apt because apt manages
     # base system and infrastructure packages beyond dotfiles. Orphaned dependency
     # packages are purged via apt-get autoremove --purge below.
+
+    # fish is in core above, so on a fresh machine it first arrives from the
+    # distribution; switching repositories then upgrades it in place.
+    if configure_fish_apt_repo; then
+      { x sudo apt-get update && x sudo apt-get -y install fish; } ||
+        echo "warning: fish installation from its apt repository failed" >&2
+    fi
 
     # Retired packages: ones this script used to install and no longer does.
     # Reported on every run and removed with --prune (see prune_apt_retired).
@@ -988,77 +1043,6 @@ if [ "$PLATFORM" = "linux" ]; then
     echo "$(basename "$0"): no supported package manager (apt-get) found, skipping" >&2
   fi
 
-fi
-
-# fish: Debian packages an out-of-date fish (trixie ships 4.0.2, but our config
-# targets 4.2+), so when fish is missing on Debian 13 we install fish 4 from the
-# OpenSUSE Build Service instead of the distro package. Other systems install
-# fish themselves (Homebrew on macOS, manually otherwise). If fish is already
-# present we leave it untouched and only warn when it predates 4.2.
-heading "fish"
-
-FISH_MIN_VERSION="4.2"
-
-if exists fish; then
-
-  # Warn about (but do not replace) an installed fish older than the version our
-  # config relies on. `fish --version` prints e.g. "fish, version 4.0.2".
-  fish_version=$(fish --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1) || fish_version=""
-  if [ -n "$fish_version" ]; then
-    fish_major=${fish_version%%.*}
-    fish_rest=${fish_version#*.}
-    fish_minor=${fish_rest%%.*}
-    min_major=${FISH_MIN_VERSION%%.*}
-    min_minor=${FISH_MIN_VERSION#*.}
-    if [ "$fish_major" -lt "$min_major" ] ||
-      { [ "$fish_major" -eq "$min_major" ] && [ "$fish_minor" -lt "$min_minor" ]; }; then
-      echo "warning: fish $fish_version is older than $FISH_MIN_VERSION; some config may not work" >&2
-      echo "hint: Debian's packaged fish is out of date; see README for fish $FISH_MIN_VERSION+ install instructions" >&2
-    fi
-  fi
-
-elif [ "$PLATFORM" = "linux" ]; then
-
-  # shellcheck disable=SC1091 # /etc/os-release is provided by the host, not the repo
-  read -r os_id os_ver < <(
-    . /etc/os-release 2>/dev/null
-    printf '%s %s\n' "${ID:-}" "${VERSION_ID:-}"
-  )
-
-  if ! { exists apt-get && $HAS_SUDO; }; then
-    echo "warning: cannot install fish without apt-get and sudo; install manually (see README)" >&2
-  elif [ "$os_id" = debian ] && [ "$os_ver" = 13 ]; then
-    echo "Installing fish $FISH_MIN_VERSION+ from the OpenSUSE Build Service (Debian 13)..."
-    # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
-    if echo 'deb http://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/ /' |
-      x sudo tee /etc/apt/sources.list.d/shells:fish:release:4.list >/dev/null &&
-      curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_13/Release.key |
-      gpg --dearmor |
-        x sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_4.gpg >/dev/null &&
-      x sudo apt-get update &&
-      x sudo apt-get -y install fish; then
-      echo "Installed fish."
-    else
-      echo "warning: fish installation failed; install manually (see README)" >&2
-    fi
-  elif [ "$os_id" = ubuntu ]; then
-    echo "Installing fish $FISH_MIN_VERSION+ from the official Launchpad PPA (ppa:fish-shell/release-4)..."
-    if ! exists add-apt-repository; then
-      x sudo apt-get update && x sudo apt-get -y install software-properties-common
-    fi
-    if x sudo add-apt-repository -y ppa:fish-shell/release-4 &&
-      x sudo apt-get update &&
-      x sudo apt-get -y install fish; then
-      echo "Installed fish."
-    else
-      echo "warning: fish installation failed; install manually (see README)" >&2
-    fi
-  else
-    echo "warning: fish not available for '${os_id:-unknown} ${os_ver:-?}'; install manually (see README)" >&2
-  fi
-
-else
-  echo "warning: fish not installed; install it (e.g. 'brew install fish', see README)" >&2
 fi
 
 # Defined above, next to --only; failures are reported there and do not stop

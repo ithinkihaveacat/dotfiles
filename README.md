@@ -294,33 +294,6 @@ again so the overlay is applied.
 - **Ubuntu/Debian**: `sudo apt-get install git`
 - **macOS**: `xcode-select --install`
 
-### fish
-
-On **Debian 13** and **macOS**, `install.sh` installs fish for you, so you can
-skip this step. Debian's packaged fish is out of date, so on Debian 13 it pulls
-fish 4.2+ from the OpenSUSE Build Service; on macOS it uses Homebrew. If fish is
-already installed at a version older than 4.2, `install.sh` warns rather than
-replacing it. On other systems, install it first:
-
-- **Ubuntu/other Debian**: `sudo apt-get install fish`
-- **Other**: <https://fishshell.com/>
-
-<!-- markdownlint-disable MD013 -->
-
-> Standard apt packages lag significantly (Ubuntu 24.04: 3.7.0, Debian
-> bookworm/Raspberry Pi OS: 3.6.0, Debian trixie: 4.0.2). For fish 4.2+, install
-> from the OpenSUSE Build Service:
->
-> ```bash
-> curl -fsSL https://download.opensuse.org/repositories/shells:fish:release:4/Debian_Unstable/Release.key | \
->   gpg --dearmor | sudo tee /usr/share/keyrings/fish-shell.gpg > /dev/null
-> echo 'deb [signed-by=/usr/share/keyrings/fish-shell.gpg] https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_Unstable/ /' | \
->   sudo tee /etc/apt/sources.list.d/fish-shell.list
-> sudo apt update && sudo apt install -y fish
-> ```
-
-<!-- markdownlint-restore MD013 -->
-
 ## Platform-specific setup
 
 ### macOS
@@ -365,13 +338,6 @@ Complete setup sequence for a fresh Raspberry Pi OS install.
    ```
 
    Reboot if `/var/run/reboot-required` exists: `sudo reboot`
-
-1. Install fish (see [Prerequisites](#fish) for the OpenSUSE Build Service
-   instructions to get fish 4.2+, or use the older distro version):
-
-   ```sh
-   sudo apt-get install fish
-   ```
 
 1. Install git: `sudo apt-get install git`
 
