@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..128'
+echo '1..132'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -1730,6 +1730,11 @@ write_dep_task TASK-55555 todo "Held by a deleted task" '[TASK-99999]'
 write_dep_task TASK-66666 blocked "Declared blocked with no edges"
 write_dep_task TASK-77777 todo "Cycle member one" '[TASK-88888]'
 write_dep_task TASK-88888 todo "Cycle member two" '[TASK-77777]'
+write_dep_task TASK-AAAAA cancelled "Cancelled blocker"
+write_dep_task TASK-BBBBB todo "Held by a cancelled task" '[TASK-AAAAA]'
+write_dep_task TASK-CCCCC in-progress "In-progress task held by finished task" '[TASK-11111]'
+write_dep_task TASK-DDDDD 'done' "Historical done task" '[TASK-11111]'
+write_dep_task TASK-EEEEE 'cancelled' "Historical cancelled task" '[TASK-11111]'
 
 READY=$("$BIN" --root "$DEP_REPO" list example --state ready 2>/dev/null | tail -n +2 | cut -f2 | sort | tr '\n' ' ')
 
@@ -1800,38 +1805,86 @@ else
   echo 'not ok 98 - doctor reports a blocked_by cycle'
 fi
 
-# Test 99: fix never invents, removes, or rewrites dependency edges
+# Test 99: open tasks with done blockers warn to remove the edge
+if printf '%s\n' "$DEP_DR" | grep -q '^\[WARN\].*TASK-44444.*blocked_by names resolved task(s): TASK-11111 (done); remove the edge' &&
+  printf '%s\n' "$DEP_DR" | grep -q '^\[WARN\].*TASK-CCCCC.*blocked_by names resolved task(s): TASK-11111 (done); remove the edge'; then
+  echo 'ok 99 - doctor reports open tasks with done blockers'
+else
+  echo 'not ok 99 - doctor reports open tasks with done blockers'
+  echo "# DEP_DR=$DEP_DR"
+fi
+
+# Test 100: open tasks with cancelled blockers warn with a distinct re-plan message
+if printf '%s\n' "$DEP_DR" | grep -q '^\[WARN\].*TASK-BBBBB.*blocked_by names resolved task(s): TASK-AAAAA (cancelled); re-plan or remove the edge'; then
+  echo 'ok 100 - doctor reports open tasks with cancelled blockers'
+else
+  echo 'not ok 100 - doctor reports open tasks with cancelled blockers'
+  echo "# DEP_DR=$DEP_DR"
+fi
+
+# Test 101: resolved tasks and unresolved edges do not trigger resolved blocked_by warnings
+if ! printf '%s\n' "$DEP_DR" | grep -q 'TASK-DDDDD.*blocked_by names resolved task(s)' &&
+  ! printf '%s\n' "$DEP_DR" | grep -q 'TASK-EEEEE.*blocked_by names resolved task(s)' &&
+  ! printf '%s\n' "$DEP_DR" | grep -q 'TASK-33333.*blocked_by names resolved task(s)' &&
+  ! printf '%s\n' "$DEP_DR" | grep -q 'TASK-55555.*blocked_by names resolved task(s)'; then
+  echo 'ok 101 - doctor exempts resolved tasks from stale blocked_by warnings'
+else
+  echo 'not ok 101 - doctor exempts resolved tasks from stale blocked_by warnings'
+  echo "# DEP_DR=$DEP_DR"
+fi
+
+# Test 102: project scoping restricts doctor dependency findings to the target project
+mkdir -p "$DEP_REPO/scoped/tasks"
+printf '# Scoped project\n' >"$DEP_REPO/scoped/PROJECT.md"
+{
+  printf -- '---\nid: TASK-F0001\nstatus: todo\nblocked_by: [TASK-11111]\n---\n\n# Scoped other task\n'
+} >"$DEP_REPO/scoped/tasks/TASK-F0001-dep.md"
+
+SCOPED_EX_DR=$("$BIN" --root "$DEP_REPO" doctor example 2>&1) || true
+SCOPED_SC_DR=$("$BIN" --root "$DEP_REPO" doctor scoped 2>&1) || true
+if printf '%s\n' "$SCOPED_EX_DR" | grep -q 'TASK-44444.*blocked_by names resolved task(s)' &&
+  ! printf '%s\n' "$SCOPED_EX_DR" | grep -q 'TASK-F0001' &&
+  printf '%s\n' "$SCOPED_SC_DR" | grep -q 'TASK-F0001.*blocked_by names resolved task(s): TASK-11111 (done); remove the edge' &&
+  ! printf '%s\n' "$SCOPED_SC_DR" | grep -q 'TASK-44444'; then
+  echo 'ok 102 - doctor scopes resolved blocked_by checks to target project'
+else
+  echo 'not ok 102 - doctor scopes resolved blocked_by checks to target project'
+  echo "# SCOPED_EX_DR=$SCOPED_EX_DR"
+  echo "# SCOPED_SC_DR=$SCOPED_SC_DR"
+fi
+
+# Test 103: fix never invents, removes, or rewrites dependency edges
 git -C "$DEP_REPO" add -A >/dev/null 2>&1
 git -C "$DEP_REPO" commit -qm 'seed dependency fixtures' >/dev/null 2>&1
 "$BIN" --root "$DEP_REPO" fix example --no-commit >/dev/null 2>&1 || true
 DEP_AFTER=$(grep -h '^blocked_by:' "$DEP_REPO"/example/tasks/*-dep.md | sort | tr '\n' ' ')
-if [ "$DEP_AFTER" = "blocked_by: [TASK-11111] blocked_by: [TASK-22222] blocked_by: [TASK-77777] blocked_by: [TASK-88888] blocked_by: [TASK-99999] " ]; then
-  echo 'ok 99 - fix leaves blocked_by edges exactly as authored'
+if [ "$DEP_AFTER" = "blocked_by: [TASK-11111] blocked_by: [TASK-11111] blocked_by: [TASK-11111] blocked_by: [TASK-11111] blocked_by: [TASK-22222] blocked_by: [TASK-77777] blocked_by: [TASK-88888] blocked_by: [TASK-99999] blocked_by: [TASK-AAAAA] " ]; then
+  echo 'ok 103 - fix leaves blocked_by edges exactly as authored'
 else
-  echo 'not ok 99 - fix leaves blocked_by edges exactly as authored'
+  echo 'not ok 103 - fix leaves blocked_by edges exactly as authored'
   echo "# after=$DEP_AFTER"
 fi
 
-# Test 100: taskgo harbor --help reports prepare, run, verify commands
+# Test 104: taskgo harbor --help reports prepare, run, verify commands
 HARBOR_HELP=$("$BIN" harbor --help)
 if [[ "$HARBOR_HELP" == *"prepare"* ]] &&
   [[ "$HARBOR_HELP" == *"run"* ]] &&
   [[ "$HARBOR_HELP" == *"verify"* ]]; then
-  echo 'ok 100 - taskgo harbor --help lists subcommands'
+  echo 'ok 104 - taskgo harbor --help lists subcommands'
 else
-  echo 'not ok 100 - taskgo harbor --help lists subcommands'
+  echo 'not ok 104 - taskgo harbor --help lists subcommands'
 fi
 
-# Test 101: taskgo harbor prepare --dry-run previews without creating files
+# Test 105: taskgo harbor prepare --dry-run previews without creating files
 DRY_TRIAL="$TEST_ROOT/dry-trial"
 DRY_PREP=$("$BIN" --root "$REPO" harbor prepare TASK-A1B2C -o "$DRY_TRIAL" --dry-run)
 if [ ! -d "$DRY_TRIAL" ] && [[ "$DRY_PREP" == *"[INFO]  Dry run: would package trial"* ]]; then
-  echo 'ok 101 - harbor prepare --dry-run previews without writing files'
+  echo 'ok 105 - harbor prepare --dry-run previews without writing files'
 else
-  echo 'not ok 101 - harbor prepare --dry-run previews without writing files'
+  echo 'not ok 105 - harbor prepare --dry-run previews without writing files'
 fi
 
-# Test 102: taskgo harbor prepare packages trial structure
+# Test 106: taskgo harbor prepare packages trial structure
 REAL_TRIAL="$TEST_ROOT/real-trial"
 WS_SRC="$TEST_ROOT/ws-src"
 mkdir -p "$WS_SRC"
@@ -1842,20 +1895,20 @@ if [ -f "$REAL_TRIAL/job.json" ] &&
   [ -f "$REAL_TRIAL/tasks/confirm-status/instruction.md" ] &&
   [ -f "$REAL_TRIAL/tasks/confirm-status/environment/Dockerfile" ] &&
   [ -f "$REAL_TRIAL/tasks/confirm-status/environment/workspace/sample.json" ]; then
-  echo 'ok 102 - harbor prepare packages job, task, and workspace'
+  echo 'ok 106 - harbor prepare packages job, task, and workspace'
 else
-  echo 'not ok 102 - harbor prepare packages job, task, and workspace'
+  echo 'not ok 106 - harbor prepare packages job, task, and workspace'
 fi
 
-# Test 103: taskgo harbor run --help and --dry-run check preflights
+# Test 107: taskgo harbor run --help and --dry-run check preflights
 RUN_HELP=$("$BIN" harbor run --help)
 if [[ "$RUN_HELP" == *"--print-config"* ]] && [[ "$RUN_HELP" == *"--dry-run"* ]]; then
-  echo 'ok 103 - harbor run --help documents preflights and options'
+  echo 'ok 107 - harbor run --help documents preflights and options'
 else
-  echo 'not ok 103 - harbor run --help documents preflights and options'
+  echo 'not ok 107 - harbor run --help documents preflights and options'
 fi
 
-# Test 104: taskgo harbor verify passes on valid candidate output
+# Test 108: taskgo harbor verify passes on valid candidate output
 VERIFY_DIR="$TEST_ROOT/verify-clean"
 BASE_JSON="$TEST_ROOT/base.json"
 CAND_JSON="$TEST_ROOT/cand.json"
@@ -1867,24 +1920,24 @@ if "$BIN" harbor verify --base-file "$BASE_JSON" --candidate-file "$CAND_JSON" -
   [ -f "$VERIFY_DIR/acceptance-packet.json" ] &&
   [ -f "$VERIFY_DIR/acceptance-packet.md" ] &&
   grep -q 'READY_FOR_HUMAN_ACCEPTANCE' "$VERIFY_DIR/acceptance-packet.md"; then
-  echo 'ok 104 - harbor verify produces Candidate Acceptance Packet for clean output'
+  echo 'ok 108 - harbor verify produces Candidate Acceptance Packet for clean output'
 else
-  echo 'not ok 104 - harbor verify produces Candidate Acceptance Packet for clean output'
+  echo 'not ok 108 - harbor verify produces Candidate Acceptance Packet for clean output'
 fi
 
-# Test 105: taskgo harbor verify detects defects and fails on syntax error or mismatch
+# Test 109: taskgo harbor verify detects defects and fails on syntax error or mismatch
 VERIFY_BAD_DIR="$TEST_ROOT/verify-bad"
 BAD_JSON="$TEST_ROOT/bad.json"
 echo '{invalid-json' >"$BAD_JSON"
 if ! "$BIN" harbor verify --base-file "$BASE_JSON" --candidate-file "$BAD_JSON" -o "$VERIFY_BAD_DIR" >/dev/null 2>&1 &&
   [ -f "$VERIFY_BAD_DIR/acceptance-packet.json" ] &&
   grep -q 'REJECT_OR_REPAIR' "$VERIFY_BAD_DIR/acceptance-packet.md"; then
-  echo 'ok 105 - harbor verify detects defects and recommends REJECT_OR_REPAIR'
+  echo 'ok 109 - harbor verify detects defects and recommends REJECT_OR_REPAIR'
 else
-  echo 'not ok 105 - harbor verify detects defects and recommends REJECT_OR_REPAIR'
+  echo 'not ok 109 - harbor verify detects defects and recommends REJECT_OR_REPAIR'
 fi
 
-# Test 106: doctor reports [FAIL] and exits non-zero on invalid YAML frontmatter syntax
+# Test 110: doctor reports [FAIL] and exits non-zero on invalid YAML frontmatter syntax
 BAD_YAML_REPO="$TEST_ROOT/bad-yaml-repo"
 mkdir -p "$BAD_YAML_REPO/proj/tasks"
 git -C "$BAD_YAML_REPO" init -q
@@ -1909,12 +1962,12 @@ EOF
 ("$BIN" --root "$BAD_YAML_REPO" sync proj >/dev/null 2>&1 || true)
 BAD_DR_OUT="$("$BIN" --root "$BAD_YAML_REPO" doctor proj 2>&1 || true)"
 if echo "$BAD_DR_OUT" | grep -q '\[FAIL\]  proj/tasks/TASK-B4D01-broken-yaml.md: invalid YAML frontmatter:'; then
-  echo 'ok 106 - doctor reports [FAIL] and exits non-zero on invalid YAML frontmatter syntax'
+  echo 'ok 110 - doctor reports [FAIL] and exits non-zero on invalid YAML frontmatter syntax'
 else
-  echo 'not ok 106 - doctor reports [FAIL] and exits non-zero on invalid YAML frontmatter syntax'
+  echo 'not ok 110 - doctor reports [FAIL] and exits non-zero on invalid YAML frontmatter syntax'
 fi
 
-# Test 107: Claude Code env vars map to canonical claude scheme without annotations
+# Test 111: Claude Code env vars map to canonical claude scheme without annotations
 AGENT_REPO="$TEST_ROOT/agent-repo"
 mkdir -p "$AGENT_REPO/proj/tasks"
 git -C "$AGENT_REPO" init -q
@@ -1947,12 +2000,12 @@ if echo "$AGENT_FM" | grep -q 'claude://11112222-3333-4444-5555-666677778888' &&
   ! echo "$AGENT_FM" | grep -q '(' &&
   ! echo "$AGENT_FM" | grep -q 'claude-code' &&
   echo "$AGENT_LOG" | grep -q "Conversation: claude://11112222-3333-4444-5555-666677778888"; then
-  echo 'ok 107 - Claude Code env vars map to canonical claude scheme without annotations'
+  echo 'ok 111 - Claude Code env vars map to canonical claude scheme without annotations'
 else
-  echo 'not ok 107 - Claude Code env vars map to canonical claude scheme without annotations'
+  echo 'not ok 111 - Claude Code env vars map to canonical claude scheme without annotations'
 fi
 
-# Test 108: aborted checkpoint does not mutate task file frontmatter
+# Test 112: aborted checkpoint does not mutate task file frontmatter
 BEFORE_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
 printf '\nUnlisted file\n' >"$AGENT_REPO/proj/unlisted.txt"
 set +e
@@ -1962,12 +2015,12 @@ set -e
 AFTER_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
 rm -f "$AGENT_REPO/proj/unlisted.txt"
 if [ "$CP_EXIT" -ne 0 ] && [ "$BEFORE_FM" = "$AFTER_FM" ]; then
-  echo 'ok 108 - aborted checkpoint does not mutate task file frontmatter'
+  echo 'ok 112 - aborted checkpoint does not mutate task file frontmatter'
 else
-  echo 'not ok 108 - aborted checkpoint does not mutate task file frontmatter'
+  echo 'not ok 112 - aborted checkpoint does not mutate task file frontmatter'
 fi
 
-# Test 109: legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed
+# Test 113: legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed
 TOL_REPO="$TEST_ROOT/tol-repo"
 mkdir -p "$TOL_REPO/proj/tasks"
 git -C "$TOL_REPO" init -q
@@ -2008,12 +2061,12 @@ if [ "$TOL_EXIT" -eq 0 ] &&
   ! echo "$TOL_DR_OUT" | grep -q 'claude.ai' &&
   echo "$UPGRADED_FM" | grep -q 'claude://afb6245a-b957-464c-934e-9d09ee099e97' &&
   ! echo "$UPGRADED_FM" | grep -q 'conversation://afb6245a-b957-464c-934e-9d09ee099e97'; then
-  echo 'ok 109 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
+  echo 'ok 113 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
 else
-  echo 'not ok 109 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
+  echo 'not ok 113 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
 fi
 
-# Test 110: remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly
+# Test 114: remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly
 VAL_REPO="$TEST_ROOT/val-repo"
 mkdir -p "$VAL_REPO/proj/tasks"
 git -C "$VAL_REPO" init -q
@@ -2050,9 +2103,9 @@ if [ "$SHORT_URI_EXIT" -ne 0 ] &&
   echo "$MALFORMED_URI_OUT" | grep -q "invalid conversation ID 'claude://aaaabbbbcccc1111 (a: b: c)'" &&
   [ "$DR_VAL_EXIT" -eq 0 ] &&
   ! echo "$DR_VAL_OUT" | grep -q "invalid YAML"; then
-  echo 'ok 110 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
+  echo 'ok 114 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
 else
-  echo 'not ok 110 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
+  echo 'not ok 114 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
 fi
 
 # --- dispatch ---------------------------------------------------------------
@@ -2133,7 +2186,7 @@ printf '%s\n' \
 git -C "$DISPATCH_REPO" add -A
 git -C "$DISPATCH_REPO" commit -qm 'init dispatch fixture'
 
-# Test 111: the note projects committed tracker state and asserts nothing else
+# Test 115: the note projects committed tracker state and asserts nothing else
 DISPATCH_RESOLVED_REPO="$(cd "$DISPATCH_REPO" && pwd -P)"
 DISPATCH_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>/dev/null)"
 # Compare against a single-line rendering: the note is hard-wrapped for pasting.
@@ -2145,20 +2198,20 @@ if [[ "$DISPATCH_FLAT" == *"Next is taskgo TASK-11111 (proj): Replace the manife
   [[ "$DISPATCH_FLAT" == *"form your own view of the approach."* ]] &&
   [[ "$DISPATCH_FLAT" != *"buffers the whole manifest"* ]] &&
   [[ "$DISPATCH_FLAT" != *"Criteria"* ]]; then
-  echo 'ok 111 - dispatch emits ID, project, title, and Goal without other task prose'
+  echo 'ok 115 - dispatch emits ID, project, title, and Goal without other task prose'
 else
-  echo 'not ok 111 - dispatch emits ID, project, title, and Goal without other task prose'
+  echo 'not ok 115 - dispatch emits ID, project, title, and Goal without other task prose'
 fi
 
-# Test 112: file references survive wrapping unbroken
+# Test 116: file references survive wrapping unbroken
 DISPATCH_LONG="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>/dev/null)"
 if [[ "$DISPATCH_LONG" == *"($DISPATCH_RESOLVED_REPO/proj/tasks/TASK-11111-manifest-loader.md)"* ]]; then
-  echo 'ok 112 - dispatch never wraps a path mid-token'
+  echo 'ok 116 - dispatch never wraps a path mid-token'
 else
-  echo 'not ok 112 - dispatch never wraps a path mid-token'
+  echo 'not ok 116 - dispatch never wraps a path mid-token'
 fi
 
-# Test 113: dispatching finished work is refused
+# Test 117: dispatching finished work is refused
 set +e
 DISPATCH_DONE_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-22222 2>&1)"
 DISPATCH_DONE_EXIT=$?
@@ -2166,12 +2219,12 @@ set -e
 if [ "$DISPATCH_DONE_EXIT" -ne 0 ] &&
   [[ "$DISPATCH_DONE_OUT" == *"taskgo dispatch: TASK-22222 is done"* ]] &&
   [[ "$DISPATCH_DONE_OUT" == *"--state ready"* ]]; then
-  echo 'ok 113 - dispatch refuses a done task and points at the ready frontier'
+  echo 'ok 117 - dispatch refuses a done task and points at the ready frontier'
 else
-  echo 'not ok 113 - dispatch refuses a done task and points at the ready frontier'
+  echo 'not ok 117 - dispatch refuses a done task and points at the ready frontier'
 fi
 
-# Test 114: unresolved blockers warn on stderr but still emit a note
+# Test 118: unresolved blockers warn on stderr but still emit a note
 set +e
 DISPATCH_BLOCKED_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-33333 2>&1 >/dev/null)"
 DISPATCH_BLOCKED_EXIT=$?
@@ -2181,22 +2234,22 @@ if [ "$DISPATCH_BLOCKED_EXIT" -eq 0 ] &&
   [[ "$DISPATCH_BLOCKED_ERR" == *"[WARN]"* ]] &&
   [[ "$DISPATCH_BLOCKED_ERR" == *"still blocked by TASK-44444"* ]] &&
   [[ "$DISPATCH_BLOCKED_OUT" == *"Next is taskgo TASK-33333"* ]]; then
-  echo 'ok 114 - dispatch warns on unresolved blockers without failing'
+  echo 'ok 118 - dispatch warns on unresolved blockers without failing'
 else
-  echo 'not ok 114 - dispatch warns on unresolved blockers without failing'
+  echo 'not ok 118 - dispatch warns on unresolved blockers without failing'
 fi
 
-# Test 115: a missing Goal is reported rather than silently producing a thin note
+# Test 119: a missing Goal is reported rather than silently producing a thin note
 set +e
 DISPATCH_NO_GOAL_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-44444 2>&1 >/dev/null)"
 set -e
 if [[ "$DISPATCH_NO_GOAL_ERR" == *"[WARN]"* ]] && [[ "$DISPATCH_NO_GOAL_ERR" == *"has no '**Goal:**'"* ]]; then
-  echo 'ok 115 - dispatch warns when the task states no Goal'
+  echo 'ok 119 - dispatch warns when the task states no Goal'
 else
-  echo 'not ok 115 - dispatch warns when the task states no Goal'
+  echo 'not ok 119 - dispatch warns when the task states no Goal'
 fi
 
-# Test 116: uncommitted project state is reported (handoff-ready precondition)
+# Test 120: uncommitted project state is reported (handoff-ready precondition)
 printf 'scratch\n' >>"$DISPATCH_REPO/proj/STATUS.md"
 set +e
 DISPATCH_DIRTY_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>&1 >/dev/null)"
@@ -2206,20 +2259,20 @@ git -C "$DISPATCH_REPO" checkout -q -- proj/STATUS.md
 if [ "$DISPATCH_DIRTY_EXIT" -eq 0 ] &&
   [[ "$DISPATCH_DIRTY_ERR" == *"[WARN]"* ]] &&
   [[ "$DISPATCH_DIRTY_ERR" == *"uncommitted changes"* ]]; then
-  echo 'ok 116 - dispatch warns when the project has uncommitted changes'
+  echo 'ok 120 - dispatch warns when the project has uncommitted changes'
 else
-  echo 'not ok 116 - dispatch warns when the project has uncommitted changes'
+  echo 'not ok 120 - dispatch warns when the project has uncommitted changes'
 fi
 
-# Test 117: warnings never contaminate the paste-ready note on stdout
+# Test 121: warnings never contaminate the paste-ready note on stdout
 DISPATCH_CLEAN="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-33333 2>/dev/null)"
 if [[ "$DISPATCH_CLEAN" != *"[WARN]"* ]] && [[ "$DISPATCH_CLEAN" != *"blocked by"* ]]; then
-  echo 'ok 117 - dispatch keeps diagnostics off stdout'
+  echo 'ok 121 - dispatch keeps diagnostics off stdout'
 else
-  echo 'not ok 117 - dispatch keeps diagnostics off stdout'
+  echo 'not ok 121 - dispatch keeps diagnostics off stdout'
 fi
 
-# Test 118: dirty task prose cannot leak into the committed-state projection
+# Test 122: dirty task prose cannot leak into the committed-state projection
 sed -i.bak 's/Cold start stops scaling with manifest size/Use a replacement goal from the working tree/' \
   "$DISPATCH_REPO/proj/tasks/TASK-11111-manifest-loader.md"
 set +e
@@ -2233,28 +2286,28 @@ if [ "$DISPATCH_DIRTY_TASK_EXIT" -eq 0 ] &&
   [[ "$DISPATCH_DIRTY_TASK_ERR" == *"uncommitted changes"* ]] &&
   [[ "$DISPATCH_DIRTY_TASK_OUT" == *"Cold start stops scaling with manifest size."* ]] &&
   [[ "$DISPATCH_DIRTY_TASK_OUT" != *"replacement goal"* ]]; then
-  echo 'ok 118 - dispatch projects committed task prose when the working tree is dirty'
+  echo 'ok 122 - dispatch projects committed task prose when the working tree is dirty'
 else
-  echo 'not ok 118 - dispatch projects committed task prose when the working tree is dirty'
+  echo 'not ok 122 - dispatch projects committed task prose when the working tree is dirty'
 fi
 
-# Test 119: explicit blocked state warns even without a blocked_by edge
+# Test 123: explicit blocked state warns even without a blocked_by edge
 DISPATCH_STATUS_BLOCKED_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-55555 2>&1 >/dev/null)"
 if [[ "$DISPATCH_STATUS_BLOCKED_ERR" == *"status is blocked but no blocked_by edges"* ]]; then
-  echo 'ok 119 - dispatch reports explicit blocked status through the shared audit'
+  echo 'ok 123 - dispatch reports explicit blocked status through the shared audit'
 else
-  echo 'not ok 119 - dispatch reports explicit blocked status through the shared audit'
+  echo 'not ok 123 - dispatch reports explicit blocked status through the shared audit'
 fi
 
-# Test 120: missing task status is reported through the shared audit
+# Test 124: missing task status is reported through the shared audit
 DISPATCH_MISSING_STATUS_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-66666 2>&1 >/dev/null)"
 if [[ "$DISPATCH_MISSING_STATUS_ERR" == *"non-standard status ''"* ]]; then
-  echo 'ok 120 - dispatch reports a missing status through the shared audit'
+  echo 'ok 124 - dispatch reports a missing status through the shared audit'
 else
-  echo 'not ok 120 - dispatch reports a missing status through the shared audit'
+  echo 'not ok 124 - dispatch reports a missing status through the shared audit'
 fi
 
-# Test 121: an uncommitted task cannot produce a dispatch note
+# Test 125: an uncommitted task cannot produce a dispatch note
 printf '%s\n' \
   '---' \
   'id: TASK-77777' \
@@ -2271,12 +2324,12 @@ DISPATCH_UNCOMMITTED_EXIT=$?
 set -e
 if [ "$DISPATCH_UNCOMMITTED_EXIT" -ne 0 ] &&
   [[ "$DISPATCH_UNCOMMITTED_OUT" == *"is not committed at HEAD"* ]]; then
-  echo 'ok 121 - dispatch refuses task records absent from HEAD'
+  echo 'ok 125 - dispatch refuses task records absent from HEAD'
 else
-  echo 'not ok 121 - dispatch refuses task records absent from HEAD'
+  echo 'not ok 125 - dispatch refuses task records absent from HEAD'
 fi
 
-# Test 122: dispatch help follows the CLI house structure
+# Test 126: dispatch help follows the CLI house structure
 DISPATCH_HELP="$("$BIN" dispatch --help)"
 DISPATCH_TOP_HELP="$("$BIN" --help)"
 if [[ "$DISPATCH_HELP" == Usage:* ]] &&
@@ -2285,9 +2338,9 @@ if [[ "$DISPATCH_HELP" == Usage:* ]] &&
   [[ "$DISPATCH_HELP" == *"Examples:"* ]] &&
   [[ "$DISPATCH_TOP_HELP" == *"dispatch TASK_ID"* ]] &&
   [[ "$DISPATCH_TOP_HELP" != *"handover TASK_ID"* ]]; then
-  echo 'ok 122 - dispatch help follows the CLI house structure'
+  echo 'ok 126 - dispatch help follows the CLI house structure'
 else
-  echo 'not ok 122 - dispatch help follows the CLI house structure'
+  echo 'not ok 126 - dispatch help follows the CLI house structure'
 fi
 
 # ===========================================================================
@@ -2330,17 +2383,17 @@ Use the initial module.
 Simple baseline.
 EOF
 
-# Test 123: sync projects active ADRs under ### Decisions in STATUS.md
+# Test 127: sync projects active ADRs under ### Decisions in STATUS.md
 ("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
 if grep -q '^### Decisions$' "$ADR_REPO/proj/STATUS.md" &&
   grep -q '001-initial-arch.md.*001: Initial Architecture' "$ADR_REPO/proj/STATUS.md" &&
   ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
-  echo 'ok 123 - sync projects active ADRs in STATUS.md and doctor passes'
+  echo 'ok 127 - sync projects active ADRs in STATUS.md and doctor passes'
 else
-  echo 'not ok 123 - sync projects active ADRs in STATUS.md and doctor passes'
+  echo 'not ok 127 - sync projects active ADRs in STATUS.md and doctor passes'
 fi
 
-# Test 124: supersedes on newer ADR retires older ADR without editing the older file
+# Test 128: supersedes on newer ADR retires older ADR without editing the older file
 cat <<'EOF' >"$ADR_REPO/proj/decisions/002-new-arch.md"
 ---
 supersedes:
@@ -2371,12 +2424,12 @@ if grep -q '002-new-arch.md.*002: New Architecture' "$ADR_REPO/proj/STATUS.md" &
   ! grep -q '001-initial-arch.md' "$ADR_REPO/proj/STATUS.md" &&
   grep -q '^Accepted$' "$ADR_REPO/proj/decisions/001-initial-arch.md" &&
   ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
-  echo 'ok 124 - supersedes edge retires older ADR from STATUS.md without modifying older file'
+  echo 'ok 128 - supersedes edge retires older ADR from STATUS.md without modifying older file'
 else
-  echo 'not ok 124 - supersedes edge retires older ADR from STATUS.md without modifying older file'
+  echo 'not ok 128 - supersedes edge retires older ADR from STATUS.md without modifying older file'
 fi
 
-# Test 125: doctor warns when supersedes names an unknown ADR
+# Test 129: doctor warns when supersedes names an unknown ADR
 cat <<'EOF' >"$ADR_REPO/proj/decisions/003-unknown-target.md"
 ---
 supersedes:
@@ -2410,12 +2463,12 @@ set -e
 rm -f "$ADR_REPO/proj/decisions/003-unknown-target.md"
 if [ "$ADR_UNKNOWN_EXIT" -ne 0 ] &&
   [[ "$ADR_UNKNOWN_OUT" == *"supersedes names unknown ADR(s): 999-missing.md"* ]]; then
-  echo 'ok 125 - doctor warns when supersedes names an unknown ADR target'
+  echo 'ok 129 - doctor warns when supersedes names an unknown ADR target'
 else
-  echo 'not ok 125 - doctor warns when supersedes names an unknown ADR target'
+  echo 'not ok 129 - doctor warns when supersedes names an unknown ADR target'
 fi
 
-# Test 126: doctor warns on ADR supersedes cycles
+# Test 130: doctor warns on ADR supersedes cycles
 cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
 ---
 supersedes:
@@ -2448,12 +2501,12 @@ ADR_CYCLE_EXIT=$?
 set -e
 if [ "$ADR_CYCLE_EXIT" -ne 0 ] &&
   [[ "$ADR_CYCLE_OUT" == *"ADR supersedes cycle:"* ]]; then
-  echo 'ok 126 - doctor detects ADR supersedes cycles'
+  echo 'ok 130 - doctor detects ADR supersedes cycles'
 else
-  echo 'not ok 126 - doctor detects ADR supersedes cycles'
+  echo 'not ok 130 - doctor detects ADR supersedes cycles'
 fi
 
-# Restore 001 without cycle and test 127: active ADR referencing a superseded ADR or broken/escaped link
+# Restore 001 without cycle and test 131: active ADR referencing a superseded ADR or broken/escaped link
 cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
 # 001: Initial Architecture
 
@@ -2503,16 +2556,16 @@ if [ "$ADR_STALE_EXIT" -ne 0 ] &&
   [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: active ADR references superseded ADR '001-initial-arch.md'"* ]] &&
   [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: stale file reference 'src/nonexistent.py'"* ]] &&
   [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: stale file reference '../../../../etc/hosts'"* ]]; then
-  echo 'ok 127 - doctor warns when an active ADR references a superseded ADR or broken/escaped link'
+  echo 'ok 131 - doctor warns when an active ADR references a superseded ADR or broken/escaped link'
 else
-  echo 'not ok 127 - doctor warns when an active ADR references a superseded ADR or broken/escaped link'
+  echo 'not ok 131 - doctor warns when an active ADR references a superseded ADR or broken/escaped link'
 fi
 
-# Test 128: superseded ADR (001-initial-arch.md) is exempt from stale link warnings
+# Test 132: superseded ADR (001-initial-arch.md) is exempt from stale link warnings
 rm -f "$ADR_REPO/proj/decisions/003-cites-superseded.md"
 ("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
 if ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
-  echo 'ok 128 - doctor exempts superseded ADRs from stale file reference warnings'
+  echo 'ok 132 - doctor exempts superseded ADRs from stale file reference warnings'
 else
-  echo 'not ok 128 - doctor exempts superseded ADRs from stale file reference warnings'
+  echo 'not ok 132 - doctor exempts superseded ADRs from stale file reference warnings'
 fi

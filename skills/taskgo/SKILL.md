@@ -70,7 +70,9 @@ blocked_by: [TASK-1627D]
 
 `status: blocked` is set manually. `blocked_by` is read-only scheduling data.
 Record the edge on the task that is *held*, never on the blocker; otherwise a
-new dependency requires editing an unrelated, already `done` task.
+new dependency requires editing an unrelated, already `done` task. Remove
+resolved edges from open tasks when `taskgo doctor` reports them (or re-plan if
+a prerequisite was cancelled).
 
 ### Planning & In-Progress Task Template
 
