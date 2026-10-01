@@ -146,15 +146,14 @@ resolution overhead:
 
 > [!NOTE] **Active Experiment — Standard Library Structural Modeling (`taskgo`,
 > `pacioli`):** A zero-dependency pattern for domain and structural data
-> modeling is currently being tested in `skills/taskgo/scripts/taskgo` and
-> `skills/agent-tools/scripts/pacioli`. Instead of introducing heavy third-party
-> validation libraries (like Pydantic) or relying on untyped dictionaries and
-> mutable classes, these scripts model domain concepts using Python 3.11+
-> standard library primitives: `@dataclass(slots=True, frozen=True)` for
-> immutable product types, `enum.StrEnum` for closed state domains, and
-> `typing.TypedDict` for wire payload schemas. If this pattern proves effective,
-> consider adopting it across other standalone Python scripts in this
-> repository.
+> modeling is currently being tested in the `taskgo` and `pacioli` CLI scripts.
+> Instead of introducing heavy third-party validation libraries (like Pydantic)
+> or relying on untyped dictionaries and mutable classes, these scripts model
+> domain concepts using Python 3.11+ standard library primitives:
+> `@dataclass(slots=True, frozen=True)` for immutable product types,
+> `enum.StrEnum` for closed state domains, and `typing.TypedDict` for wire
+> payload schemas. If this pattern proves effective, consider adopting it across
+> other standalone Python scripts in this repository.
 
 ### Handling Ctrl+C, Signals, and Broken Pipes
 

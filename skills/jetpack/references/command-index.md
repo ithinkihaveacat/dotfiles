@@ -19,8 +19,8 @@
 ## Help
 
 The block below is `scripts/jetpack --help`, kept in sync by
-`command-index-format` (coding-standards skill); do not edit it by hand. The
-sections that follow add per-subcommand detail and raw commands.
+`command-index-format`; do not edit it by hand. The sections that follow add
+per-subcommand detail and raw commands.
 
 <!-- generated: ../scripts/jetpack --help -->
 

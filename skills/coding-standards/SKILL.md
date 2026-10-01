@@ -85,12 +85,6 @@ Commit messages must adhere strictly to Conventional Commits syntax
 hard-wrapping body prose to 72 characters. See
 **[references/git.md](references/git.md)**.
 
-### Android Development
-
-Conventions and tools for working with Android Jetpack libraries, ADB device
-operations, APK analysis, package management, Wear OS debugging, and emulator
-management. See **[references/android.md](references/android.md)**.
-
 ### Web Development
 
 Guidelines for web development focusing on resilient client-side state
@@ -111,7 +105,5 @@ See **[references/web.md](references/web.md)**.
   offline-mode variables.
 - **[Git Operations](references/git.md)** — Conventional Commits syntax and
   commit message rules.
-- **[Android Conventions](references/android.md)** — Android development and
-  tooling standards.
 - **[Web Guidelines](references/web.md)** — State management and web frontend
   guidelines.

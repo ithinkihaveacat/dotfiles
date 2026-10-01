@@ -25,10 +25,9 @@
 ## Help
 
 The block below is `scripts/emumanager --help`, kept in sync by
-`command-index-format` (coding-standards skill); do not edit it by hand. The
-sections that follow add per-subcommand detail and raw commands. (The marker
-pins `ANDROID_HOME` to its documented default so the generated output is
-machine-independent.)
+`command-index-format`; do not edit it by hand. The sections that follow add
+per-subcommand detail and raw commands. (The marker pins `ANDROID_HOME` to its
+documented default so the generated output is machine-independent.)
 
 <!-- generated: env ANDROID_HOME=$HOME/.local/share/android-sdk ../scripts/emumanager --help -->
 

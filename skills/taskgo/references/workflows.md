@@ -13,10 +13,11 @@ Before starting work, an agent must:
    direction matters.
 1. If `<project>/README.md` declares `skills:` in its YAML frontmatter that are
    missing from the active `<skills>` list and a session
-   `Artifact Directory Path` (`.../brain/<id>`) is available, run
-   `skill -C <artifactDir> add <skill>...` to register them in the session, and
-   read `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if
-   needed in the current turn.
+   `Artifact Directory Path` (`.../brain/<id>`) is available, register them in
+   the session if a workspace skill manager is available (e.g.,
+   `skill -C <artifactDir> add <skill>...`), and read
+   `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if needed in
+   the current turn.
 1. Inspect linked artifact repos under their own instructions.
 
 ### Commit Authority

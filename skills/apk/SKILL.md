@@ -54,11 +54,15 @@ See `references/command-index.md` for detailed usage.
 
 > [!TIP] If the application is already installed on the device and you want to
 > launch it without reinstalling (preserving state and cache), you can compose
-> the `scripts/apk-info` package query with an ADB package management utility
-> (such as `packagename`, if available in your workspace):
+> the `scripts/apk-info` package query with `adb` (or an ADB package management
+> helper such as `packagename` if available in your workspace):
 >
-> - **Fish:** `packagename launch (apk-info package app.apk)`
-> - **Bash/Zsh:** `packagename launch $(apk-info package app.apk)`
+> - **Standard ADB:**
+>   `adb shell monkey -p "$(scripts/apk-info package app.apk)" -c android.intent.category.LAUNCHER 1`
+> - **With `packagename` (Bash/Zsh):**
+>   `packagename launch "$(apk-info package app.apk)"`
+> - **With `packagename` (Fish):**
+>   `packagename launch (apk-info package app.apk)`
 
 ## Reference Material
 

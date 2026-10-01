@@ -128,12 +128,14 @@ ______________________________________________________________________
 Ensure your application's layouts and text scale gracefully across different
 form factors and configurations.
 
-- **Dynamic Color Themes (API 36+)**:
-  - **Capability**: Test how your app's UI adapts to different Material 3 system
-    color palettes (e.g. indigo, lemongrass, porcelain).
-  - **Action**: Do not write custom theme injection scripts. Search your active
-    skills for pre-approved theme customization automation to toggle these
-    Material 3 system palettes.
+- **Dynamic Color Themes (API 36+)**: Test how your app's UI adapts to different
+  Material 3 system color palettes (e.g., indigo, lemongrass, porcelain) via the
+  `theme_customization_overlay_packages` secure setting (or a workspace helper
+  such as `adb-theme set lemongrass` if available):
+  ```bash
+  adb shell settings put secure theme_customization_overlay_packages \
+    '{"android.theme.customization.color_source":"preset","android.theme.customization.system_palette":"#DDEB78","android.theme.customization.theme_style":"EXPRESSIVE"}'
+  ```
 - **Increase Font Scale (e.g., 1.3x)**:
   ```bash
   adb shell settings put system font_scale 1.3

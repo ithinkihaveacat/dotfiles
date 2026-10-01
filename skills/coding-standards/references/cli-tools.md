@@ -285,8 +285,6 @@ The first argument must be a verb; the `[Instance]` may be omitted, as in
 
 #### Reference Implementation: `packagename`
 
-<!-- generated: ../../../bin/packagename --help -->
-
 ```text
 Usage: packagename [OPTIONS] <command> [arguments]
 
@@ -340,8 +338,6 @@ Examples:
   packagename profile-status com.example.app
 ```
 
-<!-- /generated -->
-
 ### Type 2: The Action-Centric Tool (The "Utility" Pattern)
 
 _Use this when your tool performs exactly **one primary action**._
@@ -353,8 +349,6 @@ _Use this when your tool performs exactly **one primary action**._
 - **Implicit Meaning:** "**Unzip** the archive `bundle.zip`."
 
 #### Reference Implementation: `apk-unzip`
-
-<!-- generated: ../../../bin/apk-unzip --help -->
 
 ```text
 Usage: apk-unzip [OPTIONS] ZIP_FILE
@@ -379,5 +373,3 @@ Examples:
   # Unzip to a specific directory
   apk-unzip --output /tmp/my-unzipped-archive /path/to/your/archive.zip
 ```
-
-<!-- /generated -->

@@ -61,10 +61,11 @@ State validation is designed to be observable, chronological, and verifiable.
     factors.
 - **UI-Driven Recording over Background Broadcasts**: When capturing video
   recordings or verifying user flows for audits and deliverables, record the
-  visual UI journey on-screen using `adb-screenrecord` rather than relying
-  solely on silent background broadcast commands. Enable visual touch feedback
-  (`adb shell settings put system show_touches 1` or via `adb-demo`) so viewers
-  can trace user interactions directly.
+  visual UI journey on-screen using an ADB screen recording utility (such as
+  `adb shell screenrecord` or `adb-screenrecord` if available) rather than
+  relying solely on silent background broadcast commands. Enable visual touch
+  feedback (`adb shell settings put system show_touches 1` or via `adb-demo`) so
+  viewers can trace user interactions directly.
 
 ______________________________________________________________________
 
@@ -105,16 +106,22 @@ dismissed:
 
 When capturing screenshots for a visual timeline, background notifications,
 changing clocks, or low battery warnings can cause visual clutter and make
-screenshot comparisons fail. Use the `adb-demo` helper from the `adb` skill to
-toggle a clean, static status bar (fixed clock at 10:08, 100% battery, hidden
-notifications, show-touches enabled):
+screenshot comparisons fail. Enable Android System UI Demo Mode (or run a
+workspace helper such as `adb-demo on` / `adb-demo off` if available) to toggle
+a clean, static status bar and visible touch indicators:
 
 ```bash
-# Enter demo mode with a clean status bar
-adb-demo on
+# Enter demo mode with a fixed clock, full battery, hidden notifications, and show-touches
+adb shell settings put global sysui_demo_allowed 1
+adb shell am broadcast -a com.android.systemui.demo -e command enter
+adb shell am broadcast -a com.android.systemui.demo -e command clock -e hhmm 1620
+adb shell am broadcast -a com.android.systemui.demo -e command battery -e level 100 -e plugged false
+adb shell am broadcast -a com.android.systemui.demo -e command notifications -e visible false
+adb shell settings put system show_touches 1
 
-# Exit demo mode and restore default status bar
-adb-demo off
+# Exit demo mode and restore defaults
+adb shell am broadcast -a com.android.systemui.demo -e command exit
+adb shell settings put system show_touches 0
 ```
 
 ______________________________________________________________________

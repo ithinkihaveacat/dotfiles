@@ -153,9 +153,8 @@ functionality.
 
 ### Generated Command Index Blocks
 
-Some Markdown files (most `references/command-index.md` files, plus the
-reference implementations in `cli-tools.md`) contain blocks generated from a
-script's `--help` output, delimited by marker comments:
+Some Markdown files (most `references/command-index.md` files) contain blocks
+generated from a script's `--help` output, delimited by marker comments:
 
 ```markdown
 <!-- generated: ../scripts/my-script --help -->

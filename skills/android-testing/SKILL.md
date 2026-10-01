@@ -4,9 +4,9 @@ description: >-
   Workflows and ADB commands for testing Android and Wear OS applications. Covers
   system state simulation (Doze mode, battery levels, network failover, Bluetooth
   proxy), location and sensor spoofing, health permissions, UI automation guidelines,
-  and Wear OS surfaces (watch faces and complications; for tiles and widgets, see
-  wear-widget). Use when testing Android or Wear OS apps, simulating edge cases,
-  debugging device connectivity, or automating UI test procedures.
+  and Wear OS watch faces and complications. Use when testing Android or Wear OS
+  apps, simulating edge cases, debugging device connectivity, or automating UI
+  test procedures.
 compatibility: Requires adb and a connected Android phone or Wear OS device/emulator.
 ---
 
@@ -17,8 +17,6 @@ test Android applications reliably across mobile phones and Wear OS devices. It
 focuses on triggering system state changes, validating real-time
 synchronization, implementing robust UI automation, and simulating complex edge
 cases (Doze mode, data layer disconnection, and Fused Location spoofing limits).
-
-For Wear OS Tiles and Glance/AppWidget widgets, see the `wear-widget` skill.
 
 ## Procedural Workflows & Testing Recipes
 
@@ -115,7 +113,6 @@ adb shell input keyevent KEYCODE_HOME
   permissions.
 - **[Watch Faces & Complications](references/watch-faces-and-complications.md)**
   — Watch face and complication updates via `DEBUG_SYSUI`, ambient mode
-  simulation, and standalone watch bootstrapping. (For tiles and widgets, see
-  `wear-widget`.)
+  simulation, and standalone watch bootstrapping.
 - **[Testability Patterns](references/testability-patterns.md)** — App-side
   debug receivers, data seeding, OOBE race conditions, and standby buckets.

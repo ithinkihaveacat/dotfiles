@@ -1,8 +1,7 @@
 # Watch Faces & Complications
 
 Testing Wear OS applications includes validating interactions with watch faces
-and modular complication data fields. (For Wear OS Tiles and Glance/AppWidget
-widgets, see the `wear-widget` skill.)
+and modular complication data fields.
 
 ______________________________________________________________________
 
@@ -13,11 +12,13 @@ involves simulating data updates and tapping actions.
 
 ### Triggering Complication Updates
 
-Force the system to update a complication's data feed using the
-`adb-complication-update` helper from the `adb` skill:
+Force the system to update a complication's data feed via the `DEBUG_SYSUI`
+broadcast (or a workspace helper such as `adb-complication-update <ID>` if
+available):
 
 ```bash
-adb-complication-update <ID>
+adb shell am broadcast -a com.google.android.wearable.app.DEBUG_SYSUI \
+  --es operation complication_update --ei complication_id <ID>
 ```
 
 ### Simulating Watch Face Environments (Wear OS 4+)

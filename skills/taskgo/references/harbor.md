@@ -251,7 +251,7 @@ taskgo harbor verify \
   --candidate-file ./results/config.json \
   --completion-json ./results/completion.json \
   --result-json ./results/result.json \
-  --tool-cmd "skills/coding-standards/scripts/json-format" \
+  --tool-cmd "json-format" \
   --task-id TASK-3A91F \
   --task-title "Format configuration" \
   -o ./acceptance-packet
