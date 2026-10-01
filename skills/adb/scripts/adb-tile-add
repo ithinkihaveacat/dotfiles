@@ -236,33 +236,27 @@ fi
 #   3. Renderer Timeouts: The provider hung or crashed silently before responding.
 #      Result: 'Error getting tile response' in the renderer.
 #
-# Visibility Heuristics (Two-Signal State Machine):
-# Both SysUI and WidgetTrayActivity (--vertical) emit two distinct signals:
-#   - Signal 1 (Container):
-#     * SysUI allocates the carousel slot and shifts focus
-#       ("Visible tile added", "onVisibleTileAdded", "Jumped to the tile").
-#     * WidgetTrayActivity attaches the Compose AndroidView container to
-#       ProtoTilesTileRendererImpl ("Attaching Tile to a container").
-#   - Signal 2 (Content & Inflation):
-#     * ProtoTilesTileRendererImpl receives the provider's RemoteCompose
-#       payload ("Received tile content") and inflates it into the attached
-#       container ("Rendering tile"). In TileRendererImpl.java, "Rendering tile"
-#       is only logged inside inflateIfNeededAndAttach() when BOTH a container
-#       is attached AND valid tile data has been set.
+# Visibility Heuristics:
+# Both SysUI and WidgetTrayActivity (--vertical) use TileRendererImpl from
+# com.google.android.wearable.protolayout.renderer.
 #
-# We wait for Signal 2 (followed by a post-render failure check) so automated
-# tools (like screenshots) never capture a blank slot or loading icon, and so
-# synchronous inflation exceptions ("Failed to render and attach the tile")
-# thrown right after "Rendering tile" are caught reliably.
+# In TileRendererImpl.java, "Rendering tile" is only logged inside
+# inflateIfNeededAndAttach() when BOTH a container View is attached AND valid
+# tile data has been set.
 #
-# SysUI: if Signal 1 is confirmed, we bound the additional wait for Signal 2 to
-# a short grace period (~3s) before proceeding to the post-render check.
+# Attaching alone ("Attaching Tile to a container") or receiving content
+# ("Received tile content.") does not prove the tile has rendered. Content can
+# arrive seconds after attach (or fail to arrive), and off-screen tiles may
+# receive content without being rendered.
 #
-# WidgetTrayActivity: only "Rendering tile" confirms visibility. The tray
-# appends a new widget without scrolling to it, and the renderer attaches and
-# renders only widgets on screen. A widget added below the fold logs "Received
-# tile content" but is not rendered until it is scrolled into view, so render
-# errors cannot be checked; the timeout message says which stage was reached.
+# We wait for "Rendering tile" (followed by a post-render failure check) so
+# automated tools (like screenshots) never capture a blank slot or loading
+# icon, and so synchronous inflation exceptions ("Failed to render and attach
+# the tile") thrown right after "Rendering tile" are caught reliably.
+#
+# If visibility times out before rendering, report_unconfirmed explains which
+# stage was reached (attached to carousel/tray vs content received off-screen
+# vs still loading).
 # -----------------------------------------------------------------------------
 
 LOG_FILE=""
@@ -320,17 +314,20 @@ check_render_failures() {
 }
 
 # Explains a visibility timeout by the last stage the logs reached, so a
-# widget waiting off-screen is not mistaken for one still loading. The add
+# tile waiting off-screen is not mistaken for one still loading. The add
 # itself succeeded; what is unknown is whether the document renders.
 report_unconfirmed() {
-  local timeout="$1" prog
+  local timeout="$1" prog surface
   prog=$(basename "$0")
-  if [ "$VERTICAL" = true ] &&
-    grep -Eq "Attaching Tile to a container.*$PACKAGE_NAME" "$LOG_FILE"; then
-    echo "$prog: added and attached to the tray, but not rendered within $timeout s; render errors were not checked" >&2
-  elif [ "$VERTICAL" = true ] &&
-    grep -Eq "Received tile content.*$PACKAGE_NAME" "$LOG_FILE"; then
-    echo "$prog: added, and the renderer received its content, but did not render it within $timeout s, probably because it is off-screen in the tray (scroll to it to render it); render errors were not checked" >&2
+  surface="carousel"
+  if [ "$VERTICAL" = true ]; then
+    surface="tray"
+  fi
+
+  if grep -Eq "Attaching Tile to a container.*$PACKAGE_NAME" "$LOG_FILE"; then
+    echo "$prog: added and attached to the $surface, but not rendered within $timeout s; render errors were not checked" >&2
+  elif grep -Eq "Received tile content.*$PACKAGE_NAME" "$LOG_FILE"; then
+    echo "$prog: added, and the renderer received its content, but did not render it within $timeout s, probably because it is off-screen in the $surface (scroll to it to render it); render errors were not checked" >&2
   else
     echo "$prog: added, but the tile did not become visible within $timeout s; it may still be loading, or its log lines were missed (retry with --no-wait to skip this check)" >&2
   fi
@@ -347,8 +344,6 @@ wait_for_tile_visibility() {
   local start_time
   start_time=$(date +%s)
   local timeout="${ADB_TILE_VISIBILITY_TIMEOUT:-15}"
-  local visible=false
-  local visible_time=0
 
   while true; do
     local current_time
@@ -367,34 +362,11 @@ wait_for_tile_visibility() {
       exit 1
     fi
 
-    if [ "$VERTICAL" = true ]; then
-      # In TileRendererImpl.java, "Rendering tile" is logged only when both
-      # the container is attached and valid tile content has been received.
-      # Attaching alone proves nothing: content can arrive seconds later.
-      if grep -Eq "Rendering tile.*$PACKAGE_NAME" "$LOG_FILE"; then
-        visible=true
-        break
-      fi
-    else
-      # Check for Container Visibility (Success Signal 1)
-      if [ "$visible" = false ] &&
-        grep -Eq "Visible tile added|onVisibleTileAdded|Jumped to the tile|Index=\[|show-tile" "$LOG_FILE"; then
-        visible=true
-        visible_time=$current_time
-      fi
-
-      # Check for Content Rendering (Success Signal 2)
-      if [ "$visible" = true ]; then
-        if grep -Eq "(Received tile content|Rendering tile|provideWidgetData|ProtoTiles).*$PACKAGE_NAME" "$LOG_FILE"; then
-          break
-        fi
-
-        # Robustness: If the container is visible, don't wait more than
-        # 3 seconds for the specific rendering log.
-        if [ $((current_time - visible_time)) -ge 3 ]; then
-          break
-        fi
-      fi
+    # In TileRendererImpl.java, "Rendering tile" is logged only when both
+    # the container is attached and valid tile content has been received.
+    # Attaching alone proves nothing: content can arrive seconds later.
+    if grep -Eq "Rendering tile.*$PACKAGE_NAME" "$LOG_FILE"; then
+      break
     fi
 
     # --- Failure Detection (Pre-Visibility) ---
@@ -403,27 +375,22 @@ wait_for_tile_visibility() {
     # Global timeout: the add succeeded, but visibility was not confirmed, which
     # is what --wait promises; report that rather than exit 0.
     if [ "$elapsed" -ge "$timeout" ]; then
-      if [ "$visible" = false ]; then
-        report_unconfirmed "$timeout"
-        exit 1
-      fi
-      break
+      report_unconfirmed "$timeout"
+      exit 1
     fi
 
     sleep "${ADB_TILE_RETRY_DELAY:-0.2}"
   done
 
-  if [ "$visible" = true ]; then
-    # Continue monitoring briefly after "Rendering tile" / container visibility:
-    # TileRendererImpl logs "Rendering tile" right before calling
-    # RcTileViewInstance.renderAndAttach(), which may throw
-    # "Failed to render and attach the tile" or trigger an async crash.
-    sleep "${ADB_TILE_RENDER_DELAY:-0.8}"
+  # Continue monitoring briefly after "Rendering tile":
+  # TileRendererImpl logs "Rendering tile" right before calling
+  # RcTileViewInstance.renderAndAttach(), which may throw
+  # "Failed to render and attach the tile" or trigger an async crash.
+  sleep "${ADB_TILE_RENDER_DELAY:-0.8}"
 
-    # --- Failure Detection (Post-Visibility Buffer) ---
-    check_render_failures "post-visibility"
-    echo "Success: Tile is visible."
-  fi
+  # --- Failure Detection (Post-Visibility Buffer) ---
+  check_render_failures "post-visibility"
+  echo "Success: Tile is visible."
 }
 
 # Workaround for a bug: force-stop the package to ensure a fresh bind
