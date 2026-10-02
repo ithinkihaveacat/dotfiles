@@ -1,13 +1,13 @@
 ---
 name: workspace-tools
 description: >-
-  Configures workspaces for agent-assisted development. Manages agent skills (untracked
-  symlinks), workspace tool permissions (allow/deny/ask rules for Claude Code,
-  Codex, and Antigravity),
+  Configures workspaces for agent-assisted development. Manages workspace and
+  per-session (ephemeral) agent skills (untracked symlinks), workspace tool
+  permissions (allow/deny/ask rules for Claude Code, Codex, and Antigravity),
   git hook profiles, and .envrc configurations. Use when configuring a workspace,
-  discovering or installing skills, setting tool permissions, managing git hooks,
-  or
-  updating .envrc configuration blocks.
+  discovering or installing skills (persistently in a workspace or temporarily in
+  a session), setting tool permissions, managing git hooks, or updating .envrc
+  configuration blocks.
 compatibility: >-
   Requires git. Optional: python3, uv, direnv, claude, codex, or agy.
 ---
@@ -21,12 +21,12 @@ control ever seeing the configuration. It consists of four tools:
    `AGENT_REQUIRED_HOOKS` (profiles `agent`, `node`, `gerrit`), managing them
    via trampoline stubs in `.git/hooks/`.
 1. **`skill`**: The workspace manager. Installs and tracks skills as untracked
-   symlinks, automatically adapting to the environment (Git, Perforce, or
-   unmanaged directories; more via plugins). It is fully deterministic and
-   dependency-free: it also enumerates what is installable (`skill catalog`) and
-   manages remote plugin caching, but never calls a model to decide what a
-   workspace needs — see
-   [Choosing Skills for a Workspace](#choosing-skills-for-a-workspace).
+   symlinks, automatically adapting to the environment (Git, Perforce, session
+   artifact directories, or unmanaged directories; more via plugins). It is
+   fully deterministic and dependency-free: it also enumerates what is
+   installable (`skill catalog`) and manages remote plugin caching, but never
+   calls a model to decide what a workspace needs — see
+   [Choosing Skills (Workspace vs. Session)](#choosing-skills-workspace-vs-session).
 1. **`permission`**: The permission manager. Maintains allow/deny/ask rules for
    every detected local agent (workspace-local for Claude Code and Codex,
    user-wide for Antigravity), including pre-approving the safe commands
@@ -42,28 +42,32 @@ ______________________________________________________________________
 ## Managing Skills (`skill`)
 
 The `skill` tool (symlinked in `bin/`) manages agent skills as untracked
-symlinks in your workspace. It automatically detects your environment and
-applies the correct tracking and ignoring mechanism.
+symlinks in your workspace or active session. It automatically detects your
+environment and applies the correct tracking and ignoring mechanism.
 
 ```bash
 skill <command> [arguments]
 ```
 
-### Supported Environments
+### Supported Environments & Scopes
 
-- **Git Repositories**: Links skills under `.agents/skills/` and
-  `.claude/skills/`. A marker block in `.git/info/exclude` is dynamically
-  generated to keep `git status` clean without dirtying the shared `.gitignore`.
-  If another tool rewrites the exclude file, `skill doctor` detects the drift,
-  and running `skill apply` resolves it.
-- **Antigravity (Agy) Session Directories**: When targeting an Antigravity (or
-  Jetski) session artifact directory (`~/.gemini/antigravity/brain/<id>` or
-  `~/.gemini/jetski/brain/<id>`, e.g., via
-  `skill -C <artifactDir> add <skill>`), `skill` links skills under
-  `scratch/skills/` (hidden from the artifact UI watcher and auto-allowed for
-  `view_file` reads) and writes `.agents/skills.json` +
-  `.agents/skills.json.metadata.json` (`userFacing: false`) so the agent loads
-  the skills on the next turn.
+- **Git Repositories (Workspace-Scoped / Persistent)**: Links skills under
+  `.agents/skills/` and `.claude/skills/` for all sessions operating in the
+  repository. A marker block in `.git/info/exclude` is dynamically generated to
+  keep `git status` clean without dirtying the shared `.gitignore`. If another
+  tool rewrites the exclude file, `skill doctor` detects the drift, and running
+  `skill apply` resolves it.
+- **Antigravity & Jetski Session Directories (Per-Session / Ephemeral /
+  Temporary / Scratch)**: When targeting an isolated session artifact directory
+  (`~/.gemini/antigravity/brain/<id>` or `~/.gemini/jetski/brain/<id>`, e.g.,
+  via `skill -C <artifactDir> add <skill>`), `skill` installs skills temporarily
+  for that single conversation session. It links skills under `scratch/skills/`
+  (hidden from the artifact UI watcher and auto-allowed for `view_file` reads)
+  and writes `.agents/skills.json` + `.agents/skills.json.metadata.json`
+  (`userFacing: false`) without modifying the repository's `.envrc` or git
+  excludes. The agent harness loads newly added skills into `<skills>` on the
+  next turn; to use a newly added skill in the current turn, read
+  `<artifactDir>/scratch/skills/<skill>/SKILL.md` directly.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
   skills under local destination folders.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
@@ -106,15 +110,15 @@ skill <command> [arguments]
 - **`catalog [--json]`**: List all plugin-provided skills and their sources.
   `--json` emits one object per skill with its description and structural
   profile — the discovery primitive described in
-  [Choosing Skills for a Workspace](#choosing-skills-for-a-workspace).
+  [Choosing Skills (Workspace vs. Session)](#choosing-skills-workspace-vs-session).
 - **`resolve NAME`**: Print the source path a skill name would resolve to.
 
-### Choosing Skills for a Workspace
+### Choosing Skills (Workspace vs. Session)
 
 Choosing skills is the calling agent's job. `skill` enumerates what exists and
-installs what it is told; the agent decides what belongs in the workspace based
-on project files, tech stack, and user goals. The tool itself is fully
-deterministic and requires no API keys.
+installs what it is told; the agent decides what belongs in the workspace or
+session based on project files, tech stack, and user goals. The tool itself is
+fully deterministic and requires no API keys.
 
 1. **Survey the catalog:** Run `skill catalog --json` to inspect all available
    skills in a single call (JSON Lines). Each record includes frontmatter
@@ -126,11 +130,20 @@ deterministic and requires no API keys.
    - `tests`: Count of test suites verifying tool behavior.
    - `status`: `local` (on disk), `cached` (downloaded remote), `remote` (known
      from cached frontmatter; structure is `null`), or `missing`.
-1. **Apply confirmed choices:** Explain recommendations to the user and persist
-   confirmed selections in `.envrc`:
-   ```bash
-   envrc add skills <names> && direnv reload && skill apply
-   ```
+1. **Apply confirmed choices:** Explain recommendations to the user and install
+   confirmed selections according to the desired scope:
+   - **Workspace-scoped (persistent across sessions):** Record selections in
+     `.envrc` and synchronize:
+     ```bash
+     envrc add skills <names> && direnv reload && skill apply
+     ```
+   - **Per-session (ephemeral / temporary / session-scoped / scratch):** When a
+     skill is only needed for the active conversation and the harness provides a
+     session `Artifact Directory Path` (`.../brain/<id>`), target that directory
+     with `-C` so `.envrc` and repository exclusions remain untouched:
+     ```bash
+     skill -C <artifactDir> add <names>
+     ```
 
 `skill catalog` represents the local and plugin-registered inventory. If
 external or enterprise discovery systems exist in the environment, query those
@@ -361,22 +374,45 @@ skill bundle coding-standards personal-network -o skills.zip
 skill bundle --workspace -o /tmp/project-skills/
 ```
 
-### Manually Adding a Skill
+### Adding Workspace Skills (Persistent)
 
-Add a specific skill from the catalog or a local path:
+Add a skill to the current repository workspace from the catalog or a local
+path:
 
 ```bash
 skill add coding-standards
 skill add /path/to/custom-skill
 ```
 
-An ad-hoc `skill add` is pruned by the next `skill apply` unless the skill is
-also declared in `AGENT_REQUIRED_SKILLS`. To persist it, record it in the
-workspace's `.envrc` (the `envrc` command manages the declaration):
+An ad-hoc `skill add` in a repository workspace is pruned by the next
+`skill apply` unless the skill is also declared in `AGENT_REQUIRED_SKILLS`. Only
+modify `.envrc` when persisting repository-wide default skills across sessions
+(for single-session or temporary requests, see
+[Adding Per-Session Skills](#adding-per-session-skills-ephemeral--temporary--scratch)):
 
 ```bash
-envrc add skills coding-standards
+envrc add skills coding-standards && direnv reload && skill apply
 ```
+
+### Adding Per-Session Skills (Ephemeral / Temporary / Scratch)
+
+Install a skill temporarily for the active conversation session (also referred
+to as *per-session*, *ephemeral*, *session-scoped*, *temporary*, or *scratch*
+skills) when running in an agent harness with a session
+`Artifact Directory Path` (`~/.gemini/antigravity/brain/<id>` or
+`~/.gemini/jetski/brain/<id>`):
+
+```bash
+skill -C <artifactDir> add coding-standards
+```
+
+Passing `-C <artifactDir>` targets the isolated session directory (defaulting
+`--from` to `cli`), linking the skill under `<artifactDir>/scratch/skills/` and
+registering it in `<artifactDir>/.agents/skills.json` while leaving the
+repository's `.envrc` and `.git/info/exclude` untouched. Read
+`<artifactDir>/scratch/skills/<skill>/SKILL.md` directly to use the skill in the
+current turn; the harness injects it into `<skills>` automatically on subsequent
+turns.
 
 ### Managing Permissions by Hand
 

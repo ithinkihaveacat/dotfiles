@@ -31,20 +31,27 @@ maintains, and the one deliberate exception. User-facing usage lives in
 
 ## The four flows ("what touches what")
 
-1. **Desired state** comes from `AGENT_REQUIRED_SKILLS` (or, for stateful plugin
-   workspaces, a saved state file via `FileStateMixin`). This is the set of
-   skill *names* the workspace wants — `Workspace.get_expected_skills()`.
+1. **Desired state** comes from `AGENT_REQUIRED_SKILLS` under `--from=env` (or,
+   under `--from=cli` / `-C DIR` and for stateful plugin or session workspaces,
+   command-line arguments or a saved state file via `FileStateMixin` /
+   `.agents/skills.json`). This is the set of skill *names* the workspace wants
+   — `Workspace.get_expected_skills()`.
 1. **Sources** are resolved by name against `SKILL_SOURCE_DIRS`
    (`resolve_skill_spec`): the on-disk skill directory a name points to.
 1. **Destinations** are the per-agent link directories
-   (`Workspace.get_dest_dirs()`): `.claude/skills` and/or `.agents/skills`,
-   overridable with `SKILL_DEST_DIRS`. `skill apply` makes each expected skill a
-   symlink `dest/<name> -> source` and prunes symlinks that are no longer
-   expected.
-1. **VCS invisibility** (git only): `GitWorkspace` maintains a marker block
-   (`# >>> skills >>>` … `# <<< skills <<<`) in `.git/info/exclude` listing the
-   symlink paths, so `git status` stays clean without touching the tracked
-   `.gitignore`.
+   (`Workspace.get_dest_dirs()`): `.claude/skills` and/or `.agents/skills` in
+   repository workspaces (overridable with `SKILL_DEST_DIRS`), or
+   `scratch/skills` in Antigravity/Jetski session artifact directories
+   (`AgyBrainWorkspace`). `skill apply` makes each expected skill a symlink
+   `dest/<name> -> source` and prunes symlinks that are no longer expected.
+1. **VCS invisibility & session registration**: `GitWorkspace` maintains a
+   marker block (`# >>> skills >>>` … `# <<< skills <<<`) in `.git/info/exclude`
+   listing the symlink paths, so `git status` stays clean without touching the
+   tracked `.gitignore`. In session artifact directories, `AgyBrainWorkspace`
+   writes `.agents/skills.json` (`include_only`) and
+   `.agents/skills.json.metadata.json` (`userFacing: false`) so the harness
+   loads `scratch/skills/` on the next turn without surfacing config files in
+   the artifact UI.
 
 ## Invariants
 

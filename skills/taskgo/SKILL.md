@@ -153,14 +153,19 @@ Agent Dispatch.
 
 - **Before work:**
   1. Read `AGENTS.md`, project `README.md`, `STATUS.md`, and `PLAN.md`.
-  1. **Activate project skills:** If `<project>/README.md` declares `skills:` in
-     its YAML frontmatter that are not yet in your active `<skills>` list and
-     your session provides an `Artifact Directory Path` (`.../brain/<id>`), link
-     them into the session if a workspace skill manager is available (e.g.,
-     `skill -C <artifactDir> add <skill>...`). Read
-     `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if needed
-     in the current turn; the harness will inject them into `<skills>`
-     automatically on subsequent turns.
+  1. **Activate project & per-session skills:** When your session provides an
+     `Artifact Directory Path` (`.../brain/<id>`):
+     - **Per-session / ephemeral activation:** If `<project>/README.md` declares
+       `skills:` in its YAML frontmatter that are missing from your active
+       `<skills>` list, or when asked to load *per-session*, *ephemeral*,
+       *temporary*, or *scratch* skills for the current conversation, link them
+       into the session's scratch directory without modifying `.envrc` or
+       repository files if a workspace skill manager is available (e.g.,
+       `skill -C <artifactDir> add <skill>...`).
+     - **Current-turn usage:** Read
+       `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if needed
+       in the current turn; the harness will inject them into `<skills>`
+       automatically on subsequent turns.
 - **After work:** update files, task frontmatter (`conversations`), and
   `STATUS.md` prose (`Summary` & `Next`). Run `taskgo sync` and `taskgo doctor`.
   Optionally commit using `taskgo checkpoint`. Ensure the project is left in a

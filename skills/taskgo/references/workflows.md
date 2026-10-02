@@ -11,13 +11,19 @@ Before starting work, an agent must:
    `STATUS.md` (using its generated `### Decisions` block to identify active,
    non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
    direction matters.
-1. If `<project>/README.md` declares `skills:` in its YAML frontmatter that are
-   missing from the active `<skills>` list and a session
-   `Artifact Directory Path` (`.../brain/<id>`) is available, register them in
-   the session if a workspace skill manager is available (e.g.,
-   `skill -C <artifactDir> add <skill>...`), and read
-   `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if needed in
-   the current turn.
+1. **Activate project & per-session skills:** When a session
+   `Artifact Directory Path` (`.../brain/<id>`) is available:
+   - **Per-session / ephemeral activation:** If `<project>/README.md` declares
+     `skills:` in its YAML frontmatter that are missing from the active
+     `<skills>` list, or when asked to load *per-session*, *ephemeral*,
+     *temporary*, or *scratch* skills for the current conversation, link them
+     into the session's scratch directory without modifying `.envrc` or
+     repository files if a workspace skill manager is available (e.g.,
+     `skill -C <artifactDir> add <skill>...`).
+   - **Current-turn usage:** Read
+     `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if needed
+     in the current turn; the harness will inject them into `<skills>`
+     automatically on subsequent turns.
 1. Inspect linked artifact repos under their own instructions.
 
 ### Commit Authority
