@@ -1,4 +1,10 @@
-# Command Index
+# Command Index (Deprecated)
+
+> [!WARNING] **Deprecated:** `emumanager` is deprecated in favor of the official
+> [Android CLI (`android`)](https://developer.android.com/tools/agents/android-cli)
+> (`android emulator`, `android sdk`) and standard Android SDK tools
+> (`emulator`, `avdmanager`, `adb`). See [`SKILL.md`](../SKILL.md) for the
+> migration mapping.
 
 <!-- markdownlint-disable MD013 -->
 

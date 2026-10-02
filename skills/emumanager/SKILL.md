@@ -1,12 +1,11 @@
 ---
 name: emumanager
 description: >-
-  Manages Android SDKs, system images, emulators, and Android Virtual Devices (AVDs).
-  Provides workflows for bootstrapping the SDK, downloading images, and creating,
-  starting,
-  or stopping AVDs across mobile, Wear OS, TV, and Automotive form factors. Use when
-  setting up Android SDK tools, launching or debugging emulators, creating AVDs, or
-  troubleshooting emulator boot issues.
+  DEPRECATED — Prefer the official Android CLI (android emulator, android sdk)
+  and raw Android SDK tools (emulator, avdmanager, adb) instead. Legacy wrapper
+  around sdkmanager, avdmanager, and emulator for managing Android SDKs, system
+  images, and Android Virtual Devices (AVDs). Do not use for new workflows unless
+  explicitly maintaining legacy emumanager scripts.
 compatibility: >-
   Requires Java 17+, curl, unzip, and hardware acceleration (KVM on Linux, HVF on
   macOS).
@@ -14,14 +13,46 @@ compatibility: >-
   agents with bash access.
 ---
 
-# Android Emulator Manager
+# Android Emulator Manager (Deprecated)
 
-## Using the Manager Script vs. Raw SDK Tools
+> [!WARNING] **Deprecated:** `emumanager` wraps the legacy `sdkmanager` CLI and
+> is deprecated for new agent and developer workflows. Prefer the official
+> [Android CLI (`android`)](https://developer.android.com/tools/agents/android-cli)
+> (`android emulator`, `android sdk`) together with standard Android SDK tools
+> (`emulator`, `avdmanager`, `adb`).
 
-Use `scripts/emumanager` as the primary interface for managing Android emulators
-and AVDs. References to `scripts/...` in this skill are relative to this skill
-directory. The script unifies and orchestrates `sdkmanager`, `avdmanager`, and
-`emulator`:
+## Migrating to Official Android Tools
+
+Use `android` (`android-cli`) for standard SDK package management and
+phone/tablet/desktop AVD lifecycles, and fall back to raw `avdmanager` /
+`emulator` when you need non-phone form factors (Wear OS, TV, Automotive),
+custom hardware sizing, or advanced launch flags:
+
+<!-- markdownlint-disable MD013 -->
+
+| `emumanager` Command                              | Recommended Replacement (`android-cli` / Raw SDK Tools)                                                                                                         |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `emumanager bootstrap`                            | `android init` + `android sdk install platform-tools emulator`                                                                                                  |
+| `emumanager doctor`                               | `android info` + `$ANDROID_HOME/emulator/emulator -accel-check`                                                                                                 |
+| `emumanager catalog package`                      | `android sdk list --all [--beta\|--canary] [system-images]`                                                                                                     |
+| `emumanager list package`                         | `android sdk list`                                                                                                                                              |
+| `emumanager list package --outdated`              | `android sdk update` (checks and installs available updates)                                                                                                    |
+| `emumanager download package <pkg>`               | `android sdk install [--beta\|--canary] "<pkg>"` (uses `/` path separators, e.g. `system-images/android-36/google_apis_playstore/arm64-v8a`)                    |
+| `emumanager update package`                       | `android sdk update [--beta\|--canary]`                                                                                                                         |
+| `emumanager create avd <name> --mobile`           | `android emulator create medium_phone`                                                                                                                          |
+| `emumanager create avd <name> --wear` (or custom) | `avdmanager create avd -n <name> -k "<pkg>" -d wearos_large_round` (then set `hw.ramSize=1536` and `hw.keyboard=yes` in `~/.android/avd/<name>.avd/config.ini`) |
+| `emumanager list avd`                             | `android emulator list --long`                                                                                                                                  |
+| `emumanager info avd <name>`                      | `android emulator list --long` + inspect `~/.android/avd/<name>.avd/config.ini`                                                                                 |
+| `emumanager start avd <name>`                     | `android emulator start <name> [--cold] [--headless]` (or `$ANDROID_HOME/emulator/emulator -avd <name> -no-window -no-audio -wipe-data` for advanced flags)     |
+| `emumanager stop avd <name>`                      | `android emulator stop [<name>\|<serial>]`                                                                                                                      |
+| `emumanager delete avd <name>`                    | `android emulator stop <name>` (if running) + `android emulator remove <name>`                                                                                  |
+
+<!-- markdownlint-restore MD013 -->
+
+## Legacy Script Overview (`scripts/emumanager`)
+
+For reference when maintaining existing scripts, `scripts/emumanager`
+orchestrates `sdkmanager`, `avdmanager`, and `emulator`:
 
 - Automatic system image resolution across device form factors (`--mobile`,
   `--wear`, `--tv`)

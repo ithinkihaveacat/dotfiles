@@ -48,7 +48,7 @@ coding standards, planning award flights, and more.
 | [`agent-tools`](skills/agent-tools/)           | CLI tools delegating analysis to AI models: image description, screenshot diffing, deep research     |
 | [`apk`](skills/apk/)                           | Offline APK binary analysis: manifests, resources, launcher icons, split APKs                        |
 | [`coding-standards`](skills/coding-standards/) | This repo's coding standards: shell/Python/Markdown formatting, CLI design, commit message style     |
-| [`emumanager`](skills/emumanager/)             | Android SDK bootstrap plus AVD/emulator management (mobile, Wear OS, TV, Automotive)                 |
+| [`emumanager`](skills/emumanager/)             | *(Deprecated — prefer `android-cli`)* Legacy Android SDK bootstrap and AVD/emulator manager          |
 | [`jetpack`](skills/jetpack/)                   | Current AndroidX/Jetpack facts that are wrong from memory: versions, Maven coordinates, dependencies |
 
 More specialised skills: [`android-testing`](skills/android-testing/) (system
