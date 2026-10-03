@@ -79,10 +79,11 @@ Examples:
 
 ```text
 usage: taskgo create [-h] [--slug SLUG] [--status STATUS] [--problem PROBLEM]
-                     [--goal GOAL] [--criteria CRITERIA] [--sketch SKETCH]
-                     [--constraints CONSTRAINTS] [--outcome OUTCOME]
-                     [--findings FINDINGS] [--next NEXT_STEPS] [--conv CONV]
-                     [--no-commit] [--dry-run]
+                     [--cost COST] [--goal GOAL] [--criteria CRITERIA]
+                     [--sketch SKETCH] [--constraints CONSTRAINTS]
+                     [--outcome OUTCOME] [--findings FINDINGS]
+                     [--next NEXT_STEPS] [--conv CONV] [--no-commit]
+                     [--dry-run]
                      PROJECT TITLE
 
 Create a new task in PROJECT.
@@ -98,6 +99,7 @@ options:
   --status, -s STATUS   Initial task state (default: todo)
   --problem, -p PROBLEM
                         Problem description
+  --cost COST           Consequences of leaving the task undone
   --goal, -g GOAL       Goal description
   --criteria, -c CRITERIA
                         Observable end condition
@@ -132,10 +134,10 @@ than a few words.
 
 ```text
 usage: taskgo update [-h] [--status STATUS] [--title TITLE] [--slug SLUG]
-                     [--problem PROBLEM] [--goal GOAL] [--criteria CRITERIA]
-                     [--sketch SKETCH] [--constraints CONSTRAINTS]
-                     [--outcome OUTCOME] [--findings FINDINGS]
-                     [--next NEXT_STEPS] [--conv CONV]
+                     [--problem PROBLEM] [--cost COST] [--goal GOAL]
+                     [--criteria CRITERIA] [--sketch SKETCH]
+                     [--constraints CONSTRAINTS] [--outcome OUTCOME]
+                     [--findings FINDINGS] [--next NEXT_STEPS] [--conv CONV]
                      TASK_ID
 
 Update task fields, status, or headings.
@@ -150,6 +152,7 @@ options:
   --slug SLUG           Rename the task file's slug, max 32 chars
   --problem, -p PROBLEM
                         Problem description
+  --cost COST           Consequences of leaving the task undone
   --goal, -g GOAL       Goal description
   --criteria, -c CRITERIA
                         Observable end condition

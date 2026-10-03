@@ -88,13 +88,16 @@ conversations:
 
 *(Tip: Front-load external stakeholder or impact context)*
 
-**Problem:** (optional) Mechanics of current problem, not consequences.
-**Cost:** (required if Problem is present) Currency, consequence, and who absorbs it.
+**Problem:** (optional) Current behavior and why it is a problem.
+**Cost:** (optional) Consequence of leaving the task undone and who absorbs it.
 **Goal:** (required) What should be true once done (requirements).
 **Criteria:** (required where definable) Observable end condition.
 **Sketch:** (optional) Early thinking/pointers.
 **Constraints:** (optional) Boundaries on the solution.
 ```
+
+Use Cost when it adds useful prioritization context. Problem may appear without
+Cost; the rationale may already be clear in Problem or Goal.
 
 ### Completed Task Template
 
@@ -190,8 +193,8 @@ help details and subcommand options.
 ```text
 taskgo id
 taskgo root
-taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
+taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]
@@ -208,6 +211,8 @@ taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR [--tool-cmd C
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.
+- `create` and `update` accept `--cost TEXT` for the consequences of leaving a
+  task undone. Cost is optional, including when Problem is present.
 - `update`: Edit task in-place. If using `--slug`, the rename is left
   uncommitted; commit with `checkpoint --all` to stage both old and new paths.
 - `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, and commit

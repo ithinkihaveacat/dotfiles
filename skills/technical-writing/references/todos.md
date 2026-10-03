@@ -46,21 +46,22 @@ evidence) — the labels keep long and short items structurally identical.
 
 - **Problem** (optional): How the current system behaves and why that is a
   problem — the mechanics, not just the motivation. Evidence (query output,
-  measurements, reproduction data) belongs beneath this field. Leave the
-  consequences to Cost. Use it when the background outgrows the sentence or two
-  that Goal can carry; when present it precedes Goal. Omit it when Goal's
-  background already covers the ground.
-- **Cost** (required whenever Problem is present): What leaving this undone
-  costs — the consequences of doing nothing, never the effort to fix it. Name
-  the currency, then the concrete consequence and who absorbs it. Correctness,
-  ergonomics, performance, maintenance and reputation cover most of it; invent a
-  currency where one of those would misname the harm, and do not force an item
-  into a listed one for consistency with its neighbours. A magnitude word is
-  fine when the evidence follows it ("Low. Confirmed on 2 of ~107 listings"); a
-  bare "High" or "Critical" is not, since it survives no scrutiny and ranks
-  nothing. Say whether the cost is paid loudly or silently — a fault that
-  announces itself is cheaper than one that does not. This is the field that
-  makes a backlog rankable; without it every item reads as equally worth doing.
+  measurements, reproduction data) belongs beneath this field. Use it when the
+  background outgrows the sentence or two that Goal can carry; when present it
+  precedes Goal. Omit it when Goal's background already covers the ground.
+- **Cost** (optional, including when Problem is present): What leaving this
+  undone costs — the consequences of doing nothing, never the effort to fix it.
+  Use it when it adds useful prioritization context; omit it when Problem or
+  Goal already explains the consequence. Name the currency, then the concrete
+  consequence and who absorbs it. Correctness, ergonomics, performance,
+  maintenance and reputation cover most of it; invent a currency where one of
+  those would misname the harm, and do not force an item into a listed one for
+  consistency with its neighbours. A magnitude word is fine when the evidence
+  follows it ("Low. Confirmed on 2 of ~107 listings"); a bare "High" or
+  "Critical" is not, since it survives no scrutiny and ranks nothing. Say
+  whether the cost is paid loudly or silently — a fault that announces itself is
+  cheaper than one that does not. A useful Cost statement helps compare
+  priorities; field presence alone does not establish importance.
 - **Goal** (required): The outcome — what should be true once the item is done,
   stated as requirements rather than implementation. Include a sentence or two
   of background: why this matters now, and what larger effort it serves (the
@@ -261,8 +262,8 @@ Before finalizing a TODO item, verify that:
   sorted).
 - [ ] The item defines a clear Goal and End Condition without prescribing rigid
   step-by-step plans.
-- [ ] Any item with a Problem also states its Cost, in a named currency with
-  evidence rather than a bare magnitude adjective.
+- [ ] If Cost is included, it adds useful prioritization context and names a
+  concrete consequence with evidence rather than a bare magnitude adjective.
 - [ ] Solutions in the Sketch are framed as suggestions for a future
   implementer.
 - [ ] Factual grounding (files, metrics) is cited and speculation is explicitly
