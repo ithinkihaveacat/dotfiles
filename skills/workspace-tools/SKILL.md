@@ -4,10 +4,13 @@ description: >-
   Configures workspaces for agent-assisted development. Manages workspace and
   per-session (ephemeral) agent skills (untracked symlinks), workspace tool
   permissions (allow/deny/ask rules for Claude Code, Codex, and Antigravity),
-  git hook profiles, and .envrc configurations. Use when configuring a workspace,
-  discovering or installing skills (persistently in a workspace or temporarily in
-  a session), setting tool permissions, managing git hooks, or updating .envrc
-  configuration blocks.
+  git hook profiles, .envrc configurations, and per-directory Node.js, Ruby, and
+  Python versions. Use when configuring a workspace, discovering or installing
+  skills (persistently in a workspace or temporarily in a session), setting tool
+  permissions, managing git hooks, updating .envrc configuration blocks, or when
+  a project needs a different Node.js, Ruby, or Python version: local tests fail
+  where CI passes, an API is missing from the installed runtime, or a version
+  file, `engines` field, CI workflow, or Dockerfile names another version.
 compatibility: >-
   Requires git. Optional: python3, uv, direnv, claude, codex, or agy.
 ---
@@ -33,6 +36,11 @@ control ever seeing the configuration. It consists of four tools:
    declared by installed skills.
 1. **`envrc`**: The configuration manager. Manages marker-delimited blocks in
    `.envrc` files for direnv integration.
+
+Alongside them, the runtime installers `node-install`, `ruby-install`, and
+`python-install` install per-user Node.js and Ruby versions (and check for `uv`)
+that `envrc` blocks activate per directory; see
+[Runtime Versions](#runtime-versions-node-install-ruby-install-python-install).
 
 For Git repositories, `hook apply`, `skill apply`, and `permission apply` run
 automatically on `git clone` via the global template's post-checkout hook.
@@ -342,6 +350,67 @@ See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 
+## Runtime Versions (`node-install`, `ruby-install`, `python-install`)
+
+Each project selects its own Node.js, Ruby, or Python through a typed `.envrc`
+block; the system-wide runtime is only a fallback. The installers (symlinked in
+`bin/`) put versions where those blocks look for them:
+
+- **`node-install VERSION`**: Downloads the official Node.js binary for the
+  latest matching release (`22` → newest `22.x.x`) into `$NODE_VERSIONS`
+  (`~/.local/share/node/versions`). Takes seconds. It exits non-zero when that
+  exact version is already installed, so check `node-install --installed` first.
+- **`ruby-install VERSION`**: Compiles Ruby from source with `ruby-build` into
+  `$RUBY_VERSIONS` (`~/.local/share/ruby/versions`). Takes minutes and is
+  declared unsafe, so it always prompts. `ruby-build` compiles under `$TMPDIR`;
+  on a host whose `/tmp` is a small tmpfs, point `TMPDIR` at a disk directory
+  for the build. Rebuild a version that fails to start with a library load error
+  (e.g. after an OpenSSL upgrade).
+- **`python-install`**: Checks that `uv` is installed and prints how to install
+  it if not. `uv` itself manages Python interpreters (`.python-version`,
+  `uv python install`), so there is no per-version Python install step.
+
+### Fixing a Runtime Mismatch
+
+Use this when local results disagree with CI, or a failure names an API the
+installed runtime lacks (e.g. `fs.globSync is not a function` on Node.js 20):
+
+1. **Find the version the project expects**, in roughly this order: a version
+   file (`.nvmrc`, `.node-version`, `.ruby-version`, `.python-version`),
+   `package.json` `engines`, `Gemfile` `ruby`, `pyproject.toml`
+   `requires-python`, the CI workflow (e.g. `node-version:` in
+   `.github/workflows/*.yml`), and the Dockerfile `FROM` image.
+1. **Compare it with what the directory loads:** `node --version` (or
+   `ruby --version`) and `envrc show node` (or `envrc show ruby`). No block
+   means the system runtime is in use.
+1. **Install the version if it is missing:** `node-install --installed`, then
+   `node-install 22`; or `ruby-install 3.4`.
+1. **Activate it for the directory:** `envrc create node 22` (or
+   `envrc create ruby 3.4`, `envrc create uv`). This replaces any existing block
+   of that type and runs `direnv allow`. `.envrc` is untracked local
+   configuration, so this changes nothing in the repository.
+1. **Run the project's commands inside the environment.** An agent's shell may
+   not load direnv on `cd`, so run commands through it explicitly and confirm
+   the version first:
+   ```bash
+   direnv exec . node --version
+   direnv exec . npm ci
+   direnv exec . npm test
+   ```
+   Reinstall dependencies after switching versions; native modules built for the
+   old runtime will not load.
+
+Prefer the version the project already declares. If it declares none and CI pins
+one, match CI and suggest that the user add a version file, rather than adding
+one to the repository unasked.
+
+`envrc create node` and `envrc create ruby` require `NODE_VERSIONS` and
+`RUBY_VERSIONS` to name existing directories (the dotfiles shell configuration
+sets both); `use ruby` is defined in `~/.direnvrc`, and `use node` comes from
+the direnv standard library.
+
+______________________________________________________________________
+
 ## Usage Examples
 
 ### Default Discovery & Apply (Recommended for new workspaces)
@@ -444,6 +513,7 @@ permission clean
 ## Reference Material
 
 - **[Command Index](references/command-index.md)** — Detailed synopsis, options,
-  and examples for `hook`, `skill`, `permission`, and `envrc`.
+  and examples for `hook`, `skill`, `permission`, `envrc`, and the runtime
+  installers.
 - **[Workspace Config Model](references/model.md)** — Architecture, state
   invariants, directory layouts, and doctor/preflight auditing models.

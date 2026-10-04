@@ -194,57 +194,26 @@ Run `setsecret --help`, `getsecret --help`, or `envsecret --help` for details.
 configured via `~/.direnvrc` (symlinked from `home/.direnvrc`). To activate it
 in a project, create an `.envrc` file in the project root.
 
-### Node.js
-
-Node.js versions are managed by `bin/node-install` and direnv.
-
-```sh
-node-install 22        # installs latest 22.x into ~/.local/share/node/versions
-```
-
-Add to `.envrc`:
+Node.js, Ruby, and Python versions are selected per directory with `envrc`
+blocks and installed with `node-install`, `ruby-install`, and `python-install`:
 
 ```sh
-use node 22
-layout node            # adds node_modules/.bin to PATH
-```
+node-install 22        # latest 22.x into ~/.local/share/node/versions
+envrc create node 22   # use node 22 + layout node (node_modules/.bin on PATH)
 
-### Ruby
-
-Ruby versions are managed by `bin/ruby-install` and direnv. Versions are
-compiled from source via [ruby-build](https://github.com/rbenv/ruby-build) (the
-toolchain and its build dependencies install with
-`install.sh --install-optional`), so the first install of a version takes a few
-minutes.
-
-```sh
 ruby-install 3.4       # compiles latest 3.4.x into ~/.local/share/ruby/versions
+envrc create ruby 3.4  # use ruby 3.4 + layout ruby (gems in .direnv/ruby)
+
+python-install         # checks that uv is installed
+envrc create uv        # layout uv (creates and activates .venv)
 ```
 
-Add to `.envrc`:
-
-```sh
-use ruby 3.4
-layout ruby            # project-local gems in .direnv/ruby
-```
-
-`layout ruby` keeps gems inside the project, so `gem install kamal` makes
-`kamal` available on `PATH` without touching the system Ruby.
-
-Because each version is compiled against the system libraries present at build
-time, an installed Ruby can later fail to start with a library load error (for
-example after a Homebrew `openssl` upgrade removes a library it was linked
-against). The fix is to rebuild that version: `ruby-install 3.4`.
-
-### Python
-
-Python environments use [uv](https://github.com/astral-sh/uv). Install it with
-`bin/python-install` (which installs `uv` into `~/.local/bin`), then add to
-`.envrc`:
-
-```sh
-layout uv              # creates .venv if absent, activates it
-```
+Ruby builds need the `ruby-build` toolchain and its build dependencies, which
+install with `install.sh --install-optional`. The installers live in the
+`workspace-tools` skill; its
+[Runtime Versions](skills/workspace-tools/SKILL.md#runtime-versions-node-install-ruby-install-python-install)
+section covers the full workflow, including diagnosing a project that runs on
+the wrong version.
 
 ## Installation
 

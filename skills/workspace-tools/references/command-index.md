@@ -8,6 +8,9 @@
 - [skill](#skill)
 - [permission](#permission)
 - [envrc](#envrc)
+- [node-install](#node-install)
+- [ruby-install](#ruby-install)
+- [python-install](#python-install)
 
 ## hook
 
@@ -260,6 +263,116 @@ environment default rather than from the block itself.
 syntax like $(...) is never evaluated when direnv loads the file. 'get' reads
 the file statically (no shell is executed) and unquotes simple single- or
 double-quoted values.
+```
+
+<!-- /generated -->
+
+## node-install
+
+The block below is `../scripts/node-install --help`, kept in sync by
+`command-index-format`.
+
+<!-- generated: ../scripts/node-install --help -->
+
+```text
+Usage: node-install [OPTIONS] VERSION [PREFIX]
+       node-install --list
+       node-install --installed
+
+Downloads and installs a specific version of Node.js.
+
+Arguments:
+  VERSION     Node.js version to install. Supports partial versions:
+              - "22.13.1" installs exactly v22.13.1
+              - "22.13" installs the latest v22.13.x
+              - "22" installs the latest v22.x.x
+  PREFIX      Directory where Node.js will be installed (optional).
+              A subdirectory named node-vVERSION will be created.
+              Default: $XDG_DATA_HOME/node/versions or ~/.local/share/node/versions
+
+Options:
+  -l, --list       List all available remote Node.js versions
+  -i, --installed  List all installed Node.js versions
+  --help           Display this help message and exit
+
+Examples:
+  # Install latest Node.js 22.x
+  node-install 22
+
+  # List available versions
+  node-install --list
+
+  # List installed versions
+  node-install --installed
+```
+
+<!-- /generated -->
+
+## ruby-install
+
+The block below is `../scripts/ruby-install --help`, kept in sync by
+`command-index-format`.
+
+<!-- generated: ../scripts/ruby-install --help -->
+
+```text
+Usage: ruby-install [OPTIONS] VERSION [PREFIX]
+       ruby-install --list
+       ruby-install --installed
+
+Compiles and installs a specific version of Ruby from source.
+
+Arguments:
+  VERSION     Ruby version to install. Supports partial versions:
+              - "3.4.1" installs exactly 3.4.1
+              - "3.4" installs the latest 3.4.x
+              - "3" installs the latest 3.x.x
+  PREFIX      Directory where Ruby will be installed (optional).
+              A subdirectory named ruby-vVERSION will be created.
+              Default: $XDG_DATA_HOME/ruby/versions or ~/.local/share/ruby/versions
+
+Options:
+  -l, --list       List all installable stable Ruby versions
+  -i, --installed  List all installed Ruby versions
+  --help           Display this help message and exit
+
+Examples:
+  # Install latest Ruby 3.4.x
+  ruby-install 3.4
+
+  # List installable versions
+  ruby-install --list
+
+  # List installed versions
+  ruby-install --installed
+
+Versions are compiled from source, so the first install of a version takes a few
+minutes. The build is performed by ruby-build; if a system library is missing it
+will report which one at configure time.
+```
+
+<!-- /generated -->
+
+## python-install
+
+The block below is `../scripts/python-install --help`, kept in sync by
+`command-index-format`.
+
+<!-- generated: ../scripts/python-install --help -->
+
+```text
+Usage: python-install
+
+Install Python using uv.
+
+This script checks for the presence of 'uv' and provides information on how
+to use it for Python environment management in this repository.
+
+Options:
+  --help      Display this help message and exit
+
+Examples:
+  python-install
 ```
 
 <!-- /generated -->
