@@ -121,11 +121,18 @@ Key technical discoveries, trade-offs, reproduction steps, downstream momentum.
 Immediate follow-up actions.
 ```
 
-## Project Manifest (`README.md`) & Decisions
+## Project README & Decisions
 
-- **Project Manifest (`<project>/README.md`):** Defines project identity, scope,
-  and optional YAML frontmatter for project-level configuration (such as
-  `skills` required when working on the project):
+See **[Where Knowledge Lives](references/model.md#where-knowledge-lives)** for
+which file, repository, or skill owns each kind of fact.
+
+- **Project README (`<project>/README.md`):** The stable, private description of
+  the project, changing over months: **identity** (purpose, scope), **map**
+  (where everything lives, and which source is canonical), and **standing
+  rules**. Unlike an artifact repository's README, it does not describe the
+  code. See [Project README](references/model.md#project-readme) for the
+  placement test and skeleton. Optional YAML frontmatter holds project-level
+  configuration (such as `skills` required when working on the project):
   ```markdown
   ---
   skills:
@@ -142,7 +149,8 @@ Immediate follow-up actions.
   without editing accepted historical records.
 - **STATUS.md:** The self-contained operational projection.
   - `## Summary`: Human/agent prose for current situation and active session
-    citation (`[<conversation-id>](<agent>://<conversation-id>)`).
+    citation (`[<conversation-id>](<agent>://<conversation-id>)`). Rewrite it;
+    never append a paragraph per session.
   - `<!-- taskgo:begin/end -->`: Mechanically maintained via `taskgo sync`
     (projects `In progress`, `Blocked`, active `Decisions` when `decisions/*.md`
     exist, and task state counts).
@@ -170,9 +178,11 @@ Agent Dispatch.
        in the current turn; the harness will inject them into `<skills>`
        automatically on subsequent turns.
 - **After work:** update files, task frontmatter (`conversations`), and
-  `STATUS.md` prose (`Summary` & `Next`). Run `taskgo sync` and `taskgo doctor`.
-  Optionally commit using `taskgo checkpoint`. Ensure the project is left in a
-  strict **handoff-ready** state.
+  `STATUS.md` prose (`Summary` & `Next`). Update the project `README.md`, or the
+  artifact or knowledge skill that owns a fact, only if that fact changed. Run
+  `taskgo sync` and `taskgo doctor`. Optionally commit using
+  `taskgo checkpoint`. Ensure the project is left in a strict **handoff-ready**
+  state.
 
 ### Harbor Task Execution
 

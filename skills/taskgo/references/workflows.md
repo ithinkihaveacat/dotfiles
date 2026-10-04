@@ -7,10 +7,9 @@ checks, session attribution, and task handoff protocols for `taskgo`.
 
 Before starting work, an agent must:
 
-1. Read the root `AGENTS.md`, then project `README.md` (or `PROJECT.md`),
-   `STATUS.md` (using its generated `### Decisions` block to identify active,
-   non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
-   direction matters.
+1. Read the root `AGENTS.md`, then project `README.md`, `STATUS.md` (using its
+   generated `### Decisions` block to identify active, non-superseded ADRs in
+   `decisions/`), relevant tasks, and `PLAN.md` when direction matters.
 1. **Activate project & per-session skills:** When a session
    `Artifact Directory Path` (`.../brain/<id>`) is available:
    - **Per-session / ephemeral activation:** If `<project>/README.md` declares
@@ -50,7 +49,13 @@ matters):
    `## Findings`, recording `[<conversation-id>](<agent>://<conversation-id>)`).
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
    session link, and recent outcome; `## Next` reflects immediate next actions);
-   `PLAN.md` only if intended direction changed.
+   `PLAN.md` only if intended direction changed. Rewrite the Summary rather than
+   appending a paragraph per session: outcomes of earlier sessions belong in
+   their task records and commit history.
+1. Update the project `README.md` only if identity, map, or standing rules
+   changed. If the work changed a system described by a knowledge skill or an
+   artifact repository's documentation, update that owner and record its commit
+   with a `Ref:` trailer rather than copying the new facts into the tracker.
 1. Run `<skill-dir>/scripts/taskgo sync PROJECT` after semantic edits are
    coherent.
 1. Run `<skill-dir>/scripts/taskgo doctor PROJECT` and perform its semantic

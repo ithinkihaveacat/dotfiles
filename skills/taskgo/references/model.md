@@ -58,17 +58,130 @@ repositories**:
 AGENTS.md                 # taskgo declaration + repository instructions
 INBOX.md                  # zero-ceremony capture; no schema
 <id>/
-  README.md               # project manifest (optional YAML frontmatter: skills, etc.) + scope/constraints (or PROJECT.md)
+  README.md               # identity, map, standing rules (optional YAML frontmatter: skills, etc.)
   STATUS.md               # current human view + generated task block
   PLAN.md                 # intended route forward (optional)
   tasks/*.md              # stable task records
-  decisions/*.md          # ADRs (optional)
-  references/*            # supporting context, schemas, design tokens, external docs (optional)
+  decisions/*.md          # ADRs for private or cross-artifact decisions (optional)
+  references/*            # current-state supporting context private to the project (optional)
   bugreports/*            # captured bug reports, reproduction logs, triage traces (optional)
   scripts/*               # automation, audit harnesses, pipelines, report generators (optional)
   data/*                  # input datasets, package lists, static fixtures (optional)
   results/*               # benchmark telemetry, run logs, audit outputs (optional)
   dist/*                  # static dashboards, deployable bundles, HTML reports (optional)
+```
+
+`PROJECT.md` is a legacy name for the project README; the CLI still reads it
+when `README.md` is absent, but new and renamed projects use `README.md`.
+
+`references/` holds stable descriptions that are private to the project and true
+now, such as domain notes or source material for a deliverable. Evidence from
+runs belongs in `results/`. Material imported from elsewhere and kept for
+history is labeled as such in the README map rather than presented as current.
+
+## System Projects
+
+Not every project centers on a code repository. A **system project** tracks work
+on something the user operates, such as machines and services or a household,
+whose durable description lives in a **knowledge skill**: a private skill,
+loaded by topic, that records current facts about particular systems, accounts,
+people, or places.
+
+The knowledge skill plays the role of the artifact repository. Tasks change the
+system and finish by updating the skill to the new current state, linking the
+skill repository's commit with a `Ref:` trailer. The project README names the
+skill in its map (and in `skills:` frontmatter) instead of copying its facts.
+Other projects whose work touches the same system do the same.
+
+Many knowledge skills never need a project. Create one when a system has enough
+ongoing work to track; until then, maintain the skill directly.
+
+## Where Knowledge Lives
+
+Each fact has one owner; other locations link to it. Choose the owner by who
+needs the fact and how often it changes:
+
+| Kind of fact                                                                | Owner                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------- |
+| How the code works, how to build and run it, code-level invariants and ADRs | Artifact repository (`README.md`, `AGENTS.md`, `docs/`) |
+| What a system, account, person, or place is and how to reach or operate it  | Knowledge skill                                         |
+| Why the project exists, its scope, where everything lives, standing rules   | Project `README.md`                                     |
+| Reasoning behind a private or cross-artifact standing rule                  | Project `decisions/`                                    |
+| Intended route                                                              | `PLAN.md`                                               |
+| Current situation and next actions                                          | `STATUS.md`                                             |
+| A unit of work, its outcome, and findings                                   | `tasks/`                                                |
+| Run evidence, supporting context                                            | `results/`, `references/`                               |
+| What changed, when, and why                                                 | Git history (commit prose, `Ref:` and `Conversation:`)  |
+
+The control repository files differ mainly in how often they change: `README.md`
+over months, `PLAN.md` over weeks, and `STATUS.md` nearly every commit.
+
+Information architecture drifts, and historical layouts persist. Work with it
+using these principles rather than reorganizing everything at once:
+
+1. **One owner per fact; everywhere else links.** Pointers go stale more slowly
+   than copies.
+1. **Repair opportunistically.** When touching a file, replace a copied fact
+   with a link to its owner, or move misplaced content to where it belongs.
+1. **The artifact wins.** When a description disagrees with the code or the
+   system it describes, the description is wrong.
+1. **Declare historical locations instead of forcing them to move.** An
+   in-repository `TODO.md` or an imported planning document can stay where it
+   is; the project README map says what it is and whether it is canonical.
+
+## Project README
+
+The project `README.md` is the stable, private description of the project. An
+artifact repository's own README describes the code to anyone who has it: what
+it is, how to build and use it, how it is put together. The project README
+describes the user's stewardship of it: things that are true because this
+project exists and that a stranger with only the code would not need or should
+not see. It has three roles:
+
+- **Identity:** why the project exists, whom it serves, what success looks like,
+  and what is in and out of scope. Scope may exclude things the code README
+  never mentions ("not the in-repository backlog", "no paid APIs").
+- **Map:** where everything lives — checkouts, remotes and forks, deployments,
+  data, related projects, and the knowledge skills describing the systems it
+  runs on — and which source is canonical where several overlap.
+- **Standing rules:** constraints that govern work and outlast any task,
+  especially private ones such as data-safety rules, spending limits, and
+  publication boundaries. State each rule briefly and link the ADR that explains
+  it, if one exists.
+
+To decide whether a sentence belongs in the project README, ask whether it will
+still be true after the next five tasks finish; if not, it belongs in
+`STATUS.md`, `PLAN.md`, or a task. Code facts, system facts (host specs, how to
+reach a machine), the reasoning behind rules, and history belong to the owners
+in the table above; the README links to them.
+
+Suggested skeleton (existing headings such as `## Artifacts` or `## Boundaries`
+serve the map role and need not be renamed):
+
+```markdown
+---
+skills:
+  - <skill needed when working on this project>
+---
+
+# Project Name
+
+One or two sentences on what the project is and why it exists.
+
+## Scope
+
+In scope, and explicitly out of scope.
+
+## Map
+
+- Repository: <https://github.com/owner/repo>; local checkout: `~/workspace/repo`
+- Deployment and host details: the `<knowledge-skill>` skill
+- Backlog: this tracker owns <X>; the in-repository `TODO.md` owns <Y>
+- Related projects: [other](../other/README.md) owns <Z>
+
+## Constraints
+
+- Standing rule, briefly ([ADR](decisions/001-rule.md)).
 ```
 
 ## Task Records & Archiving

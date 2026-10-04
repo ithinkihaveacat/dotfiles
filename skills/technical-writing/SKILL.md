@@ -4,9 +4,11 @@ description: >-
   Guidelines and structural standards for authoring, reviewing, and editing
   engineering documents with a factual, collegial, and constructive tone. Covers
   bug reports, known issues, friction logs, PR descriptions, commit message prose,
-  TODO/task lists, Getting Started guides, and Agent Skills (SKILL.md). Use when
-  drafting or reviewing technical documentation, friction logs, issue reports,
-  PR descriptions, onboarding guides, or agent skill files.
+  TODO/task lists, Getting Started guides, and Agent Skills (SKILL.md), both
+  capability skills and knowledge skills that record facts about systems,
+  people, and places. Use when drafting or reviewing technical documentation,
+  friction logs, issue reports, PR descriptions, onboarding guides, or agent
+  skill files, or when reorganizing a knowledge skill.
 ---
 
 # Technical Writing Style Guidelines
@@ -63,5 +65,9 @@ relevant reference guide:
   and Sketch fields without hardening into premature plans.
 - **[Getting Started Guides](references/getting-started-guides.md)** — Building
   action-oriented onboarding golden paths from zero to first result.
-- **[Agent Skills](references/skills.md)** — Authoring modular, decoupled, and
-  self-contained `SKILL.md` files and reference documents.
+- **[Capability Skills](references/capability-skills.md)** — Authoring modular,
+  decoupled, and self-contained `SKILL.md` files and reference documents for
+  skills that teach a class of task.
+- **[Knowledge Skills](references/knowledge-skills.md)** — Structuring and
+  maintaining skills that record current facts about particular systems,
+  accounts, people, and places.
