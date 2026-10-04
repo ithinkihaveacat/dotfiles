@@ -1,12 +1,17 @@
-# Agent Skill Guidelines
+# Capability Skill Guidelines
 
-This guide covers authoring, refactoring, and reviewing Agent Skills (`SKILL.md`
-files and their accompanying reference guides).
+This guide covers authoring, refactoring, and reviewing capability skills
+(`SKILL.md` files and their accompanying reference guides). A capability skill
+teaches an agent how to do a class of task: workflows, decision rules, and
+bundled tools. Skills that instead record facts about particular systems,
+people, or places are knowledge skills; see
+[Knowledge Skill Guidelines](knowledge-skills.md). Scripts bundled with a
+knowledge skill still follow this guide.
 
 ## Intent and Audience
 
-Agent skills provide instructions, workflows, and tools for AI agents operating
-in specific domains or codebases.
+Capability skills provide instructions, workflows, and tools for AI agents
+operating in specific domains or codebases.
 
 - **Goal:** Equip AI agents with self-contained, modular capabilities while
   keeping instructions portable across workspaces.
