@@ -113,15 +113,8 @@ needs the fact and how often it changes:
 | Run evidence, supporting context                                            | `results/`, `references/`                               |
 | What changed, when, and why                                                 | Git history (commit prose, `Ref:` and `Conversation:`)  |
 
-The control repository files differ mainly in how often they change:
-
-| File             | Changes                                          |
-| ---------------- | ------------------------------------------------ |
-| `README.md`      | Over months, when identity, map, or rules change |
-| `decisions/*.md` | Never once accepted; superseded instead          |
-| `PLAN.md`        | Over weeks, when direction changes               |
-| `tasks/*.md`     | Over the life of one task                        |
-| `STATUS.md`      | Nearly every commit                              |
+The control repository files differ mainly in how often they change: `README.md`
+over months, `PLAN.md` over weeks, and `STATUS.md` nearly every commit.
 
 Information architecture drifts, and historical layouts persist. Work with it
 using these principles rather than reorganizing everything at once:
@@ -156,19 +149,11 @@ not see. It has three roles:
   publication boundaries. State each rule briefly and link the ADR that explains
   it, if one exists.
 
-To decide whether a sentence belongs in the project README, ask:
-
-- **Will it still be true after the next five tasks finish?** If not, it belongs
-  in `STATUS.md`, `PLAN.md`, or a task.
-- **Would someone with only the code need it?** Then it belongs in the artifact
-  repository; link to it.
-- **Is it true of a system whether or not this project exists** (host specs,
-  paths on a server, how to reach a machine)? Then it belongs in a knowledge
-  skill; name the skill.
-- **Is it the reasoning behind a rule?** Then it belongs in an ADR; state the
-  rule and link the reasoning.
-- **Is it history** ("moved to the new host last month")? Then it belongs in Git
-  or a task outcome.
+To decide whether a sentence belongs in the project README, ask whether it will
+still be true after the next five tasks finish; if not, it belongs in
+`STATUS.md`, `PLAN.md`, or a task. Code facts, system facts (host specs, how to
+reach a machine), the reasoning behind rules, and history belong to the owners
+in the table above; the README links to them.
 
 Suggested skeleton (existing headings such as `## Artifacts` or `## Boundaries`
 serve the map role and need not be renamed):

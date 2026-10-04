@@ -127,15 +127,12 @@ See **[Where Knowledge Lives](references/model.md#where-knowledge-lives)** for
 which file, repository, or skill owns each kind of fact.
 
 - **Project README (`<project>/README.md`):** The stable, private description of
-  the project, changing over months rather than with progress. It has three
-  roles: **identity** (purpose, audience, scope), **map** (where artifacts,
-  deployments, data, and system knowledge live, and which source is canonical
-  where they overlap), and **standing rules** (constraints that outlast any
-  task). It is distinct from an artifact repository's own README, which
-  describes the code to anyone who has it. See
-  [Project README](references/model.md#project-readme) for the tests and
-  skeleton. Optional YAML frontmatter holds project-level configuration (such as
-  `skills` required when working on the project):
+  the project, changing over months: **identity** (purpose, scope), **map**
+  (where everything lives, and which source is canonical), and **standing
+  rules**. Unlike an artifact repository's README, it does not describe the
+  code. See [Project README](references/model.md#project-readme) for the
+  placement test and skeleton. Optional YAML frontmatter holds project-level
+  configuration (such as `skills` required when working on the project):
   ```markdown
   ---
   skills:
@@ -152,9 +149,8 @@ which file, repository, or skill owns each kind of fact.
   without editing accepted historical records.
 - **STATUS.md:** The self-contained operational projection.
   - `## Summary`: Human/agent prose for current situation and active session
-    citation (`[<conversation-id>](<agent>://<conversation-id>)`). Rewrite it
-    rather than appending a paragraph per session; earlier sessions' outcomes
-    belong in task records and commit history.
+    citation (`[<conversation-id>](<agent>://<conversation-id>)`). Rewrite it;
+    never append a paragraph per session.
   - `<!-- taskgo:begin/end -->`: Mechanically maintained via `taskgo sync`
     (projects `In progress`, `Blocked`, active `Decisions` when `decisions/*.md`
     exist, and task state counts).
@@ -182,11 +178,11 @@ Agent Dispatch.
        in the current turn; the harness will inject them into `<skills>`
        automatically on subsequent turns.
 - **After work:** update files, task frontmatter (`conversations`), and
-  `STATUS.md` prose (`Summary` & `Next`). Update the project `README.md` only
-  when identity, map, or standing rules changed, and update the owning artifact
-  or knowledge skill when the work changed what it describes. Run `taskgo sync`
-  and `taskgo doctor`. Optionally commit using `taskgo checkpoint`. Ensure the
-  project is left in a strict **handoff-ready** state.
+  `STATUS.md` prose (`Summary` & `Next`). Update the project `README.md`, or the
+  artifact or knowledge skill that owns a fact, only if that fact changed. Run
+  `taskgo sync` and `taskgo doctor`. Optionally commit using
+  `taskgo checkpoint`. Ensure the project is left in a strict **handoff-ready**
+  state.
 
 ### Harbor Task Execution
 

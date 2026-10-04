@@ -60,26 +60,21 @@ Within an entity file, keep three kinds of content distinct:
   it explains. When a rationale runs to several paragraphs or governs several
   entities, give it its own section and link to it.
 
-## Current State, Not History
+## Current State and Uncertainty
 
 - **Rewrite facts in place.** Version control keeps earlier states. Avoid
-  changelog sections, "Update:" paragraphs, and "previously…" trails.
+  changelog sections, "Update:" paragraphs, and "previously…" trails. Correct a
+  wrong fact in place rather than appending a correction.
 - **Keep a former state only while it still matters operationally**, for example
   a fallback copy of data on a retired host.
 - **Do not add administrative metadata** such as `updated:` or `last_reviewed:`
   fields; version control records when a file changed.
 - **Date an observation when its age affects trust in it**: "moved in Feb 2026",
   "the console offered no expiry option (2026-07)". Expiry and renewal dates are
-  facts in their own right and always belong.
-
-## Uncertainty
-
+  facts in their own right.
 - **Mark unconfirmed facts explicitly and consistently**, for example
-  "(unconfirmed)", with the source where useful: "(per the street group chat)".
-  A bare `?` is easy to miss and ambiguous.
-- **Do not present an inference as a fact.** Record what was observed and,
-  separately, what it suggests.
-- **Correct wrong facts in place** rather than appending a correction.
+  "(unconfirmed)", with the source where useful; a bare `?` is easy to miss.
+  Record what was observed separately from what it suggests.
 
 ## Privacy and Sensitivity
 
@@ -102,28 +97,19 @@ Within an entity file, keep three kinds of content distinct:
   triggers (travel profiles, shopping preferences, and neighbours rarely share a
   request). Keep parts together when the same lookups routinely need both.
 
-## Relationship to Projects and Other Sources
+## Ownership and Drift
 
 - **One owner per fact; everywhere else links.** A project document, code
-  repository, or other skill that depends on a fact names the knowledge skill
-  and the topic rather than copying the fact. Copies drift; pointers go stale
-  more slowly.
-- **A knowledge skill can be the artifact of a project.** When a system has
-  enough ongoing work to track, a project tracker can hold the work while the
-  knowledge skill holds the current description. Completing a task then includes
-  updating the skill to the new current state.
-
-## Maintenance and Drift
-
-- **Reality wins.** When a skill disagrees with the system or person it
-  describes, the skill is wrong. Check volatile facts against the source when it
-  is cheap to do so (for example, list live hosts before relying on a recorded
-  address) and correct the skill.
-- **Repair opportunistically.** When you touch a file and find content in the
-  wrong place, move it to its owner. A large reorganization is rarely needed to
-  make progress.
-- **Reorganize without changing meaning.** Moving content between files should
-  preserve every fact; check internal links afterwards.
+  repository, or other skill names the knowledge skill and topic rather than
+  copying the fact. Copies drift; pointers go stale more slowly.
+- **A knowledge skill can be a project's artifact.** When a system has ongoing
+  work, a project tracker holds the tasks; finishing a task includes updating
+  the skill to the new current state.
+- **Reality wins.** When a skill disagrees with what it describes, the skill is
+  wrong. Check volatile facts against the source when that is cheap (for
+  example, list live hosts before relying on a recorded address).
+- **Repair opportunistically.** When you find content in the wrong place, move
+  it to its owner without changing its meaning, and check internal links.
 
 ## Summary Checklist
 
