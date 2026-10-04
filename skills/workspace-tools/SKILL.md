@@ -365,7 +365,12 @@ block; the system-wide runtime is only a fallback. The installers (symlinked in
   declared unsafe, so it always prompts. `ruby-build` compiles under `$TMPDIR`;
   on a host whose `/tmp` is a small tmpfs, point `TMPDIR` at a disk directory
   for the build. Rebuild a version that fails to start with a library load error
-  (e.g. after an OpenSSL upgrade).
+  (e.g. after an OpenSSL upgrade). It needs a current `ruby-build` (looked up on
+  `PATH`, then `~/.local/bin`) and Ruby's build dependencies, both installed by
+  `~/.dotfiles/install.sh --install-optional`. If `ruby-build` is missing,
+  follow the instructions `ruby-install` prints; never install the
+  distribution's `ruby-build` package, which is too old for current Ruby
+  releases.
 - **`python-install`**: Checks that `uv` is installed and prints how to install
   it if not. `uv` itself manages Python interpreters (`.python-version`,
   `uv python install`), so there is no per-version Python install step.
