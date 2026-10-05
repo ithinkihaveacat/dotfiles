@@ -670,7 +670,9 @@ cat file.txt | scripts/token-count
 ### gemini-api-doctor
 
 Ping Gemini models to test API key validity and endpoint responsiveness. Runs
-checks in parallel and enforces a 60-second timeout.
+checks in parallel and enforces a 60-second timeout. Each success line reports
+the concrete model the server resolved (`response.model_version`), which shows
+what aliases such as `gemini-pro-latest` currently point to.
 
 ```bash
 scripts/gemini-api-doctor [MODELS...]
