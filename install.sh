@@ -542,7 +542,13 @@ function stanza_uv {
       return 1
     fi
     echo "Installing uv..."
-    if ! curl -LsSf https://astral.sh/uv/install.sh | sh || ! exists uv; then
+    # The installer evaluates $XDG_DATA_HOME/../bin and checks it against PATH
+    # literally without normalization, failing to recognize that ~/.local/bin is
+    # already on PATH. Pin UV_INSTALL_DIR to ~/.local/bin and suppress shell
+    # profile modifications (https://github.com/axodotdev/cargo-dist/issues/2529).
+    if ! curl -LsSf https://astral.sh/uv/install.sh |
+      env UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin" sh ||
+      ! exists uv; then
       echo "warning: uv installation failed" >&2
       return 1
     fi
