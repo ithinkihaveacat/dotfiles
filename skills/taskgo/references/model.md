@@ -82,10 +82,18 @@ partner guides, design specs, bug reports, or review notes. When a document is
 also published externally (such as a Google Doc, internal doc, or filed issue),
 the project `README.md` map records which copy is canonical and whether the
 local file is a working draft, a sync mirror, or a historical snapshot.
-`references/` holds stable descriptions that are private to the project and true
-now, such as domain notes or source material for a deliverable. Evidence from
-runs belongs in `results/`. Material imported from elsewhere and kept for
-history is labeled as such in the README map rather than presented as current.
+`scripts/` holds project-scoped, often ad-hoc scripts—data collectors, audit
+runners, reproduction harnesses, or report builders—especially when a project
+has no code repository of its own. These act as executable documentation:
+checking them into `scripts/` and listing them in the `README.md` map keeps
+future agent sessions from reconstructing the same helper in scratch space every
+time. They do not need the packaging or review rigor of scripts in a reusable
+skill; if one later graduates into a skill or artifact repository, update the
+map to point to the new owner. `references/` holds stable descriptions that are
+private to the project and true now, such as domain notes or source material for
+a deliverable. Evidence from runs belongs in `results/`. Material imported from
+elsewhere and kept for history is labeled as such in the README map rather than
+presented as current.
 
 ## Project Varieties & Exceptions
 
@@ -96,9 +104,9 @@ forcing a uniform mould:
 - **Document, Research, and Bug-Report Projects:** Many technical projects
   produce prose deliverables (`docs/`), bug reports (`bugreports/`), or reviews
   (`reviews/`), or coordinate across several upstream repositories and external
-  documents. Here the authored documents or filed issues are the primary
-  artifacts, and the project `README.md` map records where the canonical version
-  lives.
+  documents. Here the authored documents, filed issues, and supporting
+  `scripts/` are the primary artifacts, and the project `README.md` map records
+  where each canonical version lives.
 - **System Projects:** A **system project** tracks work on something the user
   operates, such as machines and services or a household, whose durable
   description lives in a **knowledge skill**: a private skill, loaded by topic,
@@ -133,6 +141,7 @@ needs the fact and how often it changes:
 | How the code works, how to build and run it, code-level invariants and ADRs | Artifact repository (`README.md`, `AGENTS.md`, `docs/`)                                          |
 | What a system, account, person, or place is and how to reach or operate it  | Knowledge skill (or a staging skill's reference files)                                           |
 | Authored reports, specs, guides, bug reports, or reviews                    | External canonical doc/issue, or `<project>/docs/`, `bugreports/`, `reviews/` (per `README` map) |
+| Repeatable project-specific queries, probes, or report/audit helpers        | `<project>/scripts/` (listed in `README` map; or a skill/artifact repo once promoted)            |
 | Why the project exists, its scope, where everything lives, standing rules   | Project `README.md`                                                                              |
 | Reasoning behind a private or cross-artifact standing rule                  | Project `decisions/`                                                                             |
 | Intended route                                                              | `PLAN.md`                                                                                        |
@@ -172,8 +181,9 @@ not see. It has three roles:
   and what is in and out of scope. Scope may exclude things the code README
   never mentions ("not the in-repository backlog", "no paid APIs").
 - **Map:** where everything lives — checkouts, remotes and forks, deployments,
-  data, related projects, and the knowledge skills describing the systems it
-  runs on — and which source is canonical where several overlap.
+  data, project `scripts/`, related projects, and the knowledge skills
+  describing the systems it runs on — and which source is canonical where
+  several overlap.
 - **Standing rules:** constraints that govern work and outlast any task,
   especially private ones such as data-safety rules, spending limits, and
   publication boundaries. State each rule briefly and link the ADR that explains
