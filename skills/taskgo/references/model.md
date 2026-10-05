@@ -76,79 +76,52 @@ INBOX.md                  # zero-ceremony capture; no schema
 `PROJECT.md` is a legacy name for the project README; the CLI still reads it
 when `README.md` is absent, but new and renamed projects use `README.md`.
 
-`docs/`, `bugreports/`, and `reviews/` hold authored deliverables when a
-project's output is prose rather than (or alongside) code: position papers,
-partner guides, design specs, bug reports, or review notes. When a document is
-also published externally (such as a Google Doc, internal doc, or filed issue),
-the project `README.md` map records which copy is canonical and whether the
-local file is a working draft, a sync mirror, or a historical snapshot.
-`scripts/` holds project-scoped, often ad-hoc scripts—data collectors, audit
-runners, reproduction harnesses, or report builders—especially when a project
-has no code repository of its own. These act as executable documentation:
-checking them into `scripts/` and listing them in the `README.md` map keeps
-future agent sessions from reconstructing the same helper in scratch space every
-time. They do not need the packaging or review rigor of scripts in a reusable
-skill; if one later graduates into a skill or artifact repository, update the
-map to point to the new owner. `references/` holds stable descriptions that are
-private to the project and true now, such as domain notes or source material for
-a deliverable. Evidence from runs belongs in `results/`. Material imported from
-elsewhere and kept for history is labeled as such in the README map rather than
-presented as current.
+`docs/`, `bugreports/`, and `reviews/` hold authored prose deliverables when the
+output is a document, issue report, or review rather than code; when published
+externally, the `README.md` map records which copy is canonical. `scripts/`
+holds repeatable, project-scoped helpers (queries, audit runners, report
+builders) so future sessions reuse them instead of recreating them in scratch;
+they need not meet the packaging bar of reusable skill scripts. `references/`
+holds stable descriptions that are private to the project and true now, such as
+domain notes or source material for a deliverable. Evidence from runs belongs in
+`results/`. Material imported from elsewhere and kept for history is labeled as
+such in the README map rather than presented as current.
 
-## Project Varieties & Exceptions
+## System & Non-Code Projects
 
-While `taskgo` is optimized for technical projects centered on code
-repositories, the same structure accommodates other kinds of work without
-forcing a uniform mould:
+Not every project centers on a code repository. A project's primary output may
+be prose deliverables (`docs/`, `bugreports/`, `reviews/`) and supporting
+`scripts/`, or it may have no external artifact at all (such as a personal or
+household project where `STATUS.md` and `tasks/` carry the work).
 
-- **Document, Research, and Bug-Report Projects:** Many technical projects
-  produce prose deliverables (`docs/`), bug reports (`bugreports/`), or reviews
-  (`reviews/`), or coordinate across several upstream repositories and external
-  documents. Here the authored documents, filed issues, and supporting
-  `scripts/` are the primary artifacts, and the project `README.md` map records
-  where each canonical version lives.
-- **System Projects:** A **system project** tracks work on something the user
-  operates, such as machines and services or a household, whose durable
-  description lives in a **knowledge skill**: a private skill, loaded by topic,
-  that records current facts about particular systems, accounts, people, or
-  places. The knowledge skill plays the role of the artifact repository: tasks
-  change the system and finish by updating the skill to the new current state,
-  linking the skill repository's commit with a `Ref:` trailer. The project
-  README names the skill in its map (and in `skills:` frontmatter) instead of
-  copying its facts. Many knowledge skills never need a project; create one when
-  a system has enough ongoing work to track.
-- **Personal and Non-Technical Projects:** A project like `house` or `taxes`—or
-  a task such as booking a personal holiday or figuring out what to do about a
-  front gate—may have no external repository or skill at all. The fit with
-  engineering-oriented conventions can be slightly loose, and that is fine:
-  `STATUS.md` and `tasks/` carry the work without extra ceremony.
-- **Staging Skills and Non-Conforming Projects:** Not every skill or project is
-  cleanly partitioned. A private or employer skill may act as an intentional
-  **staging ground** that mixes capability workflows and reference facts until
-  focused skills are ready to be extracted, and some projects may diverge from
-  these guidelines. Treat these rules as helpful defaults rather than rigid
-  requirements. A project or skill may self-identify its role or exceptions in
-  its documentation so agents and linters do not flag them, though even explicit
-  declaration is optional.
+A **system project** tracks work on something the user operates, such as
+machines and services or a household, whose durable description lives in a
+**knowledge skill**: a private skill, loaded by topic, that records current
+facts about particular systems, accounts, people, or places. The knowledge skill
+plays the role of the artifact repository: tasks change the system and finish by
+updating the skill to the new current state, linking the skill repository's
+commit with a `Ref:` trailer. The project README names the skill in its map (and
+in `skills:` frontmatter) instead of copying its facts. Many knowledge skills
+never need a project; create one when a system has enough ongoing work to track.
 
 ## Where Knowledge Lives
 
 Each fact has one owner; other locations link to it. Choose the owner by who
 needs the fact and how often it changes:
 
-| Kind of fact                                                                | Owner                                                                                            |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| How the code works, how to build and run it, code-level invariants and ADRs | Artifact repository (`README.md`, `AGENTS.md`, `docs/`)                                          |
-| What a system, account, person, or place is and how to reach or operate it  | Knowledge skill (or a staging skill's reference files)                                           |
-| Authored reports, specs, guides, bug reports, or reviews                    | External canonical doc/issue, or `<project>/docs/`, `bugreports/`, `reviews/` (per `README` map) |
-| Repeatable project-specific queries, probes, or report/audit helpers        | `<project>/scripts/` (listed in `README` map; or a skill/artifact repo once promoted)            |
-| Why the project exists, its scope, where everything lives, standing rules   | Project `README.md`                                                                              |
-| Reasoning behind a private or cross-artifact standing rule                  | Project `decisions/`                                                                             |
-| Intended route                                                              | `PLAN.md`                                                                                        |
-| Current situation and next actions                                          | `STATUS.md`                                                                                      |
-| A unit of work, its outcome, and findings                                   | `tasks/`                                                                                         |
-| Run evidence, supporting context                                            | `results/`, `references/`                                                                        |
-| What changed, when, and why                                                 | Git history (commit prose, `Ref:` and `Conversation:`)                                           |
+| Kind of fact                                                                | Owner                                                                         |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| How the code works, how to build and run it, code-level invariants and ADRs | Artifact repository (`README.md`, `AGENTS.md`, `docs/`)                       |
+| What a system, account, person, or place is and how to reach or operate it  | Knowledge skill                                                               |
+| Authored reports, specs, guides, bug reports, or reviews                    | External canonical doc/issue, or `<project>/docs/`, `bugreports/`, `reviews/` |
+| Repeatable project-scoped queries, probes, or report helpers                | `<project>/scripts/` (or a skill/artifact repo once promoted)                 |
+| Why the project exists, its scope, where everything lives, standing rules   | Project `README.md`                                                           |
+| Reasoning behind a private or cross-artifact standing rule                  | Project `decisions/`                                                          |
+| Intended route                                                              | `PLAN.md`                                                                     |
+| Current situation and next actions                                          | `STATUS.md`                                                                   |
+| A unit of work, its outcome, and findings                                   | `tasks/`                                                                      |
+| Run evidence, supporting context                                            | `results/`, `references/`                                                     |
+| What changed, when, and why                                                 | Git history (commit prose, `Ref:` and `Conversation:`)                        |
 
 The control repository files differ mainly in how often they change: `README.md`
 over months, `PLAN.md` over weeks, and `STATUS.md` nearly every commit.
@@ -162,11 +135,11 @@ using these principles rather than reorganizing everything at once:
    with a link to its owner, or move misplaced content to where it belongs.
 1. **The artifact wins.** When a description disagrees with the code or the
    system it describes, the description is wrong.
-1. **Declare historical locations and intentional exceptions instead of forcing
-   them to move.** An in-repository `TODO.md`, an imported planning document, a
-   hybrid staging skill, or an unconventional project can stay where it is; the
-   project `README.md` map (or skill header) says what it is and whether it is
-   canonical.
+1. **Declare historical locations and exceptions instead of forcing them to
+   move.** An in-repository `TODO.md`, an imported planning document, a staging
+   skill that mixes workflows and reference facts, or a project that diverges
+   from these defaults can stay where it is; the project `README.md` map (or
+   skill header, if useful) says what it is and whether it is canonical.
 
 ## Project README
 

@@ -11,11 +11,9 @@ compatibility: Requires Python 3.11+ (via uv) and git.
 
 # taskgo
 
-taskgo manages a private **control repository**. It is designed primarily around
-technical projects (whose primary output may be code, skills, prose documents,
-bug reports, or reviews), while accommodating personal or non-technical projects
-and tasks without ceremony. Humans read current Markdown; agents edit it,
-operate Git, reconstruct history, and generate summaries.
+taskgo manages a private **control repository** spanning multiple projects.
+Humans read current Markdown; agents edit it, operate Git, reconstruct history,
+and generate summaries.
 
 ## Tool Execution
 
@@ -147,9 +145,8 @@ which file, repository, or skill owns each kind of fact.
   or edit the `skills:` list in `<project>/README.md`'s YAML frontmatter and
   verify with `taskgo info <project>`.
 - **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`) for private or
-  cross-artifact decisions (code-level ADRs belong in the artifact repository).
-  Newer ADRs record `supersedes: [<old-adr>]` in YAML frontmatter to retire
-  older ADRs without editing accepted historical records.
+  cross-artifact decisions. Newer ADRs record `supersedes: [<old-adr>]` in YAML
+  frontmatter to retire older ADRs without editing accepted historical records.
 - **STATUS.md:** The self-contained operational projection.
   - `## Summary`: Human/agent prose for current situation and active session
     citation (`[<conversation-id>](<agent>://<conversation-id>)`). Rewrite it;

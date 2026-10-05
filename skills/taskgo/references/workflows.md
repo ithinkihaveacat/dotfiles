@@ -23,9 +23,8 @@ Before starting work, an agent must:
      `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if needed
      in the current turn; the harness will inject them into `<skills>`
      automatically on subsequent turns.
-1. Inspect linked artifact repos under their own instructions, and check the
-   project `README.md` map and `scripts/` before writing new one-off helpers in
-   scratch or `/tmp`.
+1. Inspect linked artifact repos under their own instructions, and check
+   `<project>/scripts/` before writing new scratch helpers.
 
 ### Commit Authority
 
@@ -46,10 +45,8 @@ matters):
 
 ### After Meaningful Work
 
-1. Rewrite specific files to the new current truth. If you wrote an ad-hoc
-   script in scratch that future sessions are likely to need again (especially
-   in projects without a code repository), keep it in `<project>/scripts/` and
-   list it in the project `README.md` map so subsequent sessions reuse it.
+1. Rewrite specific files to the new current truth, saving repeatable scratch
+   helpers in `<project>/scripts/` (and the `README.md` map).
 1. Update affected task record(s) (e.g. mark `done` with `## Outcome` and
    `## Findings`, recording `[<conversation-id>](<agent>://<conversation-id>)`).
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
