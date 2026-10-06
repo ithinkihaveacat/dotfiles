@@ -1,0 +1,264 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "pyobjc-framework-Cocoa",
+#   "pyobjc-framework-Quartz",
+# ]
+# ///
+
+import argparse
+import ctypes
+import os
+import plistlib
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import Quartz
+from AppKit import NSScreen, NSWorkspace
+from Foundation import NSDate, NSDefaultRunLoopMode, NSObject, NSRunLoop
+
+PROG = os.path.basename(sys.argv[0])
+LABEL = "com.github.ithinkihaveacat.macos-brightness-refresh"
+PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
+LOG = Path.home() / "Library/Logs/macos-brightness-refresh.log"
+
+# Seconds after a wake or connect event to refresh; the second pass catches
+# displays that finish powering up after the first.
+REFRESH_DELAYS = (3.0, 10.0)
+NUDGE = 0.01
+
+DESCRIPTION = """\
+Re-apply the brightness of external displays whose brightness macOS controls
+(such as the LG UltraFine 5K) by nudging it down 1% and back. Works around
+displays that come back from sleep or reconnect dimmer than the brightness
+slider shows: re-sending the same value is ignored, a changed value is not."""
+
+EPILOG = f"""\
+Examples:
+  # Fix a dim display once, right now
+  {PROG}
+
+  # Refresh automatically after every wake and reconnect, from login
+  {PROG} --install
+
+  # Watch in the foreground to see when refreshes happen
+  {PROG} --watch
+
+The LaunchAgent runs '{PROG} --watch' and logs to
+{LOG.as_posix().replace(str(Path.home()), "~")}. Remove it with '{PROG} --uninstall'."""
+
+_ds = ctypes.CDLL(
+    "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
+)
+_ds.DisplayServicesCanChangeBrightness.argtypes = [ctypes.c_uint32]
+_ds.DisplayServicesCanChangeBrightness.restype = ctypes.c_bool
+_ds.DisplayServicesGetBrightness.argtypes = [
+    ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_float),
+]
+_ds.DisplayServicesGetBrightness.restype = ctypes.c_int
+_ds.DisplayServicesSetBrightness.argtypes = [ctypes.c_uint32, ctypes.c_float]
+_ds.DisplayServicesSetBrightness.restype = ctypes.c_int
+
+
+def log(message: str) -> None:
+    print(
+        f"{datetime.now().astimezone():%Y-%m-%d %H:%M:%S} {message}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def display_names() -> dict[int, str]:
+    return {
+        int(s.deviceDescription()["NSScreenNumber"]): str(s.localizedName())
+        for s in NSScreen.screens()
+    }
+
+
+def external_displays() -> list[int]:
+    err, ids, count = Quartz.CGGetOnlineDisplayList(16, None, None)
+    if err:
+        return []
+    return [
+        d
+        for d in ids[:count]
+        if not Quartz.CGDisplayIsBuiltin(d)
+        and _ds.DisplayServicesCanChangeBrightness(d)
+    ]
+
+
+def refresh() -> int:
+    """Nudge each external display's brightness and restore it; return the count."""
+    names = display_names()
+    refreshed = 0
+    for d in external_displays():
+        level = ctypes.c_float()
+        if _ds.DisplayServicesGetBrightness(d, ctypes.byref(level)) != 0:
+            log(f"{PROG}: cannot read brightness of display {d}")
+            continue
+        current = level.value
+        nudged = current - NUDGE if current >= NUDGE else current + NUDGE
+        if _ds.DisplayServicesSetBrightness(d, nudged) != 0:
+            log(f"{PROG}: cannot set brightness of display {d}")
+            continue
+        time.sleep(0.3)
+        _ds.DisplayServicesSetBrightness(d, current)
+        log(f"refreshed {names.get(d, f'display {d}')} at {round(current * 100)}%")
+        refreshed += 1
+    return refreshed
+
+
+class Watcher(NSObject):
+    def schedule_(self, reason):
+        log(f"{reason}; refreshing in {', '.join(f'{s:g}s' for s in REFRESH_DELAYS)}")
+        NSObject.cancelPreviousPerformRequestsWithTarget_(self)
+        for delay in REFRESH_DELAYS:
+            self.performSelector_withObject_afterDelay_("refresh:", None, delay)
+
+    def refresh_(self, _):
+        refresh()
+
+    def didWake_(self, _):  # noqa: N802 (Objective-C selector)
+        self.schedule_("system woke")
+
+    def screensDidWake_(self, _):  # noqa: N802 (Objective-C selector)
+        self.schedule_("displays woke")
+
+
+def watch() -> None:
+    watcher = Watcher.alloc().init()
+    center = NSWorkspace.sharedWorkspace().notificationCenter()
+    center.addObserver_selector_name_object_(
+        watcher, "didWake:", "NSWorkspaceDidWakeNotification", None
+    )
+    center.addObserver_selector_name_object_(
+        watcher, "screensDidWake:", "NSWorkspaceScreensDidWakeNotification", None
+    )
+
+    def reconfigured(display, flags, _):
+        if flags & Quartz.kCGDisplayAddFlag and not Quartz.CGDisplayIsBuiltin(display):
+            watcher.schedule_(f"display {display} connected")
+
+    Quartz.CGDisplayRegisterReconfigurationCallback(reconfigured, None)
+
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    log("watching for wake and display connect")
+    watcher.schedule_("started")
+    loop = NSRunLoop.currentRunLoop()
+    # Run in short slices so Python signal handlers (Ctrl-C, SIGTERM) run promptly.
+    while True:
+        loop.runMode_beforeDate_(
+            NSDefaultRunLoopMode, NSDate.dateWithTimeIntervalSinceNow_(1.0)
+        )
+
+
+def launchctl(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["launchctl", *args], capture_output=True, text=True, check=False
+    )
+
+
+def install() -> None:
+    uv = shutil.which("uv")
+    if not uv:
+        print(f"{PROG}: uv not found", file=sys.stderr)
+        sys.exit(127)
+    script = Path(__file__).resolve()
+    PLIST.parent.mkdir(parents=True, exist_ok=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with PLIST.open("wb") as f:
+        plistlib.dump(
+            {
+                "Label": LABEL,
+                "ProgramArguments": [str(script), "--watch"],
+                "EnvironmentVariables": {
+                    "PATH": f"{Path(uv).parent}:/usr/bin:/bin:/usr/sbin:/sbin"
+                },
+                "RunAtLoad": True,
+                "KeepAlive": True,
+                "ProcessType": "Background",
+                "StandardOutPath": str(LOG),
+                "StandardErrorPath": str(LOG),
+            },
+            f,
+        )
+    domain = f"gui/{os.getuid()}"
+    launchctl("bootout", f"{domain}/{LABEL}")
+    result = launchctl("bootstrap", domain, str(PLIST))
+    if result.returncode != 0:
+        print(
+            f"{PROG}: launchctl bootstrap {domain} {PLIST} failed: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"installed {PLIST}", file=sys.stderr)
+
+
+def uninstall() -> None:
+    launchctl("bootout", f"gui/{os.getuid()}/{LABEL}")
+    if PLIST.exists():
+        PLIST.unlink()
+        print(f"removed {PLIST}", file=sys.stderr)
+    else:
+        print(f"{PROG}: {PLIST} not installed", file=sys.stderr)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description=DESCRIPTION,
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--watch",
+        action="store_true",
+        help="stay running and refresh after every wake and display connect",
+    )
+    mode.add_argument(
+        "--install",
+        action="store_true",
+        help="install and start a login LaunchAgent that runs --watch",
+    )
+    mode.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="stop and remove the LaunchAgent",
+    )
+    args = parser.parse_args()
+
+    if args.watch:
+        watch()
+    elif args.install:
+        install()
+    elif args.uninstall:
+        uninstall()
+    elif refresh() == 0:
+        print(
+            f"{PROG}: no external display with adjustable brightness", file=sys.stderr
+        )
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
