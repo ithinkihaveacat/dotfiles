@@ -59,20 +59,33 @@ if the title is long.
 
 Preferred states: `todo`, `in-progress`, `blocked`, `done`, `cancelled`.
 
-### Dependencies
+### Dependencies & Scheduling
 
-A task may declare what is holding it up with an optional `blocked_by` list of
-task IDs:
+A task may declare internal task graph edges (`blocked_by`) as well as external
+or temporal scheduling fields (`wait_for`, `due`, and `stale_after`):
 
 ```yaml
 blocked_by: [TASK-1627D]
+wait_for: [b/431751691, 2026-10-13]
+due: 2026-10-15
+stale_after: 2026-11-01
 ```
 
-`status: blocked` is set manually. `blocked_by` is read-only scheduling data.
-Record the edge on the task that is *held*, never on the blocker; otherwise a
-new dependency requires editing an unrelated, already `done` task. Remove
-resolved edges from open tasks when `taskgo doctor` reports them (or re-plan if
-a prerequisite was cancelled).
+- **`blocked_by`** — Internal `TASK-XXXXX` graph edges only. Record the edge on
+  the task that is *held*, never on the blocker; remove resolved edges from open
+  tasks when `taskgo doctor` reports them (or re-plan if cancelled).
+- **`wait_for`** — External or temporal gates keeping a task off the ready
+  frontier: ISO cool-down dates (`YYYY-MM-DD`, resolved once `today >= date`),
+  issue/CL URIs (`b/...`, `cl/...`, `gh:owner/repo#num`), or human handles
+  (`@stillers`).
+- **`due`** — Committed completion deadline (`YYYY-MM-DD`). `taskgo doctor`
+  emits `[FAIL]` when overdue (`due < today`) and `[WARN]` within 48 hours;
+  `taskgo list --state ready` sorts approaching `due` dates first.
+- **`stale_after`** — Relevance cutoff (`YYYY-MM-DD`) after which
+  `taskgo doctor` emits `[WARN]` prompting re-scoping or cancellation.
+
+`status: blocked` is allowed without warning when either `blocked_by` or
+`wait_for` has unresolved entries.
 
 ### Planning & In-Progress Task Template
 
@@ -203,8 +216,8 @@ help details and subcommand options.
 ```text
 taskgo id
 taskgo root
-taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
+taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]

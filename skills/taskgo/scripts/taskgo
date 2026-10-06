@@ -22,6 +22,7 @@ import textwrap
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -105,6 +106,9 @@ class TaskFrontmatter(TypedDict, total=False):
     status: str
     conversations: list[str]
     blocked_by: list[str]
+    wait_for: list[str | date] | str | date
+    due: str | date
+    stale_after: str | date
 
 
 RESOLVED_STATES = {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
@@ -794,8 +798,12 @@ def extract_frontmatter_field(content: str, key: str) -> str:
         )
         if m:
             val = m.group(1).strip().strip("'\"")
+    if isinstance(val, datetime):
+        return val.date().isoformat()
+    if isinstance(val, date):
+        return val.isoformat()
     if isinstance(val, (list, dict)):
-        return json.dumps(val)
+        return json.dumps(_to_jsonable(val))
     return str(val)
 
 
@@ -897,6 +905,37 @@ def get_task_files(root: Path, project_name: str | None = None) -> list[Path]:
     return sorted(files)
 
 
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DUE_SOON_DAYS = 7
+
+
+def parse_iso_date(value: Any) -> date | None:
+    """Parses a YYYY-MM-DD string or date object into a datetime.date, or None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip().strip("'\"")
+    if not ISO_DATE_RE.match(s):
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def get_today() -> date:
+    """Returns today's calendar date (or TASKGO_TODAY=YYYY-MM-DD when set)."""
+    env_today = os.environ.get("TASKGO_TODAY")
+    if env_today:
+        parsed = parse_iso_date(env_today)
+        if parsed is not None:
+            return parsed
+    return datetime.now().astimezone().date()
+
+
 def parse_blocked_by(fm: dict[str, Any]) -> tuple[str, ...]:
     """Reads the optional blocked_by edge list, tolerating a bare scalar."""
     raw = fm.get("blocked_by")
@@ -905,6 +944,59 @@ def parse_blocked_by(fm: dict[str, Any]) -> tuple[str, ...]:
     items = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw))
     deps = (str(item).strip().strip("'\"").upper() for item in items)
     return tuple(dict.fromkeys(d for d in deps if d))
+
+
+def parse_wait_for(fm: dict[str, Any]) -> tuple[str, ...]:
+    """Reads the optional wait_for gate list, tolerating scalars and dates."""
+    raw = fm.get("wait_for")
+    if not raw:
+        return ()
+    tokens: list[str] = []
+    if isinstance(raw, datetime):
+        tokens.append(raw.date().isoformat())
+    elif isinstance(raw, date):
+        tokens.append(raw.isoformat())
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, datetime):
+                tokens.append(item.date().isoformat())
+            elif isinstance(item, date):
+                tokens.append(item.isoformat())
+            else:
+                for sub in re.split(r"[,\s]+", str(item)):
+                    cleaned = sub.strip().strip("'\"")
+                    if cleaned:
+                        tokens.append(cleaned)
+    else:
+        for sub in re.split(r"[,\s]+", str(raw)):
+            cleaned = sub.strip().strip("'\"")
+            if cleaned:
+                tokens.append(cleaned)
+    return tuple(dict.fromkeys(tokens))
+
+
+def parse_date_field(fm: dict[str, Any], key: str) -> str | None:
+    """Reads an optional scalar date field (due, stale_after) as YYYY-MM-DD string."""
+    raw = fm.get(key)
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, datetime):
+        return raw.date().isoformat()
+    if isinstance(raw, date):
+        return raw.isoformat()
+    cleaned = str(raw).strip().strip("'\"")
+    return cleaned or None
+
+
+def normalize_wait_for_args(raw_list: list[str]) -> list[str]:
+    """Normalizes CLI --wait-for values into deduplicated gate tokens."""
+    tokens: list[str] = []
+    for entry in raw_list:
+        for sub in re.split(r"[,\s]+", str(entry)):
+            cleaned = sub.strip().strip("'\"")
+            if cleaned:
+                tokens.append(cleaned)
+    return list(dict.fromkeys(tokens))
 
 
 @dataclass(slots=True, frozen=True)
@@ -916,6 +1008,9 @@ class TaskRow:
     rel_path: str
     abs_path: Path
     blocked_by: tuple[str, ...] = ()
+    wait_for: tuple[str, ...] = ()
+    due: str | None = None
+    stale_after: str | None = None
 
 
 def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
@@ -949,6 +1044,9 @@ def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
                 rel_path,
                 f.resolve(),
                 parse_blocked_by(fm),
+                parse_wait_for(fm),
+                parse_date_field(fm, "due"),
+                parse_date_field(fm, "stale_after"),
             )
         )
     return rows
@@ -970,6 +1068,25 @@ def unresolved_blockers(row: TaskRow, index: dict[str, str]) -> list[str]:
         for dep in row.blocked_by
         if dep in index and index[dep] not in RESOLVED_STATES
     ]
+
+
+def unresolved_wait_for(row: TaskRow, today: date | None = None) -> list[str]:
+    """Returns wait_for entries still holding ROW back as of TODAY.
+
+    ISO dates (YYYY-MM-DD) hold a task back only while date > today.
+    External/human gates (b/..., cl/..., gh:..., @handle) remain unresolved
+    while present in frontmatter.
+    """
+    ref_day = today if today is not None else get_today()
+    out: list[str] = []
+    for item in row.wait_for:
+        d = parse_iso_date(item)
+        if d is not None:
+            if d > ref_day:
+                out.append(item)
+        else:
+            out.append(item)
+    return out
 
 
 def find_dependency_cycles(rows: list[TaskRow]) -> list[list[str]]:
@@ -1172,14 +1289,20 @@ def build_status_block(
             index = {r.task_id: r.status for r in all_rows if r.task_id}
         else:
             index = status_index(root)
+    today = get_today()
+    due_cutoff = today + timedelta(days=DUE_SOON_DAYS)
     in_progress = [r for r in rows if r.status == "in-progress"]
-    # Declared blocked, or held by an unresolved edge. In-progress wins the
+    # Declared blocked, or held by an unresolved edge/gate. In-progress wins the
     # row so the two sections stay disjoint; doctor reports the contradiction.
     blocked = [
         r
         for r in rows
         if r.status != "in-progress"
-        and (r.status == "blocked" or unresolved_blockers(r, index))
+        and (
+            r.status == "blocked"
+            or unresolved_blockers(r, index)
+            or (r.status not in RESOLVED_STATES and unresolved_wait_for(r, today))
+        )
     ]
     todo_count = sum(1 for r in rows if r.status == "todo")
     done_count = sum(1 for r in rows if r.status == "done")
@@ -1197,7 +1320,11 @@ def build_status_block(
     ]
     if in_progress:
         for r in in_progress:
-            lines.append(f"- `{r.task_id}` — {r.title}")
+            d = parse_iso_date(r.due)
+            suffix = (
+                f" (due `{d.isoformat()}`)" if d is not None and d <= due_cutoff else ""
+            )
+            lines.append(f"- `{r.task_id}` — {r.title}{suffix}")
     else:
         lines.append("- None")
 
@@ -1210,13 +1337,46 @@ def build_status_block(
     )
     if blocked:
         for r in blocked:
+            notes: list[str] = []
             held = unresolved_blockers(r, index)
-            suffix = (
-                f" (blocked by {', '.join(f'`{d}`' for d in held)})" if held else ""
+            if held:
+                notes.append(f"blocked by {', '.join(f'`{d}`' for d in held)}")
+            waiting = (
+                unresolved_wait_for(r, today) if r.status not in RESOLVED_STATES else []
             )
+            if waiting:
+                notes.append(f"waiting for {', '.join(f'`{w}`' for w in waiting)}")
+            if r.status not in RESOLVED_STATES:
+                d = parse_iso_date(r.due)
+                if d is not None and d <= due_cutoff:
+                    notes.append(f"due `{d.isoformat()}`")
+            suffix = f" ({'; '.join(notes)})" if notes else ""
             lines.append(f"- `{r.task_id}` — {r.title}{suffix}")
     else:
         lines.append("- None")
+
+    due_soon = [
+        r
+        for r in rows
+        if r not in in_progress
+        and r not in blocked
+        and r.status not in RESOLVED_STATES
+        and (d := parse_iso_date(r.due)) is not None
+        and d <= due_cutoff
+    ]
+    due_soon.sort(key=lambda r: (parse_iso_date(r.due) or date.max, r.task_id))
+    if due_soon:
+        lines.extend(
+            [
+                "",
+                "### Due soon",
+                "",
+            ]
+        )
+        for r in due_soon:
+            d = parse_iso_date(r.due)
+            due_str = d.isoformat() if d is not None else str(r.due)
+            lines.append(f"- `{r.task_id}` — {r.title} (due `{due_str}`)")
 
     adr_rows = get_adr_rows(root, project_name)
     if adr_rows:
@@ -1982,9 +2142,11 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     )
                 )
 
-    # Dependency edges. Never auto-remediated: an invented or removed edge is
-    # worse than an absent one, so every finding here needs human review.
+    # Dependency edges & temporal gates. Never auto-remediated: an invented or
+    # removed edge/gate is worse than an absent one, so every finding here needs
+    # human review.
     index = status_idx
+    today = get_today()
     scoped_rows = [
         r for r in all_rows if not target_project or r.project == target_project
     ]
@@ -2039,14 +2201,90 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         remediation=None,
                     )
                 )
-        if row.status == TaskStatus.BLOCKED.value and not unresolved_blockers(
-            row, index
+
+            if row.due is not None:
+                due_date = parse_iso_date(row.due)
+                if due_date is None:
+                    findings.append(
+                        Finding(
+                            category="task",
+                            severity="FAIL",
+                            message=(
+                                f"{row.rel_path}: invalid ISO date in due '{row.due}' "
+                                "(expected YYYY-MM-DD)"
+                            ),
+                            file_path=row.abs_path,
+                            remediation=None,
+                        )
+                    )
+                elif due_date < today:
+                    findings.append(
+                        Finding(
+                            category="schedule",
+                            severity="FAIL",
+                            message=(
+                                f"{row.rel_path}: overdue (due {due_date.isoformat()}, "
+                                f"{(today - due_date).days}d ago)"
+                            ),
+                            file_path=row.abs_path,
+                            remediation=None,
+                        )
+                    )
+                elif due_date <= today + timedelta(days=2):
+                    findings.append(
+                        Finding(
+                            category="schedule",
+                            severity="WARN",
+                            message=(
+                                f"{row.rel_path}: due soon (due {due_date.isoformat()}, "
+                                "within 48h)"
+                            ),
+                            file_path=row.abs_path,
+                            remediation=None,
+                        )
+                    )
+
+            if row.stale_after is not None:
+                stale_date = parse_iso_date(row.stale_after)
+                if stale_date is None:
+                    findings.append(
+                        Finding(
+                            category="task",
+                            severity="FAIL",
+                            message=(
+                                f"{row.rel_path}: invalid ISO date in stale_after "
+                                f"'{row.stale_after}' (expected YYYY-MM-DD)"
+                            ),
+                            file_path=row.abs_path,
+                            remediation=None,
+                        )
+                    )
+                elif stale_date < today:
+                    findings.append(
+                        Finding(
+                            category="schedule",
+                            severity="WARN",
+                            message=(
+                                f"{row.rel_path}: stale task "
+                                f"(stale_after {stale_date.isoformat()}); "
+                                "re-scope or cancel"
+                            ),
+                            file_path=row.abs_path,
+                            remediation=None,
+                        )
+                    )
+
+        if (
+            row.status == TaskStatus.BLOCKED.value
+            and not unresolved_blockers(row, index)
+            and not unresolved_wait_for(row, today)
         ):
-            detail = (
-                "no blocked_by edges"
-                if not row.blocked_by
-                else "all blocked_by edges resolved"
-            )
+            if row.blocked_by:
+                detail = "all blocked_by edges resolved"
+            elif row.wait_for:
+                detail = "all wait_for gates elapsed"
+            else:
+                detail = "no blocked_by edges"
             findings.append(
                 Finding(
                     category="depends",
@@ -2099,6 +2337,9 @@ def render_task_file(
     findings: str | None = None,
     next_steps: str | None = None,
     conv: str | None = None,
+    wait_for: list[str] | tuple[str, ...] | None = None,
+    due: str | None = None,
+    stale_after: str | None = None,
 ) -> str:
     """Render and format a task Markdown document."""
     body_blocks = []
@@ -2148,6 +2389,12 @@ def render_task_file(
     body = "\n\n".join(body_blocks)
 
     fm_data: dict[str, Any] = {"id": task_id, "status": status}
+    if wait_for:
+        fm_data["wait_for"] = [parse_iso_date(w) or w for w in wait_for]
+    if due:
+        fm_data["due"] = parse_iso_date(due) or due
+    if stale_after:
+        fm_data["stale_after"] = parse_iso_date(stale_after) or stale_after
     if conv:
         fm_data["conversations"] = [conv]
     fm_block = dump_frontmatter(fm_data)
@@ -2178,6 +2425,9 @@ def cmd_create(
     findings: str | None = None,
     next_steps: str | None = None,
     conv: str | None = None,
+    wait_for: list[str] | None = None,
+    due: str | None = None,
+    stale_after: str | None = None,
     no_commit: bool = False,
     dry_run: bool = False,
 ) -> None:
@@ -2192,6 +2442,14 @@ def cmd_create(
         die(
             f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
         )
+
+    if due is not None and parse_iso_date(due) is None:
+        die_scoped(f"invalid ISO date for --due (expected YYYY-MM-DD): {due}")
+    if stale_after is not None and parse_iso_date(stale_after) is None:
+        die_scoped(
+            f"invalid ISO date for --stale-after (expected YYYY-MM-DD): {stale_after}"
+        )
+    norm_wait_for = normalize_wait_for_args(wait_for) if wait_for else []
 
     if slug is not None:
         task_slug = normalize_slug(slug)
@@ -2310,6 +2568,9 @@ def cmd_create(
         findings=findings,
         next_steps=next_steps,
         conv=conv_uri,
+        wait_for=norm_wait_for or None,
+        due=due,
+        stale_after=stale_after,
     )
     atomic_write(task_file, content)
 
@@ -2371,6 +2632,9 @@ def cmd_update(
     findings: str | None = None,
     next_steps: str | None = None,
     conv: str | None = None,
+    wait_for: list[str] | None = None,
+    due: str | None = None,
+    stale_after: str | None = None,
 ) -> None:
     """Update task fields, status, or headings."""
     new_slug: str | None = None
@@ -2398,6 +2662,41 @@ def cmd_update(
         norm_status = normalize_status(status)
         status_key = next((k for k in data if str(k).lower() == "status"), "status")
         data[status_key] = norm_status
+
+    if wait_for is not None:
+        if len(wait_for) == 1 and not wait_for[0].strip():
+            for k in [k for k in list(data.keys()) if str(k).lower() == "wait_for"]:
+                data.pop(k, None)
+        else:
+            items = normalize_wait_for_args(wait_for)
+            wf_key = next((k for k in data if str(k).lower() == "wait_for"), "wait_for")
+            data[wf_key] = [parse_iso_date(w) or w for w in items]
+
+    if due is not None:
+        if not due.strip():
+            for k in [k for k in list(data.keys()) if str(k).lower() == "due"]:
+                data.pop(k, None)
+        else:
+            parsed_due = parse_iso_date(due)
+            if parsed_due is None:
+                die_scoped(f"invalid ISO date for --due (expected YYYY-MM-DD): {due}")
+            due_key = next((k for k in data if str(k).lower() == "due"), "due")
+            data[due_key] = parsed_due
+
+    if stale_after is not None:
+        if not stale_after.strip():
+            for k in [k for k in list(data.keys()) if str(k).lower() == "stale_after"]:
+                data.pop(k, None)
+        else:
+            parsed_stale = parse_iso_date(stale_after)
+            if parsed_stale is None:
+                die_scoped(
+                    f"invalid ISO date for --stale-after (expected YYYY-MM-DD): {stale_after}"
+                )
+            sa_key = next(
+                (k for k in data if str(k).lower() == "stale_after"), "stale_after"
+            )
+            data[sa_key] = parsed_stale
 
     session = normalize_conversation_id(conv) if conv else None
     if session:
@@ -2499,12 +2798,20 @@ def cmd_list(
         # "ready" is derived, not a declared status: todo with nothing holding it.
         if state.strip().lower() == "ready":
             index = status_index(root)
+            today = get_today()
             rows = [
                 r
                 for r in rows
                 if r.status == TaskStatus.TODO.value
                 and not unresolved_blockers(r, index)
+                and not unresolved_wait_for(r, today)
             ]
+            rows.sort(
+                key=lambda r: (
+                    parse_iso_date(r.due) is None,
+                    parse_iso_date(r.due) or date.max,
+                )
+            )
         else:
             norm_state = normalize_status(state)
             rows = [r for r in rows if r.status == norm_state]
@@ -2518,6 +2825,9 @@ def cmd_list(
                 "title": r.title,
                 "path": str(r.abs_path.relative_to(root)),
                 "blocked_by": list(r.blocked_by),
+                "wait_for": list(r.wait_for),
+                "due": r.due,
+                "stale_after": r.stale_after,
             }
             for r in rows
         ]
@@ -2535,6 +2845,10 @@ def cmd_list(
 
 def _to_jsonable(val: Any) -> Any:
     """Recursively converts ruamel.yaml mappings/sequences/scalars into standard JSON-serializable types."""
+    if isinstance(val, datetime):
+        return val.date().isoformat()
+    if isinstance(val, date):
+        return val.isoformat()
     if isinstance(val, dict):
         return {str(k): _to_jsonable(v) for k, v in val.items()}
     if isinstance(val, list):
@@ -2746,6 +3060,17 @@ def cmd_dispatch(task_id: str) -> None:
                     "WARN",
                     (
                         f"{resolved_id} is still blocked by {', '.join(blockers)}; "
+                        "it is not ready to dispatch"
+                    ),
+                )
+            )
+        waiting = unresolved_wait_for(row)
+        if waiting:
+            findings.append(
+                (
+                    "WARN",
+                    (
+                        f"{resolved_id} is still waiting for {', '.join(waiting)}; "
                         "it is not ready to dispatch"
                     ),
                 )
@@ -3621,6 +3946,27 @@ than a few words.""",
         help="Active conversation or session ID",
     )
     p_create.add_argument(
+        "--wait-for",
+        dest="wait_for",
+        action="append",
+        default=None,
+        metavar="GATE",
+        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., @handle)",
+    )
+    p_create.add_argument(
+        "--due",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Committed completion deadline (YYYY-MM-DD)",
+    )
+    p_create.add_argument(
+        "--stale-after",
+        dest="stale_after",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Relevance cutoff date (YYYY-MM-DD)",
+    )
+    p_create.add_argument(
         "--no-commit", action="store_true", help="Do not commit created task"
     )
     p_create.add_argument(
@@ -3668,6 +4014,27 @@ than a few words.""",
         dest="conv",
         default=None,
         help="Active conversation or session ID",
+    )
+    p_update.add_argument(
+        "--wait-for",
+        dest="wait_for",
+        action="append",
+        default=None,
+        metavar="GATE",
+        help="External or temporal gate (YYYY-MM-DD, b/..., cl/..., gh:..., @handle)",
+    )
+    p_update.add_argument(
+        "--due",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Committed completion deadline (YYYY-MM-DD)",
+    )
+    p_update.add_argument(
+        "--stale-after",
+        dest="stale_after",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Relevance cutoff date (YYYY-MM-DD)",
     )
 
     # list
@@ -4149,6 +4516,9 @@ def main(argv: list[str] | None = None) -> None:
             findings=args.findings,
             next_steps=args.next_steps,
             conv=getattr(args, "conv", None),
+            wait_for=getattr(args, "wait_for", None),
+            due=getattr(args, "due", None),
+            stale_after=getattr(args, "stale_after", None),
             no_commit=args.no_commit,
             dry_run=args.dry_run,
         )
@@ -4168,6 +4538,9 @@ def main(argv: list[str] | None = None) -> None:
             findings=args.findings,
             next_steps=args.next_steps,
             conv=getattr(args, "conv", None),
+            wait_for=getattr(args, "wait_for", None),
+            due=getattr(args, "due", None),
+            stale_after=getattr(args, "stale_after", None),
         )
     elif args.command == "list":
         cmd_list(

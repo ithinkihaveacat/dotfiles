@@ -82,8 +82,9 @@ usage: taskgo create [-h] [--slug SLUG] [--status STATUS] [--problem PROBLEM]
                      [--cost COST] [--goal GOAL] [--criteria CRITERIA]
                      [--sketch SKETCH] [--constraints CONSTRAINTS]
                      [--outcome OUTCOME] [--findings FINDINGS]
-                     [--next NEXT_STEPS] [--conv CONV] [--no-commit]
-                     [--dry-run]
+                     [--next NEXT_STEPS] [--conv CONV] [--wait-for GATE]
+                     [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD]
+                     [--no-commit] [--dry-run]
                      PROJECT TITLE
 
 Create a new task in PROJECT.
@@ -111,6 +112,11 @@ options:
   --next NEXT_STEPS     Next steps
   --conv, -C, --conversation CONV
                         Active conversation or session ID
+  --wait-for GATE       External or temporal gate (YYYY-MM-DD, b/..., cl/...,
+                        gh:..., @handle)
+  --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
+  --stale-after YYYY-MM-DD
+                        Relevance cutoff date (YYYY-MM-DD)
   --no-commit           Do not commit created task
   --dry-run             Preview allocation without modifying files
 
@@ -138,6 +144,8 @@ usage: taskgo update [-h] [--status STATUS] [--title TITLE] [--slug SLUG]
                      [--criteria CRITERIA] [--sketch SKETCH]
                      [--constraints CONSTRAINTS] [--outcome OUTCOME]
                      [--findings FINDINGS] [--next NEXT_STEPS] [--conv CONV]
+                     [--wait-for GATE] [--due YYYY-MM-DD]
+                     [--stale-after YYYY-MM-DD]
                      TASK_ID
 
 Update task fields, status, or headings.
@@ -164,6 +172,11 @@ options:
   --next NEXT_STEPS     Next steps
   --conv, -C, --conversation CONV
                         Active conversation or session ID
+  --wait-for GATE       External or temporal gate (YYYY-MM-DD, b/..., cl/...,
+                        gh:..., @handle)
+  --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
+  --stale-after YYYY-MM-DD
+                        Relevance cutoff date (YYYY-MM-DD)
 
 Examples:
   taskgo update TASK-3A91F --status in-progress

@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..136'
+echo '1..144'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -2619,4 +2619,153 @@ if ("$BIN" --root "$COST_REPO" update "$COST_OPTIONAL_PATH" \
   echo 'ok 136 - update replaces Cost with multiline text and preserves other fields'
 else
   echo 'not ok 136 - update replaces Cost with multiline text and preserves other fields'
+fi
+
+# ===========================================================================
+# wait_for, due, and stale_after frontmatter fields
+# ===========================================================================
+
+WF_REPO="$TEST_ROOT/wf-repo"
+mkdir -p "$WF_REPO/proj/tasks"
+git -C "$WF_REPO" init -q
+git -C "$WF_REPO" config user.name 'Taskgo Test'
+git -C "$WF_REPO" config user.email 'taskgo@example.invalid'
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$WF_REPO/AGENTS.md"
+printf '# Inbox\n' >"$WF_REPO/INBOX.md"
+printf '# Project\n' >"$WF_REPO/proj/README.md"
+git -C "$WF_REPO" add -A >/dev/null 2>&1
+git -C "$WF_REPO" commit -qm 'chore: init wf-repo'
+
+# Test 137: create and update support --wait-for, --due, and --stale-after and expose them in list --json
+WF_CREATED=$("$BIN" --root "$WF_REPO" create proj 'Wait on bug and deadline' \
+  --slug wait-bug \
+  --wait-for b/431751691 --wait-for '@stillers' \
+  --due 2026-10-15 \
+  --stale-after 2026-11-01 \
+  --no-commit)
+WF_ID="${WF_CREATED%%$'\t'*}"
+WF_JSON=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --json)
+if [[ "$WF_JSON" == *'"wait_for": ['* ]] &&
+  [[ "$WF_JSON" == *'"b/431751691"'* ]] &&
+  [[ "$WF_JSON" == *'"@stillers"'* ]] &&
+  [[ "$WF_JSON" == *'"due": "2026-10-15"'* ]] &&
+  [[ "$WF_JSON" == *'"stale_after": "2026-11-01"'* ]] &&
+  ("$BIN" --root "$WF_REPO" update "$WF_ID" --due 2026-10-20 --wait-for cl/970059389) >/dev/null 2>&1 &&
+  [[ $(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --json) == *'"due": "2026-10-20"'* ]] &&
+  [[ $(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --json) == *'"cl/970059389"'* ]]; then
+  echo 'ok 137 - create and update support --wait-for, --due, and --stale-after'
+else
+  echo 'not ok 137 - create and update support --wait-for, --due, and --stale-after'
+fi
+
+# Test 138: doctor allows status: blocked with unresolved wait_for, and warns when all wait_for dates elapsed
+("$BIN" --root "$WF_REPO" update "$WF_ID" --status blocked --wait-for b/431751691) >/dev/null 2>&1
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+if TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj >/dev/null 2>&1 &&
+  ("$BIN" --root "$WF_REPO" update "$WF_ID" --wait-for 2026-10-01) >/dev/null 2>&1 &&
+  (TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null &&
+  ! WF_ELAPSED_DR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj 2>&1) &&
+  [[ "$WF_ELAPSED_DR" == *"status is blocked but all wait_for gates elapsed"* ]]; then
+  echo 'ok 138 - doctor allows blocked status with unresolved wait_for and warns when elapsed'
+else
+  echo 'not ok 138 - doctor allows blocked status with unresolved wait_for and warns when elapsed'
+fi
+
+# Reset WF_ID back to clean blocked on b/431751691 with non-urgent due date
+("$BIN" --root "$WF_REPO" update "$WF_ID" --status blocked --wait-for b/431751691 --due 2026-10-20) >/dev/null 2>&1
+
+# Test 139: doctor emits [FAIL] when open task has due < today and [WARN] when due within 48h
+DUE_OVERDUE_OUT=$("$BIN" --root "$WF_REPO" create proj 'Overdue task' --slug overdue --due 2026-10-05 --no-commit)
+DUE_OVERDUE_ID="${DUE_OVERDUE_OUT%%$'\t'*}"
+DUE_SOON_OUT=$("$BIN" --root "$WF_REPO" create proj 'Soon task' --slug soon --due 2026-10-08 --no-commit)
+DUE_SOON_ID="${DUE_SOON_OUT%%$'\t'*}"
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+set +e
+DUE_DR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj 2>&1)
+DUE_DR_EXIT=$?
+set -e
+if [ "$DUE_DR_EXIT" -ne 0 ] &&
+  [[ "$DUE_DR" == *"[FAIL]  proj/tasks/${DUE_OVERDUE_ID}-overdue.md: overdue (due 2026-10-05"* ]] &&
+  [[ "$DUE_DR" == *"[WARN]  proj/tasks/${DUE_SOON_ID}-soon.md: due soon (due 2026-10-08"* ]]; then
+  echo 'ok 139 - doctor emits [FAIL] on overdue due date and [WARN] within 48h'
+else
+  echo 'not ok 139 - doctor emits [FAIL] on overdue due date and [WARN] within 48h'
+fi
+
+# Test 140: doctor emits [WARN] on open task with stale_after < today without auto-deleting on fix
+("$BIN" --root "$WF_REPO" update "$DUE_OVERDUE_ID" --status 'done') >/dev/null 2>&1
+("$BIN" --root "$WF_REPO" update "$DUE_SOON_ID" --due 2026-10-25 --stale-after 2026-10-01) >/dev/null 2>&1
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+set +e
+STALE_DR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj 2>&1)
+STALE_DR_EXIT=$?
+set -e
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" fix proj --no-commit) >/dev/null 2>&1 || true
+if [ "$STALE_DR_EXIT" -ne 0 ] &&
+  [[ "$STALE_DR" == *"[WARN]  proj/tasks/${DUE_SOON_ID}-soon.md: stale task (stale_after 2026-10-01)"* ]] &&
+  [ -f "$WF_REPO/proj/tasks/${DUE_SOON_ID}-soon.md" ]; then
+  echo 'ok 140 - doctor warns on stale_after < today without deleting task'
+else
+  echo 'not ok 140 - doctor warns on stale_after < today without deleting task'
+fi
+
+# Clean up stale_after on DUE_SOON_ID
+("$BIN" --root "$WF_REPO" update "$DUE_SOON_ID" --stale-after "") >/dev/null 2>&1
+
+# Test 141: list --state ready excludes todo tasks with unresolved wait_for gates and includes elapsed dates
+WF_FUT_OUT=$("$BIN" --root "$WF_REPO" create proj 'Future cooldown' --slug fut-wait --wait-for 2026-10-13 --no-commit)
+WF_FUT_ID="${WF_FUT_OUT%%$'\t'*}"
+WF_PAST_OUT=$("$BIN" --root "$WF_REPO" create proj 'Elapsed cooldown' --slug past-wait --wait-for 2026-10-06 --no-commit)
+WF_PAST_ID="${WF_PAST_OUT%%$'\t'*}"
+WF_EXT_OUT=$("$BIN" --root "$WF_REPO" create proj 'External handle gate' --slug ext-wait --wait-for '@stillers' --no-commit)
+WF_EXT_ID="${WF_EXT_OUT%%$'\t'*}"
+READY_OUT=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --state ready)
+if [[ "$READY_OUT" != *"$WF_FUT_ID"* ]] &&
+  [[ "$READY_OUT" != *"$WF_EXT_ID"* ]] &&
+  [[ "$READY_OUT" == *"$WF_PAST_ID"* ]]; then
+  echo 'ok 141 - list --state ready excludes unresolved wait_for gates and includes elapsed dates'
+else
+  echo 'not ok 141 - list --state ready excludes unresolved wait_for gates and includes elapsed dates'
+fi
+
+# Test 142: list --state ready sorts approaching due dates first
+("$BIN" --root "$WF_REPO" update "$DUE_SOON_ID" --due 2026-10-12) >/dev/null 2>&1
+("$BIN" --root "$WF_REPO" update "$WF_PAST_ID" --due 2026-10-09) >/dev/null 2>&1
+READY_IDS=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --state ready | awk 'NR>1 {print $2}' | tr '\n' ' ')
+if [ "$READY_IDS" = "$WF_PAST_ID $DUE_SOON_ID " ]; then
+  echo 'ok 142 - list --state ready sorts approaching due dates first'
+else
+  echo 'not ok 142 - list --state ready sorts approaching due dates first'
+  echo "# READY_IDS=$READY_IDS (expected '$WF_PAST_ID $DUE_SOON_ID ')"
+fi
+
+# Test 143: sync projects wait_for and approaching due annotations into STATUS.md
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+STATUS_TXT=$(cat "$WF_REPO/proj/STATUS.md")
+if [[ "$STATUS_TXT" == *"$WF_ID"*"waiting for \`b/431751691\`"* ]] &&
+  [[ "$STATUS_TXT" == *"$WF_FUT_ID"*"waiting for \`2026-10-13\`"* ]] &&
+  [[ "$STATUS_TXT" == *"$WF_PAST_ID"*"due \`2026-10-09\`"* ]]; then
+  echo 'ok 143 - sync projects wait_for and approaching due annotations into STATUS.md'
+else
+  echo 'not ok 143 - sync projects wait_for and approaching due annotations into STATUS.md'
+fi
+
+# Test 144: dispatch warns when dispatching a task with unresolved wait_for gates
+git -C "$WF_REPO" add -A >/dev/null 2>&1
+git -C "$WF_REPO" commit -qm 'chore(proj): seed wait_for tasks'
+set +e
+WF_DISP_ERR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" dispatch "$WF_FUT_ID" 2>&1 >/dev/null)
+set -e
+if [[ "$WF_DISP_ERR" == *"is still waiting for 2026-10-13"* ]]; then
+  echo 'ok 144 - dispatch warns when dispatching a task with unresolved wait_for gates'
+else
+  echo 'not ok 144 - dispatch warns when dispatching a task with unresolved wait_for gates'
 fi
