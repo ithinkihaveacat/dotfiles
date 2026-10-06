@@ -48,7 +48,7 @@ commit_all() {
   fi
 }
 
-echo "1..67"
+echo "1..73"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -1476,4 +1476,191 @@ if PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/serialize_test.py" "
 else
   echo "not ok 67 - Session serialization test exited non-zero"
   sed 's/^/# /' "$OUTPUT"
+fi
+
+# Tests 68-72: tool-argument validation, rate-limit pacing arithmetic and the
+# input-token budget, checked as plain functions.
+cat >"$WORK/pacing.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line for line in source.splitlines() if not line.startswith("from google")
+)
+cx = {"__name__": "caxton_helpers"}
+exec(compile(stripped, "caxton", "exec"), cx)
+
+
+def report(name, ok, detail=""):
+    print(f"check:{name}:{'pass' if ok else 'fail'} {detail}".rstrip())
+
+
+coerce = cx["coerce_tool_args"]
+
+
+# Same signature as caxton's read_file, which Gemini has called with
+# start_line={} and end_line={}.
+def read_file(path: str, start_line: int | None = None, end_line: int | None = None):
+    return {}
+
+
+bad = []
+cases = {
+    "empty objects": ({"path": "a.md", "start_line": {}, "end_line": {}}, {"path": "a.md"}),
+    "nulls": ({"path": "a.md", "start_line": None}, {"path": "a.md"}),
+    "float": ({"path": "a.md", "start_line": 3.0, "end_line": 9}, {"path": "a.md", "start_line": 3, "end_line": 9}),
+    "string": ({"path": "a.md", "start_line": " 12 "}, {"path": "a.md", "start_line": 12}),
+}
+for label, (raw, want) in cases.items():
+    got, err = coerce(read_file, raw)
+    if err or got != want:
+        bad.append(f"{label}: {got!r} {err!r}")
+for label, raw, needle in (
+    ("fractional", {"path": "a.md", "start_line": 2.5}, "'start_line' must be an integer"),
+    ("word", {"path": "a.md", "end_line": "ten"}, "'end_line' must be an integer"),
+    ("object", {"path": "a.md", "start_line": {"n": 1}}, "'start_line' must be an integer"),
+    ("bool", {"path": "a.md", "start_line": True}, "'start_line' must be an integer"),
+    ("missing path", {"start_line": 1}, "'path'"),
+    ("empty path", {"path": {}}, "'path' is required"),
+    ("unknown", {"path": "a.md", "lines": 3}, "unexpected argument 'lines'"),
+):
+    _, err = coerce(read_file, raw)
+    if not err or needle not in err or "not supported" in err:
+        bad.append(f"{label}: {err!r}")
+report("coerce-args", not bad, "; ".join(bad))
+
+
+def grep_search(query: str, path: str = "", case_insensitive: bool = False):
+    return {}
+
+
+got, err = coerce(grep_search, {"query": "x", "case_insensitive": "true", "path": {}})
+_, bad_bool = coerce(grep_search, {"query": "x", "case_insensitive": 2})
+report(
+    "coerce-bool",
+    err is None
+    and got == {"query": "x", "case_insensitive": True}
+    and "must be true or false" in (bad_bool or ""),
+    f"{got!r} {err!r} {bad_bool!r}",
+)
+
+# Pacing against a known limit: wait only until the oldest calls leave the
+# rolling window, and never forever for a call larger than the limit.
+RL = cx["RateLimiter"]
+rl = RL(tpm=1000)
+ok = rl.delay(400, 0.0) == 0.0
+rl.record(400, 0.0)
+rl.record(400, 10.0)
+ok = ok and rl.delay(200, 20.0) == 0.0
+ok = ok and abs(rl.delay(300, 20.0) - 40.0) < 1e-9
+ok = ok and abs(rl.delay(700, 20.0) - 50.0) < 1e-9
+ok = ok and abs(rl.delay(5000, 20.0) - 50.0) < 1e-9
+ok = ok and rl.delay(300, 61.0) == 0.0
+report("pacing-window", ok)
+
+# Without a known limit: unpaced until a 429, then halve (multiplicative
+# decrease) and climb back by a tenth per success (additive increase).
+rl = RL()
+ok = rl.delay(10**6, 0.0) == 0.0
+rl.record(300, 0.0)
+rl.record(300, 10.0)
+rl.throttled(400, 20.0)
+ok = ok and rl.limit() == 500.0 and rl.delay(400, 20.0) == 50.0
+for t in (80.0, 140.0):
+    rl.record(100, t)
+ok = ok and abs(rl.limit() - 600.0) < 1e-9
+rl.throttled(100, 141.0)
+ok = ok and abs(rl.limit() - 100.0) < 1e-9
+capped = RL(tpm=50)
+capped.throttled(1000, 0.0)
+ok = ok and capped.limit() == 50
+backoff = cx["backoff_delay"]
+ok = ok and backoff(0, 15, 120, 1.0) == 15 and backoff(0, 15, 120, 0.0) == 7.5
+ok = ok and backoff(5, 15, 120, 1.0) == 120 and backoff(5, 15, 120, 0.0) == 60
+report("pacing-aimd", ok, f"limit={rl.limit()}")
+
+# A 429's quota details tell a per-minute limit from a daily one.
+class FakeError(Exception):
+    def __init__(self, details):
+        self.details = details
+
+
+minute = FakeError({"error": {"details": [{"violations": [{"quotaMetric": "generativelanguage.googleapis.com/generate_content_paid_tier_input_token_count", "quotaId": "GenerateContentPaidTierInputTokensPerModelPerMinute"}]}]}})
+daily = FakeError({"error": {"details": [{"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}})
+ids = cx["quota_ids"]
+report(
+    "quota-kind",
+    not cx["is_daily_quota"](ids(minute))
+    and cx["is_daily_quota"](ids(daily))
+    and ids(FakeError(None)) == []
+    and len(ids(minute)) == 2,
+)
+
+# The input-token budget reaches the model, with a warning as it runs out.
+enrich = cx["enrich_tool_result_with_budget"]
+plenty = enrich({"status": "success"}, 1, 100, 0.0, 0, 1_000_000, 100_000)
+low = enrich({"status": "success"}, 1, 100, 0.0, 0, 250_000, 100_000)
+last = enrich({"status": "success"}, 1, 100, 0.0, 0, 150_000, 100_000)
+unset = enrich({"status": "success"}, 1, 100, 0.0, 0)
+parse = cx["parse_token_count"]
+parsed = [parse(v) for v in ("250000", "250k", "1.5M")]
+try:
+    parse("lots")
+    rejected = False
+except ValueError:
+    rejected = True
+report(
+    "input-budget",
+    plenty["remaining_input_tokens"] == 1_000_000
+    and "budget_warning" not in plenty
+    and "about 2 call(s)" in low.get("budget_warning", "")
+    and "CRITICAL" in last.get("budget_warning", "")
+    and "remaining_input_tokens" not in unset
+    and parsed == [250_000, 250_000, 1_500_000]
+    and rejected,
+    f"{low.get('budget_warning')!r} {parsed}",
+)
+PYEOF
+
+PACING_OUT="$WORK/pacing.out"
+PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/pacing.py" \
+  "$BIN" >"$PACING_OUT" 2>&1 || true
+
+pacing_check() {
+  if grep -q "^check:$1:pass" "$PACING_OUT"; then
+    echo "ok $2 - $3"
+  else
+    echo "not ok $2 - $3"
+    sed 's/^/# /' "$PACING_OUT"
+  fi
+}
+
+pacing_check coerce-args 68 "Treats empty optional arguments as unset and rejects mistyped ones by name"
+pacing_check coerce-bool 69 "Coerces boolean arguments and rejects non-boolean ones"
+pacing_check pacing-window 70 "Paces calls to keep a rolling minute of input tokens under the limit"
+pacing_check pacing-aimd 71 "Learns a limit from 429s, backs off with jitter and speeds up again"
+
+# Test 72: quota kind and input budget, folded into one line of the plan
+if grep -q "^check:quota-kind:pass" "$PACING_OUT" && grep -q "^check:input-budget:pass" "$PACING_OUT"; then
+  echo "ok 72 - Tells daily quotas from per-minute ones and reports the input-token budget"
+else
+  echo "not ok 72 - Quota classification or input-token budget check failed"
+  sed 's/^/# /' "$PACING_OUT"
+fi
+
+# Test 73: a malformed token count is a usage error, reported before any work
+if (cd "$REPO" && "$BIN" --dry-run "prompt" --tpm lots) >"$OUTPUT" 2>&1; then
+  echo "not ok 73 - Expected an invalid --tpm to fail"
+else
+  if grep -q "caxton: error: --tpm: invalid token count: 'lots'" "$OUTPUT"; then
+    echo "ok 73 - Rejects a malformed --tpm value"
+  else
+    echo "not ok 73 - Invalid --tpm error missing expected text"
+    sed 's/^/# /' "$OUTPUT"
+  fi
 fi

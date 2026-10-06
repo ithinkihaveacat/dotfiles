@@ -19,4 +19,6 @@ complete -c caxton -l serialize -d "Save payload and response to state directory
 complete -c caxton -l no-serialize -d "Disable saving payload and response to state directory"
 complete -c caxton -l max-steps -x -d "Maximum agent execution steps (default: 100)"
 complete -c caxton -l timeout -x -d "Maximum execution time in seconds (default: 1800)"
+complete -c caxton -l tpm -x -d "Input tokens per minute to stay under (e.g. 1M)"
+complete -c caxton -l max-input-tokens -x -d "Stop before total input tokens pass N (e.g. 20M)"
 complete -c caxton -s h -l help -d "Display help message and exit"

@@ -285,7 +285,18 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
 - `--serialize` / `--no-serialize`: Save request payload and final response to
   the state directory (`~/.local/state/caxton/`) (default: on).
 - `--max-steps N`: Maximum agent tool steps before stopping (default: 100).
-- `--timeout SECONDS`: Execution timeout in seconds (default: 1800).
+- `--timeout SECONDS`: Execution timeout in seconds (default: 1800), including
+  time spent waiting on rate limits.
+- `--tpm N`: Input tokens per minute to stay under (e.g. `1M`; env
+  `CAXTON_TPM`). Every step resends the whole conversation, so a run with a
+  large inlined payload reaches a tokens-per-minute limit within a few calls.
+  With `--tpm`, each call waits only until the last minute's input leaves room
+  for it. Without it, calls are unpaced until the API returns a 429; Caxton then
+  retries with backoff and paces to a learned limit that it raises again after
+  each success. A daily quota fails at once, naming the quota.
+- `--max-input-tokens N`: Stop cleanly, with the usual report of changed files,
+  before the call that would take total input tokens past `N` (e.g. `20M`; env
+  `CAXTON_MAX_INPUT_TOKENS`). The agent is told its remaining budget.
 
 `PROMPT` is the only positional argument and must come before the path options,
 which each consume every following path.

@@ -480,13 +480,22 @@ Options:
                       Save request payload and final response to state directory
                       (~/.local/state/caxton/). (default: on).
   --max-steps N       Maximum tool steps before stopping (default: 100).
-  --timeout SECONDS   Execution timeout in seconds (default: 1800).
+  --timeout SECONDS   Execution timeout in seconds (default: 1800). Includes
+                      time spent waiting on rate limits.
+  --tpm N             Input tokens per minute to stay under, e.g. 1M. Without
+                      it, calls are paced only after the API returns a 429.
+  --max-input-tokens N
+                      Stop before the call that would take total input tokens
+                      past N, e.g. 20M. Every step resends the conversation.
   -h, --help          Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY      Required. Your Gemini API key.
   GEMINI_MODEL        Optional. Default model if --model is not given.
   AGENT_OFFLINE       Refuse network calls. Exits immediately if set.
+  CAXTON_TPM          Optional. Default for --tpm.
+  CAXTON_MAX_INPUT_TOKENS
+                      Optional. Default for --max-input-tokens.
   CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
                       (default: ${XDG_STATE_HOME:-~/.local/state}/caxton).
 
@@ -503,6 +512,10 @@ Examples:
 
   # Preview exactly what would be sent, and what could be written
   caxton --dry-run "Translate the guides into French" --edit docs/
+
+  # A long run over a large tree, paced and capped
+  caxton "Simplify the docs" --edit docs/ --tpm 1M \
+    --max-input-tokens 20M --timeout 7200
 
   # Select many paths safely, and inline only the Markdown among them
   git ls-files -z '*.md' | caxton "Normalize headings" \

@@ -31,9 +31,11 @@ import argparse
 import dataclasses
 import difflib
 import fnmatch
+import inspect
 import json
 import mimetypes
 import os
+import random
 import re
 import shlex
 import shutil
@@ -42,6 +44,7 @@ import stat
 import subprocess
 import sys
 import time
+import typing
 import uuid
 from pathlib import Path
 
@@ -162,6 +165,8 @@ SINGLE_VALUE_OPTIONS = {
     "--thinking",
     "--max-steps",
     "--timeout",
+    "--tpm",
+    "--max-input-tokens",
     "--read-from",
     "--edit-from",
 }
@@ -177,6 +182,10 @@ LIST_VALUE_OPTIONS = {
 
 class CaxtonTimeoutError(Exception):
     """Raised when execution exceeds the timeout limit."""
+
+
+class InputBudgetExhaustedError(Exception):
+    """Raised before a call that would exceed --max-input-tokens."""
 
 
 # Set once the alarm is armed, so the top-level handler can name the limit.
@@ -280,6 +289,210 @@ def extract_retry_delay(exc: Exception) -> float | None:
     return None
 
 
+def quota_ids(exc: Exception) -> list[str]:
+    """Names the quotas a 429 says were exceeded, from its QuotaFailure details.
+
+    The ids distinguish a per-minute limit, which pacing can wait out, from a
+    per-day one, which it cannot (e.g. 'GenerateRequestsPerDayPerProjectPerModel').
+    """
+    found: list[str] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key in ("quotaId", "quotaMetric"):
+                value = node.get(key)
+                if isinstance(value, str) and value not in found:
+                    found.append(value)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(getattr(exc, "details", None))
+    return found
+
+
+def is_daily_quota(ids: list[str]) -> bool:
+    """Whether any exceeded quota resets daily, so retrying today is futile."""
+    return any("PerDay" in q or "per_day" in q.lower() for q in ids)
+
+
+def backoff_delay(attempt: int, base: float, cap: float, rand: float = 1.0) -> float:
+    """Exponential backoff with jitter for retry `attempt` (counting from 0).
+
+    `rand` in [0, 1] scales the upper half of the window, so a delay always
+    lies between half and all of min(cap, base * 2**attempt).
+    """
+    ceiling = min(cap, base * (2**attempt))
+    return ceiling * (0.5 + 0.5 * rand)
+
+
+class RateLimiter:
+    """Paces API calls to stay under a tokens-per-minute (TPM) limit.
+
+    Every call resends the whole conversation, so input tokens per minute,
+    not calls per minute, is what a long run runs into. With a known limit,
+    each call waits only until a rolling window has room for it. Without one,
+    calls go out unpaced until a 429 arrives; each 429 then halves a learned
+    limit (multiplicative decrease), and each success raises it by a tenth of
+    that halved value (additive increase), so throughput climbs back towards
+    the limit instead of staying at its most cautious.
+    """
+
+    WINDOW = 60.0
+
+    def __init__(self, tpm: int | None = None):
+        self.configured = tpm
+        self.learned: float | None = None
+        self.step = 0.0
+        self.events: list[tuple[float, int]] = []
+
+    def limit(self) -> float | None:
+        values = [v for v in (self.configured, self.learned) if v]
+        return min(values) if values else None
+
+    def window_tokens(self, now: float) -> int:
+        self.events = [(t, n) for t, n in self.events if now - t < self.WINDOW]
+        return sum(n for _, n in self.events)
+
+    def delay(self, estimate: int, now: float) -> float:
+        """Seconds to wait before a call of `estimate` input tokens."""
+        limit = self.limit()
+        if limit is None:
+            return 0.0
+        excess = self.window_tokens(now) + estimate - limit
+        if excess <= 0:
+            return 0.0
+        # Wait for the oldest calls to leave the window until the new one
+        # fits. A call larger than the limit on its own waits for an empty
+        # window rather than forever.
+        for t, n in self.events:
+            excess -= n
+            if excess <= 0:
+                return max(0.0, t + self.WINDOW - now)
+        return max(0.0, self.events[-1][0] + self.WINDOW - now) if self.events else 0.0
+
+    def record(self, tokens: int, now: float) -> None:
+        """Counts a successful call's input tokens and eases any learned limit."""
+        self.events.append((now, tokens))
+        if self.learned is not None:
+            self.learned += self.step
+
+    def throttled(self, estimate: int, now: float) -> None:
+        """Halves the learned limit after a 429 for a call of `estimate` tokens."""
+        offered = self.window_tokens(now) + estimate
+        base = offered if self.learned is None else min(self.learned, offered)
+        self.learned = max(1.0, base / 2)
+        self.step = self.learned / 10
+
+
+def approx_tokens(message) -> int:
+    """Rough input-token count of a chat message: about 4 bytes per token."""
+    if isinstance(message, str):
+        size = len(message.encode("utf-8"))
+    else:
+        size = 0
+        for part in message:
+            dump = getattr(part, "model_dump_json", None)
+            size += len(dump(exclude_none=True) if dump else str(part))
+    return size // 4 + 1
+
+
+def parse_token_count(text: str) -> int:
+    """Parses a token count such as '250000', '250k' or '1.5M'."""
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([kKmM]?)\s*", text or "")
+    if not match:
+        raise ValueError(f"invalid token count: '{text}'")
+    scale = {"": 1, "k": 1_000, "m": 1_000_000}[match.group(2).lower()]
+    value = int(float(match.group(1)) * scale)
+    if value <= 0:
+        raise ValueError(f"token count must be positive: '{text}'")
+    return value
+
+
+def format_tokens(n: float) -> str:
+    """Formats a token count compactly (e.g. 950, 94.2k, 1.25M)."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return f"{n:.0f}"
+
+
+def coerce_tool_args(fn, raw: dict) -> tuple[dict, str | None]:
+    """Maps a model's function-call arguments onto fn's parameters.
+
+    Models sometimes send an empty object for an optional argument they mean
+    to leave unset, or a number as a string or float. An unset-looking value
+    for an optional parameter is dropped so its default applies; anything
+    that cannot be read as the declared type is rejected with an error that
+    names the argument, rather than crashing inside the tool.
+    """
+    params = inspect.signature(fn).parameters
+    kwargs: dict = {}
+    for name, value in raw.items():
+        param = params.get(name)
+        if param is None:
+            return {}, f"unexpected argument '{name}'"
+        optional = param.default is not inspect.Parameter.empty
+        if value is None or (isinstance(value, (dict, list)) and not value):
+            if optional:
+                continue
+            return {}, f"argument '{name}' is required, got {value!r}"
+
+        types_ = [
+            t
+            for t in (typing.get_args(param.annotation) or (param.annotation,))
+            if t is not type(None)
+        ]
+        expected = types_[0] if len(types_) == 1 else None
+        if expected is int:
+            if isinstance(value, bool):
+                pass
+            elif isinstance(value, int):
+                kwargs[name] = value
+                continue
+            elif (isinstance(value, float) and value.is_integer()) or (
+                isinstance(value, str) and re.fullmatch(r"\s*[+-]?[0-9]+\s*", value)
+            ):
+                kwargs[name] = int(value)
+                continue
+            return {}, f"argument '{name}' must be an integer, got {value!r}"
+        if expected is bool:
+            if isinstance(value, bool):
+                kwargs[name] = value
+                continue
+            if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+                kwargs[name] = value.strip().lower() == "true"
+                continue
+            return {}, f"argument '{name}' must be true or false, got {value!r}"
+        if expected is str and not isinstance(value, str):
+            return {}, f"argument '{name}' must be a string, got {value!r}"
+        kwargs[name] = value
+
+    missing = [
+        name
+        for name, p in params.items()
+        if p.default is inspect.Parameter.empty and name not in kwargs
+    ]
+    if missing:
+        return {}, "missing required argument(s): " + ", ".join(
+            f"'{m}'" for m in missing
+        )
+    return kwargs, None
+
+
+def summarize_args(raw: dict, limit: int = 80) -> str:
+    """Renders raw call arguments for the log, shortening long strings."""
+    shown = {}
+    for k, v in raw.items():
+        if isinstance(v, str) and len(v) > limit:
+            v = f"{v[:limit]}… ({len(v)} chars)"
+        shown[k] = v
+    return json.dumps(shown, ensure_ascii=False, default=repr)
+
+
 def offline_switch() -> tuple[bool, str]:
     """Whether network access is forbidden here, and which switch says so."""
     var = "AGENT_OFFLINE"
@@ -293,8 +506,14 @@ def enrich_tool_result_with_budget(
     max_steps: int,
     session_start: float,
     timeout_sec: int,
+    remaining_input_tokens: int | None = None,
+    next_call_tokens: int = 0,
 ) -> dict:
-    """Enriches a tool response with remaining step and time budget telemetry."""
+    """Enriches a tool response with remaining step, time and token budgets.
+
+    With an input-token cap, `next_call_tokens` (the size of the latest
+    prompt, which every further call resends) says how many more calls fit.
+    """
     enriched = dict(res)
     steps_left = max(0, max_steps - current_step)
     enriched["remaining_steps"] = steps_left
@@ -305,15 +524,35 @@ def enrich_tool_result_with_budget(
         secs_left = max(0.0, round(timeout_sec - elapsed, 1))
         enriched["remaining_seconds"] = secs_left
 
+    calls_left = None
+    if remaining_input_tokens is not None:
+        remaining_input_tokens = max(0, remaining_input_tokens)
+        enriched["remaining_input_tokens"] = remaining_input_tokens
+        if next_call_tokens > 0:
+            calls_left = remaining_input_tokens // next_call_tokens
+
     warning = None
-    if steps_left <= 1 or (secs_left is not None and secs_left <= 20.0):
+    if calls_left is not None and calls_left <= 1 and steps_left > 1:
+        warning = (
+            "CRITICAL BUDGET LIMIT: The input-token budget allows at most"
+            f" {calls_left} more call(s)! "
+            "You MUST call complete_task() now with your best-effort report."
+        )
+    elif steps_left <= 1 or (secs_left is not None and secs_left <= 20.0):
         warning = (
             f"CRITICAL BUDGET LIMIT: Only {steps_left} step(s) remaining! "
             "You MUST call complete_task() now with your best-effort report."
         )
-    elif steps_left <= 2 or (secs_left is not None and secs_left <= 45.0):
+    elif (
+        steps_left <= 2
+        or (secs_left is not None and secs_left <= 45.0)
+        or (calls_left is not None and calls_left <= 3)
+    ):
+        left = f"{steps_left} step(s)"
+        if calls_left is not None and calls_left < steps_left:
+            left = f"input-token budget for about {calls_left} call(s)"
         warning = (
-            f"LOW BUDGET: {steps_left} step(s) remaining. "
+            f"LOW BUDGET: {left} remaining. "
             "Finalize edits and prepare to call complete_task()."
         )
     if warning:
@@ -580,13 +819,22 @@ Options:
                       Save request payload and final response to state directory
                       (~/.local/state/caxton/). (default: on).
   --max-steps N       Maximum tool steps before stopping (default: 100).
-  --timeout SECONDS   Execution timeout in seconds (default: 1800).
+  --timeout SECONDS   Execution timeout in seconds (default: 1800). Includes
+                      time spent waiting on rate limits.
+  --tpm N             Input tokens per minute to stay under, e.g. 1M. Without
+                      it, calls are paced only after the API returns a 429.
+  --max-input-tokens N
+                      Stop before the call that would take total input tokens
+                      past N, e.g. 20M. Every step resends the conversation.
   -h, --help          Display this help message and exit.
 
 Environment:
   GEMINI_API_KEY      Required. Your Gemini API key.
   GEMINI_MODEL        Optional. Default model if --model is not given.
   AGENT_OFFLINE       Refuse network calls. Exits immediately if set.
+  CAXTON_TPM          Optional. Default for --tpm.
+  CAXTON_MAX_INPUT_TOKENS
+                      Optional. Default for --max-input-tokens.
   CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
                       (default: ${{XDG_STATE_HOME:-~/.local/state}}/caxton).
 
@@ -603,6 +851,10 @@ Examples:
 
   # Preview exactly what would be sent, and what could be written
   {prog_name} --dry-run "Translate the guides into French" --edit docs/
+
+  # A long run over a large tree, paced and capped
+  {prog_name} "Simplify the docs" --edit docs/ --tpm 1M \\
+    --max-input-tokens 20M --timeout 7200
 
   # Select many paths safely, and inline only the Markdown among them
   git ls-files -z '*.md' | {prog_name} "Normalize headings" \\
@@ -826,6 +1078,9 @@ class Telemetry:
     prompt_tokens: int = 0
     candidate_tokens: int = 0
     input_limit: int = 0
+    input_tokens_total: int = 0
+    wait_seconds: float = 0.0
+    rate_limit_events: list = dataclasses.field(default_factory=list)
 
 
 def ensure_state_dir(state_dir: str) -> None:
@@ -906,6 +1161,9 @@ def save_session_response(
         f"- **Tool Calls:** {telemetry.tool_calls}\n"
         f"- **Elapsed:** {total_elapsed:.2f}s\n"
         f"- **Tokens:** {telemetry.prompt_tokens} prompt / {telemetry.candidate_tokens} candidate\n"
+        f"- **Cumulative Input Tokens:** {telemetry.input_tokens_total}\n"
+        f"- **Rate-Limit Waits:** {telemetry.wait_seconds:.1f}s,"
+        f" {len(telemetry.rate_limit_events)} rate-limit response(s)\n"
         f"- **Files Modified:** {len(telemetry.modified_files)}\n"
         f"- **Files Created:** {len(telemetry.created_files)}\n"
         f"- **Files Deleted:** {len(telemetry.deleted_files)}\n"
@@ -978,6 +1236,14 @@ def main():
     )
     parser.add_argument("--max-steps", type=int, default=100, metavar="N")
     parser.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
+    parser.add_argument(
+        "--tpm", default=os.environ.get("CAXTON_TPM") or None, metavar="N"
+    )
+    parser.add_argument(
+        "--max-input-tokens",
+        default=os.environ.get("CAXTON_MAX_INPUT_TOKENS") or None,
+        metavar="N",
+    )
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS)
 
     args = parser.parse_args()
@@ -998,6 +1264,16 @@ def main():
             )
         print_short_usage(prog_name)
         sys.exit(1)
+
+    for option in ("tpm", "max_input_tokens"):
+        value = getattr(args, option)
+        if value is not None:
+            try:
+                setattr(args, option, parse_token_count(value))
+            except ValueError as e:
+                flag = "--" + option.replace("_", "-")
+                print(f"{prog_name}: error: {flag}: {e}", file=sys.stderr)
+                sys.exit(1)
 
     if args.no_inline and inline_args:
         print(
@@ -1637,6 +1913,19 @@ def main():
             )
         )
         print(f"  Model:         {args.model} (thinking: {args.thinking})")
+        print(
+            "  Pacing:        "
+            + (
+                f"{format_tokens(args.tpm)} input tokens/min"
+                if args.tpm
+                else "adaptive (after a 429)"
+            )
+            + (
+                f", stop at {format_tokens(args.max_input_tokens)} input tokens"
+                if args.max_input_tokens
+                else ""
+            )
+        )
         if policy.inlined:
             print(
                 f"  Inlined:       {len(policy.inlined)} file(s)"
@@ -2120,7 +2409,8 @@ def main():
         """Searches across visible text files in the repository for a regex pattern or substring.
 
         Args:
-            query: Search pattern (regex or literal substring).
+            query: Search pattern: a Python regex, or a literal substring.
+              A query that is not a valid regex is searched for literally.
             path: Optional subdirectory or file path prefix to narrow the search.
             case_insensitive: Whether search should ignore case (default: False).
 
@@ -2131,13 +2421,13 @@ def main():
             return {"status": "error", "message": "query cannot be empty."}
 
         flags = re.IGNORECASE if case_insensitive else 0
+        note = None
         try:
             pattern = re.compile(query, flags)
         except re.error as e:
-            return {
-                "status": "error",
-                "message": f"Invalid regex pattern '{query}': {e}",
-            }
+            # Code searches such as 'require(' are usually meant literally.
+            pattern = re.compile(re.escape(query), flags)
+            note = f"Not a valid regex ({e}); searched for it as a literal string."
 
         target_files = []
         for rel in sorted(policy.visible):
@@ -2169,12 +2459,15 @@ def main():
             if len(matches) >= max_matches:
                 break
 
-        return {
+        result = {
             "status": "success",
             "matches": matches,
             "total_matches": len(matches),
             "truncated": len(matches) >= max_matches,
         }
+        if note:
+            result["note"] = note
+        return result
 
     # Assemble tool suite (read-only unless --edit named something writable)
     if not is_mutation_mode:
@@ -2192,6 +2485,20 @@ def main():
 
     tool_map = {fn.__name__: fn for fn in tools}
 
+    # Declare the functions explicitly. Handed bare callables, google-genai
+    # builds a JSON schema that types each optional argument (`int | None`)
+    # as both anyOf[integer, null] and "object", and Gemini then fills those
+    # arguments with an empty object instead of a number or nothing.
+    tools = [
+        types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration.from_callable_with_api_option(
+                    callable=fn, api_option="GEMINI_API"
+                )
+                for fn in tools
+            ]
+        )
+    ]
     if args.search:
         tools.append({"google_search": {}})
     if args.code:
@@ -2354,58 +2661,126 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             file=sys.stderr,
         )
 
-    def send_with_retry(message):
-        initial_backoff = 2.0
-        max_backoff = 60.0
-        backoff_multiplier = 2.0
-        retry_timeout = 300.0
+    limiter = RateLimiter(args.tpm)
+    # Every call resends the whole conversation, so the next call costs the
+    # last prompt, plus the model's last reply, plus whatever is sent now.
+    last_call = {"prompt": approx_tokens(system_instruction), "reply": 0}
 
-        current_backoff = initial_backoff
+    def send_with_retry(message):
+        server_backoff_base = 2.0
+        rate_backoff_base = 15.0
+        max_backoff = 120.0
+        server_retry_timeout = 300.0
+        rate_retry_timeout = 900.0
+
+        estimate = last_call["prompt"] + last_call["reply"] + approx_tokens(message)
+        if (
+            args.max_input_tokens
+            and telemetry.input_tokens_total + estimate > args.max_input_tokens
+        ):
+            raise InputBudgetExhaustedError(
+                f"the next call (~{format_tokens(estimate)} input tokens) would"
+                f" take the run past --max-input-tokens"
+                f" ({format_tokens(telemetry.input_tokens_total)} used of"
+                f" {format_tokens(args.max_input_tokens)})"
+            )
+
+        attempt = 0
         retry_start = time.monotonic()
 
+        def wait(seconds: float, why: str):
+            print(f"[caxton] {why}; waiting {seconds:.1f}s", file=sys.stderr)
+            time.sleep(seconds)
+            telemetry.wait_seconds += seconds
+
         while True:
+            pause = limiter.delay(estimate, time.monotonic())
+            if pause > 0:
+                limit = limiter.limit() or 0
+                wait(
+                    pause,
+                    f"Pacing: ~{format_tokens(estimate)} tokens to send,"
+                    f" {format_tokens(limiter.window_tokens(time.monotonic()))}"
+                    f" sent in the last minute, limit ~{format_tokens(limit)}/min",
+                )
             try:
                 resp = chat.send_message(message)
+                prompt_tokens = estimate
                 if resp.usage_metadata:
-                    telemetry.prompt_tokens = (
-                        resp.usage_metadata.prompt_token_count or 0
-                    )
+                    prompt_tokens = resp.usage_metadata.prompt_token_count or estimate
                     telemetry.candidate_tokens += (
                         resp.usage_metadata.candidates_token_count or 0
                     )
+                    last_call["reply"] = resp.usage_metadata.candidates_token_count or 0
+                telemetry.prompt_tokens = prompt_tokens
+                telemetry.input_tokens_total += prompt_tokens
+                last_call["prompt"] = prompt_tokens
+                limiter.record(prompt_tokens, time.monotonic())
                 return resp
             except Exception as e:
-                delay = extract_retry_delay(e)
-                # Retry 429 only if a deterministic retry delay is provided (transient rate limit).
-                # Hard quota errors (plan/billing limits without a retry window) fail immediately.
-                is_retryable = isinstance(e, genai_errors.APIError) and (
-                    (e.code == 429 and delay is not None)
-                    or e.code in (500, 502, 503, 504)
-                )
-                if not is_retryable:
+                if not isinstance(e, genai_errors.APIError) or e.code not in (
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
                     raise
-
+                msg = getattr(e, "message", None) or getattr(e, "status", "Unknown")
                 elapsed = time.monotonic() - retry_start
-                if delay is not None:
-                    # Add a 1s safety buffer to ensure the rate limit window has fully cleared
-                    sleep_sec = delay + 1.0
-                    wait_desc = f"Retrying in {sleep_sec:.1f}s (quota reset)..."
+                if e.code == 429:
+                    ids = quota_ids(e)
+                    event = {
+                        "step": telemetry.steps + 1,
+                        "estimated_tokens": estimate,
+                        "quota_ids": ids,
+                    }
+                    telemetry.rate_limit_events.append(event)
+                    if is_daily_quota(ids):
+                        event["action"] = "failed: daily quota"
+                        print(
+                            f"[caxton] Error: daily quota exhausted"
+                            f" ({', '.join(ids)}); retrying today will not help",
+                            file=sys.stderr,
+                        )
+                        raise
+                    delay = extract_retry_delay(e)
+                    if delay is not None:
+                        # A 1 s margin so the window has fully cleared.
+                        sleep_sec = delay + 1.0
+                        why = f"API error 429 ({msg}). Server asked to retry later"
+                    else:
+                        limiter.throttled(estimate, time.monotonic())
+                        sleep_sec = max(
+                            limiter.delay(estimate, time.monotonic()),
+                            backoff_delay(
+                                attempt, rate_backoff_base, max_backoff, random.random()
+                            ),
+                        )
+                        why = (
+                            f"API error 429 ({msg}). Rate limited; pacing to"
+                            f" ~{format_tokens(limiter.limit() or 0)} tokens/min"
+                        )
+                    if elapsed + sleep_sec > rate_retry_timeout:
+                        event["action"] = "failed: retries exhausted"
+                        print(
+                            f"[caxton] Error: still rate limited after"
+                            f" {elapsed:.0f}s of retries; quota"
+                            f" {', '.join(ids) or 'not named'}. This may be a"
+                            " plan or daily quota rather than a per-minute limit.",
+                            file=sys.stderr,
+                        )
+                        raise
+                    event["action"] = f"retried after {sleep_sec:.1f}s"
                 else:
-                    sleep_sec = current_backoff
-                    current_backoff = min(
-                        current_backoff * backoff_multiplier, max_backoff
+                    sleep_sec = backoff_delay(
+                        attempt, server_backoff_base, max_backoff, random.random()
                     )
-                    wait_desc = f"Retrying in {sleep_sec:.1f}s with backoff..."
-
-                if elapsed + sleep_sec > retry_timeout:
-                    raise
-
-                msg = getattr(e, "message", getattr(e, "status", "Unknown"))
-                print(
-                    f"[caxton] Warning: API error {e.code} ({msg}). {wait_desc}",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_sec)
+                    why = f"API error {e.code} ({msg}). Retrying with backoff"
+                    if elapsed + sleep_sec > server_retry_timeout:
+                        raise
+                attempt += 1
+                wait(sleep_sec, f"Warning: {why}")
 
     session_start = time.perf_counter()
     current_message = initial_prompt
@@ -2441,7 +2816,13 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             f" {len(telemetry.created_files)} created,"
             f" {len(telemetry.deleted_files)} deleted | search/replace:"
             f" {sr_stat} | tokens: {telemetry.prompt_tokens / 1000:.1f}k{limit_str}"
-            f" in / {telemetry.candidate_tokens / 1000:.1f}k out",
+            f" in ({format_tokens(telemetry.input_tokens_total)} total)"
+            f" / {telemetry.candidate_tokens / 1000:.1f}k out"
+            + (
+                f" | rate-limit waits: {telemetry.wait_seconds:.0f}s"
+                if telemetry.wait_seconds
+                else ""
+            ),
             file=sys.stderr,
         )
         if is_mutation_mode and (
@@ -2512,6 +2893,9 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     "prompt_tokens": telemetry.prompt_tokens,
                     "candidate_tokens": telemetry.candidate_tokens,
                     "input_limit": telemetry.input_limit,
+                    "input_tokens_total": telemetry.input_tokens_total,
+                    "wait_seconds": round(telemetry.wait_seconds, 3),
+                    "rate_limit_events": telemetry.rate_limit_events,
                     "tools": {
                         "search_replace": {
                             "attempts": telemetry.search_replace_attempts,
@@ -2640,6 +3024,8 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     ci = args_dict.get("case_insensitive")
                     path_str = f", path={path!r}" if path else ""
                     ci_str = ", case_insensitive=True" if ci else ""
+                    if res.get("note"):
+                        ci_str += ", as literal"
                     if status_ok:
                         cnt = res.get("total_matches", len(res.get("matches", [])))
                         suffix = (
@@ -2666,9 +3052,13 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
 
             telemetry.steps += 1
             num_calls = len(function_calls)
+            step_label = (
+                f"Step {telemetry.steps}/{args.max_steps}"
+                f" ({format_tokens(telemetry.input_tokens_total)} in)"
+            )
             if num_calls > 1:
                 print(
-                    f"[caxton] Step {telemetry.steps}/{args.max_steps} [{num_calls} parallel calls]:",
+                    f"[caxton] {step_label} [{num_calls} parallel calls]:",
                     file=sys.stderr,
                 )
 
@@ -2681,33 +3071,47 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                         "status": "error",
                         "message": f"Unknown tool: '{fc.name}'",
                     }
-                    args_dict = {}
+                    raw_args = args_dict = {}
                 else:
-                    args_dict = dict(fc.args) if fc.args else {}
-                    try:
-                        res = fn(**args_dict)
-                    except CaxtonTimeoutError:
-                        raise
-                    except Exception as e:
-                        # A malformed call (unexpected or mistyped argument) is
-                        # the model's problem to fix, not a reason to abort the
-                        # run: hand the error back so it can retry.
+                    raw_args = dict(fc.args) if fc.args else {}
+                    args_dict, arg_error = coerce_tool_args(fn, raw_args)
+                    # A malformed call (unexpected or mistyped argument) is the
+                    # model's problem to fix, not a reason to abort the run:
+                    # hand the error back so it can retry.
+                    if arg_error:
                         res = {
                             "status": "error",
-                            "message": f"Invalid call to {fc.name}: {e}",
+                            "message": f"Invalid call to {fc.name}: {arg_error}",
                         }
+                    else:
+                        try:
+                            res = fn(**args_dict)
+                        except CaxtonTimeoutError:
+                            raise
+                        except Exception as e:
+                            res = {
+                                "status": "error",
+                                "message": f"Invalid call to {fc.name}: {e}",
+                            }
 
                 # Format log snippet for stderr
                 log_line = format_tool_log(fc.name, args_dict, res)
                 if num_calls == 1:
                     print(
-                        f"[caxton] Step {telemetry.steps}/{args.max_steps}: {log_line}",
+                        f"[caxton] {step_label}: {log_line}",
                         file=sys.stderr,
                     )
                 else:
                     branch = "  └── " if idx == num_calls - 1 else "  ├── "
                     print(
                         f"[caxton] {branch}{log_line}",
+                        file=sys.stderr,
+                    )
+                # The log line shows arguments as the tool understood them;
+                # a failure is diagnosable only from what the model sent.
+                if res.get("status") != "success" and raw_args:
+                    print(
+                        f"[caxton]       args: {summarize_args(raw_args)}",
                         file=sys.stderr,
                     )
 
@@ -2717,6 +3121,12 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     max_steps=args.max_steps,
                     session_start=session_start,
                     timeout_sec=args.timeout,
+                    remaining_input_tokens=(
+                        args.max_input_tokens - telemetry.input_tokens_total
+                        if args.max_input_tokens
+                        else None
+                    ),
+                    next_call_tokens=telemetry.prompt_tokens,
                 )
 
                 tool_results.append(
@@ -2752,6 +3162,10 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
 
         sys.exit(0 if task_result.get("success") else 1)
 
+    except InputBudgetExhaustedError as e:
+        print(f"[caxton] Stopping: {e}", file=sys.stderr)
+        print_telemetry_report()
+        sys.exit(1)
     except CaxtonTimeoutError:
         print(
             f"\n{prog_name}: timed out after {args.timeout} seconds",
