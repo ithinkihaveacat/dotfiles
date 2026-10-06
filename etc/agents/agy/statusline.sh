@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
-# agy-statusline.sh - Custom status line script for Antigravity CLI.
+# statusline.sh - Custom status line script for Antigravity CLI.
 #
 # Displays real-time session metrics: agent state, host, conversation summary,
 # context window remaining, active model, and background tasks.
 #
 # Installation:
 #   1. Using CLI slash command (interactive):
-#        /statusline ~/.dotfiles/etc/agents/agy-statusline.sh
+#        /statusline ~/.dotfiles/etc/agents/agy/statusline.sh
 #      or symlinked to standard location:
-#        ln -sf ~/.dotfiles/etc/agents/agy-statusline.sh ~/.gemini/antigravity-cli/statusline.sh
+#        ln -sf ~/.dotfiles/etc/agents/agy/statusline.sh ~/.gemini/antigravity-cli/statusline.sh
 #        /statusline ~/.gemini/antigravity-cli/statusline.sh
 #
 #   2. Or add to settings.json (~/.gemini/antigravity-cli/settings.json):
 #      "statusLine": {
 #        "type": "command",
-#        "command": "~/.dotfiles/etc/agents/agy-statusline.sh",
+#        "command": "~/.dotfiles/etc/agents/agy/statusline.sh",
 #        "padding": 0,
 #        "enabled": true
 #      }
@@ -41,12 +41,12 @@ Options:
 
 Installation:
   1. Using CLI slash command:
-       /statusline ~/.dotfiles/etc/agents/agy-statusline.sh
+       /statusline ~/.dotfiles/etc/agents/agy/statusline.sh
 
   2. Or configure in settings.json:
        "statusLine": {
          "type": "command",
-         "command": "~/.dotfiles/etc/agents/agy-statusline.sh",
+         "command": "~/.dotfiles/etc/agents/agy/statusline.sh",
          "padding": 0,
          "enabled": true
        }

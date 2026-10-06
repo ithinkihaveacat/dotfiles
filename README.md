@@ -127,6 +127,8 @@ the last overlay to provide a given filename wins.
 | ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `home/.*`                    | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                             |
 | `etc/agents/AGENTS.md`       | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` (gated on their respective binaries)                  |
+| `etc/agents/agy/hooks.json`  | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks.json` (gated on `agy`)                                                |
+| `etc/agents/agy/hooks`       | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                                     |
 | `etc/shpool/config.toml`     | `link_overlay_path`                 |                                                                                                            |
 | `etc/starship/starship.toml` | `link_overlay_path`                 |                                                                                                            |
 | `etc/ghostty/config`         | `link_overlay_path`                 |                                                                                                            |

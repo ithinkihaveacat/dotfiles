@@ -1236,6 +1236,12 @@ if [ -n "$agents_context" ]; then
   fi
 fi
 
+if exists agy; then
+  xmkdir "$HOME/.gemini/config"
+  link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
+  link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
+fi
+
 # Skills are intentionally NOT installed globally. Per-repo skills are added
 # by `skill apply` (or `skill add ...`) using ~/.dotfiles/skills (plus .private
 # and .corp overlays) as the source. Keeping ~/.agents/skills and

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# claude-statusline.sh - Custom status line script for Claude Code.
+# statusline.sh - Custom status line script for Claude Code.
 #
-# Companion to agy-statusline.sh: displays the same segments (host, context
+# Companion to agy/statusline.sh: displays the same segments (host, context
 # window remaining, active model, repo) from Claude Code's statusline JSON
 # schema. Claude Code exposes no agent state or background task fields, so
 # those segments are omitted; the session title is omitted because Claude
@@ -10,12 +10,12 @@
 #
 # Installation:
 #   1. Using CLI slash command (interactive):
-#        /statusline ~/.dotfiles/etc/agents/claude-statusline.sh
+#        /statusline ~/.dotfiles/etc/agents/claude/statusline.sh
 #
 #   2. Or add to settings.json (~/.claude/settings.json):
 #      "statusLine": {
 #        "type": "command",
-#        "command": "~/.dotfiles/etc/agents/claude-statusline.sh",
+#        "command": "~/.dotfiles/etc/agents/claude/statusline.sh",
 #        "padding": 0
 #      }
 #
@@ -34,7 +34,7 @@ Custom status line script for Claude Code.
 Reads session JSON from standard input, formats real-time metrics (vim mode,
 hostname, context window remaining, active model, repository, and 5-hour
 rate limit), and outputs styled text for the statusline. The layout matches
-agy-statusline.sh, minus the agent state and background task segments, which
+agy/statusline.sh, minus the agent state and background task segments, which
 Claude Code's payload does not provide.
 
 Options:
@@ -42,12 +42,12 @@ Options:
 
 Installation:
   1. Using CLI slash command:
-       /statusline ~/.dotfiles/etc/agents/claude-statusline.sh
+       /statusline ~/.dotfiles/etc/agents/claude/statusline.sh
 
   2. Or configure in settings.json:
        "statusLine": {
          "type": "command",
-         "command": "~/.dotfiles/etc/agents/claude-statusline.sh",
+         "command": "~/.dotfiles/etc/agents/claude/statusline.sh",
          "padding": 0
        }
 
