@@ -169,16 +169,20 @@ Commands:
   doctor             Report missing or drifted rules (read-only)
 
 Options:
-  --agent NAME       Operate on a single agent backend (agy, jetski, claude, codex)
+  --agent NAME       Operate on a single agent backend
+                     (agy, jetski, jetski-web, claude, codex)
   --help             Display this help message and exit
   --plugin-template  Output a template/documentation for creating a Permission plugin
 
 Agents:
-  agy, jetski        Antigravity / Jetski CLI. User-wide: rules live in
-                     ~/.gemini/antigravity-cli/settings.json (agy) or
-                     ~/.gemini/jetski/cli/settings.json (jetski) and apply to
-                     every workspace. Patterns become command(regex:...) rules
-                     that also match the command when invoked by path.
+  agy, jetski,       Antigravity / Jetski CLI & Web. User-wide: rules live in
+  jetski-web         ~/.gemini/antigravity-cli/settings.json (agy),
+                     ~/.gemini/jetski/cli/settings.json (jetski CLI), and
+                     ~/.gemini/config/config.json (jetski-web; also synced by
+                     jetski when ~/.gemini/config exists) and apply to every
+                     workspace. Command patterns become command(regex:...)
+                     rules; native resource grants (e.g. read_file(*)) are
+                     preserved verbatim.
   claude             Claude Code. Workspace-local: rules live in the untracked
                      .claude/settings.local.json. Patterns become
                      Bash(PATTERN:*) prefix rules; deny beats ask beats allow.

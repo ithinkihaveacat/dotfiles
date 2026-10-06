@@ -257,9 +257,13 @@ backend translates them to its native syntax and scope:
   `.claude/settings.local.json` (workspace-local personal settings; the tool
   ensures the file is git-ignored). Claude Code picks these up without a
   restart.
-- **`agy`** (Antigravity CLI): `command(...)` rules in
-  `~/.gemini/antigravity-cli/settings.json` (user-wide configuration;
-  Antigravity CLI evaluates permissions from global settings).
+- **`agy` / `jetski` / `jetski-web`** (Antigravity, Jetski CLI, Jetski Web):
+  `command(...)` rules and native resource grants (e.g. `read_file(*)`) in
+  `~/.gemini/antigravity-cli/settings.json` (`agy`),
+  `~/.gemini/jetski/cli/settings.json` (`jetski` CLI), and
+  `~/.gemini/config/config.json` (`jetski-web` under
+  `userSettings.globalPermissionGrants`; synced automatically alongside `jetski`
+  when `~/.gemini/config` exists). Evaluated globally across workspaces.
 - **`codex`** (Codex CLI): `prefix_rule(...)` entries in the dedicated
   `.codex/rules/permission.rules` file (workspace-local configuration). Clean
   `allow`/`ask`/`deny` modes map to Codex's `allow`/`prompt`/`forbidden`
