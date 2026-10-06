@@ -487,6 +487,10 @@ Options:
   --max-input-tokens N
                       Stop before the call that would take total input tokens
                       past N, e.g. 20M. Every step resends the conversation.
+  --request-timeout SECONDS
+                      Abandon and retry an API request with no response after
+                      SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
+                      1k input tokens)
   -h, --help          Display this help message and exit.
 
 Environment:
@@ -496,6 +500,8 @@ Environment:
   CAXTON_TPM          Optional. Default for --tpm.
   CAXTON_MAX_INPUT_TOKENS
                       Optional. Default for --max-input-tokens.
+  CAXTON_REQUEST_TIMEOUT
+                      Optional. Default for --request-timeout.
   CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
                       (default: ${XDG_STATE_HOME:-~/.local/state}/caxton).
 

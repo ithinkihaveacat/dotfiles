@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "google-genai",
+#     "httpx",
 # ]
 # [tool.uv.sources]
 # google-genai = { index = "pypi" }
@@ -48,6 +49,7 @@ import typing
 import uuid
 from pathlib import Path
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -167,6 +169,7 @@ SINGLE_VALUE_OPTIONS = {
     "--timeout",
     "--tpm",
     "--max-input-tokens",
+    "--request-timeout",
     "--read-from",
     "--edit-from",
 }
@@ -385,6 +388,23 @@ class RateLimiter:
         base = offered if self.learned is None else min(self.learned, offered)
         self.learned = max(1.0, base / 2)
         self.step = self.learned / 10
+
+
+# A response to a large prompt with thinking on can take minutes, so a request
+# is given a floor plus time in proportion to its input before it is abandoned.
+REQUEST_TIMEOUT_FLOOR = 180.0
+REQUEST_SECONDS_PER_1K_TOKENS = 1.0
+
+
+def request_timeout(estimate: int, override: int | None = None) -> float | None:
+    """Seconds to wait for one API response, or None for no limit.
+
+    An explicit override wins, and 0 disables the limit. Otherwise the bound
+    scales with the estimated input tokens: 180 s, plus 1 s per 1k tokens.
+    """
+    if override is not None:
+        return float(override) if override > 0 else None
+    return REQUEST_TIMEOUT_FLOOR + REQUEST_SECONDS_PER_1K_TOKENS * estimate / 1000
 
 
 def approx_tokens(message) -> int:
@@ -826,6 +846,10 @@ Options:
   --max-input-tokens N
                       Stop before the call that would take total input tokens
                       past N, e.g. 20M. Every step resends the conversation.
+  --request-timeout SECONDS
+                      Abandon and retry an API request with no response after
+                      SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
+                      1k input tokens)
   -h, --help          Display this help message and exit.
 
 Environment:
@@ -835,6 +859,8 @@ Environment:
   CAXTON_TPM          Optional. Default for --tpm.
   CAXTON_MAX_INPUT_TOKENS
                       Optional. Default for --max-input-tokens.
+  CAXTON_REQUEST_TIMEOUT
+                      Optional. Default for --request-timeout.
   CAXTON_STATE_DIR    Optional. State directory for serialized payloads and responses
                       (default: ${{XDG_STATE_HOME:-~/.local/state}}/caxton).
 
@@ -1081,6 +1107,7 @@ class Telemetry:
     input_tokens_total: int = 0
     wait_seconds: float = 0.0
     rate_limit_events: list = dataclasses.field(default_factory=list)
+    request_timeouts: list = dataclasses.field(default_factory=list)
 
 
 def ensure_state_dir(state_dir: str) -> None:
@@ -1164,6 +1191,7 @@ def save_session_response(
         f"- **Cumulative Input Tokens:** {telemetry.input_tokens_total}\n"
         f"- **Rate-Limit Waits:** {telemetry.wait_seconds:.1f}s,"
         f" {len(telemetry.rate_limit_events)} rate-limit response(s)\n"
+        f"- **Request Timeouts:** {len(telemetry.request_timeouts)}\n"
         f"- **Files Modified:** {len(telemetry.modified_files)}\n"
         f"- **Files Created:** {len(telemetry.created_files)}\n"
         f"- **Files Deleted:** {len(telemetry.deleted_files)}\n"
@@ -1244,6 +1272,11 @@ def main():
         default=os.environ.get("CAXTON_MAX_INPUT_TOKENS") or None,
         metavar="N",
     )
+    parser.add_argument(
+        "--request-timeout",
+        default=os.environ.get("CAXTON_REQUEST_TIMEOUT") or None,
+        metavar="SECONDS",
+    )
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS)
 
     args = parser.parse_args()
@@ -1274,6 +1307,17 @@ def main():
                 flag = "--" + option.replace("_", "-")
                 print(f"{prog_name}: error: {flag}: {e}", file=sys.stderr)
                 sys.exit(1)
+
+    if args.request_timeout is not None:
+        value = args.request_timeout
+        if not value.isdigit():
+            print(
+                f"{prog_name}: error: --request-timeout: invalid number of"
+                f" seconds: {value!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        args.request_timeout = int(value)
 
     if args.no_inline and inline_args:
         print(
@@ -1937,7 +1981,16 @@ def main():
         print(f"  Visible:       {len(visible_sorted)} file(s)")
         print(f"  Tools:         {agent_tools_desc}")
         print(f"  Server Tools:  {', '.join(server_tools) or 'none'}")
-        print(f"  Limits:        {args.max_steps} steps, {args.timeout}s timeout")
+        if args.request_timeout is None:
+            request_limit = "180s + 1s/1k tokens per request"
+        elif args.request_timeout:
+            request_limit = f"{args.request_timeout}s per request"
+        else:
+            request_limit = "no per-request limit"
+        print(
+            f"  Limits:        {args.max_steps} steps, {args.timeout}s timeout,"
+            f" {request_limit}"
+        )
         print("\nResolved Files:  (R = visible, W = writable, I = inlined)")
         for rel in visible_sorted:
             tag = "".join(
@@ -2546,7 +2599,11 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
     client = genai.Client(api_key=api_key)
 
     try:
-        model_info = client.models.get(model=args.model)
+        # Only the input limit for the report, so give up rather than hang.
+        model_info = client.models.get(
+            model=args.model,
+            config=types.GetModelConfig(http_options=types.HttpOptions(timeout=30_000)),
+        )
         telemetry.input_limit = model_info.input_token_limit
     except Exception:
         pass
@@ -2689,7 +2746,17 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
             )
 
         attempt = 0
-        retry_start = time.monotonic()
+        # The retry budget runs from the first failure, so a request that
+        # stalled for minutes does not spend it before the first retry.
+        retry_start = None
+        timeout_sec = request_timeout(estimate, args.request_timeout)
+        request_config = config.model_copy(
+            update={
+                "http_options": types.HttpOptions(
+                    timeout=int(timeout_sec * 1000) if timeout_sec else None
+                )
+            }
+        )
 
         def wait(seconds: float, why: str):
             print(f"[caxton] {why}; waiting {seconds:.1f}s", file=sys.stderr)
@@ -2707,7 +2774,9 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     f" sent in the last minute, limit ~{format_tokens(limit)}/min",
                 )
             try:
-                resp = chat.send_message(message)
+                # The chat records history only on success, so a request that
+                # times out can be resent as it is.
+                resp = chat.send_message(message, config=request_config)
                 prompt_tokens = estimate
                 if resp.usage_metadata:
                     prompt_tokens = resp.usage_metadata.prompt_token_count or estimate
@@ -2721,16 +2790,44 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                 limiter.record(prompt_tokens, time.monotonic())
                 return resp
             except Exception as e:
-                if not isinstance(e, genai_errors.APIError) or e.code not in (
-                    429,
-                    500,
-                    502,
-                    503,
-                    504,
+                timed_out = isinstance(e, httpx.TimeoutException)
+                if not timed_out and (
+                    not isinstance(e, genai_errors.APIError)
+                    or e.code not in (429, 500, 502, 503, 504)
                 ):
                     raise
-                msg = getattr(e, "message", None) or getattr(e, "status", "Unknown")
+                if retry_start is None:
+                    retry_start = time.monotonic()
                 elapsed = time.monotonic() - retry_start
+                if timed_out:
+                    # A stalled request shares the 5xx retry budget.
+                    event = {
+                        "step": telemetry.steps + 1,
+                        "estimated_tokens": estimate,
+                        "timeout_seconds": timeout_sec,
+                    }
+                    telemetry.request_timeouts.append(event)
+                    sleep_sec = backoff_delay(
+                        attempt, server_backoff_base, max_backoff, random.random()
+                    )
+                    if elapsed + sleep_sec > server_retry_timeout:
+                        event["action"] = "failed: retries exhausted"
+                        raise RuntimeError(
+                            f"API request timed out after {timeout_sec:.0f}s"
+                            f" ({attempt + 1} attempt(s) for"
+                            f" ~{format_tokens(estimate)} input tokens);"
+                            " see --request-timeout"
+                        ) from e
+                    event["action"] = f"retried after {sleep_sec:.1f}s"
+                    attempt += 1
+                    wait(
+                        sleep_sec,
+                        f"Warning: API request timed out after {timeout_sec:.0f}s"
+                        f" (~{format_tokens(estimate)} input tokens). Retrying"
+                        " with backoff",
+                    )
+                    continue
+                msg = getattr(e, "message", None) or getattr(e, "status", "Unknown")
                 if e.code == 429:
                     ids = quota_ids(e)
                     event = {
@@ -2825,6 +2922,11 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                 f" | rate-limit waits: {telemetry.wait_seconds:.0f}s"
                 if telemetry.wait_seconds
                 else ""
+            )
+            + (
+                f" | request timeouts: {len(telemetry.request_timeouts)}"
+                if telemetry.request_timeouts
+                else ""
             ),
             file=sys.stderr,
         )
@@ -2899,6 +3001,7 @@ Once your work is complete, you MUST call complete_task(success=True, report="..
                     "input_tokens_total": telemetry.input_tokens_total,
                     "wait_seconds": round(telemetry.wait_seconds, 3),
                     "rate_limit_events": telemetry.rate_limit_events,
+                    "request_timeouts": telemetry.request_timeouts,
                     "tools": {
                         "search_replace": {
                             "attempts": telemetry.search_replace_attempts,

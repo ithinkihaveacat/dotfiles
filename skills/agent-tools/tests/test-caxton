@@ -48,7 +48,7 @@ commit_all() {
   fi
 }
 
-echo "1..73"
+echo "1..75"
 
 # Test 1: caxton --help outputs valid GNU-style help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -624,9 +624,10 @@ else
 fi
 
 # Unit checks against caxton's helpers and its capability policy. The google
-# imports are stripped so the helpers load with no third-party dependencies,
-# but the file still needs the Python version caxton declares: the system
-# python3 is 3.9 on macOS, which cannot even parse its "X | None" annotations.
+# and httpx imports are stripped so the helpers load with no third-party
+# dependencies, but the file still needs the Python version caxton declares: the
+# system python3 is 3.9 on macOS, which cannot even parse its "X | None"
+# annotations.
 # Run it through uv, as the script itself is run.
 UNIT_OUT="$WORK/unit.out"
 cat >"$WORK/unit.py" <<'PYEOF'
@@ -640,7 +641,9 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 stripped = "\n".join(
-    line for line in source.splitlines() if not line.startswith("from google")
+    line
+    for line in source.splitlines()
+    if not line.startswith(("from google", "import httpx"))
 )
 cx = {"__name__": "caxton_helpers"}
 exec(compile(stripped, "caxton", "exec"), cx)
@@ -1228,7 +1231,9 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 stripped = "\n".join(
-    line for line in source.splitlines() if not line.startswith("from google")
+    line
+    for line in source.splitlines()
+    if not line.startswith(("from google", "import httpx"))
 )
 cx = {"__name__": "caxton_helpers"}
 exec(compile(stripped, "caxton", "exec"), cx)
@@ -1278,7 +1283,9 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 stripped = "\n".join(
-    line for line in source.splitlines() if not line.startswith("from google")
+    line
+    for line in source.splitlines()
+    if not line.startswith(("from google", "import httpx"))
 )
 cx = {"__name__": "caxton_helpers"}
 exec(compile(stripped, "caxton", "exec"), cx)
@@ -1323,7 +1330,9 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 stripped = "\n".join(
-    line for line in source.splitlines() if not line.startswith("from google")
+    line
+    for line in source.splitlines()
+    if not line.startswith(("from google", "import httpx"))
 )
 cx = {"__name__": "caxton_helpers"}
 exec(compile(stripped, "caxton", "exec"), cx)
@@ -1388,7 +1397,9 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 stripped = "\n".join(
-    line for line in source.splitlines() if not line.startswith("from google")
+    line
+    for line in source.splitlines()
+    if not line.startswith(("from google", "import httpx"))
 )
 cx = {"__name__": "caxton_helpers"}
 exec(compile(stripped, "caxton", "exec"), cx)
@@ -1490,7 +1501,9 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 stripped = "\n".join(
-    line for line in source.splitlines() if not line.startswith("from google")
+    line
+    for line in source.splitlines()
+    if not line.startswith(("from google", "import httpx"))
 )
 cx = {"__name__": "caxton_helpers"}
 exec(compile(stripped, "caxton", "exec"), cx)
@@ -1625,6 +1638,17 @@ report(
     and rejected,
     f"{low.get('budget_warning')!r} {parsed}",
 )
+
+# A request's timeout scales with its input; an override wins and 0 disables.
+bound = cx["request_timeout"]
+report(
+    "request-timeout",
+    bound(0) == 180.0
+    and bound(240_000) == 420.0
+    and bound(240_000, 30) == 30.0
+    and bound(240_000, 0) is None,
+    f"{bound(0)} {bound(240_000)}",
+)
 PYEOF
 
 PACING_OUT="$WORK/pacing.out"
@@ -1663,4 +1687,74 @@ else
     echo "not ok 73 - Invalid --tpm error missing expected text"
     sed 's/^/# /' "$OUTPUT"
   fi
+fi
+
+# Test 74: the request timeout bound, and a malformed --request-timeout
+if grep -q "^check:request-timeout:pass" "$PACING_OUT" &&
+  ! (cd "$REPO" && "$BIN" --dry-run "prompt" --request-timeout soon) >"$OUTPUT" 2>&1 &&
+  grep -q "caxton: error: --request-timeout: invalid number of seconds: 'soon'" "$OUTPUT"; then
+  echo "ok 74 - Scales the request timeout with input and rejects a malformed one"
+else
+  echo "not ok 74 - Request timeout bound or --request-timeout validation failed"
+  sed 's/^/# /' "$PACING_OUT" "$OUTPUT"
+fi
+
+# Test 75: a request that never returns is abandoned, logged and retried. The
+# stub answers the model lookup with a 404 and holds every generate call open.
+STALL_PORT_FILE="$WORK/stall.port"
+STALL_POSTS="$WORK/stall.posts"
+cat >"$WORK/stall.py" <<'PYEOF'
+import http.server
+import sys
+import time
+
+
+class Stall(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": {"code": 404, "message": "stub"}}')
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open(sys.argv[2], "a") as f:
+            f.write("post\n")
+        time.sleep(3600)
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stall)
+server.daemon_threads = True
+with open(sys.argv[1], "w") as f:
+    f.write(str(server.server_address[1]))
+server.serve_forever()
+PYEOF
+python3 "$WORK/stall.py" "$STALL_PORT_FILE" "$STALL_POSTS" &
+STALL_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -s "$STALL_PORT_FILE" ]] && break
+  sleep 0.5
+done
+STALL_REPO=$(make_repo stall)
+printf '# Notes\n' >"$STALL_REPO/notes.md"
+commit_all "$STALL_REPO"
+stall_status=0
+(cd "$STALL_REPO" && AGENT_OFFLINE=0 GEMINI_API_KEY=stub \
+  GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:$(cat "$STALL_PORT_FILE" 2>/dev/null)" \
+  CAXTON_STATE_DIR="$WORK/stall-state" \
+  "$BIN" "Summarize" --no-search --request-timeout 1 --timeout 12) \
+  >"$OUTPUT" 2>&1 || stall_status=$?
+kill "$STALL_PID" 2>/dev/null || true
+wait "$STALL_PID" 2>/dev/null || true
+stall_logs=$(grep -c "API request timed out after 1s" "$OUTPUT" || true)
+stall_posts=$(wc -l <"$STALL_POSTS" 2>/dev/null || echo 0)
+if [[ $stall_status -eq 2 && $stall_logs -ge 2 && $stall_posts -ge 2 ]] &&
+  grep -q "request timeouts: [0-9]" "$OUTPUT"; then
+  echo "ok 75 - Abandons a stalled request, logs it and retries"
+else
+  echo "not ok 75 - Stalled request was not timed out and retried (exit $stall_status, $stall_logs logged, $stall_posts sent)"
+  sed 's/^/# /' "$OUTPUT"
 fi

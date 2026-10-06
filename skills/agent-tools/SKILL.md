@@ -297,6 +297,11 @@ initial prompt — is controlled by `--inline`/`--no-inline`.
 - `--max-input-tokens N`: Stop cleanly, with the usual report of changed files,
   before the call that would take total input tokens past `N` (e.g. `20M`; env
   `CAXTON_MAX_INPUT_TOKENS`). The agent is told its remaining budget.
+- `--request-timeout SECONDS`: Abandon an API request that has not answered
+  after `SECONDS` and retry it with backoff, under the same 300 s budget as a
+  5xx (env `CAXTON_REQUEST_TIMEOUT`; `0` waits indefinitely). The default is
+  180 s plus 1 s per 1k input tokens, so a single stalled request cannot use the
+  whole `--timeout`.
 
 `PROMPT` is the only positional argument and must come before the path options,
 which each consume every following path.
