@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..144'
+echo '1..152'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -2768,4 +2768,224 @@ if [[ "$WF_DISP_ERR" == *"is still waiting for 2026-10-13"* ]]; then
   echo 'ok 144 - dispatch warns when dispatching a task with unresolved wait_for gates'
 else
   echo 'not ok 144 - dispatch warns when dispatching a task with unresolved wait_for gates'
+fi
+
+# ===========================================================================
+# taskgo check [PROJECT] [--json] periodic sweep and Git watermark tests
+# ===========================================================================
+
+CHK_REPO="$TEST_ROOT/chk-repo"
+mkdir -p "$CHK_REPO/alpha/tasks" "$CHK_REPO/beta/tasks"
+git -C "$CHK_REPO" init -q
+git -C "$CHK_REPO" config user.name 'Taskgo Test'
+git -C "$CHK_REPO" config user.email 'taskgo@example.invalid'
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$CHK_REPO/AGENTS.md"
+printf '# Inbox\n' >"$CHK_REPO/INBOX.md"
+printf '# Alpha\n' >"$CHK_REPO/alpha/README.md"
+printf '# Beta\n' >"$CHK_REPO/beta/README.md"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+git -C "$CHK_REPO" commit -qm 'chore: init chk-repo'
+
+# Seed future-dated task that should NOT trigger on 2026-10-06
+CHK_QUIET_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Future gate task' \
+  --slug future-gate \
+  --wait-for 2026-10-20 \
+  --due 2026-10-25 \
+  --stale-after 2026-11-01 \
+  --no-commit)
+CHK_QUIET_ID="${CHK_QUIET_OUT%%$'\t'*}"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-05T10:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): create $CHK_QUIET_ID
+
+Task: $CHK_QUIET_ID"
+
+# Test 145: check exits 0 with empty stdout (both text and --json) when nothing triggers
+CHK_EMPTY_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check)
+CHK_EMPTY_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check --json)
+if [ -z "$CHK_EMPTY_TXT" ] && [ -z "$CHK_EMPTY_JSON" ]; then
+  echo 'ok 145 - check exits 0 with empty stdout when no tasks have triggered'
+else
+  echo 'not ok 145 - check exits 0 with empty stdout when no tasks have triggered'
+fi
+
+# Test 146: check flags elapsed wait_for dates (today >= date) and ignores resolved tasks
+CHK_DATE_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Elapsed cooldown task' \
+  --slug elapsed-date \
+  --wait-for 2026-10-06 \
+  --no-commit)
+CHK_DATE_ID="${CHK_DATE_OUT%%$'\t'*}"
+CHK_DONE_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Already done task' \
+  --slug done-date \
+  --status 'done' \
+  --wait-for 2026-10-01 \
+  --no-commit)
+CHK_DONE_ID="${CHK_DONE_OUT%%$'\t'*}"
+CHK_T146_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha)
+CHK_T146_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [[ "$CHK_T146_TXT" == *"$CHK_DATE_ID"*"wait_for date 2026-10-06 elapsed"* ]] &&
+  [[ "$CHK_T146_TXT" != *"$CHK_DONE_ID"* ]] &&
+  [[ "$CHK_T146_TXT" != *"$CHK_QUIET_ID"* ]] &&
+  [[ "$CHK_T146_JSON" == *'"kind": "wait_for_elapsed"'* ]]; then
+  echo 'ok 146 - check flags elapsed wait_for dates and skips resolved tasks'
+else
+  echo 'not ok 146 - check flags elapsed wait_for dates and skips resolved tasks'
+fi
+
+# Test 147: check flags overdue (today > due) and approaching (within 48h) deadlines
+CHK_OVER_OUT=$("$BIN" --root "$CHK_REPO" create beta 'Overdue deliverable' \
+  --slug overdue-deliv \
+  --due 2026-10-04 \
+  --no-commit)
+CHK_OVER_ID="${CHK_OVER_OUT%%$'\t'*}"
+CHK_SOON_OUT=$("$BIN" --root "$CHK_REPO" create beta 'Approaching deliverable' \
+  --slug soon-deliv \
+  --due 2026-10-08 \
+  --no-commit)
+CHK_SOON_ID="${CHK_SOON_OUT%%$'\t'*}"
+CHK_T147_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check beta --json)
+if [[ "$CHK_T147_JSON" == *"$CHK_OVER_ID"*'"kind": "due_overdue"'* ]] &&
+  [[ "$CHK_T147_JSON" == *"$CHK_SOON_ID"*'"kind": "due_soon"'* ]]; then
+  echo 'ok 147 - check flags overdue and approaching due deadlines'
+else
+  echo 'not ok 147 - check flags overdue and approaching due deadlines'
+fi
+
+# Test 148: check flags open tasks past stale_after (today > stale_after)
+CHK_STALE_OUT=$("$BIN" --root "$CHK_REPO" create beta 'Stale experiment' \
+  --slug stale-exp \
+  --stale-after 2026-10-01 \
+  --no-commit)
+CHK_STALE_ID="${CHK_STALE_OUT%%$'\t'*}"
+CHK_T148_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check beta --json)
+if [[ "$CHK_T148_JSON" == *"$CHK_STALE_ID"*'"kind": "stale"'* ]]; then
+  echo 'ok 148 - check flags open tasks past stale_after cutoff'
+else
+  echo 'not ok 148 - check flags open tasks past stale_after cutoff'
+fi
+
+# Clean up temporal test tasks in alpha/beta before URI polling tests
+("$BIN" --root "$CHK_REPO" update "$CHK_DATE_ID" --status 'done') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_OVER_ID" --status 'done') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_SOON_ID" --status 'done') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_STALE_ID" --status 'done') >/dev/null 2>&1
+
+# Set up mock CLI binaries for b/..., cl/..., and gh:... external URI polling
+MOCK_BIN="$TEST_ROOT/check-mock-bin"
+mkdir -p "$MOCK_BIN"
+
+cat >"$MOCK_BIN/issues" <<'EOF'
+#!/usr/bin/env bash
+bug_id="$3"
+if [ "$bug_id" = "1001" ]; then
+  printf 'Status: FIXED\nLast Modified: 2026-10-01T00:00:00Z\n'
+elif [ "$bug_id" = "2002" ]; then
+  printf 'Status: ASSIGNED\nLast Modified: 2026-10-05T15:00:00Z\n'
+else
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN/issues"
+
+cat >"$MOCK_BIN/g4" <<'EOF'
+#!/usr/bin/env bash
+cl_id="$3"
+if [ "$cl_id" = "5555" ]; then
+  printf 'Change 5555 is submitted; see 5556.\n'
+else
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN/g4"
+
+cat >"$MOCK_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+num="$3"
+if [ "$num" = "77" ]; then
+  printf '{"state":"CLOSED","updatedAt":"2026-10-01T09:00:00Z"}\n'
+else
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN/gh"
+
+# Test 149: Terminal upstream states (FIXED, SUBMITTED, CLOSED) always trigger regardless of recent watermark
+CHK_TERM_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Terminal external blockers' \
+  --slug term-uris \
+  --wait-for b/1001 --wait-for cl/5555 --wait-for 'gh:owner/repo#77' \
+  --no-commit)
+CHK_TERM_ID="${CHK_TERM_OUT%%$'\t'*}"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+# Commit with a watermark AFTER upstream modifiedTime (2026-10-06 > 2026-10-01)
+GIT_COMMITTER_DATE="2026-10-06T12:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): add $CHK_TERM_ID
+
+Task: $CHK_TERM_ID"
+
+CHK_T149_JSON=$(PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [[ "$CHK_T149_JSON" == *'"gate": "b/1001"'*'"upstream_state": "FIXED"'* ]] &&
+  [[ "$CHK_T149_JSON" == *'"gate": "cl/5555"'*'"upstream_state": "SUBMITTED"'* ]] &&
+  [[ "$CHK_T149_JSON" == *'"gate": "gh:owner/repo#77"'*'"upstream_state": "CLOSED"'* ]]; then
+  echo 'ok 149 - terminal upstream states trigger unconditionally regardless of watermark'
+else
+  echo 'not ok 149 - terminal upstream states trigger unconditionally regardless of watermark'
+fi
+("$BIN" --root "$CHK_REPO" update "$CHK_TERM_ID" --status 'done') >/dev/null 2>&1
+
+# Test 150: Zero-churn Git watermark: non-terminal activity (2026-10-05T15:00:00Z) triggers over
+# Task-scoped commit (2026-10-05T10:00:00Z) even after a later non-Task formatting commit (2026-10-06T08:00:00Z)
+CHK_ACT_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Active upstream bug' \
+  --slug active-bug \
+  --wait-for b/2002 \
+  --no-commit)
+CHK_ACT_ID="${CHK_ACT_OUT%%$'\t'*}"
+CHK_ACT_FILE="$CHK_REPO/alpha/tasks/${CHK_ACT_ID}-active-bug.md"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-05T10:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): checkpoint $CHK_ACT_ID
+
+Task: $CHK_ACT_ID"
+
+# Simulate a mechanical formatting sweep commit WITHOUT 'Task: <ID>' at 2026-10-06T08:00:00Z (> 15:00)
+printf '\n' >>"$CHK_ACT_FILE"
+git -C "$CHK_REPO" add "$CHK_ACT_FILE" >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-06T08:00:00Z" git -C "$CHK_REPO" commit -qm 'chore: fix metadata and status'
+
+CHK_T150_JSON=$(PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [[ "$CHK_T150_JSON" == *"$CHK_ACT_ID"*'"kind": "wait_for_activity"'* ]] &&
+  [[ "$CHK_T150_JSON" == *'"watermark": "2026-10-05T10:00:00'* ]]; then
+  echo 'ok 150 - non-terminal activity uses Task: <ID> watermark and ignores formatting sweeps'
+else
+  echo 'not ok 150 - non-terminal activity uses Task: <ID> watermark and ignores formatting sweeps'
+fi
+
+# Test 151: Advancing the Task: <ID> commit watermark past upstream modifiedTime silences non-terminal activity
+printf '\n' >>"$CHK_ACT_FILE"
+git -C "$CHK_REPO" add "$CHK_ACT_FILE" >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-05T18:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): triage $CHK_ACT_ID
+
+Task: $CHK_ACT_ID"
+
+CHK_T151_OUT=$(PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [ -z "$CHK_T151_OUT" ]; then
+  echo 'ok 151 - advancing Task: <ID> watermark silences non-terminal activity'
+else
+  echo 'not ok 151 - advancing Task: <ID> watermark silences non-terminal activity'
+fi
+
+# Test 152: Graceful degradation when tools fail or AGENT_OFFLINE=1 is active
+("$BIN" --root "$CHK_REPO" create alpha 'Unreachable bug' \
+  --slug unavail-bug \
+  --wait-for b/9999 --wait-for cl/9999 --wait-for 'gh:owner/repo#9999' \
+  --no-commit) >/dev/null 2>&1
+CHK_T152_OUT=$(PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha)
+if [ -z "$CHK_T152_OUT" ]; then
+  echo 'ok 152 - check degrades gracefully when external URI lookups fail or are offline'
+else
+  echo 'not ok 152 - check degrades gracefully when external URI lookups fail or are offline'
 fi

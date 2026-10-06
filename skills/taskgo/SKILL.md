@@ -85,7 +85,10 @@ stale_after: 2026-11-01
   `taskgo doctor` emits `[WARN]` prompting re-scoping or cancellation.
 
 `status: blocked` is allowed without warning when either `blocked_by` or
-`wait_for` has unresolved entries.
+`wait_for` has unresolved entries. Run `taskgo check [PROJECT] [--json]` to
+sweep open tasks against `today` and their task-scoped Git commit watermark,
+emitting only tasks with elapsed dates, approaching/overdue deadlines, stale
+cutoffs, or upstream URI activity/resolution.
 
 ### Planning & In-Progress Task Template
 
@@ -223,6 +226,7 @@ taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]
 taskgo dispatch TASK_ID
 taskgo sync [PROJECT]
+taskgo check [PROJECT] [--json]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]

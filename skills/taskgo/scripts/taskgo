@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import textwrap
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -3346,6 +3347,396 @@ def cmd_fix(
     print(f"SUMMARY: {commit_msg.strip()}")
 
 
+_BUG_URI_RE = re.compile(r"^b/(\d+)$", re.IGNORECASE)
+_CL_URI_RE = re.compile(r"^cl/(\d+)$", re.IGNORECASE)
+_GH_URI_RE = re.compile(r"^gh:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)$", re.IGNORECASE)
+
+_BUG_TERMINAL_STATES = {"FIXED", "WONT_FIX", "DUPLICATE", "OBSOLETE"}
+_CL_TERMINAL_STATES = {"MERGED", "SUBMITTED", "ABANDONED"}
+_GH_TERMINAL_STATES = {"CLOSED", "MERGED"}
+
+
+@dataclass(slots=True, frozen=True)
+class CheckTrigger:
+    kind: Literal[
+        "wait_for_elapsed",
+        "wait_for_resolved",
+        "wait_for_activity",
+        "due_overdue",
+        "due_soon",
+        "stale",
+    ]
+    gate: str | None
+    detail: str
+    upstream_state: str | None = None
+    upstream_modified: str | None = None
+
+
+def _is_offline() -> bool:
+    return os.environ.get("AGENT_OFFLINE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def parse_iso_timestamp(value: Any) -> datetime | None:
+    """Parses an ISO 8601 or Perforce timestamp string into an aware UTC datetime."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    s = str(value).strip().strip("'\"")
+    if not s:
+        return None
+    normalized = re.sub(r"^(\d{4})/(\d{2})/(\d{2})\b", r"\1-\2-\3", s)
+    try:
+        dt = datetime.fromisoformat(normalized)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def get_task_watermark(root: Path, row: TaskRow) -> tuple[str | None, datetime | None]:
+    """Returns (iso_str, aware_datetime) for the latest task-scoped commit on row.rel_path.
+
+    Uses `git log -1 --grep="^Task: <ID>$" --format=%cI -- <task_file>` first so
+    mechanical formatting sweeps (`taskgo fix`) cannot advance the watermark,
+    falling back to `git log -1 --format=%cI -- <task_file>`.
+    """
+    ts_str = ""
+    if row.task_id:
+        res = run_git(
+            [
+                "log",
+                "-1",
+                f"--grep=^Task: {row.task_id}$",
+                "--format=%cI",
+                "--",
+                row.rel_path,
+            ],
+            cwd=root,
+            check=False,
+        )
+        if res.returncode == 0:
+            ts_str = res.stdout.strip()
+    if not ts_str:
+        res = run_git(
+            ["log", "-1", "--format=%cI", "--", row.rel_path],
+            cwd=root,
+            check=False,
+        )
+        if res.returncode == 0:
+            ts_str = res.stdout.strip()
+    if not ts_str:
+        return None, None
+    return ts_str, parse_iso_timestamp(ts_str)
+
+
+def _run_probe_cmd(cmd: list[str], timeout_sec: float = 10.0) -> str | None:
+    """Runs a read-only external probe command gracefully, returning stdout or None."""
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError:
+        return None
+    _active_subprocesses.add(proc)
+    try:
+        stdout, _ = proc.communicate(timeout=timeout_sec)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+            proc.wait(timeout=1.0)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return None
+    finally:
+        _active_subprocesses.discard(proc)
+    if proc.returncode != 0:
+        return None
+    return stdout or ""
+
+
+def poll_external_uri(
+    gate: str,
+) -> tuple[str, bool, datetime | None, str | None] | None:
+    """Polls an external wait_for URI (`b/<id>`, `cl/<id>`, `gh:owner/repo#num`).
+
+    Returns `(canonical_status, is_terminal, modified_dt, modified_str)`, or `None`
+    when `gate` is not an external URI or when corp/network tools are unavailable.
+    """
+    if _is_offline():
+        return None
+
+    if m_bug := _BUG_URI_RE.match(gate):
+        issues_bin = shutil.which("issues")
+        if not issues_bin:
+            default_issues = Path("/google/bin/releases/issues-cli/issues")
+            if default_issues.is_file() and os.access(default_issues, os.X_OK):
+                issues_bin = str(default_issues)
+        if not issues_bin:
+            return None
+        out = _run_probe_cmd(
+            [issues_bin, "readonly", "get-issue-metadata", m_bug.group(1)]
+        )
+        if out is None:
+            return None
+        raw_status: str | None = None
+        raw_mod: str | None = None
+        for line in out.splitlines():
+            key, sep, val = line.partition(":")
+            if not sep:
+                continue
+            k = key.strip().lower()
+            v = val.strip()
+            if k == "status":
+                raw_status = v
+            elif k == "last modified":
+                raw_mod = v
+        if not raw_status and not raw_mod:
+            return None
+        norm_status = (raw_status or "OPEN").upper().replace("-", "_").replace(" ", "_")
+        if norm_status == "WONTFIX":
+            norm_status = "WONT_FIX"
+        return (
+            norm_status,
+            norm_status in _BUG_TERMINAL_STATES,
+            parse_iso_timestamp(raw_mod),
+            raw_mod,
+        )
+
+    if m_cl := _CL_URI_RE.match(gate):
+        g4_bin = shutil.which("g4")
+        if not g4_bin:
+            return None
+        out = _run_probe_cmd([g4_bin, "describe", "-s", m_cl.group(1)])
+        if out is None:
+            return None
+        first_line = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+        m_redir = re.match(r"^Change\s+\d+\s+is\s+([A-Za-z_-]+)", first_line)
+        if m_redir:
+            norm_status = m_redir.group(1).upper().replace("-", "_")
+            return norm_status, norm_status in _CL_TERMINAL_STATES, None, None
+        m_hdr = re.match(
+            r"^Change\s+\d+\s+by\s+\S+\s+on\s+(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(?:\s+\*([^*]+)\*)?",
+            first_line,
+        )
+        if not m_hdr:
+            return None
+        raw_mod = m_hdr.group(1)
+        norm_status = (m_hdr.group(2) or "SUBMITTED").strip().upper().replace("-", "_")
+        return (
+            norm_status,
+            norm_status in _CL_TERMINAL_STATES,
+            parse_iso_timestamp(raw_mod),
+            raw_mod,
+        )
+
+    if m_gh := _GH_URI_RE.match(gate):
+        gh_bin = shutil.which("gh")
+        if not gh_bin:
+            return None
+        out = _run_probe_cmd(
+            [
+                gh_bin,
+                "issue",
+                "view",
+                m_gh.group(2),
+                "--repo",
+                m_gh.group(1),
+                "--json",
+                "state,updatedAt",
+            ]
+        )
+        if out is None:
+            return None
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        raw_status = str(data.get("state") or "").strip() or None
+        raw_mod = str(data.get("updatedAt") or "").strip() or None
+        if not raw_status and not raw_mod:
+            return None
+        norm_status = (raw_status or "OPEN").upper().replace("-", "_")
+        return (
+            norm_status,
+            norm_status in _GH_TERMINAL_STATES,
+            parse_iso_timestamp(raw_mod),
+            raw_mod,
+        )
+
+    return None
+
+
+def cmd_check(
+    project: str | None = None,
+    as_json: bool = False,
+) -> None:
+    """Evaluate wait_for gates, due deadlines, and stale_after cutoffs."""
+    root = get_repo_root()
+    if project:
+        get_proj_dir(project, root)
+
+    today = get_today()
+    rows = get_task_rows(root, project)
+    probe_cache: dict[str, tuple[str, bool, datetime | None, str | None] | None] = {}
+
+    triggered_entries: list[tuple[TaskRow, str | None, list[CheckTrigger]]] = []
+
+    for row in rows:
+        if row.status in RESOLVED_STATES:
+            continue
+        if not (row.wait_for or row.due or row.stale_after):
+            continue
+
+        triggers: list[CheckTrigger] = []
+        watermark_cached: tuple[str | None, datetime | None] | None = None
+
+        def get_wm(r: TaskRow = row) -> tuple[str | None, datetime | None]:
+            nonlocal watermark_cached
+            if watermark_cached is None:
+                watermark_cached = get_task_watermark(root, r)
+            return watermark_cached
+
+        for gate in row.wait_for:
+            gate_date = parse_iso_date(gate)
+            if gate_date is not None:
+                if today >= gate_date:
+                    triggers.append(
+                        CheckTrigger(
+                            kind="wait_for_elapsed",
+                            gate=gate,
+                            detail=f"wait_for date {gate_date.isoformat()} elapsed",
+                        )
+                    )
+                continue
+
+            if gate not in probe_cache:
+                probe_cache[gate] = poll_external_uri(gate)
+            polled = probe_cache[gate]
+            if polled is None:
+                continue
+
+            up_status, is_terminal, mod_dt, mod_str = polled
+            if is_terminal:
+                triggers.append(
+                    CheckTrigger(
+                        kind="wait_for_resolved",
+                        gate=gate,
+                        detail=f"wait_for {gate} resolved ({up_status})",
+                        upstream_state=up_status,
+                        upstream_modified=mod_str,
+                    )
+                )
+            elif mod_dt is not None:
+                _, wm_dt = get_wm()
+                if wm_dt is None or mod_dt > wm_dt:
+                    triggers.append(
+                        CheckTrigger(
+                            kind="wait_for_activity",
+                            gate=gate,
+                            detail=(
+                                f"wait_for {gate} updated ({up_status} at "
+                                f"{mod_str or mod_dt.isoformat()})"
+                            ),
+                            upstream_state=up_status,
+                            upstream_modified=mod_str or mod_dt.isoformat(),
+                        )
+                    )
+
+        if row.due is not None:
+            due_date = parse_iso_date(row.due)
+            if due_date is not None:
+                if today > due_date:
+                    triggers.append(
+                        CheckTrigger(
+                            kind="due_overdue",
+                            gate=due_date.isoformat(),
+                            detail=(
+                                f"overdue (due {due_date.isoformat()}, "
+                                f"{(today - due_date).days}d ago)"
+                            ),
+                        )
+                    )
+                elif due_date <= today + timedelta(days=2):
+                    triggers.append(
+                        CheckTrigger(
+                            kind="due_soon",
+                            gate=due_date.isoformat(),
+                            detail=f"due soon (due {due_date.isoformat()}, within 48h)",
+                        )
+                    )
+
+        if row.stale_after is not None:
+            stale_date = parse_iso_date(row.stale_after)
+            if stale_date is not None and today > stale_date:
+                triggers.append(
+                    CheckTrigger(
+                        kind="stale",
+                        gate=stale_date.isoformat(),
+                        detail=f"stale task (stale_after {stale_date.isoformat()})",
+                    )
+                )
+
+        if triggers:
+            wm_str, _ = get_wm()
+            triggered_entries.append((row, wm_str, triggers))
+
+    if not triggered_entries:
+        return
+
+    if as_json:
+        out = [
+            {
+                "project": r.project,
+                "id": r.task_id,
+                "status": r.status,
+                "title": r.title,
+                "path": r.rel_path,
+                "watermark": wm_str,
+                "wait_for": list(r.wait_for),
+                "due": r.due,
+                "stale_after": r.stale_after,
+                "triggers": [
+                    {
+                        "kind": t.kind,
+                        "gate": t.gate,
+                        "detail": t.detail,
+                        **(
+                            {"upstream_state": t.upstream_state}
+                            if t.upstream_state is not None
+                            else {}
+                        ),
+                        **(
+                            {"upstream_modified": t.upstream_modified}
+                            if t.upstream_modified is not None
+                            else {}
+                        ),
+                    }
+                    for t in trigs
+                ],
+            }
+            for r, wm_str, trigs in triggered_entries
+        ]
+        print(json.dumps(out, indent=2))
+        return
+
+    for r, _, trigs in triggered_entries:
+        summary = "; ".join(t.detail for t in trigs)
+        print(
+            f"{r.project}\t{r.task_id}\t{r.status or '(missing)'}\t{summary}\t{r.rel_path}"
+        )
+
+
 def cmd_history(query: str, field: str = "status") -> None:
     """Show frontmatter field history across git revisions."""
     root = get_repo_root()
@@ -3820,6 +4211,7 @@ Commands:
   status [PROJECT] [--json]        Show project status
   dispatch TASK_ID                 Print agent instructions for a selected task
   sync [PROJECT]                   Update STATUS.md snapshot
+  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
@@ -4148,6 +4540,41 @@ working-tree or tracker readiness are written to stderr.""",
         default=None,
         metavar="PROJECT",
         help="Optional target project",
+    )
+
+    # check
+    p_check = subparsers.add_parser(
+        "check",
+        help="Evaluate wait_for gates, due deadlines, and stale_after cutoffs",
+        description="Evaluate wait_for gates, due deadlines, and stale_after cutoffs.",
+        formatter_class=HouseStyleHelpFormatter,
+        add_help=False,
+        epilog="""Examples:
+  taskgo check
+  taskgo check my-project --json
+
+Scans open tasks declaring wait_for, due, or stale_after against today and each
+task file's Git commit watermark, emitting nothing when no tasks trigger.""",
+    )
+    p_check.add_argument(
+        "--help",
+        "-h",
+        action="help",
+        help="Display this help message and exit",
+    )
+    p_check.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        metavar="PROJECT",
+        help="Optional target project",
+    )
+    p_check.add_argument(
+        "--json",
+        "-j",
+        dest="as_json",
+        action="store_true",
+        help="Output machine-readable JSON",
     )
 
     # doctor
@@ -4562,6 +4989,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_dispatch(task_id=args.task_id)
     elif args.command == "sync":
         cmd_sync(project=args.project)
+    elif args.command == "check":
+        cmd_check(project=args.project, as_json=args.as_json)
     elif args.command == "doctor":
         cmd_doctor(project=args.project)
     elif args.command == "fix":

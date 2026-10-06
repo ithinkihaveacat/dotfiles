@@ -12,6 +12,7 @@
 - [status](#status)
 - [dispatch](#dispatch)
 - [sync](#sync)
+- [check](#check)
 - [doctor](#doctor)
 - [fix](#fix)
 - [history](#history)
@@ -43,6 +44,7 @@ Commands:
   status [PROJECT] [--json]        Show project status
   dispatch TASK_ID                 Print agent instructions for a selected task
   sync [PROJECT]                   Update STATUS.md snapshot
+  check [PROJECT] [--json]         Sweep wait_for gates and date horizons
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
@@ -284,6 +286,32 @@ positional arguments:
 
 options:
   -h, --help  show this help message and exit
+```
+
+<!-- /generated -->
+
+## check
+
+<!-- generated: ../scripts/taskgo check --help -->
+
+```text
+Usage: taskgo check [--help] [--json] [PROJECT]
+
+Evaluate wait_for gates, due deadlines, and stale_after cutoffs.
+
+Arguments:
+  PROJECT     Optional target project
+
+Options:
+  --help, -h  Display this help message and exit
+  --json, -j  Output machine-readable JSON
+
+Examples:
+  taskgo check
+  taskgo check my-project --json
+
+Scans open tasks declaring wait_for, due, or stale_after against today and each
+task file's Git commit watermark, emitting nothing when no tasks trigger.
 ```
 
 <!-- /generated -->
