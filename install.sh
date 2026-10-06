@@ -865,6 +865,16 @@ if exists bat || exists batcat; then
 
 fi
 
+# fd
+
+if ! exists fd && exists fdfind; then
+
+  heading "fd"
+
+  x ln -sf "$(which fdfind)" "$BINDIR/fd"
+
+fi
+
 # Package Management Invariants (Homebrew and apt-get):
 # Both Homebrew (macOS) and apt-get (Linux) package management paths enforce four invariants:
 # 1. 24-Hour Freshness TTL: Index lists are updated and installed packages are
@@ -908,7 +918,7 @@ if exists brew; then
   fi
 
   # Core packages: always installed, on every run.
-  core="fish coreutils wget direnv jq mtr htop sevenzip ripgrep chafa node bat"
+  core="fish coreutils wget direnv jq mtr htop sevenzip ripgrep fd chafa node bat"
   # These packages have non-standard installation mechanisms (see above)
   custom="jed"
   # Optional packages: installed only with --install-optional or --install-all.
@@ -974,7 +984,7 @@ if [ "$PLATFORM" = "linux" ]; then
     fi
 
     # Core packages: always installed, on every run.
-    core="fish apt-file direnv command-not-found dnsutils htop btop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep chafa bat ruby ruby-dev"
+    core="fish apt-file direnv command-not-found dnsutils htop btop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev"
     # Optional packages: installed only with --install-optional or --install-all.
     # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
     # ruby-build binary itself is bootstrapped from git below, as the apt package
@@ -992,6 +1002,10 @@ if [ "$PLATFORM" = "linux" ]; then
     # Full unmanaged package removal is unsafe on Debian/apt because apt manages
     # base system and infrastructure packages beyond dotfiles. Orphaned dependency
     # packages are purged via apt-get autoremove --purge below.
+
+    if ! exists fd && exists fdfind; then
+      x ln -sf "$(which fdfind)" "$BINDIR/fd"
+    fi
 
     # fish is in core above, so on a fresh machine it first arrives from the
     # distribution; switching repositories then upgrades it in place.
