@@ -263,12 +263,21 @@ class PermissionAdapter:
 
 
 class AgySettingsAdapter(PermissionAdapter):
-    """Antigravity / Jetski CLI: user-wide permissions in ~/.gemini/jetski/cli/settings.json
+    """Antigravity / Jetski CLI & Web: user-wide permissions in
+    ~/.gemini/jetski/cli/settings.json, ~/.gemini/config/config.json,
     or ~/.gemini/antigravity-cli/settings.json. Supports allow, deny, and ask lists."""
 
     name = "agy"
     scope = "user"
     guard_mode = "ask"
+    NON_CMD_PREFIXES = (
+        "read_file(",
+        "write_file(",
+        "mcp(",
+        "read_url(",
+        "execute_url(",
+        "escalate_admin(",
+    )
 
     def __init__(self, target_agent: str | None = None):
         self.target_agent = target_agent
@@ -282,10 +291,15 @@ class AgySettingsAdapter(PermissionAdapter):
         paths: list[Path] = []
         target = self.target_agent
 
+        if target == "jetski-web":
+            return [home / ".gemini/config/config.json"]
+
         jetski_existing: list[Path] = []
         for p in (
             home / ".gemini/jetski/cli/settings.json",
             AGY_CONFIG_DIR / "jetski/cli/settings.json",
+            home / ".gemini/config/config.json",
+            AGY_CONFIG_DIR / "config/config.json",
         ):
             if p.is_file() and p not in jetski_existing:
                 jetski_existing.append(p)
@@ -301,6 +315,10 @@ class AgySettingsAdapter(PermissionAdapter):
 
         if target == "jetski":
             if jetski_existing:
+                if (home / ".gemini/config").is_dir() and (
+                    home / ".gemini/config/config.json"
+                ) not in jetski_existing:
+                    return [*jetski_existing, home / ".gemini/config/config.json"]
                 return jetski_existing
             if (AGY_CONFIG_DIR / "jetski/cli").is_dir():
                 return [AGY_CONFIG_DIR / "jetski/cli/settings.json"]
@@ -321,6 +339,10 @@ class AgySettingsAdapter(PermissionAdapter):
         for p in jetski_existing:
             if p not in paths:
                 paths.append(p)
+        if (home / ".gemini/config").is_dir() and (
+            home / ".gemini/config/config.json"
+        ) not in paths:
+            paths.append(home / ".gemini/config/config.json")
         for p in agy_existing:
             if p not in paths:
                 paths.append(p)
@@ -329,6 +351,7 @@ class AgySettingsAdapter(PermissionAdapter):
             jetski_existing
             or (home / ".gemini/jetski/cli").is_dir()
             or (home / ".gemini/jetski").is_dir()
+            or (home / ".gemini/config").is_dir()
             or (AGY_CONFIG_DIR / "jetski/cli").is_dir()
             or (AGY_CONFIG_DIR / "jetski").is_dir()
             or shutil.which("jetski")
@@ -382,6 +405,7 @@ class AgySettingsAdapter(PermissionAdapter):
             and (
                 (home / ".gemini/jetski").is_dir()
                 or (home / ".gemini/jetski/cli").is_dir()
+                or (home / ".gemini/config").is_dir()
                 or (home / ".gemini").is_dir()
                 or (AGY_CONFIG_DIR / "jetski").is_dir()
                 or (AGY_CONFIG_DIR / "jetski/cli").is_dir()
@@ -400,6 +424,8 @@ class AgySettingsAdapter(PermissionAdapter):
         p = pattern.strip()
         if not p:
             return ""
+        if p.endswith(")") and p.startswith(self.NON_CMD_PREFIXES):
+            return p
         if p.startswith("command(") and p.endswith(")"):
             p = p[len("command(") : -1].strip()
         if p.startswith("regex:"):
@@ -413,6 +439,8 @@ class AgySettingsAdapter(PermissionAdapter):
 
     def untranslate(self, rule: str) -> str:
         inner = rule.strip()
+        if inner.endswith(")") and inner.startswith(self.NON_CMD_PREFIXES):
+            return inner
         if inner.startswith("command(") and inner.endswith(")"):
             inner = inner[len("command(") : -1].strip()
         if inner.startswith("regex:"):
@@ -433,11 +461,15 @@ class AgySettingsAdapter(PermissionAdapter):
     def _save(self, settings_path: Path, data: dict) -> None:
         created = not settings_path.is_file()
         settings_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(settings_path.parent))
+        temp_path = Path(temp_path_str)
         try:
-            with open(settings_path, "w", encoding="utf-8") as f:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
                 f.write("\n")
+            os.replace(temp_path, settings_path)
         except Exception as e:
+            temp_path.unlink(missing_ok=True)
             die(f"[{self.name}] error writing {settings_path}: {e}")
         if created:
             print(
@@ -445,8 +477,13 @@ class AgySettingsAdapter(PermissionAdapter):
                 file=sys.stderr,
             )
 
-    def _perms(self, data: dict) -> dict:
-        perms = data.setdefault("permissions", {})
+    @staticmethod
+    def _perms(data: dict, settings_path: Path | None = None) -> dict:
+        if settings_path is not None and settings_path.name == "config.json":
+            user_settings = data.setdefault("userSettings", {})
+            perms = user_settings.setdefault("globalPermissionGrants", {})
+        else:
+            perms = data.setdefault("permissions", {})
         for mode in MODES:
             if perms.get(mode) is None:
                 perms[mode] = []
@@ -460,7 +497,7 @@ class AgySettingsAdapter(PermissionAdapter):
         added_any = False
         for settings_path in self._settings_paths():
             data = self._load(settings_path)
-            perms = self._perms(data)
+            perms = self._perms(data, settings_path)
             target_list = perms[mode]
             if rule in target_list:
                 continue
@@ -484,7 +521,7 @@ class AgySettingsAdapter(PermissionAdapter):
             if not settings_path.is_file():
                 continue
             data = self._load(settings_path)
-            perms = self._perms(data)
+            perms = self._perms(data, settings_path)
             path_changed = False
             for mode in MODES:
                 lst = perms.get(mode)
@@ -508,7 +545,7 @@ class AgySettingsAdapter(PermissionAdapter):
             if not settings_path.is_file():
                 continue
             data = self._load(settings_path)
-            perms = self._perms(data)
+            perms = self._perms(data, settings_path)
             for mode in MODES:
                 for r in perms.get(mode) or []:
                     untranslated = self.untranslate(r)
@@ -520,7 +557,7 @@ class AgySettingsAdapter(PermissionAdapter):
         if not path.is_file():
             return {}
         data = self._load(path)
-        perms = self._perms(data)
+        perms = self._perms(data, path)
         return {
             mode: [self.untranslate(rule) for rule in perms.get(mode) or []]
             for mode in MODES
@@ -533,7 +570,7 @@ class AgySettingsAdapter(PermissionAdapter):
             if not settings_path.is_file():
                 continue
             data = self._load(settings_path)
-            perms = self._perms(data)
+            perms = self._perms(data, settings_path)
             for mode in MODES:
                 perms[mode] = []
             self._save(settings_path, data)
@@ -878,10 +915,12 @@ def select_adapters(agent: str | None, workspace_root: Path) -> list[PermissionA
     adapter whose agent appears to be in use. May be empty; commands that
     cannot proceed without one should call require_adapters instead."""
     if agent:
-        target = "agy" if agent == "jetski" else agent
+        target = "agy" if agent in ("jetski", "jetski-web") else agent
         matches = [a for a in ADAPTERS if a.name == target]
         if not matches:
-            names = ", ".join(sorted({a.name for a in ADAPTERS} | {"jetski"}))
+            names = ", ".join(
+                sorted({a.name for a in ADAPTERS} | {"jetski", "jetski-web"})
+            )
             die(f"unknown agent '{agent}' (expected one of: {names})")
         if target == "agy":
             return [AgySettingsAdapter(target_agent=agent)]
@@ -1184,7 +1223,7 @@ def cmd_doctor(agent: str | None, stream=sys.stdout):
                 declared_legacy = []
                 other_legacy = []
                 for mode in MODES:
-                    for r in (data.get("permissions") or {}).get(mode) or []:
+                    for r in adapter._perms(data, p).get(mode) or []:
                         if r.startswith("command(") and not r.startswith(
                             "command(regex:"
                         ):
