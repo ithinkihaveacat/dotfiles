@@ -363,7 +363,8 @@ ______________________________________________________________________
   these packages is solely a recovery step when System UI fails to sync
   capabilities with GMS Core and renders a default watch face instead of binding
   your service.
-- **Mandatory `@AssociateWithGlanceWearWidget` Service Annotation**:
+- **Mandatory `@AssociateWithGlanceWearWidget` Service Annotation (and Why
+  Widgets Fail to Update in Production / Release Builds)**:
   - Always annotate your `GlanceWearWidgetService` with
     `@AssociateWithGlanceWearWidget(MyWidget::class)`:
     ```kotlin
@@ -372,13 +373,47 @@ ______________________________________________________________________
         override val widget: GlanceWearWidget = MyWidget()
     }
     ```
-  - **Why Required**: Glance uses static class analysis to resolve the widget
-    provider mapping without instantiating the service. When apps use Dependency
-    Injection frameworks (such as Hilt or Dagger) where the `widget` property is
-    injected or initialized during service lifecycle attachment, reflective
-    service instantiation fails or leaves `widget` uninitialized. The annotation
-    guarantees static resolution across build tools, linters, and runtime
-    resolvers (`GlanceWearWidgetManager.getProviderForWidget`).
+  - **Production Symptom ("Why does my widget render initially, but never update
+    in production / release builds?")**:
+    - Initial widget rendering (`onBind` -> `provideWidgetData`) works without
+      the annotation because the Wear OS host binds directly to the `<service>`
+      declared in `AndroidManifest.xml`.
+    - However, **programmatic updates (`triggerUpdateAll`, `triggerUpdate`, and
+      `fetchActiveWidgets`) silently fail in release builds** when the reverse
+      mapping (`MyWidget::class` -> `MyWidgetService`) in
+      `GlanceWearWidgetManager` fails. Because
+      `GlanceWearWidgetManager.State.recoverServiceToWidgetMapping()` catches
+      all reflection exceptions and only logs a `Log.w` warning, **failures do
+      not crash the app or appear in Crashlytics / Android Vitals—updates are
+      silently dropped** (`getProviderForWidget` returns `null` and
+      `fetchActiveWidgets` returns `emptyList()`):
+      1. **Hilt / Dagger / Koin Services (Silent Update Drop on Cold Cache):**
+         When `@AssociateWithGlanceWearWidget` is omitted in source—or stripped
+         by AGP 8.0+ **R8 Full Mode**—`recoverServiceToWidgetMapping()` falls
+         back to `serviceClass.getDeclaredConstructor().newInstance().widget`.
+         Because `newInstance()` does not run `Service.onCreate()`,
+         `@Inject lateinit` fields are uninitialized, throwing
+         `UninitializedPropertyAccessException` (swallowed by
+         `GlanceWearWidgetManager`), so background refreshes never reach the
+         widget.
+      1. **Multi-Widget Apps (Cross-Widget Update Collisions from R8 Horizontal
+         Class Merging):** Without a keep rule on `GlanceWearWidget` subclasses,
+         R8 horizontally merges multiple widget classes into a single obfuscated
+         class with an `int` discriminator field. Every service in the app then
+         maps to the same obfuscated widget class name, causing
+         `triggerUpdateAll()` and `fetchActiveWidgets()` to route updates to the
+         wrong `<service>` or overwrite sibling widgets.
+  - **Required ProGuard / R8 Rules (on `androidx.glance.wear` versions prior to
+    bundled consumer keep rules)**:
+    ```proguard
+    -keepattributes RuntimeVisibleAnnotations
+    -keep,allowobfuscation @interface androidx.glance.wear.AssociateWithGlanceWearWidget { *; }
+    -keep,allowobfuscation,allowshrinking @androidx.glance.wear.AssociateWithGlanceWearWidget class *
+    -keepclassmembers class * extends androidx.glance.wear.GlanceWearWidgetService {
+        public <init>();
+    }
+    -keep,allowobfuscation,allowshrinking class * extends androidx.glance.wear.GlanceWearWidget
+    ```
   - **How to Verify in Release DEX Bytecode (Obfuscation-Proof)**:
     - **Never** run `dexdump -d | grep AssociateWithGlanceWearWidget`:
       1. `dexdump -d` omits the DEX `annotations_directory_item` table unless
