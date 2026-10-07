@@ -14,8 +14,9 @@ def register(api) -> None:
         opt_out_file.parent.mkdir(parents=True, exist_ok=True)
         opt_out_file.write_text(OPT_OUT_CONTENT, encoding="utf-8")
 
-    # Register remote GitHub specification (matches other third-party skills)
+    # Shopify consolidated its API skills into skills/shopify. Keep the old
+    # catalog name so existing workspace specifications continue to resolve.
     api.register_skill(
         "remote:shopify-storefront-graphql",
-        "https://github.com/Shopify/Shopify-AI-Toolkit/tree/main/skills/shopify-storefront-graphql",
+        "https://github.com/Shopify/Shopify-AI-Toolkit/tree/main/skills/shopify",
     )
