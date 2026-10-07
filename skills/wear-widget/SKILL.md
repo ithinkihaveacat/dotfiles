@@ -379,6 +379,24 @@ ______________________________________________________________________
     service instantiation fails or leaves `widget` uninitialized. The annotation
     guarantees static resolution across build tools, linters, and runtime
     resolvers (`GlanceWearWidgetManager.getProviderForWidget`).
+  - **How to Verify in Release DEX Bytecode (Obfuscation-Proof)**:
+    - **Never** run `dexdump -d | grep AssociateWithGlanceWearWidget`:
+      1. `dexdump -d` omits the DEX `annotations_directory_item` table unless
+         `-a` is passed.
+      1. R8 obfuscates `AssociateWithGlanceWearWidget` to short names (e.g.,
+         `@Lgvl`, `@Ldmd`, `@Lc6/c`, `@Lum`), so grepping for the unobfuscated
+         string produces false negatives on minified APKs.
+    - Instead, look up each `<service>` class block in `dexdump -a` (or the
+      binary DEX `annotations_directory_item` table) by its
+      `AndroidManifest.xml` class descriptor (`Lcom/example/MyWidgetService;`,
+      which R8 cannot obfuscate) and inspect its `VISIBILITY_RUNTIME` class
+      annotations:
+      1. Verify that the `<service>` class has a `VISIBILITY_RUNTIME` class
+         annotation referencing a widget `Class` (`L...;`).
+      1. In multi-widget apps, verify that R8 horizontal class merging has
+         **not** collapsed multiple `GlanceWearWidget` subclasses into the same
+         obfuscated class descriptor (where two services annotate the same
+         `L...;` widget class, causing `serviceToWidgetMapping` collisions).
 - **Debugging & Updates: `triggerUpdateAll()` vs `fetchActiveWidgets()`**:
   - When triggering updates programmatically (e.g., from broadcast receivers,
     background workers, or interactive debug buttons), prefer
