@@ -386,17 +386,32 @@ ______________________________________________________________________
       1. R8 obfuscates `AssociateWithGlanceWearWidget` to short names (e.g.,
          `@Lgvl`, `@Ldmd`, `@Lc6/c`, `@Lum`), so grepping for the unobfuscated
          string produces false negatives on minified APKs.
-    - Instead, look up each `<service>` class block in `dexdump -a` (or the
+    - Instead, look up each `<service>` class block in `dexdump -d -a` (or the
       binary DEX `annotations_directory_item` table) by its
       `AndroidManifest.xml` class descriptor (`Lcom/example/MyWidgetService;`,
-      which R8 cannot obfuscate) and inspect its `VISIBILITY_RUNTIME` class
-      annotations:
-      1. Verify that the `<service>` class has a `VISIBILITY_RUNTIME` class
-         annotation referencing a widget `Class` (`L...;`).
-      1. In multi-widget apps, verify that R8 horizontal class merging has
+      which R8 cannot obfuscate) and check both callgraph reachability and
+      `VISIBILITY_RUNTIME` class annotations:
+      1. **Check if `recoverServiceToWidgetMapping()` is reachable:** The
+         annotation is only read inside
+         `GlanceWearWidgetManager.State.recoverServiceToWidgetMapping()`, which
+         is only reachable when the app calls `GlanceWearWidget.triggerUpdate`,
+         `GlanceWearWidget.triggerUpdateAll`, or
+         `GlanceWearWidgetManager.fetchActiveWidgets(KClass)`. If an app never
+         calls any of those methods (e.g. a static launcher widget or an app
+         that calls `TileService.getUpdater(context).requestUpdate(...)`
+         directly), R8 shakes out `recoverServiceToWidgetMapping()` as dead code
+         and strips `@AssociateWithGlanceWearWidget` benignly (`PASS`).
+      1. **When `recoverServiceToWidgetMapping()` is live:** Verify that each
+         `<service>` class has a `VISIBILITY_RUNTIME` class annotation
+         referencing a widget `Class` (`L...;`, excluding `Lkotlin/Metadata;` /
+         `Ldalvik/annotation/*;`). If missing, check whether the reflective
+         `<init>()` fallback crashes due to Hilt/Dagger `@Inject` fields
+         initialized in `onCreate()` (`FAIL`) or succeeds (`WARN`).
+      1. **In multi-widget apps:** Verify that R8 horizontal class merging has
          **not** collapsed multiple `GlanceWearWidget` subclasses into the same
-         obfuscated class descriptor (where two services annotate the same
-         `L...;` widget class, causing `serviceToWidgetMapping` collisions).
+         obfuscated class descriptor (where multiple services resolve via
+         annotation or `<init>()` fallback to the same `L...;` widget class,
+         causing `serviceToWidgetMapping` collisions — `FAIL`).
 - **Debugging & Updates: `triggerUpdateAll()` vs `fetchActiveWidgets()`**:
   - When triggering updates programmatically (e.g., from broadcast receivers,
     background workers, or interactive debug buttons), prefer
