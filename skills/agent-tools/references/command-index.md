@@ -880,10 +880,10 @@ ______________________________________________________________________
 
 ## pacioli
 
-Extract a structured purchase record (vendor, brands, items, category, order
-number/date, currency, total, `is_purchase`) from a receipt or
-order-confirmation email. Reads one email on stdin and prints a single JSON
-object, so a driver can fan it out across a mailbox in parallel.
+Extract a structured purchase record (vendor, brands, items with per-item
+categories, overall category, order number/date, currency, total, `is_purchase`)
+from a receipt or order-confirmation email. Reads one email on stdin and prints
+a single JSON object, so a driver can fan it out across a mailbox in parallel.
 
 ### Help
 
