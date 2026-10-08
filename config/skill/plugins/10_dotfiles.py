@@ -21,6 +21,11 @@ def register(api):
     )
 
     api.register_skill(
+        "remote:compose-ui-builder",
+        "https://github.com/yschimke/skills/tree/main/skills/compose-ui-builder",
+    )
+
+    api.register_skill(
         "remote:chrome-devtools-cli",
         "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli",
     )
