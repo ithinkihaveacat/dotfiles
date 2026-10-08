@@ -366,7 +366,9 @@ ______________________________________________________________________
 - **Mandatory `@AssociateWithGlanceWearWidget` Service Annotation (and Why
   Widgets Fail to Update in Production / Release Builds)**:
   - Always annotate your `GlanceWearWidgetService` with
-    `@AssociateWithGlanceWearWidget(MyWidget::class)`:
+    `@AssociateWithGlanceWearWidget(MyWidget::class)` so the runtime can resolve
+    a `GlanceWearWidget` class back to its declaring `<service>` without
+    reflective service instantiation:
     ```kotlin
     @AssociateWithGlanceWearWidget(MyWidget::class)
     class MyWidgetService : GlanceWearWidgetService() {
@@ -379,32 +381,24 @@ ______________________________________________________________________
       the annotation because the Wear OS host binds directly to the `<service>`
       declared in `AndroidManifest.xml`.
     - However, **programmatic updates (`triggerUpdateAll`, `triggerUpdate`, and
-      `fetchActiveWidgets`) silently fail in release builds** when the reverse
-      mapping (`MyWidget::class` -> `MyWidgetService`) in
-      `GlanceWearWidgetManager` fails. Because
-      `GlanceWearWidgetManager.State.recoverServiceToWidgetMapping()` catches
-      all reflection exceptions and only logs a `Log.w` warning, **failures do
-      not crash the app or appear in Crashlytics / Android Vitals—updates are
-      silently dropped** (`getProviderForWidget` returns `null` and
-      `fetchActiveWidgets` returns `emptyList()`):
-      1. **Hilt / Dagger / Koin Services (Silent Update Drop on Cold Cache):**
-         When `@AssociateWithGlanceWearWidget` is omitted in source—or stripped
-         by AGP 8.0+ **R8 Full Mode**—`recoverServiceToWidgetMapping()` falls
-         back to `serviceClass.getDeclaredConstructor().newInstance().widget`.
-         Because `newInstance()` does not run `Service.onCreate()`,
-         `@Inject lateinit` fields are uninitialized, throwing
-         `UninitializedPropertyAccessException` (swallowed by
-         `GlanceWearWidgetManager`), so background refreshes never reach the
-         widget.
-      1. **Multi-Widget Apps (Cross-Widget Update Collisions from R8 Horizontal
-         Class Merging):** Without a keep rule on `GlanceWearWidget` subclasses,
-         R8 horizontally merges multiple widget classes into a single obfuscated
-         class with an `int` discriminator field. Every service in the app then
-         maps to the same obfuscated widget class name, causing
-         `triggerUpdateAll()` and `fetchActiveWidgets()` to route updates to the
-         wrong `<service>` or overwrite sibling widgets.
-  - **Required ProGuard / R8 Rules (on `androidx.glance.wear` versions prior to
-    bundled consumer keep rules)**:
+      `fetchActiveWidgets`) can silently fail in release builds** when resolving
+      `MyWidget::class` back to `MyWidgetService` fails. Because reflection
+      exceptions during widget-to-service resolution are caught internally,
+      **failures do not crash the app or appear in Crashlytics / Android
+      Vitals—updates are silently dropped**:
+      1. **DI Services (Hilt / Dagger / Koin):** When
+         `@AssociateWithGlanceWearWidget` is omitted in source—or stripped by
+         AGP 8.0+ **R8 Full Mode**—fallback reflective instantiation of the
+         `<service>` class (`newInstance()`) bypasses `Service.onCreate()`,
+         leaving `@Inject lateinit` fields uninitialized. The resulting
+         exception is caught internally, so background updates are silently
+         dropped when the widget mapping cache is cold.
+      1. **Multi-Widget Apps (R8 Horizontal Class Merging):** Without keep rules
+         on `GlanceWearWidget` subclasses, R8 can horizontally merge multiple
+         widget classes into a single obfuscated class, causing
+         widget-to-service resolution to collide across services and route
+         updates to the wrong `<service>`.
+  - **Required ProGuard / R8 Rules**:
     ```proguard
     -keepattributes RuntimeVisibleAnnotations
     -keep,allowobfuscation @interface androidx.glance.wear.AssociateWithGlanceWearWidget { *; }
@@ -418,52 +412,39 @@ ______________________________________________________________________
     - **Never** run `dexdump -d | grep AssociateWithGlanceWearWidget`:
       1. `dexdump -d` omits the DEX `annotations_directory_item` table unless
          `-a` is passed.
-      1. R8 obfuscates `AssociateWithGlanceWearWidget` to short names (e.g.,
-         `@Lgvl`, `@Ldmd`, `@Lc6/c`, `@Lum`), so grepping for the unobfuscated
-         string produces false negatives on minified APKs.
-    - Instead, look up each `<service>` class block in `dexdump -d -a` (or the
-      binary DEX `annotations_directory_item` table) by its
+      1. R8 obfuscates the `AssociateWithGlanceWearWidget` annotation type name,
+         so grepping for the unobfuscated string produces false negatives on
+         minified APKs.
+    - Instead, inspect each `<service>` class block in `dexdump -d -a` by its
       `AndroidManifest.xml` class descriptor (`Lcom/example/MyWidgetService;`,
-      which R8 cannot obfuscate) and check both callgraph reachability and
-      `VISIBILITY_RUNTIME` class annotations:
-      1. **Check if `recoverServiceToWidgetMapping()` is reachable:** The
-         annotation is only read inside
-         `GlanceWearWidgetManager.State.recoverServiceToWidgetMapping()`, which
-         is only reachable when the app calls `GlanceWearWidget.triggerUpdate`,
-         `GlanceWearWidget.triggerUpdateAll`, or
-         `GlanceWearWidgetManager.fetchActiveWidgets(KClass)`. If an app never
-         calls any of those methods (e.g. a static launcher widget or an app
-         that calls `TileService.getUpdater(context).requestUpdate(...)`
-         directly), R8 shakes out `recoverServiceToWidgetMapping()` as dead code
-         and strips `@AssociateWithGlanceWearWidget` benignly (`PASS`).
-      1. **When `recoverServiceToWidgetMapping()` is live:** Verify that each
-         `<service>` class has a `VISIBILITY_RUNTIME` class annotation
-         referencing a widget `Class` (`L...;`, excluding `Lkotlin/Metadata;` /
-         `Ldalvik/annotation/*;`). If missing, check whether the reflective
-         `<init>()` fallback crashes due to Hilt/Dagger `@Inject` fields
-         initialized in `onCreate()` (`FAIL`) or succeeds (`WARN`).
+      which R8 cannot obfuscate):
+      1. **Check whether programmatic update APIs are called:** If the app never
+         calls `triggerUpdate`, `triggerUpdateAll`, or `fetchActiveWidgets` (for
+         example, a static widget or an app that triggers updates through
+         `TileService.getUpdater(context)` directly), R8 tree-shakes the unused
+         widget-to-service lookup codepath and strips
+         `@AssociateWithGlanceWearWidget` benignly (`PASS`).
+      1. **When update APIs are used:** Verify that each `<service>` class
+         retains a `VISIBILITY_RUNTIME` class annotation referencing a widget
+         `Class` (`L...;`, excluding `Lkotlin/Metadata;` and
+         `Ldalvik/annotation/*;`). If missing, check whether reflective
+         `<init>()` instantiation fails due to DI fields initialized in
+         `onCreate()` (`FAIL`) or succeeds (`WARN`).
       1. **In multi-widget apps:** Verify that R8 horizontal class merging has
          **not** collapsed multiple `GlanceWearWidget` subclasses into the same
-         obfuscated class descriptor (where multiple services resolve via
-         annotation or `<init>()` fallback to the same `L...;` widget class,
-         causing `serviceToWidgetMapping` collisions — `FAIL`).
+         obfuscated class descriptor (`FAIL`).
 - **Debugging & Updates: `triggerUpdateAll()` vs `fetchActiveWidgets()`**:
   - When triggering updates programmatically (e.g., from broadcast receivers,
     background workers, or interactive debug buttons), prefer
     `myWidget.triggerUpdateAll(context)` over manually iterating over
     `fetchActiveWidgets(widget::class)`.
-  - **Why It Matters for Emulators and Testbeds**: `fetchActiveWidgets()`
-    queries the platform `TilesManager.getActiveTiles()`. On development
-    testbeds or emulators where widgets/tiles are injected via ADB broadcast
-    commands (`com.google.android.wearable.app.DEBUG_SURFACE add-tile`),
-    `TilesManager` does not register the tile under the app package's UID.
-    Consequently, `fetchActiveWidgets()` returns an empty list
-    (`Update triggered for 0 active widgets.`), silently dropping updates.
-  - `triggerUpdateAll(context)` includes an explicit debug-mode fallback: when
-    debugging is detected, it directly queries
-    `GlanceWearWidgetManager.getProviderForWidget()` and issues a pull update to
-    SysUI (`triggerPullUpdate()`), ensuring dynamic state updates render
-    immediately during development and testing.
+  - **Why It Matters for Emulators and Testbeds**: On development testbeds or
+    emulators where widgets/tiles are injected via ADB debug broadcast commands
+    (`com.google.android.wearable.app.DEBUG_SURFACE add-tile`), the platform
+    active-tile registry may not list the debug surface under the app package,
+    causing `fetchActiveWidgets()` to return an empty list and drop updates.
+    `triggerUpdateAll(context)` handles both standard active instances and
+    debug-injected surfaces during development and testing.
 - **Official Tile Preview Checklist**:
   - **Dimensions**: Use exactly **400x400px** for the Tile carousel preview
     (`AndroidManifest.xml`).
