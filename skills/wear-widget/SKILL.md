@@ -471,6 +471,12 @@ ______________________________________________________________________
     1. **Surface Phase & Operational Mode**: Under each device, capture **(1)
        System Picker Image**, **(2a) Live In-Use Screenshot**, and **(2b) Live
        Screencast (Context Video)** across active modes.
+  - **32-Attribute Evaluation Framework (`C01–C19` & `D01–D13`)**: Pairs 19
+    objective pass/warn/fail launch-readiness checks (`C01–C03` build & ABI
+    gates, `C04–C09` manifest & config compliance including R8/DEX
+    `@AssociateWithGlanceWearWidget` safety, `C10–C15` static preview dimension
+    & unmasked corner verification, and `C16–C19` live runtime rendering checks)
+    with 13 informational architectural metadata fields (`D01–D13`).
   - **Structured Placeholders**: Render explicit `[Pending Capture]` cards with
     dashed borders for missing/pending slots rather than omitting columns.
   - **Formatted XML**: Format and pretty-print XML declarations with 4-space
