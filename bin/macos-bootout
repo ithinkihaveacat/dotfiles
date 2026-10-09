@@ -1,29 +1,36 @@
 #!/usr/bin/env bash
 
+# Tests: tests/test-macos-bootout
+
+set -euo pipefail
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") USER
 
-Logs out the specified user using 'launchctl bootout'.
+Forcibly logs out the specified user's graphical session.
 
 Arguments:
   USER        Username or User ID (UID) of the user to log out.
 
 Options:
-  --help      Display this help message and exit
+  --help, -h  Display this help message and exit
 
 Examples:
-  $(basename "$0") mjs
+  $(basename "$0") alice
   $(basename "$0") 501
 
-This script requires sudo privileges to execute the bootout command.
+Requires sudo privileges. Applications cannot block logout with save dialogs;
+unsaved changes may be lost.
 EOF
   exit 0
 }
 
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
-  usage
-fi
+for arg in "$@"; do
+  if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+    usage
+  fi
+done
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -32,27 +39,33 @@ require() {
   }
 }
 
-require id
-require launchctl
-require sudo
-
 usage_short() {
   cat <<EOF >&2
 Usage: $(basename "$0") USER
 
-Logs out the specified user using 'launchctl bootout'.
+Forcibly logs out the specified user's graphical session.
 
 Examples:
-  $(basename "$0") mjs
+  $(basename "$0") alice
 
 Try '$(basename "$0") --help' for more information.
 EOF
   exit 1
 }
 
-if [ -z "$1" ]; then
+if [[ $# -ne 1 || -z "$1" ]]; then
   usage_short
 fi
+
+if [[ "$1" == -* ]]; then
+  echo "$(basename "$0"): unrecognized option '$1'" >&2
+  exit 1
+fi
+
+require id
+require launchctl
+require pgrep
+require sudo
 
 # Resolve input to UID. 'id -u' works for both usernames and UIDs on macOS.
 if ! TARGET_UID=$(id -u "$1" 2>/dev/null); then
@@ -60,4 +73,16 @@ if ! TARGET_UID=$(id -u "$1" 2>/dev/null); then
   exit 1
 fi
 
-sudo launchctl bootout "gui/$TARGET_UID"
+# An account can have background processes without a graphical login session.
+# In that case launchctl reports error 125 instead of explaining what is absent.
+session_status=0
+pgrep -u "$TARGET_UID" -x loginwindow >/dev/null || session_status=$?
+if [[ "$session_status" == 1 ]]; then
+  echo "$(basename "$0"): user '$1' has no graphical login session" >&2
+  exit 1
+elif [[ "$session_status" != 0 ]]; then
+  echo "$(basename "$0"): failed to inspect graphical login sessions" >&2
+  exit 1
+fi
+
+exec sudo launchctl bootout "gui/$TARGET_UID"

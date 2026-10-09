@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$DIR/../bin/macos-bootout"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+mkdir "$WORK/stubs"
+export BOOTOUT_TRACE="$WORK/trace"
+export BOOTOUT_LOGOUT_STATUS=0
+export BOOTOUT_SESSION_STATUS=0
+
+# Every privileged operation is intercepted, including nested sudo calls.
+cat >"$WORK/stubs/id" <<'EOF'
+#!/usr/bin/env bash
+if [[ $# -eq 2 && "$1" == -u && ( "$2" == alice || "$2" == 501 ) ]]; then
+  echo 501
+else
+  exit 1
+fi
+EOF
+
+cat >"$WORK/stubs/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf 'sudo\n' >>"$BOOTOUT_TRACE"
+exec "$@"
+EOF
+
+cat >"$WORK/stubs/pgrep" <<'EOF'
+#!/usr/bin/env bash
+[[ $# -eq 4 && "$1" == -u && "$2" == 501 && "$3" == -x && "$4" == loginwindow ]] || exit 90
+exit "$BOOTOUT_SESSION_STATUS"
+EOF
+
+cat >"$WORK/stubs/launchctl" <<'EOF'
+#!/usr/bin/env bash
+printf 'launchctl\n' >>"$BOOTOUT_TRACE"
+printf '%s\n' "$@" >>"$BOOTOUT_TRACE"
+if [[ $# -eq 2 && "$1" == bootout && "$2" == gui/501 ]]; then
+  exit "$BOOTOUT_LOGOUT_STATUS"
+fi
+exit 91
+EOF
+chmod +x "$WORK/stubs/id" "$WORK/stubs/sudo" "$WORK/stubs/launchctl" "$WORK/stubs/pgrep"
+export PATH="$WORK/stubs:$PATH"
+
+run() {
+  : >"$BOOTOUT_TRACE"
+  status=0
+  "$BIN" "$@" >"$WORK/stdout" 2>"$WORK/stderr" || status=$?
+  output=$(cat "$WORK/stdout")
+  error=$(cat "$WORK/stderr")
+  trace=$(cat "$BOOTOUT_TRACE")
+}
+
+number=0
+assert() {
+  number=$((number + 1))
+  if [[ "$1" == 0 ]]; then
+    echo "ok $number - $2"
+  else
+    echo "not ok $number - $2"
+    printf '# status=%s; stderr=%s; trace=%s\n' "$status" "$error" "$trace"
+  fi
+}
+
+echo '1..11'
+
+run --help
+[[ "$status" == 0 && "$output" == *'Usage:'* && -z "$trace" ]]
+assert "$?" 'help performs no privileged operations'
+
+run -h
+[[ "$status" == 0 && "$output" == *'Usage:'* && -z "$trace" ]]
+assert "$?" 'short help alias works'
+
+run
+[[ "$status" == 1 && "$error" == *'--help'* && -z "$trace" ]]
+assert "$?" 'missing user fails before sudo'
+
+run alice extra
+[[ "$status" == 1 && -z "$trace" ]]
+assert "$?" 'extra arguments fail before sudo'
+
+run --invalid
+[[ "$status" == 1 && "$error" == *'unrecognized option'* && -z "$trace" ]]
+assert "$?" 'options cannot be passed through to id'
+
+run unknown
+[[ "$status" == 1 && "$error" == *'not found'* && -z "$trace" ]]
+assert "$?" 'unknown user fails before sudo'
+
+expected=$'sudo\nlaunchctl\nbootout\ngui/501'
+run alice
+[[ "$status" == 0 && "$trace" == "$expected" ]]
+assert "$?" 'logout targets only the specified graphical session'
+
+run 501
+[[ "$status" == 0 && "$trace" == "$expected" ]]
+assert "$?" 'numeric UID logs out the same target'
+
+export BOOTOUT_SESSION_STATUS=1
+run alice
+[[ "$status" == 1 && "$error" == *'has no graphical login session'* && -z "$trace" ]]
+assert "$?" 'absent graphical session is explained before sudo or launchctl'
+
+export BOOTOUT_SESSION_STATUS=3
+run alice
+[[ "$status" == 1 && "$error" == *'failed to inspect'* && -z "$trace" ]]
+assert "$?" 'process inspection errors are not mistaken for an absent session'
+
+export BOOTOUT_SESSION_STATUS=0
+export BOOTOUT_LOGOUT_STATUS=42
+run alice
+[[ "$status" == 42 && "$trace" == "$expected" ]]
+assert "$?" 'logout failures propagate without falling back to another session'
