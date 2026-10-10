@@ -38,6 +38,10 @@ These rules apply to all tasks and available skills. For example:
   related to local coding conventions. Apply their formatting rules (like
   specific Markdown styles) and use the required validation tools (like
   `shell-format` for Bash) exactly as instructed.
+- **Language tooling**: When a project needs a Node.js, Ruby, or Python runtime,
+  or a command it relies on is missing (a gem, npm CLI, or Python tool),
+  activate the `workspace-tools` skill and install into the workspace rather
+  than user-wide or system-wide.
 - **Version control**: When preparing to commit changes, ensure you format your
   commit messages according to the exact style and rules outlined in the
   project's standards or workflow skills. Note that a local git hook strictly
