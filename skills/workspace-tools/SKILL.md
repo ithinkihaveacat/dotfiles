@@ -1,16 +1,18 @@
 ---
 name: workspace-tools
 description: >-
-  Configures workspaces for agent-assisted development. Manages workspace and
-  per-session (ephemeral) agent skills (untracked symlinks), workspace tool
-  permissions (allow/deny/ask rules for Claude Code, Codex, and Antigravity),
-  git hook profiles, .envrc configurations, and per-directory Node.js, Ruby, and
-  Python versions. Use when configuring a workspace, discovering or installing
-  skills (persistently in a workspace or temporarily in a session), setting tool
-  permissions, managing git hooks, updating .envrc configuration blocks, or when
-  a project needs a different Node.js, Ruby, or Python version: local tests fail
-  where CI passes, an API is missing from the installed runtime, or a version
-  file, `engines` field, CI workflow, or Dockerfile names another version.
+  Sets up per-workspace scripting-language environments and agent tooling.
+  Manages Node.js, Ruby, and Python environments (the runtime version plus
+  workspace-local packages and command-line tools, activated by direnv .envrc
+  blocks), agent skills for a workspace or a single session, tool permissions
+  for Claude Code, Codex, and Antigravity, and git hook profiles. Use when a
+  project needs a runtime, or a command-line tool its own dependency install
+  does not provide (a gem, npm CLI, or Python tool), including when a command
+  the project relies on is not found; when local
+  results differ from CI or an API is missing from the installed runtime; when
+  a version file, engines field, Gemfile, CI workflow, or Dockerfile names a
+  different version; or when configuring a workspace, installing skills,
+  setting tool permissions, managing git hooks, or editing .envrc blocks.
 compatibility: >-
   Requires git. Optional: python3, uv, direnv, claude, codex, or agy.
 ---
@@ -39,11 +41,30 @@ control ever seeing the configuration. It consists of four tools:
 
 Alongside them, the runtime installers `node-install`, `ruby-install`, and
 `python-install` install per-user Node.js and Ruby versions (and check for `uv`)
-that `envrc` blocks activate per directory; see
-[Runtime Versions](#runtime-versions-node-install-ruby-install-python-install).
+that `envrc` blocks activate per directory, together with a workspace-local
+place for the project's packages and command-line tools; see
+[Language Environments](#language-environments-node-install-ruby-install-python-install).
 
 For Git repositories, `hook apply`, `skill apply`, and `permission apply` run
 automatically on `git clone` via the global template's post-checkout hook.
+
+## Gotchas
+
+- **Agent shells usually do not load direnv.** A command run in the workspace
+  still sees the system runtime unless it goes through
+  `direnv exec . <command>`; the `.envrc` blocks below only take effect that
+  way, or in an interactive shell with the direnv hook.
+- **Install a project's tools into its environment, never user-wide or
+  system-wide** unless the user asks for that. `gem install --user-install`,
+  `sudo gem install`, `npm install -g`, `pip install --user` and
+  `uv tool install` give every project one shared version, ignore the version
+  the project pins, and user-level bin directories are often not on `PATH`, so
+  the tool goes missing again in the next shell. See
+  [Installing Project Tools](#installing-project-tools).
+- **If the workspace environment cannot be set up, stop and ask.** A missing
+  `ruby-build` or `uv`, or a failed runtime build, is not a reason to fall back
+  to a user-wide install or the system runtime: report what failed and let the
+  user decide.
 
 ______________________________________________________________________
 
@@ -354,23 +375,35 @@ See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 
-## Runtime Versions (`node-install`, `ruby-install`, `python-install`)
+## Language Environments (`node-install`, `ruby-install`, `python-install`)
 
 Each project selects its own Node.js, Ruby, or Python through a typed `.envrc`
-block; the system-wide runtime is only a fallback. The installers (symlinked in
-`bin/`) put versions where those blocks look for them:
+block; the system-wide runtime is only a fallback. Each block pairs a runtime
+version with a `layout` that keeps the project's packages and tools inside the
+workspace:
+
+| Block                   | Runtime        | Packages and tools                                                |
+| ----------------------- | -------------- | ----------------------------------------------------------------- |
+| `envrc create node 22`  | `use node 22`  | `layout node`: `node_modules/.bin` on `PATH`                      |
+| `envrc create ruby 3.4` | `use ruby 3.4` | `layout ruby`: gems in `.direnv/ruby` (`GEM_HOME`), bin on `PATH` |
+| `envrc create uv`       | uv-managed     | `layout uv`: a `.venv` in the workspace, activated                |
+
+The installers (symlinked in `bin/`) put runtime versions where those blocks
+look for them:
 
 - **`node-install VERSION`**: Downloads the official Node.js binary for the
   latest matching release (`22` → newest `22.x.x`) into `$NODE_VERSIONS`
   (`~/.local/share/node/versions`). Takes seconds. It exits non-zero when that
   exact version is already installed, so check `node-install --installed` first.
 - **`ruby-install VERSION`**: Compiles Ruby from source with `ruby-build` into
-  `$RUBY_VERSIONS` (`~/.local/share/ruby/versions`). Takes minutes and is
-  declared unsafe, so it always prompts. `ruby-build` compiles under `$TMPDIR`;
-  on a host whose `/tmp` is a small tmpfs, point `TMPDIR` at a disk directory
-  for the build. Rebuild a version that fails to start with a library load error
-  (e.g. after an OpenSSL upgrade). It needs a current `ruby-build` (looked up on
-  `PATH`, then `~/.local/bin`) and Ruby's build dependencies, both installed by
+  `$RUBY_VERSIONS` (`~/.local/share/ruby/versions`). Takes minutes (over ten on
+  a small machine) and is declared unsafe, so it always prompts. Run it in the
+  background or with a long timeout and wait for it to finish; a command timeout
+  is not a build failure. `ruby-build` compiles under `$TMPDIR`; on a host whose
+  `/tmp` is a small tmpfs, point `TMPDIR` at a disk directory for the build.
+  Rebuild a version that fails to start with a library load error (e.g. after an
+  OpenSSL upgrade). It needs a current `ruby-build` (looked up on `PATH`, then
+  `~/.local/bin`) and Ruby's build dependencies, both installed by
   `~/.dotfiles/install.sh --install-optional`. If `ruby-build` is missing,
   follow the instructions `ruby-install` prints; never install the
   distribution's `ruby-build` package, which is too old for current Ruby
@@ -417,6 +450,40 @@ one to the repository unasked.
 `RUBY_VERSIONS` to name existing directories (the dotfiles shell configuration
 sets both); `use ruby` is defined in `~/.direnvrc`, and `use node` comes from
 the direnv standard library.
+
+### Installing Project Tools
+
+Use this when a project needs a command-line tool or package that is not part of
+its own dependency install: a deploy tool such as a Ruby gem, a Python CLI, or a
+command the project's scripts or README call that is not found.
+
+1. **Find the version the project pins.** Look in the CI workflow (e.g.
+   `gem install <tool> -v <version>` or `ruby-version:` in
+   `.github/workflows/*.yml`), `Gemfile`, `package.json`, `pyproject.toml`, and
+   the README. Match both the runtime and the tool version. If nothing pins the
+   tool, install the latest release and tell the user which version you chose,
+   so they can pin it.
+1. **Activate the matching environment** as in
+   [Fixing a Runtime Mismatch](#fixing-a-runtime-mismatch): install the runtime
+   if needed, then `envrc create ruby 3.4` (or `node`, `uv`).
+1. **Install into the workspace through direnv.** If the project has a `Gemfile`
+   that lists the tool, run `direnv exec . bundle install` and invoke the tool
+   as `direnv exec . bundle exec <tool>`; Bundler installs into the same
+   `.direnv/ruby`. Otherwise:
+   ```bash
+   direnv exec . gem install <gem> -v <version>         # into .direnv/ruby
+   direnv exec . uv pip install '<package>==<version>'  # into .venv
+   ```
+   For a Node.js tool, prefer the version in `package.json` (installed by
+   `npm ci` into `node_modules/.bin`), or run a pinned version once with
+   `direnv exec . npx <package>@<version>`. `npx` keeps its download in npm's
+   cache and puts nothing on `PATH`, so it is not a user-wide install.
+1. **Run the tool through direnv** (`direnv exec . <tool> ...`), and confirm it
+   resolves inside the workspace (`direnv exec . sh -c 'command -v <tool>'`).
+
+Adding a tool to the repository's own dependency files (`Gemfile`,
+`package.json`, `pyproject.toml`) is a repository change: suggest it rather than
+making it unasked.
 
 ______________________________________________________________________
 
