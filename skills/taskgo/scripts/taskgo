@@ -841,22 +841,116 @@ def extract_title(content: str) -> str:
     return extract_title_from_body(body)
 
 
+RUNIN_LABELS = ("Problem", "Cost", "Goal", "Criteria", "Sketch", "Constraints")
+
+
+def fenced_spans(body: str) -> list[tuple[int, int]]:
+    """Character ranges of the fenced code blocks in BODY."""
+    spans: list[tuple[int, int]] = []
+    fence = None
+    start = pos = 0
+    for line in body.splitlines(keepends=True):
+        m = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if fence is None and m:
+            fence, start = m.group(1), pos
+        elif (
+            fence is not None
+            and m
+            and m.group(1)[0] == fence[0]
+            and len(m.group(1)) >= len(fence)
+            and not line[m.end() :].strip()
+        ):
+            spans.append((start, pos + len(line)))
+            fence = None
+        pos += len(line)
+    if fence is not None:
+        spans.append((start, pos))
+    return spans
+
+
+def find_runins(body: str, label: str) -> list[tuple[int, int]]:
+    """Spans of each bold run-in LABEL in BODY, from the label to its text's end.
+
+    A run-in is '**Label:**' outside fenced code, in a paragraph that starts
+    with a template run-in label: at the paragraph start, or after whitespace
+    later in it (mdformat reflows adjacent run-ins into one paragraph). Bold
+    labels elsewhere, such as '- **Cost:**' in an Outcome list, are not
+    run-ins. Its text ends at a blank line followed by another bold label or a
+    heading, at the whitespace before the next run-in in the same paragraph, or
+    at the end of BODY.
+    """
+    fences = fenced_spans(body)
+    labels = "|".join(re.escape(lbl) for lbl in RUNIN_LABELS)
+    para_start = re.compile(rf"\*\*(?:{labels}):\*\*")
+
+    def is_runin(i: int) -> bool:
+        if any(a <= i < b for a, b in fences):
+            return False
+        p = body.rfind("\n\n", 0, i)
+        p = 0 if p < 0 else p + 2
+        return bool(para_start.match(body, p))
+
+    stop = re.compile(rf"\n\n(?=\*\*|#)|\s+(?=\*\*(?:{labels}):\*\*)")
+    spans = []
+    for m in re.finditer(rf"(?<!\S)\*\*{re.escape(label)}:\*\*", body):
+        if not is_runin(m.start()):
+            continue
+        end = len(body)
+        for e in stop.finditer(body, m.end()):
+            if any(a <= e.start() < b for a, b in fences):
+                continue
+            if e.group().startswith("\n\n") or is_runin(e.end()):
+                end = e.start()
+                break
+        spans.append((m.start(), end))
+    return spans
+
+
+def find_sections(body: str, heading: str) -> tuple[list[tuple[int, int]], list[str]]:
+    """Spans of each '## HEADING' section in BODY, and similar headings.
+
+    The heading text must equal HEADING exactly. A section ends before the
+    blank lines preceding the next level-1 or level-2 heading, or at the end of
+    BODY. Headings inside fenced code are ignored. The second value lists
+    level-2 headings that start with HEADING but are not equal to it (such as
+    '## Outcome & Commit'), so callers can report them.
+    """
+    fences = fenced_spans(body)
+    spans: list[tuple[int, int]] = []
+    similar: list[str] = []
+    start = None
+    pos = 0
+    for line in body.splitlines(keepends=True):
+        if not any(a <= pos < b for a, b in fences):
+            h = re.match(r"(#{1,2})[ \t]+(.*?)[ \t#]*$", line.rstrip("\n"))
+            if h:
+                if start is not None:
+                    spans.append((start, len(body[:pos].rstrip())))
+                    start = None
+                if len(h.group(1)) == 2:
+                    if h.group(2) == heading:
+                        start = pos
+                    elif re.match(rf"{re.escape(heading)}\b", h.group(2)):
+                        similar.append(line.strip())
+        pos += len(line)
+    if start is not None:
+        spans.append((start, len(body.rstrip())))
+    return spans, similar
+
+
 def extract_runin(content: str, label: str) -> str:
     """Extracts the text of a bold run-in label (e.g. '**Goal:** ...') from a task body.
 
-    Returns the label's prose with internal newlines collapsed, or '' when the
-    label is absent. Mirrors the run-in layout written by 'create'/'update'.
+    Returns the first such label's prose with internal newlines collapsed, or
+    '' when the label is absent. Mirrors the run-in layout written by
+    'create'/'update'.
     """
     body = extract_body(content)
-    body = re.sub(r"```.*?```", "", body, flags=re.DOTALL)
-    m = re.search(
-        rf"\*\*{re.escape(label)}:\*\*(.*?)(?=(\n\n\*\*|\n\n#|\Z))",
-        body,
-        re.DOTALL,
-    )
-    if not m:
+    spans = find_runins(body, label)
+    if not spans:
         return ""
-    return " ".join(m.group(1).split())
+    start, end = spans[0]
+    return " ".join(body[start + len(f"**{label}:**") : end].split())
 
 
 def normalize_slug(value: str) -> str:
@@ -2713,28 +2807,47 @@ def cmd_update(
         body = re.sub(r"^#\s+[^\n]+", f"# {title}", body, count=1, flags=re.MULTILINE)
 
     def upsert_runin(body_str: str, label: str, val: str) -> str:
-        pattern = re.compile(
-            rf"\*\*{re.escape(label)}:\*\*.*?(?=(\n\n\*\*|\n\n#|\Z))",
-            re.DOTALL,
-        )
-        replacement = (
-            f"**{label}:**\n\n{val}"
-            if ("\n" in val or val.strip().startswith("1."))
-            else f"**{label}:** {val}"
-        )
-        if pattern.search(body_str):
-            return pattern.sub(lambda _: replacement, body_str, count=1)
-        return body_str.rstrip() + f"\n\n{replacement}\n"
+        block = "\n" in val or val.strip().startswith("1.")
+        replacement = f"**{label}:**\n\n{val}" if block else f"**{label}:** {val}"
+        spans = find_runins(body_str, label)
+        if len(spans) > 1:
+            die_scoped(
+                f"{rel_path}: **{label}:** appears {len(spans)} times; "
+                "edit the task file directly"
+            )
+        if not spans:
+            return body_str.rstrip() + f"\n\n{replacement}\n"
+        start, end = spans[0]
+        before, after = body_str[:start], body_str[end:]
+        # Give the edited run-in its own paragraph, as 'create' lays it out,
+        # when mdformat has reflowed it into a paragraph with its neighbours.
+        if before.strip() and not before.endswith("\n\n"):
+            before = before.rstrip() + "\n\n"
+        if after.strip() and not after.startswith("\n\n"):
+            after = "\n\n" + after.lstrip()
+        return before + replacement + after
 
     def upsert_section(body_str: str, heading: str, val: str) -> str:
-        pattern = re.compile(
-            rf"^##\s+{re.escape(heading)}\b.*?(?=(\n#\s+|\n##\s+|\Z))",
-            re.DOTALL | re.MULTILINE,
-        )
         replacement = f"## {heading}\n\n{val}"
-        if pattern.search(body_str):
-            return pattern.sub(lambda _: replacement, body_str, count=1)
-        return body_str.rstrip() + f"\n\n{replacement}\n"
+        spans, similar = find_sections(body_str, heading)
+        if len(spans) > 1:
+            die_scoped(
+                f"{rel_path}: '## {heading}' appears {len(spans)} times; "
+                "edit the task file directly"
+            )
+        if not spans:
+            if similar:
+                print(
+                    _tagged(
+                        f"[WARN]  {rel_path}: no '## {heading}' section; "
+                        f"appending one (similar: {', '.join(similar)})",
+                        sys.stderr,
+                    ),
+                    file=sys.stderr,
+                )
+            return body_str.rstrip() + f"\n\n{replacement}\n"
+        start, end = spans[0]
+        return body_str[:start] + replacement + body_str[end:]
 
     if problem:
         body = upsert_runin(body, "Problem", problem)

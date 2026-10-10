@@ -242,6 +242,9 @@ taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR [--tool-cmd C
   task undone. Cost is optional, including when Problem is present.
 - `update`: Edit task in-place. If using `--slug`, the rename is left
   uncommitted; commit with `checkpoint --all` to stage both old and new paths.
+  Field edits replace only the named run-in (such as `**Goal:**`, moved into its
+  own paragraph) or the `##` section whose heading matches exactly, and refuse
+  when the label or heading appears more than once.
 - `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, and commit
   repairs by default.
 - `checkpoint`: Safe automatic-commit path requiring
