@@ -84,6 +84,13 @@ stale_after: 2026-11-01
 - **`stale_after`** — Relevance cutoff (`YYYY-MM-DD`) after which
   `taskgo doctor` emits `[WARN]` prompting re-scoping or cancellation.
 
+Edit these lists with `--add-blocked-by`, `--add-wait-for`, and
+`--add-conversation` on `create` or `update`, and the matching `--remove-*`
+options on `update`; repeats and absent values are no-ops. `update` refuses an
+added blocker that is unknown, the task itself, or closes a `blocked_by` cycle.
+`taskgo schema` lists every field, its value type, and each record kind's
+sections; `doctor` checks frontmatter against it.
+
 `status: blocked` is allowed without warning when either `blocked_by` or
 `wait_for` has unresolved entries. Run `taskgo check [PROJECT] [--json]` to
 sweep open tasks against `today` and their task-scoped Git commit watermark,
@@ -214,8 +221,8 @@ help details and subcommand options.
 ```text
 taskgo id
 taskgo root
-taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
+taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--expect-status STATE] [--wait-for GATE] [--add-|--remove-blocked-by ID] [--add-|--remove-wait-for GATE] [--add-|--remove-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]
@@ -227,6 +234,7 @@ taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
+taskgo schema [--json]
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.
@@ -236,7 +244,11 @@ taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
   uncommitted; commit with `checkpoint --all` to stage both old and new paths.
   Field edits replace only the named run-in (such as `**Goal:**`, moved into its
   own paragraph) or the `##` section whose heading matches exactly, and refuse
-  when the label or heading appears more than once.
+  when the label or heading appears more than once. `--expect-status STATE`
+  makes the update conditional: it changes nothing and exits non-zero unless the
+  current state is STATE. Unknown states are refused, not reset to `todo`.
+- `schema`: The declarative field and section schema for tasks, decisions, and
+  `STATUS.md`. `--json` is the conformance form for other implementations.
 - `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, and commit
   repairs by default.
 - `checkpoint`: Safe automatic-commit path requiring

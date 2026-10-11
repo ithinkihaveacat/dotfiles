@@ -26,7 +26,7 @@ import sys
 import textwrap
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -34,6 +34,7 @@ from typing import Any, Literal, TypedDict
 
 import mdformat
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedSeq
 from ruamel.yaml.representer import Representer, RoundTripRepresenter
 
 BEGIN = "<!-- taskgo:begin -->"
@@ -836,9 +837,6 @@ def extract_title(content: str) -> str:
     return extract_title_from_body(body)
 
 
-RUNIN_LABELS = ("Problem", "Cost", "Goal", "Criteria", "Sketch", "Constraints")
-
-
 def fenced_spans(body: str) -> list[tuple[int, int]]:
     """Character ranges of the fenced code blocks in BODY."""
     spans: list[tuple[int, int]] = []
@@ -1041,54 +1039,18 @@ def get_today() -> date:
 
 def parse_blocked_by(fm: dict[str, Any]) -> tuple[str, ...]:
     """Reads the optional blocked_by edge list, tolerating a bare scalar."""
-    raw = fm.get("blocked_by")
-    if not raw:
-        return ()
-    items = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw))
-    deps = (str(item).strip().strip("'\"").upper() for item in items)
-    return tuple(dict.fromkeys(d for d in deps if d))
+    return read_field(fm, TASK_SCHEMA.field("blocked_by"))
 
 
 def parse_wait_for(fm: dict[str, Any]) -> tuple[str, ...]:
     """Reads the optional wait_for gate list, tolerating scalars and dates."""
-    raw = fm.get("wait_for")
-    if not raw:
-        return ()
-    tokens: list[str] = []
-    if isinstance(raw, datetime):
-        tokens.append(raw.date().isoformat())
-    elif isinstance(raw, date):
-        tokens.append(raw.isoformat())
-    elif isinstance(raw, list):
-        for item in raw:
-            if isinstance(item, datetime):
-                tokens.append(item.date().isoformat())
-            elif isinstance(item, date):
-                tokens.append(item.isoformat())
-            else:
-                for sub in re.split(r"[,\s]+", str(item)):
-                    cleaned = sub.strip().strip("'\"")
-                    if cleaned:
-                        tokens.append(cleaned)
-    else:
-        for sub in re.split(r"[,\s]+", str(raw)):
-            cleaned = sub.strip().strip("'\"")
-            if cleaned:
-                tokens.append(cleaned)
-    return tuple(dict.fromkeys(tokens))
+    return read_field(fm, TASK_SCHEMA.field("wait_for"))
 
 
 def parse_date_field(fm: dict[str, Any], key: str) -> str | None:
     """Reads an optional scalar date field (due, stale_after) as YYYY-MM-DD string."""
-    raw = fm.get(key)
-    if raw is None or raw == "":
-        return None
-    if isinstance(raw, datetime):
-        return raw.date().isoformat()
-    if isinstance(raw, date):
-        return raw.isoformat()
-    cleaned = str(raw).strip().strip("'\"")
-    return cleaned or None
+    values = read_field(fm, TASK_SCHEMA.field(key))
+    return values[0] if values else None
 
 
 def normalize_wait_for_args(raw_list: list[str]) -> list[str]:
@@ -1100,6 +1062,364 @@ def normalize_wait_for_args(raw_list: list[str]) -> list[str]:
             if cleaned:
                 tokens.append(cleaned)
     return list(dict.fromkeys(tokens))
+
+
+# Record schema. One declarative description per controlled record kind:
+# frontmatter fields (scalar or set, value type, mutability), and body
+# sections. Validation in create/update, the doctor field checks, and the
+# create/update set options read it; `taskgo schema --json` publishes it as a
+# conformance artifact for other implementations (such as an MCP server).
+SCHEMA_VERSION = 1
+
+GATE_PATTERN = (
+    r"^(?:\d{4}-\d{2}-\d{2}|b/\d+|cl/\d+"
+    r"|gh:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|@[A-Za-z0-9_.-]+|https?://\S+)$"
+)
+
+
+@dataclass(slots=True, frozen=True)
+class ValueType:
+    description: str
+    check: Callable[[Any], bool]
+    pattern: str | None = None
+    values: tuple[str, ...] = ()
+    metavar: str = "VALUE"
+
+
+def _is_gate(value: Any) -> bool:
+    token = str(value)
+    if ISO_DATE_RE.match(token):
+        return parse_iso_date(token) is not None
+    return bool(re.match(GATE_PATTERN, token))
+
+
+VALUE_TYPES: dict[str, ValueType] = {
+    "task-id": ValueType(
+        "Task ID: TASK- and five uppercase hex digits",
+        lambda v: bool(ID_PATTERN.match(str(v))),
+        ID_PATTERN.pattern,
+        metavar="TASK_ID",
+    ),
+    "status": ValueType(
+        "Task state",
+        lambda v: str(v) in STANDARD_STATES,
+        values=tuple(s.value for s in TaskStatus),
+    ),
+    "date": ValueType(
+        "Calendar date, YYYY-MM-DD",
+        lambda v: parse_iso_date(v) is not None,
+        ISO_DATE_RE.pattern,
+    ),
+    "gate": ValueType(
+        "External or temporal gate: YYYY-MM-DD, b/N, cl/N, "
+        "gh:owner/repo#N, @handle, or an http(s) URL",
+        _is_gate,
+        GATE_PATTERN,
+        metavar="GATE",
+    ),
+    "conversation": ValueType(
+        "Conversation URI, <agent>://<id> (id of 16 or more characters)",
+        lambda v: parse_conversation_entry(v) is not None,
+        metavar="URI",
+    ),
+    "adr-ref": ValueType(
+        "ADR filename, stem, or number in the same decisions/ directory",
+        lambda v: bool(str(v).strip()),
+    ),
+    "text": ValueType("Free text", lambda v: True),
+}
+
+
+@dataclass(slots=True, frozen=True)
+class FieldSpec:
+    name: str
+    shape: Literal["scalar", "set"]
+    value: str
+    required: bool = False
+    mutable: bool = True
+    invalid: Literal["INFO", "WARN", "FAIL"] = "WARN"
+    aliases: tuple[str, ...] = ()
+    option: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SectionSpec:
+    name: str
+    form: Literal["title", "run-in", "heading", "generated"]
+    required: bool = False
+    writable: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class RecordSchema:
+    kind: str
+    path: str
+    fields: tuple[FieldSpec, ...]
+    sections: tuple[SectionSpec, ...]
+
+    def field(self, name: str) -> FieldSpec:
+        return next(f for f in self.fields if f.name == name)
+
+    def set_fields(self) -> tuple[FieldSpec, ...]:
+        return tuple(f for f in self.fields if f.shape == "set")
+
+
+TASK_SCHEMA = RecordSchema(
+    kind="task",
+    path="<project>/tasks/TASK-XXXXX-<slug>.md",
+    fields=(
+        FieldSpec("id", "scalar", "task-id", required=True, mutable=False),
+        FieldSpec("status", "scalar", "status", required=True),
+        FieldSpec("blocked_by", "set", "task-id", option="blocked-by"),
+        FieldSpec("wait_for", "set", "gate", option="wait-for"),
+        FieldSpec("due", "scalar", "date", invalid="FAIL"),
+        FieldSpec("stale_after", "scalar", "date", invalid="FAIL"),
+        FieldSpec(
+            "conversations",
+            "set",
+            "conversation",
+            invalid="INFO",
+            aliases=("conversation",),
+            option="conversation",
+        ),
+    ),
+    sections=(
+        SectionSpec("title", "title", required=True),
+        SectionSpec("Problem", "run-in"),
+        SectionSpec("Cost", "run-in"),
+        SectionSpec("Goal", "run-in"),
+        SectionSpec("Criteria", "run-in"),
+        SectionSpec("Sketch", "run-in"),
+        SectionSpec("Constraints", "run-in"),
+        SectionSpec("Outcome", "heading"),
+        SectionSpec("Findings", "heading"),
+        SectionSpec("Next", "heading"),
+    ),
+)
+
+DECISION_SCHEMA = RecordSchema(
+    kind="decision",
+    path="<project>/decisions/<NNN>-<slug>.md",
+    fields=(
+        FieldSpec("status", "scalar", "text"),
+        FieldSpec("supersedes", "set", "adr-ref"),
+    ),
+    sections=(
+        SectionSpec("title", "title", required=True),
+        SectionSpec("Status", "heading", required=True),
+        SectionSpec("Context", "heading", required=True),
+        SectionSpec("Decision", "heading", required=True),
+        SectionSpec("Consequences", "heading", required=True),
+    ),
+)
+
+STATUS_SCHEMA = RecordSchema(
+    kind="status",
+    path="<project>/STATUS.md",
+    fields=(),
+    sections=(
+        SectionSpec("title", "title", required=True),
+        SectionSpec("Summary", "heading", required=True),
+        SectionSpec("snapshot", "generated", required=True, writable=False),
+        SectionSpec("Next", "heading", required=True),
+    ),
+)
+
+SCHEMAS = (TASK_SCHEMA, DECISION_SCHEMA, STATUS_SCHEMA)
+
+RUNIN_LABELS = tuple(s.name for s in TASK_SCHEMA.sections if s.form == "run-in")
+
+
+def read_field(fm: dict[str, Any], spec: FieldSpec) -> tuple[str, ...]:
+    """Reads a field from lowercased frontmatter as normalized string values.
+
+    Set fields tolerate a bare scalar and comma- or space-separated entries;
+    dates become YYYY-MM-DD; task IDs are uppercased; repeats are dropped.
+    """
+    raw = next(
+        (fm[k] for k in (spec.name, *spec.aliases) if fm.get(k) not in (None, "")),
+        None,
+    )
+    if raw is None:
+        return ()
+    items = raw if spec.shape == "set" and isinstance(raw, list) else [raw]
+    values: list[str] = []
+    for item in items:
+        if isinstance(item, datetime):
+            values.append(item.date().isoformat())
+        elif isinstance(item, date):
+            values.append(item.isoformat())
+        elif spec.shape == "scalar" or spec.value == "conversation":
+            values.append(str(item).strip().strip("'\""))
+        else:
+            values.extend(split_field_values([str(item)], spec))
+    if spec.value == "task-id":
+        values = [v.upper() for v in values]
+    return tuple(dict.fromkeys(v for v in values if v))
+
+
+def split_field_values(raw_list: list[str], spec: FieldSpec) -> list[str]:
+    """Splits CLI or frontmatter entries for a set field into distinct values."""
+    values: list[str] = []
+    for entry in raw_list:
+        for sub in re.split(r"[,\s]+", str(entry)):
+            cleaned = sub.strip().strip("'\"")
+            if cleaned:
+                values.append(cleaned.upper() if spec.value == "task-id" else cleaned)
+    return list(dict.fromkeys(values))
+
+
+def field_is_valid(spec: FieldSpec, value: Any) -> bool:
+    return VALUE_TYPES[spec.value].check(value)
+
+
+def invalid_field_values(
+    fm: dict[str, Any], schema: RecordSchema
+) -> list[tuple[FieldSpec, str]]:
+    """Returns each (field, value) in FM whose value fails its schema type."""
+    return [
+        (spec, value)
+        for spec in schema.fields
+        for value in read_field(fm, spec)
+        if not field_is_valid(spec, value)
+    ]
+
+
+def unknown_fields(fm: dict[str, Any], schema: RecordSchema) -> list[str]:
+    """Returns frontmatter keys that SCHEMA does not declare."""
+    known = {n for f in schema.fields for n in (f.name, *f.aliases)}
+    return [k for k in fm if k not in known]
+
+
+def describe_invalid(spec: FieldSpec, value: str) -> str:
+    if spec.value == "date":
+        return f"invalid ISO date in {spec.name} '{value}' (expected YYYY-MM-DD)"
+    if spec.value == "conversation":
+        return f"unparseable conversation entry '{value}'"
+    return (
+        f"invalid {spec.name} '{value}' "
+        f"(expected {VALUE_TYPES[spec.value].description})"
+    )
+
+
+def schema_headings(schema: RecordSchema, required: bool = False) -> list[str]:
+    return [
+        s.name
+        for s in schema.sections
+        if s.form == "heading" and (s.required or not required)
+    ]
+
+
+def canonical_status(raw: Any) -> str | None:
+    """Maps a state or alias to its standard state, or None when unknown."""
+    clean = str(raw or "").strip().lower().replace(" ", "-")
+    state = STATE_ALIASES.get(clean)
+    return state.value if state else None
+
+
+def require_status(raw: str, option: str) -> str:
+    """Returns the standard state for RAW, or exits naming the valid states."""
+    state = canonical_status(raw)
+    if state is None:
+        die_scoped(
+            f"unknown status for {option}: {raw} "
+            f"(expected one of: {', '.join(VALUE_TYPES['status'].values)})"
+        )
+    return str(state)
+
+
+def require_field_values(spec: FieldSpec, values: list[str], option: str) -> None:
+    for value in values:
+        if not field_is_valid(spec, value):
+            die_scoped(
+                f"invalid {option} value '{value}' "
+                f"(expected {VALUE_TYPES[spec.value].description})"
+            )
+
+
+def edit_set_field(
+    data: Any, spec: FieldSpec, add: list[str], remove: list[str]
+) -> bool:
+    """Adds and removes values of a set field in editable frontmatter.
+
+    Repeats are no-ops. An existing list keeps its flow or block style, a new
+    blocked_by list uses flow style, and a field left empty is removed.
+    Returns True if DATA changed.
+    """
+    names = (spec.name, *spec.aliases)
+    key = next((k for k in data if str(k).lower() in names), None)
+    current = list(read_field({spec.name: data[key]} if key else {}, spec))
+    updated = [v for v in current if v not in remove]
+    updated += [v for v in add if v not in updated]
+    if updated == current:
+        return False
+    if not updated:
+        data.pop(key, None)
+        return True
+    values: list[Any] = (
+        [parse_iso_date(v) or v for v in updated] if spec.value == "gate" else updated
+    )
+    existing = data.get(key) if key is not None else None
+    if isinstance(existing, list):
+        del existing[:]
+        existing.extend(values)
+        return True
+    seq = CommentedSeq(values)
+    if spec.value == "task-id":
+        seq.fa.set_flow_style()
+    if key is not None:
+        data[key] = seq
+        return True
+    order = [f.name for f in TASK_SCHEMA.fields]
+    earlier = set(order[: order.index(spec.name)])
+    pos = max(
+        (i + 1 for i, k in enumerate(data) if str(k).lower() in earlier),
+        default=len(data),
+    )
+    data.insert(pos, spec.name, seq)
+    return True
+
+
+def remove_task_conversation(data: Any, conv_id: str) -> bool:
+    """Removes entries for CONV_ID from frontmatter conversations."""
+    changed = False
+    for key in [k for k in data if str(k).lower() in ("conversations", "conversation")]:
+        raw = data[key]
+        items = raw if isinstance(raw, list) else [raw]
+        keep = [
+            i
+            for i in items
+            if (parse_conversation_entry(i) or ("", str(i).strip()))[1] != conv_id
+        ]
+        if len(keep) == len(items):
+            continue
+        changed = True
+        if not keep:
+            data.pop(key, None)
+        elif isinstance(raw, list):
+            del raw[:]
+            raw.extend(keep)
+    return changed
+
+
+def check_new_blockers(
+    root: Path, task_id: str | None, adds: list[str], deps: tuple[str, ...]
+) -> None:
+    """Refuses unknown or self-referencing added blockers, and cycles."""
+    rows = get_task_rows(root)
+    known = {r.task_id for r in rows if r.task_id}
+    for dep in adds:
+        if dep == task_id:
+            die_scoped(f"{dep} cannot be blocked by itself")
+        if dep not in known:
+            die_scoped(f"unknown task for --add-blocked-by: {dep}")
+    if not task_id:
+        return
+    rows = [replace(r, blocked_by=deps) if r.task_id == task_id else r for r in rows]
+    for cycle in find_dependency_cycles(rows):
+        if task_id in cycle:
+            chain = " -> ".join([*cycle, cycle[0]])
+            die_scoped(f"blocked_by would form a cycle: {chain}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -1253,12 +1573,7 @@ class AdrRow:
 
 def parse_adr_list_field(fm: dict[str, Any], key: str) -> tuple[str, ...]:
     """Reads an optional scalar or list frontmatter field on an ADR."""
-    raw = fm.get(key)
-    if not raw:
-        return ()
-    items = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw))
-    cleaned = (str(item).strip().strip("'\"") for item in items)
-    return tuple(dict.fromkeys(c for c in cleaned if c))
+    return read_field(fm, DECISION_SCHEMA.field(key))
 
 
 def resolve_adr_token(token: str, filenames: list[str]) -> str | None:
@@ -1638,7 +1953,17 @@ def audit_project_adrs(
             dcontent = df.read_text(encoding="utf-8")
         except OSError:
             continue
-        for sec in ["Status", "Context", "Decision", "Consequences"]:
+        for key in unknown_fields(parse_frontmatter(dcontent)[0], DECISION_SCHEMA):
+            findings.append(
+                Finding(
+                    category="adr",
+                    severity="INFO",
+                    message=f"{name}/{df.name}: frontmatter field '{key}' is not in the decision schema",
+                    file_path=df,
+                    remediation=None,
+                )
+            )
+        for sec in schema_headings(DECISION_SCHEMA, required=True):
             if not re.search(
                 rf"^##\s+{sec}\s*$", dcontent, re.MULTILINE | re.IGNORECASE
             ):
@@ -1973,22 +2298,30 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
                 fm, _ = parse_frontmatter(content)
 
-                raw_convs = fm.get("conversations") or fm.get("conversation")
-                if raw_convs:
-                    conv_items = (
-                        raw_convs if isinstance(raw_convs, list) else [raw_convs]
+                # Field values and keys come from the task schema; id and
+                # status get repair findings below.
+                for spec, value in invalid_field_values(fm, TASK_SCHEMA):
+                    if spec.name in ("id", "status"):
+                        continue
+                    findings.append(
+                        Finding(
+                            category="task",
+                            severity=spec.invalid,
+                            message=f"{rel_path}: {describe_invalid(spec, value)}",
+                            file_path=tf,
+                            remediation=None,
+                        )
                     )
-                    for c_item in conv_items:
-                        if not parse_conversation_entry(c_item):
-                            findings.append(
-                                Finding(
-                                    category="task",
-                                    severity="INFO",
-                                    message=f"{rel_path}: unparseable conversation entry '{c_item}'",
-                                    file_path=tf,
-                                    remediation=None,
-                                )
-                            )
+                for key in unknown_fields(fm, TASK_SCHEMA):
+                    findings.append(
+                        Finding(
+                            category="task",
+                            severity="INFO",
+                            message=f"{rel_path}: frontmatter field '{key}' is not in the task schema",
+                            file_path=tf,
+                            remediation=None,
+                        )
+                    )
 
                 task_id = fm.get("id", "")
                 raw_status = fm.get("status", "")
@@ -1996,10 +2329,9 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 m = re.search(r"TASK-[0-9A-F]{5}", tf.name)
                 filename_id = m.group(0) if m else ""
 
-                needs_id_fix = not ID_PATTERN.match(task_id)
-                needs_status_fix = (
-                    bool(raw_status and raw_status not in STANDARD_STATES)
-                    or not raw_status
+                needs_id_fix = not field_is_valid(TASK_SCHEMA.field("id"), task_id)
+                needs_status_fix = not field_is_valid(
+                    TASK_SCHEMA.field("status"), raw_status
                 )
                 needs_filename_fix = (
                     bool(filename_id and filename_id != task_id) or not filename_id
@@ -2116,6 +2448,18 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         remediation=make_remediate_snapshot(name, status_file),
                     )
                 )
+
+            for sec in schema_headings(STATUS_SCHEMA, required=True):
+                if not re.search(rf"^##\s+{sec}\s*$", current_status, re.MULTILINE):
+                    findings.append(
+                        Finding(
+                            category="status",
+                            severity="WARN",
+                            message=f"{name}: STATUS.md missing ## {sec}",
+                            file_path=status_file,
+                            remediation=None,
+                        )
+                    )
 
             rows = [r for r in all_rows if r.project == name]
             active = sum(1 for r in rows if r.status == "in-progress")
@@ -2295,77 +2639,50 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     )
                 )
 
-            if row.due is not None:
-                due_date = parse_iso_date(row.due)
-                if due_date is None:
-                    findings.append(
-                        Finding(
-                            category="task",
-                            severity="FAIL",
-                            message=(
-                                f"{row.rel_path}: invalid ISO date in due '{row.due}' "
-                                "(expected YYYY-MM-DD)"
-                            ),
-                            file_path=row.abs_path,
-                            remediation=None,
-                        )
+            # Invalid dates are reported by the schema field check.
+            due_date = parse_iso_date(row.due)
+            if due_date is not None and due_date < today:
+                findings.append(
+                    Finding(
+                        category="schedule",
+                        severity="FAIL",
+                        message=(
+                            f"{row.rel_path}: overdue (due {due_date.isoformat()}, "
+                            f"{(today - due_date).days}d ago)"
+                        ),
+                        file_path=row.abs_path,
+                        remediation=None,
                     )
-                elif due_date < today:
-                    findings.append(
-                        Finding(
-                            category="schedule",
-                            severity="FAIL",
-                            message=(
-                                f"{row.rel_path}: overdue (due {due_date.isoformat()}, "
-                                f"{(today - due_date).days}d ago)"
-                            ),
-                            file_path=row.abs_path,
-                            remediation=None,
-                        )
+                )
+            elif due_date is not None and due_date <= today + timedelta(days=2):
+                findings.append(
+                    Finding(
+                        category="schedule",
+                        severity="WARN",
+                        message=(
+                            f"{row.rel_path}: due soon (due {due_date.isoformat()}, "
+                            "within 48h)"
+                        ),
+                        file_path=row.abs_path,
+                        remediation=None,
                     )
-                elif due_date <= today + timedelta(days=2):
-                    findings.append(
-                        Finding(
-                            category="schedule",
-                            severity="WARN",
-                            message=(
-                                f"{row.rel_path}: due soon (due {due_date.isoformat()}, "
-                                "within 48h)"
-                            ),
-                            file_path=row.abs_path,
-                            remediation=None,
-                        )
-                    )
+                )
 
-            if row.stale_after is not None:
-                stale_date = parse_iso_date(row.stale_after)
-                if stale_date is None:
-                    findings.append(
-                        Finding(
-                            category="task",
-                            severity="FAIL",
-                            message=(
-                                f"{row.rel_path}: invalid ISO date in stale_after "
-                                f"'{row.stale_after}' (expected YYYY-MM-DD)"
-                            ),
-                            file_path=row.abs_path,
-                            remediation=None,
-                        )
+            stale_date = parse_iso_date(row.stale_after)
+            if stale_date is not None and stale_date < today:
+                findings.append(
+                    Finding(
+                        category="schedule",
+                        severity="WARN",
+                        message=(
+                            f"{row.rel_path}: stale task "
+                            f"(stale_after {stale_date.isoformat()}); "
+                            "re-scope or cancel"
+                        ),
+                        file_path=row.abs_path,
+                        remediation=None,
                     )
-                elif stale_date < today:
-                    findings.append(
-                        Finding(
-                            category="schedule",
-                            severity="WARN",
-                            message=(
-                                f"{row.rel_path}: stale task "
-                                f"(stale_after {stale_date.isoformat()}); "
-                                "re-scope or cancel"
-                            ),
-                            file_path=row.abs_path,
-                            remediation=None,
-                        )
-                    )
+                )
 
         if (
             row.status == TaskStatus.BLOCKED.value
@@ -2433,6 +2750,8 @@ def render_task_file(
     wait_for: list[str] | tuple[str, ...] | None = None,
     due: str | None = None,
     stale_after: str | None = None,
+    blocked_by: list[str] | tuple[str, ...] | None = None,
+    conversations: list[str] | None = None,
 ) -> str:
     """Render and format a task Markdown document."""
     body_blocks = []
@@ -2482,14 +2801,19 @@ def render_task_file(
     body = "\n\n".join(body_blocks)
 
     fm_data: dict[str, Any] = {"id": task_id, "status": status}
+    if blocked_by:
+        deps = CommentedSeq(blocked_by)
+        deps.fa.set_flow_style()
+        fm_data["blocked_by"] = deps
     if wait_for:
         fm_data["wait_for"] = [parse_iso_date(w) or w for w in wait_for]
     if due:
         fm_data["due"] = parse_iso_date(due) or due
     if stale_after:
         fm_data["stale_after"] = parse_iso_date(stale_after) or stale_after
-    if conv:
-        fm_data["conversations"] = [conv]
+    convs = list(dict.fromkeys([*([conv] if conv else []), *(conversations or [])]))
+    if convs:
+        fm_data["conversations"] = convs
     fm_block = dump_frontmatter(fm_data)
 
     raw = f"""{fm_block}
@@ -2523,6 +2847,9 @@ def cmd_create(
     stale_after: str | None = None,
     no_commit: bool = False,
     dry_run: bool = False,
+    add_blocked_by: list[str] | None = None,
+    add_wait_for: list[str] | None = None,
+    add_conversations: list[str] | None = None,
 ) -> None:
     """Create a new task in PROJECT."""
     if (
@@ -2542,7 +2869,21 @@ def cmd_create(
         die_scoped(
             f"invalid ISO date for --stale-after (expected YYYY-MM-DD): {stale_after}"
         )
-    norm_wait_for = normalize_wait_for_args(wait_for) if wait_for else []
+    wait_spec = TASK_SCHEMA.field("wait_for")
+    norm_wait_for = split_field_values(
+        [*(wait_for or []), *(add_wait_for or [])], wait_spec
+    )
+    require_field_values(wait_spec, norm_wait_for, "--wait-for")
+    blocked_spec = TASK_SCHEMA.field("blocked_by")
+    deps = split_field_values(add_blocked_by or [], blocked_spec)
+    require_field_values(blocked_spec, deps, "--add-blocked-by")
+    extra_convs: list[str] = []
+    for entry in split_field_values(
+        add_conversations or [], TASK_SCHEMA.field("conversations")
+    ):
+        parsed = normalize_conversation_id(entry)
+        if parsed:
+            extra_convs.append(f"{parsed[0]}://{parsed[1]}")
 
     if slug is not None:
         task_slug = normalize_slug(slug)
@@ -2573,10 +2914,12 @@ def cmd_create(
                 file=sys.stderr,
             )
 
-    status = normalize_status(status)
+    status = require_status(status, "--status")
     session = get_active_session(conv)
     conv_uri = f"{session[0]}://{session[1]}" if session else None
     root = get_repo_root()
+    if deps:
+        check_new_blockers(root, None, deps, tuple(deps))
     proj_dir = root / project_name
     if proj_dir.is_file():
         die(
@@ -2664,6 +3007,8 @@ def cmd_create(
         wait_for=norm_wait_for or None,
         due=due,
         stale_after=stale_after,
+        blocked_by=deps or None,
+        conversations=extra_convs or None,
     )
     write_markdown(task_file, content)
 
@@ -2728,6 +3073,13 @@ def cmd_update(
     wait_for: list[str] | None = None,
     due: str | None = None,
     stale_after: str | None = None,
+    expect_status: str | None = None,
+    add_blocked_by: list[str] | None = None,
+    remove_blocked_by: list[str] | None = None,
+    add_wait_for: list[str] | None = None,
+    remove_wait_for: list[str] | None = None,
+    add_conversations: list[str] | None = None,
+    remove_conversations: list[str] | None = None,
 ) -> None:
     """Update task fields, status, or headings."""
     new_slug: str | None = None
@@ -2751,8 +3103,19 @@ def cmd_update(
         die(f"cannot read task file {rel_path}: {e}")
     data, body = parse_frontmatter_for_edit(content)
 
+    if expect_status is not None:
+        expected = require_status(expect_status, "--expect-status")
+        current = next(
+            (str(v) for k, v in data.items() if str(k).lower() == "status"), ""
+        )
+        if canonical_status(current) != expected:
+            die_scoped(
+                f"{rel_path}: status is '{current}', expected '{expected}'; "
+                "nothing changed"
+            )
+
     if status:
-        norm_status = normalize_status(status)
+        norm_status = require_status(status, "--status")
         status_key = next((k for k in data if str(k).lower() == "status"), "status")
         data[status_key] = norm_status
 
@@ -2762,6 +3125,7 @@ def cmd_update(
                 data.pop(k, None)
         else:
             items = normalize_wait_for_args(wait_for)
+            require_field_values(TASK_SCHEMA.field("wait_for"), items, "--wait-for")
             wf_key = next((k for k in data if str(k).lower() == "wait_for"), "wait_for")
             data[wf_key] = [parse_iso_date(w) or w for w in items]
 
@@ -2790,6 +3154,33 @@ def cmd_update(
                 (k for k in data if str(k).lower() == "stale_after"), "stale_after"
             )
             data[sa_key] = parsed_stale
+
+    own_id = next((str(v) for k, v in data.items() if str(k).lower() == "id"), None)
+    wait_spec = TASK_SCHEMA.field("wait_for")
+    if add_wait_for or remove_wait_for:
+        adds = split_field_values(add_wait_for or [], wait_spec)
+        require_field_values(wait_spec, adds, "--add-wait-for")
+        edit_set_field(
+            data, wait_spec, adds, split_field_values(remove_wait_for or [], wait_spec)
+        )
+
+    blocked_spec = TASK_SCHEMA.field("blocked_by")
+    if add_blocked_by or remove_blocked_by:
+        adds = split_field_values(add_blocked_by or [], blocked_spec)
+        require_field_values(blocked_spec, adds, "--add-blocked-by")
+        removes = split_field_values(remove_blocked_by or [], blocked_spec)
+        edit_set_field(data, blocked_spec, adds, removes)
+        deps = parse_blocked_by({str(k).lower(): v for k, v in data.items()})
+        check_new_blockers(root, own_id, adds, deps)
+
+    conv_spec = TASK_SCHEMA.field("conversations")
+    for entry in split_field_values(remove_conversations or [], conv_spec):
+        parsed = parse_conversation_entry(entry)
+        remove_task_conversation(data, parsed[1] if parsed else entry)
+    for entry in split_field_values(add_conversations or [], conv_spec):
+        added = normalize_conversation_id(entry)
+        if added:
+            update_task_conversation(data, *added)
 
     session = normalize_conversation_id(conv) if conv else None
     if session:
@@ -2892,6 +3283,88 @@ def cmd_update(
         _tagged(f"[INFO]  Updated {task_id_val} in {rel_path}", sys.stderr),
         file=sys.stderr,
     )
+
+
+def schema_document() -> dict[str, Any]:
+    """Returns the record schema as plain data, for conformance checks."""
+    return {
+        "version": SCHEMA_VERSION,
+        "value_types": {
+            name: {
+                "description": vt.description,
+                **({"pattern": vt.pattern} if vt.pattern else {}),
+                **({"values": list(vt.values)} if vt.values else {}),
+            }
+            for name, vt in VALUE_TYPES.items()
+        },
+        "kinds": [
+            {
+                "kind": schema.kind,
+                "path": schema.path,
+                "fields": [
+                    {
+                        "name": f.name,
+                        "shape": f.shape,
+                        "value": f.value,
+                        "required": f.required,
+                        "mutable": f.mutable,
+                        **({"aliases": list(f.aliases)} if f.aliases else {}),
+                    }
+                    for f in schema.fields
+                ],
+                "sections": [
+                    {
+                        "name": sec.name,
+                        "form": sec.form,
+                        "required": sec.required,
+                        "writable": sec.writable,
+                    }
+                    for sec in schema.sections
+                ],
+            }
+            for schema in SCHEMAS
+        ],
+    }
+
+
+def cmd_schema(as_json: bool = False) -> None:
+    """Prints the record schema for tasks, decisions, and STATUS.md."""
+    doc = schema_document()
+    if as_json:
+        print(json.dumps(doc, indent=2))
+        return
+    for kind in doc["kinds"]:
+        print(f"{kind['kind']}: {kind['path']}")
+        if kind["fields"]:
+            print("  Fields:")
+            for f in kind["fields"]:
+                notes = [
+                    n
+                    for n, on in (
+                        ("required", f["required"]),
+                        ("immutable", not f["mutable"]),
+                    )
+                    if on
+                ]
+                notes += [f"alias {a}" for a in f.get("aliases", [])]
+                print(
+                    f"    {f['name']:<15}{f['shape']:<8}{f['value']:<14}{', '.join(notes)}".rstrip()
+                )
+        print("  Sections:")
+        for sec in kind["sections"]:
+            notes = [
+                n
+                for n, on in (
+                    ("required", sec["required"]),
+                    ("read-only", not sec["writable"]),
+                )
+                if on
+            ]
+            print(f"    {sec['name']:<15}{sec['form']:<11}{', '.join(notes)}".rstrip())
+        print()
+    print("Value types:")
+    for name, vt in doc["value_types"].items():
+        print(f"  {name:<15}{vt['description']}")
 
 
 def cmd_list(
@@ -4191,6 +4664,7 @@ Commands:
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
+  schema [--json]                  Show the task, decision, and STATUS schema
 
 Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
@@ -4211,6 +4685,31 @@ Examples:
   taskgo sync my-project
   taskgo fix my-project
   taskgo checkpoint TASK-3A91F "project: start diagnosis" --all"""
+
+
+def add_set_field_options(parser: argparse.ArgumentParser, removable: bool) -> None:
+    """Adds --add-FIELD (and --remove-FIELD) options for the task set fields."""
+    for spec in TASK_SCHEMA.set_fields():
+        if spec.option is None:
+            continue
+        vt = VALUE_TYPES[spec.value]
+        parser.add_argument(
+            f"--add-{spec.option}",
+            dest=f"add_{spec.name}",
+            action="append",
+            default=None,
+            metavar=vt.metavar,
+            help=f"Add to {spec.name} (repeatable; repeats are no-ops)",
+        )
+        if removable:
+            parser.add_argument(
+                f"--remove-{spec.option}",
+                dest=f"remove_{spec.name}",
+                action="append",
+                default=None,
+                metavar=vt.metavar,
+                help=f"Remove from {spec.name} (repeatable; absent values are no-ops)",
+            )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -4331,6 +4830,7 @@ than a few words.""",
         metavar="YYYY-MM-DD",
         help="Relevance cutoff date (YYYY-MM-DD)",
     )
+    add_set_field_options(p_create, removable=False)
     p_create.add_argument(
         "--no-commit", action="store_true", help="Do not commit created task"
     )
@@ -4348,10 +4848,18 @@ than a few words.""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   taskgo update TASK-3A91F --status in-progress
+  taskgo update TASK-3A91F --expect-status todo --status in-progress
+  taskgo update TASK-3A91F --add-blocked-by TASK-1627D --remove-wait-for 2026-10-13
   taskgo update TASK-3A91F --sketch "Use in-memory dict" --findings "Latency reduced by 40%" """,
     )
     p_update.add_argument("query", metavar="TASK_ID", help="Task ID or relative path")
     p_update.add_argument("--status", "-s", default=None, help="New task state")
+    p_update.add_argument(
+        "--expect-status",
+        default=None,
+        metavar="STATE",
+        help="Refuse the update unless the current state is STATE",
+    )
     p_update.add_argument("--title", "-t", default=None, help="New task title")
     p_update.add_argument(
         "--slug",
@@ -4401,6 +4909,21 @@ than a few words.""",
         metavar="YYYY-MM-DD",
         help="Relevance cutoff date (YYYY-MM-DD)",
     )
+
+    add_set_field_options(p_update, removable=True)
+
+    # schema
+    p_schema = subparsers.add_parser(
+        "schema",
+        help="Show the task, decision, and STATUS schema",
+        description=(
+            "Show the record schema: the fields and sections of tasks, decisions,\n"
+            "and STATUS.md. Validation, doctor, and the create/update set options\n"
+            "read it; --json is the conformance form for other implementations."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_schema.add_argument("--json", action="store_true", help="Output as JSON")
 
     # list
     p_list = subparsers.add_parser(
@@ -4744,6 +5267,9 @@ def main(argv: list[str] | None = None) -> None:
             stale_after=getattr(args, "stale_after", None),
             no_commit=args.no_commit,
             dry_run=args.dry_run,
+            add_blocked_by=args.add_blocked_by,
+            add_wait_for=args.add_wait_for,
+            add_conversations=args.add_conversations,
         )
     elif args.command == "update":
         cmd_update(
@@ -4764,7 +5290,16 @@ def main(argv: list[str] | None = None) -> None:
             wait_for=getattr(args, "wait_for", None),
             due=getattr(args, "due", None),
             stale_after=getattr(args, "stale_after", None),
+            expect_status=args.expect_status,
+            add_blocked_by=args.add_blocked_by,
+            remove_blocked_by=args.remove_blocked_by,
+            add_wait_for=args.add_wait_for,
+            remove_wait_for=args.remove_wait_for,
+            add_conversations=args.add_conversations,
+            remove_conversations=args.remove_conversations,
         )
+    elif args.command == "schema":
+        cmd_schema(as_json=args.json)
     elif args.command == "list":
         cmd_list(
             project=args.project,

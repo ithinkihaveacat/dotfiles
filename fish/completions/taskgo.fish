@@ -41,6 +41,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadat
 complete -f -c taskgo -n __fish_use_subcommand -a history -d 'Show frontmatter history'
 complete -f -c taskgo -n __fish_use_subcommand -a checkpoint -d 'Commit an authorized tracker checkpoint'
 complete -f -c taskgo -n __fish_use_subcommand -a commit -d 'Commit a logical transition'
+complete -f -c taskgo -n __fish_use_subcommand -a schema -d 'Show the task, decision, and STATUS schema'
 
 # Global flags
 complete -c taskgo -n __fish_use_subcommand -l root -s R -r -d 'Control repository (default: ~/.projects)'
@@ -67,9 +68,19 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l next -x -d 'Nex
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l no-commit -d 'Create task and sync without committing'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l dry-run -d 'Preview task path without creating files'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l add-blocked-by -x -a '(__fish_taskgo_tasks)' -d 'Add a blocked_by edge'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l add-wait-for -x -d 'Add a wait_for gate'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l add-conversation -x -d 'Add a conversation URI'
 
 # update options
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -s s -l status -x -a 'todo in-progress blocked done cancelled' -d 'New task state'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l expect-status -x -a 'todo in-progress blocked done cancelled' -d 'Refuse unless current state matches'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l add-blocked-by -x -a '(__fish_taskgo_tasks)' -d 'Add a blocked_by edge'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l remove-blocked-by -x -a '(__fish_taskgo_tasks)' -d 'Remove a blocked_by edge'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l add-wait-for -x -d 'Add a wait_for gate'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l remove-wait-for -x -d 'Remove a wait_for gate'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l add-conversation -x -d 'Add a conversation URI'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l remove-conversation -x -d 'Remove a conversation URI'
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -s t -l title -x -d 'New task title'
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l slug -x -d 'Rename the task file slug (max 32 chars)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -s p -l problem -x -d 'Problem description'
@@ -105,3 +116,6 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from checkpoint' -s C -l conv -
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s b -l body -x -d 'Commit body'
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s r -l ref -x -d 'External reference URL/ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
+
+# schema options
+complete -f -c taskgo -n '__fish_seen_subcommand_from schema' -l json -d 'Output as JSON'

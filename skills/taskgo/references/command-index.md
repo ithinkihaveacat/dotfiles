@@ -18,6 +18,7 @@
 - [history](#history)
 - [checkpoint](#checkpoint)
 - [commit](#commit)
+- [schema](#schema)
 
 ## Help
 
@@ -46,6 +47,7 @@ Commands:
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
+  schema [--json]                  Show the task, decision, and STATUS schema
 
 Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
@@ -81,7 +83,8 @@ usage: taskgo create [-h] [--slug SLUG] [--status STATUS] [--problem PROBLEM]
                      [--outcome OUTCOME] [--findings FINDINGS]
                      [--next NEXT_STEPS] [--conv CONV] [--wait-for GATE]
                      [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD]
-                     [--no-commit] [--dry-run]
+                     [--add-blocked-by TASK_ID] [--add-wait-for GATE]
+                     [--add-conversation URI] [--no-commit] [--dry-run]
                      PROJECT TITLE
 
 Create a new task in PROJECT.
@@ -114,6 +117,11 @@ options:
   --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
   --stale-after YYYY-MM-DD
                         Relevance cutoff date (YYYY-MM-DD)
+  --add-blocked-by TASK_ID
+                        Add to blocked_by (repeatable; repeats are no-ops)
+  --add-wait-for GATE   Add to wait_for (repeatable; repeats are no-ops)
+  --add-conversation URI
+                        Add to conversations (repeatable; repeats are no-ops)
   --no-commit           Do not commit created task
   --dry-run             Preview allocation without modifying files
 
@@ -136,13 +144,16 @@ than a few words.
 <!-- generated: ../scripts/taskgo update --help -->
 
 ```text
-usage: taskgo update [-h] [--status STATUS] [--title TITLE] [--slug SLUG]
-                     [--problem PROBLEM] [--cost COST] [--goal GOAL]
-                     [--criteria CRITERIA] [--sketch SKETCH]
-                     [--constraints CONSTRAINTS] [--outcome OUTCOME]
-                     [--findings FINDINGS] [--next NEXT_STEPS] [--conv CONV]
-                     [--wait-for GATE] [--due YYYY-MM-DD]
-                     [--stale-after YYYY-MM-DD]
+usage: taskgo update [-h] [--status STATUS] [--expect-status STATE]
+                     [--title TITLE] [--slug SLUG] [--problem PROBLEM]
+                     [--cost COST] [--goal GOAL] [--criteria CRITERIA]
+                     [--sketch SKETCH] [--constraints CONSTRAINTS]
+                     [--outcome OUTCOME] [--findings FINDINGS]
+                     [--next NEXT_STEPS] [--conv CONV] [--wait-for GATE]
+                     [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD]
+                     [--add-blocked-by TASK_ID] [--remove-blocked-by TASK_ID]
+                     [--add-wait-for GATE] [--remove-wait-for GATE]
+                     [--add-conversation URI] [--remove-conversation URI]
                      TASK_ID
 
 Update task fields, status, or headings.
@@ -153,6 +164,8 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   --status, -s STATUS   New task state
+  --expect-status STATE
+                        Refuse the update unless the current state is STATE
   --title, -t TITLE     New task title
   --slug SLUG           Rename the task file's slug, max 32 chars
   --problem, -p PROBLEM
@@ -174,9 +187,25 @@ options:
   --due YYYY-MM-DD      Committed completion deadline (YYYY-MM-DD)
   --stale-after YYYY-MM-DD
                         Relevance cutoff date (YYYY-MM-DD)
+  --add-blocked-by TASK_ID
+                        Add to blocked_by (repeatable; repeats are no-ops)
+  --remove-blocked-by TASK_ID
+                        Remove from blocked_by (repeatable; absent values are
+                        no-ops)
+  --add-wait-for GATE   Add to wait_for (repeatable; repeats are no-ops)
+  --remove-wait-for GATE
+                        Remove from wait_for (repeatable; absent values are
+                        no-ops)
+  --add-conversation URI
+                        Add to conversations (repeatable; repeats are no-ops)
+  --remove-conversation URI
+                        Remove from conversations (repeatable; absent values
+                        are no-ops)
 
 Examples:
   taskgo update TASK-3A91F --status in-progress
+  taskgo update TASK-3A91F --expect-status todo --status in-progress
+  taskgo update TASK-3A91F --add-blocked-by TASK-1627D --remove-wait-for 2026-10-13
   taskgo update TASK-3A91F --sketch "Use in-memory dict" --findings "Latency reduced by 40%"
 ```
 
@@ -419,6 +448,24 @@ options:
   --ref, -r REFS        External references (e.g. artifact@sha)
   --conv, -C, --conversation CONV
                         Active conversation or session ID
+```
+
+<!-- /generated -->
+
+## schema
+
+<!-- generated: ../scripts/taskgo schema --help -->
+
+```text
+usage: taskgo schema [-h] [--json]
+
+Show the record schema: the fields and sections of tasks, decisions,
+and STATUS.md. Validation, doctor, and the create/update set options
+read it; --json is the conformance form for other implementations.
+
+options:
+  -h, --help  show this help message and exit
+  --json      Output as JSON
 ```
 
 <!-- /generated -->

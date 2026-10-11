@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..154'
+echo '1..163'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3046,4 +3046,122 @@ if ! MATCH_ERR=$( ("$BIN" --root "$MATCH_REPO" update example/tasks/TASK-0A003-d
   echo 'ok 154 - update refuses an ambiguous run-in'
 else
   echo 'not ok 154 - update refuses an ambiguous run-in'
+fi
+
+# Tests 155-163: the record schema drives validation, doctor, and set edits.
+SCH_REPO="$TEST_ROOT/schema-repo"
+mkdir -p "$SCH_REPO/example/tasks"
+git -C "$SCH_REPO" init -q
+cp "$REPO/AGENTS.md" "$SCH_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SCH_REPO/INBOX.md"
+printf '# Example\n' >"$SCH_REPO/example/README.md"
+for n in 1 2 3; do
+  printf '%s\n' '---' "id: TASK-5C00$n" 'status: todo' '---' '' "# Schema task $n" \
+    >"$SCH_REPO/example/tasks/TASK-5C00$n-schema-$n.md"
+done
+SCH_1="$SCH_REPO/example/tasks/TASK-5C001-schema-1.md"
+SCH_2="$SCH_REPO/example/tasks/TASK-5C002-schema-2.md"
+("$BIN" --root "$SCH_REPO" sync example) >/dev/null 2>&1
+git -C "$SCH_REPO" add -A >/dev/null 2>&1
+git -C "$SCH_REPO" commit -qm 'seed schema fixtures'
+SCH_OUT="" SCH_ERR="" SCH_BEFORE=""
+
+if SCH_OUT=$("$BIN" schema --json) &&
+  [ "$(grep -o '"kind": "[a-z]*"' <<<"$SCH_OUT" | tr '\n' ' ')" = '"kind": "task" "kind": "decision" "kind": "status" ' ] &&
+  [ "$(grep -A1 '"name": "[a-z_]*",' <<<"$SCH_OUT" | grep -B1 '"shape": "set"' | grep -o '"name": "[a-z_]*"' | tr '\n' ' ')" = '"name": "blocked_by" "name": "wait_for" "name": "conversations" "name": "supersedes" ' ] &&
+  grep -q '"in-progress"' <<<"$SCH_OUT"; then
+  echo 'ok 155 - schema --json describes kinds, set fields, and value types'
+else
+  echo 'not ok 155 - schema --json describes kinds, set fields, and value types'
+fi
+
+SCH_BEFORE=$(cat "$SCH_1")
+if ! SCH_ERR=$( ("$BIN" --root "$SCH_REPO" update TASK-5C001 --expect-status 'done' --status cancelled) 2>&1) &&
+  [[ "$SCH_ERR" == *"status is 'todo', expected 'done'; nothing changed"* ]] &&
+  [ "$(cat "$SCH_1")" = "$SCH_BEFORE" ] &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C001 --expect-status open --status wip) >/dev/null 2>&1 &&
+  grep -qx 'status: in-progress' "$SCH_1"; then
+  echo 'ok 156 - update --expect-status refuses a mismatch and accepts aliases'
+else
+  echo 'not ok 156 - update --expect-status refuses a mismatch and accepts aliases'
+fi
+
+SCH_BEFORE=$(cat "$SCH_1")
+if ! SCH_ERR=$( ("$BIN" --root "$SCH_REPO" update TASK-5C001 --status finished) 2>&1) &&
+  [[ "$SCH_ERR" == *'unknown status for --status: finished'* ]] &&
+  [ "$(cat "$SCH_1")" = "$SCH_BEFORE" ]; then
+  echo 'ok 157 - update refuses an unknown status instead of resetting to todo'
+else
+  echo 'not ok 157 - update refuses an unknown status instead of resetting to todo'
+fi
+
+if ("$BIN" --root "$SCH_REPO" update TASK-5C001 --add-blocked-by TASK-5C002 --add-blocked-by task-5c003) >/dev/null 2>&1 &&
+  grep -qx 'blocked_by: \[TASK-5C002, TASK-5C003\]' "$SCH_1" &&
+  [ "$(sed -n 4p "$SCH_1")" = 'blocked_by: [TASK-5C002, TASK-5C003]' ] &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C001 --add-blocked-by TASK-5C002 --remove-blocked-by TASK-5C003) >/dev/null 2>&1 &&
+  grep -qx 'blocked_by: \[TASK-5C002\]' "$SCH_1" &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C001 --remove-blocked-by TASK-5C002) >/dev/null 2>&1 &&
+  ! grep -q 'blocked_by' "$SCH_1"; then
+  echo 'ok 158 - update adds and removes blocked_by edges; repeats are no-ops'
+else
+  echo 'not ok 158 - update adds and removes blocked_by edges; repeats are no-ops'
+fi
+
+("$BIN" --root "$SCH_REPO" update TASK-5C001 --add-blocked-by TASK-5C002) >/dev/null 2>&1
+SCH_BEFORE=$(cat "$SCH_2")
+if ! SCH_ERR=$( ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by TASK-5C001) 2>&1) &&
+  [[ "$SCH_ERR" == *'blocked_by would form a cycle'* ]] &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by TASK-FFFFF) >/dev/null 2>&1 &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by TASK-5C002) >/dev/null 2>&1 &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by not-a-task) >/dev/null 2>&1 &&
+  [ "$(cat "$SCH_2")" = "$SCH_BEFORE" ]; then
+  echo 'ok 159 - update refuses cycles, unknown, self, and malformed blockers'
+else
+  echo 'not ok 159 - update refuses cycles, unknown, self, and malformed blockers'
+fi
+
+if ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-wait-for 2026-10-13 --add-wait-for b/123 \
+  --add-conversation claude://0123456789abcdef0123 --add-conversation codex://fedcba9876543210fedc) >/dev/null 2>&1 &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C002 --remove-wait-for 2026-10-13 \
+    --remove-conversation claude://0123456789abcdef0123) >/dev/null 2>&1 &&
+  SCH_OUT=$(cat "$SCH_2") &&
+  [[ "$SCH_OUT" == *$'wait_for:\n  - b/123\n'* ]] &&
+  [[ "$SCH_OUT" == *$'conversations:\n  - codex://fedcba9876543210fedc\n'* ]] &&
+  [[ "$SCH_OUT" != *'2026-10-13'* ]] && [[ "$SCH_OUT" != *'claude://'* ]] &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-wait-for 'next week') >/dev/null 2>&1; then
+  echo 'ok 160 - update adds and removes wait_for gates and conversations'
+else
+  echo 'not ok 160 - update adds and removes wait_for gates and conversations'
+fi
+
+if SCH_OUT=$("$BIN" --root "$SCH_REPO" create example 'Blocked at birth' --slug born-blocked \
+  --add-blocked-by TASK-5C001 --add-wait-for @someone \
+  --add-conversation claude://0123456789abcdef0123 --no-commit 2>/dev/null) &&
+  SCH_OUT=$(cat "$SCH_REPO/$(cut -f2 <<<"$SCH_OUT")") &&
+  [[ "$SCH_OUT" == *$'status: todo\nblocked_by: [TASK-5C001]\nwait_for:\n  - \'@someone\'\n'* ]] &&
+  [[ "$SCH_OUT" == *$'conversations:\n  - claude://0123456789abcdef0123\n'* ]] &&
+  ! ("$BIN" --root "$SCH_REPO" create example 'Bad blocker' --add-blocked-by TASK-FFFFF --no-commit) >/dev/null 2>&1; then
+  echo 'ok 161 - create accepts set-field additions and refuses unknown blockers'
+else
+  echo 'not ok 161 - create accepts set-field additions and refuses unknown blockers'
+  echo "# $SCH_OUT"
+fi
+
+printf '%s\n' '---' 'id: TASK-5C009' 'status: todo' 'wait_for: [soon]' 'created: 2026-10-01' \
+  '---' '' '# Off-schema task' >"$SCH_REPO/example/tasks/TASK-5C009-off-schema.md"
+("$BIN" --root "$SCH_REPO" sync example) >/dev/null 2>&1
+SCH_OUT=$("$BIN" --root "$SCH_REPO" doctor example 2>&1 || true)
+if grep -q "TASK-5C009-off-schema.md: invalid wait_for 'soon'" <<<"$SCH_OUT" &&
+  grep -q "\[INFO\]  example/tasks/TASK-5C009-off-schema.md: frontmatter field 'created' is not in the task schema" <<<"$SCH_OUT"; then
+  echo 'ok 162 - doctor checks task fields against the schema'
+else
+  echo 'not ok 162 - doctor checks task fields against the schema'
+fi
+
+sed -i.bak '/^## Next/d' "$SCH_REPO/example/STATUS.md"
+SCH_OUT=$("$BIN" --root "$SCH_REPO" doctor example 2>&1 || true)
+if grep -q '^\[WARN\]  example: STATUS.md missing ## Next' <<<"$SCH_OUT"; then
+  echo 'ok 163 - doctor checks STATUS.md sections against the schema'
+else
+  echo 'not ok 163 - doctor checks STATUS.md sections against the schema'
 fi
