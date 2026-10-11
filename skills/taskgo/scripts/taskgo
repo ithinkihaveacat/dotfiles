@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import re
 import shutil
 import signal
@@ -676,7 +677,7 @@ def run_git(
     check: bool = True,
     capture_output: bool = True,
     text: bool = True,
-    input_data: str | None = None,
+    input_data: str | bytes | None = None,
 ) -> subprocess.CompletedProcess:
     if cwd is None:
         cwd = get_repo_root()
@@ -695,10 +696,15 @@ def run_git(
     finally:
         _active_subprocesses.discard(proc)
 
-    ret = subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
+    empty = "" if text else b""
+    ret = subprocess.CompletedProcess(
+        cmd, proc.returncode, stdout or empty, stderr or empty
+    )
     if check and ret.returncode != 0:
         if ret.stderr:
-            sys.stderr.write(ret.stderr)
+            sys.stderr.write(
+                ret.stderr if text else ret.stderr.decode("utf-8", "replace")
+            )
         die(f"git {' '.join(args)} failed (exit {ret.returncode})")
     return ret
 
@@ -719,13 +725,207 @@ def write_markdown(path: Path, content: str) -> None:
     atomic_write(path, format_markdown(content))
 
 
-def is_project_dir(p: Path) -> bool:
-    if not p.is_dir() or p.name.startswith("."):
+# ===========================================================================
+# Snapshots: the core's only access to repository files
+# ===========================================================================
+
+
+class ReadOnlySnapshotError(Exception):
+    """Raised when a write reaches a snapshot that cannot be written."""
+
+
+def path_key(rel: str) -> list[str]:
+    """Sort key ordering relative paths component by component, as Path does."""
+    return rel.split("/")
+
+
+def join_rel(*parts: str) -> str:
+    """Joins relative path parts, skipping empty ones ('' is the root)."""
+    return "/".join(p for p in parts if p)
+
+
+class Snapshot:
+    """Files of a control repository, addressed by relative POSIX path.
+
+    Parsing, validation, rendering, audit, and edit operations read and write
+    only through this interface, so the same code runs over a working tree
+    (FsSnapshot) or a Git commit (GitTreeSnapshot). '' names the root.
+    """
+
+    def read_text(self, rel: str) -> str:
+        """Returns the file's UTF-8 text; raises OSError when it is absent."""
+        raise NotImplementedError
+
+    def is_file(self, rel: str) -> bool:
+        raise NotImplementedError
+
+    def is_dir(self, rel: str) -> bool:
+        raise NotImplementedError
+
+    def list_dir(self, rel: str) -> list[str]:
+        """Sorted entry names of directory REL; empty when it is not one."""
+        raise NotImplementedError
+
+    def write_text(self, rel: str, text: str) -> None:
+        """Writes TEXT to REL, creating parent directories."""
+        raise ReadOnlySnapshotError(f"cannot write {rel}: snapshot is read-only")
+
+    def rename(self, src: str, dst: str) -> None:
+        raise ReadOnlySnapshotError(f"cannot rename {src}: snapshot is read-only")
+
+    def exists(self, rel: str) -> bool:
+        return self.is_file(rel) or self.is_dir(rel)
+
+    def write_markdown(self, rel: str, content: str) -> None:
+        """Formats Markdown content and writes it.
+
+        Every writer goes through here so touched files are always formatted
+        and untouched files are never rewritten.
+        """
+        self.write_text(rel, format_markdown(content))
+
+    def glob_md(self, rel_dir: str) -> list[str]:
+        """Relative paths of the *.md files directly in REL_DIR."""
+        return [
+            join_rel(rel_dir, name)
+            for name in self.list_dir(rel_dir)
+            if name.endswith(".md") and self.is_file(join_rel(rel_dir, name))
+        ]
+
+    def walk_md(self, rel_dir: str) -> list[str]:
+        """Relative paths of every *.md file under REL_DIR, in path order."""
+        out: list[str] = []
+        for name in self.list_dir(rel_dir):
+            rel = join_rel(rel_dir, name)
+            if self.is_dir(rel):
+                out.extend(self.walk_md(rel))
+            elif name.endswith(".md") and self.is_file(rel):
+                out.append(rel)
+        return sorted(out, key=path_key)
+
+
+class FsSnapshot(Snapshot):
+    """A working tree on disk. Reads and writes go straight to the files."""
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def path(self, rel: str) -> Path:
+        return self.root / rel if rel else self.root
+
+    def read_text(self, rel: str) -> str:
+        return self.path(rel).read_text(encoding="utf-8")
+
+    def is_file(self, rel: str) -> bool:
+        return self.path(rel).is_file()
+
+    def is_dir(self, rel: str) -> bool:
+        return self.path(rel).is_dir()
+
+    def list_dir(self, rel: str) -> list[str]:
+        p = self.path(rel)
+        return sorted(c.name for c in p.iterdir()) if p.is_dir() else []
+
+    def write_text(self, rel: str, text: str) -> None:
+        p = self.path(rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(p, text)
+
+    def rename(self, src: str, dst: str) -> None:
+        self.path(src).rename(self.path(dst))
+
+    def walk_md(self, rel_dir: str) -> list[str]:
+        # rglob does not descend into symlinked directories; keep that.
+        return sorted(
+            (
+                p.relative_to(self.root).as_posix()
+                for p in self.path(rel_dir).rglob("*.md")
+                if p.is_file()
+            ),
+            key=path_key,
+        )
+
+
+class GitTreeSnapshot(Snapshot):
+    """The tree of one Git commit, read without a checkout. Read-only.
+
+    Lists the tree once and reads Markdown blobs in a single batch on first
+    use, so a whole-repository render costs two Git processes.
+    """
+
+    def __init__(self, repo: Path, rev: str):
+        self.repo = repo
+        resolved = run_git(["rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=repo)
+        self.rev = resolved.stdout.strip()
+        self.blobs: dict[str, str] = {}
+        self.children: dict[str, set[str]] = {"": set()}
+        out = run_git(["ls-tree", "-r", "-z", "--full-tree", self.rev], cwd=repo)
+        for entry in filter(None, out.stdout.split("\0")):
+            meta, rel = entry.split("\t", 1)
+            mode, kind, sha = meta.split()
+            if kind != "blob" or mode not in ("100644", "100755"):
+                continue
+            self.blobs[rel] = sha
+            parts = rel.split("/")
+            for i in range(len(parts)):
+                parent = "/".join(parts[:i])
+                self.children.setdefault(parent, set()).add(parts[i])
+        self.texts: dict[str, str] | None = None
+
+    def _load(self) -> dict[str, str]:
+        if self.texts is None:
+            md = [rel for rel in self.blobs if rel.endswith(".md")]
+            self.texts = self._cat(md)
+        return self.texts
+
+    def _cat(self, rels: list[str]) -> dict[str, str]:
+        if not rels:
+            return {}
+        shas = "".join(f"{self.blobs[rel]}\n" for rel in rels)
+        raw = run_git(
+            ["cat-file", "--batch"],
+            cwd=self.repo,
+            text=False,
+            input_data=shas.encode(),
+        ).stdout
+        texts: dict[str, str] = {}
+        pos = 0
+        for rel in rels:
+            nl = raw.index(b"\n", pos)
+            size = int(raw[pos:nl].split()[2])
+            texts[rel] = raw[nl + 1 : nl + 1 + size].decode("utf-8")
+            pos = nl + 1 + size + 1
+        return texts
+
+    def read_text(self, rel: str) -> str:
+        if rel not in self.blobs:
+            raise FileNotFoundError(f"{rel} is not in {self.rev[:12]}")
+        texts = self._load()
+        if rel not in texts:
+            texts.update(self._cat([rel]))
+        return texts[rel]
+
+    def is_file(self, rel: str) -> bool:
+        return rel in self.blobs
+
+    def is_dir(self, rel: str) -> bool:
+        return rel in self.children
+
+    def list_dir(self, rel: str) -> list[str]:
+        return sorted(self.children.get(rel, ()))
+
+
+def is_project(snap: Snapshot, name: str) -> bool:
+    if name.startswith(".") or not snap.is_dir(name):
         return False
-    return (p / "README.md").is_file() or (p / "PROJECT.md").is_file()
+    return snap.is_file(f"{name}/README.md") or snap.is_file(f"{name}/PROJECT.md")
 
 
-def get_proj_dir(project_name: str, root: Path) -> Path:
+def list_projects(snap: Snapshot) -> list[str]:
+    return [name for name in snap.list_dir("") if is_project(snap, name)]
+
+
+def check_project_name(project_name: str) -> None:
     if (
         "/" in project_name
         or "\\" in project_name
@@ -736,14 +936,18 @@ def get_proj_dir(project_name: str, root: Path) -> Path:
         die(
             f"invalid project name (must be a top-level directory and cannot start with a dot): {project_name}"
         )
-    p = root / project_name
-    if p.is_file():
+
+
+def require_project(snap: Snapshot, project_name: str) -> str:
+    """Validates PROJECT_NAME and dies unless it names a directory."""
+    check_project_name(project_name)
+    if snap.is_file(project_name):
         die(
             f"invalid project name (a file with this name already exists): {project_name}"
         )
-    if not p.is_dir():
+    if not snap.is_dir(project_name):
         die(f"unknown project: {project_name}")
-    return p
+    return project_name
 
 
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
@@ -986,24 +1190,14 @@ def normalize_status(raw_status: str) -> str:
     return STATE_ALIASES.get(clean, clean if clean in STANDARD_STATES else "todo")
 
 
-def get_task_files(root: Path, project_name: str | None = None) -> list[Path]:
-    files: list[Path] = []
+def get_task_files(snap: Snapshot, project_name: str | None = None) -> list[str]:
+    """Relative paths of the task files in PROJECT_NAME, or in every project."""
     if project_name:
-        proj_dir = get_proj_dir(project_name, root)
-        tasks_dir = proj_dir / "tasks"
-        if tasks_dir.is_dir():
-            for f in sorted(tasks_dir.glob("*.md")):
-                if f.is_file():
-                    files.append(f)
+        projects = [require_project(snap, project_name)]
     else:
-        for p in sorted(root.iterdir()):
-            if is_project_dir(p):
-                tasks_dir = p / "tasks"
-                if tasks_dir.is_dir():
-                    for f in sorted(tasks_dir.glob("*.md")):
-                        if f.is_file():
-                            files.append(f)
-    return sorted(files)
+        projects = list_projects(snap)
+    files = [f for p in projects for f in snap.glob_md(f"{p}/tasks")]
+    return sorted(files, key=path_key)
 
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1403,10 +1597,10 @@ def remove_task_conversation(data: Any, conv_id: str) -> bool:
 
 
 def check_new_blockers(
-    root: Path, task_id: str | None, adds: list[str], deps: tuple[str, ...]
+    snap: Snapshot, task_id: str | None, adds: list[str], deps: tuple[str, ...]
 ) -> None:
     """Refuses unknown or self-referencing added blockers, and cycles."""
-    rows = get_task_rows(root)
+    rows = get_task_rows(snap)
     known = {r.task_id for r in rows if r.task_id}
     for dep in adds:
         if dep == task_id:
@@ -1429,19 +1623,18 @@ class TaskRow:
     status: str
     title: str
     rel_path: str
-    abs_path: Path
     blocked_by: tuple[str, ...] = ()
     wait_for: tuple[str, ...] = ()
     due: str | None = None
     stale_after: str | None = None
 
 
-def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
-    files = get_task_files(root, project_name)
+def get_task_rows(snap: Snapshot, project_name: str | None = None) -> list[TaskRow]:
+    files = get_task_files(snap, project_name)
     rows: list[TaskRow] = []
-    for f in files:
+    for rel_path in files:
         try:
-            content = f.read_text(encoding="utf-8")
+            content = snap.read_text(rel_path)
         except OSError:
             continue
         fm, body = parse_frontmatter(content)
@@ -1456,8 +1649,7 @@ def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
             if m:
                 status = m.group(1).strip().strip("'\"")
         title = extract_title_from_body(body)
-        rel_path = str(f.relative_to(root))
-        project = Path(rel_path).as_posix().split("/")[0]
+        project = rel_path.split("/")[0]
         rows.append(
             TaskRow(
                 project,
@@ -1465,7 +1657,6 @@ def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
                 status,
                 title,
                 rel_path,
-                f.resolve(),
                 parse_blocked_by(fm),
                 parse_wait_for(fm),
                 parse_date_field(fm, "due"),
@@ -1475,9 +1666,9 @@ def get_task_rows(root: Path, project_name: str | None = None) -> list[TaskRow]:
     return rows
 
 
-def status_index(root: Path) -> dict[str, str]:
+def status_index(snap: Snapshot) -> dict[str, str]:
     """Maps every known task ID in the control repo to its declared status."""
-    return {r.task_id: r.status for r in get_task_rows(root) if r.task_id}
+    return {r.task_id: r.status for r in get_task_rows(snap) if r.task_id}
 
 
 def unresolved_blockers(row: TaskRow, index: dict[str, str]) -> list[str]:
@@ -1543,8 +1734,8 @@ def find_dependency_cycles(rows: list[TaskRow]) -> list[list[str]]:
     return cycles
 
 
-def generate_task_id(root: Path) -> str:
-    existing_ids = {r.task_id for r in get_task_rows(root) if r.task_id}
+def generate_task_id(snap: Snapshot) -> str:
+    existing_ids = {r.task_id for r in get_task_rows(snap) if r.task_id}
     for i in range(1, 257):
         entropy = f"{time.time_ns()}:{os.getpid()}:{os.urandom(8).hex()}:{i}"
         h = hashlib.sha1(entropy.encode("utf-8")).hexdigest()[:5].upper()
@@ -1559,7 +1750,7 @@ class AdrRow:
     project: str
     filename: str
     title: str
-    abs_path: Path
+    rel_path: str
     raw_supersedes: tuple[str, ...] = ()
     supersedes: tuple[str, ...] = ()
     unknown_supersedes: tuple[str, ...] = ()
@@ -1607,28 +1798,25 @@ def is_adr_self_superseded(fm: dict[str, Any], body: str) -> bool:
     return bool(m and re.search(r"\bsuperseded\b", m.group(1), re.IGNORECASE))
 
 
-def get_adr_rows(root: Path, project_name: str) -> list[AdrRow]:
+def get_adr_rows(snap: Snapshot, project_name: str) -> list[AdrRow]:
     """Loads all ADR rows under <project>/decisions/*.md and resolves supersedes edges."""
-    decisions_dir = root / project_name / "decisions"
-    if not decisions_dir.is_dir():
-        return []
-    adr_files = [df for df in sorted(decisions_dir.glob("*.md")) if df.is_file()]
+    adr_files = snap.glob_md(f"{project_name}/decisions")
     if not adr_files:
         return []
-    filenames = [df.name for df in adr_files]
+    filenames = [rel.rsplit("/", 1)[1] for rel in adr_files]
 
     prelim: list[
-        tuple[Path, str, dict[str, Any], str, tuple[str, ...], tuple[str, ...]]
+        tuple[str, str, str, dict[str, Any], str, tuple[str, ...], tuple[str, ...]]
     ] = []
     superseded_by_map: dict[str, list[str]] = {fn: [] for fn in filenames}
 
-    for df in adr_files:
+    for rel, name in zip(adr_files, filenames, strict=True):
         try:
-            content = df.read_text(encoding="utf-8")
+            content = snap.read_text(rel)
         except OSError:
             continue
         fm, body = parse_frontmatter(content)
-        title = extract_title(content) or df.stem
+        title = extract_title(content) or name.removesuffix(".md")
         raw_sup = parse_adr_list_field(fm, "supersedes")
         resolved: list[str] = []
         unknown: list[str] = []
@@ -1637,24 +1825,26 @@ def get_adr_rows(root: Path, project_name: str) -> list[AdrRow]:
             if target is not None:
                 if target not in resolved:
                     resolved.append(target)
-                if df.name not in superseded_by_map[target]:
-                    superseded_by_map[target].append(df.name)
+                if name not in superseded_by_map[target]:
+                    superseded_by_map[target].append(name)
             else:
                 unknown.append(tok)
-        prelim.append((df, title, fm, body, raw_sup, (tuple(resolved), tuple(unknown))))
+        prelim.append(
+            (rel, name, title, fm, body, raw_sup, (tuple(resolved), tuple(unknown)))
+        )
 
     rows: list[AdrRow] = []
-    for df, title, fm, body, raw_sup, (resolved_tup, unknown_tup) in prelim:
+    for rel, name, title, fm, body, raw_sup, (resolved_tup, unknown_tup) in prelim:
         rows.append(
             AdrRow(
                 project=project_name,
-                filename=df.name,
+                filename=name,
                 title=title,
-                abs_path=df.resolve(),
+                rel_path=rel,
                 raw_supersedes=raw_sup,
                 supersedes=resolved_tup,
                 unknown_supersedes=unknown_tup,
-                superseded_by=tuple(superseded_by_map.get(df.name, ())),
+                superseded_by=tuple(superseded_by_map.get(name, ())),
                 self_marked_superseded=is_adr_self_superseded(fm, body),
             )
         )
@@ -1693,7 +1883,7 @@ def find_adr_cycles(rows: list[AdrRow]) -> list[list[str]]:
 
 
 def build_status_block(
-    root: Path,
+    snap: Snapshot,
     project_name: str,
     all_rows: list[TaskRow] | None = None,
     index: dict[str, str] | None = None,
@@ -1701,12 +1891,12 @@ def build_status_block(
     if all_rows is not None:
         rows = [r for r in all_rows if r.project == project_name]
     else:
-        rows = get_task_rows(root, project_name)
+        rows = get_task_rows(snap, project_name)
     if index is None:
         if all_rows is not None:
             index = {r.task_id: r.status for r in all_rows if r.task_id}
         else:
-            index = status_index(root)
+            index = status_index(snap)
     today = get_today()
     due_cutoff = today + timedelta(days=DUE_SOON_DAYS)
     in_progress = [r for r in rows if r.status == "in-progress"]
@@ -1796,7 +1986,7 @@ def build_status_block(
             due_str = d.isoformat() if d is not None else str(r.due)
             lines.append(f"- `{r.task_id}` — {r.title} (due `{due_str}`)")
 
-    adr_rows = get_adr_rows(root, project_name)
+    adr_rows = get_adr_rows(snap, project_name)
     if adr_rows:
         active_adrs = [a for a in adr_rows if not a.is_superseded]
         lines.extend(
@@ -1835,19 +2025,18 @@ def has_commit_auth(root: Path) -> bool:
 
 
 def render_status_file(
-    root: Path,
+    snap: Snapshot,
     project_name: str,
     all_rows: list[TaskRow] | None = None,
     index: dict[str, str] | None = None,
 ) -> str:
-    proj_dir = root / project_name
-    status_file = proj_dir / "STATUS.md"
-    new_block = build_status_block(root, project_name, all_rows=all_rows, index=index)
+    status_rel = f"{project_name}/STATUS.md"
+    new_block = build_status_block(snap, project_name, all_rows=all_rows, index=index)
 
-    if not status_file.is_file():
+    if not snap.is_file(status_rel):
         return f"# Status\n\n## Summary\n\n{new_block}\n\n## Next\n"
 
-    content = status_file.read_text(encoding="utf-8")
+    content = snap.read_text(status_rel)
     if BEGIN in content and END in content:
         pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.DOTALL)
         return pattern.sub(lambda _: new_block, content)
@@ -1855,21 +2044,18 @@ def render_status_file(
 
 
 def sync_status(
-    root: Path,
+    snap: Snapshot,
     project_name: str,
     all_rows: list[TaskRow] | None = None,
     index: dict[str, str] | None = None,
 ) -> bool:
     """Returns True if file was updated/created, False if already identical."""
-    proj_dir = root / project_name
-    status_file = proj_dir / "STATUS.md"
-    rendered = render_status_file(root, project_name, all_rows=all_rows, index=index)
+    status_rel = f"{project_name}/STATUS.md"
+    rendered = render_status_file(snap, project_name, all_rows=all_rows, index=index)
     rendered = format_markdown(rendered)
-    if status_file.is_file():
-        current = status_file.read_text(encoding="utf-8")
-        if current == rendered:
-            return False
-    atomic_write(status_file, rendered)
+    if snap.is_file(status_rel) and snap.read_text(status_rel) == rendered:
+        return False
+    snap.write_text(status_rel, rendered)
     return True
 
 
@@ -1893,9 +2079,9 @@ def resolve_target(root: Path, query: str, allow_deleted: bool = False) -> Path:
         die(f"cannot resolve: {query}")
 
     hits: list[Path] = []
-    for row in get_task_rows(root):
+    for row in get_task_rows(FsSnapshot(root)):
         if row.task_id == query:
-            hits.append(row.abs_path)
+            hits.append(root / row.rel_path)
 
     if len(hits) == 1:
         return hits[0]
@@ -1932,25 +2118,33 @@ class Finding:
     category: str
     severity: Literal["PASS", "INFO", "WARN", "FAIL"]
     message: str
-    file_path: Path | None = None
-    remediation: Callable[[], list[Path] | None] | None = (
+    path: str | None = None  # relative to the repository root
+    remediation: Callable[[], list[str] | None] | None = (
         None  # None if requires human review
     )
 
 
-def audit_project_adrs(
-    root: Path, project_dir: Path, name: str, findings: list[Finding]
-) -> None:
+def resolve_link(snap: Snapshot, base: str, target: str) -> str | None:
+    """The relative path TARGET names from directory BASE, or None if outside."""
+    rel = posixpath.normpath(join_rel(base, target))
+    if rel == ".":
+        return ""
+    if rel == ".." or rel.startswith("../"):
+        return None
+    return rel
+
+
+def audit_project_adrs(snap: Snapshot, name: str, findings: list[Finding]) -> None:
     """Validates ADR sections, supersedes edges, cycles, and relative links on active ADRs."""
-    decisions_dir = project_dir / "decisions"
-    if not decisions_dir.is_dir():
+    decisions_dir = f"{name}/decisions"
+    adr_files = snap.glob_md(decisions_dir)
+    if not adr_files:
         return
 
-    for df in sorted(decisions_dir.glob("*.md")):
-        if not df.is_file():
-            continue
+    for rel in adr_files:
+        filename = rel.rsplit("/", 1)[1]
         try:
-            dcontent = df.read_text(encoding="utf-8")
+            dcontent = snap.read_text(rel)
         except OSError:
             continue
         for key in unknown_fields(parse_frontmatter(dcontent)[0], DECISION_SCHEMA):
@@ -1958,8 +2152,8 @@ def audit_project_adrs(
                 Finding(
                     category="adr",
                     severity="INFO",
-                    message=f"{name}/{df.name}: frontmatter field '{key}' is not in the decision schema",
-                    file_path=df,
+                    message=f"{name}/{filename}: frontmatter field '{key}' is not in the decision schema",
+                    path=rel,
                     remediation=None,
                 )
             )
@@ -1971,13 +2165,13 @@ def audit_project_adrs(
                     Finding(
                         category="adr",
                         severity="WARN",
-                        message=f"{name}/{df.name}: ADR missing ## {sec}",
-                        file_path=df,
+                        message=f"{name}/{filename}: ADR missing ## {sec}",
+                        path=rel,
                         remediation=None,
                     )
                 )
 
-    adr_rows = get_adr_rows(root, name)
+    adr_rows = get_adr_rows(snap, name)
     if not adr_rows:
         return
 
@@ -1991,7 +2185,7 @@ def audit_project_adrs(
                         f"{name}/decisions/{row.filename}: supersedes names unknown "
                         f"ADR(s): {', '.join(row.unknown_supersedes)}"
                     ),
-                    file_path=row.abs_path,
+                    path=row.rel_path,
                     remediation=None,
                 )
             )
@@ -2003,19 +2197,18 @@ def audit_project_adrs(
                 category="adr",
                 severity="WARN",
                 message=f"{name}: ADR supersedes cycle: {chain}",
-                file_path=decisions_dir,
+                path=decisions_dir,
                 remediation=None,
             )
         )
 
-    root_resolved = root.resolve()
-    candidate_bases = [decisions_dir, project_dir, root]
+    candidate_bases = [decisions_dir, name, ""]
 
     for row in adr_rows:
         if row.is_superseded:
             continue
         try:
-            raw_content = row.abs_path.read_text(encoding="utf-8")
+            raw_content = snap.read_text(row.rel_path)
         except OSError:
             continue
         _, body = parse_frontmatter(raw_content)
@@ -2040,7 +2233,7 @@ def audit_project_adrs(
                             f"{name}/decisions/{row.filename}: active ADR references "
                             f"superseded ADR '{other.filename}'"
                         ),
-                        file_path=row.abs_path,
+                        path=row.rel_path,
                         remediation=None,
                     )
                 )
@@ -2054,18 +2247,11 @@ def audit_project_adrs(
                 or target.startswith("/")
             ):
                 continue
-            valid_link = False
-            for base in candidate_bases:
-                try:
-                    resolved_target = (base / target).resolve()
-                    if (
-                        resolved_target.is_relative_to(root_resolved)
-                        and resolved_target.exists()
-                    ):
-                        valid_link = True
-                        break
-                except (OSError, ValueError):
-                    continue
+            valid_link = any(
+                (resolved := resolve_link(snap, base, target)) is not None
+                and snap.exists(resolved)
+                for base in candidate_bases
+            )
             if not valid_link:
                 stale_refs.append(target)
 
@@ -2075,17 +2261,17 @@ def audit_project_adrs(
                     category="adr",
                     severity="WARN",
                     message=f"{name}/decisions/{row.filename}: stale file reference '{ref}'",
-                    file_path=row.abs_path,
+                    path=row.rel_path,
                     remediation=None,
                 )
             )
 
 
 def audit_workspace(root: Path, target_project: str | None = None) -> list[Finding]:
-    """Single shared diagnostic engine for doctor and fix."""
+    """Audits the working tree: repository checks, then the snapshot audit."""
     findings: list[Finding] = []
 
-    # 1. Shallow clone check
+    # Shallow clone check
     try:
         shallow = run_git(["rev-parse", "--is-shallow-repository"]).stdout.strip()
         if shallow == "true":
@@ -2099,13 +2285,57 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
     except Exception:
         pass
 
-    # 2. AGENTS.md check & remediation
-    agents_file = root / "AGENTS.md"
-    if not agents_file.is_file():
+    return findings + audit_snapshot(FsSnapshot(root), target_project)
 
-        def remediate_missing_agents() -> list[Path]:
+
+def markdown_finding(snap: Snapshot, rel: str) -> Finding | None:
+    """A finding when REL is not formatted (fixable) or cannot be formatted."""
+    try:
+        content = snap.read_text(rel)
+        if format_markdown(content) == content:
+            return None
+
+        def remediate(target=rel) -> list[str]:
+            if not snap.is_file(target):
+                return []
+            current = snap.read_text(target)
+            formatted = format_markdown(current)
+            if current != formatted:
+                snap.write_text(target, formatted)
+                return [target]
+            return []
+
+        return Finding(
+            category="markdown",
+            severity="INFO",
+            message=f"{rel}: markdown formatting needed",
+            path=rel,
+            remediation=remediate,
+        )
+    except Exception as e:
+        return Finding(
+            category="markdown",
+            severity="WARN",
+            message=f"{rel}: failed to format markdown: {e}",
+            path=rel,
+            remediation=None,
+        )
+
+
+def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Finding]:
+    """Single shared diagnostic engine for doctor and fix.
+
+    Remediations write through SNAP, so they apply only to a writable one.
+    """
+    findings: list[Finding] = []
+
+    # 1. AGENTS.md check & remediation
+    agents_file = "AGENTS.md"
+    if not snap.is_file(agents_file):
+
+        def remediate_missing_agents() -> list[str]:
             # Tracking repos include commit authorization by default so agents can maintain tracker state.
-            write_markdown(
+            snap.write_markdown(
                 agents_file,
                 f"# Agent instructions\n\nThis repository follows taskgo: <{CANONICAL_URL}>.\n\n{COMMIT_AUTH}\n",
             )
@@ -2116,12 +2346,12 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 category="root",
                 severity="WARN",
                 message="missing AGENTS.md",
-                file_path=agents_file,
+                path=agents_file,
                 remediation=remediate_missing_agents,
             )
         )
     else:
-        agents_txt = agents_file.read_text(encoding="utf-8")
+        agents_txt = snap.read_text(agents_file)
         needs_decl = not re.search(
             r"(follows|structured|maintained|according to).*taskgo",
             agents_txt,
@@ -2132,8 +2362,8 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 
         if needs_decl or needs_url or needs_auth:
 
-            def remediate_agents() -> list[Path]:
-                cur = agents_file.read_text(encoding="utf-8")
+            def remediate_agents() -> list[str]:
+                cur = snap.read_text(agents_file)
                 has_decl = bool(
                     re.search(
                         r"(follows|structured|maintained|according to).*taskgo",
@@ -2149,7 +2379,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     cur += f"\nCanonical URL: <{CANONICAL_URL}>\n"
                 if COMMIT_AUTH not in cur:
                     cur = cur.rstrip() + f"\n\n{COMMIT_AUTH}\n"
-                write_markdown(agents_file, cur)
+                snap.write_markdown(agents_file, cur)
                 return [agents_file]
 
             if needs_decl:
@@ -2158,7 +2388,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         category="root",
                         severity="WARN",
                         message="AGENTS.md: must state that the repository follows taskgo",
-                        file_path=agents_file,
+                        path=agents_file,
                         remediation=remediate_agents,
                     )
                 )
@@ -2168,7 +2398,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         category="root",
                         severity="WARN",
                         message=f"AGENTS.md: missing canonical taskgo URL: {CANONICAL_URL}",
-                        file_path=agents_file,
+                        path=agents_file,
                         remediation=remediate_agents,
                     )
                 )
@@ -2178,17 +2408,17 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         category="root",
                         severity="INFO",
                         message=f"AGENTS.md: missing {COMMIT_AUTH}",
-                        file_path=agents_file,
+                        path=agents_file,
                         remediation=remediate_agents,
                     )
                 )
 
-    # 3. INBOX.md check & remediation
-    inbox_file = root / "INBOX.md"
-    if not inbox_file.is_file():
+    # 2. INBOX.md check & remediation
+    inbox_file = "INBOX.md"
+    if not snap.is_file(inbox_file):
 
-        def remediate_missing_inbox() -> list[Path]:
-            write_markdown(inbox_file, "# Inbox\n")
+        def remediate_missing_inbox() -> list[str]:
+            snap.write_markdown(inbox_file, "# Inbox\n")
             return [inbox_file]
 
         findings.append(
@@ -2196,13 +2426,13 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                 category="root",
                 severity="WARN",
                 message="missing INBOX.md",
-                file_path=inbox_file,
+                path=inbox_file,
                 remediation=remediate_missing_inbox,
             )
         )
 
-    # 4. Duplicate global task IDs
-    all_rows = get_task_rows(root)
+    # 3. Duplicate global task IDs
+    all_rows = get_task_rows(snap)
     status_idx = {r.task_id: r.status for r in all_rows if r.task_id}
     seen_ids: dict[str, int] = {}
     for r in all_rows:
@@ -2219,26 +2449,22 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
             )
         )
 
-    # 5. Project-level checks
-    projects: list[Path] = []
+    # 4. Project-level checks
     if target_project:
-        projects.append(get_proj_dir(target_project, root))
+        projects = [require_project(snap, target_project)]
     else:
-        for p in sorted(root.iterdir()):
-            if is_project_dir(p):
-                projects.append(p)
+        projects = list_projects(snap)
 
-    for p in projects:
-        name = p.name
-        tasks_dir = p / "tasks"
-        status_file = p / "STATUS.md"
+    for name in projects:
+        tasks_dir = f"{name}/tasks"
+        status_file = f"{name}/STATUS.md"
 
         # Check STATUS.md
-        if not status_file.is_file():
+        if not snap.is_file(status_file):
 
             def make_remediate_status(p_name=name, p_status=status_file):
-                def remediate() -> list[Path]:
-                    sync_status(root, p_name)
+                def remediate() -> list[str]:
+                    sync_status(snap, p_name)
                     return [p_status]
 
                 return remediate
@@ -2248,193 +2474,186 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     category="project",
                     severity="WARN",
                     message=f"{name}: missing STATUS.md",
-                    file_path=status_file,
+                    path=status_file,
                     remediation=make_remediate_status(name, status_file),
                 )
             )
 
         # Check tasks
-        if tasks_dir.is_dir():
-            for tf in sorted(tasks_dir.glob("*.md")):
-                if not tf.is_file():
-                    continue
-                content = tf.read_text(encoding="utf-8")
-                rel_path = str(tf.relative_to(root))
+        for tf in snap.glob_md(tasks_dir):
+            content = snap.read_text(tf)
+            rel_path = tf
+            tf_name = tf.rsplit("/", 1)[1]
 
-                m_fm = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
-                if m_fm:
-                    yaml = YAML()
-                    try:
-                        parsed_yaml = yaml.load(m_fm.group(1))
-                        if not isinstance(parsed_yaml, dict):
-                            findings.append(
-                                Finding(
-                                    category="task",
-                                    severity="FAIL",
-                                    message=(
-                                        f"{rel_path}: invalid YAML frontmatter: frontmatter must be a YAML mapping\n"
-                                        "        Fix syntax between '---' delimiters to ensure frontmatter is a key-value mapping."
-                                    ),
-                                    file_path=tf,
-                                    remediation=None,
-                                )
-                            )
-                            continue
-                    except Exception as e:
-                        err_line = str(e).splitlines()[0] if str(e) else "syntax error"
+            m_fm = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+            if m_fm:
+                yaml = YAML()
+                try:
+                    parsed_yaml = yaml.load(m_fm.group(1))
+                    if not isinstance(parsed_yaml, dict):
                         findings.append(
                             Finding(
                                 category="task",
                                 severity="FAIL",
                                 message=(
-                                    f"{rel_path}: invalid YAML frontmatter: {err_line}\n"
-                                    "        Fix YAML frontmatter syntax or restore task from git."
+                                    f"{rel_path}: invalid YAML frontmatter: frontmatter must be a YAML mapping\n"
+                                    "        Fix syntax between '---' delimiters to ensure frontmatter is a key-value mapping."
                                 ),
-                                file_path=tf,
+                                path=tf,
                                 remediation=None,
                             )
                         )
                         continue
-
-                fm, _ = parse_frontmatter(content)
-
-                # Field values and keys come from the task schema; id and
-                # status get repair findings below.
-                for spec, value in invalid_field_values(fm, TASK_SCHEMA):
-                    if spec.name in ("id", "status"):
-                        continue
+                except Exception as e:
+                    err_line = str(e).splitlines()[0] if str(e) else "syntax error"
                     findings.append(
                         Finding(
                             category="task",
-                            severity=spec.invalid,
-                            message=f"{rel_path}: {describe_invalid(spec, value)}",
-                            file_path=tf,
+                            severity="FAIL",
+                            message=(
+                                f"{rel_path}: invalid YAML frontmatter: {err_line}\n"
+                                "        Fix YAML frontmatter syntax or restore task from git."
+                            ),
+                            path=tf,
                             remediation=None,
                         )
                     )
-                for key in unknown_fields(fm, TASK_SCHEMA):
+                    continue
+
+            fm, _ = parse_frontmatter(content)
+
+            # Field values and keys come from the task schema; id and
+            # status get repair findings below.
+            for spec, value in invalid_field_values(fm, TASK_SCHEMA):
+                if spec.name in ("id", "status"):
+                    continue
+                findings.append(
+                    Finding(
+                        category="task",
+                        severity=spec.invalid,
+                        message=f"{rel_path}: {describe_invalid(spec, value)}",
+                        path=tf,
+                        remediation=None,
+                    )
+                )
+            for key in unknown_fields(fm, TASK_SCHEMA):
+                findings.append(
+                    Finding(
+                        category="task",
+                        severity="INFO",
+                        message=f"{rel_path}: frontmatter field '{key}' is not in the task schema",
+                        path=tf,
+                        remediation=None,
+                    )
+                )
+
+            task_id = fm.get("id", "")
+            raw_status = fm.get("status", "")
+
+            m = re.search(r"TASK-[0-9A-F]{5}", tf_name)
+            filename_id = m.group(0) if m else ""
+
+            needs_id_fix = not field_is_valid(TASK_SCHEMA.field("id"), task_id)
+            needs_status_fix = not field_is_valid(
+                TASK_SCHEMA.field("status"), raw_status
+            )
+            needs_filename_fix = (
+                bool(filename_id and filename_id != task_id) or not filename_id
+            )
+
+            if needs_id_fix or needs_status_fix or needs_filename_fix:
+
+                def make_remediate_task(target_tf=tf, p_tasks=tasks_dir):
+                    def remediate() -> list[str]:
+                        t_content = snap.read_text(target_tf)
+                        t_fm, t_body = parse_frontmatter_for_edit(t_content)
+                        t_id = ""
+                        id_key = None
+                        for k in list(t_fm.keys()):
+                            if str(k).lower() == "id":
+                                t_id = str(t_fm[k])
+                                id_key = k
+                                break
+                        if not ID_PATTERN.match(t_id):
+                            t_id = generate_task_id(snap)
+
+                        raw_status = "todo"
+                        status_key = None
+                        for k in list(t_fm.keys()):
+                            if str(k).lower() == "status":
+                                raw_status = str(t_fm[k])
+                                status_key = k
+                                break
+                        t_status = normalize_status(raw_status)
+                        target_name = target_tf.rsplit("/", 1)[1]
+                        t_title = extract_title(t_content) or target_name.removesuffix(
+                            ".md"
+                        )
+                        if not t_body.strip():
+                            t_body = f"\n# {t_title}\n\n## Outcome\n\n## Findings\n\n## Next\n"
+
+                        t_fm[id_key or "id"] = t_id
+                        t_fm[status_key or "status"] = t_status
+
+                        new_content = f"{dump_frontmatter(t_fm)}\n{t_body.lstrip()}\n"
+                        snap.write_markdown(target_tf, new_content)
+                        # Preserve a caller-chosen slug when the file is
+                        # already taskgo-named: only its ID prefix is
+                        # being repaired. Files adopted from other names
+                        # still get a slug derived from their title.
+                        slug = filename_slug(target_name) or slugify(t_title) or "task"
+                        new_name = f"{t_id}-{slug}.md"
+                        new_path = f"{p_tasks}/{new_name}"
+                        if target_name != new_name:
+                            snap.rename(target_tf, new_path)
+                            return [target_tf, new_path]
+                        return [target_tf]
+
+                    return remediate
+
+                if needs_id_fix:
                     findings.append(
                         Finding(
                             category="task",
-                            severity="INFO",
-                            message=f"{rel_path}: frontmatter field '{key}' is not in the task schema",
-                            file_path=tf,
-                            remediation=None,
+                            severity="WARN",
+                            message=f"{rel_path}: invalid/missing id '{task_id}'",
+                            path=tf,
+                            remediation=make_remediate_task(tf, tasks_dir),
                         )
                     )
-
-                task_id = fm.get("id", "")
-                raw_status = fm.get("status", "")
-
-                m = re.search(r"TASK-[0-9A-F]{5}", tf.name)
-                filename_id = m.group(0) if m else ""
-
-                needs_id_fix = not field_is_valid(TASK_SCHEMA.field("id"), task_id)
-                needs_status_fix = not field_is_valid(
-                    TASK_SCHEMA.field("status"), raw_status
-                )
-                needs_filename_fix = (
-                    bool(filename_id and filename_id != task_id) or not filename_id
-                )
-
-                if needs_id_fix or needs_status_fix or needs_filename_fix:
-
-                    def make_remediate_task(
-                        target_tf=tf, p_root=root, p_tasks=tasks_dir
-                    ):
-                        def remediate() -> list[Path]:
-                            t_content = target_tf.read_text(encoding="utf-8")
-                            t_fm, t_body = parse_frontmatter_for_edit(t_content)
-                            t_id = ""
-                            id_key = None
-                            for k in list(t_fm.keys()):
-                                if str(k).lower() == "id":
-                                    t_id = str(t_fm[k])
-                                    id_key = k
-                                    break
-                            if not ID_PATTERN.match(t_id):
-                                t_id = generate_task_id(p_root)
-
-                            raw_status = "todo"
-                            status_key = None
-                            for k in list(t_fm.keys()):
-                                if str(k).lower() == "status":
-                                    raw_status = str(t_fm[k])
-                                    status_key = k
-                                    break
-                            t_status = normalize_status(raw_status)
-                            t_title = extract_title(t_content) or target_tf.stem
-                            if not t_body.strip():
-                                t_body = f"\n# {t_title}\n\n## Outcome\n\n## Findings\n\n## Next\n"
-
-                            t_fm[id_key or "id"] = t_id
-                            t_fm[status_key or "status"] = t_status
-
-                            new_content = (
-                                f"{dump_frontmatter(t_fm)}\n{t_body.lstrip()}\n"
-                            )
-                            write_markdown(target_tf, new_content)
-                            # Preserve a caller-chosen slug when the file is
-                            # already taskgo-named: only its ID prefix is
-                            # being repaired. Files adopted from other names
-                            # still get a slug derived from their title.
-                            slug = (
-                                filename_slug(target_tf.name)
-                                or slugify(t_title)
-                                or "task"
-                            )
-                            new_name = f"{t_id}-{slug}.md"
-                            new_path = p_tasks / new_name
-                            if target_tf.name != new_name:
-                                target_tf.rename(new_path)
-                                return [target_tf, new_path]
-                            return [target_tf]
-
-                        return remediate
-
-                    if needs_id_fix:
-                        findings.append(
-                            Finding(
-                                category="task",
-                                severity="WARN",
-                                message=f"{rel_path}: invalid/missing id '{task_id}'",
-                                file_path=tf,
-                                remediation=make_remediate_task(tf, root, tasks_dir),
-                            )
+                if needs_status_fix and not needs_id_fix:
+                    findings.append(
+                        Finding(
+                            category="task",
+                            severity="WARN",
+                            message=f"{rel_path}: non-standard status '{raw_status}'",
+                            path=tf,
+                            remediation=make_remediate_task(tf, tasks_dir),
                         )
-                    if needs_status_fix and not needs_id_fix:
-                        findings.append(
-                            Finding(
-                                category="task",
-                                severity="WARN",
-                                message=f"{rel_path}: non-standard status '{raw_status}'",
-                                file_path=tf,
-                                remediation=make_remediate_task(tf, root, tasks_dir),
-                            )
+                    )
+                if needs_filename_fix and not needs_id_fix:
+                    findings.append(
+                        Finding(
+                            category="task",
+                            severity="WARN",
+                            message=f"{rel_path}: filename/frontmatter IDs disagree",
+                            path=tf,
+                            remediation=make_remediate_task(tf, tasks_dir),
                         )
-                    if needs_filename_fix and not needs_id_fix:
-                        findings.append(
-                            Finding(
-                                category="task",
-                                severity="WARN",
-                                message=f"{rel_path}: filename/frontmatter IDs disagree",
-                                file_path=tf,
-                                remediation=make_remediate_task(tf, root, tasks_dir),
-                            )
-                        )
+                    )
 
         # Check STATUS.md snapshot drift
-        if status_file.is_file():
-            current_status = status_file.read_text(encoding="utf-8")
+        if snap.is_file(status_file):
+            current_status = snap.read_text(status_file)
             rendered = render_status_file(
-                root, name, all_rows=all_rows, index=status_idx
+                snap, name, all_rows=all_rows, index=status_idx
             )
             rendered = format_markdown(rendered)
             if current_status != rendered:
 
                 def make_remediate_snapshot(p_name=name, p_status=status_file):
-                    def remediate() -> list[Path]:
-                        sync_status(root, p_name)
+                    def remediate() -> list[str]:
+                        sync_status(snap, p_name)
                         return [p_status]
 
                     return remediate
@@ -2444,7 +2663,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         category="status",
                         severity="WARN",
                         message=f"{name}: stale STATUS task snapshot (run sync)",
-                        file_path=status_file,
+                        path=status_file,
                         remediation=make_remediate_snapshot(name, status_file),
                     )
                 )
@@ -2456,7 +2675,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             category="status",
                             severity="WARN",
                             message=f"{name}: STATUS.md missing ## {sec}",
-                            file_path=status_file,
+                            path=status_file,
                             remediation=None,
                         )
                     )
@@ -2479,105 +2698,28 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                         category="status",
                         severity="WARN",
                         message=f"{name}: STATUS prose says no task is in progress, but {active} task(s) are in-progress",
-                        file_path=status_file,
+                        path=status_file,
                         remediation=None,  # Human semantic editing required
                     )
                 )
 
         # Check decisions ADRs
-        audit_project_adrs(root, p, name, findings)
+        audit_project_adrs(snap, name, findings)
 
         # Check Markdown formatting for all markdown files in project
-        for mf in sorted(p.rglob("*.md")):
-            if (
-                not mf.is_file()
-                or any(part.startswith(".") for part in mf.relative_to(root).parts)
-                or "node_modules" in mf.parts
-            ):
+        for mf in snap.walk_md(name):
+            parts = mf.split("/")
+            if any(part.startswith(".") for part in parts) or "node_modules" in parts:
                 continue
-            try:
-                mcontent = mf.read_text(encoding="utf-8")
-                mformatted = format_markdown(mcontent)
-                if mformatted != mcontent:
-                    rel_path = str(mf.relative_to(root))
-
-                    def make_remediate_proj_md(target_file=mf):
-                        def remediate() -> list[Path]:
-                            if not target_file.is_file():
-                                return []
-                            current = target_file.read_text(encoding="utf-8")
-                            formatted = format_markdown(current)
-                            if current != formatted:
-                                atomic_write(target_file, formatted)
-                                return [target_file]
-                            return []
-
-                        return remediate
-
-                    findings.append(
-                        Finding(
-                            category="markdown",
-                            severity="INFO",
-                            message=f"{rel_path}: markdown formatting needed",
-                            file_path=mf,
-                            remediation=make_remediate_proj_md(mf),
-                        )
-                    )
-            except Exception as e:
-                rel_path = str(mf.relative_to(root))
-                findings.append(
-                    Finding(
-                        category="markdown",
-                        severity="WARN",
-                        message=f"{rel_path}: failed to format markdown: {e}",
-                        file_path=mf,
-                        remediation=None,
-                    )
-                )
+            if (finding := markdown_finding(snap, mf)) is not None:
+                findings.append(finding)
 
     if not target_project:
-        for rmf in sorted(root.glob("*.md")):
-            if not rmf.is_file() or rmf.name.startswith("."):
+        for rmf in snap.glob_md(""):
+            if rmf.startswith("."):
                 continue
-            try:
-                rcontent = rmf.read_text(encoding="utf-8")
-                rformatted = format_markdown(rcontent)
-                if rformatted != rcontent:
-                    rel_path = rmf.name
-
-                    def make_remediate_root_md(target_file=rmf):
-                        def remediate() -> list[Path]:
-                            if not target_file.is_file():
-                                return []
-                            current = target_file.read_text(encoding="utf-8")
-                            formatted = format_markdown(current)
-                            if current != formatted:
-                                atomic_write(target_file, formatted)
-                                return [target_file]
-                            return []
-
-                        return remediate
-
-                    findings.append(
-                        Finding(
-                            category="markdown",
-                            severity="INFO",
-                            message=f"{rel_path}: markdown formatting needed",
-                            file_path=rmf,
-                            remediation=make_remediate_root_md(rmf),
-                        )
-                    )
-            except Exception as e:
-                rel_path = rmf.name
-                findings.append(
-                    Finding(
-                        category="markdown",
-                        severity="WARN",
-                        message=f"{rel_path}: failed to format markdown: {e}",
-                        file_path=rmf,
-                        remediation=None,
-                    )
-                )
+            if (finding := markdown_finding(snap, rmf)) is not None:
+                findings.append(finding)
 
     # Dependency edges & temporal gates. Never auto-remediated: an invented or
     # removed edge/gate is worse than an absent one, so every finding here needs
@@ -2595,7 +2737,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     category="depends",
                     severity="WARN",
                     message=f"{row.rel_path}: blocked_by names unknown task(s): {', '.join(unknown)}",
-                    file_path=row.abs_path,
+                    path=row.rel_path,
                     remediation=None,
                 )
             )
@@ -2615,7 +2757,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             f"{row.rel_path}: blocked_by names resolved task(s): "
                             f"{formatted}; remove the edge"
                         ),
-                        file_path=row.abs_path,
+                        path=row.rel_path,
                         remediation=None,
                     )
                 )
@@ -2634,7 +2776,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             f"{row.rel_path}: blocked_by names resolved task(s): "
                             f"{formatted}; re-plan or remove the edge"
                         ),
-                        file_path=row.abs_path,
+                        path=row.rel_path,
                         remediation=None,
                     )
                 )
@@ -2650,7 +2792,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             f"{row.rel_path}: overdue (due {due_date.isoformat()}, "
                             f"{(today - due_date).days}d ago)"
                         ),
-                        file_path=row.abs_path,
+                        path=row.rel_path,
                         remediation=None,
                     )
                 )
@@ -2663,7 +2805,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             f"{row.rel_path}: due soon (due {due_date.isoformat()}, "
                             "within 48h)"
                         ),
-                        file_path=row.abs_path,
+                        path=row.rel_path,
                         remediation=None,
                     )
                 )
@@ -2679,7 +2821,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                             f"(stale_after {stale_date.isoformat()}); "
                             "re-scope or cancel"
                         ),
-                        file_path=row.abs_path,
+                        path=row.rel_path,
                         remediation=None,
                     )
                 )
@@ -2700,7 +2842,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
                     category="depends",
                     severity="WARN",
                     message=f"{row.rel_path}: status is blocked but {detail}",
-                    file_path=row.abs_path,
+                    path=row.rel_path,
                     remediation=None,
                 )
             )
@@ -2725,7 +2867,7 @@ def audit_workspace(root: Path, target_project: str | None = None) -> list[Findi
 def cmd_id() -> None:
     """Allocate a unique task ID."""
     root = get_repo_root()
-    print(generate_task_id(root))
+    print(generate_task_id(FsSnapshot(root)))
 
 
 def cmd_root() -> None:
@@ -2827,6 +2969,23 @@ def render_task_file(
         return raw
 
 
+def create_task(snap: Snapshot, project_name: str, rel_path: str, content: str) -> None:
+    """Writes a new task, scaffolding its project if needed, and syncs STATUS.md."""
+    # Auto-initialize project scaffolding if it's a new project
+    if not is_project(snap, project_name):
+        readme = f"{project_name}/README.md"
+        if not snap.is_file(readme):
+            snap.write_markdown(readme, f"# {project_name}\n\nProject overview.\n")
+        status_file = f"{project_name}/STATUS.md"
+        if not snap.is_file(status_file):
+            snap.write_markdown(
+                status_file,
+                f"# Status\n\n## Summary\n\nInitial setup for {project_name}.\n\n<!-- taskgo:begin -->\n<!-- taskgo:end -->\n\n## Next\n",
+            )
+    snap.write_markdown(rel_path, content)
+    sync_status(snap, project_name)
+
+
 def cmd_create(
     project_name: str,
     title: str,
@@ -2918,18 +3077,18 @@ def cmd_create(
     session = get_active_session(conv)
     conv_uri = f"{session[0]}://{session[1]}" if session else None
     root = get_repo_root()
+    snap = FsSnapshot(root)
     if deps:
-        check_new_blockers(root, None, deps, tuple(deps))
-    proj_dir = root / project_name
-    if proj_dir.is_file():
+        check_new_blockers(snap, None, deps, tuple(deps))
+    if snap.is_file(project_name):
         die(
             f"cannot create project '{project_name}': a file with this name already exists"
         )
 
-    task_id = generate_task_id(root)
+    task_id = generate_task_id(snap)
     filename = f"{task_id}-{task_slug}.md"
     rel_task_path = f"{project_name}/tasks/{filename}"
-    is_new_project = not is_project_dir(proj_dir)
+    is_new_project = not is_project(snap, project_name)
 
     if dry_run:
         print(
@@ -2969,27 +3128,6 @@ def cmd_create(
         print(f"{task_id}\t{rel_task_path}")
         return
 
-    # Auto-initialize project scaffolding if it's a new project
-    is_new_project = not is_project_dir(proj_dir)
-    if is_new_project:
-        proj_dir.mkdir(parents=True, exist_ok=True)
-        readme = proj_dir / "README.md"
-        if not readme.is_file():
-            write_markdown(
-                readme,
-                f"# {project_name}\n\nProject overview.\n",
-            )
-        status_file = proj_dir / "STATUS.md"
-        if not status_file.is_file():
-            write_markdown(
-                status_file,
-                f"# Status\n\n## Summary\n\nInitial setup for {project_name}.\n\n<!-- taskgo:begin -->\n<!-- taskgo:end -->\n\n## Next\n",
-            )
-
-    tasks_dir = proj_dir / "tasks"
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    task_file = tasks_dir / filename
-
     content = render_task_file(
         task_id=task_id,
         title=title,
@@ -3010,10 +3148,7 @@ def cmd_create(
         blocked_by=deps or None,
         conversations=extra_convs or None,
     )
-    write_markdown(task_file, content)
-
-    # Sync project STATUS.md
-    sync_status(root, project_name)
+    create_task(snap, project_name, rel_task_path, content)
 
     # Machine-readable output contract on stdout
     print(f"{task_id}\t{rel_task_path}")
@@ -3055,11 +3190,12 @@ def cmd_create(
     )
 
 
-def cmd_update(
-    query: str,
+def edit_task_text(
+    snap: Snapshot,
+    rel_path: str,
+    content: str,
     status: str | None = None,
     title: str | None = None,
-    slug: str | None = None,
     problem: str | None = None,
     cost: str | None = None,
     goal: str | None = None,
@@ -3080,27 +3216,13 @@ def cmd_update(
     remove_wait_for: list[str] | None = None,
     add_conversations: list[str] | None = None,
     remove_conversations: list[str] | None = None,
-) -> None:
-    """Update task fields, status, or headings."""
-    new_slug: str | None = None
-    if slug is not None:
-        new_slug = normalize_slug(slug)
-        if not new_slug:
-            die_scoped(f"--slug contains no usable characters: {slug}")
-        if len(new_slug) > SLUG_MAX_LEN:
-            die_scoped(
-                f"--slug too long ({len(new_slug)} > {SLUG_MAX_LEN} chars): {new_slug}"
-            )
+) -> tuple[str, list[str]]:
+    """Applies field and section edits to the task text CONTENT at REL_PATH.
 
-    root = get_repo_root()
-    target_path = resolve_target(root, query)
-    rel_path = str(target_path.relative_to(root))
-    project_name = Path(rel_path).as_posix().split("/")[0]
-
-    try:
-        content = target_path.read_text(encoding="utf-8")
-    except OSError as e:
-        die(f"cannot read task file {rel_path}: {e}")
+    Returns the edited, unformatted text and any warnings. SNAP is read only
+    to check added blockers against the other tasks.
+    """
+    warnings: list[str] = []
     data, body = parse_frontmatter_for_edit(content)
 
     if expect_status is not None:
@@ -3171,7 +3293,7 @@ def cmd_update(
         removes = split_field_values(remove_blocked_by or [], blocked_spec)
         edit_set_field(data, blocked_spec, adds, removes)
         deps = parse_blocked_by({str(k).lower(): v for k, v in data.items()})
-        check_new_blockers(root, own_id, adds, deps)
+        check_new_blockers(snap, own_id, adds, deps)
 
     conv_spec = TASK_SCHEMA.field("conversations")
     for entry in split_field_values(remove_conversations or [], conv_spec):
@@ -3223,13 +3345,9 @@ def cmd_update(
             )
         if not spans:
             if similar:
-                print(
-                    _tagged(
-                        f"[WARN]  {rel_path}: no '## {heading}' section; "
-                        f"appending one (similar: {', '.join(similar)})",
-                        sys.stderr,
-                    ),
-                    file=sys.stderr,
+                warnings.append(
+                    f"{rel_path}: no '## {heading}' section; "
+                    f"appending one (similar: {', '.join(similar)})"
                 )
             return body_str.rstrip() + f"\n\n{replacement}\n"
         start, end = spans[0]
@@ -3254,33 +3372,137 @@ def cmd_update(
     if next_steps:
         body = upsert_section(body, "Next", next_steps)
 
-    new_content = fm_text + "\n" + body.lstrip()
-    write_markdown(target_path, new_content)
+    return fm_text + "\n" + body.lstrip(), warnings
 
+
+@dataclass(slots=True, frozen=True)
+class TaskUpdate:
+    task_id: str
+    rel_path: str
+    renamed_from: str | None
+    warnings: tuple[str, ...]
+
+
+def update_task(
+    snap: Snapshot,
+    rel_path: str,
+    new_slug: str | None = None,
+    fallback_id: str | None = None,
+    **edits: Any,
+) -> TaskUpdate:
+    """Edits the task at REL_PATH in SNAP, renames it, and syncs its STATUS.md.
+
+    EDITS are edit_task_text's keyword arguments. FALLBACK_ID names the task
+    in the result when its frontmatter has no ID.
+    """
+    project_name = rel_path.split("/", maxsplit=1)[0]
+    try:
+        content = snap.read_text(rel_path)
+    except OSError as e:
+        die(f"cannot read task file {rel_path}: {e}")
+    new_content, warnings = edit_task_text(snap, rel_path, content, **edits)
+    snap.write_markdown(rel_path, new_content)
+
+    data, _ = parse_frontmatter_for_edit(new_content)
     task_id_val = next(
-        (str(v) for k, v in data.items() if str(k).lower() == "id"), query
+        (str(v) for k, v in data.items() if str(k).lower() == "id"),
+        fallback_id or rel_path,
     )
 
+    renamed_from = None
     if new_slug is not None:
         prefix = task_id_val if ID_PATTERN.match(task_id_val) else ""
         new_name = f"{prefix}-{new_slug}.md" if prefix else f"{new_slug}.md"
-        new_path = target_path.with_name(new_name)
-        if new_path != target_path:
-            if new_path.exists():
+        new_rel = join_rel(rel_path.rsplit("/", 1)[0], new_name)
+        if new_rel != rel_path:
+            if snap.exists(new_rel):
                 die_scoped(f"cannot rename {rel_path}: {new_name} already exists")
-            target_path.rename(new_path)
-            print(
-                _tagged(
-                    f"[INFO]  Renamed {rel_path} -> {new_path.relative_to(root)}",
-                    sys.stderr,
-                ),
-                file=sys.stderr,
-            )
-            rel_path = str(new_path.relative_to(root))
+            snap.rename(rel_path, new_rel)
+            renamed_from, rel_path = rel_path, new_rel
 
-    sync_status(root, project_name)
+    sync_status(snap, project_name)
+    return TaskUpdate(task_id_val, rel_path, renamed_from, tuple(warnings))
+
+
+def cmd_update(
+    query: str,
+    status: str | None = None,
+    title: str | None = None,
+    slug: str | None = None,
+    problem: str | None = None,
+    cost: str | None = None,
+    goal: str | None = None,
+    criteria: str | None = None,
+    sketch: str | None = None,
+    constraints: str | None = None,
+    outcome: str | None = None,
+    findings: str | None = None,
+    next_steps: str | None = None,
+    conv: str | None = None,
+    wait_for: list[str] | None = None,
+    due: str | None = None,
+    stale_after: str | None = None,
+    expect_status: str | None = None,
+    add_blocked_by: list[str] | None = None,
+    remove_blocked_by: list[str] | None = None,
+    add_wait_for: list[str] | None = None,
+    remove_wait_for: list[str] | None = None,
+    add_conversations: list[str] | None = None,
+    remove_conversations: list[str] | None = None,
+) -> None:
+    """Update task fields, status, or headings."""
+    new_slug: str | None = None
+    if slug is not None:
+        new_slug = normalize_slug(slug)
+        if not new_slug:
+            die_scoped(f"--slug contains no usable characters: {slug}")
+        if len(new_slug) > SLUG_MAX_LEN:
+            die_scoped(
+                f"--slug too long ({len(new_slug)} > {SLUG_MAX_LEN} chars): {new_slug}"
+            )
+
+    root = get_repo_root()
+    target_path = resolve_target(root, query)
+    result = update_task(
+        FsSnapshot(root),
+        target_path.relative_to(root).as_posix(),
+        new_slug=new_slug,
+        fallback_id=query,
+        status=status,
+        title=title,
+        problem=problem,
+        cost=cost,
+        goal=goal,
+        criteria=criteria,
+        sketch=sketch,
+        constraints=constraints,
+        outcome=outcome,
+        findings=findings,
+        next_steps=next_steps,
+        conv=conv,
+        wait_for=wait_for,
+        due=due,
+        stale_after=stale_after,
+        expect_status=expect_status,
+        add_blocked_by=add_blocked_by,
+        remove_blocked_by=remove_blocked_by,
+        add_wait_for=add_wait_for,
+        remove_wait_for=remove_wait_for,
+        add_conversations=add_conversations,
+        remove_conversations=remove_conversations,
+    )
+    for warning in result.warnings:
+        print(_tagged(f"[WARN]  {warning}", sys.stderr), file=sys.stderr)
+    if result.renamed_from:
+        print(
+            _tagged(
+                f"[INFO]  Renamed {result.renamed_from} -> {result.rel_path}",
+                sys.stderr,
+            ),
+            file=sys.stderr,
+        )
     print(
-        _tagged(f"[INFO]  Updated {task_id_val} in {rel_path}", sys.stderr),
+        _tagged(f"[INFO]  Updated {result.task_id} in {result.rel_path}", sys.stderr),
         file=sys.stderr,
     )
 
@@ -3374,11 +3596,12 @@ def cmd_list(
 ) -> None:
     """List tasks in the repository or a specific project."""
     root = get_repo_root()
-    rows = get_task_rows(root, project)
+    snap = FsSnapshot(root)
+    rows = get_task_rows(snap, project)
     if state:
         # "ready" is derived, not a declared status: todo with nothing holding it.
         if state.strip().lower() == "ready":
-            index = status_index(root)
+            index = status_index(snap)
             today = get_today()
             rows = [
                 r
@@ -3404,7 +3627,7 @@ def cmd_list(
                 "id": r.task_id,
                 "status": r.status,
                 "title": r.title,
-                "path": str(r.abs_path.relative_to(root)),
+                "path": r.rel_path,
                 "blocked_by": list(r.blocked_by),
                 "wait_for": list(r.wait_for),
                 "due": r.due,
@@ -3420,8 +3643,9 @@ def cmd_list(
 
     print("PROJECT\tTASK\tSTATE\tTITLE\tPATH")
     for r in rows:
-        rel = str(r.abs_path.relative_to(root))
-        print(f"{r.project}\t{r.task_id}\t{r.status or '(missing)'}\t{r.title}\t{rel}")
+        print(
+            f"{r.project}\t{r.task_id}\t{r.status or '(missing)'}\t{r.title}\t{r.rel_path}"
+        )
 
 
 def _to_jsonable(val: Any) -> Any:
@@ -3469,7 +3693,7 @@ def cmd_info(
 ) -> None:
     """Show project metadata from README.md YAML frontmatter."""
     root = get_repo_root()
-    proj_dir = get_proj_dir(project, root)
+    proj_dir = root / require_project(FsSnapshot(root), project)
 
     readme_file = proj_dir / "README.md"
     if not readme_file.is_file() and (proj_dir / "PROJECT.md").is_file():
@@ -3518,10 +3742,11 @@ def cmd_status(
 ) -> None:
     """Show project status or whole-workspace summary."""
     root = get_repo_root()
+    snap = FsSnapshot(root)
     if project:
-        proj_dir = get_proj_dir(project, root)
+        require_project(snap, project)
         if as_json:
-            rows = get_task_rows(root, project)
+            rows = get_task_rows(snap, project)
             out = {
                 "project": project,
                 "in_progress": [r.task_id for r in rows if r.status == "in-progress"],
@@ -3533,26 +3758,26 @@ def cmd_status(
                         "id": r.task_id,
                         "status": r.status,
                         "title": r.title,
-                        "path": str(r.abs_path.relative_to(root)),
+                        "path": r.rel_path,
                     }
                     for r in rows
                 ],
             }
             print(json.dumps(out, indent=2))
             return
-        status_file = proj_dir / "STATUS.md"
-        if status_file.is_file():
-            print(status_file.read_text(encoding="utf-8").rstrip())
+        status_file = f"{project}/STATUS.md"
+        if snap.is_file(status_file):
+            print(snap.read_text(status_file).rstrip())
         else:
-            print(render_status_file(root, project).rstrip())
+            print(render_status_file(snap, project).rstrip())
         return
 
     # All projects
-    projects = list_projects(root)
+    projects = list_projects(snap)
     if as_json:
         all_data = []
         for p in projects:
-            rows = get_task_rows(root, p)
+            rows = get_task_rows(snap, p)
             all_data.append(
                 {
                     "project": p,
@@ -3568,7 +3793,7 @@ def cmd_status(
         return
 
     for p in projects:
-        rows = get_task_rows(root, p)
+        rows = get_task_rows(snap, p)
         in_prog = [r.task_id for r in rows if r.status == "in-progress"]
         blocked = [r.task_id for r in rows if r.status == "blocked"]
         todo = sum(1 for r in rows if r.status == "todo")
@@ -3578,10 +3803,6 @@ def cmd_status(
         print(
             f"{p}: in-progress=[{prog_str}] blocked=[{blk_str}] todo={todo} done={done}"
         )
-
-
-def list_projects(root: Path) -> list[str]:
-    return [p.name for p in sorted(root.iterdir()) if is_project_dir(p)]
 
 
 def cmd_dispatch(task_id: str) -> None:
@@ -3631,10 +3852,11 @@ def cmd_dispatch(task_id: str) -> None:
         if finding.severity in {"WARN", "FAIL"}
     )
 
-    rows = get_task_rows(root, project_name)
+    snap = FsSnapshot(root)
+    rows = get_task_rows(snap, project_name)
     row = next((r for r in rows if r.task_id == resolved_id), None)
     if row is not None:
-        blockers = unresolved_blockers(row, status_index(root))
+        blockers = unresolved_blockers(row, status_index(snap))
         if blockers:
             findings.append(
                 (
@@ -3707,22 +3929,22 @@ def cmd_sync(
     project: str | None = None,
 ) -> None:
     """Update STATUS.md snapshot for a project or the workspace."""
-    root = get_repo_root()
+    snap = FsSnapshot(get_repo_root())
     if project:
-        get_proj_dir(project, root)
-        updated = sync_status(root, project)
+        require_project(snap, project)
+        updated = sync_status(snap, project)
         if updated:
             print("updated")
         else:
             print("current")
         return
 
-    projects = list_projects(root)
-    all_rows = get_task_rows(root)
+    projects = list_projects(snap)
+    all_rows = get_task_rows(snap)
     index = {r.task_id: r.status for r in all_rows if r.task_id}
     any_updated = False
     for p in projects:
-        if sync_status(root, p, all_rows=all_rows, index=index):
+        if sync_status(snap, p, all_rows=all_rows, index=index):
             any_updated = True
     if any_updated:
         print("updated")
@@ -3773,8 +3995,9 @@ def cmd_fix(
 ) -> None:
     """Auto-heal IDs, statuses, and snapshot drift."""
     root = get_repo_root()
+    snap = FsSnapshot(root)
     if project:
-        get_proj_dir(project, root)
+        require_project(snap, project)
 
     findings = audit_workspace(root, project)
     fixable = [f for f in findings if f.remediation is not None]
@@ -3807,13 +4030,8 @@ def cmd_fix(
         dry_run_files: set[str] = set()
         for f in fixable:
             print(_tagged(f"[INFO]    - {f.message}", sys.stderr), file=sys.stderr)
-            if f.file_path:
-                try:
-                    dry_run_files.add(
-                        str(f.file_path.resolve().relative_to(root.resolve()))
-                    )
-                except ValueError:
-                    pass
+            if f.path:
+                dry_run_files.add(f.path)
         if dry_run_files:
             print("\n".join(sorted(dry_run_files)))
         return
@@ -3824,7 +4042,7 @@ def cmd_fix(
         die("fix: git index contains staged changes; unstage or commit them first")
 
     # Execute all remediations and collect explicitly touched paths (deduplicated)
-    touched_paths: set[Path] = set()
+    touched_paths: set[str] = set()
     executed_remediations = set()
     for f in fixable:
         if f.remediation in executed_remediations:
@@ -3834,8 +4052,8 @@ def cmd_fix(
         if res:
             for p in res:
                 touched_paths.add(p)
-        elif f.file_path:
-            touched_paths.add(f.file_path)
+        elif f.path:
+            touched_paths.add(f.path)
 
     # Re-run audit to verify convergence
     post_findings = audit_workspace(root, project)
@@ -3854,27 +4072,19 @@ def cmd_fix(
     if project:
         affected_projects.add(project)
     for tp in touched_paths:
-        try:
-            rel = tp.resolve().relative_to(root.resolve())
-            parts = rel.parts
-            if len(parts) > 1 and is_project_dir(root / parts[0]):
-                affected_projects.add(parts[0])
-        except ValueError:
-            pass
+        parts = tp.split("/")
+        if len(parts) > 1 and is_project(snap, parts[0]):
+            affected_projects.add(parts[0])
 
     for proj_name in affected_projects:
-        sync_status(root, proj_name)
-        status_p = root / proj_name / "STATUS.md"
-        if status_p.is_file():
+        sync_status(snap, proj_name)
+        status_p = f"{proj_name}/STATUS.md"
+        if snap.is_file(status_p):
             touched_paths.add(status_p)
 
-    # Convert touched paths to repo-relative files that have modifications or were created/deleted
+    # Keep the touched files that have modifications or were created/deleted
     modified_files: list[str] = []
-    for tp in sorted(touched_paths):
-        try:
-            rel = str(tp.resolve().relative_to(root.resolve()))
-        except ValueError:
-            continue
+    for rel in sorted(touched_paths, key=path_key):
         st = run_git(["status", "--porcelain", "--", rel], check=False).stdout.strip()
         if st and rel not in modified_files:
             modified_files.append(rel)
@@ -4163,11 +4373,12 @@ def cmd_check(
 ) -> None:
     """Evaluate wait_for gates, due deadlines, and stale_after cutoffs."""
     root = get_repo_root()
+    snap = FsSnapshot(root)
     if project:
-        get_proj_dir(project, root)
+        require_project(snap, project)
 
     today = get_today()
-    rows = get_task_rows(root, project)
+    rows = get_task_rows(snap, project)
     probe_cache: dict[str, tuple[str, bool, datetime | None, str | None] | None] = {}
 
     triggered_entries: list[tuple[TaskRow, str | None, list[CheckTrigger]]] = []
@@ -4398,7 +4609,8 @@ def cmd_checkpoint(
     target_path = resolve_target(root, task_id)
     rel_path = str(target_path.relative_to(root))
     project_name = Path(rel_path).as_posix().split("/")[0]
-    get_proj_dir(project_name, root)
+    snap = FsSnapshot(root)
+    require_project(snap, project_name)
     status_rel = f"{project_name}/STATUS.md"
 
     requested = [rel_path, status_rel]
@@ -4417,7 +4629,7 @@ def cmd_checkpoint(
         requested.append(p_clean)
 
     # Synchronize status for project
-    sync_status(root, project_name)
+    sync_status(snap, project_name)
 
     # Find project changes
     diff_proj = [
@@ -4543,6 +4755,7 @@ def cmd_commit(
     session = get_active_session(conv)
     conv_uri = f"{session[0]}://{session[1]}" if session else None
     root = get_repo_root()
+    snap = FsSnapshot(root)
     if not has_commit_auth(root):
         die(f"commit: committed AGENTS.md must contain {COMMIT_AUTH}")
 
@@ -4558,14 +4771,14 @@ def cmd_commit(
     projects = {
         f.split("/")[0]
         for f in staged_files
-        if "/" in f and is_project_dir(root / f.split("/")[0])
+        if "/" in f and is_project(snap, f.split("/")[0])
     }
     if len(projects) > 1:
         die("staged changes touch multiple projects")
 
     if projects:
         project_name = next(iter(projects))
-        get_proj_dir(project_name, root)
+        require_project(snap, project_name)
         findings = audit_workspace(root, project_name)
         if any(f.severity in ("WARN", "FAIL") for f in findings):
             die("doctor found errors")
@@ -4602,7 +4815,7 @@ def cmd_commit(
                 ),
                 file=sys.stderr,
             )
-        if sync_status(root, project_name):
+        if sync_status(snap, project_name):
             run_git(["add", f"{project_name}/STATUS.md"])
 
     project_for_scope = next(iter(projects)) if projects else None

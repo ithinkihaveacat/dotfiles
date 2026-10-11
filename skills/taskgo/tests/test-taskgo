@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..163'
+echo '1..164'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3164,4 +3164,75 @@ if grep -q '^\[WARN\]  example: STATUS.md missing ## Next' <<<"$SCH_OUT"; then
   echo 'ok 163 - doctor checks STATUS.md sections against the schema'
 else
   echo 'not ok 163 - doctor checks STATUS.md sections against the schema'
+fi
+
+# The core reads only through a snapshot, so a Git commit's tree must give the
+# same rows, STATUS.md, and audit findings as a checkout of that commit.
+TREE_REPO="$TEST_ROOT/tree-repo"
+TREE_EXPORT="$TEST_ROOT/tree-export"
+mkdir -p "$TREE_REPO/alpha/tasks" "$TREE_REPO/alpha/decisions" "$TREE_REPO/beta/tasks" "$TREE_EXPORT"
+git -C "$TREE_REPO" init -q
+cp "$REPO/AGENTS.md" "$TREE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$TREE_REPO/INBOX.md"
+printf '# Alpha\n' >"$TREE_REPO/alpha/README.md"
+printf '# Beta\n' >"$TREE_REPO/beta/README.md"
+printf '%s\n' '---' 'id: TASK-7E001' 'status: in-progress' '---' '' '# First alpha task' \
+  >"$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
+printf '%s\n' '---' 'id: TASK-7E002' 'status: todo' 'blocked_by: [TASK-7E001]' 'wait_for:' \
+  '  - b/42' 'due: 2020-01-01' '---' '' '# Second alpha task' \
+  >"$TREE_REPO/alpha/tasks/TASK-7E002-second.md"
+printf '%s\n' '---' 'id: TASK-7E003' 'status: todo' 'blocked_by: [TASK-7E001]' '---' '' \
+  '# Beta task held by alpha' >"$TREE_REPO/beta/tasks/TASK-7E003-held.md"
+printf '%s\n' '# First decision' '' '## Context' '' 'x' '' '## Decision' '' 'x' '' \
+  '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0001-first.md"
+printf '%s\n' '---' 'supersedes: [0001]' '---' '' '# Second decision' '' '## Context' '' \
+  'See [the readme](../README.md) and [a missing note](missing.md).' '' '## Decision' '' 'x' '' \
+  '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0002-second.md"
+("$BIN" --root "$TREE_REPO" sync) >/dev/null 2>&1
+git -C "$TREE_REPO" add -A && git -C "$TREE_REPO" commit -qm 'tree fixture'
+git -C "$TREE_REPO" archive HEAD | tar -x -C "$TREE_EXPORT"
+# Uncommitted edits must not reach the commit's snapshot.
+sed -i.bak 's/^status: in-progress$/status: done/' "$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
+rm -f "$TREE_REPO/alpha/tasks/TASK-7E001-first.md.bak"
+if TREE_OUT=$(
+  uv run -q --no-project \
+    --with-requirements <(uv export -q --script "$BIN" --no-hashes) \
+    python - "$BIN" "$TREE_REPO" "$TREE_EXPORT" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+fs = tg.FsSnapshot(Path(sys.argv[3]))
+git = tg.GitTreeSnapshot(Path(sys.argv[2]), "HEAD")
+
+
+def audit(snap):
+    return [(f.severity, f.message, f.path) for f in tg.audit_snapshot(snap)]
+
+
+projects = tg.list_projects(fs)
+assert projects == tg.list_projects(git) == ["alpha", "beta"], projects
+assert tg.get_task_rows(fs) == tg.get_task_rows(git)
+for p in projects:
+    assert tg.get_adr_rows(fs, p) == tg.get_adr_rows(git, p), p
+    assert tg.render_status_file(fs, p) == tg.render_status_file(git, p), p
+findings = audit(fs)
+assert findings == audit(git), (findings, audit(git))
+assert any("stale file reference 'missing.md'" in m for _, m, _ in findings), findings
+assert any("overdue" in m for _, m, _ in findings), findings
+try:
+    git.write_text("INBOX.md", "# Inbox\n")
+    sys.exit("GitTreeSnapshot accepted a write")
+except tg.ReadOnlySnapshotError:
+    pass
+PY
+); then
+  echo 'ok 164 - a Git-tree snapshot reads the same as a checkout of its commit'
+else
+  echo 'not ok 164 - a Git-tree snapshot reads the same as a checkout of its commit'
+  printf '# %s\n' "$TREE_OUT"
 fi

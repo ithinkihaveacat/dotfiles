@@ -257,10 +257,30 @@ actively iterating in uncommitted working trees before forming a checkpoint).
 agents must prioritize the Markdown files as current state and Git as the
 historical record.
 
+## Snapshot Core
+
+Parsing, validation, rendering, formatting, audit, and task edits read and write
+repository files only through a `Snapshot`, addressed by repository-relative
+POSIX paths:
+
+- **`FsSnapshot`:** The working tree. Reads and writes go straight to disk;
+  every CLI command uses it.
+- **`GitTreeSnapshot`:** One commit's tree, read with `git ls-tree` and
+  `git cat-file --batch`, without a checkout. It is read-only; writes raise
+  `ReadOnlySnapshotError`.
+
+Rendering a commit's tree gives the same task rows, `STATUS.md`, and audit
+findings as rendering a checkout of it. Git commands that inspect the repository
+rather than its files (commit authority, shallow clones, staging, history) stay
+in the CLI commands. Task edits are `edit_task_text()` (text in, text out) and
+`update_task()` (edit, rename, and sync over a snapshot).
+
 ## Unified AuditEngine Architecture (`doctor`, `fix`, and `dispatch`)
 
 To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
-`AuditEngine` (`audit_workspace()`):
+`AuditEngine`: `audit_snapshot()` over a snapshot, wrapped by
+`audit_workspace()`, which adds the repository's shallow-clone check.
+Remediations write through the audited snapshot:
 
 - **`doctor` (Strictly Read-Only):** Runs the audit engine, renders findings
   with canonical 4-letter plain-ASCII tags (`[PASS]`, `[INFO]`, `[WARN]`,
