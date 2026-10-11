@@ -37,8 +37,10 @@ commits, so it never does.
 
 By default the server speaks MCP Streamable HTTP on `127.0.0.1:8789/mcp`,
 statelessly: each POST carries one JSON-RPC message and gets one JSON response.
-There is no server-initiated stream and no session. `--stdio` serves one local
-client on standard input and output instead, without authentication.
+There is no server-initiated stream and no session. `GET /up` answers 200
+without authentication and without reading the repository, for a reverse proxy's
+health check. `--stdio` serves one local client on standard input and output
+instead, without authentication.
 
 ## Authentication
 
