@@ -253,6 +253,7 @@ taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 taskgo schema [--json]
+taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio]
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.
@@ -271,6 +272,9 @@ taskgo schema [--json]
   repairs by default.
 - `checkpoint`: Safe automatic-commit path requiring
   `taskgo:allow-local-commits`. Enforces 50-char subject limits.
+- `mcp`: Serve committed state read-only to MCP clients, such as cloud agents
+  without a checkout of the control repository. See
+  [MCP Server](references/mcp.md).
 
 ## Reference Material
 
@@ -279,3 +283,5 @@ taskgo schema [--json]
 - **[Model & Architecture](references/model.md)**
 - **[Agent Workflows & Handoff](references/workflows.md)**
 - **[Activity Reports](references/activity-reports.md)**
+- **[MCP Server](references/mcp.md)** — `taskgo mcp` tools, authentication, and
+  testing

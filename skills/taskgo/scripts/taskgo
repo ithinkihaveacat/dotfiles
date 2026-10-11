@@ -10,6 +10,10 @@
 #     "mdurl==0.1.2",
 #     "wcwidth==0.9.1",
 #     "ruamel.yaml==0.19.1",
+#     "PyJWT==2.15.1",
+#     "cryptography==50.0.2",
+#     "cffi==2.1.1",
+#     "pycparser==3.0",
 # ]
 # ///
 
@@ -880,6 +884,7 @@ class GitTreeSnapshot(Snapshot):
         resolved = run_git(["rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=repo)
         self.rev = resolved.stdout.strip()
         self.blobs: dict[str, str] = {}
+        self.modes: dict[str, str] = {}
         self.children: dict[str, set[str]] = {"": set()}
         out = run_git(["ls-tree", "-r", "-z", "--full-tree", self.rev], cwd=repo)
         for entry in filter(None, out.stdout.split("\0")):
@@ -888,6 +893,7 @@ class GitTreeSnapshot(Snapshot):
             if kind != "blob" or mode not in ("100644", "100755"):
                 continue
             self.blobs[rel] = sha
+            self.modes[rel] = mode
             parts = rel.split("/")
             for i in range(len(parts)):
                 parent = "/".join(parts[:i])
@@ -4727,24 +4733,22 @@ def format_field_change(c: FieldChange) -> str:
     return f"{c.date}\t{c.before} -> {c.after}\t{c.sha[:10]}\t{c.subject}"
 
 
-def cmd_history(query: str, field: str = "status") -> None:
-    """Show frontmatter field history across git revisions."""
-    root = get_repo_root()
-    target_path = resolve_target(root, query, allow_deleted=True)
-    rel_path = str(target_path.relative_to(root))
-
+def file_versions(
+    repo: Path, rev: str, rel_path: str
+) -> list[tuple[str, str, str, str]]:
+    """Every committed version of REL_PATH reachable from REV, oldest first,
+    following renames, as field_history takes them."""
     cmd = [
         "log",
         "--follow",
         "--name-only",
         "--format=COMMIT:%H\t%ad\t%s",
         "--date=short",
+        rev,
         "--",
         rel_path,
     ]
-    res = run_git(cmd)
-    if not res.stdout.strip():
-        die(f"no git history for {rel_path}")
+    res = run_git(cmd, cwd=repo)
 
     entries: list[tuple[str, str, str, str]] = []
     cur_sha = ""
@@ -4765,10 +4769,22 @@ def cmd_history(query: str, field: str = "status") -> None:
 
     versions: list[tuple[str, str, str, str]] = []
     for sha, d, s, p in reversed(entries):
-        show_res = run_git(["show", f"{sha}:{p}"], check=False)
+        show_res = run_git(["show", f"{sha}:{p}"], cwd=repo, check=False)
         if show_res.returncode != 0:
             continue
         versions.append((sha, d, s, show_res.stdout))
+    return versions
+
+
+def cmd_history(query: str, field: str = "status") -> None:
+    """Show frontmatter field history across git revisions."""
+    root = get_repo_root()
+    target_path = resolve_target(root, query, allow_deleted=True)
+    rel_path = str(target_path.relative_to(root))
+
+    versions = file_versions(root, "HEAD", rel_path)
+    if not versions:
+        die(f"no git history for {rel_path}")
 
     for change in field_history(versions, field):
         print(format_field_change(change))
@@ -5037,6 +5053,790 @@ def cmd_commit(
     run_git(["commit", "--no-verify", "--no-gpg-sign", "-F", "-"], input_data=msg)
 
 
+# ===========================================================================
+# MCP server ('taskgo mcp'): read-only tools over committed state
+# ===========================================================================
+#
+# Each tools/call resolves one commit and reads only that commit, through a
+# GitTreeSnapshot, so a response is coherent even while main moves. Payloads
+# that the CLI also prints use the CLI's own functions, so they match the CLI
+# at that commit. The transport is MCP Streamable HTTP, stateless: each POST
+# carries one JSON-RPC message and gets one JSON response. Cloudflare Access
+# authenticates callers in front of the server; the server checks the Access
+# JWT on every request. --stdio serves one local client instead.
+
+MCP_SERVER_VERSION = "0.2.0"
+MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+MCP_MAX_FILE_BYTES = 256 * 1024
+MCP_MAX_REQUEST_BYTES = 1024 * 1024
+MCP_FETCH_TIMEOUT = 60
+MCP_CERTS_TTL = 3600
+MCP_LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+MCP_DATA_CARE = (
+    "Data care: everything this server returns is private tracker content. "
+    "Never copy it, or conversation links from it, into artifact repositories "
+    "(code, commits, pull request descriptions, issues, or files), which may "
+    "be public. Describe the work there in your own words, from the code."
+)
+
+MCP_UNVERIFIED = (
+    "External wait_for gates (bugs, changes, issues, people) are not checked by "
+    "this server; each is reported as unverified and treated as still holding "
+    "its task. Run 'taskgo check' locally to poll them."
+)
+
+MCP_INSTRUCTIONS = f"""\
+This server reads a taskgo control repository: a private Git repository of
+Markdown that tracks projects, tasks (TASK-XXXXX), decisions, and each
+project's STATUS.md. It is read-only.
+
+Start with list_projects or list_tasks (state 'ready' for workable tasks),
+then get_task and get_project_status. dispatch_task gives the briefing note
+for a task. Every response names the commit it read in as_of.commit; pass it
+as 'at' to keep several reads on the same commit.
+
+{MCP_DATA_CARE}
+
+{MCP_UNVERIFIED}"""
+
+
+class McpToolError(Exception):
+    """A refusal reported to the MCP client as a tool error."""
+
+
+@dataclass(slots=True)
+class McpConfig:
+    repo: Path
+    remote: str | None  # None reads the local branch without fetching
+    branch: str
+    auth: Literal["access", "none"]
+    team: str | None = None
+    audience: str | None = None
+    certs_url: str | None = None
+
+
+class McpReader:
+    """Resolves commits of one control repository and keeps their snapshots.
+
+    Snapshots are immutable per commit, so the few most recent are kept.
+    """
+
+    KEEP = 4
+
+    def __init__(self, cfg: McpConfig):
+        self.cfg = cfg
+        self.snaps: dict[str, tuple[GitTreeSnapshot, int]] = {}
+
+    def git(self, *args: str) -> subprocess.CompletedProcess:
+        return run_git(list(args), cwd=self.cfg.repo, check=False)
+
+    def fetch(self) -> None:
+        cfg = self.cfg
+        try:
+            res = subprocess.run(
+                ["git", "fetch", "--quiet", "--no-tags", cfg.remote, cfg.branch],
+                cwd=cfg.repo,
+                capture_output=True,
+                text=True,
+                timeout=MCP_FETCH_TIMEOUT,
+                env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise McpToolError(
+                f"could not fetch {cfg.branch} from {cfg.remote} (timed out); "
+                "pass an earlier as_of.commit as 'at' to read it"
+            ) from None
+        if res.returncode != 0:
+            print(f"taskgo mcp: fetch failed: {res.stderr.strip()}", file=sys.stderr)
+            raise McpToolError(
+                f"could not fetch {cfg.branch} from {cfg.remote}; pass an "
+                "earlier as_of.commit as 'at' to read it"
+            )
+
+    def resolve(self, at: Any) -> str:
+        """The commit to read: AT when given, else the head of the branch."""
+        if at:
+            if not isinstance(at, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", at):
+                raise McpToolError(f"'at' is not a commit SHA: {at!r}")
+            res = self.git("rev-parse", "--verify", "--quiet", f"{at}^{{commit}}")
+            if res.returncode != 0 and self.cfg.remote:
+                # Perhaps newer than the last fetch.
+                self.fetch()
+                res = self.git("rev-parse", "--verify", "--quiet", f"{at}^{{commit}}")
+            if res.returncode != 0:
+                raise McpToolError(f"no commit {at} in the control repository")
+            return res.stdout.strip()
+        if self.cfg.remote:
+            self.fetch()
+            ref = f"refs/remotes/{self.cfg.remote}/{self.cfg.branch}"
+        else:
+            ref = f"refs/heads/{self.cfg.branch}"
+        res = self.git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        if res.returncode != 0:
+            raise McpToolError(f"{ref} does not exist in the control repository")
+        return res.stdout.strip()
+
+    def snapshot(self, sha: str) -> tuple[GitTreeSnapshot, int]:
+        """The snapshot of commit SHA and its commit time (Unix seconds)."""
+        if sha in self.snaps:
+            self.snaps[sha] = self.snaps.pop(sha)  # most recent last
+            return self.snaps[sha]
+        snap = GitTreeSnapshot(self.cfg.repo, sha)
+        committed = int(self.git("show", "-s", "--format=%ct", sha).stdout.strip())
+        self.snaps[sha] = (snap, committed)
+        while len(self.snaps) > self.KEEP:
+            self.snaps.pop(next(iter(self.snaps)))
+        return snap, committed
+
+
+@dataclass(slots=True)
+class McpRead:
+    """One tool call's view: a commit, its snapshot, and the reader."""
+
+    reader: McpReader
+    snap: GitTreeSnapshot
+    committed: int
+
+    def as_of(self) -> dict[str, Any]:
+        return {
+            "commit": self.snap.rev,
+            "committed_at": datetime.fromtimestamp(
+                self.committed, timezone.utc
+            ).isoformat(),
+            "today": get_today(self.snap).isoformat(),
+            "timezone": repo_timezone_name(self.snap),
+        }
+
+
+def mcp_unverified_gates(rows: list[TaskRow]) -> dict[str, list[str]]:
+    out = {}
+    for r in rows:
+        gates = [g for g in r.wait_for if parse_iso_date(g) is None]
+        if gates and r.status not in RESOLVED_STATES:
+            out[r.task_id] = gates
+    return out
+
+
+def mcp_find_task(snap: GitTreeSnapshot, task_id: Any) -> TaskRow:
+    task_id = str(task_id or "").strip().upper()
+    if not ID_PATTERN.match(task_id):
+        raise McpToolError(f"not a task ID: {task_id!r} (expected TASK-XXXXX)")
+    matches = [r for r in get_task_rows(snap) if r.task_id == task_id]
+    if not matches:
+        raise McpToolError(f"{task_id} is not in commit {snap.rev[:12]}")
+    if len(matches) > 1:
+        paths = ", ".join(r.rel_path for r in matches)
+        raise McpToolError(f"{task_id} names more than one record: {paths}")
+    return matches[0]
+
+
+def mcp_project(snap: GitTreeSnapshot, project: Any) -> str:
+    if not isinstance(project, str) or not is_project(snap, project):
+        raise McpToolError(f"unknown project: {project}")
+    return project
+
+
+def mcp_path(path: Any) -> str:
+    path = str(path or "").strip().strip("/")
+    parts = path.split("/") if path else []
+    if any(p in ("", ".", "..") for p in parts) or "\\" in path:
+        raise McpToolError(f"invalid path: {path!r}")
+    if parts and parts[0].startswith(".git"):
+        raise McpToolError(f"invalid path: {path!r}")
+    return path
+
+
+def mcp_list_projects(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "as_of": r.as_of(),
+        "projects": [project_status_json(r.snap, p) for p in list_projects(r.snap)],
+    }
+
+
+def mcp_list_tasks(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    project = args.get("project")
+    if project:
+        mcp_project(r.snap, project)
+    state = args.get("state")
+    if state and state.strip().lower() != "ready" and canonical_status(state) is None:
+        raise McpToolError(f"unknown state: {state}")
+    rows = select_task_rows(r.snap, project, state)
+    return {
+        "as_of": r.as_of(),
+        "tasks": [task_row_json(row) for row in rows],
+        "unverified_gates": mcp_unverified_gates(rows),
+    }
+
+
+def mcp_get_task(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    row = mcp_find_task(r.snap, args.get("id"))
+    content = r.snap.read_text(row.rel_path)
+    fm, _ = parse_frontmatter(content)
+    return {
+        "as_of": r.as_of(),
+        "task": task_row_json(row),
+        "blob": r.snap.blobs[row.rel_path],
+        "frontmatter": _to_jsonable(fm),
+        "sections": record_sections(content, TASK_SCHEMA),
+        "unresolved_blocked_by": unresolved_blockers(row, status_index(r.snap)),
+        "unresolved_wait_for": unresolved_wait_for(row, get_today(r.snap)),
+        "unverified_gates": mcp_unverified_gates([row]).get(row.task_id, []),
+        "content": content,
+    }
+
+
+def mcp_get_project_status(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    project = mcp_project(r.snap, args.get("project"))
+    rel = f"{project}/STATUS.md"
+    committed = r.snap.read_text(rel) if r.snap.is_file(rel) else None
+    fresh = format_markdown(render_status_file(r.snap, project))
+
+    def block(text: str | None) -> str | None:
+        if text is None:
+            return None
+        sections = record_sections(text, STATUS_SCHEMA)
+        return next((s["text"] for s in sections if s["name"] == "snapshot"), None)
+
+    committed_block = block(committed)
+    fresh_block = block(fresh)
+    return {
+        "as_of": r.as_of(),
+        "project": project,
+        "path": rel,
+        "blob": r.snap.blobs.get(rel),
+        "sections": (
+            record_sections(committed, STATUS_SCHEMA) if committed is not None else []
+        ),
+        "committed_block": committed_block,
+        "fresh_block": fresh_block,
+        "block_current": committed_block == fresh_block,
+        "unverified_gates": mcp_unverified_gates(get_task_rows(r.snap, project)),
+        "content": committed,
+    }
+
+
+def mcp_read_file(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    rel = mcp_path(args.get("path"))
+    sha = r.snap.blobs.get(rel)
+    if sha is None:
+        if r.snap.is_dir(rel):
+            raise McpToolError(f"{rel} is a directory; use list_files")
+        raise McpToolError(f"{rel} is not in commit {r.snap.rev[:12]}")
+    size = int(r.reader.git("cat-file", "-s", sha).stdout.strip())
+    if size > MCP_MAX_FILE_BYTES:
+        raise McpToolError(
+            f"{rel} is {size} bytes; the server returns files up to "
+            f"{MCP_MAX_FILE_BYTES} bytes"
+        )
+    raw = run_git(["cat-file", "blob", sha], cwd=r.reader.cfg.repo, text=False).stdout
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise McpToolError(f"{rel} is not UTF-8 text") from None
+    return {"as_of": r.as_of(), "path": rel, "blob": sha, "size": size, "content": text}
+
+
+def mcp_list_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    prefix = mcp_path(args.get("prefix"))
+    if prefix and not r.snap.exists(prefix):
+        raise McpToolError(f"{prefix} is not in commit {r.snap.rev[:12]}")
+    files = [
+        {"path": rel, "blob": sha, "executable": r.snap.modes[rel] == "100755"}
+        for rel, sha in sorted(r.snap.blobs.items())
+        if not prefix or rel == prefix or rel.startswith(prefix + "/")
+    ]
+    return {"as_of": r.as_of(), "files": files}
+
+
+def mcp_dispatch_task(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    row = mcp_find_task(r.snap, args.get("id"))
+    content = r.snap.read_text(row.rel_path)
+    try:
+        plan = plan_dispatch(
+            r.snap, row.rel_path, content, audit_snapshot(r.snap, row.project)
+        )
+    except TaskgoError as e:
+        raise McpToolError(str(e)) from None
+    note = dispatch_note(plan, f"{row.project}/STATUS.md", row.rel_path)
+    note += (
+        "\n\nThese paths are in the taskgo control repository, not in your "
+        "checkout: read them with this server's get_project_status and get_task "
+        f"tools, at commit {r.snap.rev[:12]}.\n\n{MCP_DATA_CARE}"
+    )
+    return {
+        "as_of": r.as_of(),
+        "task": task_row_json(row),
+        "findings": [{"severity": s, "message": m} for s, m in plan.findings],
+        "unverified_gates": mcp_unverified_gates([row]).get(row.task_id, []),
+        "note": note,
+    }
+
+
+def mcp_get_task_history(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    row = mcp_find_task(r.snap, args.get("id"))
+    field = str(args.get("field") or "status").strip()
+    versions = file_versions(r.reader.cfg.repo, r.snap.rev, row.rel_path)
+    changes = field_history(versions, field)
+    return {
+        "as_of": r.as_of(),
+        "task": task_row_json(row),
+        "field": field,
+        "changes": [
+            {
+                "date": c.date,
+                "before": c.before,
+                "after": c.after,
+                "commit": c.sha,
+                "subject": c.subject,
+            }
+            for c in changes
+        ],
+        "text": "\n".join(format_field_change(c) for c in changes),
+    }
+
+
+MCP_AT = {
+    "type": "string",
+    "description": (
+        "Commit SHA to read. Omit to read the head of main; pass the 'commit' "
+        "from an earlier response to keep several reads on one commit."
+    ),
+}
+MCP_TASK_ID = {"type": "string", "description": "Task ID, TASK-XXXXX."}
+MCP_PROJECT = {"type": "string", "description": "Project name."}
+
+
+@dataclass(slots=True, frozen=True)
+class McpTool:
+    name: str
+    description: str
+    properties: dict[str, Any]
+    required: tuple[str, ...]
+    handler: Callable[[McpRead, dict[str, Any]], dict[str, Any]]
+
+    def listing(self) -> dict[str, Any]:
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {**self.properties, "at": MCP_AT},
+        }
+        if self.required:
+            schema["required"] = list(self.required)
+        return {
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": schema,
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        }
+
+
+MCP_TOOLS = [
+    McpTool(
+        "list_projects",
+        "List the projects in the taskgo control repository, with task counts "
+        "and in-progress and blocked task IDs (as 'taskgo status --json').",
+        {},
+        (),
+        mcp_list_projects,
+    ),
+    McpTool(
+        "list_tasks",
+        "List tasks, optionally for one project and one state (as 'taskgo list "
+        "--json'). State 'ready' means todo with no unresolved blocked_by or "
+        "wait_for, soonest due date first.",
+        {
+            "project": MCP_PROJECT,
+            "state": {
+                "type": "string",
+                "description": "todo, in-progress, blocked, done, cancelled, or ready.",
+            },
+        },
+        (),
+        mcp_list_tasks,
+    ),
+    McpTool(
+        "get_task",
+        "Read one task record by ID: frontmatter, sections with hashes, "
+        "unresolved dependencies, and the full Markdown.",
+        {"id": MCP_TASK_ID},
+        ("id",),
+        mcp_get_task,
+    ),
+    McpTool(
+        "get_project_status",
+        "Read a project's STATUS.md: Summary and Next with hashes, the committed "
+        "task snapshot block, and a freshly computed block for today (they "
+        "differ when dates have moved since the last sync).",
+        {"project": MCP_PROJECT},
+        ("project",),
+        mcp_get_project_status,
+    ),
+    McpTool(
+        "read_file",
+        "Read any UTF-8 text file in the control repository by its "
+        f"repository-relative path, up to {MCP_MAX_FILE_BYTES // 1024} KiB.",
+        {
+            "path": {
+                "type": "string",
+                "description": "Path such as 'taskgo/PLAN.md'.",
+            }
+        },
+        ("path",),
+        mcp_read_file,
+    ),
+    McpTool(
+        "list_files",
+        "List the files in the control repository, or under one directory, "
+        "with their blob SHAs.",
+        {
+            "prefix": {
+                "type": "string",
+                "description": "Directory or file path; omit for all files.",
+            }
+        },
+        (),
+        mcp_list_files,
+    ),
+    McpTool(
+        "dispatch_task",
+        "Produce the dispatch note for an unfinished task (as 'taskgo "
+        "dispatch'), with readiness and audit findings and the data-care rule.",
+        {"id": MCP_TASK_ID},
+        ("id",),
+        mcp_dispatch_task,
+    ),
+    McpTool(
+        "get_task_history",
+        "Show how one frontmatter field of a task (default 'status') changed "
+        "across commits, following renames (as 'taskgo history').",
+        {
+            "id": MCP_TASK_ID,
+            "field": {
+                "type": "string",
+                "description": "Frontmatter field; default 'status'.",
+            },
+        },
+        ("id",),
+        mcp_get_task_history,
+    ),
+]
+MCP_TOOLS_BY_NAME = {t.name: t for t in MCP_TOOLS}
+
+
+class McpAuthError(Exception):
+    pass
+
+
+class AccessVerifier:
+    """Checks Cloudflare Access JWTs (Cf-Access-Jwt-Assertion): RS256
+    signature against the team's certificates, issuer, audience, and expiry."""
+
+    def __init__(self, team: str, audience: str, certs_url: str | None = None):
+        import jwt  # Only the server needs it.
+
+        self.jwt = jwt
+        self.team, self.audience = team, audience
+        self.jwks = jwt.PyJWKClient(
+            certs_url or f"https://{team}/cdn-cgi/access/certs",
+            cache_keys=True,
+            lifespan=MCP_CERTS_TTL,
+            # Cloudflare refuses urllib's default user agent.
+            headers={"User-Agent": f"taskgo-mcp/{MCP_SERVER_VERSION}"},
+            timeout=10,
+        )
+
+    def verify(self, token: str) -> dict[str, Any]:
+        jwt = self.jwt
+        try:
+            key = self.jwks.get_signing_key_from_jwt(token)
+            return jwt.decode(
+                token,
+                key.key,
+                algorithms=["RS256"],
+                audience=self.audience,
+                issuer=f"https://{self.team}",
+                leeway=60,
+                options={"require": ["exp", "iss", "aud"]},
+            )
+        except jwt.ExpiredSignatureError:
+            raise McpAuthError("Access token expired") from None
+        except jwt.InvalidAudienceError:
+            raise McpAuthError("Access token for another application") from None
+        except jwt.InvalidIssuerError:
+            raise McpAuthError("Access token from another team") from None
+        except jwt.PyJWKClientError as e:
+            raise McpAuthError(f"Access token key not usable: {e}") from None
+        except jwt.PyJWTError as e:
+            raise McpAuthError(f"Access token refused: {e}") from None
+
+
+def mcp_rpc_result(msg_id: Any, result: Any) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+
+def mcp_rpc_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+def mcp_tool_error(message: str) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": message}], "isError": True}
+
+
+class McpServer:
+    """The JSON-RPC methods, shared by the HTTP and stdio transports.
+
+    Calls are serialized: they share the Git repository and snapshot cache,
+    and the core is not written for concurrent use.
+    """
+
+    def __init__(self, cfg: McpConfig):
+        import threading
+
+        self.reader = McpReader(cfg)
+        self.lock = threading.Lock()
+
+    def handle(self, msg: Any) -> dict[str, Any] | None:
+        """The response to MSG, or None for a notification or response."""
+        if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+            return mcp_rpc_error(None, -32600, "invalid request")
+        if "method" not in msg or "id" not in msg:
+            return None
+        msg_id, method = msg["id"], msg["method"]
+        params = msg.get("params") or {}
+        if method == "initialize":
+            requested = params.get("protocolVersion")
+            version = (
+                requested
+                if requested in MCP_PROTOCOL_VERSIONS
+                else MCP_PROTOCOL_VERSIONS[0]
+            )
+            return mcp_rpc_result(
+                msg_id,
+                {
+                    "protocolVersion": version,
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {"name": "taskgo", "version": MCP_SERVER_VERSION},
+                    "instructions": MCP_INSTRUCTIONS,
+                },
+            )
+        if method == "ping":
+            return mcp_rpc_result(msg_id, {})
+        if method == "tools/list":
+            return mcp_rpc_result(msg_id, {"tools": [t.listing() for t in MCP_TOOLS]})
+        if method == "tools/call":
+            return mcp_rpc_result(msg_id, self.call_tool(params))
+        return mcp_rpc_error(msg_id, -32601, f"method not found: {method}")
+
+    def call_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+        tool = MCP_TOOLS_BY_NAME.get(params.get("name"))
+        if tool is None:
+            return mcp_tool_error(f"unknown tool: {params.get('name')}")
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return mcp_tool_error("arguments must be an object")
+        started = time.monotonic()
+        with self.lock:
+            try:
+                sha = self.reader.resolve(args.get("at"))
+                snap, committed = self.reader.snapshot(sha)
+                result = tool.handler(McpRead(self.reader, snap, committed), args)
+            except McpToolError as e:
+                return mcp_tool_error(str(e))
+            except SystemExit:
+                # The core died with its message on stderr.
+                return mcp_tool_error("the taskgo core refused the request")
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+                return mcp_tool_error("internal error; see the server log")
+        ms = int((time.monotonic() - started) * 1000)
+        print(f"taskgo mcp: {tool.name} {sha[:12]} {ms} ms", file=sys.stderr)
+        return {
+            "content": [{"type": "text", "text": json.dumps(result, indent=1)}],
+            "structuredContent": result,
+            "isError": False,
+        }
+
+
+def mcp_serve_stdio(server: McpServer) -> None:
+    """Newline-delimited JSON-RPC on stdin and stdout, for one local client."""
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            reply: dict[str, Any] | None = mcp_rpc_error(None, -32700, "parse error")
+        else:
+            reply = server.handle(msg)
+        if reply is not None:
+            sys.stdout.write(json.dumps(reply) + "\n")
+            sys.stdout.flush()
+
+
+def mcp_is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    host = host.strip().lower()
+    if host.startswith("["):  # [::1]:8080
+        host = host[1 : host.find("]")]
+    elif host.count(":") == 1:  # localhost:8080
+        host = host.split(":", 1)[0]
+    return host in MCP_LOOPBACK
+
+
+def mcp_serve_http(
+    server: McpServer, cfg: McpConfig, host: str, port: int, path: str
+) -> None:
+    import http.server
+    from urllib.parse import urlsplit
+
+    verifier = (
+        AccessVerifier(cfg.team or "", cfg.audience or "", cfg.certs_url)
+        if cfg.auth == "access"
+        else None
+    )
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        server_version = f"taskgo-mcp/{MCP_SERVER_VERSION}"
+        protocol_version = "HTTP/1.1"
+
+        def reply(self, status: int, body: Any = None, allow: str | None = None):
+            data = b""
+            ctype = "text/plain; charset=utf-8"
+            if isinstance(body, (dict, list)):
+                data = json.dumps(body).encode()
+                ctype = "application/json"
+            elif body is not None:
+                data = str(body).encode()
+            self.send_response(status)
+            if data:
+                self.send_header("Content-Type", ctype)
+            if allow:
+                self.send_header("Allow", allow)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def refused(self) -> bool:
+            """Replies and returns True when the request may not proceed."""
+            if urlsplit(self.path).path != path:
+                self.reply(404, "not found")
+                return True
+            if verifier is None:
+                # Unauthenticated mode serves only requests addressed to a
+                # loopback name, from a page on one if from a browser at all.
+                origin = self.headers.get("Origin")
+                if not mcp_is_loopback(self.headers.get("Host")) or (
+                    origin and not mcp_is_loopback(urlsplit(origin).netloc)
+                ):
+                    self.reply(403, "forbidden")
+                    return True
+                return False
+            token = self.headers.get("Cf-Access-Jwt-Assertion")
+            if not token:
+                self.reply(401, "Cloudflare Access token required")
+                return True
+            try:
+                verifier.verify(token)
+            except McpAuthError as e:
+                self.reply(403, str(e))
+                return True
+            return False
+
+        def do_POST(self):
+            if self.refused():
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0 or length > MCP_MAX_REQUEST_BYTES:
+                self.reply(413, "request too large")
+                return
+            try:
+                msg = json.loads(self.rfile.read(length))
+            except ValueError:
+                self.reply(400, mcp_rpc_error(None, -32700, "parse error"))
+                return
+            reply = server.handle(msg)
+            if reply is None:
+                self.reply(202)
+            elif "error" in reply and reply["error"]["code"] == -32600:
+                self.reply(400, reply)
+            else:
+                self.reply(200, reply)
+
+        def do_GET(self):
+            # No server-initiated stream, and no sessions to delete.
+            if not self.refused():
+                self.reply(405, "method not allowed", allow="POST")
+
+        def do_DELETE(self):
+            self.do_GET()
+
+        def log_message(self, format, *args):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer((host, port), Handler)
+    print(
+        f"taskgo mcp: serving {display_path(cfg.repo)} on http://{host}:{port}{path} "
+        f"(auth {cfg.auth})",
+        file=sys.stderr,
+    )
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+
+
+def cmd_mcp(
+    host: str = "127.0.0.1",
+    port: int = 8789,
+    path: str = "/mcp",
+    remote: str = "origin",
+    branch: str = "main",
+    no_fetch: bool = False,
+    auth: str = "access",
+    team: str | None = None,
+    audience: str | None = None,
+    stdio: bool = False,
+) -> None:
+    """Serve the control repository's committed state over MCP, read-only."""
+    root = get_repo_root()
+    team = team or os.environ.get("TASKGO_MCP_ACCESS_TEAM")
+    audience = audience or os.environ.get("TASKGO_MCP_ACCESS_AUD")
+    if stdio:
+        auth = "none"
+    if auth == "access" and not (team and audience):
+        die_scoped(
+            "Access needs --access-team and --access-aud (or TASKGO_MCP_ACCESS_TEAM "
+            "and TASKGO_MCP_ACCESS_AUD); --auth none serves loopback only"
+        )
+    if auth == "none" and not stdio and not mcp_is_loopback(host):
+        die_scoped(f"--auth none serves loopback only, not {host}")
+    if not no_fetch and run_git(["remote", "get-url", remote], check=False).returncode:
+        die_scoped(
+            f"no remote '{remote}' to fetch from; pass --no-fetch to read {branch}"
+        )
+    cfg = McpConfig(
+        repo=root,
+        remote=None if no_fetch else remote,
+        branch=branch,
+        auth="access" if auth == "access" else "none",
+        team=team,
+        audience=audience,
+        certs_url=os.environ.get("TASKGO_MCP_ACCESS_CERTS_URL") or None,
+    )
+    server = McpServer(cfg)
+    if stdio:
+        mcp_serve_stdio(server)
+    else:
+        mcp_serve_http(server, cfg, host, port, path)
+
+
 class HouseStyleHelpFormatter(argparse.RawDescriptionHelpFormatter):
     """Capitalizes argparse's fixed help headings to match the CLI house style."""
 
@@ -5073,6 +5873,7 @@ Commands:
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
+  mcp [OPTIONS]                    Serve committed state to MCP clients (read-only)
 
 Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
@@ -5521,6 +6322,71 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         help="Apply repairs on disk without committing",
     )
 
+    # mcp
+    p_mcp = subparsers.add_parser(
+        "mcp",
+        help="Serve the control repository's committed state over MCP",
+        description=textwrap.dedent(
+            """\
+            Serve the control repository's committed state to MCP clients,
+            read-only, over Streamable HTTP (stateless, one JSON response per
+            message) or, with --stdio, to one local client.
+
+            Each tool call fetches BRANCH from REMOTE, resolves it once, and
+            reads only that commit; it never touches the working tree.
+            Cloudflare Access, with Managed OAuth, is meant to sit in front
+            of the server, and the server checks the Access JWT of every
+            request (issuer, audience, signature, expiry). --auth none skips
+            the check and serves only requests addressed to a loopback name.
+
+            Environment:
+              TASKGO_MCP_ACCESS_TEAM  Default for --access-team
+              TASKGO_MCP_ACCESS_AUD   Default for --access-aud"""
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_mcp.add_argument(
+        "--host", default="127.0.0.1", help="Address to listen on (default 127.0.0.1)"
+    )
+    p_mcp.add_argument(
+        "--port", type=int, default=8789, help="Port to listen on (default 8789)"
+    )
+    p_mcp.add_argument("--path", default="/mcp", help="Endpoint path (default /mcp)")
+    p_mcp.add_argument(
+        "--remote", default="origin", help="Remote to fetch from (default origin)"
+    )
+    p_mcp.add_argument(
+        "--branch", default="main", help="Branch to serve (default main)"
+    )
+    p_mcp.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="Serve the local BRANCH without fetching",
+    )
+    p_mcp.add_argument(
+        "--auth",
+        choices=["access", "none"],
+        default="access",
+        help="Check Cloudflare Access JWTs (default) or nothing (loopback only)",
+    )
+    p_mcp.add_argument(
+        "--access-team",
+        metavar="DOMAIN",
+        default=None,
+        help="Access team domain, such as example.cloudflareaccess.com",
+    )
+    p_mcp.add_argument(
+        "--access-aud",
+        metavar="TAG",
+        default=None,
+        help="Access application audience (AUD) tag",
+    )
+    p_mcp.add_argument(
+        "--stdio",
+        action="store_true",
+        help="Serve one client on stdin and stdout instead (no authentication)",
+    )
+
     # history
     p_history = subparsers.add_parser(
         "history",
@@ -5737,6 +6603,19 @@ def main(argv: list[str] | None = None) -> None:
             project=args.project,
             dry_run=args.dry_run,
             no_commit=args.no_commit,
+        )
+    elif args.command == "mcp":
+        cmd_mcp(
+            host=args.host,
+            port=args.port,
+            path=args.path,
+            remote=args.remote,
+            branch=args.branch,
+            no_fetch=args.no_fetch,
+            auth=args.auth,
+            team=args.access_team,
+            audience=args.access_aud,
+            stdio=args.stdio,
         )
     elif args.command == "history":
         cmd_history(

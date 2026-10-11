@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..168'
+echo '1..171'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3318,4 +3318,61 @@ if [[ $OC_DR == *"TASK-0C002-t.md: done task has no ## Outcome text"* &&
 else
   echo 'not ok 168 - doctor notes done tasks without Outcome text'
   printf '# %s\n' "$OC_DR"
+fi
+
+# 'taskgo mcp' reads the committed tree only: the uncommitted status edit to
+# TASK-7E001 above must not show.
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+MCP_OUT=$(
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_task","arguments":{"id":"TASK-7E001"}}}' |
+    "$BIN" --root "$TREE_REPO" mcp --stdio --no-fetch 2>/dev/null |
+    "$MCP_PY" -c '
+import json, sys
+init, tools, task = (json.loads(line) for line in sys.stdin)
+names = [t["name"] for t in tools["result"]["tools"]]
+assert init["result"]["serverInfo"]["name"] == "taskgo", init
+assert "Data care" in init["result"]["instructions"]
+assert len(names) == 8 and all(
+    t["annotations"]["readOnlyHint"] for t in tools["result"]["tools"]
+), names
+got = task["result"]["structuredContent"]
+print(got["as_of"]["commit"], got["task"]["status"])
+'
+) || true
+if [[ $MCP_OUT == "$(git -C "$TREE_REPO" rev-parse HEAD) in-progress" ]]; then
+  echo 'ok 169 - mcp serves the committed tree over stdio'
+else
+  echo 'not ok 169 - mcp serves the committed tree over stdio'
+  printf '# %s\n' "$MCP_OUT"
+fi
+
+# Every tool's output matches the CLI's at the served commit.
+MCP_SYNTH="$TEST_ROOT/synthetic"
+MCP_PORT=$("$MCP_PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+"$TEST_DIR/make-synthetic" "$MCP_SYNTH" >/dev/null 2>&1
+"$BIN" --root "$MCP_SYNTH" mcp --no-fetch --auth none --port "$MCP_PORT" 2>/dev/null &
+MCP_PID=$!
+for _ in $(seq 100); do
+  "$MCP_PY" -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1)' \
+    "$MCP_PORT" 2>/dev/null && break
+  sleep 0.1
+done
+if MCP_CMP=$("$MCP_PY" "$TEST_DIR/compare-cli" "http://127.0.0.1:$MCP_PORT/mcp" "$MCP_SYNTH" 2>&1); then
+  echo 'ok 170 - mcp tools match the CLI on a synthetic tracker'
+else
+  echo 'not ok 170 - mcp tools match the CLI on a synthetic tracker'
+  printf '# %s\n' "$MCP_CMP"
+fi
+kill "$MCP_PID" 2>/dev/null || true
+wait "$MCP_PID" 2>/dev/null || true
+
+if MCP_AUTH=$("$MCP_PY" "$TEST_DIR/auth-check" 2>&1); then
+  echo 'ok 171 - mcp checks Cloudflare Access tokens'
+else
+  echo 'not ok 171 - mcp checks Cloudflare Access tokens'
+  printf '# %s\n' "$MCP_AUTH"
 fi

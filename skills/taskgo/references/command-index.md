@@ -48,6 +48,7 @@ Commands:
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
+  mcp [OPTIONS]                    Serve committed state to MCP clients (read-only)
 
 Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
@@ -466,6 +467,50 @@ read it; --json is the conformance form for other implementations.
 options:
   -h, --help  show this help message and exit
   --json      Output as JSON
+```
+
+<!-- /generated -->
+
+## mcp
+
+<!-- generated: ../scripts/taskgo mcp --help -->
+
+```text
+usage: taskgo mcp [-h] [--host HOST] [--port PORT] [--path PATH]
+                  [--remote REMOTE] [--branch BRANCH] [--no-fetch]
+                  [--auth {access,none}] [--access-team DOMAIN]
+                  [--access-aud TAG] [--stdio]
+
+Serve the control repository's committed state to MCP clients,
+read-only, over Streamable HTTP (stateless, one JSON response per
+message) or, with --stdio, to one local client.
+
+Each tool call fetches BRANCH from REMOTE, resolves it once, and
+reads only that commit; it never touches the working tree.
+Cloudflare Access, with Managed OAuth, is meant to sit in front
+of the server, and the server checks the Access JWT of every
+request (issuer, audience, signature, expiry). --auth none skips
+the check and serves only requests addressed to a loopback name.
+
+Environment:
+  TASKGO_MCP_ACCESS_TEAM  Default for --access-team
+  TASKGO_MCP_ACCESS_AUD   Default for --access-aud
+
+options:
+  -h, --help            show this help message and exit
+  --host HOST           Address to listen on (default 127.0.0.1)
+  --port PORT           Port to listen on (default 8789)
+  --path PATH           Endpoint path (default /mcp)
+  --remote REMOTE       Remote to fetch from (default origin)
+  --branch BRANCH       Branch to serve (default main)
+  --no-fetch            Serve the local BRANCH without fetching
+  --auth {access,none}  Check Cloudflare Access JWTs (default) or nothing
+                        (loopback only)
+  --access-team DOMAIN  Access team domain, such as
+                        example.cloudflareaccess.com
+  --access-aud TAG      Access application audience (AUD) tag
+  --stdio               Serve one client on stdin and stdout instead (no
+                        authentication)
 ```
 
 <!-- /generated -->

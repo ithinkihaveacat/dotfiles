@@ -1,0 +1,237 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "cryptography==50.0.2",
+#     "cffi==2.1.1",
+#     "pycparser==3.0",
+# ]
+# ///
+"""Checks the Access JWT validation of 'taskgo mcp' against locally signed
+tokens.
+
+Usage: auth-check
+
+Serves a JWKS with a throwaway RSA key on a loopback port and starts
+'taskgo mcp' on a throwaway repository, trusting that JWKS (team
+'test.invalid', audience 'test-aud'). Then sends a valid token, bad ones, and
+none, and checks each status code. Last, checks that '--auth none' refuses a
+request addressed to another host. Prints TAP.
+"""
+
+import base64
+import http.server
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+CLI = Path(__file__).resolve().parent.parent / "scripts" / "taskgo"
+TEAM, AUD = "test.invalid", "test-aud"
+
+
+def b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def jwk(key, kid: str) -> dict:
+    n = key.public_key().public_numbers()
+    return {
+        "kid": kid,
+        "kty": "RSA",
+        "alg": "RS256",
+        "use": "sig",
+        "n": b64(n.n.to_bytes((n.n.bit_length() + 7) // 8, "big")),
+        "e": b64(n.e.to_bytes(3, "big")),
+    }
+
+
+def token(key, kid: str, alg: str = "RS256", **claims) -> str:
+    now = int(time.time())
+    body = {
+        "iss": f"https://{TEAM}",
+        "aud": [AUD],
+        "email": "test@example.com",
+        "iat": now,
+        "nbf": now,
+        "exp": now + 300,
+        **claims,
+    }
+    head = b64(json.dumps({"alg": alg, "kid": kid, "typ": "JWT"}).encode())
+    payload = b64(json.dumps(body).encode())
+    if alg == "none":
+        return f"{head}.{payload}."
+    sig = key.sign(f"{head}.{payload}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    return f"{head}.{payload}.{b64(sig)}"
+
+
+def status(url: str, tok: str | None, host: str | None = None) -> int:
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    headers = {"content-type": "application/json"}
+    if tok:
+        headers["cf-access-jwt-assertion"] = tok
+    if host:
+        headers["host"] = host
+    req = urllib.request.Request(url, json.dumps(msg).encode(), headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def serve(repo: Path, port: int, *args: str, env: dict | None = None):
+    proc = subprocess.Popen(
+        [
+            str(CLI),
+            "--root",
+            str(repo),
+            "mcp",
+            "--no-fetch",
+            "--port",
+            str(port),
+            *args,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    url = f"http://127.0.0.1:{port}/mcp"
+    for _ in range(300):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return proc, url
+        except OSError:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+    proc.kill()
+    sys.exit(f"auth-check: taskgo mcp did not start on port {port}")
+
+
+def main() -> None:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwks = json.dumps({"keys": [jwk(key, "k1")]}).encode()
+
+    class Certs(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(jwks)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Certs)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    certs = f"http://127.0.0.1:{httpd.server_address[1]}/certs"
+
+    now = int(time.time())
+    cases = [
+        ("valid token", token(key, "k1"), 200),
+        ("audience in a list of several", token(key, "k1", aud=["x", AUD]), 200),
+        ("no token", None, 401),
+        ("malformed token", "not.a.jwt", 403),
+        ("unsigned token", token(key, "k1", alg="none"), 403),
+        ("wrong audience", token(key, "k1", aud=["other"]), 403),
+        ("expired", token(key, "k1", exp=now - 600), 403),
+        ("not yet valid", token(key, "k1", nbf=now + 600), 403),
+        ("no expiry", token(key, "k1", exp=None), 403),
+        ("wrong issuer", token(key, "k1", iss="https://evil.invalid"), 403),
+        ("forged signature", token(other, "k1"), 403),
+        ("unknown key", token(key, "k2"), 403),
+    ]
+    print(f"1..{len(cases) + 3}")
+    failed = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Taskgo Test",
+                "-c",
+                "user.email=taskgo@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "chore: start",
+            ],
+            check=True,
+        )
+        env = dict(os.environ, TASKGO_MCP_ACCESS_CERTS_URL=certs)
+        proc, url = serve(
+            repo,
+            free_port(),
+            "--access-team",
+            TEAM,
+            "--access-aud",
+            AUD,
+            env=env,
+        )
+        try:
+            for n, (name, tok, want) in enumerate(cases, 1):
+                got = status(url, tok)
+                ok = got == want
+                failed += not ok
+                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+        finally:
+            proc.terminate()
+            proc.wait()
+
+        n = len(cases)
+        proc, url = serve(repo, free_port(), "--auth", "none")
+        try:
+            for host, want, name in (
+                (None, 200, "auth none serves loopback"),
+                ("tracker.example.com", 403, "auth none refuses another host"),
+            ):
+                n += 1
+                got = status(url, None, host)
+                ok = got == want
+                failed += not ok
+                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+        finally:
+            proc.terminate()
+            proc.wait()
+
+        n += 1
+        res = subprocess.run(
+            [str(CLI), "--root", str(repo), "mcp", "--no-fetch", "--host", "0.0.0.0"],
+            capture_output=True,
+            text=True,
+            env={k: v for k, v in os.environ.items() if not k.startswith("TASKGO_MCP")},
+            timeout=60,
+            check=False,
+        )
+        ok = res.returncode != 0 and "Access needs" in res.stderr
+        failed += not ok
+        print(f"{'ok' if ok else 'not ok'} {n} - refuses to start without Access")
+    httpd.shutdown()
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,228 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Checks that the MCP server's output matches the taskgo CLI at one commit.
+
+Usage: compare-cli URL LOCAL_REPO
+
+LOCAL_REPO is a clone of the repository the server reads. The script asks
+the server for its head commit, checks that commit out into a temporary
+worktree, runs the CLI there with the server's 'today', and compares every
+tool's payload with the CLI's output. Prints one line per check and counts
+only, never file contents, so it is safe to run against a private tracker.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+CLI = HERE.parent / "scripts" / "taskgo"
+_id = 0
+
+
+def call(url: str, tool: str, args: dict) -> tuple[bool, dict | str]:
+    global _id
+    _id += 1
+    msg = {
+        "jsonrpc": "2.0",
+        "id": _id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args},
+    }
+    headers = {
+        "content-type": "application/json",
+        "user-agent": "taskgo-compare/0.1",
+        "accept": "application/json, text/event-stream",
+    }
+    if os.environ.get("CF_ACCESS_TOKEN"):
+        headers["cf-access-token"] = os.environ["CF_ACCESS_TOKEN"]
+    req = urllib.request.Request(url, json.dumps(msg).encode(), headers)
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        result = json.load(resp)["result"]
+    if result.get("isError"):
+        return False, result["content"][0]["text"]
+    return True, result["structuredContent"]
+
+
+class Checker:
+    def __init__(self, url: str, root: Path, today: str):
+        self.url, self.root = url, root
+        self.env = dict(os.environ, TASKGO_TODAY=today, NO_COLOR="1")
+        for k in (
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_REMOTE_SESSION_ID",
+            "CODEX_SESSION_ID",
+        ):
+            self.env.pop(k, None)
+        self.passed = self.failed = 0
+
+    def cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(CLI), "--root", str(self.root), *args],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+
+    def check(self, name: str, ok: bool) -> None:
+        if ok:
+            self.passed += 1
+        else:
+            self.failed += 1
+            print(f"FAIL {name}")
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        print("usage: compare-cli URL LOCAL_REPO", file=sys.stderr)
+        sys.exit(2)
+    url, repo = sys.argv[1], Path(sys.argv[2]).resolve()
+    ok, head = call(url, "list_projects", {})
+    if not ok:
+        sys.exit(f"compare-cli: {head}")
+    at = head["as_of"]["commit"]
+    today = head["as_of"]["today"]
+    pin = {"at": at}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "repo"
+        subprocess.run(
+            ["git", "clone", "-q", "--no-checkout", str(repo), str(root)], check=True
+        )
+        subprocess.run(["git", "-C", str(root), "checkout", "-q", at], check=True)
+        # Dispatch reads HEAD; 'main' keeps the CLI's own Git checks quiet.
+        subprocess.run(
+            ["git", "-C", str(root), "checkout", "-q", "-B", "main"], check=True
+        )
+        c = Checker(url, root, today)
+
+        c.check(
+            "list_projects",
+            head["projects"] == json.loads(c.cli("status", "--json").stdout),
+        )
+        projects = [p["project"] for p in head["projects"]]
+        all_rows = json.loads(c.cli("list", "--json").stdout)
+        for project in [None, *projects]:
+            for state in [
+                None,
+                "ready",
+                "todo",
+                "in-progress",
+                "blocked",
+                "done",
+                "cancelled",
+            ]:
+                args = {
+                    **pin,
+                    **({"project": project} if project else {}),
+                    **({"state": state} if state else {}),
+                }
+                cli_args = [
+                    "list",
+                    *([project] if project else []),
+                    *(["--state", state] if state else []),
+                    "--json",
+                ]
+                ok, got = call(url, "list_tasks", args)
+                c.check(
+                    f"list_tasks {project} {state}",
+                    ok and got["tasks"] == json.loads(c.cli(*cli_args).stdout or "[]"),
+                )
+
+        for project in projects:
+            ok, got = call(url, "get_project_status", {**pin, "project": project})
+            status = root / project / "STATUS.md"
+            committed = status.read_text() if status.is_file() else None
+            c.check(f"status committed {project}", ok and got["content"] == committed)
+            c.cli("sync", project)
+            fresh = status.read_text()
+            c.check(
+                f"status fresh {project}",
+                ok and got["fresh_block"] is not None and got["fresh_block"] in fresh,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "checkout", "-q", "--", "."], check=True
+            )
+            subprocess.run(["git", "-C", str(root), "clean", "-qfd"], check=True)
+
+        for row in all_rows:
+            tid = row["id"]
+            ok, got = call(url, "get_task", {**pin, "id": tid})
+            c.check(
+                f"get_task {tid}",
+                ok
+                and got["task"] == row
+                and got["content"] == (root / row["path"]).read_text(),
+            )
+
+            ok, got = call(url, "dispatch_task", {**pin, "id": tid})
+            res = c.cli("dispatch", tid)
+            if res.returncode != 0:
+                c.check(f"dispatch refusal {tid}", not ok)
+            else:
+                prefix = str(root.resolve()) + "/"
+                # The CLI names absolute paths, the server relative ones, so
+                # the lines wrap differently; compare words.
+                note = " ".join(res.stdout.replace(prefix, "").split())
+                findings = [
+                    ln.split("]  ", 1)[1]
+                    for ln in res.stderr.splitlines()
+                    if ln.startswith("[")
+                ]
+                c.check(
+                    f"dispatch note {tid}",
+                    ok and " ".join(got["note"].split()).startswith(note),
+                )
+                c.check(
+                    f"dispatch findings {tid}",
+                    ok and [f["message"] for f in got["findings"]] == findings,
+                )
+
+            ok, got = call(url, "get_task_history", {**pin, "id": tid})
+            c.check(
+                f"history {tid}",
+                ok and got["text"] == c.cli("history", tid).stdout.rstrip("\n"),
+            )
+
+        ok, got = call(url, "list_files", pin)
+        tracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-s"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        want = [
+            {
+                "path": ln.split("\t")[1],
+                "blob": ln.split()[1],
+                "executable": ln.startswith("100755"),
+            }
+            for ln in tracked.splitlines()
+            if not ln.startswith("120000")
+        ]
+        c.check("list_files", ok and got["files"] == want)
+        for f in want:
+            if not f["path"].endswith((".md", ".csv", ".txt", ".py")):
+                continue
+            ok, got = call(url, "read_file", {**pin, "path": f["path"]})
+            data = (root / f["path"]).read_bytes()
+            if len(data) > 256 * 1024:
+                c.check(f"read_file cap {f['path']}", not ok)
+            else:
+                c.check(
+                    f"read_file {f['path']}", ok and got["content"].encode() == data
+                )
+
+        print(f"commit {at[:12]} today {today}: {c.passed} passed, {c.failed} failed")
+        sys.exit(1 if c.failed else 0)
+
+
+if __name__ == "__main__":
+    main()
