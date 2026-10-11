@@ -10,19 +10,21 @@ Before starting work, an agent must:
 1. Read the root `AGENTS.md`, then project `README.md`, `STATUS.md` (using its
    generated `### Decisions` block to identify active, non-superseded ADRs in
    `decisions/`), relevant tasks, and `PLAN.md` when direction matters.
-1. **Activate project & per-session skills:** When a session
-   `Artifact Directory Path` (`.../brain/<id>`) is available:
-   - **Per-session / ephemeral activation:** If `<project>/README.md` declares
-     `skills:` in its YAML frontmatter that are missing from the active
-     `<skills>` list, or when asked to load *per-session*, *ephemeral*,
-     *temporary*, or *scratch* skills for the current conversation, link them
-     into the session's scratch directory without modifying `.envrc` or
-     repository files if a workspace skill manager is available (e.g.,
-     `skill -C <artifactDir> add <skill>...`).
-   - **Current-turn usage:** Read
-     `<artifactDir>/scratch/skills/<skill>/SKILL.md` via `view_file` if needed
-     in the current turn; the harness will inject them into `<skills>`
-     automatically on subsequent turns.
+1. **Activate project & per-session skills:** If `<project>/README.md` declares
+   `skills:` in its YAML frontmatter that are missing from the active `<skills>`
+   list, or when asked to load *per-session*, *ephemeral*, *temporary*, or
+   *scratch* skills for the current conversation, add them to the session scope,
+   which leaves `.envrc` and repository files untouched:
+   ```bash
+   taskgo info <project> --json | jq -r '.skills[]' | skill --scope session add -
+   ```
+   - **Antigravity:** the harness injects the skills into `<skills>` on
+     subsequent turns; read `<artifactDir>/scratch/skills/<skill>/SKILL.md` via
+     `view_file` if needed in the current turn.
+   - **Claude:** the skills are usable within the same turn.
+   - If `skill --scope session` fails naming `AGENT_SESSION_DIR`, the session
+     has no skill directory of its own; ask before adding the skills to the
+     workspace instead.
 1. Inspect linked artifact repos under their own instructions, and check
    `<project>/scripts/` before writing new scratch helpers.
 

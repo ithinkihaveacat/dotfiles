@@ -74,6 +74,9 @@ skill_test_init() {
   export PATH="$MOCK_BIN_DIR:$PATH"
   unset AGENT_PREFLIGHT_SKIP _agent_preflight_skip
   unset AGENT_REQUIRED_SKILLS
+  # Run the same whether or not the suite itself runs inside an agent session.
+  unset AGENT_SESSION_DIR AGENT_SESSION_ID CLAUDE_CODE_SESSION_ID \
+    CODEX_SESSION_ID ANTIGRAVITY_CONVERSATION_ID JETSKI_CONVERSATION_ID
 
   # A dummy p4 that fails, so we never accidentally detect Perforce.
   cat <<'EOF' >"$MOCK_BIN_DIR/p4"

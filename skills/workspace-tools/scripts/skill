@@ -59,6 +59,7 @@ def age_human(path: Path) -> str:
 
 
 _INTENT_SOURCE: str = "env"
+_SCOPE: str = "workspace"
 _CLI_SKILL_TOKENS: list[str] | None = None
 
 
@@ -89,6 +90,9 @@ def print_workspace_root(ws, stream=sys.stderr) -> None:
     directory.
     """
     root = ws.root
+    if ws.scope != "workspace":
+        print(f"skill: {ws.scope} root: {clean_p(root)}", file=stream)
+        return
     cwd = Path.cwd().resolve()
     if root == cwd:
         print(f"skill: workspace root: {clean_p(root)}", file=stream)
@@ -137,6 +141,11 @@ def find_skill_anchor(start: Path, boundary: Path) -> Path:
 
 class Workspace:
     """Base class defining the workspace interface."""
+
+    # The install scope this class serves ('--scope'), and entry names in its
+    # destination directories that belong to the agent itself, not to 'skill'.
+    scope = "workspace"
+    reserved_names: frozenset[str] = frozenset()
 
     def __init__(self, root):
         self.root = root
@@ -265,7 +274,7 @@ class Workspace:
             if not d.is_dir():
                 continue
             for item in d.iterdir():
-                if item.name.startswith("."):
+                if item.name.startswith(".") or item.name in self.reserved_names:
                     continue
                 if item.is_symlink():
                     try:
@@ -556,6 +565,8 @@ class AgyBrainWorkspace(Workspace):
     userFacing: false).
     """
 
+    scope = "session"
+
     def __init__(self, root: Path):
         super().__init__(root)
         self.dest_dir = self.root / "scratch" / "skills"
@@ -671,6 +682,58 @@ class AgyBrainWorkspace(Workspace):
                     f"{clean_p(self.skills_meta)} is missing (required to hide skills.json from artifact UI)"
                 )
         return issues
+
+    @classmethod
+    def from_conversation_env(cls):
+        """Find brain/<id> from the conversation ID Antigravity exports.
+
+        The agent's shell carries ANTIGRAVITY_CONVERSATION_ID and the app's data
+        directory (ANTIGRAVITY_APP_DATA_DIR, e.g. ~/.gemini/antigravity-cli);
+        without the latter, the known app directories are tried.
+        """
+        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR", "")
+        gemini = Path.home() / ".gemini"
+        bases = (
+            [Path(app_data)]
+            if app_data
+            else [gemini / app for app in ("antigravity-cli", "antigravity", "jetski")]
+        )
+        for var in ("ANTIGRAVITY_CONVERSATION_ID", "JETSKI_CONVERSATION_ID"):
+            conv_id = os.environ.get(var, "").strip()
+            if not conv_id or "/" in conv_id or conv_id in (".", ".."):
+                continue
+            for base in bases:
+                brain = base / "brain" / conv_id
+                if brain.is_dir():
+                    return cls(brain.resolve())
+        return None
+
+
+class ClaudeSessionWorkspace(Workspace):
+    """Claude Code session directory ($AGENT_SESSION_DIR).
+
+    The claude wrapper passes the directory to 'claude --add-dir', and Claude
+    loads skills from '.claude/skills' in any added directory, picking up new
+    links within the same turn. Nothing else reads it, so it gets no
+    '.agents/skills' and needs no exclude block.
+    """
+
+    scope = "session"
+
+    @classmethod
+    def get_supported_configs(cls) -> dict[str, list[Path]]:
+        return {".claude/skills": [Path.home() / ".claude"]}
+
+    def get_dest_dirs(self) -> list[Path]:
+        return [self.root / ".claude" / "skills"]
+
+
+class UserWorkspace(Workspace):
+    """User-level skill directories (~/.claude/skills, ~/.agents/skills)."""
+
+    scope = "user"
+    # Claude's own claude.ai skill sync lives in ~/.claude/skills/synced.
+    reserved_names = frozenset({"synced"})
 
 
 class DefaultWorkspace(Workspace):
@@ -1136,9 +1199,69 @@ def load_plugins() -> SkillAPI:
     return api
 
 
+# Session-ID variables set by agents with no session directory of their own.
+# When one is present alongside a Claude binding, the caller is a nested agent
+# (e.g. 'codex exec' inside Claude), which inherits CLAUDE_CODE_SESSION_ID
+# unchanged.
+FOREIGN_SESSION_VARS = ("CODEX_SESSION_ID",)
+
+
+def get_session_workspace() -> Workspace:
+    """Resolve the calling agent's own session directory, or exit 1.
+
+    Antigravity's brain/<id> is found from the current directory (as with
+    '-C <artifactDir>') or its conversation ID. A Claude session directory is
+    AGENT_SESSION_DIR, honored only when AGENT_SESSION_ID matches the agent's
+    own CLAUDE_CODE_SESSION_ID, so a nested agent that inherits the variables
+    cannot write into its parent's session.
+
+    Every agent passes the others' variables through to its children, so the
+    environment cannot say which agent is innermost. Antigravity's variables
+    are checked first: agy started by Claude (the common nesting) inherits a
+    matching Claude binding, while Claude started by agy is rare.
+    """
+    ws = AgyBrainWorkspace.detect() or AgyBrainWorkspace.from_conversation_env()
+    if ws:
+        return ws
+
+    session_dir = os.environ.get("AGENT_SESSION_DIR", "")
+    if session_dir:
+        bound_id = os.environ.get("AGENT_SESSION_ID", "")
+        own_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        foreign = [v for v in FOREIGN_SESSION_VARS if os.environ.get(v)]
+        if not bound_id:
+            die(
+                "--scope session: AGENT_SESSION_DIR is not bound to a session "
+                "(AGENT_SESSION_ID is not set)"
+            )
+        if bound_id != own_id or foreign:
+            die(
+                f"--scope session: AGENT_SESSION_DIR belongs to session {bound_id}, "
+                "not this agent's (nested agent?)"
+            )
+        if not Path(session_dir).is_dir():
+            die(f"--scope session: AGENT_SESSION_DIR {session_dir} is not a directory")
+        return ClaudeSessionWorkspace(Path(session_dir).resolve())
+
+    die(
+        "--scope session: no session directory: AGENT_SESSION_DIR is not set "
+        "and no Antigravity conversation was found (start Claude through the "
+        "claude wrapper; under Antigravity, pass -C <artifactDir>)"
+    )
+
+
 def get_workspace() -> Workspace:
+    if _SCOPE == "session":
+        return get_session_workspace()
+    if _SCOPE == "user":
+        return UserWorkspace(Path.home())
+    if AgyBrainWorkspace.detect():
+        die(
+            "this is an Antigravity session directory; "
+            "use 'skill --scope session' to manage its skills"
+        )
     api = get_api()
-    for cls in [AgyBrainWorkspace, *api.workspace_classes, GitWorkspace]:
+    for cls in [*api.workspace_classes, GitWorkspace]:
         try:
             ws = cls.detect()
         except Exception as e:
@@ -2036,7 +2159,8 @@ def cmd_clean():
     if hasattr(ws, "save_managed_skills"):
         ws.save_managed_skills([])
     prune_dirs(dest_dirs)
-    print(f"clean: removed {removed} link(s); cleared git excludes", file=sys.stderr)
+    cleared = "; cleared git excludes" if isinstance(ws, GitWorkspace) else ""
+    print(f"clean: removed {removed} link(s){cleared}", file=sys.stderr)
     if left > 0:
         print(f"clean: {left} path(s) left in place (not symlinks)", file=sys.stderr)
 
@@ -2423,7 +2547,7 @@ def cmd_apply(args):
         if _INTENT_SOURCE == "env":
             cmderr(
                 "apply",
-                "cannot combine skill arguments with --from=env; pass --from=cli or use -C",
+                "cannot combine skill arguments with --from=env; pass --from=cli",
                 code=2,
             )
         _CLI_SKILL_TOKENS = list(args)
@@ -3002,14 +3126,18 @@ def cmd_doctor(
     # symlink and exclude entry is relative to it, and the anchor walk can
     # resolve it above the current directory. Lead with it and label it plainly.
     if isinstance(ws, AgyBrainWorkspace):
-        ws_type = "Agy session directory"
+        ws_type = "Antigravity session directory"
+    elif isinstance(ws, ClaudeSessionWorkspace):
+        ws_type = "Claude session directory"
+    elif isinstance(ws, UserWorkspace):
+        ws_type = "User skill directories"
     elif isinstance(ws, GitWorkspace):
         ws_type = "Git repository"
     else:
         ws_type = "Non-VCS directory"
     cwd = Path.cwd().resolve()
     ws_details = [f"Root: {clean_p(ws.root)}"]
-    if ws.root != cwd:
+    if ws.scope == "workspace" and ws.root != cwd:
         ws_details.append(f"Anchor resolved above current directory {clean_p(cwd)}")
     checks.append(
         {
@@ -3704,7 +3832,13 @@ def cmd_doctor(
                 "  direnv reload   # or start a new prompt, then re-run 'skill apply'"
             )
         elif name == "Symlink Health":
-            if stray_dangling:
+            if stray_dangling and ws.scope != "workspace":
+                check["details"].append("To resolve: remove the broken links:")
+                check["details"].append(
+                    f"  skill --scope {ws.scope} remove "
+                    + " ".join(sorted({p.name for p in stray_dangling}))
+                )
+            elif stray_dangling:
                 check["details"].append(
                     "To resolve: 'skill apply' removes stray broken links automatically."
                 )
@@ -3805,13 +3939,15 @@ def cmd_doctor_all(as_json: bool = False):
 
 def usage():
     print(
-        """Usage: skill [-C DIR] [--from SOURCE] <command> [skill...]
+        """Usage: skill [-C DIR] [--scope SCOPE] [--from SOURCE] <command> [skill...]
 
-Manage per-workspace agent skills as untracked symlinks. Automatically detects
-which agent is installed on PATH and applies symlinks and local git ignores:
-  - Claude           -> .claude/skills
-  - Codex/Agy/Jetski -> .agents/skills
-  - Agy session      -> scratch/skills + .agents/skills.json
+Manage agent skills as untracked symlinks, in the directories each installed
+agent reads for the chosen scope:
+  user       ~/.claude/skills (Claude) and ~/.agents/skills (Codex, Agy)
+  workspace  .claude/skills and .agents/skills at the repository's skill
+             anchor, plus a block in .git/info/exclude (the default)
+  session    the calling agent's own session: $AGENT_SESSION_DIR/.claude/skills
+             (Claude) or brain/<id>/scratch/skills + .agents/skills.json (Agy)
 
 Commands:
   apply [SPEC...] Synchronize workspace symlinks to match desired skills
@@ -3819,10 +3955,10 @@ Commands:
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
-  list [--json]   List active skills on disk in the current workspace
+  list [--json]   List active skills on disk in the chosen scope
   update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every active
                   skill, --catalog to refresh the whole metadata index
-  clean           Remove all skills and clear git excludes
+  clean           Remove all skill links in the chosen scope (and git excludes)
   doctor [--json] Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
   catalog [--json] List plugin-provided skills and sources; --json adds each
@@ -3833,10 +3969,12 @@ Commands:
 
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
-                       (defaults --from to 'cli' unless --from is specified)
-  --from SOURCE        Desired skill source: 'env' (AGENT_REQUIRED_SKILLS,
-                       default without -C) or 'cli' (command-line arguments /
-                       on-disk state, default with -C)
+  --scope SCOPE        Where to install: 'user', 'workspace' (default) or
+                       'session'; only add, remove, list, doctor and clean take
+                       'user' or 'session'
+  --from SOURCE        Desired workspace skills: 'env' (AGENT_REQUIRED_SKILLS,
+                       the default) or 'cli' (command-line arguments / on-disk
+                       state)
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 
@@ -3844,14 +3982,24 @@ Environment:
   AGENT_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
                      has already been downloaded (at any age) instead. A skill
                      that has never been fetched is an error, not a guess.
+  AGENT_SESSION_DIR  Session directory for --scope session under Claude; set
+                     with AGENT_SESSION_ID by the claude wrapper, and honored
+                     only while AGENT_SESSION_ID matches CLAUDE_CODE_SESSION_ID
   SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
-                     (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)"""
+                     (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)
+
+Examples:
+  skill add coding-standards
+  skill --scope session add jetpack
+  skill --scope session list
+  printf '%s\\n' adb emumanager | skill --scope session add -
+  skill --scope user list"""
     )
     sys.exit(0)
 
 
 def main():
-    global _INTENT_SOURCE, _CLI_SKILL_TOKENS
+    global _INTENT_SOURCE, _CLI_SKILL_TOKENS, _SCOPE
 
     if "--plugin-template" in sys.argv:
         print('''"""
@@ -3901,6 +4049,7 @@ def register(api):
 
     target_dir_str = None
     explicit_from = None
+    explicit_scope = None
     filtered_argv = []
     raw_argv = sys.argv[1:]
     idx = 0
@@ -3942,6 +4091,20 @@ def register(api):
         elif arg.startswith("--from="):
             explicit_from = arg[len("--from=") :].lower()
             idx += 1
+        elif arg == "--scope":
+            idx += 1
+            if idx >= len(raw_argv):
+                print(
+                    "skill: option '--scope' requires an argument "
+                    "('user', 'workspace' or 'session')",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            explicit_scope = raw_argv[idx].lower()
+            idx += 1
+        elif arg.startswith("--scope="):
+            explicit_scope = arg[len("--scope=") :].lower()
+            idx += 1
         else:
             filtered_argv.append(arg)
             idx += 1
@@ -3962,10 +4125,35 @@ def register(api):
             )
             sys.exit(2)
         _INTENT_SOURCE = explicit_from
-    elif target_dir_str is not None:
-        _INTENT_SOURCE = "cli"
     else:
         _INTENT_SOURCE = "env"
+
+    cmd = filtered_argv[0]
+    if explicit_scope is not None:
+        if explicit_scope not in ("user", "workspace", "session"):
+            print(
+                f"skill: invalid --scope value '{explicit_scope}'; "
+                "expected 'user', 'workspace' or 'session'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _SCOPE = explicit_scope
+    if _SCOPE != "workspace":
+        # Outside the workspace, the links on disk are the only state: there
+        # is no declared set to reconcile against.
+        if cmd not in ("add", "remove", "rm", "list", "doctor", "clean"):
+            print(
+                f"skill: '{cmd}' does not take --scope {_SCOPE}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if explicit_from is not None:
+            print(
+                f"skill: --from does not apply to --scope {_SCOPE}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _INTENT_SOURCE = "cli"
 
     if target_dir_str is not None:
         target_dir = Path(target_dir_str).expanduser()
@@ -3974,7 +4162,6 @@ def register(api):
         except OSError as e:
             die(f"cannot change directory to '{target_dir_str}': {e.strerror or e}")
 
-    cmd = filtered_argv[0]
     args = filtered_argv[1:]
 
     if cmd == "doctor":
@@ -3984,7 +4171,7 @@ def register(api):
             if _INTENT_SOURCE == "env":
                 cmderr(
                     "doctor",
-                    "cannot combine skill arguments with --from=env; pass --from=cli or use -C",
+                    "cannot combine skill arguments with --from=env; pass --from=cli",
                     code=2,
                 )
             _CLI_SKILL_TOKENS = doctor_specs

@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+#
+# Install scopes for `skill` ('--scope user|workspace|session').
+#
+# Covers the session scope under Claude (AGENT_SESSION_DIR, bound to the
+# session ID) and under Antigravity (brain/<id>, found from the directory or the
+# conversation ID), the refusals for unbound and nested sessions, and the user
+# scope. Workspace scope is covered by test-skill-workspace and the reconcile
+# tests.
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-tools/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+skill_test_init
+
+echo "1..16"
+
+# ==============================================================================
+# Claude session scope
+# ==============================================================================
+SESSION_DIR="${TMPDIR}/claude-session"
+REPO_DIR="${TMPDIR}/repo"
+mkdir -p "$SESSION_DIR" "$REPO_DIR"
+git -C "$REPO_DIR" init -q
+cd "$REPO_DIR"
+export AGENT_SESSION_DIR="$SESSION_DIR" AGENT_SESSION_ID=sess-1 \
+  CLAUDE_CODE_SESSION_ID=sess-1
+
+# Test 1: session add links into $AGENT_SESSION_DIR/.claude/skills only
+if "${SCRIPT}" --scope session add coding-standards emumanager >/dev/null 2>&1 &&
+  [ -L "${SESSION_DIR}/.claude/skills/coding-standards" ] &&
+  [ -L "${SESSION_DIR}/.claude/skills/emumanager" ] &&
+  [ ! -e "${SESSION_DIR}/.agents" ] &&
+  [ ! -e "${REPO_DIR}/.claude" ] && [ ! -e "${REPO_DIR}/.agents" ]; then
+  echo "ok 1 - [Session] add links into the session's .claude/skills and nowhere else"
+else
+  echo "not ok 1 - [Session] add did not link into the session directory only"
+fi
+
+# Test 2: session list --json and doctor see the session's links
+if out=$("${SCRIPT}" --scope session list --json 2>/dev/null) &&
+  [ "$(json_get "$out" 'sorted(s["name"] for s in d)')" = "coding-standards emumanager" ] &&
+  dj=$("${SCRIPT}" --scope session doctor --json 2>/dev/null) &&
+  [ "$(check_status "$dj" "Workspace")" = "OK" ] &&
+  [ "$(check_status "$dj" "Required Skills")" = "OK" ] &&
+  [ "$(check_status "$dj" "Symlink Health")" = "OK" ]; then
+  echo "ok 2 - [Session] list and doctor report the session's links"
+else
+  echo "not ok 2 - [Session] list or doctor disagreed: ${out:-}"
+fi
+
+# Test 3: without --scope, add still targets the workspace inside a session
+if "${SCRIPT}" add test-skill >/dev/null 2>&1 &&
+  [ -L "${REPO_DIR}/.claude/skills/test-skill" ] &&
+  [ ! -e "${SESSION_DIR}/.claude/skills/test-skill" ]; then
+  echo "ok 3 - [Session] a plain add targets the workspace, not the session"
+else
+  echo "not ok 3 - [Session] a plain add leaked into the session directory"
+fi
+"${SCRIPT}" clean >/dev/null 2>&1 || true
+
+# Test 4: session remove and clean only touch the session directory
+if "${SCRIPT}" --scope session remove emumanager >/dev/null 2>&1 &&
+  [ ! -e "${SESSION_DIR}/.claude/skills/emumanager" ] &&
+  [ -L "${SESSION_DIR}/.claude/skills/coding-standards" ] &&
+  "${SCRIPT}" --scope session clean >/dev/null 2>&1 &&
+  [ ! -e "${SESSION_DIR}/.claude" ] && [ -d "$SESSION_DIR" ]; then
+  echo "ok 4 - [Session] remove and clean empty the session directory"
+else
+  echo "not ok 4 - [Session] remove or clean failed"
+fi
+
+# Test 5: a nested agent with its own Claude session ID is refused
+nested_rc=0
+nested_err=$(CLAUDE_CODE_SESSION_ID=sess-2 "${SCRIPT}" --scope session add emumanager 2>&1) || nested_rc=$?
+if [ "$nested_rc" -eq 1 ] && [[ "$nested_err" == *AGENT_SESSION_DIR* ]] &&
+  [ ! -e "${SESSION_DIR}/.claude/skills/emumanager" ]; then
+  echo "ok 5 - [Session] a mismatched session ID is refused, naming AGENT_SESSION_DIR"
+else
+  echo "not ok 5 - [Session] mismatched session ID not refused (rc=$nested_rc): $nested_err"
+fi
+
+# Test 6: a nested Codex, which inherits CLAUDE_CODE_SESSION_ID, is refused
+codex_rc=0
+CODEX_SESSION_ID=codex-1 "${SCRIPT}" --scope session list >/dev/null 2>&1 || codex_rc=$?
+if [ "$codex_rc" -eq 1 ]; then
+  echo "ok 6 - [Session] a nested Codex session is refused"
+else
+  echo "not ok 6 - [Session] nested Codex session not refused (rc=$codex_rc)"
+fi
+
+# Test 7: an unbound session directory (AGENT_SESSION_ID unset) is refused
+unbound_rc=0
+unbound_err=$(env -u AGENT_SESSION_ID "${SCRIPT}" --scope session list 2>&1) || unbound_rc=$?
+if [ "$unbound_rc" -eq 1 ] && [[ "$unbound_err" == *AGENT_SESSION_DIR* ]]; then
+  echo "ok 7 - [Session] an unbound session directory is refused"
+else
+  echo "not ok 7 - [Session] unbound session not refused (rc=$unbound_rc): $unbound_err"
+fi
+
+# Test 8: outside any session, --scope session fails naming AGENT_SESSION_DIR
+none_rc=0
+none_err=$(env -u AGENT_SESSION_DIR "${SCRIPT}" --scope session list 2>&1) || none_rc=$?
+if [ "$none_rc" -eq 1 ] && [[ "$none_err" == *AGENT_SESSION_DIR* ]]; then
+  echo "ok 8 - [Session] no session directory is an error naming AGENT_SESSION_DIR"
+else
+  echo "not ok 8 - [Session] missing session not reported (rc=$none_rc): $none_err"
+fi
+
+# Test 9: --scope is validated, and only the scope-aware commands take it
+bad_rc=0
+apply_rc=0
+"${SCRIPT}" --scope galaxy list >/dev/null 2>&1 || bad_rc=$?
+"${SCRIPT}" --scope session apply coding-standards >/dev/null 2>&1 || apply_rc=$?
+if [ "$bad_rc" -eq 2 ] && [ "$apply_rc" -eq 2 ]; then
+  echo "ok 9 - [Scope] an unknown scope and 'apply --scope session' are usage errors"
+else
+  echo "not ok 9 - [Scope] expected usage errors (bad=$bad_rc apply=$apply_rc)"
+fi
+unset AGENT_SESSION_DIR AGENT_SESSION_ID CLAUDE_CODE_SESSION_ID
+cd "$TMPDIR"
+
+# ==============================================================================
+# Antigravity session scope
+# ==============================================================================
+BRAIN_DIR="${HOME}/.gemini/antigravity/brain/test-conv-123"
+mkdir -p "${BRAIN_DIR}/.system_generated" "${BRAIN_DIR}/scratch"
+
+# Test 10: --scope session -C <artifactDir> links scratch/skills and writes skills.json
+if "${SCRIPT}" --scope session -C "$BRAIN_DIR" add coding-standards emumanager >/dev/null 2>&1 &&
+  [ -L "${BRAIN_DIR}/scratch/skills/coding-standards" ] &&
+  [ -L "${BRAIN_DIR}/scratch/skills/emumanager" ] &&
+  [ ! -d "${BRAIN_DIR}/.claude" ] &&
+  grep -q '"path": "scratch/skills"' "${BRAIN_DIR}/.agents/skills.json" &&
+  grep -q '"userFacing": false' "${BRAIN_DIR}/.agents/skills.json.metadata.json" &&
+  bdj=$("${SCRIPT}" --scope session -C "$BRAIN_DIR" doctor --json 2>/dev/null) &&
+  [ "$(json_get "$bdj" 'd["healthy"]')" = "true" ]; then
+  echo "ok 10 - [Agy] --scope session -C <artifactDir> links scratch/skills, writes skills.json, and passes doctor"
+else
+  echo "not ok 10 - [Agy] --scope session -C <artifactDir> setup or doctor failed"
+fi
+
+# Test 11: doctor flags skills.json drift; remove re-syncs it
+printf '{"entries": []}\n' >"${BRAIN_DIR}/.agents/skills.json"
+drift_json=$("${SCRIPT}" --scope session -C "$BRAIN_DIR" doctor --json 2>/dev/null) || true
+if [ "$(check_status "$drift_json" "Workspace Exclusions")" = "ERROR" ] &&
+  "${SCRIPT}" --scope session -C "$BRAIN_DIR" remove emumanager >/dev/null 2>&1 &&
+  [ ! -e "${BRAIN_DIR}/scratch/skills/emumanager" ] &&
+  repaired_json=$("${SCRIPT}" --scope session -C "$BRAIN_DIR" doctor --json 2>/dev/null) &&
+  [ "$(json_get "$repaired_json" 'd["healthy"]')" = "true" ]; then
+  echo "ok 11 - [Agy] doctor flags skills.json drift; remove re-syncs it"
+else
+  echo "not ok 11 - [Agy] drift detection or remove repair failed"
+fi
+
+# Test 12: the conversation ID finds brain/<id>; clean empties it and keeps scratch/
+if out=$(ANTIGRAVITY_CONVERSATION_ID=test-conv-123 "${SCRIPT}" --scope session list --json 2>/dev/null) &&
+  [ "$(json_get "$out" '[s["name"] for s in d]')" = "coding-standards" ] &&
+  ANTIGRAVITY_CONVERSATION_ID=test-conv-123 "${SCRIPT}" --scope session clean >/dev/null 2>&1 &&
+  [ ! -d "${BRAIN_DIR}/scratch/skills" ] && [ -d "${BRAIN_DIR}/scratch" ] &&
+  [ ! -f "${BRAIN_DIR}/.agents/skills.json" ]; then
+  echo "ok 12 - [Agy] ANTIGRAVITY_CONVERSATION_ID finds brain/<id>; clean empties it and keeps scratch/"
+else
+  echo "not ok 12 - [Agy] conversation-ID lookup or clean failed: ${out:-}"
+fi
+
+# Test 13: workspace scope refuses an Antigravity session directory
+agy_ws_rc=0
+"${SCRIPT}" -C "$BRAIN_DIR" add coding-standards >/dev/null 2>&1 || agy_ws_rc=$?
+if [ "$agy_ws_rc" -eq 1 ] && [ ! -e "${BRAIN_DIR}/.claude" ] && [ ! -e "${BRAIN_DIR}/scratch/skills" ]; then
+  echo "ok 13 - [Agy] workspace scope refuses an Antigravity session directory"
+else
+  echo "not ok 13 - [Agy] workspace scope wrote into an Antigravity session directory (rc=$agy_ws_rc)"
+fi
+
+# Test 14: ANTIGRAVITY_APP_DATA_DIR locates brain/<id> outside ~/.gemini
+APP_DATA="${TMPDIR}/agy-app-data"
+mkdir -p "${APP_DATA}/brain/conv-app"
+if ANTIGRAVITY_APP_DATA_DIR="$APP_DATA" ANTIGRAVITY_CONVERSATION_ID=conv-app \
+  "${SCRIPT}" --scope session add emumanager >/dev/null 2>&1 &&
+  [ -L "${APP_DATA}/brain/conv-app/scratch/skills/emumanager" ]; then
+  echo "ok 14 - [Agy] ANTIGRAVITY_APP_DATA_DIR locates brain/<id>"
+else
+  echo "not ok 14 - [Agy] ANTIGRAVITY_APP_DATA_DIR was not used"
+fi
+
+# Test 15: agy started from a wrapped Claude inherits a matching Claude
+# binding; its own conversation wins
+mkdir -p "${TMPDIR}/outer-claude"
+if AGENT_SESSION_DIR="${TMPDIR}/outer-claude" AGENT_SESSION_ID=outer \
+  CLAUDE_CODE_SESSION_ID=outer ANTIGRAVITY_APP_DATA_DIR="$APP_DATA" \
+  ANTIGRAVITY_CONVERSATION_ID=conv-app \
+  "${SCRIPT}" --scope session add coding-standards >/dev/null 2>&1 &&
+  [ -L "${APP_DATA}/brain/conv-app/scratch/skills/coding-standards" ] &&
+  [ ! -e "${TMPDIR}/outer-claude/.claude" ]; then
+  echo "ok 15 - [Agy] agy nested in a wrapped Claude uses its own session"
+else
+  echo "not ok 15 - [Agy] agy nested in Claude wrote into the Claude session"
+fi
+
+# ==============================================================================
+# User scope
+# ==============================================================================
+
+# Test 16: user scope links into ~/.claude/skills and ~/.agents/skills, and
+# leaves Claude's own ~/.claude/skills/synced alone
+mkdir -p "${HOME}/.claude/skills/synced"
+if "${SCRIPT}" --scope user add coding-standards >/dev/null 2>&1 &&
+  [ -L "${HOME}/.claude/skills/coding-standards" ] &&
+  [ -L "${HOME}/.agents/skills/coding-standards" ] &&
+  udj=$("${SCRIPT}" --scope user doctor --json 2>/dev/null) &&
+  [ "$(check_status "$udj" "Directory Cleanliness")" = "OK" ] &&
+  "${SCRIPT}" --scope user clean >/dev/null 2>&1 &&
+  [ ! -e "${HOME}/.claude/skills/coding-standards" ] &&
+  [ -d "${HOME}/.claude/skills/synced" ]; then
+  echo "ok 16 - [User] user scope links into ~/.claude and ~/.agents and ignores synced/"
+else
+  echo "not ok 16 - [User] user scope add, doctor or clean failed"
+fi

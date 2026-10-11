@@ -17,14 +17,25 @@ function __fish_skill_catalog
 end
 
 function __fish_skill_managed_skills
-    skill list 2>/dev/null | string replace -r '\s*->.*' ''
+    # List the skills of the scope (and directory) already on the command line.
+    set -l opts
+    set -l tokens (commandline -opc)
+    for i in (seq 2 (count $tokens))
+        switch $tokens[$i]
+            case --scope -C --directory
+                set -a opts $tokens[$i] $tokens[(math $i + 1)]
+            case '--scope=*' '--directory=*'
+                set -a opts $tokens[$i]
+        end
+    end
+    skill $opts list 2>/dev/null | string replace -r '\s*->.*' ''
 end
 
 # Complete subcommands
 complete -f -c skill -n __fish_use_subcommand -a add -d 'Add a skill (path or topic)'
 complete -f -c skill -n __fish_use_subcommand -a remove -d 'Remove a skill this tool added'
 complete -f -c skill -n __fish_use_subcommand -a rm -d 'Remove a skill this tool added (alias of remove)'
-complete -f -c skill -n __fish_use_subcommand -a list -d 'List managed skills in this workspace'
+complete -f -c skill -n __fish_use_subcommand -a list -d 'List managed skills in the chosen scope'
 complete -f -c skill -n __fish_use_subcommand -a update -d 'Re-fetch plugin-provided catalog entries'
 complete -f -c skill -n __fish_use_subcommand -a clean -d 'Remove all managed skills'
 complete -f -c skill -n __fish_use_subcommand -a catalog -d 'List plugin-provided skills and sources'
@@ -75,4 +86,7 @@ complete -c skill -f -n '__fish_seen_subcommand_from update' -l catalog -d 'Refr
 
 # Complete flags
 complete -c skill -f -s h -l help -d 'Display help message and exit'
+complete -c skill -s C -l directory -x -a '(__fish_complete_directories)' -d 'Run as if started in DIR'
+complete -c skill -f -l scope -x -a 'user workspace session' -d 'Where to install skills'
+complete -c skill -f -l from -x -a 'env cli' -d 'Desired workspace skills source'
 complete -c skill -f -l plugin-template -d 'Output a template for creating a Workspace plugin'

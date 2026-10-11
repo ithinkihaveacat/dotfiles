@@ -97,13 +97,15 @@ The block below is `scripts/skill --help`, kept in sync by
 <!-- generated: ../scripts/skill --help -->
 
 ```text
-Usage: skill [-C DIR] [--from SOURCE] <command> [skill...]
+Usage: skill [-C DIR] [--scope SCOPE] [--from SOURCE] <command> [skill...]
 
-Manage per-workspace agent skills as untracked symlinks. Automatically detects
-which agent is installed on PATH and applies symlinks and local git ignores:
-  - Claude           -> .claude/skills
-  - Codex/Agy/Jetski -> .agents/skills
-  - Agy session      -> scratch/skills + .agents/skills.json
+Manage agent skills as untracked symlinks, in the directories each installed
+agent reads for the chosen scope:
+  user       ~/.claude/skills (Claude) and ~/.agents/skills (Codex, Agy)
+  workspace  .claude/skills and .agents/skills at the repository's skill
+             anchor, plus a block in .git/info/exclude (the default)
+  session    the calling agent's own session: $AGENT_SESSION_DIR/.claude/skills
+             (Claude) or brain/<id>/scratch/skills + .agents/skills.json (Agy)
 
 Commands:
   apply [SPEC...] Synchronize workspace symlinks to match desired skills
@@ -111,10 +113,10 @@ Commands:
   add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
   add -           Read skill names from stdin
   remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
-  list [--json]   List active skills on disk in the current workspace
+  list [--json]   List active skills on disk in the chosen scope
   update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every active
                   skill, --catalog to refresh the whole metadata index
-  clean           Remove all skills and clear git excludes
+  clean           Remove all skill links in the chosen scope (and git excludes)
   doctor [--json] Diagnose mismatch between desired and on-disk skills (read-only)
   preflight LABEL Verify required skills and workspace health before agent launch
   catalog [--json] List plugin-provided skills and sources; --json adds each
@@ -125,10 +127,12 @@ Commands:
 
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
-                       (defaults --from to 'cli' unless --from is specified)
-  --from SOURCE        Desired skill source: 'env' (AGENT_REQUIRED_SKILLS,
-                       default without -C) or 'cli' (command-line arguments /
-                       on-disk state, default with -C)
+  --scope SCOPE        Where to install: 'user', 'workspace' (default) or
+                       'session'; only add, remove, list, doctor and clean take
+                       'user' or 'session'
+  --from SOURCE        Desired workspace skills: 'env' (AGENT_REQUIRED_SKILLS,
+                       the default) or 'cli' (command-line arguments / on-disk
+                       state)
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 
@@ -136,8 +140,18 @@ Environment:
   AGENT_OFFLINE      Set to 1 to never fetch remote skills, serving whatever
                      has already been downloaded (at any age) instead. A skill
                      that has never been fetched is an error, not a guess.
+  AGENT_SESSION_DIR  Session directory for --scope session under Claude; set
+                     with AGENT_SESSION_ID by the claude wrapper, and honored
+                     only while AGENT_SESSION_ID matches CLAUDE_CODE_SESSION_ID
   SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
                      (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)
+
+Examples:
+  skill add coding-standards
+  skill --scope session add jetpack
+  skill --scope session list
+  printf '%s\n' adb emumanager | skill --scope session add -
+  skill --scope user list
 ```
 
 <!-- /generated -->

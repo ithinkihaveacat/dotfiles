@@ -32,16 +32,21 @@ maintains, and the one deliberate exception. User-facing usage lives in
 ## The four flows ("what touches what")
 
 1. **Desired state** comes from `AGENT_REQUIRED_SKILLS` under `--from=env` (or,
-   under `--from=cli` / `-C DIR` and for stateful plugin or session workspaces,
-   command-line arguments or a saved state file via `FileStateMixin` /
-   `.agents/skills.json`). This is the set of skill *names* the workspace wants
-   — `Workspace.get_expected_skills()`.
+   under `--from=cli` and for stateful plugin workspaces, command-line arguments
+   or a saved state file via `FileStateMixin`). Outside the workspace scope
+   (`--scope user|session`) the links on disk are the only state, so desired and
+   actual never differ. This is the set of skill *names* the workspace wants —
+   `Workspace.get_expected_skills()`.
 1. **Sources** are resolved by name against `SKILL_SOURCE_DIRS`
    (`resolve_skill_spec`): the on-disk skill directory a name points to.
 1. **Destinations** are the per-agent link directories
    (`Workspace.get_dest_dirs()`): `.claude/skills` and/or `.agents/skills` in
-   repository workspaces (overridable with `SKILL_DEST_DIRS`), or
-   `scratch/skills` in Antigravity/Jetski session artifact directories
+   repository workspaces (overridable with `SKILL_DEST_DIRS`). `--scope` picks
+   the directory set: `~/.claude/skills` and `~/.agents/skills` (`user`,
+   `UserWorkspace`), or the calling agent's own session (`session`):
+   `$AGENT_SESSION_DIR/.claude/skills` under Claude (`ClaudeSessionWorkspace`,
+   honored only while `AGENT_SESSION_ID` matches `CLAUDE_CODE_SESSION_ID`), or
+   `scratch/skills` in an Antigravity/Jetski `brain/<id>` directory
    (`AgyBrainWorkspace`). `skill apply` makes each expected skill a symlink
    `dest/<name> -> source` and prunes symlinks that are no longer expected.
 1. **VCS invisibility & session registration**: `GitWorkspace` maintains a

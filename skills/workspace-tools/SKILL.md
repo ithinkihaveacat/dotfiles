@@ -86,17 +86,26 @@ skill <command> [arguments]
   keep `git status` clean without dirtying the shared `.gitignore`. If another
   tool rewrites the exclude file, `skill doctor` detects the drift, and running
   `skill apply` resolves it.
-- **Antigravity & Jetski Session Directories (Per-Session / Ephemeral /
-  Temporary / Scratch)**: When targeting an isolated session artifact directory
-  (`~/.gemini/antigravity/brain/<id>` or `~/.gemini/jetski/brain/<id>`, e.g.,
-  via `skill -C <artifactDir> add <skill>`), `skill` installs skills temporarily
-  for that single conversation session. It links skills under `scratch/skills/`
-  (hidden from the artifact UI watcher and auto-allowed for `view_file` reads)
-  and writes `.agents/skills.json` + `.agents/skills.json.metadata.json`
-  (`userFacing: false`) without modifying the repository's `.envrc` or git
-  excludes. The agent harness loads newly added skills into `<skills>` on the
-  next turn; to use a newly added skill in the current turn, read
-  `<artifactDir>/scratch/skills/<skill>/SKILL.md` directly.
+- **Session Scope (Per-Session / Ephemeral / Temporary / Scratch)**:
+  `skill --scope session add|remove|list|doctor|clean` manages the skills of the
+  calling agent's own conversation, without touching the repository, `.envrc` or
+  `~/.claude`:
+  - **Claude Code** (started through the `claude` fish wrapper): links under
+    `$AGENT_SESSION_DIR/.claude/skills`. The wrapper passes that directory to
+    `claude --add-dir` and binds it to the session ID, so a nested agent
+    (`claude -p`, `codex exec`) cannot write into it. Claude loads a newly added
+    skill within the same turn.
+  - **Antigravity & Jetski** (the session's `brain/<id>` directory, e.g.
+    `~/.gemini/antigravity-cli/brain/<id>`, found from
+    `ANTIGRAVITY_CONVERSATION_ID` or from `-C <artifactDir>`): links under
+    `scratch/skills/` (hidden from the artifact UI watcher and auto-allowed for
+    `view_file` reads) and writes `.agents/skills.json` +
+    `.agents/skills.json.metadata.json` (`userFacing: false`). The harness loads
+    newly added skills into `<skills>` on the next turn; to use one in the
+    current turn, read `<artifactDir>/scratch/skills/<skill>/SKILL.md` directly.
+- **User Scope**: `skill --scope user ...` links into `~/.claude/skills` and
+  `~/.agents/skills` for every session of the user, leaving Claude's own
+  `~/.claude/skills/synced/` alone.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
   skills under local destination folders.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
@@ -108,13 +117,16 @@ skill <command> [arguments]
 ### Global Options
 
 - **`-C, --directory DIR`**: Run as if started in `DIR` instead of the current
-  working directory. Automatically defaults `--from` to `cli` (so the caller
-  directory's `AGENT_REQUIRED_SKILLS` never leaks into `DIR`).
-- **`--from SOURCE`**: Select where desired skill intent is read from:
-  - `env` *(default without `-C`)*: Read `AGENT_REQUIRED_SKILLS` from the
-    process environment and check `.envrc` freshness.
-  - `cli` *(default with `-C`)*: Read desired skills strictly from command-line
-    arguments (`apply [SPEC...]`, `doctor [SPEC...]`) or on-disk state, ignoring
+  working directory.
+- **`--scope SCOPE`**: Where to install: `user`, `workspace` *(default)* or
+  `session` (see above). Only `add`, `remove`, `list`, `doctor` and `clean` take
+  `user` or `session`; outside the workspace, the links on disk are the only
+  state.
+- **`--from SOURCE`**: Select where desired workspace skills are read from:
+  - `env` *(default)*: Read `AGENT_REQUIRED_SKILLS` from the process environment
+    and check `.envrc` freshness.
+  - `cli`: Read desired skills strictly from command-line arguments
+    (`apply [SPEC...]`, `doctor [SPEC...]`) or on-disk state, ignoring
     `AGENT_REQUIRED_SKILLS`.
 
 ### Commands
@@ -167,11 +179,10 @@ fully deterministic and requires no API keys.
      envrc add skills <names> && direnv reload && skill apply
      ```
    - **Per-session (ephemeral / temporary / session-scoped / scratch):** When a
-     skill is only needed for the active conversation and the harness provides a
-     session `Artifact Directory Path` (`.../brain/<id>`), target that directory
-     with `-C` so `.envrc` and repository exclusions remain untouched:
+     skill is only needed for the active conversation, add it to the session
+     scope so `.envrc` and repository exclusions remain untouched:
      ```bash
-     skill -C <artifactDir> add <names>
+     skill --scope session add <names>
      ```
 
 `skill catalog` represents the local and plugin-registered inventory. If
@@ -543,21 +554,28 @@ envrc add skills coding-standards && direnv reload && skill apply
 
 Install a skill temporarily for the active conversation session (also referred
 to as *per-session*, *ephemeral*, *session-scoped*, *temporary*, or *scratch*
-skills) when running in an agent harness with a session
-`Artifact Directory Path` (`~/.gemini/antigravity/brain/<id>` or
-`~/.gemini/jetski/brain/<id>`):
+skills):
 
 ```bash
-skill -C <artifactDir> add coding-standards
+skill --scope session add coding-standards
 ```
 
-Passing `-C <artifactDir>` targets the isolated session directory (defaulting
-`--from` to `cli`), linking the skill under `<artifactDir>/scratch/skills/` and
-registering it in `<artifactDir>/.agents/skills.json` while leaving the
-repository's `.envrc` and `.git/info/exclude` untouched. Read
-`<artifactDir>/scratch/skills/<skill>/SKILL.md` directly to use the skill in the
-current turn; the harness injects it into `<skills>` automatically on subsequent
-turns.
+Under Claude, the skill is linked under `$AGENT_SESSION_DIR/.claude/skills/` and
+can be used in the same turn. Under Antigravity (`<artifactDir>` is the
+session's `Artifact Directory Path`, e.g.
+`~/.gemini/antigravity-cli/brain/<id>`), it is linked under
+`<artifactDir>/scratch/skills/` and registered in
+`<artifactDir>/.agents/skills.json`; read
+`<artifactDir>/scratch/skills/<skill>/SKILL.md` directly to use it in the
+current turn, as the harness injects it into `<skills>` only on subsequent
+turns. Either way the repository's `.envrc` and `.git/info/exclude` are left
+untouched.
+
+If `skill --scope session` fails naming `AGENT_SESSION_DIR`, this agent has no
+session directory of its own: Claude was not started through the `claude`
+wrapper, was resumed with `--continue` or the `--resume` picker, or the caller
+is a nested agent. Under Antigravity, pass `-C <artifactDir>`. Otherwise fall
+back to the workspace scope, or ask the user.
 
 ### Managing Permissions by Hand
 

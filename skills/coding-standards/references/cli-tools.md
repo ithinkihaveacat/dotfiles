@@ -166,6 +166,36 @@ including how a cold cache gets warmed, the required age reporting, and the
 cache-miss error. Both are defined in `caching.md`, which also covers what CI
 jobs and sandboxed agents need from them.
 
+## Environment Variables
+
+clig.dev covers when to read environment variables and the precedence of
+configuration sources. This repo adds naming and value conventions, so a
+variable reads the same in every tool:
+
+- **Prefixes name the owner.** `AGENT_*` is a contract shared across tools and
+  agents (`AGENT_OFFLINE`, `AGENT_SESSION_DIR`, `AGENT_SESSION_ID`); any tool
+  may read it, and its meaning is defined once. `<TOOL>_*` belongs to one tool
+  (`SKILL_SOURCE_DIRS`, `TASKGO_ROOT`).
+- **Variables the agents set themselves are read-only.** Tools may read
+  `CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID` or `ANTIGRAVITY_CONVERSATION_ID`
+  to identify their caller, but never set or repurpose them.
+- **Precedence** is flag, then variable, then default.
+- **Lists:** names are space-separated (`AGENT_REQUIRED_SKILLS="adb jetpack"`);
+  paths are colon-separated, like `PATH` (`SKILL_SOURCE_DIRS`).
+- **Booleans** follow `AGENT_OFFLINE`: `1`, `true`, `yes` and `on`
+  (case-insensitive) mean true; anything else, including `0` and empty, means
+  false, so `AGENT_OFFLINE=0 tool ...` overrides an exported value for one
+  command.
+- **Variables describe the context; flags choose the target.** A variable says
+  where the caller is (a session directory, an offline sandbox), never what a
+  command acts on. `AGENT_SESSION_DIR` being set does not redirect a plain
+  `skill add`; only `skill --scope session add` uses it.
+- **Bind inherited context to its owner.** Child processes inherit the whole
+  environment, including nested agents. A variable that belongs to one agent
+  session is paired with that session's ID (`AGENT_SESSION_DIR` with
+  `AGENT_SESSION_ID`), and is honored only while the ID matches the caller's
+  own.
+
 ## `--output`/`-o` Contract
 
 Any script that produces a new file or directory as output must support an
