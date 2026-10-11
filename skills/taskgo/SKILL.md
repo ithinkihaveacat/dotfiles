@@ -200,11 +200,6 @@ Agent Dispatch.
   `taskgo checkpoint`. Ensure the project is left in a strict **handoff-ready**
   state.
 
-### Harbor Task Execution
-
-See **[Harbor Lifecycle](references/harbor.md)** for delegating tasks to
-unattended, isolated agents (`taskgo harbor prepare / run / verify`).
-
 ### Activity Reporting
 
 See **[Activity Reports](references/activity-reports.md)** for generating
@@ -232,9 +227,6 @@ taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
-taskgo harbor prepare [TASK_ID] -o DIR [--instruction TEXT] [--workspace DIR] [--skills SKILL...] [--dry-run]
-taskgo harbor run [TARGET]
-taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR [--tool-cmd CMD] [--json]
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.
@@ -256,5 +248,4 @@ taskgo harbor verify --base-file BASE --candidate-file CAND -o DIR [--tool-cmd C
   synopsis and options
 - **[Model & Architecture](references/model.md)**
 - **[Agent Workflows & Handoff](references/workflows.md)**
-- **[Harbor Lifecycle](references/harbor.md)**
 - **[Activity Reports](references/activity-reports.md)**
