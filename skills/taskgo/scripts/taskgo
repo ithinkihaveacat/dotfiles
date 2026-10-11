@@ -596,10 +596,6 @@ def sigint_handler(signum, frame):
     handle_signal_exit(signal.SIGINT)
 
 
-signal.signal(signal.SIGTERM, sigterm_handler)
-signal.signal(signal.SIGINT, sigint_handler)
-
-
 def die(msg: str, exit_code: int = 1) -> None:
     print(f"taskgo: {msg}", file=sys.stderr)
     sys.exit(exit_code)
@@ -1174,6 +1170,49 @@ def extract_runin(content: str, label: str) -> str:
         return ""
     start, end = spans[0]
     return " ".join(body[start + len(f"**{label}:**") : end].split())
+
+
+def section_hash(text: str) -> str:
+    """The precondition hash of a section's exact text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def record_sections(content: str, schema: "RecordSchema") -> list[dict[str, str]]:
+    """The schema sections present in CONTENT, in schema order, with hashes.
+
+    Each entry is {name, text, hash}: the title is its '# ' line, a run-in runs
+    from its bold label to its text's end, a heading section from its '## '
+    line to before the next level-1 or level-2 heading (or the generated
+    block), and the generated section from BEGIN to END. A section that occurs
+    more than once is listed once per occurrence.
+    """
+    body = extract_body(content)
+    fences = fenced_spans(body)
+    begin = body.find(BEGIN)
+    out: list[dict[str, str]] = []
+    for spec in schema.sections:
+        spans: list[tuple[int, int]] = []
+        if spec.form == "title":
+            for m in re.finditer(r"^# .*$", body, re.MULTILINE):
+                if not any(a <= m.start() < b for a, b in fences):
+                    spans.append((m.start(), m.end()))
+                    break
+        elif spec.form == "run-in":
+            spans = find_runins(body, spec.name)
+        elif spec.form == "heading":
+            found, _ = find_sections(body, spec.name)
+            for a, b in found:
+                if a < begin < b:
+                    b = len(body[:begin].rstrip())
+                spans.append((a, b))
+        elif spec.form == "generated":
+            end = body.find(END)
+            if begin >= 0 and end > begin:
+                spans.append((begin, end + len(END)))
+        for a, b in spans:
+            text = body[a:b]
+            out.append({"name": spec.name, "text": text, "hash": section_hash(text)})
+    return out
 
 
 def normalize_slug(value: str) -> str:
@@ -3678,53 +3717,63 @@ def cmd_schema(as_json: bool = False) -> None:
         print(f"  {name:<15}{vt['description']}")
 
 
+def select_task_rows(
+    snap: Snapshot, project: str | None = None, state: str | None = None
+) -> list[TaskRow]:
+    """The task rows 'taskgo list' prints, filtered by STATE.
+
+    'ready' is derived, not a declared status: todo with nothing holding it,
+    soonest due date first.
+    """
+    rows = get_task_rows(snap, project)
+    if not state:
+        return rows
+    if state.strip().lower() == "ready":
+        index = status_index(snap)
+        today = get_today(snap)
+        rows = [
+            r
+            for r in rows
+            if r.status == TaskStatus.TODO.value
+            and not unresolved_blockers(r, index)
+            and not unresolved_wait_for(r, today)
+        ]
+        rows.sort(
+            key=lambda r: (
+                parse_iso_date(r.due) is None,
+                parse_iso_date(r.due) or date.max,
+            )
+        )
+        return rows
+    norm_state = normalize_status(state)
+    return [r for r in rows if r.status == norm_state]
+
+
+def task_row_json(r: TaskRow) -> dict[str, Any]:
+    """The JSON form of a task row, as 'taskgo list --json' prints it."""
+    return {
+        "project": r.project,
+        "id": r.task_id,
+        "status": r.status,
+        "title": r.title,
+        "path": r.rel_path,
+        "blocked_by": list(r.blocked_by),
+        "wait_for": list(r.wait_for),
+        "due": r.due,
+        "stale_after": r.stale_after,
+    }
+
+
 def cmd_list(
     project: str | None = None,
     state: str | None = None,
     as_json: bool = False,
 ) -> None:
     """List tasks in the repository or a specific project."""
-    root = get_repo_root()
-    snap = FsSnapshot(root)
-    rows = get_task_rows(snap, project)
-    if state:
-        # "ready" is derived, not a declared status: todo with nothing holding it.
-        if state.strip().lower() == "ready":
-            index = status_index(snap)
-            today = get_today(snap)
-            rows = [
-                r
-                for r in rows
-                if r.status == TaskStatus.TODO.value
-                and not unresolved_blockers(r, index)
-                and not unresolved_wait_for(r, today)
-            ]
-            rows.sort(
-                key=lambda r: (
-                    parse_iso_date(r.due) is None,
-                    parse_iso_date(r.due) or date.max,
-                )
-            )
-        else:
-            norm_state = normalize_status(state)
-            rows = [r for r in rows if r.status == norm_state]
+    rows = select_task_rows(FsSnapshot(get_repo_root()), project, state)
 
     if as_json:
-        out = [
-            {
-                "project": r.project,
-                "id": r.task_id,
-                "status": r.status,
-                "title": r.title,
-                "path": r.rel_path,
-                "blocked_by": list(r.blocked_by),
-                "wait_for": list(r.wait_for),
-                "due": r.due,
-                "stale_after": r.stale_after,
-            }
-            for r in rows
-        ]
-        print(json.dumps(out, indent=2))
+        print(json.dumps([task_row_json(r) for r in rows], indent=2))
         return
 
     if not rows:
@@ -3825,6 +3874,31 @@ def cmd_info(
         print(f"{label}: {val_str}")
 
 
+def project_status_json(
+    snap: Snapshot, project: str, with_tasks: bool = False
+) -> dict[str, Any]:
+    """One project's entry in 'taskgo status --json'."""
+    rows = get_task_rows(snap, project)
+    out: dict[str, Any] = {
+        "project": project,
+        "in_progress": [r.task_id for r in rows if r.status == "in-progress"],
+        "blocked": [r.task_id for r in rows if r.status == "blocked"],
+        "todo_count": sum(1 for r in rows if r.status == "todo"),
+        "done_count": sum(1 for r in rows if r.status == "done"),
+    }
+    if with_tasks:
+        out["tasks"] = [
+            {
+                "id": r.task_id,
+                "status": r.status,
+                "title": r.title,
+                "path": r.rel_path,
+            }
+            for r in rows
+        ]
+    return out
+
+
 def cmd_status(
     project: str | None = None,
     as_json: bool = False,
@@ -3835,23 +3909,7 @@ def cmd_status(
     if project:
         require_project(snap, project)
         if as_json:
-            rows = get_task_rows(snap, project)
-            out = {
-                "project": project,
-                "in_progress": [r.task_id for r in rows if r.status == "in-progress"],
-                "blocked": [r.task_id for r in rows if r.status == "blocked"],
-                "todo_count": sum(1 for r in rows if r.status == "todo"),
-                "done_count": sum(1 for r in rows if r.status == "done"),
-                "tasks": [
-                    {
-                        "id": r.task_id,
-                        "status": r.status,
-                        "title": r.title,
-                        "path": r.rel_path,
-                    }
-                    for r in rows
-                ],
-            }
+            out = project_status_json(snap, project, with_tasks=True)
             print(json.dumps(out, indent=2))
             return
         status_file = f"{project}/STATUS.md"
@@ -3864,60 +3922,53 @@ def cmd_status(
     # All projects
     projects = list_projects(snap)
     if as_json:
-        all_data = []
-        for p in projects:
-            rows = get_task_rows(snap, p)
-            all_data.append(
-                {
-                    "project": p,
-                    "in_progress": [
-                        r.task_id for r in rows if r.status == "in-progress"
-                    ],
-                    "blocked": [r.task_id for r in rows if r.status == "blocked"],
-                    "todo_count": sum(1 for r in rows if r.status == "todo"),
-                    "done_count": sum(1 for r in rows if r.status == "done"),
-                }
-            )
+        all_data = [project_status_json(snap, p) for p in projects]
         print(json.dumps(all_data, indent=2))
         return
 
     for p in projects:
-        rows = get_task_rows(snap, p)
-        in_prog = [r.task_id for r in rows if r.status == "in-progress"]
-        blocked = [r.task_id for r in rows if r.status == "blocked"]
-        todo = sum(1 for r in rows if r.status == "todo")
-        done = sum(1 for r in rows if r.status == "done")
-        prog_str = ", ".join(in_prog) if in_prog else "none"
-        blk_str = ", ".join(blocked) if blocked else "none"
+        data = project_status_json(snap, p)
+        prog_str = ", ".join(data["in_progress"]) if data["in_progress"] else "none"
+        blk_str = ", ".join(data["blocked"]) if data["blocked"] else "none"
         print(
-            f"{p}: in-progress=[{prog_str}] blocked=[{blk_str}] todo={todo} done={done}"
+            f"{p}: in-progress=[{prog_str}] blocked=[{blk_str}] "
+            f"todo={data['todo_count']} done={data['done_count']}"
         )
 
 
-def cmd_dispatch(task_id: str) -> None:
-    """Emit instructions dispatching an agent to TASK_ID."""
-    root = get_repo_root()
-    target_path = resolve_target(root, task_id)
-    rel_path = Path(str(target_path.relative_to(root))).as_posix()
-    project_name = rel_path.split("/")[0]
+class TaskgoError(Exception):
+    """A refusal the core reports to its caller: the CLI dies with the message,
+    the MCP server returns it as a tool error."""
 
-    committed = run_git(["show", f"HEAD:{rel_path}"], check=False)
-    if committed.returncode != 0:
-        die_scoped(
-            f"{rel_path} is not committed at HEAD; commit the task before dispatching it"
-        )
-    content = committed.stdout
 
+@dataclass(slots=True)
+class DispatchPlan:
+    task_id: str
+    project: str
+    title: str
+    goal: str
+    findings: list[tuple[Literal["WARN", "FAIL"], str]]
+
+
+def plan_dispatch(
+    snap: Snapshot, rel_path: str, content: str, audit: list["Finding"]
+) -> DispatchPlan:
+    """Checks a committed task record for dispatch.
+
+    CONTENT is the record as committed; AUDIT is the project's audit findings.
+    Raises TaskgoError when the record cannot be dispatched at all.
+    """
+    project_name = rel_path.split("/", maxsplit=1)[0]
     resolved_id = extract_frontmatter_field(content, "id")
     if not ID_PATTERN.match(resolved_id):
-        die_scoped(f"{rel_path} has no valid committed task ID")
+        raise TaskgoError(f"{rel_path} has no valid committed task ID")
     status = extract_frontmatter_field(content, "status")
     title = extract_title(content)
     goal = extract_runin(content, "Goal")
 
     # Dispatching finished work is a selection error, so refuse it.
     if status in RESOLVED_STATES:
-        die_scoped(
+        raise TaskgoError(
             f"{resolved_id} is {status}; dispatch accepts only unfinished work "
             f"(see 'taskgo list {project_name} --state ready')"
         )
@@ -3937,11 +3988,10 @@ def cmd_dispatch(task_id: str) -> None:
 
     findings.extend(
         (finding.severity, finding.message)
-        for finding in audit_workspace(root, project_name)
+        for finding in audit
         if finding.severity in {"WARN", "FAIL"}
     )
 
-    snap = FsSnapshot(root)
     rows = get_task_rows(snap, project_name)
     row = next((r for r in rows if r.task_id == resolved_id), None)
     if row is not None:
@@ -3967,6 +4017,56 @@ def cmd_dispatch(task_id: str) -> None:
                     ),
                 )
             )
+    return DispatchPlan(resolved_id, project_name, title, goal, findings)
+
+
+def dispatch_note(plan: DispatchPlan, status_ref: str, task_ref: str) -> str:
+    """The dispatch note: headline, Goal, and where to read before acting."""
+    headline = f"Next is taskgo {plan.task_id} ({plan.project})"
+    if plan.title:
+        headline += f": {plan.title}"
+        if plan.title[-1] not in ".?!":
+            headline += "."
+    else:
+        headline += "."
+
+    paragraphs = [headline]
+    if plan.goal:
+        paragraphs.append(plan.goal)
+    paragraphs.append(
+        f"Read {status_ref} and the task record ({task_ref}) before acting, and "
+        "form your own view of the approach."
+    )
+    # Never break inside a path or hyphenated identifier: the note is pasted and
+    # its file references must stay greppable.
+    return "\n\n".join(
+        textwrap.fill(p, width=76, break_long_words=False, break_on_hyphens=False)
+        for p in paragraphs
+    )
+
+
+def cmd_dispatch(task_id: str) -> None:
+    """Emit instructions dispatching an agent to TASK_ID."""
+    root = get_repo_root()
+    target_path = resolve_target(root, task_id)
+    rel_path = Path(str(target_path.relative_to(root))).as_posix()
+    project_name = rel_path.split("/")[0]
+
+    committed = run_git(["show", f"HEAD:{rel_path}"], check=False)
+    if committed.returncode != 0:
+        die_scoped(
+            f"{rel_path} is not committed at HEAD; commit the task before dispatching it"
+        )
+
+    try:
+        plan = plan_dispatch(
+            FsSnapshot(root),
+            rel_path,
+            committed.stdout,
+            audit_workspace(root, project_name),
+        )
+    except TaskgoError as e:
+        die_scoped(str(e))
 
     # A dispatch note points at committed state. Uncommitted project files mean
     # the receiving agent cannot see every current workspace change.
@@ -3974,7 +4074,7 @@ def cmd_dispatch(task_id: str) -> None:
         ["status", "--porcelain", "--", project_name], check=False
     ).stdout.strip()
     if dirty:
-        findings.append(
+        plan.findings.append(
             (
                 "WARN",
                 (
@@ -3984,34 +4084,11 @@ def cmd_dispatch(task_id: str) -> None:
             )
         )
 
-    for severity, message in findings:
+    for severity, message in plan.findings:
         print(_tagged(f"[{severity}]  {message}", sys.stderr), file=sys.stderr)
 
-    headline = f"Next is taskgo {resolved_id} ({project_name})"
-    if title:
-        headline += f": {title}"
-        if title[-1] not in ".?!":
-            headline += "."
-    else:
-        headline += "."
-
     status_md = str((root / project_name / "STATUS.md").resolve())
-    target_abs = str(target_path.resolve())
-    paragraphs = [headline]
-    if goal:
-        paragraphs.append(goal)
-    paragraphs.append(
-        f"Read {status_md} and the task record ({target_abs}) before acting, and "
-        "form your own view of the approach."
-    )
-    # Never break inside a path or hyphenated identifier: the note is pasted and
-    # its file references must stay greppable.
-    print(
-        "\n\n".join(
-            textwrap.fill(p, width=76, break_long_words=False, break_on_hyphens=False)
-            for p in paragraphs
-        )
-    )
+    print(dispatch_note(plan, status_md, str(target_path.resolve())))
 
 
 def cmd_sync(
@@ -4617,6 +4694,39 @@ def cmd_check(
         )
 
 
+@dataclass(slots=True, frozen=True)
+class FieldChange:
+    date: str
+    before: str
+    after: str
+    sha: str
+    subject: str
+
+
+def field_history(
+    versions: list[tuple[str, str, str, str]], field: str
+) -> list[FieldChange]:
+    """Changes of frontmatter FIELD across VERSIONS, oldest first.
+
+    Each version is (commit SHA, date, subject, file content). A version whose
+    value equals the previous one is skipped; the first has before '(none)'.
+    """
+    changes: list[FieldChange] = []
+    prev = "__x"
+    for sha, d, s, content in versions:
+        v = extract_frontmatter_field(content, field)
+        if v == prev:
+            continue
+        prev_label = "(none)" if prev == "__x" else prev
+        changes.append(FieldChange(d, prev_label, v or "(missing)", sha, s))
+        prev = v
+    return changes
+
+
+def format_field_change(c: FieldChange) -> str:
+    return f"{c.date}\t{c.before} -> {c.after}\t{c.sha[:10]}\t{c.subject}"
+
+
 def cmd_history(query: str, field: str = "status") -> None:
     """Show frontmatter field history across git revisions."""
     root = get_repo_root()
@@ -4653,19 +4763,15 @@ def cmd_history(query: str, field: str = "status") -> None:
         else:
             entries.append((cur_sha, cur_date, cur_subj, line))
 
-    prev = "__x"
+    versions: list[tuple[str, str, str, str]] = []
     for sha, d, s, p in reversed(entries):
         show_res = run_git(["show", f"{sha}:{p}"], check=False)
         if show_res.returncode != 0:
             continue
-        v = extract_frontmatter_field(show_res.stdout, field)
-        if v == prev:
-            continue
+        versions.append((sha, d, s, show_res.stdout))
 
-        prev_label = "(none)" if prev == "__x" else prev
-        v_label = v or "(missing)"
-        print(f"{d}\t{prev_label} -> {v_label}\t{sha[:10]}\t{s}")
-        prev = v
+    for change in field_history(versions, field):
+        print(format_field_change(change))
 
 
 def cmd_checkpoint(
@@ -5660,6 +5766,10 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    # Installed only when run as the CLI: the MCP server imports this file as
+    # its core module.
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    signal.signal(signal.SIGINT, sigint_handler)
     try:
         main()
     except KeyboardInterrupt:
