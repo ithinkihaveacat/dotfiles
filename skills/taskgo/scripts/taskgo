@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, TypedDict
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import mdformat
 from ruamel.yaml import YAML
@@ -1221,13 +1222,41 @@ def parse_iso_date(value: Any) -> date | None:
         return None
 
 
-def get_today() -> date:
-    """Returns today's calendar date (or TASKGO_TODAY=YYYY-MM-DD when set)."""
+def repo_timezone_name(snap: Snapshot) -> str | None:
+    """The timezone named in the root README.md frontmatter, if any."""
+    try:
+        fm, _ = parse_frontmatter(snap.read_text("README.md"))
+    except OSError:
+        return None
+    name = str(fm.get("timezone") or "").strip()
+    return name or None
+
+
+def load_zone(name: str) -> ZoneInfo | None:
+    """The ZoneInfo for IANA zone NAME, or None when it is not a known zone."""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def get_today(snap: Snapshot) -> date:
+    """Returns today's calendar date for the repository.
+
+    Stored dates are floating calendar days; the timezone only decides which
+    day it is now. TASKGO_TODAY=YYYY-MM-DD wins, then the root README.md
+    `timezone`, then the machine's local date (also when the zone is unknown,
+    which doctor reports).
+    """
     env_today = os.environ.get("TASKGO_TODAY")
     if env_today:
         parsed = parse_iso_date(env_today)
         if parsed is not None:
             return parsed
+    name = repo_timezone_name(snap)
+    zone = load_zone(name) if name else None
+    if zone is not None:
+        return datetime.now(zone).date()
     return datetime.now().astimezone().date()
 
 
@@ -1684,19 +1713,18 @@ def unresolved_blockers(row: TaskRow, index: dict[str, str]) -> list[str]:
     ]
 
 
-def unresolved_wait_for(row: TaskRow, today: date | None = None) -> list[str]:
+def unresolved_wait_for(row: TaskRow, today: date) -> list[str]:
     """Returns wait_for entries still holding ROW back as of TODAY.
 
     ISO dates (YYYY-MM-DD) hold a task back only while date > today.
     External/human gates (b/..., cl/..., gh:..., @handle) remain unresolved
     while present in frontmatter.
     """
-    ref_day = today if today is not None else get_today()
     out: list[str] = []
     for item in row.wait_for:
         d = parse_iso_date(item)
         if d is not None:
-            if d > ref_day:
+            if d > today:
                 out.append(item)
         else:
             out.append(item)
@@ -1897,7 +1925,7 @@ def build_status_block(
             index = {r.task_id: r.status for r in all_rows if r.task_id}
         else:
             index = status_index(snap)
-    today = get_today()
+    today = get_today(snap)
     due_cutoff = today + timedelta(days=DUE_SOON_DAYS)
     in_progress = [r for r in rows if r.status == "in-progress"]
     # Declared blocked, or held by an unresolved edge/gate. In-progress wins the
@@ -2721,11 +2749,27 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
             if (finding := markdown_finding(snap, rmf)) is not None:
                 findings.append(finding)
 
+    # The zone decides "today" for every project, so check it on every run.
+    tz_name = repo_timezone_name(snap)
+    if tz_name and load_zone(tz_name) is None:
+        findings.append(
+            Finding(
+                category="root",
+                severity="FAIL",
+                message=(
+                    f"unknown timezone {tz_name!r} in README.md; "
+                    "using the machine's local date"
+                ),
+                path="README.md",
+                remediation=None,
+            )
+        )
+
     # Dependency edges & temporal gates. Never auto-remediated: an invented or
     # removed edge/gate is worse than an absent one, so every finding here needs
     # human review.
     index = status_idx
-    today = get_today()
+    today = get_today(snap)
     scoped_rows = [
         r for r in all_rows if not target_project or r.project == target_project
     ]
@@ -3602,7 +3646,7 @@ def cmd_list(
         # "ready" is derived, not a declared status: todo with nothing holding it.
         if state.strip().lower() == "ready":
             index = status_index(snap)
-            today = get_today()
+            today = get_today(snap)
             rows = [
                 r
                 for r in rows
@@ -3867,7 +3911,7 @@ def cmd_dispatch(task_id: str) -> None:
                     ),
                 )
             )
-        waiting = unresolved_wait_for(row)
+        waiting = unresolved_wait_for(row, get_today(snap))
         if waiting:
             findings.append(
                 (
@@ -4377,7 +4421,7 @@ def cmd_check(
     if project:
         require_project(snap, project)
 
-    today = get_today()
+    today = get_today(snap)
     rows = get_task_rows(snap, project)
     probe_cache: dict[str, tuple[str, bool, datetime | None, str | None] | None] = {}
 

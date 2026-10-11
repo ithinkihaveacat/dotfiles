@@ -84,6 +84,13 @@ stale_after: 2026-11-01
 - **`stale_after`** — Relevance cutoff (`YYYY-MM-DD`) after which
   `taskgo doctor` emits `[WARN]` prompting re-scoping or cancellation.
 
+Dates are floating calendar days with no zone. Only "today" depends on a zone:
+`TASKGO_TODAY=YYYY-MM-DD` wins, then an IANA `timezone:` (such as
+`Europe/London`) in the root `README.md` frontmatter, then the machine's local
+date. Set the repository zone so UTC machines (cloud sessions, servers) agree
+with local ones; `taskgo doctor` fails on an unknown zone, and taskgo then uses
+the local date.
+
 Edit these lists with `--add-blocked-by`, `--add-wait-for`, and
 `--add-conversation` on `create` or `update`, and the matching `--remove-*`
 options on `update`; repeats and absent values are no-ops. `update` refuses an
