@@ -200,7 +200,8 @@ In scope, and explicitly out of scope.
 ## Task Records & Archiving
 
 Completed tasks remain as permanent, stable records in `tasks/TASK-XXXXX-*.md`
-with `status: done` (including `## Outcome` and `## Findings`).
+with `status: done`. They keep Problem, Cost, Goal, and Criteria, and add
+`## Outcome` (a verdict against each criterion) and `## Findings`.
 
 Context boundedness is achieved through `STATUS.md`:
 

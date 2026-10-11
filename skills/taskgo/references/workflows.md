@@ -49,6 +49,9 @@ matters):
    helpers in `<project>/scripts/` (and the `README.md` map).
 1. Update affected task record(s) (e.g. mark `done` with `## Outcome` and
    `## Findings`, recording `[<conversation-id>](<agent>://<conversation-id>)`).
+   A completed task keeps Problem, Cost, Goal, and Criteria; Outcome and
+   Findings replace Sketch and Constraints, and the Outcome gives a verdict
+   against each criterion.
 1. Update `STATUS.md` prose (`## Summary` captures the new baseline, active
    session link, and recent outcome; `## Next` reflects immediate next actions);
    `PLAN.md` only if intended direction changed. Rewrite the Summary rather than

@@ -141,8 +141,13 @@ conversations:
 
 # Title as imperative verb phrase
 
+**Problem:** (kept) As planned.
+**Cost:** (kept) As planned.
+**Goal:** (kept) As planned.
+**Criteria:** (kept) As planned.
+
 ## Outcome
-Summary of what shipped, external canonical web URLs, terminal verdicts, quantitative deltas, and Cost updates.
+Verdict against each criterion, then what shipped, external canonical web URLs, quantitative deltas, and Cost updates.
 
 ## Findings
 Key technical discoveries, trade-offs, reproduction steps, downstream momentum.
@@ -150,6 +155,12 @@ Key technical discoveries, trade-offs, reproduction steps, downstream momentum.
 ## Next
 Immediate follow-up actions.
 ```
+
+On completion, keep Problem, Cost, Goal, and Criteria as written, so the record
+still states what the task set out to do. Replace Sketch and Constraints with
+Outcome and Findings. `taskgo doctor` reports a done task without Outcome text
+as `[INFO]`; older records predate the rule and are repaired when next touched,
+not migrated in bulk.
 
 ## Project README & Decisions
 
