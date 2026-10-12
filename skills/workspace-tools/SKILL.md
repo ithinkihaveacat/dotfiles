@@ -136,8 +136,9 @@ skill <command> [arguments]
 
 ### Commands
 
-- **`add SPEC...`**: Link a skill (a local path or a plugin-provided catalog
-  entry) straight to its source, replacing a default's link of the same name.
+- **`add SPEC...`**: Link a skill (a catalog entry from `skill catalog`, as
+  `NAME` or `NAMESPACE:NAME`) straight to its source, replacing a default's link
+  of the same name.
 - **`add --defaults`**: Link every default through the defaults directory,
   keeping any existing link, and remove broken links to defaults; then fail if
   `doctor` would report an error. A broken link to a skill added by name is kept
