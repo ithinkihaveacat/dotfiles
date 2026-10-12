@@ -514,7 +514,7 @@ def wrap_body(text: str) -> str:
 
 def reformat_frontmatter(text: str) -> str:
     """Reflows YAML frontmatter scalars to WRAP_WIDTH using ruamel.yaml."""
-    m = re.search(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
+    m = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.DOTALL)
     if not m:
         return text
 
@@ -1175,7 +1175,7 @@ def parse_frontmatter(
 
 def parse_frontmatter_for_edit(content: str) -> tuple[Any, str]:
     """Loads frontmatter preserving raw ruamel.yaml CommentedMap and body."""
-    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
     if not match:
         yaml = YAML()
         return yaml.load("{}"), content
@@ -1225,7 +1225,7 @@ def extract_frontmatter_field(content: str, key: str) -> str:
 
 
 def extract_body(content: str) -> str:
-    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
     return content[match.end() :] if match else content
 
 
@@ -2815,13 +2815,46 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
                 )
             )
 
+        # Check project README / PROJECT frontmatter syntax
+        for doc_name in ("README.md", "PROJECT.md"):
+            doc_rel = f"{name}/{doc_name}"
+            if snap.is_file(doc_rel):
+                doc_text = snap.read_text(doc_rel)
+                if re.match(r"^---\r?\n", doc_text):
+                    try:
+                        split_record(doc_text)
+                    except ChangeSetError as e:
+                        findings.append(
+                            Finding(
+                                category="project",
+                                severity="FAIL",
+                                message=f"{doc_rel}: invalid YAML frontmatter: {e}",
+                                path=doc_rel,
+                                remediation=None,
+                            )
+                        )
+
         # Check tasks
         for tf in snap.glob_md(tasks_dir):
             content = snap.read_text(tf)
             rel_path = tf
             tf_name = tf.rsplit("/", 1)[1]
 
-            m_fm = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+            m_fm = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
+            if not m_fm and re.match(r"^---\r?\n", content):
+                findings.append(
+                    Finding(
+                        category="task",
+                        severity="FAIL",
+                        message=(
+                            f"{rel_path}: invalid YAML frontmatter: frontmatter is not closed\n"
+                            "        Add closing '---' delimiter after frontmatter fields."
+                        ),
+                        path=tf,
+                        remediation=None,
+                    )
+                )
+                continue
             if m_fm:
                 yaml = YAML()
                 try:
@@ -4117,8 +4150,10 @@ def find_record(cs: ChangeSet, record: Any) -> tuple[str, RecordSchema]:
 
 def split_record(text: str) -> tuple[Any, str]:
     """Editable frontmatter (empty when absent) and body of a record."""
-    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
+    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.DOTALL)
     if not match:
+        if re.match(r"^---\r?\n", text):
+            raise ChangeSetError("frontmatter is not closed")
         return YAML().load("{}"), text
     try:
         data = YAML().load(match.group(1))
