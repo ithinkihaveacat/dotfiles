@@ -30,7 +30,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
@@ -48,6 +48,7 @@ END = "<!-- taskgo:end -->"
 CANONICAL_URL = "https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo"
 COMMIT_AUTH = "<!-- taskgo:allow-local-commits -->"
 ID_PATTERN = re.compile(r"^TASK-[0-9A-F]{5}$")
+ID_IN_TEXT = re.compile(r"\bTASK-[0-9A-F]{5}\b")
 WRAP_WIDTH = 80
 SLUG_MAX_LEN = 32
 
@@ -777,6 +778,10 @@ class Snapshot:
     def exists(self, rel: str) -> bool:
         return self.is_file(rel) or self.is_dir(rel)
 
+    def historical_task_ids(self) -> set[str]:
+        """Task IDs named in the history of any ref of the repository."""
+        return set()
+
     def write_markdown(self, rel: str, content: str) -> None:
         """Formats Markdown content and writes it.
 
@@ -834,6 +839,9 @@ class FsSnapshot(Snapshot):
 
     def rename(self, src: str, dst: str) -> None:
         self.path(src).rename(self.path(dst))
+
+    def historical_task_ids(self) -> set[str]:
+        return task_ids_in_history(self.root)
 
     def walk_md(self, rel_dir: str) -> list[str]:
         # Only files Git would track: ignored paths (such as a nested external
@@ -899,6 +907,9 @@ class GitTreeSnapshot(Snapshot):
                 parent = "/".join(parts[:i])
                 self.children.setdefault(parent, set()).add(parts[i])
         self.texts: dict[str, str] | None = None
+
+    def historical_task_ids(self) -> set[str]:
+        return task_ids_in_history(self.repo)
 
     def _load(self) -> dict[str, str]:
         if self.texts is None:
@@ -1832,12 +1843,34 @@ def find_dependency_cycles(rows: list[TaskRow]) -> list[list[str]]:
     return cycles
 
 
-def generate_task_id(snap: Snapshot) -> str:
-    existing_ids = {r.task_id for r in get_task_rows(snap) if r.task_id}
+def task_ids_in_history(repo: Path) -> set[str]:
+    """Task IDs in the paths and messages of every commit reachable from a ref.
+
+    Covers deleted tasks, tasks on unmerged branches, and Task: trailers. One
+    uncached git log over all refs, so it is right in every repository state;
+    it costs about 4 s at 70,000 commits. Empty outside a repository or before
+    the first commit.
+    """
+    res = run_git(
+        ["log", "--all", "--no-renames", "--format=%B", "--name-only"],
+        cwd=repo,
+        check=False,
+    )
+    return set(ID_IN_TEXT.findall(res.stdout)) if res.returncode == 0 else set()
+
+
+def random_task_ids() -> Iterator[str]:
     for i in range(1, 257):
         entropy = f"{time.time_ns()}:{os.getpid()}:{os.urandom(8).hex()}:{i}"
         h = hashlib.sha1(entropy.encode("utf-8")).hexdigest()[:5].upper()
-        candidate = f"TASK-{h}"
+        yield f"TASK-{h}"
+
+
+def generate_task_id(snap: Snapshot) -> str:
+    """A task ID not used in the snapshot or anywhere in its history."""
+    existing_ids = {r.task_id for r in get_task_rows(snap) if r.task_id}
+    existing_ids |= snap.historical_task_ids()
+    for candidate in random_task_ids():
         if candidate not in existing_ids:
             return candidate
     die("could not allocate unique task ID")

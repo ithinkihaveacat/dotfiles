@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..171'
+echo '1..173'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3376,4 +3376,83 @@ if MCP_AUTH=$("$MCP_PY" "$TEST_DIR/auth-check" 2>&1); then
 else
   echo 'not ok 171 - mcp checks Cloudflare Access tokens'
   printf '# %s\n' "$MCP_AUTH"
+fi
+
+# A deleted task's ID, one on an unmerged branch, and one named only in a
+# commit message are never allocated again, from a checkout or a Git tree.
+IDH_REPO="$TEST_ROOT/id-hist-repo"
+mkdir -p "$IDH_REPO/proj/tasks"
+git -C "$IDH_REPO" init -q -b main
+cp "$REPO/AGENTS.md" "$IDH_REPO/AGENTS.md"
+printf '# Project\n' >"$IDH_REPO/proj/README.md"
+printf '%s\n' '---' 'id: TASK-7E201' 'status: todo' '---' '' '# Deleted later' \
+  >"$IDH_REPO/proj/tasks/TASK-7E201-deleted.md"
+printf '%s\n' '---' 'id: TASK-7E202' 'status: todo' '---' '' '# Still here' \
+  >"$IDH_REPO/proj/tasks/TASK-7E202-current.md"
+git -C "$IDH_REPO" add -A && git -C "$IDH_REPO" commit -qm 'two tasks'
+git -C "$IDH_REPO" rm -q proj/tasks/TASK-7E201-deleted.md
+git -C "$IDH_REPO" commit -qm 'delete a task' -m 'Task: TASK-7E204'
+git -C "$IDH_REPO" switch -qc side
+printf '%s\n' '---' 'id: TASK-7E203' 'status: todo' '---' '' '# On a branch' \
+  >"$IDH_REPO/proj/tasks/TASK-7E203-branch.md"
+git -C "$IDH_REPO" add -A && git -C "$IDH_REPO" commit -qm 'unmerged task'
+git -C "$IDH_REPO" switch -q main
+if IDH_OUT=$(
+  IDH_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN") &&
+    "$IDH_PY" - "$BIN" "$IDH_REPO" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+used = ["TASK-7E201", "TASK-7E202", "TASK-7E203", "TASK-7E204"]
+tg.random_task_ids = lambda: iter([*used, "TASK-7E2FF"])
+for snap in (tg.FsSnapshot(repo), tg.GitTreeSnapshot(repo, "main")):
+    assert set(used) <= snap.historical_task_ids(), snap.historical_task_ids()
+    got = tg.generate_task_id(snap)
+    assert got == "TASK-7E2FF", (type(snap).__name__, got)
+assert tg.task_ids_in_history(repo.parent) == set()
+PY
+); then
+  echo 'ok 172 - allocation skips deleted, branch, and trailer task IDs'
+else
+  echo 'not ok 172 - allocation skips deleted, branch, and trailer task IDs'
+  printf '# %s\n' "$IDH_OUT"
+fi
+
+# Allocation scans history in one git log, so thousands of commits stay cheap.
+BIG_REPO="$TEST_ROOT/big-repo"
+git -C "$TEST_ROOT" init -q big-repo
+cp "$REPO/AGENTS.md" "$BIG_REPO/AGENTS.md"
+mkdir -p "$BIG_REPO/proj/tasks"
+printf '# Project\n' >"$BIG_REPO/proj/README.md"
+git -C "$BIG_REPO" add -A && git -C "$BIG_REPO" commit -qm 'start'
+awk -v head="$(git -C "$BIG_REPO" rev-parse HEAD)" 'BEGIN {
+  for (i = 0; i < 5000; i++) {
+    id = sprintf("TASK-%05X", i)
+    body = sprintf("---\nid: %s\nstatus: todo\n---\n\n# Task %d\n", id, i)
+    msg = sprintf("task %d", i)
+    printf "commit refs/heads/main\ncommitter T <t@example.com> %d +0000\n", 1700000000 + i
+    printf "data %d\n%s\n", length(msg), msg
+    if (i == 0) printf "from %s\n", head
+    path = sprintf("proj/tasks/%s-t.md", id)
+    printf "M 100644 inline %s\ndata %d\n%s\n", path, length(body), body
+    if (i > 0) printf "D proj/tasks/TASK-%05X-t.md\n", i - 1
+  }
+}' | git -C "$BIG_REPO" fast-import --quiet
+git -C "$BIG_REPO" reset -q --hard main
+BIG_START=$(date +%s)
+BIG_ID=$("$BIN" --root "$BIG_REPO" id)
+BIG_SECS=$(($(date +%s) - BIG_START))
+BIG_COUNT=$(git -C "$BIG_REPO" rev-list --count main)
+if [[ $BIG_COUNT == 5001 && $BIG_ID =~ ^TASK-[0-9A-F]{5}$ && $BIG_SECS -le 5 ]] &&
+  ! git -C "$BIG_REPO" log --format= --name-only | grep -q "$BIG_ID"; then
+  echo 'ok 173 - allocation stays fast over 5000 commits'
+else
+  echo 'not ok 173 - allocation stays fast over 5000 commits'
+  printf '# %s commits, %s, %ss\n' "$BIG_COUNT" "$BIG_ID" "$BIG_SECS"
 fi

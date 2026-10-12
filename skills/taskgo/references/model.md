@@ -390,9 +390,13 @@ taskgo doctor
 ## Concurrency
 
 Prefer separate branches/worktrees. Random globally checked IDs avoid a shared
-allocator. Resolve merges by reconciling files to one intended current state;
-STATUS may be rewritten freely. Stable paths and accepted ADR text are defaults,
-not reasons to preserve a broken merge. Avoid squash integration when
+allocator: a new ID is checked against the current tree and against every ID
+named in the paths or messages of any ref's history, so a deleted task's ID or
+one on an unmerged branch is never reused. Allocation does not reserve an ID, so
+two writers can still pick the same one; `taskgo doctor` reports duplicate IDs
+after a merge. Resolve merges by reconciling files to one intended current
+state; STATUS may be rewritten freely. Stable paths and accepted ADR text are
+defaults, not reasons to preserve a broken merge. Avoid squash integration when
 intermediate state transitions matter, because squashing can erase
 reconstructible states.
 
