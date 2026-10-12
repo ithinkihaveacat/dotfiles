@@ -42,6 +42,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep wait_for gates
 complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks (read-only)'
 complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadata and snapshots'
 complete -f -c taskgo -n __fish_use_subcommand -a history -d 'Show frontmatter history'
+complete -f -c taskgo -n __fish_use_subcommand -a read -d 'Print lines of a file'
 complete -f -c taskgo -n __fish_use_subcommand -a checkpoint -d 'Commit an authorized tracker checkpoint'
 complete -f -c taskgo -n __fish_use_subcommand -a commit -d 'Commit a logical transition'
 complete -f -c taskgo -n __fish_use_subcommand -a schema -d 'Show the task, decision, and STATUS schema'
@@ -133,6 +134,13 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l co
 
 # schema options
 complete -f -c taskgo -n '__fish_seen_subcommand_from schema' -l json -d 'Output as JSON'
+
+# read options (PATH is relative to the control repository root)
+complete -f -c taskgo -n '__fish_seen_subcommand_from read' -a '(git -C (__fish_taskgo_root) ls-files 2>/dev/null)' -d File
+complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l start-line -d 'First line (default 1)'
+complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l end-line -d 'Last line (default: the last)'
+complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l at -d 'Read commit REV instead of the working tree'
+complete -f -c taskgo -n '__fish_seen_subcommand_from read' -l json -d 'Emit JSON output'
 
 # mcp options
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l host -x -d 'Address to listen on (default 127.0.0.1)'

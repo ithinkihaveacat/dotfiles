@@ -255,6 +255,7 @@ taskgo check [PROJECT] [--json]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
+taskgo read PATH [--start-line N] [--end-line N] [--at REV] [--json]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 taskgo schema [--json]

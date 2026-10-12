@@ -17,6 +17,7 @@
 - [doctor](#doctor)
 - [fix](#fix)
 - [history](#history)
+- [read](#read)
 - [checkpoint](#checkpoint)
 - [commit](#commit)
 - [schema](#schema)
@@ -47,6 +48,7 @@ Commands:
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
+  read PATH [OPTIONS]              Print lines of a file (--start-line, --end-line)
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
@@ -432,6 +434,35 @@ positional arguments:
 
 options:
   -h, --help       show this help message and exit
+```
+
+<!-- /generated -->
+
+## read
+
+<!-- generated: ../scripts/taskgo read --help -->
+
+```text
+usage: taskgo read [-h] [--start-line N] [--end-line N] [--at REV] [--json]
+                   PATH
+
+Print lines START..END of a UTF-8 file in the control repository, from the working tree or from commit REV, as the MCP server's read_file tool does. Lines are 1-indexed and inclusive and end at newline. At most 256 KiB is printed, cut after a whole line; when the output is truncated, a note on stderr names the line to continue from.
+
+positional arguments:
+  PATH            Repository-relative path
+
+options:
+  -h, --help      show this help message and exit
+  --start-line N  First line (default 1)
+  --end-line N    Last line (default: the last)
+  --at REV        Read commit REV instead of the working tree
+  --json          Print path, blob, size, line range, truncated, and content
+                  as JSON
+
+Examples:
+  taskgo read proj/PLAN.md
+  taskgo read proj/logs/logcat.txt --start-line 2001 --end-line 2400
+  taskgo read proj/PLAN.md --at HEAD~3 --json
 ```
 
 <!-- /generated -->

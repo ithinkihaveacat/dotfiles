@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..182'
+echo '1..183'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3912,4 +3912,78 @@ if MCP_ERAS=$("$MCP_PY" "$TEST_DIR/protocol-check" "$MCP_SYNTH" 2>&1); then
 else
   echo 'not ok 182 - mcp serves both protocol eras over both transports'
   printf '# %s\n' "$MCP_ERAS"
+fi
+
+# Test 183: read slices lines 1-indexed and inclusive, splitting at '\n' only
+# and keeping CRLF bytes; clamps out-of-range lines; caps output at 256 KiB
+# after a whole line (or a character boundary in one long line); refuses
+# non-UTF-8 files and paths outside the repository; and reads commits by --at.
+READ_REPO="$TEST_ROOT/read-repo"
+mkdir -p "$READ_REPO/p"
+git -C "$READ_REPO" init -q
+printf 'one\r\ntwo\x0bstill two\nthree' >"$READ_REPO/p/crlf.txt"
+: >"$READ_REPO/p/empty.txt"
+printf '\xff\xfe\n' >"$READ_REPO/p/binary.dat"
+python3 -c '
+import sys
+d = sys.argv[1]
+with open(d + "/p/big.txt", "w") as f:
+    for i in range(1, 40001):
+        f.write(f"line {i:05d} " + "x" * 10 + "\n")
+with open(d + "/p/long.txt", "w") as f:
+    f.write("a" + "\u00e9" * 200000 + "\nafter\n")
+' "$READ_REPO"
+git -C "$READ_REPO" add -A
+git -C "$READ_REPO" commit -qm 'read fixtures'
+printf 'changed\n' >"$READ_REPO/p/empty.txt"
+if READ_ERR=$(python3 -c '
+import json, subprocess, sys
+bin_, repo = sys.argv[1], sys.argv[2]
+
+def read(*args):
+    res = subprocess.run(
+        [bin_, "--root", repo, "read", *args, "--json"],
+        capture_output=True, text=True,
+    )
+    return json.loads(res.stdout) if res.returncode == 0 else None
+
+def check(name, ok):
+    if not ok:
+        sys.exit(name)
+
+d = read("p/crlf.txt")
+check("crlf whole", d["content"] == "one\r\ntwo\x0bstill two\nthree"
+      and d["total_lines"] == 3 and d["end_line"] == 3 and not d["truncated"])
+d = read("p/crlf.txt", "--start-line", "2", "--end-line", "2")
+check("crlf slice", d["content"] == "two\x0bstill two\n" and d["start_line"] == 2)
+d = read("p/crlf.txt", "--start-line", "-4", "--end-line", "99")
+check("clamp", d["start_line"] == 1 and d["end_line"] == 3)
+d = read("p/crlf.txt", "--start-line", "9")
+check("past end", d["content"] == "" and d["start_line"] == 9 and not d["truncated"])
+d = read("p/empty.txt", "--at", "HEAD")
+check("empty at HEAD", d["content"] == "" and d["total_lines"] == 0)
+d = read("p/empty.txt")
+check("working tree", d["content"] == "changed\n")
+blob = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD:p/big.txt"],
+                      capture_output=True, text=True).stdout.strip()
+d = read("p/big.txt")
+size = len(d["content"].encode())
+check("cap whole lines", d["truncated"] and d["end_line"] == 262144 // 22
+      and size <= 262144 and d["content"].endswith("\n")
+      and d["total_lines"] == 40000 and d["blob"] == blob)
+n = d["end_line"] + 1
+d = read("p/big.txt", "--start-line", str(n), "--end-line", str(n))
+check("continue", d["content"] == f"line {n:05d} " + "x" * 10 + "\n")
+d = read("p/long.txt")
+check("long line", d["truncated"] and d["end_line"] == 1
+      and d["content"] == "a" + "\u00e9" * 131071)
+check("binary", read("p/binary.dat") is None)
+check("escape", read("../read-repo/p/crlf.txt") is None)
+check("directory", read("p") is None)
+check("git dir", read(".git/HEAD") is None)
+' "$BIN" "$READ_REPO" 2>&1); then
+  echo 'ok 183 - read slices, caps, and clamps lines of a file'
+else
+  echo 'not ok 183 - read slices, caps, and clamps lines of a file'
+  printf '# %s\n' "$READ_ERR"
 fi

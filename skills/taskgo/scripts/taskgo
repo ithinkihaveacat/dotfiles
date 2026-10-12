@@ -5767,6 +5767,138 @@ def cmd_history(query: str, field: str = "status") -> None:
         print(format_field_change(change))
 
 
+# Most bytes of file content one read returns, from the CLI or the MCP server.
+READ_MAX_BYTES = 256 * 1024
+
+
+def read_line_arg(name: str, value: Any) -> int | None:
+    """VALUE as a line number argument, or None when it is absent."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TaskgoError(f"{name} must be an integer, not {value!r}")
+    return value
+
+
+def read_slice(
+    rel: str,
+    blob: str | None,
+    data: bytes,
+    start_line: Any = None,
+    end_line: Any = None,
+    limit: int = READ_MAX_BYTES,
+) -> dict[str, Any]:
+    """The read of lines START_LINE..END_LINE of file REL, whose bytes are DATA.
+
+    Lines are 1-indexed and inclusive, and end at '\\n' only, as in 'git grep
+    -n' and sed; the content is the file's bytes, with no line endings
+    rewritten. The range is clamped to the file: a start past the end, or
+    after the end line, reads nothing. At most LIMIT bytes of content are
+    returned, cut after the last whole line that fits; truncated then says so,
+    end_line names the last line returned, and the next read starts at
+    end_line + 1. A first line longer than LIMIT is cut at a character
+    boundary.
+    """
+    start = read_line_arg("start_line", start_line)
+    end = read_line_arg("end_line", end_line)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise TaskgoError(f"{rel} is not UTF-8 text") from None
+    lines = [ln + "\n" for ln in text.split("\n")]
+    lines[-1] = lines[-1][:-1]  # the text after the last newline
+    if not lines[-1]:
+        lines.pop()  # a final newline ends the last line; it starts none
+    total = len(lines)
+    s = max(1, 1 if start is None else start)
+    e = total if end is None else min(total, max(0, end))
+    parts: list[str] = []
+    used = 0
+    truncated = False
+    last = s - 1
+    for i in range(s, e + 1):
+        line = lines[i - 1]
+        size = len(line.encode("utf-8"))
+        if used + size > limit:
+            truncated = True
+            if not parts:
+                cut = line.encode("utf-8")[:limit]
+                parts.append(cut.decode("utf-8", "ignore"))
+                last = i
+            break
+        parts.append(line)
+        used += size
+        last = i
+    return {
+        "path": rel,
+        "blob": blob,
+        "size": len(data),
+        "start_line": s,
+        "end_line": last if s <= e else e,
+        "total_lines": total,
+        "truncated": truncated,
+        "content": "".join(parts),
+    }
+
+
+def cmd_read(
+    path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    at: str | None = None,
+    as_json: bool = False,
+) -> None:
+    """Print lines of a file in the working tree, or in commit AT."""
+    root = get_repo_root()
+    rel = path.strip().strip("/")
+    parts = rel.split("/") if rel else []
+    if not parts or any(p in ("", ".", "..") for p in parts) or "\\" in rel:
+        die_scoped(f"invalid path: {path!r}")
+    if parts[0].startswith(".git"):
+        die_scoped(f"invalid path: {path!r}")
+    if at:
+        res = run_git(
+            ["rev-parse", "--verify", "--quiet", f"{at}^{{commit}}"],
+            cwd=root,
+            check=False,
+        )
+        if res.returncode != 0:
+            die_scoped(f"no commit {at} in the control repository")
+        snap = GitTreeSnapshot(root, res.stdout.strip())
+        blob = snap.blobs.get(rel)
+        if blob is None:
+            if snap.is_dir(rel):
+                die_scoped(f"{rel} is a directory")
+            die_scoped(f"{rel} is not in commit {snap.rev[:12]}")
+        data = run_git(["cat-file", "blob", blob], cwd=root, text=False).stdout
+    else:
+        target = root / rel
+        if not target.resolve().is_relative_to(root.resolve()):
+            die_scoped(f"invalid path: {path!r}")
+        if target.is_dir():
+            die_scoped(f"{rel} is a directory")
+        if not target.is_file():
+            die_scoped(f"{rel} does not exist")
+        data = target.read_bytes()
+        hashed = run_git(["hash-object", "--", rel], cwd=root, check=False)
+        blob = hashed.stdout.strip() if hashed.returncode == 0 else None
+    try:
+        result = read_slice(rel, blob, data, start_line, end_line)
+    except TaskgoError as e:
+        die_scoped(str(e))
+    if as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    sys.stdout.write(result["content"])
+    if result["truncated"]:
+        print(
+            f"taskgo read: {rel}: stopped at line {result['end_line']} of "
+            f"{result['total_lines']} ({READ_MAX_BYTES // 1024} KiB limit); "
+            f"continue with --start-line {result['end_line'] + 1}",
+            file=sys.stderr,
+        )
+
+
 def cmd_checkpoint(
     task_id: str,
     subject: str,
@@ -6047,8 +6179,8 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.6.0"
-MCP_MAX_FILE_BYTES = 256 * 1024
+MCP_SERVER_VERSION = "0.7.0"
+MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
 MCP_PUSH_TIMEOUT = 60
@@ -6454,18 +6586,19 @@ def mcp_read_file(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
         if r.snap.is_dir(rel):
             raise McpToolError(f"{rel} is a directory; use list_files")
         raise McpToolError(f"{rel} is not in commit {r.snap.rev[:12]}")
-    size = int(r.reader.git("cat-file", "-s", sha).stdout.strip())
-    if size > MCP_MAX_FILE_BYTES:
-        raise McpToolError(
-            f"{rel} is {size} bytes; the server returns files up to "
-            f"{MCP_MAX_FILE_BYTES} bytes"
-        )
     raw = run_git(["cat-file", "blob", sha], cwd=r.reader.cfg.repo, text=False).stdout
     try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        raise McpToolError(f"{rel} is not UTF-8 text") from None
-    return {"as_of": r.as_of(), "path": rel, "blob": sha, "size": size, "content": text}
+        result = read_slice(
+            rel,
+            sha,
+            raw,
+            args.get("start_line"),
+            args.get("end_line"),
+            MCP_MAX_FILE_BYTES,
+        )
+    except TaskgoError as e:
+        raise McpToolError(str(e)) from None
+    return {"as_of": r.as_of(), **result}
 
 
 def mcp_list_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
@@ -6675,13 +6808,25 @@ MCP_TOOLS = [
     ),
     McpTool(
         "read_file",
-        "Read any UTF-8 text file in the control repository by its "
-        f"repository-relative path, up to {MCP_MAX_FILE_BYTES // 1024} KiB.",
+        "Read a UTF-8 text file in the control repository by its "
+        "repository-relative path, whole or as lines start_line..end_line "
+        "(1-indexed, inclusive; lines end at '\\n'). Returns at most "
+        f"{MCP_MAX_FILE_BYTES // 1024} KiB of content, cut after a whole line: "
+        "when truncated is true, end_line is the last line returned, so read "
+        "on from end_line + 1. blob is the SHA of the whole file.",
         {
             "path": {
                 "type": "string",
                 "description": "Path such as 'taskgo/PLAN.md'.",
-            }
+            },
+            "start_line": {
+                "type": "integer",
+                "description": "First line to read, from 1; default 1.",
+            },
+            "end_line": {
+                "type": "integer",
+                "description": "Last line to read, inclusive; default the last.",
+            },
         },
         ("path",),
         mcp_read_file,
@@ -7641,6 +7786,7 @@ Commands:
   doctor [PROJECT]                 Run mechanical checks (read-only)
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
+  read PATH [OPTIONS]              Print lines of a file (--start-line, --end-line)
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
@@ -8231,6 +8377,52 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         help="Frontmatter field to track (default: status)",
     )
 
+    # read
+    p_read = subparsers.add_parser(
+        "read",
+        help="Print lines of a file in the control repository",
+        description=(
+            "Print lines START..END of a UTF-8 file in the control repository,"
+            " from the working tree or from commit REV, as the MCP server's"
+            " read_file tool does. Lines are 1-indexed and inclusive and end"
+            f" at newline. At most {READ_MAX_BYTES // 1024} KiB is printed,"
+            " cut after a whole line; when the output is truncated, a note on"
+            " stderr names the line to continue from."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  taskgo read proj/PLAN.md
+  taskgo read proj/logs/logcat.txt --start-line 2001 --end-line 2400
+  taskgo read proj/PLAN.md --at HEAD~3 --json""",
+    )
+    p_read.add_argument("path", metavar="PATH", help="Repository-relative path")
+    p_read.add_argument(
+        "--start-line",
+        type=int,
+        default=None,
+        metavar="N",
+        help="First line (default 1)",
+    )
+    p_read.add_argument(
+        "--end-line",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Last line (default: the last)",
+    )
+    p_read.add_argument(
+        "--at",
+        metavar="REV",
+        default=None,
+        help="Read commit REV instead of the working tree",
+    )
+    p_read.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Print path, blob, size, line range, truncated, and content as JSON",
+    )
+
     # checkpoint
     p_checkpoint = subparsers.add_parser(
         "checkpoint",
@@ -8450,6 +8642,14 @@ def main(argv: list[str] | None = None) -> None:
         cmd_history(
             query=args.query,
             field=args.field,
+        )
+    elif args.command == "read":
+        cmd_read(
+            path=args.path,
+            start_line=args.start_line,
+            end_line=args.end_line,
+            at=args.at,
+            as_json=args.as_json,
         )
     elif args.command == "checkpoint":
         cmd_checkpoint(

@@ -16,7 +16,7 @@ One server serves one control repository.
 | `list_tasks`         | Task rows, by project and state (`ready` included)                                        | `taskgo list --json`    |
 | `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown            | the task file           |
 | `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block | `taskgo status PROJECT` |
-| `read_file`          | Any UTF-8 file up to 256 KiB                                                              | `git show`              |
+| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line   | `taskgo read --json`    |
 | `list_files`         | Files with blob SHAs, optionally under one directory                                      | `git ls-files -s`       |
 | `dispatch_task`      | The dispatch note with findings and the data-care rule; paths are repository-relative     | `taskgo dispatch`       |
 | `get_task_history`   | Changes of one frontmatter field, following renames                                       | `taskgo history`        |
