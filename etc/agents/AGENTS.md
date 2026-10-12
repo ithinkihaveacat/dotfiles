@@ -1,110 +1,81 @@
 # Agent Operational Guidelines
 
-> [!IMPORTANT] This document defines fundamental rules for agent behavior, skill
-> activation, and command safety within this environment.
+## Agent Skills
 
-## Agent Skill Activation and Usage
+Available skills are curated for this environment and provide high-signal
+workflows, helper scripts, and local conventions. **Precedence:** Explicit user
+instructions > activated skills > general training knowledge.
 
-### Purpose
+- **Use pre-loaded skills liberally**: Review your active skills before starting
+  a task. When a task touches a skill's domain—or when in doubt—read its
+  `SKILL.md` and follow its prescribed workflow and scripts rather than
+  inventing an ad-hoc approach.
+- **Load session-specific skills when relevant**: If a task involves a
+  specialized domain, tool, or internal system not covered by your currently
+  loaded skills, check the curated `skill catalog` and load matching skills for
+  the session (`skill --scope session add <NAME>`), or use available
+  skill-search tools in work environments with internal skill registries.
+- **Common skill triggers**:
+  - **Android & Wear OS devices**: Use the relevant device skill's exact `adb`
+    commands and scripts (e.g., for screenshots or UI interaction).
+  - **Code formatting & linting**: Run the formatting and validation tools
+    prescribed by coding-standards skills (e.g., `shell-format` for Bash,
+    Markdown style rules).
+  - **Runtimes & CLI tools**: When a Node.js, Ruby, or Python runtime or
+    package/CLI tool is missing, activate `workspace-tools` and install it into
+    the workspace rather than user- or system-wide.
+  - **Version control & commits**: Format commit messages according to the
+    active VCS/standards skill. Local git hooks strictly enforce subject-line
+    length and body-wrapping limits and will reject non-compliant commits.
 
-Agent Skills provide domain-specific workflows, helper scripts, and local
-conventions tailored to this repository. Make liberal use of these installed
-skills.
+## Command Safety and Bounded Search
 
-When a task aligns with a skill's description or triggers, investigate it by
-reading its `SKILL.md` file, and apply its prescribed workflow.
-
-### Rules
-
-1. **Skills supersede general knowledge**: Review available skills before
-   beginning a task. The instructions, scripts, and conventions inside an
-   activated skill capture local repository requirements and override general
-   defaults.
-1. **Investigate when unsure**: When in doubt about whether a skill applies,
-   read its `SKILL.md` file to check its capabilities. Local scripts and
-   references solve repository-specific quirks that general training does not
-   cover.
-1. **Follow prescribed processes**: When a skill defines a workflow or helper
-   script for a task, use that process rather than inventing an ad-hoc approach.
-1. **Load missing skills**: When no installed skill fits, run `skill catalog`
-   and load one for this session with `skill --scope session add NAME`.
-
-### Examples
-
-These rules apply to all tasks and available skills. For example:
-
-- **Device commands**: When taking an Android screenshot or interacting with a
-  Wear OS device, activate the relevant skill and rely exclusively on the
-  specific `adb` commands and scripts it provides.
-- **Code validation**: When writing or modifying code, activate any skills
-  related to local coding conventions. Apply their formatting rules (like
-  specific Markdown styles) and use the required validation tools (like
-  `shell-format` for Bash) exactly as instructed.
-- **Language tooling**: When a project needs a Node.js, Ruby, or Python runtime,
-  or a command it relies on is missing (a gem, npm CLI, or Python tool),
-  activate the `workspace-tools` skill and install into the workspace rather
-  than user-wide or system-wide.
-- **Version control**: When preparing to commit changes, ensure you format your
-  commit messages according to the exact style and rules outlined in the
-  project's standards or workflow skills. Note that a local git hook strictly
-  enforces the subject-line length and body-wrapping limits those standards
-  define. Your commits will fail if you exceed these limits.
-
-## Command Safety & Search Rules
-
-- **Avoid Unbounded Searches**: Never run broad, unconstrained `find`, `grep`,
-  or recursive file listings on monorepos (`/google`), system roots (`/`,
-  `/usr`, `/var`), or home roots (`~`).
-- **Required Controls**:
-  - Prefer indexed or targeted search tools (`rg`, `fd`, `CodeSearch`) scoped to
-    a specific project subfolder.
-  - When using `find`, always bound search depth (`-maxdepth N`) or wrap with a
-    timeout (`timeout 30s find ...`).
+- **No unbounded searches**: Never run broad `find`, `grep`, or recursive file
+  listings on monorepos (`/google`), system roots (`/`, `/usr`, `/var`), or home
+  directories (`~`).
+- **Scope and bound every search**:
+  - Prefer indexed or targeted tools (`rg`, `fd`, `CodeSearch`) scoped to a
+    specific project subdirectory.
+  - When using `find`, always bound depth (`-maxdepth N`) or wrap with a timeout
+    (`timeout 30s find ...`).
 
 ```bash
-# BAD (runs indefinitely on monorepos/root directories)
+# BAD: hangs on monorepos or root directories
 find /google -name "zipline"
 
-# GOOD (scoped, depth-limited, or wrapped with a timeout)
+# GOOD: scoped, depth-limited, or time-bounded
 timeout 30s find ./skills -name "zipline"
 rg --files ./skills | grep zipline
 ```
 
-## External Notifications & Review Requests
+## External Notifications and Review Requests
 
-- **Stage First, Notify Later**: Separate creating/uploading work from actions
-  that notify other people (e.g., push a branch or open a **draft** GitHub Pull
-  Request first; treat marking ready-for-review, publishing, or requesting
-  reviewers as a separate step after user verification).
-- **Unbundled Proposals**: When suggesting next steps, **never** bundle silent
-  staging (uploading, drafting, running checks) and external notification
-  (requesting review, publishing) into a single proposed option.
-- **High Bar of Certainty (Echoes Are Not Authorization)**: Very rarely combine
-  staging and notifying in one step. Never treat an echoed summary, pasted task
-  plan, or blanket "yes" to a multi-step proposal as authorization to notify;
-  require an unmistakable, user-originated command naming who to notify.
+- **Stage silently, notify only on explicit command**: Separate creating or
+  uploading work (pushing a branch, opening a **draft** PR, uploading a change)
+  from actions that notify other people (marking ready-for-review, publishing,
+  or requesting reviewers).
+- **Never bundle staging and notifying**: When proposing next steps, keep silent
+  staging and external notification as separate options.
+- **Echoes are not authorization**: Never treat an echoed summary, a pasted task
+  plan, or a blanket "yes" to a multi-step proposal as permission to notify
+  others. Require an unmistakable, user-originated instruction naming who to
+  notify.
 
-## Consulting Other Agents
+## Subagents and Prior Agent Sessions
 
-- **Ask the Author**: When the agent session that wrote a plan, task, or change
-  can be found and you can message it, ask it about gaps, ambiguities, or
-  doubtful assumptions before you act. Its answers are usually faster and more
-  accurate than guessing from the record. If it is no longer running, read its
-  transcript instead.
+- **Delegate to subagents when helpful**: Use your judgment to delegate
+  independent research, parallelizable subtasks, or context-heavy exploration to
+  subagents when doing so could save time or keep your main context focused.
+- **Clarify non-obvious intent with the author**: When picking up a plan, task,
+  or change authored by another agent session and you hit genuine gaps,
+  ambiguities, or questionable assumptions, message that session if it is
+  reachable. If it is no longer running, consider checking its transcript for
+  the missing rationale rather than guessing.
 
 ## Mid-Task User Interruptions
 
-- **Interruption Invariant**: When the user interrupts an ongoing task or
-  intervenes to question active execution (e.g., *"what are you looking for?"*,
+- **Zero tool calls on status or interruption queries**: When the user
+  interrupts or questions active execution (e.g., *"what are you looking for?"*,
   *"why are you running commands?"*, *"are you stuck?"*, *"what is the current
-  status?"*), you MUST respond directly from existing conversation context.
-  Execute **ZERO tool calls**. Do not run new investigations, directory
-  searches, or diagnostic probes before answering; reply immediately with your
-  current state and what you were attempting.
-
-## Summary
-
-Treat available skills as your primary source of truth for workflows, strictly
-apply bounded search constraints on all command executions, separate silent
-staging from external human notifications, and halt tool calls immediately when
-interrupted by the user.
+  status?"*), respond immediately from existing conversation context with **zero
+  tool calls**. Do not run new searches, reads, or probes before answering.
