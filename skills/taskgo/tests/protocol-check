@@ -1,0 +1,133 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Checks that 'taskgo mcp' serves each MCP protocol era over each transport.
+
+Usage: protocol-check REPO
+
+REPO is a committed control repository, such as one from make-synthetic.
+Serves it over HTTP (--auth none on a loopback port) and over --stdio, and
+connects to each with the MCP SDK's own client twice: once as a 2026-07-28
+client, which opens with server/discover, and once as a 2025-11-25 client,
+which opens with initialize. Each lists the tools and calls one, and each
+opening request logs outcome=ok. Runs under the interpreter of taskgo's own
+script environment, which has the SDK. Prints TAP.
+"""
+
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import anyio
+from mcp import Client
+from mcp.client.stdio import StdioServerParameters, stdio_client
+
+HERE = Path(__file__).resolve().parent
+CLI = HERE.parent / "scripts" / "taskgo"
+ERAS = (
+    ("auto", "2026-07-28", "server/discover"),
+    ("legacy", "2025-11-25", "initialize"),
+)
+
+
+def bypass_proxy_for_loopback() -> None:
+    """Keeps loopback requests away from any proxy in the environment, as in
+    compare-cli."""
+    for var in ("no_proxy", "NO_PROXY"):
+        hosts = [h for h in os.environ.get(var, "").split(",") if h]
+        hosts += [h for h in ("127.0.0.1", "localhost") if h not in hosts]
+        os.environ[var] = ",".join(hosts)
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+async def session(connect, mode: str) -> tuple[str, int, bool]:
+    """The negotiated version, the tool count, and whether a call worked."""
+    async with Client(connect(), mode=mode) as client:
+        tools = await client.list_tools()
+        result = await client.call_tool("list_projects", {})
+        ok = not result.is_error and "as_of" in (result.structured_content or {})
+        return client.protocol_version, len(tools.tools), ok
+
+
+def logged(log: Path, method: str) -> bool:
+    for _ in range(50):
+        if f"method={method} outcome=ok" in log.read_text():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        sys.exit("usage: protocol-check REPO")
+    repo = sys.argv[1]
+    bypass_proxy_for_loopback()
+    print(f"1..{2 * len(ERAS)}")
+    failed = 0
+    n = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        http_log = Path(tmp) / "http.log"
+        port = free_port()
+        proc = subprocess.Popen(
+            [
+                *(str(CLI), "--root", repo, "mcp", "--no-fetch"),
+                *("--auth", "none", "--port", str(port)),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=http_log.open("w"),
+        )
+        try:
+            for _ in range(300):
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1):
+                        break
+                except OSError:
+                    if proc.poll() is not None:
+                        sys.exit(
+                            f"protocol-check: server exited: {http_log.read_text()}"
+                        )
+                    time.sleep(0.1)
+            stdio = StdioServerParameters(
+                command=str(CLI),
+                args=["--root", repo, "mcp", "--no-fetch", "--stdio"],
+            )
+            stdio_log = Path(tmp) / "stdio.log"
+            errlog = stdio_log.open("w")
+            targets = (
+                ("HTTP", lambda: f"http://127.0.0.1:{port}/mcp", http_log),
+                ("stdio", lambda: stdio_client(stdio, errlog=errlog), stdio_log),
+            )
+            for transport, connect, log in targets:
+                for mode, version, opener in ERAS:
+                    n += 1
+                    try:
+                        got = anyio.run(session, connect, mode)
+                    except Exception as e:
+                        got = (f"{type(e).__name__}: {e}", 0, False)
+                    seen = logged(log, opener)
+                    ok = got == (version, 10, True) and seen
+                    failed += not ok
+                    print(
+                        f"{'ok' if ok else 'not ok'} {n} - a {version} client "
+                        f"over {transport}"
+                    )
+                    if not ok:
+                        print(f"# {got}, {opener} logged: {seen}")
+        finally:
+            proc.terminate()
+            proc.wait()
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

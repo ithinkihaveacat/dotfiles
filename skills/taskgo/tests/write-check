@@ -236,9 +236,11 @@ class Http:
         sys.exit(f"write-check: taskgo mcp did not start: {log.read_text()}")
 
     def post(self, body: bytes) -> tuple[int, dict | str]:
-        req = urllib.request.Request(
-            self.url, body, {"content-type": "application/json"}
-        )
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+        }
+        req = urllib.request.Request(self.url, body, headers)
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 return resp.status, json.load(resp)
@@ -788,15 +790,11 @@ def server(tg, tracker: Tracker):
     return tg.McpServer(cfg)
 
 
-def caller(srv):
+def caller(tg, srv):
     def call(tool: str, args: dict) -> tuple[bool, dict | str]:
-        msg = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": args},
-        }
-        return result_of(srv.handle(msg))
+        event = tg.McpEvent("none", time.monotonic())
+        params = {"name": tool, "arguments": args}
+        return result_of({"result": srv.call_tool(params, event)})
 
     return call
 
@@ -831,7 +829,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
 
     srv.reader.push = push_after_moves
     start = tracker.head()
-    ok, got = caller(srv)(
+    ok, got = caller(tg, srv)(
         "create", {"project": "alpha", "title": "Late", "request_id": "m1"}
     )
     tap.check(
@@ -847,7 +845,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     # The head moves before every push: retries are bounded, nothing lands.
     srv.reader.push = lambda sha: push_after_moves(sha, limit=99)
     before = moved[0]
-    ok, got = caller(srv)(
+    ok, got = caller(tg, srv)(
         "create", {"project": "alpha", "title": "Never", "request_id": "m2"}
     )
     landed = "-never.md" in git(
@@ -879,7 +877,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
 
     race.done = False
     srv.reader.push = race
-    call = caller(srv)
+    call = caller(tg, srv)
     ok, got = call(
         "apply_changes",
         {
@@ -950,7 +948,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     # 6. A push whose reply is lost, and a retry of the whole request.
     tracker = Tracker(tmp / "lost", seed)
     srv = server(tg, tracker)
-    call = caller(srv)
+    call = caller(tg, srv)
     real_push, real_fetch = srv.reader.push, srv.reader.fetch
 
     def lost_reply(sha):
@@ -1113,7 +1111,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     srv = tg.McpServer(
         tg.McpConfig(repo=tracker.server, remote=None, branch="main", auth="none")
     )
-    ok, got = caller(srv)(
+    ok, got = caller(tg, srv)(
         "create", {"project": "alpha", "title": "Local", "request_id": "n1"}
     )
     tap.check(

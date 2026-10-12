@@ -92,12 +92,18 @@ git rebase --continue
 
 ## Transports
 
+The official MCP Python SDK speaks the protocol, so the server supports every
+revision the pinned SDK does: 2026-07-28, whose clients open with
+`server/discover`, and the earlier revisions back to 2024-11-05, whose clients
+open with `initialize`.
+
 By default the server speaks MCP Streamable HTTP on `127.0.0.1:8789/mcp`,
 statelessly: each POST carries one JSON-RPC message and gets one JSON response.
-There is no server-initiated stream and no session. `GET /up` answers 200
-without authentication and without reading the repository, for a reverse proxy's
-health check. `--stdio` serves one local client on standard input and output
-instead, without authentication.
+There is no server-initiated stream and no session, so `GET` and `DELETE` on the
+endpoint get 405. A POST whose `Accept` header does not admit `application/json`
+(`*/*` does) gets 406. `GET /up` answers 200 without authentication and without
+reading the repository, for a reverse proxy's health check. `--stdio` serves one
+local client on standard input and output instead, without authentication.
 
 ## Logging
 
@@ -119,7 +125,9 @@ HTTP `status`, the duration in `ms`, the `commit` a tool call read or wrote, the
 `error` (the reply could not be sent). A refused request's body is never read,
 so it has no method. A value that is not a plain token, such as an unknown
 method or tool name from a client, is quoted as JSON and truncated, so it cannot
-break or forge a line.
+break or forge a line. A JSON-RPC error's reason is a fixed phrase for its code
+(`method not found`, `parse error`), not the error's message, which can quote
+the request.
 
 Lines name requests, never their content: no arguments, task text, file content,
 or tokens. An authentication refusal gives its reason (no token, bad signature,
@@ -161,14 +169,24 @@ tests/mcp-call http://127.0.0.1:8789/mcp list_tasks '{"state":"ready"}'
 tests/auth-check                                       # Access JWTs, log lines
 ```
 
+`protocol-check` needs the SDK, so run it with the interpreter of taskgo's own
+script environment:
+
+```sh
+py=$(uv python find --script scripts/taskgo)
+"$py" tests/protocol-check /tmp/synth   # both protocol eras, both transports
+```
+
 `compare-cli` asks the server for its commit, checks that commit out into a
 temporary clone, and compares every tool's output with the CLI's there. It
 prints only check names and counts, never file contents, so it is safe to run
 against a private tracker. `tests/write-check` serves a throwaway tracker pushed
 to a local bare repository and checks the writes: concurrent writers, a lost
 push reply, a head that moves before every push, refusals, and a stale CLI
-checkout that recovers by rebase. `test-taskgo` runs `compare-cli` on a
-synthetic tracker, `auth-check`, and `write-check`.
+checkout that recovers by rebase. `protocol-check` connects the SDK's own client
+as a 2026-07-28 client and as a 2025-11-25 one, over HTTP and over `--stdio`.
+`test-taskgo` runs `compare-cli` and `protocol-check` on a synthetic tracker,
+`auth-check`, and `write-check`.
 
 The MCP Inspector works against a local server:
 

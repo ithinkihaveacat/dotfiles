@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..181'
+echo '1..182'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3329,17 +3329,28 @@ fi
 # 'taskgo mcp' reads the committed tree only: the uncommitted status edit to
 # TASK-7E001 above must not show.
 MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# The client keeps stdin open until it has read every reply: closing it ends
+# the session, and a request still in progress then goes unanswered.
 MCP_OUT=$(
-  printf '%s\n' \
-    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
-    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_task","arguments":{"id":"TASK-7E001"}}}' |
-    "$BIN" --root "$TREE_REPO" mcp --stdio --no-fetch \
-      --branch "$(git -C "$TREE_REPO" branch --show-current)" 2>"$TEST_ROOT/mcp-stdio.log" |
-    "$MCP_PY" -c '
-import json, sys
-init, tools, task = (json.loads(line) for line in sys.stdin)
+  "$MCP_PY" -c '
+import json, subprocess, sys
+msgs = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
+    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_task", "arguments": {"id": "TASK-7E001"}}},
+]
+with open(sys.argv[1], "w") as log:
+    proc = subprocess.Popen(sys.argv[2:], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
+    proc.stdin.write("".join(json.dumps(m) + "\n" for m in msgs))
+    proc.stdin.flush()
+    replies = {}
+    while len(replies) < 3:
+        reply = json.loads(proc.stdout.readline())
+        replies[reply["id"]] = reply
+    proc.stdin.close()
+    proc.wait()
+init, tools, task = replies[1], replies[2], replies[3]
 names = [t["name"] for t in tools["result"]["tools"]]
 assert init["result"]["serverInfo"]["name"] == "taskgo", init
 assert "Data care" in init["result"]["instructions"]
@@ -3349,7 +3360,8 @@ assert all("Data care" in t["description"] for t in writes.values())
 assert all("at" not in t["inputSchema"]["properties"] for t in writes.values())
 got = task["result"]["structuredContent"]
 print(got["as_of"]["commit"], got["task"]["status"])
-'
+' "$TEST_ROOT/mcp-stdio.log" "$BIN" --root "$TREE_REPO" mcp --stdio --no-fetch \
+    --branch "$(git -C "$TREE_REPO" branch --show-current)"
 ) || true
 # Each of the four messages, the notification included, logs one line.
 MCP_LOGGED=$(grep -c '^taskgo mcp: request transport=stdio ' "$TEST_ROOT/mcp-stdio.log" || true)
@@ -3888,4 +3900,12 @@ if [ "$DONE_OK" = 1 ]; then
   echo 'ok 181 - the CLI requires an Outcome when a task becomes done'
 else
   echo 'not ok 181 - the CLI requires an Outcome when a task becomes done'
+fi
+
+# A 2026-07-28 client and a 2025-11-25 one, over HTTP and over --stdio.
+if MCP_ERAS=$("$MCP_PY" "$TEST_DIR/protocol-check" "$MCP_SYNTH" 2>&1); then
+  echo 'ok 182 - mcp serves both protocol eras over both transports'
+else
+  echo 'not ok 182 - mcp serves both protocol eras over both transports'
+  printf '# %s\n' "$MCP_ERAS"
 fi

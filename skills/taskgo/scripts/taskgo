@@ -14,10 +14,35 @@
 #     "cryptography==50.0.2",
 #     "cffi==2.1.1",
 #     "pycparser==3.0",
+#     "mcp==2.3.0",
+#     "mcp-types==2.3.0",
+#     "annotated-types==0.8.0",
+#     "anyio==4.15.1",
+#     "attrs==26.1.0",
+#     "click==8.5.0",
+#     "h11==0.16.0",
+#     "httpcore2==2.13.1",
+#     "httpx2==2.13.1",
+#     "idna==3.20",
+#     "jsonschema==4.26.0",
+#     "jsonschema-specifications==2025.9.1",
+#     "opentelemetry-api==1.45.0",
+#     "pydantic==2.13.5",
+#     "pydantic-core==2.46.5",
+#     "python-multipart==0.0.32",
+#     "referencing==0.37.0",
+#     "rpds-py==2026.9.1",
+#     "sse-starlette==3.5.0",
+#     "starlette==1.7.0",
+#     "truststore==0.10.4",
+#     "typing-extensions==4.16.0",
+#     "typing-inspection==0.4.4",
+#     "uvicorn==0.54.0",
 # ]
 # ///
 
 import argparse
+import contextvars
 import hashlib
 import io
 import json
@@ -6014,14 +6039,13 @@ def cmd_commit(
 # that the CLI also prints use the CLI's own functions, so they match the CLI
 # at that commit. Each write applies one change set over the fetched head,
 # commits it without a working tree, and pushes it without force; a rejected
-# push re-reads the head and applies the set again there. The transport is MCP
-# Streamable HTTP, stateless: each POST carries one JSON-RPC message and gets
-# one JSON response. Cloudflare Access authenticates callers in front of the
-# server; the server checks the Access JWT on every request. --stdio serves
-# one local client instead.
+# push re-reads the head and applies the set again there. The MCP Python SDK
+# speaks the protocol (ADR 12): every revision it supports, over Streamable
+# HTTP (stateless, with JSON responses) or, with --stdio, for one local client.
+# Cloudflare Access authenticates callers in front of the server; McpGate
+# checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.5.0"
-MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+MCP_SERVER_VERSION = "0.6.0"
 MCP_MAX_FILE_BYTES = 256 * 1024
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -6764,14 +6788,6 @@ class AccessVerifier:
             raise McpAuthError(f"Access token refused: {e}") from None
 
 
-def mcp_rpc_result(msg_id: Any, result: Any) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
-
-
-def mcp_rpc_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
-
-
 def mcp_tool_error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
@@ -6961,7 +6977,7 @@ class McpEvent:
 
 
 class McpServer:
-    """The JSON-RPC methods, shared by the HTTP and stdio transports.
+    """The tools, shared by the HTTP and stdio transports.
 
     Calls are serialized: they share the Git repository and snapshot cache,
     and the core is not written for concurrent use. Serializing also keeps
@@ -6977,46 +6993,6 @@ class McpServer:
         # request_id -> McpRequest. In memory: losing it, as on a restart,
         # loses only the recognition of retries, never a write (ADR 2).
         self.requests: dict[str, McpRequest] = {}
-
-    def handle(self, msg: Any, event: McpEvent | None = None) -> dict[str, Any] | None:
-        """The response to MSG, or None for a notification or response.
-        EVENT, if given, records what came of it."""
-        event = event or McpEvent("none", time.monotonic())
-        if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
-            event.fail("rpc-error", "invalid request")
-            return mcp_rpc_error(None, -32600, "invalid request")
-        event.method = msg.get("method")
-        if "method" not in msg or "id" not in msg:
-            return None
-        msg_id, method = msg["id"], msg["method"]
-        params = msg.get("params") or {}
-        if not isinstance(params, dict):
-            event.fail("rpc-error", "params must be an object")
-            return mcp_rpc_error(msg_id, -32602, "params must be an object")
-        if method == "initialize":
-            requested = params.get("protocolVersion")
-            version = (
-                requested
-                if requested in MCP_PROTOCOL_VERSIONS
-                else MCP_PROTOCOL_VERSIONS[0]
-            )
-            return mcp_rpc_result(
-                msg_id,
-                {
-                    "protocolVersion": version,
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "taskgo", "version": MCP_SERVER_VERSION},
-                    "instructions": MCP_INSTRUCTIONS,
-                },
-            )
-        if method == "ping":
-            return mcp_rpc_result(msg_id, {})
-        if method == "tools/list":
-            return mcp_rpc_result(msg_id, {"tools": [t.listing() for t in MCP_TOOLS]})
-        if method == "tools/call":
-            return mcp_rpc_result(msg_id, self.call_tool(params, event))
-        event.fail("rpc-error", "method not found")
-        return mcp_rpc_error(msg_id, -32601, f"method not found: {method}")
 
     def call_tool(self, params: dict[str, Any], event: McpEvent) -> dict[str, Any]:
         event.tool = params.get("name")
@@ -7201,23 +7177,90 @@ class McpServer:
         return {"as_of": McpRead(self.reader, snap, committed).as_of(), **result}
 
 
+# The request being served, for the transport's log line. McpGate sets it for
+# each HTTP request; over stdio, the SDK middleware sets it for each message.
+MCP_EVENT: contextvars.ContextVar[McpEvent | None] = contextvars.ContextVar(
+    "MCP_EVENT", default=None
+)
+
+MCP_RPC_ERRORS = {
+    -32700: "parse error",
+    -32600: "invalid request",
+    -32601: "method not found",
+    -32602: "invalid params",
+    -32603: "internal error",
+}
+
+
+def mcp_rpc_reason(code: Any) -> str:
+    """The log reason for JSON-RPC error CODE: a fixed phrase, since the
+    message beside it can quote the request."""
+    return MCP_RPC_ERRORS.get(code, f"error {mcp_log_value(code)}")
+
+
+def mcp_sdk_server(server: McpServer) -> Any:
+    """SERVER's tools behind the MCP SDK's low-level server, which speaks the
+    protocol: every revision the SDK supports, over either transport."""
+    import anyio
+    import mcp_types
+    from mcp.server.lowlevel import Server
+    from mcp.shared.exceptions import MCPError
+
+    async def list_tools(ctx: Any, params: Any) -> Any:
+        return mcp_types.ListToolsResult(
+            tools=[mcp_types.Tool.model_validate(t.listing()) for t in MCP_TOOLS]
+        )
+
+    async def call_tool(ctx: Any, params: Any) -> Any:
+        event = MCP_EVENT.get() or McpEvent("none", time.monotonic())
+        raw = {"name": params.name, "arguments": params.arguments}
+        # In a worker thread, so a long fetch or push holds up only the calls
+        # queued behind it on the lock, not the event loop.
+        result = await anyio.to_thread.run_sync(server.call_tool, raw, event)
+        return mcp_types.CallToolResult.model_validate(result)
+
+    async def logged(ctx: Any, call_next: Any) -> Any:
+        """Logs each stdio message; McpGate logs HTTP requests itself."""
+        if MCP_EVENT.get() is not None:
+            return await call_next(ctx)
+        event = McpEvent("stdio", time.monotonic(), method=ctx.method)
+        token = MCP_EVENT.set(event)
+        try:
+            return await call_next(ctx)
+        except MCPError as e:
+            event.fail("rpc-error", mcp_rpc_reason(e.code))
+            raise
+        except Exception:
+            # The SDK reports malformed params as a pydantic ValidationError.
+            event.fail("rpc-error", mcp_rpc_reason(-32602))
+            raise
+        finally:
+            MCP_EVENT.reset(token)
+            mcp_log(event.line())
+
+    sdk = Server(
+        "taskgo",
+        version=MCP_SERVER_VERSION,
+        instructions=MCP_INSTRUCTIONS,
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
+    sdk.middleware.append(logged)
+    return sdk
+
+
 def mcp_serve_stdio(server: McpServer) -> None:
     """Newline-delimited JSON-RPC on stdin and stdout, for one local client."""
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        event = McpEvent("stdio", time.monotonic())
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            event.fail("rpc-error", "parse error")
-            reply: dict[str, Any] | None = mcp_rpc_error(None, -32700, "parse error")
-        else:
-            reply = server.handle(msg, event)
-        if reply is not None:
-            sys.stdout.write(json.dumps(reply) + "\n")
-            sys.stdout.flush()
-        mcp_log(event.line())
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    sdk = mcp_sdk_server(server)
+
+    async def serve() -> None:
+        async with stdio_server() as (read, write):
+            await sdk.run(read, write, sdk.create_initialization_options())
+
+    anyio.run(serve)
 
 
 def mcp_is_loopback(host: str | None) -> bool:
@@ -7231,147 +7274,200 @@ def mcp_is_loopback(host: str | None) -> bool:
     return host in MCP_LOOPBACK
 
 
+async def mcp_asgi_reply(
+    send: Callable, status: int, text: str, allow: str | None = None
+) -> None:
+    data = text.encode()
+    headers = [
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(data)).encode()),
+    ]
+    if allow:
+        headers.append((b"allow", allow.encode()))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": data})
+
+
+class McpGate:
+    """ASGI, in front of the SDK's app: the health check, the endpoint's path,
+    Access or the loopback guard, the size limit, and one log line for each
+    request. The SDK sees only requests that pass, and never a token check."""
+
+    def __init__(self, app: Any, verifier: "AccessVerifier | None", path: str):
+        self.app = app
+        self.verifier = verifier
+        self.path = path
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":  # lifespan
+            await self.app(scope, receive, send)
+            return
+        headers: dict[str, str] = {}
+        for k, v in scope["headers"]:
+            headers.setdefault(k.decode("latin-1").lower(), v.decode("latin-1"))
+        if scope["path"] == MCP_HEALTH_PATH and scope["method"] == "GET":
+            # Polled by the proxy, so not logged.
+            await mcp_asgi_reply(send, 200, "ok")
+            return
+        event = McpEvent(
+            "http",
+            time.monotonic(),
+            http=scope["method"],
+            agent=headers.get("user-agent"),
+        )
+        token = MCP_EVENT.set(event)
+        try:
+            await self.serve(scope, receive, send, headers, event)
+        except BaseException as e:
+            event.fail("error", type(e).__name__)
+            raise
+        finally:
+            MCP_EVENT.reset(token)
+            mcp_log(event.line())
+
+    async def serve(
+        self,
+        scope: dict,
+        receive: Callable,
+        send: Callable,
+        headers: dict[str, str],
+        event: McpEvent,
+    ) -> None:
+        async def sending(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                event.status = message["status"]
+            elif message["type"] == "http.response.body" and event.outcome == "ok":
+                try:
+                    reply = json.loads(message.get("body") or b"null")
+                except ValueError:
+                    reply = None
+                if isinstance(reply, dict) and isinstance(reply.get("error"), dict):
+                    event.fail("rpc-error", mcp_rpc_reason(reply["error"].get("code")))
+            await send(message)
+
+        refusal = self.refusal(scope, headers)
+        if refusal:
+            status, reason, text = refusal
+            event.fail("refused", reason)
+            await mcp_asgi_reply(sending, status, text)
+            return
+        if scope["method"] != "POST":
+            # No server-initiated stream, and no sessions to delete.
+            event.fail("refused", "method not allowed")
+            await mcp_asgi_reply(sending, 405, "method not allowed", allow="POST")
+            return
+        body = await self.body(receive, headers)
+        if body is None:
+            event.fail("refused", "request too large")
+            await mcp_asgi_reply(sending, 413, "request too large")
+            return
+        if body is False:
+            # Gone before the body arrived: nothing to answer.
+            event.fail("error", "client disconnected")
+            return
+        try:
+            msg = json.loads(body)
+        except ValueError:
+            msg = None
+        if isinstance(msg, dict):
+            event.method = msg.get("method")
+
+        delivered = False
+
+        async def replay() -> dict:
+            nonlocal delivered
+            if delivered:
+                return await receive()
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, sending)
+
+    def refusal(
+        self, scope: dict, headers: dict[str, str]
+    ) -> tuple[int, str, str] | None:
+        """(status, reason, text) when the request may not proceed."""
+        from urllib.parse import urlsplit
+
+        if scope["path"] != self.path:
+            return 404, f"not found: {scope['path']}", "not found"
+        if self.verifier is None:
+            # Unauthenticated mode serves only requests addressed to a
+            # loopback name, from a page on one if from a browser at all.
+            origin = headers.get("origin")
+            if not mcp_is_loopback(headers.get("host")):
+                return 403, "not addressed to a loopback name", "forbidden"
+            if origin and not mcp_is_loopback(urlsplit(origin).netloc):
+                return 403, "from a page not on a loopback name", "forbidden"
+            return None
+        token = headers.get("cf-access-jwt-assertion")
+        if not token:
+            return 401, "no Access token", "Cloudflare Access token required"
+        try:
+            self.verifier.verify(token)
+        except McpAuthError as e:
+            return 403, str(e), str(e)
+        return None
+
+    @staticmethod
+    async def body(
+        receive: Callable, headers: dict[str, str]
+    ) -> bytes | Literal[False] | None:
+        """The request body, None if it is larger than the limit, or False if
+        the client disconnected before sending all of it."""
+        try:
+            length = int(headers.get("content-length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > MCP_MAX_REQUEST_BYTES:
+            return None
+        body = b""
+        more = True
+        while more:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return False
+            body += message.get("body", b"")
+            if len(body) > MCP_MAX_REQUEST_BYTES:
+                return None
+            more = message.get("more_body", False)
+        return body
+
+
 def mcp_serve_http(
     server: McpServer, cfg: McpConfig, host: str, port: int, path: str
 ) -> None:
-    import http.server
-    from urllib.parse import urlsplit
+    import uvicorn
+    from mcp.server.transport_security import TransportSecuritySettings
 
     verifier = (
         AccessVerifier(cfg.team or "", cfg.audience or "", cfg.certs_url)
         if cfg.auth == "access"
         else None
     )
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        server_version = f"taskgo-mcp/{MCP_SERVER_VERSION}"
-        protocol_version = "HTTP/1.1"
-        event: McpEvent
-
-        def logged(self, work: Callable[[], None]) -> None:
-            """Does WORK, then logs the request's one line."""
-            self.event = McpEvent(
-                "http",
-                time.monotonic(),
-                http=self.command,
-                agent=self.headers.get("User-Agent"),
-            )
-            try:
-                work()
-            except BaseException as e:
-                self.event.fail("error", type(e).__name__)
-                raise
-            finally:
-                mcp_log(self.event.line())
-
-        def reply(self, status: int, body: Any = None, allow: str | None = None):
-            data = b""
-            ctype = "text/plain; charset=utf-8"
-            if isinstance(body, (dict, list)):
-                data = json.dumps(body).encode()
-                ctype = "application/json"
-            elif body is not None:
-                data = str(body).encode()
-            self.event.status = status
-            self.send_response(status)
-            if data:
-                self.send_header("Content-Type", ctype)
-            if allow:
-                self.send_header("Allow", allow)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def refused(self) -> bool:
-            """Replies and returns True when the request may not proceed."""
-            if urlsplit(self.path).path != path:
-                self.event.fail("refused", f"not found: {urlsplit(self.path).path}")
-                self.reply(404, "not found")
-                return True
-            if verifier is None:
-                # Unauthenticated mode serves only requests addressed to a
-                # loopback name, from a page on one if from a browser at all.
-                origin = self.headers.get("Origin")
-                if not mcp_is_loopback(self.headers.get("Host")):
-                    self.event.fail("refused", "not addressed to a loopback name")
-                    self.reply(403, "forbidden")
-                    return True
-                if origin and not mcp_is_loopback(urlsplit(origin).netloc):
-                    self.event.fail("refused", "from a page not on a loopback name")
-                    self.reply(403, "forbidden")
-                    return True
-                return False
-            token = self.headers.get("Cf-Access-Jwt-Assertion")
-            if not token:
-                self.event.fail("refused", "no Access token")
-                self.reply(401, "Cloudflare Access token required")
-                return True
-            try:
-                verifier.verify(token)
-            except McpAuthError as e:
-                self.event.fail("refused", str(e))
-                self.reply(403, str(e))
-                return True
-            return False
-
-        def do_POST(self):
-            self.logged(self.post)
-
-        def post(self):
-            if self.refused():
-                return
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                length = -1
-            if length < 0 or length > MCP_MAX_REQUEST_BYTES:
-                self.event.fail("refused", "request too large")
-                self.reply(413, "request too large")
-                return
-            try:
-                msg = json.loads(self.rfile.read(length))
-            except ValueError:
-                self.event.fail("rpc-error", "parse error")
-                self.reply(400, mcp_rpc_error(None, -32700, "parse error"))
-                return
-            reply = server.handle(msg, self.event)
-            if reply is None:
-                self.reply(202)
-            elif "error" in reply and reply["error"]["code"] == -32600:
-                self.reply(400, reply)
-            else:
-                self.reply(200, reply)
-
-        def do_GET(self):
-            if urlsplit(self.path).path == MCP_HEALTH_PATH:
-                # Polled by the proxy, so not logged.
-                self.event = McpEvent("http", time.monotonic())
-                self.reply(200, "ok")
-                return
-            self.logged(self.not_allowed)
-
-        def do_DELETE(self):
-            self.logged(self.not_allowed)
-
-        def not_allowed(self):
-            # No server-initiated stream, and no sessions to delete.
-            if not self.refused():
-                self.event.fail("refused", "method not allowed")
-                self.reply(405, "method not allowed", allow="POST")
-
-        def log_message(self, format, *args):
-            pass
-
-    httpd = http.server.ThreadingHTTPServer((host, port), Handler)
+    app = mcp_sdk_server(server).streamable_http_app(
+        streamable_http_path=path,
+        stateless_http=True,
+        json_response=True,
+        max_request_body_size=MCP_MAX_REQUEST_BYTES,
+        # McpGate checks the Host and Origin headers, or the Access JWT.
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        ),
+    )
     print(
         f"taskgo mcp: serving {display_path(cfg.repo)} on http://{host}:{port}{path} "
         f"(auth {cfg.auth})",
         file=sys.stderr,
     )
-    try:
-        httpd.serve_forever()
-    finally:
-        httpd.server_close()
+    uvicorn.run(
+        McpGate(app, verifier, path),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        server_header=False,
+    )
 
 
 def cmd_mcp(
