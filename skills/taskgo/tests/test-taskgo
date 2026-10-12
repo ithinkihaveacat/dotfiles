@@ -2264,7 +2264,7 @@ if [[ "$DISPATCH_HELP" == Usage:* ]] &&
   [[ "$DISPATCH_HELP" == *"Arguments:"* ]] &&
   [[ "$DISPATCH_HELP" == *"Options:"* ]] &&
   [[ "$DISPATCH_HELP" == *"Examples:"* ]] &&
-  [[ "$DISPATCH_TOP_HELP" == *"dispatch TASK_ID"* ]] &&
+  [[ "$DISPATCH_TOP_HELP" == *"dispatch PROJECT|TASK_ID"* ]] &&
   [[ "$DISPATCH_TOP_HELP" != *"handover TASK_ID"* ]]; then
   echo 'ok 120 - dispatch help follows the CLI house structure'
 else
@@ -4310,4 +4310,62 @@ if [ "$EDIT_OK" = 1 ]; then
   echo 'ok 187 - taskgo edit keeps CRLF bytes and modes in the working tree'
 else
   echo 'not ok 187 - taskgo edit keeps CRLF bytes and modes in the working tree'
+fi
+
+# Test 188: dispatch takes a project or a task, and --json inlines the files
+DISPATCH_OK=1
+DISPATCH_PROJ_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch proj --at HEAD 2>/dev/null)"
+DISPATCH_PROJ_FLAT="$(printf '%s' "$DISPATCH_PROJ_OUT" | tr '\n' ' ' | tr -s ' ')"
+if [[ "$DISPATCH_PROJ_FLAT" != *"Next is taskgo project proj: Proj."* ]] ||
+  [[ "$DISPATCH_PROJ_FLAT" != *"Read proj/README.md and proj/STATUS.md before acting"* ]]; then
+  DISPATCH_OK=0
+  printf '# project note: %s\n' "$DISPATCH_PROJ_FLAT"
+fi
+if ! "$BIN" --root "$DISPATCH_REPO" dispatch proj --at HEAD --json 2>/dev/null |
+  python3 -c '
+import json, subprocess, sys
+repo = sys.argv[1]
+d = json.load(sys.stdin)
+show = lambda rel: subprocess.run(["git", "-C", repo, "show", "HEAD:" + rel],
+    capture_output=True, text=True, check=True).stdout
+assert d["task"] is None, d["task"]
+assert d["project"] == "proj"
+assert d["frontmatter"] == {}, d["frontmatter"]
+assert d["readme"]["content"] == show("proj/README.md")
+assert d["readme"]["truncated"] is False
+assert d["status"]["content"] == show("proj/STATUS.md")
+assert d["status"]["block_current"] is True
+assert d["agents_md"]["content"] == show("AGENTS.md")
+assert d["plan"] is None
+ready = [r["id"] for r in d["tasks"]["ready"]]
+blocked = [r["id"] for r in d["tasks"]["blocked"]]
+assert "TASK-11111" in ready and "TASK-33333" not in ready, ready
+assert "TASK-33333" in blocked and "TASK-55555" in blocked, blocked
+assert d["as_of"]["commit"]
+' "$DISPATCH_REPO"; then
+  DISPATCH_OK=0
+  echo '# project payload is wrong'
+fi
+if ! "$BIN" --root "$DISPATCH_REPO" dispatch task-11111 --at HEAD --json 2>/dev/null |
+  python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["task"]["task"]["id"] == "TASK-11111", d["task"]
+assert "Cold start stops scaling" in d["task"]["content"]
+assert [s["name"] for s in d["task"]["sections"]][:2] == ["title", "Problem"], d["task"]["sections"]
+assert d["note"].startswith("Next is taskgo TASK-11111 (proj)"), d["note"]
+assert "proj/tasks/TASK-11111-manifest-loader.md" in d["note"]
+'; then
+  DISPATCH_OK=0
+  echo '# task payload is wrong'
+fi
+if "$BIN" --root "$DISPATCH_REPO" dispatch TASK-22222 --at HEAD --json >/dev/null 2>&1 ||
+  "$BIN" --root "$DISPATCH_REPO" dispatch no-such-project >/dev/null 2>&1; then
+  DISPATCH_OK=0
+  echo '# a done task or an unknown target was dispatched'
+fi
+if [ "$DISPATCH_OK" = 1 ]; then
+  echo 'ok 188 - dispatch takes a project or task and --json inlines the files'
+else
+  echo 'not ok 188 - dispatch takes a project or task and --json inlines the files'
 fi

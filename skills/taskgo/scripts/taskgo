@@ -2203,18 +2203,7 @@ def build_status_block(
     today = get_today(snap)
     due_cutoff = today + timedelta(days=DUE_SOON_DAYS)
     in_progress = [r for r in rows if r.status == "in-progress"]
-    # Declared blocked, or held by an unresolved edge/gate. In-progress wins the
-    # row so the two sections stay disjoint; doctor reports the contradiction.
-    blocked = [
-        r
-        for r in rows
-        if r.status != "in-progress"
-        and (
-            r.status == "blocked"
-            or unresolved_blockers(r, index)
-            or (r.status not in RESOLVED_STATES and unresolved_wait_for(r, today))
-        )
-    ]
+    blocked = held_rows(rows, index, today)
     todo_count = sum(1 for r in rows if r.status == "todo")
     done_count = sum(1 for r in rows if r.status == "done")
     unclassified_count = sum(
@@ -2325,6 +2314,25 @@ def has_commit_auth(root: Path) -> bool:
     return agents_path.is_file() and COMMIT_AUTH in agents_path.read_text(
         encoding="utf-8"
     )
+
+
+def held_rows(rows: list[TaskRow], index: dict[str, str], today: date) -> list[TaskRow]:
+    """The rows the STATUS.md snapshot lists as blocked.
+
+    Declared blocked, or held by an unresolved edge or gate. In-progress wins
+    the row so the two sections stay disjoint; doctor reports the
+    contradiction.
+    """
+    return [
+        r
+        for r in rows
+        if r.status != "in-progress"
+        and (
+            r.status == "blocked"
+            or unresolved_blockers(r, index)
+            or (r.status not in RESOLVED_STATES and unresolved_wait_for(r, today))
+        )
+    ]
 
 
 def render_status_file(
@@ -5410,50 +5418,292 @@ def dispatch_note(plan: DispatchPlan, status_ref: str, task_ref: str) -> str:
     )
 
 
-def cmd_dispatch(task_id: str) -> None:
-    """Emit instructions dispatching an agent to TASK_ID."""
-    root = get_repo_root()
-    target_path = resolve_target(root, task_id)
-    rel_path = Path(str(target_path.relative_to(root))).as_posix()
-    project_name = rel_path.split("/")[0]
+def project_dispatch_note(project: str, title: str, refs: list[str]) -> str:
+    """The dispatch note for a project: headline and what to read first."""
+    headline = f"Next is taskgo project {project}"
+    headline += f": {title}" if title else ""
+    headline += "" if headline[-1] in ".?!" else "."
+    if len(refs) > 2:
+        listed = ", ".join(refs[:-1]) + f", and {refs[-1]}"
+    else:
+        listed = " and ".join(refs)
+    paragraphs = [
+        headline,
+        f"Read {listed} before acting, and form your own view of the approach.",
+    ]
+    return "\n\n".join(
+        textwrap.fill(p, width=76, break_long_words=False, break_on_hyphens=False)
+        for p in paragraphs
+    )
 
-    committed = run_git(["show", f"HEAD:{rel_path}"], check=False)
-    if committed.returncode != 0:
-        die_scoped(
-            f"{rel_path} is not committed at HEAD; commit the task before dispatching it"
+
+@dataclass(slots=True)
+class DispatchTarget:
+    """A resolved dispatch target: a project, or one task in it."""
+
+    project: str
+    row: TaskRow | None
+    plan: DispatchPlan | None
+    readme: str | None  # README.md, or PROJECT.md when only that exists
+    findings: list[tuple[Literal["WARN", "FAIL"], str]]
+
+    def note(self, snap: Snapshot, ref: Callable[[str], str]) -> str:
+        """The short dispatch note, naming files through REF."""
+        status_rel = f"{self.project}/STATUS.md"
+        if self.plan is not None and self.row is not None:
+            return dispatch_note(self.plan, ref(status_rel), ref(self.row.rel_path))
+        title = extract_title(snap.read_text(self.readme)) if self.readme else ""
+        rels = [r for r in (self.readme, status_rel) if r and snap.is_file(r)]
+        plan_rel = f"{self.project}/PLAN.md"
+        if snap.is_file(plan_rel):
+            rels.append(plan_rel)
+        return project_dispatch_note(
+            self.project, title, [ref(r) for r in rels] or [ref(self.project)]
         )
 
+
+def resolve_dispatch(snap: GitTreeSnapshot, target: Any) -> DispatchTarget:
+    """Resolves TARGET, a project name or a task ID, in SNAP for dispatch.
+
+    Raises TaskgoError for an unknown target or a finished task.
+    """
+    name = str(target or "").strip()
+    row = None
+    if ID_PATTERN.match(name.upper()):
+        task_id = name.upper()
+        matches = [r for r in get_task_rows(snap) if r.task_id == task_id]
+        if not matches:
+            raise TaskgoError(f"{task_id} is not in commit {snap.rev[:12]}")
+        if len(matches) > 1:
+            paths = ", ".join(r.rel_path for r in matches)
+            raise TaskgoError(f"{task_id} names more than one record: {paths}")
+        row = matches[0]
+        project = row.project
+    elif is_project(snap, name):
+        project = name
+    else:
+        raise TaskgoError(f"not a project or task ID: {name!r}")
+    audit = audit_snapshot(snap, project)
+    readme = next(
+        (
+            rel
+            for rel in (f"{project}/README.md", f"{project}/PROJECT.md")
+            if snap.is_file(rel)
+        ),
+        None,
+    )
+    if row is not None:
+        plan = plan_dispatch(snap, row.rel_path, snap.read_text(row.rel_path), audit)
+        return DispatchTarget(project, row, plan, readme, plan.findings)
+    findings = [
+        (f.severity, f.message) for f in audit if f.severity in {"WARN", "FAIL"}
+    ]
+    return DispatchTarget(project, None, None, readme, findings)
+
+
+def status_snapshot_block(text: str | None) -> str | None:
+    """The generated task snapshot block of STATUS.md text, if it has one."""
+    if text is None:
+        return None
+    sections = record_sections(text, STATUS_SCHEMA)
+    return next((s["text"] for s in sections if s["name"] == "snapshot"), None)
+
+
+def snapshot_as_of(snap: GitTreeSnapshot, committed: int) -> dict[str, Any]:
+    """The as_of of a read of SNAP, whose commit time is COMMITTED."""
+    return {
+        "commit": snap.rev,
+        "committed_at": datetime.fromtimestamp(committed, timezone.utc).isoformat(),
+        "today": get_today(snap).isoformat(),
+        "timezone": repo_timezone_name(snap),
+    }
+
+
+def commit_time(repo: Path, sha: str) -> int:
+    """The commit time of SHA, in Unix seconds."""
+    return int(run_git(["show", "-s", "--format=%ct", sha], cwd=repo).stdout.strip())
+
+
+def unverified_gates(rows: list[TaskRow]) -> dict[str, list[str]]:
+    """The wait_for gates, other than dates, of the unfinished ROWS, by task."""
+    out = {}
+    for r in rows:
+        gates = [g for g in r.wait_for if parse_iso_date(g) is None]
+        if gates and r.status not in RESOLVED_STATES:
+            out[r.task_id] = gates
+    return out
+
+
+def task_record_json(snap: GitTreeSnapshot, row: TaskRow) -> dict[str, Any]:
+    """One task record as get_task returns it, without as_of."""
+    content = snap.read_text(row.rel_path)
+    fm, _ = parse_frontmatter(content)
+    return {
+        "task": task_row_json(row),
+        "blob": snap.blobs[row.rel_path],
+        "frontmatter": _to_jsonable(fm),
+        "sections": record_sections(content, TASK_SCHEMA),
+        "unresolved_blocked_by": unresolved_blockers(row, status_index(snap)),
+        "unresolved_wait_for": unresolved_wait_for(row, get_today(snap)),
+        "unverified_gates": unverified_gates([row]).get(row.task_id, []),
+        "content": content,
+    }
+
+
+def dispatch_file(snap: GitTreeSnapshot, rel: str) -> dict[str, Any] | None:
+    """File REL verbatim, cut as read_file cuts it, or None when absent."""
+    blob = snap.blobs.get(rel)
+    if blob is None:
+        return None
+    data = snap.read_text(rel).encode("utf-8")
+    result = read_slice(rel, blob, data)
+    return {k: result[k] for k in ("path", "blob", "content", "truncated")}
+
+
+def readme_frontmatter(content: str) -> dict[str, Any]:
+    """README frontmatter as YAML parses it: no key filtered or renamed."""
+    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
+    if not match:
+        return {}
     try:
-        plan = plan_dispatch(
-            FsSnapshot(root),
-            rel_path,
-            committed.stdout,
-            audit_workspace(root, project_name),
+        data = YAML(typ="safe").load(match.group(1))
+    except Exception:
+        return {}
+    return _to_jsonable(data) if isinstance(data, dict) else {}
+
+
+def dispatch_payload(
+    snap: GitTreeSnapshot, t: DispatchTarget, as_of: dict[str, Any]
+) -> dict[str, Any]:
+    """Everything an agent reads before starting on T, in one object.
+
+    The note stays the short pointer a person pastes; the files it names
+    ride beside it verbatim, as committed in SNAP.
+    """
+    project = t.project
+    note = t.note(snap, lambda rel: rel)
+    note += (
+        "\n\nThese paths are in the taskgo control repository; this payload "
+        f"carries them as of commit {snap.rev[:12]}.\n\n{MCP_DATA_CARE}"
+    )
+    readme = dispatch_file(snap, t.readme) if t.readme else None
+    status_rel = f"{project}/STATUS.md"
+    committed = snap.read_text(status_rel) if snap.is_file(status_rel) else None
+    status = dispatch_file(snap, status_rel) or {
+        "path": status_rel,
+        "blob": None,
+        "content": None,
+        "truncated": False,
+    }
+    live_block = status_snapshot_block(
+        format_markdown(render_status_file(snap, project))
+    )
+    status.update(
+        {
+            "sections": (
+                record_sections(committed, STATUS_SCHEMA)
+                if committed is not None
+                else []
+            ),
+            "live_block": live_block,
+            "block_current": status_snapshot_block(committed) == live_block,
+        }
+    )
+    return {
+        "as_of": as_of,
+        "project": project,
+        "task": task_record_json(snap, t.row) if t.row is not None else None,
+        "note": note,
+        "findings": [{"severity": s, "message": m} for s, m in t.findings],
+        "unverified_gates": unverified_gates(get_task_rows(snap, project)),
+        "frontmatter": (
+            readme_frontmatter(snap.read_text(t.readme)) if t.readme else {}
+        ),
+        "readme": readme,
+        "status": status,
+        "plan": dispatch_file(snap, f"{project}/PLAN.md"),
+        "agents_md": dispatch_file(snap, "AGENTS.md"),
+        "tasks": {
+            "in_progress": [
+                task_row_json(r) for r in select_task_rows(snap, project, "in-progress")
+            ],
+            "blocked": [
+                task_row_json(r)
+                for r in held_rows(
+                    get_task_rows(snap, project), status_index(snap), get_today(snap)
+                )
+            ],
+            "ready": [
+                task_row_json(r) for r in select_task_rows(snap, project, "ready")
+            ],
+        },
+    }
+
+
+def cmd_dispatch(target: str, at: str | None = None, as_json: bool = False) -> None:
+    """Emit instructions dispatching an agent to a project or task."""
+    root = get_repo_root()
+    rev = at or "HEAD"
+    res = run_git(
+        ["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], cwd=root, check=False
+    )
+    if res.returncode != 0:
+        die_scoped(
+            f"no commit {at} in the control repository" if at else "HEAD has no commit"
         )
+    snap = GitTreeSnapshot(root, res.stdout.strip())
+
+    name = target.strip()
+    if at is None and ID_PATTERN.match(name.upper()):
+        task_id = name.upper()
+        committed_ids = {r.task_id for r in get_task_rows(snap)}
+        if task_id not in committed_ids:
+            local = [r for r in get_task_rows(FsSnapshot(root)) if r.task_id == task_id]
+            if local:
+                die_scoped(
+                    f"{local[0].rel_path} is not committed at HEAD; commit the "
+                    "task before dispatching it"
+                )
+    try:
+        t = resolve_dispatch(snap, name)
     except TaskgoError as e:
         die_scoped(str(e))
 
-    # A dispatch note points at committed state. Uncommitted project files mean
-    # the receiving agent cannot see every current workspace change.
-    dirty = run_git(
-        ["status", "--porcelain", "--", project_name], check=False
-    ).stdout.strip()
-    if dirty:
-        plan.findings.append(
-            (
-                "WARN",
+    if at is None:
+        # The note points at committed state. Uncommitted project files mean
+        # the receiving agent cannot see every current workspace change.
+        shallow = run_git(
+            ["rev-parse", "--is-shallow-repository"], cwd=root, check=False
+        ).stdout.strip()
+        if shallow == "true":
+            t.findings.insert(0, ("WARN", "shallow clone: history may be incomplete"))
+        dirty = run_git(
+            ["status", "--porcelain", "--", t.project], cwd=root, check=False
+        ).stdout.strip()
+        if dirty:
+            t.findings.append(
                 (
-                    f"{project_name} has uncommitted changes; the note describes "
-                    "committed state only"
-                ),
+                    "WARN",
+                    (
+                        f"{t.project} has uncommitted changes; the note describes "
+                        "committed state only"
+                    ),
+                )
             )
+
+    if as_json:
+        payload = dispatch_payload(
+            snap, t, snapshot_as_of(snap, commit_time(root, snap.rev))
         )
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
 
-    for severity, message in plan.findings:
+    for severity, message in t.findings:
         print(_tagged(f"[{severity}]  {message}", sys.stderr), file=sys.stderr)
-
-    status_md = str((root / project_name / "STATUS.md").resolve())
-    print(dispatch_note(plan, status_md, str(target_path.resolve())))
+    if at is None:
+        print(t.note(snap, lambda rel: str((root / rel).resolve())))
+    else:
+        print(t.note(snap, lambda rel: rel))
 
 
 def cmd_sync(
@@ -6900,7 +7150,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.9.0"
+MCP_SERVER_VERSION = "0.10.0"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -6942,9 +7192,10 @@ This server reads and writes a taskgo control repository: a private Git
 repository of Markdown that tracks projects, tasks (TASK-XXXXX), decisions,
 and each project's STATUS.md.
 
-Start with list_projects or list_tasks (state 'ready' for workable tasks),
-then get_task and get_project_status. dispatch_task gives the briefing note
-for a task. Every response names the commit it read in as_of.commit; pass it
+Start with dispatch(target), a project name or a task ID: one call returns
+the project's README.md, STATUS.md, PLAN.md, the root AGENTS.md, its active
+and ready tasks, and the task record. list_projects and list_tasks (state
+'ready' for workable tasks) find a target. Every response names the commit it read in as_of.commit; pass it
 as 'at' to keep several reads on the same commit.
 
 create and apply_changes record progress: each call is one commit on main,
@@ -7183,23 +7434,7 @@ class McpRead:
     committed: int
 
     def as_of(self) -> dict[str, Any]:
-        return {
-            "commit": self.snap.rev,
-            "committed_at": datetime.fromtimestamp(
-                self.committed, timezone.utc
-            ).isoformat(),
-            "today": get_today(self.snap).isoformat(),
-            "timezone": repo_timezone_name(self.snap),
-        }
-
-
-def mcp_unverified_gates(rows: list[TaskRow]) -> dict[str, list[str]]:
-    out = {}
-    for r in rows:
-        gates = [g for g in r.wait_for if parse_iso_date(g) is None]
-        if gates and r.status not in RESOLVED_STATES:
-            out[r.task_id] = gates
-    return out
+        return snapshot_as_of(self.snap, self.committed)
 
 
 def mcp_find_task(snap: GitTreeSnapshot, task_id: Any) -> TaskRow:
@@ -7249,25 +7484,13 @@ def mcp_list_tasks(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     return {
         "as_of": r.as_of(),
         "tasks": [task_row_json(row) for row in rows],
-        "unverified_gates": mcp_unverified_gates(rows),
+        "unverified_gates": unverified_gates(rows),
     }
 
 
 def mcp_get_task(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     row = mcp_find_task(r.snap, args.get("id"))
-    content = r.snap.read_text(row.rel_path)
-    fm, _ = parse_frontmatter(content)
-    return {
-        "as_of": r.as_of(),
-        "task": task_row_json(row),
-        "blob": r.snap.blobs[row.rel_path],
-        "frontmatter": _to_jsonable(fm),
-        "sections": record_sections(content, TASK_SCHEMA),
-        "unresolved_blocked_by": unresolved_blockers(row, status_index(r.snap)),
-        "unresolved_wait_for": unresolved_wait_for(row, get_today(r.snap)),
-        "unverified_gates": mcp_unverified_gates([row]).get(row.task_id, []),
-        "content": content,
-    }
+    return {"as_of": r.as_of(), **task_record_json(r.snap, row)}
 
 
 def mcp_get_project_status(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
@@ -7275,15 +7498,8 @@ def mcp_get_project_status(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     rel = f"{project}/STATUS.md"
     committed = r.snap.read_text(rel) if r.snap.is_file(rel) else None
     fresh = format_markdown(render_status_file(r.snap, project))
-
-    def block(text: str | None) -> str | None:
-        if text is None:
-            return None
-        sections = record_sections(text, STATUS_SCHEMA)
-        return next((s["text"] for s in sections if s["name"] == "snapshot"), None)
-
-    committed_block = block(committed)
-    fresh_block = block(fresh)
+    committed_block = status_snapshot_block(committed)
+    fresh_block = status_snapshot_block(fresh)
     return {
         "as_of": r.as_of(),
         "project": project,
@@ -7295,7 +7511,7 @@ def mcp_get_project_status(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
         "committed_block": committed_block,
         "fresh_block": fresh_block,
         "block_current": committed_block == fresh_block,
-        "unverified_gates": mcp_unverified_gates(get_task_rows(r.snap, project)),
+        "unverified_gates": unverified_gates(get_task_rows(r.snap, project)),
         "content": committed,
     }
 
@@ -7343,28 +7559,12 @@ def mcp_list_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     return {"as_of": r.as_of(), "files": files}
 
 
-def mcp_dispatch_task(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
-    row = mcp_find_task(r.snap, args.get("id"))
-    content = r.snap.read_text(row.rel_path)
+def mcp_dispatch(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     try:
-        plan = plan_dispatch(
-            r.snap, row.rel_path, content, audit_snapshot(r.snap, row.project)
-        )
+        t = resolve_dispatch(r.snap, args.get("target"))
     except TaskgoError as e:
         raise McpToolError(str(e)) from None
-    note = dispatch_note(plan, f"{row.project}/STATUS.md", row.rel_path)
-    note += (
-        "\n\nThese paths are in the taskgo control repository, not in your "
-        "checkout: read them with this server's get_project_status and get_task "
-        f"tools, at commit {r.snap.rev[:12]}.\n\n{MCP_DATA_CARE}"
-    )
-    return {
-        "as_of": r.as_of(),
-        "task": task_row_json(row),
-        "findings": [{"severity": s, "message": m} for s, m in plan.findings],
-        "unverified_gates": mcp_unverified_gates([row]).get(row.task_id, []),
-        "note": note,
-    }
+    return dispatch_payload(r.snap, t, r.as_of())
 
 
 def mcp_get_task_history(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
@@ -7609,12 +7809,25 @@ MCP_TOOLS = [
         mcp_list_files,
     ),
     McpTool(
-        "dispatch_task",
-        "Produce the dispatch note for an unfinished task (as 'taskgo "
-        "dispatch'), with readiness and audit findings and the data-care rule.",
-        {"id": MCP_TASK_ID},
-        ("id",),
-        mcp_dispatch_task,
+        "dispatch",
+        "Start here: everything to read before working on a project or an "
+        "unfinished task, in one call (as 'taskgo dispatch --json'). target "
+        "is a project name or a task ID. Returns the short dispatch note; "
+        "readiness and audit findings; the project's README.md frontmatter, "
+        "parsed but unfiltered; README.md, STATUS.md (with Summary and Next "
+        "hashes and a live task block), PLAN.md, and the root AGENTS.md "
+        "verbatim, each with its blob and cut as read_file cuts it; the "
+        "project's in-progress, blocked, and ready tasks; and, for a task ID, "
+        "the task as get_task returns it (task is null for a project). Done "
+        "and cancelled tasks are refused.",
+        {
+            "target": {
+                "type": "string",
+                "description": "Project name, or task ID TASK-XXXXX.",
+            }
+        },
+        ("target",),
+        mcp_dispatch,
     ),
     McpTool(
         "get_task_history",
@@ -8589,7 +8802,7 @@ Commands:
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   status [PROJECT] [--json]        Show project status
-  dispatch TASK_ID                 Print agent instructions for a selected task
+  dispatch PROJECT|TASK_ID         Print agent instructions for a project or task
   sync [PROJECT]                   Update STATUS.md snapshot
   check [PROJECT] [--json]         Sweep wait_for gates and date horizons
   doctor [PROJECT]                 Run mechanical checks (read-only)
@@ -9032,16 +9245,22 @@ than a few words.""",
     # dispatch
     p_dispatch = subparsers.add_parser(
         "dispatch",
-        help="Print agent instructions for a selected task",
-        description="Print instructions dispatching an agent to a selected task.",
+        help="Print agent instructions for a project or task",
+        description=(
+            "Print instructions dispatching an agent to a project or a selected task."
+        ),
         formatter_class=HouseStyleHelpFormatter,
         add_help=False,
         epilog="""Examples:
   taskgo dispatch TASK-3A91F
+  taskgo dispatch alpha
+  taskgo dispatch TASK-3A91F --json
   taskgo --root ~/projects dispatch TASK-3A91F
 
-The note is generated from the task record committed at HEAD. Findings about
-working-tree or tracker readiness are written to stderr.""",
+The note is generated from the records committed at HEAD (or REV). Findings
+about working-tree or tracker readiness are written to stderr. --json prints
+the note with the files it names inlined verbatim, as the MCP dispatch tool
+returns them.""",
     )
     p_dispatch.add_argument(
         "--help",
@@ -9050,9 +9269,22 @@ working-tree or tracker readiness are written to stderr.""",
         help="Display this help message and exit",
     )
     p_dispatch.add_argument(
-        "task_id",
-        metavar="TASK_ID",
-        help="Task to assign to the agent",
+        "target",
+        metavar="PROJECT|TASK_ID",
+        help="Project or task to assign to the agent",
+    )
+    p_dispatch.add_argument(
+        "--at",
+        metavar="REV",
+        default=None,
+        help="Read commit REV instead of HEAD",
+    )
+    p_dispatch.add_argument(
+        "--json",
+        "-j",
+        dest="as_json",
+        action="store_true",
+        help="Output the full payload as JSON",
     )
 
     # sync
@@ -9565,7 +9797,7 @@ def main(argv: list[str] | None = None) -> None:
             as_json=args.as_json,
         )
     elif args.command == "dispatch":
-        cmd_dispatch(task_id=args.task_id)
+        cmd_dispatch(target=args.target, at=args.at, as_json=args.as_json)
     elif args.command == "sync":
         cmd_sync(project=args.project)
     elif args.command == "check":

@@ -251,7 +251,7 @@ taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [--repl
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]
-taskgo dispatch TASK_ID
+taskgo dispatch PROJECT|TASK_ID [--at REV] [--json]
 taskgo sync [PROJECT]
 taskgo check [PROJECT] [--json]
 taskgo doctor [PROJECT]

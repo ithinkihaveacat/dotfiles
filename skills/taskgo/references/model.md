@@ -386,9 +386,10 @@ Remediations write through the audited snapshot:
   directly in `tasks/` and `decisions/`. Other documents, and files Git ignores,
   are never reformatted.
 - **`dispatch` (Committed-State Projection):** Uses the audit engine's project
-  findings alongside dispatch-specific checks, then emits a dispatch note from
-  the selected task record at `HEAD`. Findings describe working-tree or tracker
-  defects on stderr without changing the committed note on stdout.
+  findings, over the tree committed at `HEAD`, alongside dispatch-specific
+  checks, then emits a dispatch note from the selected project or task record at
+  `HEAD`. Findings describe working-tree or tracker defects on stderr without
+  changing the committed note on stdout.
 
 ## Agent Dispatch
 
@@ -401,16 +402,26 @@ start of a fresh agent session and when work passes to a successor.
 
 `taskgo dispatch TASK_ID` therefore generates a short dispatch note containing
 only the task ID, project, title, `Goal`, and paths to the project status and
-task record. These values come from the task record committed at `HEAD`, which
-keeps the note reproducible even when the working tree is dirty. The human
-dispatching the note remains the router: its summary lets that person verify the
-selected task before pasting it, while the receiving agent uses the identifier
-and title as a cross-check before reading the tracker and choosing an approach.
+task record. `taskgo dispatch PROJECT` names the project, its `README.md` title,
+and paths to its `README.md`, `STATUS.md`, and `PLAN.md`. These values come from
+the records committed at `HEAD`, which keeps the note reproducible even when the
+working tree is dirty. The human dispatching the note remains the router: its
+summary lets that person verify the selected task before pasting it, while the
+receiving agent uses the identifier and title as a cross-check before reading
+the tracker and choosing an approach.
 
 The command does not select work. `taskgo list PROJECT --state ready` exposes
 the ready frontier, and `STATUS.md` records the intended immediate direction. A
 long dispatch note or one requiring extra facts indicates that the tracker is
 not handoff-ready; repair the durable state instead of expanding the note.
+
+The note is a destination for a human router. An agent without a checkout, such
+as an MCP client, still has to read what the note names, so
+`taskgo dispatch --json` and the MCP `dispatch` tool carry those files beside
+the unchanged note: the project `README.md` with its frontmatter, `STATUS.md`,
+`PLAN.md`, the root `AGENTS.md`, the active and ready tasks, and the task
+record, verbatim, in one round trip. The payload inlines reads; it never widens
+the note.
 
 ## Command Vocabulary
 
@@ -426,8 +437,10 @@ unhyphenated verbs:
   JSON format.
 - `taskgo status [PROJECT] [--json]`: Display operational status or
   multi-project summary.
-- `taskgo dispatch TASK_ID`: Generate agent instructions from the selected task
-  record committed at `HEAD` and report readiness findings on stderr.
+- `taskgo dispatch PROJECT|TASK_ID [--at REV] [--json]`: Generate agent
+  instructions from the selected project or task record committed at `HEAD` and
+  report readiness findings on stderr; `--json` inlines the files the note
+  names.
 - `taskgo sync [PROJECT]`: Synchronize `STATUS.md` snapshot block.
 - `taskgo doctor [PROJECT]`: Diagnostic health check (read-only).
 - `taskgo fix [PROJECT] [--dry-run] [--no-commit]`: Auto-heal task metadata,

@@ -169,14 +169,17 @@ Append operational instructions to the brief:
 ## Agent Dispatch
 
 When assigning a selected task to an agent that can read the control repository,
-generate its instructions with `taskgo dispatch TASK_ID`. Choose the task
-deliberately; `taskgo list PROJECT --state ready` shows the ready frontier,
-while `## Next` in `STATUS.md` normally identifies the intended next action.
+generate its instructions with `taskgo dispatch TASK_ID`
+(`taskgo dispatch PROJECT` points an agent at a project without choosing a
+task). Choose the task deliberately; `taskgo list PROJECT --state ready` shows
+the ready frontier, while `## Next` in `STATUS.md` normally identifies the
+intended next action.
 
 Use the generated output without embellishment. It projects the task ID,
 project, title, and `Goal` from the task record committed at `HEAD`. The command
 writes the note to stdout and readiness findings to stderr. Repair `[WARN]` or
-`[FAIL]` findings before dispatching.
+`[FAIL]` findings before dispatching. `--json` prints the payload the MCP
+`dispatch` tool returns: the note with the files it names inlined.
 
 When yielding after substantial work with a clear successor task, leave the
 tracker and artifact repositories handoff-ready and include the generated note

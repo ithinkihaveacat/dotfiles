@@ -45,7 +45,7 @@ Commands:
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   status [PROJECT] [--json]        Show project status
-  dispatch TASK_ID                 Print agent instructions for a selected task
+  dispatch PROJECT|TASK_ID         Print agent instructions for a project or task
   sync [PROJECT]                   Update STATUS.md snapshot
   check [PROJECT] [--json]         Sweep wait_for gates and date horizons
   doctor [PROJECT]                 Run mechanical checks (read-only)
@@ -363,22 +363,28 @@ options:
 <!-- generated: ../scripts/taskgo dispatch --help -->
 
 ```text
-Usage: taskgo dispatch [--help] TASK_ID
+Usage: taskgo dispatch [--help] [--at REV] [--json] PROJECT|TASK_ID
 
-Print instructions dispatching an agent to a selected task.
+Print instructions dispatching an agent to a project or a selected task.
 
 Arguments:
-  TASK_ID     Task to assign to the agent
+  PROJECT|TASK_ID  Project or task to assign to the agent
 
 Options:
-  --help, -h  Display this help message and exit
+  --help, -h       Display this help message and exit
+  --at REV         Read commit REV instead of HEAD
+  --json, -j       Output the full payload as JSON
 
 Examples:
   taskgo dispatch TASK-3A91F
+  taskgo dispatch alpha
+  taskgo dispatch TASK-3A91F --json
   taskgo --root ~/projects dispatch TASK-3A91F
 
-The note is generated from the task record committed at HEAD. Findings about
-working-tree or tracker readiness are written to stderr.
+The note is generated from the records committed at HEAD (or REV). Findings
+about working-tree or tracker readiness are written to stderr. --json prints
+the note with the files it names inlined verbatim, as the MCP dispatch tool
+returns them.
 ```
 
 <!-- /generated -->

@@ -10,20 +10,20 @@ One server serves one control repository.
 
 ## Tools
 
-| Tool                 | Returns                                                                                   | CLI equivalent          |
-| -------------------- | ----------------------------------------------------------------------------------------- | ----------------------- |
-| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                 | `taskgo status --json`  |
-| `list_tasks`         | Task rows, by project and state (`ready` included)                                        | `taskgo list --json`    |
-| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown            | the task file           |
-| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block | `taskgo status PROJECT` |
-| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line   | `taskgo read --json`    |
-| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options               | `taskgo search --json`  |
-| `list_files`         | Files with blob SHAs, optionally under one directory                                      | `git ls-files -s`       |
-| `dispatch_task`      | The dispatch note with findings and the data-care rule; paths are repository-relative     | `taskgo dispatch`       |
-| `get_task_history`   | Changes of one frontmatter field, following renames                                       | `taskgo history`        |
-| `create`             | Creates one task or decision as one commit, and returns its ID                            | `taskgo create`         |
-| `apply_changes`      | Applies a change set as one commit                                                        | `taskgo apply`, commit  |
-| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob             | `taskgo edit`, commit   |
+| Tool                 | Returns                                                                                   | CLI equivalent           |
+| -------------------- | ----------------------------------------------------------------------------------------- | ------------------------ |
+| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                 | `taskgo status --json`   |
+| `list_tasks`         | Task rows, by project and state (`ready` included)                                        | `taskgo list --json`     |
+| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown            | the task file            |
+| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block | `taskgo status PROJECT`  |
+| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line   | `taskgo read --json`     |
+| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options               | `taskgo search --json`   |
+| `list_files`         | Files with blob SHAs, optionally under one directory                                      | `git ls-files -s`        |
+| `dispatch`           | For a project or task: the note, findings, and the files to read first, verbatim          | `taskgo dispatch --json` |
+| `get_task_history`   | Changes of one frontmatter field, following renames                                       | `taskgo history`         |
+| `create`             | Creates one task or decision as one commit, and returns its ID                            | `taskgo create`          |
+| `apply_changes`      | Applies a change set as one commit                                                        | `taskgo apply`, commit   |
+| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob             | `taskgo edit`, commit    |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
@@ -44,6 +44,31 @@ only costs a fetch.
 does not poll them and, like the CLI, treats them as still holding. `dispatch`
 on a checkout also warns about uncommitted changes; the server reads only
 commits, so it never does.
+
+## Dispatch
+
+`dispatch(target)` is the first call of a session: `target` is a project name or
+a task ID, and one round trip returns what the workflow reads before acting.
+
+- `note`: the short dispatch note, as `taskgo dispatch` prints it, with
+  repository-relative paths and the data-care rule.
+- `findings` and `unverified_gates`: readiness and audit findings, and the
+  project's unverified gates.
+- `frontmatter`: the project `README.md` frontmatter as YAML parses it, with no
+  key filtered or renamed (`{}` without one).
+- `readme`, `plan`, `agents_md`: the project `README.md` (or `PROJECT.md`),
+  `PLAN.md`, and the root `AGENTS.md`, each `{path, blob, content, truncated}`
+  or null when absent. Content is the file's bytes, cut after a whole line at
+  256 KiB as `read_file` cuts it.
+- `status`: `STATUS.md` the same way, plus its `sections` with hashes (for
+  `replace_section`), `live_block` (the task block computed now), and
+  `block_current`.
+- `tasks`: the project's `in_progress`, `blocked` (as the `STATUS.md` snapshot
+  counts them), and `ready` rows, as `list_tasks` returns them.
+- `task`: for a task ID, the record as `get_task` returns it; null for a
+  project. Done and cancelled tasks are refused.
+
+`blob` values serve as `expected_blob` for `edit_file` and `write_file`.
 
 ## Writes
 
