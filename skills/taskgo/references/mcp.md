@@ -99,6 +99,39 @@ without authentication and without reading the repository, for a reverse proxy's
 health check. `--stdio` serves one local client on standard input and output
 instead, without authentication.
 
+## Logging
+
+The server logs to standard error. Every request, except the health check,
+leaves one line once it is answered:
+
+```text
+taskgo mcp: request transport=http http=POST method=tools/call tool=get_task outcome=ok status=200 ms=41 commit=1a2b3c4d5e6f agent=example-client/1.0
+taskgo mcp: request transport=http http=POST outcome=refused status=403 ms=1 reason="Access token expired" agent=example-client/1.0
+```
+
+Fields appear in that order, and only when they apply: `transport` (`http` or
+`stdio`), the HTTP verb, the JSON-RPC `method`, the `tool`, the `outcome`, the
+HTTP `status`, the duration in `ms`, the `commit` a tool call read or wrote, the
+`reason` for anything but `ok`, and the client's `User-Agent`. The outcome is
+`ok`, `tool-error` (the call failed and the client got an error result),
+`rpc-error` (an unknown method, a parse error, a malformed message), `refused`
+(an HTTP refusal: authentication, a wrong host or path, a request too large), or
+`error` (the reply could not be sent). A refused request's body is never read,
+so it has no method. A value that is not a plain token, such as an unknown
+method or tool name from a client, is quoted as JSON and truncated, so it cannot
+break or forge a line.
+
+Lines name requests, never their content: no arguments, task text, file content,
+or tokens. An authentication refusal gives its reason (no token, bad signature,
+wrong audience or issuer, expired). A tool error gives its message, with every
+quoted value elided, since a failed precondition quotes the record's current
+value, which can be a title. Write attempts log the lines described under
+[Writes](#writes) first. To follow a server:
+
+```sh
+grep 'taskgo mcp: request' server.log | grep -v 'outcome=ok'
+```
+
 ## Authentication
 
 Cloudflare Access is meant to sit in front of the server, for example through a
@@ -125,7 +158,7 @@ tests/make-synthetic /tmp/synth                        # a synthetic tracker
 scripts/taskgo --root /tmp/synth mcp --no-fetch --auth none &
 tests/compare-cli http://127.0.0.1:8789/mcp /tmp/synth # server versus CLI
 tests/mcp-call http://127.0.0.1:8789/mcp list_tasks '{"state":"ready"}'
-tests/auth-check                                       # Access JWT validation
+tests/auth-check                                       # Access JWTs, log lines
 ```
 
 `compare-cli` asks the server for its commit, checks that commit out into a

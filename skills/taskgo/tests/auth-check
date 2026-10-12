@@ -15,9 +15,13 @@ Usage: auth-check
 Serves a JWKS with a throwaway RSA key on a loopback port and starts
 'taskgo mcp' on a throwaway repository, trusting that JWKS (team
 'test.invalid', audience 'test-aud'). Then sends a valid token, bad ones, and
-none, and checks each status code, and that the health check needs no token.
-A write with an expired token is refused too. Last, checks that '--auth
-none' refuses a request addressed to another host. Prints TAP.
+none, and checks each status code and the request's log line (with the
+refusal's reason, and never the token), and that the health check needs no
+token. A write with an expired token is refused too. Then checks that '--auth
+none' refuses a request addressed to another host, and that every other
+outcome (a tool call, a tool error, an RPC error, a notification, a parse
+error, an unknown path) logs one line. Last, checks that the server will not
+start without Access settings. Prints TAP.
 """
 
 import base64
@@ -77,7 +81,11 @@ def token(key, kid: str, alg: str = "RS256", **claims) -> str:
 
 
 def status(
-    url: str, tok: str | None, host: str | None = None, msg: dict | None = None
+    url: str,
+    tok: str | None,
+    host: str | None = None,
+    msg: dict | None = None,
+    body: bytes | None = None,
 ) -> int:
     msg = msg or {"jsonrpc": "2.0", "id": 1, "method": "ping"}
     headers = {"content-type": "application/json"}
@@ -85,7 +93,7 @@ def status(
         headers["cf-access-jwt-assertion"] = tok
     if host:
         headers["host"] = host
-    req = urllib.request.Request(url, json.dumps(msg).encode(), headers)
+    req = urllib.request.Request(url, body or json.dumps(msg).encode(), headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status
@@ -107,7 +115,22 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def serve(repo: Path, port: int, *args: str, env: dict | None = None):
+def logged(log: Path, count: int) -> str:
+    """The COUNT-th request line in LOG, waiting for the server to write it,
+    or "" if it never does."""
+    for _ in range(100):
+        lines = [
+            line
+            for line in log.read_text().splitlines()
+            if line.startswith("taskgo mcp: request ")
+        ]
+        if len(lines) >= count:
+            return lines[count - 1]
+        time.sleep(0.05)
+    return ""
+
+
+def serve(repo: Path, port: int, log: Path, *args: str, env: dict | None = None):
     proc = subprocess.Popen(
         [
             str(CLI),
@@ -120,7 +143,7 @@ def serve(repo: Path, port: int, *args: str, env: dict | None = None):
             *args,
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=log.open("w"),
         env=env,
     )
     url = f"http://127.0.0.1:{port}/mcp"
@@ -156,21 +179,66 @@ def main() -> None:
     certs = f"http://127.0.0.1:{httpd.server_address[1]}/certs"
 
     now = int(time.time())
+    # Name, token, status, and what the log line says of it.
     cases = [
-        ("valid token", token(key, "k1"), 200),
-        ("audience in a list of several", token(key, "k1", aud=["x", AUD]), 200),
-        ("no token", None, 401),
-        ("malformed token", "not.a.jwt", 403),
-        ("unsigned token", token(key, "k1", alg="none"), 403),
-        ("wrong audience", token(key, "k1", aud=["other"]), 403),
-        ("expired", token(key, "k1", exp=now - 600), 403),
-        ("not yet valid", token(key, "k1", nbf=now + 600), 403),
-        ("no expiry", token(key, "k1", exp=None), 403),
-        ("wrong issuer", token(key, "k1", iss="https://evil.invalid"), 403),
-        ("forged signature", token(other, "k1"), 403),
-        ("unknown key", token(key, "k2"), 403),
+        ("valid token", token(key, "k1"), 200, "outcome=ok"),
+        (
+            "audience in a list of several",
+            token(key, "k1", aud=["x", AUD]),
+            200,
+            "outcome=ok",
+        ),
+        ("no token", None, 401, 'reason="no Access token"'),
+        ("malformed token", "not.a.jwt", 403, "outcome=refused"),
+        ("unsigned token", token(key, "k1", alg="none"), 403, "outcome=refused"),
+        ("wrong audience", token(key, "k1", aud=["other"]), 403, "another application"),
+        ("expired", token(key, "k1", exp=now - 600), 403, "expired"),
+        ("not yet valid", token(key, "k1", nbf=now + 600), 403, "outcome=refused"),
+        ("no expiry", token(key, "k1", exp=None), 403, "outcome=refused"),
+        (
+            "wrong issuer",
+            token(key, "k1", iss="https://evil.invalid"),
+            403,
+            "another team",
+        ),
+        ("forged signature", token(other, "k1"), 403, "Signature"),
+        ("unknown key", token(key, "k2"), 403, "outcome=refused"),
     ]
-    print(f"1..{len(cases) + 6}")
+    # Over --auth none: name, path, body, status, and the log line's fields.
+    call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call"}
+    outcomes = [
+        (
+            "a tool call",
+            "/mcp",
+            {**call, "params": {"name": "list_projects"}},
+            200,
+            ("tool=list_projects outcome=ok", "commit="),
+        ),
+        (
+            "an unknown tool",
+            "/mcp",
+            {**call, "params": {"name": "no such tool"}},
+            200,
+            ('tool="no such tool" outcome=tool-error', 'reason="unknown tool"'),
+        ),
+        (
+            "an unknown method",
+            "/mcp",
+            {"jsonrpc": "2.0", "id": 4, "method": "bogus/method"},
+            200,
+            ("method=bogus/method outcome=rpc-error", "not found"),
+        ),
+        (
+            "a notification",
+            "/mcp",
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            202,
+            ("outcome=ok status=202",),
+        ),
+        ("a parse error", "/mcp", b"{", 400, ("outcome=rpc-error", "parse error")),
+        ("an unknown path", "/other", None, 404, ("outcome=refused", "/other")),
+    ]
+    print(f"1..{len(cases) + len(outcomes) + 7}")
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
@@ -193,9 +261,11 @@ def main() -> None:
             check=True,
         )
         env = dict(os.environ, TASKGO_MCP_ACCESS_CERTS_URL=certs)
+        log = Path(tmp) / "access.log"
         proc, url = serve(
             repo,
             free_port(),
+            log,
             "--access-team",
             TEAM,
             "--access-aud",
@@ -203,11 +273,24 @@ def main() -> None:
             env=env,
         )
         try:
-            for n, (name, tok, want) in enumerate(cases, 1):
+            for n, (name, tok, want, says) in enumerate(cases, 1):
                 got = status(url, tok)
-                ok = got == want
+                line = logged(log, n)
+                ok = (
+                    got == want
+                    and says in line
+                    and f"status={want}" in line
+                    # A refused request's body is never read.
+                    and (
+                        "transport=http http=POST "
+                        + ("method=ping " if want == 200 else "outcome")
+                    )
+                    in line
+                )
                 failed += not ok
                 print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+                if not ok:
+                    print(f"# {line}")
             # A write is refused at the door like any other request.
             write = {
                 "jsonrpc": "2.0",
@@ -220,7 +303,7 @@ def main() -> None:
             }
             n += 1
             got = status(url, token(key, "k1", exp=now - 600), msg=write)
-            ok = got == 403
+            ok = got == 403 and "outcome=refused" in logged(log, n)
             failed += not ok
             print(
                 f"{'ok' if ok else 'not ok'} {n} - expired token on a write: {got} "
@@ -239,8 +322,18 @@ def main() -> None:
         finally:
             proc.terminate()
             proc.wait()
+        n += 1
+        text = log.read_text()
+        lines = [x for x in text.splitlines() if x.startswith("taskgo mcp: request ")]
+        # The health check is not logged; the GET on the endpoint is.
+        ok = len(lines) == len(cases) + 2 and not any(
+            tok and tok in text for _, tok, _, _ in cases
+        )
+        failed += not ok
+        print(f"{'ok' if ok else 'not ok'} {n} - one line per request, no tokens")
 
-        proc, url = serve(repo, free_port(), "--auth", "none")
+        log = Path(tmp) / "none.log"
+        proc, url = serve(repo, free_port(), log, "--auth", "none")
         try:
             for host, want, name in (
                 (None, 200, "auth none serves loopback"),
@@ -248,9 +341,22 @@ def main() -> None:
             ):
                 n += 1
                 got = status(url, None, host)
-                ok = got == want
+                ok = got == want and (want == 200 or "loopback" in logged(log, 2))
                 failed += not ok
                 print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+            base = url.removesuffix("/mcp")
+            for k, (name, path, msg, want, says) in enumerate(outcomes, 3):
+                n += 1
+                if isinstance(msg, bytes):
+                    got = status(base + path, None, body=msg)
+                else:
+                    got = status(base + path, None, msg=msg)
+                line = logged(log, k)
+                ok = got == want and all(x in line for x in says) and " ms=" in line
+                failed += not ok
+                print(f"{'ok' if ok else 'not ok'} {n} - logs {name}: {got}")
+                if not ok:
+                    print(f"# {line}")
         finally:
             proc.terminate()
             proc.wait()

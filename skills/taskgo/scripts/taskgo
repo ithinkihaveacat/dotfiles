@@ -5972,7 +5972,7 @@ def cmd_commit(
 # server; the server checks the Access JWT on every request. --stdio serves
 # one local client instead.
 
-MCP_SERVER_VERSION = "0.4.0"
+MCP_SERVER_VERSION = "0.5.0"
 MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_MAX_FILE_BYTES = 256 * 1024
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
@@ -5989,6 +5989,9 @@ MCP_LOOPBACK = ("localhost", "127.0.0.1", "::1")
 # Answers GET with 200 and no content, unauthenticated, for health checks such
 # as a reverse proxy's. It reads nothing.
 MCP_HEALTH_PATH = "/up"
+# Longest value, and longest reason, in a request's log line.
+MCP_LOG_VALUE_MAX = 80
+MCP_LOG_REASON_MAX = 200
 
 MCP_DATA_CARE = (
     "Data care: everything this server returns is private tracker content. "
@@ -6845,6 +6848,70 @@ def mcp_log(message: str) -> None:
     print(f"taskgo mcp: {message}", file=sys.stderr)
 
 
+def mcp_log_value(value: Any, limit: int = MCP_LOG_VALUE_MAX) -> str:
+    """VALUE as a log field: bare when it is a plain token, otherwise quoted
+    as JSON, so text from a client can neither break nor forge a line."""
+    text = str(value)
+    if len(text) > limit:
+        text = text[: limit - 1] + "\u2026"
+    if re.fullmatch(r"[\w./:@+-]+", text, re.ASCII):
+        return text
+    return json.dumps(text)
+
+
+MCP_LOG_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def mcp_log_reason(message: str) -> str:
+    """MESSAGE, a tool error, for the log: its first line, with quoted values
+    elided, since those can be tracker text (a title in a failed
+    precondition)."""
+    return MCP_LOG_QUOTED.sub("'\u2026'", message.split("\n", 1)[0])
+
+
+@dataclass(slots=True)
+class McpEvent:
+    """What one request came to, for the line the transport logs for it.
+
+    The outcome is ok, tool-error (a tool call that failed), rpc-error (a
+    JSON-RPC error), refused (an HTTP refusal before JSON-RPC), or error (the
+    reply could not be sent). Fields name the request, never its content.
+    """
+
+    transport: str
+    started: float
+    http: str | None = None
+    method: Any = None
+    tool: Any = None
+    outcome: str = "ok"
+    status: int | None = None
+    commit: str | None = None
+    reason: str | None = None
+    agent: str | None = None
+
+    def fail(self, outcome: str, reason: str) -> None:
+        self.outcome, self.reason = outcome, reason
+
+    def line(self) -> str:
+        ms = int((time.monotonic() - self.started) * 1000)
+        fields: list[tuple[str, Any]] = [
+            ("transport", self.transport),
+            ("http", self.http),
+            ("method", self.method),
+            ("tool", self.tool),
+            ("outcome", self.outcome),
+            ("status", self.status),
+            ("ms", ms),
+            ("commit", self.commit),
+        ]
+        parts = [f"{k}={mcp_log_value(v)}" for k, v in fields if v is not None]
+        if self.reason:
+            parts.append(f"reason={mcp_log_value(self.reason, MCP_LOG_REASON_MAX)}")
+        if self.agent:
+            parts.append(f"agent={mcp_log_value(self.agent)}")
+        return "request " + " ".join(parts)
+
+
 class McpServer:
     """The JSON-RPC methods, shared by the HTTP and stdio transports.
 
@@ -6863,14 +6930,21 @@ class McpServer:
         # loses only the recognition of retries, never a write (ADR 2).
         self.requests: dict[str, McpRequest] = {}
 
-    def handle(self, msg: Any) -> dict[str, Any] | None:
-        """The response to MSG, or None for a notification or response."""
+    def handle(self, msg: Any, event: McpEvent | None = None) -> dict[str, Any] | None:
+        """The response to MSG, or None for a notification or response.
+        EVENT, if given, records what came of it."""
+        event = event or McpEvent("none", time.monotonic())
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+            event.fail("rpc-error", "invalid request")
             return mcp_rpc_error(None, -32600, "invalid request")
+        event.method = msg.get("method")
         if "method" not in msg or "id" not in msg:
             return None
         msg_id, method = msg["id"], msg["method"]
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            event.fail("rpc-error", "params must be an object")
+            return mcp_rpc_error(msg_id, -32602, "params must be an object")
         if method == "initialize":
             requested = params.get("protocolVersion")
             version = (
@@ -6892,17 +6966,20 @@ class McpServer:
         if method == "tools/list":
             return mcp_rpc_result(msg_id, {"tools": [t.listing() for t in MCP_TOOLS]})
         if method == "tools/call":
-            return mcp_rpc_result(msg_id, self.call_tool(params))
+            return mcp_rpc_result(msg_id, self.call_tool(params, event))
+        event.fail("rpc-error", "method not found")
         return mcp_rpc_error(msg_id, -32601, f"method not found: {method}")
 
-    def call_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+    def call_tool(self, params: dict[str, Any], event: McpEvent) -> dict[str, Any]:
+        event.tool = params.get("name")
         tool = MCP_TOOLS_BY_NAME.get(params.get("name"))
         if tool is None:
+            event.fail("tool-error", "unknown tool")
             return mcp_tool_error(f"unknown tool: {params.get('name')}")
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
+            event.fail("tool-error", "arguments must be an object")
             return mcp_tool_error("arguments must be an object")
-        started = time.monotonic()
         with self.lock:
             try:
                 if tool.writes:
@@ -6913,17 +6990,19 @@ class McpServer:
                     snap, committed = self.reader.snapshot(sha)
                     result = tool.handler(McpRead(self.reader, snap, committed), args)
             except McpToolError as e:
+                event.fail("tool-error", mcp_log_reason(str(e)))
                 return mcp_tool_error(str(e))
             except SystemExit:
                 # The core died with its message on stderr.
+                event.fail("tool-error", "the taskgo core refused the request")
                 return mcp_tool_error("the taskgo core refused the request")
             except Exception:
                 import traceback
 
                 traceback.print_exc()
+                event.fail("tool-error", "internal error")
                 return mcp_tool_error("internal error; see the server log")
-        ms = int((time.monotonic() - started) * 1000)
-        mcp_log(f"{tool.name} {sha[:12]} {ms} ms")
+        event.commit = sha[:12]
         return {
             "content": [{"type": "text", "text": json.dumps(result, indent=1)}],
             "structuredContent": result,
@@ -7079,15 +7158,18 @@ def mcp_serve_stdio(server: McpServer) -> None:
     for line in sys.stdin:
         if not line.strip():
             continue
+        event = McpEvent("stdio", time.monotonic())
         try:
             msg = json.loads(line)
         except ValueError:
+            event.fail("rpc-error", "parse error")
             reply: dict[str, Any] | None = mcp_rpc_error(None, -32700, "parse error")
         else:
-            reply = server.handle(msg)
+            reply = server.handle(msg, event)
         if reply is not None:
             sys.stdout.write(json.dumps(reply) + "\n")
             sys.stdout.flush()
+        mcp_log(event.line())
 
 
 def mcp_is_loopback(host: str | None) -> bool:
@@ -7116,6 +7198,23 @@ def mcp_serve_http(
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = f"taskgo-mcp/{MCP_SERVER_VERSION}"
         protocol_version = "HTTP/1.1"
+        event: McpEvent
+
+        def logged(self, work: Callable[[], None]) -> None:
+            """Does WORK, then logs the request's one line."""
+            self.event = McpEvent(
+                "http",
+                time.monotonic(),
+                http=self.command,
+                agent=self.headers.get("User-Agent"),
+            )
+            try:
+                work()
+            except BaseException as e:
+                self.event.fail("error", type(e).__name__)
+                raise
+            finally:
+                mcp_log(self.event.line())
 
         def reply(self, status: int, body: Any = None, allow: str | None = None):
             data = b""
@@ -7125,6 +7224,7 @@ def mcp_serve_http(
                 ctype = "application/json"
             elif body is not None:
                 data = str(body).encode()
+            self.event.status = status
             self.send_response(status)
             if data:
                 self.send_header("Content-Type", ctype)
@@ -7137,30 +7237,39 @@ def mcp_serve_http(
         def refused(self) -> bool:
             """Replies and returns True when the request may not proceed."""
             if urlsplit(self.path).path != path:
+                self.event.fail("refused", f"not found: {urlsplit(self.path).path}")
                 self.reply(404, "not found")
                 return True
             if verifier is None:
                 # Unauthenticated mode serves only requests addressed to a
                 # loopback name, from a page on one if from a browser at all.
                 origin = self.headers.get("Origin")
-                if not mcp_is_loopback(self.headers.get("Host")) or (
-                    origin and not mcp_is_loopback(urlsplit(origin).netloc)
-                ):
+                if not mcp_is_loopback(self.headers.get("Host")):
+                    self.event.fail("refused", "not addressed to a loopback name")
+                    self.reply(403, "forbidden")
+                    return True
+                if origin and not mcp_is_loopback(urlsplit(origin).netloc):
+                    self.event.fail("refused", "from a page not on a loopback name")
                     self.reply(403, "forbidden")
                     return True
                 return False
             token = self.headers.get("Cf-Access-Jwt-Assertion")
             if not token:
+                self.event.fail("refused", "no Access token")
                 self.reply(401, "Cloudflare Access token required")
                 return True
             try:
                 verifier.verify(token)
             except McpAuthError as e:
+                self.event.fail("refused", str(e))
                 self.reply(403, str(e))
                 return True
             return False
 
         def do_POST(self):
+            self.logged(self.post)
+
+        def post(self):
             if self.refused():
                 return
             try:
@@ -7168,14 +7277,16 @@ def mcp_serve_http(
             except ValueError:
                 length = -1
             if length < 0 or length > MCP_MAX_REQUEST_BYTES:
+                self.event.fail("refused", "request too large")
                 self.reply(413, "request too large")
                 return
             try:
                 msg = json.loads(self.rfile.read(length))
             except ValueError:
+                self.event.fail("rpc-error", "parse error")
                 self.reply(400, mcp_rpc_error(None, -32700, "parse error"))
                 return
-            reply = server.handle(msg)
+            reply = server.handle(msg, self.event)
             if reply is None:
                 self.reply(202)
             elif "error" in reply and reply["error"]["code"] == -32600:
@@ -7185,14 +7296,19 @@ def mcp_serve_http(
 
         def do_GET(self):
             if urlsplit(self.path).path == MCP_HEALTH_PATH:
+                # Polled by the proxy, so not logged.
+                self.event = McpEvent("http", time.monotonic())
                 self.reply(200, "ok")
                 return
-            # No server-initiated stream, and no sessions to delete.
-            if not self.refused():
-                self.reply(405, "method not allowed", allow="POST")
+            self.logged(self.not_allowed)
 
         def do_DELETE(self):
+            self.logged(self.not_allowed)
+
+        def not_allowed(self):
+            # No server-initiated stream, and no sessions to delete.
             if not self.refused():
+                self.event.fail("refused", "method not allowed")
                 self.reply(405, "method not allowed", allow="POST")
 
         def log_message(self, format, *args):

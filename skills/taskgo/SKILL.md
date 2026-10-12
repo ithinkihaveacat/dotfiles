@@ -291,5 +291,5 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--auth access|none] [--acce
 - **[Model & Architecture](references/model.md)**
 - **[Agent Workflows & Handoff](references/workflows.md)**
 - **[Activity Reports](references/activity-reports.md)**
-- **[MCP Server](references/mcp.md)** — `taskgo mcp` tools, authentication, and
-  testing
+- **[MCP Server](references/mcp.md)** — `taskgo mcp` tools, authentication,
+  logging, and testing
