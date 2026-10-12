@@ -84,6 +84,14 @@ rg --files ./skills | grep zipline
   plan, or blanket "yes" to a multi-step proposal as authorization to notify;
   require an unmistakable, user-originated command naming who to notify.
 
+## Consulting Other Agents
+
+- **Ask the Author**: When the agent session that wrote a plan, task, or change
+  can be found and you can message it, ask it about gaps, ambiguities, or
+  doubtful assumptions before you act. Its answers are usually faster and more
+  accurate than guessing from the record. If it is no longer running, read its
+  transcript instead.
+
 ## Mid-Task User Interruptions
 
 - **Interruption Invariant**: When the user interrupts an ongoing task or
