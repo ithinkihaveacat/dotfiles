@@ -1,12 +1,12 @@
 # MCP Server
 
-`taskgo mcp` serves a control repository's committed state to MCP clients,
-read-only. It is for agents that have a checkout of a code repository but not of
-the control repository, such as cloud sessions. The server is the CLI script
-itself, so its tools call the same functions as the matching subcommands and
-their output matches the CLI's.
+`taskgo mcp` serves a control repository's committed state to MCP clients, and
+writes to it on their behalf. It is for agents that have a checkout of a code
+repository but not of the control repository, such as cloud sessions. The server
+is the CLI script itself, so its tools call the same functions as the matching
+subcommands and their output matches the CLI's.
 
-One server serves one control repository. It never writes.
+One server serves one control repository.
 
 ## Tools
 
@@ -20,6 +20,8 @@ One server serves one control repository. It never writes.
 | `list_files`         | Files with blob SHAs, optionally under one directory                                      | `git ls-files -s`       |
 | `dispatch_task`      | The dispatch note with findings and the data-care rule; paths are repository-relative     | `taskgo dispatch`       |
 | `get_task_history`   | Changes of one frontmatter field, following renames                                       | `taskgo history`        |
+| `create`             | Creates one task or decision as one commit, and returns its ID                            | `taskgo create`         |
+| `apply_changes`      | Applies a change set as one commit                                                        | `taskgo apply`, commit  |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
@@ -32,6 +34,61 @@ the fetch when that commit is already present.
 does not poll them and, like the CLI, treats them as still holding. `dispatch`
 on a checkout also warns about uncommitted changes; the server reads only
 commits, so it never does.
+
+## Writes
+
+`create` and `apply_changes` take a change set (see
+[Change Sets](model.md#change-sets); `create` is a set with one `create`) and
+make it one commit on the branch, or nothing:
+
+1. Fetch the branch and apply the set over its head, in memory, as
+   `taskgo apply` does: every precondition (expected value, section hash, blob
+   SHA) is checked against that head, the whole result is validated, and the
+   affected `STATUS.md` blocks are regenerated.
+1. Commit the result without a working tree, through a temporary index, with the
+   head as the only parent.
+1. Push it without force. If the remote refuses (another push got there first),
+   fetch again: when the commit is on the branch after all, the push did land;
+   otherwise apply the set again over the new head, so its preconditions are
+   checked against what is now there. After five refused pushes the write fails
+   and nothing is written.
+
+Calls are serialized, so the server's own writes never race each other; pushes
+from CLI checkouts race with them on equal terms, through the remote's refusal
+of a non-fast-forward push.
+
+Commits read like CLI commits: the configured owner as author and committer (the
+server refuses to write without `user.name` and `user.email`, or the
+`GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and never guesses one), a
+Conventional Commits subject scoped to the project (the caller's, or one derived
+from the changes), an optional body, and only the trailers the caller asks for:
+`Conversation:` for its session URI, which also joins the conversations of every
+task the write touches, and `Ref:` for each reference. Writes are refused unless
+`AGENTS.md` at the head carries `<!-- taskgo:allow-local-commits -->`, and a
+server started with `--no-fetch` does not write.
+
+Every write takes a `request_id`. The server keeps, in memory, the digest of the
+request's arguments and each commit it built for it, for a day. A request whose
+ID it has seen reports the earlier commit, when that commit is on the branch,
+instead of writing again, so a client that lost a reply can retry safely; the
+same ID with different arguments is refused. A restart forgets the IDs, which
+loses only that recognition, never a write.
+
+Each write logs a line to standard error for each push attempt, with the request
+ID, the commit, and the head it was built on, or Git's reason for a refusal, and
+for each retry it recognizes.
+
+A push from a checkout that the server has moved past is refused as a
+non-fast-forward; `git pull --rebase` brings the checkout up to date. When both
+sides changed one project's `STATUS.md`, the rebase stops on its generated
+block. Take the upstream file, regenerate it, and continue:
+
+```sh
+git checkout --ours alpha/STATUS.md   # during a rebase, ours is upstream
+taskgo sync alpha
+git add alpha/STATUS.md
+git rebase --continue
+```
 
 ## Transports
 
@@ -74,8 +131,11 @@ tests/auth-check                                       # Access JWT validation
 `compare-cli` asks the server for its commit, checks that commit out into a
 temporary clone, and compares every tool's output with the CLI's there. It
 prints only check names and counts, never file contents, so it is safe to run
-against a private tracker. `test-taskgo` runs `compare-cli` on a synthetic
-tracker and `auth-check`.
+against a private tracker. `tests/write-check` serves a throwaway tracker pushed
+to a local bare repository and checks the writes: concurrent writers, a lost
+push reply, a head that moves before every push, refusals, and a stale CLI
+checkout that recovers by rebase. `test-taskgo` runs `compare-cli` on a
+synthetic tracker, `auth-check`, and `write-check`.
 
 The MCP Inspector works against a local server:
 
@@ -86,7 +146,7 @@ npx @modelcontextprotocol/inspector --cli http://127.0.0.1:8789/mcp \
 
 ## Data care
 
-Everything the server returns is private tracker content. Its MCP instructions
-and every dispatch note tell the client never to copy it into artifact
-repositories. The host running the server holds a clone of the control
-repository, so the same care applies to the host.
+Everything the server returns is private tracker content. Its MCP instructions,
+every write tool's description, and every dispatch note tell the client never to
+copy it into artifact repositories. The host running the server holds a clone of
+the control repository, so the same care applies to the host.

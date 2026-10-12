@@ -1,0 +1,1104 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Checks the write tools of 'taskgo mcp' against a local bare remote.
+
+Usage: write-check
+
+Builds a throwaway control repository with three projects, pushes it to a
+bare repository, and serves a clone of it. Concurrent clients write through
+the HTTP server; faults (a head that moves before each push, a push whose
+reply is lost, a remote that cannot be read) are injected into an in-process
+server, whose methods are the same. Checks that every write is one linear
+commit or nothing, that retries are recorded once, and that a stale CLI
+checkout recovers by rebase without losing a server commit. Prints TAP.
+"""
+
+import concurrent.futures
+import importlib.machinery
+import importlib.util
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CLI = Path(__file__).resolve().parent.parent / "scripts" / "taskgo"
+AGENTS = """\
+# Agent instructions
+
+This repository follows taskgo:
+<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.
+
+<!-- taskgo:allow-local-commits -->
+"""
+IDENTITY = {
+    "GIT_AUTHOR_NAME": "Taskgo Test",
+    "GIT_AUTHOR_EMAIL": "taskgo@example.com",
+    "GIT_COMMITTER_NAME": "Taskgo Test",
+    "GIT_COMMITTER_EMAIL": "taskgo@example.com",
+}
+TASKS = {
+    # path: (status, blocked_by, title)
+    "alpha/tasks/TASK-AA001-one.md": ("todo", [], "One"),
+    "alpha/tasks/TASK-AA002-two.md": ("todo", [], "Two"),
+    "alpha/tasks/TASK-AA003-three.md": ("in-progress", [], "Three"),
+    "alpha/tasks/TASK-AA004-four.md": ("todo", [], "Four"),
+    "alpha/tasks/TASK-AA005-five.md": ("todo", [], "Five"),
+    "beta/tasks/TASK-BB001-held.md": ("todo", ["TASK-AA003"], "Held"),
+    "beta/tasks/TASK-BB002-free.md": ("todo", [], "Free"),
+    "gamma/tasks/TASK-CC001-other.md": ("todo", [], "Other"),
+}
+
+
+def reexec_with_taskgo_env() -> None:
+    """The in-process checks import taskgo, so they need its dependencies:
+    run under the interpreter of taskgo's own script environment."""
+    try:
+        import mdformat  # noqa: F401
+        import ruamel.yaml  # noqa: F401
+    except ImportError:
+        if os.environ.get("WRITE_CHECK_REEXEC"):
+            sys.exit("write-check: taskgo's dependencies are not importable")
+        subprocess.run(
+            ["uv", "sync", "-q", "--script", str(CLI)],
+            stdin=subprocess.DEVNULL,
+            check=True,
+        )
+        py = subprocess.run(
+            ["uv", "python", "find", "--script", str(CLI)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        os.environ["WRITE_CHECK_REEXEC"] = "1"
+        os.execv(py, [py, __file__, *sys.argv[1:]])
+
+
+def git(repo: Path, *args: str, check: bool = True) -> str:
+    res = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=False
+    )
+    if check and res.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {res.stderr.strip()}")
+    return res.stdout.strip()
+
+
+def is_ancestor(repo: Path, sha: str, rev: str = "main") -> bool:
+    res = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", sha, rev], cwd=repo, check=False
+    )
+    return res.returncode == 0
+
+
+def taskgo(repo: Path, *args: str) -> str:
+    res = subprocess.run(
+        [str(CLI), "--root", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"taskgo {' '.join(args)}: {res.stderr.strip()}")
+    return res.stdout
+
+
+def load_taskgo():
+    loader = importlib.machinery.SourceFileLoader("taskgo_under_test", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class Tap:
+    def __init__(self):
+        self.n = 0
+        self.failed = 0
+
+    def check(self, name: str, ok: bool, detail: object = "") -> None:
+        self.n += 1
+        self.failed += not ok
+        print(f"{'ok' if ok else 'not ok'} {self.n} - {name}", flush=True)
+        if not ok and detail:
+            for line in str(detail).splitlines()[:20]:
+                print(f"# {line}", flush=True)
+
+
+class Tracker:
+    """A bare 'remote' seeded with the fixture, the server's clone of it
+    (no working tree, as on the host), and checkouts for CLI pushes."""
+
+    def __init__(self, root: Path, seed: Path):
+        self.root = root
+        root.mkdir(parents=True)
+        self.remote = root / "remote.git"
+        git(root, "clone", "-q", "--bare", str(seed), str(self.remote))
+        self.server = root / "server"
+        git(root, "clone", "-q", "--no-checkout", str(self.remote), str(self.server))
+
+    def head(self) -> str:
+        return git(self.remote, "rev-parse", "main")
+
+    def show(self, rel: str, rev: str = "main") -> str:
+        return git(self.remote, "show", f"{rev}:{rel}")
+
+    def checkout(self, name: str) -> Path:
+        path = self.root / name
+        # No templates: the caller's own Git hooks stay out of the test.
+        git(self.root, "clone", "-q", "--template=", str(self.remote), str(path))
+        return path
+
+    def commits(self, since: str) -> list[str]:
+        out = git(self.remote, "rev-list", f"{since}..main")
+        return out.splitlines() if out else []
+
+
+def make_seed(root: Path) -> Path:
+    seed = root / "seed"
+    git(root, "init", "-q", "-b", "main", str(seed))
+    (seed / "AGENTS.md").write_text(AGENTS)
+    (seed / "INBOX.md").write_text("# Inbox\n")
+    for project in ("alpha", "beta", "gamma"):
+        (seed / project / "tasks").mkdir(parents=True)
+        (seed / project / "README.md").write_text(f"# {project}\n")
+    (seed / "alpha" / "PLAN.md").write_text("# Plan\n\nFirst plan.\n")
+    for rel, (status, blocked_by, title) in TASKS.items():
+        task_id = rel.split("/")[-1][:10]
+        lines = ["---", f"id: {task_id}", f"status: {status}"]
+        if blocked_by:
+            lines.append(f"blocked_by: [{', '.join(blocked_by)}]")
+        lines += ["---", "", f"# {title}", "", f"**Goal:** {title} goal."]
+        (seed / rel).write_text("\n".join(lines) + "\n")
+    taskgo(seed, "sync")
+    git(seed, "add", "-A")
+    git(seed, "commit", "-q", "-m", "chore: fixture")
+    return seed
+
+
+def sync_is_clean(tracker: Tracker, name: str) -> tuple[bool, str]:
+    """True when every STATUS.md at the remote's head is what sync renders."""
+    path = tracker.checkout(name)
+    taskgo(path, "sync")
+    dirty = git(path, "status", "--porcelain")
+    return not dirty, dirty
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class Http:
+    def __init__(self, tracker: Tracker, log: Path):
+        self.port = free_port()
+        self.url = f"http://127.0.0.1:{self.port}/mcp"
+        self.log = log
+        self.proc = subprocess.Popen(
+            [
+                str(CLI),
+                "--root",
+                str(tracker.server),
+                "mcp",
+                "--auth",
+                "none",
+                "--port",
+                str(self.port),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=log.open("w"),
+        )
+        for _ in range(300):
+            try:
+                with socket.create_connection(("127.0.0.1", self.port), timeout=1):
+                    return
+            except OSError:
+                if self.proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+        self.proc.kill()
+        sys.exit(f"write-check: taskgo mcp did not start: {log.read_text()}")
+
+    def post(self, body: bytes) -> tuple[int, dict | str]:
+        req = urllib.request.Request(
+            self.url, body, {"content-type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def call(self, tool: str, args: dict) -> tuple[bool, dict | str]:
+        msg = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": args},
+        }
+        _, reply = self.post(json.dumps(msg).encode())
+        return result_of(reply)
+
+    def close(self) -> None:
+        self.proc.terminate()
+        self.proc.wait()
+
+
+def result_of(reply) -> tuple[bool, dict | str]:
+    result = reply["result"]
+    if result.get("isError"):
+        return False, result["content"][0]["text"]
+    return True, result["structuredContent"]
+
+
+def section_hash(call, task_id: str, name: str) -> str | None:
+    ok, task = call("get_task", {"id": task_id})
+    assert ok, task
+    return next((s["hash"] for s in task["sections"] if s["name"] == name), None)
+
+
+def concurrently(*calls):
+    with concurrent.futures.ThreadPoolExecutor(len(calls)) as pool:
+        return [f.result() for f in [pool.submit(c) for c in calls]]
+
+
+def http_checks(tap: Tap, tracker: Tracker, http: Http) -> None:
+    call = http.call
+    start = tracker.head()
+
+    # 1. Two agents create different tasks at once.
+    a, b = concurrently(
+        lambda: call(
+            "create", {"project": "alpha", "title": "From A", "request_id": "c1-a"}
+        ),
+        lambda: call(
+            "create", {"project": "alpha", "title": "From B", "request_id": "c1-b"}
+        ),
+    )
+    status = tracker.show("alpha/STATUS.md")
+    tap.check(
+        "1: concurrent creates both land, with distinct IDs",
+        a[0]
+        and b[0]
+        and a[1]["created"][0]["id"] != b[1]["created"][0]["id"]
+        and all(is_ancestor(tracker.remote, r[1]["commit"]) for r in (a, b))
+        and "Todo: 6" in status,
+        (a, b, status),
+    )
+
+    # 2. Two agents update different tasks in one project.
+    h1, h2 = (section_hash(call, t, "Goal") for t in ("TASK-AA001", "TASK-AA002"))
+    a, b = concurrently(
+        lambda: call(
+            "apply_changes",
+            {
+                "request_id": "c2-a",
+                "changes": [
+                    {
+                        "op": "replace_section",
+                        "record": "TASK-AA001",
+                        "section": "Goal",
+                        "text": "Goal set by A.",
+                        "expected_hash": h1,
+                    },
+                    {
+                        "op": "set",
+                        "record": "TASK-AA001",
+                        "field": "status",
+                        "value": "in-progress",
+                        "expected": "todo",
+                    },
+                ],
+            },
+        ),
+        lambda: call(
+            "apply_changes",
+            {
+                "request_id": "c2-b",
+                "changes": [
+                    {
+                        "op": "replace_section",
+                        "record": "TASK-AA002",
+                        "section": "Goal",
+                        "text": "Goal set by B.",
+                        "expected_hash": h2,
+                    },
+                    {
+                        "op": "set",
+                        "record": "TASK-AA002",
+                        "field": "status",
+                        "value": "blocked",
+                        "expected": "todo",
+                    },
+                    {
+                        "op": "add",
+                        "record": "TASK-AA002",
+                        "field": "wait_for",
+                        "values": ["@someone"],
+                    },
+                ],
+            },
+        ),
+    )
+    status = tracker.show("alpha/STATUS.md")
+    tap.check(
+        "2: concurrent updates of two tasks in one project both survive",
+        a[0]
+        and b[0]
+        and "Goal set by A." in tracker.show("alpha/tasks/TASK-AA001-one.md")
+        and "Goal set by B." in tracker.show("alpha/tasks/TASK-AA002-two.md")
+        and "`TASK-AA001` — One" in status
+        and "`TASK-AA002` — Two" in status
+        and "<<<<<<<" not in status,
+        (a, b, status),
+    )
+
+    # 3. Cross-project: finishing AA003 frees BB001 in beta, while another
+    # agent makes BB002 wait on CC001 in gamma.
+    a, b = concurrently(
+        lambda: call(
+            "apply_changes",
+            {
+                "request_id": "c3-a",
+                "changes": [
+                    {
+                        "op": "set",
+                        "record": "TASK-AA003",
+                        "field": "status",
+                        "value": "done",
+                        "expected": "in-progress",
+                    },
+                    {
+                        "op": "replace_section",
+                        "record": "TASK-AA003",
+                        "section": "Outcome",
+                        "text": "Done.",
+                        "expected_hash": None,
+                    },
+                ],
+            },
+        ),
+        lambda: call(
+            "apply_changes",
+            {
+                "request_id": "c3-b",
+                "changes": [
+                    {
+                        "op": "set",
+                        "record": "TASK-CC001",
+                        "field": "status",
+                        "value": "in-progress",
+                        "expected": "todo",
+                    },
+                    {
+                        "op": "add",
+                        "record": "TASK-BB002",
+                        "field": "blocked_by",
+                        "values": ["TASK-CC001"],
+                    },
+                ],
+            },
+        ),
+    )
+    beta = tracker.show("beta/STATUS.md")
+    tap.check(
+        "3: cross-project changes leave every affected projection current",
+        a[0]
+        and b[0]
+        and "(blocked by `TASK-AA003`)" not in beta
+        and "`TASK-BB002` — Free (blocked by `TASK-CC001`)" in beta
+        and "`TASK-CC001` — Other" in tracker.show("gamma/STATUS.md"),
+        (a, b, beta),
+    )
+
+    # 4. Two agents replace the same section from the same version.
+    h = section_hash(call, "TASK-AA004", "Goal")
+    a, b = concurrently(
+        *(
+            lambda who=who: call(
+                "apply_changes",
+                {
+                    "request_id": f"c4-{who}",
+                    "changes": [
+                        {
+                            "op": "replace_section",
+                            "record": "TASK-AA004",
+                            "section": "Goal",
+                            "text": f"Goal by {who}.",
+                            "expected_hash": h,
+                        }
+                    ],
+                },
+            )
+            for who in ("A", "B")
+        )
+    )
+    loser = b[1] if a[0] else a[1]
+    tap.check(
+        "4: the same section from the same version: one wins, one gets a "
+        "precondition failure",
+        a[0] != b[0]
+        and isinstance(loser, str)
+        and loser.startswith("precondition failed:"),
+        (a, b),
+    )
+
+    # 5. Incompatible status transitions.
+    a, b = concurrently(
+        lambda: call(
+            "apply_changes",
+            {
+                "request_id": "c5-a",
+                "changes": [
+                    {
+                        "op": "set",
+                        "record": "TASK-AA005",
+                        "field": "status",
+                        "value": "done",
+                        "expected": "todo",
+                    },
+                    {
+                        "op": "replace_section",
+                        "record": "TASK-AA005",
+                        "section": "Outcome",
+                        "text": "Shipped.",
+                        "expected_hash": None,
+                    },
+                ],
+            },
+        ),
+        lambda: call(
+            "apply_changes",
+            {
+                "request_id": "c5-b",
+                "changes": [
+                    {
+                        "op": "set",
+                        "record": "TASK-AA005",
+                        "field": "status",
+                        "value": "cancelled",
+                        "expected": "todo",
+                    }
+                ],
+            },
+        ),
+    )
+    loser = b[1] if a[0] else a[1]
+    final = tracker.show("alpha/tasks/TASK-AA005-five.md")
+    winner = "done" if a[0] else "cancelled"
+    tap.check(
+        "5: incompatible status transitions: the loser gets a conditional error",
+        a[0] != b[0]
+        and isinstance(loser, str)
+        and loser.startswith("precondition failed:")
+        and f"status: {winner}" in final,
+        (a, b),
+    )
+
+    # 8. Reads during concurrent multi-file writes see one commit each.
+    def write(n: int):
+        return call(
+            "apply_changes",
+            {
+                "request_id": f"c8-{n}",
+                "changes": [
+                    {
+                        "op": "create",
+                        "kind": "task",
+                        "project": "gamma",
+                        "sections": {"title": f"Batch {n}"},
+                    },
+                    {
+                        "op": "write_file",
+                        "path": f"gamma/notes-{n}.md",
+                        "content": f"# Note {n}\n",
+                        "expected_blob": None,
+                    },
+                ],
+            },
+        )
+
+    def read(_: int):
+        ok, got = call("list_files", {"prefix": "gamma"})
+        if not ok:
+            return False, got
+        at = got["as_of"]["commit"]
+        want = git(tracker.remote, "ls-tree", "-r", "--name-only", at, "gamma")
+        return [f["path"] for f in got["files"]] == sorted(want.splitlines()), at
+
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        writes = [pool.submit(write, n) for n in range(4)]
+        reads = [pool.submit(read, n) for n in range(12)]
+        writes, reads = [f.result() for f in writes], [f.result() for f in reads]
+    tap.check(
+        "8: reads during concurrent multi-file commits each return one coherent "
+        "snapshot",
+        all(ok for ok, _ in writes) and all(ok for ok, _ in reads),
+        (writes, reads),
+    )
+
+    # 9. Malformed and refused requests change nothing.
+    before = tracker.head()
+    bad = []
+    for name, body, want in (
+        ("not JSON", b"{not json", 400),
+        ("oversize request", b" " * (1024 * 1024 + 1), 413),
+    ):
+        got = http.post(body)
+        if got[0] != want:
+            bad.append((name, got))
+    refusals = [
+        (
+            "changes not a list",
+            lambda: call(
+                "apply_changes", {"request_id": "c9-1", "changes": {"op": "set"}}
+            ),
+        ),
+        (
+            "unknown op",
+            lambda: call(
+                "apply_changes", {"request_id": "c9-2", "changes": [{"op": "rename"}]}
+            ),
+        ),
+        (
+            "no request_id",
+            lambda: call("create", {"project": "alpha", "title": "No ID"}),
+        ),
+        (
+            "unknown argument",
+            lambda: call(
+                "create",
+                {"project": "alpha", "title": "At", "request_id": "c9-3", "at": before},
+            ),
+        ),
+        (
+            "missing dependency",
+            lambda: call(
+                "apply_changes",
+                {
+                    "request_id": "c9-4",
+                    "changes": [
+                        {
+                            "op": "add",
+                            "record": "TASK-BB002",
+                            "field": "blocked_by",
+                            "values": ["TASK-FFFFF"],
+                        }
+                    ],
+                },
+            ),
+        ),
+        (
+            "oversize file",
+            lambda: call(
+                "apply_changes",
+                {
+                    "request_id": "c9-5",
+                    "changes": [
+                        {
+                            "op": "write_file",
+                            "path": "alpha/big.txt",
+                            "content": "x" * (256 * 1024 + 1),
+                            "expected_blob": None,
+                        }
+                    ],
+                },
+            ),
+        ),
+        (
+            "done without Outcome",
+            lambda: call(
+                "apply_changes",
+                {
+                    "request_id": "c9-6",
+                    "changes": [
+                        {
+                            "op": "set",
+                            "record": "TASK-AA004",
+                            "field": "status",
+                            "value": "done",
+                        }
+                    ],
+                },
+            ),
+        ),
+        (
+            "bad conversation",
+            lambda: call(
+                "create",
+                {
+                    "project": "alpha",
+                    "title": "Conv",
+                    "request_id": "c9-7",
+                    "conversation": "not a uri",
+                },
+            ),
+        ),
+    ]
+    for name, send in refusals:
+        got = send()
+        if got[0] or not isinstance(got[1], str):
+            bad.append((name, got))
+    reused = call(
+        "create", {"project": "alpha", "title": "Other", "request_id": "c1-a"}
+    )
+    if reused[0] or "used for a different write" not in reused[1]:
+        bad.append(("request_id reused", reused))
+    tap.check(
+        "9: malformed, invalid, oversize, and reused requests change nothing",
+        not bad and tracker.head() == before,
+        bad,
+    )
+
+    # A refused write can be corrected and sent again with the same ID.
+    ok, fixed = call(
+        "apply_changes",
+        {
+            "request_id": "c9-6",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA004",
+                    "field": "status",
+                    "value": "done",
+                },
+                {
+                    "op": "replace_section",
+                    "record": "TASK-AA004",
+                    "section": "Outcome",
+                    "text": "Done.",
+                    "expected_hash": None,
+                },
+            ],
+        },
+    )
+    tap.check(
+        "a refused write, corrected, may reuse its request_id",
+        ok and len(tracker.commits(before)) == 1,
+        fixed,
+    )
+
+    # 10. A direct push from a stale CLI checkout. Both sides change
+    # alpha/STATUS.md, so the rebase stops on its generated block; taking
+    # the upstream file and running sync resolves it.
+    stale = tracker.checkout("stale")
+    ok, made = call(
+        "create", {"project": "alpha", "title": "Server side", "request_id": "c10"}
+    )
+    taskgo(stale, "update", "TASK-AA001", "--status", "done", "--outcome", "Done.")
+    taskgo(stale, "sync", "alpha")
+    git(stale, "commit", "-q", "-am", "chore(alpha): finish TASK-AA001")
+    refused = subprocess.run(
+        ["git", "push", "-q", "origin", "main"],
+        cwd=stale,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    rebase = subprocess.run(
+        ["git", "pull", "-q", "--rebase", "origin", "main"],
+        cwd=stale,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    conflicted = git(stale, "diff", "--name-only", "--diff-filter=U")
+    if rebase.returncode != 0 and conflicted == "alpha/STATUS.md":
+        git(stale, "checkout", "--ours", "alpha/STATUS.md")
+        taskgo(stale, "sync", "alpha")
+        git(stale, "add", "alpha/STATUS.md")
+        git(stale, "-c", "core.editor=true", "rebase", "--continue")
+    git(stale, "push", "-q", "origin", "main")
+    tap.check(
+        "10: a stale CLI push is refused as non-fast-forward and recovers by "
+        "rebase and sync, keeping the server commit",
+        ok
+        and refused.returncode != 0
+        and ("non-fast-forward" in refused.stderr or "rejected" in refused.stderr)
+        and is_ancestor(tracker.remote, made["commit"])
+        and conflicted == "alpha/STATUS.md"
+        and "status: done" in tracker.show("alpha/tasks/TASK-AA001-one.md")
+        and tracker.show(made["created"][0]["path"]) != "",
+        (made, refused.stderr, rebase.stderr, conflicted),
+    )
+
+    merges = git(tracker.remote, "rev-list", "--merges", f"{start}..main")
+    clean, dirty = sync_is_clean(tracker, "final-http")
+    tap.check("history is linear, with no merge commit", merges == "", merges)
+    tap.check("every STATUS.md at the head is what sync renders", clean, dirty)
+    log = http.log.read_text()
+    tap.check(
+        "each write logs its pushes",
+        log.count(" pushed ") >= 12 and "attempt 1 pushed" in log,
+        log,
+    )
+
+
+def server(tg, tracker: Tracker):
+    cfg = tg.McpConfig(repo=tracker.server, remote="origin", branch="main", auth="none")
+    return tg.McpServer(cfg)
+
+
+def caller(srv):
+    def call(tool: str, args: dict) -> tuple[bool, dict | str]:
+        msg = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": args},
+        }
+        return result_of(srv.handle(msg))
+
+    return call
+
+
+def competitor(tracker: Tracker, name: str):
+    """A CLI checkout that commits and pushes a change to INBOX.md."""
+    path = tracker.checkout(name)
+    count = [0]
+
+    def push() -> None:
+        count[0] += 1
+        git(path, "pull", "-q", "--rebase", "origin", "main")
+        with (path / "INBOX.md").open("a") as f:
+            f.write(f"\nCompeting note {count[0]}.\n")
+        git(path, "commit", "-q", "-am", f"chore: competing note {count[0]}")
+        git(path, "push", "-q", "origin", "main")
+
+    return push, count
+
+
+def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
+    # The head moves before the first two pushes: the third lands.
+    tracker = Tracker(tmp / "moves", seed)
+    srv = server(tg, tracker)
+    move, moved = competitor(tracker, "cli")
+    real_push = srv.reader.push
+
+    def push_after_moves(sha, limit=2):
+        if moved[0] < limit:
+            move()
+        return real_push(sha)
+
+    srv.reader.push = push_after_moves
+    start = tracker.head()
+    ok, got = caller(srv)(
+        "create", {"project": "alpha", "title": "Late", "request_id": "m1"}
+    )
+    tap.check(
+        "7: a head that moves before two pushes: the third attempt lands",
+        ok
+        and got["attempts"] == 3
+        and len(tracker.commits(start)) == 3
+        and tracker.head() == got["commit"]
+        and "Competing note 2." in tracker.show("INBOX.md"),
+        got,
+    )
+
+    # The head moves before every push: retries are bounded, nothing lands.
+    srv.reader.push = lambda sha: push_after_moves(sha, limit=99)
+    before = moved[0]
+    ok, got = caller(srv)(
+        "create", {"project": "alpha", "title": "Never", "request_id": "m2"}
+    )
+    landed = "-never.md" in git(
+        tracker.remote, "ls-tree", "-r", "--name-only", "main", "alpha/tasks"
+    )
+    tap.check(
+        "7, 9: a head that moves before every push: bounded retries, an "
+        "explicit error, and no server commit",
+        not ok
+        and "moved on each of 5 attempts" in got
+        and moved[0] - before == 5
+        and not landed,
+        got,
+    )
+
+    # A CLI push to another task in the project between read and push.
+    tracker = Tracker(tmp / "race", seed)
+    srv = server(tg, tracker)
+    cli = tracker.checkout("cli")
+    real_push = srv.reader.push
+
+    def race(sha):
+        if not race.done:
+            race.done = True
+            taskgo(cli, "update", "TASK-AA002", "--status", "in-progress")
+            git(cli, "commit", "-q", "-am", "chore(alpha): start TASK-AA002")
+            git(cli, "push", "-q", "origin", "main")
+        return real_push(sha)
+
+    race.done = False
+    srv.reader.push = race
+    call = caller(srv)
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "r1",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA001",
+                    "field": "status",
+                    "value": "in-progress",
+                    "expected": "todo",
+                }
+            ],
+        },
+    )
+    status = tracker.show("alpha/STATUS.md")
+    tap.check(
+        "2: a CLI push to another task in the project between read and push: "
+        "both survive, STATUS.md is current",
+        ok
+        and got["attempts"] == 2
+        and "`TASK-AA001` — One" in status
+        and "`TASK-AA002` — Two" in status
+        and git(tracker.remote, "rev-list", "--merges", "main") == "",
+        (got, status),
+    )
+
+    # A CLI push replaces the same section between read and push.
+    h = section_hash(call, "TASK-AA004", "Goal")
+    race.done = False
+
+    def race_goal(sha):
+        if not race.done:
+            race.done = True
+            git(cli, "pull", "-q", "--rebase", "origin", "main")
+            taskgo(cli, "update", "TASK-AA004", "--goal", "Goal from the CLI.")
+            git(cli, "commit", "-q", "-am", "chore(alpha): goal of TASK-AA004")
+            git(cli, "push", "-q", "origin", "main")
+        return real_push(sha)
+
+    srv.reader.push = race_goal
+    before = tracker.head()
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "r2",
+            "changes": [
+                {
+                    "op": "replace_section",
+                    "record": "TASK-AA004",
+                    "section": "Goal",
+                    "text": "Goal from the server.",
+                    "expected_hash": h,
+                }
+            ],
+        },
+    )
+    tap.check(
+        "4: a CLI push replaces the same section first: the server write gets a "
+        "precondition failure and writes nothing",
+        not ok
+        and got.startswith("precondition failed:")
+        and len(tracker.commits(before)) == 1
+        and "Goal from the CLI." in tracker.show("alpha/tasks/TASK-AA004-four.md"),
+        got,
+    )
+
+    # 6. A push whose reply is lost, and a retry of the whole request.
+    tracker = Tracker(tmp / "lost", seed)
+    srv = server(tg, tracker)
+    call = caller(srv)
+    real_push, real_fetch = srv.reader.push, srv.reader.fetch
+
+    def lost_reply(sha):
+        real_push(sha)
+        return False, "fatal: the remote end hung up unexpectedly"
+
+    srv.reader.push = lost_reply
+    start = tracker.head()
+    args = {"project": "alpha", "title": "Once", "request_id": "l1"}
+    ok, first = call("create", args)
+    srv.reader.push = real_push
+    ok2, again = call("create", args)
+    tap.check(
+        "6: a push whose reply is lost is found on the branch, and a retried "
+        "request reports it again: one commit",
+        ok
+        and ok2
+        and first["attempts"] == 1
+        and again["replayed"]
+        and again["commit"] == first["commit"]
+        and again["created"] == first["created"]
+        and len(tracker.commits(start)) == 1,
+        (first, again),
+    )
+
+    # The reply is lost and the branch cannot be read: the client is told the
+    # outcome is unknown, and its retry finds the commit.
+    def unreadable():
+        raise tg.McpToolError("could not fetch main from origin")
+
+    def lost_then_unreadable(sha):
+        result = lost_reply(sha)
+        srv.reader.fetch = unreadable
+        return result
+
+    srv.reader.push = lost_then_unreadable
+    start = tracker.head()
+    args = {
+        "changes": [
+            {
+                "op": "set",
+                "record": "TASK-AA001",
+                "field": "status",
+                "value": "in-progress",
+                "expected": "todo",
+            }
+        ],
+        "request_id": "l2",
+    }
+    ok, unknown = call("apply_changes", args)
+    srv.reader.push, srv.reader.fetch = real_push, real_fetch
+    ok2, again = call("apply_changes", args)
+    tap.check(
+        "6: a lost reply and an unreadable branch: the outcome is reported as "
+        "unknown, and the retry is recorded once",
+        not ok
+        and "retry with the same request_id" in unknown
+        and ok2
+        and again["replayed"]
+        and len(tracker.commits(start)) == 1,
+        (unknown, again),
+    )
+
+    # Commits read like CLI commits: the owner, one parent, a conventional
+    # subject, and only the trailers the caller asked for.
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "f1",
+            "subject": "Record the plan",
+            "body": "Why the plan changed.",
+            "conversation": "claude://0123456789abcdef01",
+            "refs": ["https://example.com/pull/1"],
+            "changes": [
+                {
+                    "op": "write_file",
+                    "path": "alpha/PLAN.md",
+                    "content": "# Plan\n\nSecond plan.\n",
+                    "expected_blob": git(
+                        tracker.remote, "rev-parse", "main:alpha/PLAN.md"
+                    ),
+                }
+            ],
+        },
+    )
+    fmt = "%an <%ae>|%cn <%ce>|%P"
+    meta = git(tracker.remote, "show", "-s", f"--format={fmt}", "main").split("|")
+    message = git(tracker.remote, "show", "-s", "--format=%B", "main")
+    tap.check(
+        "commits carry the owner, one parent, and a CLI-style message",
+        ok
+        and meta[0] == meta[1] == "Taskgo Test <taskgo@example.com>"
+        and len(meta[2].split()) == 1
+        and message
+        == (
+            "chore(alpha): Record the plan\n\nWhy the plan changed.\n\n"
+            "Conversation: claude://0123456789abcdef01\n"
+            "Ref: https://example.com/pull/1"
+        ),
+        (got, meta, message),
+    )
+
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "f2",
+            "conversation": "claude://0123456789abcdef01",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA002",
+                    "field": "due",
+                    "value": "2030-01-01",
+                }
+            ],
+        },
+    )
+    tap.check(
+        "a conversation joins every task the write touches",
+        ok
+        and "claude://0123456789abcdef01"
+        in tracker.show("alpha/tasks/TASK-AA002-two.md"),
+        got,
+    )
+
+    # Writes need the marker at the head, and a commit identity.
+    cli = tracker.checkout("unmark")
+    (cli / "AGENTS.md").write_text(
+        AGENTS.replace("<!-- taskgo:allow-local-commits -->\n", "")
+    )
+    git(cli, "commit", "-q", "-am", "chore: withdraw commit authority")
+    git(cli, "push", "-q", "origin", "main")
+    before = tracker.head()
+    ok, got = call(
+        "create", {"project": "alpha", "title": "Unmarked", "request_id": "u1"}
+    )
+    tap.check(
+        "9: writes are refused without the commit-authority marker",
+        not ok and "taskgo:allow-local-commits" in got and tracker.head() == before,
+        got,
+    )
+
+    saved = dict(os.environ)
+    for k in (*IDENTITY, "EMAIL"):
+        os.environ.pop(k, None)
+    os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    try:
+        ok, got = call(
+            "create", {"project": "alpha", "title": "Nobody", "request_id": "u2"}
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    tap.check(
+        "9: writes are refused without a commit identity",
+        not ok and "commit identity" in got and tracker.head() == before,
+        got,
+    )
+
+    srv = tg.McpServer(
+        tg.McpConfig(repo=tracker.server, remote=None, branch="main", auth="none")
+    )
+    ok, got = caller(srv)(
+        "create", {"project": "alpha", "title": "Local", "request_id": "n1"}
+    )
+    tap.check(
+        "a server started with --no-fetch does not write",
+        not ok and "nowhere to push" in got and tracker.head() == before,
+        got,
+    )
+
+
+def main() -> None:
+    reexec_with_taskgo_env()
+    os.environ.update(IDENTITY)
+    os.environ.pop("TASKGO_TODAY", None)
+    tap = Tap()
+    with tempfile.TemporaryDirectory(prefix="write-check-") as tmp:
+        tmp = Path(tmp)
+        seed = make_seed(tmp)
+        tracker = Tracker(tmp / "http", seed)
+        http = Http(tracker, tmp / "server.log")
+        try:
+            http_checks(tap, tracker, http)
+        finally:
+            http.close()
+        fault_checks(tap, load_taskgo(), seed, tmp)
+    print(f"1..{tap.n}", flush=True)
+    sys.exit(1 if tap.failed else 0)
+
+
+if __name__ == "__main__":
+    main()

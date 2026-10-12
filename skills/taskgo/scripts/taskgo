@@ -4436,13 +4436,17 @@ CHANGE_HANDLERS: dict[str, Callable[[ChangeSet, dict[str, Any]], None]] = {
 }
 
 
-def apply_change_set(base: Snapshot, doc: Any) -> ChangeSet:
+def apply_change_set(
+    base: Snapshot, doc: Any, conversation: str | None = None
+) -> ChangeSet:
     """Applies the change set DOC over BASE in memory.
 
     Changes apply in order, each seeing the ones before it, then the whole
     result is validated and the affected projects' STATUS.md blocks are
-    regenerated. Raises ChangeSetError, naming the change, on any refusal;
-    BASE is never written.
+    regenerated. CONVERSATION, a session URI, joins the conversations of
+    every task the set touches, as a CLI commit adds the active session.
+    Raises ChangeSetError, naming the change, on any refusal; BASE is never
+    written.
     """
     changes = doc.get("changes") if isinstance(doc, dict) else None
     if not isinstance(changes, list) or set(doc) != {"changes"}:
@@ -4457,6 +4461,16 @@ def apply_change_set(base: Snapshot, doc: Any) -> ChangeSet:
             (handler or unknown_change)(cs, change)
         except ChangeSetError as e:
             raise ChangeSetError(f"change {i} ({op}): {e}", e.kind) from None
+    if conversation is not None:
+        touched = [
+            r for r in get_task_rows(cs.snap) if r.rel_path in cs.before and r.task_id
+        ]
+        for row in touched:
+            add = {"op": "add", "record": row.task_id, "field": "conversations"}
+            try:
+                apply_add_remove(cs, {**add, "values": [conversation]})
+            except ChangeSetError as e:
+                raise ChangeSetError(f"conversation: {e}", e.kind) from None
     projects = validate_change_set(cs)
     rows = get_task_rows(cs.snap)
     index = {r.task_id: r.status for r in rows if r.task_id}
@@ -5944,22 +5958,32 @@ def cmd_commit(
 
 
 # ===========================================================================
-# MCP server ('taskgo mcp'): read-only tools over committed state
+# MCP server ('taskgo mcp'): tools over committed state
 # ===========================================================================
 #
-# Each tools/call resolves one commit and reads only that commit, through a
+# Each read resolves one commit and reads only that commit, through a
 # GitTreeSnapshot, so a response is coherent even while main moves. Payloads
 # that the CLI also prints use the CLI's own functions, so they match the CLI
-# at that commit. The transport is MCP Streamable HTTP, stateless: each POST
-# carries one JSON-RPC message and gets one JSON response. Cloudflare Access
-# authenticates callers in front of the server; the server checks the Access
-# JWT on every request. --stdio serves one local client instead.
+# at that commit. Each write applies one change set over the fetched head,
+# commits it without a working tree, and pushes it without force; a rejected
+# push re-reads the head and applies the set again there. The transport is MCP
+# Streamable HTTP, stateless: each POST carries one JSON-RPC message and gets
+# one JSON response. Cloudflare Access authenticates callers in front of the
+# server; the server checks the Access JWT on every request. --stdio serves
+# one local client instead.
 
-MCP_SERVER_VERSION = "0.3.0"
+MCP_SERVER_VERSION = "0.4.0"
 MCP_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_MAX_FILE_BYTES = 256 * 1024
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
+MCP_PUSH_TIMEOUT = 60
+# Pushes per write; each rejected one re-reads the head and applies again.
+MCP_WRITE_ATTEMPTS = 5
+# How long, and for how many requests, a retry is recognized (ADR 2).
+MCP_REQUEST_TTL = 24 * 3600
+MCP_REQUEST_KEEP = 1000
+MCP_REQUEST_ID_MAX = 128
 MCP_CERTS_TTL = 3600
 MCP_LOOPBACK = ("localhost", "127.0.0.1", "::1")
 # Answers GET with 200 and no content, unauthenticated, for health checks such
@@ -5980,14 +6004,21 @@ MCP_UNVERIFIED = (
 )
 
 MCP_INSTRUCTIONS = f"""\
-This server reads a taskgo control repository: a private Git repository of
-Markdown that tracks projects, tasks (TASK-XXXXX), decisions, and each
-project's STATUS.md. It is read-only.
+This server reads and writes a taskgo control repository: a private Git
+repository of Markdown that tracks projects, tasks (TASK-XXXXX), decisions,
+and each project's STATUS.md.
 
 Start with list_projects or list_tasks (state 'ready' for workable tasks),
 then get_task and get_project_status. dispatch_task gives the briefing note
 for a task. Every response names the commit it read in as_of.commit; pass it
 as 'at' to keep several reads on the same commit.
+
+create and apply_changes record progress: each call is one commit on main,
+or nothing. Edits name the section hash or blob SHA they replace, as read
+from get_task, get_project_status, or list_files, and are refused if it no
+longer holds; read again and retry. Pass a fresh request_id for each write
+and the same one when retrying it after an unclear outcome, so that it is
+recorded once.
 
 {MCP_DATA_CARE}
 
@@ -6082,6 +6113,91 @@ class McpReader:
         while len(self.snaps) > self.KEEP:
             self.snaps.pop(next(iter(self.snaps)))
         return snap, committed
+
+    def is_ancestor(self, sha: str, head: str) -> bool:
+        return self.git("merge-base", "--is-ancestor", sha, head).returncode == 0
+
+    def commit(self, snap: GitTreeSnapshot, cs: ChangeSet, message: str) -> str:
+        """A commit of CS over SNAP's commit, made without a working tree.
+
+        Writes blobs, a tree, and the commit to the object store, through a
+        temporary index; no ref moves.
+        """
+        import tempfile
+
+        repo = self.cfg.repo
+        with tempfile.TemporaryDirectory(prefix="taskgo-mcp-") as tmp:
+            env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+
+            def git(*args: str, data: bytes | None = None) -> str:
+                res = subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    input=data,
+                    capture_output=True,
+                    env=env,
+                    check=False,
+                )
+                if res.returncode != 0:
+                    err = res.stderr.decode("utf-8", "replace").strip()
+                    raise McpToolError(f"git {args[0]} failed: {err}")
+                return res.stdout.decode("utf-8").strip()
+
+            git("read-tree", snap.rev)
+            entries = []
+            for rel, (_, after) in cs.snap.diff().items():
+                if after is None:
+                    entries.append(f"0 {'0' * 40}\t{rel}")
+                else:
+                    blob = git("hash-object", "-w", "--stdin", data=after.encode())
+                    mode = snap.modes.get(rel, "100644")
+                    entries.append(f"{mode} {blob}\t{rel}")
+            git(
+                "update-index",
+                "-z",
+                "--index-info",
+                data="".join(e + "\0" for e in entries).encode(),
+            )
+            tree = git("write-tree")
+            return git(
+                "-c",
+                "user.useConfigOnly=true",
+                "commit-tree",
+                "--no-gpg-sign",
+                tree,
+                "-p",
+                snap.rev,
+                "-F",
+                "-",
+                data=message.encode(),
+            )
+
+    def push(self, sha: str) -> tuple[bool, str]:
+        """Pushes SHA to the branch without force: (accepted, Git's message)."""
+        cfg = self.cfg
+        try:
+            res = subprocess.run(
+                [
+                    "git",
+                    "push",
+                    "--quiet",
+                    "--no-verify",
+                    cfg.remote or "",
+                    f"{sha}:refs/heads/{cfg.branch}",
+                ],
+                cwd=cfg.repo,
+                capture_output=True,
+                text=True,
+                timeout=MCP_PUSH_TIMEOUT,
+                env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "push timed out"
+        # The ' ! [rejected] ... (fetch first)' line says why, when there is one.
+        lines = [line.strip() for line in res.stderr.strip().splitlines()]
+        why = next((line for line in lines if line.startswith("!")), None)
+        return res.returncode == 0, why or (lines[-1] if lines else "")
 
 
 @dataclass(slots=True)
@@ -6303,25 +6419,96 @@ MCP_PROJECT = {"type": "string", "description": "Project name."}
 
 @dataclass(slots=True, frozen=True)
 class McpTool:
+    """A read tool's handler maps a commit's view and the arguments to the
+    result; a write tool's handler maps the arguments to a change set."""
+
     name: str
     description: str
     properties: dict[str, Any]
     required: tuple[str, ...]
-    handler: Callable[[McpRead, dict[str, Any]], dict[str, Any]]
+    handler: Callable[..., dict[str, Any]]
+    writes: bool = False
+    destructive: bool = False
 
     def listing(self) -> dict[str, Any]:
-        schema: dict[str, Any] = {
-            "type": "object",
-            "properties": {**self.properties, "at": MCP_AT},
-        }
+        if self.writes:
+            properties = self.properties
+            annotations = {
+                "readOnlyHint": False,
+                "destructiveHint": self.destructive,
+                # With the same request_id, a retry is recorded once.
+                "idempotentHint": True,
+                "openWorldHint": False,
+            }
+        else:
+            properties = {**self.properties, "at": MCP_AT}
+            annotations = {"readOnlyHint": True, "openWorldHint": False}
+        schema: dict[str, Any] = {"type": "object", "properties": properties}
         if self.required:
             schema["required"] = list(self.required)
         return {
             "name": self.name,
             "description": self.description,
             "inputSchema": schema,
-            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+            "annotations": annotations,
         }
+
+
+def mcp_create_doc(args: dict[str, Any]) -> dict[str, Any]:
+    fields, sections = args.get("fields") or {}, args.get("sections") or {}
+    if not isinstance(fields, dict) or not isinstance(sections, dict):
+        raise McpToolError("fields and sections must be objects")
+    if "title" in sections:
+        raise McpToolError("pass the title as 'title', not in sections")
+    change = {
+        "op": "create",
+        "kind": args.get("kind") or "task",
+        "project": args.get("project"),
+        "fields": fields,
+        "sections": {"title": args.get("title"), **sections},
+    }
+    if "slug" in args:
+        change["slug"] = args["slug"]
+    return {"changes": [change]}
+
+
+def mcp_apply_doc(args: dict[str, Any]) -> dict[str, Any]:
+    return {"changes": args.get("changes")}
+
+
+MCP_WRITE_PROPERTIES = {
+    "request_id": {
+        "type": "string",
+        "description": (
+            "A fresh ID for this write, such as a UUID. Reuse it only to retry "
+            "this same write after an unclear outcome: a write that already "
+            "landed is then reported again, not recorded twice."
+        ),
+    },
+    "subject": {
+        "type": "string",
+        "description": (
+            "Commit subject, as Conventional Commits 'type(scope): description' "
+            "in up to 50 characters; derived from the changes when omitted."
+        ),
+    },
+    "body": {"type": "string", "description": "Commit body, plain text."},
+    "conversation": {
+        "type": "string",
+        "description": (
+            "Your session URI, as <agent>://<id>: recorded in a Conversation: "
+            "trailer and in the conversations of every task the write touches."
+        ),
+    },
+    "refs": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "External references, such as artifact commits (repo@sha) or pull "
+            "request URLs, each recorded in a Ref: trailer."
+        ),
+    },
+}
 
 
 MCP_TOOLS = [
@@ -6413,6 +6600,68 @@ MCP_TOOLS = [
         ("id",),
         mcp_get_task_history,
     ),
+    McpTool(
+        "create",
+        "Create one task, or a decision, as one commit on main, and return its "
+        "ID: apply_changes with a single create. Task fields: status (default "
+        "todo), due, stale_after, blocked_by, wait_for, conversations. Task "
+        "sections: Problem, Cost, Goal, Criteria, Sketch, Constraints, "
+        "Outcome, Findings, Next. A decision needs sections Context, Decision, "
+        f"and Consequences.\n\n{MCP_DATA_CARE}",
+        {
+            "project": MCP_PROJECT,
+            "title": {
+                "type": "string",
+                "description": "Title, as an imperative verb phrase.",
+            },
+            "kind": {"type": "string", "description": "task (default) or decision."},
+            "fields": {"type": "object", "description": "Frontmatter fields."},
+            "sections": {
+                "type": "object",
+                "description": 'Section texts by name, such as {"Goal": "..."}.',
+            },
+            "slug": {"type": "string", "description": "File name slug; optional."},
+            **MCP_WRITE_PROPERTIES,
+        },
+        ("project", "title", "request_id"),
+        mcp_create_doc,
+        writes=True,
+    ),
+    McpTool(
+        "apply_changes",
+        "Apply a change set as one commit on main, or nothing (as 'taskgo "
+        "apply', then a commit and push). Changes apply in order, each seeing "
+        "the ones before it:\n"
+        "- create {kind: task|decision, project, ref?, slug?, fields?, "
+        "sections}: sections.title is required; later changes name the record "
+        "'$ref'.\n"
+        "- set {record, field, value, expected?}: status, due, stale_after, or "
+        "title; expected guards the current value.\n"
+        "- add, remove {record, field, values}: blocked_by, wait_for, "
+        "conversations; supersedes on decisions.\n"
+        "- replace_section {record, section, text, expected_hash}: a task "
+        "section or STATUS.md Summary or Next; expected_hash from get_task or "
+        "get_project_status, null if absent; text null removes it.\n"
+        "- write_file {path, content, expected_blob}: a project file outside "
+        "tasks/, decisions/, and STATUS.md, or INBOX.md; expected_blob from "
+        "list_files, null if new; content null deletes it.\n"
+        "A record is a task ID, a '$ref', a decision path, or "
+        "'<project>/STATUS.md'. The result must validate (known blockers, no "
+        "cycles, an Outcome on done tasks); the affected STATUS.md blocks are "
+        f"regenerated.\n\n{MCP_DATA_CARE}",
+        {
+            "changes": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "The changes, each an object with an 'op'.",
+            },
+            **MCP_WRITE_PROPERTIES,
+        },
+        ("changes", "request_id"),
+        mcp_apply_doc,
+        writes=True,
+        destructive=True,
+    ),
 ]
 MCP_TOOLS_BY_NAME = {t.name: t for t in MCP_TOOLS}
 
@@ -6476,11 +6725,133 @@ def mcp_tool_error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
+MCP_CHANGE_ERRORS = {
+    "invalid": "refused",
+    "precondition": "precondition failed",
+    "validation": "validation failed",
+}
+
+
+@dataclass(slots=True)
+class McpRequest:
+    """One request_id: a digest of its arguments, when it was first seen,
+    and each commit built for it, with the result to report if it lands."""
+
+    digest: str
+    seen: float
+    candidates: dict[str, dict[str, Any]]
+
+
+@dataclass(slots=True, frozen=True)
+class McpCommitArgs:
+    subject: str | None
+    body: str
+    conversation: str | None
+    refs: list[str]
+
+
+def mcp_line(value: Any, what: str, limit: int = 300) -> str:
+    if not isinstance(value, str) or not value.strip() or "\n" in value.strip():
+        raise McpToolError(f"{what} must be one non-empty line")
+    if len(value.strip()) > limit:
+        raise McpToolError(f"{what} is longer than {limit} characters")
+    return value.strip()
+
+
+def mcp_commit_args(args: dict[str, Any]) -> McpCommitArgs:
+    subject = args.get("subject")
+    subject = mcp_line(subject, "subject") if subject is not None else None
+    body = args.get("body") or ""
+    if not isinstance(body, str):
+        raise McpToolError("body must be a string")
+    conv = args.get("conversation")
+    if conv is not None:
+        conv = mcp_line(conv, "conversation")
+        if "://" not in conv or not field_is_valid(
+            TASK_SCHEMA.field("conversations"), conv
+        ):
+            raise McpToolError(
+                f"conversation {conv!r} is not a session URI, as <agent>://<id>"
+            )
+    refs = args.get("refs") or []
+    if not isinstance(refs, list):
+        raise McpToolError("refs must be a list of strings")
+    return McpCommitArgs(
+        subject, body.strip(), conv, [mcp_line(r, "each ref") for r in refs]
+    )
+
+
+def mcp_describe(cs: ChangeSet) -> str:
+    """A commit description of CS, for when the caller gives no subject."""
+    diff = cs.snap.diff()
+    new = {c["path"] for c in cs.created}
+    created = [
+        c.get("id") or c["path"].rsplit("/", 1)[-1].removesuffix(".md")
+        for c in cs.created
+    ]
+    updated = sorted(
+        {
+            r.task_id
+            for r in get_task_rows(cs.snap)
+            if r.rel_path in cs.before and r.rel_path not in new and r.task_id
+        }
+    )
+    parts = []
+    if created:
+        parts.append("add " + ", ".join(created))
+    if updated:
+        parts.append("update " + ", ".join(updated))
+    if not parts:
+        names = sorted(
+            {
+                rel.rsplit("/", 1)[-1]
+                for rel in diff
+                if rel not in new
+                and (not rel.endswith("/STATUS.md") or rel in cs.before)
+            }
+        )
+        parts.append("update " + ", ".join(names or ["STATUS.md"]))
+    return "; ".join(parts)
+
+
+def mcp_commit_message(cs: ChangeSet, c: McpCommitArgs) -> str:
+    """The message a CLI checkpoint of CS would carry.
+
+    The scope is the one project the changes are in, not counting STATUS.md
+    files regenerated only because a task they list changed.
+    """
+    rels = [
+        rel
+        for rel in cs.snap.diff()
+        if "/" in rel and (not rel.endswith("/STATUS.md") or rel in cs.before)
+    ]
+    projects = {rel.split("/")[0] for rel in rels}
+    scope = next(iter(projects)) if len(projects) == 1 else None
+    if c.subject:
+        subject = ensure_conventional_subject(c.subject, scope)
+    else:
+        subject = conventional_subject(mcp_describe(cs), scope)
+    lines = [subject]
+    if c.body:
+        lines += ["", wrap_body(c.body)]
+    trailers = [f"Conversation: {c.conversation}"] if c.conversation else []
+    trailers += [f"Ref: {r}" for r in c.refs]
+    if trailers:
+        lines += ["", *trailers]
+    return "\n".join(lines) + "\n"
+
+
+def mcp_log(message: str) -> None:
+    print(f"taskgo mcp: {message}", file=sys.stderr)
+
+
 class McpServer:
     """The JSON-RPC methods, shared by the HTTP and stdio transports.
 
     Calls are serialized: they share the Git repository and snapshot cache,
-    and the core is not written for concurrent use.
+    and the core is not written for concurrent use. Serializing also keeps
+    this server's own writes from racing each other; pushes from elsewhere
+    race on equal terms, through the remote's refusal of a non-fast-forward.
     """
 
     def __init__(self, cfg: McpConfig):
@@ -6488,6 +6859,9 @@ class McpServer:
 
         self.reader = McpReader(cfg)
         self.lock = threading.Lock()
+        # request_id -> McpRequest. In memory: losing it, as on a restart,
+        # loses only the recognition of retries, never a write (ADR 2).
+        self.requests: dict[str, McpRequest] = {}
 
     def handle(self, msg: Any) -> dict[str, Any] | None:
         """The response to MSG, or None for a notification or response."""
@@ -6531,9 +6905,13 @@ class McpServer:
         started = time.monotonic()
         with self.lock:
             try:
-                sha = self.reader.resolve(args.get("at"))
-                snap, committed = self.reader.snapshot(sha)
-                result = tool.handler(McpRead(self.reader, snap, committed), args)
+                if tool.writes:
+                    result = self.write(tool, args)
+                    sha = result["as_of"]["commit"]
+                else:
+                    sha = self.reader.resolve(args.get("at"))
+                    snap, committed = self.reader.snapshot(sha)
+                    result = tool.handler(McpRead(self.reader, snap, committed), args)
             except McpToolError as e:
                 return mcp_tool_error(str(e))
             except SystemExit:
@@ -6545,12 +6923,155 @@ class McpServer:
                 traceback.print_exc()
                 return mcp_tool_error("internal error; see the server log")
         ms = int((time.monotonic() - started) * 1000)
-        print(f"taskgo mcp: {tool.name} {sha[:12]} {ms} ms", file=sys.stderr)
+        mcp_log(f"{tool.name} {sha[:12]} {ms} ms")
         return {
             "content": [{"type": "text", "text": json.dumps(result, indent=1)}],
             "structuredContent": result,
             "isError": False,
         }
+
+    def write(self, tool: McpTool, args: dict[str, Any]) -> dict[str, Any]:
+        """Applies a write tool's change set as one commit on the branch.
+
+        The set applies over the fetched head and is pushed without force. A
+        refused push re-reads the head: if the commit is there, the push did
+        land; otherwise the set applies again over the new head, so its
+        preconditions are checked against what is now there. A request_id
+        seen before reports the commit already built for it, when that
+        commit is on the branch, instead of writing again. Called with the
+        lock held.
+        """
+        reader, cfg = self.reader, self.reader.cfg
+        unknown = sorted(set(args) - set(tool.properties))
+        if unknown:
+            raise McpToolError(
+                f"unknown argument {', '.join(unknown)}"
+                + (
+                    "; writes always apply to the head of the branch"
+                    if "at" in unknown
+                    else ""
+                )
+            )
+        if cfg.remote is None:
+            raise McpToolError(
+                "this server reads a local branch (--no-fetch) and has nowhere "
+                "to push; it does not write"
+            )
+        rid = mcp_line(args.get("request_id"), "request_id", MCP_REQUEST_ID_MAX)
+        label = f"{tool.name} {json.dumps(rid[:40])}"
+        doc = tool.handler(args)
+        commit_args = mcp_commit_args(args)
+        for ident in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+            # Never a guessed identity: only the configured owner commits.
+            if reader.git("-c", "user.useConfigOnly=true", "var", ident).returncode:
+                raise McpToolError(
+                    "the server has no commit identity: set user.name and "
+                    "user.email, or GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, "
+                    "GIT_COMMITTER_NAME, and GIT_COMMITTER_EMAIL"
+                )
+        digest = hashlib.sha256(
+            json.dumps(
+                {k: v for k, v in args.items() if k != "request_id"}, sort_keys=True
+            ).encode()
+        ).hexdigest()
+        now = time.monotonic()
+        for key in [
+            k for k, r in self.requests.items() if now - r.seen > MCP_REQUEST_TTL
+        ]:
+            del self.requests[key]
+        while len(self.requests) >= MCP_REQUEST_KEEP:
+            del self.requests[next(iter(self.requests))]
+        request = self.requests.get(rid)
+        if request is not None and request.digest != digest:
+            raise McpToolError(
+                f"request_id {rid!r} was used for a different write; pass a fresh "
+                "one for each write"
+            )
+
+        try:
+            head = reader.resolve(None)
+        except McpToolError:
+            raise McpToolError(
+                f"could not fetch {cfg.branch} from {cfg.remote}; nothing was written"
+            ) from None
+        if request is not None:
+            for sha, result in request.candidates.items():
+                if reader.is_ancestor(sha, head):
+                    mcp_log(f"{label} already landed as {sha[:12]}")
+                    return {**self.landed(result), "replayed": True}
+
+        for attempt in range(1, MCP_WRITE_ATTEMPTS + 1):
+            snap, committed = reader.snapshot(head)
+            if not snap.is_file("AGENTS.md") or COMMIT_AUTH not in snap.read_text(
+                "AGENTS.md"
+            ):
+                raise McpToolError(
+                    f"writes are refused: AGENTS.md at {head[:12]} does not carry "
+                    f"{COMMIT_AUTH}"
+                )
+            try:
+                cs = apply_change_set(snap, doc, commit_args.conversation)
+            except ChangeSetError as e:
+                raise McpToolError(
+                    f"{MCP_CHANGE_ERRORS[e.kind]}: {e}; nothing was written"
+                ) from None
+            if not cs.snap.diff():
+                mcp_log(f"{label} changes nothing at {head[:12]}")
+                return {
+                    "as_of": McpRead(reader, snap, committed).as_of(),
+                    "request_id": rid,
+                    "commit": None,
+                    "subject": None,
+                    "created": [],
+                    "files": [],
+                    "attempts": attempt,
+                    "replayed": False,
+                }
+            message = mcp_commit_message(cs, commit_args)
+            sha = reader.commit(snap, cs, message)
+            result = {
+                "request_id": rid,
+                "commit": sha,
+                "subject": message.split("\n", 1)[0],
+                **change_set_result(cs),
+                "attempts": attempt,
+                "replayed": False,
+            }
+            # Remembered only once there is a commit to recognize: a request
+            # refused before that can be corrected and sent with the same ID.
+            if request is None:
+                request = self.requests[rid] = McpRequest(digest, now, {})
+            request.candidates[sha] = result
+            pushed, why = reader.push(sha)
+            if pushed:
+                mcp_log(f"{label} attempt {attempt} pushed {sha[:12]} on {head[:12]}")
+                return self.landed(result)
+            mcp_log(f"{label} attempt {attempt} push of {sha[:12]} refused: {why}")
+            try:
+                new_head = reader.resolve(None)
+            except McpToolError:
+                raise McpToolError(
+                    f"the push of {sha[:12]} failed ({why}) and {cfg.branch} could "
+                    "not be read again, so whether it landed is unknown; retry "
+                    "with the same request_id"
+                ) from None
+            if reader.is_ancestor(sha, new_head):
+                mcp_log(f"{label} attempt {attempt} landed {sha[:12]} after all")
+                return self.landed(result)
+            if new_head == head:
+                raise McpToolError(
+                    f"could not push to {cfg.remote}: {why}; nothing was written"
+                )
+            head = new_head
+        raise McpToolError(
+            f"{cfg.branch} moved on each of {MCP_WRITE_ATTEMPTS} attempts; nothing "
+            "was written. Retry with the same request_id"
+        )
+
+    def landed(self, result: dict[str, Any]) -> dict[str, Any]:
+        """RESULT, with as_of for its commit."""
+        snap, committed = self.reader.snapshot(result["commit"])
+        return {"as_of": McpRead(self.reader, snap, committed).as_of(), **result}
 
 
 def mcp_serve_stdio(server: McpServer) -> None:
@@ -6701,7 +7222,7 @@ def cmd_mcp(
     audience: str | None = None,
     stdio: bool = False,
 ) -> None:
-    """Serve the control repository's committed state over MCP, read-only."""
+    """Serve the control repository over MCP: committed state, and writes."""
     root = get_repo_root()
     team = team or os.environ.get("TASKGO_MCP_ACCESS_TEAM")
     audience = audience or os.environ.get("TASKGO_MCP_ACCESS_AUD")
@@ -6771,7 +7292,7 @@ Commands:
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
-  mcp [OPTIONS]                    Serve committed state to MCP clients (read-only)
+  mcp [OPTIONS]                    Serve the tracker to MCP clients
 
 Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
@@ -7260,15 +7781,20 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     # mcp
     p_mcp = subparsers.add_parser(
         "mcp",
-        help="Serve the control repository's committed state over MCP",
+        help="Serve the control repository over MCP",
         description=textwrap.dedent(
             """\
             Serve the control repository's committed state to MCP clients,
-            read-only, over Streamable HTTP (stateless, one JSON response per
-            message) or, with --stdio, to one local client.
+            and accept writes from them, over Streamable HTTP (stateless, one
+            JSON response per message) or, with --stdio, to one local client.
 
             Each tool call fetches BRANCH from REMOTE, resolves it once, and
-            reads only that commit; it never touches the working tree.
+            reads only that commit; it never touches the working tree. Each
+            write commits one change set on that commit and pushes it to
+            REMOTE without force, retrying on a moved head a few times. Writes
+            need the commit-authority marker in AGENTS.md, a commit identity
+            (user.name and user.email), and a remote: with --no-fetch the
+            server only reads.
             Cloudflare Access, with Managed OAuth, is meant to sit in front
             of the server, and the server checks the Access JWT of every
             request (issuer, audience, signature, expiry). --auth none skips

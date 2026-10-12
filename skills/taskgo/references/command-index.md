@@ -50,7 +50,7 @@ Commands:
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
-  mcp [OPTIONS]                    Serve committed state to MCP clients (read-only)
+  mcp [OPTIONS]                    Serve the tracker to MCP clients
 
 Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
@@ -520,11 +520,16 @@ usage: taskgo mcp [-h] [--host HOST] [--port PORT] [--path PATH]
                   [--access-aud TAG] [--stdio]
 
 Serve the control repository's committed state to MCP clients,
-read-only, over Streamable HTTP (stateless, one JSON response per
-message) or, with --stdio, to one local client.
+and accept writes from them, over Streamable HTTP (stateless, one
+JSON response per message) or, with --stdio, to one local client.
 
 Each tool call fetches BRANCH from REMOTE, resolves it once, and
-reads only that commit; it never touches the working tree.
+reads only that commit; it never touches the working tree. Each
+write commits one change set on that commit and pushes it to
+REMOTE without force, retrying on a moved head a few times. Writes
+need the commit-authority marker in AGENTS.md, a commit identity
+(user.name and user.email), and a remote: with --no-fetch the
+server only reads.
 Cloudflare Access, with Managed OAuth, is meant to sit in front
 of the server, and the server checks the Access JWT of every
 request (issuer, audience, signature, expiry). --auth none skips

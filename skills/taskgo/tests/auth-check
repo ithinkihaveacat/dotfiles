@@ -16,8 +16,8 @@ Serves a JWKS with a throwaway RSA key on a loopback port and starts
 'taskgo mcp' on a throwaway repository, trusting that JWKS (team
 'test.invalid', audience 'test-aud'). Then sends a valid token, bad ones, and
 none, and checks each status code, and that the health check needs no token.
-Last, checks that '--auth none' refuses a request addressed to another host.
-Prints TAP.
+A write with an expired token is refused too. Last, checks that '--auth
+none' refuses a request addressed to another host. Prints TAP.
 """
 
 import base64
@@ -76,8 +76,10 @@ def token(key, kid: str, alg: str = "RS256", **claims) -> str:
     return f"{head}.{payload}.{b64(sig)}"
 
 
-def status(url: str, tok: str | None, host: str | None = None) -> int:
-    msg = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+def status(
+    url: str, tok: str | None, host: str | None = None, msg: dict | None = None
+) -> int:
+    msg = msg or {"jsonrpc": "2.0", "id": 1, "method": "ping"}
     headers = {"content-type": "application/json"}
     if tok:
         headers["cf-access-jwt-assertion"] = tok
@@ -168,7 +170,7 @@ def main() -> None:
         ("forged signature", token(other, "k1"), 403),
         ("unknown key", token(key, "k2"), 403),
     ]
-    print(f"1..{len(cases) + 5}")
+    print(f"1..{len(cases) + 6}")
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
@@ -206,6 +208,24 @@ def main() -> None:
                 ok = got == want
                 failed += not ok
                 print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+            # A write is refused at the door like any other request.
+            write = {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "create",
+                    "arguments": {"project": "x", "title": "x", "request_id": "x"},
+                },
+            }
+            n += 1
+            got = status(url, token(key, "k1", exp=now - 600), msg=write)
+            ok = got == 403
+            failed += not ok
+            print(
+                f"{'ok' if ok else 'not ok'} {n} - expired token on a write: {got} "
+                "(want 403)"
+            )
             base = url.removesuffix("/mcp")
             for path, want, name in (
                 ("/up", 200, "health check needs no token"),

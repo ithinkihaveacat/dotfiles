@@ -280,8 +280,8 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--auth access|none] [--acce
   repairs by default.
 - `checkpoint`: Safe automatic-commit path requiring
   `taskgo:allow-local-commits`. Enforces 50-char subject limits.
-- `mcp`: Serve committed state read-only to MCP clients, such as cloud agents
-  without a checkout of the control repository. See
+- `mcp`: Serve committed state to MCP clients, such as cloud agents without a
+  checkout of the control repository, and commit and push their change sets. See
   [MCP Server](references/mcp.md).
 
 ## Reference Material
