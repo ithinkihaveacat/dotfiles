@@ -61,7 +61,7 @@ from dataclasses import field as dataclass_field
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NoReturn, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import mdformat
@@ -627,7 +627,7 @@ def sigint_handler(signum, frame):
     handle_signal_exit(signal.SIGINT)
 
 
-def die(msg: str, exit_code: int = 1) -> None:
+def die(msg: str, exit_code: int = 1) -> NoReturn:
     print(f"taskgo: {msg}", file=sys.stderr)
     sys.exit(exit_code)
 
@@ -635,7 +635,7 @@ def die(msg: str, exit_code: int = 1) -> None:
 _ACTIVE_COMMAND: str | None = None
 
 
-def die_scoped(msg: str, exit_code: int = 1) -> None:
+def die_scoped(msg: str, exit_code: int = 1) -> NoReturn:
     """Dies with a git-style subcommand-scoped message (taskgo list: ...)."""
     if _ACTIVE_COMMAND:
         print(f"taskgo {_ACTIVE_COMMAND}: {msg}", file=sys.stderr)
@@ -1074,6 +1074,7 @@ class OverlaySnapshot(Snapshot):
 
     def delete(self, rel: str) -> None:
         self.changes[rel] = None
+        self.modes[rel] = False
 
     def is_link(self, rel: str) -> bool:
         return self.base.is_link(rel)
@@ -3928,6 +3929,17 @@ def git_blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+@dataclass(slots=True, frozen=True)
+class AppliedEdit:
+    """One applied edit_file replacement before final Markdown formatting."""
+
+    path: str
+    occurrences_replaced: int
+    start_line: int
+    end_line: int
+    pre_format: str
+
+
 @dataclass(slots=True)
 class ChangeSet:
     """A change set being applied over an overlay of the repository."""
@@ -3943,7 +3955,7 @@ class ChangeSet:
     # Records edit_file wrote verbatim, formatted once the set has applied.
     unformatted: set[str] = dataclass_field(default_factory=set)
     # What each edit_file did, in order, for the result.
-    edits: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    edits: list[AppliedEdit] = dataclass_field(default_factory=list)
 
     def touch(self, rel: str) -> None:
         if rel not in self.before:
@@ -3991,6 +4003,11 @@ def resolve_ref(cs: ChangeSet, token: str) -> str:
     return cs.refs[token[1:]]
 
 
+def trim_boundary_path(path: str) -> str:
+    """Trims surrounding whitespace and leading/trailing '/' on boundary inputs."""
+    return path.strip().strip("/")
+
+
 def clean_rel_path(
     path: Any, *, allow_empty: bool = False, strip_slashes: bool = True
 ) -> str:
@@ -4002,9 +4019,7 @@ def clean_rel_path(
     """
     if not isinstance(path, str):
         raise TaskgoError(f"path must be a string, not {path!r}")
-    rel = path.strip()
-    if strip_slashes:
-        rel = rel.strip("/")
+    rel = trim_boundary_path(path) if strip_slashes else path.strip()
     if not rel:
         if allow_empty:
             return ""
@@ -4501,6 +4516,15 @@ def is_project_readme(rel: str) -> bool:
     return len(parts) == 2 and parts[1] in ("README.md", "PROJECT.md")
 
 
+def check_readme_frontmatter(rel: str, content: str) -> None:
+    """Refuses malformed YAML frontmatter in a project README.md or PROJECT.md."""
+    if is_project_readme(rel) and re.match(r"^---\r?\n", content):
+        try:
+            split_record(content)
+        except ChangeSetError as e:
+            raise ChangeSetError(f"{rel}: {e}") from None
+
+
 def apply_write_file(cs: ChangeSet, change: dict[str, Any]) -> None:
     """Write a whole asset. Without expected_blob (or with null) the file
     must not exist yet; to overwrite, expected_blob names its current blob,
@@ -4529,7 +4553,6 @@ def apply_write_file(cs: ChangeSet, change: dict[str, Any]) -> None:
             f"{rel}: blob is {current or 'none (absent)'}, expected {expected}",
             "precondition",
         )
-    is_readme = is_project_readme(rel)
     try:
         size = len(content.encode("utf-8"))
     except UnicodeEncodeError:
@@ -4538,11 +4561,7 @@ def apply_write_file(cs: ChangeSet, change: dict[str, Any]) -> None:
         raise ChangeSetError(
             f"{rel}: content is {size} bytes; the limit is {WRITE_FILE_MAX_BYTES}"
         )
-    if is_readme and content.startswith("---\n"):
-        try:
-            split_record(content)
-        except ChangeSetError as e:
-            raise ChangeSetError(f"{rel}: {e}") from None
+    check_readme_frontmatter(rel, content)
     if rel.endswith(".md"):
         cs.snap.write_markdown(rel, content)
     else:
@@ -4790,16 +4809,19 @@ def apply_edit_file(cs: ChangeSet, change: dict[str, Any]) -> None:
         check_record_edit(cs, rel, schema, content, after)
         cs.touch(rel)
         cs.unformatted.add(rel)
+    else:
+        check_readme_frontmatter(rel, after)
     start = content.count("\n", 0, first) + 1
+    end = start + new.removesuffix("\n").count("\n")
     cs.snap.write_text(rel, after)
     cs.edits.append(
-        {
-            "path": rel,
-            "occurrences_replaced": count if replace_all else 1,
-            "start_line": start,
-            "end_line": start + new.count("\n"),
-            "_pre_format": after,
-        }
+        AppliedEdit(
+            path=rel,
+            occurrences_replaced=count if replace_all else 1,
+            start_line=start,
+            end_line=end,
+            pre_format=after,
+        )
     )
 
 
@@ -4983,27 +5005,29 @@ def change_set_result(cs: ChangeSet) -> dict[str, Any]:
     result: dict[str, Any] = {"created": cs.created, "files": files}
     if cs.edits:
         final = {
-            e["path"]: cs.snap.read_text(e["path"])
+            e.path: cs.snap.read_text(e.path)
             for e in cs.edits
-            if cs.snap.is_file(e["path"])
+            if cs.snap.is_file(e.path)
         }
         edits_out = []
         for e in cs.edits:
-            path = e["path"]
-            pre = e.get("_pre_format")
-            s_line, e_line = e["start_line"], e["end_line"]
-            if pre is not None and path in final:
-                s_line, e_line = remap_line_span(pre, final[path], s_line, e_line)
+            s_line, e_line = e.start_line, e.end_line
+            if e.path in final:
+                s_line, e_line = remap_line_span(
+                    e.pre_format, final[e.path], s_line, e_line
+                )
             edits_out.append(
                 {
-                    "path": path,
-                    "occurrences_replaced": e["occurrences_replaced"],
+                    "path": e.path,
+                    "occurrences_replaced": e.occurrences_replaced,
                     "start_line": s_line,
                     "end_line": e_line,
-                    "total_lines": count_lines(final[path]) if path in final else None,
+                    "total_lines": (
+                        count_lines(final[e.path]) if e.path in final else None
+                    ),
                     "blob": (
-                        git_blob_sha(final[path].encode("utf-8"))
-                        if path in final
+                        git_blob_sha(final[e.path].encode("utf-8"))
+                        if e.path in final
                         else None
                     ),
                 }
@@ -5096,7 +5120,6 @@ def edit_arg_text(text: str | None, path: str | None, what: str) -> str:
         die_scoped(f"cannot read {path}: {e.strerror}")
     except UnicodeDecodeError:
         die_scoped(f"{path} is not UTF-8 text")
-    raise AssertionError("unreachable")
 
 
 def cmd_edit(
@@ -5115,7 +5138,7 @@ def cmd_edit(
         die_scoped("only one of --old-file and --new-file can be -")
     change: dict[str, Any] = {
         "op": "edit_file",
-        "path": path.strip().strip("/"),
+        "path": trim_boundary_path(path),
         "old_string": edit_arg_text(old, old_file, "old"),
         "new_string": edit_arg_text(new, new_file, "new"),
         "replace_all": replace_all,
@@ -6980,8 +7003,7 @@ def cmd_search(tokens: list[str]) -> None:
     try:
         result, matched = run_search(root, search, rev, known)
     except TaskgoError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(2)
+        die_scoped(str(e), 2)
     if search.as_json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -7320,8 +7342,9 @@ and each project's STATUS.md.
 Start with dispatch(target), a project name or a task ID: one call returns
 the project's README.md, STATUS.md, PLAN.md, the root AGENTS.md, its active
 and ready tasks, and the task record. list_projects and list_tasks (state
-'ready' for workable tasks) find a target. Every response names the commit it read in as_of.commit; pass it
-as 'at' to keep several reads on the same commit.
+'ready' for workable tasks) find a target. Every response names the commit
+it read in as_of.commit; pass it as 'at' to keep several reads on the same
+commit.
 
 create and apply_changes record progress: each call is one commit on main,
 or nothing. Edits name the section hash or blob SHA they replace, as read
@@ -7621,12 +7644,14 @@ def mcp_get_project_status(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     project = mcp_project(r.snap, args.get("project"))
     rel = f"{project}/STATUS.md"
     committed = r.snap.read_text(rel) if r.snap.is_file(rel) else None
+    proj = status_projection(r.snap, project)
     return {
         "as_of": r.as_of(),
         "project": project,
         "path": rel,
         "blob": r.snap.blobs.get(rel),
-        **status_projection(r.snap, project),
+        **proj,
+        "fresh_block": proj["live_block"],
         "unverified_gates": unverified_gates(get_task_rows(r.snap, project)),
         "content": committed,
     }
@@ -7781,7 +7806,7 @@ def mcp_edit_doc(args: dict[str, Any]) -> dict[str, Any]:
     keys = ("path", "old_string", "new_string", "replace_all", "expected_blob")
     change = {"op": "edit_file", **{k: args[k] for k in keys if k in args}}
     if isinstance(change.get("path"), str):
-        change["path"] = change["path"].strip().strip("/")
+        change["path"] = trim_boundary_path(change["path"])
     return {"changes": [change]}
 
 

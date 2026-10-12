@@ -129,7 +129,9 @@ specific non-zero values:
 
 - `0`: success, including an explicit help request (`--help`, `-h`, `help`, or
   bare `tool` for complex subcommand tools).
-- `1`: general/usage errors.
+- `1`: general/usage errors (for `grep`-style search subcommands that follow
+  POSIX `grep` / `git grep` exit semantics, `1` indicates no matches and `2`
+  indicates an error).
 - `127`: a required command-line dependency is missing (see `require()` in
   `shell.md`).
 - `130` / `143`: SIGINT / SIGTERM, with a single newline written to stderr first

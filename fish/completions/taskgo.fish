@@ -37,7 +37,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a edit -d 'Replace exact text in
 complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
 complete -f -c taskgo -n __fish_use_subcommand -a info -d 'Show project metadata from README.md frontmatter'
 complete -f -c taskgo -n __fish_use_subcommand -a status -d 'Show project status'
-complete -f -c taskgo -n __fish_use_subcommand -a dispatch -d 'Print agent instructions for a selected task'
+complete -f -c taskgo -n __fish_use_subcommand -a dispatch -d 'Print agent instructions for a project or task'
 complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
 complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep wait_for gates and date horizons'
 complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks (read-only)'
@@ -55,7 +55,7 @@ complete -c taskgo -n __fish_use_subcommand -l root -s R -r -d 'Control reposito
 complete -c taskgo -f -s h -l help -d 'Display help message and exit'
 
 # Subcommand arguments (Projects)
-complete -f -c taskgo -n '__fish_seen_subcommand_from create list info status sync check doctor fix' -a '(__fish_taskgo_projects)' -d Project
+complete -f -c taskgo -n '__fish_seen_subcommand_from create list info status dispatch sync check doctor fix' -a '(__fish_taskgo_projects)' -d Project
 
 # Subcommand arguments (Task IDs for update / history / checkpoint)
 complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint dispatch' -a '(__fish_taskgo_tasks)' -d 'Task ID'
@@ -120,7 +120,11 @@ complete -r -F -c taskgo -n '__fish_seen_subcommand_from edit' -l new-file -d 'R
 complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l replace-all -d 'Replace every occurrence'
 complete -x -c taskgo -n '__fish_seen_subcommand_from edit' -l expected-blob -d "Refuse unless the file's blob SHA is SHA"
 complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l dry-run -d 'Print the diff and write nothing'
-complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l json -d 'Emit JSON output'
+complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -s j -l json -d 'Emit JSON output'
+
+# dispatch options
+complete -x -c taskgo -n '__fish_seen_subcommand_from dispatch' -l at -d 'Read commit REV instead of HEAD'
+complete -f -c taskgo -n '__fish_seen_subcommand_from dispatch' -s j -l json -d 'Output the full payload as JSON'
 
 # list options
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s s -l state -l status -x -a 'todo in-progress blocked done cancelled ready' -d 'Filter by state'
@@ -146,18 +150,19 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s r -l ref -x -d 
 complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
 
 # schema options
-complete -f -c taskgo -n '__fish_seen_subcommand_from schema' -l json -d 'Output as JSON'
+complete -f -c taskgo -n '__fish_seen_subcommand_from schema' -s j -l json -d 'Output as JSON'
 
 # read options (PATH is relative to the control repository root)
 complete -f -c taskgo -n '__fish_seen_subcommand_from read' -a '(git -C (__fish_taskgo_root) ls-files 2>/dev/null)' -d File
 complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l start-line -d 'First line (default 1)'
 complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l end-line -d 'Last line (default: the last)'
 complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l at -d 'Read commit REV instead of the working tree'
-complete -f -c taskgo -n '__fish_seen_subcommand_from read' -l json -d 'Emit JSON output'
+complete -f -c taskgo -n '__fish_seen_subcommand_from read' -s j -l json -d 'Emit JSON output'
+complete -f -c taskgo -n '__fish_seen_subcommand_from read' -s n -l line-numbers -d 'Prefix each line with its number'
 
 # search options (other arguments go to git grep; see 'taskgo search --help')
 complete -x -c taskgo -n '__fish_seen_subcommand_from search' -l at -d 'Search commit REV instead of the working tree'
-complete -f -c taskgo -n '__fish_seen_subcommand_from search' -l json -d 'Emit JSON output'
+complete -f -c taskgo -n '__fish_seen_subcommand_from search' -s j -l json -d 'Emit JSON output'
 
 # mcp options
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l host -x -d 'Address to listen on (default 127.0.0.1)'
