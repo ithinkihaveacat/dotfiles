@@ -56,6 +56,17 @@ function __fish_envrc_needs_ruby_version
     test (count $parsed) -eq 2; and test "$parsed[1]" = create; and test "$parsed[2]" = ruby
 end
 
+# Helper functions: completing 'migrate' (its type, then its options)
+function __fish_envrc_needs_migrate_type
+    set -l parsed (__fish_envrc_parse)
+    test (count $parsed) -eq 1; and test "$parsed[1]" = migrate
+end
+
+function __fish_envrc_migrating
+    set -l parsed (__fish_envrc_parse)
+    test (count $parsed) -ge 1; and test "$parsed[1]" = migrate
+end
+
 # Helper function: list available types
 function __fish_envrc_types
     echo -e "node\nruby\nuv\nfirebase\nappengine\nblock"
@@ -97,7 +108,13 @@ complete -c envrc -n __fish_envrc_needs_command -a set -d 'Set an environment va
 complete -c envrc -n __fish_envrc_needs_command -a unset -d 'Remove an environment variable from the env block'
 complete -c envrc -n __fish_envrc_needs_command -a get -d "Print a variable's value from any managed block"
 complete -c envrc -n __fish_envrc_needs_command -a catalog -d 'List available configuration types'
+complete -c envrc -n __fish_envrc_needs_command -a migrate -d "Replace a legacy 'skills' block with skill add"
 complete -c envrc -n __fish_envrc_needs_command -a help -d 'Display help message and exit'
+
+# migrate: the block type, then its options
+complete -c envrc -n __fish_envrc_needs_migrate_type -a skills -d 'The legacy skills block'
+complete -c envrc -n __fish_envrc_migrating -s n -l dry-run -d 'Print the actions without changing anything'
+complete -c envrc -n __fish_envrc_migrating -l force -d 'Delete the block even if a name does not resolve'
 
 # Complete types for create, delete
 complete -c envrc -n __fish_envrc_needs_type -a '(__fish_envrc_types)'

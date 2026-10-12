@@ -256,6 +256,10 @@ Commands:
   unset VAR                Remove an environment variable from the env block
   get VAR                  Print a variable's value from any managed block
   catalog                  List available configuration types
+  migrate skills [--dry-run] [--force]
+                           Replace a legacy 'skills' block (from before
+                           'skill' defaults): link its skills into the
+                           workspace with 'skill add', then delete the block
 
 Types:
   node [VERSION]           Adds Node.js direnv layout (default version: 24)
@@ -274,11 +278,20 @@ Examples:
   envrc get API_ORIGIN
   envrc create block corp <corp-fragment.sh
   envrc delete node
+  envrc migrate skills --dry-run
 
 'set' writes single-quoted values, so values are always literal data: shell
 syntax like $(...) is never evaluated when direnv loads the file. 'get' reads
 the file statically (no shell is executed) and unquotes simple single- or
 double-quoted values.
+
+'migrate skills' runs 'skill -C DIR' in the .envrc's directory. Names already
+linked there or already defaults are skipped. Negated names ('-NAME', '!NAME')
+have no equivalent yet and are dropped with a warning. The block is kept, and
+the exit status is 1, if 'skill add' fails or, without --force, if a name does
+not resolve or a line is not understood, so nothing is lost silently.
+--dry-run (-n) prints the actions without changing anything. With no 'skills'
+block it does nothing and exits 0.
 ```
 
 <!-- /generated -->

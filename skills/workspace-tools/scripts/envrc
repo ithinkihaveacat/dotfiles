@@ -28,6 +28,10 @@ Commands:
   unset VAR                Remove an environment variable from the env block
   get VAR                  Print a variable's value from any managed block
   catalog                  List available configuration types
+  migrate skills [--dry-run] [--force]
+                           Replace a legacy 'skills' block (from before
+                           'skill' defaults): link its skills into the
+                           workspace with 'skill add', then delete the block
 
 Types:
   node [VERSION]           Adds Node.js direnv layout (default version: 24)
@@ -46,11 +50,20 @@ Examples:
   $SCRIPT_NAME get API_ORIGIN
   $SCRIPT_NAME create block corp <corp-fragment.sh
   $SCRIPT_NAME delete node
+  $SCRIPT_NAME migrate skills --dry-run
 
 'set' writes single-quoted values, so values are always literal data: shell
 syntax like \$(...) is never evaluated when direnv loads the file. 'get' reads
 the file statically (no shell is executed) and unquotes simple single- or
 double-quoted values.
+
+'migrate skills' runs 'skill -C DIR' in the .envrc's directory. Names already
+linked there or already defaults are skipped. Negated names ('-NAME', '!NAME')
+have no equivalent yet and are dropped with a warning. The block is kept, and
+the exit status is 1, if 'skill add' fails or, without --force, if a name does
+not resolve or a line is not understood, so nothing is lost silently.
+--dry-run (-n) prints the actions without changing anything. With no 'skills'
+block it does nothing and exits 0.
 EOF
   exit 0
 }
@@ -410,6 +423,163 @@ cmd_delete() {
   allow_direnv
 }
 
+# Print the names in a legacy 'skills' block, one per line, as written
+# (negations included). Understands 'skills NAME...' lines (any number) and the
+# older 'export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS NAME..."' form.
+# Any other non-comment line is printed to fd 3 instead.
+read_legacy_skills() {
+  local line trimmed rest
+  # shellcheck disable=SC2016 # a literal '$AGENT_REQUIRED_SKILLS' is matched
+  local legacy_re='^export[[:space:]]+AGENT_REQUIRED_SKILLS="\$AGENT_REQUIRED_SKILLS([^"]*)"$'
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" || "$trimmed" == "#"* ]]; then
+      continue
+    fi
+    if [[ "$trimmed" == "skills" ]]; then
+      continue
+    elif [[ "$trimmed" == skills[[:space:]]* ]]; then
+      rest="${trimmed#skills}"
+    elif [[ "$trimmed" =~ $legacy_re ]]; then
+      rest="${BASH_REMATCH[1]}"
+    else
+      printf '%s\n' "$trimmed" >&3
+      continue
+    fi
+    # Word-split without globbing (names like '!foo' or '*' stay literal).
+    set -f
+    # shellcheck disable=SC2086 # deliberate word splitting of the name list
+    printf '%s\n' $rest
+    set +f
+  done <<<"$(get_block_content skills)"
+}
+
+# Print the first column of 'skill ... list' (the link names), space-padded
+# for membership tests: " a b c ".
+skill_link_names() {
+  local names
+  names=$(skill "$@" list 2>/dev/null | awk '{print $1}' | tr '\n' ' ') || names=""
+  printf ' %s ' "$names"
+}
+
+cmd_migrate() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage
+  fi
+
+  local type="" dry_run=0 force=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --dry-run | -n) dry_run=1 ;;
+      --force) force=1 ;;
+      -*)
+        echo "$SCRIPT_NAME migrate: unknown option: $arg" >&2
+        exit 1
+        ;;
+      *)
+        if [[ -n "$type" ]]; then
+          echo "$SCRIPT_NAME migrate: unexpected argument: '$arg'" >&2
+          exit 1
+        fi
+        type="$arg"
+        ;;
+    esac
+  done
+  if [[ "$type" != "skills" ]]; then
+    echo "$SCRIPT_NAME migrate: usage: $SCRIPT_NAME migrate skills [--dry-run] [--force]" >&2
+    exit 1
+  fi
+
+  if ! block_exists skills; then
+    echo "$SCRIPT_NAME migrate: no 'skills' block in $ENVRC_FILE; nothing to migrate" >&2
+    return 0
+  fi
+
+  local dir names unknown
+  dir=$(dirname "$ENVRC_FILE")
+  unknown=$(read_legacy_skills 3>&1 >/dev/null)
+  names=$(read_legacy_skills 3>/dev/null)
+
+  local positives=() name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    case "$name" in
+      -* | !*)
+        echo "$SCRIPT_NAME migrate: warning: dropping '$name': opting a workspace" \
+          "out of a default skill has no equivalent yet" >&2
+        ;;
+      *) positives+=("$name") ;;
+    esac
+  done <<<"$names"
+
+  local failed=0 unresolved=() to_add=() linked defaults src base
+  if [[ ${#positives[@]} -gt 0 ]]; then
+    require skill
+    linked=$(skill_link_names -C "$dir")
+    defaults=$(skill_link_names --scope defaults)
+    for name in "${positives[@]}"; do
+      if ! src=$(skill -C "$dir" resolve "$name" 2>/dev/null) || [[ -z "$src" ]]; then
+        unresolved+=("$name")
+        echo "$SCRIPT_NAME migrate: warning: cannot resolve skill '$name'" >&2
+        continue
+      fi
+      base=$(basename "$src")
+      if [[ "$linked" == *" $base "* ]]; then
+        echo "$SCRIPT_NAME migrate: '$name' is already linked" >&2
+      elif [[ "$defaults" == *" $base "* ]]; then
+        echo "$SCRIPT_NAME migrate: '$name' is a default ('skill add --defaults' links it)" >&2
+      else
+        to_add+=("$name")
+      fi
+    done
+  fi
+
+  if [[ ${#to_add[@]} -gt 0 ]]; then
+    if [[ $dry_run -eq 1 ]]; then
+      echo "$SCRIPT_NAME migrate: would run: skill -C $dir add ${to_add[*]}" >&2
+    elif skill -C "$dir" add --quiet "${to_add[@]}"; then
+      echo "$SCRIPT_NAME migrate: added ${to_add[*]}" >&2
+    else
+      echo "$SCRIPT_NAME migrate: error: 'skill add ${to_add[*]}' failed" >&2
+      failed=1
+    fi
+  fi
+
+  local keep_reason=""
+  if [[ $failed -eq 1 ]]; then
+    keep_reason="a skill could not be added"
+  elif [[ $force -eq 0 && ${#unresolved[@]} -gt 0 ]]; then
+    keep_reason="unresolved: ${unresolved[*]}"
+  elif [[ $force -eq 0 && -n "$unknown" ]]; then
+    keep_reason="unrecognized line(s): $(printf '%s' "$unknown" | tr '\n' ';')"
+  fi
+  if [[ -n "$keep_reason" ]]; then
+    local kept="kept"
+    [[ $dry_run -eq 0 ]] || kept="would keep"
+    echo "$SCRIPT_NAME migrate: $kept the skills block in $ENVRC_FILE ($keep_reason)" >&2
+    [[ $failed -eq 1 ]] ||
+      echo "$SCRIPT_NAME migrate: to drop it anyway: $SCRIPT_NAME migrate skills --force" >&2
+    exit 1
+  fi
+
+  if [[ $dry_run -eq 1 ]]; then
+    echo "$SCRIPT_NAME migrate: would delete the skills block from $ENVRC_FILE" >&2
+    return 0
+  fi
+
+  remove_block skills
+  echo "$SCRIPT_NAME: deleted the 'skills' block from $ENVRC_FILE" >&2
+  if ! grep -qv -e '^[[:space:]]*$' -e '^# -\*- sh -\*-$' "$ENVRC_FILE"; then
+    echo "$SCRIPT_NAME migrate: $ENVRC_FILE is now empty (kept)" >&2
+  fi
+  if [[ "$ENVRC_FILE" == ".envrc" ]]; then
+    allow_direnv
+  elif command -v direnv >/dev/null 2>&1; then
+    echo "$SCRIPT_NAME migrate: run 'direnv allow $dir' to approve the change" >&2
+  fi
+}
+
 cmd_create() {
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     usage
@@ -546,6 +716,9 @@ case "$COMMAND" in
     ;;
   list)
     cmd_list "$@"
+    ;;
+  migrate)
+    cmd_migrate "$@"
     ;;
   show)
     cmd_show "$@"

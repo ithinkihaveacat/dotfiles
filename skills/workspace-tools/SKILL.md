@@ -600,6 +600,10 @@ permission doctor     # missing pre-approvals (read-only)
 skill add --defaults  # link the defaults and remove broken default links
 ```
 
+A `.envrc` that still has a `skills` block from before the defaults scope prints
+a reminder on every load; `envrc migrate skills` (`--dry-run` first) links its
+skills with `skill add` and deletes the block.
+
 ### Cleaning Up
 
 Remove all installed skills and permission rules, restoring the workspace to its

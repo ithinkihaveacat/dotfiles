@@ -18,7 +18,7 @@ fail() {
   echo "not ok $n - $1"
 }
 
-echo "1..21"
+echo "1..29"
 
 f="$TMP/a.envrc"
 
@@ -210,4 +210,146 @@ if [[ "$err" == *"unknown command: frobnicate"* && "$err" == *"--help"* ]]; then
   ok "an unknown command outputs the correct error message"
 else
   fail "an unknown command outputs the correct error message: $err"
+fi
+
+# ---------------------------------------------------------------------------
+# migrate skills (a stub 'skill' answers resolve/list and logs add)
+# ---------------------------------------------------------------------------
+STUB="$TMP/stub-bin"
+mkdir -p "$STUB"
+cat >"$STUB/skill" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_LOG"
+scope=workspace
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C) shift 2 ;;
+    --scope) scope=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+case "$1" in
+  list)
+    if [ "$scope" = defaults ]; then f=$STUB_DEFAULTS; else f=$STUB_LINKED; fi
+    for n in $(cat "$f" 2>/dev/null); do printf '%s  added  -> /src/%s\n' "$n" "$n"; done
+    ;;
+  resolve)
+    case " ${STUB_BAD:-} " in *" $2 "*) exit 1 ;; esac
+    if [ "$2" = alias-x ]; then echo /src/real_x; else echo "/src/$2"; fi
+    ;;
+  add) exit "${STUB_ADD_RC:-0}" ;;
+esac
+EOF
+chmod +x "$STUB/skill"
+export STUB_LOG="$TMP/skill-calls" STUB_LINKED="$TMP/stub-linked" STUB_DEFAULTS="$TMP/stub-defaults"
+echo "real_x" >"$STUB_LINKED"
+echo "def-one" >"$STUB_DEFAULTS"
+mig() { PATH="$STUB:$PATH" "$BIN" --output "$1" migrate skills "${@:2}"; }
+legacy_block() {
+  printf '%s\n' '# -*- sh -*-' '' \
+    '# >>> envrc managed block: skills >>>' \
+    "$@" \
+    '# <<< envrc managed block: skills <<<'
+}
+
+# 22: migrate adds what is neither linked nor a default, drops negations with
+# a warning, deletes the block, and keeps the other blocks
+m="$TMP/mig/.envrc"
+mkdir -p "$TMP/mig"
+legacy_block 'skills alpha alias-x def-one -unwanted !other' 'skills extra' >"$m"
+"$BIN" --output "$m" create uv >/dev/null 2>&1
+rm -f "$STUB_LOG"
+rc=0
+out=$(mig "$m" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && grep -qx "\-C $TMP/mig add --quiet alpha extra" "$STUB_LOG" &&
+  [[ "$out" == *"dropping '-unwanted'"* && "$out" == *"dropping '!other'"* ]] &&
+  [[ "$out" == *"'alias-x' is already linked"* && "$out" == *"'def-one' is a default"* ]] &&
+  ! grep -q 'skills' "$m" && grep -qx 'layout uv' "$m"; then
+  ok "migrate skills adds the missing skills and deletes the block"
+else
+  fail "migrate skills adds the missing skills and deletes the block (rc=$rc): $out / $(cat "$STUB_LOG")"
+fi
+
+# 23: --dry-run reports the actions and changes nothing
+legacy_block 'skills alpha' >"$m"
+before=$(cat "$m")
+rm -f "$STUB_LOG"
+rc=0
+out=$(mig "$m" --dry-run 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && [ "$(cat "$m")" = "$before" ] && ! grep -q '^-C .* add' "$STUB_LOG" &&
+  [[ "$out" == *"would run: skill -C $TMP/mig add alpha"* && "$out" == *"would delete"* ]]; then
+  ok "migrate --dry-run changes nothing"
+else
+  fail "migrate --dry-run changes nothing (rc=$rc): $out"
+fi
+
+# 24: an unresolvable name keeps the block (exit 1, naming --force) after
+# adding the rest; --force then deletes it
+legacy_block 'skills alpha no-such-skill' >"$m"
+rm -f "$STUB_LOG"
+rc=0
+out=$(STUB_BAD=no-such-skill mig "$m" 2>&1) || rc=$?
+frc=0
+fout=$(STUB_BAD=no-such-skill mig "$m" --force 2>&1) || frc=$?
+if [ "$rc" -eq 1 ] && grep -qx "\-C $TMP/mig add --quiet alpha" "$STUB_LOG" &&
+  [[ "$out" == *"cannot resolve skill 'no-such-skill'"* && "$out" == *"--force"* ]] &&
+  [ "$frc" -eq 0 ] && ! grep -q 'skills' "$m"; then
+  ok "migrate keeps the block for an unresolvable name unless --force"
+else
+  fail "migrate keeps the block for an unresolvable name unless --force (rc=$rc frc=$frc): $out / $fout"
+fi
+
+# 25: a failing 'skill add' keeps the block and exits 1, even with --force
+legacy_block 'skills alpha' >"$m"
+rc=0
+out=$(STUB_ADD_RC=1 mig "$m" --force 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'skills alpha' "$m" && [[ "$out" == *"could not be added"* ]]; then
+  ok "migrate keeps the block when skill add fails"
+else
+  fail "migrate keeps the block when skill add fails (rc=$rc): $out"
+fi
+
+# 26: with no skills block, migrate is an informative no-op
+printf '# -*- sh -*-\n' >"$m"
+rc=0
+out=$(mig "$m" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && [[ "$out" == *"nothing to migrate"* ]]; then
+  ok "migrate without a skills block does nothing"
+else
+  fail "migrate without a skills block does nothing (rc=$rc): $out"
+fi
+
+# 27: a .envrc left with only its header is kept, and says so
+legacy_block 'skills real_x' >"$m"
+out=$(mig "$m" 2>&1) || true
+if [ -f "$m" ] && [[ "$out" == *"is now empty (kept)"* ]] && ! grep -q 'skills' "$m"; then
+  ok "migrate keeps a .envrc left empty and reports it"
+else
+  fail "migrate keeps a .envrc left empty and reports it: $out"
+fi
+
+# 28: the legacy export form is understood; an unrecognized line keeps the
+# block unless --force
+# shellcheck disable=SC2016 # the literal legacy line is the fixture
+legacy_block 'export AGENT_REQUIRED_SKILLS="$AGENT_REQUIRED_SKILLS alpha"' 'echo hi' >"$m"
+rm -f "$STUB_LOG"
+rc=0
+out=$(mig "$m" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -qx "\-C $TMP/mig add --quiet alpha" "$STUB_LOG" &&
+  [[ "$out" == *"unrecognized line(s): echo hi"* ]] && grep -q 'echo hi' "$m"; then
+  ok "migrate reads the export form and keeps unrecognized lines"
+else
+  fail "migrate reads the export form and keeps unrecognized lines (rc=$rc): $out"
+fi
+
+# 29: the temporary ~/.direnvrc shim only points at the migration: it exports
+# nothing and succeeds, even under strict_env's errexit/nounset
+DIRENVRC="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/home/.direnvrc"
+# shellcheck disable=SC2016 # expanded by the inner bash
+out=$(env -u AGENT_REQUIRED_SKILLS bash -c 'set -euo pipefail; source "$1"; skills a -b
+  echo "rc=$? v=${AGENT_REQUIRED_SKILLS-unset}"' _ "$DIRENVRC" 2>&1)
+if [[ "$out" == *"run: envrc migrate skills"* && "$out" == *"rc=0 v=unset"* ]]; then
+  ok "the direnvrc skills shim warns and exports nothing"
+else
+  fail "the direnvrc skills shim warns and exports nothing: $out"
 fi
