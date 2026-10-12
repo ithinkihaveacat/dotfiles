@@ -139,8 +139,8 @@ skill <command> [arguments]
   keeping any existing link, and remove broken links to defaults; then fail if
   `doctor` would report an error. A broken link to a skill added by name is kept
   with a warning, since its source may only be unreachable for now (an unmounted
-  network path, a pruned cache). `-q`/`--quiet` reports only errors and
-  warnings.
+  network path, a pruned cache). Concurrent runs in one scope take turns.
+  `-q`/`--quiet` reports only errors and warnings.
 - **`remove NAME...`** (alias: **`rm`**): Remove a skill's links.
 - **`list [--json]`**: List the linked skills, each `default` or `added`.
 - **`bundle [SPEC...]`**: Package skills into an archive (`.zip`, `.tar.gz`) or

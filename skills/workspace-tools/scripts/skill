@@ -1592,6 +1592,31 @@ def cmd_add(specs):
         sys.exit(1)
 
 
+_SCOPE_LOCK_FD: int | None = None
+
+
+def lock_scope_root(root: Path) -> None:
+    """Hold an exclusive lock on the scope's root directory until exit.
+
+    flock(2) on a read-only descriptor of the directory itself: no lock file
+    to create or leave behind, and the kernel drops the lock when the process
+    ends. Best effort: a filesystem without flock support proceeds unlocked.
+    """
+    global _SCOPE_LOCK_FD
+    try:
+        import fcntl
+
+        fd = os.open(root, os.O_RDONLY)
+    except (ImportError, OSError):
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        os.close(fd)
+        return
+    _SCOPE_LOCK_FD = fd
+
+
 def cmd_add_defaults(quiet=False):
     """Link every default into the scope, through the defaults directory.
 
@@ -1616,6 +1641,10 @@ def cmd_add_defaults(quiet=False):
         dest_dirs = ws.get_dest_dirs()
     except RuntimeError as e:
         cmderr("add", str(e))
+
+    # Agents launched at the same time in one workspace each seed it: take
+    # turns, so none sees another's half-written links or records.
+    lock_scope_root(ws.root)
 
     changes = []
     entries, _ = scan_links(ws)
@@ -1653,7 +1682,12 @@ def cmd_add_defaults(quiet=False):
             if p.is_symlink() or p.exists() or ws.check_conflict(p):
                 continue
             d.mkdir(parents=True, exist_ok=True)
-            p.symlink_to(src)
+            try:
+                p.symlink_to(src)
+            except FileExistsError:
+                # A concurrent seeding (two agents launched at once) linked
+                # it first; whatever is there now stays, as above.
+                continue
             if src.name not in added:
                 added.append(src.name)
     changes += [f"added {name} (default)" for name in added]
