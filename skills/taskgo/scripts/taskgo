@@ -5899,6 +5899,345 @@ def cmd_read(
         )
 
 
+# Most bytes of output one search returns, from the CLI or the MCP server, and
+# the most bytes of any one output line; a longer line is cut and marked.
+SEARCH_MAX_BYTES = 64 * 1024
+SEARCH_LINE_MAX_BYTES = 1024
+SEARCH_LINE_MARK = " ...[truncated]"
+SEARCH_TIMEOUT = 30
+
+# The git grep options a search may pass, each mapped to whether it takes a
+# value. Anything else is refused, abbreviations included (git would expand
+# them): some options read files outside the repository (-f, --no-index),
+# search other trees (--cached, --untracked, --recurse-submodules), run
+# commands (-O, --textconv), or reshape the output taskgo parses (-h, -z,
+# --heading, --color).
+SEARCH_SHORT_OPTIONS = {
+    **dict.fromkeys("GEFPiwvnlLcoWpI", False),
+    **dict.fromkeys("eABCm", True),
+}
+SEARCH_LONG_OPTIONS = {
+    **dict.fromkeys(
+        (
+            "--basic-regexp",
+            "--extended-regexp",
+            "--fixed-strings",
+            "--perl-regexp",
+            "--ignore-case",
+            "--word-regexp",
+            "--invert-match",
+            "--and",
+            "--or",
+            "--not",
+            "--all-match",
+            "--function-context",
+            "--show-function",
+            "--line-number",
+            "--files-with-matches",
+            "--name-only",
+            "--files-without-match",
+            "--count",
+            "--only-matching",
+        ),
+        False,
+    ),
+    **dict.fromkeys(
+        (
+            "--after-context",
+            "--before-context",
+            "--context",
+            "--max-count",
+            "--max-depth",
+        ),
+        True,
+    ),
+}
+
+# Configuration that would change what git grep searches or how it prints:
+# pinned so that user and repository settings cannot. With core.quotePath
+# off, paths with non-ASCII characters print as they are, not C-quoted.
+SEARCH_GIT_CONFIG = (
+    "core.pager=",
+    "core.quotePath=false",
+    "color.grep=never",
+    "grep.column=false",
+    "grep.fullName=false",
+    "grep.lineNumber=true",
+    "grep.patternType=basic",
+    "grep.extendedRegexp=false",
+    "grep.fallbackToNoIndex=false",
+    "submodule.recurse=false",
+)
+
+
+@dataclass(slots=True)
+class SearchArgs:
+    """A validated search: git grep options with every pattern behind -e."""
+
+    argv: list[str]
+    paths: list[str]
+    at: str | None = None
+    as_json: bool = False
+
+
+def search_path(path: Any) -> str:
+    """PATH as a repository-relative pathspec, or a TaskgoError."""
+    if not isinstance(path, str):
+        raise TaskgoError(f"path must be a string, not {path!r}")
+    rel = path.strip().strip("/")
+    parts = rel.split("/") if rel else []
+    if not parts or any(p in ("", ".", "..") for p in parts) or "\\" in rel:
+        raise TaskgoError(f"invalid path: {path!r}")
+    if parts[0].startswith(".git"):
+        raise TaskgoError(f"invalid path: {path!r}")
+    return rel
+
+
+def parse_search_args(
+    tokens: Any, paths: Any = None, *, cli: bool = False
+) -> SearchArgs:
+    """TOKENS, git grep arguments, checked against the option allowlist.
+
+    Tokens after '--' are pathspecs, as are PATHS. A search has one bare
+    pattern, or patterns given with -e, never both: git would read a second
+    bare token as a tree to search. The bare pattern is passed as '-e
+    PATTERN', so options may follow it. With CLI, '--at REV' and '--json'
+    are taskgo's own options.
+    """
+    if tokens is None:
+        tokens = []
+    if paths is None:
+        paths = []
+    if not isinstance(tokens, list) or not isinstance(paths, list):
+        raise TaskgoError("args and paths must be lists of strings")
+    for t in [*tokens, *paths]:
+        if not isinstance(t, str):
+            raise TaskgoError(f"arguments must be strings, not {t!r}")
+        if "\0" in t:
+            raise TaskgoError(f"arguments must not contain NUL: {t!r}")
+    out = SearchArgs([], [search_path(p) for p in paths])
+    bare: list[str] = []
+    with_e = 0
+    i, n = 0, len(tokens)
+
+    def value(opt: str) -> str:
+        nonlocal i
+        i += 1
+        if i >= n:
+            raise TaskgoError(f"option {opt} needs a value")
+        return tokens[i]
+
+    while i < n:
+        t = tokens[i]
+        if t == "--":
+            out.paths += [search_path(p) for p in tokens[i + 1 :]]
+            break
+        if cli and t == "--json":
+            out.as_json = True
+        elif cli and t == "--at":
+            out.at = value(t)
+        elif cli and t.startswith("--at="):
+            out.at = t.partition("=")[2]
+        elif t in ("(", ")"):
+            out.argv.append(t)
+        elif t.startswith("--"):
+            name, eq, val = t.partition("=")
+            if name not in SEARCH_LONG_OPTIONS:
+                raise TaskgoError(f"option {name} is not allowed in a search")
+            if SEARCH_LONG_OPTIONS[name]:
+                out.argv += [name, val if eq else value(name)]
+            elif eq:
+                raise TaskgoError(f"option {name} takes no value")
+            else:
+                out.argv.append(name)
+        elif t.startswith("-") and len(t) > 1:
+            for j, c in enumerate(t[1:], start=1):
+                if c not in SEARCH_SHORT_OPTIONS:
+                    raise TaskgoError(f"option -{c} is not allowed in a search")
+                if SEARCH_SHORT_OPTIONS[c]:
+                    out.argv += [f"-{c}", t[j + 1 :] or value(f"-{c}")]
+                    with_e += c == "e"
+                    break
+                out.argv.append(f"-{c}")
+        else:
+            bare.append(t)
+            out.argv += ["-e", t]
+        i += 1
+    if len(bare) > 1:
+        raise TaskgoError(
+            f"more than one bare pattern ({', '.join(map(repr, bare))}); "
+            "give each pattern with -e, and paths after '--' or in paths"
+        )
+    if bare and with_e:
+        raise TaskgoError(
+            f"bare pattern {bare[0]!r} given with -e; give every pattern with -e"
+        )
+    if not bare and not with_e:
+        raise TaskgoError("no pattern given")
+    return out
+
+
+# A path followed by what git grep prints after one: a line number and its
+# separator (':' match, '-' context, '=' function), or a count after ':'.
+_SEARCH_AFTER_PATH = re.compile(r"\d+[:=-]|\d+$")
+
+
+def search_line_path(line: str, known: set[str]) -> str | None:
+    """The file that output LINE names, given the files KNOWN to the search."""
+    if line in known:
+        return line  # -l and -L print the bare path
+    for i, c in enumerate(line):
+        if c in ":-=" and line[:i] in known and _SEARCH_AFTER_PATH.match(line[i + 1 :]):
+            return line[:i]
+    return None
+
+
+def run_search(
+    repo: Path,
+    search: SearchArgs,
+    rev: str | None,
+    known: set[str],
+    limit: int = SEARCH_MAX_BYTES,
+) -> tuple[dict[str, Any], bool]:
+    """Runs SEARCH over commit REV, or the working tree: (result, matched).
+
+    The result has the output with REV's prefix stripped, so each path is
+    repository-relative; the files it names, in order; and truncated. Output
+    is read as git prints it, and git is stopped once LIMIT bytes are
+    read, or after SEARCH_TIMEOUT seconds. A git error is a TaskgoError
+    with git's message.
+    """
+    import tempfile
+    import threading
+
+    cmd = ["git"]
+    for setting in SEARCH_GIT_CONFIG:
+        cmd += ["-c", setting]
+    cmd += ["grep", "--no-color", "-n", "-I", *search.argv]
+    if rev:
+        cmd.append(rev)
+    cmd += ["--", *search.paths]
+    prefix = f"{rev}:".encode() if rev else b""
+    cap = SEARCH_LINE_MAX_BYTES
+    lines: list[str] = []
+    files: dict[str, None] = {}
+    used = 0
+    truncated = False
+    timed_out = threading.Event()
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=repo,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=err,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+        )
+        _active_subprocesses.add(proc)
+
+        def expire() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(SEARCH_TIMEOUT, expire)
+        timer.start()
+        try:
+            assert proc.stdout is not None
+            while True:
+                raw = proc.stdout.readline(len(prefix) + cap + 1)
+                if not raw:
+                    break
+                cut = not raw.endswith(b"\n")
+                if cut and len(raw) <= len(prefix) + cap:
+                    cut = False  # the last line, with no newline
+                elif cut:
+                    while (rest := proc.stdout.readline(65536)) and not (
+                        rest.endswith(b"\n")
+                    ):
+                        pass
+                raw = raw.rstrip(b"\n")
+                if prefix and raw.startswith(prefix):
+                    raw = raw[len(prefix) :]
+                if cut or len(raw) > cap:
+                    end = cap
+                    while end > 0 and raw[end] & 0xC0 == 0x80:
+                        end -= 1  # inside a UTF-8 character
+                    text = raw[:end].decode("utf-8", "replace") + SEARCH_LINE_MARK
+                else:
+                    text = raw.decode("utf-8", "replace")
+                size = len(text.encode("utf-8")) + 1
+                if used + size > limit:
+                    truncated = True
+                    proc.kill()
+                    break
+                used += size
+                lines.append(text)
+                path = search_line_path(text, known)
+                if path is not None:
+                    files[path] = None
+            proc.wait()
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            _active_subprocesses.discard(proc)
+        err.seek(0)
+        stderr = err.read().decode("utf-8", "replace").strip()
+    if timed_out.is_set():
+        raise TaskgoError(
+            f"search timed out after {SEARCH_TIMEOUT} s; narrow it with paths, "
+            "a simpler pattern, -l, or -m"
+        )
+    if not truncated and proc.returncode not in (0, 1):
+        raise TaskgoError(stderr or f"git grep failed (exit {proc.returncode})")
+    result = {
+        "output": "".join(line + "\n" for line in lines),
+        "files": list(files),
+        "truncated": truncated,
+    }
+    return result, truncated or proc.returncode == 0
+
+
+def cmd_search(tokens: list[str]) -> None:
+    """Search the working tree, or commit --at REV, with git grep."""
+    try:
+        search = parse_search_args(tokens, cli=True)
+    except TaskgoError as e:
+        die_scoped(str(e), 2)
+    root = get_repo_root()
+    if search.at:
+        res = run_git(
+            ["rev-parse", "--verify", "--quiet", f"{search.at}^{{commit}}"],
+            cwd=root,
+            check=False,
+        )
+        if res.returncode != 0:
+            die_scoped(f"no commit {search.at} in the control repository", 2)
+        rev = res.stdout.strip()
+        known = set(GitTreeSnapshot(root, rev).blobs)
+    else:
+        rev = None
+        listed = run_git(["ls-files", "-z"], cwd=root).stdout
+        known = set(filter(None, listed.split("\0")))
+    try:
+        result, matched = run_search(root, search, rev, known)
+    except TaskgoError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(2)
+    if search.as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        sys.stdout.write(result["output"])
+    if result["truncated"]:
+        print(
+            f"taskgo search: output stopped at {SEARCH_MAX_BYTES // 1024} KiB; "
+            "narrow the search with paths, -l, or -m",
+            file=sys.stderr,
+        )
+    sys.exit(0 if matched else 1)
+
+
 def cmd_checkpoint(
     task_id: str,
     subject: str,
@@ -6179,7 +6518,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.7.0"
+MCP_SERVER_VERSION = "0.8.0"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -6601,6 +6940,15 @@ def mcp_read_file(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     return {"as_of": r.as_of(), **result}
 
 
+def mcp_search_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        search = parse_search_args(args.get("args"), args.get("paths"))
+        result, _ = run_search(r.reader.cfg.repo, search, r.snap.rev, set(r.snap.blobs))
+    except TaskgoError as e:
+        raise McpToolError(str(e)) from None
+    return {"as_of": r.as_of(), **result}
+
+
 def mcp_list_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     prefix = mcp_path(args.get("prefix"))
     if prefix and not r.snap.exists(prefix):
@@ -6830,6 +7178,35 @@ MCP_TOOLS = [
         },
         ("path",),
         mcp_read_file,
+    ),
+    McpTool(
+        "search_files",
+        "Search file contents in the control repository with git grep (as "
+        "'taskgo search --json'). args are git grep arguments, one per item: "
+        "one bare pattern, or patterns given with -e; options such as -i, "
+        "-w, -F, -E, -P, -C N, -l, -c, -m N, --and, --or, and --not; then "
+        "optionally '--' and pathspecs. Other options are refused. Returns "
+        "grep-style output (path:line:text for matches, path-line-text for "
+        "context), with repository-relative paths that read_file accepts; "
+        "files, the paths it names; and truncated, true when the output "
+        f"stopped at {SEARCH_MAX_BYTES // 1024} KiB. Lines over "
+        f"{SEARCH_LINE_MAX_BYTES} bytes are cut. No match gives empty output.",
+        {
+            "args": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "git grep arguments, such as ['-i', 'TODO'] or "
+                "['-e', 'b/123', '--', 'meta/'].",
+            },
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Pathspecs to search, such as 'meta/' or "
+                "'*.md', added to any after '--' in args; default all files.",
+            },
+        },
+        ("args",),
+        mcp_search_files,
     ),
     McpTool(
         "list_files",
@@ -7787,6 +8164,7 @@ Commands:
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   read PATH [OPTIONS]              Print lines of a file (--start-line, --end-line)
+  search [OPTIONS] GREP_ARGS...    Search file contents with git grep (--at, --json)
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
@@ -8423,6 +8801,52 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         help="Print path, blob, size, line range, truncated, and content as JSON",
     )
 
+    # search (main() hands its arguments to cmd_search; this parser gives help)
+    p_search = subparsers.add_parser(
+        "search",
+        help="Search file contents with git grep",
+        usage="taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]",
+        description=(
+            "Search tracked files in the control repository with git grep,"
+            " in the working tree or in commit REV, as the MCP server's"
+            " search_files tool does. GREP_ARGS are git grep arguments: one"
+            " bare pattern, or patterns given with -e, and these options:"
+            " -i -w -v -E -G -F -P -n -I -l -L -c -o -W -p, -A/-B/-C N,"
+            " -m N, --max-depth N, --and, --or, --not, ( ), --all-match, and"
+            " their long forms. Other options, abbreviations, and further"
+            " bare arguments are refused. Pathspecs follow '--'. Output is"
+            " git grep's, with paths relative to the repository root, lines"
+            f" cut at {SEARCH_LINE_MAX_BYTES} bytes, and at most"
+            f" {SEARCH_MAX_BYTES // 1024} KiB in all. Exits 0 on a match, 1"
+            f" on none, and 2 on an error; git is stopped after"
+            f" {SEARCH_TIMEOUT} s."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  taskgo search TASK-084C7
+  taskgo search -i -C2 'partner name' -- meta/ '*.md'
+  taskgo search -l -e b/431751691 -e cl/123456
+  taskgo search -e TODO --and --not -e done --at HEAD~3 --json""",
+    )
+    p_search.add_argument(
+        "--at",
+        metavar="REV",
+        default=None,
+        help="Search commit REV instead of the working tree",
+    )
+    p_search.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Print output, files, and truncated as JSON",
+    )
+    p_search.add_argument(
+        "grep_args",
+        nargs=argparse.REMAINDER,
+        metavar="GREP_ARGS",
+        help="git grep pattern and options, then optionally -- PATHS",
+    )
+
     # checkpoint
     p_checkpoint = subparsers.add_parser(
         "checkpoint",
@@ -8519,6 +8943,22 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     return parser
 
 
+def search_command_split(argv: list[str]) -> tuple[list[str], list[str]] | None:
+    """ARGV split after a 'search' command: (head, its arguments), or None."""
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--root", "-R"):
+            i += 2
+        elif a.startswith("--root=") or (a.startswith("-R") and len(a) > 2):
+            i += 1
+        else:
+            break
+    if i < len(argv) and argv[i] == "search":
+        return argv[: i + 1], argv[i + 1 :]
+    return None
+
+
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
@@ -8528,13 +8968,24 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     parser = create_parser()
-    args = parser.parse_args(argv)
+    # git grep's options are not taskgo's, so search takes its arguments
+    # verbatim rather than through argparse, which would mistake them.
+    search = search_command_split(argv)
+    if search is not None:
+        head, tokens = search
+        if tokens in (["-h"], ["--help"]):
+            parser.parse_args([*head, "--help"])
+        args = parser.parse_args(head)
+    else:
+        args = parser.parse_args(argv)
 
     global _ACTIVE_COMMAND
     _ACTIVE_COMMAND = args.command
     set_explicit_root(getattr(args, "root", None))
 
-    if args.command == "id":
+    if search is not None:
+        cmd_search(search[1])
+    elif args.command == "id":
         cmd_id()
     elif args.command == "root":
         cmd_root()

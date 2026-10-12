@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..183'
+echo '1..185'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3355,7 +3355,7 @@ names = [t["name"] for t in tools["result"]["tools"]]
 assert init["result"]["serverInfo"]["name"] == "taskgo", init
 assert "Data care" in init["result"]["instructions"]
 writes = {t["name"]: t for t in tools["result"]["tools"] if not t["annotations"]["readOnlyHint"]}
-assert len(names) == 10 and sorted(writes) == ["apply_changes", "create"], names
+assert len(names) == 11 and sorted(writes) == ["apply_changes", "create"], names
 assert all("Data care" in t["description"] for t in writes.values())
 assert all("at" not in t["inputSchema"]["properties"] for t in writes.values())
 got = task["result"]["structuredContent"]
@@ -3986,4 +3986,128 @@ check("git dir", read(".git/HEAD") is None)
 else
   echo 'not ok 183 - read slices, caps, and clamps lines of a file'
   printf '# %s\n' "$READ_ERR"
+fi
+
+# Test 184: search runs git grep over the working tree or a commit (--at),
+# with paths relative to the root, also for paths holding ':', '-', or
+# non-ASCII characters; lists the files it names; cuts long lines and caps
+# output; exits 0, 1, or 2; and refuses options off the allowlist (including
+# abbreviations and bundles), a second bare pattern, and escaping paths.
+SEARCH_REPO="$TEST_ROOT/search-repo"
+mkdir -p "$SEARCH_REPO/p/a-b" "$SEARCH_REPO/p/a"
+git -C "$SEARCH_REPO" init -q
+printf 'alpha needle\nbeta\n' >"$SEARCH_REPO/p/a-b/one.md"
+printf 'x\nneedle: here\n' >"$SEARCH_REPO/p/a/b:2-odd.md"
+printf 'café needle\n' >"$SEARCH_REPO/p/café.md"
+python3 -c '
+import sys
+d = sys.argv[1]
+with open(d + "/p/long.txt", "w") as f:
+    f.write("needle " + "\u00e9" * 5000 + "\n")
+with open(d + "/p/many.txt", "w") as f:
+    for i in range(1, 20001):
+        f.write(f"needle {i:05d}\n")
+' "$SEARCH_REPO"
+git -C "$SEARCH_REPO" add -A
+git -C "$SEARCH_REPO" commit -qm 'search fixtures'
+printf 'gamma needle\n' >>"$SEARCH_REPO/p/a-b/one.md"
+if SEARCH_ERR=$(python3 -c '
+import json, subprocess, sys
+bin_, repo = sys.argv[1], sys.argv[2]
+
+def search(*args):
+    res = subprocess.run(
+        [bin_, "--root", repo, "search", *args],
+        capture_output=True, text=True, cwd="/",
+    )
+    return res.returncode, res.stdout, res.stderr
+
+def js(*args):
+    rc, out, _ = search("--json", *args)
+    return rc, json.loads(out) if rc in (0, 1) else None
+
+def check(name, ok):
+    if not ok:
+        sys.exit(name)
+
+rc, d = js("needle", "--", "p/a-b", "p/a")
+check("worktree", rc == 0 and d["output"] == (
+    "p/a-b/one.md:1:alpha needle\np/a-b/one.md:3:gamma needle\n"
+    "p/a/b:2-odd.md:2:needle: here\n") and d["files"] == [
+    "p/a-b/one.md", "p/a/b:2-odd.md"] and not d["truncated"])
+rc, d = js("--at", "HEAD", "-e", "needle", "--", "p/a-b")
+check("at HEAD", rc == 0 and d["output"] == "p/a-b/one.md:1:alpha needle\n")
+rc, d = js("-c", "needle", "--at=HEAD", "--", "*.md")
+check("count", d["files"] == ["p/a-b/one.md", "p/a/b:2-odd.md", "p/café.md"]
+      and "p/café.md:1\n" in d["output"])
+rc, d = js("-l", "-i", "ALPHA", "--at", "HEAD")
+check("files only", d["output"] == "p/a-b/one.md\n" and d["files"] == ["p/a-b/one.md"])
+rc, d = js("-C1", "beta", "--at", "HEAD", "--", "p/a-b")
+check("context", d["output"] == "p/a-b/one.md-1-alpha needle\np/a-b/one.md:2:beta\n"
+      and d["files"] == ["p/a-b/one.md"])
+rc, d = js("-e", "nothing-here")
+check("no match", rc == 1 and d == {"output": "", "files": [], "truncated": False})
+rc, d = js("needle", "--", "p/long.txt")
+line = d["output"].rstrip("\n")
+check("long line", line.endswith(" ...[truncated]")
+      and len(line.removesuffix(" ...[truncated]").encode()) <= 1024)
+rc, d = js("needle", "--", "p/many.txt")
+check("cap", rc == 0 and d["truncated"] and len(d["output"].encode()) <= 65536
+      and d["output"].endswith("\n") and d["files"] == ["p/many.txt"])
+rc, out, err = search("-e", "[")
+check("git error", rc == 2 and "Invalid regular expression" in err)
+for bad in (["--no-ind", "x"], ["-if/etc/passwd", "x"], ["--file=/etc/passwd"],
+            ["-O", "x"], ["-h", "x"], ["--color=always", "x"], ["--cached", "x"],
+            ["x", "HEAD"], ["-e", "x", "y"], ["-C"], [], ["x", "--", "../y"],
+            ["x", "--", ".git/HEAD"], ["--json"]):
+    rc, out, err = search(*bad)
+    check(f"refuse {bad}", rc == 2 and out == "")
+rc, out, err = search("--help")
+check("help", rc == 0 and "GREP_ARGS" in out)
+' "$BIN" "$SEARCH_REPO" 2>&1); then
+  echo 'ok 184 - search greps files, caps output, and refuses unsafe options'
+else
+  echo 'not ok 184 - search greps files, caps output, and refuses unsafe options'
+  printf '# %s\n' "$SEARCH_ERR"
+fi
+
+# Test 185: a search that runs past its time limit stops git and reports it.
+if SEARCH_TO=$(
+  SEARCH_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN") &&
+    "$SEARCH_PY" - "$BIN" "$SEARCH_REPO" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import os
+import sys
+import time
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+tg.SEARCH_TIMEOUT = 0.5
+repo = Path(sys.argv[2])
+search = tg.parse_search_args(["-e", "needle"])
+# A stand-in for a git grep that never finishes, such as a -P pattern that
+# backtracks without end: it sleeps (exec, so killing it closes its output).
+fake = repo.parent / "fake-git"
+fake.mkdir(exist_ok=True)
+(fake / "git").write_text("#!/bin/sh\nexec sleep 30\n")
+(fake / "git").chmod(0o755)
+os.environ["PATH"] = f"{fake}:{os.environ['PATH']}"
+start = time.monotonic()
+try:
+    tg.run_search(repo, search, None, set())
+except tg.TaskgoError as e:
+    assert "timed out" in str(e), e
+else:
+    raise AssertionError("no timeout")
+assert time.monotonic() - start < 5
+print("ok")
+PY
+); then
+  echo 'ok 185 - search stops git after its time limit'
+else
+  echo 'not ok 185 - search stops git after its time limit'
+  printf '# %s\n' "$SEARCH_TO"
 fi

@@ -43,6 +43,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical chec
 complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadata and snapshots'
 complete -f -c taskgo -n __fish_use_subcommand -a history -d 'Show frontmatter history'
 complete -f -c taskgo -n __fish_use_subcommand -a read -d 'Print lines of a file'
+complete -f -c taskgo -n __fish_use_subcommand -a search -d 'Search file contents with git grep'
 complete -f -c taskgo -n __fish_use_subcommand -a checkpoint -d 'Commit an authorized tracker checkpoint'
 complete -f -c taskgo -n __fish_use_subcommand -a commit -d 'Commit a logical transition'
 complete -f -c taskgo -n __fish_use_subcommand -a schema -d 'Show the task, decision, and STATUS schema'
@@ -141,6 +142,10 @@ complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l start-line -d 'Fi
 complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l end-line -d 'Last line (default: the last)'
 complete -x -c taskgo -n '__fish_seen_subcommand_from read' -l at -d 'Read commit REV instead of the working tree'
 complete -f -c taskgo -n '__fish_seen_subcommand_from read' -l json -d 'Emit JSON output'
+
+# search options (other arguments go to git grep; see 'taskgo search --help')
+complete -x -c taskgo -n '__fish_seen_subcommand_from search' -l at -d 'Search commit REV instead of the working tree'
+complete -f -c taskgo -n '__fish_seen_subcommand_from search' -l json -d 'Emit JSON output'
 
 # mcp options
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l host -x -d 'Address to listen on (default 127.0.0.1)'

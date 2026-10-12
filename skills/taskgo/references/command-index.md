@@ -18,6 +18,7 @@
 - [fix](#fix)
 - [history](#history)
 - [read](#read)
+- [search](#search)
 - [checkpoint](#checkpoint)
 - [commit](#commit)
 - [schema](#schema)
@@ -49,6 +50,7 @@ Commands:
   fix [PROJECT] [OPTIONS]          Auto-heal IDs, statuses, and snapshots
   history PATH_OR_TASK_ID [FIELD]  Show frontmatter history
   read PATH [OPTIONS]              Print lines of a file (--start-line, --end-line)
+  search [OPTIONS] GREP_ARGS...    Search file contents with git grep (--at, --json)
   checkpoint TASK_ID SUBJECT [...] Commit an authorized tracker checkpoint (--all)
   commit SUBJECT [OPTIONS]         Commit a logical transition
   schema [--json]                  Show the task, decision, and STATUS schema
@@ -463,6 +465,32 @@ Examples:
   taskgo read proj/PLAN.md
   taskgo read proj/logs/logcat.txt --start-line 2001 --end-line 2400
   taskgo read proj/PLAN.md --at HEAD~3 --json
+```
+
+<!-- /generated -->
+
+## search
+
+<!-- generated: ../scripts/taskgo search --help -->
+
+```text
+usage: taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
+
+Search tracked files in the control repository with git grep, in the working tree or in commit REV, as the MCP server's search_files tool does. GREP_ARGS are git grep arguments: one bare pattern, or patterns given with -e, and these options: -i -w -v -E -G -F -P -n -I -l -L -c -o -W -p, -A/-B/-C N, -m N, --max-depth N, --and, --or, --not, ( ), --all-match, and their long forms. Other options, abbreviations, and further bare arguments are refused. Pathspecs follow '--'. Output is git grep's, with paths relative to the repository root, lines cut at 1024 bytes, and at most 64 KiB in all. Exits 0 on a match, 1 on none, and 2 on an error; git is stopped after 30 s.
+
+positional arguments:
+  GREP_ARGS   git grep pattern and options, then optionally -- PATHS
+
+options:
+  -h, --help  show this help message and exit
+  --at REV    Search commit REV instead of the working tree
+  --json      Print output, files, and truncated as JSON
+
+Examples:
+  taskgo search TASK-084C7
+  taskgo search -i -C2 'partner name' -- meta/ '*.md'
+  taskgo search -l -e b/431751691 -e cl/123456
+  taskgo search -e TODO --and --not -e done --at HEAD~3 --json
 ```
 
 <!-- /generated -->
