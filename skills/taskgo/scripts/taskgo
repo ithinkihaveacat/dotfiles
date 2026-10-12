@@ -3376,6 +3376,11 @@ def cmd_create(
             )
 
     status = require_status(status, "--status")
+    if status == "done" and not (outcome or "").strip():
+        die_scoped(
+            "a done task needs an Outcome: pass --outcome with a verdict "
+            "against each criterion"
+        )
     session = get_active_session(conv)
     conv_uri = f"{session[0]}://{session[1]}" if session else None
     root = get_repo_root()
@@ -3703,6 +3708,11 @@ def update_task(
     except OSError as e:
         die(f"cannot read task file {rel_path}: {e}")
     new_content, warnings = edit_task_text(snap, rel_path, content, **edits)
+    if lacks_required_outcome(content, new_content):
+        die_scoped(
+            f"{rel_path}: a done task needs an Outcome: pass --outcome with a "
+            "verdict against each criterion; nothing changed"
+        )
     snap.write_markdown(rel_path, new_content)
 
     data, _ = parse_frontmatter_for_edit(new_content)
@@ -4381,6 +4391,25 @@ def outcome_text(text: str | None) -> str | None:
     return body[slice(*spans[0])] if spans else None
 
 
+def lacks_required_outcome(before: str | None, after: str) -> bool:
+    """True when the task text AFTER is done without Outcome text.
+
+    BEFORE is the text it replaces (None for a new task). A task that was
+    already done and keeps its Outcome unchanged is let through: older
+    records predate the rule and are repaired when next completed. The CLI,
+    'apply', and the MCP server share this rule.
+    """
+    if canonical_status(parse_frontmatter(after)[0].get("status")) != "done":
+        return False
+    was_done = before is not None and (
+        canonical_status(parse_frontmatter(before)[0].get("status")) == "done"
+    )
+    outcome = outcome_text(after)
+    if was_done and outcome == outcome_text(before):
+        return False
+    return not (outcome or "").removeprefix("## Outcome").strip()
+
+
 def validate_change_set(cs: ChangeSet) -> list[str]:
     """Checks the state after the whole change set.
 
@@ -4406,16 +4435,7 @@ def validate_change_set(cs: ChangeSet) -> list[str]:
             raise ChangeSetError(
                 f"{r.task_id} names {len(paths_by_id[r.task_id])} records", "validation"
             )
-        if canonical_status(r.status) != "done":
-            continue
-        before = cs.before[r.rel_path]
-        was_done = before is not None and (
-            canonical_status(parse_frontmatter(before)[0].get("status")) == "done"
-        )
-        outcome = outcome_text(snap.read_text(r.rel_path))
-        if was_done and outcome == outcome_text(before):
-            continue  # Older records are repaired when next completed.
-        if not (outcome or "").removeprefix("## Outcome").strip():
+        if lacks_required_outcome(cs.before[r.rel_path], snap.read_text(r.rel_path)):
             raise ChangeSetError(
                 f"{r.task_id} is done but has no Outcome", "validation"
             )

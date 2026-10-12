@@ -158,9 +158,11 @@ Immediate follow-up actions.
 
 On completion, keep Problem, Cost, Goal, and Criteria as written, so the record
 still states what the task set out to do. Replace Sketch and Constraints with
-Outcome and Findings. `taskgo doctor` reports a done task without Outcome text
-as `[INFO]`; older records predate the rule and are repaired when next touched,
-not migrated in bulk.
+Outcome and Findings. Marking a task done needs Outcome text:
+`taskgo update --status done` and `taskgo create --status done` refuse without
+`--outcome`, as `apply` and the MCP server do. `taskgo doctor` reports a done
+task without Outcome text as `[INFO]`; older records predate the rule and are
+repaired when next completed, not migrated in bulk.
 
 ## Project README & Decisions
 

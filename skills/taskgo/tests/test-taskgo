@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..180'
+echo '1..181'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -1180,7 +1180,7 @@ printf '# Proj\n' >"$TMPL_REPO/proj/README.md"
 ("$BIN" --root "$TMPL_REPO" create proj "Planning task" --status "todo")
 TODO_FILE="$(find "$TMPL_REPO/proj/tasks" -name 'TASK-*.md' | head -n 1)"
 TODO_CONTENT="$(cat "$TODO_FILE")"
-("$BIN" --root "$TMPL_REPO" create proj "Completed task" --status "done")
+("$BIN" --root "$TMPL_REPO" create proj "Completed task" --status "done" --outcome "Shipped.")
 DONE_FILE="$(find "$TMPL_REPO/proj/tasks" -name 'TASK-*-completed-task.md' | head -n 1)"
 DONE_CONTENT="$(cat "$DONE_FILE")"
 if echo "$TODO_CONTENT" | grep -q "\*\*Goal:\*\*" && echo "$DONE_CONTENT" | grep -q "## Outcome"; then
@@ -2629,7 +2629,7 @@ else
 fi
 
 # Test 134: doctor emits [WARN] on open task with stale_after < today without auto-deleting on fix
-("$BIN" --root "$WF_REPO" update "$DUE_OVERDUE_ID" --status 'done') >/dev/null 2>&1
+("$BIN" --root "$WF_REPO" update "$DUE_OVERDUE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
 ("$BIN" --root "$WF_REPO" update "$DUE_SOON_ID" --due 2026-10-25 --stale-after 2026-10-01) >/dev/null 2>&1
 (TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
 set +e
@@ -2753,6 +2753,7 @@ CHK_DATE_ID="${CHK_DATE_OUT%%$'\t'*}"
 CHK_DONE_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Already done task' \
   --slug done-date \
   --status 'done' \
+  --outcome 'Done.' \
   --wait-for 2026-10-01 \
   --no-commit)
 CHK_DONE_ID="${CHK_DONE_OUT%%$'\t'*}"
@@ -2800,10 +2801,10 @@ else
 fi
 
 # Clean up temporal test tasks in alpha/beta before URI polling tests
-("$BIN" --root "$CHK_REPO" update "$CHK_DATE_ID" --status 'done') >/dev/null 2>&1
-("$BIN" --root "$CHK_REPO" update "$CHK_OVER_ID" --status 'done') >/dev/null 2>&1
-("$BIN" --root "$CHK_REPO" update "$CHK_SOON_ID" --status 'done') >/dev/null 2>&1
-("$BIN" --root "$CHK_REPO" update "$CHK_STALE_ID" --status 'done') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_DATE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_OVER_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_SOON_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_STALE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
 
 # Set up mock CLI binaries for b/..., cl/..., and gh:... external URI polling.
 # These cases explicitly enable polling even when CI exports AGENT_OFFLINE=1;
@@ -2866,7 +2867,7 @@ if [[ "$CHK_T149_JSON" == *'"gate": "b/1001"'*'"upstream_state": "FIXED"'* ]] &&
 else
   echo 'not ok 143 - terminal upstream states trigger unconditionally regardless of watermark'
 fi
-("$BIN" --root "$CHK_REPO" update "$CHK_TERM_ID" --status 'done') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_TERM_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
 
 # Test 144: Zero-churn Git watermark: non-terminal activity (2026-10-05T15:00:00Z) triggers over
 # Task-scoped commit (2026-10-05T10:00:00Z) even after a later non-Task formatting commit (2026-10-06T08:00:00Z)
@@ -3852,4 +3853,39 @@ if [ "$TRAV_OK" = 1 ] &&
   echo 'ok 180 - apply refuses records outside the projects'
 else
   echo 'not ok 180 - apply refuses records outside the projects'
+fi
+
+# Test 181: the CLI holds done tasks to the same rule as apply and the MCP
+# server: a task becomes done only with Outcome text, while an older done
+# record without one can still be edited.
+CC_FILE="$APPLY_REPO/gamma/tasks/TASK-CC001-other.md"
+DONE_OK=1
+if "$BIN" --root "$APPLY_REPO" update TASK-CC001 --status 'done' >/dev/null 2>&1 ||
+  [ -n "$(git -C "$APPLY_REPO" status --porcelain)" ]; then
+  DONE_OK=0
+  echo '# update --status done without --outcome was accepted'
+fi
+if "$BIN" --root "$APPLY_REPO" create gamma 'Done at birth' --status 'done' \
+  --no-commit >/dev/null 2>&1 ||
+  [ -n "$(git -C "$APPLY_REPO" status --porcelain)" ]; then
+  DONE_OK=0
+  echo '# create --status done without --outcome was accepted'
+fi
+if ! "$BIN" --root "$APPLY_REPO" update TASK-CC001 --status 'done' \
+  --outcome 'Met the criterion.' >/dev/null 2>&1 ||
+  ! grep -q '^status: done$' "$CC_FILE" || ! grep -q '^## Outcome$' "$CC_FILE"; then
+  DONE_OK=0
+  echo '# update --status done --outcome was refused'
+fi
+# An older done record without Outcome stays editable.
+printf '%s\n' '---' 'id: TASK-CC001' 'status: done' '---' '' '# Other' >"$CC_FILE"
+if ! "$BIN" --root "$APPLY_REPO" update TASK-CC001 --findings 'Noted.' >/dev/null 2>&1; then
+  DONE_OK=0
+  echo '# editing a legacy done record without Outcome was refused'
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+if [ "$DONE_OK" = 1 ]; then
+  echo 'ok 181 - the CLI requires an Outcome when a task becomes done'
+else
+  echo 'not ok 181 - the CLI requires an Outcome when a task becomes done'
 fi
