@@ -569,9 +569,12 @@ untouched.
 
 If `skill --scope session` fails naming `AGENT_SESSION_DIR`, this agent has no
 session directory of its own: Claude was not started through the `claude`
-wrapper, was resumed with `--continue` or the `--resume` picker, or the caller
-is a nested agent. Under Antigravity, pass `-C <artifactDir>`. Otherwise fall
-back to the workspace scope, or ask the user.
+wrapper (for example, a `claude remote-control` server), was resumed with
+`--continue` or the `--resume` picker, or the caller is a nested agent; Codex
+has no session scope at all. Under Antigravity, pass `-C <artifactDir>`.
+Otherwise fall back to the workspace scope, or ask the user. Which launchers
+support session skills, and what a new launcher needs to, is in
+[Launchers and per-session skills](references/model.md#launchers-and-per-session-skills).
 
 ### Managing Permissions by Hand
 

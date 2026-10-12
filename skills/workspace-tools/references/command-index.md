@@ -105,7 +105,10 @@ agent reads for the chosen scope:
   workspace  .claude/skills and .agents/skills at the repository's skill
              anchor, plus a block in .git/info/exclude (the default)
   session    the calling agent's own session: $AGENT_SESSION_DIR/.claude/skills
-             (Claude) or brain/<id>/scratch/skills + .agents/skills.json (Agy)
+             (Claude) or brain/<id>/scratch/skills + .agents/skills.json (Agy);
+             only launchers that give a session its own directory support it
+             (not 'claude remote-control' or Codex; see the workspace-tools
+             skill, references/model.md)
   defaults   the default skills, which no agent reads; 'add --defaults' links
              each one into a workspace or session through this directory
 
