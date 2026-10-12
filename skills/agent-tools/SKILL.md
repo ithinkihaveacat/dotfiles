@@ -467,7 +467,7 @@ scripts/context catalog
 scripts/context show gemini-api > gemini-context.md
 
 # Pipe context directly to analysis
-scripts/context show gemini-cli | scripts/emerson "How do commands work?"
+scripts/context show gemini-api | scripts/emerson "How do tools work?"
 ```
 
 ### screenshot-describe
