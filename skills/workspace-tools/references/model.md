@@ -64,7 +64,8 @@ link.
   (`~/.private`, `~/.corp`), run by `install.sh`, so private skill names stay
   out of this repo and the launch path never edits the defaults.
 - **Workspaces**: the clone hook (`post-checkout`) and the `codex`/`agy`
-  wrappers run `skill add --defaults`.
+  wrappers run `skill add --defaults`. Outside a repository or plugin-recognized
+  workspace, that is a no-op unless the directory already has a skill folder.
 - **Claude sessions**: the `claude` wrapper creates a fresh session directory
   and runs `skill --scope session add --defaults`, so a wrapped Claude always
   sees the current defaults and the workspace is left alone.

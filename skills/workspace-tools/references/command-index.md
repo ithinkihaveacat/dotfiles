@@ -119,7 +119,9 @@ Commands:
   add --defaults  Link every default through the defaults directory, keeping
                   existing links; remove broken links to defaults (broken
                   links added by name are kept, with a warning); then fail if
-                  'doctor' finds errors (workspace and session scopes)
+                  'doctor' finds errors (workspace and session scopes). Outside
+                  a repository or plugin-recognized workspace, does nothing
+                  unless the directory already has a skill folder
                   -q, --quiet: report only errors and warnings
   remove NAME...  Remove a skill's links and exclude entries (alias: rm)
   list [--json]   List linked skills, each 'default' or 'added', in the scope

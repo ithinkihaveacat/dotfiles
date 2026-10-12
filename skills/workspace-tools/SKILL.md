@@ -116,7 +116,10 @@ skill <command> [arguments]
   its source and survives that. The defaults are set by `etc/skill/defaults.sh`
   in the dotfiles and each overlay, which `install.sh` runs.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
-  skills under local destination folders.
+  skills under local destination folders. `skill add --defaults` leaves such a
+  directory alone unless it already has a skill folder
+  (`mkdir -p .agents/skills` opts in), so launching an agent from an arbitrary
+  directory writes nothing there.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
   file into `~/.config/skill/plugins/` that defines `register(api)` and calls
   `api.register_workspace(cls)` with a subclass of `api.Workspace` (see also
