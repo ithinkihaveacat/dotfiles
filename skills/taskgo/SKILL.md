@@ -218,7 +218,7 @@ Agent Dispatch.
      ```
      - **Antigravity:** the harness injects the skills into `<skills>` on
        subsequent turns; read `<artifactDir>/scratch/skills/<skill>/SKILL.md`
-       via `view_file` if needed in the current turn.
+       via `read_file` if needed in the current turn.
      - **Claude:** the skills are usable within the same turn.
      - If `skill --scope session` fails naming `AGENT_SESSION_DIR`, the session
        has no skill directory of its own; ask before adding the skills to the
@@ -284,6 +284,16 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth a
   Caxton-style `search_and_replace` with verbatim bytes, a CRLF retry, near-miss
   diffs, and record validation. Assets keep their bytes and mode; tasks,
   decisions, and STATUS.md stay valid and are formatted. Does not commit.
+- `dispatch`: Emit agent handoff instructions for a project or task committed at
+  `HEAD` (or `--at REV`), warning on stderr about uncommitted state or missing
+  scaffolding; `--json` inlines the onboarding files and active/ready queues in
+  one payload, matching the MCP `dispatch` tool.
+- `read`: Print UTF-8 file slices (`--start-line`, `--end-line`, `-n` /
+  `--line-numbers`, `--at REV`, `--json`) up to 256 KiB per read, cut at line
+  boundaries, matching the MCP `read_file` tool.
+- `search`: Search tracked files in the working tree or `--at REV` via an
+  allowlisted `git grep` wrapper with 64 KiB output and 1 KiB line caps, exiting
+  0 on match, 1 on no match, and 2 on error, matching `search_files`.
 - `schema`: The declarative field and section schema for tasks, decisions, and
   `STATUS.md`. `--json` is the conformance form for other implementations.
 - `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, format the

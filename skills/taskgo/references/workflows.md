@@ -20,7 +20,7 @@ Before starting work, an agent must:
    ```
    - **Antigravity:** the harness injects the skills into `<skills>` on
      subsequent turns; read `<artifactDir>/scratch/skills/<skill>/SKILL.md` via
-     `view_file` if needed in the current turn.
+     `read_file` if needed in the current turn.
    - **Claude:** the skills are usable within the same turn.
    - If `skill --scope session` fails naming `AGENT_SESSION_DIR`, the session
      has no skill directory of its own; ask before adding the skills to the

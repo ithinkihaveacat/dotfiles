@@ -61,8 +61,8 @@ a task ID, and one round trip returns what the workflow reads before acting.
   or null when absent. Content is the file's bytes, cut after a whole line at
   256 KiB as `read_file` cuts it.
 - `status`: `STATUS.md` the same way, plus its `sections` with hashes (for
-  `replace_section`), `live_block` (the task block computed now), and
-  `block_current`.
+  `replace_section`), `committed_block`, `live_block` (the task block computed
+  now), and `block_current` (the same projection `get_project_status` returns).
 - `tasks`: the project's `in_progress`, `blocked` (as the `STATUS.md` snapshot
   counts them), and `ready` rows, as `list_tasks` returns them.
 - `task`: for a task ID, the record as `get_task` returns it; null for a

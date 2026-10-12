@@ -446,6 +446,15 @@ unhyphenated verbs:
   instructions from the selected project or task record committed at `HEAD` and
   report readiness findings on stderr; `--json` inlines the files the note
   names.
+- `taskgo apply CHANGES.json [--dry-run]`: Apply an atomic change set (`create`,
+  `set`, `add`, `remove`, `replace_section`, `write_file`, `delete_file`,
+  `edit_file`) to the working tree without committing.
+- `taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [...]`:
+  Replace exact text in one file as a single-operation `edit_file` change set.
+- `taskgo read PATH [--start-line N] [--end-line N] [--at REV] [--json] [-n]`:
+  Read 1-indexed line slices from the working tree or commit `REV`.
+- `taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]`: Search tracked
+  files with allowlisted `git grep` flags and bounded output.
 - `taskgo sync [PROJECT]`: Synchronize `STATUS.md` snapshot block.
 - `taskgo doctor [PROJECT]`: Diagnostic health check (read-only).
 - `taskgo fix [PROJECT] [--dry-run] [--no-commit]`: Auto-heal task metadata,

@@ -45,7 +45,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..185'
+echo '1..189'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -4401,4 +4401,103 @@ if [ "$DISPATCH_OK" = 1 ]; then
   echo 'ok 188 - dispatch takes a project or task and --json inlines the files'
 else
   echo 'not ok 188 - dispatch takes a project or task and --json inlines the files'
+fi
+
+# 189: search -- . root pathspec, -j JSON aliases, MCP edit slash trim, ADR edit
+# validation, and post-format line span remapping.
+if "$BIN" --root "$DISPATCH_REPO" search -j 'Cold start' -- . >/dev/null &&
+  "$BIN" --root "$DISPATCH_REPO" read -j proj/tasks/TASK-11111-manifest-loader.md >/dev/null &&
+  "$BIN" --root "$DISPATCH_REPO" schema -j >/dev/null &&
+  "$APPLY_PY" -c '
+import importlib.machinery, importlib.util, pathlib, sys
+spec = importlib.util.spec_from_loader(
+    "taskgo_mod",
+    importlib.machinery.SourceFileLoader("taskgo_mod", sys.argv[1]),
+)
+tg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tg)
+repo = pathlib.Path(sys.argv[2])
+
+# 1) search_path(".") normalizes to repo root rather than raising
+s = tg.parse_search_args(["Cold start"], ["."])
+assert s.paths == [], s.paths
+
+# 2) mcp_edit_doc trims leading/trailing slashes like mcp_path and cmd_edit
+doc = tg.mcp_edit_doc({"path": "/proj/PLAN.md/", "old_string": "a", "new_string": "b"})
+assert doc["changes"][0]["path"] == "proj/PLAN.md", doc
+
+# 3) check_record_edit rejects removing required ADR headings or setting invalid ADR status
+snap = tg.FsSnapshot(repo)
+cs = tg.apply_change_set(
+    snap,
+    {
+        "changes": [
+            {
+                "op": "create",
+                "kind": "decision",
+                "project": "proj",
+                "sections": {
+                    "title": "Test ADR",
+                    "Status": "Accepted",
+                    "Context": "Need parity.",
+                    "Decision": "Keep parity.",
+                    "Consequences": "Cleaner CLI.",
+                },
+            }
+        ]
+    },
+)
+adr_rel = cs.created[0]["path"]
+try:
+    tg.apply_change_set(
+        cs.snap,
+        {
+            "changes": [
+                {
+                    "op": "edit_file",
+                    "path": adr_rel,
+                    "old_string": "## Decision\n\nKeep parity.\n\n",
+                    "new_string": "",
+                }
+            ]
+        },
+    )
+    raise AssertionError("expected removal of required Decision section to fail")
+except tg.ChangeSetError as exc:
+    assert "removes required section Decision" in str(exc), exc
+
+# 4) remap_line_span reports post-format line numbers when earlier prose wraps
+long_para = " ".join(["word"] * 40)
+task_rel = "proj/tasks/TASK-99999-wrap.md"
+unwrapped = (
+    "---\nid: TASK-99999\nstatus: todo\n---\n\n# Wrap test\n\n"
+    f"**Problem:** {long_para}.\n\n**Goal:** Faster start.\n"
+)
+snap_mem = tg.OverlaySnapshot(snap)
+snap_mem.write_text(task_rel, unwrapped)
+cs2 = tg.apply_change_set(
+    snap_mem,
+    {
+        "changes": [
+            {
+                "op": "edit_file",
+                "path": task_rel,
+                "old_string": "**Goal:** Faster start.",
+                "new_string": "**Goal:** Instant start.",
+            }
+        ]
+    },
+)
+res = tg.change_set_result(cs2)
+ed = res["edits"][0]
+final_lines = cs2.snap.read_text(task_rel).splitlines()
+assert ed["start_line"] > unwrapped.splitlines().index("**Goal:** Faster start.") + 1
+assert final_lines[ed["start_line"] - 1] == "**Goal:** Instant start.", (
+    ed,
+    final_lines,
+)
+' "$BIN" "$DISPATCH_REPO"; then
+  echo 'ok 189 - search root dot, -j aliases, MCP edit path trim, ADR validation, and post-format spans'
+else
+  echo 'not ok 189 - search root dot, -j aliases, MCP edit path trim, ADR validation, and post-format spans'
 fi

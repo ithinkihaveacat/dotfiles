@@ -86,7 +86,7 @@ Examples:
 <!-- generated: ../scripts/taskgo create --help -->
 
 ```text
-usage: taskgo create [-h] [--slug SLUG] [--status STATUS] [--problem PROBLEM]
+Usage: taskgo create [-h] [--slug SLUG] [--status STATUS] [--problem PROBLEM]
                      [--cost COST] [--goal GOAL] [--criteria CRITERIA]
                      [--sketch SKETCH] [--constraints CONSTRAINTS]
                      [--outcome OUTCOME] [--findings FINDINGS]
@@ -98,12 +98,12 @@ usage: taskgo create [-h] [--slug SLUG] [--status STATUS] [--problem PROBLEM]
 
 Create a new task in PROJECT.
 
-positional arguments:
+Arguments:
   PROJECT               Project identifier
   TITLE                 Task title
 
-options:
-  -h, --help            show this help message and exit
+Options:
+  -h, --help            Display this help message and exit
   --slug SLUG           Filename mnemonic, max 32 chars (default: derived from
                         TITLE)
   --status, -s STATUS   Initial task state (default: todo)
@@ -153,7 +153,7 @@ than a few words.
 <!-- generated: ../scripts/taskgo update --help -->
 
 ```text
-usage: taskgo update [-h] [--status STATUS] [--expect-status STATE]
+Usage: taskgo update [-h] [--status STATUS] [--expect-status STATE]
                      [--title TITLE] [--slug SLUG] [--problem PROBLEM]
                      [--cost COST] [--goal GOAL] [--criteria CRITERIA]
                      [--sketch SKETCH] [--constraints CONSTRAINTS]
@@ -167,11 +167,11 @@ usage: taskgo update [-h] [--status STATUS] [--expect-status STATE]
 
 Update task fields, status, or headings.
 
-positional arguments:
+Arguments:
   TASK_ID               Task ID or relative path
 
-options:
-  -h, --help            show this help message and exit
+Options:
+  -h, --help            Display this help message and exit
   --status, -s STATUS   New task state
   --expect-status STATE
                         Refuse the update unless the current state is STATE
@@ -225,7 +225,7 @@ Examples:
 <!-- generated: ../scripts/taskgo apply --help -->
 
 ```text
-usage: taskgo apply [-h] [--dry-run] CHANGES.json
+Usage: taskgo apply [-h] [--dry-run] CHANGES.json
 
 Apply a change set to the working tree: the typed operations the MCP
 server's writes use (create, set, add, remove, replace_section,
@@ -235,11 +235,11 @@ validated; the affected projects' STATUS.md blocks are regenerated.
 Nothing is committed. Prints the created records and changed files
 as JSON.
 
-positional arguments:
+Arguments:
   CHANGES.json  Change set file, or - for standard input
 
-options:
-  -h, --help    show this help message and exit
+Options:
+  -h, --help    Display this help message and exit
   --dry-run     Print the diff the change set would make, and write nothing
 
 Example CHANGES.json:
@@ -262,7 +262,7 @@ The change-set format is in references/model.md (Change Sets).
 <!-- generated: ../scripts/taskgo edit --help -->
 
 ```text
-usage: taskgo edit [-h] [--old TEXT] [--new TEXT] [--old-file FILE]
+Usage: taskgo edit [-h] [--old TEXT] [--new TEXT] [--old-file FILE]
                    [--new-file FILE] [--replace-all] [--expected-blob SHA]
                    [--dry-run] [--json]
                    PATH
@@ -276,11 +276,11 @@ replaced and keep their mode; tasks, decisions, and STATUS.md are
 checked and formatted, and the affected STATUS.md blocks are
 regenerated. Files up to 256 KiB. Nothing is committed.
 
-positional arguments:
+Arguments:
   PATH                 Repository-relative path
 
-options:
-  -h, --help           show this help message and exit
+Options:
+  -h, --help           Display this help message and exit
   --old TEXT           Text to replace
   --new TEXT           Replacement text
   --old-file FILE      Read the text to replace from FILE (- for standard
@@ -289,7 +289,7 @@ options:
   --replace-all        Replace every occurrence, not exactly one
   --expected-blob SHA  Refuse unless the file's Git blob SHA is SHA
   --dry-run            Print the diff the edit would make, and write nothing
-  --json               Print the change-set result as JSON
+  --json, -j           Print the change-set result as JSON
 
 Examples:
   taskgo edit proj/PLAN.md --old 'Phase 1' --new 'Phase 2'
@@ -304,15 +304,15 @@ Examples:
 <!-- generated: ../scripts/taskgo list --help -->
 
 ```text
-usage: taskgo list [-h] [--state STATE] [--json] [PROJECT]
+Usage: taskgo list [-h] [--state STATE] [--json] [PROJECT]
 
 List tasks in the repository or a specific project.
 
-positional arguments:
+Arguments:
   PROJECT               Optional project name filter
 
-options:
-  -h, --help            show this help message and exit
+Options:
+  -h, --help            Display this help message and exit
   --state, --status, -s STATE
                         Filter tasks by state (e.g. in-progress, done, or
                         ready)
@@ -326,15 +326,15 @@ options:
 <!-- generated: ../scripts/taskgo info --help -->
 
 ```text
-usage: taskgo info [-h] [--json] PROJECT
+Usage: taskgo info [-h] [--json] PROJECT
 
 Show project metadata from README.md YAML frontmatter.
 
-positional arguments:
+Arguments:
   PROJECT     Target project name
 
-options:
-  -h, --help  show this help message and exit
+Options:
+  -h, --help  Display this help message and exit
   --json, -j  Output machine-readable JSON
 ```
 
@@ -345,15 +345,15 @@ options:
 <!-- generated: ../scripts/taskgo status --help -->
 
 ```text
-usage: taskgo status [-h] [--json] [PROJECT]
+Usage: taskgo status [-h] [--json] [PROJECT]
 
 Show project status or whole-workspace summary.
 
-positional arguments:
+Arguments:
   PROJECT     Optional target project
 
-options:
-  -h, --help  show this help message and exit
+Options:
+  -h, --help  Display this help message and exit
   --json, -j  Output machine-readable JSON
 ```
 
@@ -395,15 +395,15 @@ returns them.
 <!-- generated: ../scripts/taskgo sync --help -->
 
 ```text
-usage: taskgo sync [-h] [PROJECT]
+Usage: taskgo sync [-h] [PROJECT]
 
 Update STATUS.md snapshot for a project or the workspace.
 
-positional arguments:
+Arguments:
   PROJECT     Optional target project
 
-options:
-  -h, --help  show this help message and exit
+Options:
+  -h, --help  Display this help message and exit
 ```
 
 <!-- /generated -->
@@ -439,15 +439,15 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.
 <!-- generated: ../scripts/taskgo doctor --help -->
 
 ```text
-usage: taskgo doctor [-h] [PROJECT]
+Usage: taskgo doctor [-h] [PROJECT]
 
 Run mechanical health checks across the workspace or a project.
 
-positional arguments:
+Arguments:
   PROJECT     Optional target project
 
-options:
-  -h, --help  show this help message and exit
+Options:
+  -h, --help  Display this help message and exit
 ```
 
 <!-- /generated -->
@@ -457,15 +457,15 @@ options:
 <!-- generated: ../scripts/taskgo fix --help -->
 
 ```text
-usage: taskgo fix [-h] [--dry-run] [--no-commit] [PROJECT]
+Usage: taskgo fix [-h] [--dry-run] [--no-commit] [PROJECT]
 
 Auto-heal IDs, statuses, and snapshot drift.
 
-positional arguments:
+Arguments:
   PROJECT      Optional target project
 
-options:
-  -h, --help   show this help message and exit
+Options:
+  -h, --help   Display this help message and exit
   --dry-run    Preview repairs without modifying files
   --no-commit  Apply repairs on disk without committing
 ```
@@ -477,16 +477,16 @@ options:
 <!-- generated: ../scripts/taskgo history --help -->
 
 ```text
-usage: taskgo history [-h] PATH_OR_TASK_ID [FIELD]
+Usage: taskgo history [-h] PATH_OR_TASK_ID [FIELD]
 
 Show frontmatter field history across git revisions.
 
-positional arguments:
+Arguments:
   PATH_OR_TASK_ID  Task ID or relative path
   FIELD            Frontmatter field to track (default: status)
 
-options:
-  -h, --help       show this help message and exit
+Options:
+  -h, --help       Display this help message and exit
 ```
 
 <!-- /generated -->
@@ -496,21 +496,21 @@ options:
 <!-- generated: ../scripts/taskgo read --help -->
 
 ```text
-usage: taskgo read [-h] [--start-line N] [--end-line N] [--at REV] [--json]
+Usage: taskgo read [-h] [--start-line N] [--end-line N] [--at REV] [--json]
                    [-n]
                    PATH
 
 Print lines START..END of a UTF-8 file in the control repository, from the working tree or from commit REV, as the MCP server's read_file tool does. Lines are 1-indexed and inclusive and end at newline. At most 256 KiB is printed, cut after a whole line; when the output is truncated, a note on stderr names the line to continue from. Output is the file's bytes unless --line-numbers prefixes each line with 'N: '.
 
-positional arguments:
+Arguments:
   PATH                Repository-relative path
 
-options:
-  -h, --help          show this help message and exit
+Options:
+  -h, --help          Display this help message and exit
   --start-line N      First line (default 1)
   --end-line N        Last line (default: the last)
   --at REV            Read commit REV instead of the working tree
-  --json              Print path, blob, size, line range, truncated, and
+  --json, -j          Print path, blob, size, line range, truncated, and
                       content as JSON
   -n, --line-numbers  Prefix each line with its number and ': ' (as in '7:
                       text')
@@ -529,17 +529,17 @@ Examples:
 <!-- generated: ../scripts/taskgo search --help -->
 
 ```text
-usage: taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
+Usage: taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
 
-Search tracked files in the control repository with git grep, in the working tree or in commit REV, as the MCP server's search_files tool does. GREP_ARGS are git grep arguments: one bare pattern, or patterns given with -e, and these options: -i -w -v -E -G -F -P -n -I -l -L -c -o -W -p, -A/-B/-C N, -m N, --max-depth N, --and, --or, --not, ( ), --all-match, and their long forms. Other options, abbreviations, and further bare arguments are refused. Pathspecs follow '--'. Output is git grep's, with paths relative to the repository root, lines cut at 1024 bytes, and at most 64 KiB in all. Exits 0 on a match, 1 on none, and 2 on an error; git is stopped after 30 s.
+Search tracked files in the control repository with git grep, in the working tree or in commit REV, as the MCP server's search_files tool does. GREP_ARGS are git grep arguments: one bare pattern, or patterns given with -e, and these Options: -i -w -v -E -G -F -P -n -I -l -L -c -o -W -p, -A/-B/-C N, -m N, --max-depth N, --and, --or, --not, ( ), --all-match, and their long forms. Other options, abbreviations, and further bare arguments are refused. Pathspecs follow '--'. Output is git grep's, with paths relative to the repository root, lines cut at 1024 bytes, and at most 64 KiB in all. Exits 0 on a match, 1 on none, and 2 on an error; git is stopped after 30 s.
 
-positional arguments:
+Arguments:
   GREP_ARGS   git grep pattern and options, then optionally -- PATHS
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help  Display this help message and exit
   --at REV    Search commit REV instead of the working tree
-  --json      Print output, files, and truncated as JSON
+  --json, -j  Print output, files, and truncated as JSON
 
 Examples:
   taskgo search TASK-084C7
@@ -555,19 +555,19 @@ Examples:
 <!-- generated: ../scripts/taskgo checkpoint --help -->
 
 ```text
-usage: taskgo checkpoint [-h] [--all] [--path PATHS] [--body BODY]
+Usage: taskgo checkpoint [-h] [--all] [--path PATHS] [--body BODY]
                          [--ref REFS] [--conv CONV]
                          TASK_ID SUBJECT
 
 Commit an authorized tracker checkpoint for TASK_ID. Nonconforming subjects are rewritten as 'chore(<project>): <subject>' (truncated to 50 characters).
 
-positional arguments:
+Arguments:
   TASK_ID               Target task ID
   SUBJECT               Conventional Commits subject line (rewritten when
                         nonconforming)
 
-options:
-  -h, --help            show this help message and exit
+Options:
+  -h, --help            Display this help message and exit
   --all, -a             Stage all modified/untracked project files
   --path, -p PATHS      Explicit project files to stage
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
@@ -587,16 +587,16 @@ Examples:
 <!-- generated: ../scripts/taskgo commit --help -->
 
 ```text
-usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--conv CONV] SUBJECT
+Usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--conv CONV] SUBJECT
 
 Commit a logical transition with automatic project status synchronization.
 
-positional arguments:
+Arguments:
   SUBJECT               Conventional Commits subject line (rewritten when
                         nonconforming)
 
-options:
-  -h, --help            show this help message and exit
+Options:
+  -h, --help            Display this help message and exit
   --body, -b BODY       Plain-text commit body (hard-wrapped to 72 columns)
   --ref, -r REFS        External references (e.g. artifact@sha)
   --conv, -C, --conversation CONV
@@ -610,15 +610,15 @@ options:
 <!-- generated: ../scripts/taskgo schema --help -->
 
 ```text
-usage: taskgo schema [-h] [--json]
+Usage: taskgo schema [-h] [--json]
 
 Show the record schema: the fields and sections of tasks, decisions,
 and STATUS.md. Validation, doctor, and the create/update set options
 read it; --json is the conformance form for other implementations.
 
-options:
-  -h, --help  show this help message and exit
-  --json      Output as JSON
+Options:
+  -h, --help  Display this help message and exit
+  --json, -j  Output as JSON
 ```
 
 <!-- /generated -->
@@ -628,7 +628,7 @@ options:
 <!-- generated: ../scripts/taskgo mcp --help -->
 
 ```text
-usage: taskgo mcp [-h] [--host HOST] [--port PORT] [--path PATH]
+Usage: taskgo mcp [-h] [--host HOST] [--port PORT] [--path PATH]
                   [--remote REMOTE] [--branch BRANCH] [--no-fetch]
                   [--fetch-ttl SECS] [--auth {access,none}]
                   [--access-team DOMAIN] [--access-aud TAG] [--stdio]
@@ -656,8 +656,8 @@ Environment:
   TASKGO_MCP_ACCESS_TEAM  Default for --access-team
   TASKGO_MCP_ACCESS_AUD   Default for --access-aud
 
-options:
-  -h, --help            show this help message and exit
+Options:
+  -h, --help            Display this help message and exit
   --host HOST           Address to listen on (default 127.0.0.1)
   --port PORT           Port to listen on (default 8789)
   --path PATH           Endpoint path (default /mcp)

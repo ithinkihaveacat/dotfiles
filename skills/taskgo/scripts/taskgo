@@ -1148,9 +1148,11 @@ def require_project(snap: Snapshot, project_name: str) -> str:
     return project_name
 
 
-def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
+def parse_frontmatter(
+    content: str, *, lowercase_keys: bool = True
+) -> tuple[dict[str, Any], str]:
     """Tolerant frontmatter parser using ruamel.yaml. Returns (dict_of_fields, body_without_fm)."""
-    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
     if not match:
         return {}, content
 
@@ -1165,7 +1167,9 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     except Exception:
         data = {}
 
-    return {str(k).lower(): v for k, v in data.items()}, body
+    if lowercase_keys:
+        return {str(k).lower(): v for k, v in data.items()}, body
+    return {str(k): v for k, v in data.items()}, body
 
 
 def parse_frontmatter_for_edit(content: str) -> tuple[Any, str]:
@@ -3987,13 +3991,83 @@ def resolve_ref(cs: ChangeSet, token: str) -> str:
     return cs.refs[token[1:]]
 
 
+def clean_rel_path(
+    path: Any, *, allow_empty: bool = False, strip_slashes: bool = True
+) -> str:
+    """Validated repository-relative POSIX path, or raises TaskgoError.
+
+    Rejects empty components, '.', '..', backslashes, newlines, and a root
+    '.git*' directory. With STRIP_SLASHES, leading and trailing '/' are trimmed
+    first (as CLI and MCP boundary inputs allow); with ALLOW_EMPTY, '' is valid.
+    """
+    if not isinstance(path, str):
+        raise TaskgoError(f"path must be a string, not {path!r}")
+    rel = path.strip()
+    if strip_slashes:
+        rel = rel.strip("/")
+    if not rel:
+        if allow_empty:
+            return ""
+        raise TaskgoError(f"invalid path: {path!r}")
+    parts = rel.split("/")
+    if "\\" in rel or "\n" in rel or any(p in ("", ".", "..") for p in parts):
+        raise TaskgoError(f"invalid path: {path!r}")
+    if parts[0].startswith(".git"):
+        raise TaskgoError(f"invalid path: {path!r}")
+    return rel
+
+
+def resolve_commit(root: Path, rev: str) -> str | None:
+    """Full commit SHA for REV in repository ROOT, or None if not a commit."""
+    res = run_git(
+        ["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+        cwd=root,
+        check=False,
+    )
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def remap_line_span(
+    before_text: str, after_text: str, start: int, end: int
+) -> tuple[int, int]:
+    """Maps 1-indexed inclusive lines [START..END] from BEFORE_TEXT to AFTER_TEXT."""
+    if before_text == after_text:
+        return start, end
+    import difflib
+
+    before_lines = before_text.splitlines()
+    after_lines = after_text.splitlines()
+    a0, a1 = max(0, start - 1), max(start, end)
+    out_start: int | None = None
+    out_end: int | None = None
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, before_lines, after_lines, autojunk=False
+    ).get_opcodes():
+        if i2 <= a0 or i1 >= a1:
+            continue
+        if tag == "equal":
+            s = j1 + max(0, a0 - i1)
+            e = j1 + min(i2, a1) - i1
+        else:
+            s, e = j1, j2
+        if out_start is None:
+            out_start = s
+        out_end = max(s, e)
+    if out_start is None or out_end is None:
+        return start, end
+    s_line = out_start + 1
+    return s_line, max(s_line, out_end)
+
+
 def check_record_path(snap: Snapshot, rel: str) -> str:
     """REL, if it names a record inside a project: no '..', '.', or empty
     component, no backslash, and no symbolic link on the way, so a write
     cannot leave the control repository."""
+    try:
+        clean_rel_path(rel, strip_slashes=False)
+    except TaskgoError:
+        raise ChangeSetError(f"invalid path {rel!r}") from None
     parts = rel.split("/")
-    if "\\" in rel or any(p in ("", ".", "..") for p in parts):
-        raise ChangeSetError(f"invalid path {rel!r}")
     if not is_project(snap, parts[0]):
         raise ChangeSetError(f"{rel}: {parts[0]!r} is not a project")
     if snap.is_link(rel):
@@ -4582,11 +4656,22 @@ def check_record_edit(
             raise ChangeSetError(
                 f"{rel}: the edit changes id from {old_id!r} to {new_id!r}"
             )
-        raw = new_fm.get("status")
-        if canonical_status(raw) is None and raw != old_fm.get("status"):
+    for spec in schema.fields:
+        if spec.shape != "scalar" or spec.name == "id":
+            continue
+        raw = new_fm.get(spec.name)
+        if raw is None or raw == old_fm.get(spec.name):
+            continue
+        if spec.value == "status":
+            if canonical_status(raw) is None:
+                raise ChangeSetError(
+                    f"{rel}: unknown status {raw!r} (expected one of: "
+                    f"{', '.join(VALUE_TYPES['status'].values)})"
+                )
+        elif not field_is_valid(spec, str(raw) if isinstance(raw, date) else raw):
             raise ChangeSetError(
-                f"{rel}: unknown status {raw!r} (expected one of: "
-                f"{', '.join(VALUE_TYPES['status'].values)})"
+                f"{rel}: invalid {spec.name} value {raw!r} "
+                f"(expected {VALUE_TYPES[spec.value].description})"
             )
     for spec in schema.set_fields():
         if spec.name not in ("blocked_by", "supersedes"):
@@ -4606,9 +4691,18 @@ def check_record_edit(
                 raise ChangeSetError(f"{value} cannot be blocked by itself")
             cs.added_refs.append((rel, value))
     old_counts = section_counts(old_body, schema)
-    for name, n in section_counts(new_body, schema).items():
-        if n > 1 and old_counts.get(name, 0) <= 1:
-            raise ChangeSetError(f"{rel}: the edit would make {name} appear {n} times")
+    new_counts = section_counts(new_body, schema)
+    for s_spec in schema.sections:
+        n = new_counts.get(s_spec.name, 0)
+        old_n = old_counts.get(s_spec.name, 0)
+        if n > 1 and old_n <= 1:
+            raise ChangeSetError(
+                f"{rel}: the edit would make {s_spec.name} appear {n} times"
+            )
+        if s_spec.required and n == 0 and old_n > 0:
+            raise ChangeSetError(
+                f"{rel}: the edit removes required section {s_spec.name}"
+            )
 
 
 def apply_edit_file(cs: ChangeSet, change: dict[str, Any]) -> None:
@@ -4704,6 +4798,7 @@ def apply_edit_file(cs: ChangeSet, change: dict[str, Any]) -> None:
             "occurrences_replaced": count if replace_all else 1,
             "start_line": start,
             "end_line": start + new.count("\n"),
+            "_pre_format": after,
         }
     )
 
@@ -4892,20 +4987,28 @@ def change_set_result(cs: ChangeSet) -> dict[str, Any]:
             for e in cs.edits
             if cs.snap.is_file(e["path"])
         }
-        result["edits"] = [
-            {
-                **e,
-                "total_lines": (
-                    count_lines(final[e["path"]]) if e["path"] in final else None
-                ),
-                "blob": (
-                    git_blob_sha(final[e["path"]].encode("utf-8"))
-                    if e["path"] in final
-                    else None
-                ),
-            }
-            for e in cs.edits
-        ]
+        edits_out = []
+        for e in cs.edits:
+            path = e["path"]
+            pre = e.get("_pre_format")
+            s_line, e_line = e["start_line"], e["end_line"]
+            if pre is not None and path in final:
+                s_line, e_line = remap_line_span(pre, final[path], s_line, e_line)
+            edits_out.append(
+                {
+                    "path": path,
+                    "occurrences_replaced": e["occurrences_replaced"],
+                    "start_line": s_line,
+                    "end_line": e_line,
+                    "total_lines": count_lines(final[path]) if path in final else None,
+                    "blob": (
+                        git_blob_sha(final[path].encode("utf-8"))
+                        if path in final
+                        else None
+                    ),
+                }
+            )
+        result["edits"] = edits_out
     return result
 
 
@@ -5595,14 +5698,25 @@ def dispatch_file(snap: GitTreeSnapshot, rel: str) -> dict[str, Any] | None:
 
 def readme_frontmatter(content: str) -> dict[str, Any]:
     """README frontmatter as YAML parses it: no key filtered or renamed."""
-    match = re.search(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.DOTALL)
-    if not match:
-        return {}
-    try:
-        data = YAML(typ="safe").load(match.group(1))
-    except Exception:
-        return {}
-    return _to_jsonable(data) if isinstance(data, dict) else {}
+    return _to_jsonable(parse_frontmatter(content, lowercase_keys=False)[0])
+
+
+def status_projection(snap: Snapshot, project: str) -> dict[str, Any]:
+    """Committed STATUS.md sections, snapshot blocks, and drift flag for PROJECT."""
+    rel = f"{project}/STATUS.md"
+    committed = snap.read_text(rel) if snap.is_file(rel) else None
+    committed_block = status_snapshot_block(committed)
+    live_block = status_snapshot_block(
+        format_markdown(render_status_file(snap, project))
+    )
+    return {
+        "sections": (
+            record_sections(committed, STATUS_SCHEMA) if committed is not None else []
+        ),
+        "committed_block": committed_block,
+        "live_block": live_block,
+        "block_current": committed_block == live_block,
+    }
 
 
 def dispatch_payload(
@@ -5621,27 +5735,13 @@ def dispatch_payload(
     )
     readme = dispatch_file(snap, t.readme) if t.readme else None
     status_rel = f"{project}/STATUS.md"
-    committed = snap.read_text(status_rel) if snap.is_file(status_rel) else None
     status = dispatch_file(snap, status_rel) or {
         "path": status_rel,
         "blob": None,
         "content": None,
         "truncated": False,
     }
-    live_block = status_snapshot_block(
-        format_markdown(render_status_file(snap, project))
-    )
-    status.update(
-        {
-            "sections": (
-                record_sections(committed, STATUS_SCHEMA)
-                if committed is not None
-                else []
-            ),
-            "live_block": live_block,
-            "block_current": status_snapshot_block(committed) == live_block,
-        }
-    )
+    status.update(status_projection(snap, project))
     return {
         "as_of": as_of,
         "project": project,
@@ -5677,14 +5777,12 @@ def cmd_dispatch(target: str, at: str | None = None, as_json: bool = False) -> N
     """Emit instructions dispatching an agent to a project or task."""
     root = get_repo_root()
     rev = at or "HEAD"
-    res = run_git(
-        ["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], cwd=root, check=False
-    )
-    if res.returncode != 0:
+    sha = resolve_commit(root, rev)
+    if sha is None:
         die_scoped(
             f"no commit {at} in the control repository" if at else "HEAD has no commit"
         )
-    snap = GitTreeSnapshot(root, res.stdout.strip())
+    snap = GitTreeSnapshot(root, sha)
 
     name = target.strip()
     if at is None and ID_PATTERN.match(name.upper()):
@@ -6524,21 +6622,15 @@ def cmd_read(
 ) -> None:
     """Print lines of a file in the working tree, or in commit AT."""
     root = get_repo_root()
-    rel = path.strip().strip("/")
-    parts = rel.split("/") if rel else []
-    if not parts or any(p in ("", ".", "..") for p in parts) or "\\" in rel:
-        die_scoped(f"invalid path: {path!r}")
-    if parts[0].startswith(".git"):
+    try:
+        rel = clean_rel_path(path)
+    except TaskgoError:
         die_scoped(f"invalid path: {path!r}")
     if at:
-        res = run_git(
-            ["rev-parse", "--verify", "--quiet", f"{at}^{{commit}}"],
-            cwd=root,
-            check=False,
-        )
-        if res.returncode != 0:
+        sha = resolve_commit(root, at)
+        if sha is None:
             die_scoped(f"no commit {at} in the control repository")
-        snap = GitTreeSnapshot(root, res.stdout.strip())
+        snap = GitTreeSnapshot(root, sha)
         blob = snap.blobs.get(rel)
         if blob is None:
             if snap.is_dir(rel):
@@ -6657,16 +6749,10 @@ class SearchArgs:
 
 
 def search_path(path: Any) -> str:
-    """PATH as a repository-relative pathspec, or a TaskgoError."""
-    if not isinstance(path, str):
-        raise TaskgoError(f"path must be a string, not {path!r}")
-    rel = path.strip().strip("/")
-    parts = rel.split("/") if rel else []
-    if not parts or any(p in ("", ".", "..") for p in parts) or "\\" in rel:
-        raise TaskgoError(f"invalid path: {path!r}")
-    if parts[0].startswith(".git"):
-        raise TaskgoError(f"invalid path: {path!r}")
-    return rel
+    """PATH as a repository-relative pathspec ('' for '.'), or a TaskgoError."""
+    if isinstance(path, str) and path.strip().strip("/") == ".":
+        return ""
+    return clean_rel_path(path)
 
 
 def parse_search_args(
@@ -6691,7 +6777,7 @@ def parse_search_args(
             raise TaskgoError(f"arguments must be strings, not {t!r}")
         if "\0" in t:
             raise TaskgoError(f"arguments must not contain NUL: {t!r}")
-    out = SearchArgs([], [search_path(p) for p in paths])
+    out = SearchArgs([], [sp for p in paths if (sp := search_path(p))])
     bare: list[str] = []
     with_e = 0
     i, n = 0, len(tokens)
@@ -6706,9 +6792,9 @@ def parse_search_args(
     while i < n:
         t = tokens[i]
         if t == "--":
-            out.paths += [search_path(p) for p in tokens[i + 1 :]]
+            out.paths += [sp for p in tokens[i + 1 :] if (sp := search_path(p))]
             break
-        if cli and t == "--json":
+        if cli and t in ("--json", "-j"):
             out.as_json = True
         elif cli and t == "--at":
             out.at = value(t)
@@ -6883,14 +6969,9 @@ def cmd_search(tokens: list[str]) -> None:
         die_scoped(str(e), 2)
     root = get_repo_root()
     if search.at:
-        res = run_git(
-            ["rev-parse", "--verify", "--quiet", f"{search.at}^{{commit}}"],
-            cwd=root,
-            check=False,
-        )
-        if res.returncode != 0:
+        rev = resolve_commit(root, search.at)
+        if rev is None:
             die_scoped(f"no commit {search.at} in the control repository", 2)
-        rev = res.stdout.strip()
         known = set(GitTreeSnapshot(root, rev).blobs)
     else:
         rev = None
@@ -7352,24 +7433,24 @@ class McpReader:
         if at:
             if not isinstance(at, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", at):
                 raise McpToolError(f"'at' is not a commit SHA: {at!r}")
-            res = self.git("rev-parse", "--verify", "--quiet", f"{at}^{{commit}}")
-            if res.returncode != 0 and self.cfg.remote:
+            sha = resolve_commit(self.cfg.repo, at)
+            if sha is None and self.cfg.remote:
                 # Perhaps newer than the last fetch.
                 self.fetch()
-                res = self.git("rev-parse", "--verify", "--quiet", f"{at}^{{commit}}")
-            if res.returncode != 0:
+                sha = resolve_commit(self.cfg.repo, at)
+            if sha is None:
                 raise McpToolError(f"no commit {at} in the control repository")
-            return res.stdout.strip()
+            return sha
         if self.cfg.remote:
             if fetch or not self.fresh():
                 self.fetch()
             ref = self.tracking_ref()
         else:
             ref = f"refs/heads/{self.cfg.branch}"
-        res = self.git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
-        if res.returncode != 0:
+        sha = resolve_commit(self.cfg.repo, ref)
+        if sha is None:
             raise McpToolError(f"{ref} does not exist in the control repository")
-        return res.stdout.strip()
+        return sha
 
     def snapshot(self, sha: str) -> tuple[GitTreeSnapshot, int]:
         """The snapshot of commit SHA and its commit time (Unix seconds)."""
@@ -7501,13 +7582,12 @@ def mcp_project(snap: GitTreeSnapshot, project: Any) -> str:
 
 
 def mcp_path(path: Any) -> str:
-    path = str(path or "").strip().strip("/")
-    parts = path.split("/") if path else []
-    if any(p in ("", ".", "..") for p in parts) or "\\" in path:
-        raise McpToolError(f"invalid path: {path!r}")
-    if parts and parts[0].startswith(".git"):
-        raise McpToolError(f"invalid path: {path!r}")
-    return path
+    try:
+        return clean_rel_path(str(path or ""), allow_empty=True)
+    except TaskgoError:
+        raise McpToolError(
+            f"invalid path: {str(path or '').strip().strip('/')!r}"
+        ) from None
 
 
 def mcp_list_projects(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
@@ -7541,20 +7621,12 @@ def mcp_get_project_status(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     project = mcp_project(r.snap, args.get("project"))
     rel = f"{project}/STATUS.md"
     committed = r.snap.read_text(rel) if r.snap.is_file(rel) else None
-    fresh = format_markdown(render_status_file(r.snap, project))
-    committed_block = status_snapshot_block(committed)
-    fresh_block = status_snapshot_block(fresh)
     return {
         "as_of": r.as_of(),
         "project": project,
         "path": rel,
         "blob": r.snap.blobs.get(rel),
-        "sections": (
-            record_sections(committed, STATUS_SCHEMA) if committed is not None else []
-        ),
-        "committed_block": committed_block,
-        "fresh_block": fresh_block,
-        "block_current": committed_block == fresh_block,
+        **status_projection(r.snap, project),
         "unverified_gates": unverified_gates(get_task_rows(r.snap, project)),
         "content": committed,
     }
@@ -7707,7 +7779,10 @@ def mcp_apply_doc(args: dict[str, Any]) -> dict[str, Any]:
 
 def mcp_edit_doc(args: dict[str, Any]) -> dict[str, Any]:
     keys = ("path", "old_string", "new_string", "replace_all", "expected_blob")
-    return {"changes": [{"op": "edit_file", **{k: args[k] for k in keys if k in args}}]}
+    change = {"op": "edit_file", **{k: args[k] for k in keys if k in args}}
+    if isinstance(change.get("path"), str):
+        change["path"] = change["path"].strip().strip("/")
+    return {"changes": [change]}
 
 
 MCP_WRITE_PROPERTIES = {
@@ -8838,6 +8913,11 @@ class HouseStyleHelpFormatter(argparse.RawDescriptionHelpFormatter):
             rendered.replace("usage:", "Usage:", 1)
             .replace("positional arguments:", "Arguments:", 1)
             .replace("options:", "Options:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
         )
 
 
@@ -8921,7 +9001,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="taskgo",
         description="Maintain a private Git-backed personal project/task control repo.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
         add_help=False,
     )
     parser.add_argument(
@@ -8948,7 +9028,7 @@ def create_parser() -> argparse.ArgumentParser:
         "id",
         help="Allocate a unique task ID",
         description="Allocate a unique task ID.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
 
     # root
@@ -8959,7 +9039,7 @@ def create_parser() -> argparse.ArgumentParser:
             "Print the resolved control repository root (the directory all "
             "commands operate on), after validation."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
 
     # create
@@ -8967,7 +9047,7 @@ def create_parser() -> argparse.ArgumentParser:
         "create",
         help="Create a new task in PROJECT",
         description="Create a new task in PROJECT.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo create my-project "Diagnose intermittent disconnects" --slug disconnects
   taskgo create my-project "Add a read-through cache layer in front of the resolver" \\
@@ -9050,7 +9130,7 @@ than a few words.""",
         "update",
         help="Update task fields, status, or headings",
         description="Update task fields, status, or headings.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo update TASK-3A91F --status in-progress
   taskgo update TASK-3A91F --expect-status todo --status in-progress
@@ -9142,7 +9222,7 @@ than a few words.""",
             "  ]}\n\n"
             "The change-set format is in references/model.md (Change Sets)."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_apply.add_argument(
         "changes_path",
@@ -9174,7 +9254,7 @@ than a few words.""",
   taskgo edit proj/PLAN.md --old 'Phase 1' --new 'Phase 2'
   taskgo edit proj/scripts/run.py --old-file old.txt --new-file new.txt
   taskgo edit proj/decisions/001-x.md --old 'teh' --new 'the' --replace-all""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_edit.add_argument("path", metavar="PATH", help="Repository-relative path")
     p_edit.add_argument("--old", metavar="TEXT", default=None, help="Text to replace")
@@ -9209,6 +9289,7 @@ than a few words.""",
     )
     p_edit.add_argument(
         "--json",
+        "-j",
         dest="as_json",
         action="store_true",
         help="Print the change-set result as JSON",
@@ -9223,16 +9304,18 @@ than a few words.""",
             "and STATUS.md. Validation, doctor, and the create/update set options\n"
             "read it; --json is the conformance form for other implementations."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
-    p_schema.add_argument("--json", action="store_true", help="Output as JSON")
+    p_schema.add_argument(
+        "--json", "-j", dest="json", action="store_true", help="Output as JSON"
+    )
 
     # list
     p_list = subparsers.add_parser(
         "list",
         help="List tasks in the repository or a specific project",
         description="List tasks in the repository or a specific project.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_list.add_argument(
         "project",
@@ -9262,7 +9345,7 @@ than a few words.""",
         "info",
         help="Show project metadata from README.md YAML frontmatter",
         description="Show project metadata from README.md YAML frontmatter.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_info.add_argument(
         "project",
@@ -9282,7 +9365,7 @@ than a few words.""",
         "status",
         help="Show project status or whole-workspace summary",
         description="Show project status or whole-workspace summary.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_status.add_argument(
         "project",
@@ -9349,7 +9432,7 @@ returns them.""",
         "sync",
         help="Update STATUS.md snapshot for a project or the workspace",
         description="Update STATUS.md snapshot for a project or the workspace.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_sync.add_argument(
         "project",
@@ -9399,7 +9482,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         "doctor",
         help="Run mechanical health checks across the workspace or a project",
         description="Run mechanical health checks across the workspace or a project.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_doctor.add_argument(
         "project",
@@ -9414,7 +9497,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         "fix",
         help="Auto-heal IDs, statuses, and snapshot drift",
         description="Auto-heal IDs, statuses, and snapshot drift.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_fix.add_argument(
         "project",
@@ -9463,7 +9546,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
               TASKGO_MCP_ACCESS_TEAM  Default for --access-team
               TASKGO_MCP_ACCESS_AUD   Default for --access-aud"""
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_mcp.add_argument(
         "--host", default="127.0.0.1", help="Address to listen on (default 127.0.0.1)"
@@ -9522,7 +9605,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         "history",
         help="Show frontmatter field history across git revisions",
         description="Show frontmatter field history across git revisions.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_history.add_argument(
         "query", metavar="PATH_OR_TASK_ID", help="Task ID or relative path"
@@ -9548,7 +9631,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             " stderr names the line to continue from. Output is the file's"
             " bytes unless --line-numbers prefixes each line with 'N: '."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo read proj/PLAN.md
   taskgo read proj/logs/logcat.txt --start-line 2001 --end-line 2400
@@ -9578,6 +9661,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     )
     p_read.add_argument(
         "--json",
+        "-j",
         dest="as_json",
         action="store_true",
         help="Print path, blob, size, line range, truncated, and content as JSON",
@@ -9610,7 +9694,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             f" on none, and 2 on an error; git is stopped after"
             f" {SEARCH_TIMEOUT} s."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo search TASK-084C7
   taskgo search -i -C2 'partner name' -- meta/ '*.md'
@@ -9625,6 +9709,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
     )
     p_search.add_argument(
         "--json",
+        "-j",
         dest="as_json",
         action="store_true",
         help="Print output, files, and truncated as JSON",
@@ -9645,7 +9730,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             " subjects are rewritten as 'chore(<project>): <subject>'"
             " (truncated to 50 characters)."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
         epilog="""Examples:
   taskgo checkpoint TASK-3A91F "chore(proj): start diagnosis" --all
   taskgo checkpoint TASK-3A91F "docs(proj): update task" --path proj/tasks/TASK-3A91F-slug.md """,
@@ -9699,7 +9784,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         "commit",
         help="Commit a logical transition with automatic project status synchronization",
         description="Commit a logical transition with automatic project status synchronization.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=HouseStyleHelpFormatter,
     )
     p_commit.add_argument(
         "subject",
