@@ -73,7 +73,7 @@ complete -f -c skill -n '__fish_seen_subcommand_from show info' -a '(__fish_skil
 complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_catalog)'
 complete -c skill -n '__fish_seen_subcommand_from add' -a '(__fish_skill_source_skills)' -d Skill
 complete -c skill -f -n '__fish_seen_subcommand_from add' -l defaults -d 'Link every default through the defaults directory'
-complete -c skill -f -n '__fish_seen_subcommand_from add' -s q -l quiet -d 'Report only errors'
+complete -c skill -f -n '__fish_seen_subcommand_from add' -s q -l quiet -d 'Report only errors and warnings'
 
 # remove (and rm)
 complete -c skill -f -n '__fish_seen_subcommand_from remove rm' -a '(__fish_skill_managed_skills)' -d 'Managed skill'

@@ -49,8 +49,10 @@ because agy started from Claude inherits a matching Claude binding.
 Removing a default (`skill --scope defaults remove NAME`) deletes its one link
 in the defaults directory, so every link to it breaks at once. Agents ignore a
 broken link, and the next `add --defaults` removes it. A skill added by hand
-points straight at its source, so it survives the demotion. Renaming a default
-is a remove plus an add.
+points straight at its source, so it survives the demotion; if its source goes
+missing, `add --defaults` keeps the broken link and warns, because nothing would
+bring it back once the source returns. Renaming a default is a remove plus an
+add.
 
 Every operation is safe to repeat: adding a default is idempotent, removing one
 touches only the defaults directory, and seeding never replaces an existing
@@ -121,8 +123,10 @@ Every `add`, `remove` and `clean` rewrites the records from disk
 
 ## Pruning
 
-Broken-link cleanup is the only pruning, and only `add --defaults` does it.
-Links tracked by version control are never removed. `doctor` is read-only: it
-reports broken links, unmanaged files in the skill folders and records that do
-not match the links, and never checks for expected skills. `doctor` fails on
-warnings too; the check at the end of `add --defaults` fails only on errors.
+Broken-link cleanup is the only pruning, and only `add --defaults` does it, for
+links to defaults only. Links tracked by version control are never removed, and
+a broken link added by name is kept (a `doctor` warning, which does not fail a
+launch). `doctor` is read-only: it reports broken links, unmanaged files in the
+skill folders and records that do not match the links, and never checks for
+expected skills. `doctor` fails on warnings too; the check at the end of
+`add --defaults` fails only on errors.

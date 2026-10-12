@@ -1595,11 +1595,14 @@ def cmd_add(specs):
 def cmd_add_defaults(quiet=False):
     """Link every default into the scope, through the defaults directory.
 
-    Untracked broken links are removed first: a demoted or renamed default
-    leaves its links dangling, and this is where they get cleaned up. A name
-    that already has a link keeps it, so a skill added by hand is never
-    replaced. Ends with the error checks of 'doctor', so an agent wrapper can
-    seed and check its workspace in one call.
+    Untracked broken links to a default are removed first: a demoted or
+    renamed default leaves its links dangling, and this is where they get
+    cleaned up. A broken link added by name is kept with a warning: its source
+    may only be unreachable for now (an unmounted network path, a pruned
+    cache), and nothing would bring it back. A name that already has a link
+    keeps it, so a skill added by hand is never replaced. Ends with the error
+    checks of 'doctor', so an agent wrapper can seed and check its workspace
+    in one call.
     """
     if _SCOPE in ("user", "defaults"):
         cmderr("add", f"--defaults does not apply to --scope {_SCOPE}", code=2)
@@ -1617,9 +1620,17 @@ def cmd_add_defaults(quiet=False):
     changes = []
     entries, _ = scan_links(ws)
     for e in entries:
-        if e.kind == "dangling" and not e.tracked:
+        if e.kind != "dangling" or e.tracked:
+            continue
+        if e.origin == "default":
             e.path.unlink(missing_ok=True)
             changes.append(f"removed broken link {rel_to(ws.root, e.path)}")
+        else:
+            print(
+                f"skill: warning: kept broken link {rel_to(ws.root, e.path)} "
+                f"(its source is missing; 'skill remove {e.link_name}' drops it)",
+                file=sys.stderr,
+            )
 
     defaults_dir = get_defaults_dir()
     defaults = []
@@ -2591,21 +2602,40 @@ def cmd_doctor(
     # Check 4: Symlink Health
     # A VCS-tracked broken link is checked-in content, not something 'skill'
     # made, so nothing here removes it; the fix names the repository instead.
-    stray_dangling = [e.path for e in entries if e.kind == "dangling" and not e.tracked]
+    # A broken link added by name is only a warning: its source may be
+    # unreachable for now (an unmounted network path, a pruned cache), and
+    # 'add --defaults' keeps it, so it must not block an agent launch. In the
+    # defaults scope every link is a default.
+    stray_dangling = [
+        e.path
+        for e in entries
+        if e.kind == "dangling" and not e.tracked and e.origin == "default"
+    ]
+    added_dangling = [
+        e.path
+        for e in entries
+        if e.kind == "dangling" and not e.tracked and e.origin != "default"
+    ]
     tracked_dangling = [e.path for e in entries if e.kind == "dangling" and e.tracked]
-    if stray_dangling or tracked_dangling:
+    if stray_dangling or tracked_dangling or added_dangling:
         dangling_details = []
         if stray_dangling:
             dangling_details.append("Broken links:")
             dangling_details += [f"  - {rel(item)}" for item in stray_dangling]
+        if added_dangling:
+            dangling_details.append("Broken links to skills added by name:")
+            dangling_details += [f"  - {rel(item)}" for item in added_dangling]
         if tracked_dangling:
             dangling_details.append("Broken links tracked by version control:")
             dangling_details += [f"  - {rel(item)}" for item in tracked_dangling]
+        total = len(stray_dangling) + len(tracked_dangling) + len(added_dangling)
         checks.append(
             {
                 "name": "Symlink Health",
-                "status": "ERROR",
-                "summary": f"Found {len(stray_dangling) + len(tracked_dangling)} broken link(s)",
+                "status": (
+                    "ERROR" if stray_dangling or tracked_dangling else "WARNING"
+                ),
+                "summary": f"Found {total} broken link(s)",
                 "details": dangling_details,
             }
         )
@@ -2896,6 +2926,15 @@ def cmd_doctor(
                     f"  skill {scope_opt}remove "
                     + " ".join(sorted({p.name for p in stray_dangling}))
                 )
+            if added_dangling:
+                check["details"].append(
+                    "To resolve: restore the missing sources (e.g. remount or "
+                    "'skill update NAME'), or remove the links:"
+                )
+                check["details"].append(
+                    f"  skill {scope_opt}remove "
+                    + " ".join(sorted({p.name for p in added_dangling}))
+                )
             if tracked_dangling:
                 check["details"].append(
                     "To resolve: 'skill' never removes a tracked link -- fix "
@@ -3023,9 +3062,10 @@ Commands:
                   plugin-provided catalog entry (replaces a default's link)
   add -           Read skill names from stdin
   add --defaults  Link every default through the defaults directory, keeping
-                  existing links; remove broken links; then fail if 'doctor'
-                  finds errors (workspace and session scopes)
-                  -q, --quiet: report only errors
+                  existing links; remove broken links to defaults (broken
+                  links added by name are kept, with a warning); then fail if
+                  'doctor' finds errors (workspace and session scopes)
+                  -q, --quiet: report only errors and warnings
   remove NAME...  Remove a skill's links and exclude entries (alias: rm)
   list [--json]   List linked skills, each 'default' or 'added', in the scope
   clean           Remove all skill links in the scope (and git excludes)

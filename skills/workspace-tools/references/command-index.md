@@ -117,9 +117,10 @@ Commands:
                   plugin-provided catalog entry (replaces a default's link)
   add -           Read skill names from stdin
   add --defaults  Link every default through the defaults directory, keeping
-                  existing links; remove broken links; then fail if 'doctor'
-                  finds errors (workspace and session scopes)
-                  -q, --quiet: report only errors
+                  existing links; remove broken links to defaults (broken
+                  links added by name are kept, with a warning); then fail if
+                  'doctor' finds errors (workspace and session scopes)
+                  -q, --quiet: report only errors and warnings
   remove NAME...  Remove a skill's links and exclude entries (alias: rm)
   list [--json]   List linked skills, each 'default' or 'added', in the scope
   clean           Remove all skill links in the scope (and git excludes)

@@ -136,8 +136,11 @@ skill <command> [arguments]
 - **`add SPEC...`**: Link a skill (a local path or a plugin-provided catalog
   entry) straight to its source, replacing a default's link of the same name.
 - **`add --defaults`**: Link every default through the defaults directory,
-  keeping any existing link, and remove broken links; then fail if `doctor`
-  would report an error. `-q`/`--quiet` reports only errors.
+  keeping any existing link, and remove broken links to defaults; then fail if
+  `doctor` would report an error. A broken link to a skill added by name is kept
+  with a warning, since its source may only be unreachable for now (an unmounted
+  network path, a pruned cache). `-q`/`--quiet` reports only errors and
+  warnings.
 - **`remove NAME...`** (alias: **`rm`**): Remove a skill's links.
 - **`list [--json]`**: List the linked skills, each `default` or `added`.
 - **`bundle [SPEC...]`**: Package skills into an archive (`.zip`, `.tar.gz`) or
@@ -590,7 +593,7 @@ permission list
 ```bash
 skill doctor          # broken links and exclude drift (read-only)
 permission doctor     # missing pre-approvals (read-only)
-skill add --defaults  # link the defaults and remove broken links
+skill add --defaults  # link the defaults and remove broken default links
 ```
 
 ### Cleaning Up
