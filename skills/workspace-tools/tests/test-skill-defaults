@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+#
+# The defaults scope and 'skill add --defaults'.
+#
+# Covers link provenance (a default links through the defaults directory, a
+# skill added by name links straight at its source), seeding a workspace and a
+# session, demotion (removing a default breaks its links and the next seeding
+# clears them), the error check that ends a seeding, and the launch paths that
+# call it: the fish agent wrappers, etc/skill/defaults.sh and the clone hook.
+
+set -euo pipefail
+
+# shellcheck source=skills/workspace-tools/tests/common.sh disable=SC1091
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+skill_test_init
+
+echo "1..18"
+
+DEFAULTS_DIR="${XDG_STATE_HOME}/skill/defaults"
+REPO_DIR="${TMPDIR}/repo"
+mkdir -p "$REPO_DIR"
+git -C "$REPO_DIR" init -q
+cd "$REPO_DIR"
+
+# list_field JSON NAME FIELD -- one field of a 'skill list --json' entry.
+list_field() {
+  json_get "$1" "next((s['$3'] for s in d if s['name'] == '$2'), '<missing>')"
+}
+
+# Test 1: the defaults scope links straight at the source, under XDG_STATE_HOME
+if "${SCRIPT}" --scope defaults add coding-standards test-skill >/dev/null 2>&1 &&
+  [ "$(readlink "${DEFAULTS_DIR}/coding-standards")" = "${SKILL_SOURCE_DIRS}/coding-standards" ] &&
+  out=$("${SCRIPT}" --scope defaults list --json 2>/dev/null) &&
+  [ "$(json_get "$out" 'sorted(s["name"] for s in d)')" = "coding-standards test-skill" ] &&
+  [ "$(json_get "$out" 'sorted({s["origin"] for s in d})')" = "default" ]; then
+  echo "ok 1 - [Defaults] the defaults scope links each default straight at its source"
+else
+  echo "not ok 1 - [Defaults] defaults scope add or list failed: ${out:-}"
+fi
+
+# Test 2: add --defaults links every default through the defaults directory,
+# into each destination, and records them in the exclude block
+seed_out=$("${SCRIPT}" add --defaults 2>&1) || true
+out=$("${SCRIPT}" list --json 2>/dev/null)
+if [ "$(readlink .claude/skills/coding-standards)" = "${DEFAULTS_DIR}/coding-standards" ] &&
+  [ "$(readlink .agents/skills/test-skill)" = "${DEFAULTS_DIR}/test-skill" ] &&
+  [ "$(list_field "$out" coding-standards origin)" = "default" ] &&
+  [ "$(list_field "$out" coding-standards path)" = "${SKILL_SOURCE_DIRS}/coding-standards" ] &&
+  [[ "$seed_out" == *"added coding-standards (default)"* ]] &&
+  grep -q '^/.claude/skills/test-skill$' .git/info/exclude &&
+  [ -z "$(git status --porcelain)" ]; then
+  echo "ok 2 - [Seed] add --defaults links each default through the defaults directory"
+else
+  echo "not ok 2 - [Seed] seeding failed: $seed_out / $out"
+fi
+
+# Test 3: seeding again changes nothing and says nothing
+again_rc=0
+again_out=$("${SCRIPT}" add --defaults 2>&1) || again_rc=$?
+if [ "$again_rc" -eq 0 ] && [ -z "$again_out" ]; then
+  echo "ok 3 - [Seed] a repeated add --defaults is a silent no-op"
+else
+  echo "not ok 3 - [Seed] repeat seeding not silent (rc=$again_rc): $again_out"
+fi
+
+# Test 4: a plain add replaces a default's link with a direct one
+"${SCRIPT}" add test-skill >/dev/null 2>&1
+out=$("${SCRIPT}" list --json 2>/dev/null)
+if [ "$(readlink .claude/skills/test-skill)" = "${SKILL_SOURCE_DIRS}/test-skill" ] &&
+  [ "$(list_field "$out" test-skill origin)" = "added" ]; then
+  echo "ok 4 - [Provenance] a plain add replaces a default's link with a direct one"
+else
+  echo "not ok 4 - [Provenance] plain add kept the indirect link: $out"
+fi
+
+# Test 5: seeding never replaces a direct link
+"${SCRIPT}" add --defaults >/dev/null 2>&1
+if [ "$(readlink .claude/skills/test-skill)" = "${SKILL_SOURCE_DIRS}/test-skill" ]; then
+  echo "ok 5 - [Seed] add --defaults keeps a skill added by hand"
+else
+  echo "not ok 5 - [Seed] add --defaults replaced a direct link"
+fi
+
+# Test 6: demoting a default breaks its links (git stays clean, doctor fails);
+# the next seeding removes them, and a skill added by hand survives
+"${SCRIPT}" --scope defaults remove coding-standards test-skill >/dev/null 2>&1
+broken_status=$(git status --porcelain)
+dj=$(doctor_json)
+reseed_out=$("${SCRIPT}" add --defaults 2>&1) || true
+if [ -L .claude/skills/test-skill ] && [ -e .claude/skills/test-skill ] &&
+  [ -z "$broken_status" ] &&
+  [ "$(check_status "$dj" "Symlink Health")" = "ERROR" ] &&
+  [ ! -L .claude/skills/coding-standards ] && [ ! -L .agents/skills/coding-standards ] &&
+  [[ "$reseed_out" == *"removed broken link .claude/skills/coding-standards"* ]] &&
+  ! grep -q 'coding-standards' .git/info/exclude &&
+  [ "$(json_get "$(doctor_json)" 'd["healthy"]')" = "true" ]; then
+  echo "ok 6 - [Demote] a demoted default's links break and the next seeding clears them"
+else
+  echo "not ok 6 - [Demote] demotion handling wrong: $reseed_out"
+fi
+
+# Test 7: a renamed default (remove plus add) moves on the next seeding
+"${SCRIPT}" --scope defaults add emumanager >/dev/null 2>&1
+"${SCRIPT}" add --defaults >/dev/null 2>&1
+if [ "$(readlink .claude/skills/emumanager)" = "${DEFAULTS_DIR}/emumanager" ]; then
+  echo "ok 7 - [Seed] a new default reaches the workspace at the next seeding"
+else
+  echo "not ok 7 - [Seed] new default not linked"
+fi
+cd "$TMPDIR"
+
+# Test 8: seeding leaves a tracked broken link alone and fails, naming doctor
+TRACKED_DIR="${TMPDIR}/tracked"
+mkdir -p "${TRACKED_DIR}/.claude/skills"
+git -C "$TRACKED_DIR" init -q
+ln -s /nonexistent/target "${TRACKED_DIR}/.claude/skills/checked-in"
+git -C "$TRACKED_DIR" add .claude/skills/checked-in
+cd "$TRACKED_DIR"
+tracked_rc=0
+tracked_out=$("${SCRIPT}" add --quiet --defaults 2>&1) || tracked_rc=$?
+if [ "$tracked_rc" -eq 1 ] && [ -L .claude/skills/checked-in ] &&
+  [[ "$tracked_out" == *"[FAIL] Symlink Health"* ]] &&
+  [[ "$tracked_out" == *"see 'skill doctor'"* ]] &&
+  [[ "$tracked_out" != *"added "* ]]; then
+  echo "ok 8 - [Check] seeding keeps a tracked broken link and fails, naming doctor"
+else
+  echo "not ok 8 - [Check] tracked broken link mishandled (rc=$tracked_rc): $tracked_out"
+fi
+cd "$TMPDIR"
+
+# Test 9: usage errors -- --defaults with names, or in the user/defaults scope
+names_rc=0
+"${SCRIPT}" -C "$REPO_DIR" add --defaults adb >/dev/null 2>&1 || names_rc=$?
+user_rc=0
+"${SCRIPT}" --scope user add --defaults >/dev/null 2>&1 || user_rc=$?
+self_rc=0
+"${SCRIPT}" --scope defaults add --defaults >/dev/null 2>&1 || self_rc=$?
+if [ "$names_rc" -eq 2 ] && [ "$user_rc" -eq 2 ] && [ "$self_rc" -eq 2 ]; then
+  echo "ok 9 - [CLI] --defaults with names or in the user/defaults scope is a usage error"
+else
+  echo "not ok 9 - [CLI] usage errors wrong (names=$names_rc user=$user_rc self=$self_rc)"
+fi
+
+# Test 10: in the home directory, seeding is a no-op and the workspace scope
+# refuses (its skill folders are the user scope)
+home_rc=0
+(cd "$HOME" && "${SCRIPT}" add --defaults >/dev/null 2>&1) || home_rc=$?
+list_rc=0
+list_err=$(cd "$HOME" && "${SCRIPT}" list 2>&1) || list_rc=$?
+if [ "$home_rc" -eq 0 ] && [ ! -e "$HOME/.claude/skills" ] && [ ! -e "$HOME/.agents" ] &&
+  [ "$list_rc" -eq 1 ] && [[ "$list_err" == *"--scope user"* ]]; then
+  echo "ok 10 - [Home] seeding skips the home directory; workspace commands point at --scope user"
+else
+  echo "not ok 10 - [Home] home directory handling wrong (seed=$home_rc list=$list_rc): $list_err"
+fi
+
+# Test 11: SKILL_DEFAULTS_DIR names the defaults directory outright
+ALT_DEFAULTS="${TMPDIR}/alt-defaults"
+if SKILL_DEFAULTS_DIR="$ALT_DEFAULTS" "${SCRIPT}" --scope defaults add test-skill >/dev/null 2>&1 &&
+  [ -L "${ALT_DEFAULTS}/test-skill" ] && [ ! -e "${DEFAULTS_DIR}/test-skill" ]; then
+  echo "ok 11 - [Defaults] SKILL_DEFAULTS_DIR overrides the defaults directory"
+else
+  echo "not ok 11 - [Defaults] SKILL_DEFAULTS_DIR ignored"
+fi
+
+# Test 12: the claude wrapper's seeding call (no CLAUDE_CODE_SESSION_ID yet)
+# fills the session directory, bound or not; inside the session, a mismatched
+# ID is still refused
+SESSION_DIR="${TMPDIR}/session"
+mkdir -p "$SESSION_DIR"
+launcher_rc=0
+AGENT_SESSION_DIR="$SESSION_DIR" "${SCRIPT}" --scope session add --quiet --defaults \
+  >/dev/null 2>&1 || launcher_rc=$?
+nested_rc=0
+AGENT_SESSION_DIR="$SESSION_DIR" AGENT_SESSION_ID=sess-1 CLAUDE_CODE_SESSION_ID=other \
+  "${SCRIPT}" --scope session list >/dev/null 2>&1 || nested_rc=$?
+if [ "$launcher_rc" -eq 0 ] && [ "$nested_rc" -eq 1 ] &&
+  [ "$(readlink "${SESSION_DIR}/.claude/skills/emumanager")" = "${DEFAULTS_DIR}/emumanager" ] &&
+  [ ! -e "${SESSION_DIR}/.agents" ]; then
+  echo "ok 12 - [Session] the launcher seeds the session; a nested agent is still refused"
+else
+  echo "not ok 12 - [Session] launcher seeding wrong (launcher=$launcher_rc nested=$nested_rc)"
+fi
+
+# Test 13: seeding an Antigravity session registers the defaults in skills.json
+BRAIN_DIR="${HOME}/.gemini/antigravity/brain/conv-defaults"
+mkdir -p "${BRAIN_DIR}/.system_generated"
+if "${SCRIPT}" --scope session -C "$BRAIN_DIR" add --defaults >/dev/null 2>&1 &&
+  [ "$(readlink "${BRAIN_DIR}/scratch/skills/emumanager")" = "${DEFAULTS_DIR}/emumanager" ] &&
+  grep -q '"emumanager"' "${BRAIN_DIR}/.agents/skills.json"; then
+  echo "ok 13 - [Agy] seeding a brain directory registers the defaults in skills.json"
+else
+  echo "not ok 13 - [Agy] brain seeding failed"
+fi
+
+# Test 14: etc/skill/defaults.sh only adds defaults, in one quiet call
+STUB_BIN="${TMPDIR}/stub-bin"
+mkdir -p "$STUB_BIN"
+cat >"${STUB_BIN}/skill" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${TMPDIR}/skill-calls"
+EOF
+chmod +x "${STUB_BIN}/skill"
+PATH="${STUB_BIN}:$PATH" sh "${REPO_ROOT}/etc/skill/defaults.sh"
+calls=$(cat "${TMPDIR}/skill-calls")
+if [ "$(wc -l <"${TMPDIR}/skill-calls")" -eq 1 ] &&
+  [[ "$calls" == "--scope defaults add --quiet "*"workspace-tools"* ]]; then
+  echo "ok 14 - [Install] etc/skill/defaults.sh adds the defaults in one call"
+else
+  echo "not ok 14 - [Install] defaults.sh made unexpected calls: $calls"
+fi
+
+# Test 15: the clone hook seeds the defaults on a fresh clone only
+rm -f "${TMPDIR}/skill-calls"
+for tool in hook permission; do
+  printf '#!/bin/sh\nexit 0\n' >"${STUB_BIN}/${tool}"
+  chmod +x "${STUB_BIN}/${tool}"
+done
+HOOK="${REPO_ROOT}/etc/git/templates/global/hooks/post-checkout"
+zero=0000000000000000000000000000000000000000
+PATH="${STUB_BIN}:$PATH" sh "$HOOK" 1111111111111111111111111111111111111111 abc 1
+not_fresh=$(cat "${TMPDIR}/skill-calls" 2>/dev/null || true)
+PATH="${STUB_BIN}:$PATH" sh "$HOOK" "$zero" abc 1
+if [ -z "$not_fresh" ] && [ "$(cat "${TMPDIR}/skill-calls")" = "add --defaults" ]; then
+  echo "ok 15 - [Clone hook] a fresh clone runs 'skill add --defaults'"
+else
+  echo "not ok 15 - [Clone hook] unexpected skill calls: $(cat "${TMPDIR}/skill-calls" 2>/dev/null)"
+fi
+rm -rf "$STUB_BIN"
+
+# ==============================================================================
+# fish wrappers (skipped without fish)
+# ==============================================================================
+if ! command -v fish >/dev/null 2>&1; then
+  echo "ok 16 - [Wrapper] _agent_preflight seeds the workspace # skip fish not available"
+  echo "ok 17 - [Wrapper] AGENT_PREFLIGHT_SKIP bypasses the check # skip fish not available"
+  echo "ok 18 - [Wrapper] claude seeds a fresh session directory # skip fish not available"
+  exit 0
+fi
+
+WRAP_BIN="${TMPDIR}/wrap-bin"
+mkdir -p "$WRAP_BIN"
+ln -s "$SCRIPT" "${WRAP_BIN}/skill"
+cat >"${WRAP_BIN}/claude" <<'EOF'
+#!/usr/bin/env bash
+ls "$AGENT_SESSION_DIR/.claude/skills"
+echo "id=$AGENT_SESSION_ID outer=${CLAUDE_CODE_SESSION_ID:-}"
+EOF
+chmod +x "${WRAP_BIN}/claude"
+FISH_FUNCS="${REPO_ROOT}/fish/functions"
+wrap() {
+  PATH="${WRAP_BIN}:$PATH" fish --no-config -c \
+    "set fish_function_path '${FISH_FUNCS}' \$fish_function_path; $1"
+}
+
+# Test 16: _agent_preflight seeds the workspace silently, and fails (with the
+# launch-anyway hint) when the workspace has errors
+WRAP_REPO="${TMPDIR}/wrap-repo"
+mkdir -p "$WRAP_REPO"
+git -C "$WRAP_REPO" init -q
+cd "$WRAP_REPO"
+pre_rc=0
+pre_out=$(wrap "_agent_preflight codex" 2>&1) || pre_rc=$?
+mkdir -p .agents/skills/junk
+fail_rc=0
+fail_out=$(wrap "_agent_preflight codex" 2>&1) || fail_rc=$?
+if [ "$pre_rc" -eq 0 ] && [ -z "$pre_out" ] && [ -L .claude/skills/emumanager ] &&
+  [ "$fail_rc" -eq 1 ] &&
+  [[ "$fail_out" == *"to launch anyway: AGENT_PREFLIGHT_SKIP=1 codex"* ]]; then
+  echo "ok 16 - [Wrapper] _agent_preflight seeds the workspace and fails on errors"
+else
+  echo "not ok 16 - [Wrapper] _agent_preflight wrong (ok=$pre_rc fail=$fail_rc): $pre_out / $fail_out"
+fi
+
+# Test 17: AGENT_PREFLIGHT_SKIP bypasses the check
+skip_rc=0
+skip_out=$(AGENT_PREFLIGHT_SKIP=1 wrap "_agent_preflight codex" 2>&1) || skip_rc=$?
+if [ "$skip_rc" -eq 0 ] && [[ "$skip_out" == *"skill check skipped"* ]]; then
+  echo "ok 17 - [Wrapper] AGENT_PREFLIGHT_SKIP bypasses the check"
+else
+  echo "not ok 17 - [Wrapper] skip not honored (rc=$skip_rc): $skip_out"
+fi
+cd "$TMPDIR"
+
+# Test 18: the claude wrapper seeds a fresh session directory (hiding an outer
+# agent's session ID from the seeding call only) and leaves the workspace alone
+CLAUDE_REPO="${TMPDIR}/claude-repo"
+mkdir -p "$CLAUDE_REPO"
+git -C "$CLAUDE_REPO" init -q
+cd "$CLAUDE_REPO"
+claude_rc=0
+claude_out=$(CLAUDE_CODE_SESSION_ID=outer-session wrap "claude -p hi" 2>&1) || claude_rc=$?
+if [ "$claude_rc" -eq 0 ] && [[ "$claude_out" == *"emumanager"* ]] &&
+  [[ "$claude_out" == *"outer=outer-session"* ]] &&
+  [[ "$claude_out" =~ id=[0-9a-f-]{36} ]] &&
+  [ ! -e .claude ]; then
+  echo "ok 18 - [Wrapper] claude seeds a fresh session directory"
+else
+  echo "not ok 18 - [Wrapper] claude wrapper seeding failed (rc=$claude_rc): $claude_out"
+fi
+cd "$TMPDIR"

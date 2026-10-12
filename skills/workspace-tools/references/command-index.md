@@ -65,7 +65,7 @@ Environment:
                         (alias: AGENT_HOOKS_DIR)
   AGENT_REQUIRED_HOOKS  Whitespace-separated profiles 'apply' installs
                         (default: agent). Profiles it does not name are
-                        removed, the way 'skill apply' synchronizes skills.
+                        removed.
   AGENT_OFFLINE         Set to 1 to fail rather than fetch a profile whose
                         hook is downloaded (gerrit).
 
@@ -97,7 +97,7 @@ The block below is `scripts/skill --help`, kept in sync by
 <!-- generated: ../scripts/skill --help -->
 
 ```text
-Usage: skill [-C DIR] [--scope SCOPE] [--from SOURCE] <command> [skill...]
+Usage: skill [-C DIR] [--scope SCOPE] <command> [skill...]
 
 Manage agent skills as untracked symlinks, in the directories each installed
 agent reads for the chosen scope:
@@ -106,19 +106,24 @@ agent reads for the chosen scope:
              anchor, plus a block in .git/info/exclude (the default)
   session    the calling agent's own session: $AGENT_SESSION_DIR/.claude/skills
              (Claude) or brain/<id>/scratch/skills + .agents/skills.json (Agy)
+  defaults   the default skills, which no agent reads; 'add --defaults' links
+             each one into a workspace or session through this directory
 
 Commands:
-  apply [SPEC...] Synchronize workspace symlinks to match desired skills
-  bundle [SPEC...] Package skills into an archive or directory without installing
-  add SPEC...     Add a skill: a local path or a plugin-provided catalog entry
+  add SPEC...     Link a skill straight to its source: a local path or a
+                  plugin-provided catalog entry (replaces a default's link)
   add -           Read skill names from stdin
-  remove NAME...  Remove a skill and clean its exclude entry (alias: rm)
-  list [--json]   List active skills on disk in the chosen scope
-  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every active
-                  skill, --catalog to refresh the whole metadata index
-  clean           Remove all skill links in the chosen scope (and git excludes)
-  doctor [--json] Diagnose mismatch between desired and on-disk skills (read-only)
-  preflight LABEL Verify required skills and workspace health before agent launch
+  add --defaults  Link every default through the defaults directory, keeping
+                  existing links; remove broken links; then fail if 'doctor'
+                  finds errors (workspace and session scopes)
+                  -q, --quiet: report only errors
+  remove NAME...  Remove a skill's links and exclude entries (alias: rm)
+  list [--json]   List linked skills, each 'default' or 'added', in the scope
+  clean           Remove all skill links in the scope (and git excludes)
+  doctor [--json] Check the scope's links and the catalog (read-only)
+  bundle [SPEC...] Package skills into an archive or directory without installing
+  update SPEC...  Re-fetch a plugin-provided catalog entry; --all for every
+                  entry, --catalog to refresh the whole metadata index
   catalog [--json] List plugin-provided skills and sources; --json adds each
                   skill's description and structural profile (file counts and
                   sizes for scripts/, references/ and tests/)
@@ -127,12 +132,9 @@ Commands:
 
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory
-  --scope SCOPE        Where to install: 'user', 'workspace' (default) or
-                       'session'; only add, remove, list, doctor and clean take
-                       'user' or 'session'
-  --from SOURCE        Desired workspace skills: 'env' (AGENT_REQUIRED_SKILLS,
-                       the default) or 'cli' (command-line arguments / on-disk
-                       state)
+  --scope SCOPE        'user', 'workspace' (default), 'session' or 'defaults';
+                       only add, remove, list, doctor and clean take a scope
+                       other than 'workspace'
   --help, -h           Display this help message and exit
   --plugin-template    Output a template/documentation for creating a Workspace plugin
 
@@ -145,13 +147,16 @@ Environment:
                      only while AGENT_SESSION_ID matches CLAUDE_CODE_SESSION_ID
   SKILL_CACHE_DIR    Cache directory for remote skills and catalog metadata
                      (default: ${XDG_CACHE_HOME:-$HOME/.cache}/skill)
+  SKILL_DEFAULTS_DIR Directory of the defaults scope
+                     (default: ${XDG_STATE_HOME:-$HOME/.local/state}/skill/defaults)
 
 Examples:
   skill add coding-standards
   skill --scope session add jetpack
-  skill --scope session list
+  skill --scope defaults add workspace-tools
+  skill add --defaults
   printf '%s\n' adb emumanager | skill --scope session add -
-  skill --scope user list
+  skill list --json
 ```
 
 <!-- /generated -->
@@ -228,8 +233,7 @@ Usage: envrc [options] <command> [args...]
 
 Manage configuration blocks within a .envrc file. Blocks are delimited by
 managed marker comments so multiple configurations can co-exist safely. The
-'skills' block holds a list that can be edited item-by-item; the 'env' block
-holds environment variables managed with set/unset/get.
+'env' block holds environment variables managed with set/unset/get.
 
 Options:
   --output FILE  Path to the output file (default: .envrc)
@@ -239,11 +243,7 @@ Commands:
   create <type> [args...]  Create a configuration block
   delete <type>            Delete an entire configuration block
   show <type>              Print a block's content
-  add skills NAME...       Add skills to the skills block (creates it if needed)
-  remove skills NAME...    Remove skills from the skills block (alias: rm);
-                           names provided by the environment default are
-                           excluded with a '-NAME' negation instead
-  list [skills]            List active blocks, or the skills in the skills block
+  list                     List active blocks
   set VAR VALUE            Set an environment variable in the env block
                            (creates the block if needed)
   unset VAR                Remove an environment variable from the env block
@@ -256,26 +256,17 @@ Types:
   uv                       Adds Python uv direnv layout
   firebase <PROJECT_ID>    Adds Firebase project variables
   appengine <APP_ID> [URL] Adds Google App Engine variables
-  skills [NAME...]         Adds the agent skills list (AGENT_REQUIRED_SKILLS)
   block <NAME>             Adds a raw block named NAME; content is read from
                            stdin
 
 Examples:
   envrc create node 22
   envrc create uv
-  envrc add skills adb jetpack
-  envrc remove skills stillers
-  envrc list skills
+  envrc list
   envrc set API_ORIGIN https://api.example.com
   envrc get API_ORIGIN
   envrc create block corp <corp-fragment.sh
   envrc delete node
-
-The skills block contains a 'skills NAME...' line (a direnv function defined
-in ~/.direnvrc) that appends to the AGENT_REQUIRED_SKILLS environment
-variable. Prefix a name with '-' or '!' to exclude a globally required skill;
-'remove' writes the negation automatically when the name comes from the
-environment default rather than from the block itself.
 
 'set' writes single-quoted values, so values are always literal data: shell
 syntax like $(...) is never evaluated when direnv loads the file. 'get' reads

@@ -1231,6 +1231,17 @@ link_overlay_files "config/skill/plugins" "$XDG_CONFIG_HOME/skill/plugins"
 xmkdir "$XDG_CONFIG_HOME/permission/plugins"
 link_overlay_files "config/permission/plugins" "$XDG_CONFIG_HOME/permission/plugins"
 
+heading "skill defaults"
+
+# Each repo's etc/skill/defaults.sh adds and removes default skills with
+# `skill --scope defaults`, so overlay skill names stay out of this repo. They
+# run here rather than at agent launch, which only links the defaults.
+for src in "${SRCDIRS[@]}"; do
+  [ -f "$src/etc/skill/defaults.sh" ] || continue
+  x env PATH="$SRCDIR/bin:$PATH" sh "$src/etc/skill/defaults.sh" ||
+    echo "warning: $src/etc/skill/defaults.sh failed" >&2
+done
+
 heading "agents"
 
 # Symlink user-supplied context for all agents
@@ -1256,10 +1267,12 @@ if exists agy; then
   link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
 fi
 
-# Skills are intentionally NOT installed globally. Per-repo skills are added
-# by `skill apply` (or `skill add ...`) using ~/.dotfiles/skills (plus .private
-# and .corp overlays) as the source. Keeping ~/.agents/skills and
-# ~/.claude/skills empty prevents every project from seeing every skill.
+# Skills are intentionally NOT installed globally. The defaults are linked into
+# each repo by its clone hook and into each wrapped agent's session at launch
+# (`skill add --defaults`), and others with `skill add ...`, using
+# ~/.dotfiles/skills (plus .private and .corp overlays) as the source. Keeping
+# ~/.agents/skills and ~/.claude/skills empty prevents every project from
+# seeing every skill.
 
 if ! is_fresh "$PACKAGE_STAMP"; then
 

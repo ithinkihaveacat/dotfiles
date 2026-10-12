@@ -14,8 +14,8 @@
 #
 # Every sourcing test gets its own `mktemp -d` sandbox, so the files are
 # independent and parallel-safe. Assertions prefer structured output (`skill
-# doctor --json`, the in-process ReconcilePlan) over matching human-readable
-# report strings; string checks are reserved for the user-facing formatting
+# doctor --json`, `skill list --json`) over matching human-readable report
+# strings; string checks are reserved for the user-facing formatting
 # contracts (remediation hints).
 
 # Resolve the tests/ directory from this file's own path, so a sourcing test
@@ -70,10 +70,11 @@ skill_test_init() {
   cp "${REPO_ROOT}/config/skill/plugins/05_local.py" \
     "${XDG_CONFIG_HOME}/skill/plugins/05_local.py"
   export XDG_CACHE_HOME="${TMPDIR}/.cache"
+  export XDG_STATE_HOME="${TMPDIR}/.local/state"
+  unset SKILL_DEFAULTS_DIR
   # Ensure p4 is not found by default during Git/Unmanaged tests.
   export PATH="$MOCK_BIN_DIR:$PATH"
   unset AGENT_PREFLIGHT_SKIP _agent_preflight_skip
-  unset AGENT_REQUIRED_SKILLS
   # Run the same whether or not the suite itself runs inside an agent session.
   unset AGENT_SESSION_DIR AGENT_SESSION_ID CLAUDE_CODE_SESSION_ID \
     CODEX_SESSION_ID ANTIGRAVITY_CONVERSATION_ID JETSKI_CONVERSATION_ID
@@ -93,8 +94,8 @@ EOF
 # Run `skill doctor --json` in the current directory and print the JSON blob to
 # stdout. doctor exits non-zero on an unhealthy workspace, which is expected, so
 # swallow the status (callers inspect the JSON, and json_get on empty fails
-# loudly enough). Extra args (e.g. env overrides) are ignored here on purpose:
-# callers set SKILL_SOURCE_DIRS/AGENT_REQUIRED_SKILLS in the environment.
+# loudly enough). Callers set SKILL_SOURCE_DIRS and the like in the
+# environment.
 doctor_json() {
   "${SCRIPT}" doctor --json 2>/dev/null || true
 }
@@ -164,78 +165,15 @@ else:
 # In-process Python helpers (import the skill module as `m`)
 # ---------------------------------------------------------------------------
 
-# run_module SNIPptr -- exec the skill script as module `m`, then run the
-# snippet. AGENT_REQUIRED_SKILLS may be passed as $2.
+# run_module SNIPPET -- exec the skill script as module `m`, then run the
+# snippet.
 run_module() {
-  AGENT_REQUIRED_SKILLS="${2:-}" python3 -c "
+  python3 -c "
 import importlib.machinery, importlib.util
 loader = importlib.machinery.SourceFileLoader('m', '${SCRIPT}')
 spec = importlib.util.spec_from_loader('m', loader)
 m = importlib.util.module_from_spec(spec)
 loader.exec_module(m)
-$1
-"
-}
-
-# run_parser SPECS -- print "<required>|<negated>" for a given
-# AGENT_REQUIRED_SKILLS value, exercising get_parsed_skills() directly.
-run_parser() {
-  run_module "
-req, neg = m.get_parsed_skills()
-print(','.join(req) + '|' + ','.join(neg))" "$1"
-}
-
-# run_plan SNIPptr [SPECS] -- exec the skill module as `m` with a common
-# preamble: a FakeWorkspace class and a resolver mapping any name under
-# ${PLAN_SRC}/<name> to that directory (missing dirs raise -> unresolvable).
-# PLAN_SRC is supplied by the sourcing test (its directory must exist first).
-# shellcheck disable=SC2154  # PLAN_SRC is a documented caller-provided input
-run_plan() {
-  AGENT_REQUIRED_SKILLS="${2:-}" python3 -c "
-import importlib.machinery, importlib.util, os
-from pathlib import Path
-
-loader = importlib.machinery.SourceFileLoader('m', '${SCRIPT}')
-spec = importlib.util.spec_from_loader('m', loader)
-m = importlib.util.module_from_spec(spec)
-loader.exec_module(m)
-
-PLAN_SRC = Path('${PLAN_SRC}')
-
-
-def fake_resolve(spec):
-    name = spec.split(':', 1)[-1]
-    p = PLAN_SRC / name
-    if not p.is_dir():
-        raise ValueError(f\"cannot resolve skill '{spec}'\")
-    return p, name
-
-
-m.resolve_skill_spec = fake_resolve
-m.check_env_freshness = lambda ws: None
-
-
-class FakeWorkspace:
-    def __init__(self, root, dests, expected, actual, tracked=()):
-        self.root = Path(root)
-        self._dests = [Path(d) for d in dests]
-        self._expected = list(expected)
-        self._actual = actual  # (set, unmanaged_list, dangling_list)
-        self._tracked = set(str(t) for t in tracked)
-
-    def get_expected_skills(self):
-        return self._expected
-
-    def get_dest_dirs(self):
-        return self._dests
-
-    def get_actual_skills(self):
-        s, u, d = self._actual
-        return set(s), list(u), list(d)
-
-    def is_tracked(self, path):
-        return str(path) in self._tracked
-
 $1
 "
 }

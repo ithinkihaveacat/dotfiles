@@ -197,11 +197,6 @@ set -x UV_EXCLUDE_NEWER "7 days"
 # have working root certificates out of the box, avoiding SSL validation failures in user scripts.
 set -x UV_PYTHON_PREFERENCE managed
 
-# Default required skills for agent CLI preflight checks
-if not set -q AGENT_REQUIRED_SKILLS
-    set -gx AGENT_REQUIRED_SKILLS agent-tools coding-standards workspace-tools technical-writing taskgo
-end
-
 _load_overlay $HOME/.private
 _load_overlay $HOME/.corp
 

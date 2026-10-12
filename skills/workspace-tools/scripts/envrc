@@ -12,8 +12,7 @@ Usage: $SCRIPT_NAME [options] <command> [args...]
 
 Manage configuration blocks within a .envrc file. Blocks are delimited by
 managed marker comments so multiple configurations can co-exist safely. The
-'skills' block holds a list that can be edited item-by-item; the 'env' block
-holds environment variables managed with set/unset/get.
+'env' block holds environment variables managed with set/unset/get.
 
 Options:
   --output FILE  Path to the output file (default: .envrc)
@@ -23,11 +22,7 @@ Commands:
   create <type> [args...]  Create a configuration block
   delete <type>            Delete an entire configuration block
   show <type>              Print a block's content
-  add skills NAME...       Add skills to the skills block (creates it if needed)
-  remove skills NAME...    Remove skills from the skills block (alias: rm);
-                           names provided by the environment default are
-                           excluded with a '-NAME' negation instead
-  list [skills]            List active blocks, or the skills in the skills block
+  list                     List active blocks
   set VAR VALUE            Set an environment variable in the env block
                            (creates the block if needed)
   unset VAR                Remove an environment variable from the env block
@@ -40,26 +35,17 @@ Types:
   uv                       Adds Python uv direnv layout
   firebase <PROJECT_ID>    Adds Firebase project variables
   appengine <APP_ID> [URL] Adds Google App Engine variables
-  skills [NAME...]         Adds the agent skills list (AGENT_REQUIRED_SKILLS)
   block <NAME>             Adds a raw block named NAME; content is read from
                            stdin
 
 Examples:
   $SCRIPT_NAME create node 22
   $SCRIPT_NAME create uv
-  $SCRIPT_NAME add skills adb jetpack
-  $SCRIPT_NAME remove skills stillers
-  $SCRIPT_NAME list skills
+  $SCRIPT_NAME list
   $SCRIPT_NAME set API_ORIGIN https://api.example.com
   $SCRIPT_NAME get API_ORIGIN
   $SCRIPT_NAME create block corp <corp-fragment.sh
   $SCRIPT_NAME delete node
-
-The skills block contains a 'skills NAME...' line (a direnv function defined
-in ~/.direnvrc) that appends to the AGENT_REQUIRED_SKILLS environment
-variable. Prefix a name with '-' or '!' to exclude a globally required skill;
-'remove' writes the negation automatically when the name comes from the
-environment default rather than from the block itself.
 
 'set' writes single-quoted values, so values are always literal data: shell
 syntax like \$(...) is never evaluated when direnv loads the file. 'get' reads
@@ -102,17 +88,9 @@ require() {
   }
 }
 
-lc() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
-}
-
-is_list_type() {
-  [[ "$1" == "skills" ]]
-}
-
 is_known_type() {
   case "$1" in
-    skills | node | ruby | uv | firebase | appengine | block)
+    node | ruby | uv | firebase | appengine | block)
       return 0
       ;;
     *)
@@ -172,94 +150,10 @@ allow_direnv() {
   fi
 }
 
-# Case-insensitive membership test: list_contains NEEDLE ITEM...
-list_contains() {
-  local needle item
-  needle=$(lc "$1")
-  shift
-  for item in "$@"; do
-    if [[ "$(lc "$item")" == "$needle" ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Print ITEM... with TOKEN dropped (case-insensitive): drop_token TOKEN ITEM...
-drop_token() {
-  local target item out=""
-  target=$(lc "$1")
-  shift
-  for item in "$@"; do
-    if [[ "$(lc "$item")" != "$target" ]]; then
-      out="${out:+$out }$item"
-    fi
-  done
-  printf '%s' "$out"
-}
-
-# Print the skills block's items, one per line. Understands the canonical
-# 'skills NAME...' line as well as the legacy raw-export form (which gets
-# rewritten canonically on the next mutation). Returns 1 on any line it does
-# not understand, so hand-crafted blocks are never silently clobbered.
-read_skills_items() {
-  local content line trimmed rest item
-  # shellcheck disable=SC2016 # single quotes intended: match a literal '$AGENT_REQUIRED_SKILLS'
-  local legacy_re='^export[[:space:]]+AGENT_REQUIRED_SKILLS="\$AGENT_REQUIRED_SKILLS([^"]*)"$'
-  content=$(get_block_content skills)
-  while IFS= read -r line; do
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    if [[ -z "$trimmed" || "$trimmed" == "#"* ]]; then
-      continue
-    fi
-    rest=""
-    if [[ "$trimmed" == "skills" ]]; then
-      :
-    elif [[ "$trimmed" == skills\ * ]]; then
-      rest="${trimmed#skills }"
-    elif [[ "$trimmed" =~ $legacy_re ]]; then
-      rest="${BASH_REMATCH[1]}"
-    else
-      return 1
-    fi
-    # shellcheck disable=SC2086 # word splitting of the item list is intended
-    for item in $rest; do
-      printf '%s\n' "$item"
-    done
-  done <<<"$content"
-  return 0
-}
-
-# Load the skills block items into $ITEMS (space-separated), or exit with an
-# error if the block content is not machine-editable.
-load_skills_items() {
-  local caller="$1" raw
-  ITEMS=""
-  if ! raw=$(read_skills_items); then
-    echo "$SCRIPT_NAME $caller: skills block in $ENVRC_FILE has unrecognized content;" \
-      "edit it manually or run '$SCRIPT_NAME delete skills' and recreate it" >&2
-    exit 1
-  fi
-  local item
-  # shellcheck disable=SC2086 # word splitting of the item list is intended
-  for item in $raw; do
-    ITEMS="${ITEMS:+$ITEMS }$item"
-  done
-}
-
 # Replace a block's content (creating the block if it does not exist)
 write_block() {
   remove_block "$1"
   append_block "$1" "$2"
-}
-
-write_skills_block() {
-  local items="$1" content="skills"
-  if [[ -n "$items" ]]; then
-    content="skills $items"
-  fi
-  write_block skills "$content"
 }
 
 # Quote a string in single quotes for literal inclusion in shell source
@@ -312,61 +206,14 @@ var_exported_outside_blocks() {
   ' "$ENVRC_FILE"
 }
 
-# Print the effective required-skills list from the inherited environment,
-# applying the '-name'/'!name' negation mini-language (mirrors 'skill').
-env_required_skills() {
-  local tok name item out="" newout
-  # shellcheck disable=SC2086 # word splitting of the env list is intended
-  for tok in ${AGENT_REQUIRED_SKILLS:-}; do
-    case "$tok" in
-      -* | !*)
-        name="${tok#?}"
-        newout=""
-        # shellcheck disable=SC2086
-        for item in $out; do
-          if [[ "$(lc "$item")" != "$(lc "$name")" ]]; then
-            newout="${newout:+$newout }$item"
-          fi
-        done
-        out="$newout"
-        ;;
-      *)
-        # shellcheck disable=SC2086
-        if ! list_contains "$tok" $out; then
-          out="${out:+$out }$tok"
-        fi
-        ;;
-    esac
-  done
-  printf '%s' "$out"
-}
-
 cmd_list() {
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     usage
   fi
 
   if [[ $# -ge 1 ]]; then
-    local type="$1"
-    if ! is_known_type "$type"; then
-      echo "$SCRIPT_NAME list: unknown configuration type: '$type'" >&2
-      exit 1
-    fi
-    if ! is_list_type "$type"; then
-      echo "$SCRIPT_NAME list: '$type' is not a list-valued block" >&2
-      exit 1
-    fi
-    if ! block_exists skills; then
-      echo "No skills block in $ENVRC_FILE" >&2
-      return
-    fi
-    load_skills_items list
-    local item
-    # shellcheck disable=SC2086 # word splitting of the item list is intended
-    for item in $ITEMS; do
-      printf '%s\n' "$item"
-    done
-    return
+    echo "$SCRIPT_NAME list: unexpected argument: '$1'" >&2
+    exit 1
   fi
 
   if [[ ! -f "$ENVRC_FILE" ]]; then
@@ -392,7 +239,6 @@ cmd_catalog() {
   echo "  uv                       Python uv direnv layout"
   echo "  firebase PROJECT_ID      Firebase project variables"
   echo "  appengine APP_ID [URL]   Google App Engine variables"
-  echo "  skills [NAME...]         Agent skills list (supports add/remove/list)"
   echo "  block NAME               Raw block; content is read from stdin"
 }
 
@@ -564,156 +410,6 @@ cmd_delete() {
   allow_direnv
 }
 
-cmd_add() {
-  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    usage
-  fi
-
-  if [[ $# -lt 1 ]]; then
-    echo "$SCRIPT_NAME add: missing configuration type" >&2
-    exit 1
-  fi
-
-  local type="$1"
-  shift
-  if ! is_known_type "$type"; then
-    echo "$SCRIPT_NAME add: unknown configuration type: '$type'" >&2
-    exit 1
-  fi
-  if ! is_list_type "$type"; then
-    echo "$SCRIPT_NAME add: '$type' is not a list-valued block; use '$SCRIPT_NAME create $type'" >&2
-    exit 1
-  fi
-  if [[ $# -lt 1 ]]; then
-    echo "$SCRIPT_NAME add: skill name required (to create an empty block, use '$SCRIPT_NAME create skills')" >&2
-    exit 1
-  fi
-
-  ITEMS=""
-  if block_exists skills; then
-    load_skills_items add
-  fi
-
-  local changed=0 name bare
-  for name in "$@"; do
-    case "$name" in
-      -* | !*)
-        # Explicit negation request: exclude the named skill
-        bare="${name#?}"
-        # shellcheck disable=SC2086 # word splitting of the item list is intended
-        if list_contains "-$bare" $ITEMS || list_contains "!$bare" $ITEMS; then
-          echo "$SCRIPT_NAME add: '$bare' is already excluded" >&2
-        else
-          # shellcheck disable=SC2086
-          ITEMS=$(drop_token "$bare" $ITEMS)
-          ITEMS="${ITEMS:+$ITEMS }-$bare"
-          changed=1
-          echo "$SCRIPT_NAME: excluded '$bare'" >&2
-        fi
-        ;;
-      *)
-        # shellcheck disable=SC2086 # word splitting of the item list is intended
-        if list_contains "-$name" $ITEMS || list_contains "!$name" $ITEMS; then
-          # shellcheck disable=SC2086
-          ITEMS=$(drop_token "-$name" $ITEMS)
-          # shellcheck disable=SC2086
-          ITEMS=$(drop_token "!$name" $ITEMS)
-          changed=1
-          echo "$SCRIPT_NAME: re-enabled '$name' (removed negation)" >&2
-        elif list_contains "$name" $ITEMS; then
-          echo "$SCRIPT_NAME add: '$name' already present" >&2
-        else
-          ITEMS="${ITEMS:+$ITEMS }$name"
-          changed=1
-          echo "$SCRIPT_NAME: added '$name'" >&2
-        fi
-        ;;
-    esac
-  done
-
-  if [[ $changed -eq 1 ]]; then
-    write_skills_block "$ITEMS"
-    echo "$SCRIPT_NAME: updated skills block in $ENVRC_FILE" >&2
-    allow_direnv
-  fi
-}
-
-cmd_remove() {
-  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    usage
-  fi
-
-  if [[ $# -lt 1 ]]; then
-    echo "$SCRIPT_NAME remove: missing configuration type" >&2
-    exit 1
-  fi
-
-  local type="$1"
-  shift
-  if ! is_known_type "$type"; then
-    echo "$SCRIPT_NAME remove: unknown configuration type: '$type'" >&2
-    exit 1
-  fi
-  if ! is_list_type "$type"; then
-    echo "$SCRIPT_NAME remove: '$type' is not a list-valued block; to delete the block, use '$SCRIPT_NAME delete $type'" >&2
-    exit 1
-  fi
-  if [[ $# -lt 1 ]]; then
-    echo "$SCRIPT_NAME remove: skill name required (to delete the whole block, use '$SCRIPT_NAME delete skills')" >&2
-    exit 1
-  fi
-
-  ITEMS=""
-  if block_exists skills; then
-    load_skills_items remove
-  fi
-
-  local env_base changed=0 name bare
-  env_base=$(env_required_skills)
-  for name in "$@"; do
-    case "$name" in
-      -* | !*)
-        # Remove an existing negation token (re-enable the default)
-        bare="${name#?}"
-        # shellcheck disable=SC2086 # word splitting of the item list is intended
-        if list_contains "-$bare" $ITEMS || list_contains "!$bare" $ITEMS; then
-          # shellcheck disable=SC2086
-          ITEMS=$(drop_token "-$bare" $ITEMS)
-          # shellcheck disable=SC2086
-          ITEMS=$(drop_token "!$bare" $ITEMS)
-          changed=1
-          echo "$SCRIPT_NAME: removed negation of '$bare'" >&2
-        else
-          echo "$SCRIPT_NAME remove: '$name' not present; nothing to do" >&2
-        fi
-        ;;
-      *)
-        # shellcheck disable=SC2086 # word splitting of the item list is intended
-        if list_contains "$name" $ITEMS; then
-          # shellcheck disable=SC2086
-          ITEMS=$(drop_token "$name" $ITEMS)
-          changed=1
-          echo "$SCRIPT_NAME: removed '$name'" >&2
-        elif list_contains "-$name" $ITEMS || list_contains "!$name" $ITEMS; then
-          echo "$SCRIPT_NAME remove: '$name' is already excluded" >&2
-        elif list_contains "$name" $env_base; then
-          ITEMS="${ITEMS:+$ITEMS }-$name"
-          changed=1
-          echo "$SCRIPT_NAME: excluded default skill '$name' (added '-$name')" >&2
-        else
-          echo "$SCRIPT_NAME remove: '$name' not present; nothing to do" >&2
-        fi
-        ;;
-    esac
-  done
-
-  if [[ $changed -eq 1 ]]; then
-    write_skills_block "$ITEMS"
-    echo "$SCRIPT_NAME: updated skills block in $ENVRC_FILE" >&2
-    allow_direnv
-  fi
-}
-
 cmd_create() {
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     usage
@@ -769,7 +465,7 @@ EOF
       fi
       block_name="$1"
       case "$block_name" in
-        git-identity-beebo | node | ruby | uv | firebase | appengine | skills | env | block)
+        git-identity-beebo | node | ruby | uv | firebase | appengine | env | block)
           echo "$SCRIPT_NAME create block: '$block_name' is a reserved block name" >&2
           exit 1
           ;;
@@ -826,20 +522,6 @@ EOF
       )
       ;;
 
-    skills)
-      if block_exists skills; then
-        echo "$SCRIPT_NAME create: skills block already exists in $ENVRC_FILE (use '$SCRIPT_NAME add skills NAME...' to modify it)" >&2
-        exit 1
-      fi
-      if [[ -f "$ENVRC_FILE" ]] && grep -q "AGENT_REQUIRED_SKILLS" "$ENVRC_FILE"; then
-        echo "$SCRIPT_NAME: warning: $ENVRC_FILE already references AGENT_REQUIRED_SKILLS outside a managed block" >&2
-      fi
-      content="skills"
-      if [[ $# -gt 0 ]]; then
-        content="skills $*"
-      fi
-      ;;
-
     *)
       echo "$SCRIPT_NAME: unknown configuration type: $type" >&2
       exit 1
@@ -861,12 +543,6 @@ case "$COMMAND" in
     ;;
   delete)
     cmd_delete "$@"
-    ;;
-  add)
-    cmd_add "$@"
-    ;;
-  remove | rm)
-    cmd_remove "$@"
     ;;
   list)
     cmd_list "$@"

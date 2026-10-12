@@ -1,8 +1,7 @@
 # Wrapper for claude that gives each session its own directory, for scratch
 # files (TMPDIR) and per-session skills (AGENT_SESSION_DIR, read by
-# 'skill --scope session').
+# 'skill --scope session'), seeded with the default skills.
 function claude --description 'Run claude with a per-session directory for scratch files and skills'
-    _agent_preflight claude; or return
     set -lx TMPDIR (mktemp -d /tmp/claude.XXXXXXXXXX)
     set -lx AGENT_SESSION_DIR $TMPDIR
     set -lx AGENT_SESSION_ID
@@ -53,6 +52,21 @@ function claude --description 'Run claude with a per-session directory for scrat
         end
         set session_args --session-id $session_id
         set AGENT_SESSION_ID $session_id
+    end
+
+    # Seed the session with the defaults; the workspace is left alone. This is
+    # a new session, so an outer agent's session variables (when claude is
+    # started from inside another agent) are hidden from the seeding call.
+    begin
+        set -lx CLAUDE_CODE_SESSION_ID
+        set -lx CODEX_SESSION_ID
+        set -lx ANTIGRAVITY_CONVERSATION_ID
+        set -lx JETSKI_CONVERSATION_ID
+        _agent_preflight claude --scope session
+    end
+    or begin
+        rm -rf $TMPDIR
+        return 1
     end
 
     command claude --add-dir $TMPDIR $session_args $argv

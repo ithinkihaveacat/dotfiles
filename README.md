@@ -68,17 +68,17 @@ workspace as untracked symlinks in `.claude/skills/` or `.agents/skills/`,
 auto-detecting which agent is installed:
 
 ```sh
-skill apply       # sync workspace symlinks with AGENT_REQUIRED_SKILLS
-skill add jetpack # add one skill by name
-skill list        # what's active in this workspace
+skill add --defaults # link the default skills
+skill add jetpack    # add one skill by name
+skill list           # what's linked here, 'default' or 'added'
 ```
 
 Skill names resolve against `skills/` in this repo and its `.private`/`.corp`
 overlays (later layers shadow by name); plugins in `config/skill/plugins/`
-register additional remote skills from third-party catalogs. Projects declare
-the skills they require via direnv (`skills NAME …` in `.envrc`, maintained by
-`envrc add skills NAME`), and `skill preflight` verifies them before an agent is
-launched.
+register additional remote skills from third-party catalogs. The default skills
+are set by `etc/skill/defaults.sh` in each layer, which `install.sh` runs. A
+fresh clone links them into the repository, and the agent wrappers link them
+into each session.
 
 ## Overlays
 
@@ -123,20 +123,21 @@ the last overlay to provide a given filename wins.
 
 ### Overlay-aware paths
 
-| Path                         | Mechanism                           | Notes                                                                                                      |
-| ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `home/.*`                    | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                             |
-| `etc/agents/AGENTS.md`       | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` (gated on their respective binaries)                  |
-| `etc/agents/agy/hooks.json`  | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks.json` (gated on `agy`)                                                |
-| `etc/agents/agy/hooks`       | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                                     |
-| `etc/shpool/config.toml`     | `link_overlay_path`                 |                                                                                                            |
-| `etc/starship/starship.toml` | `link_overlay_path`                 |                                                                                                            |
-| `etc/ghostty/config`         | `link_overlay_path`                 |                                                                                                            |
-| `etc/bat/config`             | `link_overlay_path`                 |                                                                                                            |
-| `etc/code/`                  | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                                          |
-| `etc/macos/KeyBindings`      | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                                   |
-| `etc/macos/Solarized.clr`    | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                              |
-| `skills/*/`                  | `skill` catalog source              | Not linked globally; added per workspace via `skill add`/`skill apply` (see [Agent skills](#agent-skills)) |
+| Path                         | Mechanism                           | Notes                                                                                        |
+| ---------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------- |
+| `home/.*`                    | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                               |
+| `etc/agents/AGENTS.md`       | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` (gated on their respective binaries)    |
+| `etc/agents/agy/hooks.json`  | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks.json` (gated on `agy`)                                  |
+| `etc/agents/agy/hooks`       | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                       |
+| `etc/shpool/config.toml`     | `link_overlay_path`                 |                                                                                              |
+| `etc/starship/starship.toml` | `link_overlay_path`                 |                                                                                              |
+| `etc/ghostty/config`         | `link_overlay_path`                 |                                                                                              |
+| `etc/bat/config`             | `link_overlay_path`                 |                                                                                              |
+| `etc/code/`                  | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                            |
+| `etc/macos/KeyBindings`      | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                     |
+| `etc/macos/Solarized.clr`    | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                |
+| `etc/skill/defaults.sh`      | run by `install.sh`                 | Adds or removes default skills with `skill --scope defaults`                                 |
+| `skills/*/`                  | `skill` catalog source              | Not linked globally; added per workspace via `skill add` (see [Agent skills](#agent-skills)) |
 
 ### Per-overlay `update` hooks
 

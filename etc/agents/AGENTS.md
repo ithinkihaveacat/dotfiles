@@ -26,6 +26,8 @@ reading its `SKILL.md` file, and apply its prescribed workflow.
    cover.
 1. **Follow prescribed processes**: When a skill defines a workflow or helper
    script for a task, use that process rather than inventing an ad-hoc approach.
+1. **Load missing skills**: When no installed skill fits, run `skill catalog`
+   and load one for this session with `skill --scope session add NAME`.
 
 ### Examples
 

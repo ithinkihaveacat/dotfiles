@@ -104,23 +104,21 @@ else
 fi
 
 # Test 10: exclude block is regenerable: corrupt it, doctor flags the drift as a
-# Workspace Exclusions ERROR, and apply regenerates it back to green.
-export AGENT_REQUIRED_SKILLS="coding-standards emumanager"
+# Workspace Exclusions ERROR, and 'add --defaults' rewrites it back to green.
 sed '/skills/d' .git/info/exclude >.git/info/exclude.tmp && mv .git/info/exclude.tmp .git/info/exclude
 before=$(doctor_json)
 if [ "$(check_status "$before" "Workspace Exclusions")" = "ERROR" ] &&
-  "${SCRIPT}" apply >/dev/null 2>&1 &&
+  "${SCRIPT}" add --defaults >/dev/null 2>&1 &&
   grep -q '/.claude/skills/coding-standards' .git/info/exclude; then
   after=$(doctor_json)
   if [ "$(check_status "$after" "Workspace Exclusions")" = "OK" ]; then
-    echo "ok 10 - [Git] doctor flags exclude drift; apply regenerates it"
+    echo "ok 10 - [Git] doctor flags exclude drift; add --defaults rewrites it"
   else
-    echo "not ok 10 - [Git] apply did not restore exclude block"
+    echo "not ok 10 - [Git] add --defaults did not restore exclude block"
   fi
 else
-  echo "not ok 10 - [Git] doctor should flag exclude drift and apply should fix it"
+  echo "not ok 10 - [Git] doctor should flag exclude drift and add --defaults should fix it"
 fi
-export AGENT_REQUIRED_SKILLS=""
 
 # Test 11: remove deletes symlink and exclude entry
 if "${SCRIPT}" remove emumanager >/dev/null 2>&1 &&
@@ -142,23 +140,21 @@ fi
 
 # Test 13: from a subdirectory with no local skills dir, 'add' binds to the
 # anchor an agent would discover (the repo root), installs there rather than
-# scattering a skills dir into the subdirectory, and a 'preflight' run from the
-# subdirectory agrees with that install.
+# scattering a skills dir into the subdirectory, and the launch check
+# ('add --defaults') run from the subdirectory agrees with that install.
 mkdir -p sub
 cd sub
-export AGENT_REQUIRED_SKILLS="coding-standards"
 if "${SCRIPT}" add coding-standards >/dev/null 2>&1 &&
   [ -L ../.claude/skills/coding-standards ] && [ -L ../.agents/skills/coding-standards ] &&
   [ ! -e .claude/skills/coding-standards ] && [ ! -e .agents/skills/coding-standards ] &&
   grep -q "/.claude/skills/coding-standards" ../.git/info/exclude &&
   grep -q "/.agents/skills/coding-standards" ../.git/info/exclude &&
-  "${SCRIPT}" preflight claude >/dev/null 2>&1 &&
-  [ ! -f ../.git/info/skills ]; then
-  echo "ok 13 - [Git] subdirectory add binds to repo-root anchor; preflight agrees"
+  "${SCRIPT}" add --quiet --defaults >/dev/null 2>&1 &&
+  [ ! -e .claude ] && [ ! -f ../.git/info/skills ]; then
+  echo "ok 13 - [Git] subdirectory add binds to repo-root anchor; seeding agrees"
 else
-  echo "not ok 13 - [Git] subdirectory anchor/exclude/preflight mismatch"
+  echo "not ok 13 - [Git] subdirectory anchor/exclude/seeding mismatch"
 fi
-export AGENT_REQUIRED_SKILLS=""
 cd ..
 "${SCRIPT}" clean >/dev/null 2>&1 || true
 
@@ -312,50 +308,46 @@ fi
 cd "$TMPDIR"
 
 # ==============================================================================
-# -C / --directory and --from=<env|cli>
+# -C / --directory and removed options
 # ==============================================================================
 
-# Test 21: skill -C <git-subdir> binds to repo anchor, and an empty --from=cli apply prunes all
+# Test 21: skill -C <git-subdir> binds to the repo anchor for add and clean
 C_GIT_DIR="${TMPDIR}/c-git-repo"
 mkdir -p "${C_GIT_DIR}/sub/deep" "${C_GIT_DIR}/.claude/skills" "${C_GIT_DIR}/.agents/skills"
 git -C "$C_GIT_DIR" init -q
-if "${SCRIPT}" -C "${C_GIT_DIR}/sub/deep" --from=cli apply coding-standards emumanager >/dev/null 2>&1 &&
+if "${SCRIPT}" -C "${C_GIT_DIR}/sub/deep" add coding-standards emumanager >/dev/null 2>&1 &&
   [ -L "${C_GIT_DIR}/.agents/skills/coding-standards" ] &&
   [ -L "${C_GIT_DIR}/.agents/skills/emumanager" ] &&
-  "${SCRIPT}" -C "${C_GIT_DIR}/sub/deep" --from=cli apply >/dev/null 2>&1 &&
+  "${SCRIPT}" -C "${C_GIT_DIR}/sub/deep" clean >/dev/null 2>&1 &&
   [ ! -e "${C_GIT_DIR}/.agents/skills/coding-standards" ] &&
   [ ! -e "${C_GIT_DIR}/.agents/skills/emumanager" ]; then
-  echo "ok 21 - [-C Git] subdirectory -C binds to repo anchor and empty apply prunes all skills"
+  echo "ok 21 - [-C Git] subdirectory -C binds to the repo anchor for add and clean"
 else
-  echo "not ok 21 - [-C Git] subdirectory -C or empty apply failed"
+  echo "not ok 21 - [-C Git] subdirectory -C add or clean failed"
 fi
 
-# Test 22: -C alone keeps the default --from=env: it applies the caller's
-# AGENT_REQUIRED_SKILLS and rejects CLI skill args
-mkdir -p "${C_GIT_DIR}/.claude/skills" "${C_GIT_DIR}/.agents/skills"
-export AGENT_REQUIRED_SKILLS="coding-standards"
-conflict_env_rc=0
-"${SCRIPT}" -C "$C_GIT_DIR" apply emumanager >/dev/null 2>&1 || conflict_env_rc=$?
-if [ "$conflict_env_rc" -eq 2 ] &&
-  "${SCRIPT}" -C "$C_GIT_DIR" apply >/dev/null 2>&1 &&
-  [ -L "${C_GIT_DIR}/.agents/skills/coding-standards" ]; then
-  echo "ok 22 - [-C] -C defaults to --from=env: applies AGENT_REQUIRED_SKILLS and rejects CLI skill args"
+# Test 22: the removed --from option is a usage error, and apply and preflight
+# are unknown commands
+from_rc=0
+"${SCRIPT}" --from=cli list >/dev/null 2>&1 || from_rc=$?
+apply_rc=0
+"${SCRIPT}" -C "$C_GIT_DIR" apply >/dev/null 2>&1 || apply_rc=$?
+preflight_rc=0
+"${SCRIPT}" -C "$C_GIT_DIR" preflight claude >/dev/null 2>&1 || preflight_rc=$?
+if [ "$from_rc" -eq 2 ] && [ "$apply_rc" -eq 1 ] && [ "$preflight_rc" -eq 1 ]; then
+  echo "ok 22 - [CLI] --from, apply and preflight are gone"
 else
-  echo "not ok 22 - [-C] -C --from=env behavior failed (rc=$conflict_env_rc)"
+  echo "not ok 22 - [CLI] removed interface still accepted (from=$from_rc apply=$apply_rc preflight=$preflight_rc)"
 fi
 
-# Test 23: --from=cli without -C applies CLI skills in CWD, ignores AGENT_REQUIRED_SKILLS, and supports bundle -w
-cd "$C_GIT_DIR"
-export AGENT_REQUIRED_SKILLS="nonexistent-caller-env-skill"
+# Test 23: bundle -w bundles the skills linked in the -C workspace
 BUNDLE_OUT="${TMPDIR}/bundle-cli-out"
-if "${SCRIPT}" --from=cli apply emumanager >/dev/null 2>&1 &&
-  [ -L "${C_GIT_DIR}/.agents/skills/emumanager" ] &&
-  [ ! -e "${C_GIT_DIR}/.agents/skills/coding-standards" ] &&
-  "${SCRIPT}" -C "$C_GIT_DIR" --from=cli bundle -w -o "$BUNDLE_OUT" >/dev/null 2>&1 &&
-  [ -f "${BUNDLE_OUT}/emumanager/SKILL.md" ]; then
-  echo "ok 23 - [--from=cli] --from=cli without -C applies CLI skills, ignores AGENT_REQUIRED_SKILLS, and bundles workspace"
+if "${SCRIPT}" -C "$C_GIT_DIR" add emumanager >/dev/null 2>&1 &&
+  "${SCRIPT}" -C "$C_GIT_DIR" bundle -w -o "$BUNDLE_OUT" >/dev/null 2>&1 &&
+  [ -f "${BUNDLE_OUT}/emumanager/SKILL.md" ] &&
+  [ ! -e "${BUNDLE_OUT}/coding-standards" ]; then
+  echo "ok 23 - [-C] bundle -w bundles the skills linked in the workspace"
 else
-  echo "not ok 23 - [--from=cli] --from=cli without -C or bundle -w failed"
+  echo "not ok 23 - [-C] bundle -w failed"
 fi
-export AGENT_REQUIRED_SKILLS=""
 cd "$TMPDIR"

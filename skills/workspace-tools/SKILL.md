@@ -45,8 +45,9 @@ that `envrc` blocks activate per directory, together with a workspace-local
 place for the project's packages and command-line tools; see
 [Language Environments](#language-environments-node-install-ruby-install-python-install).
 
-For Git repositories, `hook apply`, `skill apply`, and `permission apply` run
-automatically on `git clone` via the global template's post-checkout hook.
+For Git repositories, `hook apply`, `skill add --defaults`, and
+`permission apply` run automatically on `git clone` via the global template's
+post-checkout hook.
 
 ## Gotchas
 
@@ -84,8 +85,8 @@ skill <command> [arguments]
   `.agents/skills/` and `.claude/skills/` for all sessions operating in the
   repository. A marker block in `.git/info/exclude` is dynamically generated to
   keep `git status` clean without dirtying the shared `.gitignore`. If another
-  tool rewrites the exclude file, `skill doctor` detects the drift, and running
-  `skill apply` resolves it.
+  tool rewrites the exclude file, `skill doctor` detects the drift, and any
+  `skill add` or `skill remove` rewrites the block.
 - **Session Scope (Per-Session / Ephemeral / Temporary / Scratch)**:
   `skill --scope session add|remove|list|doctor|clean` manages the skills of the
   calling agent's own conversation, without touching the repository, `.envrc` or
@@ -105,7 +106,15 @@ skill <command> [arguments]
     current turn, read `<artifactDir>/scratch/skills/<skill>/SKILL.md` directly.
 - **User Scope**: `skill --scope user ...` links into `~/.claude/skills` and
   `~/.agents/skills` for every session of the user, leaving Claude's own
-  `~/.claude/skills/synced/` alone.
+  `~/.claude/skills/synced/` alone. It is meant to stay empty.
+- **Defaults Scope**: `skill --scope defaults add|remove NAME...` manages the
+  default skills, a directory no agent reads
+  (`${XDG_STATE_HOME:-~/.local/state}/skill/defaults`). `skill add --defaults`
+  links each default into a workspace or session *through* that directory, so
+  removing a default breaks its links everywhere and the next
+  `skill add --defaults` clears them. A skill added by name links straight at
+  its source and survives that. The defaults are set by `etc/skill/defaults.sh`
+  in the dotfiles and each overlay, which `install.sh` runs.
 - **Unmanaged Directories**: Works in plain directories without VCS, symlinking
   skills under local destination folders.
 - **Plugins**: Additional workspace types can be registered by dropping a Python
@@ -118,36 +127,27 @@ skill <command> [arguments]
 
 - **`-C, --directory DIR`**: Run as if started in `DIR` instead of the current
   working directory.
-- **`--scope SCOPE`**: Where to install: `user`, `workspace` *(default)* or
-  `session` (see above). Only `add`, `remove`, `list`, `doctor` and `clean` take
-  `user` or `session`; outside the workspace, the links on disk are the only
-  state.
-- **`--from SOURCE`**: Select where desired workspace skills are read from:
-  - `env` *(default)*: Read `AGENT_REQUIRED_SKILLS` from the process environment
-    and check `.envrc` freshness.
-  - `cli`: Read desired skills strictly from command-line arguments
-    (`apply [SPEC...]`, `doctor [SPEC...]`) or on-disk state, ignoring
-    `AGENT_REQUIRED_SKILLS`.
+- **`--scope SCOPE`**: Where to install: `user`, `workspace` *(default)*,
+  `session` or `defaults` (see above). Only `add`, `remove`, `list`, `doctor`
+  and `clean` take a scope other than `workspace`.
 
 ### Commands
 
-- **`apply [SPEC...]`**: Synchronize workspace symlinks to match desired skills
-  (`AGENT_REQUIRED_SKILLS` under `--from=env`, or positional `SPEC...` arguments
-  under `--from=cli`).
+- **`add SPEC...`**: Link a skill (a local path or a plugin-provided catalog
+  entry) straight to its source, replacing a default's link of the same name.
+- **`add --defaults`**: Link every default through the defaults directory,
+  keeping any existing link, and remove broken links; then fail if `doctor`
+  would report an error. `-q`/`--quiet` reports only errors.
+- **`remove NAME...`** (alias: **`rm`**): Remove a skill's links.
+- **`list [--json]`**: List the linked skills, each `default` or `added`.
 - **`bundle [SPEC...]`**: Package skills into an archive (`.zip`, `.tar.gz`) or
-  directory without installing them (`-w`/`--workspace` for workspace skills).
-- **`add SPEC...`**: Add a skill (a local path or a plugin-provided catalog
-  entry).
-- **`remove NAME...`** (alias: **`rm`**): Remove a managed skill.
-- **`list [--json]`**: List skills currently managed in this workspace.
+  directory without installing them (`-w`/`--workspace` for the skills linked in
+  the workspace).
 - **`update SPEC...`**: Re-fetch a plugin-provided catalog entry (`--all` for
   all, `--catalog` for the catalog index).
-- **`clean`**: Remove all managed skills and clear tracking records.
-- **`doctor [--json] [SPEC...]`**: Diagnose mismatch between desired and on-disk
-  skills (read-only). Shares a unified reconciliation planner with `apply` to
-  audit symlinks, exclusions, and catalog specs, and warns when
-  `AGENT_REQUIRED_SKILLS` looks stale relative to `.envrc` under `--from=env`
-  (fix: `direnv reload`).
+- **`clean`**: Remove all skill links in the scope and clear tracking records.
+- **`doctor [--json]`**: Check the scope's links (broken links, unmanaged files,
+  exclude records) and the catalog (read-only).
 - **`catalog [--json]`**: List all plugin-provided skills and their sources.
   `--json` emits one object per skill with its description and structural
   profile — the discovery primitive described in
@@ -173,10 +173,9 @@ fully deterministic and requires no API keys.
      from cached frontmatter; structure is `null`), or `missing`.
 1. **Apply confirmed choices:** Explain recommendations to the user and install
    confirmed selections according to the desired scope:
-   - **Workspace-scoped (persistent across sessions):** Record selections in
-     `.envrc` and synchronize:
+   - **Workspace-scoped (persistent across sessions):**
      ```bash
-     envrc add skills <names> && direnv reload && skill apply
+     skill add <names>
      ```
    - **Per-session (ephemeral / temporary / session-scoped / scratch):** When a
      skill is only needed for the active conversation, add it to the session
@@ -196,12 +195,12 @@ Variable names follow a two-tier rule: `AGENT_*` variables are **policy** a
 human sets (what agents should do in this workspace); `SKILL_*` variables are
 **plumbing** for this tool (how it finds and links things, rarely touched).
 
-- `AGENT_REQUIRED_SKILLS`: Space-separated skill names this workspace requires;
-  prefix a name with `-` or `!` to exclude a globally required skill. Managed
-  per-workspace via `envrc add skills` / `envrc remove skills` (`.envrc`).
-- `AGENT_PREFLIGHT_SKIP`: When set, `skill preflight` passes without checking —
-  bypass the agent launch gate once with `AGENT_PREFLIGHT_SKIP=1 claude`. (The
-  legacy spelling `_agent_preflight_skip` is still honored.)
+- `AGENT_PREFLIGHT_SKIP`: When set, the `claude`, `codex` and `agy` wrappers
+  launch without seeding the defaults or checking skill health — e.g.
+  `AGENT_PREFLIGHT_SKIP=1 claude`. (The legacy spelling `_agent_preflight_skip`
+  is still honored.)
+- `SKILL_DEFAULTS_DIR`: The defaults scope's directory (default:
+  `${XDG_STATE_HOME:-$HOME/.local/state}/skill/defaults`).
 - `SKILL_SOURCE_DIRS`: Optional colon-separated environment variable override
   searched for skills by name (by default, local skills are discovered
   automatically from standard workspace and configuration directories via the
@@ -211,13 +210,13 @@ human sets (what agents should do in this workspace); `SKILL_*` variables are
 - `SKILL_CACHE_DIR`: This tool's cache directory for remote skills and catalog
   metadata (default: `${XDG_CACHE_HOME:-$HOME/.cache}/skill`).
 - `AGENT_OFFLINE`: Set to `1` to serve remote skills from that cache instead of
-  fetching them — what a CI job or a network-denied agent sandbox needs, so
-  `preflight` does not gate an agent launch on GitHub being reachable. A skill
-  that has never been fetched is a clear error rather than a silent omission.
-  See local workspace caching guidelines.
+  fetching them — what a CI job or a network-denied agent sandbox needs, so an
+  agent launch does not depend on GitHub being reachable. A skill that has never
+  been fetched is a clear error rather than a silent omission. See local
+  workspace caching guidelines.
 
-For the underlying model — what `apply` touches, the invariants `doctor` audits,
-and the one place `doctor` and `preflight` deliberately differ — see
+For the underlying model — the scopes, how a link records where it came from,
+and who seeds the defaults — see
 [The workspace-tools model](references/model.md).
 
 ______________________________________________________________________
@@ -368,11 +367,8 @@ configurations co-exist safely and other tools never edit `.envrc` directly.
 
 - **`create <type> [args...]`** / **`delete <type>`** / **`show <type>`**:
   Create, delete, or print a typed block (`node`, `ruby`, `uv`, `firebase`,
-  `appengine`, `skills`, or a raw `block NAME` whose content is read from
-  stdin).
-- **`add skills NAME...`** / **`remove skills NAME...`** / **`list [skills]`**:
-  Edit the workspace's required-skills declaration item-by-item (see
-  [Managing Skills (`skill`)](#managing-skills-skill)).
+  `appengine`, or a raw `block NAME` whose content is read from stdin).
+- **`list`**: List the active blocks.
 - **`set VAR VALUE`** / **`unset VAR`** / **`get VAR`**: Manage individual
   environment variables in a managed `env` block. Values are written
   single-quoted, so they are always literal data — shell syntax is never
@@ -500,14 +496,14 @@ ______________________________________________________________________
 
 ## Usage Examples
 
-### Default Discovery & Apply (Recommended for new workspaces)
+### Setting Up a Workspace (Recommended for new workspaces)
 
-Analyze the current directory, install the required hooks and skills, and
-pre-approve their safe commands:
+Install the required hooks and the default skills, and pre-approve their safe
+commands (what a fresh `git clone` runs):
 
 ```bash
 hook apply
-skill apply
+skill add --defaults
 permission apply
 ```
 
@@ -540,14 +536,14 @@ skill add coding-standards
 skill add /path/to/custom-skill
 ```
 
-An ad-hoc `skill add` in a repository workspace is pruned by the next
-`skill apply` unless the skill is also declared in `AGENT_REQUIRED_SKILLS`. Only
-modify `.envrc` when persisting repository-wide default skills across sessions
-(for single-session or temporary requests, see
-[Adding Per-Session Skills](#adding-per-session-skills-ephemeral--temporary--scratch)):
+The link persists across sessions until `skill remove`, and survives the skill
+being dropped from the defaults. For single-session or temporary requests, see
+[Adding Per-Session Skills](#adding-per-session-skills-ephemeral--temporary--scratch).
+To make a skill a default for every workspace and session, add it to the
+defaults (and to `etc/skill/defaults.sh`, so other machines get it too):
 
 ```bash
-envrc add skills coding-standards && direnv reload && skill apply
+skill --scope defaults add coding-standards
 ```
 
 ### Adding Per-Session Skills (Ephemeral / Temporary / Scratch)
@@ -589,9 +585,9 @@ permission list
 ### Health Checks
 
 ```bash
-skill doctor       # symlink/exclude drift (read-only)
-permission doctor  # missing pre-approvals (read-only)
-skill apply        # synchronize and repair the workspace configuration
+skill doctor          # broken links and exclude drift (read-only)
+permission doctor     # missing pre-approvals (read-only)
+skill add --defaults  # link the defaults and remove broken links
 ```
 
 ### Cleaning Up
@@ -609,5 +605,5 @@ permission clean
 - **[Command Index](references/command-index.md)** — Detailed synopsis, options,
   and examples for `hook`, `skill`, `permission`, `envrc`, and the runtime
   installers.
-- **[Workspace Config Model](references/model.md)** — Architecture, state
-  invariants, directory layouts, and doctor/preflight auditing models.
+- **[Workspace Config Model](references/model.md)** — Scopes, link provenance,
+  who seeds the defaults, and what `doctor` checks.

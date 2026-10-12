@@ -180,7 +180,7 @@ variable reads the same in every tool:
   `CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID` or `ANTIGRAVITY_CONVERSATION_ID`
   to identify their caller, but never set or repurpose them.
 - **Precedence** is flag, then variable, then default.
-- **Lists:** names are space-separated (`AGENT_REQUIRED_SKILLS="adb jetpack"`);
+- **Lists:** names are space-separated (`AGENT_REQUIRED_HOOKS="agent node"`);
   paths are colon-separated, like `PATH` (`SKILL_SOURCE_DIRS`).
 - **Booleans** follow `AGENT_OFFLINE`: `1`, `true`, `yes` and `on`
   (case-insensitive) mean true; anything else, including `0` and empty, means
@@ -194,7 +194,7 @@ variable reads the same in every tool:
   environment, including nested agents. A variable that belongs to one agent
   session is paired with that session's ID (`AGENT_SESSION_DIR` with
   `AGENT_SESSION_ID`), and is honored only while the ID matches the caller's
-  own.
+  own, or for the launcher that sets it up before the agent starts.
 
 ## `--output`/`-o` Contract
 

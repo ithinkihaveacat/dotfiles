@@ -44,12 +44,6 @@ function __fish_envrc_needs_type
     test (count $parsed) -eq 1; and contains "$parsed[1]" create delete show
 end
 
-# Helper function: check if we are completing the list type for add/remove/list
-function __fish_envrc_needs_list_type
-    set -l parsed (__fish_envrc_parse)
-    test (count $parsed) -eq 1; and contains "$parsed[1]" add remove rm list
-end
-
 # Helper function: check if we are completing the node version
 function __fish_envrc_needs_node_version
     set -l parsed (__fish_envrc_parse)
@@ -64,7 +58,7 @@ end
 
 # Helper function: list available types
 function __fish_envrc_types
-    echo -e "node\nruby\nuv\nfirebase\nappengine\nskills\nblock"
+    echo -e "node\nruby\nuv\nfirebase\nappengine\nblock"
 end
 
 # Helper function: list local Node.js versions
@@ -97,10 +91,7 @@ complete -c envrc -f
 # Complete subcommands
 complete -c envrc -n __fish_envrc_needs_command -a create -d 'Create a configuration block'
 complete -c envrc -n __fish_envrc_needs_command -a delete -d 'Delete an entire configuration block'
-complete -c envrc -n __fish_envrc_needs_command -a add -d 'Add skills to the skills block'
-complete -c envrc -n __fish_envrc_needs_command -a remove -d 'Remove skills from the skills block'
-complete -c envrc -n __fish_envrc_needs_command -a rm -d 'Remove skills from the skills block'
-complete -c envrc -n __fish_envrc_needs_command -a list -d 'List active blocks or skills'
+complete -c envrc -n __fish_envrc_needs_command -a list -d 'List active blocks'
 complete -c envrc -n __fish_envrc_needs_command -a show -d "Print a block's content"
 complete -c envrc -n __fish_envrc_needs_command -a set -d 'Set an environment variable in the env block'
 complete -c envrc -n __fish_envrc_needs_command -a unset -d 'Remove an environment variable from the env block'
@@ -110,9 +101,6 @@ complete -c envrc -n __fish_envrc_needs_command -a help -d 'Display help message
 
 # Complete types for create, delete
 complete -c envrc -n __fish_envrc_needs_type -a '(__fish_envrc_types)'
-
-# Complete list-valued types for add, remove, rm, list
-complete -c envrc -n __fish_envrc_needs_list_type -a skills -d 'Agent skills list'
 
 # Complete node versions
 complete -c envrc -n __fish_envrc_needs_node_version -a '(__fish_envrc_node_versions)'

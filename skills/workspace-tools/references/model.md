@@ -2,176 +2,92 @@
 
 <!-- markdownlint-disable MD013 -->
 
-Maintainer reference for the `skill` tool: what it touches, the invariants it
-maintains, and the one deliberate exception. User-facing usage lives in
-`../SKILL.md`; this document explains *why the pieces fit together*.
+Maintainer reference for the `skill` tool: what it touches and why the pieces
+fit together. User-facing usage lives in `../SKILL.md`.
 
-## The picture
+## An installer, not a reconciler
+
+`skill` links skills where it is told to and keeps no expected set. There is no
+declared list to compare against, nothing records what has already run, and
+there is no "apply" step. The links on disk are the whole state, and each link's
+target says where it came from.
+
+## Scopes
+
+`--scope` picks the directories a command acts on (`get_workspace()`):
+
+| Scope       | Directories                                                                                                 | Class                                         |
+| ----------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `workspace` | `.claude/skills` and `.agents/skills` at the repository's skill anchor (overridable with `SKILL_DEST_DIRS`) | `GitWorkspace`, plugins, `DefaultWorkspace`   |
+| `session`   | `$AGENT_SESSION_DIR/.claude/skills` (Claude), or `scratch/skills` in an Antigravity `brain/<id>`            | `ClaudeSessionWorkspace`, `AgyBrainWorkspace` |
+| `user`      | `~/.claude/skills` and `~/.agents/skills`, leaving Claude's `synced/` alone                                 | `UserWorkspace`                               |
+| `defaults`  | `${SKILL_DEFAULTS_DIR:-${XDG_STATE_HOME:-~/.local/state}/skill/defaults}`, which no agent reads             | `DefaultsWorkspace`                           |
+
+The workspace scope refuses to run in the home directory itself, whose skill
+folders are the user scope. The user scope is meant to stay empty: every project
+would see every skill.
+
+A Claude session directory is honored only while `AGENT_SESSION_ID` matches the
+caller's `CLAUDE_CODE_SESSION_ID` and no other agent's session variable
+(`CODEX_SESSION_ID`) is set, so a nested agent cannot write into its parent's
+session. The one caller with no `CLAUDE_CODE_SESSION_ID` is the `claude` wrapper
+seeding the directory before Claude starts. Antigravity is checked first,
+because agy started from Claude inherits a matching Claude binding.
+
+## Link provenance
 
 ```text
-        AGENT_REQUIRED_SKILLS (env)              SKILL_SOURCE_DIRS (env)
-                  │                                       │
-                  │ "expected" skill names                │ search path
-                  ▼                                       ▼
-           ┌────────────┐    resolve_skill_spec    ┌──────────────┐
-           │  expected  │ ───────────────────────▶ │ source skill │
-           │   skills   │                          │ directories  │
-           └────────────┘                          └──────────────┘
-                  │                                       │
-                  │              skill apply              │ symlink target
-                  ▼                                       ▼
-   dest dirs ─▶ .claude/skills/<name> ─┐
-  (per agent)   .agents/skills/<name> ─┴──▶ untracked symlinks on disk
-                  │                                       │
-                  │ GitWorkspace only                     │
-                  ▼                                       │
-       .git/info/exclude  ◀──── marker block keeps ───────┘
-       (# >>> skills >>>)        git status clean
+<repo>/.claude/skills/jetpack -> ~/.local/state/skill/defaults/jetpack -> ~/.dotfiles/skills/jetpack
+<repo>/.claude/skills/adb     -> ~/.dotfiles/skills/adb
 ```
 
-## The four flows ("what touches what")
+- **Default** (indirect): created by `skill add --defaults`, which links every
+  entry of the defaults directory through it. `list` shows `default`.
+- **Added** (direct): created by `skill add NAME`, which links straight at the
+  source and replaces an indirect link of the same name. `list` shows `added`.
 
-1. **Desired state** comes from `AGENT_REQUIRED_SKILLS` under `--from=env` (or,
-   under `--from=cli` and for stateful plugin workspaces, command-line arguments
-   or a saved state file via `FileStateMixin`). Outside the workspace scope
-   (`--scope user|session`) the links on disk are the only state, so desired and
-   actual never differ. This is the set of skill *names* the workspace wants —
-   `Workspace.get_expected_skills()`.
-1. **Sources** are resolved by name against `SKILL_SOURCE_DIRS`
-   (`resolve_skill_spec`): the on-disk skill directory a name points to.
-1. **Destinations** are the per-agent link directories
-   (`Workspace.get_dest_dirs()`): `.claude/skills` and/or `.agents/skills` in
-   repository workspaces (overridable with `SKILL_DEST_DIRS`). `--scope` picks
-   the directory set: `~/.claude/skills` and `~/.agents/skills` (`user`,
-   `UserWorkspace`), or the calling agent's own session (`session`):
-   `$AGENT_SESSION_DIR/.claude/skills` under Claude (`ClaudeSessionWorkspace`,
-   honored only while `AGENT_SESSION_ID` matches `CLAUDE_CODE_SESSION_ID`), or
-   `scratch/skills` in an Antigravity/Jetski `brain/<id>` directory
-   (`AgyBrainWorkspace`). `skill apply` makes each expected skill a symlink
-   `dest/<name> -> source` and prunes symlinks that are no longer expected.
-1. **VCS invisibility & session registration**: `GitWorkspace` maintains a
-   marker block (`# >>> skills >>>` … `# <<< skills <<<`) in `.git/info/exclude`
-   listing the symlink paths, so `git status` stays clean without touching the
-   tracked `.gitignore`. In session artifact directories, `AgyBrainWorkspace`
-   writes `.agents/skills.json` (`include_only`) and
-   `.agents/skills.json.metadata.json` (`userFacing: false`) so the harness
-   loads `scratch/skills/` on the next turn without surfacing config files in
-   the artifact UI.
+Removing a default (`skill --scope defaults remove NAME`) deletes its one link
+in the defaults directory, so every link to it breaks at once. Agents ignore a
+broken link, and the next `add --defaults` removes it. A skill added by hand
+points straight at its source, so it survives the demotion. Renaming a default
+is a remove plus an add.
 
-## Invariants
+Every operation is safe to repeat: adding a default is idempotent, removing one
+touches only the defaults directory, and seeding never replaces an existing
+link.
 
-These are what `skill doctor` audits (read-only) and `skill apply` repairs:
+## Who seeds what
 
-- **I1 — Alignment.** For every expected skill there is exactly one symlink in
-  each destination, resolving to the expected source. No missing links, no extra
-  or stale links, no links that resolve elsewhere. (doctor: *Required Skills*;
-  severity ERROR.)
-- **I2 — Live links.** Every managed symlink resolves to an existing target;
-  none dangle. (doctor: *Symlink Health*; ERROR.)
-- **I3 — Clean folders.** Destination folders contain only managed symlinks or
-  VCS-managed (tracked) files/directories — no untracked real files or stray
-  directories. (doctor: *Directory Cleanliness*; ERROR.)
-- **I4 — Quiet VCS.** The exclude marker block exactly matches the managed
-  symlinks; no drift. (doctor: *Workspace Exclusions*; ERROR — git only.)
+- **Defaults** are set by `etc/skill/defaults.sh` in this repo and each overlay
+  (`~/.private`, `~/.corp`), run by `install.sh`, so private skill names stay
+  out of this repo and the launch path never edits the defaults.
+- **Workspaces**: the clone hook (`post-checkout`) and the `codex`/`agy`
+  wrappers run `skill add --defaults`.
+- **Claude sessions**: the `claude` wrapper creates a fresh session directory
+  and runs `skill --scope session add --defaults`, so a wrapped Claude always
+  sees the current defaults and the workspace is left alone.
 
-Health is the conjunction of these (plus the agent, plugin-path, and catalog
-checks). `apply` is the idempotent fixpoint: running it makes a workspace
-healthy, and running it again changes nothing.
+Each `skill` run costs about half a second, so each launch makes one call:
+`add --defaults` ends with the error checks of `doctor` and fails if any remain
+(`AGENT_PREFLIGHT_SKIP=1` launches anyway).
 
-## The shared reconciliation planner (`build_reconcile_plan`)
+## Records
 
-To guarantee that `skill doctor` and `skill apply` never drift in their
-definition of convergence, both commands derive desired-vs-actual state from a
-single shared planner function, `build_reconcile_plan(ws) -> ReconcilePlan`:
+- **`GitWorkspace`** keeps a marker block (`# >>> skills >>>` …
+  `# <<< skills <<<`) in `.git/info/exclude` listing every link, broken ones
+  included, so `git status` stays clean without touching `.gitignore`.
+- **`AgyBrainWorkspace`** writes `.agents/skills.json` (`include_only`, live
+  links only) and `.agents/skills.json.metadata.json` (`userFacing: false`), so
+  the harness loads `scratch/skills/` on the next turn without surfacing the
+  files in the artifact UI.
 
-- **`skill doctor`** renders the `ReconcilePlan` read-only to report workspace
-  health.
-- **`skill apply`** executes permitted actions derived from the exact same plan
-  (creating missing links, re-linking target mismatches, pruning stray dangling
-  or extra symlinks), then recomputes the plan to verify convergence
-  (`has_fixable_findings()`).
+Every `add`, `remove` and `clean` rewrites the records from disk
+(`sync_records()`).
 
-Because both commands consume a unified `ReconcilePlan`:
+## Pruning
 
-- **Unresolvable declared specs** (`ResolvedSkill.error`) are kept distinct from
-  missing skills (reported under *Unresolvable skills*) and set
-  `destructive_blocked = True`, preventing `apply` from misclassifying and
-  deleting live symlinks for unresolvable specs.
-- **Tracked dangling links** (`DiskEntry.tracked`) are separated from stray
-  dangling links so `apply` prunes only untracked broken links, avoiding loops
-  where `doctor` recommends `skill apply` for checked-in symlinks it cannot
-  remove.
-- **Target mismatches** (`overwritten_by_add`) are recognized as re-link targets
-  rather than extra links to delete.
-
-## The freshness check (advisory)
-
-`AGENT_REQUIRED_SKILLS` is the source of truth `skill` acts on — but in a direnv
-workspace it is a *cache*: the `.envrc` managed skills block (written by
-`envrc`, evaluated via the `skills` function in `~/.direnvrc`) records changes
-that only reach the environment at the next prompt. Between an `.envrc` edit and
-the next direnv reload, the cache is stale.
-
-`check_env_freshness()` detects this by statically parsing the managed block
-(never executing shell) and asserting that every name the block adds appears in
-the parsed environment, and every name it negates does not. Detection is
-deliberately **one-directional**: a name present in the environment but absent
-from the block is unjudgeable, because the base layer (global defaults from the
-shell config) cannot be observed separately. That asymmetry is safe — the
-detectable direction (block declares, env lacks) is the one where acting on the
-stale cache would *destroy* state, while the undetectable direction merely
-delays convergence by one reload.
-
-The result is strictly advisory: it may cause `skill` to **say more or do less,
-never to do something different**:
-
-- **`doctor`** renders it as the *Environment Freshness* check (WARNING) with a
-  `direnv reload` resolution step.
-- **`apply`** declines to run its pruning phase while stale (additions still
-  proceed; they are harmless), telling the user to reload and re-run.
-- Nothing ever merges block contents into the expected-skills set. If that ever
-  seems desirable, the correct design is to recompute the environment via
-  `direnv export` — not a partial merge here.
-
-A block whose content the parser does not recognize yields *no* freshness data
-(the check disappears entirely): an advisory signal must not guess.
-
-## The one exception: doctor vs. preflight severity
-
-`doctor` and `preflight` run the *same* checks but answer different questions,
-so they weigh findings differently:
-
-- **`skill doctor`** is a full audit. *Any* non-OK finding — ERROR or WARNING —
-  makes it exit non-zero. It is the place warnings surface.
-- **`skill preflight LABEL`** is the gate run just before an agent launches (it
-  calls `cmd_doctor(errors_only=True)`). Only **ERROR**-severity findings block
-  launch; WARNING findings are suppressed from its output and do not stop the
-  agent. Setting `AGENT_PREFLIGHT_SKIP` (legacy spelling:
-  `_agent_preflight_skip`) bypasses the gate entirely; the failure message
-  advertises this escape hatch so it never has to be remembered.
-
-This is the single, deliberate asymmetry in the model. It exists because three
-checks are advisory rather than blocking:
-
-- **Orphaned Directories** (WARNING): a `.claude/skills` or `.agents/skills`
-  folder exists locally, but the matching agent's global config (`~/.claude`,
-  `~/.codex`, or `~/.gemini/antigravity-cli`) does not. This state is reachable
-  legitimately: `get_dest_dirs()` treats an existing local skills directory as a
-  managed destination even when no global agent is detected (the "local-dir
-  fallback"). So a workspace can be fully synchronized *and* carry an orphaned
-  folder at once. Blocking launch on it would let `skill apply` configure a
-  workspace that `skill preflight` then refuses — so preflight only warns, via
-  `doctor`.
-- **Catalog Cache** staleness (WARNING): a cached remote catalog stub is older
-  than its source. Advisory only, and never consulted at launch — `preflight`
-  runs with `check_catalog=False`.
-- **Environment Freshness** (WARNING): the `.envrc` managed skills block
-  declares changes that `AGENT_REQUIRED_SKILLS` does not reflect yet (see "The
-  freshness check" above). The skills an agent actually loads come from the
-  on-disk symlinks, which may well match the declared intent — only the
-  environment copy is behind — so blocking launch on it would be wrong.
-
-Everything else a `doctor` reports is an ERROR and blocks launch: a missing
-skill, a dangling symlink, unmanaged junk, exclude drift, a missing plugin local
-path, no detected agent (with no local skill dirs to fall back on), or a catalog
-stub missing from the index.
+Broken-link cleanup is the only pruning, and only `add --defaults` does it.
+Links tracked by version control are never removed. `doctor` is read-only: it
+reports broken links, unmanaged files in the skill folders and records that do
+not match the links, and never checks for expected skills. `doctor` fails on
+warnings too; the check at the end of `add --defaults` fails only on errors.
