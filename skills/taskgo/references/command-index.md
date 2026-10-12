@@ -229,10 +229,11 @@ usage: taskgo apply [-h] [--dry-run] CHANGES.json
 
 Apply a change set to the working tree: the typed operations the MCP
 server's writes use (create, set, add, remove, replace_section,
-write_file, and edit_file), all or none. Preconditions are checked as
-each change applies; the state after the whole set is validated; the
-affected projects' STATUS.md blocks are regenerated. Nothing is
-committed. Prints the created records and changed files as JSON.
+write_file, delete_file, and edit_file), all or none. Preconditions
+are checked as each change applies; the state after the whole set is
+validated; the affected projects' STATUS.md blocks are regenerated.
+Nothing is committed. Prints the created records and changed files
+as JSON.
 
 positional arguments:
   CHANGES.json  Change set file, or - for standard input
@@ -496,25 +497,29 @@ options:
 
 ```text
 usage: taskgo read [-h] [--start-line N] [--end-line N] [--at REV] [--json]
+                   [-n]
                    PATH
 
-Print lines START..END of a UTF-8 file in the control repository, from the working tree or from commit REV, as the MCP server's read_file tool does. Lines are 1-indexed and inclusive and end at newline. At most 256 KiB is printed, cut after a whole line; when the output is truncated, a note on stderr names the line to continue from.
+Print lines START..END of a UTF-8 file in the control repository, from the working tree or from commit REV, as the MCP server's read_file tool does. Lines are 1-indexed and inclusive and end at newline. At most 256 KiB is printed, cut after a whole line; when the output is truncated, a note on stderr names the line to continue from. Output is the file's bytes unless --line-numbers prefixes each line with 'N: '.
 
 positional arguments:
-  PATH            Repository-relative path
+  PATH                Repository-relative path
 
 options:
-  -h, --help      show this help message and exit
-  --start-line N  First line (default 1)
-  --end-line N    Last line (default: the last)
-  --at REV        Read commit REV instead of the working tree
-  --json          Print path, blob, size, line range, truncated, and content
-                  as JSON
+  -h, --help          show this help message and exit
+  --start-line N      First line (default 1)
+  --end-line N        Last line (default: the last)
+  --at REV            Read commit REV instead of the working tree
+  --json              Print path, blob, size, line range, truncated, and
+                      content as JSON
+  -n, --line-numbers  Prefix each line with its number and ': ' (as in '7:
+                      text')
 
 Examples:
   taskgo read proj/PLAN.md
   taskgo read proj/logs/logcat.txt --start-line 2001 --end-line 2400
   taskgo read proj/PLAN.md --at HEAD~3 --json
+  taskgo read -n proj/PLAN.md --start-line 40 --end-line 60
 ```
 
 <!-- /generated -->

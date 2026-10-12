@@ -306,7 +306,8 @@ The file is a JSON object with one key, `changes`:
 | `set`             | `record`, `field`, `value`, `expected` (optional)                             | `expected`, when given                |
 | `add`, `remove`   | `record`, `field`, `values`                                                   | none; repeats and absences are no-ops |
 | `replace_section` | `record`, `section`, `text`, `expected_hash`                                  | the section's hash                    |
-| `write_file`      | `path`, `content`, `expected_blob`, `executable` (optional)                   | the file's Git blob SHA               |
+| `write_file`      | `path`, `content`, `expected_blob` (optional), `executable` (optional)        | absent, or the file's Git blob SHA    |
+| `delete_file`     | `path`, `expected_blob`                                                       | the file's Git blob SHA               |
 | `edit_file`       | `path`, `old_string`, `new_string`, `replace_all`, `expected_blob` (optional) | `old_string` occurs; `expected_blob`  |
 
 - **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
@@ -324,12 +325,16 @@ The file is a JSON object with one key, `changes`:
   it. Text that would add or remove any other section is refused.
 - **Files:** `write_file` writes project assets: any file in an existing project
   outside `tasks/`, `decisions/`, and `STATUS.md`, and `INBOX.md`. It refuses
-  `.git*` paths, `..`, symbolic links, more than 256 KiB, non-UTF-8 content,
-  deleting a project's `README.md`, and a `README.md` whose frontmatter does not
-  parse. `expected_blob` is null for a new file, and a null `content` deletes. A
-  rewritten file keeps its mode and a new one is not executable, unless
-  `executable` is `true` or `false`, which sets the mode (100755 or 100644).
-  Markdown is formatted, so the result reports each written file's new blob SHA.
+  `.git*` paths, `..`, symbolic links, more than 256 KiB, non-UTF-8 content, and
+  a `README.md` whose frontmatter does not parse. Without `expected_blob` (or
+  with null) the file must be new; a file that exists is refused with its blob,
+  which `expected_blob` must name to overwrite it, so a write never loses a
+  change made since the caller read the file. `content` must be a string:
+  `delete_file` deletes a file whose blob is `expected_blob`, under the same
+  path rules, except a project's `README.md`. A rewritten file keeps its mode
+  and a new one is not executable, unless `executable` is `true` or `false`,
+  which sets the mode (100755 or 100644). Markdown is formatted, so the result
+  reports each written file's new blob SHA.
 - **Edits:** `edit_file` replaces exact text in an existing file, as Caxton's
   `search_and_replace` does: `old_string` must occur exactly once, or
   `replace_all` must be true. It edits the assets `write_file` writes and the

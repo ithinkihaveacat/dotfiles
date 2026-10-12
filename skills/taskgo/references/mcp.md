@@ -68,7 +68,11 @@ a task ID, and one round trip returns what the workflow reads before acting.
 - `task`: for a task ID, the record as `get_task` returns it; null for a
   project. Done and cancelled tasks are refused.
 
-`blob` values serve as `expected_blob` for `edit_file` and `write_file`.
+`blob` values serve as `expected_blob` for `edit_file`, `write_file`, and
+`delete_file`. `read_file` content is the file's bytes, so it can be quoted in
+`old_string` as it is; `line_numbers: true` prefixes each line with its number
+and `: ` (as in `7: text`), counted against the 256 KiB, for citing lines or
+choosing a range, and leaves the content no longer the file's bytes.
 
 ## Writes
 

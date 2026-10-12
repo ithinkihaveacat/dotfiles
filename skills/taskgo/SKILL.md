@@ -257,7 +257,7 @@ taskgo check [PROJECT] [--json]
 taskgo doctor [PROJECT]
 taskgo fix [PROJECT] [--dry-run] [--no-commit]
 taskgo history PATH_OR_TASK_ID [FIELD]
-taskgo read PATH [--start-line N] [--end-line N] [--at REV] [--json]
+taskgo read PATH [--start-line N] [--end-line N] [--at REV] [--json] [-n]
 taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
@@ -276,10 +276,10 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth a
   makes the update conditional: it changes nothing and exits non-zero unless the
   current state is STATE. Unknown states are refused, not reset to `todo`.
 - `apply`: Apply a change set (JSON typed operations: create, set, add, remove,
-  replace_section, write_file, edit_file) to the working tree, all or none, with
-  preconditions, whole-set validation, and STATUS regeneration for affected
-  projects. It is the MCP server's write semantics, offline; it does not commit.
-  See [Change Sets](references/model.md#change-sets).
+  replace_section, write_file, delete_file, edit_file) to the working tree, all
+  or none, with preconditions, whole-set validation, and STATUS regeneration for
+  affected projects. It is the MCP server's write semantics, offline; it does
+  not commit. See [Change Sets](references/model.md#change-sets).
 - `edit`: Replace exact text in one file (a change set of one `edit_file`):
   Caxton-style `search_and_replace` with verbatim bytes, a CRLF retry, near-miss
   diffs, and record validation. Assets keep their bytes and mode; tasks,
