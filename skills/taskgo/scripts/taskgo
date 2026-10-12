@@ -775,8 +775,18 @@ class Snapshot:
     def rename(self, src: str, dst: str) -> None:
         raise ReadOnlySnapshotError(f"cannot rename {src}: snapshot is read-only")
 
+    def delete(self, rel: str) -> None:
+        raise ReadOnlySnapshotError(f"cannot delete {rel}: snapshot is read-only")
+
     def exists(self, rel: str) -> bool:
         return self.is_file(rel) or self.is_dir(rel)
+
+    def is_link(self, rel: str) -> bool:
+        """True when REL or a directory above it is a symbolic link."""
+        return False
+
+    def is_executable(self, rel: str) -> bool:
+        return False
 
     def historical_task_ids(self) -> set[str]:
         """Task IDs named in the history of any ref of the repository."""
@@ -840,6 +850,19 @@ class FsSnapshot(Snapshot):
     def rename(self, src: str, dst: str) -> None:
         self.path(src).rename(self.path(dst))
 
+    def delete(self, rel: str) -> None:
+        self.path(rel).unlink()
+
+    def is_link(self, rel: str) -> bool:
+        parts = rel.split("/") if rel else []
+        return any(
+            self.path("/".join(parts[: i + 1])).is_symlink() for i in range(len(parts))
+        )
+
+    def is_executable(self, rel: str) -> bool:
+        p = self.path(rel)
+        return p.is_file() and bool(p.stat().st_mode & 0o111)
+
     def historical_task_ids(self) -> set[str]:
         return task_ids_in_history(self.root)
 
@@ -893,11 +916,14 @@ class GitTreeSnapshot(Snapshot):
         self.rev = resolved.stdout.strip()
         self.blobs: dict[str, str] = {}
         self.modes: dict[str, str] = {}
+        self.links: set[str] = set()
         self.children: dict[str, set[str]] = {"": set()}
         out = run_git(["ls-tree", "-r", "-z", "--full-tree", self.rev], cwd=repo)
         for entry in filter(None, out.stdout.split("\0")):
             meta, rel = entry.split("\t", 1)
             mode, kind, sha = meta.split()
+            if mode == "120000":
+                self.links.add(rel)
             if kind != "blob" or mode not in ("100644", "100755"):
                 continue
             self.blobs[rel] = sha
@@ -910,6 +936,13 @@ class GitTreeSnapshot(Snapshot):
 
     def historical_task_ids(self) -> set[str]:
         return task_ids_in_history(self.repo)
+
+    def is_link(self, rel: str) -> bool:
+        parts = rel.split("/")
+        return any("/".join(parts[: i + 1]) in self.links for i in range(len(parts)))
+
+    def is_executable(self, rel: str) -> bool:
+        return self.modes.get(rel) == "100755"
 
     def _load(self) -> dict[str, str]:
         if self.texts is None:
@@ -952,6 +985,79 @@ class GitTreeSnapshot(Snapshot):
 
     def list_dir(self, rel: str) -> list[str]:
         return sorted(self.children.get(rel, ()))
+
+
+class OverlaySnapshot(Snapshot):
+    """Pending writes over a base snapshot, held in memory.
+
+    A change set is applied here and reaches the base only once all of it has
+    applied and validated, so a refused change set writes nothing.
+    """
+
+    def __init__(self, base: Snapshot):
+        self.base = base
+        self.changes: dict[str, str | None] = {}  # None: deleted
+        self.history: set[str] | None = None
+
+    def read_text(self, rel: str) -> str:
+        if rel in self.changes:
+            text = self.changes[rel]
+            if text is None:
+                raise FileNotFoundError(f"{rel} is deleted")
+            return text
+        return self.base.read_text(rel)
+
+    def is_file(self, rel: str) -> bool:
+        if rel in self.changes:
+            return self.changes[rel] is not None
+        return self.base.is_file(rel)
+
+    def is_dir(self, rel: str) -> bool:
+        prefix = f"{rel}/" if rel else ""
+        return self.base.is_dir(rel) or any(
+            k.startswith(prefix) for k, v in self.changes.items() if v is not None
+        )
+
+    def list_dir(self, rel: str) -> list[str]:
+        prefix = f"{rel}/" if rel else ""
+        names = set(self.base.list_dir(rel))
+        for k, v in self.changes.items():
+            if not k.startswith(prefix):
+                continue
+            rest = k[len(prefix) :]
+            if v is not None:
+                names.add(rest.split("/", 1)[0])
+            elif "/" not in rest:
+                names.discard(rest)
+        return sorted(names)
+
+    def write_text(self, rel: str, text: str) -> None:
+        self.changes[rel] = text
+
+    def delete(self, rel: str) -> None:
+        self.changes[rel] = None
+
+    def is_link(self, rel: str) -> bool:
+        return self.base.is_link(rel)
+
+    def is_executable(self, rel: str) -> bool:
+        return rel not in self.changes and self.base.is_executable(rel)
+
+    def historical_task_ids(self) -> set[str]:
+        # Read once per change set: a set may create several tasks.
+        if self.history is None:
+            self.history = self.base.historical_task_ids()
+        return self.history
+
+    def diff(self) -> dict[str, tuple[str | None, str | None]]:
+        """(before, after) text of each path the overlay changes; None: absent."""
+        out: dict[str, tuple[str | None, str | None]] = {}
+        for rel in sorted(self.changes, key=path_key):
+            after = self.changes[rel]
+            before = self.base.read_text(rel) if self.base.is_file(rel) else None
+            if before != after:
+                out[rel] = (before, after)
+        return out
 
 
 def is_project(snap: Snapshot, name: str) -> bool:
@@ -1194,39 +1300,47 @@ def section_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def section_spans(body: str, spec: "SectionSpec") -> list[tuple[int, int]]:
+    """Spans of each occurrence of section SPEC in the record body BODY.
+
+    The title is its '# ' line, a run-in runs from its bold label to its
+    text's end, a heading section from its '## ' line to before the next
+    level-1 or level-2 heading (or the generated block), and the generated
+    section from BEGIN to END.
+    """
+    begin = body.find(BEGIN)
+    spans: list[tuple[int, int]] = []
+    if spec.form == "title":
+        fences = fenced_spans(body)
+        for m in re.finditer(r"^# .*$", body, re.MULTILINE):
+            if not any(a <= m.start() < b for a, b in fences):
+                spans.append((m.start(), m.end()))
+                break
+    elif spec.form == "run-in":
+        spans = find_runins(body, spec.name)
+    elif spec.form == "heading":
+        found, _ = find_sections(body, spec.name)
+        for a, b in found:
+            if a < begin < b:
+                b = len(body[:begin].rstrip())
+            spans.append((a, b))
+    elif spec.form == "generated":
+        end = body.find(END)
+        if begin >= 0 and end > begin:
+            spans.append((begin, end + len(END)))
+    return spans
+
+
 def record_sections(content: str, schema: "RecordSchema") -> list[dict[str, str]]:
     """The schema sections present in CONTENT, in schema order, with hashes.
 
-    Each entry is {name, text, hash}: the title is its '# ' line, a run-in runs
-    from its bold label to its text's end, a heading section from its '## '
-    line to before the next level-1 or level-2 heading (or the generated
-    block), and the generated section from BEGIN to END. A section that occurs
-    more than once is listed once per occurrence.
+    Each entry is {name, text, hash}, with the text section_spans() finds. A
+    section that occurs more than once is listed once per occurrence.
     """
     body = extract_body(content)
-    fences = fenced_spans(body)
-    begin = body.find(BEGIN)
     out: list[dict[str, str]] = []
     for spec in schema.sections:
-        spans: list[tuple[int, int]] = []
-        if spec.form == "title":
-            for m in re.finditer(r"^# .*$", body, re.MULTILINE):
-                if not any(a <= m.start() < b for a, b in fences):
-                    spans.append((m.start(), m.end()))
-                    break
-        elif spec.form == "run-in":
-            spans = find_runins(body, spec.name)
-        elif spec.form == "heading":
-            found, _ = find_sections(body, spec.name)
-            for a, b in found:
-                if a < begin < b:
-                    b = len(body[:begin].rstrip())
-                spans.append((a, b))
-        elif spec.form == "generated":
-            end = body.find(END)
-            if begin >= 0 and end > begin:
-                spans.append((begin, end + len(END)))
-        for a, b in spans:
+        for a, b in section_spans(body, spec):
             text = body[a:b]
             out.append({"name": spec.name, "text": text, "hash": section_hash(text)})
     return out
@@ -1642,12 +1756,17 @@ def require_field_values(spec: FieldSpec, values: list[str], option: str) -> Non
 
 
 def edit_set_field(
-    data: Any, spec: FieldSpec, add: list[str], remove: list[str]
+    data: Any,
+    spec: FieldSpec,
+    add: list[str],
+    remove: list[str],
+    schema: RecordSchema = TASK_SCHEMA,
 ) -> bool:
     """Adds and removes values of a set field in editable frontmatter.
 
     Repeats are no-ops. An existing list keeps its flow or block style, a new
-    blocked_by list uses flow style, and a field left empty is removed.
+    blocked_by or supersedes list uses flow style, and a field left empty is
+    removed. A new field goes after the fields SCHEMA declares before it.
     Returns True if DATA changed.
     """
     names = (spec.name, *spec.aliases)
@@ -1669,12 +1788,12 @@ def edit_set_field(
         existing.extend(values)
         return True
     seq = CommentedSeq(values)
-    if spec.value == "task-id":
+    if spec.value in ("task-id", "adr-ref"):
         seq.fa.set_flow_style()
     if key is not None:
         data[key] = seq
         return True
-    order = [f.name for f in TASK_SCHEMA.fields]
+    order = [f.name for f in schema.fields]
     earlier = set(order[: order.index(spec.name)])
     pos = max(
         (i + 1 for i, k in enumerate(data) if str(k).lower() in earlier),
@@ -3672,6 +3791,744 @@ def cmd_update(
         _tagged(f"[INFO]  Updated {result.task_id} in {result.rel_path}", sys.stderr),
         file=sys.stderr,
     )
+
+
+# ===========================================================================
+# Change sets: typed, atomic writes (taskgo apply; the MCP server's writes)
+# ===========================================================================
+
+WRITE_FILE_MAX_BYTES = 256 * 1024
+CHANGE_OPS = ("create", "set", "add", "remove", "replace_section", "write_file")
+# Scalars `set` may change, per record kind; title is the record's H1.
+SETTABLE = {
+    "task": ("status", "due", "stale_after", "title"),
+    "decision": ("status",),
+}
+
+
+class ChangeSetError(Exception):
+    """A change set refused before anything was written.
+
+    KIND is 'invalid' (a malformed or disallowed change), 'precondition' (an
+    expected value, section hash, or blob SHA that no longer holds), or
+    'validation' (the state after the whole set breaks a rule).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        kind: Literal["invalid", "precondition", "validation"] = "invalid",
+    ):
+        super().__init__(message)
+        self.kind = kind
+
+
+def git_blob_sha(data: bytes) -> str:
+    """The Git blob SHA-1 of DATA, as 'git hash-object' computes it."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+@dataclass(slots=True)
+class ChangeSet:
+    """A change set being applied over an overlay of the repository."""
+
+    snap: OverlaySnapshot
+    # 'ref' names from create, mapped to the task ID or decision path.
+    refs: dict[str, str]
+    created: list[dict[str, str]]
+    # Text of each controlled record before the set touched it; None: new.
+    before: dict[str, str | None]
+    # (record path, value) pairs added to blocked_by or supersedes.
+    added_refs: list[tuple[str, str]]
+
+    def touch(self, rel: str) -> None:
+        if rel not in self.before:
+            self.before[rel] = (
+                self.snap.base.read_text(rel) if self.snap.base.is_file(rel) else None
+            )
+
+
+def change_keys(change: dict[str, Any], required: tuple[str, ...], optional=()) -> None:
+    missing = [k for k in required if k not in change]
+    if missing:
+        raise ChangeSetError(f"missing {', '.join(missing)}")
+    unknown = sorted(set(change) - {"op", *required, *optional})
+    if unknown:
+        raise ChangeSetError(f"unknown key {', '.join(unknown)}")
+
+
+def change_str(value: Any, what: str, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str):
+        raise ChangeSetError(f"{what} must be a string{' or null' if nullable else ''}")
+    return value
+
+
+def change_line(value: Any, what: str) -> str:
+    text = str(change_str(value, what)).strip()
+    if not text or "\n" in text:
+        raise ChangeSetError(f"{what} must be one non-empty line")
+    return text
+
+
+def change_list(value: Any, what: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ChangeSetError(f"{what} must be a list of strings")
+    return value
+
+
+def resolve_ref(cs: ChangeSet, token: str) -> str:
+    """The task ID or decision path that a '$name' TOKEN names; else TOKEN."""
+    if not token.startswith("$"):
+        return token
+    if token[1:] not in cs.refs:
+        raise ChangeSetError(f"unknown ref {token} (refs name earlier creates)")
+    return cs.refs[token[1:]]
+
+
+def find_record(cs: ChangeSet, record: Any) -> tuple[str, RecordSchema]:
+    """The path and schema of RECORD: a task ID, a '$ref', or a path."""
+    token = resolve_ref(cs, change_line(record, "record"))
+    if ID_PATTERN.match(token.upper()):
+        task_id = token.upper()
+        paths = [r.rel_path for r in get_task_rows(cs.snap) if r.task_id == task_id]
+        if not paths:
+            raise ChangeSetError(f"no task {task_id}")
+        if len(paths) > 1:
+            raise ChangeSetError(f"{task_id} names {len(paths)} records")
+        return paths[0], TASK_SCHEMA
+    parts = token.split("/")
+    if len(parts) == 2 and parts[1] == "STATUS.md" and is_project(cs.snap, parts[0]):
+        return token, STATUS_SCHEMA
+    if (
+        len(parts) == 3
+        and parts[1] == "decisions"
+        and token.endswith(".md")
+        and cs.snap.is_file(token)
+    ):
+        return token, DECISION_SCHEMA
+    raise ChangeSetError(
+        f"record {token!r} is not a task ID, a '$ref', a decision path, "
+        "or a project's STATUS.md"
+    )
+
+
+def split_record(text: str) -> tuple[Any, str]:
+    """Editable frontmatter (empty when absent) and body of a record."""
+    match = re.search(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
+    if not match:
+        return YAML().load("{}"), text
+    try:
+        data = YAML().load(match.group(1))
+    except Exception as e:
+        raise ChangeSetError(f"cannot parse its frontmatter: {e}") from None
+    if not isinstance(data, dict):
+        raise ChangeSetError("its frontmatter is not a YAML mapping")
+    return data, text[match.end() :]
+
+
+def join_record(data: Any, body: str) -> str:
+    return (dump_frontmatter(data) + "\n" if data else "") + body.lstrip()
+
+
+def fm_key(data: Any, name: str) -> Any:
+    return next((k for k in data if str(k).lower() == name), name)
+
+
+def resolve_values(
+    cs: ChangeSet, spec: FieldSpec, values: list[str], rel: str | None
+) -> list[str]:
+    """Checks set-field VALUES and resolves '$ref' entries in them."""
+    out: list[str] = []
+    for raw in values:
+        value = raw.strip()
+        if spec.value in ("task-id", "adr-ref"):
+            value = resolve_ref(cs, value)
+        if spec.value == "task-id":
+            value = value.upper()
+        if spec.value == "adr-ref":
+            value = value.rsplit("/", 1)[-1].removesuffix(".md")
+        if spec.value == "conversation" and "://" not in value:
+            raise ChangeSetError(
+                f"conversation {value!r} needs a scheme, as <agent>://<id>"
+            )
+        if not field_is_valid(spec, value):
+            raise ChangeSetError(
+                f"invalid {spec.name} value {raw!r} "
+                f"(expected {VALUE_TYPES[spec.value].description})"
+            )
+        if rel and spec.name in ("blocked_by", "supersedes"):
+            cs.added_refs.append((rel, value))
+        out.append(value)
+    return list(dict.fromkeys(out))
+
+
+def create_task_change(cs: ChangeSet, change: dict[str, Any], project: str) -> str:
+    fields = change.get("fields") or {}
+    sections = change.get("sections") or {}
+    if not isinstance(fields, dict) or not isinstance(sections, dict):
+        raise ChangeSetError("fields and sections must be objects")
+    settable = {"status", "due", "stale_after"} | {
+        f.name for f in TASK_SCHEMA.set_fields()
+    }
+    unknown = sorted(set(fields) - settable)
+    if unknown:
+        raise ChangeSetError(f"unknown task field {', '.join(unknown)}")
+    writable = {s.name for s in TASK_SCHEMA.sections}
+    unknown = sorted(set(sections) - writable)
+    if unknown:
+        raise ChangeSetError(f"unknown task section {', '.join(unknown)}")
+    title = change_line(sections.get("title"), "sections.title")
+    status = canonical_status(change_str(fields.get("status", "todo"), "status"))
+    if status is None:
+        raise ChangeSetError(f"unknown status {fields.get('status')!r}")
+    dates: dict[str, str | None] = {}
+    for name in ("due", "stale_after"):
+        value = change_str(fields.get(name), name, nullable=True)
+        if value is not None and parse_iso_date(value) is None:
+            raise ChangeSetError(f"{name} must be YYYY-MM-DD: {value!r}")
+        dates[name] = value
+    sets: dict[str, list[str]] = {}
+    for spec in TASK_SCHEMA.set_fields():
+        values = change_list(fields.get(spec.name, []), spec.name)
+        sets[spec.name] = resolve_values(cs, spec, values, None)
+    texts = {
+        name: change_str(text, f"sections.{name}")
+        for name, text in sections.items()
+        if name != "title"
+    }
+    if "slug" in change:
+        slug = normalize_slug(str(change_str(change["slug"], "slug")))
+        if not slug or len(slug) > SLUG_MAX_LEN:
+            raise ChangeSetError(f"slug must give 1 to {SLUG_MAX_LEN} characters")
+    else:
+        slug = slugify(title) or "task"
+
+    task_id = generate_task_id(cs.snap)
+    rel = f"{project}/tasks/{task_id}-{slug}.md"
+    content = render_task_file(
+        task_id=task_id,
+        title=title,
+        status=status,
+        problem=texts.get("Problem"),
+        cost=texts.get("Cost"),
+        goal=texts.get("Goal"),
+        criteria=texts.get("Criteria"),
+        sketch=texts.get("Sketch"),
+        constraints=texts.get("Constraints"),
+        outcome=texts.get("Outcome"),
+        findings=texts.get("Findings"),
+        next_steps=texts.get("Next"),
+        wait_for=sets["wait_for"],
+        due=dates["due"],
+        stale_after=dates["stale_after"],
+        blocked_by=sets["blocked_by"],
+        conversations=sets["conversations"],
+    )
+    cs.touch(rel)
+    cs.snap.write_markdown(rel, content)
+    cs.added_refs.extend((rel, dep) for dep in sets["blocked_by"])
+    cs.created.append({"kind": "task", "id": task_id, "path": rel})
+    return task_id
+
+
+def create_decision_change(cs: ChangeSet, change: dict[str, Any], project: str) -> str:
+    fields = change.get("fields") or {}
+    sections = change.get("sections") or {}
+    if not isinstance(fields, dict) or not isinstance(sections, dict):
+        raise ChangeSetError("fields and sections must be objects")
+    unknown = sorted(set(fields) - {f.name for f in DECISION_SCHEMA.fields})
+    if unknown:
+        raise ChangeSetError(f"unknown decision field {', '.join(unknown)}")
+    names = [s.name for s in DECISION_SCHEMA.sections]
+    unknown = sorted(set(sections) - set(names))
+    if unknown:
+        raise ChangeSetError(f"unknown decision section {', '.join(unknown)}")
+    title = change_line(sections.get("title"), "sections.title")
+    sections = {"Status": "Accepted", **sections}
+    missing = [n for n in names if n != "title" and not sections.get(n)]
+    if missing:
+        raise ChangeSetError(f"missing decision section {', '.join(missing)}")
+    supersedes = resolve_values(
+        cs,
+        DECISION_SCHEMA.field("supersedes"),
+        change_list(fields.get("supersedes", []), "supersedes"),
+        None,
+    )
+    status = change_str(fields.get("status"), "status", nullable=True)
+    if "slug" in change:
+        slug = normalize_slug(str(change_str(change["slug"], "slug")))
+        if not slug or len(slug) > SLUG_MAX_LEN:
+            raise ChangeSetError(f"slug must give 1 to {SLUG_MAX_LEN} characters")
+    else:
+        slug = slugify(title) or "decision"
+
+    numbers = [
+        int(m.group(1))
+        for name in cs.snap.list_dir(f"{project}/decisions")
+        if (m := re.match(r"^(\d+)-", name))
+    ]
+    number = max(numbers, default=0) + 1
+    rel = f"{project}/decisions/{number:03d}-{slug}.md"
+    data: dict[str, Any] = {}
+    if status:
+        data["status"] = status
+    if supersedes:
+        seq = CommentedSeq(supersedes)
+        seq.fa.set_flow_style()
+        data["supersedes"] = seq
+    body = "\n\n".join(
+        [f"# {number}. {title}"]
+        + [f"## {n}\n\n{str(sections[n]).strip()}" for n in names if n != "title"]
+    )
+    cs.touch(rel)
+    cs.snap.write_markdown(rel, (dump_frontmatter(data) + "\n" if data else "") + body)
+    cs.added_refs.extend((rel, s) for s in supersedes)
+    cs.created.append({"kind": "decision", "path": rel})
+    return rel
+
+
+def apply_create(cs: ChangeSet, change: dict[str, Any]) -> None:
+    change_keys(change, ("kind", "project"), ("ref", "slug", "fields", "sections"))
+    kind = change["kind"]
+    project = change_line(change["project"], "project")
+    if "/" in project or project.startswith(".") or not is_project(cs.snap, project):
+        raise ChangeSetError(
+            f"unknown project {project!r} (new projects are created locally)"
+        )
+    ref = change.get("ref")
+    if ref is not None:
+        ref = change_line(ref, "ref").removeprefix("$")
+        if ref in cs.refs:
+            raise ChangeSetError(f"ref ${ref} is already defined")
+    if kind == "task":
+        target = create_task_change(cs, change, project)
+    elif kind == "decision":
+        target = create_decision_change(cs, change, project)
+    else:
+        raise ChangeSetError(f"kind must be 'task' or 'decision', not {kind!r}")
+    if ref is not None:
+        cs.refs[ref] = target
+        cs.created[-1]["ref"] = ref
+
+
+def current_scalar(data: Any, body: str, field: str) -> str | None:
+    if field == "title":
+        return extract_title_from_body(body) or None
+    raw = next((v for k, v in data.items() if str(k).lower() == field), None)
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (date, datetime)):
+        return parse_iso_date(raw).isoformat()  # type: ignore[union-attr]
+    return str(raw)
+
+
+def apply_set(cs: ChangeSet, change: dict[str, Any]) -> None:
+    change_keys(change, ("record", "field", "value"), ("expected",))
+    rel, schema = find_record(cs, change["record"])
+    field = change_str(change["field"], "field")
+    if field not in SETTABLE.get(schema.kind, ()):
+        raise ChangeSetError(f"cannot set {field!r} on a {schema.kind}")
+    data, body = split_record(cs.snap.read_text(rel))
+    current = current_scalar(data, body, str(field))
+    is_task_status = schema.kind == "task" and field == "status"
+    if is_task_status and current is not None:
+        current = canonical_status(current) or current
+    if "expected" in change:
+        expected = change_str(change["expected"], "expected", nullable=True)
+        if is_task_status and expected is not None:
+            expected = canonical_status(expected) or expected
+        if expected != current:
+            raise ChangeSetError(
+                f"{rel}: {field} is {current!r}, expected {expected!r}",
+                "precondition",
+            )
+    value = change_str(change["value"], "value", nullable=field != "title")
+    if field == "title":
+        value = change_line(value, "value")
+        spans = section_spans(body, TASK_SCHEMA.sections[0])
+        if spans:
+            a, b = spans[0]
+            body = f"{body[:a]}# {value}{body[b:]}"
+        else:
+            body = f"# {value}\n\n{body}"
+    elif value is None:
+        data.pop(fm_key(data, field), None)
+    elif is_task_status:
+        status = canonical_status(value)
+        if status is None:
+            raise ChangeSetError(f"unknown status {value!r}")
+        data[fm_key(data, field)] = status
+    elif field in ("due", "stale_after"):
+        parsed = parse_iso_date(value)
+        if parsed is None:
+            raise ChangeSetError(f"{field} must be YYYY-MM-DD: {value!r}")
+        data[fm_key(data, field)] = parsed
+    else:
+        data[fm_key(data, field)] = value
+    cs.touch(rel)
+    cs.snap.write_markdown(rel, join_record(data, body))
+
+
+def apply_add_remove(cs: ChangeSet, change: dict[str, Any]) -> None:
+    change_keys(change, ("record", "field", "values"))
+    op = change["op"]
+    rel, schema = find_record(cs, change["record"])
+    field = change_str(change["field"], "field")
+    spec = next((f for f in schema.set_fields() if f.name == field), None)
+    if spec is None:
+        raise ChangeSetError(f"{field!r} is not a set field of a {schema.kind}")
+    values = change_list(change["values"], "values")
+    values = resolve_values(cs, spec, values, rel if op == "add" else None)
+    data, body = split_record(cs.snap.read_text(rel))
+    if spec.name == "blocked_by" and op == "add":
+        own = str(data.get(fm_key(data, "id"), "")).upper()
+        if own in values:
+            raise ChangeSetError(f"{own} cannot be blocked by itself")
+    if spec.name == "conversations":
+        for value in values:
+            scheme, conv_id = parse_conversation_entry(value)  # type: ignore[misc]
+            if op == "add":
+                update_task_conversation(data, scheme, conv_id)
+            else:
+                remove_task_conversation(data, conv_id)
+    elif op == "add":
+        edit_set_field(data, spec, values, [], schema)
+    else:
+        edit_set_field(data, spec, [], values, schema)
+    cs.touch(rel)
+    cs.snap.write_markdown(rel, join_record(data, body))
+
+
+def section_counts(body: str, schema: RecordSchema) -> dict[str, int]:
+    return {s.name: len(section_spans(body, s)) for s in schema.sections}
+
+
+def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
+    change_keys(change, ("record", "section", "text", "expected_hash"))
+    rel, schema = find_record(cs, change["record"])
+    name = change_str(change["section"], "section")
+    spec = next((s for s in schema.sections if s.name == name), None)
+    if (
+        spec is None
+        or spec.form in ("title", "generated")
+        or schema.kind == "decision"
+        or not spec.writable
+    ):
+        raise ChangeSetError(f"cannot replace section {name!r} of a {schema.kind}")
+    text = change_str(change["text"], "text", nullable=True)
+    expected = change_str(change["expected_hash"], "expected_hash", nullable=True)
+    if text is not None and (BEGIN in text or END in text):
+        raise ChangeSetError("text must not contain the generated block markers")
+    data, body = split_record(cs.snap.read_text(rel))
+    spans = section_spans(body, spec)
+    if len(spans) > 1:
+        raise ChangeSetError(
+            f"{rel}: {name} appears {len(spans)} times; edit the file directly"
+        )
+    current = section_hash(body[slice(*spans[0])]) if spans else None
+    if expected != current:
+        raise ChangeSetError(
+            f"{rel}: {name} has hash {current or 'none (absent)'}, "
+            f"expected {expected or 'none (absent)'}",
+            "precondition",
+        )
+    if text is None and spec.required:
+        raise ChangeSetError(f"{name} is required in a {schema.kind}")
+
+    replacement = None
+    if text is not None:
+        text = text.strip()
+        if spec.form == "run-in":
+            block = "\n" in text or text.startswith("1.")
+            label = f"**{name}:**"
+            replacement = f"{label}\n\n{text}" if block else f"{label} {text}".strip()
+        else:
+            replacement = f"## {name}\n\n{text}".strip()
+    if spans:
+        a, b = spans[0]
+    else:
+        # Before the first section the schema lists after this one.
+        later = schema.sections[schema.sections.index(spec) + 1 :]
+        starts = [
+            found[0][0]
+            for s in later
+            if s.form != "title" and (found := section_spans(body, s))
+        ]
+        a = b = min(starts, default=len(body.rstrip()))
+    before, after = body[:a].rstrip(), body[b:].lstrip()
+    parts = [p for p in (before, replacement, after) if p]
+    new_body = "\n\n".join(parts) + "\n"
+
+    expected_counts = section_counts(body, schema)
+    expected_counts[name] = 0 if replacement is None else 1
+    if section_counts(format_markdown(new_body), schema) != expected_counts:
+        raise ChangeSetError(
+            f"text for {name} would add or remove other sections of {rel}"
+        )
+    cs.touch(rel)
+    cs.snap.write_markdown(rel, join_record(data, new_body))
+
+
+def check_asset_path(snap: Snapshot, path: Any) -> str:
+    """REL, if write_file may write it: a project asset or INBOX.md."""
+    rel = change_line(path, "path")
+    parts = rel.split("/")
+    if "\\" in rel or any(p in ("", ".", "..") for p in parts):
+        raise ChangeSetError(f"invalid path {rel!r}")
+    if any(p.startswith(".git") for p in parts):
+        raise ChangeSetError(f"{rel}: Git files are not writable")
+    if rel != "INBOX.md":
+        if len(parts) < 2 or not is_project(snap, parts[0]):
+            raise ChangeSetError(
+                f"{rel}: only files in an existing project, and INBOX.md, are writable"
+            )
+        if parts[1] in ("tasks", "decisions") or parts[1:] == ["STATUS.md"]:
+            raise ChangeSetError(
+                f"{rel} is controlled state; change it with typed operations"
+            )
+    if snap.is_link(rel):
+        raise ChangeSetError(f"{rel} is or is under a symbolic link")
+    if snap.is_dir(rel):
+        raise ChangeSetError(f"{rel} is a directory")
+    if any(snap.is_file("/".join(parts[:i])) for i in range(1, len(parts))):
+        raise ChangeSetError(f"{rel}: a parent of it is a file")
+    if snap.is_executable(rel):
+        raise ChangeSetError(f"{rel} is executable; change it locally")
+    return rel
+
+
+def apply_write_file(cs: ChangeSet, change: dict[str, Any]) -> None:
+    change_keys(change, ("path", "content", "expected_blob"))
+    rel = check_asset_path(cs.snap, change["path"])
+    content = change_str(change["content"], "content", nullable=True)
+    expected = change_str(change["expected_blob"], "expected_blob", nullable=True)
+    current = None
+    if cs.snap.is_file(rel):
+        try:
+            current = git_blob_sha(cs.snap.read_text(rel).encode("utf-8"))
+        except UnicodeDecodeError:
+            raise ChangeSetError(f"{rel} is not UTF-8 text") from None
+    if (expected or "").lower() != (current or ""):
+        raise ChangeSetError(
+            f"{rel}: blob is {current or 'none (absent)'}, "
+            f"expected {expected or 'none (absent)'}",
+            "precondition",
+        )
+    parts = rel.split("/")
+    is_readme = len(parts) == 2 and parts[1] in ("README.md", "PROJECT.md")
+    if content is None:
+        if is_readme:
+            raise ChangeSetError(f"{rel} defines its project; it cannot be deleted")
+        if current is not None:
+            cs.snap.delete(rel)
+        return
+    try:
+        size = len(content.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ChangeSetError(f"{rel}: content is not valid UTF-8") from None
+    if size > WRITE_FILE_MAX_BYTES:
+        raise ChangeSetError(
+            f"{rel}: content is {size} bytes; the limit is {WRITE_FILE_MAX_BYTES}"
+        )
+    if is_readme and content.startswith("---\n"):
+        try:
+            split_record(content)
+        except ChangeSetError as e:
+            raise ChangeSetError(f"{rel}: {e}") from None
+    if rel.endswith(".md"):
+        cs.snap.write_markdown(rel, content)
+    else:
+        cs.snap.write_text(rel, content)
+
+
+def outcome_text(text: str | None) -> str | None:
+    """The Outcome section of the task text TEXT, or None when it has none."""
+    if text is None:
+        return None
+    body = extract_body(text)
+    spec = next(s for s in TASK_SCHEMA.sections if s.name == "Outcome")
+    spans = section_spans(body, spec)
+    return body[slice(*spans[0])] if spans else None
+
+
+def validate_change_set(cs: ChangeSet) -> list[str]:
+    """Checks the state after the whole change set.
+
+    Returns the projects whose STATUS.md must be regenerated: each project
+    with a changed task, decision, or STATUS.md, and each project with a task
+    that a changed task blocks (a snapshot block shows only direct blockers).
+    """
+    snap = cs.snap
+    rows = get_task_rows(snap)
+    paths_by_id: dict[str, list[str]] = {}
+    for r in rows:
+        paths_by_id.setdefault(r.task_id, []).append(r.rel_path)
+    touched = [r for r in rows if r.rel_path in cs.before]
+    touched_ids = {r.task_id for r in touched}
+
+    for rel, value in cs.added_refs:
+        if "/tasks/" in rel and value not in paths_by_id:
+            raise ChangeSetError(
+                f"{rel}: blocked_by names unknown task {value}", "validation"
+            )
+    for r in touched:
+        if len(paths_by_id[r.task_id]) > 1:
+            raise ChangeSetError(
+                f"{r.task_id} names {len(paths_by_id[r.task_id])} records", "validation"
+            )
+        if canonical_status(r.status) != "done":
+            continue
+        before = cs.before[r.rel_path]
+        was_done = before is not None and (
+            canonical_status(parse_frontmatter(before)[0].get("status")) == "done"
+        )
+        outcome = outcome_text(snap.read_text(r.rel_path))
+        if was_done and outcome == outcome_text(before):
+            continue  # Older records are repaired when next completed.
+        if not (outcome or "").removeprefix("## Outcome").strip():
+            raise ChangeSetError(
+                f"{r.task_id} is done but has no Outcome", "validation"
+            )
+    for cycle in find_dependency_cycles(rows):
+        if touched_ids & set(cycle):
+            chain = " -> ".join([*cycle, cycle[0]])
+            raise ChangeSetError(
+                f"blocked_by would form a cycle: {chain}", "validation"
+            )
+
+    decisions = sorted(rel for rel in cs.before if "/decisions/" in rel)
+    for project in sorted({rel.split("/")[0] for rel in decisions}):
+        adr_rows = get_adr_rows(snap, project)
+        filenames = [a.filename for a in adr_rows]
+        names = {rel.rsplit("/", 1)[1] for rel in decisions if rel.startswith(project)}
+        for rel, token in cs.added_refs:
+            if rel.startswith(f"{project}/decisions/") and (
+                resolve_adr_token(token, filenames) is None
+            ):
+                raise ChangeSetError(
+                    f"{rel}: supersedes names unknown {token}", "validation"
+                )
+        for cycle in find_adr_cycles(adr_rows):
+            if names & set(cycle):
+                chain = " -> ".join([*cycle, cycle[0]])
+                raise ChangeSetError(
+                    f"supersedes would form a cycle: {chain}", "validation"
+                )
+
+    projects = {rel.split("/")[0] for rel in cs.before}
+    projects |= {r.project for r in rows if touched_ids & set(r.blocked_by)}
+    return sorted(projects)
+
+
+def unknown_change(cs: ChangeSet, change: Any) -> None:
+    raise ChangeSetError(f"op must be one of: {', '.join(CHANGE_OPS)}")
+
+
+CHANGE_HANDLERS: dict[str, Callable[[ChangeSet, dict[str, Any]], None]] = {
+    "create": apply_create,
+    "set": apply_set,
+    "add": apply_add_remove,
+    "remove": apply_add_remove,
+    "replace_section": apply_replace_section,
+    "write_file": apply_write_file,
+}
+
+
+def apply_change_set(base: Snapshot, doc: Any) -> ChangeSet:
+    """Applies the change set DOC over BASE in memory.
+
+    Changes apply in order, each seeing the ones before it, then the whole
+    result is validated and the affected projects' STATUS.md blocks are
+    regenerated. Raises ChangeSetError, naming the change, on any refusal;
+    BASE is never written.
+    """
+    changes = doc.get("changes") if isinstance(doc, dict) else None
+    if not isinstance(changes, list) or set(doc) != {"changes"}:
+        raise ChangeSetError("a change set is an object with one key, 'changes'")
+    if not changes:
+        raise ChangeSetError("the change set has no changes")
+    cs = ChangeSet(OverlaySnapshot(base), {}, [], {}, [])
+    for i, change in enumerate(changes, 1):
+        op = change.get("op") if isinstance(change, dict) else None
+        handler = CHANGE_HANDLERS.get(op) if isinstance(op, str) else None
+        try:
+            (handler or unknown_change)(cs, change)
+        except ChangeSetError as e:
+            raise ChangeSetError(f"change {i} ({op}): {e}", e.kind) from None
+    projects = validate_change_set(cs)
+    rows = get_task_rows(cs.snap)
+    index = {r.task_id: r.status for r in rows if r.task_id}
+    for project in projects:
+        if is_project(cs.snap, project):
+            sync_status(cs.snap, project, all_rows=rows, index=index)
+    return cs
+
+
+def change_set_result(cs: ChangeSet) -> dict[str, Any]:
+    """The created records and the files changed, with their new blob SHAs."""
+    files = []
+    for rel, (before, after) in cs.snap.diff().items():
+        files.append(
+            {
+                "path": rel,
+                "change": (
+                    "deleted"
+                    if after is None
+                    else "added"
+                    if before is None
+                    else "modified"
+                ),
+                "blob": git_blob_sha(after.encode("utf-8"))
+                if after is not None
+                else None,
+            }
+        )
+    return {"created": cs.created, "files": files}
+
+
+def cmd_apply(changes_path: str, dry_run: bool = False) -> None:
+    """Apply a change set to the working tree."""
+    try:
+        raw = (
+            sys.stdin.read()
+            if changes_path == "-"
+            else Path(changes_path).read_text(encoding="utf-8")
+        )
+    except OSError as e:
+        die_scoped(f"cannot read {changes_path}: {e.strerror}")
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as e:
+        die_scoped(f"{changes_path} is not JSON: {e}")
+    root = get_repo_root()
+    base = FsSnapshot(root)
+    try:
+        cs = apply_change_set(base, doc)
+    except ChangeSetError as e:
+        die_scoped(f"{e}; nothing changed")
+    diff = cs.snap.diff()
+    if dry_run:
+        import difflib
+
+        for rel, (before, after) in diff.items():
+            sys.stdout.writelines(
+                difflib.unified_diff(
+                    (before or "").splitlines(keepends=True),
+                    (after or "").splitlines(keepends=True),
+                    "/dev/null" if before is None else f"a/{rel}",
+                    "/dev/null" if after is None else f"b/{rel}",
+                )
+            )
+        return
+    result = change_set_result(cs)
+    for rel, (_, after) in diff.items():
+        if after is None:
+            base.delete(rel)
+        else:
+            base.write_text(rel, after)
+    print(json.dumps(result, indent=2))
 
 
 def schema_document() -> dict[str, Any]:
@@ -5901,6 +6758,7 @@ Commands:
   root                             Print the active control repository root
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
+  apply CHANGES.json [--dry-run]   Apply a change set to the working tree
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   status [PROJECT] [--json]        Show project status
@@ -6160,6 +7018,43 @@ than a few words.""",
     )
 
     add_set_field_options(p_update, removable=True)
+
+    # apply
+    p_apply = subparsers.add_parser(
+        "apply",
+        help="Apply a change set to the working tree",
+        description=(
+            "Apply a change set to the working tree: the typed operations the MCP\n"
+            "server's writes use (create, set, add, remove, replace_section, and\n"
+            "write_file), all or none. Preconditions are checked as each change\n"
+            "applies; the state after the whole set is validated; the affected\n"
+            "projects' STATUS.md blocks are regenerated. Nothing is committed.\n"
+            "Prints the created records and changed files as JSON."
+        ),
+        epilog=(
+            "Example CHANGES.json:\n"
+            '  {"changes": [\n'
+            '    {"op": "create", "kind": "task", "project": "my-project", "ref": "a",\n'
+            '     "sections": {"title": "Add a cache", "Goal": "Sub-10ms reads"}},\n'
+            '    {"op": "add", "record": "TASK-3A91F", "field": "blocked_by",\n'
+            '     "values": ["$a"]},\n'
+            '    {"op": "set", "record": "TASK-3A91F", "field": "status",\n'
+            '     "value": "blocked", "expected": "todo"}\n'
+            "  ]}\n\n"
+            "The change-set format is in references/model.md (Change Sets)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_apply.add_argument(
+        "changes_path",
+        metavar="CHANGES.json",
+        help="Change set file, or - for standard input",
+    )
+    p_apply.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the diff the change set would make, and write nothing",
+    )
 
     # schema
     p_schema = subparsers.add_parser(
@@ -6612,6 +7507,8 @@ def main(argv: list[str] | None = None) -> None:
             add_conversations=args.add_conversations,
             remove_conversations=args.remove_conversations,
         )
+    elif args.command == "apply":
+        cmd_apply(changes_path=args.changes_path, dry_run=args.dry_run)
     elif args.command == "schema":
         cmd_schema(as_json=args.json)
     elif args.command == "list":

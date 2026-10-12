@@ -243,6 +243,7 @@ taskgo id
 taskgo root
 taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
 taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--expect-status STATE] [--wait-for GATE] [--add-|--remove-blocked-by ID] [--add-|--remove-wait-for GATE] [--add-|--remove-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
+taskgo apply CHANGES.json [--dry-run]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]
@@ -268,6 +269,11 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--auth access|none] [--acce
   when the label or heading appears more than once. `--expect-status STATE`
   makes the update conditional: it changes nothing and exits non-zero unless the
   current state is STATE. Unknown states are refused, not reset to `todo`.
+- `apply`: Apply a change set (JSON typed operations: create, set, add, remove,
+  replace_section, write_file) to the working tree, all or none, with
+  preconditions, whole-set validation, and STATUS regeneration for affected
+  projects. It is the MCP server's write semantics, offline; it does not commit.
+  See [Change Sets](references/model.md#change-sets).
 - `schema`: The declarative field and section schema for tasks, decisions, and
   `STATUS.md`. `--json` is the conformance form for other implementations.
 - `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, and commit

@@ -7,6 +7,7 @@
 - [Help](#help)
 - [create](#create)
 - [update](#update)
+- [apply](#apply)
 - [list](#list)
 - [info](#info)
 - [status](#status)
@@ -36,6 +37,7 @@ Commands:
   root                             Print the active control repository root
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
+  apply CHANGES.json [--dry-run]   Apply a change set to the working tree
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   status [PROJECT] [--json]        Show project status
@@ -208,6 +210,42 @@ Examples:
   taskgo update TASK-3A91F --expect-status todo --status in-progress
   taskgo update TASK-3A91F --add-blocked-by TASK-1627D --remove-wait-for 2026-10-13
   taskgo update TASK-3A91F --sketch "Use in-memory dict" --findings "Latency reduced by 40%"
+```
+
+<!-- /generated -->
+
+## apply
+
+<!-- generated: ../scripts/taskgo apply --help -->
+
+```text
+usage: taskgo apply [-h] [--dry-run] CHANGES.json
+
+Apply a change set to the working tree: the typed operations the MCP
+server's writes use (create, set, add, remove, replace_section, and
+write_file), all or none. Preconditions are checked as each change
+applies; the state after the whole set is validated; the affected
+projects' STATUS.md blocks are regenerated. Nothing is committed.
+Prints the created records and changed files as JSON.
+
+positional arguments:
+  CHANGES.json  Change set file, or - for standard input
+
+options:
+  -h, --help    show this help message and exit
+  --dry-run     Print the diff the change set would make, and write nothing
+
+Example CHANGES.json:
+  {"changes": [
+    {"op": "create", "kind": "task", "project": "my-project", "ref": "a",
+     "sections": {"title": "Add a cache", "Goal": "Sub-10ms reads"}},
+    {"op": "add", "record": "TASK-3A91F", "field": "blocked_by",
+     "values": ["$a"]},
+    {"op": "set", "record": "TASK-3A91F", "field": "status",
+     "value": "blocked", "expected": "todo"}
+  ]}
+
+The change-set format is in references/model.md (Change Sets).
 ```
 
 <!-- /generated -->

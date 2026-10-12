@@ -269,12 +269,79 @@ POSIX paths:
 - **`GitTreeSnapshot`:** One commit's tree, read with `git ls-tree` and
   `git cat-file --batch`, without a checkout. It is read-only; writes raise
   `ReadOnlySnapshotError`.
+- **`OverlaySnapshot`:** Pending writes held in memory over either of the
+  others. A [change set](#change-sets) is applied to one, so a refused change
+  set writes nothing.
 
 Rendering a commit's tree gives the same task rows, `STATUS.md`, and audit
 findings as rendering a checkout of it. Git commands that inspect the repository
 rather than its files (commit authority, shallow clones, staging, history) stay
 in the CLI commands. Task edits are `edit_task_text()` (text in, text out) and
 `update_task()` (edit, rename, and sync over a snapshot).
+
+## Change Sets
+
+A change set is the unit of a typed write: a list of operations applied in
+order, all or none. `taskgo apply CHANGES.json` applies one to the working tree
+without committing, so the MCP server's write semantics can be tried offline.
+The file is a JSON object with one key, `changes`:
+
+```json
+{"changes": [
+  {"op": "create", "kind": "task", "project": "my-project", "ref": "a",
+   "fields": {"blocked_by": ["TASK-3A91F"]},
+   "sections": {"title": "Add a cache", "Goal": "Sub-10ms reads."}},
+  {"op": "set", "record": "TASK-3A91F", "field": "status", "value": "done",
+   "expected": "in-progress"},
+  {"op": "replace_section", "record": "TASK-3A91F", "section": "Outcome",
+   "text": "Met.", "expected_hash": null}
+]}
+```
+
+| Operation         | Keys                                                                          | Precondition                          |
+| ----------------- | ----------------------------------------------------------------------------- | ------------------------------------- |
+| `create`          | `kind` (`task` or `decision`), `project`, `ref`, `slug`, `fields`, `sections` | none; IDs and numbers are allocated   |
+| `set`             | `record`, `field`, `value`, `expected` (optional)                             | `expected`, when given                |
+| `add`, `remove`   | `record`, `field`, `values`                                                   | none; repeats and absences are no-ops |
+| `replace_section` | `record`, `section`, `text`, `expected_hash`                                  | the section's hash                    |
+| `write_file`      | `path`, `content`, `expected_blob`                                            | the file's Git blob SHA               |
+
+- **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
+  for a record an earlier `create` named with `ref`. `$name` also works in
+  `blocked_by` and `supersedes` values, so one set can create a task and the
+  task it blocks.
+- **Fields:** `set` takes a task's `status`, `due`, `stale_after`, or `title`,
+  and a decision's `status`; null clears an optional one. `add` and `remove`
+  take the set fields of the [schema](command-index.md#schema). Conversations
+  need an explicit `<agent>://<id>`.
+- **Sections:** `replace_section` takes a task section other than the title, or
+  `STATUS.md` Summary or Next. `expected_hash` is the hash `get_task` or
+  `get_project_status` reports, or null when the section is absent; a null
+  `text` removes an optional section. A new section goes where the schema orders
+  it. Text that would add or remove any other section is refused.
+- **Files:** `write_file` writes project assets: any file in an existing project
+  outside `tasks/`, `decisions/`, and `STATUS.md`, and `INBOX.md`. It refuses
+  `.git*` paths, `..`, symbolic links, executable files, more than 256 KiB,
+  non-UTF-8 content, deleting a project's `README.md`, and a `README.md` whose
+  frontmatter does not parse. `expected_blob` is null for a new file, and a null
+  `content` deletes. Markdown is formatted, so the result reports each written
+  file's new blob SHA.
+
+Each precondition is checked when its change applies, against the state the
+changes before it left. Validation then runs on the state after the whole set:
+added blockers and superseded decisions exist, no `blocked_by` or `supersedes`
+cycle passes through a changed record, task IDs stay unique, and a task that
+becomes done, or whose Outcome changes while done, has a non-empty Outcome.
+Last, `STATUS.md` is regenerated for each project with a changed task, decision,
+or `STATUS.md`, and for each project with a task that a changed task blocks; a
+snapshot block shows only direct blockers, so no further project can change.
+Other projects' date-driven refreshes stay with `taskgo sync`.
+
+A refusal names the change and its kind: `invalid` (malformed or disallowed),
+`precondition` (an expected value, hash, or blob that no longer holds), or
+`validation` (the whole set's result breaks a rule). Nothing is written. To read
+section hashes offline, run `taskgo mcp --stdio --no-fetch`, which serves the
+committed local branch.
 
 ## Unified AuditEngine Architecture (`doctor`, `fix`, and `dispatch`)
 
