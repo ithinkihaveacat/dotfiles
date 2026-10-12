@@ -75,9 +75,13 @@ skill_test_init() {
   # Ensure p4 is not found by default during Git/Unmanaged tests.
   export PATH="$MOCK_BIN_DIR:$PATH"
   unset AGENT_PREFLIGHT_SKIP _agent_preflight_skip
-  # Run the same whether or not the suite itself runs inside an agent session.
+  # Run the same whether or not the suite itself runs inside an agent session
+  # (Claude, Codex, Antigravity/Jetski) or with skill's own overrides set.
   unset AGENT_SESSION_DIR AGENT_SESSION_ID CLAUDE_CODE_SESSION_ID \
-    CODEX_SESSION_ID ANTIGRAVITY_CONVERSATION_ID JETSKI_CONVERSATION_ID
+    CODEX_SESSION_ID ANTIGRAVITY_CONVERSATION_ID JETSKI_CONVERSATION_ID \
+    ANTIGRAVITY_APP_DATA_DIR AGY_APP_DATA_DIR \
+    SKILL_CACHE_DIR SKILL_DEST_DIRS SKILL_DEBUG AGENT_OFFLINE \
+    NO_COLOR FORCE_COLOR
 
   # A dummy p4 that fails, so we never accidentally detect Perforce.
   cat <<'EOF' >"$MOCK_BIN_DIR/p4"
