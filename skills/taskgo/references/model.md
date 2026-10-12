@@ -355,11 +355,15 @@ Remediations write through the audited snapshot:
   `[FAIL]`), and exits non-zero on errors per CLI design standards.
 - **`fix` (Auto-Healing Engine):** Runs the exact same audit engine, executes
   structured remediation callbacks for auto-fixable findings (assigning missing
-  task IDs, normalizing status aliases, synchronizing `STATUS.md` snapshots),
-  verifies convergence, and auto-commits repairs by default with deterministic
-  `COMMIT_SHA` output on `stdout`. Use `--dry-run` to preview changes without
-  modifying files or committing, or `--no-commit` to apply repairs on disk
-  without committing.
+  task IDs, normalizing status aliases, synchronizing `STATUS.md` snapshots,
+  formatting the Markdown of tracker records), verifies convergence, and
+  auto-commits repairs by default with deterministic `COMMIT_SHA` output on
+  `stdout`. Use `--dry-run` to preview changes without modifying files or
+  committing, or `--no-commit` to apply repairs on disk without committing.
+  Tracker records are the root `AGENTS.md`, `INBOX.md`, and `README.md`, and
+  each project's `README.md`, `PROJECT.md`, `STATUS.md`, and the Markdown files
+  directly in `tasks/` and `decisions/`. Other documents, and files Git ignores,
+  are never reformatted.
 - **`dispatch` (Committed-State Projection):** Uses the audit engine's project
   findings alongside dispatch-specific checks, then emits a dispatch note from
   the selected task record at `HEAD`. Findings describe working-tree or tracker

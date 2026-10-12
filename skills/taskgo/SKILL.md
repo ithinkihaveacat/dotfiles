@@ -276,8 +276,11 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--auth access|none] [--acce
   See [Change Sets](references/model.md#change-sets).
 - `schema`: The declarative field and section schema for tasks, decisions, and
   `STATUS.md`. `--json` is the conformance form for other implementations.
-- `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, and commit
-  repairs by default.
+- `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, format the
+  Markdown of tracker records (root `AGENTS.md`, `INBOX.md`, and `README.md`;
+  each project's `README.md`, `PROJECT.md`, `STATUS.md`, `tasks/`, and
+  `decisions/`), and commit repairs by default. Other documents are left as
+  their owners wrote them.
 - `checkpoint`: Safe automatic-commit path requiring
   `taskgo:allow-local-commits`. Enforces 50-char subject limits.
 - `mcp`: Serve committed state to MCP clients, such as cloud agents without a
