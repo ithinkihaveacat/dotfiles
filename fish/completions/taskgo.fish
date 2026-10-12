@@ -32,23 +32,27 @@ complete -f -c taskgo -n __fish_use_subcommand -a id -d 'Allocate a unique task 
 complete -f -c taskgo -n __fish_use_subcommand -a root -d 'Print the active control repository root'
 complete -f -c taskgo -n __fish_use_subcommand -a create -d 'Create a new task'
 complete -f -c taskgo -n __fish_use_subcommand -a update -d 'Update task fields, status, or headings'
+complete -f -c taskgo -n __fish_use_subcommand -a apply -d 'Apply a change set to the working tree'
 complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
+complete -f -c taskgo -n __fish_use_subcommand -a info -d 'Show project metadata from README.md frontmatter'
 complete -f -c taskgo -n __fish_use_subcommand -a status -d 'Show project status'
 complete -f -c taskgo -n __fish_use_subcommand -a dispatch -d 'Print agent instructions for a selected task'
 complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
+complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep wait_for gates and date horizons'
 complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks (read-only)'
 complete -f -c taskgo -n __fish_use_subcommand -a fix -d 'Auto-heal task metadata and snapshots'
 complete -f -c taskgo -n __fish_use_subcommand -a history -d 'Show frontmatter history'
 complete -f -c taskgo -n __fish_use_subcommand -a checkpoint -d 'Commit an authorized tracker checkpoint'
 complete -f -c taskgo -n __fish_use_subcommand -a commit -d 'Commit a logical transition'
 complete -f -c taskgo -n __fish_use_subcommand -a schema -d 'Show the task, decision, and STATUS schema'
+complete -f -c taskgo -n __fish_use_subcommand -a mcp -d 'Serve the tracker to MCP clients'
 
 # Global flags
 complete -c taskgo -n __fish_use_subcommand -l root -s R -r -d 'Control repository (default: ~/.projects)'
 complete -c taskgo -f -s h -l help -d 'Display help message and exit'
 
 # Subcommand arguments (Projects)
-complete -f -c taskgo -n '__fish_seen_subcommand_from create list status sync doctor fix' -a '(__fish_taskgo_projects)' -d Project
+complete -f -c taskgo -n '__fish_seen_subcommand_from create list info status sync check doctor fix' -a '(__fish_taskgo_projects)' -d Project
 
 # Subcommand arguments (Task IDs for update / history / checkpoint)
 complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint dispatch' -a '(__fish_taskgo_tasks)' -d 'Task ID'
@@ -68,6 +72,9 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l next -x -d 'Nex
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l no-commit -d 'Create task and sync without committing'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l dry-run -d 'Preview task path without creating files'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l wait-for -x -d 'External or temporal gate'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l due -x -d 'Committed completion deadline (YYYY-MM-DD)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l stale-after -x -d 'Relevance cutoff date (YYYY-MM-DD)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l add-blocked-by -x -a '(__fish_taskgo_tasks)' -d 'Add a blocked_by edge'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l add-wait-for -x -d 'Add a wait_for gate'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l add-conversation -x -d 'Add a conversation URI'
@@ -93,13 +100,20 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l outcome -x -d '
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l findings -x -d Findings
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l next -x -d 'Next steps'
 complete -f -c taskgo -n '__fish_seen_subcommand_from update' -s C -l conv -l conversation -x -d 'Active conversation or session ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l wait-for -x -d 'External or temporal gate'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l due -x -d 'Committed completion deadline (YYYY-MM-DD)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l stale-after -x -d 'Relevance cutoff date (YYYY-MM-DD)'
+
+# apply options (CHANGES.json file, or - for standard input)
+complete -c taskgo -n '__fish_seen_subcommand_from apply' -F -d 'Change set file'
+complete -f -c taskgo -n '__fish_seen_subcommand_from apply' -l dry-run -d 'Print the diff and write nothing'
 
 # list options
-complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s s -l state -l status -x -a 'todo in-progress blocked done cancelled' -d 'Filter by state'
+complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s s -l state -l status -x -a 'todo in-progress blocked done cancelled ready' -d 'Filter by state'
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s j -l json -d 'Emit JSON output'
 
-# status options
-complete -f -c taskgo -n '__fish_seen_subcommand_from status' -s j -l json -d 'Emit JSON output'
+# info, status, and check options
+complete -f -c taskgo -n '__fish_seen_subcommand_from info status check' -s j -l json -d 'Emit JSON output'
 
 # fix options
 complete -f -c taskgo -n '__fish_seen_subcommand_from fix' -l dry-run -d 'Preview repairs without modifying files'
@@ -119,3 +133,15 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from commit' -s C -l conv -l co
 
 # schema options
 complete -f -c taskgo -n '__fish_seen_subcommand_from schema' -l json -d 'Output as JSON'
+
+# mcp options
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l host -x -d 'Address to listen on (default 127.0.0.1)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l port -x -d 'Port to listen on (default 8789)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l path -x -d 'Endpoint path (default /mcp)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l remote -x -a '(git -C (__fish_taskgo_root) remote 2>/dev/null)' -d 'Remote to fetch from (default origin)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l branch -x -d 'Branch to serve (default main)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l no-fetch -d 'Serve the local branch without fetching'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l auth -x -a 'access none' -d 'Check Access JWTs, or nothing (loopback only)'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l access-team -x -d 'Access team domain'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l access-aud -x -d 'Access application audience (AUD) tag'
+complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l stdio -d 'Serve one client on stdin and stdout'
