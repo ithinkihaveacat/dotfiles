@@ -3887,6 +3887,20 @@ def resolve_ref(cs: ChangeSet, token: str) -> str:
     return cs.refs[token[1:]]
 
 
+def check_record_path(snap: Snapshot, rel: str) -> str:
+    """REL, if it names a record inside a project: no '..', '.', or empty
+    component, no backslash, and no symbolic link on the way, so a write
+    cannot leave the control repository."""
+    parts = rel.split("/")
+    if "\\" in rel or any(p in ("", ".", "..") for p in parts):
+        raise ChangeSetError(f"invalid path {rel!r}")
+    if not is_project(snap, parts[0]):
+        raise ChangeSetError(f"{rel}: {parts[0]!r} is not a project")
+    if snap.is_link(rel):
+        raise ChangeSetError(f"{rel} is or is under a symbolic link")
+    return rel
+
+
 def find_record(cs: ChangeSet, record: Any) -> tuple[str, RecordSchema]:
     """The path and schema of RECORD: a task ID, a '$ref', or a path."""
     token = resolve_ref(cs, change_line(record, "record"))
@@ -3897,16 +3911,14 @@ def find_record(cs: ChangeSet, record: Any) -> tuple[str, RecordSchema]:
             raise ChangeSetError(f"no task {task_id}")
         if len(paths) > 1:
             raise ChangeSetError(f"{task_id} names {len(paths)} records")
-        return paths[0], TASK_SCHEMA
+        return check_record_path(cs.snap, paths[0]), TASK_SCHEMA
     parts = token.split("/")
-    if len(parts) == 2 and parts[1] == "STATUS.md" and is_project(cs.snap, parts[0]):
-        return token, STATUS_SCHEMA
-    if (
-        len(parts) == 3
-        and parts[1] == "decisions"
-        and token.endswith(".md")
-        and cs.snap.is_file(token)
-    ):
+    if len(parts) == 2 and parts[1] == "STATUS.md":
+        return check_record_path(cs.snap, token), STATUS_SCHEMA
+    if len(parts) == 3 and parts[1] == "decisions" and token.endswith(".md"):
+        check_record_path(cs.snap, token)
+        if not cs.snap.is_file(token):
+            raise ChangeSetError(f"no decision {token}")
         return token, DECISION_SCHEMA
     raise ChangeSetError(
         f"record {token!r} is not a task ID, a '$ref', a decision path, "
@@ -4006,7 +4018,7 @@ def create_task_change(cs: ChangeSet, change: dict[str, Any], project: str) -> s
         slug = slugify(title) or "task"
 
     task_id = generate_task_id(cs.snap)
-    rel = f"{project}/tasks/{task_id}-{slug}.md"
+    rel = check_record_path(cs.snap, f"{project}/tasks/{task_id}-{slug}.md")
     content = render_task_file(
         task_id=task_id,
         title=title,
@@ -4070,7 +4082,7 @@ def create_decision_change(cs: ChangeSet, change: dict[str, Any], project: str) 
         if (m := re.match(r"^(\d+)-", name))
     ]
     number = max(numbers, default=0) + 1
-    rel = f"{project}/decisions/{number:03d}-{slug}.md"
+    rel = check_record_path(cs.snap, f"{project}/decisions/{number:03d}-{slug}.md")
     data: dict[str, Any] = {}
     if status:
         data["status"] = status
