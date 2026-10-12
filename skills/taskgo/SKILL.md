@@ -189,7 +189,8 @@ which file, repository, or skill owns each kind of fact.
   verify with `taskgo info <project>`.
 - **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`) for private or
   cross-artifact decisions. Newer ADRs record `supersedes: [<old-adr>]` in YAML
-  frontmatter to retire older ADRs without editing accepted historical records.
+  frontmatter to retire older ADRs; edit an accepted ADR in place only for
+  typos, status updates, broken links, or implementation notes.
 - **STATUS.md:** The self-contained operational projection.
   - `## Summary`: Human/agent prose for current situation and active session
     citation (`[<conversation-id>](<agent>://<conversation-id>)`). Rewrite it;
@@ -246,6 +247,7 @@ taskgo root
 taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
 taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--expect-status STATE] [--wait-for GATE] [--add-|--remove-blocked-by ID] [--add-|--remove-wait-for GATE] [--add-|--remove-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo apply CHANGES.json [--dry-run]
+taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [--replace-all] [--expected-blob SHA] [--dry-run] [--json]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo status [PROJECT] [--json]
@@ -274,10 +276,14 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth a
   makes the update conditional: it changes nothing and exits non-zero unless the
   current state is STATE. Unknown states are refused, not reset to `todo`.
 - `apply`: Apply a change set (JSON typed operations: create, set, add, remove,
-  replace_section, write_file) to the working tree, all or none, with
+  replace_section, write_file, edit_file) to the working tree, all or none, with
   preconditions, whole-set validation, and STATUS regeneration for affected
   projects. It is the MCP server's write semantics, offline; it does not commit.
   See [Change Sets](references/model.md#change-sets).
+- `edit`: Replace exact text in one file (a change set of one `edit_file`):
+  Caxton-style `search_and_replace` with verbatim bytes, a CRLF retry, near-miss
+  diffs, and record validation. Assets keep their bytes and mode; tasks,
+  decisions, and STATUS.md stay valid and are formatted. Does not commit.
 - `schema`: The declarative field and section schema for tasks, decisions, and
   `STATUS.md`. `--json` is the conformance form for other implementations.
 - `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, format the

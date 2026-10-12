@@ -57,6 +57,7 @@ import textwrap
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -737,9 +738,18 @@ def run_git(
 
 
 def atomic_write(path: Path, content: str) -> None:
-    """Atomically writes content to path using a PID-tagged temp file and os.replace."""
+    """Atomically writes content to path using a PID-tagged temp file and os.replace.
+
+    Line endings are written verbatim, and an existing file keeps its
+    permission bits (an executable script stays executable).
+    """
     tmp = path.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(content, encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+    try:
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+    except FileNotFoundError:
+        pass
     os.replace(tmp, path)
 
 
@@ -855,7 +865,8 @@ class FsSnapshot(Snapshot):
         return self.root / rel if rel else self.root
 
     def read_text(self, rel: str) -> str:
-        return self.path(rel).read_text(encoding="utf-8")
+        # No newline translation: CRLF bytes survive, as in a Git blob.
+        return self.path(rel).read_bytes().decode("utf-8")
 
     def is_file(self, rel: str) -> bool:
         return self.path(rel).is_file()
@@ -1022,6 +1033,8 @@ class OverlaySnapshot(Snapshot):
     def __init__(self, base: Snapshot):
         self.base = base
         self.changes: dict[str, str | None] = {}  # None: deleted
+        # Executable bits a change set sets or clears, by path.
+        self.modes: dict[str, bool] = {}
         self.history: set[str] | None = None
 
     def read_text(self, rel: str) -> str:
@@ -1066,7 +1079,15 @@ class OverlaySnapshot(Snapshot):
         return self.base.is_link(rel)
 
     def is_executable(self, rel: str) -> bool:
-        return rel not in self.changes and self.base.is_executable(rel)
+        if rel in self.modes:
+            return self.modes[rel]
+        if rel in self.changes and self.changes[rel] is None:
+            return False
+        # A rewritten file keeps its mode; a new one is not executable.
+        return self.base.is_executable(rel)
+
+    def set_executable(self, rel: str, executable: bool) -> None:
+        self.modes[rel] = executable
 
     def historical_task_ids(self) -> set[str]:
         # Read once per change set: a set may create several tasks.
@@ -1075,12 +1096,19 @@ class OverlaySnapshot(Snapshot):
         return self.history
 
     def diff(self) -> dict[str, tuple[str | None, str | None]]:
-        """(before, after) text of each path the overlay changes; None: absent."""
+        """(before, after) text of each path the overlay changes; None: absent.
+
+        A path whose executable bit changes is listed even when its text
+        does not.
+        """
         out: dict[str, tuple[str | None, str | None]] = {}
-        for rel in sorted(self.changes, key=path_key):
-            after = self.changes[rel]
+        for rel in sorted(set(self.changes) | set(self.modes), key=path_key):
+            after = self.read_text(rel) if self.is_file(rel) else None
             before = self.base.read_text(rel) if self.base.is_file(rel) else None
-            if before != after:
+            mode_changed = after is not None and (
+                self.is_executable(rel) != self.base.is_executable(rel)
+            )
+            if before != after or mode_changed:
                 out[rel] = (before, after)
         return out
 
@@ -3849,7 +3877,15 @@ def cmd_update(
 # ===========================================================================
 
 WRITE_FILE_MAX_BYTES = 256 * 1024
-CHANGE_OPS = ("create", "set", "add", "remove", "replace_section", "write_file")
+CHANGE_OPS = (
+    "create",
+    "set",
+    "add",
+    "remove",
+    "replace_section",
+    "write_file",
+    "edit_file",
+)
 # Scalars `set` may change, per record kind; title is the record's H1.
 SETTABLE = {
     "task": ("status", "due", "stale_after", "title"),
@@ -3891,6 +3927,10 @@ class ChangeSet:
     before: dict[str, str | None]
     # (record path, value) pairs added to blocked_by or supersedes.
     added_refs: list[tuple[str, str]]
+    # Records edit_file wrote verbatim, formatted once the set has applied.
+    unformatted: set[str] = dataclass_field(default_factory=set)
+    # What each edit_file did, in order, for the result.
+    edits: list[dict[str, Any]] = dataclass_field(default_factory=list)
 
     def touch(self, rel: str) -> None:
         if rel not in self.before:
@@ -4335,7 +4375,10 @@ def apply_replace_section(cs: ChangeSet, change: dict[str, Any]) -> None:
 
 
 def check_asset_path(snap: Snapshot, path: Any) -> str:
-    """REL, if write_file may write it: a project asset or INBOX.md."""
+    """REL, if write_file or edit_file may write it: a project asset or
+    INBOX.md. An executable file is an asset like any other; writes keep
+    its mode unless write_file's 'executable' says otherwise.
+    """
     rel = change_line(path, "path")
     parts = rel.split("/")
     if "\\" in rel or any(p in ("", ".", "..") for p in parts):
@@ -4357,16 +4400,19 @@ def check_asset_path(snap: Snapshot, path: Any) -> str:
         raise ChangeSetError(f"{rel} is a directory")
     if any(snap.is_file("/".join(parts[:i])) for i in range(1, len(parts))):
         raise ChangeSetError(f"{rel}: a parent of it is a file")
-    if snap.is_executable(rel):
-        raise ChangeSetError(f"{rel} is executable; change it locally")
     return rel
 
 
 def apply_write_file(cs: ChangeSet, change: dict[str, Any]) -> None:
-    change_keys(change, ("path", "content", "expected_blob"))
+    change_keys(change, ("path", "content", "expected_blob"), ("executable",))
     rel = check_asset_path(cs.snap, change["path"])
     content = change_str(change["content"], "content", nullable=True)
     expected = change_str(change["expected_blob"], "expected_blob", nullable=True)
+    executable = change.get("executable")
+    if executable is not None and not isinstance(executable, bool):
+        raise ChangeSetError("executable must be true, false, or null")
+    if executable is not None and content is None:
+        raise ChangeSetError(f"{rel}: executable needs content; a deletion has none")
     current = None
     if cs.snap.is_file(rel):
         try:
@@ -4404,6 +4450,222 @@ def apply_write_file(cs: ChangeSet, change: dict[str, Any]) -> None:
         cs.snap.write_markdown(rel, content)
     else:
         cs.snap.write_text(rel, content)
+    if executable is not None:
+        cs.snap.set_executable(rel, executable)
+
+
+def count_lines(text: str) -> int:
+    """Lines in TEXT, each ended by '\\n' (the last perhaps by the end)."""
+    return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+
+
+# Files with more lines than this get no near-miss hint from edit_file.
+EDIT_HINT_MAX_LINES = 2000
+
+
+def edit_near_miss(content: str, old: str) -> str:
+    """A unified diff of OLD against the closest lines of CONTENT, or ''.
+
+    The anchor is the line of CONTENT closest to OLD's first non-blank line,
+    compared without surrounding whitespace, as Caxton's search_and_replace
+    does.
+    """
+    import difflib
+
+    lines = content.split("\n")
+    old_lines = old.split("\n")
+    first = next((ln.strip() for ln in old_lines if ln.strip()), "")
+    if not first or len(lines) > EDIT_HINT_MAX_LINES:
+        return ""
+    stripped = [ln.strip() for ln in lines]
+    matches = difflib.get_close_matches(first, stripped, n=1)
+    if not matches:
+        return ""
+    lead = next(i for i, ln in enumerate(old_lines) if ln.strip())
+    idx = max(0, stripped.index(matches[0]) - lead)
+    window = lines[max(0, idx - 1) : idx + len(old_lines) + 1]
+    return "\n".join(
+        difflib.unified_diff(
+            old_lines, window, "old_string", "file", lineterm="", n=len(old_lines)
+        )
+    )
+
+
+def edit_target(cs: ChangeSet, path: Any) -> tuple[str, RecordSchema | None]:
+    """The path edit_file may change, and its schema when it is a record.
+
+    Records are a project's tasks/*.md, decisions/*.md, and STATUS.md; any
+    other file write_file may write is an asset. The file must exist.
+    """
+    rel = change_line(path, "path")
+    parts = rel.split("/")
+    schema: RecordSchema | None = None
+    if len(parts) == 3 and parts[1] == "tasks" and rel.endswith(".md"):
+        schema = TASK_SCHEMA
+    elif len(parts) == 3 and parts[1] == "decisions" and rel.endswith(".md"):
+        schema = DECISION_SCHEMA
+    elif len(parts) == 2 and parts[1] == "STATUS.md":
+        schema = STATUS_SCHEMA
+    if schema is not None:
+        check_record_path(cs.snap, rel)
+    elif len(parts) > 1 and parts[1] in ("tasks", "decisions"):
+        raise ChangeSetError(
+            f"{rel}: only the records directly in {parts[1]}/ can be edited"
+        )
+    else:
+        check_asset_path(cs.snap, rel)
+    if not cs.snap.is_file(rel):
+        raise ChangeSetError(f"{rel}: no such file (edit_file changes existing files)")
+    return rel, schema
+
+
+def check_record_edit(
+    cs: ChangeSet, rel: str, schema: RecordSchema, before: str, after: str
+) -> None:
+    """Refuses an edit of record REL from BEFORE to AFTER that would break it.
+
+    The frontmatter must still parse, a task keeps its ID and a known status,
+    no schema section may appear twice where it appeared at most once.
+    Entries the edit adds to blocked_by or supersedes join cs.added_refs, so
+    validation checks them as it checks the typed operations' additions.
+    (apply_edit_file keeps edits out of a STATUS.md generated block.)
+    """
+    try:
+        split_record(after)
+    except ChangeSetError as e:
+        raise ChangeSetError(f"{rel}: after the edit, {e}") from None
+    old_fm, old_body = parse_frontmatter(before)
+    new_fm, new_body = parse_frontmatter(after)
+    if schema is TASK_SCHEMA:
+        old_id, new_id = str(old_fm.get("id", "")), str(new_fm.get("id", ""))
+        if new_id != old_id:
+            raise ChangeSetError(
+                f"{rel}: the edit changes id from {old_id!r} to {new_id!r}"
+            )
+        raw = new_fm.get("status")
+        if canonical_status(raw) is None and raw != old_fm.get("status"):
+            raise ChangeSetError(
+                f"{rel}: unknown status {raw!r} (expected one of: "
+                f"{', '.join(VALUE_TYPES['status'].values)})"
+            )
+    for spec in schema.set_fields():
+        if spec.name not in ("blocked_by", "supersedes"):
+            continue
+        added = [
+            v for v in read_field(new_fm, spec) if v not in read_field(old_fm, spec)
+        ]
+        for value in added:
+            if spec.value == "adr-ref":
+                value = value.rsplit("/", 1)[-1].removesuffix(".md")
+            if not field_is_valid(spec, value):
+                raise ChangeSetError(
+                    f"{rel}: invalid {spec.name} value {value!r} "
+                    f"(expected {VALUE_TYPES[spec.value].description})"
+                )
+            if spec.name == "blocked_by" and value == str(new_fm.get("id", "")).upper():
+                raise ChangeSetError(f"{value} cannot be blocked by itself")
+            cs.added_refs.append((rel, value))
+    old_counts = section_counts(old_body, schema)
+    for name, n in section_counts(new_body, schema).items():
+        if n > 1 and old_counts.get(name, 0) <= 1:
+            raise ChangeSetError(f"{rel}: the edit would make {name} appear {n} times")
+
+
+def apply_edit_file(cs: ChangeSet, change: dict[str, Any]) -> None:
+    """Replaces exact text in one file, as Caxton's search_and_replace does.
+
+    OLD_STRING must occur exactly once, or REPLACE_ALL must be true. Bytes
+    are matched verbatim; only when nothing matches, the file has CRLF line
+    endings, and OLD_STRING has none, are both strings retried with CRLF.
+    Assets are written as replaced; records are formatted once the whole set
+    has applied, as every record write is. An executable keeps its mode.
+    """
+    change_keys(
+        change, ("path", "old_string", "new_string"), ("replace_all", "expected_blob")
+    )
+    rel, schema = edit_target(cs, change["path"])
+    old = change_str(change["old_string"], "old_string")
+    new = change_str(change["new_string"], "new_string")
+    expected = change_str(change.get("expected_blob"), "expected_blob", nullable=True)
+    replace_all = change.get("replace_all", False)
+    if not isinstance(replace_all, bool):
+        raise ChangeSetError("replace_all must be true or false")
+    if not old:
+        raise ChangeSetError("old_string must not be empty")
+    try:
+        content = cs.snap.read_text(rel)
+    except UnicodeDecodeError:
+        raise ChangeSetError(f"{rel} is not UTF-8 text") from None
+    data = content.encode("utf-8")
+    if len(data) > WRITE_FILE_MAX_BYTES:
+        raise ChangeSetError(
+            f"{rel} is {len(data)} bytes; edit_file changes files up to "
+            f"{WRITE_FILE_MAX_BYTES}"
+        )
+    if expected is not None and expected.lower() != git_blob_sha(data):
+        raise ChangeSetError(
+            f"{rel}: blob is {git_blob_sha(data)}, expected {expected}", "precondition"
+        )
+
+    count = content.count(old)
+    if count == 0 and "\r\n" in content and "\r\n" not in old and "\n" in old:
+        crlf_old = old.replace("\n", "\r\n")
+        if content.count(crlf_old):
+            old = crlf_old
+            new = new.replace("\r\n", "\n").replace("\n", "\r\n")
+            count = content.count(old)
+    if count == 0:
+        hint = edit_near_miss(content, old)
+        raise ChangeSetError(
+            f"{rel}: old_string not found"
+            + (f"; the closest text:\n{hint}" if hint else "; check whitespace"),
+            "precondition",
+        )
+    if count > 1 and not replace_all:
+        raise ChangeSetError(
+            f"{rel}: old_string occurs {count} times; add surrounding text to "
+            "make it unique, or set replace_all"
+        )
+    if schema is STATUS_SCHEMA:
+        if BEGIN in new or END in new:
+            raise ChangeSetError(
+                "new_string must not contain the generated block markers"
+            )
+        a, b = content.find(BEGIN), content.find(END)
+        if a != -1 and b != -1:
+            block = (a, b + len(END))
+            pos = content.find(old)
+            while pos != -1:
+                if pos < block[1] and pos + len(old) > block[0]:
+                    raise ChangeSetError(
+                        f"{rel}: old_string reaches into the generated block, "
+                        "which taskgo regenerates"
+                    )
+                if not replace_all:
+                    break
+                pos = content.find(old, pos + len(old))
+
+    first = content.find(old)
+    after = content.replace(old, new, -1 if replace_all else 1)
+    size = len(after.encode("utf-8"))
+    if size > WRITE_FILE_MAX_BYTES:
+        raise ChangeSetError(
+            f"{rel}: the result is {size} bytes; the limit is {WRITE_FILE_MAX_BYTES}"
+        )
+    if schema is not None:
+        check_record_edit(cs, rel, schema, content, after)
+        cs.touch(rel)
+        cs.unformatted.add(rel)
+    start = content.count("\n", 0, first) + 1
+    cs.snap.write_text(rel, after)
+    cs.edits.append(
+        {
+            "path": rel,
+            "occurrences_replaced": count if replace_all else 1,
+            "start_line": start,
+            "end_line": start + new.count("\n"),
+        }
+    )
 
 
 def outcome_text(text: str | None) -> str | None:
@@ -4506,6 +4768,7 @@ CHANGE_HANDLERS: dict[str, Callable[[ChangeSet, dict[str, Any]], None]] = {
     "remove": apply_add_remove,
     "replace_section": apply_replace_section,
     "write_file": apply_write_file,
+    "edit_file": apply_edit_file,
 }
 
 
@@ -4544,6 +4807,11 @@ def apply_change_set(
                 apply_add_remove(cs, {**add, "values": [conversation]})
             except ChangeSetError as e:
                 raise ChangeSetError(f"conversation: {e}", e.kind) from None
+    # Records edit_file wrote verbatim are formatted now, so that several
+    # edits of one record each match the text the one before it left.
+    for rel in sorted(cs.unformatted, key=path_key):
+        if cs.snap.is_file(rel):
+            cs.snap.write_markdown(rel, cs.snap.read_text(rel))
     projects = validate_change_set(cs)
     rows = get_task_rows(cs.snap)
     index = {r.task_id: r.status for r in rows if r.task_id}
@@ -4554,25 +4822,50 @@ def apply_change_set(
 
 
 def change_set_result(cs: ChangeSet) -> dict[str, Any]:
-    """The created records and the files changed, with their new blob SHAs."""
+    """The created records and the files changed, with their new blob SHAs.
+
+    A file whose executable bit changed says so; each edit_file reports its
+    replacements, the lines of the first, and the file's lines afterwards.
+    """
     files = []
     for rel, (before, after) in cs.snap.diff().items():
-        files.append(
+        entry: dict[str, Any] = {
+            "path": rel,
+            "change": (
+                "deleted"
+                if after is None
+                else "added"
+                if before is None
+                else "modified"
+            ),
+            "blob": git_blob_sha(after.encode("utf-8")) if after is not None else None,
+        }
+        executable = cs.snap.is_executable(rel)
+        if after is not None and executable != cs.snap.base.is_executable(rel):
+            entry["executable"] = executable
+        files.append(entry)
+    result: dict[str, Any] = {"created": cs.created, "files": files}
+    if cs.edits:
+        final = {
+            e["path"]: cs.snap.read_text(e["path"])
+            for e in cs.edits
+            if cs.snap.is_file(e["path"])
+        }
+        result["edits"] = [
             {
-                "path": rel,
-                "change": (
-                    "deleted"
-                    if after is None
-                    else "added"
-                    if before is None
-                    else "modified"
+                **e,
+                "total_lines": (
+                    count_lines(final[e["path"]]) if e["path"] in final else None
                 ),
-                "blob": git_blob_sha(after.encode("utf-8"))
-                if after is not None
-                else None,
+                "blob": (
+                    git_blob_sha(final[e["path"]].encode("utf-8"))
+                    if e["path"] in final
+                    else None
+                ),
             }
-        )
-    return {"created": cs.created, "files": files}
+            for e in cs.edits
+        ]
+    return result
 
 
 def cmd_apply(changes_path: str, dry_run: bool = False) -> None:
@@ -4589,6 +4882,24 @@ def cmd_apply(changes_path: str, dry_run: bool = False) -> None:
         doc = json.loads(raw)
     except json.JSONDecodeError as e:
         die_scoped(f"{changes_path} is not JSON: {e}")
+    result = run_change_set(doc, dry_run)
+    if result is not None:
+        print(json.dumps(result, indent=2))
+
+
+def set_file_executable(path: Path, executable: bool) -> None:
+    """Sets or clears PATH's executable bits, where it is readable."""
+    mode = path.stat().st_mode & 0o7777
+    mode = (mode | (mode & 0o444) >> 2) if executable else (mode & ~0o111)
+    os.chmod(path, mode)
+
+
+def run_change_set(doc: Any, dry_run: bool = False) -> dict[str, Any] | None:
+    """Applies change set DOC to the working tree and returns the result.
+
+    With DRY_RUN, prints the diff instead, writes nothing, and returns None.
+    A refused set exits, naming the change, with nothing written.
+    """
     root = get_repo_root()
     base = FsSnapshot(root)
     try:
@@ -4600,6 +4911,13 @@ def cmd_apply(changes_path: str, dry_run: bool = False) -> None:
         import difflib
 
         for rel, (before, after) in diff.items():
+            old_x, new_x = base.is_executable(rel), cs.snap.is_executable(rel)
+            if before is not None and after is not None and old_x != new_x:
+                modes = ("100755" if x else "100644" for x in (old_x, new_x))
+                old_mode, new_mode = modes
+                sys.stdout.write(
+                    f"mode {rel}\nold mode {old_mode}\nnew mode {new_mode}\n"
+                )
             sys.stdout.writelines(
                 difflib.unified_diff(
                     (before or "").splitlines(keepends=True),
@@ -4608,14 +4926,78 @@ def cmd_apply(changes_path: str, dry_run: bool = False) -> None:
                     "/dev/null" if after is None else f"b/{rel}",
                 )
             )
-        return
+        return None
     result = change_set_result(cs)
     for rel, (_, after) in diff.items():
         if after is None:
             base.delete(rel)
-        else:
-            base.write_text(rel, after)
-    print(json.dumps(result, indent=2))
+            continue
+        base.write_text(rel, after)
+        if cs.snap.is_executable(rel) != base.is_executable(rel):
+            set_file_executable(base.path(rel), cs.snap.is_executable(rel))
+    return result
+
+
+def edit_arg_text(text: str | None, path: str | None, what: str) -> str:
+    """The text of --WHAT or --WHAT-file (- for standard input), verbatim."""
+    if (text is None) == (path is None):
+        die_scoped(f"give exactly one of --{what} and --{what}-file")
+    if text is not None:
+        return text
+    try:
+        if path == "-":
+            return sys.stdin.buffer.read().decode("utf-8")
+        return Path(str(path)).read_bytes().decode("utf-8")
+    except OSError as e:
+        die_scoped(f"cannot read {path}: {e.strerror}")
+    except UnicodeDecodeError:
+        die_scoped(f"{path} is not UTF-8 text")
+    raise AssertionError("unreachable")
+
+
+def cmd_edit(
+    path: str,
+    old: str | None = None,
+    new: str | None = None,
+    old_file: str | None = None,
+    new_file: str | None = None,
+    replace_all: bool = False,
+    expected_blob: str | None = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+) -> None:
+    """Replace exact text in one file of the working tree (edit_file)."""
+    if old_file == "-" and new_file == "-":
+        die_scoped("only one of --old-file and --new-file can be -")
+    change: dict[str, Any] = {
+        "op": "edit_file",
+        "path": path.strip().strip("/"),
+        "old_string": edit_arg_text(old, old_file, "old"),
+        "new_string": edit_arg_text(new, new_file, "new"),
+        "replace_all": replace_all,
+    }
+    if expected_blob is not None:
+        change["expected_blob"] = expected_blob
+    result = run_change_set({"changes": [change]}, dry_run)
+    if result is None:
+        return
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return
+    e = result["edits"][0]
+    n = e["occurrences_replaced"]
+    lines = (
+        f"line {e['start_line']}"
+        if e["start_line"] == e["end_line"]
+        else f"lines {e['start_line']}-{e['end_line']}"
+    )
+    print(
+        f"{e['path']}: replaced {n} occurrence{'s' if n != 1 else ''} "
+        f"(first at {lines}); {e['total_lines']} lines, blob {e['blob'][:12]}"
+    )
+    others = [f["path"] for f in result["files"] if f["path"] != e["path"]]
+    if others:
+        print(f"also changed: {', '.join(others)}")
 
 
 def schema_document() -> dict[str, Any]:
@@ -6518,7 +6900,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.8.0"
+MCP_SERVER_VERSION = "0.9.0"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -6742,7 +7124,7 @@ class McpReader:
                     entries.append(f"0 {'0' * 40}\t{rel}")
                 else:
                     blob = git("hash-object", "-w", "--stdin", data=after.encode())
-                    mode = snap.modes.get(rel, "100644")
+                    mode = "100755" if cs.snap.is_executable(rel) else "100644"
                     entries.append(f"{mode} {blob}\t{rel}")
             git(
                 "update-index",
@@ -7078,6 +7460,11 @@ def mcp_apply_doc(args: dict[str, Any]) -> dict[str, Any]:
     return {"changes": args.get("changes")}
 
 
+def mcp_edit_doc(args: dict[str, Any]) -> dict[str, Any]:
+    keys = ("path", "old_string", "new_string", "replace_all", "expected_blob")
+    return {"changes": [{"op": "edit_file", **{k: args[k] for k in keys if k in args}}]}
+
+
 MCP_WRITE_PROPERTIES = {
     "request_id": {
         "type": "string",
@@ -7285,9 +7672,12 @@ MCP_TOOLS = [
         "- replace_section {record, section, text, expected_hash}: a task "
         "section or STATUS.md Summary or Next; expected_hash from get_task or "
         "get_project_status, null if absent; text null removes it.\n"
-        "- write_file {path, content, expected_blob}: a project file outside "
-        "tasks/, decisions/, and STATUS.md, or INBOX.md; expected_blob from "
-        "list_files, null if new; content null deletes it.\n"
+        "- write_file {path, content, expected_blob, executable?}: a project "
+        "file outside tasks/, decisions/, and STATUS.md, or INBOX.md; "
+        "expected_blob from list_files, null if new; content null deletes it; "
+        "executable true or false sets the file's mode, omitted keeps it.\n"
+        "- edit_file {path, old_string, new_string, replace_all?, "
+        "expected_blob?}: exact text replacement, as the edit_file tool does.\n"
         "A record is a task ID, a '$ref', a decision path, or "
         "'<project>/STATUS.md'. The result must validate (known blockers, no "
         "cycles, an Outcome on done tasks); the affected STATUS.md blocks are "
@@ -7302,6 +7692,47 @@ MCP_TOOLS = [
         },
         ("changes", "request_id"),
         mcp_apply_doc,
+        writes=True,
+        destructive=True,
+    ),
+    McpTool(
+        "edit_file",
+        "Replace exact text in one file as one commit on main (apply_changes "
+        "with a single edit_file). old_string must occur exactly once, or set "
+        "replace_all. Bytes match verbatim; when nothing matches in a CRLF "
+        "file and old_string has bare '\\n' line ends, both strings are "
+        "retried with CRLF. A miss returns a diff against the closest text. "
+        "Edits a project asset (an executable keeps its mode), INBOX.md, a "
+        "task, a decision, or a project's STATUS.md outside its generated "
+        "block; a record must still validate (same id, known status, "
+        "parseable frontmatter, no duplicated section, known blockers) and is "
+        f"formatted. Files up to {WRITE_FILE_MAX_BYTES // 1024} KiB. Returns "
+        "edits: occurrences_replaced, the start_line and end_line of the "
+        "first replacement, total_lines, and the new blob.\n\n"
+        f"{MCP_DATA_CARE}",
+        {
+            "path": {
+                "type": "string",
+                "description": "Path such as 'taskgo/PLAN.md'.",
+            },
+            "old_string": {
+                "type": "string",
+                "description": "The exact text to replace; not empty.",
+            },
+            "new_string": {"type": "string", "description": "The replacement."},
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace every occurrence; default false.",
+            },
+            "expected_blob": {
+                "type": "string",
+                "description": "Refuse unless the file's blob SHA is this "
+                "(from read_file or list_files); optional.",
+            },
+            **MCP_WRITE_PROPERTIES,
+        },
+        ("path", "old_string", "new_string", "request_id"),
+        mcp_edit_doc,
         writes=True,
         destructive=True,
     ),
@@ -8154,6 +8585,7 @@ Commands:
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
   apply CHANGES.json [--dry-run]   Apply a change set to the working tree
+  edit PATH [OPTIONS]              Replace exact text in a file (--old, --new)
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   status [PROJECT] [--json]        Show project status
@@ -8422,11 +8854,11 @@ than a few words.""",
         help="Apply a change set to the working tree",
         description=(
             "Apply a change set to the working tree: the typed operations the MCP\n"
-            "server's writes use (create, set, add, remove, replace_section, and\n"
-            "write_file), all or none. Preconditions are checked as each change\n"
-            "applies; the state after the whole set is validated; the affected\n"
-            "projects' STATUS.md blocks are regenerated. Nothing is committed.\n"
-            "Prints the created records and changed files as JSON."
+            "server's writes use (create, set, add, remove, replace_section,\n"
+            "write_file, and edit_file), all or none. Preconditions are checked as\n"
+            "each change applies; the state after the whole set is validated; the\n"
+            "affected projects' STATUS.md blocks are regenerated. Nothing is\n"
+            "committed. Prints the created records and changed files as JSON."
         ),
         epilog=(
             "Example CHANGES.json:\n"
@@ -8451,6 +8883,65 @@ than a few words.""",
         "--dry-run",
         action="store_true",
         help="Print the diff the change set would make, and write nothing",
+    )
+
+    # edit
+    p_edit = subparsers.add_parser(
+        "edit",
+        help="Replace exact text in a file of the working tree",
+        description=(
+            "Replace exact text in one file of the working tree, as the MCP\n"
+            "server's edit_file tool does: a change set of one edit_file change.\n"
+            "OLD must occur exactly once unless --replace-all is given. Bytes\n"
+            "match verbatim; only when nothing matches in a CRLF file are both\n"
+            "texts retried with CRLF line endings. Assets are written as\n"
+            "replaced and keep their mode; tasks, decisions, and STATUS.md are\n"
+            "checked and formatted, and the affected STATUS.md blocks are\n"
+            f"regenerated. Files up to {WRITE_FILE_MAX_BYTES // 1024} KiB. "
+            "Nothing is committed."
+        ),
+        epilog="""Examples:
+  taskgo edit proj/PLAN.md --old 'Phase 1' --new 'Phase 2'
+  taskgo edit proj/scripts/run.py --old-file old.txt --new-file new.txt
+  taskgo edit proj/decisions/001-x.md --old 'teh' --new 'the' --replace-all""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_edit.add_argument("path", metavar="PATH", help="Repository-relative path")
+    p_edit.add_argument("--old", metavar="TEXT", default=None, help="Text to replace")
+    p_edit.add_argument("--new", metavar="TEXT", default=None, help="Replacement text")
+    p_edit.add_argument(
+        "--old-file",
+        metavar="FILE",
+        default=None,
+        help="Read the text to replace from FILE (- for standard input)",
+    )
+    p_edit.add_argument(
+        "--new-file",
+        metavar="FILE",
+        default=None,
+        help="Read the replacement from FILE (- for standard input)",
+    )
+    p_edit.add_argument(
+        "--replace-all",
+        action="store_true",
+        help="Replace every occurrence, not exactly one",
+    )
+    p_edit.add_argument(
+        "--expected-blob",
+        metavar="SHA",
+        default=None,
+        help="Refuse unless the file's Git blob SHA is SHA",
+    )
+    p_edit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the diff the edit would make, and write nothing",
+    )
+    p_edit.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Print the change-set result as JSON",
     )
 
     # schema
@@ -9043,6 +9534,18 @@ def main(argv: list[str] | None = None) -> None:
         )
     elif args.command == "apply":
         cmd_apply(changes_path=args.changes_path, dry_run=args.dry_run)
+    elif args.command == "edit":
+        cmd_edit(
+            path=args.path,
+            old=args.old,
+            new=args.new,
+            old_file=args.old_file,
+            new_file=args.new_file,
+            replace_all=args.replace_all,
+            expected_blob=args.expected_blob,
+            dry_run=args.dry_run,
+            as_json=args.as_json,
+        )
     elif args.command == "schema":
         cmd_schema(as_json=args.json)
     elif args.command == "list":

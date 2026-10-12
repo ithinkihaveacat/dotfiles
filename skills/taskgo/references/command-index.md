@@ -8,6 +8,7 @@
 - [create](#create)
 - [update](#update)
 - [apply](#apply)
+- [edit](#edit)
 - [list](#list)
 - [info](#info)
 - [status](#status)
@@ -40,6 +41,7 @@ Commands:
   create PROJECT TITLE [OPTIONS]   Create a new task (--slug, --problem, etc.)
   update TASK_ID [OPTIONS]         Update task fields, status, or headings
   apply CHANGES.json [--dry-run]   Apply a change set to the working tree
+  edit PATH [OPTIONS]              Replace exact text in a file (--old, --new)
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   status [PROJECT] [--json]        Show project status
@@ -226,11 +228,11 @@ Examples:
 usage: taskgo apply [-h] [--dry-run] CHANGES.json
 
 Apply a change set to the working tree: the typed operations the MCP
-server's writes use (create, set, add, remove, replace_section, and
-write_file), all or none. Preconditions are checked as each change
-applies; the state after the whole set is validated; the affected
-projects' STATUS.md blocks are regenerated. Nothing is committed.
-Prints the created records and changed files as JSON.
+server's writes use (create, set, add, remove, replace_section,
+write_file, and edit_file), all or none. Preconditions are checked as
+each change applies; the state after the whole set is validated; the
+affected projects' STATUS.md blocks are regenerated. Nothing is
+committed. Prints the created records and changed files as JSON.
 
 positional arguments:
   CHANGES.json  Change set file, or - for standard input
@@ -250,6 +252,48 @@ Example CHANGES.json:
   ]}
 
 The change-set format is in references/model.md (Change Sets).
+```
+
+<!-- /generated -->
+
+## edit
+
+<!-- generated: ../scripts/taskgo edit --help -->
+
+```text
+usage: taskgo edit [-h] [--old TEXT] [--new TEXT] [--old-file FILE]
+                   [--new-file FILE] [--replace-all] [--expected-blob SHA]
+                   [--dry-run] [--json]
+                   PATH
+
+Replace exact text in one file of the working tree, as the MCP
+server's edit_file tool does: a change set of one edit_file change.
+OLD must occur exactly once unless --replace-all is given. Bytes
+match verbatim; only when nothing matches in a CRLF file are both
+texts retried with CRLF line endings. Assets are written as
+replaced and keep their mode; tasks, decisions, and STATUS.md are
+checked and formatted, and the affected STATUS.md blocks are
+regenerated. Files up to 256 KiB. Nothing is committed.
+
+positional arguments:
+  PATH                 Repository-relative path
+
+options:
+  -h, --help           show this help message and exit
+  --old TEXT           Text to replace
+  --new TEXT           Replacement text
+  --old-file FILE      Read the text to replace from FILE (- for standard
+                       input)
+  --new-file FILE      Read the replacement from FILE (- for standard input)
+  --replace-all        Replace every occurrence, not exactly one
+  --expected-blob SHA  Refuse unless the file's Git blob SHA is SHA
+  --dry-run            Print the diff the edit would make, and write nothing
+  --json               Print the change-set result as JSON
+
+Examples:
+  taskgo edit proj/PLAN.md --old 'Phase 1' --new 'Phase 2'
+  taskgo edit proj/scripts/run.py --old-file old.txt --new-file new.txt
+  taskgo edit proj/decisions/001-x.md --old 'teh' --new 'the' --replace-all
 ```
 
 <!-- /generated -->

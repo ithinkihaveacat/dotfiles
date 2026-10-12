@@ -1314,6 +1314,143 @@ def cache_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     )
 
 
+def edit_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
+    """edit_file and write_file's executable flag through the server."""
+    tracker = Tracker(tmp / "edits", seed)
+    call = caller(tg, server(tg, tracker))
+
+    def mode(rel: str) -> str:
+        return git(tracker.remote, "ls-tree", "main", "--", rel).split()[0]
+
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "e1",
+            "changes": [
+                {
+                    "op": "write_file",
+                    "path": "alpha/scripts/run.py",
+                    "content": "#!/usr/bin/env python3\nprint('one')\n",
+                    "expected_blob": None,
+                    "executable": True,
+                },
+                {
+                    "op": "write_file",
+                    "path": "alpha/data.csv",
+                    "content": "a,b\r\n1,2\r\n",
+                    "expected_blob": None,
+                },
+            ],
+        },
+    )
+    entry = ok and next(f for f in got["files"] if f["path"] == "alpha/scripts/run.py")
+    tap.check(
+        "write_file with executable true commits a new file as 100755",
+        ok and entry["executable"] is True and mode("alpha/scripts/run.py") == "100755",
+        got,
+    )
+
+    ok, got = call(
+        "edit_file",
+        {
+            "request_id": "e2",
+            "path": "alpha/scripts/run.py",
+            "old_string": "print('one')",
+            "new_string": "print('two')",
+        },
+    )
+    tap.check(
+        "edit_file changes an executable and keeps its mode",
+        ok
+        and got["edits"][0]["occurrences_replaced"] == 1
+        and got["edits"][0]["start_line"] == 2
+        and mode("alpha/scripts/run.py") == "100755"
+        and "print('two')" in tracker.show("alpha/scripts/run.py"),
+        got,
+    )
+
+    ok, got = call(
+        "edit_file",
+        {
+            "request_id": "e3",
+            "path": "alpha/data.csv",
+            "old_string": "a,b\n1,2",
+            "new_string": "a,b\nx,y",
+        },
+    )
+    raw = subprocess.run(
+        [*git_argv(tracker.remote), "show", "main:alpha/data.csv"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    tap.check(
+        "edit_file retries bare newlines as CRLF in a CRLF file",
+        ok and raw == b"a,b\r\nx,y\r\n",
+        (got, raw),
+    )
+
+    ok, got = call(
+        "edit_file",
+        {
+            "request_id": "e4",
+            "path": "alpha/tasks/TASK-AA001-one.md",
+            "old_string": "**Goal:** One goal.",
+            "new_string": "**Goal:** One   goal,   edited.",
+            "conversation": "jetski://00000000-0000-4000-8000-0000000000e4",
+        },
+    )
+    task = tracker.show("alpha/tasks/TASK-AA001-one.md")
+    tap.check(
+        "edit_file on a task formats it and records the conversation",
+        ok
+        and "**Goal:** One goal, edited." in task
+        and "00000000-0000-4000-8000-0000000000e4" in task,
+        (got, task),
+    )
+
+    head = tracker.head()
+    ok, got = call(
+        "edit_file",
+        {
+            "request_id": "e5",
+            "path": "alpha/PLAN.md",
+            "old_string": "Frist plan.",
+            "new_string": "Second plan.",
+        },
+    )
+    tap.check(
+        "a missed edit_file writes nothing and shows the closest text",
+        not ok
+        and "+First plan." in str(got)
+        and "-Frist plan." in str(got)
+        and tracker.head() == head,
+        got,
+    )
+
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "e6",
+            "changes": [
+                {
+                    "op": "write_file",
+                    "path": "alpha/scripts/run.py",
+                    "content": "print('three')\n",
+                    "expected_blob": git(
+                        tracker.remote, "rev-parse", "main:alpha/scripts/run.py"
+                    ),
+                    "executable": False,
+                }
+            ],
+        },
+    )
+    tap.check(
+        "write_file with executable false commits the file as 100644",
+        ok and mode("alpha/scripts/run.py") == "100644",
+        got,
+    )
+
+
 def bypass_proxy_for_loopback() -> None:
     """Keeps loopback requests away from any proxy in the environment.
 
@@ -1350,6 +1487,7 @@ def main() -> None:
         tg = load_taskgo()
         fault_checks(tap, tg, seed, tmp, ttl)
         cache_checks(tap, tg, seed, tmp)
+        edit_checks(tap, tg, seed, tmp)
     print(f"1..{tap.n}", flush=True)
     sys.exit(1 if tap.failed else 0)
 

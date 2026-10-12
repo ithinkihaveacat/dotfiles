@@ -3355,7 +3355,7 @@ names = [t["name"] for t in tools["result"]["tools"]]
 assert init["result"]["serverInfo"]["name"] == "taskgo", init
 assert "Data care" in init["result"]["instructions"]
 writes = {t["name"]: t for t in tools["result"]["tools"] if not t["annotations"]["readOnlyHint"]}
-assert len(names) == 11 and sorted(writes) == ["apply_changes", "create"], names
+assert len(names) == 12 and sorted(writes) == ["apply_changes", "create", "edit_file"], names
 assert all("Data care" in t["description"] for t in writes.values())
 assert all("at" not in t["inputSchema"]["properties"] for t in writes.values())
 got = task["result"]["structuredContent"]
@@ -3802,7 +3802,6 @@ for path, text in [
     ("alpha/../x.md", "invalid path"),
     ("/alpha/x.md", "invalid path"),
     ("alpha/link.md", "symbolic link"),
-    ("alpha/run.sh", "executable"),
     ("alpha/PLAN.md/x", "a parent of it is a file"),
     ("alpha/tasks", "controlled state"),
 ]:
@@ -3817,6 +3816,20 @@ refused("invalid", "not valid UTF-8", write("alpha/bad.txt", "\ud800"))
 refused("precondition", "expected none (absent)", write("alpha/PLAN.md", "x\n"))
 refused("precondition", "blob is none (absent)",
         write("alpha/nope.md", "x\n", blob("alpha/PLAN.md")))
+# Executables are assets: a write keeps the mode, and executable sets it.
+cs = apply(write("alpha/run.sh", "#!/bin/sh\necho hi\n", blob("alpha/run.sh")))
+assert cs.snap.is_executable("alpha/run.sh")
+assert "executable" not in tg.change_set_result(cs)["files"][0]
+cs = apply({**write("alpha/new.sh", "#!/bin/sh\n"), "executable": True})
+assert cs.snap.is_executable("alpha/new.sh")
+assert tg.change_set_result(cs)["files"][0]["executable"] is True
+cs = apply({**write("alpha/run.sh", "#!/bin/sh\n", blob("alpha/run.sh")),
+            "executable": False})
+assert tg.change_set_result(cs)["files"][0]["executable"] is False
+refused("invalid", "executable must be",
+        {**write("alpha/x.sh", "x\n"), "executable": "yes"})
+refused("invalid", "a deletion has none",
+        {**write("alpha/run.sh", None, blob("alpha/run.sh")), "executable": True})
 PY
 ); then
   echo 'ok 178 - write_file writes project assets and refuses the rest'
@@ -4110,4 +4123,191 @@ PY
 else
   echo 'not ok 185 - search stops git after its time limit'
   printf '# %s\n' "$SEARCH_TO"
+fi
+
+# Test 186: edit_file replaces exact text: once unless replace_all, verbatim
+# in assets (CRLF kept, with a CRLF retry for bare '\n'), with a near-miss
+# diff; records are checked (id, status, frontmatter, duplicate sections,
+# blockers, supersedes, the STATUS.md generated block) and then formatted.
+git -C "$APPLY_REPO" checkout -q -- .
+git -C "$APPLY_REPO" clean -fdq
+if EDIT_SEM=$(
+  "$APPLY_PY" - "$BIN" "$APPLY_REPO" 2>&1 <<'PY'
+import runpy, subprocess, sys
+g = runpy.run_path(sys.argv[2] + "/../apply-lib.py")
+tg, apply, refused, repo, TASK = g["tg"], g["apply"], g["refused"], g["repo"], g["TASK"]
+
+
+def edit(path, old, new, **kw):
+    return {"op": "edit_file", "path": path, "old_string": old, "new_string": new, **kw}
+
+
+def write(path, content):
+    return {"op": "write_file", "path": path, "content": content, "expected_blob": None}
+
+
+# Assets are written verbatim, and several edits of one file chain.
+cs = apply(edit("alpha/PLAN.md", "First plan.", "Second   plan.\nMore."),
+           edit("alpha/PLAN.md", "More.", "Most."))
+assert cs.snap.read_text("alpha/PLAN.md") == "# Plan\n\nSecond   plan.\nMost.\n"
+res = tg.change_set_result(cs)
+e = res["edits"][0]
+assert (e["occurrences_replaced"], e["start_line"], e["end_line"]) == (1, 3, 4), e
+assert res["edits"][1]["total_lines"] == 4
+assert res["edits"][1]["blob"] == tg.git_blob_sha(b"# Plan\n\nSecond   plan.\nMost.\n")
+assert set(cs.snap.diff()) == {"alpha/PLAN.md"}  # no STATUS.md for an asset
+
+# Exactly one match, unless replace_all.
+refused("invalid", "occurs 2 times",
+        write("alpha/two.txt", "a\nb\na\n"), edit("alpha/two.txt", "a", "c"))
+cs = apply(write("alpha/two.txt", "a\nb\na\n"),
+           edit("alpha/two.txt", "a", "c", replace_all=True))
+assert cs.snap.read_text("alpha/two.txt") == "c\nb\nc\n"
+assert tg.change_set_result(cs)["edits"][0]["occurrences_replaced"] == 2
+
+# A miss shows the closest text.
+try:
+    apply(edit("alpha/PLAN.md", "Frist plan.", "x"))
+except tg.ChangeSetError as err:
+    assert err.kind == "precondition", err
+    assert "-Frist plan." in str(err) and "+First plan." in str(err), err
+else:
+    raise AssertionError("a miss was accepted")
+
+# CRLF: exact bytes match first; bare '\n' is retried as CRLF.
+cs = apply(write("alpha/crlf.txt", "one\r\ntwo\r\nthree\r\n"),
+           edit("alpha/crlf.txt", "one\ntwo", "uno\ndos"))
+assert cs.snap.read_text("alpha/crlf.txt") == "uno\r\ndos\r\nthree\r\n"
+cs = apply(write("alpha/crlf.txt", "one\r\ntwo\n"),
+           edit("alpha/crlf.txt", "two\n", "deux\n"))
+assert cs.snap.read_text("alpha/crlf.txt") == "one\r\ndeux\n"
+
+# Executables keep their mode; preconditions and paths.
+cs = apply(edit("alpha/run.sh", "#!/bin/sh", "#!/bin/bash"))
+assert cs.snap.is_executable("alpha/run.sh")
+assert cs.snap.read_text("alpha/run.sh") == "#!/bin/bash\n"
+refused("precondition", "expected 0000",
+        edit("alpha/PLAN.md", "First", "x", expected_blob="0000"))
+blob = tg.git_blob_sha((repo / "alpha/PLAN.md").read_bytes())
+apply(edit("alpha/PLAN.md", "First", "x", expected_blob=blob.upper()))
+refused("invalid", "must not be empty", edit("alpha/PLAN.md", "", "x"))
+refused("invalid", "replace_all must be", edit("alpha/PLAN.md", "F", "x", replace_all=1))
+refused("invalid", "no such file", edit("alpha/nope.md", "x", "y"))
+refused("invalid", "Git files", edit("alpha/.git/x", "x", "y"))
+refused("invalid", "invalid path", edit("alpha/../INBOX.md", "x", "y"))
+refused("invalid", "symbolic link", edit("alpha/link.md", "Plan", "y"))
+refused("invalid", "only the records directly", edit("alpha/tasks/x/y.md", "x", "y"))
+refused("invalid", "unknown key", {**edit("alpha/PLAN.md", "F", "x"), "content": 1})
+apply(edit("INBOX.md", "# Inbox", "# In"))
+(repo / "alpha/bin.dat").write_bytes(b"\xff\xfe\n")
+(repo / "alpha/big.txt").write_text("x" * (tg.WRITE_FILE_MAX_BYTES + 1))
+try:
+    refused("invalid", "not UTF-8", edit("alpha/bin.dat", "x", "y"))
+    refused("invalid", "edit_file changes files up to", edit("alpha/big.txt", "x", "y"))
+    refused("invalid", "the limit is",
+            write("alpha/near.txt", "ab" + "x" * (tg.WRITE_FILE_MAX_BYTES - 2)),
+            edit("alpha/near.txt", "ab", "abc"))
+finally:
+    (repo / "alpha/bin.dat").unlink()
+    (repo / "alpha/big.txt").unlink()
+
+# Tasks: edited verbatim, formatted at the end, STATUS.md regenerated.
+cs = apply(edit(TASK, "**Goal:** One.", "**Goal:** Uno   dos."),
+           edit(TASK, "Uno   dos.", "Uno   tres."),
+           edit(TASK, "status: todo", "status: in-progress"))
+text = cs.snap.read_text(TASK)
+assert "**Goal:** Uno tres." in text and "status: in-progress" in text, text
+assert "TASK-AA001" in cs.snap.read_text("alpha/STATUS.md")
+refused("invalid", "changes id", edit(TASK, "id: TASK-AA001", "id: TASK-AA002"))
+refused("invalid", "unknown status", edit(TASK, "status: todo", "status: nah"))
+refused("invalid", "frontmatter", edit(TASK, "status: todo", "status: [todo"))
+refused("invalid", "Goal appear 2 times",
+        edit(TASK, "**Goal:** One.", "**Goal:** One.\n\n**Goal:** Two."))
+refused("validation", "unknown task TASK-FFFFF",
+        edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-FFFFF]"))
+refused("validation", "cycle",
+        edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-BB001]"))
+refused("invalid", "blocked by itself",
+        edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-AA001]"))
+cs = apply(edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-CC001]"))
+assert "blocked_by:" in cs.snap.read_text(TASK)
+
+# Decisions, accepted ones included; supersedes additions are validated.
+ADR = "alpha/decisions/001-first.md"
+cs = apply(edit(ADR, "\nD.\n", "\nD, clarified.\n"))
+assert "D, clarified." in cs.snap.read_text(ADR)
+refused("validation", "supersedes names unknown",
+        edit(ADR, "# 1. First choice", "---\nsupersedes: [999]\n---\n\n# 1. First choice"))
+
+# STATUS.md: free outside the generated block, refused inside it.
+STATUS = "alpha/STATUS.md"
+status = (repo / STATUS).read_text()
+inside = status.split(tg.BEGIN)[1].split(tg.END)[0].strip().splitlines()[0]
+refused("invalid", "generated block", edit(STATUS, inside, "x"))
+title = status.splitlines()[0]
+refused("invalid", "markers", edit(STATUS, title, title + tg.END))
+cs = apply(edit(STATUS, title, title + " of alpha"))
+assert cs.snap.read_text(STATUS).startswith(title + " of alpha\n")
+PY
+); then
+  echo 'ok 186 - edit_file replaces exact text and keeps records valid'
+else
+  echo 'not ok 186 - edit_file replaces exact text and keeps records valid'
+  printf '# %s\n' "${EDIT_SEM//$'\n'/$'\n'# }"
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+git -C "$APPLY_REPO" clean -fdq
+
+# Test 187: taskgo edit writes the working tree: CRLF bytes and executable
+# bits survive, --dry-run writes nothing, and apply sets executable bits.
+printf 'one\r\ntwo\r\n' >"$APPLY_REPO/alpha/crlf.txt"
+git -C "$APPLY_REPO" add alpha/crlf.txt
+git -C "$APPLY_REPO" commit -qm 'crlf fixture'
+EDIT_OK=1
+EDIT_DRY=$("$BIN" --root "$APPLY_REPO" edit alpha/PLAN.md --old First --new Second --dry-run)
+if ! grep -q '^+Second plan\.$' <<<"$EDIT_DRY" ||
+  [ -n "$(git -C "$APPLY_REPO" status --porcelain)" ]; then
+  EDIT_OK=0
+  echo '# --dry-run did not print the diff, or wrote'
+fi
+EDIT_OUT=$("$BIN" --root "$APPLY_REPO" edit alpha/crlf.txt --old $'one\ntwo' --new $'uno\ndos')
+if ! printf 'uno\r\ndos\r\n' | cmp -s - "$APPLY_REPO/alpha/crlf.txt" ||
+  ! grep -q '^alpha/crlf.txt: replaced 1 occurrence (first at lines 1-2); 2 lines' <<<"$EDIT_OUT"; then
+  EDIT_OK=0
+  printf '# crlf edit: %s\n' "$EDIT_OUT"
+fi
+printf '#!/bin/sh\n' >"$TEST_ROOT/old.txt"
+printf '#!/bin/sh\necho edited\n' >"$TEST_ROOT/new.txt"
+EDIT_JSON=$("$BIN" --root "$APPLY_REPO" edit alpha/run.sh --old-file "$TEST_ROOT/old.txt" \
+  --new-file - --json <"$TEST_ROOT/new.txt")
+if [ ! -x "$APPLY_REPO/alpha/run.sh" ] ||
+  ! grep -q 'echo edited' "$APPLY_REPO/alpha/run.sh" ||
+  ! python3 -c '
+import json, sys
+out = json.loads(sys.argv[1])
+assert out["edits"][0]["blob"] == sys.argv[2], out
+' "$EDIT_JSON" "$(git -C "$APPLY_REPO" hash-object alpha/run.sh)"; then
+  EDIT_OK=0
+  printf '# executable edit: %s\n' "$EDIT_JSON"
+fi
+if "$BIN" --root "$APPLY_REPO" edit alpha/PLAN.md --old First >/dev/null 2>&1 ||
+  "$BIN" --root "$APPLY_REPO" edit alpha/PLAN.md --old Nope --new x >/dev/null 2>&1; then
+  EDIT_OK=0
+  echo '# a missing --new or a missed edit was accepted'
+fi
+printf '%s\n' '{"changes": [' \
+  '{"op": "write_file", "path": "alpha/new.sh", "content": "#!/bin/sh\n", "expected_blob": null, "executable": true},' \
+  '{"op": "write_file", "path": "alpha/run.sh", "content": "#!/bin/sh\n", "expected_blob": "'"$(git -C "$APPLY_REPO" hash-object alpha/run.sh)"'", "executable": false}' \
+  ']}' >"$TEST_ROOT/apply-x.json"
+if ! "$BIN" --root "$APPLY_REPO" apply "$TEST_ROOT/apply-x.json" >/dev/null ||
+  [ ! -x "$APPLY_REPO/alpha/new.sh" ] || [ -x "$APPLY_REPO/alpha/run.sh" ]; then
+  EDIT_OK=0
+  echo '# apply did not set or clear executable bits'
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+git -C "$APPLY_REPO" clean -fdq
+if [ "$EDIT_OK" = 1 ]; then
+  echo 'ok 187 - taskgo edit keeps CRLF bytes and modes in the working tree'
+else
+  echo 'not ok 187 - taskgo edit keeps CRLF bytes and modes in the working tree'
 fi

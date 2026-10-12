@@ -23,6 +23,7 @@ One server serves one control repository.
 | `get_task_history`   | Changes of one frontmatter field, following renames                                       | `taskgo history`        |
 | `create`             | Creates one task or decision as one commit, and returns its ID                            | `taskgo create`         |
 | `apply_changes`      | Applies a change set as one commit                                                        | `taskgo apply`, commit  |
+| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob             | `taskgo edit`, commit   |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
@@ -46,9 +47,10 @@ commits, so it never does.
 
 ## Writes
 
-`create` and `apply_changes` take a change set (see
-[Change Sets](model.md#change-sets); `create` is a set with one `create`) and
-make it one commit on the branch, or nothing:
+`create`, `apply_changes`, and `edit_file` take a change set (see
+[Change Sets](model.md#change-sets); `create` is a set with one `create`, and
+`edit_file` a set with one `edit_file`) and make it one commit on the branch, or
+nothing:
 
 1. Apply the set over the head, in memory, as `taskgo apply` does: every
    precondition (expected value, section hash, blob SHA) is checked against that
@@ -71,6 +73,13 @@ make it one commit on the branch, or nothing:
 Calls are serialized, so the server's own writes never race each other; pushes
 from CLI checkouts race with them on equal terms, through the remote's refusal
 of a non-fast-forward push.
+
+`edit_file` names its target by text, not by hash: applied again over a moved
+head, it matches `old_string` afresh, so an edit lands beside another writer's
+change to a different part of the same file, and `old_string` that is no longer
+there is a precondition failure. Pass `expected_blob` (from `read_file` or
+`list_files`) to refuse any change made since the file was read. A miss returns
+a unified diff of `old_string` against the closest lines of the file.
 
 Commits read like CLI commits: the configured owner as author and committer (the
 server refuses to write without `user.name` and `user.email`, or the

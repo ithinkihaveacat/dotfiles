@@ -219,13 +219,15 @@ Projects with durable architectural invariants store Nygard-style ADRs in
 `<project>/decisions/NNN-slug.md` with `## Status`, `## Context`, `## Decision`,
 and `## Consequences` sections.
 
-To keep accepted ADRs immutable while preventing obsolete decisions from
-polluting active agent context:
+To keep accepted ADRs stable while preventing obsolete decisions from polluting
+active agent context:
 
 - **Declarative `supersedes` Edges:** When a newer ADR replaces an earlier
   decision, record `supersedes: [001-old-decision.md]` (matching by filename,
   stem, or numeric prefix like `001`) in the *newer* ADR's YAML frontmatter
-  rather than rewriting the older file.
+  rather than rewriting the older file. Edit an accepted ADR in place only for
+  typos, status updates, broken links, or implementation notes, never to change
+  its decision.
 - **Active ADR Projection (`STATUS.md`):** When `<project>/decisions/*.md` is
   non-empty, `taskgo sync` projects a `### Decisions` list inside the generated
   `<!-- taskgo:begin --> ... <!-- taskgo:end -->` snapshot containing only
@@ -304,7 +306,8 @@ The file is a JSON object with one key, `changes`:
 | `set`             | `record`, `field`, `value`, `expected` (optional)                             | `expected`, when given                |
 | `add`, `remove`   | `record`, `field`, `values`                                                   | none; repeats and absences are no-ops |
 | `replace_section` | `record`, `section`, `text`, `expected_hash`                                  | the section's hash                    |
-| `write_file`      | `path`, `content`, `expected_blob`                                            | the file's Git blob SHA               |
+| `write_file`      | `path`, `content`, `expected_blob`, `executable` (optional)                   | the file's Git blob SHA               |
+| `edit_file`       | `path`, `old_string`, `new_string`, `replace_all`, `expected_blob` (optional) | `old_string` occurs; `expected_blob`  |
 
 - **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
   for a record an earlier `create` named with `ref`. `$name` also works in
@@ -321,11 +324,29 @@ The file is a JSON object with one key, `changes`:
   it. Text that would add or remove any other section is refused.
 - **Files:** `write_file` writes project assets: any file in an existing project
   outside `tasks/`, `decisions/`, and `STATUS.md`, and `INBOX.md`. It refuses
-  `.git*` paths, `..`, symbolic links, executable files, more than 256 KiB,
-  non-UTF-8 content, deleting a project's `README.md`, and a `README.md` whose
-  frontmatter does not parse. `expected_blob` is null for a new file, and a null
-  `content` deletes. Markdown is formatted, so the result reports each written
-  file's new blob SHA.
+  `.git*` paths, `..`, symbolic links, more than 256 KiB, non-UTF-8 content,
+  deleting a project's `README.md`, and a `README.md` whose frontmatter does not
+  parse. `expected_blob` is null for a new file, and a null `content` deletes. A
+  rewritten file keeps its mode and a new one is not executable, unless
+  `executable` is `true` or `false`, which sets the mode (100755 or 100644).
+  Markdown is formatted, so the result reports each written file's new blob SHA.
+- **Edits:** `edit_file` replaces exact text in an existing file, as Caxton's
+  `search_and_replace` does: `old_string` must occur exactly once, or
+  `replace_all` must be true. It edits the assets `write_file` writes and the
+  records too: tasks, decisions, and a project's `STATUS.md` outside its
+  generated block. Bytes match verbatim; only when nothing matches, the file has
+  CRLF line endings, and `old_string` has bare `\n` ones, are both strings
+  retried with CRLF. Assets are written exactly as replaced and keep their mode.
+  A record must stay valid: its frontmatter parses, a task keeps its `id` and a
+  known status, no section appears twice that did not before, and entries added
+  to `blocked_by` or `supersedes` are checked as `add` checks them; records are
+  formatted once the whole set has applied, so several edits of one record each
+  match the text the one before it left. Files and results are limited to 256
+  KiB. A miss is a precondition failure, with a unified diff against the closest
+  lines; several matches without `replace_all` are invalid. The result's `edits`
+  list gives each edit's `occurrences_replaced`, the `start_line` and `end_line`
+  of its first replacement (lines end at `\n`), and the file's `total_lines` and
+  `blob` after the set.
 
 Each precondition is checked when its change applies, against the state the
 changes before it left. Validation then runs on the state after the whole set:

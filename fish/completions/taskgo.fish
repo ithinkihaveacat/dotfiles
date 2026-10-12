@@ -33,6 +33,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a root -d 'Print the active cont
 complete -f -c taskgo -n __fish_use_subcommand -a create -d 'Create a new task'
 complete -f -c taskgo -n __fish_use_subcommand -a update -d 'Update task fields, status, or headings'
 complete -f -c taskgo -n __fish_use_subcommand -a apply -d 'Apply a change set to the working tree'
+complete -f -c taskgo -n __fish_use_subcommand -a edit -d 'Replace exact text in a file'
 complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
 complete -f -c taskgo -n __fish_use_subcommand -a info -d 'Show project metadata from README.md frontmatter'
 complete -f -c taskgo -n __fish_use_subcommand -a status -d 'Show project status'
@@ -109,6 +110,17 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from update' -l stale-after -x 
 # apply options (CHANGES.json file, or - for standard input)
 complete -c taskgo -n '__fish_seen_subcommand_from apply' -F -d 'Change set file'
 complete -f -c taskgo -n '__fish_seen_subcommand_from apply' -l dry-run -d 'Print the diff and write nothing'
+
+# edit options (PATH is relative to the control repository root)
+complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -a '(git -C (__fish_taskgo_root) ls-files 2>/dev/null)' -d File
+complete -x -c taskgo -n '__fish_seen_subcommand_from edit' -l old -d 'Text to replace'
+complete -x -c taskgo -n '__fish_seen_subcommand_from edit' -l new -d 'Replacement text'
+complete -r -F -c taskgo -n '__fish_seen_subcommand_from edit' -l old-file -d 'Read the text to replace from FILE'
+complete -r -F -c taskgo -n '__fish_seen_subcommand_from edit' -l new-file -d 'Read the replacement from FILE'
+complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l replace-all -d 'Replace every occurrence'
+complete -x -c taskgo -n '__fish_seen_subcommand_from edit' -l expected-blob -d "Refuse unless the file's blob SHA is SHA"
+complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l dry-run -d 'Print the diff and write nothing'
+complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l json -d 'Emit JSON output'
 
 # list options
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s s -l state -l status -x -a 'todo in-progress blocked done cancelled ready' -d 'Filter by state'
