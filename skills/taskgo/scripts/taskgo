@@ -6037,11 +6037,13 @@ def cmd_commit(
 # Each read resolves one commit and reads only that commit, through a
 # GitTreeSnapshot, so a response is coherent even while main moves. Payloads
 # that the CLI also prints use the CLI's own functions, so they match the CLI
-# at that commit. Each write applies one change set over the fetched head,
-# commits it without a working tree, and pushes it without force; a rejected
-# push re-reads the head and applies the set again there. The MCP Python SDK
-# speaks the protocol (ADR 12): every revision it supports, over Streamable
-# HTTP (stateless, with JSON responses) or, with --stdio, for one local client.
+# at that commit. Unpinned reads fetch the branch, or use the head fetched or
+# pushed in the last few seconds (--fetch-ttl). Each write applies one change
+# set over the head, commits it without a working tree, and pushes it without
+# force; a rejected push fetches the head and applies the set again there.
+# The MCP Python SDK speaks the protocol (ADR 12): every revision it supports,
+# over Streamable HTTP (stateless, with JSON responses) or, with --stdio, for
+# one local client.
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
@@ -6050,6 +6052,10 @@ MCP_MAX_FILE_BYTES = 256 * 1024
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
 MCP_PUSH_TIMEOUT = 60
+# Seconds a fetch (or this server's own push) stays fresh for unpinned reads;
+# 0 fetches on every call. Half of an agent's back-to-back tool calls come
+# within 5s of each other.
+MCP_FETCH_TTL = 5.0
 # Pushes per write; each rejected one re-reads the head and applies again.
 MCP_WRITE_ATTEMPTS = 5
 # How long, and for how many requests, a retry is recognized (ADR 2).
@@ -6113,12 +6119,18 @@ class McpConfig:
     team: str | None = None
     audience: str | None = None
     certs_url: str | None = None
+    fetch_ttl: float = MCP_FETCH_TTL
 
 
 class McpReader:
     """Resolves commits of one control repository and keeps their snapshots.
 
     Snapshots are immutable per commit, so the few most recent are kept.
+
+    The remote-tracking ref is the cached head of the branch. It is fresh for
+    fetch_ttl seconds after a fetch, or after a push by this server, which
+    moves it; until then, unpinned reads use it without fetching. Losing the
+    cache, as on a restart, only costs a fetch.
     """
 
     KEEP = 4
@@ -6126,9 +6138,37 @@ class McpReader:
     def __init__(self, cfg: McpConfig):
         self.cfg = cfg
         self.snaps: dict[str, tuple[GitTreeSnapshot, int]] = {}
+        # When the remote-tracking ref was last known to match the remote
+        # (time.monotonic()); None when it is not known to.
+        self.fetched_at: float | None = None
 
     def git(self, *args: str) -> subprocess.CompletedProcess:
         return run_git(list(args), cwd=self.cfg.repo, check=False)
+
+    def tracking_ref(self) -> str:
+        return f"refs/remotes/{self.cfg.remote}/{self.cfg.branch}"
+
+    def cached(self) -> bool:
+        """True when there is a cached head that writes may try first."""
+        return self.cfg.fetch_ttl > 0 and self.fetched_at is not None
+
+    def fresh(self) -> bool:
+        """True when the cached head is recent enough for an unpinned read."""
+        at = self.fetched_at
+        return (
+            self.cfg.fetch_ttl > 0
+            and at is not None
+            and time.monotonic() - at < self.cfg.fetch_ttl
+        )
+
+    def forget(self) -> None:
+        """Stops trusting the cached head: the next unpinned read fetches."""
+        self.fetched_at = None
+
+    def pushed(self, sha: str) -> None:
+        """Records that SHA is now the head of the remote branch."""
+        self.git("update-ref", self.tracking_ref(), sha)
+        self.fetched_at = time.monotonic()
 
     def fetch(self) -> None:
         cfg = self.cfg
@@ -6153,9 +6193,14 @@ class McpReader:
                 f"could not fetch {cfg.branch} from {cfg.remote}; pass an "
                 "earlier as_of.commit as 'at' to read it"
             )
+        self.fetched_at = time.monotonic()
 
-    def resolve(self, at: Any) -> str:
-        """The commit to read: AT when given, else the head of the branch."""
+    def resolve(self, at: Any, *, fetch: bool = False) -> str:
+        """The commit to read: AT when given, else the head of the branch.
+
+        The head is the cached one while it is fresh, unless FETCH asks for
+        the remote's head as it is now.
+        """
         if at:
             if not isinstance(at, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", at):
                 raise McpToolError(f"'at' is not a commit SHA: {at!r}")
@@ -6168,8 +6213,9 @@ class McpReader:
                 raise McpToolError(f"no commit {at} in the control repository")
             return res.stdout.strip()
         if self.cfg.remote:
-            self.fetch()
-            ref = f"refs/remotes/{self.cfg.remote}/{self.cfg.branch}"
+            if fetch or not self.fresh():
+                self.fetch()
+            ref = self.tracking_ref()
         else:
             ref = f"refs/heads/{self.cfg.branch}"
         res = self.git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
@@ -7036,11 +7082,14 @@ class McpServer:
     def write(self, tool: McpTool, args: dict[str, Any]) -> dict[str, Any]:
         """Applies a write tool's change set as one commit on the branch.
 
-        The set applies over the fetched head and is pushed without force. A
-        refused push re-reads the head: if the commit is there, the push did
-        land; otherwise the set applies again over the new head, so its
-        preconditions are checked against what is now there. A request_id
-        seen before reports the commit already built for it, when that
+        The set applies over the head and is pushed without force. The head
+        is the cached one when there is one, and the push checks that it
+        still is: a refused push re-reads the head from the remote. If the
+        commit is there, the push did land; otherwise the set applies again
+        over the new head, so its preconditions are checked against what is
+        now there. A refusal by the set itself over a cached head is checked
+        against the fetched head the same way. A request_id seen before
+        fetches first and reports the commit already built for it, when that
         commit is on the branch, instead of writing again. Called with the
         lock held.
         """
@@ -7091,8 +7140,15 @@ class McpServer:
                 "one for each write"
             )
 
+        # A request seen before reads the remote as it is now, so a commit
+        # built for it that landed unseen is found. Otherwise the set first
+        # applies over the cached head, when there is one, and the push says
+        # whether it was still the head; anything that can come from a stale
+        # head (a refused push, a failed precondition or validation, no
+        # change, no commit authority) fetches and tries again.
+        fetched = request is not None or not reader.cached()
         try:
-            head = reader.resolve(None)
+            head = reader.resolve(None, fetch=fetched)
         except McpToolError:
             raise McpToolError(
                 f"could not fetch {cfg.branch} from {cfg.remote}; nothing was written"
@@ -7103,11 +7159,29 @@ class McpServer:
                     mcp_log(f"{label} already landed as {sha[:12]}")
                     return {**self.landed(result), "replayed": True}
 
-        for attempt in range(1, MCP_WRITE_ATTEMPTS + 1):
+        def refetch(why: str) -> str:
+            mcp_log(f"{label} cached head {head[:12]} may be stale ({why}); fetching")
+            reader.forget()
+            try:
+                return reader.resolve(None, fetch=True)
+            except McpToolError:
+                raise McpToolError(
+                    f"could not fetch {cfg.branch} from {cfg.remote}; nothing was "
+                    "written"
+                ) from None
+
+        # Pushes allowed: the first, over a cached head, does not count.
+        budget = MCP_WRITE_ATTEMPTS + (0 if fetched else 1)
+        pushes = 0
+        mine: set[str] = set()
+        while True:
             snap, committed = reader.snapshot(head)
             if not snap.is_file("AGENTS.md") or COMMIT_AUTH not in snap.read_text(
                 "AGENTS.md"
             ):
+                if not fetched:
+                    head, fetched = refetch("no commit authority"), True
+                    continue
                 raise McpToolError(
                     f"writes are refused: AGENTS.md at {head[:12]} does not carry "
                     f"{COMMIT_AUTH}"
@@ -7115,10 +7189,16 @@ class McpServer:
             try:
                 cs = apply_change_set(snap, doc, commit_args.conversation)
             except ChangeSetError as e:
+                if not fetched and e.kind != "invalid":
+                    head, fetched = refetch(MCP_CHANGE_ERRORS[e.kind]), True
+                    continue
                 raise McpToolError(
                     f"{MCP_CHANGE_ERRORS[e.kind]}: {e}; nothing was written"
                 ) from None
             if not cs.snap.diff():
+                if not fetched:
+                    head, fetched = refetch("no change"), True
+                    continue
                 mcp_log(f"{label} changes nothing at {head[:12]}")
                 return {
                     "as_of": McpRead(reader, snap, committed).as_of(),
@@ -7127,49 +7207,57 @@ class McpServer:
                     "subject": None,
                     "created": [],
                     "files": [],
-                    "attempts": attempt,
+                    "attempts": pushes,
                     "replayed": False,
                 }
             message = mcp_commit_message(cs, commit_args)
             sha = reader.commit(snap, cs, message)
+            pushes += 1
             result = {
                 "request_id": rid,
                 "commit": sha,
                 "subject": message.split("\n", 1)[0],
                 **change_set_result(cs),
-                "attempts": attempt,
+                "attempts": pushes,
                 "replayed": False,
             }
             # Remembered only once there is a commit to recognize: a request
             # refused before that can be corrected and sent with the same ID.
+            # Every pushed commit is kept, since a push can land unseen.
             if request is None:
                 request = self.requests[rid] = McpRequest(digest, now, {})
             request.candidates[sha] = result
+            mine.add(sha)
             pushed, why = reader.push(sha)
             if pushed:
-                mcp_log(f"{label} attempt {attempt} pushed {sha[:12]} on {head[:12]}")
+                reader.pushed(sha)
+                mcp_log(f"{label} attempt {pushes} pushed {sha[:12]} on {head[:12]}")
                 return self.landed(result)
-            mcp_log(f"{label} attempt {attempt} push of {sha[:12]} refused: {why}")
+            mcp_log(f"{label} attempt {pushes} push of {sha[:12]} refused: {why}")
+            reader.forget()
             try:
-                new_head = reader.resolve(None)
+                new_head = reader.resolve(None, fetch=True)
             except McpToolError:
                 raise McpToolError(
                     f"the push of {sha[:12]} failed ({why}) and {cfg.branch} could "
                     "not be read again, so whether it landed is unknown; retry "
                     "with the same request_id"
                 ) from None
-            if reader.is_ancestor(sha, new_head):
-                mcp_log(f"{label} attempt {attempt} landed {sha[:12]} after all")
-                return self.landed(result)
+            fetched = True
+            for cand, cand_result in request.candidates.items():
+                if reader.is_ancestor(cand, new_head):
+                    mcp_log(f"{label} attempt {pushes} landed {cand[:12]} after all")
+                    return {**self.landed(cand_result), "replayed": cand not in mine}
             if new_head == head:
                 raise McpToolError(
                     f"could not push to {cfg.remote}: {why}; nothing was written"
                 )
             head = new_head
-        raise McpToolError(
-            f"{cfg.branch} moved on each of {MCP_WRITE_ATTEMPTS} attempts; nothing "
-            "was written. Retry with the same request_id"
-        )
+            if pushes >= budget:
+                raise McpToolError(
+                    f"{cfg.branch} moved on each of {pushes} attempts; nothing "
+                    "was written. Retry with the same request_id"
+                )
 
     def landed(self, result: dict[str, Any]) -> dict[str, Any]:
         """RESULT, with as_of for its commit."""
@@ -7481,9 +7569,12 @@ def cmd_mcp(
     team: str | None = None,
     audience: str | None = None,
     stdio: bool = False,
+    fetch_ttl: float = MCP_FETCH_TTL,
 ) -> None:
     """Serve the control repository over MCP: committed state, and writes."""
     root = get_repo_root()
+    if not fetch_ttl >= 0:
+        die_scoped(f"--fetch-ttl must be 0 or more seconds, not {fetch_ttl}")
     team = team or os.environ.get("TASKGO_MCP_ACCESS_TEAM")
     audience = audience or os.environ.get("TASKGO_MCP_ACCESS_AUD")
     if stdio:
@@ -7507,6 +7598,7 @@ def cmd_mcp(
         team=team,
         audience=audience,
         certs_url=os.environ.get("TASKGO_MCP_ACCESS_CERTS_URL") or None,
+        fetch_ttl=fetch_ttl,
     )
     server = McpServer(cfg)
     if stdio:
@@ -8049,12 +8141,15 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             JSON response per message) or, with --stdio, to one local client.
 
             Each tool call fetches BRANCH from REMOTE, resolves it once, and
-            reads only that commit; it never touches the working tree. Each
-            write commits one change set on that commit and pushes it to
-            REMOTE without force, retrying on a moved head a few times. Writes
-            need the commit-authority marker in AGENTS.md, a commit identity
-            (user.name and user.email), and a remote: with --no-fetch the
-            server only reads.
+            reads only that commit; it never touches the working tree. A read
+            within --fetch-ttl seconds of the last fetch, or of the server's
+            own push, uses that head instead, so it may miss a push from
+            elsewhere for that long. Each write commits one change set on the
+            head and pushes it to REMOTE without force, retrying on a moved
+            head a few times; with a cached head, the push alone checks that
+            the head has not moved. Writes need the commit-authority marker
+            in AGENTS.md, a commit identity (user.name and user.email), and a
+            remote: with --no-fetch the server only reads.
             Cloudflare Access, with Managed OAuth, is meant to sit in front
             of the server, and the server checks the Access JWT of every
             request (issuer, audience, signature, expiry). --auth none skips
@@ -8083,6 +8178,16 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         "--no-fetch",
         action="store_true",
         help="Serve the local BRANCH without fetching",
+    )
+    p_mcp.add_argument(
+        "--fetch-ttl",
+        type=float,
+        metavar="SECS",
+        default=MCP_FETCH_TTL,
+        help=(
+            f"Seconds a fetched or pushed head serves reads (default "
+            f"{MCP_FETCH_TTL:g}; 0 fetches for every call)"
+        ),
     )
     p_mcp.add_argument(
         "--auth",
@@ -8339,6 +8444,7 @@ def main(argv: list[str] | None = None) -> None:
             team=args.access_team,
             audience=args.access_aud,
             stdio=args.stdio,
+            fetch_ttl=args.fetch_ttl,
         )
     elif args.command == "history":
         cmd_history(

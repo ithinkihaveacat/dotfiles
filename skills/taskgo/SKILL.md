@@ -258,7 +258,7 @@ taskgo history PATH_OR_TASK_ID [FIELD]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 taskgo schema [--json]
-taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio]
+taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio]
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.

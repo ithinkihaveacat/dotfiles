@@ -141,6 +141,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l path -x -d 'Endpoi
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l remote -x -a '(git -C (__fish_taskgo_root) remote 2>/dev/null)' -d 'Remote to fetch from (default origin)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l branch -x -d 'Branch to serve (default main)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l no-fetch -d 'Serve the local branch without fetching'
+complete -x -c taskgo -n '__fish_seen_subcommand_from mcp' -l fetch-ttl -d 'Seconds a fetched or pushed head serves reads'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l auth -x -a 'access none' -d 'Check Access JWTs, or nothing (loopback only)'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l access-team -x -d 'Access team domain'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l access-aud -x -d 'Access application audience (AUD) tag'

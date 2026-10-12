@@ -516,20 +516,23 @@ options:
 ```text
 usage: taskgo mcp [-h] [--host HOST] [--port PORT] [--path PATH]
                   [--remote REMOTE] [--branch BRANCH] [--no-fetch]
-                  [--auth {access,none}] [--access-team DOMAIN]
-                  [--access-aud TAG] [--stdio]
+                  [--fetch-ttl SECS] [--auth {access,none}]
+                  [--access-team DOMAIN] [--access-aud TAG] [--stdio]
 
 Serve the control repository's committed state to MCP clients,
 and accept writes from them, over Streamable HTTP (stateless, one
 JSON response per message) or, with --stdio, to one local client.
 
 Each tool call fetches BRANCH from REMOTE, resolves it once, and
-reads only that commit; it never touches the working tree. Each
-write commits one change set on that commit and pushes it to
-REMOTE without force, retrying on a moved head a few times. Writes
-need the commit-authority marker in AGENTS.md, a commit identity
-(user.name and user.email), and a remote: with --no-fetch the
-server only reads.
+reads only that commit; it never touches the working tree. A read
+within --fetch-ttl seconds of the last fetch, or of the server's
+own push, uses that head instead, so it may miss a push from
+elsewhere for that long. Each write commits one change set on the
+head and pushes it to REMOTE without force, retrying on a moved
+head a few times; with a cached head, the push alone checks that
+the head has not moved. Writes need the commit-authority marker
+in AGENTS.md, a commit identity (user.name and user.email), and a
+remote: with --no-fetch the server only reads.
 Cloudflare Access, with Managed OAuth, is meant to sit in front
 of the server, and the server checks the Access JWT of every
 request (issuer, audience, signature, expiry). --auth none skips
@@ -547,6 +550,8 @@ options:
   --remote REMOTE       Remote to fetch from (default origin)
   --branch BRANCH       Branch to serve (default main)
   --no-fetch            Serve the local BRANCH without fetching
+  --fetch-ttl SECS      Seconds a fetched or pushed head serves reads (default
+                        5; 0 fetches for every call)
   --auth {access,none}  Check Cloudflare Access JWTs (default) or nothing
                         (loopback only)
   --access-team DOMAIN  Access team domain, such as

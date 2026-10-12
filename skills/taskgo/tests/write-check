@@ -4,7 +4,7 @@
 # ///
 """Checks the write tools of 'taskgo mcp' against a local bare remote.
 
-Usage: write-check
+Usage: write-check [--fetch-ttl SECS]
 
 Builds a throwaway control repository with three projects, pushes it to a
 bare repository, and serves a clone of it. Concurrent clients write through
@@ -12,7 +12,9 @@ the HTTP server; faults (a head that moves before each push, a push whose
 reply is lost, a remote that cannot be read) are injected into an in-process
 server, whose methods are the same. Checks that every write is one linear
 commit or nothing, that retries are recorded once, and that a stale CLI
-checkout recovers by rebase without losing a server commit. Prints TAP.
+checkout recovers by rebase without losing a server commit. --fetch-ttl is
+passed to the servers under test (default: the server's own); the checks of
+the cached head itself pick their own. Prints TAP.
 """
 
 import concurrent.futures
@@ -206,10 +208,11 @@ def free_port() -> int:
 
 
 class Http:
-    def __init__(self, tracker: Tracker, log: Path):
+    def __init__(self, tracker: Tracker, log: Path, ttl: float | None = None):
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}/mcp"
         self.log = log
+        extra = [] if ttl is None else ["--fetch-ttl", str(ttl)]
         self.proc = subprocess.Popen(
             [
                 str(CLI),
@@ -220,6 +223,7 @@ class Http:
                 "none",
                 "--port",
                 str(self.port),
+                *extra,
             ],
             stdout=subprocess.DEVNULL,
             stderr=log.open("w"),
@@ -785,8 +789,10 @@ def http_checks(tap: Tap, tracker: Tracker, http: Http) -> None:
     )
 
 
-def server(tg, tracker: Tracker):
+def server(tg, tracker: Tracker, ttl: float | None = None):
     cfg = tg.McpConfig(repo=tracker.server, remote="origin", branch="main", auth="none")
+    if ttl is not None:
+        cfg.fetch_ttl = ttl
     return tg.McpServer(cfg)
 
 
@@ -815,10 +821,10 @@ def competitor(tracker: Tracker, name: str):
     return push, count
 
 
-def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
+def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None:
     # The head moves before the first two pushes: the third lands.
     tracker = Tracker(tmp / "moves", seed)
-    srv = server(tg, tracker)
+    srv = server(tg, tracker, ttl)
     move, moved = competitor(tracker, "cli")
     real_push = srv.reader.push
 
@@ -843,8 +849,11 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     )
 
     # The head moves before every push: retries are bounded, nothing lands.
+    # The server pushed m1 a moment ago, so with a cached head the first push
+    # is an extra, optimistic one.
     srv.reader.push = lambda sha: push_after_moves(sha, limit=99)
     before = moved[0]
+    pushes = 5 + srv.reader.cached()
     ok, got = caller(tg, srv)(
         "create", {"project": "alpha", "title": "Never", "request_id": "m2"}
     )
@@ -855,15 +864,15 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         "7, 9: a head that moves before every push: bounded retries, an "
         "explicit error, and no server commit",
         not ok
-        and "moved on each of 5 attempts" in got
-        and moved[0] - before == 5
+        and f"moved on each of {pushes} attempts" in got
+        and moved[0] - before == pushes
         and not landed,
         got,
     )
 
     # A CLI push to another task in the project between read and push.
     tracker = Tracker(tmp / "race", seed)
-    srv = server(tg, tracker)
+    srv = server(tg, tracker, ttl)
     cli = tracker.checkout("cli")
     real_push = srv.reader.push
 
@@ -947,7 +956,7 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
 
     # 6. A push whose reply is lost, and a retry of the whole request.
     tracker = Tracker(tmp / "lost", seed)
-    srv = server(tg, tracker)
+    srv = server(tg, tracker, ttl)
     call = caller(tg, srv)
     real_push, real_fetch = srv.reader.push, srv.reader.fetch
 
@@ -1121,6 +1130,190 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     )
 
 
+def counting(srv) -> dict[str, int]:
+    """Counts the reader's fetches and pushes, the remote round trips."""
+    counts = {"fetch": 0, "push": 0}
+    real_fetch, real_push = srv.reader.fetch, srv.reader.push
+
+    def fetch():
+        counts["fetch"] += 1
+        return real_fetch()
+
+    def push(sha):
+        counts["push"] += 1
+        return real_push(sha)
+
+    srv.reader.fetch, srv.reader.push = fetch, push
+    return counts
+
+
+def cache_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
+    """The cached head: reads within --fetch-ttl, and writes over it."""
+    # An hour: nothing in these checks waits for the cache to expire.
+    tracker = Tracker(tmp / "cache", seed)
+    srv = server(tg, tracker, 3600)
+    call = caller(tg, srv)
+    counts = counting(srv)
+    reads = [call("list_tasks", {"project": "alpha"}) for _ in range(3)]
+    tap.check(
+        "back-to-back reads within the TTL fetch once and read one commit",
+        all(ok for ok, _ in reads)
+        and counts["fetch"] == 1
+        and len({r["as_of"]["commit"] for _, r in reads}) == 1,
+        (counts, reads[0]),
+    )
+
+    ok, made = call("create", {"project": "alpha", "title": "Fast", "request_id": "k1"})
+    ok2, seen = call("get_task", {"id": made["created"][0]["id"]} if ok else {})
+    tap.check(
+        "a write over the cached head is one push, and the next read sees it "
+        "without a fetch",
+        ok
+        and ok2
+        and counts == {"fetch": 1, "push": 1}
+        and made["attempts"] == 1
+        and seen["as_of"]["commit"] == made["commit"] == tracker.head(),
+        (counts, made, seen),
+    )
+
+    # A CLI push the server has not seen: reads within the TTL miss it, and
+    # a write that names its blob is refused over the cached head, so the
+    # server fetches and applies it over the real head.
+    cli = tracker.checkout("cli")
+    (cli / "alpha" / "PLAN.md").write_text("# Plan\n\nFrom the CLI.\n")
+    git(cli, "commit", "-q", "-am", "chore(alpha): plan from the CLI")
+    git(cli, "push", "-q", "origin", "main")
+    ok, stale = call("list_tasks", {"project": "alpha"})
+    cli_head = tracker.head()
+    ok2, got = call(
+        "apply_changes",
+        {
+            "request_id": "k2",
+            "changes": [
+                {
+                    "op": "write_file",
+                    "path": "alpha/PLAN.md",
+                    "content": "# Plan\n\nFrom the server.\n",
+                    "expected_blob": git(
+                        tracker.remote, "rev-parse", "main:alpha/PLAN.md"
+                    ),
+                }
+            ],
+        },
+    )
+    tap.check(
+        "a read within the TTL may miss a CLI push; a write refused over the "
+        "stale cached head fetches and lands over the real head",
+        ok
+        and stale["as_of"]["commit"] == made["commit"]
+        and ok2
+        and got["attempts"] == 1
+        and counts == {"fetch": 2, "push": 2}
+        and tracker.commits(cli_head) == [got["commit"]]
+        and "From the server." in tracker.show("alpha/PLAN.md"),
+        (counts, got),
+    )
+
+    # The same with no precondition: the push over the stale head is refused,
+    # and the set applies again over the real head.
+    git(cli, "pull", "-q", "--rebase", "origin", "main")
+    (cli / "INBOX.md").write_text("# Inbox\n\nFrom the CLI.\n")
+    git(cli, "commit", "-q", "-am", "chore: inbox from the CLI")
+    git(cli, "push", "-q", "origin", "main")
+    cli_head = tracker.head()
+    ok, got = call("create", {"project": "beta", "title": "Late", "request_id": "k3"})
+    tap.check(
+        "a push over a stale cached head is refused, and the write lands over "
+        "the real head on the second push",
+        ok
+        and got["attempts"] == 2
+        and counts == {"fetch": 3, "push": 4}
+        and tracker.commits(cli_head) == [got["commit"]],
+        (counts, got),
+    )
+
+    # A push lands but its reply is lost, and the branch cannot be read. The
+    # cached head is then made stale by hand, as by a cache warmed before the
+    # landing. A retry with the same request_id must fetch, not apply over
+    # the cache, and report the landed commit.
+    real_push, real_fetch = srv.reader.push, srv.reader.fetch
+
+    def unreadable():
+        raise tg.McpToolError("could not fetch main from origin")
+
+    def lost_then_unreadable(sha):
+        real_push(sha)
+        srv.reader.fetch = unreadable
+        return False, "fatal: the remote end hung up unexpectedly"
+
+    srv.reader.push = lost_then_unreadable
+    before = tracker.head()
+    args = {"project": "gamma", "title": "Exactly once", "request_id": "k4"}
+    ok, unknown = call("create", args)
+    srv.reader.push, srv.reader.fetch = real_push, real_fetch
+    git(tracker.server, "update-ref", srv.reader.tracking_ref(), before)
+    srv.reader.fetched_at = time.monotonic()
+    ok2, again = call("create", args)
+    titles = git(tracker.remote, "log", "--format=%s", f"{before}..main")
+    tap.check(
+        "a retry after a lost reply fetches despite a cached head, and the "
+        "write is recorded once",
+        not ok
+        and "retry with the same request_id" in unknown
+        and ok2
+        and again["replayed"]
+        and len(tracker.commits(before)) == 1,
+        (unknown, again, titles),
+    )
+
+    # A no-op over the cached head is checked against the fetched head:
+    # TASK-AA005 is todo in the cache and in-progress at the remote.
+    git(cli, "pull", "-q", "--rebase", "origin", "main")
+    taskgo(cli, "update", "TASK-AA005", "--status", "in-progress")
+    taskgo(cli, "sync", "alpha")
+    git(cli, "commit", "-q", "-am", "chore(alpha): start TASK-AA005")
+    git(cli, "push", "-q", "origin", "main")
+    cli_head = tracker.head()
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "k5",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA005",
+                    "field": "status",
+                    "value": "todo",
+                }
+            ],
+        },
+    )
+    tap.check(
+        "a change that is a no-op over the cached head is applied over the "
+        "fetched head instead",
+        ok
+        and got["commit"]
+        and tracker.commits(cli_head) == [got["commit"]]
+        and "status: todo" in tracker.show("alpha/tasks/TASK-AA005-five.md"),
+        got,
+    )
+
+    # --fetch-ttl 0: every call fetches, and a write fetches before it pushes.
+    srv = server(tg, tracker, 0)
+    call = caller(tg, srv)
+    counts = counting(srv)
+    reads = [call("list_tasks", {"project": "alpha"}) for _ in range(3)]
+    ok, got = call("create", {"project": "alpha", "title": "Slow", "request_id": "z1"})
+    tap.check(
+        "--fetch-ttl 0 fetches for every read and before every write",
+        all(r for r, _ in reads)
+        and ok
+        and counts == {"fetch": 4, "push": 1}
+        and got["attempts"] == 1,
+        (counts, got),
+    )
+
+
 def bypass_proxy_for_loopback() -> None:
     """Keeps loopback requests away from any proxy in the environment.
 
@@ -1135,6 +1328,11 @@ def bypass_proxy_for_loopback() -> None:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Checks taskgo mcp writes.")
+    parser.add_argument("--fetch-ttl", type=float, default=None, metavar="SECS")
+    ttl = parser.parse_args().fetch_ttl
     reexec_with_taskgo_env()
     bypass_proxy_for_loopback()
     os.environ.update(IDENTITY)
@@ -1144,12 +1342,14 @@ def main() -> None:
         tmp = Path(tmp)
         seed = make_seed(tmp)
         tracker = Tracker(tmp / "http", seed)
-        http = Http(tracker, tmp / "server.log")
+        http = Http(tracker, tmp / "server.log", ttl)
         try:
             http_checks(tap, tracker, http)
         finally:
             http.close()
-        fault_checks(tap, load_taskgo(), seed, tmp)
+        tg = load_taskgo()
+        fault_checks(tap, tg, seed, tmp, ttl)
+        cache_checks(tap, tg, seed, tmp)
     print(f"1..{tap.n}", flush=True)
     sys.exit(1 if tap.failed else 0)
 

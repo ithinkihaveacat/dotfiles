@@ -30,6 +30,14 @@ commit read, its commit time, and today's date in the repository timezone.
 Passing `as_of.commit` back as `at` keeps several calls on one commit, and skips
 the fetch when that commit is already present.
 
+To spare the remote a round trip per call, a read within `--fetch-ttl` seconds
+(5 by default) of the last fetch, or of the server's own push, uses that head
+without fetching. Bursts of calls fetch once, and a read after a write sees the
+write at once; a push from elsewhere can go unseen for up to the TTL.
+`--fetch-ttl 0` fetches for every call, and for every write before it applies.
+The cache is the remote-tracking ref and a timestamp in memory, so a restart
+only costs a fetch.
+
 `wait_for` gates other than dates are reported as `unverified_gates`. The server
 does not poll them and, like the CLI, treats them as still holding. `dispatch`
 on a checkout also warns about uncommitted changes; the server reads only
@@ -41,16 +49,22 @@ commits, so it never does.
 [Change Sets](model.md#change-sets); `create` is a set with one `create`) and
 make it one commit on the branch, or nothing:
 
-1. Fetch the branch and apply the set over its head, in memory, as
-   `taskgo apply` does: every precondition (expected value, section hash, blob
-   SHA) is checked against that head, the whole result is validated, and the
-   affected `STATUS.md` blocks are regenerated.
+1. Apply the set over the head, in memory, as `taskgo apply` does: every
+   precondition (expected value, section hash, blob SHA) is checked against that
+   head, the whole result is validated, and the affected `STATUS.md` blocks are
+   regenerated. The head is the cached one when the server has fetched or pushed
+   since it started, and `--fetch-ttl` is not 0; otherwise the server fetches it
+   first. A refusal over a cached head (a failed precondition or validation, no
+   change, no commit authority) fetches and applies the set again over the
+   fetched head; a malformed set fails at once.
 1. Commit the result without a working tree, through a temporary index, with the
    head as the only parent.
-1. Push it without force. If the remote refuses (another push got there first),
-   fetch again: when the commit is on the branch after all, the push did land;
-   otherwise apply the set again over the new head, so its preconditions are
-   checked against what is now there. After five refused pushes the write fails
+1. Push it without force, which also checks that a cached head is still the
+   head: a write in steady state is one round trip. If the remote refuses
+   (another push got there first), fetch again: when the commit is on the branch
+   after all, the push did land; otherwise apply the set again over the new
+   head, so its preconditions are checked against what is now there. After five
+   refused pushes, not counting a first push over a cached head, the write fails
    and nothing is written.
 
 Calls are serialized, so the server's own writes never race each other; pushes
@@ -70,9 +84,10 @@ server started with `--no-fetch` does not write.
 Every write takes a `request_id`. The server keeps, in memory, the digest of the
 request's arguments and each commit it built for it, for a day. A request whose
 ID it has seen reports the earlier commit, when that commit is on the branch,
-instead of writing again, so a client that lost a reply can retry safely; the
-same ID with different arguments is refused. A restart forgets the IDs, which
-loses only that recognition, never a write.
+instead of writing again, so a client that lost a reply can retry safely; such a
+retry always fetches, and does not trust a cached head. The same ID with
+different arguments is refused. A restart forgets the IDs, which loses only that
+recognition, never a write.
 
 Each write logs a line to standard error for each push attempt, with the request
 ID, the commit, and the head it was built on, or Git's reason for a refusal, and
@@ -182,11 +197,13 @@ temporary clone, and compares every tool's output with the CLI's there. It
 prints only check names and counts, never file contents, so it is safe to run
 against a private tracker. `tests/write-check` serves a throwaway tracker pushed
 to a local bare repository and checks the writes: concurrent writers, a lost
-push reply, a head that moves before every push, refusals, and a stale CLI
-checkout that recovers by rebase. `protocol-check` connects the SDK's own client
-as a 2026-07-28 client and as a 2025-11-25 one, over HTTP and over `--stdio`.
-`test-taskgo` runs `compare-cli` and `protocol-check` on a synthetic tracker,
-`auth-check`, and `write-check`.
+push reply, a head that moves before every push, refusals, a stale CLI checkout
+that recovers by rebase, and the cached head (reads within the TTL, writes over
+a stale cached head, and a retry after a lost reply); run it again with
+`--fetch-ttl 0` to check the servers without a cache. `protocol-check` connects
+the SDK's own client as a 2026-07-28 client and as a 2025-11-25 one, over HTTP
+and over `--stdio`. `test-taskgo` runs `compare-cli` and `protocol-check` on a
+synthetic tracker, `auth-check`, and `write-check` both ways.
 
 The MCP Inspector works against a local server:
 
