@@ -7564,6 +7564,29 @@ MCP_LOGS_PATH = "/logs"
 MCP_LOGS_DATA_PATH = "/logs/records"
 # Tool calls by one caller this many seconds apart or less form one chain.
 MCP_CHAIN_GAP = 120.0
+# Tool arguments a record keeps, shortened: those that name what a call is
+# about (a project, a task, a path, a search), never those that carry text
+# (titles, bodies, file content, edits) or conversation links.
+MCP_LOG_ARGS = (
+    "target",
+    "project",
+    "id",
+    "state",
+    "path",
+    "prefix",
+    "field",
+    "kind",
+    "slug",
+    "start_line",
+    "end_line",
+    "line_numbers",
+    "replace_all",
+    "args",
+    "paths",
+    "at",
+    "request_id",
+)
+MCP_LOG_ARG_MAX = 60
 # JWT claims that identify a caller, hashed into a record's caller key.
 MCP_CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
 
@@ -8742,6 +8765,7 @@ class McpEvent:
     agent: str | None = None
     caller: str | None = None
     size: int | None = None  # bytes of a tool call's result
+    args: dict[str, str] | None = None
     at: float = dataclass_field(default_factory=time.time)
     ms: int | None = None
 
@@ -8790,6 +8814,7 @@ class McpEvent:
             "http": self.http,
             "method": text(self.method),
             "tool": text(self.tool),
+            "args": self.args or None,
             "outcome": self.outcome,
             "status": self.status,
             "ms": self.ms,
@@ -8801,6 +8826,37 @@ class McpEvent:
             "version": MCP_SERVER_VERSION,
         }
         return {k: v for k, v in rec.items() if v is not None}
+
+
+def mcp_log_args(args: dict[str, Any]) -> dict[str, str]:
+    """A tool call's ARGS for its record: the MCP_LOG_ARGS that are present,
+    each on one line and shortened, and apply_changes' changes as each one's
+    operation and target."""
+
+    def short(value: Any) -> str:
+        if isinstance(value, list):
+            value = " ".join(str(v) for v in value)
+        text = " ".join(str(value).split())
+        if len(text) > MCP_LOG_ARG_MAX:
+            text = text[: MCP_LOG_ARG_MAX - 1] + "\u2026"
+        return text
+
+    out = {
+        k: short(args[k])
+        for k in MCP_LOG_ARGS
+        if isinstance(args.get(k), (str, int, bool, list))
+    }
+    changes = args.get("changes")
+    if isinstance(changes, list):
+        parts = []
+        for c in changes:
+            if not isinstance(c, dict):
+                continue
+            target = c.get("record") or c.get("path") or c.get("project")
+            detail = c.get("field") or c.get("section")
+            parts.append(" ".join(str(x) for x in (c.get("op"), target, detail) if x))
+        out["changes"] = short(f"{len(changes)}: " + ", ".join(parts))
+    return out
 
 
 def mcp_caller(*parts: Any) -> str:
@@ -9058,6 +9114,7 @@ class McpServer:
         if not isinstance(args, dict):
             event.fail("tool-error", "arguments must be an object")
             return mcp_tool_error("arguments must be an object")
+        event.args = mcp_log_args(args)
         with self.lock:
             try:
                 if tool.writes:
@@ -9444,7 +9501,7 @@ async def mcp_asgi_reply(
 # stats over those kept; kamal-proxy buffers responses, so it polls rather
 # than streams. The script is pinned by its hash in the page's CSP.
 MCP_LOGS_SCRIPT = """
-const DATA = "@DATA@", MAX = 500;
+const DATA = "@DATA@", MAX = 500, CLIENT_MAX = 20;
 const $ = (id) => document.getElementById(id);
 const state = { server: "", next: 0 };
 
@@ -9455,6 +9512,16 @@ function cell(tr, text, cls) {
   return td;
 }
 
+// A client's name, clipped; the cell's title has all of it.
+function client(tr, name, cls) {
+  const td = cell(tr, name, cls);
+  if (name && name.length > CLIENT_MAX) {
+    td.textContent = name.slice(0, CLIENT_MAX - 1) + "\u2026";
+    td.title = name;
+  }
+  return td;
+}
+
 function table(el, head, rows) {
   const t = document.createElement("table");
   const h = t.createTHead().insertRow();
@@ -9462,7 +9529,7 @@ function table(el, head, rows) {
   const b = t.createTBody();
   for (const r of rows) {
     const tr = b.insertRow();
-    r.forEach((v, i) => cell(tr, v, head[i][1]));
+    r.forEach((v, i) => (head[i][2] ? client : cell)(tr, v, head[i][1]));
   }
   el.replaceChildren(t);
 }
@@ -9472,10 +9539,11 @@ function row(rec) {
   if (rec.outcome !== "ok") tr.className = "fail";
   const when = new Date(rec.ts);
   cell(tr, when.toLocaleTimeString([], { hour12: false })).title = rec.ts;
-  cell(tr, rec.agent || rec.transport);
+  client(tr, rec.agent || rec.transport);
   cell(tr, rec.caller);
   cell(tr, rec.method);
   cell(tr, rec.tool);
+  cell(tr, Object.entries(rec.args || {}).map(([k, v]) => `${k}=${v}`).join(" "), "args");
   cell(tr, rec.outcome);
   cell(tr, rec.status, "num");
   cell(tr, rec.ms, "num");
@@ -9492,13 +9560,13 @@ function render(stats, version) {
     (outcomes.length ? ` (${outcomes.join(", ")})` : "") +
     ` · ${stats.chains} chains · server ${version}`;
   const num = (label) => [label, "num"];
-  const head = (name) => [[name], num("Requests"), num("Failed"),
+  const head = (name, clip) => [[name, "", clip], num("Requests"), num("Failed"),
     num("p50 ms"), num("p95 ms"), num("p50 bytes")];
   const line = (key) => (r) => [r[key], r.requests, r.failed,
     r.p50_ms, r.p95_ms, r.p50_bytes];
-  table($("agents"), head("Client"), stats.agents.map(line("agent")));
+  table($("agents"), head("Client", true), stats.agents.map(line("agent")));
   table($("tools"), head("Tool"), stats.tools.map(line("tool")));
-  table($("sequences"), [num("Count"), ["Client"], ["Sequence"]],
+  table($("sequences"), [num("Count"), ["Client", "", true], ["Sequence"]],
     stats.sequences.map((q) => [q.count, q.agent, q.calls.join(" > ")]));
 }
 
@@ -9579,6 +9647,7 @@ thead td { background: var(--head); font-weight: 600; }
 td.num { text-align: right; }
 tr.fail td { background: var(--fail-bg); color: var(--fail-fg); }
 #rows td:last-child { white-space: normal; min-width: 16em; }
+#rows td.args { white-space: normal; min-width: 14em; max-width: 28em; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -9597,7 +9666,7 @@ tr.fail td { background: var(--fail-bg); color: var(--fail-fg); }
 <div class="scroll">
 <table>
 <thead><tr><td>Time</td><td>Client</td><td>Caller</td><td>Method</td><td>Tool</td>
-<td>Outcome</td><td class="num">Status</td><td class="num">ms</td>
+<td>Arguments</td><td>Outcome</td><td class="num">Status</td><td class="num">ms</td>
 <td class="num">Bytes</td><td>Commit</td><td>Reason</td></tr></thead>
 <tbody id="rows"></tbody>
 </table>
@@ -10648,7 +10717,9 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
 
             Each request is logged as a line on stderr and as a JSON record
             appended to the request log (rotated at 8 MiB, keeping 4 old
-            files), never with its content; 'taskgo requests' summarises it.
+            files); a record keeps a tool call's short identifying arguments
+            (project, task, path, search), never text such as titles, bodies,
+            or file content. 'taskgo requests' summarises the log.
             Over HTTP, GET /logs is a live page of the latest requests, behind
             the same check as the endpoint; GET /up is an unauthenticated
             health check.
@@ -10740,8 +10811,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             then requests, failures, latency, and result size per client and
             per tool, then the commonest runs of two or three tool calls in
             one caller's chains. A chain is a caller's tool calls, each no
-            more than --gap seconds after the one before. Records name
-            requests, never their content.
+            more than --gap seconds after the one before.
 
             Environment:
               TASKGO_MCP_LOG  Default for --log"""

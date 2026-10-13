@@ -687,7 +687,9 @@ the check and serves only requests addressed to a loopback name.
 
 Each request is logged as a line on stderr and as a JSON record
 appended to the request log (rotated at 8 MiB, keeping 4 old
-files), never with its content; 'taskgo requests' summarises it.
+files); a record keeps a tool call's short identifying arguments
+(project, task, path, search), never text such as titles, bodies,
+or file content. 'taskgo requests' summarises the log.
 Over HTTP, GET /logs is a live page of the latest requests, behind
 the same check as the endpoint; GET /up is an unauthenticated
 health check.
@@ -734,8 +736,7 @@ Summarise the request log of 'taskgo mcp': requests by outcome,
 then requests, failures, latency, and result size per client and
 per tool, then the commonest runs of two or three tool calls in
 one caller's chains. A chain is a caller's tool calls, each no
-more than --gap seconds after the one before. Records name
-requests, never their content.
+more than --gap seconds after the one before.
 
 Environment:
   TASKGO_MCP_LOG  Default for --log

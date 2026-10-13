@@ -241,6 +241,13 @@ The record has the same fields, under the same names (`agent` for the
 `User-Agent`), plus:
 
 - `ts`: when the request came, in UTC with milliseconds;
+- `args`: a tool call's identifying arguments, each shortened to one line of 60
+  characters: `target`, `project`, `id`, `state`, `path`, `prefix`, `field`,
+  `kind`, `slug`, the line range and flags, the search's `args` and `paths`,
+  `at`, and `request_id`, and for `apply_changes`, each change's operation and
+  target (`2: set TASK-3A91F status, edit_file proj/PLAN.md`). Arguments that
+  carry text (titles, sections, bodies, file content, `old_string` and
+  `new_string`, values) and conversation links are left out;
 - `bytes`: the size of a successful tool call's result;
 - `caller`: an opaque key for the caller, a hash of the Access token's
   identifying claims (`sub`, `email`, and an OAuth client claim if there is
@@ -248,7 +255,7 @@ The record has the same fields, under the same names (`agent` for the
 - `version`: the server's version.
 
 ```json
-{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.12.0"}
+{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","args":{"project":"proj","state":"ready"},"outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.12.0"}
 ```
 
 The request log is `--log FILE`, else `TASKGO_MCP_LOG`, else
@@ -260,14 +267,17 @@ and rotation locks it. Logging never fails a request: if the file cannot be
 written, the server says so once on standard error and keeps logging lines
 there.
 
-Lines and records name requests, never their content: no arguments, task text,
-file content, or tokens. An authentication refusal gives its reason (no token,
-bad signature, wrong audience or issuer, expired). A tool error gives its
-message, with every quoted value elided, since a failed precondition quotes the
-record's current value, which can be a title. Write attempts log the lines
-described under [Writes](#writes) first. The first request with each kind of
-valid Access token (a browser's, a client's) also logs the names, not the
-values, of its claims, which say what a caller key could be built from.
+Lines and records name requests, never their content: no task text, file
+content, edits, or tokens. A record's `args` can still hold a short private
+detail, such as a project name, a path, or a search pattern; the log stays on
+the server's host and behind the endpoint's check, and is not for copying into
+artifact repositories. An authentication refusal gives its reason (no token, bad
+signature, wrong audience or issuer, expired). A tool error gives its message,
+with every quoted value elided, since a failed precondition quotes the record's
+current value, which can be a title. Write attempts log the lines described
+under [Writes](#writes) first. The first request with each kind of valid Access
+token (a browser's, a client's) also logs the names, not the values, of its
+claims, which say what a caller key could be built from.
 
 **The log page.** Over HTTP, `GET /logs` is a page of the latest 500 requests,
 newest first, with requests, failures, and latency per client and per tool, and
