@@ -263,7 +263,7 @@ taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 taskgo schema [--json]
-taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio] [--log FILE]
+taskgo mcp [--host HOST] [--port PORT] [--no-fetch | --local] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio] [--log FILE]
 taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
 ```
 

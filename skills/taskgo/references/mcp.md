@@ -27,10 +27,12 @@ One server serves one control repository.
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
-never reads or changes the working tree. Every response carries `as_of`: the
-commit read, its commit time, and today's date in the repository timezone.
-Passing `as_of.commit` back as `at` keeps several calls on one commit, and skips
-the fetch when that commit is already present.
+never reads the working tree, and changes it only as a `--local` server's write
+does (see [Writing to a checkout](#writing-to-a-checkout)). Every response
+carries `as_of`: the commit read, its commit time, today's date in the
+repository timezone, and `stale: true` when the commit is a head that could not
+be refreshed. Passing `as_of.commit` back as `at` keeps several calls on one
+commit, and skips the fetch when that commit is already present.
 
 To spare the remote a round trip per call, a read within `--fetch-ttl` seconds
 (5 by default) of the last fetch, or of the server's own push, uses that head
@@ -39,6 +41,13 @@ write at once; a push from elsewhere can go unseen for up to the TTL.
 `--fetch-ttl 0` fetches for every call, and for every write before it applies.
 The cache is the remote-tracking ref and a timestamp in memory, so a restart
 only costs a fetch.
+
+When the fetch fails (the remote is unreachable, or it times out after a
+minute), an unpinned read is served the head last fetched, or last pushed by
+this server, if there is one, and its `as_of` carries `"stale": true`; the
+failure is logged on standard error. A read with nothing fetched yet, a pinned
+read whose commit is not present, and every write fail instead: nothing is
+written over a head that may have moved.
 
 `wait_for` gates other than dates are reported as `unverified_gates`. The server
 does not poll them and, like the CLI, treats them as still holding. `dispatch`
@@ -114,19 +123,27 @@ Commits read like CLI commits: the configured owner as author and committer (the
 server refuses to write without `user.name` and `user.email`, or the
 `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and never guesses one), a
 Conventional Commits subject scoped to the project (the caller's, or one derived
-from the changes), an optional body, and only the trailers the caller asks for:
+from the changes), an optional body, and the trailers the caller asks for:
 `Conversation:` for its session URI, which also joins the conversations of every
-task the write touches, and `Ref:` for each reference. Writes are refused unless
-`AGENTS.md` at the head carries `<!-- taskgo:allow-local-commits -->`, and a
-server started with `--no-fetch` does not write.
+task the write touches, and `Ref:` for each reference. After those, every commit
+carries `Request-Id:`, the write's `request_id`, and `Request-Digest:`, the
+first 16 hex digits of the SHA-256 of its other arguments as sorted JSON. Writes
+are refused unless `AGENTS.md` at the head carries
+`<!-- taskgo:allow-local-commits -->`, and a server started with `--no-fetch`
+does not write.
 
 Every write takes a `request_id`. The server keeps, in memory, the digest of the
 request's arguments and each commit it built for it, for a day. A request whose
 ID it has seen reports the earlier commit, when that commit is on the branch,
 instead of writing again, so a client that lost a reply can retry safely; such a
 retry always fetches, and does not trust a cached head. The same ID with
-different arguments is refused. A restart forgets the IDs, which loses only that
-recognition, never a write.
+different arguments is refused. A restart forgets the IDs, so a write whose ID
+is not in memory first looks for its `Request-Id:` trailer in the last 200
+commits behind the head: a commit found with the same `Request-Digest:` is
+reported as `replayed: true`, from what the commit records (its subject, the
+records it created, and the files it changed, but not the lines of its edits),
+and one with another digest is refused as a reused ID. A retry is thus recorded
+once across restarts, as long as its commit is within those 200.
 
 Each write logs a line to standard error for each push attempt, with the request
 ID, the commit, and the head it was built on, or Git's reason for a refusal, and
@@ -144,6 +161,26 @@ git add alpha/STATUS.md
 git rebase --continue
 ```
 
+### Writing to a checkout
+
+`--local` serves a checkout on the same machine, with no remote: typically a
+`--stdio` server pointed at the user's own control repository (`--root`), for
+agents working in other workspaces there, which have no clone of it and no
+tunnel to a hosted server. Reads see the local branch as it is, for every call,
+with no fetch and no cache. A write commits as above, through a temporary index,
+and then moves the local branch to the commit instead of pushing it,
+compare-and-swap style: the move is refused if the branch is no longer at the
+head the set was applied over (a commit from the CLI got there first), and the
+server then applies the set again over the new head, as after a refused push.
+Before moving, the server requires the checkout to have the branch checked out
+and no uncommitted change (staged, unstaged, or untracked) to any path the
+commit touches; other dirty paths do not matter. After moving, it brings the
+index and working tree from the old head to the new one for the touched paths
+only (`git read-tree -m -u`), which also removes files the commit deletes, so
+the checkout shows the commit as if it had been made there and the CLI goes on
+working with no rebase. The checkout is never pushed; that stays with the user.
+`--local` and `--no-fetch` exclude each other.
+
 ## Transports
 
 The official MCP Python SDK speaks the protocol, so the server supports every
@@ -159,7 +196,14 @@ endpoint get 405. A POST whose `Accept` header does not admit `application/json`
 reading the repository, for a reverse proxy's health check. `GET /logs` is a
 page of the server's latest requests (see [Logging](#logging)), behind the same
 check as the endpoint. `--stdio` serves one local client on standard input and
-output instead, without authentication.
+output instead, without authentication. A stdio server for agents on the same
+machine as the user's checkout is usually started with `--local` (see
+[Writing to a checkout](#writing-to-a-checkout)), so that their writes land on
+the checkout's branch without a remote in between:
+
+```json
+{"command": "taskgo", "args": ["--root", "/home/me/projects", "mcp", "--local", "--stdio"]}
+```
 
 ## Logging
 
@@ -197,7 +241,7 @@ The record has the same fields, under the same names (`agent` for the
 - `version`: the server's version.
 
 ```json
-{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.11.0"}
+{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.12.0"}
 ```
 
 The request log is `--log FILE`, else `TASKGO_MCP_LOG`, else
@@ -287,14 +331,19 @@ prints only check names and counts, never file contents, so it is safe to run
 against a private tracker. `tests/write-check` serves a throwaway tracker pushed
 to a local bare repository and checks the writes: concurrent writers, a lost
 push reply, a head that moves before every push, refusals, a stale CLI checkout
-that recovers by rebase, and the cached head (reads within the TTL, writes over
-a stale cached head, and a retry after a lost reply); run it again with
-`--fetch-ttl 0` to check the servers without a cache. `protocol-check` connects
-the SDK's own client as a 2026-07-28 client and as a 2025-11-25 one, over HTTP
-and over `--stdio`. `auth-check` also checks the log page and its records, with
-and without a token, and that the request log holds one record per request and
-no token. `test-taskgo` runs `compare-cli` and `protocol-check` on a synthetic
-tracker, `auth-check`, and `write-check` both ways.
+that recovers by rebase, the cached head (reads within the TTL, writes over a
+stale cached head, and a retry after a lost reply), a read served a stale head
+when the remote cannot be fetched, a retry recognized from its `Request-Id:`
+trailer by a new server, and a `--local` server on a checkout (a write lands on
+the local branch and in the working tree, is refused over a dirty touched file
+or a detached HEAD, and is applied again after a CLI commit gets in first; one
+write goes over `--stdio`); run it again with `--fetch-ttl 0` to check the
+servers without a cache. `protocol-check` connects the SDK's own client as a
+2026-07-28 client and as a 2025-11-25 one, over HTTP and over `--stdio`.
+`auth-check` also checks the log page and its records, with and without a token,
+and that the request log holds one record per request and no token.
+`test-taskgo` runs `compare-cli` and `protocol-check` on a synthetic tracker,
+`auth-check`, and `write-check` both ways.
 
 The MCP Inspector works against a local server:
 

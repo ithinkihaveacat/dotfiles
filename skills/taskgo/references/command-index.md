@@ -654,7 +654,7 @@ Options:
 
 ```text
 Usage: taskgo mcp [-h] [--host HOST] [--port PORT] [--path PATH]
-                  [--remote REMOTE] [--branch BRANCH] [--no-fetch]
+                  [--remote REMOTE] [--branch BRANCH] [--no-fetch | --local]
                   [--fetch-ttl SECS] [--auth {access,none}]
                   [--access-team DOMAIN] [--access-aud TAG] [--stdio]
                   [--log FILE]
@@ -667,12 +667,18 @@ Each tool call fetches BRANCH from REMOTE, resolves it once, and
 reads only that commit; it never touches the working tree. A read
 within --fetch-ttl seconds of the last fetch, or of the server's
 own push, uses that head instead, so it may miss a push from
-elsewhere for that long. Each write commits one change set on the
-head and pushes it to REMOTE without force, retrying on a moved
-head a few times; with a cached head, the push alone checks that
-the head has not moved. Writes need the commit-authority marker
-in AGENTS.md, a commit identity (user.name and user.email), and a
-remote: with --no-fetch the server only reads.
+elsewhere for that long; a read whose fetch fails is served the
+last fetched head, marked stale in as_of. Each write commits one
+change set on the head and pushes it to REMOTE without force,
+retrying on a moved head a few times; with a cached head, the
+push alone checks that the head has not moved. Writes need the
+commit-authority marker in AGENTS.md, a commit identity
+(user.name and user.email), and a remote: with --no-fetch the
+server only reads. With --local, for a checkout on this machine,
+there is no remote: reads see the local BRANCH as it is, and a
+write moves it (only if it has not moved since the write read
+it) and refreshes the checked-out files it touched, so it needs
+BRANCH checked out and those files unchanged in the checkout.
 Cloudflare Access, with Managed OAuth, is meant to sit in front
 of the server, and the server checks the Access JWT of every
 request (issuer, audience, signature, expiry). --auth none skips
@@ -697,7 +703,9 @@ Options:
   --path PATH           Endpoint path (default /mcp)
   --remote REMOTE       Remote to fetch from (default origin)
   --branch BRANCH       Branch to serve (default main)
-  --no-fetch            Serve the local BRANCH without fetching
+  --no-fetch            Serve the local BRANCH without fetching; no writes
+  --local               Serve the local BRANCH without a remote: writes move
+                        it and refresh the checkout
   --fetch-ttl SECS      Seconds a fetched or pushed head serves reads (default
                         5; 0 fetches for every call)
   --auth {access,none}  Check Cloudflare Access JWTs (default) or nothing
