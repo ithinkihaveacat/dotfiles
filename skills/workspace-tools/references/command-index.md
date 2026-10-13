@@ -110,7 +110,7 @@ agent reads for the chosen scope:
              (not 'claude remote-control' or Codex; see the workspace-tools
              skill, references/model.md)
   defaults   the default skills, which no agent reads; 'add --defaults' links
-             each one into a workspace or session through this directory
+             each one into a workspace, session or user through this directory
 
 Commands:
   add SPEC...     Link a skill straight to its source: a catalog entry from
@@ -120,7 +120,7 @@ Commands:
   add --defaults  Link every default through the defaults directory, keeping
                   existing links; remove broken links to defaults (broken
                   links added by name are kept, with a warning); then fail if
-                  'doctor' finds errors (workspace and session scopes). Outside
+                  'doctor' finds errors. Outside
                   a repository or plugin-recognized workspace, does nothing
                   unless the directory already has a skill folder
                   -q, --quiet: report only errors and warnings

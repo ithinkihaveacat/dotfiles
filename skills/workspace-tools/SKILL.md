@@ -106,12 +106,14 @@ skill <command> [arguments]
     current turn, read `<artifactDir>/scratch/skills/<skill>/SKILL.md` directly.
 - **User Scope**: `skill --scope user ...` links into `~/.claude/skills` and
   `~/.agents/skills` for every session of the user, leaving Claude's own
-  `~/.claude/skills/synced/` alone. It is meant to stay empty.
+  `~/.claude/skills/synced/` alone. It is meant to stay empty on a long-lived
+  machine; in an ephemeral per-project environment, where the user is the
+  project, `skill --scope user add --defaults` seeds it (never implicit).
 - **Defaults Scope**: `skill --scope defaults add|remove NAME...` manages the
   default skills, a directory no agent reads
   (`${XDG_STATE_HOME:-~/.local/state}/skill/defaults`). `skill add --defaults`
-  links each default into a workspace or session *through* that directory, so
-  removing a default breaks its links everywhere and the next
+  links each default into a workspace, session or user scope *through* that
+  directory, so removing a default breaks its links everywhere and the next
   `skill add --defaults` clears them. A skill added by name links straight at
   its source and survives that. The defaults are set by `etc/skill/defaults.sh`
   in the dotfiles and each overlay, which `install.sh` runs.
