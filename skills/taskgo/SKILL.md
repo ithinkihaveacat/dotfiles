@@ -175,18 +175,19 @@ which file, repository, or skill owns each kind of fact.
   rules**. Unlike an artifact repository's README, it does not describe the
   code. See [Project README](references/model.md#project-readme) for the
   placement test and skeleton. Optional YAML frontmatter holds project-level
-  configuration (such as `skills` required when working on the project):
+  configuration, such as the agent `skills` to work on the project, named as the
+  `skill` CLI resolves them (a catalog short name, optionally `namespace:name`):
   ```markdown
   ---
   skills:
-    - wear-widget-bundle
+    - coding-standards
+    - local:notes
   ---
 
   # Project Name
   ```
-  To add or update required skills for a project in the control repository, add
-  or edit the `skills:` list in `<project>/README.md`'s YAML frontmatter and
-  verify with `taskgo info <project>`.
+  `taskgo skills <project>` prints the list; `taskgo dispatch` carries it in its
+  note; `taskgo doctor` warns about a name the catalog does not have.
 - **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`) for private or
   cross-artifact decisions. Newer ADRs record `supersedes: [<old-adr>]` in YAML
   frontmatter to retire older ADRs; edit an accepted ADR in place only for
@@ -206,23 +207,22 @@ See **[Agent Workflows & Handoff](references/workflows.md)** for detailed
 protocols on commit authority, session attribution, External Agent Handoff, and
 Agent Dispatch.
 
-- **Before work:**
-  1. Read `AGENTS.md`, project `README.md`, `STATUS.md`, and `PLAN.md`.
-  1. **Activate project & per-session skills:** If `<project>/README.md`
-     declares `skills:` in its YAML frontmatter that are missing from your
-     active `<skills>` list, or when asked to load *per-session*, *ephemeral*,
-     *temporary*, or *scratch* skills for the current conversation, add them to
-     the session scope, which leaves `.envrc` and repository files untouched:
+- **Before work:** run `taskgo dispatch <project|TASK_ID>` and follow its note:
+  it names the files to read (`AGENTS.md`, the project `README.md`, `STATUS.md`,
+  `PLAN.md`, the task record) and the project's skills.
+  1. Read the files it names.
+  1. **Activate the project's skills** if your harness has a skill manager:
      ```bash
-     taskgo info <project> --json | jq -r '.skills[]' | skill --scope session add -
+     taskgo skills <project> | skill --scope session add -
      ```
-     - **Antigravity:** the harness injects the skills into `<skills>` on
-       subsequent turns; read `<artifactDir>/scratch/skills/<skill>/SKILL.md`
-       via `read_file` if needed in the current turn.
-     - **Claude:** the skills are usable within the same turn.
-     - If `skill --scope session` fails naming `AGENT_SESSION_DIR`, the session
-       has no skill directory of its own; ask before adding the skills to the
-       workspace instead.
+     Pipe the whole list: a skill that is already active is reported and
+     skipped. The session scope leaves `.envrc` and repository files untouched;
+     harness details (when the skills become usable, what to do when there is no
+     session directory) are the `skill` CLI's, in the `workspace-tools` skill
+     and its output.
+- **CLI or MCP:** when the control repository is the session's workspace, use
+  the CLI. Elsewhere, prefer the `taskgo` MCP tools when the harness has them
+  (`dispatch` returns the same note and files); otherwise the CLI with `--root`.
 - **After work:** update files, task frontmatter (`conversations`), and
   `STATUS.md` prose (`Summary` & `Next`). Update the project `README.md`, or the
   artifact or knowledge skill that owns a fact, only if that fact changed. Run
@@ -250,6 +250,7 @@ taskgo apply CHANGES.json [--dry-run]
 taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [--replace-all] [--expected-blob SHA] [--dry-run] [--json]
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
+taskgo skills PROJECT [--json]
 taskgo status [PROJECT] [--json]
 taskgo dispatch PROJECT|TASK_ID [--at REV] [--json]
 taskgo sync [PROJECT]
@@ -287,8 +288,11 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   decisions, and STATUS.md stay valid and are formatted. Does not commit.
 - `dispatch`: Emit agent handoff instructions for a project or task committed at
   `HEAD` (or `--at REV`), warning on stderr about uncommitted state or missing
-  scaffolding; `--json` inlines the onboarding files and active/ready queues in
-  one payload, matching the MCP `dispatch` tool.
+  scaffolding; the note ends with the project's skills and how to activate them;
+  `--json` inlines the onboarding files, the `skills` list, and active/ready
+  queues in one payload, matching the MCP `dispatch` tool.
+- `skills`: Print the skills a project's README frontmatter declares, one per
+  line (`--json` for an array), for `skill --scope session add -`.
 - `read`: Print UTF-8 file slices (`--start-line`, `--end-line`, `-n` /
   `--line-numbers`, `--at REV`, `--json`) up to 256 KiB per read, cut at line
   boundaries, matching the MCP `read_file` tool.

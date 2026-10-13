@@ -7,24 +7,22 @@ checks, session attribution, and task handoff protocols for `taskgo`.
 
 Before starting work, an agent must:
 
-1. Read the root `AGENTS.md`, then project `README.md`, `STATUS.md` (using its
-   generated `### Decisions` block to identify active, non-superseded ADRs in
-   `decisions/`), relevant tasks, and `PLAN.md` when direction matters.
-1. **Activate project & per-session skills:** If `<project>/README.md` declares
-   `skills:` in its YAML frontmatter that are missing from the active `<skills>`
-   list, or when asked to load *per-session*, *ephemeral*, *temporary*, or
-   *scratch* skills for the current conversation, add them to the session scope,
-   which leaves `.envrc` and repository files untouched:
+1. Run `taskgo dispatch <project|TASK_ID>` (or the MCP `dispatch` tool) and read
+   what its note names: the root `AGENTS.md`, then project `README.md`,
+   `STATUS.md` (using its generated `### Decisions` block to identify active,
+   non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
+   direction matters.
+1. **Activate the project's skills**, as the note lists them, if the harness has
+   a skill manager:
    ```bash
-   taskgo info <project> --json | jq -r '.skills[]' | skill --scope session add -
+   taskgo skills <project> | skill --scope session add -
    ```
-   - **Antigravity:** the harness injects the skills into `<skills>` on
-     subsequent turns; read `<artifactDir>/scratch/skills/<skill>/SKILL.md` via
-     `read_file` if needed in the current turn.
-   - **Claude:** the skills are usable within the same turn.
-   - If `skill --scope session` fails naming `AGENT_SESSION_DIR`, the session
-     has no skill directory of its own; ask before adding the skills to the
-     workspace instead.
+   Pipe the whole list; the `skill` CLI reports and skips a skill the workspace
+   already links, and says when the new ones become usable. The session scope
+   leaves `.envrc` and repository files untouched. If `skill --scope session`
+   reports that the session has no directory of its own, ask before adding the
+   skills to the workspace instead. Without a skill manager, read each skill's
+   `SKILL.md` directly.
 1. Inspect linked artifact repos under their own instructions, and check
    `<project>/scripts/` before writing new scratch helpers.
 
@@ -176,10 +174,12 @@ the ready frontier, while `## Next` in `STATUS.md` normally identifies the
 intended next action.
 
 Use the generated output without embellishment. It projects the task ID,
-project, title, and `Goal` from the task record committed at `HEAD`. The command
-writes the note to stdout and readiness findings to stderr. Repair `[WARN]` or
-`[FAIL]` findings before dispatching. `--json` prints the payload the MCP
-`dispatch` tool returns: the note with the files it names inlined.
+project, title, and `Goal` from the task record committed at `HEAD`, and ends
+with the project's skills when its README declares any, with the command that
+activates them. The command writes the note to stdout and readiness findings to
+stderr. Repair `[WARN]` or `[FAIL]` findings before dispatching. `--json` prints
+the payload the MCP `dispatch` tool returns: the note with the files it names
+inlined, and the `skills` list.
 
 When yielding after substantial work with a clear successor task, leave the
 tracker and artifact repositories handoff-ready and include the generated note
@@ -196,4 +196,9 @@ Cold start stops scaling with manifest size.
 Read /path/to/compiler/STATUS.md and the task record
 (/path/to/compiler/tasks/TASK-3A91F-manifest-loader.md) before acting, and form your
 own view of the approach.
+
+Skills: coding-standards, local:notes. Activate them for this session if your
+harness has a skill manager (taskgo skills compiler | skill --scope session
+add -); adding one that is already active is harmless. Otherwise read each
+skill's SKILL.md.
 ```

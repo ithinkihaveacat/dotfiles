@@ -11,6 +11,7 @@
 - [edit](#edit)
 - [list](#list)
 - [info](#info)
+- [skills](#skills)
 - [status](#status)
 - [dispatch](#dispatch)
 - [sync](#sync)
@@ -44,6 +45,7 @@ Commands:
   edit PATH [OPTIONS]              Replace exact text in a file (--old, --new)
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
+  skills PROJECT [--json]          Print the skills a project declares
   status [PROJECT] [--json]        Show project status
   dispatch PROJECT|TASK_ID         Print agent instructions for a project or task
   sync [PROJECT]                   Update STATUS.md snapshot
@@ -336,6 +338,29 @@ Arguments:
 Options:
   -h, --help  Display this help message and exit
   --json, -j  Output machine-readable JSON
+```
+
+<!-- /generated -->
+
+## skills
+
+<!-- generated: ../scripts/taskgo skills --help -->
+
+```text
+Usage: taskgo skills [-h] [--json] PROJECT
+
+Print the agent skills a project's README.md frontmatter declares, one per line, for a skill manager to activate.
+
+Arguments:
+  PROJECT     Target project name
+
+Options:
+  -h, --help  Display this help message and exit
+  --json, -j  Output a JSON array
+
+Examples:
+  taskgo skills alpha | skill --scope session add -
+  taskgo skills alpha --json
 ```
 
 <!-- /generated -->
