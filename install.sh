@@ -15,7 +15,7 @@
 # `pipefail` itself is not POSIX.
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "install.sh: must be run with bash, e.g.:" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/main/install.sh | bash" >&2
   exit 1
 fi
 if [ "${BASH_VERSINFO[0]}" -lt 3 ] || { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
@@ -135,7 +135,7 @@ repeatedly; an existing checkout is fast-forwarded first.
 Can also be run directly from the network, which clones the repo to ~/.dotfiles
 (if absent) before installing:
 
-  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/main/install.sh | bash
 
 The work is split into features, and a profile picks which of them run. The
 default, workstation, sets up a long-lived machine for interactive use; cloud
@@ -189,7 +189,7 @@ EXAMPLES:
   $(basename "$0") --profile cloud --with android -n  # Preview a selection
 
   # Install/update over the network, passing flags after '-s --':
-  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --profile cloud
+  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/main/install.sh | bash -s -- --profile cloud
 
 EOF
   exit "${1:-0}"

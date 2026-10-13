@@ -231,7 +231,7 @@ then installs — and on later runs, updates (it fast-forwards `~/.dotfiles`
 before applying):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/main/install.sh | bash
 ```
 
 It must be piped to `bash`, not `sh` — the script is bash and refuses to run
@@ -240,7 +240,7 @@ download the whole script before running anything (rather than streaming it into
 the interpreter), use the equivalent:
 
 ```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/main/install.sh)"
 ```
 
 ### Option 2: From a local checkout
@@ -289,7 +289,7 @@ For the setup script of a disposable cloud or agent container, use the `cloud`
 profile:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --profile cloud
+curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/main/install.sh | bash -s -- --profile cloud
 ```
 
 It links the dotfiles and fish config, prefetches what the uv-based scripts
