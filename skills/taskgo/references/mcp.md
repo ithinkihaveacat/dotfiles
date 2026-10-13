@@ -300,8 +300,8 @@ commonest runs of two or three tool calls by client. A run counts within one
 caller's chain: its tool calls, each at most `--gap` seconds (120) after the one
 before, since stateless HTTP has no session to group them by. `--days` (7)
 limits the records read, and `--json` prints the same as JSON, with client names
-in full where the text cuts them at 20 characters, as the page does. The records
-are JSON lines, so `jq` reads them too:
+in full; the text cuts them at 20 characters, as the page does. The records are
+JSON lines, so `jq` reads them too:
 
 ```sh
 taskgo requests --days 1
