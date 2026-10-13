@@ -90,6 +90,9 @@ OPTIONS:
                 Default: warn only
   --non-interactive
                 Run without prompting or interactive terminal-session validation
+  --no-agents   Leave AI agents alone: do not link their context files or hooks,
+                and do not update their CLIs. For cloud agent environments,
+                where the platform supplies and manages the agent
   --only PART   Run only the named part of the script, then exit: no git pull,
                 no symlinks, no sudo, no other packages. Parts: uv (install uv
                 and fetch everything this repository's uv-based
@@ -108,6 +111,7 @@ EXAMPLES:
   $(basename "$0") --trace           # Same, but log each wrapped command
   $(basename "$0") --install-optional  # Also install the optional package set
   $(basename "$0") --install-all --prune  # Full set; offer to remove extras
+  $(basename "$0") --no-agents       # Provision a cloud agent environment
   $(basename "$0") --only uv         # Prepare a CI/cloud environment for offline use
   UV_OFFLINE=1 $(basename "$0") --only uv  # Check it is ready, without the network
 
@@ -126,6 +130,7 @@ NON_INTERACTIVE=0
 INSTALL_TIER=core
 PRUNE=0
 ONLY=""
+AGENTS=1
 
 # XDG Base Directory specification defaults
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -169,6 +174,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --non-interactive)
       NON_INTERACTIVE=1
+      shift
+      ;;
+    --no-agents)
+      AGENTS=0
       shift
       ;;
     --only)
@@ -1242,29 +1251,33 @@ for src in "${SRCDIRS[@]}"; do
     echo "warning: $src/etc/skill/defaults.sh failed" >&2
 done
 
-heading "agents"
+if [ "$AGENTS" = 1 ]; then
 
-# Symlink user-supplied context for all agents
-agents_context=$(overlay_path "etc/agents/AGENTS.md") || agents_context=""
-if [ -n "$agents_context" ]; then
-  if is_codex_agent; then
-    xmkdir "$HOME/.codex"
-    x ln -sf "$agents_context" "$HOME/.codex/AGENTS.md"
+  heading "agents"
+
+  # Symlink user-supplied context for all agents
+  agents_context=$(overlay_path "etc/agents/AGENTS.md") || agents_context=""
+  if [ -n "$agents_context" ]; then
+    if is_codex_agent; then
+      xmkdir "$HOME/.codex"
+      x ln -sf "$agents_context" "$HOME/.codex/AGENTS.md"
+    fi
+    if exists agy; then
+      xmkdir "$HOME/.gemini"
+      x ln -sf "$agents_context" "$HOME/.gemini/GEMINI.md"
+    fi
+    if exists claude; then
+      xmkdir "$HOME/.claude"
+      x ln -sf "$agents_context" "$HOME/.claude/CLAUDE.md"
+    fi
   fi
+
   if exists agy; then
-    xmkdir "$HOME/.gemini"
-    x ln -sf "$agents_context" "$HOME/.gemini/GEMINI.md"
+    xmkdir "$HOME/.gemini/config"
+    link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
+    link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
   fi
-  if exists claude; then
-    xmkdir "$HOME/.claude"
-    x ln -sf "$agents_context" "$HOME/.claude/CLAUDE.md"
-  fi
-fi
 
-if exists agy; then
-  xmkdir "$HOME/.gemini/config"
-  link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
-  link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
 fi
 
 # Skills are intentionally NOT installed globally. The defaults are linked into
@@ -1276,7 +1289,7 @@ fi
 
 if ! is_fresh "$PACKAGE_STAMP"; then
 
-  if exists agy || exists claude || is_codex_agent; then
+  if [ "$AGENTS" = 1 ] && { exists agy || exists claude || is_codex_agent; }; then
 
     heading "agent CLIs"
 
