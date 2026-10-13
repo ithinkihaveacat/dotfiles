@@ -7549,6 +7549,9 @@ MCP_LOOPBACK = ("localhost", "127.0.0.1", "::1")
 # Answers GET with 200 and no content, unauthenticated, for health checks such
 # as a reverse proxy's. It reads nothing.
 MCP_HEALTH_PATH = "/up"
+# Icons a browser asks for on its own (Safari asks for three on each visit to
+# the log page): answered 404, unauthenticated, and not logged.
+MCP_ICON_PATHS = re.compile(r"/(?:favicon\.ico|apple-touch-icon[\w-]*\.png)")
 # Longest value, and longest reason, in a request's log line.
 MCP_LOG_VALUE_MAX = 80
 MCP_LOG_REASON_MAX = 200
@@ -7587,6 +7590,8 @@ MCP_LOG_ARGS = (
     "request_id",
 )
 MCP_LOG_ARG_MAX = 60
+# Longest client name the log page and 'taskgo requests' show.
+MCP_CLIENT_MAX = 20
 # JWT claims that identify a caller, hashed into a record's caller key.
 MCP_CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
 
@@ -9501,7 +9506,7 @@ async def mcp_asgi_reply(
 # stats over those kept; kamal-proxy buffers responses, so it polls rather
 # than streams. The script is pinned by its hash in the page's CSP.
 MCP_LOGS_SCRIPT = """
-const DATA = "@DATA@", MAX = 500, CLIENT_MAX = 20;
+const DATA = "@DATA@", MAX = 500, CLIENT_MAX = @CLIENT_MAX@;
 const $ = (id) => document.getElementById(id);
 const state = { server: "", next: 0 };
 
@@ -9597,7 +9602,7 @@ async function poll() {
 }
 
 poll();
-""".replace("@DATA@", MCP_LOGS_DATA_PATH)
+""".replace("@DATA@", MCP_LOGS_DATA_PATH).replace("@CLIENT_MAX@", str(MCP_CLIENT_MAX))
 
 MCP_LOGS_CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; "
@@ -9705,6 +9710,9 @@ class McpGate:
         if scope["path"] == MCP_HEALTH_PATH and scope["method"] == "GET":
             # Polled by the proxy, so not logged.
             await mcp_asgi_reply(send, 200, "ok")
+            return
+        if scope["method"] == "GET" and MCP_ICON_PATHS.fullmatch(scope["path"]):
+            await mcp_asgi_reply(send, 404, "not found")
             return
         event = McpEvent(
             "http",
@@ -10024,6 +10032,16 @@ def cmd_requests(
         return
     print(f"Requests: {stats['requests']}, {stats['first']} to {stats['last']}")
     print("Outcomes: " + ", ".join(f"{k} {v}" for k, v in stats["outcomes"].items()))
+
+    def clip(name: str) -> str:
+        """A client's name, cut for its column; --json has all of it."""
+        if len(name) <= MCP_CLIENT_MAX:
+            return name
+        return name[: MCP_CLIENT_MAX - 1] + "\u2026"
+
+    for rows in (stats["agents"], stats["sequences"]):
+        for row in rows:
+            row["agent"] = clip(row["agent"])
     for key, title in (("agent", "Client"), ("tool", "Tool")):
         rows = stats[f"{key}s"]
         if not rows:

@@ -200,11 +200,13 @@ statelessly: each POST carries one JSON-RPC message and gets one JSON response.
 There is no server-initiated stream and no session, so `GET` and `DELETE` on the
 endpoint get 405. A POST whose `Accept` header does not admit `application/json`
 (`*/*` does) gets 406. `GET /up` answers 200 without authentication and without
-reading the repository, for a reverse proxy's health check. `GET /logs` is a
-page of the server's latest requests (see [Logging](#logging)), behind the same
-check as the endpoint. `--stdio` serves one local client on standard input and
-output instead, without authentication. A stdio server for agents on the same
-machine as the user's checkout is usually started with `--local` (see
+reading the repository, for a reverse proxy's health check. `GET /favicon.ico`
+and `GET /apple-touch-icon*.png`, which browsers ask for on their own, get 404
+without authentication and are not logged. `GET /logs` is a page of the server's
+latest requests (see [Logging](#logging)), behind the same check as the
+endpoint. `--stdio` serves one local client on standard input and output
+instead, without authentication. A stdio server for agents on the same machine
+as the user's checkout is usually started with `--local` (see
 [Writing to a checkout](#writing-to-a-checkout)), so that their writes land on
 the checkout's branch without a remote in between:
 
@@ -297,8 +299,9 @@ failures, latency, and median result size per client and per tool, then the
 commonest runs of two or three tool calls by client. A run counts within one
 caller's chain: its tool calls, each at most `--gap` seconds (120) after the one
 before, since stateless HTTP has no session to group them by. `--days` (7)
-limits the records read, and `--json` prints the same as JSON. The records are
-JSON lines, so `jq` reads them too:
+limits the records read, and `--json` prints the same as JSON, with client names
+in full where the text cuts them at 20 characters, as the page does. The records
+are JSON lines, so `jq` reads them too:
 
 ```sh
 taskgo requests --days 1
