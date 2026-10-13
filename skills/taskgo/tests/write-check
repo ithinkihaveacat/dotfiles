@@ -11,10 +11,13 @@ bare repository, and serves a clone of it. Concurrent clients write through
 the HTTP server; faults (a head that moves before each push, a push whose
 reply is lost, a remote that cannot be read) are injected into an in-process
 server, whose methods are the same. Checks that every write is one linear
-commit or nothing, that retries are recorded once, and that a stale CLI
-checkout recovers by rebase without losing a server commit. --fetch-ttl is
-passed to the servers under test (default: the server's own); the checks of
-the cached head itself pick their own. Prints TAP.
+commit or nothing, that retries are recorded once, also by a new server that
+finds them by their trailers, that a stale CLI checkout recovers by rebase
+without losing a server commit, that reads outlive an unreadable remote as
+stale, and that a --local server (in process, and over --stdio) writes to a
+checkout's branch and working tree. --fetch-ttl is passed to the servers
+under test (default: the server's own); the checks of the cached head itself
+pick their own. Prints TAP.
 """
 
 import concurrent.futures
@@ -1024,32 +1027,30 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None
     )
 
     # Commits read like CLI commits: the owner, one parent, a conventional
-    # subject, and only the trailers the caller asked for.
-    ok, got = call(
-        "apply_changes",
-        {
-            "request_id": "f1",
-            "subject": "Record the plan",
-            "body": "Why the plan changed.",
-            "conversation": "claude://0123456789abcdef01",
-            "refs": ["https://example.com/pull/1"],
-            "changes": [
-                {
-                    "op": "write_file",
-                    "path": "alpha/PLAN.md",
-                    "content": "# Plan\n\nSecond plan.\n",
-                    "expected_blob": git(
-                        tracker.remote, "rev-parse", "main:alpha/PLAN.md"
-                    ),
-                }
-            ],
-        },
-    )
+    # subject, the trailers the caller asked for, and the request's own.
+    args = {
+        "request_id": "f1",
+        "subject": "Record the plan",
+        "body": "Why the plan changed.",
+        "conversation": "claude://0123456789abcdef01",
+        "refs": ["https://example.com/pull/1"],
+        "changes": [
+            {
+                "op": "write_file",
+                "path": "alpha/PLAN.md",
+                "content": "# Plan\n\nSecond plan.\n",
+                "expected_blob": git(tracker.remote, "rev-parse", "main:alpha/PLAN.md"),
+            }
+        ],
+    }
+    ok, got = call("apply_changes", args)
     fmt = "%an <%ae>|%cn <%ce>|%P"
     meta = git(tracker.remote, "show", "-s", f"--format={fmt}", "main").split("|")
     message = git(tracker.remote, "show", "-s", "--format=%B", "main")
+    digest = tg.mcp_request_digest(args)[: tg.MCP_REQUEST_DIGEST_LEN]
     tap.check(
-        "commits carry the owner, one parent, and a CLI-style message",
+        "commits carry the owner, one parent, and a CLI-style message with the "
+        "request's trailers",
         ok
         and meta[0] == meta[1] == "Taskgo Test <taskgo@example.com>"
         and len(meta[2].split()) == 1
@@ -1057,9 +1058,31 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None
         == (
             "chore(alpha): Record the plan\n\nWhy the plan changed.\n\n"
             "Conversation: claude://0123456789abcdef01\n"
-            "Ref: https://example.com/pull/1"
+            "Ref: https://example.com/pull/1\n"
+            f"Request-Id: f1\nRequest-Digest: {digest}"
         ),
         (got, meta, message),
+    )
+
+    # A new server, as after a restart, finds the commit by its trailers: the
+    # same request again is replayed, not written again, and the same ID for
+    # another write is refused.
+    fresh = caller(tg, server(tg, tracker, ttl))
+    before = tracker.head()
+    ok, again = fresh("apply_changes", args)
+    ok2, other = fresh("apply_changes", {**args, "body": "Another body."})
+    tap.check(
+        "a request_id forgotten by a restart is recognized from its trailer, "
+        "and refused for a different write",
+        ok
+        and again["replayed"]
+        and again["commit"] == got["commit"]
+        and again["files"] == got["files"]
+        and again["subject"] == got["subject"]
+        and tracker.head() == before
+        and not ok2
+        and "used for a different write" in other,
+        (again, other),
     )
 
     ok, got = call(
@@ -1129,6 +1152,233 @@ def fault_checks(tap: Tap, tg, seed: Path, tmp: Path, ttl: float | None) -> None
         "a server started with --no-fetch does not write",
         not ok and "nowhere to push" in got and tracker.head() == before,
         got,
+    )
+
+    # The remote becomes unreadable after a fetch: reads are served the last
+    # fetched head, marked stale, and miss what lands meanwhile; writes fail
+    # and write nothing. Once it is readable again, reads are current.
+    tracker = Tracker(tmp / "stale", seed)
+    srv = server(tg, tracker, 0)
+    call = caller(tg, srv)
+    ok, first = call("list_tasks", {"project": "alpha"})
+    git(tracker.server, "remote", "set-url", "origin", str(tmp / "gone.git"))
+    cli = tracker.checkout("cli")
+    (cli / "INBOX.md").write_text("# Inbox\n\nUnseen.\n")
+    git(cli, "commit", "-q", "-am", "chore: unseen note")
+    git(cli, "push", "-q", "origin", "main")
+    ok2, stale = call("list_tasks", {"project": "alpha"})
+    ok3, refused = call(
+        "create", {"project": "alpha", "title": "Blind", "request_id": "s1"}
+    )
+    git(tracker.server, "remote", "set-url", "origin", str(tracker.remote))
+    ok4, current = call("list_tasks", {"project": "alpha"})
+    tap.check(
+        "a read whose fetch fails is served the last fetched head as stale; a "
+        "write fails and writes nothing",
+        ok
+        and "stale" not in first["as_of"]
+        and ok2
+        and stale["as_of"]["stale"] is True
+        and stale["as_of"]["commit"] == first["as_of"]["commit"]
+        and not ok3
+        and refused == "could not fetch main from origin; nothing was written"
+        and tracker.head() == git(cli, "rev-parse", "main")
+        and ok4
+        and "stale" not in current["as_of"]
+        and current["as_of"]["commit"] == tracker.head(),
+        (first["as_of"], stale["as_of"], refused, current["as_of"]),
+    )
+
+
+def local_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
+    """A --local server on a checkout: writes move the local branch and
+    refresh the working tree, with no remote."""
+    tracker = Tracker(tmp / "local", seed)
+    co = tracker.checkout("checkout")
+    git(co, "remote", "remove", "origin")
+    cfg = tg.McpConfig(repo=co, remote=None, branch="main", auth="none", local=True)
+    srv = tg.McpServer(cfg)
+    call = caller(tg, srv)
+
+    def head() -> str:
+        return git(co, "rev-parse", "main")
+
+    def dirty() -> str:
+        return git(co, "status", "--porcelain", "--untracked-files=all")
+
+    start = head()
+    ok, made = call(
+        "create", {"project": "alpha", "title": "Local", "request_id": "x1"}
+    )
+    path = ok and co / made["created"][0]["path"]
+    tap.check(
+        "a --local write lands on the local branch and in the working tree",
+        ok
+        and made["attempts"] == 1
+        and head() == made["commit"]
+        and git(co, "rev-parse", "main^") == start
+        and dirty() == ""
+        and path.is_file()
+        and "Todo: 5" in (co / "alpha" / "STATUS.md").read_text()
+        and tracker.head() == start,
+        (made, dirty()),
+    )
+
+    # A dirty touched file refuses the write; a dirty unrelated file does not,
+    # and stays as it was.
+    (co / "alpha" / "PLAN.md").write_text("# Plan\n\nEdited in the checkout.\n")
+    before = head()
+    ok, refused = call(
+        "apply_changes",
+        {
+            "request_id": "x2",
+            "changes": [
+                {
+                    "op": "write_file",
+                    "path": "alpha/PLAN.md",
+                    "content": "# Plan\n\nFrom the server.\n",
+                    "expected_blob": git(co, "rev-parse", "main:alpha/PLAN.md"),
+                }
+            ],
+        },
+    )
+    unmoved = head() == before
+    ok2, beside = call(
+        "create", {"project": "beta", "title": "Beside", "request_id": "x3"}
+    )
+    tap.check(
+        "a --local write is refused over a dirty touched file, and lands beside "
+        "a dirty unrelated one",
+        not ok
+        and "uncommitted changes to alpha/PLAN.md" in refused
+        and unmoved
+        and ok2
+        and head() == beside["commit"]
+        and dirty() == "M alpha/PLAN.md"
+        and "Edited in the checkout." in (co / "alpha" / "PLAN.md").read_text(),
+        (refused, beside, dirty()),
+    )
+    git(co, "checkout", "-q", "--", "alpha/PLAN.md")
+
+    git(co, "checkout", "-q", "--detach")
+    before = head()
+    ok, refused = call(
+        "create", {"project": "alpha", "title": "Detached", "request_id": "x4"}
+    )
+    git(co, "checkout", "-q", "main")
+    tap.check(
+        "a --local write is refused unless the branch is checked out",
+        not ok and "does not have main checked out" in refused and head() == before,
+        refused,
+    )
+
+    # A CLI commit between the read and the move: the move is refused, and
+    # the set applies again over the new head; both survive, linearly.
+    real_push = srv.reader.push
+
+    def race(sha):
+        if not race.done:
+            race.done = True
+            taskgo(co, "update", "TASK-AA002", "--status", "in-progress")
+            git(co, "commit", "-q", "-am", "chore(alpha): start TASK-AA002")
+        return real_push(sha)
+
+    race.done = False
+    srv.reader.push = race
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "x5",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA001",
+                    "field": "status",
+                    "value": "in-progress",
+                    "expected": "todo",
+                }
+            ],
+        },
+    )
+    srv.reader.push = real_push
+    status = (co / "alpha" / "STATUS.md").read_text()
+    tap.check(
+        "a CLI commit between a --local write's read and its move: the write "
+        "applies again over it",
+        ok
+        and got["attempts"] == 2
+        and head() == got["commit"]
+        and dirty() == ""
+        and "`TASK-AA001` — One" in status
+        and "`TASK-AA002` — Two" in status
+        and git(co, "rev-list", "--merges", "main") == "",
+        (got, dirty(), status),
+    )
+
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "x6",
+            "changes": [
+                {
+                    "op": "delete_file",
+                    "path": "alpha/PLAN.md",
+                    "expected_blob": git(co, "rev-parse", "main:alpha/PLAN.md"),
+                }
+            ],
+        },
+    )
+    tap.check(
+        "a --local write that deletes a file removes it from the working tree",
+        ok and not (co / "alpha" / "PLAN.md").exists() and dirty() == "",
+        (got, dirty()),
+    )
+
+    # The same over --stdio, through the SDK's client, as an agent on the
+    # machine would connect; --local needs no remote.
+    import anyio
+    from mcp import Client
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    params = StdioServerParameters(
+        command=str(CLI),
+        args=[
+            *("--root", str(co), "mcp", "--local", "--stdio"),
+            *("--log", str(tmp / "local-stdio.jsonl")),
+        ],
+    )
+
+    async def over_stdio():
+        with (tmp / "local-stdio.log").open("w") as errlog:
+            async with Client(stdio_client(params, errlog=errlog)) as client:
+                result = await client.call_tool(
+                    "create",
+                    {"project": "gamma", "title": "By stdio", "request_id": "x7"},
+                )
+                return not result.is_error, result.structured_content
+
+    before = head()
+    ok, got = anyio.run(over_stdio)
+    tap.check(
+        "a --local --stdio server writes to the checkout",
+        ok
+        and head() == got["commit"]
+        and git(co, "rev-parse", "main^") == before
+        and dirty() == ""
+        and (co / got["created"][0]["path"]).is_file(),
+        (got, dirty()),
+    )
+
+    both = subprocess.run(
+        [str(CLI), "--root", str(co), "mcp", "--local", "--no-fetch", "--stdio"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tap.check(
+        "--local and --no-fetch exclude each other",
+        both.returncode == 2 and "not allowed with" in both.stderr,
+        both.stderr,
     )
 
 
@@ -1490,6 +1740,7 @@ def main() -> None:
         fault_checks(tap, tg, seed, tmp, ttl)
         cache_checks(tap, tg, seed, tmp)
         edit_checks(tap, tg, seed, tmp)
+        local_checks(tap, tg, seed, tmp)
     print(f"1..{tap.n}", flush=True)
     sys.exit(1 if tap.failed else 0)
 
