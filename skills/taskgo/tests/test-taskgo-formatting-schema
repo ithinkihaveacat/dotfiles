@@ -1,0 +1,432 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$TEST_DIR/../scripts/taskgo" ]]; then
+  TEST_DIR="/usr/local/google/home/stillers/.dotfiles/skills/taskgo/tests"
+fi
+BIN="$TEST_DIR/../scripts/taskgo"
+# shellcheck disable=SC2034
+MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..19"
+
+init_base_repo() {
+  local target="${1:-$TEST_ROOT/repo}"
+  mkdir -p "$target/example/tasks"
+  git -C "$target" init -q
+  printf '%s
+' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' >"$target/AGENTS.md"
+  printf '# Inbox
+' >"$target/INBOX.md"
+  printf '# Example project
+' >"$target/example/PROJECT.md"
+  printf '# Plan
+' >"$target/example/PLAN.md"
+  printf '%s
+' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
+}
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck disable=SC2034
+APPLY_PY="$MCP_PY"
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+# Test 148: Markdown formatting findings are not hidden when the control
+# repository itself lives under a dot-directory (such as ~/.projects).
+FMT_REPO="$TEST_ROOT/.hidden/fmtrepo"
+mkdir -p "$FMT_REPO/alpha/tasks" "$FMT_REPO/beta"
+git -C "$FMT_REPO" init -q
+cp "$REPO/AGENTS.md" "$FMT_REPO/AGENTS.md"
+printf '# Inbox\n' >"$FMT_REPO/INBOX.md"
+printf '# Alpha\n\n* untidy   bullet\n' >"$FMT_REPO/alpha/README.md"
+printf '# Beta\n' >"$FMT_REPO/beta/README.md"
+printf '# Notes\n\n* untidy   bullet\n' >"$FMT_REPO/alpha/NOTES.md"
+printf '# Notes\n\n* untidy   bullet\n' >"$FMT_REPO/beta/NOTES.md"
+("$BIN" --root "$FMT_REPO" sync) >/dev/null 2>&1
+git -C "$FMT_REPO" add -A >/dev/null 2>&1
+git -C "$FMT_REPO" commit -qm 'seed'
+FMT_DOCTOR=$("$BIN" --root "$FMT_REPO" doctor 2>&1 || true)
+FMT_DRY=$("$BIN" --root "$FMT_REPO" fix --dry-run 2>/dev/null || true)
+# Only records are swept: NOTES.md is a free-form document, left alone.
+if grep -q 'alpha/README.md: markdown formatting needed' <<<"$FMT_DOCTOR" &&
+  grep -qx 'alpha/README.md' <<<"$FMT_DRY" &&
+  [[ $FMT_DOCTOR != *NOTES.md* && $FMT_DRY != *NOTES.md* ]]; then
+  echo 'ok 1 - doctor and fix agree on formatting under a dot-directory root'
+else
+  echo 'not ok 1 - doctor and fix agree on formatting under a dot-directory root'
+  printf '# doctor: %s\n# fix: %s\n' "$FMT_DOCTOR" "$FMT_DRY"
+fi
+
+# Test 149: Writes format the files they touch and leave others unchanged.
+("$BIN" --root "$FMT_REPO" create alpha 'Format   on write' \
+  --slug fmt --goal 'A   goal that is * written untidily' --no-commit) >/dev/null 2>&1
+FMT_TASK=$(ls "$FMT_REPO"/alpha/tasks/TASK-*-fmt.md)
+("$BIN" --root "$FMT_REPO" update "$(basename "$FMT_TASK" | cut -c1-10)" \
+  --criteria 'Untidy   criteria   text') >/dev/null 2>&1
+("$BIN" --root "$FMT_REPO" create gamma 'New project task' --no-commit) >/dev/null 2>&1
+FMT_CHANGED=$(git -C "$FMT_REPO" status --porcelain | awk '{print $2}' | sort | tr '\n' ' ')
+FMT_OK=1
+for f in "$FMT_TASK" "$FMT_REPO"/alpha/STATUS.md "$FMT_REPO"/gamma/*.md "$FMT_REPO"/gamma/tasks/*.md; do
+  "$MARKDOWN_FORMAT" --check "$f" >/dev/null 2>&1 || FMT_OK=0
+done
+if [ "$FMT_OK" = 1 ] &&
+  [ "$FMT_CHANGED" = "alpha/STATUS.md alpha/tasks/ gamma/ " ] &&
+  git -C "$FMT_REPO" diff --quiet -- alpha/NOTES.md beta/NOTES.md; then
+  echo 'ok 2 - writes format touched files only'
+else
+  echo "not ok 2 - writes format touched files only ($FMT_CHANGED)"
+fi
+
+# Tests 151-154: run-in and section edits change only the addressed field.
+MATCH_REPO="$TEST_ROOT/match-repo"
+mkdir -p "$MATCH_REPO/example/tasks"
+git -C "$MATCH_REPO" init -q
+printf '%s\n' \
+  '---' 'id: TASK-0A001' 'status: todo' '---' '' '# Reflowed run-ins' '' \
+  '**Problem:** Old problem. **Cost:** Old cost. **Goal:** Old goal.' \
+  '**Criteria:** Old criteria.' \
+  >"$MATCH_REPO/example/tasks/TASK-0A001-reflowed.md"
+printf '%s\n' \
+  '---' 'id: TASK-0A002' 'status: done' '---' '' '# Similar heading' '' \
+  '## Outcome & Commit' '' '- **Cost:** Kept list item.' '' \
+  '## Findings' '' 'Kept findings.' \
+  >"$MATCH_REPO/example/tasks/TASK-0A002-similar.md"
+printf '%s\n' \
+  '---' 'id: TASK-0A003' 'status: todo' '---' '' '# Duplicate goal' '' \
+  '**Goal:** First.' '' '**Goal:** Second.' \
+  >"$MATCH_REPO/example/tasks/TASK-0A003-duplicate.md"
+MATCH_A="$MATCH_REPO/example/tasks/TASK-0A001-reflowed.md"
+MATCH_B="$MATCH_REPO/example/tasks/TASK-0A002-similar.md"
+MATCH_C="$MATCH_REPO/example/tasks/TASK-0A003-duplicate.md"
+MATCH_OUT="" MATCH_ERR=""
+
+if ("$BIN" --root "$MATCH_REPO" update example/tasks/TASK-0A001-reflowed.md --goal 'New goal.') >/dev/null 2>&1 &&
+  MATCH_OUT=$(cat "$MATCH_A") &&
+  [[ "$MATCH_OUT" == *'**Problem:** Old problem. **Cost:** Old cost.'* ]] &&
+  [[ "$MATCH_OUT" == *$'\n\n**Goal:** New goal.\n\n**Criteria:** Old criteria.'* ]] &&
+  [[ "$MATCH_OUT" != *'Old goal'* ]]; then
+  echo 'ok 3 - update replaces a reflowed run-in and keeps the next one'
+else
+  echo 'not ok 3 - update replaces a reflowed run-in and keeps the next one'
+fi
+
+MATCH_ERR=$( ("$BIN" --root "$MATCH_REPO" update example/tasks/TASK-0A002-similar.md --outcome 'New outcome.') 2>&1 >/dev/null) &&
+  MATCH_OUT=$(cat "$MATCH_B")
+if [[ "$MATCH_OUT" == *$'## Outcome & Commit\n\n- **Cost:** Kept list item.'* ]] &&
+  [[ "$MATCH_OUT" == *$'## Outcome\n\nNew outcome.'* ]] &&
+  [[ "$MATCH_ERR" == *"similar: ## Outcome & Commit"* ]]; then
+  echo 'ok 4 - update matches section headings exactly and reports similar ones'
+else
+  echo 'not ok 4 - update matches section headings exactly and reports similar ones'
+fi
+
+MATCH_BEFORE=$(cat "$MATCH_C")
+if ! MATCH_ERR=$( ("$BIN" --root "$MATCH_REPO" update example/tasks/TASK-0A003-duplicate.md --goal 'Third.') 2>&1) &&
+  [[ "$MATCH_ERR" == *'appears 2 times'* ]] &&
+  [ "$(cat "$MATCH_C")" = "$MATCH_BEFORE" ]; then
+  echo 'ok 5 - update refuses an ambiguous run-in'
+else
+  echo 'not ok 5 - update refuses an ambiguous run-in'
+fi
+
+# Tests 155-163: the record schema drives validation, doctor, and set edits.
+SCH_REPO="$TEST_ROOT/schema-repo"
+mkdir -p "$SCH_REPO/example/tasks"
+git -C "$SCH_REPO" init -q
+cp "$REPO/AGENTS.md" "$SCH_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SCH_REPO/INBOX.md"
+printf '# Example\n' >"$SCH_REPO/example/README.md"
+for n in 1 2 3; do
+  printf '%s\n' '---' "id: TASK-5C00$n" 'status: todo' '---' '' "# Schema task $n" \
+    >"$SCH_REPO/example/tasks/TASK-5C00$n-schema-$n.md"
+done
+SCH_1="$SCH_REPO/example/tasks/TASK-5C001-schema-1.md"
+SCH_2="$SCH_REPO/example/tasks/TASK-5C002-schema-2.md"
+("$BIN" --root "$SCH_REPO" sync example) >/dev/null 2>&1
+git -C "$SCH_REPO" add -A >/dev/null 2>&1
+git -C "$SCH_REPO" commit -qm 'seed schema fixtures'
+SCH_OUT="" SCH_ERR="" SCH_BEFORE=""
+
+if SCH_OUT=$("$BIN" schema --json) &&
+  [ "$(grep -o '"kind": "[a-z]*"' <<<"$SCH_OUT" | tr '\n' ' ')" = '"kind": "task" "kind": "decision" "kind": "status" ' ] &&
+  [ "$(grep -A1 '"name": "[a-z_]*",' <<<"$SCH_OUT" | grep -B1 '"shape": "set"' | grep -o '"name": "[a-z_]*"' | tr '\n' ' ')" = '"name": "blocked_by" "name": "wait_for" "name": "conversations" "name": "supersedes" ' ] &&
+  grep -q '"in-progress"' <<<"$SCH_OUT"; then
+  echo 'ok 6 - schema --json describes kinds, set fields, and value types'
+else
+  echo 'not ok 6 - schema --json describes kinds, set fields, and value types'
+fi
+
+SCH_BEFORE=$(cat "$SCH_1")
+if ! SCH_ERR=$( ("$BIN" --root "$SCH_REPO" update TASK-5C001 --expect-status 'done' --status cancelled) 2>&1) &&
+  [[ "$SCH_ERR" == *"status is 'todo', expected 'done'; nothing changed"* ]] &&
+  [ "$(cat "$SCH_1")" = "$SCH_BEFORE" ] &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C001 --expect-status open --status wip) >/dev/null 2>&1 &&
+  grep -qx 'status: in-progress' "$SCH_1"; then
+  echo 'ok 7 - update --expect-status refuses a mismatch and accepts aliases'
+else
+  echo 'not ok 7 - update --expect-status refuses a mismatch and accepts aliases'
+fi
+
+SCH_BEFORE=$(cat "$SCH_1")
+if ! SCH_ERR=$( ("$BIN" --root "$SCH_REPO" update TASK-5C001 --status finished) 2>&1) &&
+  [[ "$SCH_ERR" == *'unknown status for --status: finished'* ]] &&
+  [ "$(cat "$SCH_1")" = "$SCH_BEFORE" ]; then
+  echo 'ok 8 - update refuses an unknown status instead of resetting to todo'
+else
+  echo 'not ok 8 - update refuses an unknown status instead of resetting to todo'
+fi
+
+if ("$BIN" --root "$SCH_REPO" update TASK-5C001 --add-blocked-by TASK-5C002 --add-blocked-by task-5c003) >/dev/null 2>&1 &&
+  grep -qx 'blocked_by: \[TASK-5C002, TASK-5C003\]' "$SCH_1" &&
+  [ "$(sed -n 4p "$SCH_1")" = 'blocked_by: [TASK-5C002, TASK-5C003]' ] &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C001 --add-blocked-by TASK-5C002 --remove-blocked-by TASK-5C003) >/dev/null 2>&1 &&
+  grep -qx 'blocked_by: \[TASK-5C002\]' "$SCH_1" &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C001 --remove-blocked-by TASK-5C002) >/dev/null 2>&1 &&
+  ! grep -q 'blocked_by' "$SCH_1"; then
+  echo 'ok 9 - update adds and removes blocked_by edges; repeats are no-ops'
+else
+  echo 'not ok 9 - update adds and removes blocked_by edges; repeats are no-ops'
+fi
+
+("$BIN" --root "$SCH_REPO" update TASK-5C001 --add-blocked-by TASK-5C002) >/dev/null 2>&1
+SCH_BEFORE=$(cat "$SCH_2")
+if ! SCH_ERR=$( ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by TASK-5C001) 2>&1) &&
+  [[ "$SCH_ERR" == *'blocked_by would form a cycle'* ]] &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by TASK-FFFFF) >/dev/null 2>&1 &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by TASK-5C002) >/dev/null 2>&1 &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-blocked-by not-a-task) >/dev/null 2>&1 &&
+  [ "$(cat "$SCH_2")" = "$SCH_BEFORE" ]; then
+  echo 'ok 10 - update refuses cycles, unknown, self, and malformed blockers'
+else
+  echo 'not ok 10 - update refuses cycles, unknown, self, and malformed blockers'
+fi
+
+if ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-wait-for 2026-10-13 --add-wait-for b/123 \
+  --add-conversation claude://0123456789abcdef0123 --add-conversation codex://fedcba9876543210fedc) >/dev/null 2>&1 &&
+  ("$BIN" --root "$SCH_REPO" update TASK-5C002 --remove-wait-for 2026-10-13 \
+    --remove-conversation claude://0123456789abcdef0123) >/dev/null 2>&1 &&
+  SCH_OUT=$(cat "$SCH_2") &&
+  [[ "$SCH_OUT" == *$'wait_for:\n  - b/123\n'* ]] &&
+  [[ "$SCH_OUT" == *$'conversations:\n  - codex://fedcba9876543210fedc\n'* ]] &&
+  [[ "$SCH_OUT" != *'2026-10-13'* ]] && [[ "$SCH_OUT" != *'claude://'* ]] &&
+  ! ("$BIN" --root "$SCH_REPO" update TASK-5C002 --add-wait-for 'next week') >/dev/null 2>&1; then
+  echo 'ok 11 - update adds and removes wait_for gates and conversations'
+else
+  echo 'not ok 11 - update adds and removes wait_for gates and conversations'
+fi
+
+if SCH_OUT=$("$BIN" --root "$SCH_REPO" create example 'Blocked at birth' --slug born-blocked \
+  --add-blocked-by TASK-5C001 --add-wait-for @someone \
+  --add-conversation claude://0123456789abcdef0123 --no-commit 2>/dev/null) &&
+  SCH_OUT=$(cat "$SCH_REPO/$(cut -f2 <<<"$SCH_OUT")") &&
+  [[ "$SCH_OUT" == *$'status: todo\nblocked_by: [TASK-5C001]\nwait_for:\n  - \'@someone\'\n'* ]] &&
+  [[ "$SCH_OUT" == *$'conversations:\n  - claude://0123456789abcdef0123\n'* ]] &&
+  ! ("$BIN" --root "$SCH_REPO" create example 'Bad blocker' --add-blocked-by TASK-FFFFF --no-commit) >/dev/null 2>&1; then
+  echo 'ok 12 - create accepts set-field additions and refuses unknown blockers'
+else
+  echo 'not ok 12 - create accepts set-field additions and refuses unknown blockers'
+  echo "# $SCH_OUT"
+fi
+
+printf '%s\n' '---' 'id: TASK-5C009' 'status: todo' 'wait_for: [soon]' 'created: 2026-10-01' \
+  '---' '' '# Off-schema task' >"$SCH_REPO/example/tasks/TASK-5C009-off-schema.md"
+("$BIN" --root "$SCH_REPO" sync example) >/dev/null 2>&1
+SCH_OUT=$("$BIN" --root "$SCH_REPO" doctor example 2>&1 || true)
+if grep -q "TASK-5C009-off-schema.md: invalid wait_for 'soon'" <<<"$SCH_OUT" &&
+  grep -q "\[INFO\]  example/tasks/TASK-5C009-off-schema.md: frontmatter field 'created' is not in the task schema" <<<"$SCH_OUT"; then
+  echo 'ok 13 - doctor checks task fields against the schema'
+else
+  echo 'not ok 13 - doctor checks task fields against the schema'
+fi
+
+sed -i.bak '/^## Next/d' "$SCH_REPO/example/STATUS.md"
+SCH_OUT=$("$BIN" --root "$SCH_REPO" doctor example 2>&1 || true)
+if grep -q '^\[WARN\]  example: STATUS.md missing ## Next' <<<"$SCH_OUT"; then
+  echo 'ok 14 - doctor checks STATUS.md sections against the schema'
+else
+  echo 'not ok 14 - doctor checks STATUS.md sections against the schema'
+fi
+
+# The core reads only through a snapshot, so a Git commit's tree must give the
+# same rows, STATUS.md, and audit findings as a checkout of that commit.
+TREE_REPO="$TEST_ROOT/tree-repo"
+TREE_EXPORT="$TEST_ROOT/tree-export"
+mkdir -p "$TREE_REPO/alpha/tasks" "$TREE_REPO/alpha/decisions" "$TREE_REPO/beta/tasks" "$TREE_EXPORT"
+git -C "$TREE_REPO" init -q
+cp "$REPO/AGENTS.md" "$TREE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$TREE_REPO/INBOX.md"
+printf '# Alpha\n' >"$TREE_REPO/alpha/README.md"
+printf '# Beta\n' >"$TREE_REPO/beta/README.md"
+printf '%s\n' '---' 'id: TASK-7E001' 'status: in-progress' '---' '' '# First alpha task' \
+  >"$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
+printf '%s\n' '---' 'id: TASK-7E002' 'status: todo' 'blocked_by: [TASK-7E001]' 'wait_for:' \
+  '  - b/42' 'due: 2020-01-01' '---' '' '# Second alpha task' \
+  >"$TREE_REPO/alpha/tasks/TASK-7E002-second.md"
+printf '%s\n' '---' 'id: TASK-7E003' 'status: todo' 'blocked_by: [TASK-7E001]' '---' '' \
+  '# Beta task held by alpha' >"$TREE_REPO/beta/tasks/TASK-7E003-held.md"
+printf '%s\n' '# First decision' '' '## Context' '' 'x' '' '## Decision' '' 'x' '' \
+  '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0001-first.md"
+printf '%s\n' '---' 'supersedes: [0001]' '---' '' '# Second decision' '' '## Context' '' \
+  'See [the readme](../README.md) and [a missing note](missing.md).' '' '## Decision' '' 'x' '' \
+  '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0002-second.md"
+("$BIN" --root "$TREE_REPO" sync) >/dev/null 2>&1
+git -C "$TREE_REPO" add -A && git -C "$TREE_REPO" commit -qm 'tree fixture'
+git -C "$TREE_REPO" archive HEAD | tar -x -C "$TREE_EXPORT"
+# Uncommitted edits must not reach the commit's snapshot.
+sed -i.bak 's/^status: in-progress$/status: done/' "$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
+rm -f "$TREE_REPO/alpha/tasks/TASK-7E001-first.md.bak"
+# Use the script's own environment, which install.sh prefetches for offline CI;
+# a fresh resolution of its requirements is not in the cache there.
+if TREE_OUT=$(
+  TREE_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN") &&
+    "$TREE_PY" - "$BIN" "$TREE_REPO" "$TREE_EXPORT" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+fs = tg.FsSnapshot(Path(sys.argv[3]))
+git = tg.GitTreeSnapshot(Path(sys.argv[2]), "HEAD")
+
+
+def audit(snap):
+    return [(f.severity, f.message, f.path) for f in tg.audit_snapshot(snap)]
+
+
+projects = tg.list_projects(fs)
+assert projects == tg.list_projects(git) == ["alpha", "beta"], projects
+assert tg.get_task_rows(fs) == tg.get_task_rows(git)
+for p in projects:
+    assert tg.get_adr_rows(fs, p) == tg.get_adr_rows(git, p), p
+    assert tg.render_status_file(fs, p) == tg.render_status_file(git, p), p
+findings = audit(fs)
+assert findings == audit(git), (findings, audit(git))
+assert any("stale file reference 'missing.md'" in m for _, m, _ in findings), findings
+assert any("overdue" in m for _, m, _ in findings), findings
+try:
+    git.write_text("INBOX.md", "# Inbox\n")
+    sys.exit("GitTreeSnapshot accepted a write")
+except tg.ReadOnlySnapshotError:
+    pass
+PY
+); then
+  echo 'ok 15 - a Git-tree snapshot reads the same as a checkout of its commit'
+else
+  echo 'not ok 15 - a Git-tree snapshot reads the same as a checkout of its commit'
+  printf '# %s\n' "$TREE_OUT"
+fi
+
+# Machine and repository zones 26 hours apart are always on different days, so
+# a wait_for date of the repository's today shows which zone decided.
+TZ_REPO="$TEST_ROOT/tz-repo"
+mkdir -p "$TZ_REPO/proj/tasks"
+git -C "$TZ_REPO" init -q
+cp "$REPO/AGENTS.md" "$TZ_REPO/AGENTS.md"
+printf '# Inbox\n' >"$TZ_REPO/INBOX.md"
+printf '# Project\n' >"$TZ_REPO/proj/README.md"
+TZ_FAR_DAY=$(TZ=Pacific/Kiritimati date +%F)
+TZ_NEAR_DAY=$(TZ=Etc/GMT+12 date +%F)
+printf '%s\n' '---' 'id: TASK-7E101' 'status: todo' 'wait_for:' "  - $TZ_FAR_DAY" '---' '' \
+  '# Wait for the far day' >"$TZ_REPO/proj/tasks/TASK-7E101-far-day.md"
+tz_ready() {
+  TZ=Etc/GMT+12 "$BIN" --root "$TZ_REPO" list proj --state ready | awk 'NR>1 {print $2}'
+}
+TZ_LOCAL=$(tz_ready)
+printf '%s\n' '---' 'timezone: Pacific/Kiritimati' '---' '' '# Control repository' \
+  >"$TZ_REPO/README.md"
+TZ_REPO_ZONE=$(tz_ready)
+TZ_OVERRIDE=$(TASKGO_TODAY="$TZ_NEAR_DAY" tz_ready)
+if [[ -z $TZ_LOCAL && $TZ_REPO_ZONE == TASK-7E101 && -z $TZ_OVERRIDE ]]; then
+  echo 'ok 16 - the repository timezone, not the machine, decides today'
+else
+  echo 'not ok 16 - the repository timezone, not the machine, decides today'
+  printf '# local=%s repo=%s override=%s\n' "$TZ_LOCAL" "$TZ_REPO_ZONE" "$TZ_OVERRIDE"
+fi
+
+printf '%s\n' '---' 'timezone: Europe/Nowhere' '---' '' '# Control repository' \
+  >"$TZ_REPO/README.md"
+TZ_BAD_DR=$(TZ=Etc/GMT+12 "$BIN" --root "$TZ_REPO" doctor 2>&1) && TZ_BAD_RC=0 || TZ_BAD_RC=$?
+if [[ $TZ_BAD_RC -ne 0 && $TZ_BAD_DR == *"unknown timezone 'Europe/Nowhere'"* && -z $(tz_ready) ]]; then
+  echo 'ok 17 - doctor reports an unknown timezone and today falls back to local'
+else
+  echo 'not ok 17 - doctor reports an unknown timezone and today falls back to local'
+  printf '# %s\n' "$TZ_BAD_DR"
+fi
+
+# An ignored nested checkout under a project belongs to another repository:
+# the Markdown sweep skips it. Free-form documents (SWEPT.md) are the
+# owner's to format; untracked records Git would add (README.md) are swept.
+IGN_REPO="$TEST_ROOT/ignored-repo"
+mkdir -p "$IGN_REPO/proj/tasks" "$IGN_REPO/proj/vendor/checkout"
+git -C "$IGN_REPO" init -q
+cp "$REPO/AGENTS.md" "$IGN_REPO/AGENTS.md"
+printf '# Inbox\n' >"$IGN_REPO/INBOX.md"
+printf '# Project\n\nTrailing   \n* item\n' >"$IGN_REPO/proj/README.md"
+printf 'vendor/\n' >"$IGN_REPO/proj/.gitignore"
+printf '# Ignored\n\nTrailing   \n* item\n' >"$IGN_REPO/proj/vendor/checkout/IGNORED.md"
+printf '# Swept\n\nTrailing   \n* item\n' >"$IGN_REPO/proj/SWEPT.md"
+"$BIN" --root "$IGN_REPO" sync proj >/dev/null 2>&1 || true
+IGN_DR=$("$BIN" --root "$IGN_REPO" doctor proj 2>&1) || true
+IGN_FIX=$("$BIN" --root "$IGN_REPO" fix proj --dry-run 2>&1) || true
+if [[ $IGN_DR != *IGNORED.md* && $IGN_FIX != *IGNORED.md* &&
+  $IGN_DR != *SWEPT.md* && $IGN_FIX != *SWEPT.md* &&
+  $IGN_DR == *proj/README.md* && $IGN_FIX == *proj/README.md* ]]; then
+  echo 'ok 18 - the Markdown sweep covers records, not ignored or free-form files'
+else
+  echo 'not ok 18 - the Markdown sweep covers records, not ignored or free-form files'
+  printf '# doctor: %s\n# fix: %s\n' "$IGN_DR" "$IGN_FIX"
+fi
+
+# A done task keeps its contract sections and says how it met them in an
+# Outcome; doctor notes done tasks whose Outcome is missing or empty.
+oc_task() {
+  printf '%s\n' '---' "id: $1" "status: $2" '---' '' "# Task $1" '' \
+    '**Goal:** A goal.' '' '**Criteria:** A criterion.' "${@:3}" \
+    >"$IGN_REPO/proj/tasks/$1-t.md"
+}
+oc_task TASK-0C001 "done" '' '## Outcome' '' 'Criterion met.'
+oc_task TASK-0C002 "done" '' '## Outcome' '' '## Findings' '' 'Some.'
+oc_task TASK-0C003 "done" '' '## Outcome & Commit' '' 'Shipped.'
+oc_task TASK-0C004 todo
+"$BIN" --root "$IGN_REPO" sync proj >/dev/null 2>&1 || true
+OC_DR=$("$BIN" --root "$IGN_REPO" doctor proj 2>&1) || true
+if [[ $OC_DR == *"TASK-0C002-t.md: done task has no ## Outcome text"* &&
+  $OC_DR == *"TASK-0C003-t.md: done task has no ## Outcome text (similar: ## Outcome & Commit)"* &&
+  $OC_DR != *"TASK-0C001-t.md: done"* && $OC_DR != *"TASK-0C004-t.md: done"* &&
+  $OC_DR != *"[WARN]"*"Outcome"* ]]; then
+  echo 'ok 19 - doctor notes done tasks without Outcome text'
+else
+  echo 'not ok 19 - doctor notes done tasks without Outcome text'
+  printf '# %s\n' "$OC_DR"
+fi
+
+# 'taskgo mcp' reads the committed tree only: the uncommitted status edit to
+# TASK-7E001 above must not show.

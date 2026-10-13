@@ -348,9 +348,10 @@ write goes over `--stdio`); run it again with `--fetch-ttl 0` to check the
 servers without a cache. `protocol-check` connects the SDK's own client as a
 2026-07-28 client and as a 2025-11-25 one, over HTTP and over `--stdio`.
 `auth-check` also checks the log page and its records, with and without a token,
-and that the request log holds one record per request and no token.
-`test-taskgo` runs `compare-cli` and `protocol-check` on a synthetic tracker,
-`auth-check`, and `write-check` both ways.
+and that the request log holds one record per request and no token. The test
+suite (`prove skills/taskgo/tests/test-*`) runs `compare-cli` and
+`protocol-check` on a synthetic tracker, `auth-check`, and `write-check` both
+ways.
 
 The MCP Inspector works against a local server:
 

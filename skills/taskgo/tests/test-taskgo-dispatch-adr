@@ -1,0 +1,977 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$TEST_DIR/../scripts/taskgo" ]]; then
+  TEST_DIR="/usr/local/google/home/stillers/.dotfiles/skills/taskgo/tests"
+fi
+BIN="$TEST_DIR/../scripts/taskgo"
+# shellcheck disable=SC2034
+MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..24"
+
+init_base_repo() {
+  local target="${1:-$TEST_ROOT/repo}"
+  mkdir -p "$target/example/tasks"
+  git -C "$target" init -q
+  printf '%s
+' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' >"$target/AGENTS.md"
+  printf '# Inbox
+' >"$target/INBOX.md"
+  printf '# Example project
+' >"$target/example/PROJECT.md"
+  printf '# Plan
+' >"$target/example/PLAN.md"
+  printf '%s
+' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
+}
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck disable=SC2034
+APPLY_PY="$MCP_PY"
+
+# Test 105: Claude Code env vars map to canonical claude scheme without annotations
+AGENT_REPO="$TEST_ROOT/agent-repo"
+mkdir -p "$AGENT_REPO/proj/tasks"
+git -C "$AGENT_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$AGENT_REPO/AGENTS.md"
+printf '# Inbox\n' >"$AGENT_REPO/INBOX.md"
+printf '# Proj\n' >"$AGENT_REPO/proj/README.md"
+cat <<'EOF' >"$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md"
+---
+id: TASK-A6E01
+status: todo
+---
+
+# Agent Task
+EOF
+("$BIN" --root "$AGENT_REPO" sync proj)
+git -C "$AGENT_REPO" add .
+git -C "$AGENT_REPO" commit -q -m "initial agent task"
+printf '\nNew content\n' >>"$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md"
+(AI_AGENT="claude-code_2-1-267_agent" CLAUDE_CODE_SESSION_ID="11112222-3333-4444-5555-666677778888" "$BIN" --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): diagnose runner timeouts" --all)
+AGENT_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
+AGENT_LOG="$(git -C "$AGENT_REPO" log -1 --pretty=%B)"
+if echo "$AGENT_FM" | grep -q 'claude://11112222-3333-4444-5555-666677778888' &&
+  ! echo "$AGENT_FM" | grep -q '(' &&
+  ! echo "$AGENT_FM" | grep -q 'claude-code' &&
+  echo "$AGENT_LOG" | grep -q "Conversation: claude://11112222-3333-4444-5555-666677778888"; then
+  echo 'ok 1 - Claude Code env vars map to canonical claude scheme without annotations'
+else
+  echo 'not ok 1 - Claude Code env vars map to canonical claude scheme without annotations'
+fi
+
+# Test 106: aborted checkpoint does not mutate task file frontmatter
+BEFORE_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
+printf '\nUnlisted file\n' >"$AGENT_REPO/proj/unlisted.txt"
+set +e
+(AI_AGENT="jetski" JETSKI_CONVERSATION_ID="77778888-9999-0000-1111-222233334444" "$BIN" --root "$AGENT_REPO" checkpoint TASK-A6E01 "chore(proj): will abort" 2>/dev/null)
+CP_EXIT=$?
+set -e
+AFTER_FM="$(cat "$AGENT_REPO/proj/tasks/TASK-A6E01-agent-task.md")"
+rm -f "$AGENT_REPO/proj/unlisted.txt"
+if [ "$CP_EXIT" -ne 0 ] && [ "$BEFORE_FM" = "$AFTER_FM" ]; then
+  echo 'ok 2 - aborted checkpoint does not mutate task file frontmatter'
+else
+  echo 'not ok 2 - aborted checkpoint does not mutate task file frontmatter'
+fi
+
+# Test 107: legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed
+TOL_REPO="$TEST_ROOT/tol-repo"
+mkdir -p "$TOL_REPO/proj/tasks"
+git -C "$TOL_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$TOL_REPO/AGENTS.md"
+printf '# Inbox\n' >"$TOL_REPO/INBOX.md"
+printf '# Proj\n' >"$TOL_REPO/proj/README.md"
+cat <<'EOF' >"$TOL_REPO/proj/tasks/TASK-A1B2C-tol-task.md"
+---
+id: TASK-A1B2C
+status: todo
+conversations:
+  - conversation://afb6245a-b957-464c-934e-9d09ee099e97
+  - https://claude.ai/code/session_1234567890abcdef
+  - invalid-short
+---
+
+# Tol Task
+EOF
+("$BIN" --root "$TOL_REPO" sync proj)
+set +e
+TOL_DR_OUT="$("$BIN" --root "$TOL_REPO" doctor proj 2>&1)"
+TOL_EXIT=$?
+set -e
+
+# Update TASK-A1B2C with active claude session matching the legacy session ID
+(AI_AGENT=claude "$BIN" --root "$TOL_REPO" update TASK-A1B2C --status in-progress --conv "afb6245a-b957-464c-934e-9d09ee099e97" >/dev/null)
+UPGRADED_FM="$(cat "$TOL_REPO/proj/tasks/TASK-A1B2C-tol-task.md")"
+
+if [ "$TOL_EXIT" -eq 0 ] &&
+  echo "$TOL_DR_OUT" | grep -q '\[INFO\]  proj/tasks/TASK-A1B2C-tol-task.md: unparseable conversation entry' &&
+  ! echo "$TOL_DR_OUT" | grep -q 'claude.ai' &&
+  echo "$UPGRADED_FM" | grep -q 'claude://afb6245a-b957-464c-934e-9d09ee099e97' &&
+  ! echo "$UPGRADED_FM" | grep -q 'conversation://afb6245a-b957-464c-934e-9d09ee099e97'; then
+  echo 'ok 3 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
+else
+  echo 'not ok 3 - legacy conversation upgrades to agent scheme, web URLs accepted, non-blocking INFO on malformed'
+fi
+
+# Test 108: remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly
+VAL_REPO="$TEST_ROOT/val-repo"
+mkdir -p "$VAL_REPO/proj/tasks"
+git -C "$VAL_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$VAL_REPO/AGENTS.md"
+printf '# Inbox\n' >"$VAL_REPO/INBOX.md"
+printf '# Proj\n' >"$VAL_REPO/proj/README.md"
+
+set +e
+SHORT_URI_OUT="$("$BIN" --root "$VAL_REPO" create proj "Short URI" --conv "x://b" 2>&1)"
+SHORT_URI_EXIT=$?
+MALFORMED_URI_OUT="$("$BIN" --root "$VAL_REPO" create proj "Malformed URI" --conv "claude://aaaabbbbcccc1111 (a: b: c)" 2>&1)"
+MALFORMED_URI_EXIT=$?
+set -e
+
+# Create a task with a valid URI through create (which uses render_task_file)
+("$BIN" --root "$VAL_REPO" create proj "Valid Task" --conv "claude://c4fed3a6-83c5-57b2-9588-bcc651cbba58" >/dev/null)
+("$BIN" --root "$VAL_REPO" sync proj)
+
+set +e
+DR_VAL_OUT="$("$BIN" --root "$VAL_REPO" doctor proj 2>&1)"
+DR_VAL_EXIT=$?
+set -e
+
+if [ "$SHORT_URI_EXIT" -ne 0 ] &&
+  echo "$SHORT_URI_OUT" | grep -q "invalid conversation ID 'x://b'" &&
+  [ "$MALFORMED_URI_EXIT" -ne 0 ] &&
+  echo "$MALFORMED_URI_OUT" | grep -q "invalid conversation ID 'claude://aaaabbbbcccc1111 (a: b: c)'" &&
+  [ "$DR_VAL_EXIT" -eq 0 ] &&
+  ! echo "$DR_VAL_OUT" | grep -q "invalid YAML"; then
+  echo 'ok 4 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
+else
+  echo 'not ok 4 - remainder validation rejects short/malformed URIs, and render_task_file quotes YAML cleanly'
+fi
+
+# --- dispatch ---------------------------------------------------------------
+
+DISPATCH_REPO="$TEST_ROOT/dispatch-repo"
+mkdir -p "$DISPATCH_REPO/proj/tasks"
+git -C "$DISPATCH_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$DISPATCH_REPO/AGENTS.md"
+printf '# Inbox\n' >"$DISPATCH_REPO/INBOX.md"
+printf '# Proj\n' >"$DISPATCH_REPO/proj/README.md"
+printf '# Status\n' >"$DISPATCH_REPO/proj/STATUS.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-11111' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Replace the manifest loader with the streaming parser' \
+  '' \
+  '**Problem:** The loader buffers the whole manifest.' \
+  '' \
+  '**Goal:** Cold start stops scaling with manifest size.' \
+  '' \
+  '**Criteria:** Cold start is flat across manifest sizes.' \
+  >"$DISPATCH_REPO/proj/tasks/TASK-11111-manifest-loader.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-22222' \
+  'status: done' \
+  '---' \
+  '' \
+  '# Land the schema' \
+  >"$DISPATCH_REPO/proj/tasks/TASK-22222-schema.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-33333' \
+  'status: todo' \
+  'blocked_by: [TASK-44444]' \
+  '---' \
+  '' \
+  '# Wire the export pipeline' \
+  '' \
+  '**Goal:** Exports run end to end.' \
+  >"$DISPATCH_REPO/proj/tasks/TASK-33333-export.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-44444' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Freeze the schema' \
+  >"$DISPATCH_REPO/proj/tasks/TASK-44444-freeze.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-55555' \
+  'status: blocked' \
+  '---' \
+  '' \
+  '# Wait for an external release' \
+  '' \
+  '**Goal:** Adopt the release after it ships.' \
+  >"$DISPATCH_REPO/proj/tasks/TASK-55555-blocked.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-66666' \
+  '---' \
+  '' \
+  '# Classify the task' \
+  '' \
+  '**Goal:** Give the task a valid state.' \
+  >"$DISPATCH_REPO/proj/tasks/TASK-66666-missing-status.md"
+("$BIN" --root "$DISPATCH_REPO" sync proj >/dev/null)
+git -C "$DISPATCH_REPO" add -A
+git -C "$DISPATCH_REPO" commit -qm 'init dispatch fixture'
+
+# Test 109: the note projects committed tracker state and asserts nothing else
+DISPATCH_RESOLVED_REPO="$(cd "$DISPATCH_REPO" && pwd -P)"
+DISPATCH_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>/dev/null)"
+# Compare against a single-line rendering: the note is hard-wrapped for pasting.
+DISPATCH_FLAT="$(printf '%s' "$DISPATCH_OUT" | tr '\n' ' ' | tr -s ' ')"
+if [[ "$DISPATCH_FLAT" == *"Next is taskgo TASK-11111 (proj): Replace the manifest loader with the streaming parser."* ]] &&
+  [[ "$DISPATCH_FLAT" == *"Cold start stops scaling with manifest size."* ]] &&
+  [[ "$DISPATCH_FLAT" == *"$DISPATCH_RESOLVED_REPO/proj/STATUS.md"* ]] &&
+  [[ "$DISPATCH_FLAT" == *"$DISPATCH_RESOLVED_REPO/proj/tasks/TASK-11111-manifest-loader.md"* ]] &&
+  [[ "$DISPATCH_FLAT" == *"form your own view of the approach."* ]] &&
+  [[ "$DISPATCH_FLAT" != *"buffers the whole manifest"* ]] &&
+  [[ "$DISPATCH_FLAT" != *"Criteria"* ]]; then
+  echo 'ok 5 - dispatch emits ID, project, title, and Goal without other task prose'
+else
+  echo 'not ok 5 - dispatch emits ID, project, title, and Goal without other task prose'
+fi
+
+# Test 110: file references survive wrapping unbroken
+DISPATCH_LONG="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>/dev/null)"
+if [[ "$DISPATCH_LONG" == *"($DISPATCH_RESOLVED_REPO/proj/tasks/TASK-11111-manifest-loader.md)"* ]]; then
+  echo 'ok 6 - dispatch never wraps a path mid-token'
+else
+  echo 'not ok 6 - dispatch never wraps a path mid-token'
+fi
+
+# Test 111: dispatching finished work is refused
+set +e
+DISPATCH_DONE_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-22222 2>&1)"
+DISPATCH_DONE_EXIT=$?
+set -e
+if [ "$DISPATCH_DONE_EXIT" -ne 0 ] &&
+  [[ "$DISPATCH_DONE_OUT" == *"taskgo dispatch: TASK-22222 is done"* ]] &&
+  [[ "$DISPATCH_DONE_OUT" == *"--state ready"* ]]; then
+  echo 'ok 7 - dispatch refuses a done task and points at the ready frontier'
+else
+  echo 'not ok 7 - dispatch refuses a done task and points at the ready frontier'
+fi
+
+# Test 112: unresolved blockers warn on stderr but still emit a note
+set +e
+DISPATCH_BLOCKED_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-33333 2>&1 >/dev/null)"
+DISPATCH_BLOCKED_EXIT=$?
+set -e
+DISPATCH_BLOCKED_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-33333 2>/dev/null)"
+if [ "$DISPATCH_BLOCKED_EXIT" -eq 0 ] &&
+  [[ "$DISPATCH_BLOCKED_ERR" == *"[WARN]"* ]] &&
+  [[ "$DISPATCH_BLOCKED_ERR" == *"still blocked by TASK-44444"* ]] &&
+  [[ "$DISPATCH_BLOCKED_OUT" == *"Next is taskgo TASK-33333"* ]]; then
+  echo 'ok 8 - dispatch warns on unresolved blockers without failing'
+else
+  echo 'not ok 8 - dispatch warns on unresolved blockers without failing'
+fi
+
+# Test 113: a missing Goal is reported rather than silently producing a thin note
+set +e
+DISPATCH_NO_GOAL_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-44444 2>&1 >/dev/null)"
+set -e
+if [[ "$DISPATCH_NO_GOAL_ERR" == *"[WARN]"* ]] && [[ "$DISPATCH_NO_GOAL_ERR" == *"has no '**Goal:**'"* ]]; then
+  echo 'ok 9 - dispatch warns when the task states no Goal'
+else
+  echo 'not ok 9 - dispatch warns when the task states no Goal'
+fi
+
+# Test 114: uncommitted project state is reported (handoff-ready precondition)
+printf 'scratch\n' >>"$DISPATCH_REPO/proj/STATUS.md"
+set +e
+DISPATCH_DIRTY_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>&1 >/dev/null)"
+DISPATCH_DIRTY_EXIT=$?
+set -e
+git -C "$DISPATCH_REPO" checkout -q -- proj/STATUS.md
+if [ "$DISPATCH_DIRTY_EXIT" -eq 0 ] &&
+  [[ "$DISPATCH_DIRTY_ERR" == *"[WARN]"* ]] &&
+  [[ "$DISPATCH_DIRTY_ERR" == *"uncommitted changes"* ]]; then
+  echo 'ok 10 - dispatch warns when the project has uncommitted changes'
+else
+  echo 'not ok 10 - dispatch warns when the project has uncommitted changes'
+fi
+
+# Test 115: warnings never contaminate the paste-ready note on stdout
+DISPATCH_CLEAN="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-33333 2>/dev/null)"
+if [[ "$DISPATCH_CLEAN" != *"[WARN]"* ]] && [[ "$DISPATCH_CLEAN" != *"blocked by"* ]]; then
+  echo 'ok 11 - dispatch keeps diagnostics off stdout'
+else
+  echo 'not ok 11 - dispatch keeps diagnostics off stdout'
+fi
+
+# Test 116: dirty task prose cannot leak into the committed-state projection
+sed -i.bak 's/Cold start stops scaling with manifest size/Use a replacement goal from the working tree/' \
+  "$DISPATCH_REPO/proj/tasks/TASK-11111-manifest-loader.md"
+set +e
+DISPATCH_DIRTY_TASK_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>&1 >/dev/null)"
+DISPATCH_DIRTY_TASK_EXIT=$?
+set -e
+DISPATCH_DIRTY_TASK_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-11111 2>/dev/null)"
+git -C "$DISPATCH_REPO" checkout -q -- proj/tasks/TASK-11111-manifest-loader.md
+rm -f "$DISPATCH_REPO/proj/tasks/TASK-11111-manifest-loader.md.bak"
+if [ "$DISPATCH_DIRTY_TASK_EXIT" -eq 0 ] &&
+  [[ "$DISPATCH_DIRTY_TASK_ERR" == *"uncommitted changes"* ]] &&
+  [[ "$DISPATCH_DIRTY_TASK_OUT" == *"Cold start stops scaling with manifest size."* ]] &&
+  [[ "$DISPATCH_DIRTY_TASK_OUT" != *"replacement goal"* ]]; then
+  echo 'ok 12 - dispatch projects committed task prose when the working tree is dirty'
+else
+  echo 'not ok 12 - dispatch projects committed task prose when the working tree is dirty'
+fi
+
+# Test 117: explicit blocked state warns even without a blocked_by edge
+DISPATCH_STATUS_BLOCKED_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-55555 2>&1 >/dev/null)"
+if [[ "$DISPATCH_STATUS_BLOCKED_ERR" == *"status is blocked but no blocked_by edges"* ]]; then
+  echo 'ok 13 - dispatch reports explicit blocked status through the shared audit'
+else
+  echo 'not ok 13 - dispatch reports explicit blocked status through the shared audit'
+fi
+
+# Test 118: missing task status is reported through the shared audit
+DISPATCH_MISSING_STATUS_ERR="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-66666 2>&1 >/dev/null)"
+if [[ "$DISPATCH_MISSING_STATUS_ERR" == *"non-standard status ''"* ]]; then
+  echo 'ok 14 - dispatch reports a missing status through the shared audit'
+else
+  echo 'not ok 14 - dispatch reports a missing status through the shared audit'
+fi
+
+# Test 119: an uncommitted task cannot produce a dispatch note
+printf '%s\n' \
+  '---' \
+  'id: TASK-77777' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Dispatch an uncommitted task' \
+  '' \
+  '**Goal:** Keep the note reproducible.' \
+  >"$DISPATCH_REPO/proj/tasks/TASK-77777-uncommitted.md"
+set +e
+DISPATCH_UNCOMMITTED_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch TASK-77777 2>&1)"
+DISPATCH_UNCOMMITTED_EXIT=$?
+set -e
+if [ "$DISPATCH_UNCOMMITTED_EXIT" -ne 0 ] &&
+  [[ "$DISPATCH_UNCOMMITTED_OUT" == *"is not committed at HEAD"* ]]; then
+  echo 'ok 15 - dispatch refuses task records absent from HEAD'
+else
+  echo 'not ok 15 - dispatch refuses task records absent from HEAD'
+fi
+
+# ===========================================================================
+# ADR supersedes edges, active projection, and stale-reference pruning
+# ===========================================================================
+
+ADR_REPO="$TEST_ROOT/adr-repo"
+mkdir -p "$ADR_REPO/proj/tasks" "$ADR_REPO/proj/decisions" "$ADR_REPO/proj/src"
+git -C "$ADR_REPO" init -q
+git -C "$ADR_REPO" config user.name 'Taskgo Test'
+git -C "$ADR_REPO" config user.email 'taskgo@example.invalid'
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$ADR_REPO/AGENTS.md"
+printf '# Inbox\n' >"$ADR_REPO/INBOX.md"
+printf '# Project\n' >"$ADR_REPO/proj/README.md"
+printf 'print("ok")\n' >"$ADR_REPO/proj/src/live.py"
+
+cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
+# 001: Initial Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Initial design relies on [live module](src/live.py).
+
+## Decision
+
+Use the initial module.
+
+## Consequences
+
+Simple baseline.
+EOF
+
+# Test 121: sync projects active ADRs under ### Decisions in STATUS.md
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+if grep -q '^### Decisions$' "$ADR_REPO/proj/STATUS.md" &&
+  grep -q '001-initial-arch.md.*001: Initial Architecture' "$ADR_REPO/proj/STATUS.md" &&
+  ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
+  echo 'ok 16 - sync projects active ADRs in STATUS.md and doctor passes'
+else
+  echo 'not ok 16 - sync projects active ADRs in STATUS.md and doctor passes'
+fi
+
+# Test 122: supersedes on newer ADR retires older ADR without editing the older file
+cat <<'EOF' >"$ADR_REPO/proj/decisions/002-new-arch.md"
+---
+supersedes:
+  - 001-initial-arch.md
+---
+
+# 002: New Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Replaces 001-initial-arch.md with a streaming pipeline.
+
+## Decision
+
+Adopt the streaming pipeline.
+
+## Consequences
+
+Higher throughput.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+if grep -q '002-new-arch.md.*002: New Architecture' "$ADR_REPO/proj/STATUS.md" &&
+  ! grep -q '001-initial-arch.md' "$ADR_REPO/proj/STATUS.md" &&
+  grep -q '^Accepted$' "$ADR_REPO/proj/decisions/001-initial-arch.md" &&
+  ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
+  echo 'ok 17 - supersedes edge retires older ADR from STATUS.md without modifying older file'
+else
+  echo 'not ok 17 - supersedes edge retires older ADR from STATUS.md without modifying older file'
+fi
+
+# Test 123: doctor warns when supersedes names an unknown ADR
+cat <<'EOF' >"$ADR_REPO/proj/decisions/003-unknown-target.md"
+---
+supersedes:
+  - 999-missing.md
+---
+
+# 003: Unknown Target
+
+## Status
+
+Accepted
+
+## Context
+
+Tests unknown supersedes target detection.
+
+## Decision
+
+None.
+
+## Consequences
+
+Doctor warns.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+set +e
+ADR_UNKNOWN_OUT="$("$BIN" --root "$ADR_REPO" doctor proj 2>&1)"
+ADR_UNKNOWN_EXIT=$?
+set -e
+rm -f "$ADR_REPO/proj/decisions/003-unknown-target.md"
+if [ "$ADR_UNKNOWN_EXIT" -ne 0 ] &&
+  [[ "$ADR_UNKNOWN_OUT" == *"supersedes names unknown ADR(s): 999-missing.md"* ]]; then
+  echo 'ok 18 - doctor warns when supersedes names an unknown ADR target'
+else
+  echo 'not ok 18 - doctor warns when supersedes names an unknown ADR target'
+fi
+
+# Test 124: doctor warns on ADR supersedes cycles
+cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
+---
+supersedes:
+  - 002-new-arch.md
+---
+
+# 001: Initial Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Cycle test.
+
+## Decision
+
+Cycle.
+
+## Consequences
+
+Doctor warns.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+set +e
+ADR_CYCLE_OUT="$("$BIN" --root "$ADR_REPO" doctor proj 2>&1)"
+ADR_CYCLE_EXIT=$?
+set -e
+if [ "$ADR_CYCLE_EXIT" -ne 0 ] &&
+  [[ "$ADR_CYCLE_OUT" == *"ADR supersedes cycle:"* ]]; then
+  echo 'ok 19 - doctor detects ADR supersedes cycles'
+else
+  echo 'not ok 19 - doctor detects ADR supersedes cycles'
+fi
+
+# Restore 001 without cycle and test 131: active ADR referencing a superseded ADR or broken/escaped link
+cat <<'EOF' >"$ADR_REPO/proj/decisions/001-initial-arch.md"
+# 001: Initial Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+References [deleted module](src/deleted_module.py).
+
+## Decision
+
+Use deleted module.
+
+## Consequences
+
+Stale once deleted.
+EOF
+
+cat <<'EOF' >"$ADR_REPO/proj/decisions/003-cites-superseded.md"
+# 003: Dependent Architecture
+
+## Status
+
+Accepted
+
+## Context
+
+Still depends on 001-initial-arch.md, [missing file](src/nonexistent.py), and [escaped](../../../../etc/hosts).
+
+## Decision
+
+Follow 001-initial-arch.md.
+
+## Consequences
+
+Warned because 001-initial-arch.md is superseded and links are broken or escape the control repo.
+EOF
+
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+set +e
+ADR_STALE_OUT="$("$BIN" --root "$ADR_REPO" doctor proj 2>&1)"
+ADR_STALE_EXIT=$?
+set -e
+if [ "$ADR_STALE_EXIT" -ne 0 ] &&
+  [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: active ADR references superseded ADR '001-initial-arch.md'"* ]] &&
+  [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: stale file reference 'src/nonexistent.py'"* ]] &&
+  [[ "$ADR_STALE_OUT" == *"003-cites-superseded.md: stale file reference '../../../../etc/hosts'"* ]]; then
+  echo 'ok 20 - doctor warns when an active ADR references a superseded ADR or broken/escaped link'
+else
+  echo 'not ok 20 - doctor warns when an active ADR references a superseded ADR or broken/escaped link'
+fi
+
+# Test 126: superseded ADR (001-initial-arch.md) is exempt from stale link warnings
+rm -f "$ADR_REPO/proj/decisions/003-cites-superseded.md"
+("$BIN" --root "$ADR_REPO" sync proj) >/dev/null
+if ("$BIN" --root "$ADR_REPO" doctor proj) >/dev/null 2>&1; then
+  echo 'ok 21 - doctor exempts superseded ADRs from stale file reference warnings'
+else
+  echo 'not ok 21 - doctor exempts superseded ADRs from stale file reference warnings'
+fi
+
+# shellcheck disable=SC2034
+APPLY_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# Test 188: dispatch takes a project or a task, and --json inlines the files
+DISPATCH_OK=1
+DISPATCH_PROJ_OUT="$("$BIN" --root "$DISPATCH_REPO" dispatch proj --at HEAD 2>/dev/null)"
+DISPATCH_PROJ_FLAT="$(printf '%s' "$DISPATCH_PROJ_OUT" | tr '\n' ' ' | tr -s ' ')"
+if [[ "$DISPATCH_PROJ_FLAT" != *"Next is taskgo project proj: Proj."* ]] ||
+  [[ "$DISPATCH_PROJ_FLAT" != *"Read proj/README.md and proj/STATUS.md before acting"* ]]; then
+  DISPATCH_OK=0
+  printf '# project note: %s\n' "$DISPATCH_PROJ_FLAT"
+fi
+if ! "$BIN" --root "$DISPATCH_REPO" dispatch proj --at HEAD --json 2>/dev/null |
+  python3 -c '
+import json, subprocess, sys
+repo = sys.argv[1]
+d = json.load(sys.stdin)
+show = lambda rel: subprocess.run(["git", "-C", repo, "show", "HEAD:" + rel],
+    capture_output=True, text=True, check=True).stdout
+assert d["task"] is None, d["task"]
+assert d["project"] == "proj"
+assert d["frontmatter"] == {}, d["frontmatter"]
+assert d["readme"]["content"] == show("proj/README.md")
+assert d["readme"]["truncated"] is False
+assert d["status"]["content"] == show("proj/STATUS.md")
+assert d["status"]["block_current"] is True
+assert d["agents_md"]["content"] == show("AGENTS.md")
+assert d["plan"] is None
+ready = [r["id"] for r in d["tasks"]["ready"]]
+blocked = [r["id"] for r in d["tasks"]["blocked"]]
+assert "TASK-11111" in ready and "TASK-33333" not in ready, ready
+assert "TASK-33333" in blocked and "TASK-55555" in blocked, blocked
+assert d["as_of"]["commit"]
+' "$DISPATCH_REPO"; then
+  DISPATCH_OK=0
+  echo '# project payload is wrong'
+fi
+if ! "$BIN" --root "$DISPATCH_REPO" dispatch task-11111 --at HEAD --json 2>/dev/null |
+  python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["task"]["task"]["id"] == "TASK-11111", d["task"]
+assert "Cold start stops scaling" in d["task"]["content"]
+assert [s["name"] for s in d["task"]["sections"]][:2] == ["title", "Problem"], d["task"]["sections"]
+assert d["note"].startswith("Next is taskgo TASK-11111 (proj)"), d["note"]
+assert "proj/tasks/TASK-11111-manifest-loader.md" in d["note"]
+'; then
+  DISPATCH_OK=0
+  echo '# task payload is wrong'
+fi
+if "$BIN" --root "$DISPATCH_REPO" dispatch TASK-22222 --at HEAD --json >/dev/null 2>&1 ||
+  "$BIN" --root "$DISPATCH_REPO" dispatch no-such-project >/dev/null 2>&1; then
+  DISPATCH_OK=0
+  echo '# a done task or an unknown target was dispatched'
+fi
+if [ "$DISPATCH_OK" = 1 ]; then
+  echo 'ok 22 - dispatch takes a project or task and --json inlines the files'
+else
+  echo 'not ok 22 - dispatch takes a project or task and --json inlines the files'
+fi
+
+# 189: search -- . root pathspec, -j JSON aliases, MCP edit slash trim, ADR edit
+# validation, and post-format line span remapping.
+if "$BIN" --root "$DISPATCH_REPO" search -j 'Cold start' -- . >/dev/null &&
+  "$BIN" --root "$DISPATCH_REPO" read -j proj/tasks/TASK-11111-manifest-loader.md >/dev/null &&
+  "$BIN" --root "$DISPATCH_REPO" schema -j >/dev/null &&
+  "$APPLY_PY" -c '
+import importlib.machinery, importlib.util, pathlib, sys
+spec = importlib.util.spec_from_loader(
+    "taskgo_mod",
+    importlib.machinery.SourceFileLoader("taskgo_mod", sys.argv[1]),
+)
+tg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tg)
+repo = pathlib.Path(sys.argv[2])
+
+# 1) search_path(".") normalizes to repo root rather than raising
+s = tg.parse_search_args(["Cold start"], ["."])
+assert s.paths == [], s.paths
+
+# 2) mcp_edit_doc trims leading/trailing slashes like mcp_path and cmd_edit
+doc = tg.mcp_edit_doc({"path": "/proj/PLAN.md/", "old_string": "a", "new_string": "b"})
+assert doc["changes"][0]["path"] == "proj/PLAN.md", doc
+
+# 3) check_record_edit rejects removing required ADR headings or setting invalid ADR status
+snap = tg.FsSnapshot(repo)
+cs = tg.apply_change_set(
+    snap,
+    {
+        "changes": [
+            {
+                "op": "create",
+                "kind": "decision",
+                "project": "proj",
+                "sections": {
+                    "title": "Test ADR",
+                    "Status": "Accepted",
+                    "Context": "Need parity.",
+                    "Decision": "Keep parity.",
+                    "Consequences": "Cleaner CLI.",
+                },
+            }
+        ]
+    },
+)
+adr_rel = cs.created[0]["path"]
+try:
+    tg.apply_change_set(
+        cs.snap,
+        {
+            "changes": [
+                {
+                    "op": "edit_file",
+                    "path": adr_rel,
+                    "old_string": "## Decision\n\nKeep parity.\n\n",
+                    "new_string": "",
+                }
+            ]
+        },
+    )
+    raise AssertionError("expected removal of required Decision section to fail")
+except tg.ChangeSetError as exc:
+    assert "removes required section Decision" in str(exc), exc
+
+# 4) remap_line_span reports post-format line numbers when earlier prose wraps
+long_para = " ".join(["word"] * 40)
+task_rel = "proj/tasks/TASK-99999-wrap.md"
+unwrapped = (
+    "---\nid: TASK-99999\nstatus: todo\n---\n\n# Wrap test\n\n"
+    f"**Problem:** {long_para}.\n\n**Goal:** Faster start.\n"
+)
+snap_mem = tg.OverlaySnapshot(snap)
+snap_mem.write_text(task_rel, unwrapped)
+cs2 = tg.apply_change_set(
+    snap_mem,
+    {
+        "changes": [
+            {
+                "op": "edit_file",
+                "path": task_rel,
+                "old_string": "**Goal:** Faster start.",
+                "new_string": "**Goal:** Instant start.",
+            }
+        ]
+    },
+)
+res = tg.change_set_result(cs2)
+ed = res["edits"][0]
+final_lines = cs2.snap.read_text(task_rel).splitlines()
+assert ed["start_line"] > unwrapped.splitlines().index("**Goal:** Faster start.") + 1
+assert final_lines[ed["start_line"] - 1] == "**Goal:** Instant start.", (
+    ed,
+    final_lines,
+)
+# 5) edit_file rejects broken YAML frontmatter in project README.md
+try:
+    tg.apply_change_set(
+        snap_mem,
+        {
+            "changes": [
+                {
+                    "op": "edit_file",
+                    "path": "proj/README.md",
+                    "old_string": "# proj",
+                    "new_string": "---\nskills: [broken\n---\n\n# proj",
+                }
+            ]
+        },
+    )
+    raise AssertionError("expected malformed README frontmatter edit to fail")
+except tg.ChangeSetError as exc:
+    assert "proj/README.md" in str(exc), exc
+
+# 6) trailing newline on single-line replacement reports exact line number
+snap_mem.write_text("proj/three.txt", "a\nb\nc\n")
+cs3 = tg.apply_change_set(
+    snap_mem,
+    {
+        "changes": [
+            {
+                "op": "edit_file",
+                "path": "proj/three.txt",
+                "old_string": "c\n",
+                "new_string": "REPLACED\n",
+            }
+        ]
+    },
+)
+ed3 = tg.change_set_result(cs3)["edits"][0]
+assert (ed3["start_line"], ed3["end_line"]) == (3, 3), ed3
+
+# 7) delete followed by recreate clears stale executable bit
+snap_mem.write_text("proj/run.sh", "#!/bin/sh\necho hi\n")
+snap_mem.set_executable("proj/run.sh", True)
+cs4 = tg.apply_change_set(
+    snap_mem,
+    {
+        "changes": [
+            {
+                "op": "delete_file",
+                "path": "proj/run.sh",
+                "expected_blob": tg.git_blob_sha(b"#!/bin/sh\necho hi\n"),
+            },
+            {
+                "op": "write_file",
+                "path": "proj/run.sh",
+                "content": "echo plain\n",
+            },
+        ]
+    },
+)
+assert not cs4.snap.is_executable("proj/run.sh")
+
+# 8) deleting closing --- fence in README or writing CRLF broken YAML fails, and doctor catches it
+snap_mem.write_text("proj/README.md", "---\nskills:\n  - example\n---\n\n# proj\n")
+try:
+    tg.apply_change_set(
+        snap_mem,
+        {
+            "changes": [
+                {
+                    "op": "edit_file",
+                    "path": "proj/README.md",
+                    "old_string": "\n---\n",
+                    "new_string": "\n",
+                }
+            ]
+        },
+    )
+    raise AssertionError("expected unclosed README frontmatter to fail")
+except tg.ChangeSetError as exc:
+    assert "frontmatter is not closed" in str(exc), exc
+
+try:
+    tg.apply_change_set(
+        snap_mem,
+        {
+            "changes": [
+                {
+                    "op": "edit_file",
+                    "path": "proj/README.md",
+                    "old_string": "skills:\n  - example",
+                    "new_string": "skills: [broken",
+                }
+            ]
+        },
+    )
+    raise AssertionError("expected broken YAML in README to fail")
+except tg.ChangeSetError as exc:
+    assert "proj/README.md" in str(exc), exc
+
+snap_unclosed = tg.OverlaySnapshot(snap_mem)
+snap_unclosed.write_text("proj/README.md", "---\r\nskills:\r\n  - example\r\n\r\n# proj\r\n")
+doc_findings = tg.audit_snapshot(snap_unclosed, "proj")
+assert any(
+    f.severity == "FAIL" and "frontmatter is not closed" in f.message
+    for f in doc_findings
+), doc_findings
+' "$BIN" "$DISPATCH_REPO" &&
+  {
+    SEARCH_ERR=$("$BIN" --root "$DISPATCH_REPO" search --max-count=nope foo 2>&1) || SEARCH_RC=$?
+    [ "${SEARCH_RC:-0}" -eq 2 ] && printf '%s\n' "$SEARCH_ERR" | grep -q '^taskgo search: '
+  }; then
+  echo 'ok 23 - search root dot, -j aliases, MCP edit path trim, ADR validation, and post-format spans'
+else
+  echo 'not ok 23 - search root dot, -j aliases, MCP edit path trim, ADR validation, and post-format spans'
+fi
+
+# The request log rotates at its size bound and keeps four old files; 'taskgo
+# requests' reads a log with its rotated files, from --days ago on, and counts
+# runs of calls within each caller's chains.
+REQ_DIR="$TEST_ROOT/requests"
+if REQ_PY=$("$MCP_PY" -c '
+import importlib.machinery, importlib.util, json, pathlib, sys, time
+spec = importlib.util.spec_from_loader(
+    "taskgo_mod",
+    importlib.machinery.SourceFileLoader("taskgo_mod", sys.argv[1]),
+)
+tg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tg)
+tg.mcp_log = lambda message: None
+root = pathlib.Path(sys.argv[2])
+
+def event(tool, at, caller=None):
+    e = tg.McpEvent("http", time.monotonic(), method="tools/call", tool=tool,
+                    agent=caller and "client/" + caller, caller=caller)
+    e.at = at
+    return e
+
+# A bound of one byte rotates before every record: five files, one each.
+tg.MCP_LOG_ROTATE_BYTES = 1
+rotating = tg.McpLog(root / "rotating.jsonl")
+for i in range(8):
+    rotating.emit(event(f"tool{i}", 1000.0 + i))
+files = sorted(p.name for p in root.iterdir())
+assert files == ["rotating.jsonl", *(f"rotating.jsonl.{i}" for i in range(1, 5))], files
+tools = [r["tool"] for r in tg.mcp_log_read(root / "rotating.jsonl")]
+assert tools == ["tool3", "tool4", "tool5", "tool6", "tool7"], tools
+
+# Two callers each run dispatch > read_file > search_files twice, ten
+# minutes apart; a record 30 days old is out of range.
+tg.MCP_LOG_ROTATE_BYTES = 8 * 1024 * 1024
+log = tg.McpLog(root / "mcp.jsonl")
+now = time.time()
+log.emit(event("get_task", now - 30 * 86400, "aaaa"))
+for run in range(2):
+    for caller in ("aaaa", "bbbb"):
+        for i, tool in enumerate(("dispatch", "read_file", "search_files")):
+            log.emit(event(tool, now - 3600 + run * 600 + i, caller))
+print("ok")
+' "$BIN" "$REQ_DIR" 2>&1) && [[ $REQ_PY == ok ]] &&
+  REQ_JSON=$("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --json 2>&1) &&
+  REQ_TEXT=$("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --days 1 2>&1) &&
+  "$MCP_PY" -c '
+import json, sys
+got = json.loads(sys.argv[1])
+assert got["requests"] == 12 and got["chains"] == 4, got
+seq = [(s["agent"], s["calls"], s["count"]) for s in got["sequences"]]
+assert seq[:2] == [
+    ("client/aaaa", ["dispatch", "read_file", "search_files"], 2),
+    ("client/bbbb", ["dispatch", "read_file", "search_files"], 2),
+], seq
+assert [t["tool"] for t in got["tools"]] == ["dispatch", "read_file", "search_files"]
+' "$REQ_JSON" &&
+  [[ $REQ_TEXT == *"Requests: 12,"*"2  client/aaaa  dispatch > read_file > search_files"* ]] &&
+  ! "$BIN" requests --log "$REQ_DIR/none.jsonl" 2>/dev/null &&
+  [[ $("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --days 0 2>&1) == "taskgo requests: --days must be more than 0, not 0" ]]; then
+  echo 'ok 24 - request log rotates, and requests summarises it'
+else
+  echo 'not ok 24 - request log rotates, and requests summarises it'
+  printf '# %s\n' "$REQ_PY" "${REQ_JSON:-}" "${REQ_TEXT:-}"
+fi
+
+# --- skills ----------------------------------------------------------------

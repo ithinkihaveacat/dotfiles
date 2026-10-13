@@ -1,0 +1,690 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$TEST_DIR/../scripts/taskgo" ]]; then
+  TEST_DIR="/usr/local/google/home/stillers/.dotfiles/skills/taskgo/tests"
+fi
+BIN="$TEST_DIR/../scripts/taskgo"
+# shellcheck disable=SC2034
+MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..9"
+
+init_base_repo() {
+  local target="${1:-$TEST_ROOT/repo}"
+  mkdir -p "$target/example/tasks"
+  git -C "$target" init -q
+  printf '%s
+' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' >"$target/AGENTS.md"
+  printf '# Inbox
+' >"$target/INBOX.md"
+  printf '# Example project
+' >"$target/example/PROJECT.md"
+  printf '# Plan
+' >"$target/example/PLAN.md"
+  printf '%s
+' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
+}
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck disable=SC2034
+APPLY_PY="$MCP_PY"
+
+# Change sets (taskgo apply): a fixture of three projects, where a task in
+# beta is blocked by one in alpha and gamma is unrelated.
+APPLY_REPO="$TEST_ROOT/apply-repo"
+mkdir -p "$APPLY_REPO"/{alpha/tasks,alpha/decisions,beta/tasks,gamma/tasks}
+git -C "$APPLY_REPO" init -q -b main
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$APPLY_REPO/AGENTS.md"
+printf '# Inbox\n' >"$APPLY_REPO/INBOX.md"
+for p in alpha beta gamma; do printf '# %s\n' "$p" >"$APPLY_REPO/$p/README.md"; done
+printf '# Plan\n\nFirst plan.\n' >"$APPLY_REPO/alpha/PLAN.md"
+printf '#!/bin/sh\n' >"$APPLY_REPO/alpha/run.sh" && chmod +x "$APPLY_REPO/alpha/run.sh"
+ln -s PLAN.md "$APPLY_REPO/alpha/link.md"
+printf '%s\n' '---' 'id: TASK-AA001' 'status: todo' '---' '' '# First' '' \
+  '**Goal:** One.' >"$APPLY_REPO/alpha/tasks/TASK-AA001-first.md"
+printf '%s\n' '# 1. First choice' '' '## Status' '' 'Accepted' '' '## Context' '' \
+  'C.' '' '## Decision' '' 'D.' '' '## Consequences' '' 'Q.' \
+  >"$APPLY_REPO/alpha/decisions/001-first.md"
+printf '%s\n' '---' 'id: TASK-BB001' 'status: todo' 'blocked_by: [TASK-AA001]' \
+  '---' '' '# Dependent' >"$APPLY_REPO/beta/tasks/TASK-BB001-dep.md"
+printf '%s\n' '---' 'id: TASK-CC001' 'status: todo' '---' '' '# Other' \
+  >"$APPLY_REPO/gamma/tasks/TASK-CC001-other.md"
+"$BIN" --root "$APPLY_REPO" sync >/dev/null
+git -C "$APPLY_REPO" add -A && git -C "$APPLY_REPO" commit -qm 'fixture'
+
+printf '%s\n' '{"changes": [' \
+  '{"op": "set", "record": "TASK-AA001", "field": "status", "value": "in-progress", "expected": "todo"},' \
+  '{"op": "write_file", "path": "alpha/PLAN.md", "content": "# Plan\n\nNew plan.\n",' \
+  ' "expected_blob": "'"$(git -C "$APPLY_REPO" hash-object alpha/PLAN.md)"'"}' \
+  ']}' >"$TEST_ROOT/apply-ok.json"
+APPLY_DIFF=$("$BIN" --root "$APPLY_REPO" apply --dry-run "$TEST_ROOT/apply-ok.json")
+APPLY_DIRTY=$(git -C "$APPLY_REPO" status --porcelain)
+APPLY_OUT=$("$BIN" --root "$APPLY_REPO" apply "$TEST_ROOT/apply-ok.json")
+if [[ -z $APPLY_DIRTY ]] &&
+  grep -q '^+status: in-progress$' <<<"$APPLY_DIFF" &&
+  grep -q '^+New plan\.$' <<<"$APPLY_DIFF" &&
+  grep -q "^+- \`TASK-AA001\` — First\$" <<<"$APPLY_DIFF" &&
+  [[ $(git -C "$APPLY_REPO" status --porcelain | wc -l) -eq 3 ]] &&
+  python3 -c '
+import json, sys
+out = json.loads(sys.argv[1])
+blobs = {f["path"]: f["blob"] for f in out["files"]}
+assert out["created"] == [] and blobs["alpha/PLAN.md"] == sys.argv[2], out
+' "$APPLY_OUT" "$(git -C "$APPLY_REPO" hash-object alpha/PLAN.md)"; then
+  echo 'ok 1 - apply --dry-run prints the diff; apply writes and reports blobs'
+else
+  echo 'not ok 1 - apply --dry-run prints the diff; apply writes and reports blobs'
+  APPLY_ALL="$APPLY_DIFF$APPLY_OUT"
+  printf '# %s\n' "${APPLY_ALL//$'\n'/$'\n'# }"
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+
+# Each set fails at its last change, after earlier changes that would apply.
+APPLY_REFUSED=0
+for bad in \
+  '{"op": "set", "record": "TASK-AA001", "field": "status", "value": "done", "expected": "in-progress"}' \
+  '{"op": "replace_section", "record": "TASK-AA001", "section": "Goal", "text": "Two.", "expected_hash": "0000000000000000"}' \
+  '{"op": "write_file", "path": "alpha/tasks/TASK-AA001-first.md", "content": "", "expected_blob": null}' \
+  '{"op": "set", "record": "TASK-AA001", "field": "status", "value": "done"}'; do
+  printf '{"changes": [%s, %s]}\n' \
+    '{"op": "write_file", "path": "INBOX.md", "content": "# Inbox\n\nNew.\n", "expected_blob": "'"$(git -C "$APPLY_REPO" hash-object INBOX.md)"'"}' \
+    "$bad" >"$TEST_ROOT/apply-bad.json"
+  if APPLY_ERR=$("$BIN" --root "$APPLY_REPO" apply "$TEST_ROOT/apply-bad.json" 2>&1); then
+    APPLY_REFUSED=1
+  elif ! grep -q '^taskgo apply: .*; nothing changed$' <<<"$APPLY_ERR" ||
+    [[ -n $(git -C "$APPLY_REPO" status --porcelain) ]]; then
+    APPLY_REFUSED=1
+    printf '# %s\n' "${APPLY_ERR//$'\n'/$'\n'# }"
+  fi
+done
+if [[ $APPLY_REFUSED == 0 ]]; then
+  echo 'ok 2 - a refused change set writes nothing'
+else
+  echo 'not ok 2 - a refused change set writes nothing'
+fi
+
+# shellcheck disable=SC2034
+APPLY_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+cat >"$TEST_ROOT/apply-lib.py" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+TASK = "alpha/tasks/TASK-AA001-first.md"
+
+
+def apply(*changes, base=None):
+    return tg.apply_change_set(base or tg.FsSnapshot(repo), {"changes": list(changes)})
+
+
+def refused(kind, text, *changes):
+    try:
+        apply(*changes)
+    except tg.ChangeSetError as e:
+        assert e.kind == kind and text in str(e), (kind, text, str(e))
+        return
+    raise AssertionError(f"accepted: {changes}")
+
+
+def section_hash(rel, name, schema=tg.TASK_SCHEMA):
+    text = (repo / rel).read_text()
+    return next(s["hash"] for s in tg.record_sections(text, schema) if s["name"] == name)
+PY
+
+if APPLY_SEM=$(
+  "$APPLY_PY" - "$BIN" "$APPLY_REPO" 2>&1 <<'PY'
+import runpy, sys
+g = runpy.run_path(sys.argv[2] + "/../apply-lib.py")
+tg, apply, refused, section_hash, TASK = (
+    g["tg"], g["apply"], g["refused"], g["section_hash"], g["TASK"]
+)
+repo = g["repo"]
+
+# Refs link records created in the same set; nothing reaches the disk.
+cs = apply(
+    {"op": "create", "kind": "task", "project": "alpha", "ref": "a",
+     "sections": {"title": "Build it", "Goal": "Built."}},
+    {"op": "create", "kind": "task", "project": "alpha", "ref": "b",
+     "fields": {"blocked_by": ["$a"], "conversations": ["claude://0123456789abcdef01"]},
+     "sections": {"title": "Ship it"}},
+)
+a, b = cs.created
+assert (a["ref"], b["ref"]) == ("a", "b"), cs.created
+assert f"blocked_by: [{a['id']}]" in cs.snap.read_text(b["path"])
+assert f"`{b['id']}` — Ship it (blocked by `{a['id']}`)" in cs.snap.read_text(
+    "alpha/STATUS.md"
+)
+assert not (repo / b["path"]).exists()
+
+# Changes see the ones before them; done needs an Outcome by the set's end.
+cs = apply(
+    {"op": "set", "record": "TASK-AA001", "field": "status", "value": "in-progress",
+     "expected": "todo"},
+    {"op": "set", "record": "TASK-AA001", "field": "status", "value": "done",
+     "expected": "in-progress"},
+    {"op": "replace_section", "record": "TASK-AA001", "section": "Outcome",
+     "text": "Done.", "expected_hash": None},
+)
+assert "## Outcome\n\nDone." in cs.snap.read_text(TASK)
+refused("validation", "has no Outcome",
+        {"op": "set", "record": "TASK-AA001", "field": "status", "value": "done"})
+refused("precondition", "status is 'todo', expected 'done'",
+        {"op": "set", "record": "TASK-AA001", "field": "status", "value": "todo",
+         "expected": "done"})
+refused("validation", "cycle",
+        {"op": "add", "record": "TASK-AA001", "field": "blocked_by",
+         "values": ["TASK-BB001"]})
+refused("validation", "unknown task TASK-FFFFF",
+        {"op": "add", "record": "TASK-AA001", "field": "blocked_by",
+         "values": ["TASK-FFFFF"]})
+refused("invalid", "cannot be blocked by itself",
+        {"op": "add", "record": "TASK-AA001", "field": "blocked_by",
+         "values": ["TASK-AA001"]})
+refused("invalid", "unknown ref $zz",
+        {"op": "add", "record": "$zz", "field": "blocked_by", "values": []})
+refused("invalid", "op must be one of",
+        {"op": "delete", "record": "TASK-AA001"})
+refused("invalid", "unknown key extra",
+        {"op": "set", "record": "TASK-AA001", "field": "due", "value": None,
+         "extra": 1})
+refused("invalid", "cannot set 'id'",
+        {"op": "set", "record": "TASK-AA001", "field": "id", "value": "TASK-AA002"})
+refused("invalid", "unknown project",
+        {"op": "create", "kind": "task", "project": "delta",
+         "sections": {"title": "T"}})
+refused("invalid", "would add or remove other sections",
+        {"op": "replace_section", "record": "TASK-AA001", "section": "Goal",
+         "text": "One.\n\n## Next\n\nMore.",
+         "expected_hash": section_hash(TASK, "Goal")})
+refused("invalid", "cannot replace section 'title'",
+        {"op": "replace_section", "record": "TASK-AA001", "section": "title",
+         "text": "X", "expected_hash": None})
+refused("invalid", "Summary is required",
+        {"op": "replace_section", "record": "alpha/STATUS.md", "section": "Summary",
+         "text": None,
+         "expected_hash": section_hash("alpha/STATUS.md", "Summary", tg.STATUS_SCHEMA)})
+refused("invalid", "cannot replace section 'Context' of a decision",
+        {"op": "replace_section", "record": "alpha/decisions/001-first.md",
+         "section": "Context", "text": "X", "expected_hash": None})
+
+# Sections absent before land in schema order.
+cs = apply(
+    {"op": "replace_section", "record": "TASK-AA001", "section": "Findings",
+     "text": "F.", "expected_hash": None},
+    {"op": "replace_section", "record": "TASK-AA001", "section": "Problem",
+     "text": "P.", "expected_hash": None},
+    {"op": "replace_section", "record": "TASK-AA001", "section": "Outcome",
+     "text": "O.", "expected_hash": None},
+)
+body = cs.snap.read_text(TASK)
+order = [body.index(s) for s in ("# First", "**Problem:** P.", "**Goal:** One.",
+                                 "## Outcome", "## Findings")]
+assert order == sorted(order), body
+
+# STATUS.md Summary is replaced without touching the generated block.
+cs = apply({"op": "replace_section", "record": "alpha/STATUS.md",
+            "section": "Summary", "text": "All new.",
+            "expected_hash": section_hash("alpha/STATUS.md", "Summary",
+                                          tg.STATUS_SCHEMA)})
+status = cs.snap.read_text("alpha/STATUS.md")
+assert "## Summary\n\nAll new.\n\n<!-- taskgo:begin -->" in status, status
+assert status.count(tg.BEGIN) == 1
+
+# Titles are scalars too.
+cs = apply({"op": "set", "record": "TASK-AA001", "field": "title",
+            "value": "Renamed", "expected": "First"})
+assert "\n# Renamed\n" in cs.snap.read_text(TASK)
+
+# Conversations take explicit URIs.
+cs = apply({"op": "add", "record": "TASK-AA001", "field": "conversations",
+            "values": ["codex://0123456789abcdef01"]})
+assert "codex://0123456789abcdef01" in cs.snap.read_text(TASK)
+refused("invalid", "needs a scheme",
+        {"op": "add", "record": "TASK-AA001", "field": "conversations",
+         "values": ["0123456789abcdef01"]})
+
+# Decisions are numbered after the last one and project into STATUS.md.
+cs = apply({"op": "create", "kind": "decision", "project": "alpha", "ref": "d",
+            "fields": {"supersedes": ["001-first"]},
+            "sections": {"title": "Second choice", "Context": "C.",
+                         "Decision": "D.", "Consequences": "Q."}})
+rel = cs.created[0]["path"]
+assert rel == "alpha/decisions/002-second-choice.md", rel
+assert cs.snap.read_text(rel).startswith(
+    "---\nsupersedes: [001-first]\n---\n\n# 2. Second choice\n\n## Status\n\nAccepted"
+), cs.snap.read_text(rel)
+status = cs.snap.read_text("alpha/STATUS.md")
+assert "002-second-choice.md" in status and "001-first.md" not in status
+refused("validation", "supersedes names unknown 009",
+        {"op": "create", "kind": "decision", "project": "alpha",
+         "fields": {"supersedes": ["009"]},
+         "sections": {"title": "T", "Context": "C.", "Decision": "D.",
+                      "Consequences": "Q."}})
+refused("invalid", "missing decision section Context",
+        {"op": "create", "kind": "decision", "project": "alpha",
+         "sections": {"title": "T", "Decision": "D.", "Consequences": "Q."}})
+
+# A commit's tree is a base too, as the MCP server will use it.
+cs = apply({"op": "create", "kind": "task", "project": "gamma",
+            "sections": {"title": "From a tree"}},
+           base=tg.GitTreeSnapshot(repo, "HEAD"))
+assert cs.created[0]["path"] in cs.snap.diff()
+PY
+); then
+  echo 'ok 3 - change sets link, order, and validate their changes'
+else
+  echo 'not ok 3 - change sets link, order, and validate their changes'
+  printf '# %s\n' "${APPLY_SEM//$'\n'/$'\n'# }"
+fi
+
+if APPLY_DEP=$(
+  "$APPLY_PY" - "$BIN" "$APPLY_REPO" 2>&1 <<'PY'
+import runpy, sys
+g = runpy.run_path(sys.argv[2] + "/../apply-lib.py")
+apply, repo = g["apply"], g["repo"]
+# Make gamma's block stale; a set that does not touch gamma leaves it alone.
+gamma = repo / "gamma/STATUS.md"
+gamma.write_text(gamma.read_text().replace("Todo: 1", "Todo: 9"))
+cs = apply(
+    {"op": "set", "record": "TASK-AA001", "field": "status", "value": "done"},
+    {"op": "replace_section", "record": "TASK-AA001", "section": "Outcome",
+     "text": "Done.", "expected_hash": None},
+)
+diff = cs.snap.diff()
+assert set(diff) == {g["TASK"], "alpha/STATUS.md", "beta/STATUS.md"}, set(diff)
+assert "### Blocked\n\n- None" in diff["beta/STATUS.md"][1]
+PY
+); then
+  echo 'ok 4 - apply regenerates only affected and dependent projects'
+else
+  echo 'not ok 4 - apply regenerates only affected and dependent projects'
+  printf '# %s\n' "${APPLY_DEP//$'\n'/$'\n'# }"
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+
+if APPLY_WF=$(
+  "$APPLY_PY" - "$BIN" "$APPLY_REPO" 2>&1 <<'PY'
+import runpy, subprocess, sys
+g = runpy.run_path(sys.argv[2] + "/../apply-lib.py")
+tg, apply, refused, repo = g["tg"], g["apply"], g["refused"], g["repo"]
+
+
+def blob(rel):
+    return subprocess.run(["git", "hash-object", rel], cwd=repo, text=True,
+                          capture_output=True, check=True).stdout.strip()
+
+
+def write(path, content, expected=None):
+    return {"op": "write_file", "path": path, "content": content,
+            "expected_blob": expected}
+
+
+assert tg.git_blob_sha((repo / "alpha/PLAN.md").read_bytes()) == blob("alpha/PLAN.md")
+cs = apply(
+    write("alpha/PLAN.md", "# Plan\n\n\n\nReformatted   plan.\n", blob("alpha/PLAN.md")),
+    write("alpha/references/new.md", "# New\n"),
+    write("alpha/data.txt", "plain\n"),
+    {"op": "delete_file", "path": "INBOX.md", "expected_blob": blob("INBOX.md")},
+)
+assert cs.snap.read_text("alpha/PLAN.md") == "# Plan\n\nReformatted plan.\n"
+assert cs.snap.read_text("alpha/references/new.md") == "# New\n"
+assert not cs.snap.is_file("INBOX.md")
+for path, text in [
+    ("alpha/tasks/x.md", "controlled state"),
+    ("alpha/decisions/x.md", "controlled state"),
+    ("alpha/STATUS.md", "controlled state"),
+    ("AGENTS.md", "only files in an existing project"),
+    ("README.md", "only files in an existing project"),
+    ("newdir/x.md", "only files in an existing project"),
+    ("alpha", "only files in an existing project"),
+    ("alpha/.github/x.yml", "Git files"),
+    (".gitignore", "Git files"),
+    ("alpha/../x.md", "invalid path"),
+    ("/alpha/x.md", "invalid path"),
+    ("alpha/link.md", "symbolic link"),
+    ("alpha/PLAN.md/x", "a parent of it is a file"),
+    ("alpha/tasks", "controlled state"),
+]:
+    refused("invalid", text, write(path, "x\n"))
+refused("invalid", "cannot be deleted",
+        {"op": "delete_file", "path": "alpha/README.md",
+         "expected_blob": blob("alpha/README.md")})
+refused("invalid", "frontmatter",
+        write("alpha/README.md", "---\n: [\n---\n# alpha\n", blob("alpha/README.md")))
+refused("invalid", "the limit is",
+        write("alpha/big.txt", "x" * (tg.WRITE_FILE_MAX_BYTES + 1)))
+refused("invalid", "not valid UTF-8", write("alpha/bad.txt", "\ud800"))
+refused("precondition", "already exists (blob " + blob("alpha/PLAN.md"),
+        write("alpha/PLAN.md", "x\n"))
+refused("precondition", "already exists",
+        {"op": "write_file", "path": "alpha/PLAN.md", "content": "x\n"})
+cs = apply({"op": "write_file", "path": "alpha/fresh.md", "content": "# Fresh\n"})
+assert cs.snap.read_text("alpha/fresh.md") == "# Fresh\n"
+refused("invalid", "delete a file with delete_file",
+        write("alpha/PLAN.md", None, blob("alpha/PLAN.md")))
+refused("invalid", "missing expected_blob",
+        {"op": "delete_file", "path": "alpha/PLAN.md"})
+refused("invalid", "expected_blob must be a string",
+        {"op": "delete_file", "path": "alpha/PLAN.md", "expected_blob": None})
+refused("precondition", "no such file",
+        {"op": "delete_file", "path": "alpha/nope.md",
+         "expected_blob": blob("alpha/PLAN.md")})
+refused("precondition", "expected 0000",
+        {"op": "delete_file", "path": "alpha/PLAN.md", "expected_blob": "0000"})
+refused("invalid", "controlled state",
+        {"op": "delete_file", "path": "alpha/tasks/TASK-AA001-first.md",
+         "expected_blob": blob("alpha/tasks/TASK-AA001-first.md")})
+refused("invalid", "unknown key content",
+        {"op": "delete_file", "path": "alpha/PLAN.md",
+         "expected_blob": blob("alpha/PLAN.md"), "content": "x"})
+refused("precondition", "blob is none (absent)",
+        write("alpha/nope.md", "x\n", blob("alpha/PLAN.md")))
+# Executables are assets: a write keeps the mode, and executable sets it.
+cs = apply(write("alpha/run.sh", "#!/bin/sh\necho hi\n", blob("alpha/run.sh")))
+assert cs.snap.is_executable("alpha/run.sh")
+assert "executable" not in tg.change_set_result(cs)["files"][0]
+cs = apply({**write("alpha/new.sh", "#!/bin/sh\n"), "executable": True})
+assert cs.snap.is_executable("alpha/new.sh")
+assert tg.change_set_result(cs)["files"][0]["executable"] is True
+cs = apply({**write("alpha/run.sh", "#!/bin/sh\n", blob("alpha/run.sh")),
+            "executable": False})
+assert tg.change_set_result(cs)["files"][0]["executable"] is False
+refused("invalid", "executable must be",
+        {**write("alpha/x.sh", "x\n"), "executable": "yes"})
+PY
+); then
+  echo 'ok 5 - write_file and delete_file change project assets only'
+else
+  echo 'not ok 5 - write_file and delete_file change project assets only'
+  printf '# %s\n' "${APPLY_WF//$'\n'/$'\n'# }"
+fi
+
+# Test 180: apply refuses records outside the projects: a '..' path, a
+# non-project STATUS.md, and decisions reached through a symbolic link, so a
+# change set cannot write outside the control repository.
+git -C "$APPLY_REPO" checkout -q -- .
+OUTSIDE="$TEST_ROOT/decisions"
+mkdir -p "$OUTSIDE"
+cp "$APPLY_REPO/alpha/decisions/001-first.md" "$OUTSIDE/001-outside.md"
+cp "$OUTSIDE/001-outside.md" "$TEST_ROOT/outside.orig"
+ln -s "$OUTSIDE" "$APPLY_REPO/gamma/decisions"
+TRAV_OK=1
+for change in \
+  '{"op": "set", "record": "../decisions/001-outside.md", "field": "status", "value": "Superseded"}' \
+  '{"op": "set", "record": "gamma/decisions/001-outside.md", "field": "status", "value": "Superseded"}' \
+  '{"op": "add", "record": "../decisions/001-outside.md", "field": "supersedes", "values": ["001"]}' \
+  '{"op": "replace_section", "record": "nope/STATUS.md", "section": "Summary", "text": "x", "expected_hash": null}' \
+  '{"op": "create", "kind": "decision", "project": "gamma", "sections": {"title": "Escape", "Context": "C.", "Decision": "D.", "Consequences": "Q."}}'; do
+  printf '{"changes": [%s]}\n' "$change" >"$TEST_ROOT/apply-trav.json"
+  if "$BIN" --root "$APPLY_REPO" apply "$TEST_ROOT/apply-trav.json" >/dev/null 2>&1; then
+    TRAV_OK=0
+    printf '# accepted: %s\n' "$change"
+  fi
+done
+rm "$APPLY_REPO/gamma/decisions"
+if [ "$TRAV_OK" = 1 ] &&
+  cmp -s "$TEST_ROOT/outside.orig" "$OUTSIDE/001-outside.md" &&
+  [ "$(ls "$OUTSIDE")" = "001-outside.md" ] &&
+  [ -z "$(git -C "$APPLY_REPO" status --porcelain)" ]; then
+  echo 'ok 6 - apply refuses records outside the projects'
+else
+  echo 'not ok 6 - apply refuses records outside the projects'
+fi
+
+# Test 181: the CLI holds done tasks to the same rule as apply and the MCP
+# server: a task becomes done only with Outcome text, while an older done
+# record without one can still be edited.
+CC_FILE="$APPLY_REPO/gamma/tasks/TASK-CC001-other.md"
+DONE_OK=1
+if "$BIN" --root "$APPLY_REPO" update TASK-CC001 --status 'done' >/dev/null 2>&1 ||
+  [ -n "$(git -C "$APPLY_REPO" status --porcelain)" ]; then
+  DONE_OK=0
+  echo '# update --status done without --outcome was accepted'
+fi
+if "$BIN" --root "$APPLY_REPO" create gamma 'Done at birth' --status 'done' \
+  --no-commit >/dev/null 2>&1 ||
+  [ -n "$(git -C "$APPLY_REPO" status --porcelain)" ]; then
+  DONE_OK=0
+  echo '# create --status done without --outcome was accepted'
+fi
+if ! "$BIN" --root "$APPLY_REPO" update TASK-CC001 --status 'done' \
+  --outcome 'Met the criterion.' >/dev/null 2>&1 ||
+  ! grep -q '^status: done$' "$CC_FILE" || ! grep -q '^## Outcome$' "$CC_FILE"; then
+  DONE_OK=0
+  echo '# update --status done --outcome was refused'
+fi
+# An older done record without Outcome stays editable.
+printf '%s\n' '---' 'id: TASK-CC001' 'status: done' '---' '' '# Other' >"$CC_FILE"
+if ! "$BIN" --root "$APPLY_REPO" update TASK-CC001 --findings 'Noted.' >/dev/null 2>&1; then
+  DONE_OK=0
+  echo '# editing a legacy done record without Outcome was refused'
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+if [ "$DONE_OK" = 1 ]; then
+  echo 'ok 7 - the CLI requires an Outcome when a task becomes done'
+else
+  echo 'not ok 7 - the CLI requires an Outcome when a task becomes done'
+fi
+
+# Test 186: edit_file replaces exact text: once unless replace_all, verbatim
+# in assets (CRLF kept, with a CRLF retry for bare '\n'), with a near-miss
+# diff; records are checked (id, status, frontmatter, duplicate sections,
+# blockers, supersedes, the STATUS.md generated block) and then formatted.
+git -C "$APPLY_REPO" checkout -q -- .
+git -C "$APPLY_REPO" clean -fdq
+if EDIT_SEM=$(
+  "$APPLY_PY" - "$BIN" "$APPLY_REPO" 2>&1 <<'PY'
+import runpy, subprocess, sys
+g = runpy.run_path(sys.argv[2] + "/../apply-lib.py")
+tg, apply, refused, repo, TASK = g["tg"], g["apply"], g["refused"], g["repo"], g["TASK"]
+
+
+def edit(path, old, new, **kw):
+    return {"op": "edit_file", "path": path, "old_string": old, "new_string": new, **kw}
+
+
+def write(path, content):
+    return {"op": "write_file", "path": path, "content": content, "expected_blob": None}
+
+
+# Assets are written verbatim, and several edits of one file chain.
+cs = apply(edit("alpha/PLAN.md", "First plan.", "Second   plan.\nMore."),
+           edit("alpha/PLAN.md", "More.", "Most."))
+assert cs.snap.read_text("alpha/PLAN.md") == "# Plan\n\nSecond   plan.\nMost.\n"
+res = tg.change_set_result(cs)
+e = res["edits"][0]
+assert (e["occurrences_replaced"], e["start_line"], e["end_line"]) == (1, 3, 4), e
+assert res["edits"][1]["total_lines"] == 4
+assert res["edits"][1]["blob"] == tg.git_blob_sha(b"# Plan\n\nSecond   plan.\nMost.\n")
+assert set(cs.snap.diff()) == {"alpha/PLAN.md"}  # no STATUS.md for an asset
+
+# Exactly one match, unless replace_all.
+refused("invalid", "occurs 2 times",
+        write("alpha/two.txt", "a\nb\na\n"), edit("alpha/two.txt", "a", "c"))
+cs = apply(write("alpha/two.txt", "a\nb\na\n"),
+           edit("alpha/two.txt", "a", "c", replace_all=True))
+assert cs.snap.read_text("alpha/two.txt") == "c\nb\nc\n"
+assert tg.change_set_result(cs)["edits"][0]["occurrences_replaced"] == 2
+
+# A miss shows the closest text.
+try:
+    apply(edit("alpha/PLAN.md", "Frist plan.", "x"))
+except tg.ChangeSetError as err:
+    assert err.kind == "precondition", err
+    assert "-Frist plan." in str(err) and "+First plan." in str(err), err
+else:
+    raise AssertionError("a miss was accepted")
+
+# CRLF: exact bytes match first; bare '\n' is retried as CRLF.
+cs = apply(write("alpha/crlf.txt", "one\r\ntwo\r\nthree\r\n"),
+           edit("alpha/crlf.txt", "one\ntwo", "uno\ndos"))
+assert cs.snap.read_text("alpha/crlf.txt") == "uno\r\ndos\r\nthree\r\n"
+cs = apply(write("alpha/crlf.txt", "one\r\ntwo\n"),
+           edit("alpha/crlf.txt", "two\n", "deux\n"))
+assert cs.snap.read_text("alpha/crlf.txt") == "one\r\ndeux\n"
+
+# Executables keep their mode; preconditions and paths.
+cs = apply(edit("alpha/run.sh", "#!/bin/sh", "#!/bin/bash"))
+assert cs.snap.is_executable("alpha/run.sh")
+assert cs.snap.read_text("alpha/run.sh") == "#!/bin/bash\n"
+refused("precondition", "expected 0000",
+        edit("alpha/PLAN.md", "First", "x", expected_blob="0000"))
+blob = tg.git_blob_sha((repo / "alpha/PLAN.md").read_bytes())
+apply(edit("alpha/PLAN.md", "First", "x", expected_blob=blob.upper()))
+refused("invalid", "must not be empty", edit("alpha/PLAN.md", "", "x"))
+refused("invalid", "replace_all must be", edit("alpha/PLAN.md", "F", "x", replace_all=1))
+refused("invalid", "no such file", edit("alpha/nope.md", "x", "y"))
+refused("invalid", "Git files", edit("alpha/.git/x", "x", "y"))
+refused("invalid", "invalid path", edit("alpha/../INBOX.md", "x", "y"))
+refused("invalid", "symbolic link", edit("alpha/link.md", "Plan", "y"))
+refused("invalid", "only the records directly", edit("alpha/tasks/x/y.md", "x", "y"))
+refused("invalid", "unknown key", {**edit("alpha/PLAN.md", "F", "x"), "content": 1})
+apply(edit("INBOX.md", "# Inbox", "# In"))
+(repo / "alpha/bin.dat").write_bytes(b"\xff\xfe\n")
+(repo / "alpha/big.txt").write_text("x" * (tg.WRITE_FILE_MAX_BYTES + 1))
+try:
+    refused("invalid", "not UTF-8", edit("alpha/bin.dat", "x", "y"))
+    refused("invalid", "edit_file changes files up to", edit("alpha/big.txt", "x", "y"))
+    refused("invalid", "the limit is",
+            write("alpha/near.txt", "ab" + "x" * (tg.WRITE_FILE_MAX_BYTES - 2)),
+            edit("alpha/near.txt", "ab", "abc"))
+finally:
+    (repo / "alpha/bin.dat").unlink()
+    (repo / "alpha/big.txt").unlink()
+
+# Tasks: edited verbatim, formatted at the end, STATUS.md regenerated.
+cs = apply(edit(TASK, "**Goal:** One.", "**Goal:** Uno   dos."),
+           edit(TASK, "Uno   dos.", "Uno   tres."),
+           edit(TASK, "status: todo", "status: in-progress"))
+text = cs.snap.read_text(TASK)
+assert "**Goal:** Uno tres." in text and "status: in-progress" in text, text
+assert "TASK-AA001" in cs.snap.read_text("alpha/STATUS.md")
+refused("invalid", "changes id", edit(TASK, "id: TASK-AA001", "id: TASK-AA002"))
+refused("invalid", "unknown status", edit(TASK, "status: todo", "status: nah"))
+refused("invalid", "frontmatter", edit(TASK, "status: todo", "status: [todo"))
+refused("invalid", "Goal appear 2 times",
+        edit(TASK, "**Goal:** One.", "**Goal:** One.\n\n**Goal:** Two."))
+refused("validation", "unknown task TASK-FFFFF",
+        edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-FFFFF]"))
+refused("validation", "cycle",
+        edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-BB001]"))
+refused("invalid", "blocked by itself",
+        edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-AA001]"))
+cs = apply(edit(TASK, "status: todo", "status: todo\nblocked_by: [TASK-CC001]"))
+assert "blocked_by:" in cs.snap.read_text(TASK)
+
+# Decisions, accepted ones included; supersedes additions are validated.
+ADR = "alpha/decisions/001-first.md"
+cs = apply(edit(ADR, "\nD.\n", "\nD, clarified.\n"))
+assert "D, clarified." in cs.snap.read_text(ADR)
+refused("validation", "supersedes names unknown",
+        edit(ADR, "# 1. First choice", "---\nsupersedes: [999]\n---\n\n# 1. First choice"))
+
+# STATUS.md: free outside the generated block, refused inside it.
+STATUS = "alpha/STATUS.md"
+status = (repo / STATUS).read_text()
+inside = status.split(tg.BEGIN)[1].split(tg.END)[0].strip().splitlines()[0]
+refused("invalid", "generated block", edit(STATUS, inside, "x"))
+title = status.splitlines()[0]
+refused("invalid", "markers", edit(STATUS, title, title + tg.END))
+cs = apply(edit(STATUS, title, title + " of alpha"))
+assert cs.snap.read_text(STATUS).startswith(title + " of alpha\n")
+PY
+); then
+  echo 'ok 8 - edit_file replaces exact text and keeps records valid'
+else
+  echo 'not ok 8 - edit_file replaces exact text and keeps records valid'
+  printf '# %s\n' "${EDIT_SEM//$'\n'/$'\n'# }"
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+git -C "$APPLY_REPO" clean -fdq
+
+# Test 187: taskgo edit writes the working tree: CRLF bytes and executable
+# bits survive, --dry-run writes nothing, and apply sets executable bits.
+printf 'one\r\ntwo\r\n' >"$APPLY_REPO/alpha/crlf.txt"
+git -C "$APPLY_REPO" add alpha/crlf.txt
+git -C "$APPLY_REPO" commit -qm 'crlf fixture'
+EDIT_OK=1
+EDIT_DRY=$("$BIN" --root "$APPLY_REPO" edit alpha/PLAN.md --old First --new Second --dry-run)
+if ! grep -q '^+Second plan\.$' <<<"$EDIT_DRY" ||
+  [ -n "$(git -C "$APPLY_REPO" status --porcelain)" ]; then
+  EDIT_OK=0
+  echo '# --dry-run did not print the diff, or wrote'
+fi
+EDIT_OUT=$("$BIN" --root "$APPLY_REPO" edit alpha/crlf.txt --old $'one\ntwo' --new $'uno\ndos')
+if ! printf 'uno\r\ndos\r\n' | cmp -s - "$APPLY_REPO/alpha/crlf.txt" ||
+  ! grep -q '^alpha/crlf.txt: replaced 1 occurrence (first at lines 1-2); 2 lines' <<<"$EDIT_OUT"; then
+  EDIT_OK=0
+  printf '# crlf edit: %s\n' "$EDIT_OUT"
+fi
+printf '#!/bin/sh\n' >"$TEST_ROOT/old.txt"
+printf '#!/bin/sh\necho edited\n' >"$TEST_ROOT/new.txt"
+EDIT_JSON=$("$BIN" --root "$APPLY_REPO" edit alpha/run.sh --old-file "$TEST_ROOT/old.txt" \
+  --new-file - --json <"$TEST_ROOT/new.txt")
+if [ ! -x "$APPLY_REPO/alpha/run.sh" ] ||
+  ! grep -q 'echo edited' "$APPLY_REPO/alpha/run.sh" ||
+  ! python3 -c '
+import json, sys
+out = json.loads(sys.argv[1])
+assert out["edits"][0]["blob"] == sys.argv[2], out
+' "$EDIT_JSON" "$(git -C "$APPLY_REPO" hash-object alpha/run.sh)"; then
+  EDIT_OK=0
+  printf '# executable edit: %s\n' "$EDIT_JSON"
+fi
+if "$BIN" --root "$APPLY_REPO" edit alpha/PLAN.md --old First >/dev/null 2>&1 ||
+  "$BIN" --root "$APPLY_REPO" edit alpha/PLAN.md --old Nope --new x >/dev/null 2>&1; then
+  EDIT_OK=0
+  echo '# a missing --new or a missed edit was accepted'
+fi
+printf '%s\n' '{"changes": [' \
+  '{"op": "write_file", "path": "alpha/new.sh", "content": "#!/bin/sh\n", "expected_blob": null, "executable": true},' \
+  '{"op": "write_file", "path": "alpha/run.sh", "content": "#!/bin/sh\n", "expected_blob": "'"$(git -C "$APPLY_REPO" hash-object alpha/run.sh)"'", "executable": false}' \
+  ']}' >"$TEST_ROOT/apply-x.json"
+if ! "$BIN" --root "$APPLY_REPO" apply "$TEST_ROOT/apply-x.json" >/dev/null ||
+  [ ! -x "$APPLY_REPO/alpha/new.sh" ] || [ -x "$APPLY_REPO/alpha/run.sh" ]; then
+  EDIT_OK=0
+  echo '# apply did not set or clear executable bits'
+fi
+git -C "$APPLY_REPO" checkout -q -- .
+git -C "$APPLY_REPO" clean -fdq
+if [ "$EDIT_OK" = 1 ]; then
+  echo 'ok 9 - taskgo edit keeps CRLF bytes and modes in the working tree'
+else
+  echo 'not ok 9 - taskgo edit keeps CRLF bytes and modes in the working tree'
+fi

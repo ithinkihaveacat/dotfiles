@@ -1,0 +1,536 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$TEST_DIR/../scripts/taskgo" ]]; then
+  TEST_DIR="/usr/local/google/home/stillers/.dotfiles/skills/taskgo/tests"
+fi
+BIN="$TEST_DIR/../scripts/taskgo"
+# shellcheck disable=SC2034
+MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..11"
+
+init_base_repo() {
+  local target="${1:-$TEST_ROOT/repo}"
+  mkdir -p "$target/example/tasks"
+  git -C "$target" init -q
+  printf '%s
+' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' >"$target/AGENTS.md"
+  printf '# Inbox
+' >"$target/INBOX.md"
+  printf '# Example project
+' >"$target/example/PROJECT.md"
+  printf '# Plan
+' >"$target/example/PLAN.md"
+  printf '%s
+' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
+}
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck disable=SC2034
+APPLY_PY="$MCP_PY"
+
+TREE_REPO="$TEST_ROOT/tree-repo"
+TREE_EXPORT="$TEST_ROOT/tree-export"
+mkdir -p "$TREE_REPO"/{alpha/tasks,alpha/decisions,beta/tasks} "$TREE_EXPORT"
+git -C "$TREE_REPO" init -q
+printf '%s\n' '# Agent instructions' '' 'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' '<!-- taskgo:allow-local-commits -->' >"$TREE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$TREE_REPO/INBOX.md"
+printf '# Alpha\n' >"$TREE_REPO/alpha/README.md"
+printf '# Beta\n' >"$TREE_REPO/beta/README.md"
+printf '%s\n' '---' 'id: TASK-7E001' 'status: in-progress' '---' '' '# First alpha task' \
+  >"$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
+printf '%s\n' '---' 'id: TASK-7E002' 'status: todo' 'blocked_by: [TASK-7E001]' 'wait_for:' \
+  '  - b/42' 'due: 2020-01-01' '---' '' '# Second alpha task' \
+  >"$TREE_REPO/alpha/tasks/TASK-7E002-second.md"
+printf '%s\n' '---' 'id: TASK-7E003' 'status: todo' 'blocked_by: [TASK-7E001]' '---' '' \
+  '# Beta task held by alpha' >"$TREE_REPO/beta/tasks/TASK-7E003-held.md"
+printf '%s\n' '# First decision' '' '## Context' '' 'x' '' '## Decision' '' 'x' '' \
+  '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0001-first.md"
+printf '%s\n' '---' 'supersedes: [0001]' '---' '' '# Second decision' '' '## Context' '' \
+  'See [the readme](../README.md) and [a missing note](missing.md).' '' '## Decision' '' 'x' '' \
+  '## Consequences' '' 'x' >"$TREE_REPO/alpha/decisions/0002-second.md"
+("$BIN" --root "$TREE_REPO" sync) >/dev/null 2>&1
+git -C "$TREE_REPO" add -A && git -C "$TREE_REPO" commit -qm 'tree fixture'
+git -C "$TREE_REPO" archive HEAD | tar -x -C "$TREE_EXPORT"
+sed -i.bak 's/^status: in-progress$/status: done/' "$TREE_REPO/alpha/tasks/TASK-7E001-first.md"
+rm -f "$TREE_REPO/alpha/tasks/TASK-7E001-first.md.bak"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# The client keeps stdin open until it has read every reply: closing it ends
+# the session, and a request still in progress then goes unanswered.
+MCP_OUT=$(
+  "$MCP_PY" -c '
+import json, subprocess, sys
+msgs = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
+    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_task", "arguments": {"id": "TASK-7E001"}}},
+]
+with open(sys.argv[1], "w") as log:
+    proc = subprocess.Popen(sys.argv[2:], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
+    proc.stdin.write("".join(json.dumps(m) + "\n" for m in msgs))
+    proc.stdin.flush()
+    replies = {}
+    while len(replies) < 3:
+        reply = json.loads(proc.stdout.readline())
+        replies[reply["id"]] = reply
+    proc.stdin.close()
+    proc.wait()
+init, tools, task = replies[1], replies[2], replies[3]
+names = [t["name"] for t in tools["result"]["tools"]]
+assert init["result"]["serverInfo"]["name"] == "taskgo", init
+assert "Data care" in init["result"]["instructions"]
+writes = {t["name"]: t for t in tools["result"]["tools"] if not t["annotations"]["readOnlyHint"]}
+assert len(names) == 12 and sorted(writes) == ["apply_changes", "create", "edit_file"], names
+assert all("Data care" in t["description"] for t in writes.values())
+assert all("at" not in t["inputSchema"]["properties"] for t in writes.values())
+got = task["result"]["structuredContent"]
+print(got["as_of"]["commit"], got["task"]["status"])
+' "$TEST_ROOT/mcp-stdio.log" "$BIN" --root "$TREE_REPO" mcp --stdio --no-fetch \
+    --branch "$(git -C "$TREE_REPO" branch --show-current)" --log "$TEST_ROOT/mcp-stdio.jsonl"
+) || true
+# Each of the four messages, the notification included, logs one line, and
+# one record in the request log, all under one caller.
+MCP_LOGGED=$(grep -c '^taskgo mcp: request transport=stdio ' "$TEST_ROOT/mcp-stdio.log" || true)
+MCP_RECORDS=$("$MCP_PY" -c '
+import json, sys
+recs = [json.loads(line) for line in open(sys.argv[1])]
+call = [r for r in recs if r.get("tool") == "get_task"]
+assert len(recs) == 4 and all(r["transport"] == "stdio" for r in recs), recs
+assert len({r["caller"] for r in recs}) == 1, recs
+assert len(call) == 1 and call[0]["outcome"] == "ok" and call[0]["bytes"] > 0, call
+assert all(r["ts"].endswith("Z") and isinstance(r["ms"], int) for r in recs), recs
+print("ok")
+' "$TEST_ROOT/mcp-stdio.jsonl" 2>&1) || true
+if [[ $MCP_OUT == "$(git -C "$TREE_REPO" rev-parse HEAD) in-progress" && $MCP_LOGGED == 4 &&
+$MCP_RECORDS == ok ]]; then
+  echo 'ok 1 - mcp serves the committed tree over stdio'
+else
+  echo 'not ok 1 - mcp serves the committed tree over stdio'
+  printf '# %s\n' "$MCP_OUT" "logged $MCP_LOGGED requests" "$MCP_RECORDS"
+fi
+
+# Every tool's output matches the CLI's at the served commit.
+MCP_SYNTH="$TEST_ROOT/synthetic"
+MCP_PORT=$("$MCP_PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+"$TEST_DIR/make-synthetic" "$MCP_SYNTH" >/dev/null 2>&1
+"$BIN" --root "$MCP_SYNTH" mcp --no-fetch --auth none --port "$MCP_PORT" \
+  --log "$TEST_ROOT/mcp-synthetic.jsonl" 2>/dev/null &
+MCP_PID=$!
+for _ in $(seq 100); do
+  "$MCP_PY" -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1)' \
+    "$MCP_PORT" 2>/dev/null && break
+  sleep 0.1
+done
+if MCP_CMP=$("$MCP_PY" "$TEST_DIR/compare-cli" "http://127.0.0.1:$MCP_PORT/mcp" "$MCP_SYNTH" 2>&1); then
+  echo 'ok 2 - mcp tools match the CLI on a synthetic tracker'
+else
+  echo 'not ok 2 - mcp tools match the CLI on a synthetic tracker'
+  printf '# %s\n' "$MCP_CMP"
+fi
+kill "$MCP_PID" 2>/dev/null || true
+wait "$MCP_PID" 2>/dev/null || true
+
+if MCP_AUTH=$("$MCP_PY" "$TEST_DIR/auth-check" 2>&1); then
+  echo 'ok 3 - mcp checks Cloudflare Access tokens'
+else
+  echo 'not ok 3 - mcp checks Cloudflare Access tokens'
+  printf '# %s\n' "$MCP_AUTH"
+fi
+
+# A deleted task's ID, one on an unmerged branch, and one named only in a
+# commit message are never allocated again, from a checkout or a Git tree.
+IDH_REPO="$TEST_ROOT/id-hist-repo"
+mkdir -p "$IDH_REPO/proj/tasks"
+git -C "$IDH_REPO" init -q -b main
+cp "$REPO/AGENTS.md" "$IDH_REPO/AGENTS.md"
+printf '# Project\n' >"$IDH_REPO/proj/README.md"
+printf '%s\n' '---' 'id: TASK-7E201' 'status: todo' '---' '' '# Deleted later' \
+  >"$IDH_REPO/proj/tasks/TASK-7E201-deleted.md"
+printf '%s\n' '---' 'id: TASK-7E202' 'status: todo' '---' '' '# Still here' \
+  >"$IDH_REPO/proj/tasks/TASK-7E202-current.md"
+git -C "$IDH_REPO" add -A && git -C "$IDH_REPO" commit -qm 'two tasks'
+git -C "$IDH_REPO" rm -q proj/tasks/TASK-7E201-deleted.md
+git -C "$IDH_REPO" commit -qm 'delete a task' -m 'Task: TASK-7E204'
+git -C "$IDH_REPO" switch -qc side
+printf '%s\n' '---' 'id: TASK-7E203' 'status: todo' '---' '' '# On a branch' \
+  >"$IDH_REPO/proj/tasks/TASK-7E203-branch.md"
+git -C "$IDH_REPO" add -A && git -C "$IDH_REPO" commit -qm 'unmerged task'
+git -C "$IDH_REPO" switch -q main
+if IDH_OUT=$(
+  IDH_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN") &&
+    "$IDH_PY" - "$BIN" "$IDH_REPO" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+repo = Path(sys.argv[2])
+used = ["TASK-7E201", "TASK-7E202", "TASK-7E203", "TASK-7E204"]
+tg.random_task_ids = lambda: iter([*used, "TASK-7E2FF"])
+for snap in (tg.FsSnapshot(repo), tg.GitTreeSnapshot(repo, "main")):
+    assert set(used) <= snap.historical_task_ids(), snap.historical_task_ids()
+    got = tg.generate_task_id(snap)
+    assert got == "TASK-7E2FF", (type(snap).__name__, got)
+assert tg.task_ids_in_history(repo.parent) == set()
+PY
+); then
+  echo 'ok 4 - allocation skips deleted, branch, and trailer task IDs'
+else
+  echo 'not ok 4 - allocation skips deleted, branch, and trailer task IDs'
+  printf '# %s\n' "$IDH_OUT"
+fi
+
+# A 2026-07-28 client and a 2025-11-25 one, over HTTP and over --stdio.
+if MCP_ERAS=$("$MCP_PY" "$TEST_DIR/protocol-check" "$MCP_SYNTH" 2>&1); then
+  echo 'ok 5 - mcp serves both protocol eras over both transports'
+else
+  echo 'not ok 5 - mcp serves both protocol eras over both transports'
+  printf '# %s\n' "$MCP_ERAS"
+fi
+
+# Test 183: read slices lines 1-indexed and inclusive, splitting at '\n' only
+# and keeping CRLF bytes; clamps out-of-range lines; caps output at 256 KiB
+# after a whole line (or a character boundary in one long line); refuses
+# non-UTF-8 files and paths outside the repository; and reads commits by --at.
+READ_REPO="$TEST_ROOT/read-repo"
+mkdir -p "$READ_REPO/p"
+git -C "$READ_REPO" init -q
+printf 'one\r\ntwo\x0bstill two\nthree' >"$READ_REPO/p/crlf.txt"
+: >"$READ_REPO/p/empty.txt"
+printf '\xff\xfe\n' >"$READ_REPO/p/binary.dat"
+python3 -c '
+import sys
+d = sys.argv[1]
+with open(d + "/p/big.txt", "w") as f:
+    for i in range(1, 40001):
+        f.write(f"line {i:05d} " + "x" * 10 + "\n")
+with open(d + "/p/long.txt", "w") as f:
+    f.write("a" + "\u00e9" * 200000 + "\nafter\n")
+' "$READ_REPO"
+git -C "$READ_REPO" add -A
+git -C "$READ_REPO" commit -qm 'read fixtures'
+printf 'changed\n' >"$READ_REPO/p/empty.txt"
+if READ_ERR=$(python3 -c '
+import json, subprocess, sys
+bin_, repo = sys.argv[1], sys.argv[2]
+
+def read(*args):
+    res = subprocess.run(
+        [bin_, "--root", repo, "read", *args, "--json"],
+        capture_output=True, text=True,
+    )
+    return json.loads(res.stdout) if res.returncode == 0 else None
+
+def check(name, ok):
+    if not ok:
+        sys.exit(name)
+
+d = read("p/crlf.txt")
+check("crlf whole", d["content"] == "one\r\ntwo\x0bstill two\nthree"
+      and d["total_lines"] == 3 and d["end_line"] == 3 and not d["truncated"])
+d = read("p/crlf.txt", "--start-line", "2", "--end-line", "2")
+check("crlf slice", d["content"] == "two\x0bstill two\n" and d["start_line"] == 2)
+d = read("p/crlf.txt", "--start-line", "-4", "--end-line", "99")
+check("clamp", d["start_line"] == 1 and d["end_line"] == 3)
+d = read("p/crlf.txt", "--start-line", "9")
+check("past end", d["content"] == "" and d["start_line"] == 9 and not d["truncated"])
+d = read("p/empty.txt", "--at", "HEAD")
+check("empty at HEAD", d["content"] == "" and d["total_lines"] == 0)
+d = read("p/empty.txt")
+check("working tree", d["content"] == "changed\n")
+blob = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD:p/big.txt"],
+                      capture_output=True, text=True).stdout.strip()
+d = read("p/big.txt")
+size = len(d["content"].encode())
+check("cap whole lines", d["truncated"] and d["end_line"] == 262144 // 22
+      and size <= 262144 and d["content"].endswith("\n")
+      and d["total_lines"] == 40000 and d["blob"] == blob)
+n = d["end_line"] + 1
+d = read("p/big.txt", "--start-line", str(n), "--end-line", str(n))
+check("continue", d["content"] == f"line {n:05d} " + "x" * 10 + "\n")
+d = read("p/long.txt")
+check("long line", d["truncated"] and d["end_line"] == 1
+      and d["content"] == "a" + "\u00e9" * 131071)
+check("binary", read("p/binary.dat") is None)
+check("escape", read("../read-repo/p/crlf.txt") is None)
+check("directory", read("p") is None)
+check("git dir", read(".git/HEAD") is None)
+d = read("p/crlf.txt", "--start-line", "2", "-n")
+check("numbered", d["content"] == "2: two\x0bstill two\n3: three"
+      and d["line_numbers"] is True and d["end_line"] == 3)
+check("verbatim by default", "line_numbers" not in read("p/crlf.txt"))
+d = read("p/big.txt", "--line-numbers")
+size = len(d["content"].encode())
+check("numbered cap counts prefixes", d["truncated"] and size <= 262144
+      and d["end_line"] < 262144 // 22
+      and d["content"].endswith("%d: line %05d " % (d["end_line"], d["end_line"]) + "x" * 10 + "\n"))
+plain = subprocess.run([bin_, "--root", repo, "read", "-n", "p/crlf.txt",
+                        "--end-line", "1"], capture_output=True).stdout
+check("numbered plain", plain == b"1: one\r\n")
+' "$BIN" "$READ_REPO" 2>&1); then
+  echo 'ok 6 - read slices, caps, and clamps lines of a file'
+else
+  echo 'not ok 6 - read slices, caps, and clamps lines of a file'
+  printf '# %s\n' "$READ_ERR"
+fi
+
+# Test 184: search runs git grep over the working tree or a commit (--at),
+# with paths relative to the root, also for paths holding ':', '-', or
+# non-ASCII characters; lists the files it names; cuts long lines and caps
+# output; exits 0, 1, or 2; and refuses options off the allowlist (including
+# abbreviations and bundles), a second bare pattern, and escaping paths.
+SEARCH_REPO="$TEST_ROOT/search-repo"
+mkdir -p "$SEARCH_REPO/p/a-b" "$SEARCH_REPO/p/a"
+git -C "$SEARCH_REPO" init -q
+printf 'alpha needle\nbeta\n' >"$SEARCH_REPO/p/a-b/one.md"
+printf 'x\nneedle: here\n' >"$SEARCH_REPO/p/a/b:2-odd.md"
+printf 'café needle\n' >"$SEARCH_REPO/p/café.md"
+python3 -c '
+import sys
+d = sys.argv[1]
+with open(d + "/p/long.txt", "w") as f:
+    f.write("needle " + "\u00e9" * 5000 + "\n")
+with open(d + "/p/many.txt", "w") as f:
+    for i in range(1, 20001):
+        f.write(f"needle {i:05d}\n")
+' "$SEARCH_REPO"
+git -C "$SEARCH_REPO" add -A
+git -C "$SEARCH_REPO" commit -qm 'search fixtures'
+printf 'gamma needle\n' >>"$SEARCH_REPO/p/a-b/one.md"
+if SEARCH_ERR=$(python3 -c '
+import json, subprocess, sys
+bin_, repo = sys.argv[1], sys.argv[2]
+
+def search(*args):
+    res = subprocess.run(
+        [bin_, "--root", repo, "search", *args],
+        capture_output=True, text=True, cwd="/",
+    )
+    return res.returncode, res.stdout, res.stderr
+
+def js(*args):
+    rc, out, _ = search("--json", *args)
+    return rc, json.loads(out) if rc in (0, 1) else None
+
+def check(name, ok):
+    if not ok:
+        sys.exit(name)
+
+rc, d = js("needle", "--", "p/a-b", "p/a")
+check("worktree", rc == 0 and d["output"] == (
+    "p/a-b/one.md:1:alpha needle\np/a-b/one.md:3:gamma needle\n"
+    "p/a/b:2-odd.md:2:needle: here\n") and d["files"] == [
+    "p/a-b/one.md", "p/a/b:2-odd.md"] and not d["truncated"])
+rc, d = js("--at", "HEAD", "-e", "needle", "--", "p/a-b")
+check("at HEAD", rc == 0 and d["output"] == "p/a-b/one.md:1:alpha needle\n")
+rc, d = js("-c", "needle", "--at=HEAD", "--", "*.md")
+check("count", d["files"] == ["p/a-b/one.md", "p/a/b:2-odd.md", "p/café.md"]
+      and "p/café.md:1\n" in d["output"])
+rc, d = js("-l", "-i", "ALPHA", "--at", "HEAD")
+check("files only", d["output"] == "p/a-b/one.md\n" and d["files"] == ["p/a-b/one.md"])
+rc, d = js("-C1", "beta", "--at", "HEAD", "--", "p/a-b")
+check("context", d["output"] == "p/a-b/one.md-1-alpha needle\np/a-b/one.md:2:beta\n"
+      and d["files"] == ["p/a-b/one.md"])
+rc, d = js("-e", "nothing-here")
+check("no match", rc == 1 and d == {"output": "", "files": [], "truncated": False})
+rc, d = js("needle", "--", "p/long.txt")
+line = d["output"].rstrip("\n")
+check("long line", line.endswith(" ...[truncated]")
+      and len(line.removesuffix(" ...[truncated]").encode()) <= 1024)
+rc, d = js("needle", "--", "p/many.txt")
+check("cap", rc == 0 and d["truncated"] and len(d["output"].encode()) <= 65536
+      and d["output"].endswith("\n") and d["files"] == ["p/many.txt"])
+rc, out, err = search("-e", "[")
+check("git error", rc == 2 and "Invalid regular expression" in err)
+for bad in (["--no-ind", "x"], ["-if/etc/passwd", "x"], ["--file=/etc/passwd"],
+            ["-O", "x"], ["-h", "x"], ["--color=always", "x"], ["--cached", "x"],
+            ["x", "HEAD"], ["-e", "x", "y"], ["-C"], [], ["x", "--", "../y"],
+            ["x", "--", ".git/HEAD"], ["--json"]):
+    rc, out, err = search(*bad)
+    check(f"refuse {bad}", rc == 2 and out == "")
+rc, out, err = search("--help")
+check("help", rc == 0 and "GREP_ARGS" in out)
+' "$BIN" "$SEARCH_REPO" 2>&1); then
+  echo 'ok 7 - search greps files, caps output, and refuses unsafe options'
+else
+  echo 'not ok 7 - search greps files, caps output, and refuses unsafe options'
+  printf '# %s\n' "$SEARCH_ERR"
+fi
+
+# Test 185: a search that runs past its time limit stops git and reports it.
+if SEARCH_TO=$(
+  SEARCH_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN") &&
+    "$SEARCH_PY" - "$BIN" "$SEARCH_REPO" 2>&1 <<'PY'
+import importlib.machinery
+import importlib.util
+import os
+import sys
+import time
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader("taskgo_under_test", sys.argv[1])
+tg = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(tg)
+tg.SEARCH_TIMEOUT = 0.5
+repo = Path(sys.argv[2])
+search = tg.parse_search_args(["-e", "needle"])
+# A stand-in for a git grep that never finishes, such as a -P pattern that
+# backtracks without end: it sleeps (exec, so killing it closes its output).
+fake = repo.parent / "fake-git"
+fake.mkdir(exist_ok=True)
+(fake / "git").write_text("#!/bin/sh\nexec sleep 30\n")
+(fake / "git").chmod(0o755)
+os.environ["PATH"] = f"{fake}:{os.environ['PATH']}"
+start = time.monotonic()
+try:
+    tg.run_search(repo, search, None, set())
+except tg.TaskgoError as e:
+    assert "timed out" in str(e), e
+else:
+    raise AssertionError("no timeout")
+assert time.monotonic() - start < 5
+print("ok")
+PY
+); then
+  echo 'ok 8 - search stops git after its time limit'
+else
+  echo 'not ok 8 - search stops git after its time limit'
+  printf '# %s\n' "$SEARCH_TO"
+fi
+# A project README declares the agent skills to work on it; 'skills' prints
+# them, dispatch carries them, and doctor checks them against the skill CLI's
+# catalog when that CLI is on PATH.
+SKILLS_REPO="$TEST_ROOT/skills-repo"
+mkdir -p "$SKILLS_REPO/proj/tasks" "$SKILLS_REPO/bare/tasks" "$SKILLS_REPO/bin"
+git -C "$SKILLS_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$SKILLS_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SKILLS_REPO/INBOX.md"
+printf '%s\n' \
+  '---' \
+  'skills:' \
+  '  - coding-standards' \
+  '  - local:notes' \
+  '  - coding-standard' \
+  '---' \
+  '' \
+  '# Proj' \
+  >"$SKILLS_REPO/proj/README.md"
+printf '# Bare\n' >"$SKILLS_REPO/bare/README.md"
+("$BIN" --root "$SKILLS_REPO" sync >/dev/null)
+git -C "$SKILLS_REPO" add -A
+git -C "$SKILLS_REPO" commit -qm 'init skills fixture'
+# A stand-in skill CLI: its catalog is JSON Lines of {"name": ...}.
+cat >"$SKILLS_REPO/bin/skill" <<'FAKE_SKILL'
+#!/usr/bin/env bash
+[ "$1" = catalog ] && [ "$2" = --json ] || exit 2
+printf '%s\n' '{"name": "coding-standards", "status": "local"}' \
+  '{"name": "local:notes", "status": "local"}'
+FAKE_SKILL
+chmod +x "$SKILLS_REPO/bin/skill"
+# And one that fails, standing in for no skill CLI at all.
+mkdir -p "$SKILLS_REPO/nobin"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$SKILLS_REPO/nobin/skill"
+chmod +x "$SKILLS_REPO/nobin/skill"
+
+# Test 191: skills prints the list; dispatch carries it, with the command on
+# a line of its own
+SKILLS_OUT="$("$BIN" --root "$SKILLS_REPO" skills proj 2>&1)"
+SKILLS_JSON="$("$BIN" --root "$SKILLS_REPO" skills proj --json 2>&1)"
+SKILLS_NONE="$("$BIN" --root "$SKILLS_REPO" skills bare 2>&1)"
+SKILLS_NOTE="$("$BIN" --root "$SKILLS_REPO" dispatch proj 2>/dev/null)"
+SKILLS_BARE_NOTE="$("$BIN" --root "$SKILLS_REPO" dispatch bare 2>/dev/null)"
+SKILLS_PAYLOAD="$("$BIN" --root "$SKILLS_REPO" dispatch proj --json 2>/dev/null)"
+if [[ "$SKILLS_OUT" == $'coding-standards\nlocal:notes\ncoding-standard' ]] &&
+  [[ "$SKILLS_JSON" == '["coding-standards", "local:notes", "coding-standard"]' ]] &&
+  [[ -z "$SKILLS_NONE" ]] &&
+  [[ "$SKILLS_NOTE" == *$'\n\nSkills: coding-standards, local:notes, coding-standard. '* ]] &&
+  [[ "$SKILLS_NOTE" == *$'\n\n  taskgo skills proj | skill --scope session add -' ]] &&
+  [[ "$SKILLS_BARE_NOTE" != *"Skills:"* ]] &&
+  "$MCP_PY" -c '
+import json, sys
+got = json.loads(sys.argv[1])
+assert got["skills"] == ["coding-standards", "local:notes", "coding-standard"], got["skills"]
+assert got["frontmatter"]["skills"] == got["skills"], got["frontmatter"]
+assert "\n\n  taskgo skills proj | skill --scope session add -\n\n" in got["note"], got["note"]
+' "$SKILLS_PAYLOAD"; then
+  echo 'ok 9 - skills prints a project'"'"'s skills; dispatch carries them and the command to activate them'
+else
+  echo 'not ok 9 - skills prints a project'"'"'s skills; dispatch carries them and the command to activate them'
+  printf '# %s\n' "$SKILLS_OUT" "$SKILLS_JSON" "$SKILLS_NOTE"
+fi
+
+# Test 192: doctor checks the names against the skill CLI's catalog, and says
+# when it cannot
+set +e
+SKILLS_DOCTOR="$(PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_DOCTOR_RC=0
+PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj >/dev/null 2>&1 || SKILLS_DOCTOR_RC=$?
+SKILLS_DOCTOR_BARE_RC=0
+PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor bare >/dev/null 2>&1 || SKILLS_DOCTOR_BARE_RC=$?
+SKILLS_DOCTOR_NOCLI="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+set -e
+if [[ "$SKILLS_DOCTOR" == *"[WARN]  proj/README.md: unknown skill 'coding-standard' (did you mean 'coding-standards'?)"* ]] &&
+  [[ "$SKILLS_DOCTOR" != *"unknown skill 'coding-standards'"* ]] &&
+  [[ "$SKILLS_DOCTOR" != *"unknown skill 'local:notes'"* ]] &&
+  [[ "$SKILLS_DOCTOR_RC" -eq 1 ]] && [[ "$SKILLS_DOCTOR_BARE_RC" -eq 0 ]] &&
+  [[ "$SKILLS_DOCTOR_NOCLI" == *"[INFO]  skills not checked (skill CLI not found or failed)"* ]] &&
+  [[ "$SKILLS_DOCTOR_NOCLI" != *"unknown skill"* ]]; then
+  echo 'ok 10 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
+else
+  echo 'not ok 10 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
+  printf '# %s\n' "$SKILLS_DOCTOR" "$SKILLS_DOCTOR_NOCLI"
+fi
+
+# Test 193: a skills value that is not a list of names is reported, and
+# yields no skills
+set +e
+printf '%s\n' '---' 'skills:' '  notes: true' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
+SKILLS_SHAPE="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_SHAPE_LIST="$("$BIN" --root "$SKILLS_REPO" skills proj 2>&1)"
+printf '%s\n' '---' 'skills:' '  - ../escape' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
+SKILLS_SPEC="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+set -e
+if [[ "$SKILLS_SHAPE" == *"[WARN]  proj/README.md: skills must be a list of skill names, not"* ]] &&
+  [[ -z "$SKILLS_SHAPE_LIST" ]] &&
+  [[ "$SKILLS_SPEC" == *"skills must be a list of skill names, not '../escape'"* ]]; then
+  echo 'ok 11 - doctor reports a skills value that is not a list of skill names'
+else
+  echo 'not ok 11 - doctor reports a skills value that is not a list of skill names'
+  printf '# %s\n' "$SKILLS_SHAPE" "$SKILLS_SPEC"
+fi

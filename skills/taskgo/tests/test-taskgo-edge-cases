@@ -1,0 +1,801 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$TEST_DIR/../scripts/taskgo" ]]; then
+  TEST_DIR="/usr/local/google/home/stillers/.dotfiles/skills/taskgo/tests"
+fi
+BIN="$TEST_DIR/../scripts/taskgo"
+# shellcheck disable=SC2034
+MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..30"
+
+init_base_repo() {
+  local target="${1:-$TEST_ROOT/repo}"
+  mkdir -p "$target/example/tasks"
+  git -C "$target" init -q
+  printf '%s
+' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' >"$target/AGENTS.md"
+  printf '# Inbox
+' >"$target/INBOX.md"
+  printf '# Example project
+' >"$target/example/PROJECT.md"
+  printf '# Plan
+' >"$target/example/PLAN.md"
+  printf '%s
+' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
+}
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck disable=SC2034
+APPLY_PY="$MCP_PY"
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+# Test 35 & 36: SIGTERM and SIGINT signal teardown
+SIG_REPO="$TEST_ROOT/sig-repo"
+mkdir -p "$SIG_REPO/proj/tasks" "$TEST_ROOT/mock-bin"
+git -C "$SIG_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$SIG_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SIG_REPO/INBOX.md"
+printf '# Proj\n' >"$SIG_REPO/proj/README.md"
+printf '# Status\n' >"$SIG_REPO/proj/STATUS.md"
+
+cat <<'EOF' >"$TEST_ROOT/mock-bin/git"
+#!/bin/sh
+trap 'exit 143' TERM
+trap 'exit 130' INT
+sleep 30
+EOF
+chmod +x "$TEST_ROOT/mock-bin/git"
+
+python3 -c '
+import sys, os, signal, subprocess, time
+repo, bin_path, mock_bin = sys.argv[1:4]
+env = os.environ.copy()
+env["PATH"] = mock_bin + ":" + env.get("PATH", "")
+
+def run_test(sig, expected, test_num, desc):
+    p = subprocess.Popen([bin_path, "--root", repo, "create", "proj", f"Slow task {test_num}"], cwd=repo, env=env, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    time.sleep(0.8)
+    os.killpg(os.getpgid(p.pid), sig)
+    _, err = p.communicate(timeout=5)
+    if p.returncode == expected and "TimeoutExpired" not in err and "Traceback" not in err:
+        print(f"ok {test_num} - {desc}")
+    else:
+        print(f"not ok {test_num} - {desc} (exit code {p.returncode})")
+        if err:
+            for line in err.splitlines():
+                print(f"# {line}")
+
+run_test(signal.SIGTERM, 143, 1, "SIGTERM gracefully terminates subprocesses with exit code 143 and no traceback")
+run_test(signal.SIGINT, 130, 2, "SIGINT exits with code 130 and no traceback")
+' "$SIG_REPO" "$BIN" "$TEST_ROOT/mock-bin"
+
+if ("$BIN" --root "$REPO" create "../escaped" "Escape task" 2>/dev/null); then
+  echo "not ok 3 - create should reject traversing project names"
+else
+  echo "ok 3 - create rejects invalid / traversing project names"
+fi
+
+COMPLEX_REPO="$TEST_ROOT/complex-repo"
+mkdir -p "$COMPLEX_REPO/proj/tasks"
+git -C "$COMPLEX_REPO" init -q
+printf '# Agent\n\n<!-- taskgo:allow-local-commits -->\n' >"$COMPLEX_REPO/AGENTS.md"
+printf '# Proj\n' >"$COMPLEX_REPO/proj/README.md"
+printf '# Status\n' >"$COMPLEX_REPO/proj/STATUS.md"
+cat <<'EOF' >"$COMPLEX_REPO/proj/tasks/TASK-C0001-complex.md"
+---
+id: TASK-C0001
+status: todo
+tags:
+  - alpha
+  - beta
+metadata:
+  nested: value
+---
+
+# Complex Task
+
+## Outcome
+EOF
+git -C "$COMPLEX_REPO" add .
+git -C "$COMPLEX_REPO" commit -q -m "init complex"
+("$BIN" --root "$COMPLEX_REPO" update TASK-C0001 --status in-progress --outcome "Completed migration")
+if grep -q 'alpha' "$COMPLEX_REPO/proj/tasks/TASK-C0001-complex.md" && grep -q 'nested: value' "$COMPLEX_REPO/proj/tasks/TASK-C0001-complex.md"; then
+  echo "ok 4 - update preserves complex YAML frontmatter lists and mappings"
+else
+  echo "not ok 4 - update preserves complex YAML frontmatter lists and mappings"
+fi
+
+cat <<'EOF' >"$COMPLEX_REPO/proj/tasks/TASK-C0002-headings.md"
+---
+id: TASK-C0002
+status: todo
+---
+
+# Heading Test
+
+## Findings
+
+Some initial findings.
+
+## Next
+
+Next steps.
+EOF
+("$BIN" --root "$COMPLEX_REPO" update TASK-C0002 --findings "Updated findings")
+if grep -q '## Next' "$COMPLEX_REPO/proj/tasks/TASK-C0002-headings.md" && grep -q 'Next steps.' "$COMPLEX_REPO/proj/tasks/TASK-C0002-headings.md"; then
+  echo "ok 5 - update preserves subsequent H1 and H2 headings when updating a section"
+else
+  echo "not ok 5 - update preserves subsequent H1 and H2 headings when updating a section"
+fi
+
+ZERO_REPO="$TEST_ROOT/zero-repo"
+mkdir -p "$ZERO_REPO"
+git -C "$ZERO_REPO" init -q
+printf '# Agent\n\n<!-- taskgo:allow-local-commits -->\n' >"$ZERO_REPO/AGENTS.md"
+("$BIN" --root "$ZERO_REPO" create myproj "First task ever")
+if [ "$(git -C "$ZERO_REPO" rev-list --count HEAD 2>/dev/null || echo 0)" -eq 1 ]; then
+  echo "ok 6 - create auto-commits first task in a 0-commit repository"
+else
+  echo "not ok 6 - create auto-commits first task in a 0-commit repository"
+fi
+
+# 42: resolve_target rejects paths outside repository gracefully without traceback
+OUT_ERR="$("$BIN" --root "$REPO" update /etc/passwd --status "done" 2>&1 || true)"
+if echo "$OUT_ERR" | grep -q "path is outside control repository" && ! echo "$OUT_ERR" | grep -q "Traceback"; then
+  echo "ok 7 - resolve_target rejects paths outside repository gracefully without traceback"
+else
+  echo "not ok 7 - resolve_target rejects paths outside repository gracefully without traceback"
+fi
+
+# 43: root resolution reports clean errors for missing and non-Git roots,
+# and TASKGO_ROOT is honored from any working directory
+MISSING_ROOT="$TEST_ROOT/does-not-exist"
+OUT_MISSING="$(TASKGO_ROOT="$MISSING_ROOT" "$BIN" id 2>&1 || true)"
+NONGIT_DIR="$(mktemp -d)"
+OUT_NONGIT="$(TASKGO_ROOT="$NONGIT_DIR" "$BIN" id 2>&1 || true)"
+rm -rf "$NONGIT_DIR"
+OUT_ENV="$(cd "$TEST_ROOT" && TASKGO_ROOT="$REPO" "$BIN" list)"
+if [[ "$OUT_MISSING" == *"does not exist"* ]] &&
+  [[ "$OUT_MISSING" != *"Traceback"* ]] &&
+  [[ "$OUT_NONGIT" == *"not a Git repository"* ]] &&
+  [[ "$OUT_NONGIT" != *"Traceback"* ]] &&
+  [[ "$OUT_ENV" == *"TASK-A1B2C"* ]]; then
+  echo "ok 8 - root resolution reports clean errors and honors TASKGO_ROOT"
+else
+  echo "not ok 8 - root resolution reports clean errors and honors TASKGO_ROOT"
+fi
+
+# 44: fix preserves complex YAML types during auto-heal
+FIX_REPO="$TEST_ROOT/fix-complex-repo"
+mkdir -p "$FIX_REPO/proj/tasks"
+git -C "$FIX_REPO" init -q
+printf '# Agent\n\n<!-- taskgo:allow-local-commits -->\n' >"$FIX_REPO/AGENTS.md"
+printf '# Proj\n' >"$FIX_REPO/proj/README.md"
+printf '# Status\n' >"$FIX_REPO/proj/STATUS.md"
+cat <<'EOF' >"$FIX_REPO/proj/tasks/fixme.md"
+---
+status: open
+tags:
+  - first
+  - second
+active: true
+---
+
+# Unallocated Task
+
+## Outcome
+EOF
+git -C "$FIX_REPO" add .
+git -C "$FIX_REPO" commit -q -m "init unallocated"
+("$BIN" --root "$FIX_REPO" fix proj)
+FIXED_FILE="$(ls "$FIX_REPO/proj/tasks"/TASK-*-unallocated-task.md 2>/dev/null || true)"
+if [ -n "$FIXED_FILE" ] && grep -q '  - first' "$FIXED_FILE" && grep -q 'active: true' "$FIXED_FILE" && ! grep -q "active: 'True'" "$FIXED_FILE"; then
+  echo "ok 9 - fix preserves complex YAML types during auto-heal"
+else
+  echo "not ok 9 - fix preserves complex YAML types during auto-heal"
+fi
+
+# 45: list rejects traversing project names
+if ("$BIN" --root "$REPO" list "../escaped" 2>/dev/null); then
+  echo "not ok 10 - list should reject traversing project names"
+else
+  echo "ok 10 - list rejects traversing project names"
+fi
+
+# 46: create --conv records conversation in frontmatter and commit trailer
+CONV_REPO="$TEST_ROOT/conv-repo"
+mkdir -p "$CONV_REPO"
+git -C "$CONV_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$CONV_REPO/AGENTS.md"
+printf '# Inbox\n' >"$CONV_REPO/INBOX.md"
+git -C "$CONV_REPO" add AGENTS.md INBOX.md
+git -C "$CONV_REPO" commit -q -m "initial repo"
+("$BIN" --root "$CONV_REPO" create convproj "Conv task" --conv "afb6245a-b957-464c-934e-9d09ee099e97")
+CONV_TASK="$(ls "$CONV_REPO/convproj/tasks"/TASK-*.md 2>/dev/null || true)"
+LAST_COMMIT_MSG="$(git -C "$CONV_REPO" log -1 --pretty=%B)"
+if [ -n "$CONV_TASK" ] && grep -q 'conversation://afb6245a-b957-464c-934e-9d09ee099e97' "$CONV_TASK" && echo "$LAST_COMMIT_MSG" | grep -q "Conversation: conversation://afb6245a-b957-464c-934e-9d09ee099e97"; then
+  echo "ok 11 - create --conv records conversation in frontmatter and commit trailer"
+else
+  echo "not ok 11 - create --conv records conversation in frontmatter and commit trailer"
+fi
+
+# 47: update --conv appends conversation to frontmatter
+("$BIN" --root "$CONV_REPO" update "$CONV_TASK" --conv "3109efcc-bb3f-44a5-8d91-eb678656cc0c")
+if grep -q 'conversation://afb6245a-b957-464c-934e-9d09ee099e97' "$CONV_TASK" && grep -q 'conversation://3109efcc-bb3f-44a5-8d91-eb678656cc0c' "$CONV_TASK"; then
+  echo "ok 12 - update --conv appends conversation to frontmatter"
+else
+  echo "not ok 12 - update --conv appends conversation to frontmatter"
+fi
+
+# 48: checkpoint --conv appends Conversation trailer to commit
+printf '\nNew line\n' >>"$CONV_TASK"
+("$BIN" --root "$CONV_REPO" checkpoint "$(basename "$CONV_TASK" | grep -oE 'TASK-[0-9A-F]{5}')" "convproj: test checkpoint" --all --conv "09825342-4500-4dc2-ba68-6f22bfa9646e")
+CP_MSG="$(git -C "$CONV_REPO" log -1 --pretty=%B)"
+if echo "$CP_MSG" | grep -q "Conversation: conversation://09825342-4500-4dc2-ba68-6f22bfa9646e"; then
+  echo "ok 13 - checkpoint --conv appends Conversation trailer to commit"
+else
+  echo "not ok 13 - checkpoint --conv appends Conversation trailer to commit"
+fi
+
+# 50: checkpoint and commit handle project filepaths containing spaces without quoting errors
+SPACE_REPO="$TEST_ROOT/space-repo"
+mkdir -p "$SPACE_REPO/spaceproj/tasks"
+git -C "$SPACE_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$SPACE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SPACE_REPO/INBOX.md"
+printf '# Space Proj\n' >"$SPACE_REPO/spaceproj/README.md"
+cat <<'EOF' >"$SPACE_REPO/spaceproj/tasks/TASK-12AC1-spaced-task.md"
+---
+id: TASK-12AC1
+status: todo
+---
+
+# Spaced Task
+
+## Outcome
+EOF
+("$BIN" --root "$SPACE_REPO" sync spaceproj)
+echo "doc with spaces" >"$SPACE_REPO/spaceproj/file with spaces.txt"
+git -C "$SPACE_REPO" add .
+git -C "$SPACE_REPO" commit -q -m "initial spaced"
+echo "edited doc with spaces" >"$SPACE_REPO/spaceproj/file with spaces.txt"
+("$BIN" --root "$SPACE_REPO" checkpoint TASK-12AC1 "spaceproj: update spaced file" --path "spaceproj/file with spaces.txt")
+if git -C "$SPACE_REPO" log -1 --pretty=%s | grep -q "chore(spaceproj): update spaced file"; then
+  echo "ok 14 - checkpoint and commit handle project filepaths containing spaces without quoting errors"
+else
+  echo "not ok 14 - checkpoint and commit handle project filepaths containing spaces without quoting errors"
+fi
+
+# 51: commit does not mutate STATUS.md or index when doctor audit fails
+MUT_REPO="$TEST_ROOT/mut-repo"
+mkdir -p "$MUT_REPO/proj/tasks"
+git -C "$MUT_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$MUT_REPO/AGENTS.md"
+printf '# Inbox\n' >"$MUT_REPO/INBOX.md"
+printf '# Proj\n' >"$MUT_REPO/proj/README.md"
+cat <<'EOF' >"$MUT_REPO/proj/tasks/TASK-MUT01-broken-status.md"
+---
+id: TASK-MUT01
+status: in-progress
+---
+
+# Broken Status Task
+
+## Outcome
+EOF
+# Prose contradicts in-progress status (triggers WARN from doctor)
+printf '# Status\n\n## Summary\n\nNothing is in-progress.\n' >"$MUT_REPO/proj/STATUS.md"
+git -C "$MUT_REPO" add .
+git -C "$MUT_REPO" commit -q -m "initial broken"
+echo "some staged code" >"$MUT_REPO/proj/code.txt"
+git -C "$MUT_REPO" add "$MUT_REPO/proj/code.txt"
+ORIGINAL_STATUS_CONTENT="$(cat "$MUT_REPO/proj/STATUS.md")"
+COMMIT_ERR="$("$BIN" --root "$MUT_REPO" commit "proj: commit code" 2>&1 || true)"
+AFTER_STATUS_CONTENT="$(cat "$MUT_REPO/proj/STATUS.md")"
+STATUS_STAGED="$(git -C "$MUT_REPO" diff --cached --name-only | grep 'STATUS.md' || true)"
+if echo "$COMMIT_ERR" | grep -q "doctor found errors" && [ "$ORIGINAL_STATUS_CONTENT" = "$AFTER_STATUS_CONTENT" ] && [ -z "$STATUS_STAGED" ]; then
+  echo "ok 15 - commit does not mutate STATUS.md or index when doctor audit fails"
+else
+  echo "not ok 15 - commit does not mutate STATUS.md or index when doctor audit fails"
+fi
+
+# 53: trailers form a contiguous block without intervening blank lines
+TRAIL_REPO="$TEST_ROOT/trail-repo"
+mkdir -p "$TRAIL_REPO/proj/tasks"
+git -C "$TRAIL_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$TRAIL_REPO/AGENTS.md"
+printf '# Inbox\n' >"$TRAIL_REPO/INBOX.md"
+printf '# Proj\n' >"$TRAIL_REPO/proj/README.md"
+cat <<'EOF' >"$TRAIL_REPO/proj/tasks/TASK-B1100-trail-task.md"
+---
+id: TASK-B1100
+status: todo
+---
+
+# Trail Task
+
+## Outcome
+EOF
+("$BIN" --root "$TRAIL_REPO" sync proj)
+git -C "$TRAIL_REPO" add .
+git -C "$TRAIL_REPO" commit -q -m "initial trail"
+echo "change" >"$TRAIL_REPO/proj/change.txt"
+git -C "$TRAIL_REPO" add "$TRAIL_REPO/proj/change.txt"
+("$BIN" --root "$TRAIL_REPO" commit "proj: test trailers" --body "Commit body text." --conv "f1a63b0a-348e-4b9d-9bb1-762e84fe72a5" --ref "abc@123" --ref "def@456")
+TRAIL_PARSED="$(git -C "$TRAIL_REPO" log -1 --pretty=format:%B | git -C "$TRAIL_REPO" interpret-trailers --parse)"
+EXPECTED_TRAILERS="$(printf "Conversation: conversation://f1a63b0a-348e-4b9d-9bb1-762e84fe72a5\nRef: abc@123\nRef: def@456")"
+if [ "$TRAIL_PARSED" = "$EXPECTED_TRAILERS" ]; then
+  echo "ok 16 - trailers form a contiguous block without intervening blank lines"
+else
+  echo "not ok 16 - trailers form a contiguous block without intervening blank lines"
+fi
+
+# 54: frontmatter parser handles closing marker at EOF without trailing newline
+EOF_REPO="$TEST_ROOT/eof-repo"
+mkdir -p "$EOF_REPO/proj/tasks"
+git -C "$EOF_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$EOF_REPO/AGENTS.md"
+printf '# Inbox\n' >"$EOF_REPO/INBOX.md"
+printf '# Proj\n' >"$EOF_REPO/proj/README.md"
+printf -- '---\nid: TASK-E0F01\nstatus: todo\n---' >"$EOF_REPO/proj/tasks/TASK-E0F01-eof-task.md"
+("$BIN" --root "$EOF_REPO" sync proj)
+git -C "$EOF_REPO" add .
+git -C "$EOF_REPO" commit -q -m "initial eof"
+("$BIN" --root "$EOF_REPO" update TASK-E0F01 --status "in-progress")
+if [ "$(grep -c '^---$' "$EOF_REPO/proj/tasks/TASK-E0F01-eof-task.md")" -eq 2 ]; then
+  echo "ok 17 - frontmatter parser handles closing marker at EOF without trailing newline"
+else
+  echo "not ok 17 - frontmatter parser handles closing marker at EOF without trailing newline"
+fi
+
+# 56: project names reject dot-directories
+DOT_REPO="$TEST_ROOT/dot-repo"
+mkdir -p "$DOT_REPO"
+git -C "$DOT_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$DOT_REPO/AGENTS.md"
+printf '# Inbox\n' >"$DOT_REPO/INBOX.md"
+DOT_ERR="$("$BIN" --root "$DOT_REPO" create .git "Task inside git" 2>&1 || true)"
+if echo "$DOT_ERR" | grep -q "cannot start with a dot" || echo "$DOT_ERR" | grep -q "invalid project name"; then
+  echo "ok 18 - project names reject dot-directories"
+else
+  echo "not ok 18 - project names reject dot-directories"
+fi
+
+# 57: task update and fix preserve custom key casing and comments in frontmatter
+PRESERVE_REPO="$TEST_ROOT/preserve-repo"
+mkdir -p "$PRESERVE_REPO/proj/tasks"
+git -C "$PRESERVE_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$PRESERVE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$PRESERVE_REPO/INBOX.md"
+printf '# Proj\n' >"$PRESERVE_REPO/proj/README.md"
+cat <<'EOF' >"$PRESERVE_REPO/proj/tasks/TASK-A2E5E-preserve.md"
+---
+id: TASK-A2E5E
+status: todo
+CustomKey: ImportantValue # inline comment
+---
+
+# Preserve Task
+
+## Outcome
+EOF
+("$BIN" --root "$PRESERVE_REPO" sync proj)
+git -C "$PRESERVE_REPO" add .
+git -C "$PRESERVE_REPO" commit -q -m "initial preserve"
+("$BIN" --root "$PRESERVE_REPO" update TASK-A2E5E --status "in-progress")
+TASK_CONTENT="$(cat "$PRESERVE_REPO/proj/tasks/TASK-A2E5E-preserve.md")"
+if echo "$TASK_CONTENT" | grep -q "CustomKey: ImportantValue" && echo "$TASK_CONTENT" | grep -q "# inline comment"; then
+  echo "ok 19 - task update and fix preserve custom key casing and comments in frontmatter"
+else
+  echo "not ok 19 - task update and fix preserve custom key casing and comments in frontmatter"
+fi
+
+# 58: commands function cleanly when executed from a subdirectory
+SUB_REPO="$TEST_ROOT/sub-repo"
+mkdir -p "$SUB_REPO/proj/tasks"
+git -C "$SUB_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$SUB_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SUB_REPO/INBOX.md"
+printf '# Proj\n' >"$SUB_REPO/proj/README.md"
+cat <<'EOF' >"$SUB_REPO/proj/tasks/TASK-58001-sub-task.md"
+---
+id: TASK-58001
+status: todo
+---
+
+# Sub Task
+
+## Outcome
+EOF
+("$BIN" --root "$SUB_REPO" sync proj)
+git -C "$SUB_REPO" add .
+git -C "$SUB_REPO" commit -q -m "initial sub"
+OTHER_DIR="$TEST_ROOT/unrelated-cwd"
+mkdir -p "$OTHER_DIR"
+("$BIN" --root "$SUB_REPO" update TASK-58001 --status "in-progress")
+SUB_LIST="$(cd "$OTHER_DIR" && "$BIN" --root "$SUB_REPO" list proj)"
+SUB_STATUS="$(cd "$OTHER_DIR" && "$BIN" --root "$SUB_REPO" status proj)"
+if echo "$SUB_LIST" | grep -q "in-progress" && echo "$SUB_STATUS" | grep -q "In progress"; then
+  echo "ok 20 - commands resolve project and task paths relative to the root regardless of cwd"
+else
+  echo "not ok 20 - commands resolve project and task paths relative to the root regardless of cwd"
+fi
+
+# 59: fix does not overwrite metadata fixes or resurrect unrenamed files
+RACE_REPO="$TEST_ROOT/race-repo"
+mkdir -p "$RACE_REPO/proj/tasks"
+git -C "$RACE_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$RACE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$RACE_REPO/INBOX.md"
+printf '# Proj\n' >"$RACE_REPO/proj/README.md"
+cat <<'EOF' >"$RACE_REPO/proj/tasks/unformatted-missing-id.md"
+# Unformatted Task
+
+* item1
+* item2
+
+## Outcome
+Some outcome.
+EOF
+("$BIN" --root "$RACE_REPO" fix proj)
+OLD_EXISTS=0
+if [ -f "$RACE_REPO/proj/tasks/unformatted-missing-id.md" ]; then
+  OLD_EXISTS=1
+fi
+NEW_TASK_FILE="$(find "$RACE_REPO/proj/tasks" -name 'TASK-*.md' | head -n 1)"
+NEW_FM_ID="$(grep '^id: TASK-' "$NEW_TASK_FILE" 2>/dev/null || true)"
+if [ "$OLD_EXISTS" -eq 0 ] && [ -n "$NEW_FM_ID" ]; then
+  echo "ok 21 - fix does not overwrite metadata fixes or resurrect unrenamed files"
+else
+  echo "not ok 21 - fix does not overwrite metadata fixes or resurrect unrenamed files"
+fi
+
+# 60: history tracks field changes across task renames
+RENAME_REPO="$TEST_ROOT/rename-repo"
+mkdir -p "$RENAME_REPO/proj/tasks"
+git -C "$RENAME_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$RENAME_REPO/AGENTS.md"
+printf '# Inbox\n' >"$RENAME_REPO/INBOX.md"
+printf '# Proj\n' >"$RENAME_REPO/proj/README.md"
+cat <<'EOF' >"$RENAME_REPO/proj/tasks/TASK-60001-initial-title.md"
+---
+id: TASK-60001
+status: todo
+---
+
+# Initial Title
+
+## Outcome
+EOF
+("$BIN" --root "$RENAME_REPO" sync proj)
+git -C "$RENAME_REPO" add .
+git -C "$RENAME_REPO" commit -q -m "initial task"
+("$BIN" --root "$RENAME_REPO" update TASK-60001 --title "Renamed Title" --status "in-progress")
+git -C "$RENAME_REPO" mv "$RENAME_REPO/proj/tasks/TASK-60001-initial-title.md" "$RENAME_REPO/proj/tasks/TASK-60001-renamed-title.md"
+("$BIN" --root "$RENAME_REPO" sync proj)
+git -C "$RENAME_REPO" add .
+git -C "$RENAME_REPO" commit -q -m "rename task"
+HIST_OUT="$("$BIN" --root "$RENAME_REPO" history TASK-60001 status)"
+if echo "$HIST_OUT" | grep -q "todo" && echo "$HIST_OUT" | grep -q "in-progress"; then
+  echo "ok 22 - history tracks field changes across task renames"
+else
+  echo "not ok 22 - history tracks field changes across task renames"
+fi
+
+# 61: project creation rejects collision with existing root files
+COLLIDE_REPO="$TEST_ROOT/collide-repo"
+mkdir -p "$COLLIDE_REPO"
+git -C "$COLLIDE_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$COLLIDE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$COLLIDE_REPO/INBOX.md"
+COLLIDE_ERR="$("$BIN" --root "$COLLIDE_REPO" create INBOX.md "Colliding task" 2>&1 || true)"
+if echo "$COLLIDE_ERR" | grep -q "exists" || echo "$COLLIDE_ERR" | grep -q "invalid project name"; then
+  echo "ok 23 - project creation rejects collision with existing root files"
+else
+  echo "not ok 23 - project creation rejects collision with existing root files"
+fi
+
+# 62: create defaults to planning template for todo and outcome template for done
+TMPL_REPO="$TEST_ROOT/tmpl-repo"
+mkdir -p "$TMPL_REPO/proj"
+git -C "$TMPL_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$TMPL_REPO/AGENTS.md"
+printf '# Inbox\n' >"$TMPL_REPO/INBOX.md"
+printf '# Proj\n' >"$TMPL_REPO/proj/README.md"
+("$BIN" --root "$TMPL_REPO" create proj "Planning task" --status "todo")
+TODO_FILE="$(find "$TMPL_REPO/proj/tasks" -name 'TASK-*.md' | head -n 1)"
+TODO_CONTENT="$(cat "$TODO_FILE")"
+("$BIN" --root "$TMPL_REPO" create proj "Completed task" --status "done" --outcome "Shipped.")
+DONE_FILE="$(find "$TMPL_REPO/proj/tasks" -name 'TASK-*-completed-task.md' | head -n 1)"
+DONE_CONTENT="$(cat "$DONE_FILE")"
+if echo "$TODO_CONTENT" | grep -q "\*\*Goal:\*\*" && echo "$DONE_CONTENT" | grep -q "## Outcome"; then
+  echo "ok 24 - create defaults to planning template for todo and outcome template for done"
+else
+  echo "not ok 24 - create defaults to planning template for todo and outcome template for done"
+fi
+
+# 63: update on deleted task exits cleanly without traceback while history succeeds
+DEL_REPO="$TEST_ROOT/del-repo"
+mkdir -p "$DEL_REPO/proj/tasks"
+git -C "$DEL_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$DEL_REPO/AGENTS.md"
+printf '# Inbox\n' >"$DEL_REPO/INBOX.md"
+printf '# Proj\n' >"$DEL_REPO/proj/README.md"
+cat <<'EOF' >"$DEL_REPO/proj/tasks/TASK-63001-deleted-task.md"
+---
+id: TASK-63001
+status: todo
+---
+
+# Deleted Task
+
+## Outcome
+EOF
+("$BIN" --root "$DEL_REPO" sync proj)
+git -C "$DEL_REPO" add .
+git -C "$DEL_REPO" commit -q -m "initial del"
+git -C "$DEL_REPO" rm -q "$DEL_REPO/proj/tasks/TASK-63001-deleted-task.md"
+("$BIN" --root "$DEL_REPO" sync proj)
+git -C "$DEL_REPO" add .
+git -C "$DEL_REPO" commit -q -m "remove task"
+DEL_UPD_ERR="$("$BIN" --root "$DEL_REPO" update TASK-63001 --status "in-progress" 2>&1 || true)"
+DEL_HIST_OUT="$("$BIN" --root "$DEL_REPO" history TASK-63001 status 2>&1 || true)"
+if ! echo "$DEL_UPD_ERR" | grep -q "Traceback" && echo "$DEL_HIST_OUT" | grep -q "todo"; then
+  echo "ok 25 - update on deleted task exits cleanly without traceback while history succeeds"
+else
+  echo "not ok 25 - update on deleted task exits cleanly without traceback while history succeeds"
+fi
+
+# 64: checkpoint does not stage root files sharing prefix with project
+PFX_REPO="$TEST_ROOT/pfx-repo"
+mkdir -p "$PFX_REPO/myproj/tasks"
+git -C "$PFX_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$PFX_REPO/AGENTS.md"
+printf '# Inbox\n' >"$PFX_REPO/INBOX.md"
+printf '# MyProj\n' >"$PFX_REPO/myproj/README.md"
+printf 'root file content\n' >"$PFX_REPO/myproj.txt"
+cat <<'EOF' >"$PFX_REPO/myproj/tasks/TASK-64001-pfx-task.md"
+---
+id: TASK-64001
+status: todo
+---
+
+# Pfx Task
+
+## Outcome
+EOF
+("$BIN" --root "$PFX_REPO" sync myproj)
+git -C "$PFX_REPO" add AGENTS.md INBOX.md myproj
+git -C "$PFX_REPO" commit -q -m "initial pfx"
+("$BIN" --root "$PFX_REPO" update TASK-64001 --status "in-progress")
+("$BIN" --root "$PFX_REPO" checkpoint TASK-64001 "checkpoint in-progress" --all)
+PFX_STATUS="$(git -C "$PFX_REPO" status --porcelain)"
+if echo "$PFX_STATUS" | grep -q "?? myproj.txt"; then
+  echo "ok 26 - checkpoint does not stage root files sharing prefix with project"
+else
+  echo "not ok 26 - checkpoint does not stage root files sharing prefix with project"
+fi
+
+# 65: markdown formatting preserves and wraps frontmatter at EOF
+EOF_REPO="$TEST_ROOT/eof-repo"
+mkdir -p "$EOF_REPO/proj/tasks"
+git -C "$EOF_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$EOF_REPO/AGENTS.md"
+printf '# Inbox\n' >"$EOF_REPO/INBOX.md"
+printf '# Proj\n' >"$EOF_REPO/proj/README.md"
+printf -- '---\nid: TASK-65001\nstatus: todo\nLongKey: This is a very long frontmatter value that should be formatted and parsed cleanly by reformat_frontmatter\n---' >"$EOF_REPO/proj/tasks/TASK-65001-eof-wrap.md"
+("$BIN" --root "$EOF_REPO" fix proj --no-commit)
+EOF_FMT="$(cat "$EOF_REPO/proj/tasks/TASK-65001-eof-wrap.md")"
+if echo "$EOF_FMT" | grep -q "id: TASK-65001"; then
+  echo "ok 27 - markdown formatting preserves and wraps frontmatter at EOF"
+else
+  echo "not ok 27 - markdown formatting preserves and wraps frontmatter at EOF"
+fi
+
+# 68: update dies cleanly on YAML syntax error without corrupting file
+SYNTAX_REPO="$TEST_ROOT/syntax-repo"
+mkdir -p "$SYNTAX_REPO/proj/tasks"
+git -C "$SYNTAX_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$SYNTAX_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SYNTAX_REPO/INBOX.md"
+printf '# Proj\n' >"$SYNTAX_REPO/proj/README.md"
+cat <<'EOF' >"$SYNTAX_REPO/proj/tasks/TASK-68001-broken-yaml.md"
+---
+id: TASK-68001
+status: todo
+bad_yaml: [unclosed list
+---
+
+# Broken Yaml
+
+**Goal:**
+
+**Criteria:**
+EOF
+SYNTAX_ERR="$("$BIN" --root "$SYNTAX_REPO" update TASK-68001 --status "in-progress" 2>&1 || true)"
+ORIG_CONTENT="$(cat "$SYNTAX_REPO/proj/tasks/TASK-68001-broken-yaml.md")"
+if echo "$SYNTAX_ERR" | grep -q "cannot parse YAML frontmatter" && echo "$ORIG_CONTENT" | grep -q "bad_yaml: \[unclosed list"; then
+  echo "ok 28 - update dies cleanly on YAML syntax error without corrupting file"
+else
+  echo "not ok 28 - update dies cleanly on YAML syntax error without corrupting file"
+fi
+
+# 69: update on non-existent task file exits cleanly without traceback
+NOFILE_REPO="$TEST_ROOT/nofile-repo"
+mkdir -p "$NOFILE_REPO/proj/tasks"
+git -C "$NOFILE_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$NOFILE_REPO/AGENTS.md"
+printf '# Inbox\n' >"$NOFILE_REPO/INBOX.md"
+printf '# Proj\n' >"$NOFILE_REPO/proj/README.md"
+NOFILE_ERR="$("$BIN" --root "$NOFILE_REPO" update "proj/tasks/TASK-99999-does-not-exist.md" --status "in-progress" 2>&1 || true)"
+if ! echo "$NOFILE_ERR" | grep -q "Traceback" && echo "$NOFILE_ERR" | grep -q "taskgo:"; then
+  echo "ok 29 - update on non-existent task file exits cleanly without traceback"
+else
+  echo "not ok 29 - update on non-existent task file exits cleanly without traceback"
+fi
+
+# 70: root prints the resolved control repository; doctor reports root and source
+OUT_ROOT="$(TASKGO_ROOT="$REPO" "$BIN" root)"
+RESOLVED="$(cd "$REPO" && pwd -P)"
+DOCTOR_OUT="$("$BIN" --root "$REPO" doctor example 2>&1 || true)"
+if [[ "$OUT_ROOT" == "$RESOLVED" ]] &&
+  [[ "$DOCTOR_OUT" == *"[PASS]"*"Control repository"* ]] &&
+  [[ "$DOCTOR_OUT" == *"Root: "*"$RESOLVED"* ]] &&
+  [[ "$DOCTOR_OUT" == *"Source: --root"* ]]; then
+  echo "ok 30 - root and doctor report the resolved control repository"
+else
+  echo "not ok 30 - root and doctor report the resolved control repository"
+fi

@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$TEST_DIR/../scripts/taskgo" ]]; then
+  TEST_DIR="/usr/local/google/home/stillers/.dotfiles/skills/taskgo/tests"
+fi
+BIN="$TEST_DIR/../scripts/taskgo"
+# shellcheck disable=SC2034
+MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..20"
+
+init_base_repo() {
+  local target="${1:-$TEST_ROOT/repo}"
+  mkdir -p "$target/example/tasks"
+  git -C "$target" init -q
+  printf '%s
+' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' >"$target/AGENTS.md"
+  printf '# Inbox
+' >"$target/INBOX.md"
+  printf '# Example project
+' >"$target/example/PROJECT.md"
+  printf '# Plan
+' >"$target/example/PLAN.md"
+  printf '%s
+' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
+}
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck disable=SC2034
+APPLY_PY="$MCP_PY"
+
+# Cost is an optional task field; exercise creation, insertion and replacement.
+COST_REPO="$TEST_ROOT/cost-repo"
+mkdir -p "$COST_REPO"
+git -C "$COST_REPO" init -q
+COST_TASK="$COST_REPO/example/tasks/"
+if ("$BIN" --root "$COST_REPO" create example 'Record consequences' \
+  --slug consequences --problem 'Requests are slow' \
+  --cost 'Users wait for every request' --goal 'Reduce latency' --no-commit) >/dev/null 2>&1 &&
+  COST_CONTENT=$(cat "$COST_TASK"*consequences.md) &&
+  [[ "$COST_CONTENT" == *'**Problem:** Requests are slow'*'**Cost:** Users wait for every request'*'**Goal:** Reduce latency'* ]]; then
+  echo 'ok 1 - create writes Cost between Problem and Goal'
+else
+  echo 'not ok 1 - create writes Cost between Problem and Goal'
+fi
+
+if ("$BIN" --root "$COST_REPO" create example 'Keep cost optional' \
+  --slug optional --problem 'Background only' --no-commit) >/dev/null 2>&1 &&
+  COST_OPTIONAL_CONTENT=$(cat "$COST_TASK"*optional.md) &&
+  [[ "$COST_OPTIONAL_CONTENT" != *'**Cost:**'* ]] &&
+  ("$BIN" --root "$COST_REPO" update example/tasks/"$(basename "$COST_TASK"*optional.md)" \
+    --goal 'Preserve optional fields') >/dev/null 2>&1 &&
+  [[ $(cat "$COST_TASK"*optional.md) != *'**Cost:**'* ]]; then
+  echo 'ok 2 - create and update accept Problem without Cost'
+else
+  echo 'not ok 2 - create and update accept Problem without Cost'
+fi
+
+COST_OPTIONAL_PATH="example/tasks/$(basename "$COST_TASK"*optional.md)"
+if ("$BIN" --root "$COST_REPO" update "$COST_OPTIONAL_PATH" \
+  --cost 'Maintenance burden') >/dev/null 2>&1 &&
+  COST_INSERTED=$(cat "$COST_TASK"*optional.md) &&
+  [[ "$COST_INSERTED" == *'**Cost:** Maintenance burden'* ]] &&
+  [[ "$COST_INSERTED" == *'**Goal:** Preserve optional fields'* ]]; then
+  echo 'ok 3 - update adds a previously absent Cost'
+else
+  echo 'not ok 3 - update adds a previously absent Cost'
+fi
+
+if ("$BIN" --root "$COST_REPO" update "$COST_OPTIONAL_PATH" \
+  --cost $'Users wait.\n\nRetries add load.') >/dev/null 2>&1 &&
+  COST_REPLACED=$(cat "$COST_TASK"*optional.md) &&
+  [[ "$COST_REPLACED" == *'Users wait.'*'Retries add load.'* ]] &&
+  [[ "$COST_REPLACED" != *'Maintenance burden'* ]] &&
+  [[ "$COST_REPLACED" == *'**Problem:** Background only'* ]] &&
+  [[ "$COST_REPLACED" == *'**Goal:** Preserve optional fields'* ]] &&
+  [ "$(awk '/\*\*Cost:\*\*/ { n++ } END { print n+0 }' "$COST_TASK"*optional.md)" -eq 1 ]; then
+  echo 'ok 4 - update replaces Cost with multiline text and preserves other fields'
+else
+  echo 'not ok 4 - update replaces Cost with multiline text and preserves other fields'
+fi
+
+# ===========================================================================
+# wait_for, due, and stale_after frontmatter fields
+# ===========================================================================
+
+WF_REPO="$TEST_ROOT/wf-repo"
+mkdir -p "$WF_REPO/proj/tasks"
+git -C "$WF_REPO" init -q
+git -C "$WF_REPO" config user.name 'Taskgo Test'
+git -C "$WF_REPO" config user.email 'taskgo@example.invalid'
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$WF_REPO/AGENTS.md"
+printf '# Inbox\n' >"$WF_REPO/INBOX.md"
+printf '# Project\n' >"$WF_REPO/proj/README.md"
+git -C "$WF_REPO" add -A >/dev/null 2>&1
+git -C "$WF_REPO" commit -qm 'chore: init wf-repo'
+
+# Test 131: create and update support --wait-for, --due, and --stale-after and expose them in list --json
+WF_CREATED=$("$BIN" --root "$WF_REPO" create proj 'Wait on bug and deadline' \
+  --slug wait-bug \
+  --wait-for b/431751691 --wait-for '@stillers' \
+  --due 2026-10-15 \
+  --stale-after 2026-11-01 \
+  --no-commit)
+WF_ID="${WF_CREATED%%$'\t'*}"
+WF_JSON=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --json)
+if [[ "$WF_JSON" == *'"wait_for": ['* ]] &&
+  [[ "$WF_JSON" == *'"b/431751691"'* ]] &&
+  [[ "$WF_JSON" == *'"@stillers"'* ]] &&
+  [[ "$WF_JSON" == *'"due": "2026-10-15"'* ]] &&
+  [[ "$WF_JSON" == *'"stale_after": "2026-11-01"'* ]] &&
+  ("$BIN" --root "$WF_REPO" update "$WF_ID" --due 2026-10-20 --wait-for cl/970059389) >/dev/null 2>&1 &&
+  [[ $(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --json) == *'"due": "2026-10-20"'* ]] &&
+  [[ $(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --json) == *'"cl/970059389"'* ]]; then
+  echo 'ok 5 - create and update support --wait-for, --due, and --stale-after'
+else
+  echo 'not ok 5 - create and update support --wait-for, --due, and --stale-after'
+fi
+
+# Test 132: doctor allows status: blocked with unresolved wait_for, and warns when all wait_for dates elapsed
+("$BIN" --root "$WF_REPO" update "$WF_ID" --status blocked --wait-for b/431751691) >/dev/null 2>&1
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+if TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj >/dev/null 2>&1 &&
+  ("$BIN" --root "$WF_REPO" update "$WF_ID" --wait-for 2026-10-01) >/dev/null 2>&1 &&
+  (TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null &&
+  ! WF_ELAPSED_DR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj 2>&1) &&
+  [[ "$WF_ELAPSED_DR" == *"status is blocked but all wait_for gates elapsed"* ]]; then
+  echo 'ok 6 - doctor allows blocked status with unresolved wait_for and warns when elapsed'
+else
+  echo 'not ok 6 - doctor allows blocked status with unresolved wait_for and warns when elapsed'
+fi
+
+# Reset WF_ID back to clean blocked on b/431751691 with non-urgent due date
+("$BIN" --root "$WF_REPO" update "$WF_ID" --status blocked --wait-for b/431751691 --due 2026-10-20) >/dev/null 2>&1
+
+# Test 133: doctor emits [FAIL] when open task has due < today and [WARN] when due within 48h
+DUE_OVERDUE_OUT=$("$BIN" --root "$WF_REPO" create proj 'Overdue task' --slug overdue --due 2026-10-05 --no-commit)
+DUE_OVERDUE_ID="${DUE_OVERDUE_OUT%%$'\t'*}"
+DUE_SOON_OUT=$("$BIN" --root "$WF_REPO" create proj 'Soon task' --slug soon --due 2026-10-08 --no-commit)
+DUE_SOON_ID="${DUE_SOON_OUT%%$'\t'*}"
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+set +e
+DUE_DR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj 2>&1)
+DUE_DR_EXIT=$?
+set -e
+if [ "$DUE_DR_EXIT" -ne 0 ] &&
+  [[ "$DUE_DR" == *"[FAIL]  proj/tasks/${DUE_OVERDUE_ID}-overdue.md: overdue (due 2026-10-05"* ]] &&
+  [[ "$DUE_DR" == *"[WARN]  proj/tasks/${DUE_SOON_ID}-soon.md: due soon (due 2026-10-08"* ]]; then
+  echo 'ok 7 - doctor emits [FAIL] on overdue due date and [WARN] within 48h'
+else
+  echo 'not ok 7 - doctor emits [FAIL] on overdue due date and [WARN] within 48h'
+fi
+
+# Test 134: doctor emits [WARN] on open task with stale_after < today without auto-deleting on fix
+("$BIN" --root "$WF_REPO" update "$DUE_OVERDUE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+("$BIN" --root "$WF_REPO" update "$DUE_SOON_ID" --due 2026-10-25 --stale-after 2026-10-01) >/dev/null 2>&1
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+set +e
+STALE_DR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" doctor proj 2>&1)
+STALE_DR_EXIT=$?
+set -e
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" fix proj --no-commit) >/dev/null 2>&1 || true
+if [ "$STALE_DR_EXIT" -ne 0 ] &&
+  [[ "$STALE_DR" == *"[WARN]  proj/tasks/${DUE_SOON_ID}-soon.md: stale task (stale_after 2026-10-01)"* ]] &&
+  [ -f "$WF_REPO/proj/tasks/${DUE_SOON_ID}-soon.md" ]; then
+  echo 'ok 8 - doctor warns on stale_after < today without deleting task'
+else
+  echo 'not ok 8 - doctor warns on stale_after < today without deleting task'
+fi
+
+# Clean up stale_after on DUE_SOON_ID
+("$BIN" --root "$WF_REPO" update "$DUE_SOON_ID" --stale-after "") >/dev/null 2>&1
+
+# Test 135: list --state ready excludes todo tasks with unresolved wait_for gates and includes elapsed dates
+WF_FUT_OUT=$("$BIN" --root "$WF_REPO" create proj 'Future cooldown' --slug fut-wait --wait-for 2026-10-13 --no-commit)
+WF_FUT_ID="${WF_FUT_OUT%%$'\t'*}"
+WF_PAST_OUT=$("$BIN" --root "$WF_REPO" create proj 'Elapsed cooldown' --slug past-wait --wait-for 2026-10-06 --no-commit)
+WF_PAST_ID="${WF_PAST_OUT%%$'\t'*}"
+WF_EXT_OUT=$("$BIN" --root "$WF_REPO" create proj 'External handle gate' --slug ext-wait --wait-for '@stillers' --no-commit)
+WF_EXT_ID="${WF_EXT_OUT%%$'\t'*}"
+READY_OUT=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --state ready)
+if [[ "$READY_OUT" != *"$WF_FUT_ID"* ]] &&
+  [[ "$READY_OUT" != *"$WF_EXT_ID"* ]] &&
+  [[ "$READY_OUT" == *"$WF_PAST_ID"* ]]; then
+  echo 'ok 9 - list --state ready excludes unresolved wait_for gates and includes elapsed dates'
+else
+  echo 'not ok 9 - list --state ready excludes unresolved wait_for gates and includes elapsed dates'
+fi
+
+# Test 136: list --state ready sorts approaching due dates first
+("$BIN" --root "$WF_REPO" update "$DUE_SOON_ID" --due 2026-10-12) >/dev/null 2>&1
+("$BIN" --root "$WF_REPO" update "$WF_PAST_ID" --due 2026-10-09) >/dev/null 2>&1
+READY_IDS=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" list proj --state ready | awk 'NR>1 {print $2}' | tr '\n' ' ')
+if [ "$READY_IDS" = "$WF_PAST_ID $DUE_SOON_ID " ]; then
+  echo 'ok 10 - list --state ready sorts approaching due dates first'
+else
+  echo 'not ok 10 - list --state ready sorts approaching due dates first'
+  echo "# READY_IDS=$READY_IDS (expected '$WF_PAST_ID $DUE_SOON_ID ')"
+fi
+
+# Test 137: sync projects wait_for and approaching due annotations into STATUS.md
+(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" sync proj) >/dev/null
+STATUS_TXT=$(cat "$WF_REPO/proj/STATUS.md")
+if [[ "$STATUS_TXT" == *"$WF_ID"*"waiting for \`b/431751691\`"* ]] &&
+  [[ "$STATUS_TXT" == *"$WF_FUT_ID"*"waiting for \`2026-10-13\`"* ]] &&
+  [[ "$STATUS_TXT" == *"$WF_PAST_ID"*"due \`2026-10-09\`"* ]]; then
+  echo 'ok 11 - sync projects wait_for and approaching due annotations into STATUS.md'
+else
+  echo 'not ok 11 - sync projects wait_for and approaching due annotations into STATUS.md'
+fi
+
+# Test 138: dispatch warns when dispatching a task with unresolved wait_for gates
+git -C "$WF_REPO" add -A >/dev/null 2>&1
+git -C "$WF_REPO" commit -qm 'chore(proj): seed wait_for tasks'
+set +e
+WF_DISP_ERR=$(TASKGO_TODAY=2026-10-06 "$BIN" --root "$WF_REPO" dispatch "$WF_FUT_ID" 2>&1 >/dev/null)
+set -e
+if [[ "$WF_DISP_ERR" == *"is still waiting for 2026-10-13"* ]]; then
+  echo 'ok 12 - dispatch warns when dispatching a task with unresolved wait_for gates'
+else
+  echo 'not ok 12 - dispatch warns when dispatching a task with unresolved wait_for gates'
+fi
+
+# ===========================================================================
+# taskgo check [PROJECT] [--json] periodic sweep and Git watermark tests
+# ===========================================================================
+
+CHK_REPO="$TEST_ROOT/chk-repo"
+mkdir -p "$CHK_REPO/alpha/tasks" "$CHK_REPO/beta/tasks"
+git -C "$CHK_REPO" init -q
+git -C "$CHK_REPO" config user.name 'Taskgo Test'
+git -C "$CHK_REPO" config user.email 'taskgo@example.invalid'
+
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$CHK_REPO/AGENTS.md"
+printf '# Inbox\n' >"$CHK_REPO/INBOX.md"
+printf '# Alpha\n' >"$CHK_REPO/alpha/README.md"
+printf '# Beta\n' >"$CHK_REPO/beta/README.md"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+git -C "$CHK_REPO" commit -qm 'chore: init chk-repo'
+
+# Seed future-dated task that should NOT trigger on 2026-10-06
+CHK_QUIET_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Future gate task' \
+  --slug future-gate \
+  --wait-for 2026-10-20 \
+  --due 2026-10-25 \
+  --stale-after 2026-11-01 \
+  --no-commit)
+CHK_QUIET_ID="${CHK_QUIET_OUT%%$'\t'*}"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-05T10:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): create $CHK_QUIET_ID
+
+Task: $CHK_QUIET_ID"
+
+# Test 139: check exits 0 with empty stdout (both text and --json) when nothing triggers
+CHK_EMPTY_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check)
+CHK_EMPTY_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check --json)
+if [ -z "$CHK_EMPTY_TXT" ] && [ -z "$CHK_EMPTY_JSON" ]; then
+  echo 'ok 13 - check exits 0 with empty stdout when no tasks have triggered'
+else
+  echo 'not ok 13 - check exits 0 with empty stdout when no tasks have triggered'
+fi
+
+# Test 140: check flags elapsed wait_for dates (today >= date) and ignores resolved tasks
+CHK_DATE_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Elapsed cooldown task' \
+  --slug elapsed-date \
+  --wait-for 2026-10-06 \
+  --no-commit)
+CHK_DATE_ID="${CHK_DATE_OUT%%$'\t'*}"
+CHK_DONE_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Already done task' \
+  --slug done-date \
+  --status 'done' \
+  --outcome 'Done.' \
+  --wait-for 2026-10-01 \
+  --no-commit)
+CHK_DONE_ID="${CHK_DONE_OUT%%$'\t'*}"
+CHK_T146_TXT=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha)
+CHK_T146_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [[ "$CHK_T146_TXT" == *"$CHK_DATE_ID"*"wait_for date 2026-10-06 elapsed"* ]] &&
+  [[ "$CHK_T146_TXT" != *"$CHK_DONE_ID"* ]] &&
+  [[ "$CHK_T146_TXT" != *"$CHK_QUIET_ID"* ]] &&
+  [[ "$CHK_T146_JSON" == *'"kind": "wait_for_elapsed"'* ]]; then
+  echo 'ok 14 - check flags elapsed wait_for dates and skips resolved tasks'
+else
+  echo 'not ok 14 - check flags elapsed wait_for dates and skips resolved tasks'
+fi
+
+# Test 141: check flags overdue (today > due) and approaching (within 48h) deadlines
+CHK_OVER_OUT=$("$BIN" --root "$CHK_REPO" create beta 'Overdue deliverable' \
+  --slug overdue-deliv \
+  --due 2026-10-04 \
+  --no-commit)
+CHK_OVER_ID="${CHK_OVER_OUT%%$'\t'*}"
+CHK_SOON_OUT=$("$BIN" --root "$CHK_REPO" create beta 'Approaching deliverable' \
+  --slug soon-deliv \
+  --due 2026-10-08 \
+  --no-commit)
+CHK_SOON_ID="${CHK_SOON_OUT%%$'\t'*}"
+CHK_T147_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check beta --json)
+if [[ "$CHK_T147_JSON" == *"$CHK_OVER_ID"*'"kind": "due_overdue"'* ]] &&
+  [[ "$CHK_T147_JSON" == *"$CHK_SOON_ID"*'"kind": "due_soon"'* ]]; then
+  echo 'ok 15 - check flags overdue and approaching due deadlines'
+else
+  echo 'not ok 15 - check flags overdue and approaching due deadlines'
+fi
+
+# Test 142: check flags open tasks past stale_after (today > stale_after)
+CHK_STALE_OUT=$("$BIN" --root "$CHK_REPO" create beta 'Stale experiment' \
+  --slug stale-exp \
+  --stale-after 2026-10-01 \
+  --no-commit)
+CHK_STALE_ID="${CHK_STALE_OUT%%$'\t'*}"
+CHK_T148_JSON=$(AGENT_OFFLINE=1 TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check beta --json)
+if [[ "$CHK_T148_JSON" == *"$CHK_STALE_ID"*'"kind": "stale"'* ]]; then
+  echo 'ok 16 - check flags open tasks past stale_after cutoff'
+else
+  echo 'not ok 16 - check flags open tasks past stale_after cutoff'
+fi
+
+# Clean up temporal test tasks in alpha/beta before URI polling tests
+("$BIN" --root "$CHK_REPO" update "$CHK_DATE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_OVER_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_SOON_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+("$BIN" --root "$CHK_REPO" update "$CHK_STALE_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+
+# Set up mock CLI binaries for b/..., cl/..., and gh:... external URI polling.
+# These cases explicitly enable polling even when CI exports AGENT_OFFLINE=1;
+# all three probe commands are local fixtures and never access the network.
+MOCK_BIN="$TEST_ROOT/check-mock-bin"
+mkdir -p "$MOCK_BIN"
+
+cat >"$MOCK_BIN/issues" <<'EOF'
+#!/usr/bin/env bash
+bug_id="$3"
+if [ "$bug_id" = "1001" ]; then
+  printf 'Status: FIXED\nLast Modified: 2026-10-01T00:00:00Z\n'
+elif [ "$bug_id" = "2002" ]; then
+  printf 'Status: ASSIGNED\nLast Modified: 2026-10-05T15:00:00Z\n'
+else
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN/issues"
+
+cat >"$MOCK_BIN/g4" <<'EOF'
+#!/usr/bin/env bash
+cl_id="$3"
+if [ "$cl_id" = "5555" ]; then
+  printf 'Change 5555 is submitted; see 5556.\n'
+else
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN/g4"
+
+cat >"$MOCK_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+num="$3"
+if [ "$num" = "77" ]; then
+  printf '{"state":"CLOSED","updatedAt":"2026-10-01T09:00:00Z"}\n'
+else
+  exit 1
+fi
+EOF
+chmod +x "$MOCK_BIN/gh"
+
+# Test 143: Terminal upstream states (FIXED, SUBMITTED, CLOSED) always trigger regardless of recent watermark
+CHK_TERM_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Terminal external blockers' \
+  --slug term-uris \
+  --wait-for b/1001 --wait-for cl/5555 --wait-for 'gh:owner/repo#77' \
+  --no-commit)
+CHK_TERM_ID="${CHK_TERM_OUT%%$'\t'*}"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+# Commit with a watermark AFTER upstream modifiedTime (2026-10-06 > 2026-10-01)
+GIT_COMMITTER_DATE="2026-10-06T12:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): add $CHK_TERM_ID
+
+Task: $CHK_TERM_ID"
+
+CHK_T149_JSON=$(AGENT_OFFLINE=0 PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [[ "$CHK_T149_JSON" == *'"gate": "b/1001"'*'"upstream_state": "FIXED"'* ]] &&
+  [[ "$CHK_T149_JSON" == *'"gate": "cl/5555"'*'"upstream_state": "SUBMITTED"'* ]] &&
+  [[ "$CHK_T149_JSON" == *'"gate": "gh:owner/repo#77"'*'"upstream_state": "CLOSED"'* ]]; then
+  echo 'ok 17 - terminal upstream states trigger unconditionally regardless of watermark'
+else
+  echo 'not ok 17 - terminal upstream states trigger unconditionally regardless of watermark'
+fi
+("$BIN" --root "$CHK_REPO" update "$CHK_TERM_ID" --status 'done' --outcome 'Done.') >/dev/null 2>&1
+
+# Test 144: Zero-churn Git watermark: non-terminal activity (2026-10-05T15:00:00Z) triggers over
+# Task-scoped commit (2026-10-05T10:00:00Z) even after a later non-Task formatting commit (2026-10-06T08:00:00Z)
+CHK_ACT_OUT=$("$BIN" --root "$CHK_REPO" create alpha 'Active upstream bug' \
+  --slug active-bug \
+  --wait-for b/2002 \
+  --no-commit)
+CHK_ACT_ID="${CHK_ACT_OUT%%$'\t'*}"
+CHK_ACT_FILE="$CHK_REPO/alpha/tasks/${CHK_ACT_ID}-active-bug.md"
+git -C "$CHK_REPO" add -A >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-05T10:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): checkpoint $CHK_ACT_ID
+
+Task: $CHK_ACT_ID"
+
+# Simulate a mechanical formatting sweep commit WITHOUT 'Task: <ID>' at 2026-10-06T08:00:00Z (> 15:00)
+printf '\n' >>"$CHK_ACT_FILE"
+git -C "$CHK_REPO" add "$CHK_ACT_FILE" >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-06T08:00:00Z" git -C "$CHK_REPO" commit -qm 'chore: fix metadata and status'
+
+CHK_T150_JSON=$(AGENT_OFFLINE=0 PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [[ "$CHK_T150_JSON" == *"$CHK_ACT_ID"*'"kind": "wait_for_activity"'* ]] &&
+  [[ "$CHK_T150_JSON" == *'"watermark": "2026-10-05T10:00:00'* ]]; then
+  echo 'ok 18 - non-terminal activity uses Task: <ID> watermark and ignores formatting sweeps'
+else
+  echo 'not ok 18 - non-terminal activity uses Task: <ID> watermark and ignores formatting sweeps'
+fi
+
+# Test 145: Advancing the Task: <ID> commit watermark past upstream modifiedTime silences non-terminal activity
+printf '\n' >>"$CHK_ACT_FILE"
+git -C "$CHK_REPO" add "$CHK_ACT_FILE" >/dev/null 2>&1
+GIT_COMMITTER_DATE="2026-10-05T18:00:00Z" git -C "$CHK_REPO" commit -qm "chore(alpha): triage $CHK_ACT_ID
+
+Task: $CHK_ACT_ID"
+
+CHK_T151_OUT=$(AGENT_OFFLINE=0 PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha --json)
+if [ -z "$CHK_T151_OUT" ]; then
+  echo 'ok 19 - advancing Task: <ID> watermark silences non-terminal activity'
+else
+  echo 'not ok 19 - advancing Task: <ID> watermark silences non-terminal activity'
+fi
+
+# Test 146: Graceful degradation when tools fail
+("$BIN" --root "$CHK_REPO" create alpha 'Unreachable bug' \
+  --slug unavail-bug \
+  --wait-for b/9999 --wait-for cl/9999 --wait-for 'gh:owner/repo#9999' \
+  --no-commit) >/dev/null 2>&1
+CHK_T152_OUT=$(AGENT_OFFLINE=0 PATH="$MOCK_BIN:$PATH" TASKGO_TODAY=2026-10-06 "$BIN" --root "$CHK_REPO" check alpha)
+if [ -z "$CHK_T152_OUT" ]; then
+  echo 'ok 20 - check degrades gracefully when external URI lookups fail'
+else
+  echo 'not ok 20 - check degrades gracefully when external URI lookups fail'
+fi

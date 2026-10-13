@@ -1,0 +1,590 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color styling is asserted explicitly per test; isolate from inherited
+# NO_COLOR/FORCE_COLOR.
+unset NO_COLOR FORCE_COLOR
+
+# Isolate test suite from ambient agent runtime variables.
+unset AI_AGENT INVOKER_INFO_NAME
+unset JETSKI_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_SESSION
+unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_REMOTE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_PROJECT_ID
+unset OPENCODE_SESSION_ID CODEX_SESSION_ID
+unset INVOKER_INFO_ROOT_SESSION_ID CONVERSATION_ID
+
+export GIT_AUTHOR_NAME="Taskgo Test"
+export GIT_AUTHOR_EMAIL="taskgo@example.com"
+export GIT_COMMITTER_NAME="Taskgo Test"
+export GIT_COMMITTER_EMAIL="taskgo@example.com"
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$TEST_DIR/../scripts/taskgo" ]]; then
+  TEST_DIR="/usr/local/google/home/stillers/.dotfiles/skills/taskgo/tests"
+fi
+BIN="$TEST_DIR/../scripts/taskgo"
+# shellcheck disable=SC2034
+MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
+
+echo "1..38"
+
+init_base_repo() {
+  local target="${1:-$TEST_ROOT/repo}"
+  mkdir -p "$target/example/tasks"
+  git -C "$target" init -q
+  printf '%s
+' '# Agent instructions' '' 'This repository follows taskgo:' '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' >"$target/AGENTS.md"
+  printf '# Inbox
+' >"$target/INBOX.md"
+  printf '# Example project
+' >"$target/example/PROJECT.md"
+  printf '# Plan
+' >"$target/example/PLAN.md"
+  printf '%s
+' '---' 'id: TASK-A1B2C' 'status: todo' '---' '' '# Confirm generated status formatting' >"$target/example/tasks/TASK-A1B2C-confirm-status.md"
+}
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+MCP_PY=$(uv sync -q --script "$BIN" </dev/null && uv python find --script "$BIN")
+# shellcheck disable=SC2034
+APPLY_PY="$MCP_PY"
+
+# Test 15 & 16: README.md recognition and optional PLAN.md
+README_REPO="$TEST_ROOT/readme-repo"
+mkdir -p "$README_REPO/proj1/tasks"
+git -C "$README_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  '' \
+  '<!-- taskgo:allow-local-commits -->' \
+  >"$README_REPO/AGENTS.md"
+printf '# Inbox\n' >"$README_REPO/INBOX.md"
+printf '# Proj1 README\n' >"$README_REPO/proj1/README.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-C3D4E' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Task in README repo' \
+  >"$README_REPO/proj1/tasks/TASK-C3D4E-task.md"
+
+("$BIN" --root "$README_REPO" sync proj1) >/dev/null
+if ("$BIN" --root "$README_REPO" doctor proj1) >/dev/null 2>&1; then
+  echo 'ok 1 - doctor recognizes project via README.md with optional PLAN.md'
+else
+  echo 'not ok 1 - doctor failed to recognize README.md project'
+fi
+
+# Test 17: fix command auto-heals missing ID/status and auto-commits
+printf '# Unformatted Task\n' >"$README_REPO/proj1/tasks/bare-task.md"
+git -C "$README_REPO" config user.name 'Taskgo Test'
+git -C "$README_REPO" config user.email 'taskgo@example.invalid'
+git -C "$README_REPO" add .
+git -C "$README_REPO" commit -qm 'init'
+
+printf '# Unformatted Task with no id\n' >"$README_REPO/proj1/tasks/bare-task.md"
+fix_out=$("$BIN" --root "$README_REPO" fix proj1 2>&1)
+if printf '%s\n' "$fix_out" | grep -q 'COMMIT_SHA:' &&
+  ("$BIN" --root "$README_REPO" doctor proj1) >/dev/null 2>&1; then
+  echo 'ok 2 - fix auto-heals missing IDs and auto-commits with metadata'
+else
+  echo 'not ok 2 - fix failed to auto-heal or auto-commit'
+  printf '# %s\n' "$fix_out"
+fi
+
+# Test 17: fix --dry-run
+printf '# Another bare task\n' >"$README_REPO/proj1/tasks/another-task.md"
+fix_dry_out=$("$BIN" --root "$README_REPO" fix proj1 --dry-run 2>&1)
+if [[ -f "$README_REPO/proj1/tasks/another-task.md" ]] &&
+  ! git -C "$README_REPO" status --porcelain | grep -q 'TASK-' &&
+  printf '%s\n' "$fix_dry_out" | grep -q 'Dry run:'; then
+  echo 'ok 3 - fix --dry-run reports actions without modifying working tree'
+else
+  echo 'not ok 3 - fix --dry-run mutated working tree or failed'
+  printf '# %s\n' "$fix_dry_out"
+fi
+rm -f "$README_REPO/proj1/tasks/another-task.md"
+
+# Test 18: create command auto-commits and updates STATUS.md
+pre_create_sha=$(git -C "$README_REPO" rev-parse HEAD)
+created_id=$("$BIN" --root "$README_REPO" create proj1 'New created task' | cut -f1)
+post_create_sha=$(git -C "$README_REPO" rev-parse HEAD)
+if [[ -n "$created_id" ]] &&
+  [[ "$pre_create_sha" != "$post_create_sha" ]] &&
+  ("$BIN" --root "$README_REPO" list proj1) | grep -q "$created_id" &&
+  grep -q "TASK-.*New created task" "$README_REPO/proj1/STATUS.md" 2>/dev/null || grep -q "Todo: " "$README_REPO/proj1/STATUS.md"; then
+  echo 'ok 4 - create and list commands function cleanly'
+else
+  echo 'not ok 4 - create or list command failed'
+fi
+
+# Test 19: fix does NOT stage unrelated untracked files
+printf 'unrelated secret data\n' >"$README_REPO/unrelated_secret.txt"
+printf '# Bad Task\n' >"$README_REPO/proj1/tasks/bad-task.md"
+("$BIN" --root "$README_REPO" fix proj1 >/dev/null 2>&1)
+if git -C "$README_REPO" status --porcelain | grep -Fq '?? unrelated_secret.txt'; then
+  echo 'ok 5 - fix does not stage unrelated untracked files'
+else
+  echo 'not ok 5 - fix overreached and staged unrelated untracked files'
+  git -C "$README_REPO" status --porcelain
+fi
+
+# Test 20: sync without arguments synchronizes all projects
+printf '%s\n' \
+  '---' \
+  'id: TASK-E5F6A' \
+  'status: in-progress' \
+  '---' \
+  '' \
+  '# Multi-sync task' \
+  >"$README_REPO/proj1/tasks/TASK-E5F6A-multisync.md"
+("$BIN" --root "$README_REPO" sync >/dev/null 2>&1)
+if ("$BIN" --root "$README_REPO" doctor proj1) >/dev/null 2>&1; then
+  echo 'ok 6 - sync without arguments synchronizes workspace'
+else
+  echo 'not ok 6 - sync without arguments failed to synchronize'
+fi
+
+# Test 21: create normalizes status aliases
+wip_id=$("$BIN" --root "$README_REPO" create proj1 'WIP task' --status wip | cut -f1)
+wip_file=$("$BIN" --root "$README_REPO" list proj1 | grep "$wip_id" | cut -f5)
+if grep -q '^status: in-progress$' "$README_REPO/$wip_file"; then
+  echo 'ok 7 - create normalizes status aliases'
+else
+  echo 'not ok 7 - create failed to normalize status alias'
+  cat "$README_REPO/$wip_file"
+fi
+
+# Test 22: create auto-scaffolds a new project directory
+newproj_id=$("$BIN" --root "$README_REPO" create brandnew 'First task in new project' | cut -f1)
+if [[ -n "$newproj_id" ]] &&
+  [[ -f "$README_REPO/brandnew/README.md" ]] &&
+  [[ -f "$README_REPO/brandnew/STATUS.md" ]] &&
+  ("$BIN" --root "$README_REPO" doctor brandnew) >/dev/null 2>&1; then
+  echo 'ok 8 - create auto-scaffolds new project'
+else
+  echo 'not ok 8 - create failed to auto-scaffold new project'
+fi
+
+# Test 23: checkpoint succeeds on project file changes without modifying task file directly
+printf '# Updated plan\n' >"$README_REPO/brandnew/PLAN.md"
+cp_out=$("$BIN" --root "$README_REPO" checkpoint "$newproj_id" "brandnew: update plan" --path brandnew/PLAN.md 2>&1)
+if ! git -C "$README_REPO" status --porcelain | grep -q 'brandnew' &&
+  ("$BIN" --root "$README_REPO" doctor brandnew) >/dev/null 2>&1; then
+  echo 'ok 9 - checkpoint succeeds with only --path project changes'
+else
+  echo 'not ok 9 - checkpoint failed when task file was unchanged'
+  printf '# %s\n' "$cp_out"
+  git -C "$README_REPO" status --porcelain
+fi
+
+# Test 24: list --json and status --json output valid JSON
+list_json=$("$BIN" --root "$README_REPO" list --json)
+status_json=$("$BIN" --root "$README_REPO" status --json)
+if python3 -c "import json, sys; json.loads(sys.argv[1]); json.loads(sys.argv[2])" "$list_json" "$status_json" >/dev/null 2>&1; then
+  echo 'ok 10 - list --json and status --json emit valid JSON'
+else
+  echo 'not ok 10 - JSON output formatting failed'
+fi
+
+# Test 25: list handles flexible flag ordering and status alias filtering
+alias_list=$("$BIN" --root "$README_REPO" list --json --state inprogress proj1)
+if python3 -c "import json, sys; d = json.loads(sys.argv[1]); sys.exit(0 if len(d) >= 1 and d[0]['status'] == 'in-progress' else 1)" "$alias_list" >/dev/null 2>&1; then
+  echo 'ok 11 - list handles flexible flag ordering and alias filtering'
+else
+  echo 'not ok 11 - list failed with flexible flag order or alias filter'
+fi
+
+# Test 26: checkpoint handles staging deleted files via --path
+rm "$README_REPO/brandnew/PLAN.md"
+del_cp_out=$("$BIN" --root "$README_REPO" checkpoint "$newproj_id" "brandnew: remove plan" --path brandnew/PLAN.md 2>&1)
+if ! git -C "$README_REPO" status --porcelain | grep -q 'brandnew' &&
+  ("$BIN" --root "$README_REPO" doctor brandnew) >/dev/null 2>&1; then
+  echo 'ok 12 - checkpoint stages deleted project files via --path'
+else
+  echo 'not ok 12 - checkpoint failed to stage deleted file'
+  printf '# %s\n' "$del_cp_out"
+  git -C "$README_REPO" status --porcelain
+fi
+
+# Test 27: create --dry-run previews allocation without writing files
+dry_out=$("$BIN" --root "$README_REPO" create brandnew 'Dry run task' --dry-run)
+dry_path=$(printf '%s\n' "$dry_out" | cut -f2)
+if [[ -n "$dry_path" ]] && [[ ! -e "$README_REPO/$dry_path" ]]; then
+  echo 'ok 13 - create --dry-run previews path without writing files'
+else
+  echo 'not ok 13 - create --dry-run wrote files or returned empty'
+fi
+
+# Test 28: fix --no-commit applies repairs on disk without committing
+printf '# Bad Task No Commit\n' >"$README_REPO/brandnew/tasks/bad-uncommitted.md"
+head_before=$(git -C "$README_REPO" rev-parse HEAD)
+fix_nc_out=$("$BIN" --root "$README_REPO" fix brandnew --no-commit 2>&1)
+head_after=$(git -C "$README_REPO" rev-parse HEAD)
+if [[ "$head_before" == "$head_after" ]] &&
+  git -C "$README_REPO" status --porcelain | grep -q 'brandnew' &&
+  ("$BIN" --root "$README_REPO" doctor brandnew) >/dev/null 2>&1; then
+  echo 'ok 14 - fix --no-commit applies repairs without committing'
+else
+  echo 'not ok 14 - fix --no-commit failed or unexpectedly committed'
+  printf '# %s\n' "$fix_nc_out"
+fi
+
+# Test 29: fix preserves custom frontmatter fields
+printf '%s\n' \
+  '---' \
+  'id: TASK-OLD01' \
+  'status: wip' \
+  'priority: high' \
+  'owner: alice' \
+  '---' \
+  '' \
+  '# Custom fields task' \
+  >"$README_REPO/brandnew/tasks/TASK-OLD01-custom.md"
+("$BIN" --root "$README_REPO" fix brandnew >/dev/null 2>&1)
+remediated_file=$("$BIN" --root "$README_REPO" list brandnew | grep 'Custom fields task' | cut -f5)
+if grep -q '^priority: high$' "$README_REPO/$remediated_file" &&
+  grep -q '^owner: alice$' "$README_REPO/$remediated_file" &&
+  grep -q '^status: in-progress$' "$README_REPO/$remediated_file"; then
+  echo 'ok 15 - fix preserves custom frontmatter keys'
+else
+  echo 'not ok 15 - fix stripped custom frontmatter fields'
+  cat "$README_REPO/$remediated_file"
+fi
+
+# Test 30: create handles flags preceding positional arguments
+flag_first_out=$("$BIN" --root "$README_REPO" create --dry-run --status wip brandnew 'Flag first task')
+if printf '%s\n' "$flag_first_out" | grep -q 'brandnew/tasks/TASK-'; then
+  echo 'ok 16 - create handles flags placed before positional arguments'
+else
+  echo 'not ok 16 - create failed with flags before positional arguments'
+  printf '# %s\n' "$flag_first_out"
+fi
+
+# Test 31: get_task_files ignores non-project directories with tasks subfolder
+mkdir -p "$README_REPO/nonproject_dir/tasks"
+printf '# Fake task\n' >"$README_REPO/nonproject_dir/tasks/TASK-FAKE1-fake.md"
+all_tasks=$("$BIN" --root "$README_REPO" list)
+rm -rf "$README_REPO/nonproject_dir"
+if ! printf '%s\n' "$all_tasks" | grep -q 'nonproject_dir'; then
+  echo 'ok 17 - list ignores non-project directories lacking README.md'
+else
+  echo 'not ok 17 - list included tasks from non-project directory'
+fi
+
+printf "\nExtra unformatted trailing text   \n" >>"$README_REPO/proj1/tasks/TASK-C3D4E-task.md"
+
+# Test 33: fix commits modified STATUS.md along with task repairs
+("$BIN" --root "$README_REPO" sync proj1) >/dev/null 2>&1
+("$BIN" --root "$README_REPO" fix proj1) >/dev/null 2>&1
+if ! git -C "$README_REPO" status --porcelain | grep -q 'STATUS.md'; then
+  echo 'ok 18 - fix commits modified STATUS.md along with task repairs'
+else
+  echo 'not ok 18 - fix left STATUS.md unstaged or dirty'
+  git -C "$README_REPO" status --porcelain
+fi
+
+# Test 34: hooks are bypassed via --no-verify on internal commits
+("$BIN" --root "$README_REPO" fix proj1) >/dev/null 2>&1
+git -C "$README_REPO" add -A && git -C "$README_REPO" commit -qm 'clean' || true
+mkdir -p "$README_REPO/.git/hooks"
+cat <<'EOF' >"$README_REPO/.git/hooks/commit-msg"
+#!/bin/sh
+echo "Rejecting all commits via test hook" >&2
+exit 1
+EOF
+chmod +x "$README_REPO/.git/hooks/commit-msg"
+
+hook_task_id=$("$BIN" --root "$README_REPO" create proj1 'Hook bypass task' | cut -f1)
+if [[ -n "$hook_task_id" ]]; then
+  sed -i.bak 's/status: todo/status: in-progress/' "$README_REPO/proj1/tasks/$hook_task_id-"*.md
+  rm -f "$README_REPO/proj1/tasks/$hook_task_id-"*.bak
+fi
+if [[ -n "$hook_task_id" ]] &&
+  ("$BIN" --root "$README_REPO" checkpoint "$hook_task_id" "proj1: test hook bypass") >/dev/null 2>&1; then
+  echo 'ok 19 - taskgo commits bypass hooks via --no-verify'
+else
+  echo 'not ok 19 - hook blocked taskgo commit'
+fi
+rm -f "$README_REPO/.git/hooks/commit-msg"
+
+REPO="$TEST_ROOT/repo"
+init_base_repo "$REPO"
+
+# 71: help reports the resolved control repository root and its source
+HELP_DEFAULT="$("$BIN" --help)"
+HELP_ENV="$(TASKGO_ROOT="$REPO" "$BIN" --help)"
+HELP_ROOT="$("$BIN" --root "$REPO" --help)"
+HELP_MISSING="$("$BIN" --root "$TEST_ROOT/missing-help-root" --help)"
+if [[ "$HELP_DEFAULT" == *"Environment:"* ]] &&
+  [[ "$HELP_DEFAULT" == *"Root: ~/.projects"* ]] &&
+  [[ "$HELP_DEFAULT" == *"Source: default"* ]] &&
+  [[ "$HELP_ENV" == *"Root: $REPO"* ]] &&
+  [[ "$HELP_ENV" == *"Source: TASKGO_ROOT"* ]] &&
+  [[ "$HELP_ROOT" == *"Source: --root"* ]] &&
+  [[ "$HELP_MISSING" == *"Root: $TEST_ROOT/missing-help-root"* ]]; then
+  echo "ok 20 - help reports resolved control repository root and source"
+else
+  echo "not ok 20 - help reports resolved control repository root and source"
+fi
+
+# 73: create derives a word-boundary slug and warns when it shortens the title
+LONG_TITLE='Generate readable task filename slugs with clean length limits'
+SLUG_OUT="$("$BIN" --root "$README_REPO" create proj1 "$LONG_TITLE" 2>"$TEST_ROOT/slug-warn.txt")"
+SLUG_PATH="$(printf '%s' "$SLUG_OUT" | cut -f2)"
+SLUG_WARN="$(cat "$TEST_ROOT/slug-warn.txt")"
+SLUG_NAME="$(basename "$SLUG_PATH")"
+if [[ "$SLUG_NAME" == "$(printf '%s' "$SLUG_OUT" | cut -f1)-generate-readable-task-filename.md" ]] &&
+  [[ -f "$README_REPO/$SLUG_PATH" ]] &&
+  [[ "$SLUG_WARN" == *"[WARN]"*"Title too long for a filename"* ]] &&
+  [[ "$SLUG_WARN" == *"--slug SLUG (<= 32 chars)"* ]]; then
+  echo 'ok 21 - create truncates slugs at word boundaries and warns'
+else
+  echo 'not ok 21 - create truncates slugs at word boundaries and warns'
+  echo "# name=$SLUG_NAME warn=$SLUG_WARN"
+fi
+
+# 74: --slug overrides the derived slug, is normalized, and suppresses the warning
+EXPLICIT_OUT="$("$BIN" --root "$README_REPO" create proj1 "$LONG_TITLE" --slug 'Filename Slugs!' 2>"$TEST_ROOT/slug-quiet.txt")"
+EXPLICIT_ID="$(printf '%s' "$EXPLICIT_OUT" | cut -f1)"
+EXPLICIT_PATH="$(printf '%s' "$EXPLICIT_OUT" | cut -f2)"
+if [[ "$(basename "$EXPLICIT_PATH")" == "$EXPLICIT_ID-filename-slugs.md" ]] &&
+  [[ -f "$README_REPO/$EXPLICIT_PATH" ]] &&
+  ! grep -q '\[WARN\]' "$TEST_ROOT/slug-quiet.txt"; then
+  echo 'ok 22 - create honours and normalizes an explicit --slug'
+else
+  echo 'not ok 22 - create honours and normalizes an explicit --slug'
+  echo "# path=$EXPLICIT_PATH warn=$(cat "$TEST_ROOT/slug-quiet.txt")"
+fi
+
+# 75: short titles produce untruncated slugs without a warning
+SHORT_OUT="$("$BIN" --root "$README_REPO" create proj1 'Fix cache eviction' 2>"$TEST_ROOT/slug-short.txt")"
+SHORT_ID="$(printf '%s' "$SHORT_OUT" | cut -f1)"
+if [[ "$(basename "$(printf '%s' "$SHORT_OUT" | cut -f2)")" == "$SHORT_ID-fix-cache-eviction.md" ]] &&
+  ! grep -q '\[WARN\]' "$TEST_ROOT/slug-short.txt"; then
+  echo 'ok 23 - create leaves short titles unshortened and unwarned'
+else
+  echo 'not ok 23 - create leaves short titles unshortened and unwarned'
+fi
+
+# 76: over-long and unusable --slug values are rejected with actionable errors
+LONG_SLUG_ERR="$("$BIN" --root "$README_REPO" create proj1 'Rejected' --slug 'aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd' 2>&1 || true)"
+LONG_SLUG_CODE=0
+"$BIN" --root "$README_REPO" create proj1 'Rejected' --slug 'aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd' >/dev/null 2>&1 || LONG_SLUG_CODE=$?
+EMPTY_SLUG_ERR="$("$BIN" --root "$README_REPO" create proj1 'Rejected' --slug '###' 2>&1 || true)"
+if [[ "$LONG_SLUG_CODE" -eq 1 ]] &&
+  [[ "$LONG_SLUG_ERR" == *"taskgo create: --slug too long (43 > 32 chars)"* ]] &&
+  [[ "$EMPTY_SLUG_ERR" == *"taskgo create: --slug contains no usable characters"* ]] &&
+  [[ "$LONG_SLUG_ERR" != *"Traceback"* ]] &&
+  [[ "$(find "$README_REPO/proj1/tasks" -name '*rejected*' | wc -l)" -eq 0 ]]; then
+  echo 'ok 24 - create rejects unusable --slug values without creating files'
+else
+  echo 'not ok 24 - create rejects unusable --slug values without creating files'
+  echo "# code=$LONG_SLUG_CODE err=$LONG_SLUG_ERR"
+fi
+
+# 77: titles with no slug-able characters fall back to a warned default
+UNICODE_OUT="$("$BIN" --root "$README_REPO" create proj1 '日本語のタイトル' 2>"$TEST_ROOT/slug-unicode.txt")"
+UNICODE_ID="$(printf '%s' "$UNICODE_OUT" | cut -f1)"
+if [[ "$(basename "$(printf '%s' "$UNICODE_OUT" | cut -f2)")" == "$UNICODE_ID-task.md" ]] &&
+  grep -q 'Title yields no usable filename slug' "$TEST_ROOT/slug-unicode.txt"; then
+  echo 'ok 25 - create falls back to a default slug and warns'
+else
+  echo 'not ok 25 - create falls back to a default slug and warns'
+fi
+
+# 78: update --slug renames the task file in place and keeps the ID prefix
+RENAME_OUT="$("$BIN" --root "$README_REPO" update "$SHORT_ID" --slug 'Cache eviction' 2>&1)"
+BAD_RENAME="$("$BIN" --root "$README_REPO" update "$SHORT_ID" --slug 'aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddddddd' 2>&1 || true)"
+if [[ -f "$README_REPO/proj1/tasks/$SHORT_ID-cache-eviction.md" ]] &&
+  [[ ! -f "$README_REPO/proj1/tasks/$SHORT_ID-fix-cache-eviction.md" ]] &&
+  [[ "$RENAME_OUT" == *"[INFO]  Renamed"*"$SHORT_ID-cache-eviction.md"* ]] &&
+  [[ "$BAD_RENAME" == *"taskgo update: --slug too long"* ]] &&
+  grep -q "^# Fix cache eviction$" "$README_REPO/proj1/tasks/$SHORT_ID-cache-eviction.md"; then
+  echo 'ok 26 - update --slug renames the task file and keeps the ID prefix'
+else
+  echo 'not ok 26 - update --slug renames the task file and keeps the ID prefix'
+  echo "# out=$RENAME_OUT"
+fi
+
+# 79: fix preserves a chosen slug while repairing a mismatched filename ID
+SLUG_FIX_REPO="$TEST_ROOT/slug-fix-repo"
+mkdir -p "$SLUG_FIX_REPO/proj/tasks"
+git -C "$SLUG_FIX_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$SLUG_FIX_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SLUG_FIX_REPO/INBOX.md"
+printf '# Proj\n' >"$SLUG_FIX_REPO/proj/README.md"
+printf '%s\n' \
+  '---' \
+  'id: TASK-11111' \
+  'status: todo' \
+  '---' \
+  '' \
+  '# Generate readable task filename slugs with clean length limits' \
+  >"$SLUG_FIX_REPO/proj/tasks/TASK-22222-filename-slugs.md"
+"$BIN" --root "$SLUG_FIX_REPO" fix proj --no-commit >/dev/null 2>&1 || true
+if [[ -f "$SLUG_FIX_REPO/proj/tasks/TASK-11111-filename-slugs.md" ]] &&
+  [[ ! -f "$SLUG_FIX_REPO/proj/tasks/TASK-22222-filename-slugs.md" ]]; then
+  echo 'ok 27 - fix preserves a chosen slug while repairing the filename ID'
+else
+  echo 'not ok 27 - fix preserves a chosen slug while repairing the filename ID'
+  echo "# $(find "$SLUG_FIX_REPO/proj/tasks" -name '*.md')"
+fi
+
+# 80: create commits a Conventional Commits subject with the title in the body
+CC_CREATE_WARN="$TEST_ROOT/cc-create-warn.txt"
+CC_OUT="$("$BIN" --root "$README_REPO" create proj1 'Conventional subject coverage' 2>"$CC_CREATE_WARN")"
+CC_ID="$(printf '%s' "$CC_OUT" | cut -f1)"
+CC_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
+if [[ "$CC_SUBJECT" == "chore(proj1): create $CC_ID" ]] &&
+  git -C "$README_REPO" log -1 --format=%B | grep -q '^Conventional subject coverage$' &&
+  ! grep -q '\[WARN\]' "$CC_CREATE_WARN"; then
+  echo 'ok 28 - create commits a conventional subject with the title in the body'
+else
+  echo 'not ok 28 - create commits a conventional subject with the title in the body'
+  echo "# subject=$CC_SUBJECT id=$CC_ID"
+fi
+
+# 81: checkpoint rewrites nonconforming subjects deterministically and warns
+printf '# Plan notes\n' >"$README_REPO/brandnew/PLAN.md"
+RW_ERR="$TEST_ROOT/cc-rewrite.txt"
+"$BIN" --root "$README_REPO" checkpoint "$newproj_id" 'update plan with more notes' \
+  --path brandnew/PLAN.md 2>"$RW_ERR" >/dev/null ||
+  echo "# checkpoint rewrite run failed"
+RW_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
+if [[ "$RW_SUBJECT" == 'chore(brandnew): update plan with more notes' ]] &&
+  grep -q '\[WARN\].*Rewrote nonconforming commit subject' "$RW_ERR"; then
+  echo 'ok 29 - checkpoint rewrites nonconforming subjects with a warning'
+else
+  echo 'not ok 29 - checkpoint rewrites nonconforming subjects with a warning'
+  echo "# subject=$RW_SUBJECT err=$(cat "$RW_ERR")"
+fi
+
+# 82: checkpoint leaves conforming subjects untouched
+printf '# More plan notes\n' >>"$README_REPO/brandnew/PLAN.md"
+OK_ERR="$TEST_ROOT/cc-conforming.txt"
+"$BIN" --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): annotate plan' \
+  --path brandnew/PLAN.md 2>"$OK_ERR" >/dev/null ||
+  echo "# checkpoint conforming run failed"
+OK_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
+if [[ "$OK_SUBJECT" == 'docs(brandnew): annotate plan' ]] &&
+  ! grep -q '\[WARN\]' "$OK_ERR"; then
+  echo 'ok 30 - checkpoint leaves conforming subjects untouched'
+else
+  echo 'not ok 30 - checkpoint leaves conforming subjects untouched'
+  echo "# subject=$OK_SUBJECT err=$(cat "$OK_ERR")"
+fi
+
+# 83: over-long subjects are truncated to the limit with an ellipsis
+printf '# Truncation notes\n' >>"$README_REPO/brandnew/PLAN.md"
+TRUNC_ERR="$TEST_ROOT/cc-truncate.txt"
+"$BIN" --root "$README_REPO" checkpoint "$newproj_id" \
+  'fix(brandnew): a very long drawn out subject line that goes well past fifty characters' \
+  --path brandnew/PLAN.md 2>"$TRUNC_ERR" >/dev/null ||
+  echo "# checkpoint truncation run failed"
+TRUNC_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
+if [[ "${#TRUNC_SUBJECT}" -le 50 ]] &&
+  [[ "$TRUNC_SUBJECT" == *'...' ]] &&
+  grep -q '\[WARN\].*Truncated over-long commit subject' "$TRUNC_ERR"; then
+  echo 'ok 31 - checkpoint truncates over-long subjects with a warning'
+else
+  echo 'not ok 31 - checkpoint truncates over-long subjects with a warning'
+  echo "# len=${#TRUNC_SUBJECT} subject=$TRUNC_SUBJECT err=$(cat "$TRUNC_ERR")"
+fi
+
+# 84: fix auto-commits use a conventional subject too
+printf '# Bare task for fix subject\n' >"$README_REPO/proj1/tasks/bare-fix-subject.md"
+"$BIN" --root "$README_REPO" fix proj1 >/dev/null 2>&1 || true
+FIX_SUBJECT="$(git -C "$README_REPO" log -1 --format=%s)"
+if [[ "$FIX_SUBJECT" == 'chore(proj1): fix metadata and status' ]]; then
+  echo 'ok 32 - fix commits use a conventional subject'
+else
+  echo 'not ok 32 - fix commits use a conventional subject'
+  echo "# subject=$FIX_SUBJECT"
+fi
+
+# 85: checkpoint hard-wraps over-long plain-text bodies to 72 columns
+printf '# Wrap notes\n' >>"$README_REPO/brandnew/PLAN.md"
+WRAP_ERR="$TEST_ROOT/cc-wrap.txt"
+WRAP_BODY='The freeze review confronted the one-category-per-reading assumption against spike-live-002 and it fell because at both named institutions the categories are true of the same act.'
+"$BIN" --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): wrap plan' \
+  --path brandnew/PLAN.md --body "$WRAP_BODY" 2>"$WRAP_ERR" >/dev/null ||
+  echo "# checkpoint wrap run failed"
+LONG_LINE="$(git -C "$README_REPO" log -1 --format=%B | awk 'NR>2 && length($0)>72 {print; exit}')"
+if [[ -z "$LONG_LINE" ]] &&
+  git -C "$README_REPO" log -1 --format=%B | grep -q 'one-category-per-reading' &&
+  grep -q '\[WARN\].*Rewrapped commit body' "$WRAP_ERR"; then
+  echo 'ok 33 - checkpoint hard-wraps bodies to 72 columns'
+else
+  echo 'not ok 33 - checkpoint hard-wraps bodies to 72 columns'
+  echo "# long=$LONG_LINE err=$(cat "$WRAP_ERR")"
+fi
+
+# 86: URLs are never split even when they exceed the wrap width alone
+printf '# URL notes\n' >>"$README_REPO/brandnew/PLAN.md"
+URL_BODY='See https://example.invalid/very/long/path/segment/that/exceeds/the/seventy/two/column/wrap/limit entirely.'
+"$BIN" --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): record link' \
+  --path brandnew/PLAN.md --body "$URL_BODY" 2>/dev/null >/dev/null ||
+  echo "# checkpoint url run failed"
+URL_LINE="$(git -C "$README_REPO" log -1 --format=%B | grep -o 'https://[^ ]*')"
+if [[ "$URL_LINE" == 'https://example.invalid/very/long/path/segment/that/exceeds/the/seventy/two/column/wrap/limit' ]]; then
+  echo 'ok 34 - urls survive body wrapping intact'
+else
+  echo 'not ok 34 - urls survive body wrapping intact'
+  echo "# url=$URL_LINE"
+fi
+
+# 87: indented and fenced body lines pass through verbatim
+printf '# Verbatim notes\n' >>"$README_REPO/brandnew/PLAN.md"
+VERB_ERR="$TEST_ROOT/cc-verbatim.txt"
+VERB_BODY='Before the block.
+    indented code stays put
+After the block.'
+"$BIN" --root "$README_REPO" checkpoint "$newproj_id" 'docs(brandnew): keep blocks' \
+  --path brandnew/PLAN.md --body "$VERB_BODY" 2>"$VERB_ERR" >/dev/null ||
+  echo "# checkpoint verbatim run failed"
+if git -C "$README_REPO" log -1 --format=%B | grep -qF '    indented code stays put'; then
+  echo 'ok 35 - indented body lines pass through unwrapped'
+else
+  echo 'not ok 35 - indented body lines pass through unwrapped'
+  echo "# err=$(cat "$VERB_ERR")"
+fi
+
+# Test 88: piped doctor output carries plain ASCII tags, no escapes
+DR_OUT=$("$BIN" --root "$REPO" doctor 2>&1) || true
+if printf '%s' "$DR_OUT" | grep -q $'\033'; then
+  echo 'not ok 36 - piped doctor output unexpectedly contains escape sequences'
+elif ! printf '%s' "$DR_OUT" | grep -q '^\[PASS\]'; then
+  echo 'not ok 36 - piped doctor output missing canonical PASS tag'
+else
+  echo 'ok 36 - piped doctor output is plain ASCII tags'
+fi
+
+# Test 89: FORCE_COLOR styles diagnostic tags even when piped
+DR_OUT=$(FORCE_COLOR=1 "$BIN" --root "$REPO" doctor 2>&1) || true
+if printf '%s' "$DR_OUT" | grep -q $'\033\[32m\[PASS\]'; then
+  echo 'ok 37 - FORCE_COLOR styles PASS tags'
+else
+  echo 'not ok 37 - FORCE_COLOR did not style PASS tags'
+fi
+
+# Test 90: NO_COLOR suppresses styling even when FORCE_COLOR is set
+DR_OUT=$(NO_COLOR=1 FORCE_COLOR=1 "$BIN" --root "$REPO" doctor 2>&1) || true
+if printf '%s' "$DR_OUT" | grep -q $'\033'; then
+  echo 'not ok 38 - NO_COLOR did not suppress styling'
+else
+  echo 'ok 38 - NO_COLOR suppresses styling despite FORCE_COLOR'
+fi
