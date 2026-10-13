@@ -1239,6 +1239,29 @@ def get_session_workspace() -> Workspace:
     )
 
 
+def detect_project_workspace() -> Workspace | None:
+    """The workspace scope of the current directory, or None; never exits.
+
+    What 'skill add' (workspace scope) would operate on from here, for a
+    session-scope add to see which skills are active already.
+    """
+    if is_home_workspace() or AgyBrainWorkspace.detect():
+        return None
+    api = get_api()
+    for cls in [*api.workspace_classes, GitWorkspace]:
+        try:
+            ws = cls.detect()
+        except Exception as e:
+            print(
+                f"skill: warning: workspace detector {cls.__name__} failed: {e}",
+                file=sys.stderr,
+            )
+            continue
+        if ws:
+            return ws
+    return DefaultWorkspace(Path.cwd())
+
+
 def get_workspace() -> Workspace:
     if _SCOPE == "session":
         return get_session_workspace()
@@ -1547,6 +1570,29 @@ def cmd_add(specs):
         deduped_skills.append((src, name))
     resolved_skills = deduped_skills
 
+    # A session add names a project's skills without working out which ones
+    # the workspace already links, so skip those: the harness has them.
+    if ws.scope == "session":
+        project_ws = detect_project_workspace()
+        try:
+            active_dirs = project_ws.get_dest_dirs() if project_ws else []
+        except RuntimeError:
+            active_dirs = []
+        kept = []
+        for src, name in resolved_skills:
+            link = next(
+                (d / src.name for d in active_dirs if (d / src.name).is_symlink()),
+                None,
+            )
+            if link is not None and os.path.realpath(link) == os.path.realpath(src):
+                log(
+                    f"already active {name} (workspace {clean_p(link)})",
+                    file=sys.stderr,
+                )
+                continue
+            kept.append((src, name))
+        resolved_skills = kept
+
     # Check for conflicts across all destinations first
     for src, _name in resolved_skills:
         for d in dest_dirs:
@@ -1587,6 +1633,14 @@ def cmd_add(specs):
         log(f"added {name} -> {src}", file=sys.stderr)
 
     sync_records(ws)
+
+    if resolved_skills and isinstance(ws, AgyBrainWorkspace):
+        # The harness reads skills.json at the start of a turn.
+        log(
+            "session skills are in <skills> from the next turn; to use one "
+            f"now, read {clean_p(ws.dest_dir)}/<name>/SKILL.md",
+            file=sys.stderr,
+        )
 
     if has_errors:
         sys.exit(1)

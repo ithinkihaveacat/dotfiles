@@ -562,7 +562,12 @@ skills):
 
 ```bash
 skill --scope session add coding-standards
+taskgo skills <project> | skill --scope session add -   # a project's whole list
 ```
+
+A session add skips, and reports as `already active`, a skill the current
+directory's workspace already links to the same source, so a list can be piped
+in whole without working out which skills are new.
 
 Under Claude, the skill is linked under `$AGENT_SESSION_DIR/.claude/skills/` and
 can be used in the same turn. Under Antigravity (`<artifactDir>` is the
@@ -571,9 +576,9 @@ session's `Artifact Directory Path`, e.g.
 `<artifactDir>/scratch/skills/` and registered in
 `<artifactDir>/.agents/skills.json`; read
 `<artifactDir>/scratch/skills/<skill>/SKILL.md` directly to use it in the
-current turn, as the harness injects it into `<skills>` only on subsequent
-turns. Either way the repository's `.envrc` and `.git/info/exclude` are left
-untouched.
+current turn, as the harness injects it into `<skills>` only on subsequent turns
+(the command says so after adding). Either way the repository's `.envrc` and
+`.git/info/exclude` are left untouched.
 
 If `skill --scope session` fails naming `AGENT_SESSION_DIR`, this agent has no
 session directory of its own: Claude was not started through the `claude`
