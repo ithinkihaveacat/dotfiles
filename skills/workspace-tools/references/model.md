@@ -129,6 +129,7 @@ links to defaults only. Links tracked by version control are never removed, and
 a broken link added by name is kept (a `doctor` warning, which does not fail a
 launch). Concurrent `add --defaults` runs take turns on an flock(2) of the
 scope's root directory. `doctor` is read-only: it reports broken links,
-unmanaged files in the skill folders and records that do not match the links,
-and never checks for expected skills. `doctor` fails on warnings too; the check
-at the end of `add --defaults` fails only on errors.
+unmanaged files in the skill folders (only a warning in the user scope, whose
+folders other installers share) and records that do not match the links, and
+never checks for expected skills. `doctor` fails on warnings too; the check at
+the end of `add --defaults` fails only on errors.
