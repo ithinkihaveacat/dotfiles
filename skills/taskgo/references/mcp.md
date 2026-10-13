@@ -335,23 +335,23 @@ py=$(uv python find --script scripts/taskgo)
 `compare-cli` asks the server for its commit, checks that commit out into a
 temporary clone, and compares every tool's output with the CLI's there. It
 prints only check names and counts, never file contents, so it is safe to run
-against a private tracker. `tests/write-check` serves a throwaway tracker pushed
-to a local bare repository and checks the writes: concurrent writers, a lost
-push reply, a head that moves before every push, refusals, a stale CLI checkout
-that recovers by rebase, the cached head (reads within the TTL, writes over a
-stale cached head, and a retry after a lost reply), a read served a stale head
-when the remote cannot be fetched, a retry recognized from its `Request-Id:`
-trailer by a new server, and a `--local` server on a checkout (a write lands on
-the local branch and in the working tree, is refused over a dirty touched file
-or a detached HEAD, and is applied again after a CLI commit gets in first; one
-write goes over `--stdio`); run it again with `--fetch-ttl 0` to check the
-servers without a cache. `protocol-check` connects the SDK's own client as a
-2026-07-28 client and as a 2025-11-25 one, over HTTP and over `--stdio`.
-`auth-check` also checks the log page and its records, with and without a token,
-and that the request log holds one record per request and no token. The test
-suite (`prove skills/taskgo/tests/test-*`) runs `compare-cli` and
-`protocol-check` on a synthetic tracker, `auth-check`, and `write-check` both
-ways.
+against a private tracker. `tests/test-taskgo-mcp-write` serves a throwaway
+tracker pushed to a local bare repository and checks the writes: concurrent
+writers, a lost push reply, a head that moves before every push, refusals, a
+stale CLI checkout that recovers by rebase, the cached head (reads within the
+TTL, writes over a stale cached head, and a retry after a lost reply), a read
+served a stale head when the remote cannot be fetched, a retry recognized from
+its `Request-Id:` trailer by a new server, and a `--local` server on a checkout
+(a write lands on the local branch and in the working tree, is refused over a
+dirty touched file or a detached HEAD, and is applied again after a CLI commit
+gets in first; one write goes over `--stdio`); run it again with `--fetch-ttl 0`
+to check the servers without a cache. `protocol-check` connects the SDK's own
+client as a 2026-07-28 client and as a 2025-11-25 one, over HTTP and over
+`--stdio`. `auth-check` also checks the log page and its records, with and
+without a token, and that the request log holds one record per request and no
+token. The test suite (`prove skills/taskgo/tests/test-*`) runs `compare-cli`
+and `protocol-check` on a synthetic tracker, `auth-check`, and
+`test-taskgo-mcp-write` both ways.
 
 The MCP Inspector works against a local server:
 
