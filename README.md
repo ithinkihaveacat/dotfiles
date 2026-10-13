@@ -259,6 +259,33 @@ again so the overlay is applied.
 > **Note:** `install.sh` may overwrite unmanaged files in locations such as
 > `~/Library/KeyBindings`. It is otherwise safe to run multiple times.
 
+### Choosing what runs
+
+`install.sh` is split into features (linking dotfiles, packages, uv, agent
+setup, and so on), and a profile picks which of them run. The default,
+`workstation`, runs them all. `--with` and `--without` adjust a profile,
+`--only` names the features outright, and `--dry-run` prints the selection
+without running anything; `./install.sh --help` lists the features and profiles.
+
+A failing feature is reported and the rest still run; the exit status is
+non-zero if any failed. Set `AGENT_OFFLINE=1` to skip every feature that needs
+the network.
+
+### Cloud environments
+
+For the setup script of a disposable cloud or agent container, use the `cloud`
+profile:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --profile cloud
+```
+
+It links the dotfiles and fish config, prefetches what the uv-based scripts
+need, and sets up skill plugins and default skills. It does not use `sudo`,
+install or upgrade packages, update uv or agent CLIs, pull the repositories, or
+change npm's prefix, so it needs no access beyond GitHub and uv's package index.
+The platform's own agent setup is left alone.
+
 ## Prerequisites
 
 ### git
@@ -377,8 +404,8 @@ The check downloads nothing and puts nothing on `PATH`, but it is not read-only:
 it builds each script's environment inside uv's cache from the packages already
 there, which is how it proves they work offline.
 
-`--only uv` runs just that part of `install.sh`: no `git pull`, no symlinks into
-`$HOME`, no `sudo`, and no other packages.
+`--only uv` runs just the uv feature of `install.sh`: no `git pull`, no symlinks
+into `$HOME`, no `sudo`, and no other packages.
 
 Afterwards, run with `UV_OFFLINE=1` and `AGENT_OFFLINE=1` (see
 [tests/README.md](tests/README.md)). CI does exactly this before running the

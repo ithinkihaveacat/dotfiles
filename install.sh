@@ -2,7 +2,8 @@
 # bash 3.2+ compatible (macOS default). Do not use bash 4+ features
 # (declare -A, readarray, ${var,,}, |&).
 
-# Tests: tests/test-install-only (--only), tests/test-install-prune (--prune)
+# Tests: tests/test-install-only (--only), tests/test-install-prune (--prune),
+# tests/test-install-profiles (--profile, --with, --without, --dry-run)
 
 # When piped from the network the caller picks the interpreter
 # (`curl ... | bash`), so the shebang above is bypassed. The body of this script
@@ -38,7 +39,8 @@ set -euo pipefail
 # if it is not already present, point the push remote at SSH, then re-exec the
 # on-disk copy with the same arguments. A local run (./install.sh) has a real
 # BASH_SOURCE and skips this block entirely; an existing checkout is left for
-# the `git pull` step further down to fast-forward.
+# the git-pull feature further down to fast-forward. The low-speed limit makes
+# a stalled connection fail instead of hanging a setup script.
 if [ ! -f "${BASH_SOURCE[0]:-}" ]; then
   DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
   if [ ! -d "$DOTFILES/.git" ]; then
@@ -47,12 +49,66 @@ if [ ! -f "${BASH_SOURCE[0]:-}" ]; then
       exit 127
     }
     echo "Cloning dotfiles into $DOTFILES..."
-    git clone https://github.com/ithinkihaveacat/dotfiles.git "$DOTFILES"
+    git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+      clone https://github.com/ithinkihaveacat/dotfiles.git "$DOTFILES"
     git -C "$DOTFILES" remote set-url origin --push \
       git@github.com:ithinkihaveacat/dotfiles.git
   fi
   exec "$DOTFILES/install.sh" "$@"
 fi
+
+# Features: the parts of this script, in the order they run. Each entry is
+# "name|profiles|description"; a profile runs the features that list it, and
+# --with/--without/--only adjust that. A feature is a function named feature_
+# plus its name (with - as _), run in a subshell: a failure is reported and the
+# remaining features still run. When adding one, decide which profiles it
+# belongs to: "cloud" (a disposable container's setup script, often with no
+# sudo and an egress allowlist) takes only features that need no sudo, upgrade
+# nothing, and reach no host beyond GitHub and uv's package index; "ci" is just
+# what CI jobs need.
+FEATURES=(
+  'git-pull|workstation|Fast-forward ~/.dotfiles and its overlays'
+  'links|workstation cloud|Symlink dotfiles into the home directory, fish and tool configs'
+  'macos|workstation|Key bindings, defaults, colors, git keychain (macOS only)'
+  'fish-completions|workstation|Regenerate fish completions'
+  'packages|workstation|Install packages for the tier; daily upgrades (sudo on Linux)'
+  'uv-upgrade|workstation|Self-update uv and upgrade uv tools (daily)'
+  'uv|workstation cloud ci|Install uv if missing; prefetch what scripts fetch on first use'
+  'vscode|workstation|Link VS Code settings'
+  'npm|workstation|Set the npm global prefix to ~/.local/share/npm'
+  'gradle|workstation|Size the gradle heap to RAM; link init scripts'
+  'android|workstation|Update Android CLI tools (daily); install with the optional tier'
+  'skills|workstation cloud|Link skill and permission plugins; apply default skills'
+  'agents|workstation|Link agent context and hooks; update agent CLIs (daily)'
+  'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
+)
+PROFILES="workstation cloud ci"
+
+# Print each feature's name and description for --help, then each profile's
+# features.
+function features_help {
+  local entry name rest profile list
+  for entry in "${FEATURES[@]}"; do
+    name=${entry%%|*}
+    rest=${entry#*|}
+    printf '  %-17s %s\n' "$name" "${rest#*|}"
+  done
+  echo
+  echo "PROFILES:"
+  for profile in $PROFILES; do
+    list=""
+    for entry in "${FEATURES[@]}"; do
+      rest=${entry#*|}
+      if [[ " ${rest%%|*} " == *" $profile "* ]]; then
+        list="${list:+$list }${entry%%|*}"
+      fi
+    done
+    if [ "$profile" = workstation ]; then
+      list="all features (the default)"
+    fi
+    printf '  %-17s %s\n' "$profile" "$list"
+  done
+}
 
 # Show usage information
 function usage {
@@ -68,14 +124,31 @@ Can also be run directly from the network, which clones the repo to ~/.dotfiles
 
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash
 
+The work is split into features, and a profile picks which of them run: the
+default, workstation, runs them all; cloud is for the setup script of a
+disposable cloud or agent container, and does no sudo, no package installs, and
+no upgrades. A failing feature is reported and the others still run; the exit
+status is non-zero if any failed.
+
 Packages are grouped into tiers: a core set that is always installed, an
 optional set, and a full set. By default only core is installed. Pass
 --install-optional to add the optional set, or --install-all to add both the
 optional and full sets. Packages outside every tier are left alone and merely
-reported, unless --prune is given.
+reported, unless --prune is given. Tiers apply to the packages and android
+features only.
 
 OPTIONS:
   --help        Show this help message and exit
+  --profile NAME
+                Run the features of profile NAME (see PROFILES below)
+  --with FEATURE[,FEATURE...]
+                Also run these features
+  --without FEATURE[,FEATURE...]
+                Do not run these features
+  --only FEATURE[,FEATURE...]
+                Run only these features, in their usual order. Cannot be
+                combined with --profile or --with
+  --dry-run     Print the features that would run, one per line, and exit
   --trace       Print each wrapped command to stderr before running it
   --force       Overwrite existing real files when laying down overlay symlinks
                 and bypass the 24-hour package/tool update TTL
@@ -89,48 +162,82 @@ OPTIONS:
                 interactive; removes without asking when non-interactive.
                 Default: warn only
   --non-interactive
-                Run without prompting or interactive terminal-session validation
-  --no-agents   Leave AI agents alone: do not link their context files or hooks,
-                and do not update their CLIs. For cloud agent environments,
-                where the platform supplies and manages the agent
-  --only PART   Run only the named part of the script, then exit: no git pull,
-                no symlinks, no sudo, no other packages. Parts: uv (install uv
-                and fetch everything this repository's uv-based
-                scripts download on first use, so they then work offline).
-                For preparing CI jobs and cloud agent environments
+                Run without prompting; use sudo only if it needs no password
+  --no-agents   Same as --without agents
+
+FEATURES:
+$(features_help)
 
 ENVIRONMENT:
-  UV_OFFLINE    With --only uv, set to 1 to check offline readiness without
-                the network: nothing is downloaded or put on PATH, but each
-                script's environment is (re)built inside uv's cache from
+  AGENT_OFFLINE Set to 1 to make no network requests: features that need the
+                network are skipped (and say so), and uv works from its cache
+                as with UV_OFFLINE
+  UV_OFFLINE    Set to 1 to have the uv feature check offline readiness
+                without the network: nothing is downloaded or put on PATH, but
+                each script's environment is (re)built inside uv's cache from
                 packages already there, which is what proves it works.
-                Exits non-zero, naming each item, if any package is missing
+                Fails, naming each item, if any package is missing
 
 EXAMPLES:
   $(basename "$0")                   # Install or update; core packages only
   $(basename "$0") --trace           # Same, but log each wrapped command
   $(basename "$0") --install-optional  # Also install the optional package set
   $(basename "$0") --install-all --prune  # Full set; offer to remove extras
-  $(basename "$0") --no-agents       # Provision a cloud agent environment
-  $(basename "$0") --only uv         # Prepare a CI/cloud environment for offline use
+  $(basename "$0") --profile cloud   # From a cloud environment's setup script
+  $(basename "$0") --without agents,npm  # Leave agent CLIs and npm alone
+  $(basename "$0") --only uv         # Prepare a CI job for offline use
   UV_OFFLINE=1 $(basename "$0") --only uv  # Check it is ready, without the network
+  $(basename "$0") --profile cloud --with gradle --dry-run  # Preview a selection
 
   # Install/update over the network, passing flags after '-s --':
-  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --force
+  curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --profile cloud
 
 EOF
   exit "${1:-0}"
 }
 
+# Returns success if $1 is the name of a feature.
+function is_feature {
+  local entry
+  for entry in "${FEATURES[@]}"; do
+    if [ "${entry%%|*}" = "$1" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Validate a comma-separated feature list given to option $1, and print it
+# space-separated.
+function feature_list {
+  local option=$1 names name
+  names=$(printf '%s' "$2" | tr ',' ' ')
+  if [ -z "${names// /}" ]; then
+    echo "$(basename "$0"): $option requires a feature name" >&2
+    return 1
+  fi
+  for name in $names; do
+    if ! is_feature "$name"; then
+      echo "$(basename "$0"): $option: unknown feature '$name'" >&2
+      echo "hint: see '$(basename "$0") --help' for the list of features" >&2
+      return 1
+    fi
+  done
+  printf '%s' "$names"
+}
+
 TRACE=0
 FORCE=0
 HAS_SUDO=false
-REBOOT_REQUIRED=0
 NON_INTERACTIVE=0
+NON_INTERACTIVE_FLAG=0
 INSTALL_TIER=core
 PRUNE=0
+DRY_RUN=0
+PROFILE=""
 ONLY=""
-AGENTS=1
+WITH=""
+WITHOUT=""
 
 # XDG Base Directory specification defaults
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -138,10 +245,28 @@ export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 
+# Options that take a value accept it as the next argument or after "=".
+function option_value {
+  if [ $# -lt 2 ] || [ -z "$2" ]; then
+    echo "$(basename "$0"): $1 requires an argument" >&2
+    usage 1 >&2
+  fi
+}
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --help)
+    --*=*)
+      # Split --option=value into two arguments.
+      opt=${1%%=*}
+      val=${1#*=}
+      shift
+      set -- "$opt" "$val" "$@"
+      continue
+      ;;
+  esac
+  case $1 in
+    --help | -h)
       usage 0
       ;;
     --trace)
@@ -174,23 +299,38 @@ while [[ $# -gt 0 ]]; do
       ;;
     --non-interactive)
       NON_INTERACTIVE=1
+      NON_INTERACTIVE_FLAG=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
       shift
       ;;
     --no-agents)
-      AGENTS=0
+      WITHOUT="$WITHOUT agents"
       shift
       ;;
-    --only)
-      if [ $# -lt 2 ]; then
-        echo "$(basename "$0"): --only requires an argument" >&2
-        usage 1 >&2
-      fi
-      ONLY=$2
+    --profile)
+      option_value "$@"
+      case " $PROFILES " in
+        *" $2 "*) ;;
+        *)
+          echo "$(basename "$0"): --profile: unknown profile '$2' (supported: $PROFILES)" >&2
+          exit 1
+          ;;
+      esac
+      PROFILE=$2
       shift 2
       ;;
-    --only=*)
-      ONLY=${1#--only=}
-      shift
+    --with | --without | --only)
+      option_value "$@"
+      names=$(feature_list "$1" "$2")
+      case $1 in
+        --with) WITH="$WITH $names" ;;
+        --without) WITHOUT="$WITHOUT $names" ;;
+        --only) ONLY="$ONLY $names" ;;
+      esac
+      shift 2
       ;;
     -*)
       echo "$(basename "$0"): unknown option: $1" >&2
@@ -203,13 +343,44 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-case "$ONLY" in
-  "" | uv) ;;
-  *)
-    echo "$(basename "$0"): --only: unknown part '$ONLY' (supported: uv)" >&2
-    exit 1
-    ;;
-esac
+if [ -n "$ONLY" ] && [ -n "$PROFILE$WITH" ]; then
+  echo "$(basename "$0"): --only cannot be combined with --profile or --with" >&2
+  exit 1
+fi
+
+# Resolve the selection to a space-separated list in FEATURES order.
+SELECTED=""
+for entry in "${FEATURES[@]}"; do
+  name=${entry%%|*}
+  rest=${entry#*|}
+  if [ -n "$ONLY" ]; then
+    [[ " $ONLY " == *" $name "* ]] || continue
+  elif [[ " ${rest%%|*} " != *" ${PROFILE:-workstation} "* && " $WITH " != *" $name "* ]]; then
+    continue
+  fi
+  [[ " $WITHOUT " != *" $name "* ]] || continue
+  SELECTED="${SELECTED:+$SELECTED }$name"
+done
+
+if [ "$DRY_RUN" = 1 ]; then
+  for name in $SELECTED; do
+    printf '%s\n' "$name"
+  done
+  exit 0
+fi
+
+# Returns success if feature $1 is selected.
+function selected {
+  [[ " $SELECTED " == *" $1 "* ]]
+}
+
+# A cloud container's setup script should say what it wants rather than get a
+# workstation run; the variables only describe where we are, so warn rather
+# than switch profile.
+if [ -z "$PROFILE$ONLY" ] && [ -n "${CLAUDE_CODE_REMOTE:-}${CODESPACES:-}${CI:-}" ]; then
+  echo "warning: this looks like a cloud or CI environment, but the workstation profile is running" >&2
+  echo "hint: for a setup script, use '$(basename "$0") --profile cloud'" >&2
+fi
 
 # Auto-detect non-interactive mode if stdin is not a TTY
 if [ ! -t 0 ]; then
@@ -225,21 +396,50 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Ask for sudo upfront if we're likely to need it (no --only part needs it)
-if [ "$PLATFORM" = "linux" ] && [ -z "$ONLY" ]; then
+# Returns success if AGENT_OFFLINE asks for no network requests.
+function is_offline {
+  case "$(echo "${AGENT_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) return 0 ;;
+  esac
+  return 1
+}
+
+# Report that a step was skipped because it needs the network.
+function skip_offline {
+  echo "skipped: $1 (AGENT_OFFLINE is set)" >&2
+}
+
+# Offline, uv must also work from its cache alone: uv-based scripts (including
+# `skill`) and the uv feature's readiness check both read UV_OFFLINE.
+if is_offline; then
+  export UV_OFFLINE=1
+fi
+
+# Bounded network requests: fail on a dropped connection instead of hanging a
+# setup script until the platform kills it.
+CURL_OPTS=(--connect-timeout 15 --max-time 300)
+GIT_NET_OPTS=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60)
+
+# Ask for sudo upfront, but only if a selected feature needs it. When it would
+# need a password, ask on the terminal if there is one; a non-interactive run
+# (an explicit --non-interactive, or a setup script with no terminal at all)
+# uses sudo only if it is passwordless, and skips apt otherwise.
+if [ "$PLATFORM" = "linux" ]; then
   export DEBIAN_FRONTEND="noninteractive"
-  # Check if sudo requires a password first
-  if sudo -n true 2>/dev/null; then
-    # Passwordless sudo is configured, no need to prompt
+fi
+if [ "$PLATFORM" = "linux" ] && selected packages && ! is_offline; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "warning: sudo not found; skipping apt" >&2
+  elif sudo -n true 2>/dev/null; then
     HAS_SUDO=true
-  elif [ "$NON_INTERACTIVE" = 1 ]; then
-    echo "Non-interactive mode: skipping interactive sudo validation"
-    HAS_SUDO=true
+  elif [ "$NON_INTERACTIVE_FLAG" = 1 ] || ! (: </dev/tty) 2>/dev/null; then
+    echo "warning: sudo needs a password and this run cannot prompt for it; skipping apt" >&2
   else
     echo "This script requires sudo access for package management."
     echo "You may be prompted for your password."
     # Good for 5 mins; for more see https://github.com/mathiasbynens/dotfiles/blob/master/.macos#L13
-    if ! sudo -v; then
+    # shellcheck disable=SC2024 # the redirect is for sudo's password prompt
+    if ! sudo -v </dev/tty; then
       echo "$(basename "$0"): failed to obtain sudo access" >&2
       exit 1
     fi
@@ -435,7 +635,7 @@ function configure_fish_apt_repo {
     echo "Configuring the fish apt repository (OpenSUSE Build Service)..."
     local tmp_key status=0
     tmp_key=$(mktemp)
-    { curl -fsSL -o "$tmp_key" "${url}Release.key" &&
+    { curl "${CURL_OPTS[@]}" -fsSL -o "$tmp_key" "${url}Release.key" &&
       x sudo install -m 644 "$tmp_key" "$key" &&
       echo "$line" | x sudo tee "$list" >/dev/null; } || status=$?
     rm -f "$tmp_key"
@@ -477,161 +677,13 @@ if [ -d "$DSTDIR/.corp" ]; then
   SRCDIRS+=("$DSTDIR/.corp")
 fi
 
-# uv: installs uv itself, then fetches everything this repository's uv-based
-# scripts download on first use, so they keep working once the network is gone
-# (CI jobs, sandboxed cloud agents, planes).
-#
-# Architecture note: uv is the preferred way to get tools, because it works the
-# same on macOS, Debian, CI runners, and cloud containers where brew and apt
-# often do not. Skills stay self-contained: a skill's scripts need only uv, and
-# fetch their own pinned tools through uvx (or `uv run --script` metadata) on
-# first use, so each tool version is pinned in exactly one place. install.sh
-# does not duplicate those installs; its uv part only makes sure uv exists and
-# warms uv's cache ahead of time. The longer-term aim is to split this script
-# into parts that can run on their own; --only is the first step, with a stanza
-# becoming a function, selectable with --only, once there is a reason to run it
-# alone.
-
-# Bash wrappers that run pinned tools via uvx, each paired (after "|") with a
-# small valid input in printf %b notation. A wrapper is warmed by checking that
-# input, so it fetches exactly the versions it pins and the pins stay in the
-# wrapper; the input must pass, or later tools in the wrapper never run. Add a
-# wrapper here when it starts calling uvx. Scripts with a `uv run --script`
-# shebang need no entry: they are discovered below.
-UVX_WRAPPERS=(
-  'skills/coding-standards/scripts/python-format|x = 1'
-  'skills/coding-standards/scripts/shell-format|#!/bin/sh\ntrue'
-)
-
-# Run a uv command quietly, reporting one git-style status line and, on
-# failure, the command's output (indented) so the cause is visible.
-function uv_item {
-  local ok=$1 bad=$2 label=$3 out
-  shift 3
-  if [ "$TRACE" = 1 ]; then
-    printf '+ %s\n' "$(printf '%q ' "$@")" >&2
-  fi
-  if out=$("$@" 2>&1); then
-    printf '%s  %s\n' "$ok" "$label"
-    return 0
-  fi
-  printf '%s  %s\n' "$bad" "$label" >&2
-  # shellcheck disable=SC2001 # sed prefixes every line, including the first
-  echo "$out" | sed 's/^/    /' >&2
-  return 1
-}
-
-# Returns non-zero if anything failed (or, with UV_OFFLINE, is not cached), so
-# `--only uv` exits non-zero; a full run only warns.
-function stanza_uv {
-  heading "uv"
-
-  local offline=0 ok bad failed=0
-  case "$(echo "${UV_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
-    1 | true | yes | on) offline=1 ;;
-  esac
-  if [ "$offline" = 1 ]; then
-    ok="cached " bad="missing"
-  else
-    ok="fetched" bad="failed "
-  fi
-
-  # The standalone installer puts uv in ~/.local/bin; a full run has already
-  # put that on PATH, --only has not.
-  case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) export PATH="$HOME/.local/bin:$PATH" ;;
-  esac
-
-  # uv is installed via the standalone astral installer on every platform (it
-  # is not a brew/apt package here) because many scripts use `uv run` shebangs.
-  if ! exists uv; then
-    if [ "$offline" = 1 ]; then
-      echo "$(basename "$0"): uv not found" >&2
-      return 1
-    fi
-    echo "Installing uv..."
-    # The installer evaluates $XDG_DATA_HOME/../bin and checks it against PATH
-    # literally without normalization, failing to recognize that ~/.local/bin is
-    # already on PATH. Pin UV_INSTALL_DIR to ~/.local/bin and suppress shell
-    # profile modifications (https://github.com/axodotdev/cargo-dist/issues/2529).
-    if ! curl -LsSf https://astral.sh/uv/install.sh |
-      env UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin" sh ||
-      ! exists uv; then
-      echo "warning: uv installation failed" >&2
-      return 1
-    fi
-  elif [ -z "$ONLY" ] && ! is_fresh "$PACKAGE_STAMP"; then
-    # Periodic upgrades belong to full runs; --only only fills in what is
-    # missing, and leaves a uv it did not install (e.g. CI's) alone.
-    echo "Updating uv..."
-    # `uv self update` only works for the standalone installer; a uv provided
-    # by a package manager (e.g. a leftover brew uv mid-migration) will refuse,
-    # so warn rather than abort.
-    uv self update || echo "warning: uv self update failed (uv may be package-managed)"
-    echo "Upgrading uv tools..."
-    uv tool upgrade --all || echo "warning: uv tool upgrade failed"
-  fi
-
-  # Tools such as shellcheck and shfmt are deliberately not installed on PATH
-  # here: the scripts that need them run their own pinned versions via uvx, so
-  # a skill needs nothing but uv, and each tool version is pinned in exactly
-  # one place (the script). This part only warms uv's cache for those scripts.
-  # For an ad-hoc run, use e.g. `uvx --from shellcheck-py==<pin> shellcheck`.
-
-  # Fetch what the repository's scripts need. With UV_OFFLINE, uv builds the
-  # same environments from its cache alone, which checks offline readiness
-  # (it writes to uv's cache, so it is not read-only).
-  local entry rel f first_line
-  for entry in "${UVX_WRAPPERS[@]}"; do
-    rel=${entry%%|*}
-    uv_item "$ok" "$bad" "$rel" "$SRCDIR/$rel" --check \
-      <<<"$(printf '%b' "${entry#*|}")" || failed=1
-  done
-  # bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
-  for f in "$SRCDIR"/bin/* "$SRCDIR"/skills/*/scripts/*; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    first_line=""
-    read -r first_line <"$f" 2>/dev/null || true
-    case "$first_line" in
-      '#!/usr/bin/env -S uv run'*)
-        uv_item "$ok" "$bad" "${f#"$SRCDIR"/}" uv sync --script "$f" </dev/null || failed=1
-        ;;
-    esac
-  done
-
-  if [ "$failed" != 0 ]; then
-    if [ "$offline" = 1 ]; then
-      echo "warning: some uv items are not available offline; re-run '$(basename "$0") --only uv' with network access" >&2
-    else
-      echo "warning: some uv items failed to install or fetch" >&2
-    fi
-    return 1
-  fi
-}
-
-if [ -n "$ONLY" ]; then
-  "stanza_$ONLY"
-  exit $?
-fi
-
-# Pull each source repo to its upstream before applying. Mirrors the `git up`
-# alias in ~/.gitconfig. Non-fast-forward or detached states are surfaced as
-# errors via --ff-only so they can't be silently skipped.
-git_up() {
-  local dir=$1
-  [ -d "$dir/.git" ] || return 0
-  if ! git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
-    return 0
-  fi
-  x git -C "$dir" remote update -p
-  x git -C "$dir" merge --ff-only '@{upstream}'
-}
-
-for src in "${SRCDIRS[@]}"; do
-  heading "git pull ($(basename "$src"))"
-  git_up "$src"
-done
+# ~/.local/bin holds links made by several features, the standalone uv, and
+# ruby-build; features that write to it create it first.
+BINDIR="$HOME/.local/bin"
+case ":$PATH:" in
+  *":$BINDIR:"*) ;;
+  *) export PATH="$BINDIR:$PATH" ;;
+esac
 
 overlay_path() {
   local rel=$1
@@ -684,10 +736,35 @@ link_overlay_path() {
   fi
 }
 
+# Pull each source repo to its upstream before applying. Mirrors the `git up`
+# alias in ~/.gitconfig. Non-fast-forward or detached states are surfaced as
+# errors via --ff-only so they can't be silently skipped.
+git_up() {
+  local dir=$1
+  [ -d "$dir/.git" ] || return 0
+  if ! git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+    return 0
+  fi
+  x git "${GIT_NET_OPTS[@]}" -C "$dir" remote update -p
+  x git -C "$dir" merge --ff-only '@{upstream}'
+}
+
+function feature_git_pull {
+  local src
+  if is_offline; then
+    skip_offline "git pull"
+    return 0
+  fi
+  for src in "${SRCDIRS[@]}"; do
+    heading "git pull ($(basename "$src"))"
+    git_up "$src"
+  done
+}
+
 # "dotfiles" that will end up in $HOME
 
 link_home_dotfiles() {
-  local src=$1
+  local src=$1 f
   [ -d "$src/home" ] || return 0
   for f in "$src"/home/.*; do
     if [ -d "$f" ]; then
@@ -700,189 +777,162 @@ link_home_dotfiles() {
   done
 }
 
-for src in "${SRCDIRS[@]}"; do
-  link_home_dotfiles "$src"
-done
+function feature_links {
+  local src f target
 
-# Remove dangling symlinks
+  heading "links"
 
-for f in "$DSTDIR"/.*; do
+  for src in "${SRCDIRS[@]}"; do
+    link_home_dotfiles "$src"
+  done
 
-  if [ -L "$f" ]; then
-    target=$(readlink "$f")
-    # If target is relative, make it absolute relative to DSTDIR
-    if [[ "$target" != /* ]]; then
-      target="$DSTDIR/$target"
+  # Remove dangling symlinks
+  for f in "$DSTDIR"/.*; do
+    if [ -L "$f" ]; then
+      target=$(readlink "$f")
+      # If target is relative, make it absolute relative to DSTDIR
+      if [[ "$target" != /* ]]; then
+        target="$DSTDIR/$target"
+      fi
+      if [ ! -e "$target" ]; then
+        x rm "$f"
+      fi
     fi
-    if [ ! -e "$target" ]; then
-      x rm "$f"
+  done
+
+  xmkdir "$BINDIR"
+
+  heading "fish"
+
+  # Fish configuration needs to be in ~/.config/fish
+  if [ ! -L "$XDG_CONFIG_HOME/fish" ] || [ "$(readlink "$XDG_CONFIG_HOME/fish")" != "$SRCDIR/fish" ]; then
+    if [ -d "$XDG_CONFIG_HOME/fish" ] || [ -L "$XDG_CONFIG_HOME/fish" ]; then
+      x rm -rf "$XDG_CONFIG_HOME/fish"
+    fi
+    xmkdir "$XDG_CONFIG_HOME"
+    x ln -s "$SRCDIR/fish" "$XDG_CONFIG_HOME/fish"
+  fi
+
+  if exists shpool; then
+    heading "shpool"
+    xmkdir "$XDG_CONFIG_HOME/shpool"
+    link_overlay_path "etc/shpool/config.toml" "$XDG_CONFIG_HOME/shpool/config.toml"
+  fi
+
+  if exists starship; then
+    heading "starship"
+    link_overlay_path "etc/starship/starship.toml" "$XDG_CONFIG_HOME/starship.toml"
+  fi
+
+  if exists ghostty; then
+    heading "ghostty"
+    xmkdir "$XDG_CONFIG_HOME/ghostty"
+    link_overlay_path "etc/ghostty/config" "$XDG_CONFIG_HOME/ghostty/config"
+  fi
+
+  if exists bat || exists batcat; then
+    heading "bat"
+    xmkdir "$XDG_CONFIG_HOME/bat"
+    link_overlay_path "etc/bat/config" "$XDG_CONFIG_HOME/bat/config"
+    if ! exists bat && exists batcat; then
+      x ln -sf "$(which batcat)" "$BINDIR/bat"
     fi
   fi
 
-done
-
-LOCAL="$HOME/.local"
-xmkdir "$LOCAL"
-BINDIR="$LOCAL/bin"
-xmkdir "$BINDIR"
-export PATH="$BINDIR:$PATH"
-
-case "$PLATFORM" in
-
-  darwin)
-    heading "macos"
-    # For some reason *some* applications (like TextEdit) won't read
-    # DefaultKeyBinding.dict if it's symlinked, or is in a symlinked directory,
-    # so rsync instead of symlink... http://apple.stackexchange.com/a/53110/890
-    # rdar://12429092
-    keybindings_dir=$(overlay_path "etc/macos/KeyBindings") || keybindings_dir=""
-    if [ -n "$keybindings_dir" ]; then
-      x rsync -a --delete "$keybindings_dir/" "$DSTDIR/Library/KeyBindings/"
-    fi
-
-    "$SRCDIR/etc/macos/apply-defaults"
-
-    # https://github.com/altercation/ethanschoonover.com/tree/master/projects/solarized/apple-colorpalette-solarized
-    solarized_clr=$(overlay_path "etc/macos/Solarized.clr") || solarized_clr=""
-    if [ -n "$solarized_clr" ]; then
-      x cp "$solarized_clr" "$DSTDIR/Library/Colors/Solarized.clr"
-    fi
-
-    if [[ -x /System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport ]]; then
-      x ln -sf /System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport "$BINDIR"
-    fi
-
-    if [[ -x "$(which networkQuality)" ]]; then
-      x ln -sf "$(which networkQuality)" "$BINDIR/speedtest"
-    fi
-
-    #	if [[ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]]; then
-    #	  x ln -sf /Applications/Tailscale.app/Contents/MacOS/Tailscale "$BINDIR/tailscale"
-    #	fi
-
-    if [[ -x "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" ]]; then
-      x ln -sf "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" "$BINDIR/code"
-    fi
-    ;;
-
-esac
-
-# fish
-
-heading "fish"
-
-# Fish configuration needs to be in ~/.config/fish
-
-if [ ! -L "$XDG_CONFIG_HOME/fish" ] || [ "$(readlink "$XDG_CONFIG_HOME/fish")" != "$SRCDIR/fish" ]; then
-
-  if [ -d "$XDG_CONFIG_HOME/fish" ] || [ -L "$XDG_CONFIG_HOME/fish" ]; then
-    x rm -rf "$XDG_CONFIG_HOME/fish"
+  if ! exists fd && exists fdfind; then
+    heading "fd"
+    x ln -sf "$(which fdfind)" "$BINDIR/fd"
   fi
-  xmkdir "$XDG_CONFIG_HOME"
-  x ln -s "$SRCDIR/fish" "$XDG_CONFIG_HOME/fish"
+}
 
-fi
+function feature_macos {
+  local keybindings_dir solarized_clr
 
-# Update completions if completions more than 7 days old
+  [ "$PLATFORM" = darwin ] || return 0
 
-if exists fish; then
+  heading "macos"
+  xmkdir "$BINDIR"
 
-  # shellcheck disable=SC2016 # Variable expands in fish shell, not bash
-  fish_completions_dir=$(fish -c 'echo $__fish_cache_dir/generated_completions' 2>/dev/null)
-  if [[ -n "$fish_completions_dir" ]] && ! find "$fish_completions_dir" -maxdepth 0 -mtime -7 2>/dev/null | grep -q .; then
-    echo "Updating fish completions..."
-    fish -c fish_update_completions
+  # For some reason *some* applications (like TextEdit) won't read
+  # DefaultKeyBinding.dict if it's symlinked, or is in a symlinked directory,
+  # so rsync instead of symlink... http://apple.stackexchange.com/a/53110/890
+  # rdar://12429092
+  keybindings_dir=$(overlay_path "etc/macos/KeyBindings") || keybindings_dir=""
+  if [ -n "$keybindings_dir" ]; then
+    x rsync -a --delete "$keybindings_dir/" "$DSTDIR/Library/KeyBindings/"
   fi
 
-fi
+  "$SRCDIR/etc/macos/apply-defaults"
 
-# Generated fish completions
-
-heading "fish completions"
-
-XDG_COMPLETIONS_DIR="$XDG_DATA_HOME/fish/completions"
-xmkdir "$XDG_COMPLETIONS_DIR"
-
-if exists hcloud; then
-  x hcloud completion fish >"$XDG_COMPLETIONS_DIR/hcloud.fish"
-fi
-
-if exists gog; then
-  x gog completion fish >"$XDG_COMPLETIONS_DIR/gog.fish"
-fi
-
-bat_cmd=""
-if exists bat; then
-  bat_cmd="bat"
-elif exists batcat; then
-  bat_cmd="batcat"
-fi
-
-if [ -n "$bat_cmd" ]; then
-  # bat / batcat --completion was added in 0.25.0; attempt completion generation without halting install.sh on error
-  tmp_comp=$(mktemp)
-  if "$bat_cmd" --completion fish >"$tmp_comp" 2>/dev/null; then
-    x cp "$tmp_comp" "$XDG_COMPLETIONS_DIR/bat.fish"
-  fi
-  rm -f "$tmp_comp"
-fi
-
-# shpool
-
-if exists shpool; then
-
-  heading "shpool"
-
-  xmkdir "$XDG_CONFIG_HOME/shpool"
-  link_overlay_path "etc/shpool/config.toml" "$XDG_CONFIG_HOME/shpool/config.toml"
-
-fi
-
-# starship
-
-if exists starship; then
-
-  heading "starship"
-
-  link_overlay_path "etc/starship/starship.toml" "$XDG_CONFIG_HOME/starship.toml"
-
-fi
-
-# ghostty
-
-if exists ghostty; then
-
-  heading "ghostty"
-
-  xmkdir "$XDG_CONFIG_HOME/ghostty"
-  link_overlay_path "etc/ghostty/config" "$XDG_CONFIG_HOME/ghostty/config"
-
-fi
-
-# bat
-
-if exists bat || exists batcat; then
-
-  heading "bat"
-
-  xmkdir "$XDG_CONFIG_HOME/bat"
-  link_overlay_path "etc/bat/config" "$XDG_CONFIG_HOME/bat/config"
-
-  if ! exists bat && exists batcat; then
-    x ln -sf "$(which batcat)" "$BINDIR/bat"
+  # https://github.com/altercation/ethanschoonover.com/tree/master/projects/solarized/apple-colorpalette-solarized
+  solarized_clr=$(overlay_path "etc/macos/Solarized.clr") || solarized_clr=""
+  if [ -n "$solarized_clr" ]; then
+    x cp "$solarized_clr" "$DSTDIR/Library/Colors/Solarized.clr"
   fi
 
-fi
+  if [[ -x /System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport ]]; then
+    x ln -sf /System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport "$BINDIR"
+  fi
 
-# fd
+  if [[ -x "$(which networkQuality)" ]]; then
+    x ln -sf "$(which networkQuality)" "$BINDIR/speedtest"
+  fi
 
-if ! exists fd && exists fdfind; then
+  #	if [[ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]]; then
+  #	  x ln -sf /Applications/Tailscale.app/Contents/MacOS/Tailscale "$BINDIR/tailscale"
+  #	fi
 
-  heading "fd"
+  if [[ -x "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" ]]; then
+    x ln -sf "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" "$BINDIR/code"
+  fi
 
-  x ln -sf "$(which fdfind)" "$BINDIR/fd"
+  heading "git"
+  git config --file ~/.gitconfig.local credential.helper osxkeychain
+}
 
-fi
+function feature_fish_completions {
+  local fish_completions_dir completions_dir bat_cmd="" tmp_comp
+
+  # Update completions if completions more than 7 days old
+  if exists fish; then
+    # shellcheck disable=SC2016 # Variable expands in fish shell, not bash
+    fish_completions_dir=$(fish -c 'echo $__fish_cache_dir/generated_completions' 2>/dev/null)
+    if [[ -n "$fish_completions_dir" ]] && ! find "$fish_completions_dir" -maxdepth 0 -mtime -7 2>/dev/null | grep -q .; then
+      echo "Updating fish completions..."
+      fish -c fish_update_completions
+    fi
+  fi
+
+  # Generated fish completions
+
+  heading "fish completions"
+
+  completions_dir="$XDG_DATA_HOME/fish/completions"
+  xmkdir "$completions_dir"
+
+  if exists hcloud; then
+    x hcloud completion fish >"$completions_dir/hcloud.fish"
+  fi
+
+  if exists gog; then
+    x gog completion fish >"$completions_dir/gog.fish"
+  fi
+
+  if exists bat; then
+    bat_cmd="bat"
+  elif exists batcat; then
+    bat_cmd="batcat"
+  fi
+
+  if [ -n "$bat_cmd" ]; then
+    # bat / batcat --completion was added in 0.25.0; attempt completion generation without halting install.sh on error
+    tmp_comp=$(mktemp)
+    if "$bat_cmd" --completion fish >"$tmp_comp" 2>/dev/null; then
+      x cp "$tmp_comp" "$completions_dir/bat.fish"
+    fi
+    rm -f "$tmp_comp"
+  fi
+}
 
 # Package Management Invariants (Homebrew and apt-get):
 # Both Homebrew (macOS) and apt-get (Linux) package management paths enforce four invariants:
@@ -901,7 +951,9 @@ fi
 #    - apt-get: Allowlist-based pruning is unsafe because `apt` manages OS base and
 #      system infrastructure; orphaned dependencies are purged via `autoremove --purge`.
 
-if exists brew; then
+function packages_brew {
+  local installed_formulae installed_casks core custom optional full allowlist
+  local install_set to_install jdk
 
   heading "brew"
 
@@ -979,212 +1031,333 @@ if exists brew; then
   elif [ "$PRUNE" = 1 ]; then
     prune_brew_extras "$allowlist"
   fi
+}
 
-fi
-
-if [ "$PLATFORM" = "linux" ]; then
+function packages_apt {
+  local core optional full install_set retired ruby_build_src
 
   heading "apt-get"
 
-  if exists apt-get && $HAS_SUDO; then
-
-    if ! is_fresh "$PACKAGE_STAMP"; then
-      x sudo apt-get update # refresh package lists
+  if ! exists apt-get || ! $HAS_SUDO; then
+    if ! exists apt-get; then
+      echo "$(basename "$0"): no supported package manager (apt-get) found, skipping" >&2
+    else
+      echo "$(basename "$0"): no usable sudo, skipping apt-get" >&2
     fi
-
-    # Core packages: always installed, on every run.
-    core="fish apt-file direnv command-not-found dnsutils htop btop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev"
-    # Optional packages: installed only with --install-optional or --install-all.
-    # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
-    # ruby-build binary itself is bootstrapped from git below, as the apt package
-    # is too old to build current Ruby). rustc (YJIT) is omitted to stay lean.
-    optional="pv entr fzf pwgen build-essential autoconf libssl-dev libyaml-dev libreadline-dev zlib1g-dev libffi-dev libgmp-dev libncurses-dev libgdbm-dev gh"
-    # Full packages: installed only with --install-all.
-    full=""
-
-    # TODO: JDK installation on Linux (not yet documented; see fish/config.fish
-    # for context on how JAVA_HOME is set and what the macOS approach looks like)
-
-    install_set=$(install_set_for_tier "$core" "$optional" "$full")
-
-    comm -13 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
-    # Full unmanaged package removal is unsafe on Debian/apt because apt manages
-    # base system and infrastructure packages beyond dotfiles. Orphaned dependency
-    # packages are purged via apt-get autoremove --purge below.
-
-    if ! exists fd && exists fdfind; then
-      x ln -sf "$(which fdfind)" "$BINDIR/fd"
-    fi
-
-    # fish is in core above, so on a fresh machine it first arrives from the
-    # distribution; switching repositories then upgrades it in place.
-    if configure_fish_apt_repo; then
-      { x sudo apt-get update && x sudo apt-get -y install fish; } ||
-        echo "warning: fish installation from its apt repository failed" >&2
-    fi
-
-    # Retired packages: ones this script used to install and no longer does.
-    # Reported on every run and removed with --prune (see prune_apt_retired).
-    #   sysstat, pcp: sysstat recommends pcp, which installs 6 heavyweight
-    #     daemon services.
-    #   shfmt, shellcheck: now run by the formatter scripts via pinned uvx
-    #     (see stanza_uv).
-    retired="sysstat pcp shellcheck shfmt"
-    prune_apt_retired "$retired"
-
-    # ruby-build: the engine behind ruby-install. Installed alongside the Ruby
-    # build deps above whenever the optional/all tier is selected, so the two
-    # always arrive together. apt's ruby-build is too old to build current Ruby,
-    # so bootstrap a current copy from git into ~/.local (binary at
-    # ~/.local/bin/ruby-build, where ruby-install looks for it).
-    if [ "$INSTALL_TIER" != core ] && exists git; then
-      RUBY_BUILD_SRC="$HOME/.local/share/ruby-build"
-      if [ -d "$RUBY_BUILD_SRC/.git" ]; then
-        if ! is_fresh "$PACKAGE_STAMP"; then
-          x git -C "$RUBY_BUILD_SRC" pull --ff-only || echo "warning: ruby-build update failed"
-        fi
-      else
-        x git clone https://github.com/rbenv/ruby-build.git "$RUBY_BUILD_SRC" || echo "warning: ruby-build clone failed"
-      fi
-      if [ -x "$RUBY_BUILD_SRC/install.sh" ]; then
-        x env PREFIX="$HOME/.local" "$RUBY_BUILD_SRC/install.sh" || echo "warning: ruby-build install failed"
-      fi
-    fi
-
-    if ! is_fresh "$PACKAGE_STAMP"; then
-      # Upgrade installed packages non-interactively
-      x sudo apt-get -y upgrade || echo "warning: apt-get upgrade failed, skipping"
-      x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
-
-      # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
-      x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"
-
-      # Autoclean and clean package archives
-      x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping"
-      x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping"
-    fi
-
-    if [ -f /var/run/reboot-required ]; then
-      REBOOT_REQUIRED=1
-    fi
-
-  else
-    echo "$(basename "$0"): no supported package manager (apt-get) found, skipping" >&2
+    return 0
   fi
 
-fi
-
-# Defined above, next to --only; failures are reported there and do not stop
-# the rest of the run.
-stanza_uv || true
-
-heading "git"
-
-if [ "$PLATFORM" = "darwin" ]; then
-  git config --file ~/.gitconfig.local credential.helper osxkeychain
-fi
-
-heading "vscode"
-
-# Don't use system tools to update VS Code
-if [ -e /etc/apt/sources.list.d/vscode.list ] && $HAS_SUDO; then
-  x sudo rm -f /etc/apt/sources.list.d/vscode.list || true
-fi
-
-if ! exists code; then
-  if [ -d "/Applications/Visual Studio Code.app" ]; then
-    x ln -sf "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" "$BINDIR/code"
+  if ! is_fresh "$PACKAGE_STAMP"; then
+    x sudo apt-get update # refresh package lists
   fi
-fi
 
-if exists code; then
+  # Core packages: always installed, on every run.
+  core="fish apt-file direnv command-not-found dnsutils htop btop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev"
+  # Optional packages: installed only with --install-optional or --install-all.
+  # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
+  # ruby-build binary itself is bootstrapped from git below, as the apt package
+  # is too old to build current Ruby). rustc (YJIT) is omitted to stay lean.
+  optional="pv entr fzf pwgen build-essential autoconf libssl-dev libyaml-dev libreadline-dev zlib1g-dev libffi-dev libgmp-dev libncurses-dev libgdbm-dev gh"
+  # Full packages: installed only with --install-all.
+  full=""
 
+  # TODO: JDK installation on Linux (not yet documented; see fish/config.fish
+  # for context on how JAVA_HOME is set and what the macOS approach looks like)
+
+  install_set=$(install_set_for_tier "$core" "$optional" "$full")
+
+  comm -13 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
+  # Full unmanaged package removal is unsafe on Debian/apt because apt manages
+  # base system and infrastructure packages beyond dotfiles. Orphaned dependency
+  # packages are purged via apt-get autoremove --purge below.
+
+  if ! exists fd && exists fdfind; then
+    xmkdir "$BINDIR"
+    x ln -sf "$(which fdfind)" "$BINDIR/fd"
+  fi
+
+  # fish is in core above, so on a fresh machine it first arrives from the
+  # distribution; switching repositories then upgrades it in place.
+  if configure_fish_apt_repo; then
+    { x sudo apt-get update && x sudo apt-get -y install fish; } ||
+      echo "warning: fish installation from its apt repository failed" >&2
+  fi
+
+  # Retired packages: ones this script used to install and no longer does.
+  # Reported on every run and removed with --prune (see prune_apt_retired).
+  #   sysstat, pcp: sysstat recommends pcp, which installs 6 heavyweight
+  #     daemon services.
+  #   shfmt, shellcheck: now run by the formatter scripts via pinned uvx
+  #     (see feature_uv).
+  retired="sysstat pcp shellcheck shfmt"
+  prune_apt_retired "$retired"
+
+  # ruby-build: the engine behind ruby-install. Installed alongside the Ruby
+  # build deps above whenever the optional/all tier is selected, so the two
+  # always arrive together. apt's ruby-build is too old to build current Ruby,
+  # so bootstrap a current copy from git into ~/.local (binary at
+  # ~/.local/bin/ruby-build, where ruby-install looks for it).
+  if [ "$INSTALL_TIER" != core ] && exists git; then
+    ruby_build_src="$HOME/.local/share/ruby-build"
+    if [ -d "$ruby_build_src/.git" ]; then
+      if ! is_fresh "$PACKAGE_STAMP"; then
+        x git "${GIT_NET_OPTS[@]}" -C "$ruby_build_src" pull --ff-only || echo "warning: ruby-build update failed"
+      fi
+    else
+      x git "${GIT_NET_OPTS[@]}" clone https://github.com/rbenv/ruby-build.git "$ruby_build_src" || echo "warning: ruby-build clone failed"
+    fi
+    if [ -x "$ruby_build_src/install.sh" ]; then
+      x env PREFIX="$HOME/.local" "$ruby_build_src/install.sh" || echo "warning: ruby-build install failed"
+    fi
+  fi
+
+  if ! is_fresh "$PACKAGE_STAMP"; then
+    # Upgrade installed packages non-interactively
+    x sudo apt-get -y upgrade || echo "warning: apt-get upgrade failed, skipping"
+    x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
+
+    # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
+    x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"
+
+    # Autoclean and clean package archives
+    x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping"
+    x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping"
+  fi
+}
+
+function feature_packages {
+  if is_offline; then
+    skip_offline "packages"
+    return 0
+  fi
+  if exists brew; then
+    packages_brew
+  fi
   if [ "$PLATFORM" = "linux" ]; then
-    DST="$DSTDIR/.config/Code/User"
+    packages_apt
+  fi
+}
+
+# uv-upgrade: periodic upgrades of uv and its tools, for long-lived machines.
+# The uv feature only fills in what is missing, and leaves a uv it did not
+# install (e.g. CI's, or a cloud image's) alone.
+function feature_uv_upgrade {
+  exists uv || return 0
+  is_fresh "$PACKAGE_STAMP" && return 0
+  if is_offline; then
+    skip_offline "uv upgrade"
+    return 0
+  fi
+  heading "uv upgrade"
+  echo "Updating uv..."
+  # `uv self update` only works for the standalone installer; a uv provided
+  # by a package manager (e.g. a leftover brew uv mid-migration) will refuse,
+  # so warn rather than abort.
+  uv self update || echo "warning: uv self update failed (uv may be package-managed)"
+  echo "Upgrading uv tools..."
+  uv tool upgrade --all || echo "warning: uv tool upgrade failed"
+}
+
+# uv: installs uv itself, then fetches everything this repository's uv-based
+# scripts download on first use, so they keep working once the network is gone
+# (CI jobs, sandboxed cloud agents, planes).
+#
+# Architecture note: uv is the preferred way to get tools, because it works the
+# same on macOS, Debian, CI runners, and cloud containers where brew and apt
+# often do not. Skills stay self-contained: a skill's scripts need only uv, and
+# fetch their own pinned tools through uvx (or `uv run --script` metadata) on
+# first use, so each tool version is pinned in exactly one place. install.sh
+# does not duplicate those installs; its uv feature only makes sure uv exists
+# and warms uv's cache ahead of time.
+
+# Bash wrappers that run pinned tools via uvx, each paired (after "|") with a
+# small valid input in printf %b notation. A wrapper is warmed by checking that
+# input, so it fetches exactly the versions it pins and the pins stay in the
+# wrapper; the input must pass, or later tools in the wrapper never run. Add a
+# wrapper here when it starts calling uvx. Scripts with a `uv run --script`
+# shebang need no entry: they are discovered below.
+UVX_WRAPPERS=(
+  'skills/coding-standards/scripts/python-format|x = 1'
+  'skills/coding-standards/scripts/shell-format|#!/bin/sh\ntrue'
+)
+
+# Run a uv command quietly, reporting one git-style status line and, on
+# failure, the command's output (indented) so the cause is visible.
+function uv_item {
+  local ok=$1 bad=$2 label=$3 out
+  shift 3
+  if [ "$TRACE" = 1 ]; then
+    printf '+ %s\n' "$(printf '%q ' "$@")" >&2
+  fi
+  if out=$("$@" 2>&1); then
+    printf '%s  %s\n' "$ok" "$label"
+    return 0
+  fi
+  printf '%s  %s\n' "$bad" "$label" >&2
+  # shellcheck disable=SC2001 # sed prefixes every line, including the first
+  echo "$out" | sed 's/^/    /' >&2
+  return 1
+}
+
+# Returns non-zero if anything failed (or, offline, is not cached).
+function feature_uv {
+  heading "uv"
+
+  local offline=0 ok bad failed=0
+  case "$(echo "${UV_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) offline=1 ;;
+  esac
+  if [ "$offline" = 1 ]; then
+    ok="cached " bad="missing"
   else
-    DST="$DSTDIR/Library/Application Support/Code/User"
+    ok="fetched" bad="failed "
   fi
 
-  xmkdir "$DST"
+  # uv is installed via the standalone astral installer on every platform (it
+  # is not a brew/apt package here) because many scripts use `uv run` shebangs.
+  # The installer puts it in ~/.local/bin, which is already on PATH.
+  if ! exists uv; then
+    if [ "$offline" = 1 ]; then
+      echo "$(basename "$0"): uv not found" >&2
+      return 1
+    fi
+    echo "Installing uv..."
+    # The installer evaluates $XDG_DATA_HOME/../bin and checks it against PATH
+    # literally without normalization, failing to recognize that ~/.local/bin is
+    # already on PATH. Pin UV_INSTALL_DIR to ~/.local/bin and suppress shell
+    # profile modifications (https://github.com/axodotdev/cargo-dist/issues/2529).
+    if ! curl "${CURL_OPTS[@]}" -LsSf https://astral.sh/uv/install.sh |
+      env UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$BINDIR" sh ||
+      ! exists uv; then
+      echo "warning: uv installation failed" >&2
+      return 1
+    fi
+  fi
 
-  link_overlay_files "etc/code" "$DST"
+  # Tools such as shellcheck and shfmt are deliberately not installed on PATH
+  # here: the scripts that need them run their own pinned versions via uvx, so
+  # a skill needs nothing but uv, and each tool version is pinned in exactly
+  # one place (the script). This feature only warms uv's cache for those
+  # scripts. For an ad-hoc run, use e.g. `uvx --from shellcheck-py==<pin> shellcheck`.
 
-  # Let's try Settings Sync for now https://code.visualstudio.com/docs/editor/settings-sync
+  # Fetch what the repository's scripts need. With UV_OFFLINE, uv builds the
+  # same environments from its cache alone, which checks offline readiness
+  # (it writes to uv's cache, so it is not read-only).
+  local entry rel f first_line
+  for entry in "${UVX_WRAPPERS[@]}"; do
+    rel=${entry%%|*}
+    uv_item "$ok" "$bad" "$rel" "$SRCDIR/$rel" --check \
+      <<<"$(printf '%b' "${entry#*|}")" || failed=1
+  done
+  # bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
+  for f in "$SRCDIR"/bin/* "$SRCDIR"/skills/*/scripts/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    first_line=""
+    read -r first_line <"$f" 2>/dev/null || true
+    case "$first_line" in
+      '#!/usr/bin/env -S uv run'*)
+        uv_item "$ok" "$bad" "${f#"$SRCDIR"/}" uv sync --script "$f" </dev/null || failed=1
+        ;;
+    esac
+  done
 
-  # expected=$(echo "ms-vscode.vscode-typescript-tslint-plugin golang.go stkb.rewrap esbenp.prettier-vscode eg2.vscode-npm-script GitHub.vscode-pull-request-github DavidAnson.vscode-markdownlint github.github-vscode-theme" | tr '[:upper:]' '[:lower:]')
-  # actual=$(code --list-extensions | perl -pe '$_ = lc; chomp if eof' | tr '\n' ' ') # perl to remove trailing newline
+  if [ "$failed" != 0 ]; then
+    if [ "$offline" = 1 ]; then
+      echo "warning: some uv items are not available offline; re-run '$(basename "$0") --only uv' with network access" >&2
+    else
+      echo "warning: some uv items failed to install or fetch" >&2
+    fi
+    return 1
+  fi
+}
 
-  # # can't use xargs because GNU xargs need -r; macOS xargs does -r by default, but rejects the switch
-  # for ext in $(comm -23 <(echo "$actual" | tr ' ' '\n' | sort) <(echo "$expected" | tr ' ' '\n' | sort)); do
-  #   code --uninstall-extension "$ext"
-  # done
-  # for ext in $(comm -13 <(echo "$actual" | tr ' ' '\n' | sort) <(echo "$expected" | tr ' ' '\n' | sort)); do
-  #   code --install-extension "$ext"
-  # done
+function feature_vscode {
+  local dst
 
-fi
+  heading "vscode"
 
-if exists npm; then
+  # Don't use system tools to update VS Code
+  if [ -e /etc/apt/sources.list.d/vscode.list ] && $HAS_SUDO; then
+    x sudo rm -f /etc/apt/sources.list.d/vscode.list || true
+  fi
+
+  if ! exists code; then
+    if [ -d "/Applications/Visual Studio Code.app" ]; then
+      xmkdir "$BINDIR"
+      x ln -sf "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" "$BINDIR/code"
+    fi
+  fi
+
+  if exists code; then
+    if [ "$PLATFORM" = "linux" ]; then
+      dst="$DSTDIR/.config/Code/User"
+    else
+      dst="$DSTDIR/Library/Application Support/Code/User"
+    fi
+
+    xmkdir "$dst"
+
+    link_overlay_files "etc/code" "$dst"
+
+    # Let's try Settings Sync for now https://code.visualstudio.com/docs/editor/settings-sync
+  fi
+}
+
+function feature_npm {
+  exists npm || return 0
 
   heading "npm"
 
   x npm config set prefix "$HOME/.local/share/npm"
 
   # Packages are installed into $(npm config get prefix)
+}
 
-fi
+function feature_gradle {
+  local mem_bytes mem_kb mem_gb heap gradle_dir gradle_props
 
-heading "gradle"
+  heading "gradle"
 
-if [ "$PLATFORM" = "darwin" ]; then
-  # macOS: hw.memsize is usually the exact physical RAM in bytes
-  mem_bytes=$(sysctl -n hw.memsize)
-  mem_gb=$((mem_bytes / 1024 / 1024 / 1024))
-elif [ "$PLATFORM" = "linux" ]; then
-  # Linux: MemTotal is often less than physical RAM due to hardware reservations (GPU, etc.)
-  # Round to the nearest GB to infer the physical capacity.
-  mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-  mem_gb=$(((mem_kb + 524288) / 1048576))
-else
-  mem_gb=0
-fi
+  if [ "$PLATFORM" = "darwin" ]; then
+    # macOS: hw.memsize is usually the exact physical RAM in bytes
+    mem_bytes=$(sysctl -n hw.memsize)
+    mem_gb=$((mem_bytes / 1024 / 1024 / 1024))
+  elif [ "$PLATFORM" = "linux" ]; then
+    # Linux: MemTotal is often less than physical RAM due to hardware reservations (GPU, etc.)
+    # Round to the nearest GB to infer the physical capacity.
+    mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    mem_gb=$(((mem_kb + 524288) / 1048576))
+  else
+    mem_gb=0
+  fi
 
-echo "Detected ${mem_gb} GB RAM"
+  echo "Detected ${mem_gb} GB RAM"
 
-if [ "$mem_gb" -ge 64 ]; then
-  heap="6g"
-elif [ "$mem_gb" -ge 32 ]; then
-  heap="4g"
-elif [ "$mem_gb" -ge 16 ]; then
-  heap="3g"
-elif [ "$mem_gb" -ge 8 ]; then
-  heap="2g"
-elif [ "$mem_gb" -ge 4 ]; then
-  heap="1g"
-else
-  # For 1GB or 2GB machines, use a very small heap
-  heap="512m"
-fi
+  if [ "$mem_gb" -ge 64 ]; then
+    heap="6g"
+  elif [ "$mem_gb" -ge 32 ]; then
+    heap="4g"
+  elif [ "$mem_gb" -ge 16 ]; then
+    heap="3g"
+  elif [ "$mem_gb" -ge 8 ]; then
+    heap="2g"
+  elif [ "$mem_gb" -ge 4 ]; then
+    heap="1g"
+  else
+    # For 1GB or 2GB machines, use a very small heap
+    heap="512m"
+  fi
 
-gradle_dir="$HOME/.gradle"
-gradle_props="$gradle_dir/gradle.properties"
+  gradle_dir="$HOME/.gradle"
+  gradle_props="$gradle_dir/gradle.properties"
 
-xmkdir "$gradle_dir"
+  xmkdir "$gradle_dir"
 
-xmkdir "$gradle_dir/init.d"
-link_overlay_files "etc/gradle/init.d" "$gradle_dir/init.d"
+  xmkdir "$gradle_dir/init.d"
+  link_overlay_files "etc/gradle/init.d" "$gradle_dir/init.d"
 
-if [ ! -f "$gradle_props" ]; then
-  echo "Creating $gradle_props with heap=${heap}"
-  cat >"$gradle_props" <<EOF
-# Generated by dotfiles update
-org.gradle.jvmargs=-Xmx${heap} -XX:+UseG1GC
-org.gradle.parallel=true
-org.gradle.caching=true
-EOF
-else
-  if grep -q "# Generated by dotfiles update" "$gradle_props"; then
-    echo "Updating generated $gradle_props with heap=${heap}"
+  if [ ! -f "$gradle_props" ]; then
+    echo "Creating $gradle_props with heap=${heap}"
     cat >"$gradle_props" <<EOF
 # Generated by dotfiles update
 org.gradle.jvmargs=-Xmx${heap} -XX:+UseG1GC
@@ -1192,11 +1365,48 @@ org.gradle.parallel=true
 org.gradle.caching=true
 EOF
   else
-    echo "Skipping $gradle_props as it was not generated by this script and already exists."
+    if grep -q "# Generated by dotfiles update" "$gradle_props"; then
+      echo "Updating generated $gradle_props with heap=${heap}"
+      cat >"$gradle_props" <<EOF
+# Generated by dotfiles update
+org.gradle.jvmargs=-Xmx${heap} -XX:+UseG1GC
+org.gradle.parallel=true
+org.gradle.caching=true
+EOF
+    else
+      echo "Skipping $gradle_props as it was not generated by this script and already exists."
+    fi
   fi
-fi
+}
 
-if exists android || exists compose-preview || [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; then
+# Download installer script $1 and run it with the remaining arguments. Unlike
+# `bash <(curl ...)`, a failed download is an error rather than an empty script
+# that "succeeds".
+function run_installer {
+  local url=$1 script status=0
+  shift
+  script=$(mktemp)
+  if curl "${CURL_OPTS[@]}" -fsSL -o "$script" "$url"; then
+    x bash "$script" "$@" || status=$?
+  else
+    echo "warning: failed to download $url" >&2
+    status=1
+  fi
+  rm -f "$script"
+  return "$status"
+}
+
+function feature_android {
+  local tiered=0
+  if [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; then
+    tiered=1
+  fi
+  exists android || exists compose-preview || [ "$tiered" = 1 ] || return 0
+  if is_offline; then
+    skip_offline "android"
+    return 0
+  fi
+
   if ! is_fresh "$PACKAGE_STAMP"; then
     heading "android"
     if exists android; then
@@ -1211,47 +1421,59 @@ if exists android || exists compose-preview || [ "$INSTALL_TIER" = "optional" ] 
         compose-preview update || echo "warning: compose-preview update failed" >&2
     fi
   fi
-  if { ! exists android || ! exists compose-preview; } && { [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; }; then
+  if { ! exists android || ! exists compose-preview; } && [ "$tiered" = 1 ]; then
     heading "android"
     if ! exists android; then
-      x bash <(curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh) &&
+      run_installer https://dl.google.com/android/cli/latest/linux_x86_64/install.sh &&
         x android skills list --long=false >/dev/null ||
         echo "warning: android install failed" >&2
     fi
     if ! exists compose-preview; then
       # MODIFY_PATH=0 and --no-modify-path work around upstream issue #108.
-      x env MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
-        bash <(curl -fsSL https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh) \
+      MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
+        run_installer https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh \
         --cli-only --no-modify-path || echo "warning: compose-preview install failed" >&2
     fi
   fi
-fi
+}
 
-heading "skill plugins"
+function feature_skills {
+  local src
 
-# Clean up legacy skill-select configuration and cache
-x rm -rf "$XDG_CONFIG_HOME/skill-select"
-x rm -rf "$XDG_CACHE_HOME/skill-select"
+  heading "skill plugins"
 
-# Plugins for 'skill' and 'permission'
-# (overlay repos provide these under config/<tool>/plugins).
-xmkdir "$XDG_CONFIG_HOME/skill/plugins"
-link_overlay_files "config/skill/plugins" "$XDG_CONFIG_HOME/skill/plugins"
-xmkdir "$XDG_CONFIG_HOME/permission/plugins"
-link_overlay_files "config/permission/plugins" "$XDG_CONFIG_HOME/permission/plugins"
+  # Clean up legacy skill-select configuration and cache
+  x rm -rf "$XDG_CONFIG_HOME/skill-select"
+  x rm -rf "$XDG_CACHE_HOME/skill-select"
 
-heading "skill defaults"
+  # Plugins for 'skill' and 'permission'
+  # (overlay repos provide these under config/<tool>/plugins).
+  xmkdir "$XDG_CONFIG_HOME/skill/plugins"
+  link_overlay_files "config/skill/plugins" "$XDG_CONFIG_HOME/skill/plugins"
+  xmkdir "$XDG_CONFIG_HOME/permission/plugins"
+  link_overlay_files "config/permission/plugins" "$XDG_CONFIG_HOME/permission/plugins"
 
-# Each repo's etc/skill/defaults.sh adds and removes default skills with
-# `skill --scope defaults`, so overlay skill names stay out of this repo. They
-# run here rather than at agent launch, which only links the defaults.
-for src in "${SRCDIRS[@]}"; do
-  [ -f "$src/etc/skill/defaults.sh" ] || continue
-  x env PATH="$SRCDIR/bin:$PATH" sh "$src/etc/skill/defaults.sh" ||
-    echo "warning: $src/etc/skill/defaults.sh failed" >&2
-done
+  heading "skill defaults"
 
-if [ "$AGENTS" = 1 ]; then
+  # Each repo's etc/skill/defaults.sh adds and removes default skills with
+  # `skill --scope defaults`, so overlay skill names stay out of this repo. They
+  # run here rather than at agent launch, which only links the defaults.
+  for src in "${SRCDIRS[@]}"; do
+    [ -f "$src/etc/skill/defaults.sh" ] || continue
+    x env PATH="$SRCDIR/bin:$PATH" sh "$src/etc/skill/defaults.sh" ||
+      echo "warning: $src/etc/skill/defaults.sh failed" >&2
+  done
+
+  # Skills are intentionally NOT installed globally. The defaults are linked
+  # into each repo by its clone hook and into each wrapped agent's session at
+  # launch (`skill add --defaults`), and others with `skill add ...`, using
+  # ~/.dotfiles/skills (plus .private and .corp overlays) as the source.
+  # Keeping ~/.agents/skills and ~/.claude/skills empty prevents every project
+  # from seeing every skill.
+}
+
+function feature_agents {
+  local agents_context
 
   heading "agents"
 
@@ -1278,51 +1500,77 @@ if [ "$AGENTS" = 1 ]; then
     link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
   fi
 
-fi
-
-# Skills are intentionally NOT installed globally. The defaults are linked into
-# each repo by its clone hook and into each wrapped agent's session at launch
-# (`skill add --defaults`), and others with `skill add ...`, using
-# ~/.dotfiles/skills (plus .private and .corp overlays) as the source. Keeping
-# ~/.agents/skills and ~/.claude/skills empty prevents every project from
-# seeing every skill.
-
-if ! is_fresh "$PACKAGE_STAMP"; then
-
-  if [ "$AGENTS" = 1 ] && { exists agy || exists claude || is_codex_agent; }; then
-
-    heading "agent CLIs"
-
-    if exists agy; then
-      x agy update || echo "warning: agy update failed" >&2
-    fi
-    if exists claude; then
-      x claude update || echo "warning: claude update failed" >&2
-    fi
-    if is_codex_agent; then
-      x codex update || echo "warning: codex update failed" >&2
-    fi
-
+  is_fresh "$PACKAGE_STAMP" && return 0
+  exists agy || exists claude || is_codex_agent || return 0
+  if is_offline; then
+    skip_offline "agent CLI updates"
+    return 0
   fi
 
-  touch_stamp "$PACKAGE_STAMP"
+  heading "agent CLIs"
 
+  if exists agy; then
+    x agy update || echo "warning: agy update failed" >&2
+  fi
+  if exists claude; then
+    x claude update || echo "warning: claude update failed" >&2
+  fi
+  if is_codex_agent; then
+    x codex update || echo "warning: codex update failed" >&2
+  fi
+}
+
+function feature_overlay_hooks {
+  if [ -x "$DSTDIR/.private/update" ]; then
+    heading "private update"
+    "$DSTDIR/.private/update"
+  fi
+
+  if [ -x "$DSTDIR/.corp/update" ]; then
+    heading "corp update"
+    "$DSTDIR/.corp/update"
+  fi
+}
+
+# Run each selected feature in a subshell with errexit, so a failure stops that
+# feature only. errexit is ignored inside any command that is part of an `||`
+# or `if` test, hence the explicit status capture.
+FAILED=""
+for name in $SELECTED; do
+  set +e
+  (
+    set -e
+    "feature_${name//-/_}"
+  )
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    FAILED="${FAILED:+$FAILED }$name"
+  fi
+done
+
+# The daily steps (package upgrades, uv self-update, Android and agent CLI
+# updates) share one stamp; restart its 24 hours only when one of them ran.
+if ! is_fresh "$PACKAGE_STAMP" && ! is_offline; then
+  for name in packages uv-upgrade android agents; do
+    if selected "$name"; then
+      touch_stamp "$PACKAGE_STAMP"
+      break
+    fi
+  done
 fi
 
-if [ -x "$DSTDIR/.private/update" ]; then
-  heading "private update"
-  "$DSTDIR/.private/update"
-fi
-
-if [ -x "$DSTDIR/.corp/update" ]; then
-  heading "corp update"
-  "$DSTDIR/.corp/update"
-fi
-
-if [ "$REBOOT_REQUIRED" = 1 ]; then
+if selected packages && [ -f /var/run/reboot-required ]; then
   echo "warning: a reboot is required to complete updates"
   if [ -f /var/run/reboot-required.pkgs ]; then
     sed 's/^/warning: /' /var/run/reboot-required.pkgs
   fi
   echo "hint: sudo reboot"
+fi
+
+if [ -n "$FAILED" ]; then
+  for name in $FAILED; do
+    echo "failed: $name" >&2
+  done
+  exit 1
 fi

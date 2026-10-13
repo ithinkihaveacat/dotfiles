@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-install-profiles (install.sh --profile, --with, --without,
+# --dry-run, AGENT_OFFLINE)
+#
+# Runs a copy of install.sh from a minimal fake repository inside a temporary
+# HOME, with sudo, apt-get, brew, npm, curl, git, and uv replaced by stubs that
+# record their arguments. Nothing on the host is touched, and nothing reaches
+# the network.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../install.sh"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# Fake repository at $HOME/.dotfiles: install.sh links into its parent.
+REPO="$TMP/home/.dotfiles"
+mkdir -p "$REPO/home" "$REPO/fish" "$REPO/skills/coding-standards/scripts" \
+  "$REPO/skills/demo/scripts"
+cp "$BIN" "$REPO/install.sh"
+echo "# test" >"$REPO/home/.testrc"
+for wrapper in python-format shell-format; do
+  # shellcheck disable=SC2016 # expands in the generated stub
+  printf '#!/bin/sh\necho "%s $*" >>"$CALLS"\n' "$wrapper" \
+    >"$REPO/skills/coding-standards/scripts/$wrapper"
+  chmod +x "$REPO/skills/coding-standards/scripts/$wrapper"
+done
+printf '#!/usr/bin/env -S uv run --script\nprint("demo")\n' >"$REPO/skills/demo/scripts/demo"
+
+# Stubs record "name args" in $CALLS; uv also records UV_OFFLINE, and fails
+# when $FAKE_UV_FAIL is set.
+STUBS="$TMP/stubs"
+mkdir -p "$STUBS"
+for cmd in sudo apt-get brew npm curl git; do
+  # shellcheck disable=SC2016 # expands in the generated stub
+  printf '#!/bin/sh\necho "%s $*" >>"$CALLS"\n' "$cmd" >"$STUBS/$cmd"
+done
+cat >"$STUBS/uv" <<'EOF'
+#!/bin/sh
+echo "uv $* UV_OFFLINE=${UV_OFFLINE:-}" >>"$CALLS"
+[ -z "${FAKE_UV_FAIL:-}" ]
+EOF
+chmod +x "$STUBS"/*
+export CALLS="$TMP/calls"
+
+# run [ENV=VALUE...] -- ARGS...: output (stdout and stderr) in $output, exit
+# status in $status, recorded calls in $calls. Runs with a clean environment.
+run() {
+  local envs=()
+  while [ "$1" != -- ]; do
+    envs+=("$1")
+    shift
+  done
+  shift
+  : >"$CALLS"
+  status=0
+  output=$(env -i HOME="$TMP/home" PATH="$STUBS:/usr/bin:/bin" CALLS="$CALLS" \
+    ${envs[@]+"${envs[@]}"} "$REPO/install.sh" "$@" 2>&1 </dev/null) || status=$?
+  calls=$(cat "$CALLS")
+}
+
+n=0
+check() {
+  local desc=$1
+  shift
+  n=$((n + 1))
+  if "$@"; then
+    echo "ok $n - $desc"
+  else
+    echo "not ok $n - $desc (status $status)"
+    printf '%s\n' "$output" | sed 's/^/# /'
+    printf 'calls:\n%s\n' "$calls" | sed 's/^/# /'
+  fi
+}
+is() { [[ "$1" == "$2" ]]; }
+has() { [[ "$1" == *"$2"* ]]; }
+lacks() { [[ "$1" != *"$2"* ]]; }
+fails_with() { [[ $status -eq 1 && "$output" == *"$1"* ]]; }
+links_to() { [[ -L "$1" && "$(readlink "$1")" == "$2" ]]; }
+absent() { [[ ! -e "$1" && ! -L "$1" ]]; }
+# no_calls NAME...: no recorded call starts with any NAME.
+no_calls() {
+  local name
+  for name in "$@"; do
+    if printf '%s\n' "$calls" | grep -q "^$name "; then
+      return 1
+    fi
+  done
+}
+
+echo "1..22"
+
+# Selection, without running anything.
+run -- --profile cloud --dry-run
+check "cloud profile selects links, uv, skills" is "$output" $'links\nuv\nskills'
+run -- --dry-run
+check "default profile selects every feature, in order" \
+  is "$(printf '%s\n' "$output" | paste -sd ' ' -)" \
+  "git-pull links macos fish-completions packages uv-upgrade uv vscode npm gradle android skills agents overlay-hooks"
+run -- --no-agents --without npm,gradle --dry-run
+check "--no-agents and --without remove features" \
+  is "$(printf '%s\n' "$output" | paste -sd ' ' -)" \
+  "git-pull links macos fish-completions packages uv-upgrade uv vscode android skills overlay-hooks"
+run -- --profile=cloud --with gradle --dry-run
+check "--with adds a feature in its usual place" is "$output" $'links\nuv\ngradle\nskills'
+run -- --only uv,links --dry-run
+check "--only runs exactly the named features" is "$output" $'links\nuv'
+run -- --only uv --profile cloud
+check "--only cannot be combined with --profile" fails_with "--only cannot be combined"
+run -- --profile laptop
+check "an unknown profile is rejected" fails_with "unknown profile 'laptop'"
+run -- --without bogus
+check "an unknown feature is rejected" fails_with "--without: unknown feature 'bogus'"
+
+# A cloud run makes no system changes and reaches no host directly.
+run -- --profile cloud
+check "cloud run exits 0" is "$status" 0
+check "cloud run never calls sudo or apt-get" no_calls sudo apt-get
+check "cloud run never calls brew, npm, curl, or git" no_calls brew npm curl git
+check "cloud run does not self-update uv" lacks "$calls" "uv self"
+check "cloud run does not upgrade uv tools" lacks "$calls" "uv tool"
+check "cloud run prefetches uv scripts" \
+  has "$calls" "uv sync --script $REPO/skills/demo/scripts/demo"
+check "cloud run warms the uvx wrappers" has "$calls" "shell-format --check"
+check "cloud run links dotfiles" links_to "$TMP/home/.testrc" "$REPO/home/.testrc"
+check "cloud run links fish config" links_to "$TMP/home/.config/fish" "$REPO/fish"
+check "cloud run leaves the daily update stamp alone" \
+  absent "$TMP/home/.cache/dotfiles/last_package_update"
+
+# Offline: uv works from its cache, network features are skipped and say so.
+run AGENT_OFFLINE=1 -- --profile cloud
+check "offline cloud run tells uv to stay offline" has "$calls" "UV_OFFLINE=1"
+run AGENT_OFFLINE=1 -- --only git-pull,packages,uv-upgrade
+check "offline run reports each skipped network feature" \
+  is "$(printf '%s\n' "$output" | grep '^skipped: ' | paste -sd '|' -)" \
+  "skipped: git pull (AGENT_OFFLINE is set)|skipped: packages (AGENT_OFFLINE is set)|skipped: uv upgrade (AGENT_OFFLINE is set)"
+
+# A failing feature is reported, and the features after it still run.
+run FAKE_UV_FAIL=1 -- --profile cloud
+check "a failed feature makes the run exit non-zero and names it" fails_with "failed: uv"
+check "features after a failed one still run" has "$output" "# skill plugins"
