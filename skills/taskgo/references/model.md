@@ -478,7 +478,7 @@ structural overview and CLI quick reference:
 ````markdown
 # Control Repository
 
-A private project and task control repository maintained with [**`taskgo`**](https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo).
+A private project and task control repository maintained with [**`taskgo`**](https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo).
 
 ## Structure
 
