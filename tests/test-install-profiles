@@ -34,7 +34,7 @@ printf '#!/usr/bin/env -S uv run --script\nprint("demo")\n' >"$REPO/skills/demo/
 # when $FAKE_UV_FAIL is set.
 STUBS="$TMP/stubs"
 mkdir -p "$STUBS"
-for cmd in sudo apt-get brew npm curl git; do
+for cmd in sudo apt-get dpkg-query brew npm curl git; do
   # shellcheck disable=SC2016 # expands in the generated stub
   printf '#!/bin/sh\necho "%s $*" >>"$CALLS"\n' "$cmd" >"$STUBS/$cmd"
 done
@@ -91,7 +91,7 @@ no_calls() {
   done
 }
 
-echo "1..22"
+echo "1..29"
 
 # Selection, without running anything.
 run -- --profile cloud --dry-run
@@ -99,13 +99,13 @@ check "cloud profile selects links, uv, skills" is "$output" $'links\nuv\nskills
 run -- --dry-run
 check "default profile selects every feature, in order" \
   is "$(printf '%s\n' "$output" | paste -sd ' ' -)" \
-  "git-pull links macos fish-completions packages uv-upgrade uv vscode npm gradle android skills agents overlay-hooks"
-run -- --no-agents --without npm,gradle --dry-run
-check "--no-agents and --without remove features" \
+  "git-pull links macos fish-completions base cli-extras uv vscode npm skills agents upgrades overlay-hooks"
+run -- --without agents,npm,upgrades -n
+check "--without removes features" \
   is "$(printf '%s\n' "$output" | paste -sd ' ' -)" \
-  "git-pull links macos fish-completions packages uv-upgrade uv vscode android skills overlay-hooks"
-run -- --profile=cloud --with gradle --dry-run
-check "--with adds a feature in its usual place" is "$output" $'links\nuv\ngradle\nskills'
+  "git-pull links macos fish-completions base cli-extras uv vscode skills overlay-hooks"
+run -- --profile=cloud --with android -n
+check "--with adds a feature in its usual place" is "$output" $'links\nandroid\nuv\nskills'
 run -- --only uv,links --dry-run
 check "--only runs exactly the named features" is "$output" $'links\nuv'
 run -- --only uv --profile cloud
@@ -133,12 +133,34 @@ check "cloud run leaves the daily update stamp alone" \
 # Offline: uv works from its cache, network features are skipped and say so.
 run AGENT_OFFLINE=1 -- --profile cloud
 check "offline cloud run tells uv to stay offline" has "$calls" "UV_OFFLINE=1"
-run AGENT_OFFLINE=1 -- --only git-pull,packages,uv-upgrade
+run AGENT_OFFLINE=1 -- --only git-pull,cli-extras,upgrades
 check "offline run reports each skipped network feature" \
   is "$(printf '%s\n' "$output" | grep '^skipped: ' | paste -sd '|' -)" \
-  "skipped: git pull (AGENT_OFFLINE is set)|skipped: packages (AGENT_OFFLINE is set)|skipped: uv upgrade (AGENT_OFFLINE is set)"
+  "skipped: git pull (AGENT_OFFLINE is set)|skipped: packages (AGENT_OFFLINE is set)|skipped: upgrades (AGENT_OFFLINE is set)"
 
 # A failing feature is reported, and the features after it still run.
 run FAKE_UV_FAIL=1 -- --profile cloud
 check "a failed feature makes the run exit non-zero and names it" fails_with "failed: uv"
 check "features after a failed one still run" has "$output" "# skill plugins"
+
+# Package features install only their own packages, through one apt step
+# (Linux only: on macOS the package step uses brew, which is not stubbed).
+if [ "$(uname -s)" = Linux ]; then
+  run -- --only cli-extras,media
+  check "package features install their apt packages in one step" \
+    has "$calls" "sudo apt-get -y install entr fzf gh pv pwgen"
+  check "package features do not upgrade anything" lacks "$calls" "upgrade"
+  run -- --only upgrades
+  check "upgrades upgrade apt packages" has "$calls" "sudo apt-get -y upgrade"
+  check "upgrades update uv" has "$calls" "uv self update"
+  run -- --only upgrades
+  check "upgrades say when they ran recently" has "$output" "ran in the last 24 hours"
+  check "upgrades run at most once a day" lacks "$calls" "upgrade"
+  run -- --only upgrades --force
+  check "--force runs upgrades again" has "$calls" "sudo apt-get -y upgrade"
+else
+  for _ in 1 2 3 4 5 6 7; do
+    n=$((n + 1))
+    echo "ok $n # SKIP apt package checks need Linux"
+  done
+fi

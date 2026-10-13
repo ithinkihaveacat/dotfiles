@@ -59,30 +59,40 @@ fi
 
 # Features: the parts of this script, in the order they run. Each entry is
 # "name|profiles|description"; a profile runs the features that list it, and
-# --with/--without/--only adjust that. A feature is a function named feature_
-# plus its name (with - as _), run in a subshell: a failure is reported and the
-# remaining features still run. When adding one, decide which profiles it
-# belongs to: "cloud" (a disposable container's setup script, often with no
-# sudo and an egress allowlist) takes only features that need no sudo, upgrade
-# nothing, and reach no host beyond GitHub and uv's package index; "ci" is just
-# what CI jobs need.
+# --with/--without/--only adjust that. A feature with no profile runs only when
+# named. Most features are a function named feature_ plus the name (with - as
+# _), run in a subshell, so a failure is reported and the remaining features
+# still run. Package features (PACKAGE_FEATURES) contribute their packages
+# (packages_of) to one shared install step, which runs before the first of
+# them; some also have a function for setup beyond packages.
+#
+# When adding a feature, decide which profiles it belongs to: "workstation" is
+# a long-lived machine for interactive use (a bare run); "cloud" is a
+# disposable container's setup script, often with no sudo and an egress
+# allowlist, so it takes only features that need no sudo, upgrade nothing, and
+# reach no host beyond GitHub and uv's package index; "ci" is just what CI jobs
+# need.
 FEATURES=(
   'git-pull|workstation|Fast-forward ~/.dotfiles and its overlays'
   'links|workstation cloud|Symlink dotfiles into the home directory, fish and tool configs'
-  'macos|workstation|Key bindings, defaults, colors, git keychain (macOS only)'
+  'macos|workstation|Key bindings, system defaults, colors, git keychain (macOS)'
   'fish-completions|workstation|Regenerate fish completions'
-  'packages|workstation|Install packages for the tier; daily upgrades (sudo on Linux)'
-  'uv-upgrade|workstation|Self-update uv and upgrade uv tools (daily)'
+  'base|workstation|Core command-line packages, and fish from its own repository'
+  'cli-extras|workstation|gh, git-lfs, fzf, yazi, and other interactive tools'
+  'services|-|Hetzner Cloud and gog CLIs'
+  'media|-|ImageMagick, FFmpeg, yt-dlp, ExifTool'
+  'android|-|Android SDK tools, Android CLI, compose-preview, JDKs, gradle settings'
+  'ruby|-|ruby-build and the dependencies for building Ruby'
   'uv|workstation cloud ci|Install uv if missing; prefetch what scripts fetch on first use'
   'vscode|workstation|Link VS Code settings'
   'npm|workstation|Set the npm global prefix to ~/.local/share/npm'
-  'gradle|workstation|Size the gradle heap to RAM; link init scripts'
-  'android|workstation|Update Android CLI tools (daily); install with the optional tier'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
-  'agents|workstation|Link agent context and hooks; update agent CLIs (daily)'
+  'agents|workstation|Link agent context and hooks'
+  'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
   'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
 )
 PROFILES="workstation cloud ci"
+PACKAGE_FEATURES="base cli-extras services media android ruby"
 
 # Print each feature's name and description for --help, then each profile's
 # features.
@@ -103,10 +113,13 @@ function features_help {
         list="${list:+$list }${entry%%|*}"
       fi
     done
-    if [ "$profile" = workstation ]; then
-      list="all features (the default)"
-    fi
-    printf '  %-17s %s\n' "$profile" "$list"
+    printf '%s\n' "$list" | fold -s -w 60 | {
+      read -r line
+      printf '  %-17s %s\n' "$profile" "$line"
+      while read -r line; do
+        printf '  %-17s %s\n' "" "$line"
+      done
+    }
   done
 }
 
@@ -115,32 +128,26 @@ function usage {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Installs and updates dotfiles. Symlinks and copies dotfiles from ~/.dotfiles to
-their correct locations, installs packages, and wires up tool-specific config.
-Safe to run repeatedly; an existing checkout is fast-forwarded first.
+Sets up and updates this machine from ~/.dotfiles: symlinks dotfiles into
+place, installs packages, and wires up tool-specific config. Safe to run
+repeatedly; an existing checkout is fast-forwarded first.
 
 Can also be run directly from the network, which clones the repo to ~/.dotfiles
 (if absent) before installing:
 
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash
 
-The work is split into features, and a profile picks which of them run: the
-default, workstation, runs them all; cloud is for the setup script of a
-disposable cloud or agent container, and does no sudo, no package installs, and
-no upgrades. A failing feature is reported and the others still run; the exit
-status is non-zero if any failed.
-
-Packages are grouped into tiers: a core set that is always installed, an
-optional set, and a full set. By default only core is installed. Pass
---install-optional to add the optional set, or --install-all to add both the
-optional and full sets. Packages outside every tier are left alone and merely
-reported, unless --prune is given. Tiers apply to the packages and android
-features only.
+The work is split into features, and a profile picks which of them run. The
+default, workstation, sets up a long-lived machine for interactive use; cloud
+is for the setup script of a disposable cloud or agent container, and uses no
+sudo, installs no packages, and upgrades nothing. Features in no profile run
+only when named with --with or --only. A failing feature is reported and the
+others still run; the exit status is non-zero if any failed.
 
 OPTIONS:
-  --help        Show this help message and exit
+  -h, --help    Show this help message and exit
   --profile NAME
-                Run the features of profile NAME (see PROFILES below)
+                Run the features of profile NAME (default: workstation)
   --with FEATURE[,FEATURE...]
                 Also run these features
   --without FEATURE[,FEATURE...]
@@ -148,22 +155,15 @@ OPTIONS:
   --only FEATURE[,FEATURE...]
                 Run only these features, in their usual order. Cannot be
                 combined with --profile or --with
-  --dry-run     Print the features that would run, one per line, and exit
-  --trace       Print each wrapped command to stderr before running it
-  --force       Overwrite existing real files when laying down overlay symlinks
-                and bypass the 24-hour package/tool update TTL
-                (default: refuse and exit)
-  --install-optional
-                Install the core and optional package sets
-  --install-all Install the core, optional, and full package sets
-  --prune       Remove installed packages not in any tier (brew), and apt
-                packages this script has retired (keeping any that other
-                installed packages depend on). Prompts first when
-                interactive; removes without asking when non-interactive.
-                Default: warn only
-  --non-interactive
-                Run without prompting; use sudo only if it needs no password
-  --no-agents   Same as --without agents
+  -n, --dry-run Print the features that would run, one per line, and exit
+  --force       Replace existing real files with links, and run the daily
+                upgrades even if they ran in the last 24 hours
+  --prune       Remove brew packages that no feature installs, and apt packages
+                this script has retired (keeping any that other installed
+                packages depend on). Asks first when interactive; otherwise
+                --prune is the consent. Default: warn only
+  --no-input    Never prompt; use sudo only if it needs no password
+  --verbose     Print each wrapped command to stderr before running it
 
 FEATURES:
 $(features_help)
@@ -179,15 +179,14 @@ ENVIRONMENT:
                 Fails, naming each item, if any package is missing
 
 EXAMPLES:
-  $(basename "$0")                   # Install or update; core packages only
-  $(basename "$0") --trace           # Same, but log each wrapped command
-  $(basename "$0") --install-optional  # Also install the optional package set
-  $(basename "$0") --install-all --prune  # Full set; offer to remove extras
-  $(basename "$0") --profile cloud   # From a cloud environment's setup script
-  $(basename "$0") --without agents,npm  # Leave agent CLIs and npm alone
-  $(basename "$0") --only uv         # Prepare a CI job for offline use
+  $(basename "$0")                    # Set up or update this machine
+  $(basename "$0") --with android,ruby  # Also install Android and Ruby tooling
+  $(basename "$0") --prune            # Also remove packages no feature installs
+  $(basename "$0") --without upgrades # Skip the daily upgrades
+  $(basename "$0") --profile cloud    # From a cloud environment's setup script
+  $(basename "$0") --only uv          # Prepare a CI job for offline use
   UV_OFFLINE=1 $(basename "$0") --only uv  # Check it is ready, without the network
-  $(basename "$0") --profile cloud --with gradle --dry-run  # Preview a selection
+  $(basename "$0") --profile cloud --with android -n  # Preview a selection
 
   # Install/update over the network, passing flags after '-s --':
   curl -fsSL https://raw.githubusercontent.com/ithinkihaveacat/dotfiles/master/install.sh | bash -s -- --profile cloud
@@ -226,12 +225,11 @@ function feature_list {
   printf '%s' "$names"
 }
 
-TRACE=0
+VERBOSE=0
 FORCE=0
 HAS_SUDO=false
 NON_INTERACTIVE=0
-NON_INTERACTIVE_FLAG=0
-INSTALL_TIER=core
+NO_INPUT=0
 PRUNE=0
 DRY_RUN=0
 PROFILE=""
@@ -266,48 +264,28 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
   case $1 in
-    --help | -h)
+    -h | --help)
       usage 0
       ;;
-    --trace)
-      TRACE=1
+    --verbose)
+      VERBOSE=1
       shift
       ;;
     --force)
       FORCE=1
       shift
       ;;
-    --install-optional)
-      if [ "$INSTALL_TIER" = all ]; then
-        echo "$(basename "$0"): --install-optional and --install-all are mutually exclusive" >&2
-        usage 1 >&2
-      fi
-      INSTALL_TIER=optional
-      shift
-      ;;
-    --install-all)
-      if [ "$INSTALL_TIER" = optional ]; then
-        echo "$(basename "$0"): --install-optional and --install-all are mutually exclusive" >&2
-        usage 1 >&2
-      fi
-      INSTALL_TIER=all
-      shift
-      ;;
     --prune)
       PRUNE=1
       shift
       ;;
-    --non-interactive)
+    --no-input)
       NON_INTERACTIVE=1
-      NON_INTERACTIVE_FLAG=1
+      NO_INPUT=1
       shift
       ;;
-    --dry-run)
+    -n | --dry-run)
       DRY_RUN=1
-      shift
-      ;;
-    --no-agents)
-      WITHOUT="$WITHOUT agents"
       shift
       ;;
     --profile)
@@ -374,6 +352,17 @@ function selected {
   [[ " $SELECTED " == *" $1 "* ]]
 }
 
+# Returns success if any package feature is selected.
+function packages_selected {
+  local name
+  for name in $PACKAGE_FEATURES; do
+    if selected "$name"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # A cloud container's setup script should say what it wants rather than get a
 # workstation run; the variables only describe where we are, so warn rather
 # than switch profile.
@@ -395,6 +384,9 @@ case "$(uname -s)" in
     exit 1
     ;;
 esac
+if [ "$PLATFORM" = "linux" ]; then
+  export DEBIAN_FRONTEND="noninteractive"
+fi
 
 # Returns success if AGENT_OFFLINE asks for no network requests.
 function is_offline {
@@ -420,36 +412,9 @@ fi
 CURL_OPTS=(--connect-timeout 15 --max-time 300)
 GIT_NET_OPTS=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60)
 
-# Ask for sudo upfront, but only if a selected feature needs it. When it would
-# need a password, ask on the terminal if there is one; a non-interactive run
-# (an explicit --non-interactive, or a setup script with no terminal at all)
-# uses sudo only if it is passwordless, and skips apt otherwise.
-if [ "$PLATFORM" = "linux" ]; then
-  export DEBIAN_FRONTEND="noninteractive"
-fi
-if [ "$PLATFORM" = "linux" ] && selected packages && ! is_offline; then
-  if ! command -v sudo >/dev/null 2>&1; then
-    echo "warning: sudo not found; skipping apt" >&2
-  elif sudo -n true 2>/dev/null; then
-    HAS_SUDO=true
-  elif [ "$NON_INTERACTIVE_FLAG" = 1 ] || ! (: </dev/tty) 2>/dev/null; then
-    echo "warning: sudo needs a password and this run cannot prompt for it; skipping apt" >&2
-  else
-    echo "This script requires sudo access for package management."
-    echo "You may be prompted for your password."
-    # Good for 5 mins; for more see https://github.com/mathiasbynens/dotfiles/blob/master/.macos#L13
-    # shellcheck disable=SC2024 # the redirect is for sudo's password prompt
-    if ! sudo -v </dev/tty; then
-      echo "$(basename "$0"): failed to obtain sudo access" >&2
-      exit 1
-    fi
-    HAS_SUDO=true
-  fi
-fi
-
-# Runs the command, optionally logging it first when --trace is set.
+# Runs the command, optionally logging it first when --verbose is set.
 function x {
-  if [ "$TRACE" = 1 ]; then
+  if [ "$VERBOSE" = 1 ]; then
     printf '+ %s\n' "$(printf '%q ' "$@")" >&2
   fi
   "$@"
@@ -494,14 +459,36 @@ function heading {
   printf '# %s\n' "$@"
 }
 
-# Echo the space-separated package list for the active INSTALL_TIER, given the
-# core, optional, and full sets as $1, $2, $3. core is always included.
-function install_set_for_tier {
-  case "$INSTALL_TIER" in
-    all) printf '%s %s %s' "$1" "$2" "$3" ;;
-    optional) printf '%s %s' "$1" "$2" ;;
-    *) printf '%s' "$1" ;;
+# Print the packages package feature $1 installs with manager $2: "brew"
+# (formulae), "cask" (brew casks), or "apt". Only direct needs are listed;
+# brew and apt pull in dependencies (such as rust) themselves.
+function packages_of {
+  case "$1:$2" in
+    base:brew) echo "fish coreutils wget direnv jq mtr htop sevenzip ripgrep fd chafa node bat" ;;
+    base:apt) echo "fish apt-file direnv command-not-found dnsutils htop btop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev" ;;
+    cli-extras:brew) echo "git git-lfs gh fzf pv entr pwgen yazi" ;;
+    cli-extras:apt) echo "gh fzf pv entr pwgen" ;;
+    services:brew) echo "hcloud openclaw/tap/gogcli" ;;
+    media:brew) echo "imagemagick-full ffmpeg yt-dlp exiftool" ;;
+    android:brew) echo "apktool bundletool scrcpy jadx pidcat" ;;
+    # JAVA_HOME is set in fish/config.fish; consult that for the current
+    # value, how to override it for a single command, etc.
+    android:cask) echo "temurin@17 temurin@21" ;;
+    # brew pulls ruby-build's build deps (openssl, libyaml, readline) itself;
+    # on Linux, ruby-build itself is bootstrapped from git (feature_ruby).
+    ruby:brew) echo "ruby-build" ;;
+    ruby:apt) echo "build-essential autoconf libssl-dev libyaml-dev libreadline-dev zlib1g-dev libffi-dev libgmp-dev libncurses-dev libgdbm-dev" ;;
   esac
+}
+
+# Print the packages that the package features named in $2 (space-separated)
+# install with manager $1.
+function packages_for {
+  local manager=$1 name list=""
+  for name in $2; do
+    list="$list $(packages_of "$name" "$manager")"
+  done
+  printf '%s' "$list"
 }
 
 # Report brew leaves that are not in the allowlist ($1, space-separated). With
@@ -516,7 +503,7 @@ function prune_brew_extras {
   indented=$(echo "$extras" | sed 's/^/  /')
 
   if [ "$PRUNE" != 1 ]; then
-    echo "warning: unmanaged brew packages present (not in any tier):" >&2
+    echo "warning: unmanaged brew packages present (installed by no feature):" >&2
     echo "$indented" >&2
     echo "hint: remove with 'brew remove <pkg>', or re-run with --prune" >&2
     return 0
@@ -845,6 +832,123 @@ function feature_links {
   fi
 }
 
+# Apply macOS defaults (system preferences), grouped by application. Safe to
+# re-run. Based on:
+#   https://github.com/mathiasbynens/dotfiles/blob/master/.macos
+#   https://github.com/hjuutilainen/dotfiles/blob/master/bin/osx-user-defaults.sh
+#
+# To find the bundle identifier of an app:
+#   osascript -e 'id of app "Safari"'   # => com.apple.Safari
+#
+# To find what setting to change (fish shell):
+#   vimdiff (defaults read -g | psub) (read -p "echo 'Make change, press enter' > "; and defaults read -g | psub)
+#   vimdiff (defaults read pro.writer.mac | psub) (read -p "echo 'Make change, press enter' > "; and defaults read pro.writer.mac | psub)
+function macos_defaults {
+  # System
+
+  # NSUserKeyEquivalent modifiers: @ Command, ^ Control, ~ Option, $ Shift
+  defaults write -g NSAutomaticQuoteSubstitutionEnabled -bool false
+  defaults write -g NSAutomaticDashSubstitutionEnabled -bool false
+  defaults write -g NSAutomaticSpellingCorrectionEnabled -bool false
+  defaults write -g WebAutomaticSpellingCorrectionEnabled -bool false
+  defaults write -g NSAutomaticCapitalizationEnabled -bool false
+  # Don't convert double space to period + double space
+  defaults write -g NSAutomaticPeriodSubstitutionEnabled -bool false
+  # Don't show suggestions on the Touch Bar
+  defaults write -g NSAutomaticTextCompletionEnabled -bool false
+  defaults write -g NSDocumentSaveNewDocumentsToCloud -bool false
+  # Speed up mouse (requires logout to take effect)
+  defaults write -g com.apple.mouse.scaling -float 6
+  defaults write com.apple.driver.AppleBluetoothMultitouch.mouse MouseButtonMode -string TwoButton
+  defaults write -g AppleShowAllExtensions -int 1
+  # Paste and Match Style on cmd-v http://apple.stackexchange.com/a/167649/890
+  defaults write -g NSUserKeyEquivalents -dict-add "Paste and Match Style" -string "@v"
+
+  # Finder
+
+  defaults write com.apple.finder _FXSortFoldersFirst -int 1
+  defaults write com.apple.finder ShowStatusBar -bool true
+  defaults write com.apple.finder FXEnableExtensionChangeWarning -bool false
+  defaults write com.apple.finder NewWindowTarget -string PfHm
+
+  # Terminal
+
+  # Disable "marks" http://apple.stackexchange.com/a/209907/890
+  defaults write com.apple.Terminal AutoMarkPromptLines -int 0
+
+  # Photos
+
+  # Don't open automatically when external media is connected
+  defaults -currentHost write com.apple.ImageCapture disableHotPlug -bool true
+
+  # Messages
+
+  defaults write com.apple.messageshelper.MessageController SOInputLineSettings \
+    -dict-add "automaticEmojiSubstitutionEnablediMessage" -bool false
+  defaults write com.apple.messageshelper.MessageController SOInputLineSettings \
+    -dict-add "automaticQuoteSubstitutionEnabled" -bool false
+  defaults write com.apple.messageshelper.MessageController SOInputLineSettings \
+    -dict-add "automaticDashSubstitutionEnabled" -bool false
+  defaults write com.apple.messageshelper.MessageController SOInputLineSettings \
+    -dict-add "automaticSpellingCorrectionEnabled" -bool false
+
+  # Spotlight
+  #
+  # To regenerate this array from current settings:
+  #   defaults read com.apple.Spotlight orderedItems | sed -E -e 's/^[[:space:]]+//g' | tr -d '()\n' | tr ',' '\n'
+
+  defaults write com.apple.Spotlight orderedItems -array \
+    '{enabled = 1;name = APPLICATIONS;}' \
+    '{enabled = 0;name = "MENU_SPOTLIGHT_SUGGESTIONS";}' \
+    '{enabled = 1;name = "MENU_CONVERSION";}' \
+    '{enabled = 1;name = "MENU_EXPRESSION";}' \
+    '{enabled = 1;name = "MENU_DEFINITION";}' \
+    '{enabled = 1;name = "SYSTEM_PREFS";}' \
+    '{enabled = 0;name = DOCUMENTS;}' \
+    '{enabled = 0;name = DIRECTORIES;}' \
+    '{enabled = 0;name = PRESENTATIONS;}' \
+    '{enabled = 0;name = SPREADSHEETS;}' \
+    '{enabled = 0;name = PDF;}' \
+    '{enabled = 0;name = MESSAGES;}' \
+    '{enabled = 1;name = CONTACT;}' \
+    '{enabled = 0;name = "EVENT_TODO";}' \
+    '{enabled = 0;name = IMAGES;}' \
+    '{enabled = 0;name = BOOKMARKS;}' \
+    '{enabled = 0;name = MUSIC;}' \
+    '{enabled = 0;name = MOVIES;}' \
+    '{enabled = 0;name = FONTS;}' \
+    '{enabled = 0;name = "MENU_OTHER";}' \
+    '{enabled = 0;name = "MENU_WEBSEARCH";}' \
+    '{enabled = 0;name = SOURCE;}'
+
+  # iA Writer
+
+  # Bind cmd-n to new file (instead of new file in library)
+  defaults write pro.writer.mac NSUserKeyEquivalents -dict-add "New" -string "@n"
+  defaults write pro.writer.mac "Document Path Extension" -string "md"
+  defaults write pro.writer.mac nightMode -int 0
+  defaults write pro.writer.mac "Editor Indent Using Spaces" -int 1
+  # Use "Quattro" font
+  defaults write pro.writer.mac "Editor Typeface" -int 2
+  defaults write pro.writer.mac "Preview Center Headings" -int 0
+  defaults write pro.writer.mac "Markdown Smart Punctuation Enabled" -int 1
+  defaults write pro.writer.mac "Library Show Extension" -int 1
+  defaults write pro.writer.mac "Library Shows Search Bar" -int 0
+  defaults write pro.writer.mac "Organizer Shows Favorites" -int 0
+  defaults write pro.writer.mac "Organizer Shows Hashtags" -int 1
+  defaults write pro.writer.mac "Organizer Shows Smart Folders" -int 1
+  defaults write pro.writer.mac "Template Identifier" -string "net.ia.writer.template.github"
+  defaults write pro.writer.mac "Editor Line Length Limit" -int 72
+  # Library sort order (folders first, by name) must be set manually via
+  # Preferences > Library, as it is stored in a binary NSKeyedArchiver blob
+  # that cannot be reproduced with a plain defaults write.
+
+  # Firefox
+
+  # Bind cmd-opt-j to Web Console, to match Chrome
+  defaults write org.mozilla.firefox NSUserKeyEquivalents -dict-add "Web Console" -string "@~j"
+}
+
 function feature_macos {
   local keybindings_dir solarized_clr
 
@@ -862,7 +966,7 @@ function feature_macos {
     x rsync -a --delete "$keybindings_dir/" "$DSTDIR/Library/KeyBindings/"
   fi
 
-  "$SRCDIR/etc/macos/apply-defaults"
+  macos_defaults
 
   # https://github.com/altercation/ethanschoonover.com/tree/master/projects/solarized/apple-colorpalette-solarized
   solarized_clr=$(overlay_path "etc/macos/Solarized.clr") || solarized_clr=""
@@ -934,26 +1038,23 @@ function feature_fish_completions {
   fi
 }
 
-# Package Management Invariants (Homebrew and apt-get):
-# Both Homebrew (macOS) and apt-get (Linux) package management paths enforce four invariants:
-# 1. 24-Hour Freshness TTL: Index lists are updated and installed packages are
-#    upgraded non-interactively at most once every 24 hours (bypassed with --force).
-#    Target package sets are always diffed and missing packages are installed
-#    immediately on every run.
-# 2. Accurate State Diffing: Target package sets (core/optional/full) are diffed
-#    against installed states (via `brew list` or `dpkg-query` filtered by
-#    'install ok installed') to prevent redundant installation steps.
-# 3. Cache Purging: Downloaded package archives and build caches are purged from
-#    disk periodically and after upgrades (brew cleanup, apt-get clean).
-# 4. Unmanaged Package Pruning:
-#    - Homebrew: As a userland manager, packages outside tier allowlists are
-#      reported and pruned when requested (`--prune`).
-#    - apt-get: Allowlist-based pruning is unsafe because `apt` manages OS base and
-#      system infrastructure; orphaned dependencies are purged via `autoremove --purge`.
+# Packages (Homebrew and apt-get):
+# 1. The selected package features' packages are diffed against what is
+#    installed (`brew list`, or `dpkg-query` filtered by 'install ok
+#    installed'), and only the missing ones are installed, on every run.
+# 2. The package index is refreshed at most once every 24 hours (bypassed with
+#    --force); upgrading what is installed is the upgrades feature's job.
+# 3. Unmanaged packages:
+#    - Homebrew: As a userland manager, leaves outside every package feature
+#      (selected or not) are reported, and removed with --prune.
+#    - apt-get: Allowlist-based pruning is unsafe because apt also manages the
+#      OS itself, so only packages this script has retired are candidates;
+#      orphaned dependencies are purged by `autoremove --purge` in upgrades.
 
+# Install the packages of the package features in $1 (space-separated).
 function packages_brew {
-  local installed_formulae installed_casks core custom optional full allowlist
-  local install_set to_install jdk
+  local features=$1 installed_formulae installed_casks allowlist
+  local to_install cask
 
   heading "brew"
 
@@ -974,30 +1075,11 @@ function packages_brew {
   fi
 
   # The non-HEAD version is years old...
-  if ! echo "$installed_formulae" | grep -qx "jed"; then
+  if [[ " $features " == *" base "* ]] && ! echo "$installed_formulae" | grep -qx "jed"; then
     x brew install jed --HEAD
   fi
 
-  # Core packages: always installed, on every run.
-  core="fish coreutils wget direnv jq mtr htop sevenzip ripgrep fd chafa node bat"
-  # These packages have non-standard installation mechanisms (see above)
-  custom="jed"
-  # Optional packages: installed only with --install-optional or --install-all.
-  # Known packages, so they are kept (not flagged) when present on a core run.
-  # ruby-build compiles Ruby for ruby-install/direnv; brew pulls its build deps
-  # (openssl, libyaml, readline) automatically.
-  optional="imagemagick-full yt-dlp ffmpeg apktool git bundletool scrcpy jadx git-lfs firebase-cli mosquitto gh openclaw/tap/gogcli hcloud entr pv exiftool pidcat yazi fzf pwgen ruby-build rust rustup wasm-bindgen"
-  # Full packages: installed only with --install-all. Heaviest or least-used
-  # extras; add to this list as needed.
-  full=""
-
-  # The allowlist is every package the script knows about. Any `brew leaves`
-  # entry outside it is unmanaged: reported, and removed only with --prune.
-  allowlist="$core $custom $optional $full"
-
-  install_set=$(install_set_for_tier "$core" "$optional" "$full")
-
-  to_install=$(comm -13 <(echo "$installed_formulae") <(echo "$install_set" | tr ' ' '\n' | sort))
+  to_install=$(comm -13 <(echo "$installed_formulae") <(packages_for brew "$features" | tr ' ' '\n' | sed '/^$/d' | sort))
   if [ -n "$to_install" ]; then
     echo "$to_install" | xargs brew install
   fi
@@ -1009,41 +1091,30 @@ function packages_brew {
     fi
   fi
 
-  # JDK: Temurin casks are installed below. They land in:
-  #   /Library/Java/JavaVirtualMachines/temurin-*.jdk/Contents/Home
-  # JAVA_HOME is set in fish/config.fish; consult that for the current value,
-  # how to override it for a single command, etc.
-  for jdk in temurin@17 temurin@21; do
-    if ! echo "$installed_casks" | grep -qx "$jdk"; then
-      x brew install --cask "$jdk"
+  for cask in $(packages_for cask "$features"); do
+    if ! echo "$installed_casks" | grep -qx "$cask"; then
+      x brew install --cask "$cask"
     fi
   done
 
-  if ! is_fresh "$PACKAGE_STAMP"; then
-    # Upgrade all installed packages non-interactively
-    brew upgrade --no-ask
-
-    prune_brew_extras "$allowlist"
-
-    # Final cleanup of unused dependencies and installer caches from disk
-    brew autoremove
-    brew cleanup
-  elif [ "$PRUNE" = 1 ]; then
-    prune_brew_extras "$allowlist"
-  fi
+  # The allowlist is every package any feature installs (jed is installed
+  # --HEAD above). Any `brew leaves` entry outside it is unmanaged.
+  allowlist="jed $(packages_for brew "$PACKAGE_FEATURES")"
+  prune_brew_extras "$allowlist"
 }
 
+# Install the packages of the package features in $1 (space-separated).
 function packages_apt {
-  local core optional full install_set retired ruby_build_src
+  local features=$1 install_set retired
 
   heading "apt-get"
 
-  if ! exists apt-get || ! $HAS_SUDO; then
-    if ! exists apt-get; then
-      echo "$(basename "$0"): no supported package manager (apt-get) found, skipping" >&2
-    else
-      echo "$(basename "$0"): no usable sudo, skipping apt-get" >&2
-    fi
+  if ! exists apt-get; then
+    echo "$(basename "$0"): no supported package manager (apt-get) found, skipping" >&2
+    return 0
+  fi
+  if ! $HAS_SUDO; then
+    echo "$(basename "$0"): no usable sudo, skipping apt-get" >&2
     return 0
   fi
 
@@ -1051,34 +1122,21 @@ function packages_apt {
     x sudo apt-get update # refresh package lists
   fi
 
-  # Core packages: always installed, on every run.
-  core="fish apt-file direnv command-not-found dnsutils htop btop iftop iotop lsof traceroute mtr-tiny whois locate wget curl gnupg zip unzip libxml2-utils jed sqlite3 jq ripgrep fd-find chafa bat ruby ruby-dev"
-  # Optional packages: installed only with --install-optional or --install-all.
-  # The lib*-dev set is Ruby's build toolchain for ruby-build/ruby-install (the
-  # ruby-build binary itself is bootstrapped from git below, as the apt package
-  # is too old to build current Ruby). rustc (YJIT) is omitted to stay lean.
-  optional="pv entr fzf pwgen build-essential autoconf libssl-dev libyaml-dev libreadline-dev zlib1g-dev libffi-dev libgmp-dev libncurses-dev libgdbm-dev gh"
-  # Full packages: installed only with --install-all.
-  full=""
-
   # TODO: JDK installation on Linux (not yet documented; see fish/config.fish
   # for context on how JAVA_HOME is set and what the macOS approach looks like)
 
-  install_set=$(install_set_for_tier "$core" "$optional" "$full")
+  install_set=$(packages_for apt "$features")
 
-  comm -13 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$install_set" | tr ' ' '\n' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
-  # Full unmanaged package removal is unsafe on Debian/apt because apt manages
-  # base system and infrastructure packages beyond dotfiles. Orphaned dependency
-  # packages are purged via apt-get autoremove --purge below.
+  comm -13 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$install_set" | tr ' ' '\n' | sed '/^$/d' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
 
   if ! exists fd && exists fdfind; then
     xmkdir "$BINDIR"
     x ln -sf "$(which fdfind)" "$BINDIR/fd"
   fi
 
-  # fish is in core above, so on a fresh machine it first arrives from the
+  # fish is in base, so on a fresh machine it first arrives from the
   # distribution; switching repositories then upgrades it in place.
-  if configure_fish_apt_repo; then
+  if [[ " $features " == *" base "* ]] && configure_fish_apt_repo; then
     { x sudo apt-get update && x sudo apt-get -y install fish; } ||
       echo "warning: fish installation from its apt repository failed" >&2
   fi
@@ -1091,71 +1149,119 @@ function packages_apt {
   #     (see feature_uv).
   retired="sysstat pcp shellcheck shfmt"
   prune_apt_retired "$retired"
-
-  # ruby-build: the engine behind ruby-install. Installed alongside the Ruby
-  # build deps above whenever the optional/all tier is selected, so the two
-  # always arrive together. apt's ruby-build is too old to build current Ruby,
-  # so bootstrap a current copy from git into ~/.local (binary at
-  # ~/.local/bin/ruby-build, where ruby-install looks for it).
-  if [ "$INSTALL_TIER" != core ] && exists git; then
-    ruby_build_src="$HOME/.local/share/ruby-build"
-    if [ -d "$ruby_build_src/.git" ]; then
-      if ! is_fresh "$PACKAGE_STAMP"; then
-        x git "${GIT_NET_OPTS[@]}" -C "$ruby_build_src" pull --ff-only || echo "warning: ruby-build update failed"
-      fi
-    else
-      x git "${GIT_NET_OPTS[@]}" clone https://github.com/rbenv/ruby-build.git "$ruby_build_src" || echo "warning: ruby-build clone failed"
-    fi
-    if [ -x "$ruby_build_src/install.sh" ]; then
-      x env PREFIX="$HOME/.local" "$ruby_build_src/install.sh" || echo "warning: ruby-build install failed"
-    fi
-  fi
-
-  if ! is_fresh "$PACKAGE_STAMP"; then
-    # Upgrade installed packages non-interactively
-    x sudo apt-get -y upgrade || echo "warning: apt-get upgrade failed, skipping"
-    x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping"
-
-    # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
-    x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping"
-
-    # Autoclean and clean package archives
-    x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping"
-    x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping"
-  fi
 }
 
-function feature_packages {
+# The install step shared by the package features; runs once, before the
+# first selected one.
+function install_packages {
+  local features="" name
   if is_offline; then
     skip_offline "packages"
     return 0
   fi
+  for name in $PACKAGE_FEATURES; do
+    if selected "$name"; then
+      features="$features $name"
+    fi
+  done
   if exists brew; then
-    packages_brew
+    packages_brew "$features"
   fi
   if [ "$PLATFORM" = "linux" ]; then
-    packages_apt
+    packages_apt "$features"
   fi
 }
 
-# uv-upgrade: periodic upgrades of uv and its tools, for long-lived machines.
-# The uv feature only fills in what is missing, and leaves a uv it did not
-# install (e.g. CI's, or a cloud image's) alone.
-function feature_uv_upgrade {
-  exists uv || return 0
-  is_fresh "$PACKAGE_STAMP" && return 0
-  if is_offline; then
-    skip_offline "uv upgrade"
+# upgrades: everything that only needs doing now and then on a long-lived
+# machine, at most once every 24 hours (bypassed with --force). It upgrades
+# whatever is installed, whichever features installed it, so a tool added
+# once with --with stays current on later bare runs. Each step only warns on
+# failure, so one broken upgrade does not hold back the rest.
+function feature_upgrades {
+  local ruby_build_src="$HOME/.local/share/ruby-build"
+
+  if is_fresh "$PACKAGE_STAMP"; then
+    echo "upgrades: ran in the last 24 hours; skipping (--force to run now)"
     return 0
   fi
-  heading "uv upgrade"
-  echo "Updating uv..."
-  # `uv self update` only works for the standalone installer; a uv provided
-  # by a package manager (e.g. a leftover brew uv mid-migration) will refuse,
-  # so warn rather than abort.
-  uv self update || echo "warning: uv self update failed (uv may be package-managed)"
-  echo "Upgrading uv tools..."
-  uv tool upgrade --all || echo "warning: uv tool upgrade failed"
+  if is_offline; then
+    skip_offline "upgrades"
+    return 0
+  fi
+
+  if exists brew; then
+    heading "brew upgrade"
+    # The package step refreshes the index itself when it runs.
+    if ! packages_selected; then
+      brew update || echo "warning: brew update failed" >&2
+    fi
+    brew upgrade --no-ask || echo "warning: brew upgrade failed" >&2
+    # Remove unused dependencies and installer caches from disk
+    brew autoremove || echo "warning: brew autoremove failed" >&2
+    brew cleanup || echo "warning: brew cleanup failed" >&2
+  fi
+
+  if [ "$PLATFORM" = "linux" ] && exists apt-get; then
+    heading "apt-get upgrade"
+    if ! $HAS_SUDO; then
+      echo "$(basename "$0"): no usable sudo, skipping apt-get upgrade" >&2
+    else
+      if ! packages_selected; then
+        x sudo apt-get update || echo "warning: apt-get update failed" >&2
+      fi
+      x sudo apt-get -y upgrade || echo "warning: apt-get upgrade failed, skipping" >&2
+      x sudo apt-get -y full-upgrade || echo "warning: apt-get full-upgrade failed, skipping" >&2
+      # Try autoremove with --purge, fallback to standard autoremove if restricted, and ignore failure
+      x sudo apt-get -y autoremove --purge || x sudo apt-get -y autoremove || echo "warning: apt-get autoremove failed, skipping" >&2
+      # Autoclean and clean package archives
+      x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping" >&2
+      x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping" >&2
+    fi
+  fi
+
+  if exists uv; then
+    heading "uv upgrade"
+    # `uv self update` only works for the standalone installer; a uv provided
+    # by a package manager (e.g. a leftover brew uv mid-migration) will refuse,
+    # so warn rather than abort.
+    uv self update || echo "warning: uv self update failed (uv may be package-managed)" >&2
+    uv tool upgrade --all || echo "warning: uv tool upgrade failed" >&2
+  fi
+
+  if [ -d "$ruby_build_src/.git" ]; then
+    heading "ruby-build upgrade"
+    { x git "${GIT_NET_OPTS[@]}" -C "$ruby_build_src" pull --ff-only &&
+      x env PREFIX="$HOME/.local" "$ruby_build_src/install.sh"; } ||
+      echo "warning: ruby-build update failed" >&2
+  fi
+
+  if exists android || exists compose-preview; then
+    heading "android upgrade"
+  fi
+  if exists android; then
+    x android update || echo "warning: android update failed" >&2
+    # Populate/refresh ~/.android/cli/skills without writing to agent skill directories.
+    x android skills list --long=false >/dev/null || echo "warning: android skills update failed" >&2
+  fi
+  if exists compose-preview; then
+    # MODIFY_PATH=0 suppresses silent PATH modification of shell configs
+    # (https://github.com/yschimke/skills/issues/108). Revert once fixed upstream.
+    x env CLI_ONLY=1 MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
+      compose-preview update || echo "warning: compose-preview update failed" >&2
+  fi
+
+  if exists agy || exists claude || is_codex_agent; then
+    heading "agent CLIs upgrade"
+  fi
+  if exists agy; then
+    x agy update || echo "warning: agy update failed" >&2
+  fi
+  if exists claude; then
+    x claude update || echo "warning: claude update failed" >&2
+  fi
+  if is_codex_agent; then
+    x codex update || echo "warning: codex update failed" >&2
+  fi
 }
 
 # uv: installs uv itself, then fetches everything this repository's uv-based
@@ -1186,7 +1292,7 @@ UVX_WRAPPERS=(
 function uv_item {
   local ok=$1 bad=$2 label=$3 out
   shift 3
-  if [ "$TRACE" = 1 ]; then
+  if [ "$VERBOSE" = 1 ]; then
     printf '+ %s\n' "$(printf '%q ' "$@")" >&2
   fi
   if out=$("$@" 2>&1); then
@@ -1313,7 +1419,26 @@ function feature_npm {
   # Packages are installed into $(npm config get prefix)
 }
 
-function feature_gradle {
+# Download installer script $1 and run it with the remaining arguments. Unlike
+# `bash <(curl ...)`, a failed download is an error rather than an empty script
+# that "succeeds".
+function run_installer {
+  local url=$1 script status=0
+  shift
+  script=$(mktemp)
+  if curl "${CURL_OPTS[@]}" -fsSL -o "$script" "$url"; then
+    x bash "$script" "$@" || status=$?
+  else
+    echo "warning: failed to download $url" >&2
+    status=1
+  fi
+  rm -f "$script"
+  return "$status"
+}
+
+# Write ~/.gradle/gradle.properties with a heap sized to this machine's RAM
+# (unless the file was not written by this script), and link the init scripts.
+function gradle_settings {
   local mem_bytes mem_kb mem_gb heap gradle_dir gradle_props
 
   heading "gradle"
@@ -1322,13 +1447,11 @@ function feature_gradle {
     # macOS: hw.memsize is usually the exact physical RAM in bytes
     mem_bytes=$(sysctl -n hw.memsize)
     mem_gb=$((mem_bytes / 1024 / 1024 / 1024))
-  elif [ "$PLATFORM" = "linux" ]; then
+  else
     # Linux: MemTotal is often less than physical RAM due to hardware reservations (GPU, etc.)
     # Round to the nearest GB to infer the physical capacity.
     mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     mem_gb=$(((mem_kb + 524288) / 1048576))
-  else
-    mem_gb=0
   fi
 
   echo "Detected ${mem_gb} GB RAM"
@@ -1356,85 +1479,70 @@ function feature_gradle {
   xmkdir "$gradle_dir/init.d"
   link_overlay_files "etc/gradle/init.d" "$gradle_dir/init.d"
 
-  if [ ! -f "$gradle_props" ]; then
-    echo "Creating $gradle_props with heap=${heap}"
-    cat >"$gradle_props" <<EOF
+  if [ -f "$gradle_props" ] && ! grep -q "# Generated by dotfiles update" "$gradle_props"; then
+    echo "Skipping $gradle_props as it was not generated by this script and already exists."
+    return 0
+  fi
+  echo "Writing $gradle_props with heap=${heap}"
+  cat >"$gradle_props" <<EOF
 # Generated by dotfiles update
 org.gradle.jvmargs=-Xmx${heap} -XX:+UseG1GC
 org.gradle.parallel=true
 org.gradle.caching=true
 EOF
-  else
-    if grep -q "# Generated by dotfiles update" "$gradle_props"; then
-      echo "Updating generated $gradle_props with heap=${heap}"
-      cat >"$gradle_props" <<EOF
-# Generated by dotfiles update
-org.gradle.jvmargs=-Xmx${heap} -XX:+UseG1GC
-org.gradle.parallel=true
-org.gradle.caching=true
-EOF
-    else
-      echo "Skipping $gradle_props as it was not generated by this script and already exists."
-    fi
-  fi
 }
 
-# Download installer script $1 and run it with the remaining arguments. Unlike
-# `bash <(curl ...)`, a failed download is an error rather than an empty script
-# that "succeeds".
-function run_installer {
-  local url=$1 script status=0
-  shift
-  script=$(mktemp)
-  if curl "${CURL_OPTS[@]}" -fsSL -o "$script" "$url"; then
-    x bash "$script" "$@" || status=$?
-  else
-    echo "warning: failed to download $url" >&2
-    status=1
-  fi
-  rm -f "$script"
-  return "$status"
-}
-
+# android: the SDK tools and JDKs come from the package step; this adds the
+# gradle settings and the Android CLI and compose-preview, which have their
+# own installers (and are kept current by the upgrades feature).
 function feature_android {
-  local tiered=0
-  if [ "$INSTALL_TIER" = "optional" ] || [ "$INSTALL_TIER" = "all" ]; then
-    tiered=1
+  gradle_settings
+
+  if exists android && exists compose-preview; then
+    return 0
   fi
-  exists android || exists compose-preview || [ "$tiered" = 1 ] || return 0
   if is_offline; then
-    skip_offline "android"
+    skip_offline "Android CLI and compose-preview installs"
     return 0
   fi
 
-  if ! is_fresh "$PACKAGE_STAMP"; then
-    heading "android"
-    if exists android; then
-      x android update || echo "warning: android update failed" >&2
-      # Populate/refresh ~/.android/cli/skills without writing to agent skill directories.
-      x android skills list --long=false >/dev/null || echo "warning: android skills update failed" >&2
-    fi
-    if exists compose-preview; then
-      # MODIFY_PATH=0 suppresses silent PATH modification of shell configs
-      # (https://github.com/yschimke/skills/issues/108). Revert once fixed upstream.
-      x env CLI_ONLY=1 MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
-        compose-preview update || echo "warning: compose-preview update failed" >&2
-    fi
-  fi
-  if { ! exists android || ! exists compose-preview; } && [ "$tiered" = 1 ]; then
-    heading "android"
-    if ! exists android; then
+  heading "android"
+  if ! exists android; then
+    if [ "$(uname -s -m)" = "Linux x86_64" ]; then
       run_installer https://dl.google.com/android/cli/latest/linux_x86_64/install.sh &&
         x android skills list --long=false >/dev/null ||
         echo "warning: android install failed" >&2
-    fi
-    if ! exists compose-preview; then
-      # MODIFY_PATH=0 and --no-modify-path work around upstream issue #108.
-      MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
-        run_installer https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh \
-        --cli-only --no-modify-path || echo "warning: compose-preview install failed" >&2
+    else
+      echo "warning: no Android CLI installer for $(uname -s -m); skipping" >&2
     fi
   fi
+  if ! exists compose-preview; then
+    # MODIFY_PATH=0 and --no-modify-path work around upstream issue #108.
+    MODIFY_PATH=0 SKILL_DIR="$XDG_DATA_HOME/compose-preview" \
+      run_installer https://raw.githubusercontent.com/yschimke/skills/main/scripts/install.sh \
+      --cli-only --no-modify-path || echo "warning: compose-preview install failed" >&2
+  fi
+}
+
+# ruby: the engine behind ruby-install. On macOS it is a brew package; on
+# Linux apt's ruby-build is too old to build current Ruby, so bootstrap a
+# current copy from git into ~/.local (binary at ~/.local/bin/ruby-build,
+# where ruby-install looks for it). The upgrades feature keeps it current.
+function feature_ruby {
+  local ruby_build_src="$HOME/.local/share/ruby-build"
+
+  [ "$PLATFORM" = "linux" ] || return 0
+  [ ! -x "$BINDIR/ruby-build" ] || return 0
+
+  heading "ruby-build"
+  if [ ! -d "$ruby_build_src/.git" ]; then
+    if is_offline; then
+      skip_offline "ruby-build clone"
+      return 0
+    fi
+    x git "${GIT_NET_OPTS[@]}" clone https://github.com/rbenv/ruby-build.git "$ruby_build_src"
+  fi
+  x env PREFIX="$HOME/.local" "$ruby_build_src/install.sh"
 }
 
 function feature_skills {
@@ -1499,25 +1607,6 @@ function feature_agents {
     link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
     link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
   fi
-
-  is_fresh "$PACKAGE_STAMP" && return 0
-  exists agy || exists claude || is_codex_agent || return 0
-  if is_offline; then
-    skip_offline "agent CLI updates"
-    return 0
-  fi
-
-  heading "agent CLIs"
-
-  if exists agy; then
-    x agy update || echo "warning: agy update failed" >&2
-  fi
-  if exists claude; then
-    x claude update || echo "warning: claude update failed" >&2
-  fi
-  if is_codex_agent; then
-    x codex update || echo "warning: codex update failed" >&2
-  fi
 }
 
 function feature_overlay_hooks {
@@ -1532,35 +1621,69 @@ function feature_overlay_hooks {
   fi
 }
 
-# Run each selected feature in a subshell with errexit, so a failure stops that
-# feature only. errexit is ignored inside any command that is part of an `||`
-# or `if` test, hence the explicit status capture.
+# Ask for sudo upfront, but only if a selected feature will use it on Linux:
+# the package step, or upgrades when due. When it would need a password, ask
+# on the terminal if there is one; a non-interactive run (--no-input, or a
+# setup script with no terminal at all) uses sudo only if it is passwordless,
+# and skips apt otherwise.
+if [ "$PLATFORM" = "linux" ] && ! is_offline &&
+  { packages_selected || { selected upgrades && ! is_fresh "$PACKAGE_STAMP"; }; }; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "warning: sudo not found; skipping apt" >&2
+  elif sudo -n true 2>/dev/null; then
+    HAS_SUDO=true
+  elif [ "$NO_INPUT" = 1 ] || ! (: </dev/tty) 2>/dev/null; then
+    echo "warning: sudo needs a password and this run cannot prompt for it; skipping apt" >&2
+  else
+    echo "This script requires sudo access for package management."
+    echo "You may be prompted for your password."
+    # Good for 5 mins; for more see https://github.com/mathiasbynens/dotfiles/blob/master/.macos#L13
+    # shellcheck disable=SC2024 # the redirect is for sudo's password prompt
+    if ! sudo -v </dev/tty; then
+      echo "$(basename "$0"): failed to obtain sudo access" >&2
+      exit 1
+    fi
+    HAS_SUDO=true
+  fi
+fi
+
 FAILED=""
-for name in $SELECTED; do
+
+# Run step $2 (a function) in a subshell with errexit, so a failure stops that
+# step only, and record $1 as failed if it does. errexit is ignored inside any
+# command that is part of an `||` or `if` test, hence the explicit status
+# capture.
+function run_step {
+  local status
   set +e
   (
     set -e
-    "feature_${name//-/_}"
+    "$2"
   )
   status=$?
   set -e
   if [ "$status" -ne 0 ]; then
-    FAILED="${FAILED:+$FAILED }$name"
+    FAILED="${FAILED:+$FAILED }$1"
+  fi
+}
+
+PACKAGES_DONE=0
+for name in $SELECTED; do
+  if [ "$PACKAGES_DONE" = 0 ] && [[ " $PACKAGE_FEATURES " == *" $name "* ]]; then
+    PACKAGES_DONE=1
+    run_step packages install_packages
+  fi
+  if declare -F "feature_${name//-/_}" >/dev/null; then
+    run_step "$name" "feature_${name//-/_}"
   fi
 done
 
-# The daily steps (package upgrades, uv self-update, Android and agent CLI
-# updates) share one stamp; restart its 24 hours only when one of them ran.
-if ! is_fresh "$PACKAGE_STAMP" && ! is_offline; then
-  for name in packages uv-upgrade android agents; do
-    if selected "$name"; then
-      touch_stamp "$PACKAGE_STAMP"
-      break
-    fi
-  done
+# Restart the upgrades' 24 hours only when they ran.
+if selected upgrades && ! is_fresh "$PACKAGE_STAMP" && ! is_offline; then
+  touch_stamp "$PACKAGE_STAMP"
 fi
 
-if selected packages && [ -f /var/run/reboot-required ]; then
+if { packages_selected || selected upgrades; } && [ -f /var/run/reboot-required ]; then
   echo "warning: a reboot is required to complete updates"
   if [ -f /var/run/reboot-required.pkgs ]; then
     sed 's/^/warning: /' /var/run/reboot-required.pkgs

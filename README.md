@@ -212,7 +212,7 @@ envrc create uv        # layout uv (creates and activates .venv)
 ```
 
 Ruby builds need the `ruby-build` toolchain and its build dependencies, which
-install with `install.sh --install-optional`. The installers live in the
+install with `install.sh --with ruby`. The installers live in the
 `workspace-tools` skill; its
 [Runtime Versions](skills/workspace-tools/SKILL.md#runtime-versions-node-install-ruby-install-python-install)
 section covers the full workflow, including diagnosing a project that runs on
@@ -263,9 +263,21 @@ again so the overlay is applied.
 
 `install.sh` is split into features (linking dotfiles, packages, uv, agent
 setup, and so on), and a profile picks which of them run. The default,
-`workstation`, runs them all. `--with` and `--without` adjust a profile,
-`--only` names the features outright, and `--dry-run` prints the selection
+`workstation`, sets up a long-lived machine for interactive use: dotfiles, fish
+and its completions, core packages and interactive extras, and a daily upgrade
+of everything installed. Heavier package sets (`android`, `ruby`, `media`,
+`services`) are in no profile and are added with `--with`:
+
+```sh
+./install.sh --with android,ruby  # also install Android and Ruby tooling
+./install.sh --without upgrades   # skip the daily upgrades
+./install.sh --prune              # also remove brew packages no feature installs
+```
+
+`--only` names the features outright, and `-n`/`--dry-run` prints the selection
 without running anything; `./install.sh --help` lists the features and profiles.
+Once installed, a package is kept current by later runs whether or not its
+feature is selected again.
 
 A failing feature is reported and the rest still run; the exit status is
 non-zero if any failed. Set `AGENT_OFFLINE=1` to skip every feature that needs
