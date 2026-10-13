@@ -48,7 +48,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..190'
+echo '1..193'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -4689,4 +4689,112 @@ assert [t["tool"] for t in got["tools"]] == ["dispatch", "read_file", "search_fi
 else
   echo 'not ok 190 - request log rotates, and requests summarises it'
   printf '# %s\n' "$REQ_PY" "${REQ_JSON:-}" "${REQ_TEXT:-}"
+fi
+
+# --- skills ----------------------------------------------------------------
+# A project README declares the agent skills to work on it; 'skills' prints
+# them, dispatch carries them, and doctor checks them against the skill CLI's
+# catalog when that CLI is on PATH.
+SKILLS_REPO="$TEST_ROOT/skills-repo"
+mkdir -p "$SKILLS_REPO/proj/tasks" "$SKILLS_REPO/bare/tasks" "$SKILLS_REPO/bin"
+git -C "$SKILLS_REPO" init -q
+printf '%s\n' \
+  '# Agent instructions' \
+  '' \
+  'This repository follows taskgo:' \
+  '<https://github.com/ithinkihaveacat/dotfiles/tree/master/skills/taskgo>.' \
+  >"$SKILLS_REPO/AGENTS.md"
+printf '# Inbox\n' >"$SKILLS_REPO/INBOX.md"
+printf '%s\n' \
+  '---' \
+  'skills:' \
+  '  - coding-standards' \
+  '  - local:notes' \
+  '  - coding-standard' \
+  '---' \
+  '' \
+  '# Proj' \
+  >"$SKILLS_REPO/proj/README.md"
+printf '# Bare\n' >"$SKILLS_REPO/bare/README.md"
+("$BIN" --root "$SKILLS_REPO" sync >/dev/null)
+git -C "$SKILLS_REPO" add -A
+git -C "$SKILLS_REPO" commit -qm 'init skills fixture'
+# A stand-in skill CLI: its catalog is JSON Lines of {"name": ...}.
+cat >"$SKILLS_REPO/bin/skill" <<'FAKE_SKILL'
+#!/usr/bin/env bash
+[ "$1" = catalog ] && [ "$2" = --json ] || exit 2
+printf '%s\n' '{"name": "coding-standards", "status": "local"}' \
+  '{"name": "local:notes", "status": "local"}'
+FAKE_SKILL
+chmod +x "$SKILLS_REPO/bin/skill"
+# And one that fails, standing in for no skill CLI at all.
+mkdir -p "$SKILLS_REPO/nobin"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$SKILLS_REPO/nobin/skill"
+chmod +x "$SKILLS_REPO/nobin/skill"
+
+# Test 191: skills prints the list; dispatch carries it, with the command on
+# a line of its own
+SKILLS_OUT="$("$BIN" --root "$SKILLS_REPO" skills proj 2>&1)"
+SKILLS_JSON="$("$BIN" --root "$SKILLS_REPO" skills proj --json 2>&1)"
+SKILLS_NONE="$("$BIN" --root "$SKILLS_REPO" skills bare 2>&1)"
+SKILLS_NOTE="$("$BIN" --root "$SKILLS_REPO" dispatch proj 2>/dev/null)"
+SKILLS_BARE_NOTE="$("$BIN" --root "$SKILLS_REPO" dispatch bare 2>/dev/null)"
+SKILLS_PAYLOAD="$("$BIN" --root "$SKILLS_REPO" dispatch proj --json 2>/dev/null)"
+if [[ "$SKILLS_OUT" == $'coding-standards\nlocal:notes\ncoding-standard' ]] &&
+  [[ "$SKILLS_JSON" == '["coding-standards", "local:notes", "coding-standard"]' ]] &&
+  [[ -z "$SKILLS_NONE" ]] &&
+  [[ "$SKILLS_NOTE" == *$'\n\nSkills: coding-standards, local:notes, coding-standard. '* ]] &&
+  [[ "$SKILLS_NOTE" == *$'\n\n  taskgo skills proj | skill --scope session add -' ]] &&
+  [[ "$SKILLS_BARE_NOTE" != *"Skills:"* ]] &&
+  "$MCP_PY" -c '
+import json, sys
+got = json.loads(sys.argv[1])
+assert got["skills"] == ["coding-standards", "local:notes", "coding-standard"], got["skills"]
+assert got["frontmatter"]["skills"] == got["skills"], got["frontmatter"]
+assert "\n\n  taskgo skills proj | skill --scope session add -\n\n" in got["note"], got["note"]
+' "$SKILLS_PAYLOAD"; then
+  echo 'ok 191 - skills prints a project'"'"'s skills; dispatch carries them and the command to activate them'
+else
+  echo 'not ok 191 - skills prints a project'"'"'s skills; dispatch carries them and the command to activate them'
+  printf '# %s\n' "$SKILLS_OUT" "$SKILLS_JSON" "$SKILLS_NOTE"
+fi
+
+# Test 192: doctor checks the names against the skill CLI's catalog, and says
+# when it cannot
+set +e
+SKILLS_DOCTOR="$(PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_DOCTOR_RC=0
+PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj >/dev/null 2>&1 || SKILLS_DOCTOR_RC=$?
+SKILLS_DOCTOR_BARE_RC=0
+PATH="$SKILLS_REPO/bin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor bare >/dev/null 2>&1 || SKILLS_DOCTOR_BARE_RC=$?
+SKILLS_DOCTOR_NOCLI="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+set -e
+if [[ "$SKILLS_DOCTOR" == *"[WARN]  proj/README.md: unknown skill 'coding-standard' (did you mean 'coding-standards'?)"* ]] &&
+  [[ "$SKILLS_DOCTOR" != *"unknown skill 'coding-standards'"* ]] &&
+  [[ "$SKILLS_DOCTOR" != *"unknown skill 'local:notes'"* ]] &&
+  [[ "$SKILLS_DOCTOR_RC" -eq 1 ]] && [[ "$SKILLS_DOCTOR_BARE_RC" -eq 0 ]] &&
+  [[ "$SKILLS_DOCTOR_NOCLI" == *"[INFO]  skills not checked (skill CLI not found or failed)"* ]] &&
+  [[ "$SKILLS_DOCTOR_NOCLI" != *"unknown skill"* ]]; then
+  echo 'ok 192 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
+else
+  echo 'not ok 192 - doctor warns about a declared skill the catalog lacks, and says when it cannot check'
+  printf '# %s\n' "$SKILLS_DOCTOR" "$SKILLS_DOCTOR_NOCLI"
+fi
+
+# Test 193: a skills value that is not a list of names is reported, and
+# yields no skills
+set +e
+printf '%s\n' '---' 'skills:' '  notes: true' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
+SKILLS_SHAPE="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+SKILLS_SHAPE_LIST="$("$BIN" --root "$SKILLS_REPO" skills proj 2>&1)"
+printf '%s\n' '---' 'skills:' '  - ../escape' '---' '' '# Proj' >"$SKILLS_REPO/proj/README.md"
+SKILLS_SPEC="$(PATH="$SKILLS_REPO/nobin:$PATH" "$BIN" --root "$SKILLS_REPO" doctor proj 2>&1)"
+set -e
+if [[ "$SKILLS_SHAPE" == *"[WARN]  proj/README.md: skills must be a list of skill names, not"* ]] &&
+  [[ -z "$SKILLS_SHAPE_LIST" ]] &&
+  [[ "$SKILLS_SPEC" == *"skills must be a list of skill names, not '../escape'"* ]]; then
+  echo 'ok 193 - doctor reports a skills value that is not a list of skill names'
+else
+  echo 'not ok 193 - doctor reports a skills value that is not a list of skill names'
+  printf '# %s\n' "$SKILLS_SHAPE" "$SKILLS_SPEC"
 fi

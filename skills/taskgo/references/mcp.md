@@ -10,20 +10,20 @@ One server serves one control repository.
 
 ## Tools
 
-| Tool                 | Returns                                                                                   | CLI equivalent           |
-| -------------------- | ----------------------------------------------------------------------------------------- | ------------------------ |
-| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                 | `taskgo status --json`   |
-| `list_tasks`         | Task rows, by project and state (`ready` included)                                        | `taskgo list --json`     |
-| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown            | the task file            |
-| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block | `taskgo status PROJECT`  |
-| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line   | `taskgo read --json`     |
-| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options               | `taskgo search --json`   |
-| `list_files`         | Files with blob SHAs, optionally under one directory                                      | `git ls-files -s`        |
-| `dispatch`           | For a project or task: the note, findings, and the files to read first, verbatim          | `taskgo dispatch --json` |
-| `get_task_history`   | Changes of one frontmatter field, following renames                                       | `taskgo history`         |
-| `create`             | Creates one task or decision as one commit, and returns its ID                            | `taskgo create`          |
-| `apply_changes`      | Applies a change set as one commit                                                        | `taskgo apply`, commit   |
-| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob             | `taskgo edit`, commit    |
+| Tool                 | Returns                                                                                                                 | CLI equivalent           |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                               | `taskgo status --json`   |
+| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                      | `taskgo list --json`     |
+| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                          | the task file            |
+| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                               | `taskgo status PROJECT`  |
+| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                 | `taskgo read --json`     |
+| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                             | `taskgo search --json`   |
+| `list_files`         | Files with blob SHAs, optionally under one directory                                                                    | `git ls-files -s`        |
+| `dispatch`           | For a project or task: the note, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo dispatch --json` |
+| `get_task_history`   | Changes of one frontmatter field, following renames                                                                     | `taskgo history`         |
+| `create`             | Creates one task or decision as one commit, and returns its ID                                                          | `taskgo create`          |
+| `apply_changes`      | Applies a change set as one commit                                                                                      | `taskgo apply`, commit   |
+| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                           | `taskgo edit`, commit    |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
@@ -45,7 +45,10 @@ only costs a fetch.
 When the fetch fails (the remote is unreachable, or it times out after a
 minute), an unpinned read is served the head last fetched, or last pushed by
 this server, if there is one, and its `as_of` carries `"stale": true`; the
-failure is logged on standard error. A read with nothing fetched yet, a pinned
+failure is logged on standard error. Unpinned reads within `--fetch-ttl` seconds
+of the failure are served the same way without fetching again, so an unreachable
+remote costs one fetch (at most a minute) per TTL, not one per call; with
+`--fetch-ttl 0`, every read tries. A read with nothing fetched yet, a pinned
 read whose commit is not present, and every write fail instead: nothing is
 written over a head that may have moved.
 
@@ -140,13 +143,14 @@ request's arguments and each commit it built for it, for a day. A request whose
 ID it has seen reports the earlier commit, when that commit is on the branch,
 instead of writing again, so a client that lost a reply can retry safely; such a
 retry always fetches, and does not trust a cached head. The same ID with
-different arguments is refused. A restart forgets the IDs, so a write whose ID
-is not in memory first looks for its `Request-Id:` trailer in the last 200
-commits behind the head: a commit found with the same `Request-Digest:` is
-reported as `replayed: true`, from what the commit records (its subject, the
-records it created, and the files it changed, but not the lines of its edits),
-and one with another digest is refused as a reused ID. A retry is thus recorded
-once across restarts, as long as its commit is within those 200.
+different arguments is refused. The table is in memory, but the recognition
+survives a restart: a write whose ID is not in memory first looks for its
+`Request-Id:` trailer in the last 200 commits behind the head: a commit found
+with the same `Request-Digest:` is reported as `replayed: true`, from what the
+commit records (its subject, the records it created, and the files it changed,
+but not the lines of its edits), and one with another digest is refused as a
+reused ID. A retry is thus recorded once across restarts, as long as its commit
+is within those 200.
 
 Each write logs a line to standard error for each push attempt, with the request
 ID, the commit, and the head it was built on, or Git's reason for a refusal, and

@@ -308,8 +308,10 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   their owners wrote them.
 - `checkpoint`: Safe automatic-commit path requiring
   `taskgo:allow-local-commits`. Enforces 50-char subject limits.
-- `mcp`: Serve committed state to MCP clients, such as cloud agents without a
-  checkout of the control repository, and commit and push their change sets. See
+- `mcp`: Serve committed state to MCP clients and write their change sets as
+  commits: by default from and to a remote, for cloud agents without a checkout
+  of the control repository; with `--local`, on a checkout's own branch, for
+  agents in other workspaces on the same machine. See
   [MCP Server](references/mcp.md).
 - `requests`: Summarise the MCP server's request log (requests per client and
   tool, failures, latency, and the commonest runs of tool calls). Over HTTP the

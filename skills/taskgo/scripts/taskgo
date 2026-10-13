@@ -5472,12 +5472,20 @@ def skill_catalog() -> set[tuple[str, str]] | None:
         return None
     if res.returncode != 0:
         return None
+    # JSON Lines today; a JSON array is accepted should that change.
+    records: list[Any]
+    try:
+        whole = json.loads(res.stdout)
+        records = whole if isinstance(whole, list) else [whole]
+    except ValueError:
+        records = []
+        for line in res.stdout.splitlines():
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                continue
     entries: set[tuple[str, str]] = set()
-    for line in res.stdout.splitlines():
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
+    for rec in records:
         key = str(rec.get("name") or "") if isinstance(rec, dict) else ""
         if not key:
             continue
@@ -5825,17 +5833,19 @@ def skills_note(project: str, skills: list[str]) -> str:
     """The dispatch note's skills paragraph: what to activate, and how.
 
     Adding a skill that is already active is harmless, so the agent need
-    not work out which ones it lacks.
+    not work out which ones it lacks. The command is on a line of its own,
+    never wrapped, so it can be run as it is.
     """
-    return textwrap.fill(
-        f"Skills: {', '.join(skills)}. Activate them for this session if your "
-        "harness has a skill manager (taskgo skills "
-        f"{project} | skill --scope session add -); adding one that is already "
-        "active is harmless. Otherwise read each skill's SKILL.md.",
+    prose = textwrap.fill(
+        f"Skills: {', '.join(skills)}. If your harness has a skill manager, "
+        "activate them for this session with the command below (adding one "
+        "that is already active is harmless); otherwise read each skill's "
+        "SKILL.md.",
         width=76,
         break_long_words=False,
         break_on_hyphens=False,
     )
+    return f"{prose}\n\n  taskgo skills {project} | skill --scope session add -"
 
 
 def resolve_dispatch(snap: GitTreeSnapshot, target: Any) -> DispatchTarget:
@@ -7645,6 +7655,11 @@ class McpReader:
         # When the remote-tracking ref was last known to match the remote
         # (time.monotonic()); None when it is not known to.
         self.fetched_at: float | None = None
+        # When a fetch last failed; None after one succeeds. Unpinned reads
+        # within fetch_ttl of a failure serve the stale head without trying
+        # again, so an unreachable remote costs one timeout per TTL, not one
+        # per call.
+        self.failed_at: float | None = None
 
     def git(self, *args: str) -> subprocess.CompletedProcess:
         return run_git(list(args), cwd=self.cfg.repo, check=False)
@@ -7695,18 +7710,30 @@ class McpReader:
                 check=False,
             )
         except subprocess.TimeoutExpired:
+            self.failed_at = time.monotonic()
             mcp_log(f"fetch failed: timed out after {MCP_FETCH_TIMEOUT}s")
             raise McpToolError(
                 f"could not fetch {cfg.branch} from {cfg.remote} (timed out); "
                 "pass an earlier as_of.commit as 'at' to read it"
             ) from None
         if res.returncode != 0:
+            self.failed_at = time.monotonic()
             mcp_log(f"fetch failed: {res.stderr.strip()}")
             raise McpToolError(
                 f"could not fetch {cfg.branch} from {cfg.remote}; pass an "
                 "earlier as_of.commit as 'at' to read it"
             )
         self.fetched_at = time.monotonic()
+        self.failed_at = None
+
+    def failing(self) -> bool:
+        """True while a failed fetch is recent enough not to retry for a read."""
+        at = self.failed_at
+        return (
+            self.cfg.fetch_ttl > 0
+            and at is not None
+            and time.monotonic() - at < self.cfg.fetch_ttl
+        )
 
     def resolve(self, at: Any, *, fetch: bool = False) -> str:
         """The commit to read: AT when given, else the head of the branch.
@@ -7738,9 +7765,14 @@ class McpReader:
 
         An unpinned read whose fetch fails is served the head last fetched,
         or pushed by this server, when there is one, rather than nothing;
-        the response says so. A pinned read, or a first read with nothing
-        fetched yet, fails as the fetch did.
+        the response says so, and reads within fetch_ttl of the failure are
+        served the same way without fetching again. A pinned read, or a
+        first read with nothing fetched yet, fails as the fetch did.
         """
+        if not at and self.cfg.remote and self.failing() and not self.fresh():
+            sha = resolve_commit(self.cfg.repo, self.tracking_ref())
+            if sha is not None:
+                return sha, True
         try:
             return self.resolve(at), False
         except McpToolError:
@@ -7909,8 +7941,18 @@ class McpReader:
 
     def find_request(self, head: str, rid: str) -> tuple[str, str | None] | None:
         """The commit, with its digest, that the last MCP_REQUEST_SCAN commits
-        behind HEAD record for request RID in their trailers, or None."""
-        res = self.git("log", "-z", f"-n{MCP_REQUEST_SCAN}", "--format=%H%n%B", head)
+        behind HEAD record for request RID in their trailers, or None.
+
+        Git picks out the trailer block, so a body line that happens to start
+        with the trailer's name is not one.
+        """
+        res = self.git(
+            "log",
+            "-z",
+            f"-n{MCP_REQUEST_SCAN}",
+            "--format=%H%n%(trailers:only,unfold)",
+            head,
+        )
         if res.returncode != 0:
             return None
         for record in res.stdout.split("\0"):
@@ -9842,8 +9884,6 @@ def cmd_mcp(
     root = get_repo_root()
     if not fetch_ttl >= 0:
         die_scoped(f"--fetch-ttl must be 0 or more seconds, not {fetch_ttl}")
-    if no_fetch and local:
-        die_scoped("--no-fetch and --local exclude each other")
     team = team or os.environ.get("TASKGO_MCP_ACCESS_TEAM")
     audience = audience or os.environ.get("TASKGO_MCP_ACCESS_AUD")
     if stdio:
@@ -10454,10 +10494,11 @@ than a few words.""",
   taskgo dispatch TASK-3A91F --json
   taskgo --root ~/projects dispatch TASK-3A91F
 
-The note is generated from the records committed at HEAD (or REV). Findings
-about working-tree or tracker readiness are written to stderr. --json prints
-the note with the files it names inlined verbatim, as the MCP dispatch tool
-returns them.""",
+The note is generated from the records committed at HEAD (or REV), and ends
+with the project's skills when its README declares any. Findings about
+working-tree or tracker readiness are written to stderr. --json prints the
+note, the files it names inlined verbatim, the skills list, and the project's
+in-progress, blocked, and ready tasks, as the MCP dispatch tool returns them.""",
     )
     p_dispatch.add_argument(
         "--help",

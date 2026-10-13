@@ -407,10 +407,11 @@ Examples:
   taskgo dispatch TASK-3A91F --json
   taskgo --root ~/projects dispatch TASK-3A91F
 
-The note is generated from the records committed at HEAD (or REV). Findings
-about working-tree or tracker readiness are written to stderr. --json prints
-the note with the files it names inlined verbatim, as the MCP dispatch tool
-returns them.
+The note is generated from the records committed at HEAD (or REV), and ends
+with the project's skills when its README declares any. Findings about
+working-tree or tracker readiness are written to stderr. --json prints the
+note, the files it names inlined verbatim, the skills list, and the project's
+in-progress, blocked, and ready tasks, as the MCP dispatch tool returns them.
 ```
 
 <!-- /generated -->
