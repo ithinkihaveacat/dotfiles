@@ -65,6 +65,9 @@ a task ID, and one round trip returns what the workflow reads before acting.
   project's unverified gates.
 - `frontmatter`: the project `README.md` frontmatter as YAML parses it, with no
   key filtered or renamed (`{}` without one).
+- `skills`: the agent skills that frontmatter declares, normalized to a list of
+  names as the `skill` CLI resolves them (`[]` without any). The note says how
+  to activate them; a client without a skill manager ignores them.
 - `readme`, `plan`, `agents_md`: the project `README.md` (or `PROJECT.md`),
   `PLAN.md`, and the root `AGENTS.md`, each `{path, blob, content, truncated}`
   or null when absent. Content is the file's bytes, cut after a whole line at
