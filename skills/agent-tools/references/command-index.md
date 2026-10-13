@@ -747,8 +747,8 @@ Catalog Entries:
   compose-architecture   Android Compose Architecture documentation
   firebase               Firebase CLI and hosting documentation
   gemini-api             Gemini API documentation and examples
-  gemini-cli             Gemini CLI documentation
   gemini-sdk-js          Google Gemini JavaScript SDK codegen instructions
+  gemini-sdk-py          Google Gen AI Python SDK documentation
   homeassistant          Home Assistant integration, automation, API and CLI documentation
   inkyframe              Pimoroni Inky Frame documentation
   kamal                  Kamal deployment documentation
