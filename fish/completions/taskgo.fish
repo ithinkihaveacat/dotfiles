@@ -49,6 +49,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a checkpoint -d 'Commit an autho
 complete -f -c taskgo -n __fish_use_subcommand -a commit -d 'Commit a logical transition'
 complete -f -c taskgo -n __fish_use_subcommand -a schema -d 'Show the task, decision, and STATUS schema'
 complete -f -c taskgo -n __fish_use_subcommand -a mcp -d 'Serve the tracker to MCP clients'
+complete -f -c taskgo -n __fish_use_subcommand -a requests -d "Summarise the MCP server's request log"
 
 # Global flags
 complete -c taskgo -n __fish_use_subcommand -l root -s R -r -d 'Control repository (default: ~/.projects)'
@@ -176,3 +177,10 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l auth -x -a 'access
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l access-team -x -d 'Access team domain'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l access-aud -x -d 'Access application audience (AUD) tag'
 complete -f -c taskgo -n '__fish_seen_subcommand_from mcp' -l stdio -d 'Serve one client on stdin and stdout'
+complete -r -c taskgo -n '__fish_seen_subcommand_from mcp' -l log -d 'Request log to append to'
+
+# requests options
+complete -r -c taskgo -n '__fish_seen_subcommand_from requests' -l log -d 'Request log to read'
+complete -x -c taskgo -n '__fish_seen_subcommand_from requests' -l days -d 'Read the last N days of records (default 7)'
+complete -x -c taskgo -n '__fish_seen_subcommand_from requests' -l gap -d 'Longest pause within a chain, in seconds'
+complete -f -c taskgo -n '__fish_seen_subcommand_from requests' -s j -l json -d 'Emit JSON output'

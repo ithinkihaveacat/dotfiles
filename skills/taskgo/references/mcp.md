@@ -156,13 +156,16 @@ statelessly: each POST carries one JSON-RPC message and gets one JSON response.
 There is no server-initiated stream and no session, so `GET` and `DELETE` on the
 endpoint get 405. A POST whose `Accept` header does not admit `application/json`
 (`*/*` does) gets 406. `GET /up` answers 200 without authentication and without
-reading the repository, for a reverse proxy's health check. `--stdio` serves one
-local client on standard input and output instead, without authentication.
+reading the repository, for a reverse proxy's health check. `GET /logs` is a
+page of the server's latest requests (see [Logging](#logging)), behind the same
+check as the endpoint. `--stdio` serves one local client on standard input and
+output instead, without authentication.
 
 ## Logging
 
-The server logs to standard error. Every request, except the health check,
-leaves one line once it is answered:
+Every request, except the health check and the log page's own, is logged twice
+once it is answered: as a line on standard error, and as a JSON record appended
+to the request log. The line:
 
 ```text
 taskgo mcp: request transport=http http=POST method=tools/call tool=get_task outcome=ok status=200 ms=41 commit=1a2b3c4d5e6f agent=example-client/1.0
@@ -183,15 +186,62 @@ break or forge a line. A JSON-RPC error's reason is a fixed phrase for its code
 (`method not found`, `parse error`), not the error's message, which can quote
 the request.
 
-Lines name requests, never their content: no arguments, task text, file content,
-or tokens. An authentication refusal gives its reason (no token, bad signature,
-wrong audience or issuer, expired). A tool error gives its message, with every
-quoted value elided, since a failed precondition quotes the record's current
-value, which can be a title. Write attempts log the lines described under
-[Writes](#writes) first. To follow a server:
+The record has the same fields, under the same names (`agent` for the
+`User-Agent`), plus:
+
+- `ts`: when the request came, in UTC with milliseconds;
+- `bytes`: the size of a successful tool call's result;
+- `caller`: an opaque key for the caller, a hash of the Access token's
+  identifying claims (`sub`, `email`, and an OAuth client claim if there is
+  one), or of a stdio server's process; HTTP with `--auth none` has none;
+- `version`: the server's version.
+
+```json
+{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.11.0"}
+```
+
+The request log is `--log FILE`, else `TASKGO_MCP_LOG`, else
+`$XDG_STATE_HOME/taskgo/mcp.jsonl` (`~/.local/state/taskgo/mcp.jsonl`), over
+either transport, so stdio servers keep one too. At 8 MiB the file is renamed
+`FILE.1`, and older ones move up to `FILE.4`, which is dropped: at most 40 MiB.
+Several servers can share a file, as stdio servers do by default; each append
+and rotation locks it. Logging never fails a request: if the file cannot be
+written, the server says so once on standard error and keeps logging lines
+there.
+
+Lines and records name requests, never their content: no arguments, task text,
+file content, or tokens. An authentication refusal gives its reason (no token,
+bad signature, wrong audience or issuer, expired). A tool error gives its
+message, with every quoted value elided, since a failed precondition quotes the
+record's current value, which can be a title. Write attempts log the lines
+described under [Writes](#writes) first. The first request with each kind of
+valid Access token (a browser's, a client's) also logs the names, not the
+values, of its claims, which say what a caller key could be built from.
+
+**The log page.** Over HTTP, `GET /logs` is a page of the latest 500 requests,
+newest first, with requests, failures, and latency per client and per tool, and
+the commonest runs of tool calls. It polls `GET /logs/records?after=N` every
+second for the records after its cursor and the stats over those kept, so a
+request shows within about a second. The server loads the latest records from
+the request log when it starts, so the page survives a restart. Both routes are
+plain HTTP, not MCP: no tool, resource, or instruction mentions them. They need
+what the endpoint needs (an Access token, or a loopback name with
+`--auth none`), so any client that can call the tools can read them too: the log
+is less sensitive than the tracker they already read. Their refusals are logged;
+the page's polling is not.
+
+**Summaries.** `taskgo requests` reads the request log and its rotated files
+(`--log`, else as for the server) and prints requests by outcome, then requests,
+failures, latency, and median result size per client and per tool, then the
+commonest runs of two or three tool calls by client. A run counts within one
+caller's chain: its tool calls, each at most `--gap` seconds (120) after the one
+before, since stateless HTTP has no session to group them by. `--days` (7)
+limits the records read, and `--json` prints the same as JSON. The records are
+JSON lines, so `jq` reads them too:
 
 ```sh
-grep 'taskgo mcp: request' server.log | grep -v 'outcome=ok'
+taskgo requests --days 1
+jq -r 'select(.outcome != "ok") | [.ts, .agent, .tool, .reason] | @tsv' ~/.local/state/taskgo/mcp.jsonl
 ```
 
 ## Authentication
@@ -220,7 +270,7 @@ tests/make-synthetic /tmp/synth                        # a synthetic tracker
 scripts/taskgo --root /tmp/synth mcp --no-fetch --auth none &
 tests/compare-cli http://127.0.0.1:8789/mcp /tmp/synth # server versus CLI
 tests/mcp-call http://127.0.0.1:8789/mcp list_tasks '{"state":"ready"}'
-tests/auth-check                                       # Access JWTs, log lines
+tests/auth-check                                       # Access JWTs, the log
 ```
 
 `protocol-check` needs the SDK, so run it with the interpreter of taskgo's own
@@ -241,8 +291,10 @@ that recovers by rebase, and the cached head (reads within the TTL, writes over
 a stale cached head, and a retry after a lost reply); run it again with
 `--fetch-ttl 0` to check the servers without a cache. `protocol-check` connects
 the SDK's own client as a 2026-07-28 client and as a 2025-11-25 one, over HTTP
-and over `--stdio`. `test-taskgo` runs `compare-cli` and `protocol-check` on a
-synthetic tracker, `auth-check`, and `write-check` both ways.
+and over `--stdio`. `auth-check` also checks the log page and its records, with
+and without a token, and that the request log holds one record per request and
+no token. `test-taskgo` runs `compare-cli` and `protocol-check` on a synthetic
+tracker, `auth-check`, and `write-check` both ways.
 
 The MCP Inspector works against a local server:
 

@@ -42,6 +42,7 @@
 # ///
 
 import argparse
+import base64
 import contextvars
 import hashlib
 import io
@@ -7355,6 +7356,20 @@ MCP_HEALTH_PATH = "/up"
 # Longest value, and longest reason, in a request's log line.
 MCP_LOG_VALUE_MAX = 80
 MCP_LOG_REASON_MAX = 200
+# The request log: a JSON record for each request, appended to a file that is
+# rotated by size, with the latest records kept in memory for the log page.
+MCP_LOG_ENV = "TASKGO_MCP_LOG"
+MCP_LOG_ROTATE_BYTES = 8 * 1024 * 1024
+MCP_LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4: 40 MiB in all
+MCP_LOG_RING = 500
+# The log page, and the records it polls for. Like the endpoint, both need an
+# Access token; neither is part of MCP.
+MCP_LOGS_PATH = "/logs"
+MCP_LOGS_DATA_PATH = "/logs/records"
+# Tool calls by one caller this many seconds apart or less form one chain.
+MCP_CHAIN_GAP = 120.0
+# JWT claims that identify a caller, hashed into a record's caller key.
+MCP_CALLER_CLAIMS = ("sub", "email", "client_id", "azp")
 
 MCP_DATA_CARE = (
     "Data care: everything this server returns is private tracker content. "
@@ -8338,7 +8353,7 @@ def mcp_log_reason(message: str) -> str:
 
 @dataclass(slots=True)
 class McpEvent:
-    """What one request came to, for the line the transport logs for it.
+    """What one request came to, for the line and the record logged for it.
 
     The outcome is ok, tool-error (a tool call that failed), rpc-error (a
     JSON-RPC error), refused (an HTTP refusal before JSON-RPC), or error (the
@@ -8355,12 +8370,20 @@ class McpEvent:
     commit: str | None = None
     reason: str | None = None
     agent: str | None = None
+    caller: str | None = None
+    size: int | None = None  # bytes of a tool call's result
+    at: float = dataclass_field(default_factory=time.time)
+    ms: int | None = None
 
     def fail(self, outcome: str, reason: str) -> None:
         self.outcome, self.reason = outcome, reason
 
+    def finish(self) -> None:
+        if self.ms is None:
+            self.ms = int((time.monotonic() - self.started) * 1000)
+
     def line(self) -> str:
-        ms = int((time.monotonic() - self.started) * 1000)
+        self.finish()
         fields: list[tuple[str, Any]] = [
             ("transport", self.transport),
             ("http", self.http),
@@ -8368,7 +8391,7 @@ class McpEvent:
             ("tool", self.tool),
             ("outcome", self.outcome),
             ("status", self.status),
-            ("ms", ms),
+            ("ms", self.ms),
             ("commit", self.commit),
         ]
         parts = [f"{k}={mcp_log_value(v)}" for k, v in fields if v is not None]
@@ -8377,6 +8400,262 @@ class McpEvent:
         if self.agent:
             parts.append(f"agent={mcp_log_value(self.agent)}")
         return "request " + " ".join(parts)
+
+    def record(self) -> dict[str, Any]:
+        """The request as a JSON record, with the line's fields and when it
+        came, its result's size, its caller key, and the server's version.
+        Client text is truncated as in the line; JSON escapes the rest."""
+        self.finish()
+
+        def text(value: Any, limit: int = MCP_LOG_VALUE_MAX) -> str | None:
+            if value is None:
+                return None
+            value = str(value)
+            return value if len(value) <= limit else value[: limit - 1] + "\u2026"
+
+        stamp = datetime.fromtimestamp(self.at, timezone.utc)
+        rec = {
+            "ts": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "transport": self.transport,
+            "http": self.http,
+            "method": text(self.method),
+            "tool": text(self.tool),
+            "outcome": self.outcome,
+            "status": self.status,
+            "ms": self.ms,
+            "bytes": self.size,
+            "commit": self.commit,
+            "reason": text(self.reason, MCP_LOG_REASON_MAX),
+            "agent": text(self.agent),
+            "caller": self.caller,
+            "version": MCP_SERVER_VERSION,
+        }
+        return {k: v for k, v in rec.items() if v is not None}
+
+
+def mcp_caller(*parts: Any) -> str:
+    """An opaque key for one caller, from PARTS that identify it, so that a
+    record groups a caller's calls without naming who it is."""
+    joined = "\0".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(joined.encode()).hexdigest()[:10]
+
+
+def mcp_log_default() -> Path:
+    """The request log's path without --log or TASKGO_MCP_LOG."""
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    return Path(state) / "taskgo" / "mcp.jsonl"
+
+
+def mcp_log_files(path: Path) -> list[Path]:
+    """PATH and its rotated files that exist, oldest first."""
+    rotated = [Path(f"{path}.{i}") for i in range(MCP_LOG_ROTATED, 0, -1)]
+    return [f for f in [*rotated, path] if f.is_file()]
+
+
+def mcp_log_records(f: Path, since: float | None = None) -> list[dict[str, Any]]:
+    """The records in log file F, from SINCE (seconds since the epoch) on,
+    each with its time as _at. Lines that are not records are skipped: a
+    write cut short leaves a partial line."""
+    records: list[dict[str, Any]] = []
+    with open(f, encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            try:
+                rec = json.loads(raw)
+                at = datetime.fromisoformat(rec["ts"]).timestamp()
+            except (ValueError, TypeError, KeyError):
+                continue
+            if since is None or at >= since:
+                rec["_at"] = at
+                records.append(rec)
+    return records
+
+
+def mcp_log_read(path: Path, since: float | None = None) -> list[dict[str, Any]]:
+    """The records in PATH and its rotated files, oldest first, from SINCE
+    on."""
+    return [rec for f in mcp_log_files(path) for rec in mcp_log_records(f, since)]
+
+
+class McpLog:
+    """Where each request is logged: a line on stderr, a record appended to
+    the log file, and, for the log page, the latest records in memory.
+
+    Logging never fails a request. A record the file cannot take is dropped
+    there (the stderr line remains), with one warning. Several servers may
+    share one file, as stdio servers do by default: each append and rotation
+    holds an exclusive lock on the file.
+    """
+
+    def __init__(self, path: Path | None, keep: int = 0):
+        import collections
+        import secrets
+
+        self.path = path
+        self.recent: collections.deque[tuple[int, dict[str, Any]]] = collections.deque(
+            maxlen=keep or None
+        )
+        self.keep = keep
+        self.seq = 0
+        # Names this process's sequence of records for the page's cursor.
+        self.instance = secrets.token_hex(4)
+        self.warned = False
+        if keep and path:
+            # The latest records, read from the newest file back.
+            latest: list[dict[str, Any]] = []
+            try:
+                for f in reversed(mcp_log_files(path)):
+                    latest = mcp_log_records(f) + latest
+                    if len(latest) >= keep:
+                        break
+            except OSError as e:
+                self.warn(e)
+            for rec in latest[-keep:]:
+                rec.pop("_at", None)
+                self.remember(rec)
+
+    def remember(self, rec: dict[str, Any]) -> None:
+        if self.keep:
+            self.seq += 1
+            self.recent.append((self.seq, rec))
+
+    def emit(self, event: McpEvent) -> None:
+        mcp_log(event.line())
+        rec = event.record()
+        self.remember(rec)
+        if self.path:
+            try:
+                self.append(json.dumps(rec, separators=(",", ":")) + "\n")
+            except OSError as e:
+                self.warn(e)
+
+    def warn(self, e: OSError) -> None:
+        if not self.warned:
+            self.warned = True
+            mcp_log(
+                f"cannot use the request log {self.path}: {e}; logging to stderr only"
+            )
+
+    def append(self, line: str) -> None:
+        import fcntl
+
+        assert self.path
+        data = line.encode()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Another server may rotate the file between the open and the lock;
+        # then the lock is on a rotated file, so open the new one.
+        for _ in range(3):
+            with open(self.path, "ab") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                st = os.fstat(fh.fileno())
+                try:
+                    current = os.stat(self.path).st_ino == st.st_ino
+                except FileNotFoundError:
+                    current = False
+                if not current:
+                    continue
+                if st.st_size and st.st_size + len(data) > MCP_LOG_ROTATE_BYTES:
+                    for i in range(MCP_LOG_ROTATED - 1, 0, -1):
+                        older = Path(f"{self.path}.{i}")
+                        if older.exists():
+                            os.replace(older, f"{self.path}.{i + 1}")
+                    os.replace(self.path, f"{self.path}.1")
+                    with open(self.path, "ab") as fresh:
+                        fresh.write(data)
+                else:
+                    fh.write(data)
+                return
+        raise OSError(f"{self.path} kept being rotated")
+
+    def since(self, cursor: int) -> list[dict[str, Any]]:
+        return [rec for seq, rec in self.recent if seq > cursor]
+
+
+def mcp_percentile(values: list[int], pct: int) -> int | None:
+    """The nearest-rank PCT percentile of VALUES."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, -(-len(ordered) * pct // 100) - 1)]
+
+
+def mcp_log_stats(
+    records: list[dict[str, Any]], gap: float = MCP_CHAIN_GAP, top: int = 10
+) -> dict[str, Any]:
+    """Counts over request RECORDS (oldest first): outcomes, then requests,
+    failures, and latency per client and per tool, then the commonest runs of
+    two or three tool calls within one caller's chains (calls GAP seconds
+    apart or less), by client."""
+
+    def group(key: str) -> list[dict[str, Any]]:
+        rows: dict[str, list[dict[str, Any]]] = {}
+        for rec in records:
+            if rec.get(key) is not None:
+                rows.setdefault(str(rec[key]), []).append(rec)
+        out = []
+        for name, recs in rows.items():
+            ms = [r["ms"] for r in recs if isinstance(r.get("ms"), int)]
+            sizes = [r["bytes"] for r in recs if isinstance(r.get("bytes"), int)]
+            out.append(
+                {
+                    key: name,
+                    "requests": len(recs),
+                    "failed": sum(r.get("outcome") != "ok" for r in recs),
+                    "p50_ms": mcp_percentile(ms, 50),
+                    "p95_ms": mcp_percentile(ms, 95),
+                    "p50_bytes": mcp_percentile(sizes, 50),
+                }
+            )
+        return sorted(out, key=lambda row: (-row["requests"], row[key]))
+
+    outcomes: dict[str, int] = {}
+    for rec in records:
+        outcome = str(rec.get("outcome"))
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+
+    chains: list[tuple[str, list[str]]] = []
+    open_chains: dict[tuple[Any, ...], tuple[float, list[str]]] = {}
+    for rec in records:
+        if rec.get("method") != "tools/call" or rec.get("tool") is None:
+            continue
+        at = rec.get("_at")
+        if at is None:
+            try:
+                at = datetime.fromisoformat(rec["ts"]).timestamp()
+            except (ValueError, TypeError, KeyError):
+                continue
+        key = (rec.get("transport"), rec.get("caller"), rec.get("agent"))
+        last = open_chains.get(key)
+        if last is None or at - last[0] > gap:
+            calls: list[str] = []
+            chains.append((str(rec.get("agent") or rec.get("transport")), calls))
+        else:
+            calls = last[1]
+        calls.append(str(rec["tool"]))
+        open_chains[key] = (at, calls)
+    runs: dict[tuple[str, tuple[str, ...]], int] = {}
+    for client, calls in chains:
+        for size in (2, 3):
+            for i in range(len(calls) - size + 1):
+                run = (client, tuple(calls[i : i + size]))
+                runs[run] = runs.get(run, 0) + 1
+    sequences = [
+        {"agent": client, "calls": list(calls), "count": count}
+        for (client, calls), count in sorted(
+            runs.items(), key=lambda kv: (-kv[1], -len(kv[0][1]), kv[0])
+        )
+        if count > 1
+    ][:top]
+
+    return {
+        "requests": len(records),
+        "first": records[0]["ts"] if records else None,
+        "last": records[-1]["ts"] if records else None,
+        "outcomes": dict(sorted(outcomes.items(), key=lambda kv: -kv[1])),
+        "agents": group("agent"),
+        "tools": group("tool"),
+        "chains": len(chains),
+        "sequences": sequences,
+    }
 
 
 class McpServer:
@@ -8388,10 +8667,12 @@ class McpServer:
     race on equal terms, through the remote's refusal of a non-fast-forward.
     """
 
-    def __init__(self, cfg: McpConfig):
+    def __init__(self, cfg: McpConfig, log: McpLog | None = None):
         import threading
 
         self.reader = McpReader(cfg)
+        # Without a log, requests are logged to stderr only.
+        self.log = log or McpLog(None)
         self.lock = threading.Lock()
         # request_id -> McpRequest. In memory: losing it, as on a restart,
         # loses only the recognition of retries, never a write (ADR 2).
@@ -8430,8 +8711,10 @@ class McpServer:
                 event.fail("tool-error", "internal error")
                 return mcp_tool_error("internal error; see the server log")
         event.commit = sha[:12]
+        text = json.dumps(result, indent=1)
+        event.size = len(text.encode())
         return {
-            "content": [{"type": "text", "text": json.dumps(result, indent=1)}],
+            "content": [{"type": "text", "text": text}],
             "structuredContent": result,
             "isError": False,
         }
@@ -8664,11 +8947,16 @@ def mcp_sdk_server(server: McpServer) -> Any:
         result = await anyio.to_thread.run_sync(server.call_tool, raw, event)
         return mcp_types.CallToolResult.model_validate(result)
 
+    # One stdio server serves one client.
+    stdio_caller = mcp_caller("stdio", os.getpid(), time.time())
+
     async def logged(ctx: Any, call_next: Any) -> Any:
         """Logs each stdio message; McpGate logs HTTP requests itself."""
         if MCP_EVENT.get() is not None:
             return await call_next(ctx)
-        event = McpEvent("stdio", time.monotonic(), method=ctx.method)
+        event = McpEvent(
+            "stdio", time.monotonic(), method=ctx.method, caller=stdio_caller
+        )
         token = MCP_EVENT.set(event)
         try:
             return await call_next(ctx)
@@ -8681,7 +8969,7 @@ def mcp_sdk_server(server: McpServer) -> Any:
             raise
         finally:
             MCP_EVENT.reset(token)
-            mcp_log(event.line())
+            server.log.emit(event)
 
     sdk = Server(
         "taskgo",
@@ -8720,28 +9008,211 @@ def mcp_is_loopback(host: str | None) -> bool:
 
 
 async def mcp_asgi_reply(
-    send: Callable, status: int, text: str, allow: str | None = None
+    send: Callable,
+    status: int,
+    text: str,
+    allow: str | None = None,
+    content_type: str = "text/plain; charset=utf-8",
+    extra: tuple[tuple[str, str], ...] = (),
 ) -> None:
     data = text.encode()
     headers = [
-        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-type", content_type.encode()),
         (b"content-length", str(len(data)).encode()),
     ]
     if allow:
         headers.append((b"allow", allow.encode()))
+    headers += [(k.encode(), v.encode()) for k, v in extra]
     await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": data})
 
 
-class McpGate:
-    """ASGI, in front of the SDK's app: the health check, the endpoint's path,
-    Access or the loopback guard, the size limit, and one log line for each
-    request. The SDK sees only requests that pass, and never a token check."""
+# The log page: static, with every value inserted as text. It polls
+# MCP_LOGS_DATA_PATH every second for the records after its cursor and the
+# stats over those kept; kamal-proxy buffers responses, so it polls rather
+# than streams. The script is pinned by its hash in the page's CSP.
+MCP_LOGS_SCRIPT = """
+const DATA = "@DATA@", MAX = 500;
+const $ = (id) => document.getElementById(id);
+const state = { server: "", next: 0 };
 
-    def __init__(self, app: Any, verifier: "AccessVerifier | None", path: str):
+function cell(tr, text, cls) {
+  const td = tr.insertCell();
+  td.textContent = text == null ? "" : String(text);
+  if (cls) td.className = cls;
+  return td;
+}
+
+function table(el, head, rows) {
+  const t = document.createElement("table");
+  const h = t.createTHead().insertRow();
+  for (const [label, cls] of head) cell(h, label, cls);
+  const b = t.createTBody();
+  for (const r of rows) {
+    const tr = b.insertRow();
+    r.forEach((v, i) => cell(tr, v, head[i][1]));
+  }
+  el.replaceChildren(t);
+}
+
+function row(rec) {
+  const tr = document.createElement("tr");
+  if (rec.outcome !== "ok") tr.className = "fail";
+  const when = new Date(rec.ts);
+  cell(tr, when.toLocaleTimeString([], { hour12: false })).title = rec.ts;
+  cell(tr, rec.agent || rec.transport);
+  cell(tr, rec.caller);
+  cell(tr, rec.method);
+  cell(tr, rec.tool);
+  cell(tr, rec.outcome);
+  cell(tr, rec.status, "num");
+  cell(tr, rec.ms, "num");
+  cell(tr, rec.bytes, "num");
+  cell(tr, rec.commit);
+  cell(tr, rec.reason);
+  return tr;
+}
+
+function render(stats, version) {
+  const outcomes = Object.entries(stats.outcomes).map(([k, v]) => `${k} ${v}`);
+  $("summary").textContent =
+    `${stats.requests} requests kept` +
+    (outcomes.length ? ` (${outcomes.join(", ")})` : "") +
+    ` · ${stats.chains} chains · server ${version}`;
+  const num = (label) => [label, "num"];
+  const head = (name) => [[name], num("Requests"), num("Failed"),
+    num("p50 ms"), num("p95 ms"), num("p50 bytes")];
+  const line = (key) => (r) => [r[key], r.requests, r.failed,
+    r.p50_ms, r.p95_ms, r.p50_bytes];
+  table($("agents"), head("Client"), stats.agents.map(line("agent")));
+  table($("tools"), head("Tool"), stats.tools.map(line("tool")));
+  table($("sequences"), [num("Count"), ["Client"], ["Sequence"]],
+    stats.sequences.map((q) => [q.count, q.agent, q.calls.join(" > ")]));
+}
+
+function status(cls, text) {
+  $("status").className = cls;
+  $("status").textContent = text;
+}
+
+async function poll() {
+  let delay = 1000;
+  try {
+    const url = `${DATA}?after=${state.next}&server=${encodeURIComponent(state.server)}`;
+    const reply = await fetch(url, { cache: "no-store", credentials: "same-origin" });
+    if (!reply.ok) throw new Error(`HTTP ${reply.status}`);
+    const data = await reply.json();
+    if (data.server !== state.server) $("rows").replaceChildren();
+    state.server = data.server;
+    state.next = data.next;
+    for (const rec of data.records) $("rows").prepend(row(rec));
+    while ($("rows").children.length > MAX) $("rows").lastElementChild.remove();
+    render(data.stats, data.version);
+    status("live", "live");
+  } catch (e) {
+    status("down", `disconnected (${e.message}); retrying. Reload to sign in again.`);
+    delay = 5000;
+  }
+  setTimeout(poll, delay);
+}
+
+poll();
+""".replace("@DATA@", MCP_LOGS_DATA_PATH)
+
+MCP_LOGS_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; "
+    "script-src 'sha256-"
+    + base64.b64encode(hashlib.sha256(MCP_LOGS_SCRIPT.encode()).digest()).decode()
+    + "'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+MCP_LOGS_PAGE = (
+    """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>taskgo requests</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e2de;
+  --head: #f1f0ec; --fail-bg: #fdecea; --fail-fg: #9b1c1c;
+  --live: #1f7a3d; --down: #b42318;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --fg: #e8e7e3; --muted: #9a9993; --line: #2e2d2b;
+    --head: #21201e; --fail-bg: #3a1d1b; --fail-fg: #ffb4ab;
+    --live: #6fcf8f; --down: #ff8a80;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 14px; margin: 20px 0 6px; color: var(--muted); font-weight: 600; }
+#status.live { color: var(--live); }
+#status.down { color: var(--down); }
+#summary { color: var(--muted); }
+.grid { display: grid; gap: 0 24px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
+thead td { background: var(--head); font-weight: 600; }
+td.num { text-align: right; }
+tr.fail td { background: var(--fail-bg); color: var(--fail-fg); }
+#rows td:last-child { white-space: normal; min-width: 16em; }
+</style>
+</head>
+<body>
+<header>
+<h1>taskgo requests</h1>
+<span id="status">connecting</span>
+<span id="summary"></span>
+</header>
+<div class="grid">
+<section><h2>Clients</h2><div class="scroll" id="agents"></div></section>
+<section><h2>Tools</h2><div class="scroll" id="tools"></div></section>
+</div>
+<h2>Commonest sequences of tool calls</h2>
+<div class="scroll" id="sequences"></div>
+<h2>Requests, newest first</h2>
+<div class="scroll">
+<table>
+<thead><tr><td>Time</td><td>Client</td><td>Caller</td><td>Method</td><td>Tool</td>
+<td>Outcome</td><td class="num">Status</td><td class="num">ms</td>
+<td class="num">Bytes</td><td>Commit</td><td>Reason</td></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+<script>"""
+    + MCP_LOGS_SCRIPT
+    + """</script>
+</body>
+</html>
+"""
+)
+
+
+class McpGate:
+    """ASGI, in front of the SDK's app: the health check, the log page, the
+    endpoint's path, Access or the loopback guard, the size limit, and one
+    log record for each request. The SDK sees only requests that pass, and
+    never a token check."""
+
+    def __init__(
+        self, app: Any, verifier: "AccessVerifier | None", path: str, log: McpLog
+    ):
         self.app = app
         self.verifier = verifier
         self.path = path
+        self.log = log
+        self.claim_sets: set[frozenset[str]] = set()
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":  # lifespan
@@ -8761,14 +9232,72 @@ class McpGate:
             agent=headers.get("user-agent"),
         )
         token = MCP_EVENT.set(event)
+        quiet = False
         try:
-            await self.serve(scope, receive, send, headers, event)
+            if scope["path"] in (MCP_LOGS_PATH, MCP_LOGS_DATA_PATH):
+                quiet = await self.logs(scope, send, headers, event)
+            else:
+                await self.serve(scope, receive, send, headers, event)
         except BaseException as e:
             event.fail("error", type(e).__name__)
+            quiet = False
             raise
         finally:
             MCP_EVENT.reset(token)
-            mcp_log(event.line())
+            if not quiet:
+                self.log.emit(event)
+
+    async def logs(
+        self, scope: dict, send: Callable, headers: dict[str, str], event: McpEvent
+    ) -> bool:
+        """Serves the log page, or the records after the page's cursor with
+        stats over those kept. True if it did: the page polls every second,
+        so only refusals are logged."""
+        from urllib.parse import parse_qs
+
+        refusal = self.refusal(headers, event)
+        if refusal is None and scope["method"] != "GET":
+            refusal = 405, "method not allowed", "method not allowed"
+        if refusal:
+            status, reason, text = refusal
+            event.fail("refused", reason)
+            event.status = status
+            allow = "GET" if status == 405 else None
+            await mcp_asgi_reply(send, status, text, allow=allow)
+            return False
+        private = (("cache-control", "no-store"), ("x-content-type-options", "nosniff"))
+        if scope["path"] == MCP_LOGS_PATH:
+            await mcp_asgi_reply(
+                send,
+                200,
+                MCP_LOGS_PAGE,
+                content_type="text/html; charset=utf-8",
+                extra=(*private, ("content-security-policy", MCP_LOGS_CSP)),
+            )
+            return True
+        query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+        try:
+            after = int(query.get("after", ["0"])[0])
+        except ValueError:
+            after = 0
+        if query.get("server", [""])[0] != self.log.instance:
+            # Another process's cursor, as after a restart: start over.
+            after = 0
+        payload = {
+            "server": self.log.instance,
+            "version": MCP_SERVER_VERSION,
+            "next": self.log.seq,
+            "records": self.log.since(after),
+            "stats": mcp_log_stats([rec for _, rec in self.log.recent]),
+        }
+        await mcp_asgi_reply(
+            send,
+            200,
+            json.dumps(payload, separators=(",", ":")),
+            content_type="application/json",
+            extra=private,
+        )
+        return True
 
     async def serve(
         self,
@@ -8790,7 +9319,10 @@ class McpGate:
                     event.fail("rpc-error", mcp_rpc_reason(reply["error"].get("code")))
             await send(message)
 
-        refusal = self.refusal(scope, headers)
+        if scope["path"] != self.path:
+            refusal = 404, f"not found: {scope['path']}", "not found"
+        else:
+            refusal = self.refusal(headers, event)
         if refusal:
             status, reason, text = refusal
             event.fail("refused", reason)
@@ -8829,13 +9361,12 @@ class McpGate:
         await self.app(scope, replay, sending)
 
     def refusal(
-        self, scope: dict, headers: dict[str, str]
+        self, headers: dict[str, str], event: McpEvent
     ) -> tuple[int, str, str] | None:
-        """(status, reason, text) when the request may not proceed."""
+        """(status, reason, text) when the request may not proceed. A request
+        with an Access token gets its caller key from the token's claims."""
         from urllib.parse import urlsplit
 
-        if scope["path"] != self.path:
-            return 404, f"not found: {scope['path']}", "not found"
         if self.verifier is None:
             # Unauthenticated mode serves only requests addressed to a
             # loopback name, from a page on one if from a browser at all.
@@ -8849,9 +9380,16 @@ class McpGate:
         if not token:
             return 401, "no Access token", "Cloudflare Access token required"
         try:
-            self.verifier.verify(token)
+            claims = self.verifier.verify(token)
         except McpAuthError as e:
             return 403, str(e), str(e)
+        event.caller = mcp_caller(*(claims.get(k) for k in MCP_CALLER_CLAIMS))
+        names = frozenset(claims)
+        if names not in self.claim_sets:
+            # Names only, once for each kind of token (a browser's, a
+            # client's): what a caller key could be built from.
+            self.claim_sets.add(names)
+            mcp_log("Access token claims: " + " ".join(sorted(names)))
         return None
 
     @staticmethod
@@ -8902,11 +9440,11 @@ def mcp_serve_http(
     )
     print(
         f"taskgo mcp: serving {display_path(cfg.repo)} on http://{host}:{port}{path} "
-        f"(auth {cfg.auth})",
+        f"(auth {cfg.auth}); request log {server.log.path}, page {MCP_LOGS_PATH}",
         file=sys.stderr,
     )
     uvicorn.run(
-        McpGate(app, verifier, path),
+        McpGate(app, verifier, path, server.log),
         host=host,
         port=port,
         log_level="warning",
@@ -8927,6 +9465,7 @@ def cmd_mcp(
     audience: str | None = None,
     stdio: bool = False,
     fetch_ttl: float = MCP_FETCH_TTL,
+    log: str | None = None,
 ) -> None:
     """Serve the control repository over MCP: committed state, and writes."""
     root = get_repo_root()
@@ -8957,11 +9496,64 @@ def cmd_mcp(
         certs_url=os.environ.get("TASKGO_MCP_ACCESS_CERTS_URL") or None,
         fetch_ttl=fetch_ttl,
     )
-    server = McpServer(cfg)
+    log_path = Path(log or os.environ.get(MCP_LOG_ENV) or mcp_log_default())
+    # Only the HTTP server has a page to keep records in memory for.
+    server = McpServer(cfg, McpLog(log_path.expanduser(), 0 if stdio else MCP_LOG_RING))
     if stdio:
         mcp_serve_stdio(server)
     else:
         mcp_serve_http(server, cfg, host, port, path)
+
+
+def cmd_requests(
+    log: str | None = None,
+    days: float = 7,
+    gap: float = MCP_CHAIN_GAP,
+    as_json: bool = False,
+) -> None:
+    """Summarise the MCP server's request log."""
+    if not days > 0:
+        die_scoped(f"--days must be more than 0, not {days:g}")
+    if not gap >= 0:
+        die_scoped(f"--gap must be 0 or more seconds, not {gap:g}")
+    path = Path(log or os.environ.get(MCP_LOG_ENV) or mcp_log_default()).expanduser()
+    if not mcp_log_files(path):
+        die_scoped(f"no request log at {path}")
+    try:
+        records = mcp_log_read(path, time.time() - days * 86400)
+    except OSError as e:
+        die_scoped(f"cannot read {path}: {e}")
+    stats = mcp_log_stats(records, gap)
+    if as_json:
+        print(json.dumps({"log": str(path), "days": days, **stats}, indent=2))
+        return
+
+    def ms(value: int | None) -> str:
+        return "-" if value is None else str(value)
+
+    print(f"Log: {path} (last {days:g} days)")
+    if not records:
+        print("Requests: none")
+        return
+    print(f"Requests: {stats['requests']}, {stats['first']} to {stats['last']}")
+    print("Outcomes: " + ", ".join(f"{k} {v}" for k, v in stats["outcomes"].items()))
+    for key, title in (("agent", "Client"), ("tool", "Tool")):
+        rows = stats[f"{key}s"]
+        if not rows:
+            continue
+        width = max(len(title), *(len(r[key]) for r in rows))
+        print(f"\n{title:<{width}}  Requests  Failed  p50 ms  p95 ms  p50 bytes")
+        for r in rows:
+            print(
+                f"{r[key]:<{width}}  {r['requests']:>8}  {r['failed']:>6}  "
+                f"{ms(r['p50_ms']):>6}  {ms(r['p95_ms']):>6}  {ms(r['p50_bytes']):>9}"
+            )
+    print(f"\nChains: {stats['chains']} (tool calls {gap:g} s apart or less)")
+    if stats["sequences"]:
+        width = max(len("Client"), *(len(q["agent"]) for q in stats["sequences"]))
+        print(f"\nCount  {'Client':<{width}}  Sequence")
+        for q in stats["sequences"]:
+            print(f"{q['count']:>5}  {q['agent']:<{width}}  " + " > ".join(q["calls"]))
 
 
 class HouseStyleHelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -9602,9 +10194,17 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             request (issuer, audience, signature, expiry). --auth none skips
             the check and serves only requests addressed to a loopback name.
 
+            Each request is logged as a line on stderr and as a JSON record
+            appended to the request log (rotated at 8 MiB, keeping 4 old
+            files), never with its content; 'taskgo requests' summarises it.
+            Over HTTP, GET /logs is a live page of the latest requests, behind
+            the same check as the endpoint; GET /up is an unauthenticated
+            health check.
+
             Environment:
               TASKGO_MCP_ACCESS_TEAM  Default for --access-team
-              TASKGO_MCP_ACCESS_AUD   Default for --access-aud"""
+              TASKGO_MCP_ACCESS_AUD   Default for --access-aud
+              TASKGO_MCP_LOG          Default for --log"""
         ),
         formatter_class=HouseStyleHelpFormatter,
     )
@@ -9658,6 +10258,61 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         "--stdio",
         action="store_true",
         help="Serve one client on stdin and stdout instead (no authentication)",
+    )
+    p_mcp.add_argument(
+        "--log",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Request log to append to (default "
+            "$XDG_STATE_HOME/taskgo/mcp.jsonl, or ~/.local/state/taskgo/mcp.jsonl)"
+        ),
+    )
+
+    # requests
+    p_requests = subparsers.add_parser(
+        "requests",
+        help="Summarise the MCP server's request log",
+        description=textwrap.dedent(
+            """\
+            Summarise the request log of 'taskgo mcp': requests by outcome,
+            then requests, failures, latency, and result size per client and
+            per tool, then the commonest runs of two or three tool calls in
+            one caller's chains. A chain is a caller's tool calls, each no
+            more than --gap seconds after the one before. Records name
+            requests, never their content.
+
+            Environment:
+              TASKGO_MCP_LOG  Default for --log"""
+        ),
+        formatter_class=HouseStyleHelpFormatter,
+        epilog="""Examples:
+  taskgo requests
+  taskgo requests --days 1 --gap 60
+  taskgo requests --log /data/log/mcp.jsonl --json | jq '.sequences[:3]'""",
+    )
+    p_requests.add_argument(
+        "--log",
+        metavar="FILE",
+        default=None,
+        help="Request log to read, with its rotated files (default as for mcp)",
+    )
+    p_requests.add_argument(
+        "--days",
+        type=float,
+        metavar="N",
+        default=7,
+        help="Read the last N days of records (default 7)",
+    )
+    p_requests.add_argument(
+        "--gap",
+        type=float,
+        metavar="SECS",
+        default=MCP_CHAIN_GAP,
+        help=f"Longest pause within a chain (default {MCP_CHAIN_GAP:g})",
+    )
+    p_requests.add_argument(
+        "--json", "-j", dest="json", action="store_true", help="Output as JSON"
     )
 
     # history
@@ -10034,7 +10689,10 @@ def main(argv: list[str] | None = None) -> None:
             audience=args.access_aud,
             stdio=args.stdio,
             fetch_ttl=args.fetch_ttl,
+            log=args.log,
         )
+    elif args.command == "requests":
+        cmd_requests(log=args.log, days=args.days, gap=args.gap, as_json=args.json)
     elif args.command == "history":
         cmd_history(
             query=args.query,

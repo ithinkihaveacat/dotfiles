@@ -20,8 +20,10 @@ refusal's reason, and never the token), and that the health check needs no
 token. A write with an expired token is refused too. Then checks that '--auth
 none' refuses a request addressed to another host, and that every other
 outcome (a tool call, a tool error, an RPC error, a notification, a parse
-error, an unknown path) logs one line. Last, checks that the server will not
-start without Access settings. Prints TAP.
+error, an unknown path) logs one line. The log page and its records need a
+valid token too, and show the requests' records, never a token; the page's
+own requests are not logged, but its refusals are. Last, checks that the
+server will not start without Access settings. Prints TAP.
 """
 
 import base64
@@ -37,6 +39,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -117,6 +120,24 @@ def status(
         return e.code
 
 
+def fetch(
+    url: str, tok: str | None = None, method: str = "GET", host: str | None = None
+) -> tuple[int, Any, bytes]:
+    """(status, headers, body) of a request without a JSON-RPC body."""
+    headers = {}
+    if tok:
+        headers["cf-access-jwt-assertion"] = tok
+    if host:
+        headers["host"] = host
+    data = b"" if method == "POST" else None
+    req = urllib.request.Request(url, data, headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+
 def get_status(url: str) -> int:
     try:
         with urllib.request.urlopen(url, timeout=30) as resp:
@@ -156,6 +177,8 @@ def serve(repo: Path, port: int, log: Path, *args: str, env: dict | None = None)
             "--no-fetch",
             "--port",
             str(port),
+            "--log",
+            str(log.with_suffix(".jsonl")),
             *args,
         ],
         stdout=subprocess.DEVNULL,
@@ -255,7 +278,7 @@ def main() -> None:
         ("a parse error", "/mcp", b"{", 400, ("outcome=rpc-error", "parse error")),
         ("an unknown path", "/other", None, 404, ("outcome=refused", "/other")),
     ]
-    print(f"1..{len(cases) + len(outcomes) + 7}")
+    print(f"1..{len(cases) + len(outcomes) + 14}")
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
@@ -336,18 +359,81 @@ def main() -> None:
                 ok = got == want
                 failed += not ok
                 print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+            good = token(key, "k1")
+            # Every request so far is logged but the health check: the cases,
+            # the write, and the GET.
+            requests = len(cases) + 2
+            for name, path, tok, method, want in (
+                ("log page needs a token", "/logs", None, "GET", 401),
+                (
+                    "log records need a valid token",
+                    "/logs/records",
+                    "x.y.z",
+                    "GET",
+                    403,
+                ),
+                ("log page answers only GET", "/logs", good, "POST", 405),
+            ):
+                n += 1
+                requests += 1
+                got, _, _ = fetch(base + path, tok, method)
+                ok = got == want and f"status={want}" in logged(log, requests)
+                failed += not ok
+                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+            n += 1
+            got, headers, body = fetch(base + "/logs", good)
+            csp = headers.get("content-security-policy") or ""
+            ok = (
+                got == 200
+                and headers.get("content-type", "").startswith("text/html")
+                and "script-src 'sha256-" in csp
+                and b"taskgo requests" in body
+            )
+            failed += not ok
+            print(f"{'ok' if ok else 'not ok'} {n} - log page with a token: {got}")
+            n += 1
+            got, _, body = fetch(base + "/logs/records", good)
+            try:
+                data = json.loads(body)
+                recs = data["records"]
+            except (ValueError, KeyError):
+                data, recs = {}, []
+            passed = [r for r in recs if r.get("outcome") == "ok"]
+            ok = (
+                got == 200
+                and len(recs) == requests
+                and data["stats"]["requests"] == requests
+                and len(passed) == 2
+                # Callers with a valid token have a caller key; one key here.
+                and len({r.get("caller") for r in passed}) == 1
+                and None not in {r.get("caller") for r in passed}
+                and not any(tok and tok.encode() in body for _, tok, _, _ in cases)
+            )
+            failed += not ok
+            print(f"{'ok' if ok else 'not ok'} {n} - log records with a token: {got}")
+            if not ok:
+                print(f"# {body[:300]!r}")
         finally:
             proc.terminate()
             proc.wait()
         n += 1
         text = log.read_text()
         lines = [x for x in text.splitlines() if x.startswith("taskgo mcp: request ")]
-        # The health check is not logged; the GET on the endpoint is.
-        ok = len(lines) == len(cases) + 2 and not any(
-            tok and tok in text for _, tok, _, _ in cases
+        records = log.with_suffix(".jsonl").read_text()
+        # The health check and the log page's own requests are not logged;
+        # the GET on the endpoint and the page's refusals are.
+        ok = (
+            len(lines) == requests
+            and len(records.splitlines()) == requests
+            and all(json.loads(x)["transport"] == "http" for x in records.splitlines())
+            and not any(
+                tok and (tok in text or tok in records) for _, tok, _, _ in cases
+            )
         )
         failed += not ok
-        print(f"{'ok' if ok else 'not ok'} {n} - one line per request, no tokens")
+        print(
+            f"{'ok' if ok else 'not ok'} {n} - one line and record per request, no tokens"
+        )
 
         log = Path(tmp) / "none.log"
         proc, url = serve(repo, free_port(), log, "--auth", "none")
@@ -374,6 +460,19 @@ def main() -> None:
                 print(f"{'ok' if ok else 'not ok'} {n} - logs {name}: {got}")
                 if not ok:
                     print(f"# {line}")
+            for host, want, name in (
+                (None, 200, "auth none serves the log page on loopback"),
+                (
+                    "tracker.example.com",
+                    403,
+                    "auth none refuses the log page elsewhere",
+                ),
+            ):
+                n += 1
+                got, _, _ = fetch(base + "/logs/records", host=host)
+                ok = got == want
+                failed += not ok
+                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
         finally:
             proc.terminate()
             proc.wait()

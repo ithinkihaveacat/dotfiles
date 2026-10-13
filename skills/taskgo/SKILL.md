@@ -262,7 +262,8 @@ taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 taskgo schema [--json]
-taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio]
+taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio] [--log FILE]
+taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
 ```
 
 - `create`: Allocate ID, write record, sync STATUS, optionally commit.
@@ -306,6 +307,10 @@ taskgo mcp [--host HOST] [--port PORT] [--no-fetch] [--fetch-ttl SECS] [--auth a
 - `mcp`: Serve committed state to MCP clients, such as cloud agents without a
   checkout of the control repository, and commit and push their change sets. See
   [MCP Server](references/mcp.md).
+- `requests`: Summarise the MCP server's request log (requests per client and
+  tool, failures, latency, and the commonest runs of tool calls). Over HTTP the
+  server also shows its latest requests live at `/logs`. See
+  [Logging](references/mcp.md#logging).
 
 ## Reference Material
 

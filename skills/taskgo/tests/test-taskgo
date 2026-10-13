@@ -22,6 +22,9 @@ BIN="$TEST_DIR/../scripts/taskgo"
 MARKDOWN_FORMAT="$TEST_DIR/../../coding-standards/scripts/markdown-format"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
+# Servers the tests start log their requests here, not in the user's state
+# directory, unless given --log.
+export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
 
 REPO="$TEST_ROOT/repo"
 mkdir -p "$REPO/example/tasks"
@@ -45,7 +48,7 @@ printf '%s\n' \
   '# Confirm generated status formatting' \
   >"$REPO/example/tasks/TASK-A1B2C-confirm-status.md"
 
-echo '1..189'
+echo '1..190'
 
 if ("$BIN" --root "$REPO" sync example) &&
   "$MARKDOWN_FORMAT" --check "$REPO/example/STATUS.md" >/dev/null; then
@@ -3361,22 +3364,35 @@ assert all("at" not in t["inputSchema"]["properties"] for t in writes.values())
 got = task["result"]["structuredContent"]
 print(got["as_of"]["commit"], got["task"]["status"])
 ' "$TEST_ROOT/mcp-stdio.log" "$BIN" --root "$TREE_REPO" mcp --stdio --no-fetch \
-    --branch "$(git -C "$TREE_REPO" branch --show-current)"
+    --branch "$(git -C "$TREE_REPO" branch --show-current)" --log "$TEST_ROOT/mcp-stdio.jsonl"
 ) || true
-# Each of the four messages, the notification included, logs one line.
+# Each of the four messages, the notification included, logs one line, and
+# one record in the request log, all under one caller.
 MCP_LOGGED=$(grep -c '^taskgo mcp: request transport=stdio ' "$TEST_ROOT/mcp-stdio.log" || true)
-if [[ $MCP_OUT == "$(git -C "$TREE_REPO" rev-parse HEAD) in-progress" && $MCP_LOGGED == 4 ]]; then
+MCP_RECORDS=$("$MCP_PY" -c '
+import json, sys
+recs = [json.loads(line) for line in open(sys.argv[1])]
+call = [r for r in recs if r.get("tool") == "get_task"]
+assert len(recs) == 4 and all(r["transport"] == "stdio" for r in recs), recs
+assert len({r["caller"] for r in recs}) == 1, recs
+assert len(call) == 1 and call[0]["outcome"] == "ok" and call[0]["bytes"] > 0, call
+assert all(r["ts"].endswith("Z") and isinstance(r["ms"], int) for r in recs), recs
+print("ok")
+' "$TEST_ROOT/mcp-stdio.jsonl" 2>&1) || true
+if [[ $MCP_OUT == "$(git -C "$TREE_REPO" rev-parse HEAD) in-progress" && $MCP_LOGGED == 4 &&
+$MCP_RECORDS == ok ]]; then
   echo 'ok 169 - mcp serves the committed tree over stdio'
 else
   echo 'not ok 169 - mcp serves the committed tree over stdio'
-  printf '# %s\n' "$MCP_OUT" "logged $MCP_LOGGED requests"
+  printf '# %s\n' "$MCP_OUT" "logged $MCP_LOGGED requests" "$MCP_RECORDS"
 fi
 
 # Every tool's output matches the CLI's at the served commit.
 MCP_SYNTH="$TEST_ROOT/synthetic"
 MCP_PORT=$("$MCP_PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 "$TEST_DIR/make-synthetic" "$MCP_SYNTH" >/dev/null 2>&1
-"$BIN" --root "$MCP_SYNTH" mcp --no-fetch --auth none --port "$MCP_PORT" 2>/dev/null &
+"$BIN" --root "$MCP_SYNTH" mcp --no-fetch --auth none --port "$MCP_PORT" \
+  --log "$TEST_ROOT/mcp-synthetic.jsonl" 2>/dev/null &
 MCP_PID=$!
 for _ in $(seq 100); do
   "$MCP_PY" -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1)' \
@@ -4608,4 +4624,69 @@ assert any(
   echo 'ok 189 - search root dot, -j aliases, MCP edit path trim, ADR validation, and post-format spans'
 else
   echo 'not ok 189 - search root dot, -j aliases, MCP edit path trim, ADR validation, and post-format spans'
+fi
+
+# The request log rotates at its size bound and keeps four old files; 'taskgo
+# requests' reads a log with its rotated files, from --days ago on, and counts
+# runs of calls within each caller's chains.
+REQ_DIR="$TEST_ROOT/requests"
+if REQ_PY=$("$MCP_PY" -c '
+import importlib.machinery, importlib.util, json, pathlib, sys, time
+spec = importlib.util.spec_from_loader(
+    "taskgo_mod",
+    importlib.machinery.SourceFileLoader("taskgo_mod", sys.argv[1]),
+)
+tg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tg)
+tg.mcp_log = lambda message: None
+root = pathlib.Path(sys.argv[2])
+
+def event(tool, at, caller=None):
+    e = tg.McpEvent("http", time.monotonic(), method="tools/call", tool=tool,
+                    agent=caller and "client/" + caller, caller=caller)
+    e.at = at
+    return e
+
+# A bound of one byte rotates before every record: five files, one each.
+tg.MCP_LOG_ROTATE_BYTES = 1
+rotating = tg.McpLog(root / "rotating.jsonl")
+for i in range(8):
+    rotating.emit(event(f"tool{i}", 1000.0 + i))
+files = sorted(p.name for p in root.iterdir())
+assert files == ["rotating.jsonl", *(f"rotating.jsonl.{i}" for i in range(1, 5))], files
+tools = [r["tool"] for r in tg.mcp_log_read(root / "rotating.jsonl")]
+assert tools == ["tool3", "tool4", "tool5", "tool6", "tool7"], tools
+
+# Two callers each run dispatch > read_file > search_files twice, ten
+# minutes apart; a record 30 days old is out of range.
+tg.MCP_LOG_ROTATE_BYTES = 8 * 1024 * 1024
+log = tg.McpLog(root / "mcp.jsonl")
+now = time.time()
+log.emit(event("get_task", now - 30 * 86400, "aaaa"))
+for run in range(2):
+    for caller in ("aaaa", "bbbb"):
+        for i, tool in enumerate(("dispatch", "read_file", "search_files")):
+            log.emit(event(tool, now - 3600 + run * 600 + i, caller))
+print("ok")
+' "$BIN" "$REQ_DIR" 2>&1) && [[ $REQ_PY == ok ]] &&
+  REQ_JSON=$("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --json 2>&1) &&
+  REQ_TEXT=$("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --days 1 2>&1) &&
+  "$MCP_PY" -c '
+import json, sys
+got = json.loads(sys.argv[1])
+assert got["requests"] == 12 and got["chains"] == 4, got
+seq = [(s["agent"], s["calls"], s["count"]) for s in got["sequences"]]
+assert seq[:2] == [
+    ("client/aaaa", ["dispatch", "read_file", "search_files"], 2),
+    ("client/bbbb", ["dispatch", "read_file", "search_files"], 2),
+], seq
+assert [t["tool"] for t in got["tools"]] == ["dispatch", "read_file", "search_files"]
+' "$REQ_JSON" &&
+  [[ $REQ_TEXT == *"Requests: 12,"*"2  client/aaaa  dispatch > read_file > search_files"* ]] &&
+  ! "$BIN" requests --log "$REQ_DIR/none.jsonl" 2>/dev/null &&
+  [[ $("$BIN" requests --log "$REQ_DIR/mcp.jsonl" --days 0 2>&1) == "taskgo requests: --days must be more than 0, not 0" ]]; then
+  echo 'ok 190 - request log rotates, and requests summarises it'
+else
+  echo 'not ok 190 - request log rotates, and requests summarises it'
+  printf '# %s\n' "$REQ_PY" "${REQ_JSON:-}" "${REQ_TEXT:-}"
 fi

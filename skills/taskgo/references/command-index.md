@@ -632,6 +632,7 @@ Usage: taskgo mcp [-h] [--host HOST] [--port PORT] [--path PATH]
                   [--remote REMOTE] [--branch BRANCH] [--no-fetch]
                   [--fetch-ttl SECS] [--auth {access,none}]
                   [--access-team DOMAIN] [--access-aud TAG] [--stdio]
+                  [--log FILE]
 
 Serve the control repository's committed state to MCP clients,
 and accept writes from them, over Streamable HTTP (stateless, one
@@ -652,9 +653,17 @@ of the server, and the server checks the Access JWT of every
 request (issuer, audience, signature, expiry). --auth none skips
 the check and serves only requests addressed to a loopback name.
 
+Each request is logged as a line on stderr and as a JSON record
+appended to the request log (rotated at 8 MiB, keeping 4 old
+files), never with its content; 'taskgo requests' summarises it.
+Over HTTP, GET /logs is a live page of the latest requests, behind
+the same check as the endpoint; GET /up is an unauthenticated
+health check.
+
 Environment:
   TASKGO_MCP_ACCESS_TEAM  Default for --access-team
   TASKGO_MCP_ACCESS_AUD   Default for --access-aud
+  TASKGO_MCP_LOG          Default for --log
 
 Options:
   -h, --help            Display this help message and exit
@@ -673,6 +682,41 @@ Options:
   --access-aud TAG      Access application audience (AUD) tag
   --stdio               Serve one client on stdin and stdout instead (no
                         authentication)
+  --log FILE            Request log to append to (default
+                        $XDG_STATE_HOME/taskgo/mcp.jsonl, or
+                        ~/.local/state/taskgo/mcp.jsonl)
+```
+
+<!-- /generated -->
+
+## requests
+
+<!-- generated: ../scripts/taskgo requests --help -->
+
+```text
+Usage: taskgo requests [-h] [--log FILE] [--days N] [--gap SECS] [--json]
+
+Summarise the request log of 'taskgo mcp': requests by outcome,
+then requests, failures, latency, and result size per client and
+per tool, then the commonest runs of two or three tool calls in
+one caller's chains. A chain is a caller's tool calls, each no
+more than --gap seconds after the one before. Records name
+requests, never their content.
+
+Environment:
+  TASKGO_MCP_LOG  Default for --log
+
+Options:
+  -h, --help  Display this help message and exit
+  --log FILE  Request log to read, with its rotated files (default as for mcp)
+  --days N    Read the last N days of records (default 7)
+  --gap SECS  Longest pause within a chain (default 120)
+  --json, -j  Output as JSON
+
+Examples:
+  taskgo requests
+  taskgo requests --days 1 --gap 60
+  taskgo requests --log /data/log/mcp.jsonl --json | jq '.sequences[:3]'
 ```
 
 <!-- /generated -->
