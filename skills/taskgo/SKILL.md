@@ -66,7 +66,7 @@ or temporal scheduling fields (`wait_for`, `due`, and `stale_after`):
 
 ```yaml
 blocked_by: [TASK-1627D]
-wait_for: [b/431751691, 2026-10-13]
+wait_for: [b/123456, 2026-10-13]
 due: 2026-10-15
 stale_after: 2026-11-01
 ```
@@ -77,7 +77,7 @@ stale_after: 2026-11-01
 - **`wait_for`** — External or temporal gates keeping a task off the ready
   frontier: ISO cool-down dates (`YYYY-MM-DD`, resolved once `today >= date`),
   issue/CL URIs (`b/...`, `cl/...`, `gh:owner/repo#num`), or human handles
-  (`@stillers`).
+  (`@reviewer`).
 - **`due`** — Committed completion deadline (`YYYY-MM-DD`). `taskgo doctor`
   emits `[FAIL]` when overdue (`due < today`) and `[WARN]` within 48 hours;
   `taskgo list --state ready` sorts approaching `due` dates first.

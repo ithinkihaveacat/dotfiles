@@ -570,7 +570,7 @@ options:
 Examples:
   taskgo search TASK-084C7
   taskgo search -i -C2 'partner name' -- meta/ '*.md'
-  taskgo search -l -e b/431751691 -e cl/123456
+  taskgo search -l -e b/123456 -e cl/123456
   taskgo search -e TODO --and --not -e done --at HEAD~3 --json
 ```
 
