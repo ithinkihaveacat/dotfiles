@@ -36,7 +36,7 @@ complete -f -c taskgo -n __fish_use_subcommand -a apply -d 'Apply a change set t
 complete -f -c taskgo -n __fish_use_subcommand -a edit -d 'Replace exact text in a file'
 complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
 complete -f -c taskgo -n __fish_use_subcommand -a info -d 'Show project metadata from README.md frontmatter'
-complete -f -c taskgo -n __fish_use_subcommand -a status -d 'Show project status'
+complete -f -c taskgo -n __fish_use_subcommand -a status -d "Show a task's or project's status"
 complete -f -c taskgo -n __fish_use_subcommand -a handoff -d 'Print agent instructions for a project or task'
 complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
 complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep wait_for gates and date horizons'
@@ -59,7 +59,7 @@ complete -c taskgo -f -s h -l help -d 'Display help message and exit'
 complete -f -c taskgo -n '__fish_seen_subcommand_from create list info status handoff handover sync check doctor fix' -a '(__fish_taskgo_projects)' -d Project
 
 # Subcommand arguments (Task IDs for update / history / checkpoint)
-complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint handoff handover' -a '(__fish_taskgo_tasks)' -d 'Task ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint status handoff handover' -a '(__fish_taskgo_tasks)' -d 'Task ID'
 
 # create options
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l slug -x -d 'Filename mnemonic (max 32 chars)'
@@ -124,6 +124,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l dry-run -d 'Print
 complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -s j -l json -d 'Emit JSON output'
 
 # handoff options
+complete -x -c taskgo -n '__fish_seen_subcommand_from status' -l at -d 'Read commit REV instead of the working tree'
 complete -x -c taskgo -n '__fish_seen_subcommand_from handoff handover' -l at -d 'Read commit REV instead of the working tree'
 complete -f -c taskgo -n '__fish_seen_subcommand_from handoff handover' -s j -l json -d 'Output the full payload as JSON'
 

@@ -252,7 +252,7 @@ taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [--repl
 taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo skills PROJECT [--json]
-taskgo status [PROJECT] [--json]
+taskgo status [PROJECT|TASK_ID] [--at REV] [--json]
 taskgo handoff PROJECT|TASK_ID [--at REV] [--json]
 taskgo sync [PROJECT]
 taskgo check [PROJECT] [--json]

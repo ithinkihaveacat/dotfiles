@@ -46,7 +46,7 @@ Commands:
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   skills PROJECT [--json]          Print the skills a project declares
-  status [PROJECT] [--json]        Show project status
+  status [PROJECT|TASK_ID]         Show a task's or project's status
   handoff PROJECT|TASK_ID          Print agent instructions for a project or task
   sync [PROJECT]                   Update STATUS.md snapshot
   check [PROJECT] [--json]         Sweep wait_for gates and date horizons
@@ -370,16 +370,27 @@ Examples:
 <!-- generated: ../scripts/taskgo status --help -->
 
 ```text
-Usage: taskgo status [-h] [--json] [PROJECT]
+Usage: taskgo status [-h] [--at REV] [--json] [PROJECT|TASK_ID]
 
-Show project status or whole-workspace summary.
+Show a task's or a project's status, or a one-line summary of each project.
 
 Arguments:
-  PROJECT     Optional target project
+  PROJECT|TASK_ID  Project or task; omit for every project
 
 Options:
-  -h, --help  Display this help message and exit
-  --json, -j  Output machine-readable JSON
+  -h, --help       Display this help message and exit
+  --at REV         Read commit REV instead of the working tree
+  --json, -j       Output machine-readable JSON
+
+Examples:
+  taskgo status
+  taskgo status alpha
+  taskgo status TASK-3A91F
+  taskgo status TASK-3A91F --at HEAD --json
+
+For a project, prints its STATUS.md. For a task, prints its state, with
+what the tracker derives (ready, or the blockers and gates holding it), then
+the record; --json prints the record as the MCP get_task tool returns it.
 ```
 
 <!-- /generated -->

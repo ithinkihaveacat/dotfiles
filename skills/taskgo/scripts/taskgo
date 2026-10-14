@@ -5673,13 +5673,49 @@ def project_status_json(
     return out
 
 
+def task_state_line(snap: Snapshot, row: TaskRow) -> str:
+    """A task's declared status and what the tracker derives from it."""
+    held = []
+    if row.status not in RESOLVED_STATES:
+        held = [
+            *(f"blocked by {b}" for b in unresolved_blockers(row, status_index(snap))),
+            *(f"waiting for {w}" for w in unresolved_wait_for(row, get_today(snap))),
+        ]
+    if row.status == TaskStatus.TODO.value and not held:
+        return f"{row.status}, ready"
+    return ", ".join([row.status, *held])
+
+
 def cmd_status(
-    project: str | None = None,
+    target: str | None = None,
+    at: str | None = None,
     as_json: bool = False,
 ) -> None:
-    """Show project status or whole-workspace summary."""
+    """Show a task's, a project's, or the whole workspace's status."""
     root = get_repo_root()
-    snap = FsSnapshot(root)
+    snap = tree_snapshot(root, at)
+    name = (target or "").strip()
+    if name and ID_PATTERN.match(name.upper()):
+        try:
+            row = find_task_row(snap, name.upper())
+        except TaskgoError as e:
+            die_scoped(str(e))
+        if as_json:
+            committed = commit_time(root, snap.rev) if snap.rev else None
+            out = {
+                "as_of": snapshot_as_of(snap, committed),
+                **task_record_json(snap, row),
+            }
+            print(json.dumps(out, indent=2, ensure_ascii=False))
+            return
+        title = row.title or row.task_id
+        print(f"{row.task_id} ({row.project}): {title}")
+        print(f"State: {task_state_line(snap, row)}")
+        print(f"Path: {row.rel_path}")
+        print()
+        print(snap.read_text(row.rel_path).rstrip())
+        return
+    project = name or None
     if project:
         require_project(snap, project)
         if as_json:
@@ -5887,6 +5923,22 @@ def skills_note(project: str, skills: list[str]) -> str:
     return f"{prose}\n\n  taskgo skills {project} | skill --scope session add -"
 
 
+def find_task_row(snap: TreeSnapshot, task_id: str) -> TaskRow:
+    """The one record of TASK_ID in SNAP; raises TaskgoError otherwise."""
+    matches = [r for r in get_task_rows(snap) if r.task_id == task_id]
+    if not matches:
+        where = (
+            f"commit {snap.rev[:12]}"
+            if isinstance(snap, GitTreeSnapshot)
+            else "the working tree"
+        )
+        raise TaskgoError(f"{task_id} is not in {where}")
+    if len(matches) > 1:
+        paths = ", ".join(r.rel_path for r in matches)
+        raise TaskgoError(f"{task_id} names more than one record: {paths}")
+    return matches[0]
+
+
 def resolve_handoff(snap: TreeSnapshot, target: Any) -> HandoffTarget:
     """Resolves TARGET, a project name or a task ID, in SNAP for handoff.
 
@@ -5895,19 +5947,7 @@ def resolve_handoff(snap: TreeSnapshot, target: Any) -> HandoffTarget:
     name = str(target or "").strip()
     row = None
     if ID_PATTERN.match(name.upper()):
-        task_id = name.upper()
-        matches = [r for r in get_task_rows(snap) if r.task_id == task_id]
-        if not matches:
-            where = (
-                f"commit {snap.rev[:12]}"
-                if isinstance(snap, GitTreeSnapshot)
-                else "the working tree"
-            )
-            raise TaskgoError(f"{task_id} is not in {where}")
-        if len(matches) > 1:
-            paths = ", ".join(r.rel_path for r in matches)
-            raise TaskgoError(f"{task_id} names more than one record: {paths}")
-        row = matches[0]
+        row = find_task_row(snap, name.upper())
         project = row.project
     elif is_project(snap, name):
         project = name
@@ -8071,13 +8111,10 @@ def mcp_find_task(snap: GitTreeSnapshot, task_id: Any) -> TaskRow:
     task_id = str(task_id or "").strip().upper()
     if not ID_PATTERN.match(task_id):
         raise McpToolError(f"not a task ID: {task_id!r} (expected TASK-XXXXX)")
-    matches = [r for r in get_task_rows(snap) if r.task_id == task_id]
-    if not matches:
-        raise McpToolError(f"{task_id} is not in commit {snap.rev[:12]}")
-    if len(matches) > 1:
-        paths = ", ".join(r.rel_path for r in matches)
-        raise McpToolError(f"{task_id} names more than one record: {paths}")
-    return matches[0]
+    try:
+        return find_task_row(snap, task_id)
+    except TaskgoError as e:
+        raise McpToolError(str(e)) from None
 
 
 def mcp_project(snap: GitTreeSnapshot, project: Any) -> str:
@@ -10149,7 +10186,7 @@ Commands:
   list [PROJECT] [OPTIONS]         List tasks (--state ready for the frontier)
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   skills PROJECT [--json]          Print the skills a project declares
-  status [PROJECT] [--json]        Show project status
+  status [PROJECT|TASK_ID]         Show a task's or project's status
   handoff PROJECT|TASK_ID          Print agent instructions for a project or task
   sync [PROJECT]                   Update STATUS.md snapshot
   check [PROJECT] [--json]         Sweep wait_for gates and date horizons
@@ -10601,16 +10638,34 @@ than a few words.""",
     # status
     p_status = subparsers.add_parser(
         "status",
-        help="Show project status or whole-workspace summary",
-        description="Show project status or whole-workspace summary.",
+        help="Show a task's, a project's, or the workspace's status",
+        description=(
+            "Show a task's or a project's status, or a one-line summary of "
+            "each project."
+        ),
         formatter_class=HouseStyleHelpFormatter,
+        epilog="""Examples:
+  taskgo status
+  taskgo status alpha
+  taskgo status TASK-3A91F
+  taskgo status TASK-3A91F --at HEAD --json
+
+For a project, prints its STATUS.md. For a task, prints its state, with
+what the tracker derives (ready, or the blockers and gates holding it), then
+the record; --json prints the record as the MCP get_task tool returns it.""",
     )
     p_status.add_argument(
-        "project",
+        "target",
         nargs="?",
         default=None,
-        metavar="PROJECT",
-        help="Optional target project",
+        metavar="PROJECT|TASK_ID",
+        help="Project or task; omit for every project",
+    )
+    p_status.add_argument(
+        "--at",
+        metavar="REV",
+        default=None,
+        help="Read commit REV instead of the working tree",
     )
     p_status.add_argument(
         "--json",
@@ -11268,10 +11323,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "skills":
         cmd_skills(project=args.project, as_json=args.as_json)
     elif args.command == "status":
-        cmd_status(
-            project=args.project,
-            as_json=args.as_json,
-        )
+        cmd_status(target=args.target, at=args.at, as_json=args.as_json)
     elif args.command == "handoff":
         cmd_handoff(target=args.target, at=args.at, as_json=args.as_json)
     elif args.command == "sync":

@@ -441,8 +441,9 @@ unhyphenated verbs:
   shortened at word boundaries to 32 characters, with a warning.
 - `taskgo list [PROJECT] [--state STATE] [--json]`: List tasks in tabular or
   JSON format.
-- `taskgo status [PROJECT] [--json]`: Display operational status or
-  multi-project summary.
+- `taskgo status [PROJECT|TASK_ID] [--at REV] [--json]`: Display a project's
+  `STATUS.md`, a task's record with its derived state (ready, or what holds it),
+  or a multi-project summary.
 - `taskgo handoff PROJECT|TASK_ID [--at REV] [--json]`: Generate agent
   instructions from the selected project or task record in the working tree (or
   at `--at REV`) and report readiness findings on stderr; `--json` inlines the
