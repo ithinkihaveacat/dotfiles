@@ -116,12 +116,12 @@ ready frontier, while `## Next` in `STATUS.md` normally identifies the intended
 next action.
 
 Use the generated output without embellishment. It projects the task ID,
-project, title, and `Goal` from the task record committed at `HEAD`, and ends
-with the project's skills when its README declares any, with the command that
-activates them. The command writes the note to stdout and readiness findings to
-stderr. Repair `[WARN]` or `[FAIL]` findings before handing off. `--json` prints
-the payload the MCP `handoff` tool returns: the note with the files it names
-inlined, and the `skills` list.
+project, title, and `Goal` from the task record in the working tree (or at
+`--at REV`), and ends with the project's skills when its README declares any,
+with the command that activates them. The command writes the note to stdout and
+readiness findings to stderr. Repair `[WARN]` or `[FAIL]` findings before
+handing off. `--json` prints the payload the MCP `handoff` tool returns: the
+note with the files it names inlined, and the `skills` list.
 
 When yielding after substantial work with a clear successor task, leave the
 tracker and artifact repositories handoff-ready and include the generated note

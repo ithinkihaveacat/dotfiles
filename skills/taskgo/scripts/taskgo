@@ -940,6 +940,41 @@ class FsSnapshot(Snapshot):
         )
 
 
+class WorktreeBlobs:
+    """Git blob SHAs of working-tree files, computed on demand.
+
+    Read like GitTreeSnapshot.blobs: a SHA names the bytes on disk, so it
+    matches the committed blob exactly when the file is unchanged.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def get(self, rel: str, default: str | None = None) -> str | None:
+        path = self.root / rel
+        if path.is_symlink() or not path.is_file():
+            return default
+        data = path.read_bytes()
+        return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+    def __getitem__(self, rel: str) -> str:
+        sha = self.get(rel)
+        if sha is None:
+            raise KeyError(rel)
+        return sha
+
+
+class WorktreeSnapshot(FsSnapshot):
+    """A working tree read as handoff and status read it: the files on disk,
+    with REV, the commit HEAD names (None before the first commit), and the
+    blob SHA of each file."""
+
+    def __init__(self, root: Path, rev: str | None):
+        super().__init__(root)
+        self.rev = rev
+        self.blobs = WorktreeBlobs(root)
+
+
 class GitTreeSnapshot(Snapshot):
     """The tree of one Git commit, read without a checkout. Read-only.
 
@@ -1022,6 +1057,10 @@ class GitTreeSnapshot(Snapshot):
 
     def list_dir(self, rel: str) -> list[str]:
         return sorted(self.children.get(rel, ()))
+
+
+# What handoff reads: a commit, or the working tree beside the commit HEAD names.
+TreeSnapshot = GitTreeSnapshot | WorktreeSnapshot
 
 
 class OverlaySnapshot(Snapshot):
@@ -5688,9 +5727,9 @@ class HandoffPlan:
 def plan_handoff(
     snap: Snapshot, rel_path: str, content: str, audit: list["Finding"]
 ) -> HandoffPlan:
-    """Checks a committed task record for handoff.
+    """Checks a task record for handoff.
 
-    CONTENT is the record as committed; AUDIT is the project's audit findings.
+    CONTENT is the record as read; AUDIT is the project's audit findings.
     Raises TaskgoError when the record cannot be handed off at all.
     """
     project_name = rel_path.split("/", maxsplit=1)[0]
@@ -5848,7 +5887,7 @@ def skills_note(project: str, skills: list[str]) -> str:
     return f"{prose}\n\n  taskgo skills {project} | skill --scope session add -"
 
 
-def resolve_handoff(snap: GitTreeSnapshot, target: Any) -> HandoffTarget:
+def resolve_handoff(snap: TreeSnapshot, target: Any) -> HandoffTarget:
     """Resolves TARGET, a project name or a task ID, in SNAP for handoff.
 
     Raises TaskgoError for an unknown target or a finished task.
@@ -5859,7 +5898,12 @@ def resolve_handoff(snap: GitTreeSnapshot, target: Any) -> HandoffTarget:
         task_id = name.upper()
         matches = [r for r in get_task_rows(snap) if r.task_id == task_id]
         if not matches:
-            raise TaskgoError(f"{task_id} is not in commit {snap.rev[:12]}")
+            where = (
+                f"commit {snap.rev[:12]}"
+                if isinstance(snap, GitTreeSnapshot)
+                else "the working tree"
+            )
+            raise TaskgoError(f"{task_id} is not in {where}")
         if len(matches) > 1:
             paths = ", ".join(r.rel_path for r in matches)
             raise TaskgoError(f"{task_id} names more than one record: {paths}")
@@ -5889,14 +5933,25 @@ def status_snapshot_block(text: str | None) -> str | None:
     return next((s["text"] for s in sections if s["name"] == "snapshot"), None)
 
 
-def snapshot_as_of(snap: GitTreeSnapshot, committed: int) -> dict[str, Any]:
-    """The as_of of a read of SNAP, whose commit time is COMMITTED."""
-    return {
-        "commit": snap.rev,
-        "committed_at": datetime.fromtimestamp(committed, timezone.utc).isoformat(),
+def snapshot_as_of(snap: Snapshot, committed: int | None) -> dict[str, Any]:
+    """The as_of of a read of SNAP, whose commit time is COMMITTED.
+
+    A read of the working tree names the commit HEAD names and says it read
+    the working tree, whose files may differ from that commit.
+    """
+    as_of = {
+        "commit": getattr(snap, "rev", None),
+        "committed_at": (
+            datetime.fromtimestamp(committed, timezone.utc).isoformat()
+            if committed is not None
+            else None
+        ),
         "today": get_today(snap).isoformat(),
         "timezone": repo_timezone_name(snap),
     }
+    if isinstance(snap, WorktreeSnapshot):
+        as_of["working_tree"] = True
+    return as_of
 
 
 def commit_time(repo: Path, sha: str) -> int:
@@ -5914,7 +5969,7 @@ def unverified_gates(rows: list[TaskRow]) -> dict[str, list[str]]:
     return out
 
 
-def task_record_json(snap: GitTreeSnapshot, row: TaskRow) -> dict[str, Any]:
+def task_record_json(snap: TreeSnapshot, row: TaskRow) -> dict[str, Any]:
     """One task record as get_task returns it, without as_of."""
     content = snap.read_text(row.rel_path)
     fm, _ = parse_frontmatter(content)
@@ -5930,7 +5985,7 @@ def task_record_json(snap: GitTreeSnapshot, row: TaskRow) -> dict[str, Any]:
     }
 
 
-def handoff_file(snap: GitTreeSnapshot, rel: str) -> dict[str, Any] | None:
+def handoff_file(snap: TreeSnapshot, rel: str) -> dict[str, Any] | None:
     """File REL verbatim, cut as read_file cuts it, or None when absent."""
     blob = snap.blobs.get(rel)
     if blob is None:
@@ -5964,18 +6019,24 @@ def status_projection(snap: Snapshot, project: str) -> dict[str, Any]:
 
 
 def handoff_payload(
-    snap: GitTreeSnapshot, t: HandoffTarget, as_of: dict[str, Any]
+    snap: TreeSnapshot, t: HandoffTarget, as_of: dict[str, Any]
 ) -> dict[str, Any]:
     """Everything an agent reads before starting on T, in one object.
 
     The note stays the short pointer a person pastes; the files it names
-    ride beside it verbatim, as committed in SNAP.
+    ride beside it verbatim, as SNAP holds them.
     """
     project = t.project
     note = t.note(snap, lambda rel: rel)
+    if isinstance(snap, GitTreeSnapshot):
+        source = f"commit {snap.rev[:12]}"
+    elif snap.rev:
+        source = f"the working tree (HEAD is {snap.rev[:12]})"
+    else:
+        source = "the working tree"
     note += (
         "\n\nThese paths are in the taskgo control repository; this payload "
-        f"carries them as of commit {snap.rev[:12]}.\n\n{MCP_DATA_CARE}"
+        f"carries them as of {source}.\n\n{MCP_DATA_CARE}"
     )
     readme = handoff_file(snap, t.readme) if t.readme else None
     status_rel = f"{project}/STATUS.md"
@@ -6018,36 +6079,28 @@ def handoff_payload(
     }
 
 
+def tree_snapshot(root: Path, at: str | None) -> TreeSnapshot:
+    """The tree status and handoff read: commit AT, or else the working tree."""
+    if at is None:
+        return WorktreeSnapshot(root, resolve_commit(root, "HEAD"))
+    sha = resolve_commit(root, at)
+    if sha is None:
+        die_scoped(f"no commit {at} in the control repository")
+    return GitTreeSnapshot(root, sha)
+
+
 def cmd_handoff(target: str, at: str | None = None, as_json: bool = False) -> None:
     """Emit instructions handing a project or task to an agent."""
     root = get_repo_root()
-    rev = at or "HEAD"
-    sha = resolve_commit(root, rev)
-    if sha is None:
-        die_scoped(
-            f"no commit {at} in the control repository" if at else "HEAD has no commit"
-        )
-    snap = GitTreeSnapshot(root, sha)
-
-    name = target.strip()
-    if at is None and ID_PATTERN.match(name.upper()):
-        task_id = name.upper()
-        committed_ids = {r.task_id for r in get_task_rows(snap)}
-        if task_id not in committed_ids:
-            local = [r for r in get_task_rows(FsSnapshot(root)) if r.task_id == task_id]
-            if local:
-                die_scoped(
-                    f"{local[0].rel_path} is not committed at HEAD; commit the "
-                    "task before handing it off"
-                )
+    snap = tree_snapshot(root, at)
     try:
-        t = resolve_handoff(snap, name)
+        t = resolve_handoff(snap, target.strip())
     except TaskgoError as e:
         die_scoped(str(e))
 
     if at is None:
-        # The note points at committed state. Uncommitted project files mean
-        # the receiving agent cannot see every current workspace change.
+        # A local agent reads the working tree, as the note does; an agent
+        # reading through the MCP server sees only what has been pushed.
         shallow = run_git(
             ["rev-parse", "--is-shallow-repository"], cwd=root, check=False
         ).stdout.strip()
@@ -6061,16 +6114,15 @@ def cmd_handoff(target: str, at: str | None = None, as_json: bool = False) -> No
                 (
                     "WARN",
                     (
-                        f"{t.project} has uncommitted changes; the note describes "
-                        "committed state only"
+                        f"{t.project} has uncommitted changes; agents reading "
+                        "through MCP see only what is committed and pushed"
                     ),
                 )
             )
 
     if as_json:
-        payload = handoff_payload(
-            snap, t, snapshot_as_of(snap, commit_time(root, snap.rev))
-        )
+        committed = commit_time(root, snap.rev) if snap.rev else None
+        payload = handoff_payload(snap, t, snapshot_as_of(snap, committed))
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
@@ -10584,9 +10636,10 @@ than a few words.""",
   taskgo handover TASK-3A91F --json
   taskgo --root ~/projects handoff TASK-3A91F
 
-The note is generated from the records committed at HEAD (or REV), and ends
-with the project's skills when its README declares any. Findings about
-working-tree or tracker readiness are written to stderr. --json prints the
+The note is generated from the working tree (or commit REV), and ends with
+the project's skills when its README declares any. Findings about tracker
+readiness, and uncommitted changes an agent reading through MCP cannot see,
+are written to stderr. --json prints the
 note, the files it names inlined verbatim, the skills list, and the project's
 in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.""",
     )
@@ -10605,7 +10658,7 @@ in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.""",
         "--at",
         metavar="REV",
         default=None,
-        help="Read commit REV instead of HEAD",
+        help="Read commit REV instead of the working tree",
     )
     p_handoff.add_argument(
         "--json",

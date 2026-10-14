@@ -124,7 +124,7 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -l dry-run -d 'Print
 complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -s j -l json -d 'Emit JSON output'
 
 # handoff options
-complete -x -c taskgo -n '__fish_seen_subcommand_from handoff handover' -l at -d 'Read commit REV instead of HEAD'
+complete -x -c taskgo -n '__fish_seen_subcommand_from handoff handover' -l at -d 'Read commit REV instead of the working tree'
 complete -f -c taskgo -n '__fish_seen_subcommand_from handoff handover' -s j -l json -d 'Output the full payload as JSON'
 
 # list options

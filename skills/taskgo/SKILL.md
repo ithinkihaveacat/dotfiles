@@ -288,7 +288,7 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   diffs, and record validation. Assets keep their bytes and mode; tasks,
   decisions, and STATUS.md stay valid and are formatted. Does not commit.
 - `handoff` (or `handover`; `dispatch`, its former name, still works): Emit
-  agent handoff instructions for a project or task committed at `HEAD` (or
+  agent handoff instructions for a project or task in the working tree (or at
   `--at REV`), warning on stderr about uncommitted state or missing scaffolding;
   the note ends with the project's skills and how to activate them; `--json`
   inlines the onboarding files, the `skills` list, and active/ready queues in

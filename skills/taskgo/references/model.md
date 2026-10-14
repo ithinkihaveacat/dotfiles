@@ -390,11 +390,11 @@ Remediations write through the audited snapshot:
   each project's `README.md`, `PROJECT.md`, `STATUS.md`, and the Markdown files
   directly in `tasks/` and `decisions/`. Other documents, and files Git ignores,
   are never reformatted.
-- **`handoff` (Committed-State Projection):** Uses the audit engine's project
-  findings, over the tree committed at `HEAD`, alongside handoff-specific
-  checks, then emits a handoff note from the selected project or task record at
-  `HEAD`. Findings describe working-tree or tracker defects on stderr without
-  changing the committed note on stdout.
+- **`handoff` (Tree Projection):** Uses the audit engine's project findings,
+  over the working tree (or the commit `--at` names), alongside handoff-specific
+  checks, then emits a handoff note from the selected project or task record.
+  Findings describe tracker defects, and uncommitted changes, on stderr without
+  changing the note on stdout.
 
 ## Agent Handoff
 
@@ -409,11 +409,12 @@ session and when work passes to a successor.
 only the task ID, project, title, `Goal`, and paths to the project status and
 task record. `taskgo handoff PROJECT` names the project, its `README.md` title,
 and paths to its `README.md`, `STATUS.md`, and `PLAN.md`. These values come from
-the records committed at `HEAD`, which keeps the note reproducible even when the
-working tree is dirty. The human passing on the note remains the router: its
-summary lets that person verify the selected task before pasting it, while the
-receiving agent uses the identifier and title as a cross-check before reading
-the tracker and choosing an approach.
+the working tree, which a local agent reads too; `--at REV` reads a commit
+instead. An agent reading through the MCP server sees only what has been pushed,
+so uncommitted changes in the project raise a warning. The human passing on the
+note remains the router: its summary lets that person verify the selected task
+before pasting it, while the receiving agent uses the identifier and title as a
+cross-check before reading the tracker and choosing an approach.
 
 The command does not select work. `taskgo list PROJECT --state ready` exposes
 the ready frontier, and `STATUS.md` records the intended immediate direction. A
@@ -443,9 +444,9 @@ unhyphenated verbs:
 - `taskgo status [PROJECT] [--json]`: Display operational status or
   multi-project summary.
 - `taskgo handoff PROJECT|TASK_ID [--at REV] [--json]`: Generate agent
-  instructions from the selected project or task record committed at `HEAD` and
-  report readiness findings on stderr; `--json` inlines the files the note
-  names.
+  instructions from the selected project or task record in the working tree (or
+  at `--at REV`) and report readiness findings on stderr; `--json` inlines the
+  files the note names.
 - `taskgo apply CHANGES.json [--dry-run]`: Apply an atomic change set (`create`,
   `set`, `add`, `remove`, `replace_section`, `write_file`, `delete_file`,
   `edit_file`) to the working tree without committing.

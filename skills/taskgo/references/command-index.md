@@ -398,7 +398,7 @@ Arguments:
 
 Options:
   --help, -h       Display this help message and exit
-  --at REV         Read commit REV instead of HEAD
+  --at REV         Read commit REV instead of the working tree
   --json, -j       Output the full payload as JSON
 
 Examples:
@@ -407,9 +407,10 @@ Examples:
   taskgo handover TASK-3A91F --json
   taskgo --root ~/projects handoff TASK-3A91F
 
-The note is generated from the records committed at HEAD (or REV), and ends
-with the project's skills when its README declares any. Findings about
-working-tree or tracker readiness are written to stderr. --json prints the
+The note is generated from the working tree (or commit REV), and ends with
+the project's skills when its README declares any. Findings about tracker
+readiness, and uncommitted changes an agent reading through MCP cannot see,
+are written to stderr. --json prints the
 note, the files it names inlined verbatim, the skills list, and the project's
 in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.
 ```
