@@ -79,7 +79,7 @@ stale_after: 2026-11-01
   issue/CL URIs (`b/...`, `cl/...`, `gh:owner/repo#num`), or human handles
   (`@reviewer`).
 - **`due`** — Committed completion deadline (`YYYY-MM-DD`). `taskgo doctor`
-  emits `[FAIL]` when overdue (`due < today`) and `[WARN]` within 48 hours;
+  emits `[FAIL]` when overdue (`due < today`) and `[INFO]` within 48 hours;
   `taskgo list --state ready` sorts approaching `due` dates first.
 - **`stale_after`** — Relevance cutoff (`YYYY-MM-DD`) after which
   `taskgo doctor` emits `[WARN]` prompting re-scoping or cancellation.
