@@ -110,10 +110,10 @@ git log --grep='TASK-XXXXX' --format='%h %s %(trailers:key=Conversation,valueonl
 
 When assigning a selected task to an agent that can read the control repository,
 generate its instructions with `taskgo handoff TASK_ID`
-(`taskgo handoff PROJECT` points an agent at a project without choosing a task).
-Choose the task deliberately; `taskgo list PROJECT --state ready` shows the
-ready frontier, while `## Next` in `STATUS.md` normally identifies the intended
-next action.
+(`taskgo handoff PROJECT` points an agent at a project and lists its in-progress
+and ready tasks without choosing one). Choose the task deliberately;
+`taskgo list PROJECT --state ready` shows the ready frontier, while `## Next` in
+`STATUS.md` normally identifies the intended next action.
 
 Use the generated output without embellishment. It projects the task ID,
 project, title, and `Goal` from the task record in the working tree (or at

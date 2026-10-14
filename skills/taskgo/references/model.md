@@ -408,13 +408,16 @@ session and when work passes to a successor.
 `taskgo handoff TASK_ID` therefore generates a short handoff note containing
 only the task ID, project, title, `Goal`, and paths to the project status and
 task record. `taskgo handoff PROJECT` names the project, its `README.md` title,
-and paths to its `README.md`, `STATUS.md`, and `PLAN.md`. These values come from
-the working tree, which a local agent reads too; `--at REV` reads a commit
-instead. An agent reading through the MCP server sees only what has been pushed,
-so uncommitted changes in the project raise a warning. The human passing on the
-note remains the router: its summary lets that person verify the selected task
-before pasting it, while the receiving agent uses the identifier and title as a
-cross-check before reading the tracker and choosing an approach.
+its in-progress and ready tasks (one line each, at most ten), and paths to its
+`README.md`, `STATUS.md`, and `PLAN.md`. The task list is what lets the person
+passing the note on check it, as the `Goal` does for a task; it lists the
+frontier without choosing from it. These values come from the working tree,
+which a local agent reads too; `--at REV` reads a commit instead. An agent
+reading through the MCP server sees only what has been pushed, so uncommitted
+changes in the project raise a warning. The human passing on the note remains
+the router: its summary lets that person verify the selected task before pasting
+it, while the receiving agent uses the identifier and title as a cross-check
+before reading the tracker and choosing an approach.
 
 The command does not select work. `taskgo list PROJECT --state ready` exposes
 the ready frontier, and `STATUS.md` records the intended immediate direction. A

@@ -5855,8 +5855,42 @@ def handoff_note(plan: HandoffPlan, status_ref: str, task_ref: str) -> str:
     )
 
 
-def project_handoff_note(project: str, title: str, refs: list[str]) -> str:
-    """The handoff note for a project: headline and what to read first."""
+# The most tasks a project handoff note lists before pointing at 'taskgo list'.
+HANDOFF_TASK_LIMIT = 10
+
+
+def project_handoff_tasks(snap: Snapshot, project: str) -> str:
+    """The project note's task list: in-progress tasks, then ready ones.
+
+    One unwrapped line per task, so the person passing the note on can
+    check where the agent will start; the agent still chooses.
+    """
+    groups = [
+        ("In progress", select_task_rows(snap, project, "in-progress")),
+        ("Ready", select_task_rows(snap, project, "ready")),
+    ]
+    if not any(rows for _, rows in groups):
+        return "No task is in progress or ready."
+    lines = []
+    budget = HANDOFF_TASK_LIMIT
+    for label, rows in groups:
+        if not rows:
+            continue
+        lines.append(f"{label}:")
+        lines.extend(f"  {r.task_id}  {r.title or '(untitled)'}" for r in rows[:budget])
+        if len(rows) > budget:
+            state = "in-progress" if label == "In progress" else "ready"
+            lines.append(
+                f"  ...and {len(rows) - budget} more "
+                f"(taskgo list {project} --state {state})"
+            )
+        budget = max(budget - len(rows), 0)
+    return "\n".join(lines)
+
+
+def project_handoff_note(project: str, title: str, refs: list[str], tasks: str) -> str:
+    """The handoff note for a project: headline, its active and ready tasks,
+    and what to read first."""
     headline = f"Next is taskgo project {project}"
     headline += f": {title}" if title else ""
     headline += "" if headline[-1] in ".?!" else "."
@@ -5868,10 +5902,12 @@ def project_handoff_note(project: str, title: str, refs: list[str]) -> str:
         headline,
         f"Read {listed} before acting, and form your own view of the approach.",
     ]
-    return "\n\n".join(
+    # The task list is already laid out, one task per line, so it is not filled.
+    headline, read = (
         textwrap.fill(p, width=76, break_long_words=False, break_on_hyphens=False)
         for p in paragraphs
     )
+    return f"{headline}\n\n{tasks}\n\n{read}"
 
 
 @dataclass(slots=True)
@@ -5897,7 +5933,10 @@ class HandoffTarget:
             if snap.is_file(plan_rel):
                 rels.append(plan_rel)
             note = project_handoff_note(
-                self.project, title, [ref(r) for r in rels] or [ref(self.project)]
+                self.project,
+                title,
+                [ref(r) for r in rels] or [ref(self.project)],
+                project_handoff_tasks(snap, self.project),
             )
         if self.skills:
             note += "\n\n" + skills_note(self.project, self.skills)
