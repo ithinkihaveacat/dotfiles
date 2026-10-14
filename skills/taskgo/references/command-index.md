@@ -13,7 +13,7 @@
 - [info](#info)
 - [skills](#skills)
 - [status](#status)
-- [dispatch](#dispatch)
+- [handoff](#handoff)
 - [sync](#sync)
 - [check](#check)
 - [doctor](#doctor)
@@ -47,7 +47,7 @@ Commands:
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   skills PROJECT [--json]          Print the skills a project declares
   status [PROJECT] [--json]        Show project status
-  dispatch PROJECT|TASK_ID         Print agent instructions for a project or task
+  handoff PROJECT|TASK_ID          Print agent instructions for a project or task
   sync [PROJECT]                   Update STATUS.md snapshot
   check [PROJECT] [--json]         Sweep wait_for gates and date horizons
   doctor [PROJECT]                 Run mechanical checks (read-only)
@@ -75,7 +75,7 @@ Examples:
   taskgo create my-project "Diagnose intermittent disconnects" --slug disconnects
   taskgo create my-project "Add cache layer" --slug cache-layer --problem "High latency"
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
-  taskgo dispatch TASK-3A91F
+  taskgo handoff TASK-3A91F
   taskgo sync my-project
   taskgo fix my-project
   taskgo checkpoint TASK-3A91F "project: start diagnosis" --all
@@ -384,14 +384,14 @@ Options:
 
 <!-- /generated -->
 
-## dispatch
+## handoff
 
-<!-- generated: ../scripts/taskgo dispatch --help -->
+<!-- generated: ../scripts/taskgo handoff --help -->
 
 ```text
-Usage: taskgo dispatch [--help] [--at REV] [--json] PROJECT|TASK_ID
+Usage: taskgo handoff [--help] [--at REV] [--json] PROJECT|TASK_ID
 
-Print instructions dispatching an agent to a project or a selected task.
+Print instructions handing a project or a selected task to an agent.
 
 Arguments:
   PROJECT|TASK_ID  Project or task to assign to the agent
@@ -402,16 +402,16 @@ Options:
   --json, -j       Output the full payload as JSON
 
 Examples:
-  taskgo dispatch TASK-3A91F
-  taskgo dispatch alpha
-  taskgo dispatch TASK-3A91F --json
-  taskgo --root ~/projects dispatch TASK-3A91F
+  taskgo handoff TASK-3A91F
+  taskgo handoff alpha
+  taskgo handover TASK-3A91F --json
+  taskgo --root ~/projects handoff TASK-3A91F
 
 The note is generated from the records committed at HEAD (or REV), and ends
 with the project's skills when its README declares any. Findings about
 working-tree or tracker readiness are written to stderr. --json prints the
 note, the files it names inlined verbatim, the skills list, and the project's
-in-progress, blocked, and ready tasks, as the MCP dispatch tool returns them.
+in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.
 ```
 
 <!-- /generated -->

@@ -7,7 +7,7 @@ checks, session attribution, and task handoff protocols for `taskgo`.
 
 Before starting work, an agent must:
 
-1. Run `taskgo dispatch <project|TASK_ID>` (or the MCP `dispatch` tool) and read
+1. Run `taskgo handoff <project|TASK_ID>` (or the MCP `handoff` tool) and read
    what its note names: the root `AGENTS.md`, then project `README.md`,
    `STATUS.md` (using its generated `### Decisions` block to identify active,
    non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
@@ -106,79 +106,21 @@ git log --grep='Conversation:.*<conversation-id>'
 git log --grep='TASK-XXXXX' --format='%h %s %(trailers:key=Conversation,valueonly)'
 ```
 
-## Task Export and Ejection (External Agent Handoff)
-
-When delegating a task to an isolated agent or contributor—one operating
-strictly within a single artifact repository with no access to the control
-repository—execute the **three-phase delegation lifecycle**:
-
-1. **Phase 1: Export (Control Repo Agent):** Evaluate isolation feasibility,
-   resolve path drift, and generate a self-contained task brief (ejection
-   payload).
-1. **Phase 2: Implementation (Isolated Worker):** Execute the task on an
-   isolated branch utilizing explicit implementer latitude. Rely exclusively on
-   repo-native validation. Report findings out-of-band.
-1. **Phase 3: Reconciliation & Integration (Control Repo Agent):** Review the
-   isolated branch, apply workspace-level tooling (formatters/linters), polish
-   commit formatting to strictly enforce metadata segregation, and commit the
-   finalized tracker state.
-
-### Feasibility & Sanity Check (Phase 1)
-
-- **Isolation Feasibility:** The task must be entirely executable within a
-  single target repository.
-- **Sanity Pass:** Validate that all cited target files and test scripts
-  currently exist in the target repository.
-
-### Payload Construction
-
-Construct the exported brief to be completely self-contained:
-
-1. **Strict Path Portability:** Use repository-relative paths (e.g.
-   `src/parser.py`). Never output absolute host paths or `file:///` URLs.
-1. **Component Orientation:** Synthesize a concise 1–2 sentence overview of the
-   target subsystem.
-1. **Core Specification & Implementer Latitude:** Embed Title, Problem, Goal,
-   Constraints, and Criteria. Explicitly instruct the worker that they possess
-   **implementer latitude**.
-1. **Inlined Dependencies:** Resolve and inline all referenced ADRs and design
-   tokens.
-1. **Secrets and Credentials:** Inline necessary API keys or secrets into the
-   exported brief. Emit a visible warning in your chat response.
-1. **Repo-Native Verification:** Specify exact repo-native commands (e.g.
-   `npm test`) for validation.
-
-### Handoff & Reconciliation Protocol
-
-Append operational instructions to the brief:
-
-1. **Opaque Task ID Preservation:** Define `TASK-XXXXX` as an opaque routing
-   key.
-1. **Commit Conventions:** Commit to an isolated feature branch. Append the Task
-   ID as a Git trailer (`Resolves: TASK-XXXXX`).
-1. **Out-of-Band Reporting:** Instruct the worker to report completion
-   exclusively via chat response, including the verbatim Task ID, integration
-   target, active session record, and key findings.
-1. **Strict Data Segregation:** The Task ID belongs in public commit trailers.
-   Branch references, conversation links, and internal reasoning belong strictly
-   in the out-of-band chat response. Private metadata must never leak into
-   artifact commits.
-
-## Agent Dispatch
+## Agent Handoff
 
 When assigning a selected task to an agent that can read the control repository,
-generate its instructions with `taskgo dispatch TASK_ID`
-(`taskgo dispatch PROJECT` points an agent at a project without choosing a
-task). Choose the task deliberately; `taskgo list PROJECT --state ready` shows
-the ready frontier, while `## Next` in `STATUS.md` normally identifies the
-intended next action.
+generate its instructions with `taskgo handoff TASK_ID`
+(`taskgo handoff PROJECT` points an agent at a project without choosing a task).
+Choose the task deliberately; `taskgo list PROJECT --state ready` shows the
+ready frontier, while `## Next` in `STATUS.md` normally identifies the intended
+next action.
 
 Use the generated output without embellishment. It projects the task ID,
 project, title, and `Goal` from the task record committed at `HEAD`, and ends
 with the project's skills when its README declares any, with the command that
 activates them. The command writes the note to stdout and readiness findings to
-stderr. Repair `[WARN]` or `[FAIL]` findings before dispatching. `--json` prints
-the payload the MCP `dispatch` tool returns: the note with the files it names
+stderr. Repair `[WARN]` or `[FAIL]` findings before handing off. `--json` prints
+the payload the MCP `handoff` tool returns: the note with the files it names
 inlined, and the `skills` list.
 
 When yielding after substantial work with a clear successor task, leave the
@@ -187,7 +129,7 @@ in the final response. The note remains chat output rather than a tracked
 artifact.
 
 ```console
-$ taskgo dispatch TASK-3A91F
+$ taskgo handoff TASK-3A91F
 Next is taskgo TASK-3A91F (compiler): Replace the manifest loader with the
 streaming parser.
 

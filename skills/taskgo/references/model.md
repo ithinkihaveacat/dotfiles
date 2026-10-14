@@ -247,7 +247,7 @@ violation of the Single Source of Truth:
 
 1. **YAML Frontmatter (`conversations:`):** Acts as the spatial, fast-read
    manifest of all sessions that have contributed to the task. It guarantees
-   context portability during task ejection (when Git history is severed) and
+   context portability during task export (when Git history is severed) and
    provides zero-latency visibility for active (`in-progress`) sessions before
    commits exist.
 1. **Git Commit Trailers (`Conversation:`):** Act as the temporal, immutable
@@ -369,7 +369,7 @@ A refusal names the change and its kind: `invalid` (malformed or disallowed),
 section hashes offline, run `taskgo mcp --stdio --no-fetch`, which serves the
 committed local branch.
 
-## Unified AuditEngine Architecture (`doctor`, `fix`, and `dispatch`)
+## Unified AuditEngine Architecture (`doctor`, `fix`, and `handoff`)
 
 To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
 `AuditEngine`: `audit_snapshot()` over a snapshot, wrapped by
@@ -390,40 +390,40 @@ Remediations write through the audited snapshot:
   each project's `README.md`, `PROJECT.md`, `STATUS.md`, and the Markdown files
   directly in `tasks/` and `decisions/`. Other documents, and files Git ignores,
   are never reformatted.
-- **`dispatch` (Committed-State Projection):** Uses the audit engine's project
-  findings, over the tree committed at `HEAD`, alongside dispatch-specific
-  checks, then emits a dispatch note from the selected project or task record at
+- **`handoff` (Committed-State Projection):** Uses the audit engine's project
+  findings, over the tree committed at `HEAD`, alongside handoff-specific
+  checks, then emits a handoff note from the selected project or task record at
   `HEAD`. Findings describe working-tree or tracker defects on stderr without
   changing the committed note on stdout.
 
-## Agent Dispatch
+## Agent Handoff
 
-Agent dispatch and isolated-worker ejection solve different problems. An
-isolated worker cannot read the control repository, so an ejection payload must
-inline the task specification and its dependencies. An agent with the control
-repository can read the tracker, artifact repositories, and Git history; it
-needs a destination rather than duplicated context. This is true both at the
-start of a fresh agent session and when work passes to a successor.
+Agent handoff and task export solve different problems. An isolated worker
+cannot read the control repository, so an exported brief must inline the task
+specification and its dependencies. An agent with the control repository can
+read the tracker, artifact repositories, and Git history; it needs a destination
+rather than duplicated context. This is true both at the start of a fresh agent
+session and when work passes to a successor.
 
-`taskgo dispatch TASK_ID` therefore generates a short dispatch note containing
+`taskgo handoff TASK_ID` therefore generates a short handoff note containing
 only the task ID, project, title, `Goal`, and paths to the project status and
-task record. `taskgo dispatch PROJECT` names the project, its `README.md` title,
+task record. `taskgo handoff PROJECT` names the project, its `README.md` title,
 and paths to its `README.md`, `STATUS.md`, and `PLAN.md`. These values come from
 the records committed at `HEAD`, which keeps the note reproducible even when the
-working tree is dirty. The human dispatching the note remains the router: its
+working tree is dirty. The human passing on the note remains the router: its
 summary lets that person verify the selected task before pasting it, while the
 receiving agent uses the identifier and title as a cross-check before reading
 the tracker and choosing an approach.
 
 The command does not select work. `taskgo list PROJECT --state ready` exposes
 the ready frontier, and `STATUS.md` records the intended immediate direction. A
-long dispatch note or one requiring extra facts indicates that the tracker is
-not handoff-ready; repair the durable state instead of expanding the note.
+long handoff note or one requiring extra facts indicates that the tracker is not
+handoff-ready; repair the durable state instead of expanding the note.
 
 The note is a destination for a human router. An agent without a checkout, such
 as an MCP client, still has to read what the note names, so
-`taskgo dispatch --json` and the MCP `dispatch` tool carry those files beside
-the unchanged note: the project `README.md` with its frontmatter, `STATUS.md`,
+`taskgo handoff --json` and the MCP `handoff` tool carry those files beside the
+unchanged note: the project `README.md` with its frontmatter, `STATUS.md`,
 `PLAN.md`, the root `AGENTS.md`, the active and ready tasks, and the task
 record, verbatim, in one round trip. The payload inlines reads; it never widens
 the note.
@@ -442,7 +442,7 @@ unhyphenated verbs:
   JSON format.
 - `taskgo status [PROJECT] [--json]`: Display operational status or
   multi-project summary.
-- `taskgo dispatch PROJECT|TASK_ID [--at REV] [--json]`: Generate agent
+- `taskgo handoff PROJECT|TASK_ID [--at REV] [--json]`: Generate agent
   instructions from the selected project or task record committed at `HEAD` and
   report readiness findings on stderr; `--json` inlines the files the note
   names.

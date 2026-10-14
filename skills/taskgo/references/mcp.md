@@ -10,20 +10,20 @@ One server serves one control repository.
 
 ## Tools
 
-| Tool                 | Returns                                                                                                                 | CLI equivalent           |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                               | `taskgo status --json`   |
-| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                      | `taskgo list --json`     |
-| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                          | the task file            |
-| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                               | `taskgo status PROJECT`  |
-| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                 | `taskgo read --json`     |
-| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                             | `taskgo search --json`   |
-| `list_files`         | Files with blob SHAs, optionally under one directory                                                                    | `git ls-files -s`        |
-| `dispatch`           | For a project or task: the note, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo dispatch --json` |
-| `get_task_history`   | Changes of one frontmatter field, following renames                                                                     | `taskgo history`         |
-| `create`             | Creates one task or decision as one commit, and returns its ID                                                          | `taskgo create`          |
-| `apply_changes`      | Applies a change set as one commit                                                                                      | `taskgo apply`, commit   |
-| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                           | `taskgo edit`, commit    |
+| Tool                 | Returns                                                                                                                 | CLI equivalent          |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                               | `taskgo status --json`  |
+| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                      | `taskgo list --json`    |
+| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                          | the task file           |
+| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                               | `taskgo status PROJECT` |
+| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                 | `taskgo read --json`    |
+| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                             | `taskgo search --json`  |
+| `list_files`         | Files with blob SHAs, optionally under one directory                                                                    | `git ls-files -s`       |
+| `handoff`            | For a project or task: the note, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json` |
+| `get_task_history`   | Changes of one frontmatter field, following renames                                                                     | `taskgo history`        |
+| `create`             | Creates one task or decision as one commit, and returns its ID                                                          | `taskgo create`         |
+| `apply_changes`      | Applies a change set as one commit                                                                                      | `taskgo apply`, commit  |
+| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                           | `taskgo edit`, commit   |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
@@ -53,16 +53,16 @@ read whose commit is not present, and every write fail instead: nothing is
 written over a head that may have moved.
 
 `wait_for` gates other than dates are reported as `unverified_gates`. The server
-does not poll them and, like the CLI, treats them as still holding. `dispatch`
-on a checkout also warns about uncommitted changes; the server reads only
-commits, so it never does.
+does not poll them and, like the CLI, treats them as still holding. `handoff` on
+a checkout also warns about uncommitted changes; the server reads only commits,
+so it never does.
 
-## Dispatch
+## Handoff
 
-`dispatch(target)` is the first call of a session: `target` is a project name or
+`handoff(target)` is the first call of a session: `target` is a project name or
 a task ID, and one round trip returns what the workflow reads before acting.
 
-- `note`: the short dispatch note, as `taskgo dispatch` prints it, with
+- `note`: the short handoff note, as `taskgo handoff` prints it, with
   repository-relative paths and the data-care rule.
 - `findings` and `unverified_gates`: readiness and audit findings, and the
   project's unverified gates.
@@ -376,6 +376,6 @@ npx @modelcontextprotocol/inspector --cli http://127.0.0.1:8789/mcp \
 ## Data care
 
 Everything the server returns is private tracker content. Its MCP instructions,
-every write tool's description, and every dispatch note tell the client never to
+every write tool's description, and every handoff note tell the client never to
 copy it into artifact repositories. The host running the server holds a clone of
 the control repository, so the same care applies to the host.

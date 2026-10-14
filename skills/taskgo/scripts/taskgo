@@ -5508,7 +5508,7 @@ def audit_skills(snap: Snapshot, target_project: str | None = None) -> list[Find
     """Checks each project's declared skills against the skill CLI's catalog.
 
     Separate from audit_snapshot because it runs a command: doctor and fix
-    call it; dispatch and the MCP server do not.
+    call it; handoff and the MCP server do not.
     """
     import difflib
 
@@ -5677,7 +5677,7 @@ class TaskgoError(Exception):
 
 
 @dataclass(slots=True)
-class DispatchPlan:
+class HandoffPlan:
     task_id: str
     project: str
     title: str
@@ -5685,13 +5685,13 @@ class DispatchPlan:
     findings: list[tuple[Literal["WARN", "FAIL"], str]]
 
 
-def plan_dispatch(
+def plan_handoff(
     snap: Snapshot, rel_path: str, content: str, audit: list["Finding"]
-) -> DispatchPlan:
-    """Checks a committed task record for dispatch.
+) -> HandoffPlan:
+    """Checks a committed task record for handoff.
 
     CONTENT is the record as committed; AUDIT is the project's audit findings.
-    Raises TaskgoError when the record cannot be dispatched at all.
+    Raises TaskgoError when the record cannot be handed off at all.
     """
     project_name = rel_path.split("/", maxsplit=1)[0]
     resolved_id = extract_frontmatter_field(content, "id")
@@ -5701,10 +5701,10 @@ def plan_dispatch(
     title = extract_title(content)
     goal = extract_runin(content, "Goal")
 
-    # Dispatching finished work is a selection error, so refuse it.
+    # Handing off finished work is a selection error, so refuse it.
     if status in RESOLVED_STATES:
         raise TaskgoError(
-            f"{resolved_id} is {status}; dispatch accepts only unfinished work "
+            f"{resolved_id} is {status}; handoff accepts only unfinished work "
             f"(see 'taskgo list {project_name} --state ready')"
         )
 
@@ -5737,7 +5737,7 @@ def plan_dispatch(
                     "WARN",
                     (
                         f"{resolved_id} is still blocked by {', '.join(blockers)}; "
-                        "it is not ready to dispatch"
+                        "it is not ready for handoff"
                     ),
                 )
             )
@@ -5748,15 +5748,15 @@ def plan_dispatch(
                     "WARN",
                     (
                         f"{resolved_id} is still waiting for {', '.join(waiting)}; "
-                        "it is not ready to dispatch"
+                        "it is not ready for handoff"
                     ),
                 )
             )
-    return DispatchPlan(resolved_id, project_name, title, goal, findings)
+    return HandoffPlan(resolved_id, project_name, title, goal, findings)
 
 
-def dispatch_note(plan: DispatchPlan, status_ref: str, task_ref: str) -> str:
-    """The dispatch note: headline, Goal, and where to read before acting."""
+def handoff_note(plan: HandoffPlan, status_ref: str, task_ref: str) -> str:
+    """The handoff note: headline, Goal, and where to read before acting."""
     headline = f"Next is taskgo {plan.task_id} ({plan.project})"
     if plan.title:
         headline += f": {plan.title}"
@@ -5780,8 +5780,8 @@ def dispatch_note(plan: DispatchPlan, status_ref: str, task_ref: str) -> str:
     )
 
 
-def project_dispatch_note(project: str, title: str, refs: list[str]) -> str:
-    """The dispatch note for a project: headline and what to read first."""
+def project_handoff_note(project: str, title: str, refs: list[str]) -> str:
+    """The handoff note for a project: headline and what to read first."""
     headline = f"Next is taskgo project {project}"
     headline += f": {title}" if title else ""
     headline += "" if headline[-1] in ".?!" else "."
@@ -5800,28 +5800,28 @@ def project_dispatch_note(project: str, title: str, refs: list[str]) -> str:
 
 
 @dataclass(slots=True)
-class DispatchTarget:
-    """A resolved dispatch target: a project, or one task in it."""
+class HandoffTarget:
+    """A resolved handoff target: a project, or one task in it."""
 
     project: str
     row: TaskRow | None
-    plan: DispatchPlan | None
+    plan: HandoffPlan | None
     readme: str | None  # README.md, or PROJECT.md when only that exists
     findings: list[tuple[Literal["WARN", "FAIL"], str]]
     skills: list[str]  # as the project README declares them
 
     def note(self, snap: Snapshot, ref: Callable[[str], str]) -> str:
-        """The short dispatch note, naming files through REF."""
+        """The short handoff note, naming files through REF."""
         status_rel = f"{self.project}/STATUS.md"
         if self.plan is not None and self.row is not None:
-            note = dispatch_note(self.plan, ref(status_rel), ref(self.row.rel_path))
+            note = handoff_note(self.plan, ref(status_rel), ref(self.row.rel_path))
         else:
             title = extract_title(snap.read_text(self.readme)) if self.readme else ""
             rels = [r for r in (self.readme, status_rel) if r and snap.is_file(r)]
             plan_rel = f"{self.project}/PLAN.md"
             if snap.is_file(plan_rel):
                 rels.append(plan_rel)
-            note = project_dispatch_note(
+            note = project_handoff_note(
                 self.project, title, [ref(r) for r in rels] or [ref(self.project)]
             )
         if self.skills:
@@ -5830,7 +5830,7 @@ class DispatchTarget:
 
 
 def skills_note(project: str, skills: list[str]) -> str:
-    """The dispatch note's skills paragraph: what to activate, and how.
+    """The handoff note's skills paragraph: what to activate, and how.
 
     Adding a skill that is already active is harmless, so the agent need
     not work out which ones it lacks. The command is on a line of its own,
@@ -5848,8 +5848,8 @@ def skills_note(project: str, skills: list[str]) -> str:
     return f"{prose}\n\n  taskgo skills {project} | skill --scope session add -"
 
 
-def resolve_dispatch(snap: GitTreeSnapshot, target: Any) -> DispatchTarget:
-    """Resolves TARGET, a project name or a task ID, in SNAP for dispatch.
+def resolve_handoff(snap: GitTreeSnapshot, target: Any) -> HandoffTarget:
+    """Resolves TARGET, a project name or a task ID, in SNAP for handoff.
 
     Raises TaskgoError for an unknown target or a finished task.
     """
@@ -5873,12 +5873,12 @@ def resolve_dispatch(snap: GitTreeSnapshot, target: Any) -> DispatchTarget:
     readme = project_readme_rel(snap, project)
     skills = project_skills(snap, project)
     if row is not None:
-        plan = plan_dispatch(snap, row.rel_path, snap.read_text(row.rel_path), audit)
-        return DispatchTarget(project, row, plan, readme, plan.findings, skills)
+        plan = plan_handoff(snap, row.rel_path, snap.read_text(row.rel_path), audit)
+        return HandoffTarget(project, row, plan, readme, plan.findings, skills)
     findings = [
         (f.severity, f.message) for f in audit if f.severity in {"WARN", "FAIL"}
     ]
-    return DispatchTarget(project, None, None, readme, findings, skills)
+    return HandoffTarget(project, None, None, readme, findings, skills)
 
 
 def status_snapshot_block(text: str | None) -> str | None:
@@ -5930,7 +5930,7 @@ def task_record_json(snap: GitTreeSnapshot, row: TaskRow) -> dict[str, Any]:
     }
 
 
-def dispatch_file(snap: GitTreeSnapshot, rel: str) -> dict[str, Any] | None:
+def handoff_file(snap: GitTreeSnapshot, rel: str) -> dict[str, Any] | None:
     """File REL verbatim, cut as read_file cuts it, or None when absent."""
     blob = snap.blobs.get(rel)
     if blob is None:
@@ -5963,8 +5963,8 @@ def status_projection(snap: Snapshot, project: str) -> dict[str, Any]:
     }
 
 
-def dispatch_payload(
-    snap: GitTreeSnapshot, t: DispatchTarget, as_of: dict[str, Any]
+def handoff_payload(
+    snap: GitTreeSnapshot, t: HandoffTarget, as_of: dict[str, Any]
 ) -> dict[str, Any]:
     """Everything an agent reads before starting on T, in one object.
 
@@ -5977,9 +5977,9 @@ def dispatch_payload(
         "\n\nThese paths are in the taskgo control repository; this payload "
         f"carries them as of commit {snap.rev[:12]}.\n\n{MCP_DATA_CARE}"
     )
-    readme = dispatch_file(snap, t.readme) if t.readme else None
+    readme = handoff_file(snap, t.readme) if t.readme else None
     status_rel = f"{project}/STATUS.md"
-    status = dispatch_file(snap, status_rel) or {
+    status = handoff_file(snap, status_rel) or {
         "path": status_rel,
         "blob": None,
         "content": None,
@@ -5999,8 +5999,8 @@ def dispatch_payload(
         "skills": t.skills,
         "readme": readme,
         "status": status,
-        "plan": dispatch_file(snap, f"{project}/PLAN.md"),
-        "agents_md": dispatch_file(snap, "AGENTS.md"),
+        "plan": handoff_file(snap, f"{project}/PLAN.md"),
+        "agents_md": handoff_file(snap, "AGENTS.md"),
         "tasks": {
             "in_progress": [
                 task_row_json(r) for r in select_task_rows(snap, project, "in-progress")
@@ -6018,8 +6018,8 @@ def dispatch_payload(
     }
 
 
-def cmd_dispatch(target: str, at: str | None = None, as_json: bool = False) -> None:
-    """Emit instructions dispatching an agent to a project or task."""
+def cmd_handoff(target: str, at: str | None = None, as_json: bool = False) -> None:
+    """Emit instructions handing a project or task to an agent."""
     root = get_repo_root()
     rev = at or "HEAD"
     sha = resolve_commit(root, rev)
@@ -6038,10 +6038,10 @@ def cmd_dispatch(target: str, at: str | None = None, as_json: bool = False) -> N
             if local:
                 die_scoped(
                     f"{local[0].rel_path} is not committed at HEAD; commit the "
-                    "task before dispatching it"
+                    "task before handing it off"
                 )
     try:
-        t = resolve_dispatch(snap, name)
+        t = resolve_handoff(snap, name)
     except TaskgoError as e:
         die_scoped(str(e))
 
@@ -6068,7 +6068,7 @@ def cmd_dispatch(target: str, at: str | None = None, as_json: bool = False) -> N
             )
 
     if as_json:
-        payload = dispatch_payload(
+        payload = handoff_payload(
             snap, t, snapshot_as_of(snap, commit_time(root, snap.rev))
         )
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -7523,7 +7523,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.12.0"
+MCP_SERVER_VERSION = "0.13.0"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -7613,12 +7613,12 @@ This server reads and writes a taskgo control repository: a private Git
 repository of Markdown that tracks projects, tasks (TASK-XXXXX), decisions,
 and each project's STATUS.md.
 
-Start with dispatch(target), a project name or a task ID: one call returns
+Start with handoff(target), a project name or a task ID: one call returns
 the project's README.md, STATUS.md, PLAN.md, the root AGENTS.md, its active
 and ready tasks, and the task record. list_projects and list_tasks (state
 'ready' for workable tasks) find a target. Every response names the commit
 it read in as_of.commit; pass it as 'at' to keep several reads on the same
-commit. dispatch.skills names the agent skills the project expects: activate
+commit. handoff.skills names the agent skills the project expects: activate
 them if your harness has a skill manager (adding one already active is
 harmless), otherwise ignore them.
 
@@ -8131,12 +8131,12 @@ def mcp_list_files(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     return {"as_of": r.as_of(), "files": files}
 
 
-def mcp_dispatch(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
+def mcp_handoff(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
     try:
-        t = resolve_dispatch(r.snap, args.get("target"))
+        t = resolve_handoff(r.snap, args.get("target"))
     except TaskgoError as e:
         raise McpToolError(str(e)) from None
-    return dispatch_payload(r.snap, t, r.as_of())
+    return handoff_payload(r.snap, t, r.as_of())
 
 
 def mcp_get_task_history(r: McpRead, args: dict[str, Any]) -> dict[str, Any]:
@@ -8392,10 +8392,12 @@ MCP_TOOLS = [
         mcp_list_files,
     ),
     McpTool(
-        "dispatch",
-        "Start here: everything to read before working on a project or an "
-        "unfinished task, in one call (as 'taskgo dispatch --json'). target "
-        "is a project name or a task ID. Returns the short dispatch note; "
+        "handoff",
+        "Start here: the handoff (or handover) for a project or an unfinished "
+        "task, to call first when asked to start, resume, or take over work "
+        "on one: everything to read before acting, in one call (as 'taskgo "
+        "handoff --json'). target is a project name or a task ID. Returns "
+        "the short handoff note; "
         "readiness and audit findings; the project's README.md frontmatter, "
         "parsed but unfiltered, and the agent skills it declares (skills); "
         "README.md, STATUS.md (with Summary and Next "
@@ -8411,7 +8413,7 @@ MCP_TOOLS = [
             }
         },
         ("target",),
-        mcp_dispatch,
+        mcp_handoff,
     ),
     McpTool(
         "get_task_history",
@@ -10096,7 +10098,7 @@ Commands:
   info PROJECT [--json]            Show project metadata from README.md frontmatter
   skills PROJECT [--json]          Print the skills a project declares
   status [PROJECT] [--json]        Show project status
-  dispatch PROJECT|TASK_ID         Print agent instructions for a project or task
+  handoff PROJECT|TASK_ID          Print agent instructions for a project or task
   sync [PROJECT]                   Update STATUS.md snapshot
   check [PROJECT] [--json]         Sweep wait_for gates and date horizons
   doctor [PROJECT]                 Run mechanical checks (read-only)
@@ -10124,7 +10126,7 @@ Examples:
   taskgo create my-project "Diagnose intermittent disconnects" --slug disconnects
   taskgo create my-project "Add cache layer" --slug cache-layer --problem "High latency"
   taskgo update TASK-3A91F --status in-progress --sketch "Use in-memory dict"
-  taskgo dispatch TASK-3A91F
+  taskgo handoff TASK-3A91F
   taskgo sync my-project
   taskgo fix my-project
   taskgo checkpoint TASK-3A91F "project: start diagnosis" --all"""
@@ -10566,45 +10568,46 @@ than a few words.""",
         help="Output machine-readable JSON",
     )
 
-    # dispatch
-    p_dispatch = subparsers.add_parser(
-        "dispatch",
+    # handoff (handover; dispatch is its former name)
+    p_handoff = subparsers.add_parser(
+        "handoff",
+        aliases=["handover", "dispatch"],
         help="Print agent instructions for a project or task",
         description=(
-            "Print instructions dispatching an agent to a project or a selected task."
+            "Print instructions handing a project or a selected task to an agent."
         ),
         formatter_class=HouseStyleHelpFormatter,
         add_help=False,
         epilog="""Examples:
-  taskgo dispatch TASK-3A91F
-  taskgo dispatch alpha
-  taskgo dispatch TASK-3A91F --json
-  taskgo --root ~/projects dispatch TASK-3A91F
+  taskgo handoff TASK-3A91F
+  taskgo handoff alpha
+  taskgo handover TASK-3A91F --json
+  taskgo --root ~/projects handoff TASK-3A91F
 
 The note is generated from the records committed at HEAD (or REV), and ends
 with the project's skills when its README declares any. Findings about
 working-tree or tracker readiness are written to stderr. --json prints the
 note, the files it names inlined verbatim, the skills list, and the project's
-in-progress, blocked, and ready tasks, as the MCP dispatch tool returns them.""",
+in-progress, blocked, and ready tasks, as the MCP handoff tool returns them.""",
     )
-    p_dispatch.add_argument(
+    p_handoff.add_argument(
         "--help",
         "-h",
         action="help",
         help="Display this help message and exit",
     )
-    p_dispatch.add_argument(
+    p_handoff.add_argument(
         "target",
         metavar="PROJECT|TASK_ID",
         help="Project or task to assign to the agent",
     )
-    p_dispatch.add_argument(
+    p_handoff.add_argument(
         "--at",
         metavar="REV",
         default=None,
         help="Read commit REV instead of HEAD",
     )
-    p_dispatch.add_argument(
+    p_handoff.add_argument(
         "--json",
         "-j",
         dest="as_json",
@@ -11117,6 +11120,9 @@ def main(argv: list[str] | None = None) -> None:
     else:
         args = parser.parse_args(argv)
 
+    # handover and dispatch (the former name) are aliases of handoff.
+    if args.command in ("handover", "dispatch"):
+        args.command = "handoff"
     global _ACTIVE_COMMAND
     _ACTIVE_COMMAND = args.command
     set_explicit_root(getattr(args, "root", None))
@@ -11213,8 +11219,8 @@ def main(argv: list[str] | None = None) -> None:
             project=args.project,
             as_json=args.as_json,
         )
-    elif args.command == "dispatch":
-        cmd_dispatch(target=args.target, at=args.at, as_json=args.as_json)
+    elif args.command == "handoff":
+        cmd_handoff(target=args.target, at=args.at, as_json=args.as_json)
     elif args.command == "sync":
         cmd_sync(project=args.project)
     elif args.command == "check":

@@ -4,7 +4,7 @@ description: >-
   Maintains a private Git-backed personal project and task control repository
   using concise current Markdown, derived Git history, ADRs, and status synchronization.
   Use when tracking tasks, updating project status (STATUS.md), managing ADRs,
-  synchronizing tracker state, delegating tasks to external agents, or generating
+  synchronizing tracker state, handing tasks to agents, or generating
   human-facing activity reports (weekly/monthly/quarterly).
 compatibility: Requires Python 3.11+ (via uv) and git.
 ---
@@ -186,7 +186,7 @@ which file, repository, or skill owns each kind of fact.
 
   # Project Name
   ```
-  `taskgo skills <project>` prints the list; `taskgo dispatch` carries it in its
+  `taskgo skills <project>` prints the list; `taskgo handoff` carries it in its
   note; `taskgo doctor` warns about a name the catalog does not have.
 - **Decisions:** Lightweight Nygard-style ADRs (`decisions/*.md`) for private or
   cross-artifact decisions. Newer ADRs record `supersedes: [<old-adr>]` in YAML
@@ -204,10 +204,11 @@ which file, repository, or skill owns each kind of fact.
 ## Agent Workflow
 
 See **[Agent Workflows & Handoff](references/workflows.md)** for detailed
-protocols on commit authority, session attribution, External Agent Handoff, and
-Agent Dispatch.
+protocols on commit authority, session attribution, and Agent Handoff. To hand a
+task to an isolated worker that cannot read the control repository, see
+**[Task Export](references/export.md)**.
 
-- **Before work:** run `taskgo dispatch <project|TASK_ID>` and follow its note:
+- **Before work:** run `taskgo handoff <project|TASK_ID>` and follow its note:
   it names the files to read (`AGENTS.md`, the project `README.md`, `STATUS.md`,
   `PLAN.md`, the task record) and the project's skills.
   1. Read the files it names.
@@ -222,7 +223,7 @@ Agent Dispatch.
      and its output.
 - **CLI or MCP:** when the control repository is the session's workspace, use
   the CLI. Elsewhere, prefer the `taskgo` MCP tools when the harness has them
-  (`dispatch` returns the same note and files); otherwise the CLI with `--root`.
+  (`handoff` returns the same note and files); otherwise the CLI with `--root`.
 - **After work:** update files, task frontmatter (`conversations`), and
   `STATUS.md` prose (`Summary` & `Next`). Update the project `README.md`, or the
   artifact or knowledge skill that owns a fact, only if that fact changed. Run
@@ -252,7 +253,7 @@ taskgo list [PROJECT] [--state STATE] [--json]
 taskgo info PROJECT [--json]
 taskgo skills PROJECT [--json]
 taskgo status [PROJECT] [--json]
-taskgo dispatch PROJECT|TASK_ID [--at REV] [--json]
+taskgo handoff PROJECT|TASK_ID [--at REV] [--json]
 taskgo sync [PROJECT]
 taskgo check [PROJECT] [--json]
 taskgo doctor [PROJECT]
@@ -286,11 +287,12 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   Caxton-style `search_and_replace` with verbatim bytes, a CRLF retry, near-miss
   diffs, and record validation. Assets keep their bytes and mode; tasks,
   decisions, and STATUS.md stay valid and are formatted. Does not commit.
-- `dispatch`: Emit agent handoff instructions for a project or task committed at
-  `HEAD` (or `--at REV`), warning on stderr about uncommitted state or missing
-  scaffolding; the note ends with the project's skills and how to activate them;
-  `--json` inlines the onboarding files, the `skills` list, and active/ready
-  queues in one payload, matching the MCP `dispatch` tool.
+- `handoff` (or `handover`; `dispatch`, its former name, still works): Emit
+  agent handoff instructions for a project or task committed at `HEAD` (or
+  `--at REV`), warning on stderr about uncommitted state or missing scaffolding;
+  the note ends with the project's skills and how to activate them; `--json`
+  inlines the onboarding files, the `skills` list, and active/ready queues in
+  one payload, matching the MCP `handoff` tool.
 - `skills`: Print the skills a project's README frontmatter declares, one per
   line (`--json` for an array), for `skill --scope session add -`.
 - `read`: Print UTF-8 file slices (`--start-line`, `--end-line`, `-n` /
