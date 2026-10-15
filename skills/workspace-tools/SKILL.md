@@ -318,17 +318,22 @@ scope to one.
 permission <command> [arguments] [options]
 ```
 
-### Commands
+### Commands & Namespaces
 
-- **`add PATTERN...`**: Add rule patterns to the allowlist (`--deny` for the
-  denylist, `--ask` for the always-prompt list). `add -` reads one pattern per
+- **`cmd add PATTERN...`**: Add rule patterns to the allowlist (`--deny` for the
+  denylist, `--ask` for the always-prompt list). `cmd add -` reads one pattern per
   line from stdin.
-- **`remove PATTERN...`** (alias: **`rm`**): Remove patterns from all lists.
-- **`list`** (alias: **`ls`**): List rules per agent, as clean patterns.
-- **`apply`**: Pre-approve the safe commands declared by this workspace's
+- **`cmd remove PATTERN...`** (alias: **`rm`**): Remove command patterns from all lists.
+- **`cmd list`** (alias: **`ls`**): List command rules per agent.
+- **`path add PATH...`**: Grant directory access (`--ro` for read-only; default read and write;
+  `--workspace` for workspace-local or `--global` for user-wide).
+- **`path remove PATH...`** (alias: **`rm`**): Revoke directory access grants.
+- **`path list`** (alias: **`ls`**): List granted paths per agent.
+- **`list`** (alias: **`ls`**): List all permission rules (both commands and paths).
+- **`apply`**: Pre-approve the safe commands and paths declared by this workspace's
   installed skills (idempotent; see below).
-- **`clean`**: Clear all permission rules for detected agents.
-- **`doctor`**: Report rules that `apply` would add but that are missing
+- **`clean [cmd|path]`**: Clear permission rules for detected agents (default: all).
+- **`doctor`**: Report missing rules or drifted settings across commands and paths
   (read-only; exits non-zero on problems).
 
 ### Safe-Command Declarations (`permissions/unsafe`)
@@ -345,8 +350,8 @@ permission <command> [arguments] [options]
 
 New scripts added to a skill are therefore pre-approved by default; only the
 exceptions need maintaining. The `permission` tool's own mutating subcommands
-(`add`, `remove`, `clean`) are declared unsafe so an agent can never edit its
-own allowlist unprompted.
+(`cmd add`, `cmd remove`, `path add`, `path remove`, `clean`) are declared
+unsafe so an agent can never edit its own allowlist unprompted.
 
 ### Codex permission behavior
 
@@ -592,10 +597,11 @@ support session skills, and what a new launcher needs to, is in
 ### Managing Permissions by Hand
 
 ```bash
-permission add "git show" "git log"   # allow on every detected agent
-permission add --deny "rm -rf"        # block outright
-permission add --ask "adb-tile-add" --agent claude
-permission list
+permission cmd add "git show" "git log"   # allow commands on every detected agent
+permission cmd add --deny "rm -rf"        # block command outright
+permission cmd add --ask "adb-tile-add" --agent claude
+permission path add ~/.dotfiles ~/.corp   # grant directory access
+permission list                           # list commands and paths
 ```
 
 ### Health Checks

@@ -258,8 +258,32 @@ class PermissionAdapter:
         """Returns clean rules from one configuration file."""
         return {}
 
-    def clean(self, workspace_root: Path) -> None:
+    def clean(self, workspace_root: Path, kind: str = "all") -> None:
         raise NotImplementedError
+
+    def add_path(
+        self,
+        workspace_root: Path,
+        target_path: Path,
+        access: str = "all",
+        scope: str = "user",
+    ) -> bool:
+        """Adds a filesystem path grant; returns True if newly added, False if already present."""
+        return False
+
+    def remove_path(
+        self, workspace_root: Path, target_path: Path, scope: str = "user"
+    ) -> bool:
+        """Removes a filesystem path grant; returns True if removed, False if not present."""
+        return False
+
+    def paths(self, workspace_root: Path) -> list[dict]:
+        """Returns list of [{"path": str, "access": "read, write"|"read-only", "scope": "user"|"workspace"}]."""
+        return []
+
+    def clean_paths(self, workspace_root: Path) -> None:
+        """Clears all configured path rules."""
+        pass
 
 
 class AgySettingsAdapter(PermissionAdapter):
@@ -563,7 +587,7 @@ class AgySettingsAdapter(PermissionAdapter):
             for mode in MODES
         }
 
-    def clean(self, workspace_root: Path) -> None:
+    def clean(self, workspace_root: Path, kind: str = "all") -> None:
         if not self.is_initialized(workspace_root):
             return
         for settings_path in self._settings_paths():
@@ -572,12 +596,195 @@ class AgySettingsAdapter(PermissionAdapter):
             data = self._load(settings_path)
             perms = self._perms(data, settings_path)
             for mode in MODES:
-                perms[mode] = []
+                lst = perms.get(mode) or []
+                if kind == "cmd":
+                    perms[mode] = [
+                        r
+                        for r in lst
+                        if r.startswith(("read_file(", "write_file("))
+                    ]
+                elif kind == "path":
+                    perms[mode] = [
+                        r
+                        for r in lst
+                        if not r.startswith(("read_file(", "write_file("))
+                    ]
+                else:
+                    perms[mode] = []
             self._save(settings_path, data)
+        desc = (
+            "command rules"
+            if kind == "cmd"
+            else ("path rules" if kind == "path" else "all permission rules")
+        )
         print(
-            f"[{self.name} ({self.scope})] cleared all permission rules",
+            f"[{self.name} ({self.scope})] cleared {desc}",
             file=sys.stderr,
         )
+
+    def clean_paths(self, workspace_root: Path) -> None:
+        self.clean(workspace_root, kind="path")
+
+    def _ensure_gemini_settings_non_workspace(self) -> None:
+        home = Path.home()
+        candidates = [
+            home / ".gemini/settings.json",
+            AGY_CONFIG_DIR / "settings.json",
+        ]
+        for s_file in candidates:
+            if s_file.is_file():
+                try:
+                    data = self._load(s_file)
+                    if not data.get("allowNonWorkspaceAccess"):
+                        data["allowNonWorkspaceAccess"] = True
+                        self._save(s_file, data)
+                except Exception:
+                    pass
+
+    def _prune_projects_json(self, target_str: str) -> None:
+        home = Path.home()
+        for base in (home / ".gemini", AGY_CONFIG_DIR):
+            projects_dir = base / "config" / "projects"
+            if not projects_dir.is_dir():
+                continue
+            prefix_read = f"read_file({target_str}/"
+            prefix_write = f"write_file({target_str}/"
+            for pfile in projects_dir.glob("*.json"):
+                try:
+                    data = self._load(pfile)
+                    pg = data.setdefault("permissionGrants", {}).setdefault(
+                        "permissionGrants", {}
+                    )
+                    allow = pg.get("allow")
+                    if isinstance(allow, list):
+                        pruned = [
+                            r
+                            for r in allow
+                            if not (
+                                r.startswith(prefix_read)
+                                or r.startswith(prefix_write)
+                            )
+                        ]
+                        if len(pruned) != len(allow):
+                            pg["allow"] = pruned
+                            self._save(pfile, data)
+                except Exception:
+                    pass
+
+    def add_path(
+        self,
+        workspace_root: Path,
+        target_path: Path,
+        access: str = "all",
+        scope: str = "user",
+    ) -> bool:
+        target_str = str(target_path).rstrip("/")
+        read_rule = f"read_file({target_str})"
+        write_rule = f"write_file({target_str})"
+        rules_to_add = [read_rule]
+        if access == "all":
+            rules_to_add.append(write_rule)
+
+        added_any = False
+        prefix_read = f"read_file({target_str}/"
+        prefix_write = f"write_file({target_str}/"
+
+        for settings_path in self._settings_paths():
+            data = self._load(settings_path)
+            perms = self._perms(data, settings_path)
+            allow_list = perms["allow"]
+
+            # Prune existing single-file or subpath rules subsumed by this directory grant
+            pruned = [
+                r
+                for r in allow_list
+                if not (
+                    r.startswith(prefix_read) or r.startswith(prefix_write)
+                )
+            ]
+            if len(pruned) != len(allow_list):
+                allow_list[:] = pruned
+                added_any = True
+
+            for r in rules_to_add:
+                if r not in allow_list:
+                    allow_list.append(r)
+                    added_any = True
+
+            if settings_path.name == "config.json":
+                user_settings = data.setdefault("userSettings", {})
+                if not user_settings.get("allowNonWorkspaceAccess"):
+                    user_settings["allowNonWorkspaceAccess"] = True
+                    added_any = True
+
+            self._save(settings_path, data)
+
+        self._ensure_gemini_settings_non_workspace()
+        self._prune_projects_json(target_str)
+        return added_any
+
+    def remove_path(
+        self, workspace_root: Path, target_path: Path, scope: str = "user"
+    ) -> bool:
+        target_str = str(target_path).rstrip("/")
+        rules_to_remove = {
+            f"read_file({target_str})",
+            f"write_file({target_str})",
+        }
+        removed_any = False
+        for settings_path in self._settings_paths():
+            if not settings_path.is_file():
+                continue
+            data = self._load(settings_path)
+            perms = self._perms(data, settings_path)
+            changed = False
+            for mode in MODES:
+                lst = perms.get(mode)
+                if lst:
+                    before = len(lst)
+                    lst[:] = [r for r in lst if r not in rules_to_remove]
+                    if len(lst) != before:
+                        changed = True
+                        removed_any = True
+            if changed:
+                self._save(settings_path, data)
+        return removed_any
+
+    def paths(self, workspace_root: Path) -> list[dict]:
+        path_map: dict[str, dict] = {}
+        for settings_path in self._settings_paths():
+            if not settings_path.is_file():
+                continue
+            data = self._load(settings_path)
+            perms = self._perms(data, settings_path)
+            for r in perms.get("allow") or []:
+                if r.startswith("read_file(") and r.endswith(")"):
+                    target = r[len("read_file(") : -1]
+                    if target != "*":
+                        info = path_map.setdefault(
+                            target, {"read": False, "write": False}
+                        )
+                        info["read"] = True
+                elif r.startswith("write_file(") and r.endswith(")"):
+                    target = r[len("write_file(") : -1]
+                    if target != "*":
+                        info = path_map.setdefault(
+                            target, {"read": False, "write": False}
+                        )
+                        info["write"] = True
+        result = []
+        for p_str, info in sorted(path_map.items()):
+            access = (
+                "read, write"
+                if (info["write"] or (info["read"] and info["write"]))
+                else "read-only"
+            )
+            result.append({
+                "path": p_str,
+                "access": access,
+                "scope": self.scope,
+            })
+        return result
 
 
 class ClaudeSettingsAdapter(PermissionAdapter):
@@ -672,6 +879,9 @@ class ClaudeSettingsAdapter(PermissionAdapter):
             self._save(workspace_root, data)
         return removed
 
+    def _user_settings_path(self) -> Path:
+        return CLAUDE_CONFIG_DIR / "settings.json"
+
     def rules(self, workspace_root: Path) -> dict[str, list[str]]:
         settings_path = self._settings_path(workspace_root)
         if not settings_path.is_file():
@@ -679,7 +889,12 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         data = self._load(settings_path)
         perms = data.get("permissions", {})
         return {
-            mode: [self.untranslate(r) for r in perms.get(mode) or []] for mode in MODES
+            mode: [
+                self.untranslate(r)
+                for r in perms.get(mode) or []
+                if r.startswith("Bash(")
+            ]
+            for mode in MODES
         }
 
     def rules_in(self, path: Path) -> dict[str, list[str]]:
@@ -688,24 +903,180 @@ class ClaudeSettingsAdapter(PermissionAdapter):
         data = self._load(path)
         perms = data.get("permissions", {})
         return {
-            mode: [self.untranslate(rule) for rule in perms.get(mode) or []]
+            mode: [
+                self.untranslate(rule)
+                for rule in perms.get(mode) or []
+                if rule.startswith("Bash(")
+            ]
             for mode in MODES
         }
 
-    def clean(self, workspace_root: Path) -> None:
-        settings_path = self._settings_path(workspace_root)
-        if not settings_path.is_file():
-            return
+    def add_path(
+        self,
+        workspace_root: Path,
+        target_path: Path,
+        access: str = "all",
+        scope: str = "user",
+    ) -> bool:
+        target_str = str(target_path).rstrip("/")
+        settings_path = (
+            self._user_settings_path()
+            if scope == "user"
+            else self._settings_path(workspace_root)
+        )
         data = self._load(settings_path)
-        perms = data.get("permissions")
-        if perms:
-            for mode in MODES:
-                perms[mode] = []
-            self._save(workspace_root, data)
+        perms = data.setdefault("permissions", {})
+        dirs = perms.setdefault("additionalDirectories", [])
+        added_any = False
+        if target_str not in dirs:
+            dirs.append(target_str)
+            added_any = True
+
+        allow_list = perms.setdefault("allow", [])
+        r_rule = f"Read({target_str}/**)"
+        w_rule = f"Write({target_str}/**)"
+        if r_rule not in allow_list:
+            allow_list.append(r_rule)
+            added_any = True
+        if access == "all" and w_rule not in allow_list:
+            allow_list.append(w_rule)
+            added_any = True
+
+        if added_any:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            if scope != "user":
+                sync_git_exclude(workspace_root)
+        return added_any
+
+    def remove_path(
+        self, workspace_root: Path, target_path: Path, scope: str = "user"
+    ) -> bool:
+        target_str = str(target_path).rstrip("/")
+        rules_to_remove = {f"Read({target_str}/**)", f"Write({target_str}/**)"}
+        removed_any = False
+        for s_path in (
+            self._user_settings_path(),
+            self._settings_path(workspace_root),
+        ):
+            if not s_path.is_file():
+                continue
+            data = self._load(s_path)
+            perms = data.get("permissions", {})
+            changed = False
+            dirs = perms.get("additionalDirectories")
+            if dirs and target_str in dirs:
+                dirs.remove(target_str)
+                changed = True
+                removed_any = True
+            allow_list = perms.get("allow")
+            if allow_list:
+                before = len(allow_list)
+                allow_list[:] = [
+                    r for r in allow_list if r not in rules_to_remove
+                ]
+                if len(allow_list) != before:
+                    changed = True
+                    removed_any = True
+            if changed:
+                with open(s_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.write("\n")
+        return removed_any
+
+    def paths(self, workspace_root: Path) -> list[dict]:
+        path_map: dict[str, dict] = {}
+        for s_path, scope in (
+            (self._user_settings_path(), "user"),
+            (self._settings_path(workspace_root), "workspace"),
+        ):
+            if not s_path.is_file():
+                continue
+            data = self._load(s_path)
+            perms = data.get("permissions", {})
+            for d in perms.get("additionalDirectories") or []:
+                info = path_map.setdefault(
+                    d, {"read": True, "write": True, "scope": scope}
+                )
+            for r in perms.get("allow") or []:
+                if r.startswith("Read(") and r.endswith("/**)"):
+                    p = r[len("Read(") : -len("/**)")]
+                    path_map.setdefault(
+                        p, {"read": True, "write": False, "scope": scope}
+                    )["read"] = True
+                elif r.startswith("Write(") and r.endswith("/**)"):
+                    p = r[len("Write(") : -len("/**)")]
+                    path_map.setdefault(
+                        p, {"read": False, "write": True, "scope": scope}
+                    )["write"] = True
+        result = []
+        for p_str, info in sorted(path_map.items()):
+            access = "read, write" if info.get("write") else "read-only"
+            result.append({
+                "path": p_str,
+                "access": access,
+                "scope": info.get("scope", "user"),
+            })
+        return result
+
+    def clean(self, workspace_root: Path, kind: str = "all") -> None:
+        settings_path = self._settings_path(workspace_root)
+        if settings_path.is_file():
+            data = self._load(settings_path)
+            perms = data.get("permissions")
+            if perms:
+                if kind == "cmd":
+                    for mode in MODES:
+                        perms[mode] = [
+                            r
+                            for r in perms.get(mode) or []
+                            if not r.startswith("Bash(")
+                        ]
+                elif kind == "path":
+                    perms.pop("additionalDirectories", None)
+                    for mode in MODES:
+                        perms[mode] = [
+                            r
+                            for r in perms.get(mode) or []
+                            if not r.startswith(("Read(", "Write("))
+                        ]
+                else:
+                    perms.pop("additionalDirectories", None)
+                    for mode in MODES:
+                        perms[mode] = []
+                self._save(workspace_root, data)
+
+        if kind in ("path", "all"):
+            user_s_path = self._user_settings_path()
+            if user_s_path.is_file():
+                u_data = self._load(user_s_path)
+                u_perms = u_data.get("permissions")
+                if u_perms:
+                    u_perms.pop("additionalDirectories", None)
+                    for mode in MODES:
+                        u_perms[mode] = [
+                            r
+                            for r in u_perms.get(mode) or []
+                            if not r.startswith(("Read(", "Write("))
+                        ]
+                    with open(user_s_path, "w", encoding="utf-8") as f:
+                        json.dump(u_data, f, indent=2)
+                        f.write("\n")
+
+        desc = (
+            "command rules"
+            if kind == "cmd"
+            else ("path rules" if kind == "path" else "all permission rules")
+        )
         print(
-            f"[{self.name} ({self.scope})] cleared all permission rules",
+            f"[{self.name} ({self.scope})] cleared {desc}",
             file=sys.stderr,
         )
+
+    def clean_paths(self, workspace_root: Path) -> None:
+        self.clean(workspace_root, kind="path")
 
 
 class CodexRulesAdapter(PermissionAdapter):
@@ -887,18 +1258,107 @@ class CodexRulesAdapter(PermissionAdapter):
     def rules_in(self, path: Path) -> dict[str, list[str]]:
         return self._load_rules(path) if path.is_file() else {}
 
-    def clean(self, workspace_root: Path) -> None:
-        path = self._rules_path(workspace_root)
-        if not path.is_file():
-            return
-        path.unlink()
+    def _trusted_folders_path(self) -> Path:
+        home = Path.home()
+        if (AGY_CONFIG_DIR / "trustedFolders.json").is_file():
+            return AGY_CONFIG_DIR / "trustedFolders.json"
+        return home / ".gemini" / "trustedFolders.json"
+
+    def add_path(
+        self,
+        workspace_root: Path,
+        target_path: Path,
+        access: str = "all",
+        scope: str = "user",
+    ) -> bool:
+        target_str = str(target_path).rstrip("/")
+        tf_path = self._trusted_folders_path()
+        data = {}
+        if tf_path.is_file():
+            try:
+                with open(tf_path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        if data.get(target_str) == "TRUST_FOLDER":
+            return False
+        data[target_str] = "TRUST_FOLDER"
+        tf_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_path_str = tempfile.mkstemp(dir=str(tf_path.parent))
+        temp_path = Path(temp_path_str)
         try:
-            path.parent.rmdir()
-        except OSError:
-            pass
-        sync_git_exclude(workspace_root)
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            os.replace(temp_path, tf_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        return True
+
+    def remove_path(
+        self, workspace_root: Path, target_path: Path, scope: str = "user"
+    ) -> bool:
+        target_str = str(target_path).rstrip("/")
+        tf_path = self._trusted_folders_path()
+        if not tf_path.is_file():
+            return False
+        try:
+            with open(tf_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return False
+        if target_str in data:
+            del data[target_str]
+            tf_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tf_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            return True
+        return False
+
+    def paths(self, workspace_root: Path) -> list[dict]:
+        tf_path = self._trusted_folders_path()
+        if not tf_path.is_file():
+            return []
+        try:
+            with open(tf_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return []
+        return [
+            {"path": p, "access": "read, write", "scope": "user"}
+            for p, val in sorted(data.items())
+            if val == "TRUST_FOLDER"
+        ]
+
+    def clean_paths(self, workspace_root: Path) -> None:
+        tf_path = self._trusted_folders_path()
+        if tf_path.is_file():
+            try:
+                tf_path.unlink()
+            except OSError:
+                pass
+
+    def clean(self, workspace_root: Path, kind: str = "all") -> None:
+        if kind in ("cmd", "all"):
+            path = self._rules_path(workspace_root)
+            if path.is_file():
+                path.unlink()
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
+                sync_git_exclude(workspace_root)
+        if kind in ("path", "all"):
+            self.clean_paths(workspace_root)
+        desc = (
+            "command rules"
+            if kind == "cmd"
+            else ("path rules" if kind == "path" else "all permission rules")
+        )
         print(
-            f"[{self.name} ({self.scope})] cleared all permission rules",
+            f"[{self.name} ({self.scope})] cleared {desc}",
             file=sys.stderr,
         )
 
@@ -1023,6 +1483,38 @@ def compute_workspace_rules() -> tuple[list[str], list[str]]:
     return sorted(set(allow)), sorted(set(guard))
 
 
+def parse_paths_file(skill_dir: Path) -> list[str]:
+    paths_file = skill_dir / "permissions" / "paths"
+    if not paths_file.is_file():
+        return []
+    lines = []
+    with open(paths_file, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                lines.append(line)
+    return lines
+
+
+def compute_workspace_paths() -> list[str]:
+    """Aggregates declared paths over all installed skills."""
+    res = subprocess.run(
+        [SKILL_BIN, "list", "--json"], capture_output=True, text=True, check=False
+    )
+    if res.returncode != 0:
+        return []
+    try:
+        entries = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    paths: list[str] = []
+    for entry in entries:
+        p = entry.get("path")
+        if p:
+            paths.extend(parse_paths_file(Path(p)))
+    return sorted(set(paths))
+
+
 def cmd_apply(agent: str | None):
     ws = get_workspace_root()
     adapters = select_adapters(agent, ws)
@@ -1030,9 +1522,10 @@ def cmd_apply(agent: str | None):
         print("apply: no supported agents detected; nothing to do", file=sys.stderr)
         return
     allow, guard = compute_workspace_rules()
-    if not allow and not guard:
+    declared_paths = compute_workspace_paths()
+    if not allow and not guard and not declared_paths:
         print(
-            "apply: no installed skills declare any commands "
+            "apply: no installed skills declare any commands or paths "
             "(run 'skill add --defaults' to install skills first)",
             file=sys.stderr,
         )
@@ -1041,12 +1534,23 @@ def cmd_apply(agent: str | None):
     for adapter in adapters:
         added_allow = sum(adapter.add(ws, p, "allow") for p in allow)
         added_guard = sum(adapter.add(ws, p, adapter.guard_mode) for p in guard)
-        print(
+        added_paths = 0
+        for dp in declared_paths:
+            exp = Path(os.path.expanduser(os.path.expandvars(dp))).resolve()
+            if adapter.add_path(ws, exp, access="all", scope="user"):
+                added_paths += 1
+
+        msg = (
             f"[{adapter.name} ({adapter.scope})] allow: {added_allow} added, "
             f"{len(allow) - added_allow} already present; "
-            f"{adapter.guard_mode}: {added_guard} added",
-            file=sys.stderr,
+            f"{adapter.guard_mode}: {added_guard} added"
         )
+        if declared_paths:
+            msg += (
+                f"; paths: {added_paths} added, "
+                f"{len(declared_paths) - added_paths} already present"
+            )
+        print(msg, file=sys.stderr)
 
 
 def cmd_doctor(agent: str | None, stream=sys.stdout):
@@ -1383,10 +1887,10 @@ def read_patterns(args: list[str]) -> list[str]:
     return args
 
 
-def cmd_add(patterns: list[str], mode: str, agent: str | None):
+def cmd_cmd_add(patterns: list[str], mode: str, agent: str | None):
     if not patterns:
-        print("permission add: pattern required", file=sys.stderr)
-        print("Try 'permission add --help' for more information.", file=sys.stderr)
+        print("permission cmd add: pattern required", file=sys.stderr)
+        print("Try 'permission cmd add --help' for more information.", file=sys.stderr)
         sys.exit(1)
     ws = get_workspace_root()
     for adapter in require_adapters(agent, ws):
@@ -1403,10 +1907,10 @@ def cmd_add(patterns: list[str], mode: str, agent: str | None):
                 )
 
 
-def cmd_remove(patterns: list[str], agent: str | None):
+def cmd_cmd_remove(patterns: list[str], agent: str | None):
     if not patterns:
-        print("permission remove: pattern required", file=sys.stderr)
-        print("Try 'permission remove --help' for more information.", file=sys.stderr)
+        print("permission cmd remove: pattern required", file=sys.stderr)
+        print("Try 'permission cmd remove --help' for more information.", file=sys.stderr)
         sys.exit(1)
     ws = get_workspace_root()
     for adapter in require_adapters(agent, ws):
@@ -1426,7 +1930,7 @@ def cmd_remove(patterns: list[str], agent: str | None):
                 )
 
 
-def cmd_list(agent: str | None):
+def cmd_cmd_list(agent: str | None):
     ws = get_workspace_root()
     has_any = False
     for adapter in select_adapters(agent, ws):
@@ -1444,43 +1948,136 @@ def cmd_list(agent: str | None):
                     print(f"    {p}")
         has_any = True
     if not has_any:
+        print("No command permission rules configured.", file=sys.stderr)
+
+
+def cmd_path_add(
+    raw_paths: list[str], access: str, scope: str, agent: str | None
+):
+    if not raw_paths:
+        print("permission path add: path required", file=sys.stderr)
+        print("Try 'permission path add --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+    ws = get_workspace_root()
+    adapters = require_adapters(agent, ws)
+    for p in raw_paths:
+        expanded = Path(os.path.expanduser(os.path.expandvars(p))).resolve()
+        for adapter in adapters:
+            if adapter.add_path(ws, expanded, access=access, scope=scope):
+                print(
+                    f"[{adapter.name} ({scope})] granted {access}: {clean_p(expanded)}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[{adapter.name} ({scope})] already granted: {clean_p(expanded)}",
+                    file=sys.stderr,
+                )
+
+
+def cmd_path_remove(raw_paths: list[str], scope: str, agent: str | None):
+    if not raw_paths:
+        print("permission path remove: path required", file=sys.stderr)
+        print("Try 'permission path remove --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+    ws = get_workspace_root()
+    adapters = require_adapters(agent, ws)
+    for p in raw_paths:
+        expanded = Path(os.path.expanduser(os.path.expandvars(p))).resolve()
+        for adapter in adapters:
+            if adapter.remove_path(ws, expanded, scope=scope):
+                print(
+                    f"[{adapter.name} ({scope})] removed path: {clean_p(expanded)}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[{adapter.name} ({scope})] path not found: {clean_p(expanded)}",
+                    file=sys.stderr,
+                )
+
+
+def cmd_path_list(agent: str | None):
+    ws = get_workspace_root()
+    has_any = False
+    for adapter in select_adapters(agent, ws):
+        p_list = adapter.paths(ws)
+        if not p_list:
+            continue
+        print(f"[{adapter.name} ({adapter.scope})]")
+        print("  paths:")
+        for item in p_list:
+            print(
+                f"    {clean_p(item['path'])} ({item['access']}) [{item['scope']}]"
+            )
+        has_any = True
+    if not has_any:
+        print("No path permission rules configured.", file=sys.stderr)
+
+
+def cmd_list(agent: str | None):
+    ws = get_workspace_root()
+    has_any = False
+    for adapter in select_adapters(agent, ws):
+        rules = adapter.rules(ws) if adapter.is_initialized(ws) else {}
+        p_list = adapter.paths(ws)
+        has_rules = any(rules.get(m) for m in MODES)
+        if not has_rules and not p_list:
+            continue
+        print(f"[{adapter.name} ({adapter.scope})]")
+        if has_rules:
+            for mode in MODES:
+                patterns = rules.get(mode)
+                if patterns:
+                    print(f"  {mode}:")
+                    for p in patterns:
+                        print(f"    {p}")
+        if p_list:
+            print("  paths:")
+            for item in p_list:
+                print(
+                    f"    {clean_p(item['path'])} ({item['access']}) [{item['scope']}]"
+                )
+        has_any = True
+    if not has_any:
         print("No permission rules configured.", file=sys.stderr)
 
 
-def cmd_clean(agent: str | None):
+def cmd_clean(kind: str, agent: str | None):
     ws = get_workspace_root()
     cleaned = False
     for adapter in select_adapters(agent, ws):
-        if adapter.is_initialized(ws):
-            adapter.clean(ws)
-            cleaned = True
+        adapter.clean(ws, kind=kind)
+        cleaned = True
     if not cleaned:
         print("clean: nothing to do", file=sys.stderr)
 
 
 HELP_MAIN = """Usage: permission <command> [arguments]
 
-Manage agent tool permissions (allow/deny/ask rules) across all detected
-local agents. Rules are written as clean command patterns (e.g. "git show");
-each agent backend translates them to its native syntax. Scope and meaning
-follow each agent's own configuration model, so the same rule can grant
-different things to different agents (see Agents below).
+Manage agent tool and filesystem permissions across all detected local
+agents (Jetski CLI & Web, Antigravity, Claude Code, and Codex).
+
+Namespaces:
+  cmd add PATTERN...       Add command patterns to allowlist (--deny / --ask)
+  cmd remove PATTERN...    Remove command patterns (alias: rm)
+  cmd list                 List command rules per agent (alias: ls)
+
+  path add PATH...         Grant access to filesystem directories (--ro for read-only)
+  path remove PATH...      Revoke filesystem directory access (alias: rm)
+  path list                List granted paths per agent (alias: ls)
 
 Commands:
-  add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
-                     for the other lists); 'add -' reads patterns from stdin
-  remove PATTERN...  Remove rule patterns from all lists (alias: rm)
-  list               List permission rules per agent (alias: ls)
-  apply              Pre-approve the safe commands declared by this
-                     workspace's installed skills (idempotent)
-  clean              Clear all configured permission rules
-  doctor             Report missing or drifted rules (read-only)
+  list                     List all permission rules (commands and paths; alias: ls)
+  apply                    Pre-approve safe commands and paths from installed skills
+  clean [cmd|path]         Clear configured permission rules (default: all)
+  doctor                   Report missing or drifted rules across commands and paths
 
 Options:
-  --agent NAME       Operate on a single agent backend
-                     (agy, jetski, jetski-web, claude, codex)
-  --help             Display this help message and exit
-  --plugin-template  Output a template/documentation for creating a Permission plugin
+  --agent NAME             Operate on a single agent backend
+                           (agy, jetski, jetski-web, claude, codex)
+  --help                   Display this help message and exit
+  --plugin-template        Output a template/documentation for creating a Permission plugin
 
 Agents:
   agy, jetski,       Antigravity / Jetski CLI & Web. User-wide: rules live in
@@ -1490,28 +2087,37 @@ Agents:
                      jetski when ~/.gemini/config exists) and apply to every
                      workspace. Command patterns become command(regex:...)
                      rules; native resource grants (e.g. read_file(*)) are
-                     preserved verbatim.
-  claude             Claude Code. Workspace-local: rules live in the untracked
-                     .claude/settings.local.json. Patterns become
-                     Bash(PATTERN:*) prefix rules; deny beats ask beats allow.
-                     'allow' only skips the approval prompt and leaves Claude
-                     Code's sandbox settings unchanged.
+                     preserved verbatim. Path grants become read_file/write_file
+                     grants and enable allowNonWorkspaceAccess.
+  claude             Claude Code. Workspace-local for commands (.claude/settings.local.json);
+                     path grants update additionalDirectories and Read/Write rules
+                     (workspace-local or user-wide via --global in ~/.claude/settings.json).
+                     Patterns become Bash(PATTERN:*) prefix rules; deny beats ask
+                     beats allow. 'allow' only skips the approval prompt and
+                     leaves Claude Code's sandbox settings unchanged.
   codex              Codex CLI. Workspace-local: rules live in the untracked
                      .codex/rules/permission.rules, which Codex loads only for
-                     trusted projects. Patterns become prefix_rule() token
-                     prefixes; ask and deny map to Codex's prompt and
+                     trusted projects. Path grants update
+                     ~/.gemini/trustedFolders.json. Patterns become prefix_rule()
+                     token prefixes; ask and deny map to Codex's prompt and
                      forbidden, and the most restrictive match wins. 'allow'
                      also runs the command outside the Codex sandbox without
-                     prompting, a stronger grant than the other agents give.
+                     prompting, a stronger grant than the other agents give."""
 
-Claude Code and Codex match the command name as typed, so a rule for "tool"
-does not cover an invocation of /path/to/tool."""
+HELP_CMD = """Usage: permission cmd <action> [options] [arguments]
 
-HELP_ADD = """Usage: permission add [options] PATTERN...
+Manage executable tool permissions (allow, deny, and ask command rules).
+
+Actions:
+  add PATTERN...     Add command patterns to the allowlist (--deny / --ask)
+  remove PATTERN...  Remove command patterns from all lists (alias: rm)
+  list               List command rules per agent (alias: ls)"""
+
+HELP_CMD_ADD = """Usage: permission cmd add [options] PATTERN...
 
 Add tool permission rules. PATTERN is a clean command pattern such as
 "git show" or "packagename uninstall"; each agent backend translates it
-to its native rule syntax. Use 'add -' to read one pattern per line
+to its native rule syntax. Use 'cmd add -' to read one pattern per line
 from stdin.
 
 Options:
@@ -1521,7 +2127,7 @@ Options:
                      (agy, jetski, jetski-web, claude, codex)
   --help             Display this help message and exit"""
 
-HELP_REMOVE = """Usage: permission remove PATTERN...
+HELP_CMD_REMOVE = """Usage: permission cmd remove PATTERN...
 
 Remove tool permission rules from all lists (alias: rm).
 
@@ -1530,9 +2136,62 @@ Options:
                      (agy, jetski, jetski-web, claude, codex)
   --help             Display this help message and exit"""
 
+HELP_CMD_LIST = """Usage: permission cmd list
+
+List command permission rules per agent (alias: ls).
+
+Options:
+  --agent NAME       Operate on a single agent backend
+                     (agy, jetski, jetski-web, claude, codex)
+  --help             Display this help message and exit"""
+
+HELP_PATH = """Usage: permission path <action> [options] [arguments]
+
+Manage filesystem path permissions (directory read/write grants).
+
+Actions:
+  add PATH...        Grant access to filesystem directories
+  remove PATH...     Revoke directory access (alias: rm)
+  list               List granted paths per agent (alias: ls)"""
+
+HELP_PATH_ADD = """Usage: permission path add [options] PATH...
+
+Grant agent read and write access to directories. Paths are canonicalized
+automatically. For Jetski/Agy, this adds read_file and write_file grants
+and enables allowNonWorkspaceAccess. For Claude Code, it updates
+additionalDirectories. For Codex, it marks the folder as trusted.
+
+Options:
+  --ro, --read-only  Grant read-only access (default: read and write)
+  --workspace        Scope grant to the current workspace (default: user-wide)
+  --global           Scope grant user-wide (default)
+  --agent NAME       Operate on a single agent backend
+                     (agy, jetski, jetski-web, claude, codex)
+  --help             Display this help message and exit"""
+
+HELP_PATH_REMOVE = """Usage: permission path remove PATH...
+
+Revoke directory access grants across agents (alias: rm).
+
+Options:
+  --workspace        Target workspace-scoped grants
+  --global           Target user-wide grants (default)
+  --agent NAME       Operate on a single agent backend
+                     (agy, jetski, jetski-web, claude, codex)
+  --help             Display this help message and exit"""
+
+HELP_PATH_LIST = """Usage: permission path list
+
+List granted filesystem paths per agent (alias: ls).
+
+Options:
+  --agent NAME       Operate on a single agent backend
+                     (agy, jetski, jetski-web, claude, codex)
+  --help             Display this help message and exit"""
+
 HELP_LIST = """Usage: permission list
 
-List permission rules per agent (alias: ls).
+List all permission rules (commands and paths) per agent (alias: ls).
 
 Options:
   --agent NAME       Operate on a single agent backend
@@ -1541,25 +2200,20 @@ Options:
 
 HELP_APPLY = """Usage: permission apply
 
-Pre-approve the safe commands declared by this workspace's installed
-skills (idempotent). Every executable in an installed skill's scripts/
-directory is allowed, except entries in the skill's permissions/unsafe
-file: whole-script entries are skipped entirely (they prompt normally),
-and subcommand entries (e.g. "packagename uninstall") are guarded with
-an 'ask' rule. Note: Antigravity / Jetski pre-approvals are applied user-wide;
-Claude Code and Codex pre-approvals are applied to the local workspace. A Codex
-allow rule runs its matching command outside the sandbox without prompting;
-see 'permission --help' for how each agent interprets rules.
+Pre-approve the safe commands and paths declared by this workspace's
+installed skills (idempotent). Every executable in an installed skill's
+scripts/ directory is allowed (unless in permissions/unsafe), and all
+directories listed in permissions/paths are granted.
 
 Options:
   --agent NAME       Operate on a single agent backend
                      (agy, jetski, jetski-web, claude, codex)
   --help             Display this help message and exit"""
 
-HELP_CLEAN = """Usage: permission clean
+HELP_CLEAN = """Usage: permission clean [cmd|path]
 
-Clear all permission rules for detected agents (workspace-local for Claude Code
-and Codex, user-wide for Antigravity / Jetski).
+Clear permission rules for detected agents. Clears both command and path
+rules by default, or limits to 'cmd' or 'path' if specified.
 
 Options:
   --agent NAME       Operate on a single agent backend
@@ -1569,8 +2223,8 @@ Options:
 HELP_DOCTOR = """Usage: permission doctor
 
 Compare each agent's current rules against what 'permission apply' would
-configure and report anything missing (read-only). Exits non-zero if
-problems are found.
+configure, audit non-workspace access settings, and report anything missing
+(read-only). Exits non-zero if problems are found.
 
 Options:
   --agent NAME       Operate on a single agent backend
@@ -1578,9 +2232,30 @@ Options:
   --help             Display this help message and exit"""
 
 SUBCOMMAND_HELP = {
-    "add": HELP_ADD,
-    "remove": HELP_REMOVE,
-    "rm": HELP_REMOVE,
+    "cmd": HELP_CMD,
+    "command": HELP_CMD,
+    "cmd add": HELP_CMD_ADD,
+    "command add": HELP_CMD_ADD,
+    "cmd remove": HELP_CMD_REMOVE,
+    "command remove": HELP_CMD_REMOVE,
+    "cmd rm": HELP_CMD_REMOVE,
+    "command rm": HELP_CMD_REMOVE,
+    "cmd list": HELP_CMD_LIST,
+    "command list": HELP_CMD_LIST,
+    "cmd ls": HELP_CMD_LIST,
+    "command ls": HELP_CMD_LIST,
+    "path": HELP_PATH,
+    "dir": HELP_PATH,
+    "path add": HELP_PATH_ADD,
+    "dir add": HELP_PATH_ADD,
+    "path remove": HELP_PATH_REMOVE,
+    "dir remove": HELP_PATH_REMOVE,
+    "path rm": HELP_PATH_REMOVE,
+    "dir rm": HELP_PATH_REMOVE,
+    "path list": HELP_PATH_LIST,
+    "dir list": HELP_PATH_LIST,
+    "path ls": HELP_PATH_LIST,
+    "dir ls": HELP_PATH_LIST,
     "list": HELP_LIST,
     "ls": HELP_LIST,
     "apply": HELP_APPLY,
@@ -1623,57 +2298,178 @@ def register(api):
 
     # Help handling: bare invocation, 'help [cmd]', '--help'/'-h' anywhere.
     if not argv or argv[0] in ("--help", "-h", "help"):
-        topic = argv[1] if len(argv) > 1 else None
+        topic = " ".join(argv[1:]) if len(argv) > 1 else None
         print(SUBCOMMAND_HELP.get(topic, HELP_MAIN))
         sys.exit(0)
 
-    cmd = argv[0]
-    args = argv[1:]
-    if "--help" in args or "-h" in args or "help" in args:
-        print(SUBCOMMAND_HELP.get(cmd, HELP_MAIN))
+    ns = argv[0]
+    rest = argv[1:]
+
+    # Legacy usage errors
+    if ns == "add":
+        print(
+            "permission: error: 'add' requires a namespace ('cmd' or 'path').\n"
+            "  To manage executable commands:   permission cmd add <pattern...>\n"
+            "  To manage filesystem paths:      permission path add <path...>",
+            file=sys.stderr,
+        )
+        print("Try 'permission --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+    if ns in ("remove", "rm"):
+        print(
+            "permission: error: 'remove' requires a namespace ('cmd' or 'path').\n"
+            "  To remove executable commands:   permission cmd remove <pattern...>\n"
+            "  To remove filesystem paths:      permission path remove <path...>",
+            file=sys.stderr,
+        )
+        print("Try 'permission --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Namespace: cmd ---
+    if ns in ("cmd", "command"):
+        if not rest or rest[0] in ("--help", "-h", "help"):
+            topic = f"{ns} {rest[1]}" if len(rest) > 1 else ns
+            print(SUBCOMMAND_HELP.get(topic, HELP_CMD))
+            sys.exit(0)
+        action = rest[0]
+        cmd_args = rest[1:]
+        if "--help" in cmd_args or "-h" in cmd_args or "help" in cmd_args:
+            print(SUBCOMMAND_HELP.get(f"{ns} {action}", HELP_CMD))
+            sys.exit(0)
+        if action not in ("add", "remove", "rm", "list", "ls"):
+            usage_error(ns, f"unknown command '{action}'")
+
+        mode = "allow"
+        agent = None
+        patterns = []
+        i = 0
+        while i < len(cmd_args):
+            arg = cmd_args[i]
+            if arg == "--deny" and action == "add":
+                mode = "deny"
+            elif arg == "--ask" and action == "add":
+                mode = "ask"
+            elif arg == "--agent":
+                if i + 1 >= len(cmd_args):
+                    usage_error(f"{ns} {action}", "--agent requires a value")
+                agent = cmd_args[i + 1]
+                i += 1
+            elif arg.startswith("--agent="):
+                agent = arg.split("=", 1)[1]
+            elif arg.startswith("-") and arg != "-":
+                usage_error(f"{ns} {action}", f"unrecognized option '{arg}'")
+            else:
+                patterns.append(arg)
+            i += 1
+
+        if action in ("list", "ls") and patterns:
+            usage_error(f"{ns} {action}", f"unexpected argument '{patterns[0]}'")
+
+        if action == "add":
+            cmd_cmd_add(read_patterns(patterns), mode, agent)
+        elif action in ("remove", "rm"):
+            cmd_cmd_remove(read_patterns(patterns), agent)
+        elif action in ("list", "ls"):
+            cmd_cmd_list(agent)
+        return
+
+    # --- Namespace: path ---
+    if ns in ("path", "dir"):
+        if not rest or rest[0] in ("--help", "-h", "help"):
+            topic = f"{ns} {rest[1]}" if len(rest) > 1 else ns
+            print(SUBCOMMAND_HELP.get(topic, HELP_PATH))
+            sys.exit(0)
+        action = rest[0]
+        path_args = rest[1:]
+        if "--help" in path_args or "-h" in path_args or "help" in path_args:
+            print(SUBCOMMAND_HELP.get(f"{ns} {action}", HELP_PATH))
+            sys.exit(0)
+        if action not in ("add", "remove", "rm", "list", "ls"):
+            usage_error(ns, f"unknown command '{action}'")
+
+        access = "all"
+        scope = "user"
+        agent = None
+        raw_paths = []
+        i = 0
+        while i < len(path_args):
+            arg = path_args[i]
+            if arg in ("--ro", "--read-only") and action == "add":
+                access = "read-only"
+            elif arg in ("--rw", "--read-write") and action == "add":
+                access = "all"
+            elif arg in ("--workspace", "--local"):
+                scope = "workspace"
+            elif arg in ("--global", "--user"):
+                scope = "user"
+            elif arg == "--agent":
+                if i + 1 >= len(path_args):
+                    usage_error(f"{ns} {action}", "--agent requires a value")
+                agent = path_args[i + 1]
+                i += 1
+            elif arg.startswith("--agent="):
+                agent = arg.split("=", 1)[1]
+            elif arg.startswith("-") and arg != "-":
+                usage_error(f"{ns} {action}", f"unrecognized option '{arg}'")
+            else:
+                raw_paths.append(arg)
+            i += 1
+
+        if action in ("list", "ls") and raw_paths:
+            usage_error(f"{ns} {action}", f"unexpected argument '{raw_paths[0]}'")
+
+        if action == "add":
+            cmd_path_add(read_patterns(raw_paths), access, scope, agent)
+        elif action in ("remove", "rm"):
+            cmd_path_remove(read_patterns(raw_paths), scope, agent)
+        elif action in ("list", "ls"):
+            cmd_path_list(agent)
+        return
+
+    # --- Top-level commands ---
+    if ns not in ("list", "ls", "apply", "clean", "doctor"):
+        usage_error(None, f"unknown command '{ns}'")
+
+    if "--help" in rest or "-h" in rest or "help" in rest:
+        print(SUBCOMMAND_HELP.get(ns, HELP_MAIN))
         sys.exit(0)
 
-    if cmd not in ("add", "remove", "rm", "list", "ls", "apply", "clean", "doctor"):
-        usage_error(None, f"unknown command '{cmd}'")
-
-    # Parse options shared by all subcommands.
-    mode = "allow"
     agent = None
-    patterns = []
+    kind = "all"
+    positional = []
     i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg == "--deny" and cmd == "add":
-            mode = "deny"
-        elif arg == "--ask" and cmd == "add":
-            mode = "ask"
-        elif arg == "--agent":
-            if i + 1 >= len(args):
-                usage_error(cmd, "--agent requires a value")
-            agent = args[i + 1]
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--agent":
+            if i + 1 >= len(rest):
+                usage_error(ns, "--agent requires a value")
+            agent = rest[i + 1]
             i += 1
         elif arg.startswith("--agent="):
             agent = arg.split("=", 1)[1]
         elif arg.startswith("-") and arg != "-":
-            usage_error(cmd, f"unrecognized option '{arg}'")
+            usage_error(ns, f"unrecognized option '{arg}'")
         else:
-            patterns.append(arg)
+            positional.append(arg)
         i += 1
 
-    if cmd in ("list", "ls", "apply", "clean", "doctor") and patterns:
-        usage_error(cmd, f"unexpected argument '{patterns[0]}'")
+    if ns in ("list", "ls", "apply", "doctor") and positional:
+        usage_error(ns, f"unexpected argument '{positional[0]}'")
 
-    if cmd == "add":
-        cmd_add(read_patterns(patterns), mode, agent)
-    elif cmd in ("remove", "rm"):
-        cmd_remove(read_patterns(patterns), agent)
-    elif cmd in ("list", "ls"):
+    if ns == "clean":
+        if positional:
+            if positional[0] in ("cmd", "path", "all"):
+                kind = positional[0]
+            else:
+                usage_error("clean", f"unknown clean target '{positional[0]}' (expected 'cmd' or 'path')")
+            if len(positional) > 1:
+                usage_error("clean", f"unexpected argument '{positional[1]}'")
+        cmd_clean(kind, agent)
+    elif ns in ("list", "ls"):
         cmd_list(agent)
-    elif cmd == "apply":
+    elif ns == "apply":
         cmd_apply(agent)
-    elif cmd == "clean":
-        cmd_clean(agent)
-    elif cmd == "doctor":
+    elif ns == "doctor":
         cmd_doctor(agent)
 
 
