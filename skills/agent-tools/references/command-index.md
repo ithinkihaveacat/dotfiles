@@ -255,7 +255,7 @@ options:
   --max-size N          Longest-edge resize cap, in px (default: 768; built-
                         ins may use a smaller default)
   --model MODEL         Gemini model id (default: $GEMINI_MODEL if set, else
-                        gemini-3.5-flash-lite)
+                        gemini-flash-lite-latest)
   --no-cache            Bypass the resize cache
   --recursive           Recurse into directory arguments
   --schema SCHEMA       llm-style schema_dsl, e.g. 'has_bed bool, count int'.
@@ -394,7 +394,7 @@ Options:
   --maps                Use Google Maps grounding instead of Google Search. (Cannot be combined with --code).
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
-  --model MODEL         Gemini model to use (default: gemini-pro-latest).
+  --model MODEL         Gemini model to use (default: gemini-4-argon).
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
@@ -471,7 +471,7 @@ Options:
   --no-inline         Inline nothing; the model reads files on demand.
   -n, --dry-run       Print the resolved policy and payload, then exit.
   --force             Bypass safety checks (dirty worktree, 1MB limit, etc.).
-  --model MODEL       Gemini model to use (default: gemini-pro-latest).
+  --model MODEL       Gemini model to use (default: gemini-4-argon).
   --thinking LEVEL    Thinking level: 'high', 'low', 'none' (default: 'high').
   --search, --no-search
                       Google Search grounding for external context (default: on).
@@ -609,7 +609,7 @@ Input:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-pro-latest)
+  --model MODEL  Gemini model to use (default: gemini-4-argon)
 
 Environment:
   GEMINI_API_KEY   Required. Your Gemini API key.
@@ -817,7 +817,7 @@ Arguments:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-3.5-flash-lite)
+  --model MODEL  Gemini model to use (default: gemini-flash-lite-latest)
   -v, --verbose  Output "true" or "false" to stderr
 
 Environment:
@@ -896,8 +896,8 @@ Extract a structured purchase record from a receipt email (stdin -> JSON).
 
 options:
   -h, --help     Show this help message and exit
-  --model MODEL  Gemini model id (default: $GEMINI_MODEL if set, else
-                 gemini-3.5-flash-lite)
+  --model MODEL  Gemini model id (default: $GEMINI_MODEL if set, else gemini-
+                 flash-lite-latest)
   --max-chars N  Truncate email text to N chars before the model call
                  (default: 12000)
   --text-only    Print the stripped email text instead of calling the model
@@ -942,7 +942,7 @@ Input:
 
 Options:
   --help         Display this help message and exit
-  --model MODEL  Gemini model to use (default: gemini-3.5-flash-lite)
+  --model MODEL  Gemini model to use (default: gemini-flash-lite-latest)
 
 Environment:
   GEMINI_API_KEY       Required. Your Gemini API key.
