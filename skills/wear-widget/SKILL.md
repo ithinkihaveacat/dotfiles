@@ -415,9 +415,17 @@ ______________________________________________________________________
       1. R8 obfuscates the `AssociateWithGlanceWearWidget` annotation type name,
          so grepping for the unobfuscated string produces false negatives on
          minified APKs.
-    - Instead, inspect each `<service>` class block in `dexdump -d -a` by its
-      `AndroidManifest.xml` class descriptor (`Lcom/example/MyWidgetService;`,
-      which R8 cannot obfuscate):
+    - Instead, inspect each `<service>` class by its `AndroidManifest.xml` class
+      descriptor (`Lcom/example/MyWidgetService;`, which R8 cannot obfuscate).
+      Prefer smali: disassemble every DEX file of every split with the `apk`
+      skill's `apk-smali disassemble`, then read the service's class annotations
+      with `apk-smali show annotations TREE com.example.MyWidgetService` and
+      locate callers with
+      `apk-smali find TREE --calls '->triggerUpdate' --methods` (repeat for
+      `triggerUpdateAll` and `fetchActiveWidgets`; `--extends` lists the
+      `GlanceWearWidget` subclasses). If neither baksmali nor apktool is
+      available, fall back to the service's class block in `dexdump -d -a`.
+      Either way:
       1. **Check whether programmatic update APIs are called:** If the app never
          calls `triggerUpdate`, `triggerUpdateAll`, or `fetchActiveWidgets` (for
          example, a static widget or an app that triggers updates through
