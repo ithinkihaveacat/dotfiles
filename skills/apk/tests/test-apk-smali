@@ -1,0 +1,587 @@
+#!/usr/bin/env bash
+
+# Tests: skills/apk/tests/test-apk-smali
+#
+# Hermetic tests for apk-smali. 'find' and 'show' run against the hand-written
+# smali fixtures (as a directory and as a ZIP archive); 'disassemble' runs
+# against mock baksmali and apktool binaries that turn fake DEX files into
+# smali, so no Android SDK, Java, or network access is needed.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/apk-smali"
+FIXTURE="$DIR/fixtures/apk-smali/smali"
+
+TMPDIR_TEST=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_TEST"' EXIT
+STDOUT="$TMPDIR_TEST/stdout"
+STDERR="$TMPDIR_TEST/stderr"
+MOCK_LOG="$TMPDIR_TEST/mock.log"
+SCRIPT_TMP="$TMPDIR_TEST/tmp"
+WORK="$TMPDIR_TEST/work"
+mkdir -p "$SCRIPT_TMP" "$WORK"
+
+PYTHON=$(command -v python3)
+UV=$(command -v uv)
+
+# PATH directories: BASE_BIN holds only what running the script needs (uv and
+# python3), so baksmali or apktool installed on the host cannot leak in.
+BASE_BIN="$TMPDIR_TEST/base-bin"
+BAKSMALI_BIN="$TMPDIR_TEST/baksmali-bin"
+APKTOOL_BIN="$TMPDIR_TEST/apktool-bin"
+mkdir -p "$BASE_BIN" "$BAKSMALI_BIN" "$APKTOOL_BIN"
+ln -s "$UV" "$BASE_BIN/uv"
+ln -s "$PYTHON" "$BASE_BIN/python3"
+
+# A fake DEX file is the DEX magic followed by "class DESCRIPTOR TAG" lines.
+# Both mocks write one .smali file per class, recording TAG in a comment so
+# tests can tell which DEX file a class came from.
+cat <<'EOF' >"$BAKSMALI_BIN/baksmali"
+#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open(os.environ["MOCK_LOG"], "a") as log:
+    log.write("baksmali " + " ".join(os.path.basename(a) for a in args) + "\n")
+if os.environ.get("MOCK_BAKSMALI_FAIL") == "1":
+    print("mock baksmali: invalid dex", file=sys.stderr)
+    sys.exit(1)
+assert args[0] in ("d", "disassemble"), args
+out = args[args.index("-o") + 1]
+data = open(args[-1], "rb").read()
+assert data.startswith(b"dex\n"), "not a dex file"
+for line in data.decode().splitlines():
+    if not line.startswith("class "):
+        continue
+    _, desc, tag = line.split()
+    path = os.path.join(out, desc[1:-1] + ".smali")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(f".class public {desc}\n.super Ljava/lang/Object;\n# tag {tag}\n")
+EOF
+
+cat <<'EOF' >"$APKTOOL_BIN/apktool"
+#!/usr/bin/env python3
+import os, re, sys, zipfile
+args = sys.argv[1:]
+with open(os.environ["MOCK_LOG"], "a") as log:
+    log.write("apktool " + " ".join(os.path.basename(a) for a in args) + "\n")
+assert args[0] == "d" and "--no-res" in args, args
+out = args[args.index("-o") + 1]
+os.makedirs(out, exist_ok=True)
+open(os.path.join(out, "apktool.yml"), "w").write("version: mock\n")
+with zipfile.ZipFile(args[-1]) as apk:
+    for name in apk.namelist():
+        m = re.match(r"^classes(\d*)\.dex$", name)
+        if not m:
+            continue
+        n = int(m.group(1) or 1)
+        root = "smali" if n == 1 else f"smali_classes{n}"
+        for line in apk.read(name).decode().splitlines():
+            if not line.startswith("class "):
+                continue
+            _, desc, tag = line.split()
+            path = os.path.join(out, root, desc[1:-1] + ".smali")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(f".class public {desc}\n.super Ljava/lang/Object;\n# tag {tag}\n")
+EOF
+chmod +x "$BAKSMALI_BIN/baksmali" "$APKTOOL_BIN/apktool"
+
+# mkzip OUT ENTRY=CONTENT...: CONTENT may contain \n escapes; a CONTENT of
+# @FILE copies FILE.
+mkzip() {
+  "$PYTHON" - "$@" <<'EOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    for spec in sys.argv[2:]:
+        name, _, content = spec.partition("=")
+        if content.startswith("@"):
+            z.write(content[1:], name)
+        else:
+            z.writestr(name, content.encode().decode("unicode_escape"))
+EOF
+}
+
+dex() { # dex "Lcom/example/Foo; tag" ... -> fake DEX content
+  local out='dex\n035' line
+  for line in "$@"; do out+="\\nclass $line"; done
+  printf '%s' "$out"
+}
+
+TESTNUM=0
+report() {
+  echo "# exit status: ${RC:-}"
+  sed 's/^/# stdout: /' "$STDOUT" 2>/dev/null || true
+  sed 's/^/# stderr: /' "$STDERR" 2>/dev/null || true
+}
+ok() {
+  TESTNUM=$((TESTNUM + 1))
+  echo "ok $TESTNUM - $1"
+}
+not_ok() {
+  TESTNUM=$((TESTNUM + 1))
+  echo "not ok $TESTNUM - $1"
+  report
+}
+
+# run PATHDIRS ARGS...: run apk-smali with PATH limited to PATHDIRS.
+run() {
+  local path="$1"
+  shift
+  RC=0
+  : >"$MOCK_LOG"
+  PATH="$path" TMPDIR="$SCRIPT_TMP" MOCK_LOG="$MOCK_LOG" \
+    "$BIN" "$@" >"$STDOUT" 2>"$STDERR" || RC=$?
+  OUT=$(<"$STDOUT")
+  ERR=$(<"$STDERR")
+}
+
+NOTOOLS="$BASE_BIN"
+WITH_BAKSMALI="$BAKSMALI_BIN:$APKTOOL_BIN:$BASE_BIN"
+WITH_APKTOOL="$APKTOOL_BIN:$BASE_BIN"
+
+leftover_temp() {
+  compgen -G "$SCRIPT_TMP/apk-smali*" >/dev/null
+}
+
+SMALI_ZIP="$WORK/fixtures-smali.zip"
+(cd "$FIXTURE/.." && "$PYTHON" -m zipfile -c "$SMALI_ZIP" smali)
+
+# -----------------------------------------------------------------------------
+# Help and usage
+# -----------------------------------------------------------------------------
+
+run "$NOTOOLS" --help
+if [[ $RC == 0 && $OUT == *"Usage: apk-smali COMMAND"* && $OUT == *"disassemble"* ]]; then
+  ok "--help prints usage and exits 0"
+else
+  not_ok "--help prints usage and exits 0"
+fi
+
+run "$NOTOOLS" -h
+H=$OUT
+run "$NOTOOLS"
+if [[ $RC == 0 && $OUT == "$H" && -n $H ]]; then
+  ok "-h and bare invocation match --help"
+else
+  not_ok "-h and bare invocation match --help"
+fi
+
+run "$NOTOOLS" frobnicate
+if [[ $RC == 1 && $ERR == *"apk-smali: unknown command 'frobnicate'"* ]]; then
+  ok "unknown command exits 1 with a prefixed error"
+else
+  not_ok "unknown command exits 1 with a prefixed error"
+fi
+
+run "$NOTOOLS" find
+if [[ $RC == 2 && $ERR == *"Try 'apk-smali find --help'"* && $ERR == *"Examples:"* ]]; then
+  ok "find without arguments prints concise help and exits 2"
+else
+  not_ok "find without arguments prints concise help and exits 2"
+fi
+
+run "$NOTOOLS" show method --help
+if [[ $RC == 0 && $OUT == *"--depth N"* ]]; then
+  ok "show method --help exits 0"
+else
+  not_ok "show method --help exits 0"
+fi
+
+run "$NOTOOLS" help find
+if [[ $RC == 0 && $OUT == *"Usage: apk-smali find"* ]]; then
+  ok "help COMMAND prints command help"
+else
+  not_ok "help COMMAND prints command help"
+fi
+
+run "$NOTOOLS" find "$FIXTURE"
+if [[ $RC == 2 && $ERR == *"apk-smali find: a predicate is required"* ]]; then
+  ok "find without a predicate exits 2"
+else
+  not_ok "find without a predicate exits 2"
+fi
+
+run "$NOTOOLS" show method "$FIXTURE" com.example.MyService onCreate --depth x
+if [[ $RC == 1 && $ERR == *"apk-smali show method: --depth"* ]]; then
+  ok "show method rejects a non-numeric --depth"
+else
+  not_ok "show method rejects a non-numeric --depth"
+fi
+
+# -----------------------------------------------------------------------------
+# find and show, against a directory and a ZIP archive of the same fixtures
+# -----------------------------------------------------------------------------
+
+for TREE in "$FIXTURE" "$SMALI_ZIP"; do
+  if [[ $TREE == *.zip ]]; then KIND=zip; else KIND=dir; fi
+
+  run "$NOTOOLS" find "$TREE" --declares 'onTrimMemory(I)V'
+  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+    ok "[$KIND] find --declares matches an override"
+  else
+    not_ok "[$KIND] find --declares matches an override"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --declares onTrimMemory
+  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+    ok "[$KIND] find --declares accepts a bare method name"
+  else
+    not_ok "[$KIND] find --declares accepts a bare method name"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --calls '->onTrimMemory'
+  if [[ $RC == 0 && $OUT == $'Lcom/example/MyService;\nLcom/example/OtherWidgetService;' ]]; then
+    ok "[$KIND] find --calls without a class matches any receiver"
+  else
+    not_ok "[$KIND] find --calls without a class matches any receiver"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --calls 'Landroid/app/Service;->onTrimMemory(I)V'
+  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+    ok "[$KIND] find --calls with a full target matches the invoke-super"
+  else
+    not_ok "[$KIND] find --calls with a full target matches the invoke-super"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --calls 'android.content.ComponentCallbacks2->onTrimMemory' --methods
+  if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;->forward(Landroid/content/ComponentCallbacks2;I)V" ]]; then
+    ok "[$KIND] find --calls --methods prints the calling method"
+  else
+    not_ok "[$KIND] find --calls --methods prints the calling method"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --annotated-with 'La/b;'
+  if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;" ]]; then
+    ok "[$KIND] find --annotated-with matches an obfuscated annotation type"
+  else
+    not_ok "[$KIND] find --annotated-with matches an obfuscated annotation type"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --annotated-with com.example.lib.AssociateWith
+  if [[ $RC == 0 && $OUT == "Lcom/example/MyWidgetService;" ]]; then
+    ok "[$KIND] find --annotated-with accepts a dotted class name"
+  else
+    not_ok "[$KIND] find --annotated-with accepts a dotted class name"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --extends 'Lcom/example/lib/WidgetService;'
+  if [[ $RC == 0 && $OUT == $'Lcom/example/MyWidgetService;\nLcom/example/OtherWidgetService;' ]]; then
+    ok "[$KIND] find --extends lists every direct subclass"
+  else
+    not_ok "[$KIND] find --extends lists every direct subclass"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --extends com.example.lib.WidgetService --annotated-with 'La/b;'
+  if [[ $RC == 0 && $OUT == "Lcom/example/OtherWidgetService;" ]]; then
+    ok "[$KIND] find combines predicates with AND"
+  else
+    not_ok "[$KIND] find combines predicates with AND"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --implements 'Ljava/lang/annotation/Annotation;'
+  if [[ $RC == 0 && $OUT == "La/b;" ]]; then
+    ok "[$KIND] find --implements matches .implements"
+  else
+    not_ok "[$KIND] find --implements matches .implements"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --annotated-with 'Lkotlin/Metadata;' --declares onTrimMemory
+  if [[ $RC == 0 && $OUT == "Lcom/example/MyService;" ]]; then
+    ok "[$KIND] find matches Kotlin metadata annotations"
+  else
+    not_ok "[$KIND] find matches Kotlin metadata annotations"
+  fi
+
+  run "$NOTOOLS" find "$TREE" --declares 'onLowMemory()V'
+  if [[ $RC == 1 && -z $OUT && -z $ERR ]]; then
+    ok "[$KIND] find exits 1 silently when nothing matches"
+  else
+    not_ok "[$KIND] find exits 1 silently when nothing matches"
+  fi
+
+  run "$NOTOOLS" show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+  if [[ $RC == 0 && $OUT == ".method public onTrimMemory(I)V"*".end method" &&
+    $OUT == *"invoke-super {p0, p1}, Landroid/app/Service;->onTrimMemory(I)V"* &&
+    $OUT != *".method private final trimCaches"* ]]; then
+    ok "[$KIND] show method prints exactly the method body"
+  else
+    not_ok "[$KIND] show method prints exactly the method body"
+  fi
+
+  run "$NOTOOLS" show method "$TREE" 'Lcom/example/MyService;' 'onTrimMemory(I)V' --depth 1
+  if [[ $RC == 0 && $OUT == *".method private final trimCaches(I)V"* &&
+    $OUT != *".method private final clearAll()V"* ]]; then
+    ok "[$KIND] show method --depth 1 adds directly called same-class methods"
+  else
+    not_ok "[$KIND] show method --depth 1 adds directly called same-class methods"
+  fi
+
+  run "$NOTOOLS" show method "$TREE" com.example.MyService onTrimMemory --depth 3
+  COUNT=$(grep -c '^\.method private final clearAll()V' "$STDOUT" || true)
+  if [[ $RC == 0 && $OUT == *".method private final clearAll()V"* && $COUNT == 1 &&
+    $OUT != *".method public onCreate()V"* ]]; then
+    ok "[$KIND] show method --depth follows calls recursively and deduplicates"
+  else
+    not_ok "[$KIND] show method --depth follows calls recursively and deduplicates"
+  fi
+
+  run "$NOTOOLS" show method "$TREE" com.example.MyService 'onLowMemory()V'
+  if [[ $RC == 1 && $ERR == *"apk-smali show method: Lcom/example/MyService;->onLowMemory()V: method not found"* ]]; then
+    ok "[$KIND] show method reports a missing method"
+  else
+    not_ok "[$KIND] show method reports a missing method"
+  fi
+
+  run "$NOTOOLS" show annotations "$TREE" com.example.MyWidgetService
+  if [[ $RC == 0 && $OUT == *".annotation runtime Lcom/example/lib/AssociateWith;"* &&
+    $OUT == *"value = Lcom/example/MyWidget;"* && $OUT != *"kotlin/Metadata"* &&
+    $OUT != *"Inject"* ]]; then
+    ok "[$KIND] show annotations prints class annotations and their values"
+  else
+    not_ok "[$KIND] show annotations prints class annotations and their values"
+  fi
+
+  run "$NOTOOLS" show annotations "$TREE" com.example.MyService
+  if [[ $RC == 0 && -z $OUT ]]; then
+    ok "[$KIND] show annotations hides kotlin/Metadata and dalvik annotations"
+  else
+    not_ok "[$KIND] show annotations hides kotlin/Metadata and dalvik annotations"
+  fi
+
+  run "$NOTOOLS" show annotations "$TREE" com.example.MyService --all
+  if [[ $RC == 0 && $OUT == *"Lkotlin/Metadata;"* && $OUT == *"Ldalvik/annotation/SourceDebugExtension;"* ]]; then
+    ok "[$KIND] show annotations --all includes compiler annotations"
+  else
+    not_ok "[$KIND] show annotations --all includes compiler annotations"
+  fi
+
+  run "$NOTOOLS" show annotations "$TREE" com.example.MyWidgetService --members
+  if [[ $RC == 0 && $OUT == *"# Lcom/example/MyWidgetService;->repository:Lcom/example/Repository;"* &&
+    $OUT == *"Ljavax/inject/Inject;"* &&
+    $OUT == *"# Lcom/example/MyWidgetService;->getWidget()Lcom/example/lib/Widget;"* &&
+    $OUT == *"VisibleForTesting"* && $OUT != *"NotNull"* ]]; then
+    ok "[$KIND] show annotations --members adds field and method annotations"
+  else
+    not_ok "[$KIND] show annotations --members adds field and method annotations"
+  fi
+
+  run "$NOTOOLS" show annotations "$TREE" 'Lcom/example/OtherWidgetService;'
+  if [[ $RC == 0 && $OUT == $'.annotation runtime La/b;\n    value = Lcom/example/OtherWidget;\n.end annotation' ]]; then
+    ok "[$KIND] show annotations prints an obfuscated annotation block verbatim"
+  else
+    not_ok "[$KIND] show annotations prints an obfuscated annotation block verbatim"
+  fi
+
+  run "$NOTOOLS" show class "$TREE" a.b
+  if [[ $RC == 0 && $OUT == ".class public interface abstract annotation La/b;"*".end method" ]]; then
+    ok "[$KIND] show class prints the whole file"
+  else
+    not_ok "[$KIND] show class prints the whole file"
+  fi
+
+  run "$NOTOOLS" show class "$TREE" com.example.Missing
+  if [[ $RC == 1 && $ERR == *"Lcom/example/Missing;: class not found"* ]]; then
+    ok "[$KIND] show class reports a missing class"
+  else
+    not_ok "[$KIND] show class reports a missing class"
+  fi
+done
+
+run "$NOTOOLS" find "$WORK/does-not-exist" --extends Lx\;
+if [[ $RC == 2 && $ERR == *"apk-smali find: "*"No such file or directory"* ]]; then
+  ok "find exits 2 when TREE does not exist"
+else
+  not_ok "find exits 2 when TREE does not exist"
+fi
+
+mkzip "$WORK/plain.apk" "classes.dex=$(dex 'Lcom/example/Foo; a')"
+run "$NOTOOLS" find "$WORK/plain.apk" --extends Lx\;
+if [[ $RC == 2 && $ERR == *"run 'apk-smali disassemble"* ]]; then
+  ok "find on an APK exits 2 and suggests disassemble"
+else
+  not_ok "find on an APK exits 2 and suggests disassemble"
+fi
+
+# -----------------------------------------------------------------------------
+# disassemble
+# -----------------------------------------------------------------------------
+
+mkzip "$WORK/app.apk" \
+  "AndroidManifest.xml=binary" \
+  "classes.dex=$(dex 'Lcom/example/Foo; one' 'Lcom/example/Dup; one')" \
+  "classes2.dex=$(dex 'Lcom/example/Bar; two' 'Lcom/example/Dup; two')"
+
+run "$WITH_BAKSMALI" disassemble "$WORK/app.apk"
+if [[ $RC == 0 && -d $OUT && $OUT == "$SCRIPT_TMP"/* &&
+  -f $OUT/com/example/Foo.smali && -f $OUT/com/example/Bar.smali &&
+  "$(<"$OUT/com/example/Dup.smali")" == *"# tag one"* &&
+  "$(<"$MOCK_LOG")" == "baksmali disassemble -o "*" classes.dex"$'\n'"baksmali disassemble -o "*" classes2.dex" &&
+  $ERR == *"1 duplicate class definition(s) skipped"* ]]; then
+  ok "disassemble runs baksmali on every DEX file of a multi-dex APK, first definition wins"
+else
+  not_ok "disassemble runs baksmali on every DEX file of a multi-dex APK, first definition wins"
+fi
+if [[ ! -e $OUT/AndroidManifest.xml ]] && ! compgen -G "$SCRIPT_TMP/apk-smali-work*" >/dev/null; then
+  ok "disassemble keeps only smali and removes its work directory"
+else
+  not_ok "disassemble keeps only smali and removes its work directory"
+fi
+rm -rf "$OUT"
+
+mkdir -p "$WORK/splits"
+mkzip "$WORK/splits/base-master.apk" \
+  "classes.dex=$(dex 'Lcom/example/Base; base' 'Lcom/example/Shared; base')"
+mkzip "$WORK/splits/base-xxhdpi.apk" "resources.arsc=binary"
+mkzip "$WORK/splits/a-feature.apk" \
+  "classes.dex=$(dex 'Lcom/example/Feature; feature' 'Lcom/example/Shared; feature')" \
+  "classes2.dex=$(dex 'Lcom/example/Feature2; feature')"
+mkzip "$WORK/splits.zip" \
+  "base-master.apk=@$WORK/splits/base-master.apk" \
+  "base-xxhdpi.apk=@$WORK/splits/base-xxhdpi.apk" \
+  "a-feature.apk=@$WORK/splits/a-feature.apk"
+
+for SPLITS in "$WORK/splits.zip" "$WORK/splits"; do
+  run "$WITH_BAKSMALI" disassemble "$SPLITS"
+  if [[ $RC == 0 && -f $OUT/com/example/Base.smali && -f $OUT/com/example/Feature.smali &&
+    -f $OUT/com/example/Feature2.smali &&
+    "$(<"$OUT/com/example/Shared.smali")" == *"# tag base"* &&
+    $(grep -c '^baksmali' "$MOCK_LOG") == 3 ]]; then
+    ok "disassemble merges all splits and multi-dex ($(basename "$SPLITS")), base split first"
+  else
+    not_ok "disassemble merges all splits and multi-dex ($(basename "$SPLITS")), base split first"
+  fi
+  rm -rf "$OUT"
+done
+
+mkzip "$WORK/app.aab" \
+  "base/manifest/AndroidManifest.xml=proto" \
+  "base/dex/classes.dex=$(dex 'Lcom/example/Shared; base')" \
+  "feature/dex/classes.dex=$(dex 'Lcom/example/Shared; feature' 'Lcom/example/Feature; feature')"
+run "$WITH_BAKSMALI" disassemble "$WORK/app.aab"
+if [[ $RC == 0 && -f $OUT/com/example/Feature.smali &&
+  "$(<"$OUT/com/example/Shared.smali")" == *"# tag base"* ]]; then
+  ok "disassemble handles an App Bundle, base module first"
+else
+  not_ok "disassemble handles an App Bundle, base module first"
+fi
+rm -rf "$OUT"
+
+dex 'Lcom/example/Raw; raw' | "$PYTHON" -c 'import sys; open(sys.argv[1], "wb").write(sys.stdin.read().encode().decode("unicode_escape").encode())' "$WORK/classes.dex"
+run "$WITH_BAKSMALI" disassemble "$WORK/classes.dex"
+if [[ $RC == 0 && -f $OUT/com/example/Raw.smali ]]; then
+  ok "disassemble accepts a raw DEX file"
+else
+  not_ok "disassemble accepts a raw DEX file"
+fi
+rm -rf "$OUT"
+
+run "$WITH_APKTOOL" disassemble "$WORK/app.apk"
+if [[ $RC == 0 && -f $OUT/com/example/Foo.smali && -f $OUT/com/example/Bar.smali &&
+  "$(<"$OUT/com/example/Dup.smali")" == *"# tag one"* && ! -e $OUT/apktool.yml &&
+  "$(<"$MOCK_LOG")" == "apktool d --no-res -f -o "*" app.apk" ]]; then
+  ok "disassemble falls back to apktool --no-res and merges smali_classesN"
+else
+  not_ok "disassemble falls back to apktool --no-res and merges smali_classesN"
+fi
+rm -rf "$OUT"
+
+run "$WITH_APKTOOL" disassemble "$WORK/classes.dex"
+if [[ $RC == 1 && $ERR == *"DEX input requires baksmali"* ]] && ! leftover_temp; then
+  ok "disassemble rejects raw DEX input when only apktool is available"
+else
+  not_ok "disassemble rejects raw DEX input when only apktool is available"
+fi
+
+run "$NOTOOLS" disassemble "$WORK/app.apk"
+if [[ $RC == 127 && $ERR == "apk-smali disassemble: baksmali not found"*"apktool"* && -z $OUT ]] &&
+  ! leftover_temp; then
+  ok "disassemble exits 127 when neither baksmali nor apktool is on PATH"
+else
+  not_ok "disassemble exits 127 when neither baksmali nor apktool is on PATH"
+fi
+
+run "$NOTOOLS" disassemble "$SMALI_ZIP"
+if [[ $RC == 0 && -f $OUT/com/example/MyService.smali && -f $OUT/a/b.smali &&
+  ! -e $OUT/smali ]] && cmp -s "$OUT/com/example/MyService.smali" "$FIXTURE/com/example/MyService.smali"; then
+  ok "disassemble passes a smali ZIP through without baksmali or apktool"
+else
+  not_ok "disassemble passes a smali ZIP through without baksmali or apktool"
+fi
+rm -rf "$OUT"
+
+run "$NOTOOLS" disassemble "$FIXTURE"
+if [[ $RC == 0 && $OUT == "$FIXTURE" ]] && ! leftover_temp; then
+  ok "disassemble prints a plain smali directory unchanged"
+else
+  not_ok "disassemble prints a plain smali directory unchanged"
+fi
+
+run "$NOTOOLS" disassemble -o "$WORK/copy" "$FIXTURE"
+if [[ $RC == 0 && $OUT == "$WORK/copy" && -f $WORK/copy/com/example/MyWidget.smali ]]; then
+  ok "disassemble -o copies a smali directory"
+else
+  not_ok "disassemble -o copies a smali directory"
+fi
+
+mkdir -p "$WORK/apktool-out/smali/com/example" "$WORK/apktool-out/smali_classes2/com/example"
+printf '.class public Lcom/example/Dup;\n# tag one\n' >"$WORK/apktool-out/smali/com/example/Dup.smali"
+printf '.class public Lcom/example/Dup;\n# tag two\n' >"$WORK/apktool-out/smali_classes2/com/example/Dup.smali"
+printf '.class public Lcom/example/Two;\n' >"$WORK/apktool-out/smali_classes2/com/example/Two.smali"
+run "$NOTOOLS" disassemble "$WORK/apktool-out"
+if [[ $RC == 0 && $OUT == "$SCRIPT_TMP"/* && -f $OUT/com/example/Two.smali &&
+  "$(<"$OUT/com/example/Dup.smali")" == *"# tag one"* ]]; then
+  ok "disassemble normalizes an apktool layout into one tree, smali/ first"
+else
+  not_ok "disassemble normalizes an apktool layout into one tree, smali/ first"
+fi
+rm -rf "$OUT"
+
+mkdir -p "$WORK/existing"
+echo keep >"$WORK/existing/notes.txt"
+run "$WITH_BAKSMALI" disassemble --output "$WORK/existing/nested/out" "$WORK/app.apk"
+if [[ $RC == 0 && $OUT == "$WORK/existing/nested/out" && -f $OUT/com/example/Foo.smali ]]; then
+  ok "disassemble --output creates a missing directory and prints it"
+else
+  not_ok "disassemble --output creates a missing directory and prints it"
+fi
+
+run "$WITH_BAKSMALI" disassemble -o "$WORK/existing" "$WORK/app.apk"
+if [[ $RC == 0 && -f $WORK/existing/notes.txt && -f $WORK/existing/com/example/Bar.smali ]]; then
+  ok "disassemble -o into an existing directory keeps unrelated files"
+else
+  not_ok "disassemble -o into an existing directory keeps unrelated files"
+fi
+
+MOCK_BAKSMALI_FAIL=1 run "$WITH_BAKSMALI" disassemble -o "$WORK/existing" "$WORK/app.apk"
+if [[ $RC == 1 && $ERR == *"apk-smali disassemble: baksmali failed on app.apk!classes.dex"*"invalid dex"* &&
+  -f $WORK/existing/notes.txt ]]; then
+  ok "disassemble failure leaves a caller's --output directory in place"
+else
+  not_ok "disassemble failure leaves a caller's --output directory in place"
+fi
+
+MOCK_BAKSMALI_FAIL=1 run "$WITH_BAKSMALI" disassemble "$WORK/app.apk"
+if [[ $RC == 1 && -z $OUT ]] && ! leftover_temp; then
+  ok "disassemble failure removes the temporary directory it created"
+else
+  not_ok "disassemble failure removes the temporary directory it created"
+fi
+
+run "$WITH_BAKSMALI" disassemble "$WORK/missing.apk"
+if [[ $RC == 1 && $ERR == "apk-smali disassemble: $WORK/missing.apk: No such file or directory" ]]; then
+  ok "disassemble reports a missing input"
+else
+  not_ok "disassemble reports a missing input"
+fi
+
+mkzip "$WORK/empty.zip" "README=nothing here"
+run "$WITH_BAKSMALI" disassemble "$WORK/empty.zip"
+if [[ $RC == 1 && $ERR == *"no APK, DEX, or .smali files found"* ]] && ! leftover_temp; then
+  ok "disassemble rejects an archive with nothing to disassemble"
+else
+  not_ok "disassemble rejects an archive with nothing to disassemble"
+fi
+
+echo "1..$TESTNUM"

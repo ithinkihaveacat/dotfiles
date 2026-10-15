@@ -4,12 +4,15 @@ description: >-
   Performs offline binary analysis, extraction, decoding, decompilation, and inspection
   of Android APKs and split-APK ZIP archives. Provides tools for reading manifests,
   extracting launcher icons, inspecting Wear OS tiles/widgets/complications, decoding
-  resources, and rasterizing vector drawables.
+  resources, rasterizing vector drawables, and disassembling DEX bytecode to smali
+  for evidence-grade code checks (overrides, call sites, annotations).
   Use when inspecting APK metadata, decompiling resources, analyzing binary manifests,
+  verifying what compiled code does (smali, R8/obfuscation-aware checks),
   extracting icons, rasterizing vector drawables to PNG, or installing local APK
   packages on a device.
 compatibility: >-
   Requires apkanalyzer, unzip, and xmllint. Some scripts require xpath, aapt, or apktool.
+  apk-smali requires uv, plus baksmali or apktool to disassemble; jadx is optional.
   Designed for filesystem-based agents with bash access.
 ---
 
@@ -47,6 +50,17 @@ See `references/command-index.md` for detailed usage.
 - `scripts/avd-to-png`: Convert Android Vector Drawable (AVD) XML files to SVG
   and render them to PNG.
 
+### Bytecode Analysis
+
+- `scripts/apk-smali`: Disassemble all DEX files of an APK, split-APK archive,
+  or App Bundle into one smali tree (`disassemble`), then query it: classes that
+  declare, call, extend, implement, or are annotated with something (`find`),
+  and a class, method body with its same-class callees, or class annotations
+  (`show class`, `show method`, `show annotations`). `find` and `show` also read
+  a pre-disassembled smali archive (any ZIP or directory of baksmali output) in
+  place. See `references/bytecode-analysis.md` for when to use smali versus jadx
+  and how to report findings.
+
 ### Device Interaction
 
 - `scripts/apk-install-and-launch`: Install the APK/ZIP on a connected device
@@ -68,5 +82,8 @@ See `references/command-index.md` for detailed usage.
 
 - **[Command Index](references/command-index.md)** — Detailed synopsis, options,
   and examples for all APK scripts.
+- **[Bytecode Analysis](references/bytecode-analysis.md)** — Smali versus jadx
+  versus dexdump, smali basics, static-analysis limits, evidence rules, and
+  cross-checking against upstream library sources.
 - **[Troubleshooting](references/troubleshooting.md)** — Solutions for missing
-  dependencies (`apkanalyzer`, `xpath`, `apktool`, `aapt`).
+  dependencies (`apkanalyzer`, `xpath`, `apktool`, `aapt`, `baksmali`).

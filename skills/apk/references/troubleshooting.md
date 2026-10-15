@@ -42,3 +42,22 @@ extract the launcher icon path. **Solution**:
 - macOS / Debian / Ubuntu: Install Android SDK Build-Tools via Android Studio or
   SDK Manager, and ensure the build-tools directory (e.g.,
   `Android/sdk/build-tools/<version>/`) is in your PATH.
+
+### `baksmali` not found (`apk-smali disassemble` exits 127)
+
+**Context**: `apk-smali disassemble` turns DEX bytecode into smali with
+`baksmali`, falling back to `apktool d --no-res` when `baksmali` is not on PATH.
+It exits 127 only when neither is available. `apk-smali find` and
+`apk-smali show` need neither tool, and neither does `disassemble` when its
+input is already smali. **Solution** (either tool is enough; `baksmali` is
+preferred because it also handles raw `.dex` files and App Bundles):
+
+- `baksmali`: on macOS, `brew install smali` provides `baksmali`. Elsewhere, get
+  a baksmali JAR as described in the
+  [smali README](https://github.com/google/smali) (requires Java) and put a
+  wrapper named `baksmali` on PATH:
+  ```bash
+  printf '#!/bin/sh\nexec java -jar "$HOME/lib/baksmali.jar" "$@"\n' >~/.local/bin/baksmali
+  chmod +x ~/.local/bin/baksmali
+  ```
+- `apktool`: see [`apktool` not found](#apktool-not-found) above.

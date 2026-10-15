@@ -1,0 +1,1430 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Disassemble Android DEX bytecode to smali and query the resulting tree."""
+
+# Tests: skills/apk/tests/test-apk-smali
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import zipfile
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+PROG = os.path.basename(sys.argv[0]) or "apk-smali"
+
+# Annotations hidden by 'show annotations' unless --all is given: compiler
+# bookkeeping rather than annotations written in source.
+NOISE_ANNOTATIONS = ("Lkotlin/Metadata;",)
+NOISE_ANNOTATION_PREFIXES = ("Ldalvik/annotation/",)
+
+DEX_MAGIC = b"dex\n"
+DEX_NAME_RE = re.compile(r"^classes(\d*)\.dex$")
+APKTOOL_SMALI_DIR_RE = re.compile(r"^smali(?:_classes(\d+))?$")
+INVOKE_RE = re.compile(r"^\s*invoke-[\w/-]+\s+\{[^}]*\},\s*([^\s,]+)")
+
+# =============================================================================
+# HELP TEXT
+# =============================================================================
+
+HELP_MAIN = f"""\
+Usage: {PROG} COMMAND [ARGUMENTS]
+
+Disassemble Android DEX bytecode to smali and query the result.
+
+Commands:
+  disassemble          Disassemble an APK, split-APK archive, or DEX file into
+                       a single smali tree and print its path.
+  find                 List classes that declare, call, extend, implement, or
+                       are annotated with something.
+  show                 Print a class, a method body, or class annotations.
+
+Options:
+  -h, --help           Display this help message and exit.
+
+Examples:
+  # Disassemble every DEX file of an APK into one tree
+  TREE=$({PROG} disassemble app-release.apk)
+
+  # Which classes override onTrimMemory(I)V?
+  {PROG} find "$TREE" --declares 'onTrimMemory(I)V'
+
+  # A method plus the same-class helpers it calls, one level deep
+  {PROG} show method "$TREE" com.example.MyService 'onCreate()V' --depth 1
+
+  # Runtime annotations on a service declared in AndroidManifest.xml
+  {PROG} show annotations "$TREE" com.example.MyWidgetService
+
+A TREE is a directory or a ZIP archive of .smali files, such as the output of
+'{PROG} disassemble', baksmali, or apktool. ZIP archives are read in place.
+
+Run '{PROG} COMMAND --help' for command-specific help.
+"""
+
+SHORT_MAIN = f"""\
+Usage: {PROG} COMMAND [ARGUMENTS]
+
+Disassemble Android DEX bytecode to smali and query the result.
+
+Commands:
+  disassemble, find, show
+
+Examples:
+  {PROG} disassemble app-release.apk
+  {PROG} find smali/ --extends 'Landroid/app/Service;'
+
+Try '{PROG} --help' for more information.
+"""
+
+HELP_DISASSEMBLE = f"""\
+Usage: {PROG} disassemble [OPTIONS] INPUT
+
+Disassemble all DEX bytecode in INPUT into a single smali tree (one .smali file
+per class, at the path named by its class descriptor) and print the tree's path.
+
+Arguments:
+  INPUT             One of:
+                      - an APK, or a raw .dex file
+                      - a split-APK archive (.zip, .apks, .xapk) or a directory
+                        of split APKs; every split is disassembled
+                      - an Android App Bundle (.aab); every module is included
+                      - a directory of extracted APK contents (classes*.dex)
+                      - a ZIP archive or directory of .smali files, which is
+                        passed through without disassembly
+
+Options:
+  -o, --output DIR  Write the tree to DIR (created if missing; existing files
+                    with the same path are overwritten).
+                    (defaults to a new temporary directory)
+  -h, --help        Display this help message and exit.
+
+Examples:
+  # Disassemble an APK into a new temporary directory
+  TREE=$({PROG} disassemble app-release.apk)
+
+  # Disassemble every split in an archive into a specific directory
+  {PROG} disassemble --output /tmp/app-smali app-splits.zip
+
+  # Normalize an existing apktool output directory (smali_classes2/, ...)
+  {PROG} disassemble -o /tmp/app-smali decoded-apk/
+
+Notes:
+  DEX files are disassembled with baksmali when it is on PATH, otherwise with
+  'apktool d --no-res' (APK inputs only).
+
+  When a class is defined more than once, the first definition wins, in class
+  loading order: classes.dex, classes2.dex, ... within an APK, and the base
+  split (or base module) before other splits in alphabetical order. A warning
+  reports how many duplicates were skipped.
+
+  A directory that already holds a plain smali tree is printed unchanged
+  unless --output is given.
+"""
+
+SHORT_DISASSEMBLE = f"""\
+Usage: {PROG} disassemble [OPTIONS] INPUT
+
+Disassemble all DEX bytecode in an APK or split-APK archive into one smali tree.
+
+Examples:
+  {PROG} disassemble app-release.apk
+  {PROG} disassemble -o /tmp/app-smali app-splits.zip
+
+Try '{PROG} disassemble --help' for more information.
+"""
+
+HELP_FIND = f"""\
+Usage: {PROG} find TREE PREDICATE... [OPTIONS]
+
+List the descriptors of classes in TREE that match every PREDICATE, one per
+line, sorted.
+
+Arguments:
+  TREE                      A directory or ZIP archive of .smali files.
+
+Predicates:
+  --declares METHOD         The class declares METHOD.
+  --calls [CLASS]->METHOD   A method of the class invokes METHOD (invoke-*).
+                            Omit CLASS to match any receiver type.
+  --annotated-with CLASS    The class carries a class-level annotation of
+                            type CLASS.
+  --extends CLASS           The class's direct superclass (.super) is CLASS.
+  --implements CLASS        The class directly implements interface CLASS.
+
+  METHOD is NAME, NAME(PARAMS) (any return type), or NAME(PARAMS)RETURN, for
+  example onTrimMemory, onTrimMemory(I), or onTrimMemory(I)V. CLASS is a type
+  descriptor (Lcom/example/Foo;) or a dotted name (com.example.Foo).
+
+Options:
+  --methods                 Print the matching methods (CLASS->METHOD) instead
+                            of classes; requires --declares or --calls.
+  -h, --help                Display this help message and exit.
+
+Exit Status:
+  0  at least one class matched
+  1  no class matched
+  2  an error occurred
+
+Examples:
+  # Classes that override onTrimMemory(I)V
+  {PROG} find "$TREE" --declares 'onTrimMemory(I)V'
+
+  # Methods that call any onTrimMemory, whatever the receiver
+  {PROG} find "$TREE" --calls '->onTrimMemory' --methods
+
+  # Services that are also annotated with an (obfuscated) annotation type
+  {PROG} find app-smali.zip --extends 'Landroid/app/Service;' \\
+      --annotated-with 'La/b;'
+"""
+
+SHORT_FIND = f"""\
+Usage: {PROG} find TREE PREDICATE... [OPTIONS]
+
+List classes in a smali tree that match every predicate.
+
+Examples:
+  {PROG} find "$TREE" --declares 'onTrimMemory(I)V'
+  {PROG} find "$TREE" --calls 'Landroid/content/Context;->startService'
+
+Try '{PROG} find --help' for more information.
+"""
+
+HELP_SHOW = f"""\
+Usage: {PROG} show WHAT TREE CLASS [ARGUMENTS] [OPTIONS]
+
+Print part of a class from a smali tree.
+
+Commands:
+  class                Print the whole .smali file of CLASS.
+  method               Print the body of a method, optionally with the
+                       same-class methods it calls.
+  annotations          Print the class-level annotations of CLASS.
+
+Arguments:
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS                A type descriptor (Lcom/example/Foo;) or a dotted name
+                       (com.example.Foo).
+
+Options:
+  -h, --help           Display this help message and exit.
+
+Examples:
+  {PROG} show class "$TREE" com.example.MyWidgetService
+  {PROG} show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+  {PROG} show annotations "$TREE" 'Lcom/example/MyWidgetService;'
+
+Run '{PROG} show WHAT --help' for help on each command.
+"""
+
+SHORT_SHOW = f"""\
+Usage: {PROG} show WHAT TREE CLASS [ARGUMENTS] [OPTIONS]
+
+Print a class, a method body, or class annotations from a smali tree.
+
+Commands:
+  class, method, annotations
+
+Examples:
+  {PROG} show method "$TREE" com.example.MyService 'onCreate()V'
+  {PROG} show annotations "$TREE" com.example.MyWidgetService
+
+Try '{PROG} show --help' for more information.
+"""
+
+HELP_SHOW_CLASS = f"""\
+Usage: {PROG} show class TREE CLASS
+
+Print the whole .smali file of CLASS.
+
+Arguments:
+  TREE         A directory or ZIP archive of .smali files.
+  CLASS        A type descriptor (Lcom/example/Foo;) or a dotted name
+               (com.example.Foo).
+
+Options:
+  -h, --help   Display this help message and exit.
+
+Examples:
+  {PROG} show class "$TREE" com.example.MyWidgetService
+  {PROG} show class app-smali.zip 'La/b;'
+"""
+
+SHORT_SHOW_CLASS = f"""\
+Usage: {PROG} show class TREE CLASS
+
+Print the whole .smali file of CLASS.
+
+Examples:
+  {PROG} show class "$TREE" com.example.MyWidgetService
+
+Try '{PROG} show class --help' for more information.
+"""
+
+HELP_SHOW_METHOD = f"""\
+Usage: {PROG} show method TREE CLASS METHOD [OPTIONS]
+
+Print the full .method ... .end method body of METHOD in CLASS. All overloads
+are printed when METHOD omits the parameter list.
+
+Arguments:
+  TREE           A directory or ZIP archive of .smali files.
+  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
+                 (com.example.Foo).
+  METHOD         NAME, NAME(PARAMS), or NAME(PARAMS)RETURN, for example
+                 onTrimMemory(I)V.
+
+Options:
+  --depth N      Also print methods of CLASS that the printed methods invoke,
+                 following calls N levels deep; each method is printed once.
+                 (default: 0)
+  -h, --help     Display this help message and exit.
+
+Examples:
+  # The body of an override
+  {PROG} show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+
+  # The override plus the private helpers it calls, two levels deep
+  {PROG} show method "$TREE" 'Lcom/example/MyService;' onTrimMemory --depth 2
+"""
+
+SHORT_SHOW_METHOD = f"""\
+Usage: {PROG} show method TREE CLASS METHOD [OPTIONS]
+
+Print the body of a method from a smali tree.
+
+Examples:
+  {PROG} show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+
+Try '{PROG} show method --help' for more information.
+"""
+
+HELP_SHOW_ANNOTATIONS = f"""\
+Usage: {PROG} show annotations TREE CLASS [OPTIONS]
+
+Print the class-level .annotation blocks of CLASS, including their values
+(for example the class literals an annotation references).
+
+Arguments:
+  TREE           A directory or ZIP archive of .smali files.
+  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
+                 (com.example.Foo).
+
+Options:
+  --all          Include Lkotlin/Metadata; and Ldalvik/annotation/* blocks,
+                 which are hidden by default.
+  --members      Also print field and method annotations; each group is
+                 preceded by a '# CLASS', '# CLASS->FIELD' or
+                 '# CLASS->METHOD' comment line.
+  -h, --help     Display this help message and exit.
+
+Examples:
+  # Runtime annotations on a service declared in AndroidManifest.xml
+  {PROG} show annotations "$TREE" com.example.MyWidgetService
+
+  # Every annotation in the class, including compiler metadata
+  {PROG} show annotations app-smali.zip 'La/b;' --all --members
+"""
+
+SHORT_SHOW_ANNOTATIONS = f"""\
+Usage: {PROG} show annotations TREE CLASS [OPTIONS]
+
+Print the class-level annotations of a class from a smali tree.
+
+Examples:
+  {PROG} show annotations "$TREE" com.example.MyWidgetService
+
+Try '{PROG} show annotations --help' for more information.
+"""
+
+# =============================================================================
+# ERRORS AND ARGUMENT PARSING
+# =============================================================================
+
+
+class UsageError(Exception):
+    """Invalid invocation; reported with a pointer to --help."""
+
+
+class ToolError(Exception):
+    """A runtime failure; reported as 'PROG CMD: message'."""
+
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def need(condition: bool, message: str) -> None:
+    """Raise UsageError(message) unless condition holds."""
+    if not condition:
+        raise UsageError(message)
+
+
+def wants_help(argv: list[str]) -> bool:
+    for arg in argv:
+        if arg == "--":
+            return False
+        if arg in ("-h", "--help"):
+            return True
+    return False
+
+
+@dataclass(slots=True)
+class Spec:
+    """Declarative description of one command's flags and positionals."""
+
+    positionals: list[str]
+    flags: dict[str, str | None] = field(default_factory=dict)  # name -> metavar
+    aliases: dict[str, str] = field(default_factory=dict)
+
+
+def parse_args(argv: list[str], spec: Spec) -> tuple[list[str], dict[str, str | bool]]:
+    """Parse GNU-style options (anywhere, --opt=value, '--') per spec."""
+    positionals: list[str] = []
+    options: dict[str, str | bool] = {}
+    i = 0
+    only_positionals = False
+    while i < len(argv):
+        arg = argv[i]
+        i += 1
+        if only_positionals or arg == "-" or not arg.startswith("-"):
+            positionals.append(arg)
+            continue
+        if arg == "--":
+            only_positionals = True
+            continue
+        name, eq, inline = arg.partition("=")
+        name = spec.aliases.get(name, name)
+        if name not in spec.flags:
+            raise UsageError(f"unrecognized option '{arg}'")
+        metavar = spec.flags[name]
+        if metavar is None:
+            if eq:
+                raise UsageError(f"option '{name}' does not take a value")
+            options[name] = True
+            continue
+        if eq:
+            value = inline
+        elif i < len(argv):
+            value = argv[i]
+            i += 1
+        else:
+            raise UsageError(f"option '{name}' requires an argument")
+        if name in options:
+            raise UsageError(f"option '{name}' given more than once")
+        options[name] = value
+    if len(positionals) > len(spec.positionals):
+        extra = positionals[len(spec.positionals)]
+        raise UsageError(f"unexpected argument '{extra}'")
+    return positionals, options
+
+
+# =============================================================================
+# DESCRIPTORS AND PATTERNS
+# =============================================================================
+
+
+def to_descriptor(name: str) -> str:
+    """Convert com.example.Foo, com/example/Foo or Lcom/example/Foo; to a descriptor."""
+    name = name.strip()
+    if not name:
+        raise UsageError("empty class name")
+    if name.startswith("L") and name.endswith(";") and len(name) > 2:
+        return name
+    if name.startswith("[") or ";" in name or "(" in name or ">" in name:
+        raise UsageError(f"not a class name or descriptor: {name}")
+    return "L" + name.replace(".", "/") + ";"
+
+
+def descriptor_path(descriptor: str) -> str:
+    return descriptor[1:-1] + ".smali"
+
+
+def check_method_pattern(pattern: str) -> str:
+    if not pattern or "->" in pattern or " " in pattern:
+        raise UsageError(f"not a method name or signature: '{pattern}'")
+    if "(" in pattern and ")" not in pattern:
+        raise UsageError(f"unterminated parameter list in '{pattern}'")
+    return pattern
+
+
+def method_matches(pattern: str, signature: str) -> bool:
+    """Match NAME, NAME(PARAMS) or NAME(PARAMS)RETURN against name(params)return."""
+    if "(" not in pattern:
+        return signature.split("(", 1)[0] == pattern
+    if pattern.endswith(")"):
+        return signature.startswith(pattern)
+    return signature == pattern
+
+
+@dataclass(slots=True, frozen=True)
+class CallPattern:
+    owner: str | None  # class descriptor, or None for any receiver
+    method: str | None  # method pattern, or None for any method
+
+    @classmethod
+    def parse(cls, text: str) -> CallPattern:
+        if "->" in text:
+            owner_text, _, method_text = text.partition("->")
+            owner = to_descriptor(owner_text) if owner_text else None
+            method = check_method_pattern(method_text) if method_text else None
+        elif text.startswith("L") and text.endswith(";"):
+            owner, method = text, None
+        else:
+            owner, method = None, check_method_pattern(text)
+        if owner is None and method is None:
+            raise UsageError(f"empty call pattern: '{text}'")
+        return cls(owner, method)
+
+    def matches(self, target: str) -> bool:
+        owner, sep, signature = target.partition("->")
+        if not sep:
+            return False
+        if self.owner is not None and owner != self.owner:
+            return False
+        return self.method is None or method_matches(self.method, signature)
+
+
+# =============================================================================
+# SMALI PARSING
+# =============================================================================
+
+
+@dataclass(slots=True)
+class Annotation:
+    type: str
+    lines: list[str]
+
+
+@dataclass(slots=True)
+class Member:
+    signature: str  # name(params)return for methods, name:type for fields
+    lines: list[str]
+    annotations: list[Annotation] = field(default_factory=list)
+    invokes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SmaliClass:
+    descriptor: str
+    path: str
+    text: str
+    superclass: str | None = None
+    interfaces: list[str] = field(default_factory=list)
+    annotations: list[Annotation] = field(default_factory=list)
+    fields: list[Member] = field(default_factory=list)
+    methods: list[Member] = field(default_factory=list)
+
+
+def annotation_type(line: str) -> str:
+    # .annotation <runtime|system|build> Lpkg/Type;
+    parts = line.split()
+    return parts[-1] if parts else ""
+
+
+def read_annotation(lines: list[str], i: int) -> tuple[Annotation, int]:
+    """Read an .annotation block starting at lines[i]; return it and the next index."""
+    start = i
+    while i < len(lines) and lines[i].strip() != ".end annotation":
+        i += 1
+    block = lines[start : i + 1]
+    return Annotation(annotation_type(lines[start]), block), i + 1
+
+
+def parse_smali(text: str, path: str) -> SmaliClass:
+    lines = text.splitlines()
+    cls = SmaliClass(descriptor="", path=path, text=text)
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith(".class "):
+            cls.descriptor = stripped.split()[-1]
+        elif stripped.startswith(".super "):
+            cls.superclass = stripped.split()[-1]
+        elif stripped.startswith(".implements "):
+            cls.interfaces.append(stripped.split()[-1])
+        elif stripped.startswith(".annotation "):
+            annotation, i = read_annotation(lines, i)
+            cls.annotations.append(annotation)
+            continue
+        elif stripped.startswith(".field "):
+            i = parse_field(lines, i, cls)
+            continue
+        elif stripped.startswith(".method "):
+            i = parse_method(lines, i, cls)
+            continue
+        i += 1
+    if not cls.descriptor:
+        cls.descriptor = "L" + path.rsplit(".smali", 1)[0] + ";"
+    return cls
+
+
+def field_signature(line: str) -> str:
+    # .field <flags> name:Ltype; [= value]
+    decl = line.split(" = ", 1)[0].split()
+    return decl[-1] if decl else ""
+
+
+def parse_field(lines: list[str], i: int, cls: SmaliClass) -> int:
+    member = Member(field_signature(lines[i]), [lines[i]])
+    cls.fields.append(member)
+    j = i + 1
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    # A field with annotations is a block closed by '.end field'.
+    if j < len(lines) and lines[j].strip().startswith(".annotation "):
+        while j < len(lines):
+            stripped = lines[j].strip()
+            if stripped.startswith(".annotation "):
+                annotation, j = read_annotation(lines, j)
+                member.annotations.append(annotation)
+                member.lines.extend(annotation.lines)
+                continue
+            member.lines.append(lines[j])
+            j += 1
+            if stripped == ".end field":
+                break
+        return j
+    return i + 1
+
+
+def parse_method(lines: list[str], i: int, cls: SmaliClass) -> int:
+    member = Member(lines[i].split()[-1], [])
+    cls.methods.append(member)
+    in_param = False
+    j = i
+    while j < len(lines):
+        line = lines[j]
+        stripped = line.strip()
+        member.lines.append(line)
+        j += 1
+        if stripped == ".end method":
+            break
+        if stripped.startswith((".param ", ".parameter")):
+            in_param = True
+        elif stripped in (".end param", ".end parameter"):
+            in_param = False
+        elif stripped.startswith(".annotation "):
+            annotation, j = read_annotation(lines, j - 1)
+            member.lines.extend(annotation.lines[1:])
+            if not in_param:
+                member.annotations.append(annotation)
+        elif stripped.startswith("invoke-"):
+            match = INVOKE_RE.match(line)
+            if match:
+                member.invokes.append(match.group(1))
+        elif stripped.startswith("."):
+            # Any other directive ends a .param block that had no annotations.
+            in_param = False
+    return j
+
+
+# =============================================================================
+# SMALI TREES (DIRECTORY OR ZIP)
+# =============================================================================
+
+
+def precedence_key(relpath: str) -> tuple[int, str]:
+    """Sort apktool's smali/, smali_classes2/, ... in class loading order."""
+    top = relpath.split("/", 1)[0]
+    match = APKTOOL_SMALI_DIR_RE.match(top) if "/" in relpath else None
+    if match:
+        return (int(match.group(1) or 1), relpath)
+    return (0, relpath)
+
+
+def contains_dex(names: list[str]) -> bool:
+    return any(DEX_NAME_RE.match(name) for name in names)
+
+
+class SmaliTree:
+    """Read-only access to the .smali files in a directory or ZIP archive."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._zip: zipfile.ZipFile | None = None
+        if os.path.isdir(path):
+            entries = []
+            for root, dirs, files in os.walk(path):
+                dirs.sort()
+                for name in files:
+                    if name.endswith(".smali"):
+                        full = os.path.join(root, name)
+                        entries.append(os.path.relpath(full, path).replace(os.sep, "/"))
+        elif os.path.isfile(path):
+            if not zipfile.is_zipfile(path):
+                raise ToolError(f"{path}: not a directory or ZIP archive")
+            try:
+                self._zip = zipfile.ZipFile(path)
+                names = self._zip.namelist()
+            except (zipfile.BadZipFile, OSError) as e:
+                raise ToolError(f"{path}: {e}") from e
+            entries = [n for n in names if n.endswith(".smali") and not n.endswith("/")]
+            if not entries and contains_dex(names):
+                raise ToolError(
+                    f"{path}: contains DEX bytecode, not smali; "
+                    f"run '{PROG} disassemble {path}' first"
+                )
+        else:
+            raise ToolError(f"{path}: No such file or directory")
+        if not entries:
+            raise ToolError(f"{path}: no .smali files found")
+        self.entries = sorted(entries, key=precedence_key)
+
+    def display_path(self, relpath: str) -> str:
+        if self._zip is not None:
+            return f"{self.path}:{relpath}"
+        return os.path.join(self.path, relpath)
+
+    def read(self, relpath: str) -> str:
+        try:
+            if self._zip is not None:
+                data = self._zip.read(relpath)
+            else:
+                with open(os.path.join(self.path, relpath), "rb") as f:
+                    data = f.read()
+        except (OSError, KeyError, zipfile.BadZipFile) as e:
+            raise ToolError(f"{self.display_path(relpath)}: {e}") from e
+        return data.decode("utf-8", errors="replace")
+
+    def texts(self) -> Iterator[tuple[str, str]]:
+        for relpath in self.entries:
+            yield relpath, self.read(relpath)
+
+    def load(self, descriptor: str) -> SmaliClass:
+        """Load a class by descriptor; the first definition in precedence order wins."""
+        wanted = descriptor_path(descriptor)
+        candidates = [
+            e for e in self.entries if e == wanted or e.endswith("/" + wanted)
+        ]
+        for relpath in candidates:
+            cls = parse_smali(self.read(relpath), relpath)
+            if cls.descriptor == descriptor:
+                return cls
+        # Fall back to the .class directive, for trees whose paths do not
+        # follow the descriptor (for example renamed case-colliding files).
+        needle = f" {descriptor}"
+        for relpath, text in self.texts():
+            head = text.split("\n", 3)
+            if any(
+                h.startswith(".class") and h.rstrip().endswith(needle) for h in head
+            ):
+                return parse_smali(text, relpath)
+        raise ToolError(f"{descriptor}: class not found in {self.path}")
+
+
+# =============================================================================
+# COMMAND: find
+# =============================================================================
+
+
+@dataclass(slots=True)
+class FindQuery:
+    declares: str | None = None
+    calls: CallPattern | None = None
+    annotated_with: str | None = None
+    extends: str | None = None
+    implements: str | None = None
+
+    def needles(self) -> list[str]:
+        """Literal substrings every matching file must contain (a cheap prefilter)."""
+        out = []
+        if self.declares:
+            out.append(self.declares.split("(", 1)[0])
+        if self.calls:
+            if self.calls.owner:
+                out.append(self.calls.owner + "->")
+            if self.calls.method:
+                out.append("->" + self.calls.method.split("(", 1)[0])
+        for descriptor in (self.annotated_with, self.extends, self.implements):
+            if descriptor:
+                out.append(descriptor)
+        return out
+
+    def class_matches(self, cls: SmaliClass) -> bool:
+        if self.extends and cls.superclass != self.extends:
+            return False
+        if self.implements and self.implements not in cls.interfaces:
+            return False
+        return not self.annotated_with or any(
+            a.type == self.annotated_with for a in cls.annotations
+        )
+
+    def method_matches(self, method: Member) -> bool:
+        if self.declares and not method_matches(self.declares, method.signature):
+            return False
+        return not self.calls or any(self.calls.matches(t) for t in method.invokes)
+
+    @property
+    def has_method_predicate(self) -> bool:
+        return bool(self.declares or self.calls)
+
+
+def cmd_find(argv: list[str]) -> int:
+    name = f"{PROG} find"
+    if wants_help(argv):
+        sys.stdout.write(HELP_FIND)
+        return 0
+    if not argv:
+        sys.stderr.write(SHORT_FIND)
+        return 2
+    spec = Spec(
+        positionals=["TREE"],
+        flags={
+            "--declares": "METHOD",
+            "--calls": "PATTERN",
+            "--annotated-with": "CLASS",
+            "--extends": "CLASS",
+            "--implements": "CLASS",
+            "--methods": None,
+        },
+    )
+    try:
+        positionals, options = parse_args(argv, spec)
+        need(bool(positionals), "TREE required")
+        query = FindQuery()
+        if "--declares" in options:
+            query.declares = check_method_pattern(str(options["--declares"]))
+        if "--calls" in options:
+            query.calls = CallPattern.parse(str(options["--calls"]))
+        if "--annotated-with" in options:
+            query.annotated_with = to_descriptor(str(options["--annotated-with"]))
+        if "--extends" in options:
+            query.extends = to_descriptor(str(options["--extends"]))
+        if "--implements" in options:
+            query.implements = to_descriptor(str(options["--implements"]))
+        need(
+            bool(
+                query.has_method_predicate
+                or query.annotated_with
+                or query.extends
+                or query.implements
+            ),
+            "a predicate is required (--declares, --calls, --annotated-with, "
+            "--extends, or --implements)",
+        )
+        list_methods = bool(options.get("--methods"))
+        need(
+            not list_methods or query.has_method_predicate,
+            "--methods requires --declares or --calls",
+        )
+    except UsageError as e:
+        return usage_error(name, str(e), "find", code=2)
+
+    try:
+        tree = SmaliTree(positionals[0])
+        needles = query.needles()
+        results: set[str] = set()
+        for relpath, text in tree.texts():
+            if not all(n in text for n in needles):
+                continue
+            cls = parse_smali(text, relpath)
+            if not query.class_matches(cls):
+                continue
+            if not query.has_method_predicate:
+                results.add(cls.descriptor)
+                continue
+            methods = [m for m in cls.methods if query.method_matches(m)]
+            if not methods:
+                continue
+            if list_methods:
+                results.update(f"{cls.descriptor}->{m.signature}" for m in methods)
+            else:
+                results.add(cls.descriptor)
+    except ToolError as e:
+        print(f"{name}: {e}", file=sys.stderr)
+        return 2
+    for result in sorted(results):
+        print(result)
+    return 0 if results else 1
+
+
+# =============================================================================
+# COMMAND: show
+# =============================================================================
+
+
+def is_noise(annotation: Annotation) -> bool:
+    return annotation.type in NOISE_ANNOTATIONS or annotation.type.startswith(
+        NOISE_ANNOTATION_PREFIXES
+    )
+
+
+def show_class(argv: list[str]) -> int:
+    name = f"{PROG} show class"
+    if wants_help(argv):
+        sys.stdout.write(HELP_SHOW_CLASS)
+        return 0
+    if not argv:
+        sys.stderr.write(SHORT_SHOW_CLASS)
+        return 1
+    try:
+        positionals, _ = parse_args(argv, Spec(positionals=["TREE", "CLASS"]))
+        need(len(positionals) == 2, "TREE and CLASS required")
+        descriptor = to_descriptor(positionals[1])
+    except UsageError as e:
+        return usage_error(name, str(e), "show class")
+    try:
+        cls = SmaliTree(positionals[0]).load(descriptor)
+    except ToolError as e:
+        print(f"{name}: {e}", file=sys.stderr)
+        return e.code
+    sys.stdout.write(cls.text if cls.text.endswith("\n") else cls.text + "\n")
+    return 0
+
+
+def show_method(argv: list[str]) -> int:
+    name = f"{PROG} show method"
+    if wants_help(argv):
+        sys.stdout.write(HELP_SHOW_METHOD)
+        return 0
+    if not argv:
+        sys.stderr.write(SHORT_SHOW_METHOD)
+        return 1
+    try:
+        spec = Spec(positionals=["TREE", "CLASS", "METHOD"], flags={"--depth": "N"})
+        positionals, options = parse_args(argv, spec)
+        need(len(positionals) == 3, "TREE, CLASS, and METHOD required")
+        descriptor = to_descriptor(positionals[1])
+        pattern = check_method_pattern(positionals[2])
+        depth_text = str(options.get("--depth", "0"))
+        need(
+            depth_text.isdigit(),
+            f"--depth: not a non-negative integer: '{depth_text}'",
+        )
+        depth = int(depth_text)
+    except UsageError as e:
+        return usage_error(name, str(e), "show method")
+    try:
+        cls = SmaliTree(positionals[0]).load(descriptor)
+    except ToolError as e:
+        print(f"{name}: {e}", file=sys.stderr)
+        return e.code
+
+    by_signature = {m.signature: m for m in cls.methods}
+    roots = [m for m in cls.methods if method_matches(pattern, m.signature)]
+    if not roots:
+        print(f"{name}: {descriptor}->{pattern}: method not found", file=sys.stderr)
+        return 1
+    printed: list[Member] = []
+    seen: set[str] = set()
+    level = roots
+    for current_depth in range(depth + 1):
+        next_level: list[Member] = []
+        for method in level:
+            if method.signature in seen:
+                continue
+            seen.add(method.signature)
+            printed.append(method)
+            if current_depth == depth:
+                continue
+            for target in method.invokes:
+                owner, _, signature = target.partition("->")
+                callee = by_signature.get(signature) if owner == descriptor else None
+                if callee is not None and callee.signature not in seen:
+                    next_level.append(callee)
+        level = next_level
+    sys.stdout.write("\n\n".join("\n".join(m.lines) for m in printed) + "\n")
+    return 0
+
+
+def show_annotations(argv: list[str]) -> int:
+    name = f"{PROG} show annotations"
+    if wants_help(argv):
+        sys.stdout.write(HELP_SHOW_ANNOTATIONS)
+        return 0
+    if not argv:
+        sys.stderr.write(SHORT_SHOW_ANNOTATIONS)
+        return 1
+    try:
+        spec = Spec(
+            positionals=["TREE", "CLASS"], flags={"--all": None, "--members": None}
+        )
+        positionals, options = parse_args(argv, spec)
+        need(len(positionals) == 2, "TREE and CLASS required")
+        descriptor = to_descriptor(positionals[1])
+    except UsageError as e:
+        return usage_error(name, str(e), "show annotations")
+    try:
+        cls = SmaliTree(positionals[0]).load(descriptor)
+    except ToolError as e:
+        print(f"{name}: {e}", file=sys.stderr)
+        return e.code
+
+    include_all = bool(options.get("--all"))
+
+    def visible(annotations: list[Annotation]) -> list[Annotation]:
+        return [a for a in annotations if include_all or not is_noise(a)]
+
+    groups: list[tuple[str, list[Annotation]]] = [
+        (cls.descriptor, visible(cls.annotations))
+    ]
+    if options.get("--members"):
+        for member in cls.fields + cls.methods:
+            groups.append(
+                (f"{cls.descriptor}->{member.signature}", visible(member.annotations))
+            )
+    blocks = []
+    for header, group in groups:
+        if not group:
+            continue
+        body = "\n\n".join("\n".join(a.lines) for a in group)
+        blocks.append(f"# {header}\n{body}" if options.get("--members") else body)
+    if blocks:
+        sys.stdout.write("\n\n".join(blocks) + "\n")
+    return 0
+
+
+def cmd_show(argv: list[str]) -> int:
+    if not argv:
+        sys.stderr.write(SHORT_SHOW)
+        return 1
+    what, rest = argv[0], argv[1:]
+    if what in ("-h", "--help", "help"):
+        sys.stdout.write(HELP_SHOW)
+        return 0
+    handlers = {
+        "class": show_class,
+        "method": show_method,
+        "annotations": show_annotations,
+    }
+    handler = handlers.get(what)
+    if handler is None:
+        return usage_error(f"{PROG} show", f"unknown command '{what}'", "show")
+    return handler(rest)
+
+
+# =============================================================================
+# COMMAND: disassemble
+# =============================================================================
+
+
+@dataclass(slots=True, frozen=True)
+class Unit:
+    """One thing to disassemble: a DEX file (baksmali) or an APK (apktool)."""
+
+    kind: str  # "dex" or "apk"
+    path: str
+    label: str
+
+
+def dex_sort_key(name: str) -> int:
+    match = DEX_NAME_RE.match(os.path.basename(name))
+    return int(match.group(1) or 1) if match else 0
+
+
+def split_sort_key(name: str) -> tuple[int, str]:
+    """Base split (or base module) first, then the rest alphabetically."""
+    base = os.path.basename(name.rstrip("/")).lower()
+    is_base = base in ("base.apk", "base") or base.endswith(
+        ("-base-split.apk", "base-master.apk")
+    )
+    return (0 if is_base else 1, name)
+
+
+def is_dex_file(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == DEX_MAGIC
+    except OSError:
+        return False
+
+
+def extract_member(archive: zipfile.ZipFile, member: str, dest: str) -> str:
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with archive.open(member) as src, open(dest, "wb") as out:
+        shutil.copyfileobj(src, out)
+    return dest
+
+
+def apk_units(apk: str, label: str, work: str, backend: str) -> list[Unit]:
+    """Units for one APK: its DEX files (baksmali) or the APK itself (apktool)."""
+    try:
+        with zipfile.ZipFile(apk) as archive:
+            dexes = sorted(
+                (n for n in archive.namelist() if DEX_NAME_RE.match(n)),
+                key=dex_sort_key,
+            )
+            if not dexes:
+                return []
+            if backend == "apktool":
+                return [Unit("apk", apk, label)]
+            units = []
+            for dex in dexes:
+                dest = tempfile.mkdtemp(prefix="dex.", dir=work)
+                units.append(
+                    Unit(
+                        "dex",
+                        extract_member(archive, dex, os.path.join(dest, dex)),
+                        f"{label}!{dex}",
+                    )
+                )
+            return units
+    except (zipfile.BadZipFile, OSError) as e:
+        raise ToolError(f"{label}: {e}") from e
+
+
+def bundle_units(
+    archive: zipfile.ZipFile, label: str, work: str, backend: str
+) -> list[Unit]:
+    """Units for an Android App Bundle: MODULE/dex/classes*.dex, base module first."""
+    if backend != "baksmali":
+        raise ToolError(f"{label}: App Bundle input requires baksmali")
+    modules: dict[str, list[str]] = {}
+    for name in archive.namelist():
+        parts = name.split("/")
+        if len(parts) == 3 and parts[1] == "dex" and DEX_NAME_RE.match(parts[2]):
+            modules.setdefault(parts[0], []).append(name)
+    units = []
+    for module in sorted(modules, key=split_sort_key):
+        for dex in sorted(modules[module], key=dex_sort_key):
+            dest = tempfile.mkdtemp(prefix="dex.", dir=work)
+            units.append(
+                Unit(
+                    "dex",
+                    extract_member(
+                        archive, dex, os.path.join(dest, os.path.basename(dex))
+                    ),
+                    f"{label}!{dex}",
+                )
+            )
+    return units
+
+
+def find_backend() -> str | None:
+    if shutil.which("baksmali"):
+        return "baksmali"
+    if shutil.which("apktool"):
+        return "apktool"
+    return None
+
+
+def require_backend(name: str) -> str:
+    backend = find_backend()
+    if backend is None:
+        raise ToolError(
+            "baksmali not found, and neither was the apktool fallback; install "
+            "baksmali (https://github.com/google/smali) or apktool "
+            "(https://apktool.org) and make sure it is on PATH",
+            code=127,
+        )
+    return backend
+
+
+def run_tool(argv: list[str], label: str) -> None:
+    try:
+        result = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False
+        )
+    except OSError as e:
+        raise ToolError(f"{argv[0]}: {e}") from e
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        raise ToolError(
+            f"{argv[0]} failed on {label} (exit {result.returncode}){suffix}"
+        )
+
+
+def disassemble_unit(unit: Unit, work: str) -> list[str]:
+    """Disassemble one unit; return smali roots in class loading order."""
+    out = tempfile.mkdtemp(prefix="smali.", dir=work)
+    if unit.kind == "dex":
+        run_tool(["baksmali", "disassemble", "-o", out, unit.path], unit.label)
+        return [out]
+    run_tool(["apktool", "d", "--no-res", "-f", "-o", out, unit.path], unit.label)
+    roots = [
+        d
+        for d in os.listdir(out)
+        if APKTOOL_SMALI_DIR_RE.match(d) and os.path.isdir(os.path.join(out, d))
+    ]
+    roots.sort(key=lambda d: precedence_key(d + "/x"))
+    return [os.path.join(out, d) for d in roots]
+
+
+class Merger:
+    """Moves .smali files into the output tree; the first definition of a path wins."""
+
+    def __init__(self, output: str) -> None:
+        self.output = output
+        self.written: set[str] = set()
+        self.duplicates = 0
+
+    def add(
+        self, relpath: str, src: str | None = None, data: bytes | None = None
+    ) -> None:
+        if relpath in self.written:
+            self.duplicates += 1
+            return
+        self.written.add(relpath)
+        dest = os.path.join(self.output, relpath)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if src is not None:
+            shutil.move(src, dest)
+        else:
+            with open(dest, "wb") as f:
+                f.write(data or b"")
+
+    def add_root(self, root: str) -> None:
+        for dirpath, dirs, files in os.walk(root):
+            dirs.sort()
+            for name in sorted(files):
+                if name.endswith(".smali"):
+                    full = os.path.join(dirpath, name)
+                    self.add(os.path.relpath(full, root).replace(os.sep, "/"), src=full)
+
+
+def canonical_relpath(text: str, fallback: str) -> str:
+    """Path of a smali file from its .class directive, else the apktool-stripped path."""
+    for line in text.split("\n", 20)[:20]:
+        stripped = line.strip()
+        if stripped.startswith(".class "):
+            descriptor = stripped.split()[-1]
+            if descriptor.startswith("L") and descriptor.endswith(";"):
+                return descriptor_path(descriptor)
+    parts = fallback.split("/")
+    if len(parts) > 1 and APKTOOL_SMALI_DIR_RE.match(parts[0]):
+        return "/".join(parts[1:])
+    return fallback
+
+
+def copy_smali_tree(tree: SmaliTree, merger: Merger) -> None:
+    for relpath in tree.entries:
+        data = tree.read(relpath)
+        merger.add(canonical_relpath(data, relpath), data=data.encode("utf-8"))
+
+
+def is_apktool_layout(path: str) -> bool:
+    try:
+        return any(
+            APKTOOL_SMALI_DIR_RE.match(d) and os.path.isdir(os.path.join(path, d))
+            for d in os.listdir(path)
+        )
+    except OSError:
+        return False
+
+
+def has_smali(path: str) -> bool:
+    for _root, _dirs, files in os.walk(path):
+        if any(f.endswith(".smali") for f in files):
+            return True
+    return False
+
+
+def plan_units(input_path: str, work: str, name: str) -> list[Unit]:
+    """Decide what to disassemble; raises ToolError for unsupported inputs."""
+    if os.path.isdir(input_path):
+        entries = sorted(os.listdir(input_path))
+        apks = [e for e in entries if e.lower().endswith(".apk")]
+        dexes = sorted((e for e in entries if DEX_NAME_RE.match(e)), key=dex_sort_key)
+        if dexes:
+            if require_backend(name) != "baksmali":
+                raise ToolError(f"{input_path}: DEX input requires baksmali")
+            return [Unit("dex", os.path.join(input_path, d), d) for d in dexes]
+        if apks:
+            backend = require_backend(name)
+            units = []
+            for apk in sorted(apks, key=split_sort_key):
+                units.extend(
+                    apk_units(os.path.join(input_path, apk), apk, work, backend)
+                )
+            return units
+        raise ToolError(f"{input_path}: no APK, DEX, or .smali files found")
+
+    if is_dex_file(input_path):
+        if require_backend(name) != "baksmali":
+            raise ToolError(f"{input_path}: DEX input requires baksmali")
+        return [Unit("dex", input_path, os.path.basename(input_path))]
+
+    label = os.path.basename(input_path)
+    try:
+        with zipfile.ZipFile(input_path) as archive:
+            names = archive.namelist()
+            if contains_dex(names):
+                return apk_units(input_path, label, work, require_backend(name))
+            apks = sorted(
+                (n for n in names if n.lower().endswith(".apk")), key=split_sort_key
+            )
+            if apks:
+                backend = require_backend(name)
+                units = []
+                for apk in apks:
+                    dest = os.path.join(
+                        tempfile.mkdtemp(prefix="apk.", dir=work), os.path.basename(apk)
+                    )
+                    extract_member(archive, apk, dest)
+                    units.extend(apk_units(dest, f"{label}!{apk}", work, backend))
+                return units
+            if any(
+                n.split("/")[-2:-1] == ["dex"] and DEX_NAME_RE.match(n.split("/")[-1])
+                for n in names
+            ):
+                return bundle_units(archive, label, work, require_backend(name))
+    except zipfile.BadZipFile as e:
+        raise ToolError(f"{input_path}: not an APK, ZIP archive, or DEX file") from e
+    except OSError as e:
+        raise ToolError(f"{input_path}: {e}") from e
+    raise ToolError(f"{input_path}: no APK, DEX, or .smali files found")
+
+
+def cmd_disassemble(argv: list[str]) -> int:
+    name = f"{PROG} disassemble"
+    if wants_help(argv):
+        sys.stdout.write(HELP_DISASSEMBLE)
+        return 0
+    if not argv:
+        sys.stderr.write(SHORT_DISASSEMBLE)
+        return 1
+    try:
+        spec = Spec(
+            positionals=["INPUT"], flags={"--output": "DIR"}, aliases={"-o": "--output"}
+        )
+        positionals, options = parse_args(argv, spec)
+        need(bool(positionals), "INPUT required")
+        need(
+            "--output" not in options or bool(options["--output"]),
+            "--output requires a non-empty argument",
+        )
+    except UsageError as e:
+        return usage_error(name, str(e), "disassemble")
+
+    input_path = positionals[0]
+    output = str(options["--output"]) if "--output" in options else None
+    if not os.path.exists(input_path):
+        print(f"{name}: {input_path}: No such file or directory", file=sys.stderr)
+        return 1
+
+    # A plain smali tree needs no work unless the caller asked for a copy.
+    smali_tree: SmaliTree | None = None
+    if os.path.isdir(input_path) and has_smali(input_path):
+        if output is None and not is_apktool_layout(input_path):
+            print(input_path)
+            return 0
+        smali_tree = SmaliTree(input_path)
+    elif os.path.isfile(input_path) and zipfile.is_zipfile(input_path):
+        try:
+            with zipfile.ZipFile(input_path) as archive:
+                names = archive.namelist()
+        except (zipfile.BadZipFile, OSError) as e:
+            print(f"{name}: {input_path}: {e}", file=sys.stderr)
+            return 1
+        if any(n.endswith(".smali") for n in names) and not contains_dex(names):
+            try:
+                smali_tree = SmaliTree(input_path)
+            except ToolError as e:
+                print(f"{name}: {e}", file=sys.stderr)
+                return e.code
+
+    created_temp = output is None
+    try:
+        if output is None:
+            output = tempfile.mkdtemp(prefix="apk-smali.")
+        else:
+            try:
+                os.makedirs(output, exist_ok=True)
+            except OSError as e:
+                raise ToolError(
+                    f"{output}: cannot create directory: {e.strerror}"
+                ) from e
+        merger = Merger(output)
+        work = tempfile.mkdtemp(prefix="apk-smali-work.")
+        try:
+            if smali_tree is not None:
+                copy_smali_tree(smali_tree, merger)
+                summary = f"{len(merger.written)} classes copied"
+            else:
+                units = plan_units(input_path, work, name)
+                if not units:
+                    raise ToolError(f"{input_path}: no DEX files found")
+                for unit in units:
+                    for root in disassemble_unit(unit, work):
+                        merger.add_root(root)
+                summary = f"{len(merger.written)} classes from {len(units)} " + (
+                    "DEX file(s)" if units[0].kind == "dex" else "APK(s) via apktool"
+                )
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    except BaseException as e:
+        if created_temp and output is not None:
+            shutil.rmtree(output, ignore_errors=True)
+        if isinstance(e, ToolError):
+            print(f"{name}: {e}", file=sys.stderr)
+            return e.code
+        if isinstance(e, OSError):
+            print(f"{name}: {e}", file=sys.stderr)
+            return 1
+        raise
+    if merger.duplicates:
+        print(
+            f"{name}: warning: {merger.duplicates} duplicate class definition(s) "
+            "skipped; the first definition was kept",
+            file=sys.stderr,
+        )
+    print(f"{name}: {summary}", file=sys.stderr)
+    print(output)
+    return 0
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+
+def usage_error(name: str, message: str, command: str, code: int = 1) -> int:
+    print(f"{name}: {message}", file=sys.stderr)
+    print(f"Try '{PROG} {command} --help' for more information.", file=sys.stderr)
+    return code
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        sys.stdout.write(HELP_MAIN)
+        return 0
+    command, rest = argv[0], argv[1:]
+    commands = {"disassemble": cmd_disassemble, "find": cmd_find, "show": cmd_show}
+    if command == "help":
+        if rest and rest[0] in commands:
+            return commands[rest[0]](["--help"])
+        sys.stdout.write(HELP_MAIN)
+        return 0
+    handler = commands.get(command)
+    if handler is None:
+        print(f"{PROG}: unknown command '{command}'", file=sys.stderr)
+        sys.stderr.write("\n" + SHORT_MAIN)
+        return 1
+    return handler(rest)
+
+
+def sigterm_handler(signum, frame):
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)

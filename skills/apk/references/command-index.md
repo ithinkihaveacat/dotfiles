@@ -8,6 +8,7 @@
 - [apk-info](#apk-info)
 - [apk-install-and-launch](#apk-install-and-launch)
 - [apk-launcher-icon-extract](#apk-launcher-icon-extract)
+- [apk-smali](#apk-smali)
 - [apk-unzip](#apk-unzip)
 - [avd-to-png](#avd-to-png)
 
@@ -142,6 +143,274 @@ Examples:
 
   # Extract launcher icons to a specific directory
   apk-launcher-icon-extract --output /tmp/icons /path/to/your/app.zip
+```
+
+<!-- /generated -->
+
+## apk-smali
+
+Disassembles DEX bytecode to one smali tree and queries it. See
+[bytecode-analysis.md](bytecode-analysis.md) for when to use smali and how to
+report findings.
+
+<!-- generated: ../scripts/apk-smali --help -->
+
+```text
+Usage: apk-smali COMMAND [ARGUMENTS]
+
+Disassemble Android DEX bytecode to smali and query the result.
+
+Commands:
+  disassemble          Disassemble an APK, split-APK archive, or DEX file into
+                       a single smali tree and print its path.
+  find                 List classes that declare, call, extend, implement, or
+                       are annotated with something.
+  show                 Print a class, a method body, or class annotations.
+
+Options:
+  -h, --help           Display this help message and exit.
+
+Examples:
+  # Disassemble every DEX file of an APK into one tree
+  TREE=$(apk-smali disassemble app-release.apk)
+
+  # Which classes override onTrimMemory(I)V?
+  apk-smali find "$TREE" --declares 'onTrimMemory(I)V'
+
+  # A method plus the same-class helpers it calls, one level deep
+  apk-smali show method "$TREE" com.example.MyService 'onCreate()V' --depth 1
+
+  # Runtime annotations on a service declared in AndroidManifest.xml
+  apk-smali show annotations "$TREE" com.example.MyWidgetService
+
+A TREE is a directory or a ZIP archive of .smali files, such as the output of
+'apk-smali disassemble', baksmali, or apktool. ZIP archives are read in place.
+
+Run 'apk-smali COMMAND --help' for command-specific help.
+```
+
+<!-- /generated -->
+
+### apk-smali disassemble
+
+<!-- generated: ../scripts/apk-smali disassemble --help -->
+
+```text
+Usage: apk-smali disassemble [OPTIONS] INPUT
+
+Disassemble all DEX bytecode in INPUT into a single smali tree (one .smali file
+per class, at the path named by its class descriptor) and print the tree's path.
+
+Arguments:
+  INPUT             One of:
+                      - an APK, or a raw .dex file
+                      - a split-APK archive (.zip, .apks, .xapk) or a directory
+                        of split APKs; every split is disassembled
+                      - an Android App Bundle (.aab); every module is included
+                      - a directory of extracted APK contents (classes*.dex)
+                      - a ZIP archive or directory of .smali files, which is
+                        passed through without disassembly
+
+Options:
+  -o, --output DIR  Write the tree to DIR (created if missing; existing files
+                    with the same path are overwritten).
+                    (defaults to a new temporary directory)
+  -h, --help        Display this help message and exit.
+
+Examples:
+  # Disassemble an APK into a new temporary directory
+  TREE=$(apk-smali disassemble app-release.apk)
+
+  # Disassemble every split in an archive into a specific directory
+  apk-smali disassemble --output /tmp/app-smali app-splits.zip
+
+  # Normalize an existing apktool output directory (smali_classes2/, ...)
+  apk-smali disassemble -o /tmp/app-smali decoded-apk/
+
+Notes:
+  DEX files are disassembled with baksmali when it is on PATH, otherwise with
+  'apktool d --no-res' (APK inputs only).
+
+  When a class is defined more than once, the first definition wins, in class
+  loading order: classes.dex, classes2.dex, ... within an APK, and the base
+  split (or base module) before other splits in alphabetical order. A warning
+  reports how many duplicates were skipped.
+
+  A directory that already holds a plain smali tree is printed unchanged
+  unless --output is given.
+```
+
+<!-- /generated -->
+
+### apk-smali find
+
+<!-- generated: ../scripts/apk-smali find --help -->
+
+```text
+Usage: apk-smali find TREE PREDICATE... [OPTIONS]
+
+List the descriptors of classes in TREE that match every PREDICATE, one per
+line, sorted.
+
+Arguments:
+  TREE                      A directory or ZIP archive of .smali files.
+
+Predicates:
+  --declares METHOD         The class declares METHOD.
+  --calls [CLASS]->METHOD   A method of the class invokes METHOD (invoke-*).
+                            Omit CLASS to match any receiver type.
+  --annotated-with CLASS    The class carries a class-level annotation of
+                            type CLASS.
+  --extends CLASS           The class's direct superclass (.super) is CLASS.
+  --implements CLASS        The class directly implements interface CLASS.
+
+  METHOD is NAME, NAME(PARAMS) (any return type), or NAME(PARAMS)RETURN, for
+  example onTrimMemory, onTrimMemory(I), or onTrimMemory(I)V. CLASS is a type
+  descriptor (Lcom/example/Foo;) or a dotted name (com.example.Foo).
+
+Options:
+  --methods                 Print the matching methods (CLASS->METHOD) instead
+                            of classes; requires --declares or --calls.
+  -h, --help                Display this help message and exit.
+
+Exit Status:
+  0  at least one class matched
+  1  no class matched
+  2  an error occurred
+
+Examples:
+  # Classes that override onTrimMemory(I)V
+  apk-smali find "$TREE" --declares 'onTrimMemory(I)V'
+
+  # Methods that call any onTrimMemory, whatever the receiver
+  apk-smali find "$TREE" --calls '->onTrimMemory' --methods
+
+  # Services that are also annotated with an (obfuscated) annotation type
+  apk-smali find app-smali.zip --extends 'Landroid/app/Service;' \
+      --annotated-with 'La/b;'
+```
+
+<!-- /generated -->
+
+### apk-smali show
+
+<!-- generated: ../scripts/apk-smali show --help -->
+
+```text
+Usage: apk-smali show WHAT TREE CLASS [ARGUMENTS] [OPTIONS]
+
+Print part of a class from a smali tree.
+
+Commands:
+  class                Print the whole .smali file of CLASS.
+  method               Print the body of a method, optionally with the
+                       same-class methods it calls.
+  annotations          Print the class-level annotations of CLASS.
+
+Arguments:
+  TREE                 A directory or ZIP archive of .smali files.
+  CLASS                A type descriptor (Lcom/example/Foo;) or a dotted name
+                       (com.example.Foo).
+
+Options:
+  -h, --help           Display this help message and exit.
+
+Examples:
+  apk-smali show class "$TREE" com.example.MyWidgetService
+  apk-smali show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+  apk-smali show annotations "$TREE" 'Lcom/example/MyWidgetService;'
+
+Run 'apk-smali show WHAT --help' for help on each command.
+```
+
+<!-- /generated -->
+
+#### apk-smali show class
+
+<!-- generated: ../scripts/apk-smali show class --help -->
+
+```text
+Usage: apk-smali show class TREE CLASS
+
+Print the whole .smali file of CLASS.
+
+Arguments:
+  TREE         A directory or ZIP archive of .smali files.
+  CLASS        A type descriptor (Lcom/example/Foo;) or a dotted name
+               (com.example.Foo).
+
+Options:
+  -h, --help   Display this help message and exit.
+
+Examples:
+  apk-smali show class "$TREE" com.example.MyWidgetService
+  apk-smali show class app-smali.zip 'La/b;'
+```
+
+<!-- /generated -->
+
+#### apk-smali show method
+
+<!-- generated: ../scripts/apk-smali show method --help -->
+
+```text
+Usage: apk-smali show method TREE CLASS METHOD [OPTIONS]
+
+Print the full .method ... .end method body of METHOD in CLASS. All overloads
+are printed when METHOD omits the parameter list.
+
+Arguments:
+  TREE           A directory or ZIP archive of .smali files.
+  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
+                 (com.example.Foo).
+  METHOD         NAME, NAME(PARAMS), or NAME(PARAMS)RETURN, for example
+                 onTrimMemory(I)V.
+
+Options:
+  --depth N      Also print methods of CLASS that the printed methods invoke,
+                 following calls N levels deep; each method is printed once.
+                 (default: 0)
+  -h, --help     Display this help message and exit.
+
+Examples:
+  # The body of an override
+  apk-smali show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
+
+  # The override plus the private helpers it calls, two levels deep
+  apk-smali show method "$TREE" 'Lcom/example/MyService;' onTrimMemory --depth 2
+```
+
+<!-- /generated -->
+
+#### apk-smali show annotations
+
+<!-- generated: ../scripts/apk-smali show annotations --help -->
+
+```text
+Usage: apk-smali show annotations TREE CLASS [OPTIONS]
+
+Print the class-level .annotation blocks of CLASS, including their values
+(for example the class literals an annotation references).
+
+Arguments:
+  TREE           A directory or ZIP archive of .smali files.
+  CLASS          A type descriptor (Lcom/example/Foo;) or a dotted name
+                 (com.example.Foo).
+
+Options:
+  --all          Include Lkotlin/Metadata; and Ldalvik/annotation/* blocks,
+                 which are hidden by default.
+  --members      Also print field and method annotations; each group is
+                 preceded by a '# CLASS', '# CLASS->FIELD' or
+                 '# CLASS->METHOD' comment line.
+  -h, --help     Display this help message and exit.
+
+Examples:
+  # Runtime annotations on a service declared in AndroidManifest.xml
+  apk-smali show annotations "$TREE" com.example.MyWidgetService
+
+  # Every annotation in the class, including compiler metadata
+  apk-smali show annotations app-smali.zip 'La/b;' --all --members
 ```
 
 <!-- /generated -->
