@@ -122,13 +122,26 @@ on top of it, and comprehensive documentation guidelines.
 
 ### Fish Shell Completions
 
-Scripts in `bin/` may have corresponding Fish shell completion files in
-`fish/completions/`. When updating a script, you must also update its completion
-file if one exists.
+Scripts may have a Fish shell completion file. When updating a script, you must
+also update its completion file if one exists.
+
+#### Where Completion Files Live
+
+A completion file is named `<script-name>.fish` and lives beside what it
+completes, so it travels with the script:
+
+- **Skill scripts:** `skills/<skill>/completions/<script-name>.fish`, for the
+  script `skills/<skill>/scripts/<script-name>`. `fish/config.fish` (and
+  `_load_overlay` for `~/.private` and `~/.corp`) adds every
+  `skills/*/completions/` directory to `fish_complete_path`, so nothing is
+  copied or installed.
+- **Other `bin/` scripts and fish functions:** `fish/completions/`.
+
+Helpers shared by several completion files (such as `__fish_android_devices`)
+live in `fish/functions/`.
 
 #### Completion Requirements
 
-- Completion files are named `<script-name>.fish` in `fish/completions/`
 - When adding, removing, or modifying command-line options in a script, update
   the corresponding completion file
 - When adding a new script that accepts command-line options, consider creating
@@ -136,20 +149,21 @@ file if one exists.
 - Completion files should provide completions for all documented options and
   subcommands
 
-#### Finding Completion Files
-
-Check if a completion file exists for a script:
+`tests/test-fish-completions` (run in CI) enforces the layout above and checks
+each completion file against its script's `--help`: every option `--help`
+defines must be completed and, for a script without subcommands, every completed
+option must be defined by `--help`. A script's `--help` is the source of truth;
+fix the completion file, not the test.
 
 ```bash
-# For a script named bin/my-script
-ls fish/completions/my-script.fish
+prove tests/test-fish-completions
 ```
 
 ### Example
 
-If you modify `bin/emumanager` to add a new subcommand or option, you must also
-update `fish/completions/emumanager.fish` to include completions for the new
-functionality.
+If you modify `skills/emumanager/scripts/emumanager` to add a new subcommand or
+option, you must also update `skills/emumanager/completions/emumanager.fish` to
+include completions for the new functionality.
 
 ### Generated Command Index Blocks
 

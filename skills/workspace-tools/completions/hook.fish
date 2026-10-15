@@ -1,4 +1,5 @@
 complete -c hook -f
+complete -c hook -s S -l source-dir -x -a '(__fish_complete_directories)' -d 'Source directory containing hook profiles'
 
 complete -c hook -n __fish_use_subcommand -a apply -d 'Synchronize hooks to match AGENT_REQUIRED_HOOKS'
 complete -c hook -n __fish_use_subcommand -a add -d 'Add a hook profile'

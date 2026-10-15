@@ -31,6 +31,7 @@ complete -c context -f -n __fish_context_needs_command -a catalog -d 'List avail
 complete -c context -f -n __fish_context_needs_command -a show -d 'Show context for a target'
 complete -c context -f -n __fish_context_needs_command -a template -d 'Output a template for creating a Python plugin'
 complete -c context -f -n __fish_context_needs_command -a help -d 'Display help message'
+complete -c context -f -s h -l help -d 'Display help message and exit'
 
 # Complete entries for 'show' subcommand
 # We allow file completion (no -f) so users can complete local directories,

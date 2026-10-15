@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-fish-completions
+#
+# Checks every fish completion file against the command it completes:
+#
+# - A skill script's completion lives in its skill, as
+#   skills/SKILL/completions/NAME.fish beside skills/SKILL/scripts/NAME, and
+#   fish/completions/ holds only completions for bin/ scripts and fish
+#   functions.
+# - The options a script's --help defines (indented lines that start with a
+#   dash) are all completed, and, for a script without subcommands, every
+#   completed option is defined by --help. A subcommand's options are not
+#   listed in the top-level --help, so the second check would misfire there.
+
+if ! command -v fish >/dev/null 2>&1; then
+  echo "1..0 # SKIP fish not installed"
+  exit 0
+fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+cd "$ROOT" || exit 1
+
+test_num=0
+failed=0
+
+ok() {
+  test_num=$((test_num + 1))
+  echo "ok $test_num - $1"
+}
+
+not_ok() {
+  test_num=$((test_num + 1))
+  failed=1
+  echo "not ok $test_num - $1"
+  shift
+  local line
+  for line in "$@"; do
+    echo "#   $line"
+  done
+}
+
+# Options defined by help text on stdin, one per line (--long or -s). Only the
+# option column of an indented line that starts with an option counts, so
+# options mentioned in prose or in another command's examples do not. Every
+# script that takes --help also takes -h, whether or not its help says so.
+help_options() {
+  local line spec word
+  local -a words
+  while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]+-{1,2}[A-Za-z0-9] ]] || continue
+    spec=${line#"${line%%[![:space:]]*}"}
+    spec=${spec%%  *}
+    read -r -a words <<<"${spec//[\[\],|]/ }"
+    [[ ${words[0]} =~ ^-{1,2}[A-Za-z0-9][A-Za-z0-9-]*(=.*)?$ ]] || continue
+    for word in "${words[@]}"; do
+      case $word in
+        --[A-Za-z0-9]*)
+          word=${word#--}
+          printf -- '--%s\n' "${word%%[!A-Za-z0-9-]*}"
+          [[ $word == help ]] && printf -- '-h\n'
+          ;;
+        -[A-Za-z0-9])
+          printf '%s\n' "$word"
+          ;;
+      esac
+    done
+  done
+}
+
+# The completions FILE defines for CMD, as fish itself lists them once the file
+# is loaded: one canonical 'complete' command per line.
+fish_completions() {
+  # shellcheck disable=SC2016 # $argv is expanded by fish, not bash
+  fish --no-config -c 'source $argv[1]; and complete -c $argv[2]' "$1" "$2"
+}
+
+# Options a completion file completes for CMD, one per line. Quoted strings
+# (descriptions, conditions, arguments) are removed first so their text is not
+# mistaken for options.
+completion_options() {
+  fish_completions "$1" "$2" |
+    sed -E "s/'([^'\\\\]|\\\\.)*'//g" |
+    grep -oE ' -[lso] [^ ]+' |
+    sed -E 's/^ -l /--/; s/^ -s /-/; s/^ -o /-/'
+}
+
+# Whether fish completes subcommands (conditions on earlier words) for CMD.
+has_subcommands() {
+  fish_completions "$1" "$2" | grep -qE ' -n '
+}
+
+check_options() {
+  local name=$1 file=$2 script=$3
+  local help status=0 expected actual missing extra
+  local -a details=()
+
+  help=$(NO_COLOR=1 "$script" --help 2>&1 </dev/null) || status=$?
+  if [[ $status -ne 0 ]]; then
+    not_ok "$name: --help exits 0" "exit status $status" "${help%%$'\n'*}"
+    return
+  fi
+
+  expected=$(help_options <<<"$help" | sort -u)
+  actual=$(completion_options "$file" "$name" | sort -u)
+
+  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | grep . | tr '\n' ' ')
+  [[ -n $missing ]] && details+=("in --help but not completed: $missing")
+
+  if ! has_subcommands "$file" "$name"; then
+    extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | grep . | tr '\n' ' ')
+    [[ -n $extra ]] && details+=("completed but not in --help: $extra")
+  fi
+
+  if [[ ${#details[@]} -eq 0 ]]; then
+    ok "$name: completion matches --help"
+  else
+    not_ok "$name: completion matches --help" "${details[@]}"
+  fi
+}
+
+for file in skills/*/completions/*.fish; do
+  [[ -e $file ]] || continue
+  name=$(basename "$file" .fish)
+  skill_dir=${file%/completions/*}
+  script="$skill_dir/scripts/$name"
+  if [[ ! -x $script ]]; then
+    not_ok "$file: completes a script in its skill" "no executable $script"
+    continue
+  fi
+  check_options "$name" "$file" "$script"
+done
+
+for file in fish/completions/*.fish; do
+  [[ -e $file ]] || continue
+  name=$(basename "$file" .fish)
+  if [[ -L bin/$name ]]; then
+    not_ok "$file: completes a bin/ script or fish function" \
+      "bin/$name links to $(readlink "bin/$name"); move the completion into that skill's completions/"
+  elif [[ -f bin/$name && -x bin/$name ]]; then
+    check_options "$name" "$file" "bin/$name"
+  elif [[ -f fish/functions/$name.fish ]]; then
+    ok "$file: completes a fish function"
+  else
+    not_ok "$file: completes a bin/ script or fish function" \
+      "no bin/$name or fish/functions/$name.fish"
+  fi
+done
+
+echo "1..$test_num"
+exit "$failed"

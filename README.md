@@ -14,7 +14,7 @@ with agents such as Claude Code, Codex, and Gemini CLI.
 ├── fish/
 │   ├── config.fish      # Main fish config; loads .private overlay if present
 │   ├── conf.d/          # Fish startup snippets
-│   ├── completions/     # Fish completions
+│   ├── completions/     # Fish completions for bin/ scripts and functions
 │   └── functions/       # Fish functions (autoloaded)
 ├── home/                # Dotfiles symlinked into $HOME by install.sh
 ├── etc/                 # Tool-specific config (git templates, VS Code, etc.)
@@ -162,8 +162,9 @@ installs, auth setup, etc.).
 ```
 
 `fish/config.fish` prepends `~/.private/fish/functions` (and `.corp`
-equivalents) and `~/.private/fish/completions` to the fish search paths, and
-sources any `~/.private/fish/conf.d/*.fish` snippets at shell startup.
+equivalents), `~/.private/fish/completions` and each
+`~/.private/skills/*/completions` to the fish search paths, and sources any
+`~/.private/fish/conf.d/*.fish` snippets at shell startup.
 
 To install: clone your private repos to `~/.private` and/or `~/.corp`, then run
 `./install.sh` again.

@@ -179,6 +179,10 @@ set -x VISUAL $EDITOR
 
 # completions
 
+# Completions for skill scripts live beside the scripts, in each skill's
+# completions/ directory; _load_overlay adds the overlays' skills likewise.
+set -p fish_complete_path $HOME/.dotfiles/skills/*/completions
+
 type -q pbcopy; or alias pbcopy fish_clipboard_copy
 type -q pbpaste; or alias pbpaste fish_clipboard_paste
 
