@@ -247,6 +247,8 @@ hook [options] <command> [arguments]
   directory (default: bundled `resources/hooks/` or `$HOOK_SOURCE_DIR`).
 - **`--copy`**: Copy hook sources rather than installing trampolines (for
   machines with no persistent dotfiles/skill tree).
+- **`--external`**: Make `add`/`remove` operate on an external sub-hook (see
+  below) rather than a profile.
 - **`--all`**: Delete all hooks during `clean` (requires `--force`).
 - **`--force`**: Confirm deletion for `clean --all`.
 
@@ -277,6 +279,17 @@ hook [options] <command> [arguments]
 - **`doctor`**: Audit `.git/hooks/` for missing, drifted, or unmanaged hooks
   (read-only).
 - **`clean`**: Remove all managed hooks and restore legacy/original hooks.
+- **`add --external HOOK-NAME:KEY SOURCE`**: Install `SOURCE`, a hook script
+  kept outside this tree (for example in another repository), as sub-hook `KEY`
+  of `HOOK-NAME` (e.g. `pre-push:90-check`). `KEY` is two digits, a dash and a
+  name; the digits set its run order after `00-legacy`. Keys owned by a profile
+  are refused.
+- **`remove --external HOOK-NAME:KEY`**: Remove an external sub-hook, restoring
+  a preserved `00-legacy` hook if nothing else is left.
+
+External sub-hooks are trampolines like profile sub-hooks, so editing the source
+takes effect immediately. `list` shows them as `external`, `doctor` checks that
+their source still exists, and `apply` and `clean` leave them in place.
 
 ### Environment Variables
 

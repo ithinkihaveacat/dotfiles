@@ -17,6 +17,7 @@ complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a node -d 'pret
 complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a gerrit -d 'Gerrit Change-Id trailer'
 
 complete -c hook -n '__fish_seen_subcommand_from add apply' -l copy -d 'Copy the hook source instead of installing a trampoline'
+complete -c hook -n '__fish_seen_subcommand_from add remove rm' -l external -r -d 'Operate on an external sub-hook (HOOK-NAME:KEY)'
 complete -c hook -n '__fish_seen_subcommand_from clean' -l all -d 'Delete the entire hooks directory (requires --force)'
 complete -c hook -n '__fish_seen_subcommand_from clean' -l force -d 'Confirm the deletion'
 complete -c hook -s h -l help -d 'Display help message and exit'

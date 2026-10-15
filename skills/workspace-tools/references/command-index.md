@@ -37,17 +37,29 @@ A pre-existing hook not managed by this tool is preserved as
 .git/hooks/<hook-name>.d/00-legacy and continues to run first. Removing the
 last managed sub-hook restores it as the plain hook.
 
+A hook source kept outside this tree (in another repository, say) can join
+the same multiplexer as an external sub-hook: 'add --external' installs a
+trampoline to it under a key you choose. External sub-hooks are shown by
+'list', checked by 'doctor', and left alone by 'apply' and 'clean'.
+
 Commands:
   apply             Synchronize this repository's hooks to match
                     AGENT_REQUIRED_HOOKS (idempotent)
   add PROFILE...    Add a hook profile
+  add --external HOOK-NAME:KEY SOURCE
+                    Add SOURCE as sub-hook KEY of HOOK-NAME (e.g.
+                    pre-push:90-check); KEY is two digits, a dash and a name,
+                    and sets the run order
   remove PROFILE... Remove a hook profile, leaving other hooks in place
                     (alias: rm)
+  remove --external HOOK-NAME:KEY
+                    Remove an external sub-hook
   list              List the hooks installed in this repository (alias: ls)
   catalog           List the hook profiles available to add
   doctor            Report missing, drifted or unmanaged hooks (read-only)
   clean             Remove every profile this tool manages, leaving
-                    third-party hooks and 00-legacy in place
+                    third-party hooks, external sub-hooks and 00-legacy in
+                    place
 
 Options:
   --source-dir DIR, -S DIR
@@ -55,6 +67,8 @@ Options:
                     (default: bundled resources/hooks, or $HOOK_SOURCE_DIR)
   --copy            add/apply: copy the hook source instead of installing a
                     trampoline to it, for a machine with no dotfiles tree
+  --external        add/remove: operate on an external sub-hook rather than
+                    a profile
   --all             clean: delete the entire hooks directory, including
                     third-party hooks; requires --force
   --force           clean --all: confirm the deletion
@@ -75,6 +89,7 @@ Examples:
   hook list
   hook doctor
   hook remove gerrit
+  hook add --external pre-push:90-check ~/src/checks/pre-push
   env AGENT_REQUIRED_HOOKS='agent node' hook apply
 
 'add'/'apply' abort immediately, installing nothing for that profile, if a

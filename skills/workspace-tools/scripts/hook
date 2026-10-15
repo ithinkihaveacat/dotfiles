@@ -40,17 +40,29 @@ A pre-existing hook not managed by this tool is preserved as
 .git/hooks/<hook-name>.d/00-legacy and continues to run first. Removing the
 last managed sub-hook restores it as the plain hook.
 
+A hook source kept outside this tree (in another repository, say) can join
+the same multiplexer as an external sub-hook: 'add --external' installs a
+trampoline to it under a key you choose. External sub-hooks are shown by
+'list', checked by 'doctor', and left alone by 'apply' and 'clean'.
+
 Commands:
   apply             Synchronize this repository's hooks to match
                     AGENT_REQUIRED_HOOKS (idempotent)
   add PROFILE...    Add a hook profile
+  add --external HOOK-NAME:KEY SOURCE
+                    Add SOURCE as sub-hook KEY of HOOK-NAME (e.g.
+                    pre-push:90-check); KEY is two digits, a dash and a name,
+                    and sets the run order
   remove PROFILE... Remove a hook profile, leaving other hooks in place
                     (alias: rm)
+  remove --external HOOK-NAME:KEY
+                    Remove an external sub-hook
   list              List the hooks installed in this repository (alias: ls)
   catalog           List the hook profiles available to add
   doctor            Report missing, drifted or unmanaged hooks (read-only)
   clean             Remove every profile this tool manages, leaving
-                    third-party hooks and 00-legacy in place
+                    third-party hooks, external sub-hooks and 00-legacy in
+                    place
 
 Options:
   --source-dir DIR, -S DIR
@@ -58,6 +70,8 @@ Options:
                     (default: bundled resources/hooks, or \$HOOK_SOURCE_DIR)
   --copy            add/apply: copy the hook source instead of installing a
                     trampoline to it, for a machine with no dotfiles tree
+  --external        add/remove: operate on an external sub-hook rather than
+                    a profile
   --all             clean: delete the entire hooks directory, including
                     third-party hooks; requires --force
   --force           clean --all: confirm the deletion
@@ -78,6 +92,7 @@ Examples:
   $SCRIPT_NAME list
   $SCRIPT_NAME doctor
   $SCRIPT_NAME remove gerrit
+  $SCRIPT_NAME add --external pre-push:90-check ~/src/checks/pre-push
   env AGENT_REQUIRED_HOOKS='agent node' $SCRIPT_NAME apply
 
 'add'/'apply' abort immediately, installing nothing for that profile, if a
@@ -624,6 +639,89 @@ profile_installed() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# External sub-hooks
+# ---------------------------------------------------------------------------
+
+# An external sub-hook is a trampoline (or --copy) this tool installed at a
+# HOOK-NAME:KEY no profile claims, pointing at a source outside this tree.
+# Nothing records it but the stub itself, whose marker line names the source.
+
+profile_owning() { # profile_owning HOOK-NAME KEY -> prints the profile
+  local profile pair
+  for profile in $PROFILES; do
+    for pair in $(profile_pairs "$profile"); do
+      if [ "$pair" = "$1:$2" ]; then
+        printf '%s\n' "$profile"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+EXT_NAME=""
+EXT_KEY=""
+parse_external_spec() { # parse_external_spec SPEC -> sets EXT_NAME, EXT_KEY
+  local spec="$1" owner
+  case "$spec" in
+    *:*) ;;
+    *) die "expected HOOK-NAME:KEY, got '$spec' (e.g. pre-push:90-check)" ;;
+  esac
+  EXT_NAME="${spec%%:*}"
+  EXT_KEY="${spec#*:}"
+  [[ $EXT_NAME =~ ^[a-z][a-z0-9-]*$ ]] || die "invalid hook name: '$EXT_NAME'"
+  [[ $EXT_KEY =~ ^[0-9][0-9]-[A-Za-z0-9._-]+$ ]] ||
+    die "invalid key: '$EXT_KEY' (expected two digits, a dash and a name, e.g. 90-check)"
+  [ "$EXT_KEY" != "$LEGACY_KEY" ] ||
+    die "key $LEGACY_KEY is reserved for a preserved pre-existing hook"
+  if owner=$(profile_owning "$EXT_NAME" "$EXT_KEY"); then
+    die "$EXT_NAME:$EXT_KEY belongs to profile '$owner'; use '$SCRIPT_NAME $cmd $owner'"
+  fi
+}
+
+add_external() { # add_external SPEC SOURCE
+  local src="$2" sub
+  parse_external_spec "$1"
+  sub="$HOOKS_DIR/$EXT_NAME.d/$EXT_KEY"
+  [ -f "$src" ] || die "hook source not found: $src"
+  [ -x "$src" ] || die "hook source is not executable: $src"
+  if [ -e "$sub" ] && ! is_managed_subhook "$sub"; then
+    die "refusing to overwrite $sub, which was not installed by $SCRIPT_NAME"
+  fi
+  install_subhook "$EXT_NAME" "$EXT_KEY" "$src"
+}
+
+remove_external() { # remove_external SPEC
+  local sub
+  parse_external_spec "$1"
+  sub="$HOOKS_DIR/$EXT_NAME.d/$EXT_KEY"
+  if [ -e "$sub" ] && ! is_managed_subhook "$sub"; then
+    die "refusing to remove $sub, which was not installed by $SCRIPT_NAME"
+  fi
+  remove_subhook "$EXT_NAME" "$EXT_KEY"
+}
+
+external_subhooks() { # prints "HOOK-NAME KEY" for each external sub-hook
+  local sub name key
+  for sub in "$HOOKS_DIR"/*.d/*; do
+    [ -f "$sub" ] || continue
+    key=$(basename "$sub")
+    name=$(basename "$(dirname "$sub")" .d)
+    [ "$key" != "$LEGACY_KEY" ] || continue
+    ! profile_owning "$name" "$key" >/dev/null || continue
+    is_managed_subhook "$sub" || continue
+    printf '%s %s\n' "$name" "$key"
+  done
+}
+
+subhook_source() { # subhook_source PATH -> the source a managed sub-hook names
+  local target
+  target=$(trampoline_target "$1")
+  [ -n "$target" ] || target=$(copy_target "$1")
+  printf '%s\n' "$target"
+}
+
 cmd_apply() {
   local wanted profile found
   wanted=$(required_profiles)
@@ -650,7 +748,7 @@ cmd_apply() {
 }
 
 cmd_list() {
-  local profile pair names any=no
+  local profile pair names name key any=no
   for profile in $PROFILES; do
     if profile_installed "$profile"; then
       names=""
@@ -661,6 +759,10 @@ cmd_list() {
       any=yes
     fi
   done
+  while read -r name key; do
+    printf '%-8s %-12s %s\n' external "$name" "$key -> $(subhook_source "$HOOKS_DIR/$name.d/$key")"
+    any=yes
+  done < <(external_subhooks)
   [ "$any" = yes ] || echo "$SCRIPT_NAME list: no hook profiles installed in $(git rev-parse --show-toplevel)" >&2
 }
 
@@ -750,6 +852,27 @@ cmd_doctor() {
     fi
   done
 
+  local src
+  while read -r name key; do
+    src=$(subhook_source "$HOOKS_DIR/$name.d/$key")
+    state=$(subhook_state "$name" "$key")
+    case "$state" in
+      ok)
+        report PASS "external: $name:$key installed and current"
+        ;;
+      orphaned_subhook)
+        report FAIL "external: $name:$key points at a source that no longer exists: $src"
+        printf '        restore the source, or run '\''%s remove --external %s:%s'\''\n' "$SCRIPT_NAME" "$name" "$key"
+        rc=1
+        ;;
+      *)
+        report WARN "external: $name:$key is not installed correctly ($state)"
+        printf '        run '\''%s add --external %s:%s %s'\'' to refresh it\n' "$SCRIPT_NAME" "$name" "$key" "$src"
+        rc=1
+        ;;
+    esac
+  done < <(external_subhooks)
+
   return "$rc"
 }
 
@@ -825,12 +948,17 @@ esac
 copy_mode=no
 all_mode=no
 force_mode=no
+external_mode=no
 args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help | -h) usage ;;
     --copy)
       copy_mode=yes
+      shift
+      ;;
+    --external)
+      external_mode=yes
       shift
       ;;
     --all)
@@ -881,6 +1009,10 @@ case "$cmd" in
   *) [ "$copy_mode" = no ] || die "does not accept --copy" ;;
 esac
 case "$cmd" in
+  add | remove | rm) ;;
+  *) [ "$external_mode" = no ] || die "does not accept --external" ;;
+esac
+case "$cmd" in
   clean)
     [ "$force_mode" = no ] || [ "$all_mode" = yes ] || die "clean: --force requires --all"
     ;;
@@ -916,12 +1048,22 @@ case "$cmd" in
     cmd_apply
     ;;
   add)
-    [ "${#args[@]}" -gt 0 ] || die "profile required (try '$SCRIPT_NAME catalog')"
-    for profile in "${args[@]}"; do add_profile "$profile"; done
+    if [ "$external_mode" = yes ]; then
+      [ "${#args[@]}" -eq 2 ] || die "--external takes HOOK-NAME:KEY SOURCE (e.g. pre-push:90-check ./check)"
+      add_external "${args[0]}" "${args[1]}"
+    else
+      [ "${#args[@]}" -gt 0 ] || die "profile required (try '$SCRIPT_NAME catalog')"
+      for profile in "${args[@]}"; do add_profile "$profile"; done
+    fi
     ;;
   remove | rm)
-    [ "${#args[@]}" -gt 0 ] || die "profile required (try '$SCRIPT_NAME list')"
-    for profile in "${args[@]}"; do remove_profile "$profile"; done
+    if [ "$external_mode" = yes ]; then
+      [ "${#args[@]}" -eq 1 ] || die "--external takes HOOK-NAME:KEY (try '$SCRIPT_NAME list')"
+      remove_external "${args[0]}"
+    else
+      [ "${#args[@]}" -gt 0 ] || die "profile required (try '$SCRIPT_NAME list')"
+      for profile in "${args[@]}"; do remove_profile "$profile"; done
+    fi
     ;;
   list | ls)
     [ "${#args[@]}" -eq 0 ] || die "takes no positional arguments"
