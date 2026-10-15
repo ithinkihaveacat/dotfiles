@@ -141,10 +141,42 @@ ADB simulation), the following conditions must be met on the Wear OS device:
 
 ### Simulating Gestures via ADB
 
-You can inject simulated gesture events into the active foreground application
-using the `IWearGestureService` command-line tool.
+Applications subscribe to semantic **gesture actions** (`PrimaryAction`,
+`DismissAction`), while `cmd IWearGestureService gesture <gesture>` injects a
+physical **raw gesture** (such as `DoublePinch` or `WristTurn`). Because the
+action-to-gesture mapping can vary across OEMs (such as Pixel Watch vs. Samsung)
+and emulator system images, first query the device's active mapping before
+injecting gestures:
 
-- **Simulate Double Pinch (Primary Action)**:
+```bash
+adb shell cmd IWearGestureService get-supported-actions -readable
+```
+
+*Example Output*:
+
+```json
+{
+  "remote": {
+    "PrimaryAction": "DoublePinch",
+    "DismissAction": "WristTurn"
+  },
+  "local": {
+    "PrimaryAction": "DoublePinch",
+    "DismissAction": "WristTurn"
+  }
+}
+```
+
+- `"local"` (`GESTURE_SUBSCRIBER_TYPE_LOCAL`): Action-to-gesture mappings for
+  on-watch apps and features.
+- `"remote"` (`GESTURE_SUBSCRIBER_TYPE_REMOTE`): Action-to-gesture mappings for
+  connected external devices (such as a paired TV or smart glasses) controlled
+  by gestures performed on the watch.
+
+Use the raw gesture name listed under `"local"` to inject simulated gesture
+events into the active foreground watch application:
+
+- **Simulate Primary Action (e.g., Double Pinch)**:
 
   ```bash
   adb shell cmd IWearGestureService gesture DoublePinch
@@ -156,7 +188,7 @@ using the `IWearGestureService` command-line tool.
   adb shell cmd IWearGestureService gesture 1
   ```
 
-- **Simulate Wrist Turn (Dismiss Action)**:
+- **Simulate Dismiss Action (e.g., Wrist Turn)**:
 
   ```bash
   adb shell cmd IWearGestureService gesture WristTurn
@@ -172,14 +204,14 @@ using the `IWearGestureService` command-line tool.
 
 The gesture service accepts standard PascalCase string names or integer IDs:
 
-| Gesture Name             | CLI String Name     | Integer ID | Common Action Mapping                                  |
+| Gesture Name             | CLI String Name     | Integer ID | Default Pixel Watch / Emulator Action Mapping          |
 | :----------------------- | :------------------ | :--------- | :----------------------------------------------------- |
 | **Double Pinch**         | `DoublePinch`       | `1`        | `PrimaryAction` (Select, Play/Pause, Answer Call)      |
 | **Wrist Turn**           | `WristTurn`         | `2`        | `DismissAction` (Back, Silence/Dismiss Alarm, Hang Up) |
-| **Single Pinch**         | `SinglePinch`       | `3`        | Custom                                                 |
-| **Palm Up Single Pinch** | `PalmUpSinglePinch` | `4`        | Custom                                                 |
-| **Palm Up Double Pinch** | `PalmUpDoublePinch` | `5`        | Custom                                                 |
-| **Double Wrist Turn**    | `DoubleWristTurn`   | `6`        | Custom                                                 |
+| **Single Pinch**         | `SinglePinch`       | `3`        | Custom / OEM-configured                                |
+| **Palm Up Single Pinch** | `PalmUpSinglePinch` | `4`        | Custom / OEM-configured                                |
+| **Palm Up Double Pinch** | `PalmUpDoublePinch` | `5`        | Custom / OEM-configured                                |
+| **Double Wrist Turn**    | `DoubleWristTurn`   | `6`        | Custom / OEM-configured                                |
 
 ### Developer Overrides (Bypassing Constraints)
 
