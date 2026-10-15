@@ -47,7 +47,7 @@ All Fish shell scripts, whether new or updated, _must_ be formatted by
 Example command:
 
 ```bash
-fish_indent -w fish/completions/emumanager.fish
+fish_indent -w skills/emumanager/completions/emumanager.fish
 ```
 
 - `-w` edits files in-place.
