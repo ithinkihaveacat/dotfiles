@@ -87,7 +87,7 @@ FEATURES=(
   'vscode|workstation|Link VS Code settings'
   'npm|workstation|Set the npm global prefix to ~/.local/share/npm'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
-  'agents|workstation|Link agent context and hooks'
+  'agents|workstation|Link agent context and hooks, and synchronize permissions'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
   'overlay-hooks|workstation|Run each overlay'"'"'s update hook'
 )
@@ -1606,6 +1606,36 @@ function feature_agents {
     xmkdir "$HOME/.gemini/config"
     link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
     link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
+  fi
+
+  heading "agent permissions"
+
+  local permission_tool="$SRCDIR/bin/permission"
+  if [ -x "$permission_tool" ]; then
+    local paths_to_approve=()
+    local src ws
+
+    # Pre-approve base dotfiles and any active overlays
+    for src in "${SRCDIRS[@]}"; do
+      [ -d "$src" ] && paths_to_approve+=("$src")
+    done
+
+    # Include user projects repository if present
+    if [ -d "$HOME/.projects" ]; then
+      paths_to_approve+=("$HOME/.projects")
+    fi
+
+    if [[ ${#paths_to_approve[@]} -gt 0 ]]; then
+      x "$permission_tool" path add "${paths_to_approve[@]}" ||
+        echo "warning: failed to grant path permissions" >&2
+    fi
+
+    for ws in "${paths_to_approve[@]}"; do
+      if [ -d "$ws/.git" ] || [ -d "$ws/.agents/skills" ]; then
+        (cd "$ws" && x "$permission_tool" apply) ||
+          echo "warning: failed to apply permissions in $ws" >&2
+      fi
+    done
   fi
 }
 
