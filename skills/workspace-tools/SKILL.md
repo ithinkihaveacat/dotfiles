@@ -334,20 +334,24 @@ permission <command> [arguments] [options]
 ### Commands & Namespaces
 
 - **`cmd add PATTERN...`**: Add rule patterns to the allowlist (`--deny` for the
-  denylist, `--ask` for the always-prompt list). `cmd add -` reads one pattern per
-  line from stdin.
-- **`cmd remove PATTERN...`** (alias: **`rm`**): Remove command patterns from all lists.
+  denylist, `--ask` for the always-prompt list). `cmd add -` reads one pattern
+  per line from stdin.
+- **`cmd remove PATTERN...`** (alias: **`rm`**): Remove command patterns from
+  all lists.
 - **`cmd list`** (alias: **`ls`**): List command rules per agent.
-- **`path add PATH...`**: Grant directory access (`--ro` for read-only; default read and write;
-  `--workspace` for workspace-local or `--global` for user-wide).
+- **`path add PATH...`**: Grant directory access (`--ro` for read-only; default
+  read and write; `--workspace` for workspace-local or `--global` for
+  user-wide).
 - **`path remove PATH...`** (alias: **`rm`**): Revoke directory access grants.
 - **`path list`** (alias: **`ls`**): List granted paths per agent.
-- **`list`** (alias: **`ls`**): List all permission rules (both commands and paths).
-- **`apply`**: Pre-approve the safe commands and paths declared by this workspace's
-  installed skills (idempotent; see below).
-- **`clean [cmd|path]`**: Clear permission rules for detected agents (default: all).
-- **`doctor`**: Report missing rules or drifted settings across commands and paths
-  (read-only; exits non-zero on problems).
+- **`list`** (alias: **`ls`**): List all permission rules (both commands and
+  paths).
+- **`apply`**: Pre-approve the safe commands and paths declared by this
+  workspace's installed skills (idempotent; see below).
+- **`clean [cmd|path]`**: Clear permission rules for detected agents (default:
+  all).
+- **`doctor`**: Report missing rules or drifted settings across commands and
+  paths (read-only; exits non-zero on problems).
 
 ### Safe-Command Declarations (`permissions/unsafe`)
 

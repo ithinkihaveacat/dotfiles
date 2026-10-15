@@ -193,27 +193,29 @@ The block below is `scripts/permission --help`, kept in sync by
 ```text
 Usage: permission <command> [arguments]
 
-Manage agent tool permissions (allow/deny/ask rules) across all detected
-local agents. Rules are written as clean command patterns (e.g. "git show");
-each agent backend translates them to its native syntax. Scope and meaning
-follow each agent's own configuration model, so the same rule can grant
-different things to different agents (see Agents below).
+Manage agent tool and filesystem permissions across all detected local
+agents (Jetski CLI & Web, Antigravity, Claude Code, and Codex).
+
+Namespaces:
+  cmd add PATTERN...       Add command patterns to allowlist (--deny / --ask)
+  cmd remove PATTERN...    Remove command patterns (alias: rm)
+  cmd list                 List command rules per agent (alias: ls)
+
+  path add PATH...         Grant access to filesystem directories (--ro for read-only)
+  path remove PATH...      Revoke filesystem directory access (alias: rm)
+  path list                List granted paths per agent (alias: ls)
 
 Commands:
-  add PATTERN...     Add rule patterns to the allowlist (--deny / --ask
-                     for the other lists); 'add -' reads patterns from stdin
-  remove PATTERN...  Remove rule patterns from all lists (alias: rm)
-  list               List permission rules per agent (alias: ls)
-  apply              Pre-approve the safe commands declared by this
-                     workspace's installed skills (idempotent)
-  clean              Clear all configured permission rules
-  doctor             Report missing or drifted rules (read-only)
+  list                     List all permission rules (commands and paths; alias: ls)
+  apply                    Pre-approve safe commands and paths from installed skills
+  clean [cmd|path]         Clear configured permission rules (default: all)
+  doctor                   Report missing or drifted rules across commands and paths
 
 Options:
-  --agent NAME       Operate on a single agent backend
-                     (agy, jetski, jetski-web, claude, codex)
-  --help             Display this help message and exit
-  --plugin-template  Output a template/documentation for creating a Permission plugin
+  --agent NAME             Operate on a single agent backend
+                           (agy, jetski, jetski-web, claude, codex)
+  --help                   Display this help message and exit
+  --plugin-template        Output a template/documentation for creating a Permission plugin
 
 Agents:
   agy, jetski,       Antigravity / Jetski CLI & Web. User-wide: rules live in
@@ -223,22 +225,22 @@ Agents:
                      jetski when ~/.gemini/config exists) and apply to every
                      workspace. Command patterns become command(regex:...)
                      rules; native resource grants (e.g. read_file(*)) are
-                     preserved verbatim.
-  claude             Claude Code. Workspace-local: rules live in the untracked
-                     .claude/settings.local.json. Patterns become
-                     Bash(PATTERN:*) prefix rules; deny beats ask beats allow.
-                     'allow' only skips the approval prompt and leaves Claude
-                     Code's sandbox settings unchanged.
+                     preserved verbatim. Path grants become read_file/write_file
+                     grants and enable allowNonWorkspaceAccess.
+  claude             Claude Code. Workspace-local for commands (.claude/settings.local.json);
+                     path grants update additionalDirectories and Read/Write rules
+                     (workspace-local or user-wide via --global in ~/.claude/settings.json).
+                     Patterns become Bash(PATTERN:*) prefix rules; deny beats ask
+                     beats allow. 'allow' only skips the approval prompt and
+                     leaves Claude Code's sandbox settings unchanged.
   codex              Codex CLI. Workspace-local: rules live in the untracked
                      .codex/rules/permission.rules, which Codex loads only for
-                     trusted projects. Patterns become prefix_rule() token
-                     prefixes; ask and deny map to Codex's prompt and
+                     trusted projects. Path grants update
+                     ~/.gemini/trustedFolders.json. Patterns become prefix_rule()
+                     token prefixes; ask and deny map to Codex's prompt and
                      forbidden, and the most restrictive match wins. 'allow'
                      also runs the command outside the Codex sandbox without
                      prompting, a stronger grant than the other agents give.
-
-Claude Code and Codex match the command name as typed, so a rule for "tool"
-does not cover an invocation of /path/to/tool.
 ```
 
 <!-- /generated -->
