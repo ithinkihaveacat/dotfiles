@@ -73,8 +73,9 @@ A method reference is `CLASS->name(PARAMS)RETURN`, for example
 - `.class` declares the class and its access flags (`interface`, `abstract`,
   `annotation`, `enum`, `synthetic`).
 - `.super` is the direct superclass; `.implements` lines list the directly
-  implemented interfaces. Neither includes inherited types, so walk up the
-  hierarchy with repeated `show class` calls when needed.
+  implemented interfaces. Neither includes inherited types;
+  `apk-smali show hierarchy TREE CLASS [--interfaces]` walks the superclass
+  chain up to the first class outside the APK (usually a framework class).
 - `.method` blocks hold one method each, ending with `.end method`. A method
   with the same name and descriptor as one in a superclass is an override.
 

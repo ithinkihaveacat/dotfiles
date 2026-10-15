@@ -55,11 +55,12 @@ See `references/command-index.md` for detailed usage.
 - `scripts/apk-smali`: Disassemble all DEX files of an APK, split-APK archive,
   or App Bundle into one smali tree (`disassemble`), then query it: classes that
   declare, call, extend, implement, or are annotated with something (`find`),
-  and a class, method body with its same-class callees, or class annotations
-  (`show class`, `show method`, `show annotations`). `find` and `show` also read
-  a pre-disassembled smali archive (any ZIP or directory of baksmali output) in
-  place. See `references/bytecode-analysis.md` for when to use smali versus jadx
-  and how to report findings.
+  and a class, method body with its same-class callees, class annotations, or
+  superclass chain (`show class`, `show method`, `show annotations`,
+  `show hierarchy`). `find` and `show` also read a pre-disassembled smali
+  archive (any ZIP or directory of baksmali output) in place. See
+  `references/bytecode-analysis.md` for when to use smali versus jadx and how to
+  report findings.
 
 ### Device Interaction
 

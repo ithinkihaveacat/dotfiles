@@ -48,7 +48,8 @@ Commands:
                        a single smali tree and print its path.
   find                 List classes that declare, call, extend, implement, or
                        are annotated with something.
-  show                 Print a class, a method body, or class annotations.
+  show                 Print a class, a method body, class annotations, or a
+                       superclass chain.
 
 Options:
   -h, --help           Display this help message and exit.
@@ -210,6 +211,7 @@ Commands:
   method               Print the body of a method, optionally with the
                        same-class methods it calls.
   annotations          Print the class-level annotations of CLASS.
+  hierarchy            Print the superclass chain of CLASS.
 
 Arguments:
   TREE                 A directory or ZIP archive of .smali files.
@@ -223,6 +225,7 @@ Examples:
   {PROG} show class "$TREE" com.example.MyWidgetService
   {PROG} show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
   {PROG} show annotations "$TREE" 'Lcom/example/MyWidgetService;'
+  {PROG} show hierarchy "$TREE" com.example.MyWidgetService
 
 Run '{PROG} show WHAT --help' for help on each command.
 """
@@ -230,10 +233,11 @@ Run '{PROG} show WHAT --help' for help on each command.
 SHORT_SHOW = f"""\
 Usage: {PROG} show WHAT TREE CLASS [ARGUMENTS] [OPTIONS]
 
-Print a class, a method body, or class annotations from a smali tree.
+Print a class, a method body, class annotations, or the superclass chain from
+a smali tree.
 
 Commands:
-  class, method, annotations
+  class, method, annotations, hierarchy
 
 Examples:
   {PROG} show method "$TREE" com.example.MyService 'onCreate()V'
@@ -345,6 +349,43 @@ Examples:
   {PROG} show annotations "$TREE" com.example.MyWidgetService
 
 Try '{PROG} show annotations --help' for more information.
+"""
+
+HELP_SHOW_HIERARCHY = f"""\
+Usage: {PROG} show hierarchy TREE CLASS [OPTIONS]
+
+Print CLASS and its superclasses, one descriptor per line, from CLASS up to
+java.lang.Object. The chain stops at the first superclass that is not in TREE
+(typically a framework class such as Landroid/app/Service;), which is printed
+with a '# not in tree' comment.
+
+Arguments:
+  TREE            A directory or ZIP archive of .smali files.
+  CLASS           A type descriptor (Lcom/example/Foo;) or a dotted name
+                  (com.example.Foo).
+
+Options:
+  --interfaces    Also print each class's directly implemented interfaces,
+                  indented, as 'implements DESCRIPTOR' lines.
+  -h, --help      Display this help message and exit.
+
+Examples:
+  # Does an obfuscated service extend the library base class?
+  {PROG} show hierarchy "$TREE" com.example.MyWidgetService
+
+  # Include the interfaces each class implements
+  {PROG} show hierarchy app-smali.zip 'La/b;' --interfaces
+"""
+
+SHORT_SHOW_HIERARCHY = f"""\
+Usage: {PROG} show hierarchy TREE CLASS [OPTIONS]
+
+Print the superclass chain of a class from a smali tree.
+
+Examples:
+  {PROG} show hierarchy "$TREE" com.example.MyWidgetService
+
+Try '{PROG} show hierarchy --help' for more information.
 """
 
 # =============================================================================
@@ -703,8 +744,8 @@ class SmaliTree:
         for relpath in self.entries:
             yield relpath, self.read(relpath)
 
-    def load(self, descriptor: str) -> SmaliClass:
-        """Load a class by descriptor; the first definition in precedence order wins."""
+    def lookup(self, descriptor: str) -> SmaliClass | None:
+        """Load a class from the path named by its descriptor, or return None."""
         wanted = descriptor_path(descriptor)
         candidates = [
             e for e in self.entries if e == wanted or e.endswith("/" + wanted)
@@ -713,6 +754,13 @@ class SmaliTree:
             cls = parse_smali(self.read(relpath), relpath)
             if cls.descriptor == descriptor:
                 return cls
+        return None
+
+    def load(self, descriptor: str) -> SmaliClass:
+        """Load a class by descriptor; the first definition in precedence order wins."""
+        cls = self.lookup(descriptor)
+        if cls is not None:
+            return cls
         # Fall back to the .class directive, for trees whose paths do not
         # follow the descriptor (for example renamed case-colliding files).
         needle = f" {descriptor}"
@@ -987,6 +1035,52 @@ def show_annotations(argv: list[str]) -> int:
     return 0
 
 
+def show_hierarchy(argv: list[str]) -> int:
+    name = f"{PROG} show hierarchy"
+    if wants_help(argv):
+        sys.stdout.write(HELP_SHOW_HIERARCHY)
+        return 0
+    if not argv:
+        sys.stderr.write(SHORT_SHOW_HIERARCHY)
+        return 1
+    try:
+        positionals, options = parse_args(
+            argv, Spec(positionals=["TREE", "CLASS"], flags={"--interfaces": None})
+        )
+        need(len(positionals) == 2, "TREE and CLASS required")
+        descriptor = to_descriptor(positionals[1])
+    except UsageError as e:
+        return usage_error(name, str(e), "show hierarchy")
+    try:
+        tree = SmaliTree(positionals[0])
+        cls: SmaliClass | None = tree.load(descriptor)
+    except ToolError as e:
+        print(f"{name}: {e}", file=sys.stderr)
+        return e.code
+    lines: list[str] = []
+    seen: set[str] = set()
+    current = descriptor
+    while True:
+        seen.add(current)
+        if cls is None:
+            lines.append(f"{current}  # not in tree")
+            break
+        lines.append(current)
+        if options.get("--interfaces"):
+            lines.extend(f"  implements {i}" for i in cls.interfaces)
+        parent = cls.superclass
+        if parent is None or parent in seen:
+            break
+        current = parent
+        try:
+            cls = tree.lookup(current)
+        except ToolError as e:
+            print(f"{name}: {e}", file=sys.stderr)
+            return e.code
+    sys.stdout.write("\n".join(lines) + "\n")
+    return 0
+
+
 def cmd_show(argv: list[str]) -> int:
     if not argv:
         sys.stderr.write(SHORT_SHOW)
@@ -999,6 +1093,7 @@ def cmd_show(argv: list[str]) -> int:
         "class": show_class,
         "method": show_method,
         "annotations": show_annotations,
+        "hierarchy": show_hierarchy,
     }
     handler = handlers.get(what)
     if handler is None:

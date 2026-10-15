@@ -165,7 +165,8 @@ Commands:
                        a single smali tree and print its path.
   find                 List classes that declare, call, extend, implement, or
                        are annotated with something.
-  show                 Print a class, a method body, or class annotations.
+  show                 Print a class, a method body, class annotations, or a
+                       superclass chain.
 
 Options:
   -h, --help           Display this help message and exit.
@@ -306,6 +307,7 @@ Commands:
   method               Print the body of a method, optionally with the
                        same-class methods it calls.
   annotations          Print the class-level annotations of CLASS.
+  hierarchy            Print the superclass chain of CLASS.
 
 Arguments:
   TREE                 A directory or ZIP archive of .smali files.
@@ -319,6 +321,7 @@ Examples:
   apk-smali show class "$TREE" com.example.MyWidgetService
   apk-smali show method "$TREE" com.example.MyService 'onTrimMemory(I)V'
   apk-smali show annotations "$TREE" 'Lcom/example/MyWidgetService;'
+  apk-smali show hierarchy "$TREE" com.example.MyWidgetService
 
 Run 'apk-smali show WHAT --help' for help on each command.
 ```
@@ -411,6 +414,38 @@ Examples:
 
   # Every annotation in the class, including compiler metadata
   apk-smali show annotations app-smali.zip 'La/b;' --all --members
+```
+
+<!-- /generated -->
+
+#### apk-smali show hierarchy
+
+<!-- generated: ../scripts/apk-smali show hierarchy --help -->
+
+```text
+Usage: apk-smali show hierarchy TREE CLASS [OPTIONS]
+
+Print CLASS and its superclasses, one descriptor per line, from CLASS up to
+java.lang.Object. The chain stops at the first superclass that is not in TREE
+(typically a framework class such as Landroid/app/Service;), which is printed
+with a '# not in tree' comment.
+
+Arguments:
+  TREE            A directory or ZIP archive of .smali files.
+  CLASS           A type descriptor (Lcom/example/Foo;) or a dotted name
+                  (com.example.Foo).
+
+Options:
+  --interfaces    Also print each class's directly implemented interfaces,
+                  indented, as 'implements DESCRIPTOR' lines.
+  -h, --help      Display this help message and exit.
+
+Examples:
+  # Does an obfuscated service extend the library base class?
+  apk-smali show hierarchy "$TREE" com.example.MyWidgetService
+
+  # Include the interfaces each class implements
+  apk-smali show hierarchy app-smali.zip 'La/b;' --interfaces
 ```
 
 <!-- /generated -->
