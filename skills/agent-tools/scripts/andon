@@ -1,0 +1,869 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+# Tests: skills/agent-tools/tests/test-andon
+"""Andon alert store and triage CLI, shared by every harness integration."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import secrets
+import sys
+import tempfile
+from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
+from typing import Any, NoReturn, NotRequired, TypedDict
+
+PROG = "andon"
+DEFAULT_LEVEL = 3
+SUMMARY_MAX = 120
+MIN_SUFFIX = 4
+
+
+class Color(StrEnum):
+    YELLOW = "yellow"
+    RED = "red"
+
+
+class Kind(StrEnum):
+    SKILL_CONTRADICTION = "skill_contradiction"
+    RULE_CONFLICT = "rule_conflict"
+    STALE_INSTRUCTION = "stale_instruction"
+    STUCK_LOOP = "stuck_loop"
+    TOOL_ANOMALY = "tool_anomaly"
+    ENVIRONMENT_BLOCK = "environment_block"
+    OTHER = "other"
+
+
+class Status(StrEnum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+    DISMISSED = "dismissed"
+
+
+GUIDANCE = {
+    Color.YELLOW: (
+        "Logged yellow Andon alert. Continue with your chosen workaround; "
+        "do not interrupt the user."
+    ),
+    Color.RED: (
+        "Logged red Andon alert. Stop work on the blocked path and explain "
+        "the blocker and the decision you need to the user."
+    ),
+}
+
+# Fields a pull may carry. The first group comes from the model; the second
+# is stamped by the harness integration, never by the model.
+MODEL_FIELDS = (
+    "color",
+    "kind",
+    "level",
+    "summary",
+    "details",
+    "sources",
+    "resolution",
+    "proposed_fix",
+)
+HARNESS_FIELDS = (
+    "harness",
+    "conversation_id",
+    "agent_id",
+    "tool_use_id",
+    "step_idx",
+    "transcript_path",
+    "workspace_paths",
+    "model_name",
+    "mcp_error",
+)
+
+
+class Alert(TypedDict):
+    id: str
+    created_at: str
+    updated_at: str
+    resolved_at: str | None
+    status: str
+    color: str
+    kind: str
+    level: int
+    summary: str
+    details: str
+    sources: list[str]
+    resolution: str | None
+    proposed_fix: str | None
+    resolution_note: str | None
+    fingerprint: str
+    args_hash: str
+    harness: NotRequired[str | None]
+    conversation_id: NotRequired[str | None]
+    agent_id: NotRequired[str | None]
+    tool_use_id: NotRequired[str | None]
+    step_idx: NotRequired[int | None]
+    transcript_path: NotRequired[str | None]
+    workspace_paths: NotRequired[list[str]]
+    model_name: NotRequired[str | None]
+    mcp_error: NotRequired[str | None]
+
+
+class AndonError(Exception):
+    """A failure reported as one line on stderr, exit status 1."""
+
+
+# --- Store -------------------------------------------------------------------
+
+
+def state_dir() -> Path:
+    if override := os.environ.get("ANDON_STATE_DIR"):
+        return Path(override).expanduser()
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "andon"
+
+
+def events_path() -> Path:
+    return state_dir() / "events.jsonl"
+
+
+def config_path() -> Path:
+    return state_dir() / "config.json"
+
+
+def write_hint(path: Path, err: OSError) -> AndonError:
+    return AndonError(
+        f"cannot write {path}: {err.strerror or err}; "
+        "run outside the sandbox or set ANDON_STATE_DIR to a writable directory"
+    )
+
+
+def load_alerts() -> list[Alert]:
+    """Reads every alert without taking the lock (safe on a read-only mount)."""
+    path = events_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError as err:
+        raise AndonError(f"cannot read {path}: {err.strerror or err}") from err
+    alerts: list[Alert] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            alerts.append(json.loads(line))
+        except json.JSONDecodeError:
+            print(
+                f"{PROG}: warning: {path}:{lineno}: skipping bad line", file=sys.stderr
+            )
+    return alerts
+
+
+@contextlib.contextmanager
+def locked_alerts():
+    """Yields the alert list under an exclusive lock and saves it atomically.
+
+    Readers never take the lock: the file is only ever replaced whole, so a
+    reader sees either the old or the new version, never a torn line.
+    """
+    directory = state_dir()
+    path = events_path()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        lock = open(directory / "events.jsonl.lock", "a")  # noqa: SIM115
+    except OSError as err:
+        raise write_hint(directory, err) from err
+    with lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        alerts = load_alerts()
+        yield alerts
+        try:
+            fd, tmp = tempfile.mkstemp(dir=directory, prefix=".events.", suffix=".tmp")
+        except OSError as err:
+            raise write_hint(directory, err) from err
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                for alert in alerts:
+                    out.write(json.dumps(alert, ensure_ascii=False, sort_keys=True))
+                    out.write("\n")
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, path)
+        except OSError as err:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise write_hint(path, err) from err
+
+
+def load_config() -> dict[str, Any]:
+    try:
+        return json.loads(config_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    except OSError as err:
+        raise AndonError(f"cannot read {config_path()}: {err.strerror or err}") from err
+
+
+def save_config(config: dict[str, Any]) -> None:
+    path = config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as err:
+        raise write_hint(path, err) from err
+
+
+def parse_level(value: Any) -> int | None:
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        return None
+    return level if 1 <= level <= 5 else None
+
+
+def effective_level() -> tuple[int, str]:
+    """Returns the default trigger level and where it came from."""
+    if (env := os.environ.get("ANDON_LEVEL")) is not None:
+        if (level := parse_level(env)) is not None:
+            return level, "ANDON_LEVEL"
+        print(
+            f"{PROG}: warning: ignoring ANDON_LEVEL={env!r} (want 1-5)", file=sys.stderr
+        )
+    if (level := parse_level(load_config().get("level"))) is not None:
+        return level, str(config_path())
+    return DEFAULT_LEVEL, "default"
+
+
+# --- Records -----------------------------------------------------------------
+
+
+def now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def new_id() -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    return f"ANDON-{stamp}-{secrets.token_hex(2)}"
+
+
+def normalize_source(source: str) -> str:
+    """Spells a source the same way from every workspace and session."""
+    source = source.strip()
+    home = str(Path.home())
+    if source == home or source.startswith(home + os.sep):
+        source = "~" + source[len(home) :]
+    while source.startswith("./"):
+        source = source[2:]
+    return source
+
+
+def fingerprint(kind: str, sources: list[str], summary: str) -> str:
+    if sources:
+        key = kind + ":" + "\n".join(sorted(set(sources)))
+    else:
+        key = kind + ":" + summary.strip().lower()
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def args_hash(fields: dict[str, Any]) -> str:
+    model = {k: fields.get(k) for k in MODEL_FIELDS}
+    return hashlib.sha256(json.dumps(model, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def build_alert(fields: dict[str, Any]) -> Alert:
+    """Validates a pull and returns its record; raises AndonError on bad input."""
+    unknown = set(fields) - set(MODEL_FIELDS) - set(HARNESS_FIELDS)
+    if unknown:
+        raise AndonError(f"unknown field(s): {', '.join(sorted(unknown))}")
+    try:
+        color = Color(fields.get("color"))
+    except ValueError as err:
+        raise AndonError("color must be yellow or red") from err
+    try:
+        kind = Kind(fields.get("kind"))
+    except ValueError as err:
+        kinds = ", ".join(k.value for k in Kind)
+        raise AndonError(f"kind must be one of: {kinds}") from err
+    summary = str(fields.get("summary") or "").strip()
+    details = str(fields.get("details") or "").strip()
+    if not summary:
+        raise AndonError("summary required")
+    if not details:
+        raise AndonError("details required")
+    if len(summary) > SUMMARY_MAX:
+        summary = summary[: SUMMARY_MAX - 1] + "…"
+    raw_level = fields.get("level")
+    level = parse_level(raw_level) if raw_level is not None else effective_level()[0]
+    if level is None:
+        raise AndonError("level must be an integer from 1 to 5")
+    raw_sources = fields.get("sources") or []
+    if not isinstance(raw_sources, list):
+        raise AndonError("sources must be a list of strings")
+    sources = [normalize_source(str(s)) for s in raw_sources if str(s).strip()]
+    stamp = now()
+    alert: Alert = {
+        "id": new_id(),
+        "created_at": stamp,
+        "updated_at": stamp,
+        "resolved_at": None,
+        "status": Status.OPEN,
+        "color": color,
+        "kind": kind,
+        "level": level,
+        "summary": summary,
+        "details": details,
+        "sources": sources,
+        "resolution": fields.get("resolution") or None,
+        "proposed_fix": fields.get("proposed_fix") or None,
+        "resolution_note": None,
+        "fingerprint": fingerprint(kind, sources, summary),
+        "args_hash": args_hash(fields),
+    }
+    for key in HARNESS_FIELDS:
+        if fields.get(key) is not None:
+            alert[key] = fields[key]  # type: ignore[literal-required]
+    return alert
+
+
+def find_alert(alerts: list[Alert], ref: str) -> Alert:
+    """Finds an alert by full ID or by a unique suffix of 4+ characters."""
+    ref = ref.strip()
+    for alert in alerts:
+        if alert["id"] == ref:
+            return alert
+    if len(ref) < MIN_SUFFIX:
+        raise AndonError(f"{ref}: give the full ID or at least {MIN_SUFFIX} characters")
+    matches = [a for a in alerts if a["id"].lower().endswith(ref.lower())]
+    if not matches:
+        raise AndonError(f"{ref}: no such alert")
+    if len(matches) > 1:
+        ids = ", ".join(a["id"] for a in matches[:5])
+        raise AndonError(f"{ref}: ambiguous; matches {ids}")
+    return matches[0]
+
+
+def open_counts(alerts: list[Alert]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for alert in alerts:
+        if alert["status"] == Status.OPEN:
+            counts[alert["fingerprint"]] = counts.get(alert["fingerprint"], 0) + 1
+    return counts
+
+
+# --- Output ------------------------------------------------------------------
+
+
+def emit_json(value: Any) -> None:
+    json.dump(value, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+
+
+def short_id(alert_id: str) -> str:
+    return alert_id.rsplit("-", 1)[-1]
+
+
+def render_prompt(alert: Alert) -> str:
+    sources = ", ".join(f"`{s}`" for s in alert["sources"]) or "(none recorded)"
+    lines = [
+        (
+            f"Investigate and resolve Andon alert `{alert['id']}` "
+            f"(`{alert['color']}` / `{alert['kind']}`):"
+        ),
+        "",
+        f"- **Summary**: {alert['summary']}",
+        f"- **Sources**: {sources}",
+        f"- **Details**: {alert['details']}",
+    ]
+    if alert.get("resolution"):
+        label = (
+            "Workaround taken" if alert["color"] == Color.YELLOW else "Decision needed"
+        )
+        lines.append(f"- **{label}**: {alert['resolution']}")
+    if alert.get("proposed_fix"):
+        lines.append(f"- **Proposed fix**: {alert['proposed_fix']}")
+    seen = open_counts(load_alerts()).get(alert["fingerprint"], 0)
+    if seen > 1:
+        lines.append(f"- **Recurrences**: {seen} open alerts share this fingerprint")
+    lines += [
+        "",
+        (
+            "Fix the source of the defect (the skill, rule, script or tool named "
+            "above), not just this one occurrence. If the alert is not a real "
+            "defect, dismiss it instead with `andon dismiss`."
+        ),
+        "",
+        "After updating the affected files, clear the Andon by running:",
+        "",
+        f'`andon resolve {alert["id"]} --all-matching --note "<brief summary of fix>"`',
+    ]
+    if follow_up := follow_up_command(alert):
+        lines += [
+            "",
+            (
+                "If the details are not enough to reproduce the problem, ask the "
+                "session that pulled the cord (this forks it; the original is untouched):"
+            ),
+            "",
+            f"`{follow_up}`",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def follow_up_command(alert: Alert) -> str | None:
+    session = alert.get("conversation_id")
+    if alert.get("harness") != "claude-code" or not session:
+        return None
+    question = (
+        f"Explain the context in which you pulled the Andon cord for {alert['id']}: "
+        "what you were doing, what you read, and what failed. Do not change any files."
+    )
+    command = f"claude -p --resume {session} --fork-session {json.dumps(question)}"
+    if workspaces := alert.get("workspace_paths"):
+        command = f"cd {json.dumps(workspaces[0])} && {command}"
+    return command
+
+
+def render_show(alert: Alert, recurrences: int) -> str:
+    keys = [
+        "id",
+        "status",
+        "color",
+        "kind",
+        "level",
+        "summary",
+        "details",
+        "sources",
+        "resolution",
+        "proposed_fix",
+        "fingerprint",
+        "created_at",
+        "updated_at",
+        "resolved_at",
+        "resolution_note",
+        *HARNESS_FIELDS,
+    ]
+    lines = []
+    for key in keys:
+        value = alert.get(key)
+        if value in (None, [], ""):
+            continue
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        lines.append(f"{key:<16}{value}")
+    if recurrences > 1:
+        lines.append(f"{'recurrences':<16}{recurrences} open with this fingerprint")
+    return "\n".join(lines) + "\n"
+
+
+# --- Commands ----------------------------------------------------------------
+
+
+def read_pull_input(args: argparse.Namespace) -> dict[str, Any]:
+    if args.input is not None:
+        if args.input != "-":
+            raise AndonError("the only input source is '-' (standard input)")
+        try:
+            fields = json.load(sys.stdin)
+        except json.JSONDecodeError as err:
+            raise AndonError(f"standard input is not JSON: {err}") from err
+        if not isinstance(fields, dict):
+            raise AndonError("standard input must be a JSON object")
+        return fields
+    fields: dict[str, Any] = {
+        "color": args.color,
+        "kind": args.kind,
+        "summary": args.summary,
+        "details": args.details,
+        "sources": args.source or [],
+        "resolution": args.resolution,
+        "proposed_fix": args.proposed_fix,
+        "level": args.level,
+        "harness": "cli",
+    }
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    alert = build_alert(read_pull_input(args))
+    with locked_alerts() as alerts:
+        alerts.append(alert)
+        recurrences = open_counts(alerts)[alert["fingerprint"]]
+    response = {
+        "ok": True,
+        "id": alert["id"],
+        "color": alert["color"],
+        "kind": alert["kind"],
+        "level": alert["level"],
+        "fingerprint": alert["fingerprint"],
+        "recurrences": recurrences,
+        "guidance": GUIDANCE[Color(alert["color"])],
+    }
+    if args.json:
+        emit_json(response)
+    else:
+        print(alert["id"])
+        print(f"{PROG}: {response['guidance']}", file=sys.stderr)
+    return 0
+
+
+def matches_filters(alert: Alert, args: argparse.Namespace) -> bool:
+    if args.status != "all" and alert["status"] != args.status:
+        return False
+    if args.color and alert["color"] != args.color:
+        return False
+    if args.kind and alert["kind"] != args.kind:
+        return False
+    if args.level and alert["level"] != args.level:
+        return False
+    if args.session and alert.get("conversation_id") != args.session:
+        return False
+    if args.workspace:
+        wanted = os.path.abspath(os.path.expanduser(args.workspace))
+        paths = [os.path.abspath(p) for p in alert.get("workspace_paths") or []]
+        if wanted not in paths:
+            return False
+    return True
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    alerts = load_alerts()
+    counts = open_counts(alerts)
+    # The store is in pull order, so newest first is the file reversed.
+    selected = [a for a in reversed(alerts) if matches_filters(a, args)]
+    if args.json:
+        emit_json(
+            [{**a, "recurrences": counts.get(a["fingerprint"], 0)} for a in selected]
+        )
+        return 0
+    if not selected:
+        print(f"{PROG}: no matching alerts", file=sys.stderr)
+        return 0
+    for alert in selected:
+        seen = counts.get(alert["fingerprint"], 0)
+        badge = f"x{seen}" if seen > 1 else ""
+        status = "" if alert["status"] == Status.OPEN else f"[{alert['status']}] "
+        print(
+            f"{short_id(alert['id'])}  {alert['color']:<6} L{alert['level']}  "
+            f"{alert['kind']:<19} {badge:<4} {status}{alert['summary']}"
+        )
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    alerts = load_alerts()
+    alert = find_alert(alerts, args.id)
+    recurrences = open_counts(alerts).get(alert["fingerprint"], 0)
+    if args.json:
+        emit_json({**alert, "recurrences": recurrences})
+    else:
+        sys.stdout.write(render_show(alert, recurrences))
+    return 0
+
+
+def cmd_prompt(args: argparse.Namespace) -> int:
+    sys.stdout.write(render_prompt(find_alert(load_alerts(), args.id)))
+    return 0
+
+
+def cmd_transition(args: argparse.Namespace) -> int:
+    target = {
+        "resolve": Status.RESOLVED,
+        "dismiss": Status.DISMISSED,
+        "reopen": Status.OPEN,
+    }[args.command]
+    with locked_alerts() as alerts:
+        alert = find_alert(alerts, args.id)
+        group = [alert]
+        if args.all_matching:
+            group += [
+                a
+                for a in alerts
+                if a is not alert
+                and a["fingerprint"] == alert["fingerprint"]
+                and (a["status"] == Status.OPEN) == (target != Status.OPEN)
+            ]
+        stamp = now()
+        for one in group:
+            one["status"] = target
+            one["updated_at"] = stamp
+            one["resolved_at"] = None if target == Status.OPEN else stamp
+            if args.note is not None:
+                one["resolution_note"] = args.note
+    verb = {"resolve": "resolved", "dismiss": "dismissed", "reopen": "reopened"}[
+        args.command
+    ]
+    for one in group:
+        print(f"{verb} {one['id']}", file=sys.stderr)
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    alerts = load_alerts()
+
+    def tally(key: str, rows: list[Alert]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for row in rows:
+            out[str(row[key])] = out.get(str(row[key]), 0) + 1  # type: ignore[literal-required]
+        return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    opened = [a for a in alerts if a["status"] == Status.OPEN]
+    sources: dict[str, int] = {}
+    for alert in opened:
+        for source in alert["sources"]:
+            sources[source] = sources.get(source, 0) + 1
+    groups = open_counts(alerts)
+    by_fingerprint = {a["fingerprint"]: a["summary"] for a in opened}
+    level, level_source = effective_level()
+    stats = {
+        "total": len(alerts),
+        "open": len(opened),
+        "open_red": sum(1 for a in opened if a["color"] == Color.RED),
+        "level": level,
+        "level_source": level_source,
+        "by_status": tally("status", alerts),
+        "open_by_color": tally("color", opened),
+        "open_by_kind": tally("kind", opened),
+        "open_by_level": tally("level", opened),
+        "top_sources": dict(
+            sorted(sources.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        ),
+        "top_fingerprints": [
+            {"fingerprint": fp, "open": n, "summary": by_fingerprint[fp]}
+            for fp, n in sorted(groups.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        ],
+    }
+    if args.json:
+        emit_json(stats)
+        return 0
+    print(f"{stats['open']} open ({stats['open_red']} red), {stats['total']} total")
+    print(f"level {level} ({level_source})")
+    for title, table in (
+        ("open by kind", stats["open_by_kind"]),
+        ("top sources", stats["top_sources"]),
+    ):
+        if table:
+            print(f"\n{title}:")
+            for name, n in table.items():
+                print(f"  {n:>4}  {name}")
+    if stats["top_fingerprints"]:
+        print("\ntop fingerprints:")
+        for row in stats["top_fingerprints"]:
+            print(f"  {row['open']:>4}  {row['fingerprint']}  {row['summary']}")
+    return 0
+
+
+def cmd_level(args: argparse.Namespace) -> int:
+    if args.reset and args.value is not None:
+        raise AndonError("give a level or --reset, not both")
+    if args.reset or args.value is not None:
+        config = load_config()
+        if args.reset:
+            config.pop("level", None)
+        else:
+            config["level"] = args.value
+        save_config(config)
+    level, source = effective_level()
+    if args.json:
+        emit_json({"level": level, "source": source})
+    else:
+        print(level)
+        if source == "ANDON_LEVEL" and (args.reset or args.value is not None):
+            print(
+                f"{PROG} level: ANDON_LEVEL overrides the saved level", file=sys.stderr
+            )
+    return 0
+
+
+def cmd_clear_resolved(args: argparse.Namespace) -> int:
+    with locked_alerts() as alerts:
+        kept = [a for a in alerts if a["status"] == Status.OPEN]
+        removed = len(alerts) - len(kept)
+        alerts[:] = kept
+    print(f"removed {removed} closed alert(s)", file=sys.stderr)
+    return 0
+
+
+# --- Entry point -------------------------------------------------------------
+
+EPILOG = """\
+Examples:
+  andon list
+  andon list --color red --status all
+  andon show e790
+  andon prompt e790 | claude -p
+  andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
+  andon level 5
+  andon pull --color yellow --kind stale_instruction \\
+      --summary "deploy SKILL.md names a script that no longer exists" \\
+      --details "scripts/deploy-fast: No such file or directory" \\
+      --source skills/deploy/SKILL.md --resolution "Ran scripts/deploy instead"
+
+Agents pull the cord through their harness integration (a native tool), not
+this command. Alerts live in $ANDON_STATE_DIR, else
+${XDG_STATE_HOME:-~/.local/state}/andon. Reads never take the store's lock, so
+list, show, prompt and stats work from a read-only sandbox.
+
+Environment:
+  ANDON_STATE_DIR  Directory holding events.jsonl and config.json.
+  ANDON_LEVEL      Default trigger level (1-5); overrides 'andon level'.
+"""
+
+
+class Parser(argparse.ArgumentParser):
+    """Exits 1 on a usage error, as every tool in this repository does."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: {message}\n")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(
+        prog=PROG,
+        description="Record and triage Andon alerts: defects agents report in "
+        "their own instructions, skills and tools.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    def command(name: str, help_text: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, help=help_text, description=help_text)
+
+    pull = command("pull", "Pull the cord: record a new alert")
+    pull.add_argument(
+        "input", nargs="?", metavar="-", help="read the alert as JSON from stdin"
+    )
+    pull.add_argument("--color", choices=[c.value for c in Color])
+    pull.add_argument("--kind", choices=[k.value for k in Kind])
+    pull.add_argument(
+        "--summary", help=f"one-line headline (at most {SUMMARY_MAX} characters)"
+    )
+    pull.add_argument("--details", help="what conflicted or failed, quoted")
+    pull.add_argument(
+        "--source",
+        action="append",
+        metavar="PATH",
+        help="file, rule or tool involved (repeatable)",
+    )
+    pull.add_argument(
+        "--resolution", help="workaround taken (yellow) or decision needed (red)"
+    )
+    pull.add_argument("--proposed-fix", help="the edit that would remove the defect")
+    pull.add_argument(
+        "--level", type=int, choices=range(1, 6), metavar="N", help="trigger level 1-5"
+    )
+    pull.add_argument(
+        "--json", action="store_true", help="print the tool response as JSON"
+    )
+
+    lst = command("list", "List alerts, newest first")
+    lst.add_argument(
+        "--status", choices=[*[s.value for s in Status], "all"], default="open"
+    )
+    lst.add_argument("--color", choices=[c.value for c in Color])
+    lst.add_argument("--kind", choices=[k.value for k in Kind])
+    lst.add_argument("--level", type=int, choices=range(1, 6), metavar="N")
+    lst.add_argument("--workspace", metavar="DIR", help="only alerts pulled in DIR")
+    lst.add_argument("--session", metavar="ID", help="only alerts from session ID")
+    lst.add_argument("--json", action="store_true", help="print JSON")
+
+    show = command("show", "Show one alert in full")
+    show.add_argument(
+        "id", metavar="ID", help="alert ID or a unique suffix of 4+ characters"
+    )
+    show.add_argument("--json", action="store_true", help="print JSON")
+
+    prompt = command(
+        "prompt", "Print a Markdown fix prompt that ends by resolving the alert"
+    )
+    prompt.add_argument(
+        "id", metavar="ID", help="alert ID or a unique suffix of 4+ characters"
+    )
+
+    for name, help_text in (
+        ("resolve", "Mark an alert resolved"),
+        ("dismiss", "Mark an alert dismissed (not a real defect)"),
+        ("reopen", "Reopen a resolved or dismissed alert"),
+    ):
+        p = command(name, help_text)
+        p.add_argument(
+            "id", metavar="ID", help="alert ID or a unique suffix of 4+ characters"
+        )
+        p.add_argument("--note", help="what was done")
+        p.add_argument(
+            "--all-matching",
+            action="store_true",
+            help="also every alert sharing its fingerprint",
+        )
+
+    stats = command(
+        "stats", "Count alerts by status, color, kind, source and fingerprint"
+    )
+    stats.add_argument("--json", action="store_true", help="print JSON")
+
+    level = command("level", "Print or set the default trigger level")
+    level.add_argument(
+        "value",
+        nargs="?",
+        type=int,
+        choices=range(1, 6),
+        metavar="N",
+        help="new level, 1-5",
+    )
+    level.add_argument(
+        "--reset", action="store_true", help=f"return to the default ({DEFAULT_LEVEL})"
+    )
+    level.add_argument("--json", action="store_true", help="print JSON")
+
+    command("clear-resolved", "Delete every resolved and dismissed alert")
+    return parser
+
+
+HANDLERS = {
+    "pull": cmd_pull,
+    "list": cmd_list,
+    "show": cmd_show,
+    "prompt": cmd_prompt,
+    "resolve": cmd_transition,
+    "dismiss": cmd_transition,
+    "reopen": cmd_transition,
+    "stats": cmd_stats,
+    "level": cmd_level,
+    "clear-resolved": cmd_clear_resolved,
+}
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command is None:
+        parser.print_help()
+        return 0
+    try:
+        return HANDLERS[args.command](args)
+    except AndonError as err:
+        print(f"{PROG} {args.command}: {err}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)

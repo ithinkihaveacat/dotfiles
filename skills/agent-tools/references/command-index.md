@@ -26,6 +26,8 @@
   citations
 - [markdown-embed-images](#markdown-embed-images) - Embed local Markdown images
   as reference-style Base64
+- [andon](#andon) - Record and triage Andon alerts (harness defects agents
+  report)
 - [Image Encoding](#image-encoding) - Platform-specific encoding details
 - [Request Structure](#request-structure) - API request patterns
 
@@ -1221,6 +1223,65 @@ Examples:
 
   # Preview changes without modifying files:
   markdown-embed-images --dry-run document.md
+```
+
+<!-- /generated -->
+
+______________________________________________________________________
+
+## andon
+
+The store and triage CLI behind the Andon plugin (`plugins/andon/claude`).
+Agents pull the cord through the plugin's native tool; people and fix sessions
+use this command to list, inspect, resolve and dismiss alerts.
+
+### Help
+
+<!-- generated: ../scripts/andon --help -->
+
+```text
+usage: andon [-h] COMMAND ...
+
+Record and triage Andon alerts: defects agents report in their own instructions, skills and tools.
+
+positional arguments:
+  COMMAND
+    pull            Pull the cord: record a new alert
+    list            List alerts, newest first
+    show            Show one alert in full
+    prompt          Print a Markdown fix prompt that ends by resolving the
+                    alert
+    resolve         Mark an alert resolved
+    dismiss         Mark an alert dismissed (not a real defect)
+    reopen          Reopen a resolved or dismissed alert
+    stats           Count alerts by status, color, kind, source and
+                    fingerprint
+    level           Print or set the default trigger level
+    clear-resolved  Delete every resolved and dismissed alert
+
+options:
+  -h, --help        show this help message and exit
+
+Examples:
+  andon list
+  andon list --color red --status all
+  andon show e790
+  andon prompt e790 | claude -p
+  andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
+  andon level 5
+  andon pull --color yellow --kind stale_instruction \
+      --summary "deploy SKILL.md names a script that no longer exists" \
+      --details "scripts/deploy-fast: No such file or directory" \
+      --source skills/deploy/SKILL.md --resolution "Ran scripts/deploy instead"
+
+Agents pull the cord through their harness integration (a native tool), not
+this command. Alerts live in $ANDON_STATE_DIR, else
+${XDG_STATE_HOME:-~/.local/state}/andon. Reads never take the store's lock, so
+list, show, prompt and stats work from a read-only sandbox.
+
+Environment:
+  ANDON_STATE_DIR  Directory holding events.jsonl and config.json.
+  ANDON_LEVEL      Default trigger level (1-5); overrides 'andon level'.
 ```
 
 <!-- /generated -->

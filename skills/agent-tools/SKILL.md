@@ -4,11 +4,12 @@ description: >-
   Command-line AI tools and context gatherers for image analysis, screenshot diffing,
   smart cropping, token counting, technical essays (emerson), boolean condition evaluation,
   Android UI automation (popper), receipt extraction (pacioli), GitHub data formatting
-  (gh-markdown), deep reasoning research (Oracle), and whole-tree text refactoring
-  (Caxton).
+  (gh-markdown), deep reasoning research (Oracle), whole-tree text refactoring
+  (Caxton), and Andon alerts that agents raise about their own instructions (andon).
   Use when analyzing images, comparing screenshots, evaluating conditions, extracting
   receipts, gathering domain context, automating Android apps, refactoring multi-file
-  repositories with Caxton, or performing deep research with Oracle.
+  repositories with Caxton, performing deep research with Oracle, or triaging and
+  fixing Andon alerts.
 compatibility: >-
   Requires curl, jq, and uv. Image tools also need base64 and magick (ImageMagick).
   Needs a Gemini API key (GEMINI_API_KEY) and network access to generativelanguage.googleapis.com.
@@ -795,6 +796,47 @@ scripts/markdown-embed-images --dry-run document.md
 Base64 budget, default: 300), `-n, --dry-run` (preview changes).
 
 **Exit codes:** 0 success, 1 error.
+
+## Agent Plugins
+
+`plugins/` holds harness plugins, one directory per plugin with one subdirectory
+per agent harness. `plugins/.claude-plugin/marketplace.json` makes it a Claude
+Code marketplace.
+
+### andon
+
+The Andon cord lets an agent report defects in its own instructions, skills,
+rules and tools (a contradiction, a stale flag or path, a misbehaving tool) as
+it works. The Claude Code plugin adds an always-on rule, a pre-approved
+`mcp__andon__pull` tool, a status-line count, and a `/andon` board. Every
+session writes to one store, `${XDG_STATE_HOME:-~/.local/state}/andon`, through
+`scripts/andon`. See [plugins/andon/README.md](plugins/andon/README.md) for the
+design.
+
+Install it once, from a terminal, at user scope. It then loads in terminal and
+desktop Code tab sessions alike (`/plugin` doesn't run in the desktop app):
+
+```bash
+claude plugin install andon --marketplace ~/.dotfiles/skills/agent-tools/plugins
+```
+
+The plugin is read from this folder, so `/reload-plugins` picks up edits. In a
+session, say "andon level 5" or run `/andon level 5` to raise the trigger level
+for that conversation. `/andon level 4 --save` changes the default for every
+session.
+
+Triage with the CLI:
+
+```bash
+# Open alerts from every session, newest first, with recurrence counts
+scripts/andon list
+
+# A Markdown fix prompt that ends with the command that resolves the alert
+scripts/andon prompt e790 | claude -p
+
+# Close every alert that shares the fingerprint
+scripts/andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
+```
 
 ## Image Encoding Notes
 
