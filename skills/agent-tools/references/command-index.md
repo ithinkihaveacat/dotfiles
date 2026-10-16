@@ -1263,16 +1263,12 @@ options:
   -h, --help        show this help message and exit
 
 Examples:
-  andon list
-  andon list --color red --status all
+  andon list --color red
   andon show e790
-  andon prompt e790 | claude -p
   andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
-  andon level 5
-  andon pull --color yellow --kind stale_instruction \
-      --summary "deploy SKILL.md names a script that no longer exists" \
-      --details "scripts/deploy-fast: No such file or directory" \
-      --source skills/deploy/SKILL.md --resolution "Ran scripts/deploy instead"
+
+  # Hand an alert to a fresh agent, which fixes the source and resolves it
+  andon prompt e790 | claude -p
 
 Agents pull the cord through their harness integration (a native tool), not
 this command. Alerts live in $ANDON_STATE_DIR, else

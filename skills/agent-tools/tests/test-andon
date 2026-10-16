@@ -30,7 +30,7 @@ not_ok() {
 }
 detail=""
 
-echo "1..14"
+echo "1..15"
 
 # 1: a pull from flags prints its ID on stdout and guidance on stderr
 id1=$("$BIN" pull --color yellow --kind stale_instruction \
@@ -176,4 +176,32 @@ if [[ "$(jq -r '.total == .open' <<<"$detail")" == true && "$(jq -r '.by_status.
   ok "clear-resolved drops closed alerts"
 else
   not_ok "clear-resolved drops closed alerts" "$detail"
+fi
+
+# 15: SIGTERM while waiting for the lock exits 130 with a bare newline
+if ! command -v python3 >/dev/null 2>&1; then
+  ok "SIGTERM exits 130 # SKIP python3 not installed"
+else
+  touch "$ANDON_STATE_DIR/events.jsonl.lock"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+time.sleep(6)' "$ANDON_STATE_DIR/events.jsonl.lock" &
+  holder=$!
+  sleep 0.5
+  "$BIN" pull --color yellow --kind other --summary s --details d >/dev/null 2>"$TMP/err" &
+  puller=$!
+  sleep 2
+  kill -TERM "$puller"
+  status=0
+  wait "$puller" || status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  leftovers=$(find "$ANDON_STATE_DIR" -name '.events.*.tmp' | wc -l | tr -d ' ')
+  detail="status $status, stderr $(od -c "$TMP/err" | head -2), leftovers $leftovers"
+  if [[ $status == 130 && "$(cat "$TMP/err")" == "" && $(wc -c <"$TMP/err") -eq 1 && $leftovers == 0 ]]; then
+    ok "SIGTERM while waiting for the lock exits 130 cleanly"
+  else
+    not_ok "SIGTERM while waiting for the lock exits 130 cleanly" "$detail"
+  fi
 fi

@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import secrets
+import signal
 import sys
 import tempfile
 from datetime import UTC, datetime
@@ -193,10 +194,14 @@ def locked_alerts():
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(tmp, path)
-        except OSError as err:
+        except BaseException as err:
+            # Includes KeyboardInterrupt (and SIGTERM, raised as one): the old
+            # file stays whole and the temp file goes.
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            raise write_hint(path, err) from err
+            if isinstance(err, OSError):
+                raise write_hint(path, err) from err
+            raise
 
 
 def load_config() -> dict[str, Any]:
@@ -489,7 +494,27 @@ def read_pull_input(args: argparse.Namespace) -> dict[str, Any]:
     return {k: v for k, v in fields.items() if v is not None}
 
 
+PULL_SHORT = """\
+Usage: andon pull --color COLOR --kind KIND --summary TEXT --details TEXT [OPTIONS]
+       andon pull - < alert.json
+
+Pull the cord: record a new alert.
+
+Examples:
+  andon pull --color yellow --kind stale_instruction \\
+      --summary "deploy SKILL.md names a script that no longer exists" \\
+      --details "scripts/deploy-fast: No such file or directory"
+
+Try 'andon pull --help' for more information.
+"""
+
+
 def cmd_pull(args: argparse.Namespace) -> int:
+    if args.input is None and not any(
+        (args.color, args.kind, args.summary, args.details)
+    ):
+        sys.stderr.write(PULL_SHORT)
+        return 1
     alert = build_alert(read_pull_input(args))
     with locked_alerts() as alerts:
         alerts.append(alert)
@@ -693,16 +718,12 @@ def cmd_clear_resolved(args: argparse.Namespace) -> int:
 
 EPILOG = """\
 Examples:
-  andon list
-  andon list --color red --status all
+  andon list --color red
   andon show e790
-  andon prompt e790 | claude -p
   andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
-  andon level 5
-  andon pull --color yellow --kind stale_instruction \\
-      --summary "deploy SKILL.md names a script that no longer exists" \\
-      --details "scripts/deploy-fast: No such file or directory" \\
-      --source skills/deploy/SKILL.md --resolution "Ran scripts/deploy instead"
+
+  # Hand an alert to a fresh agent, which fixes the source and resolves it
+  andon prompt e790 | claude -p
 
 Agents pull the cord through their harness integration (a native tool), not
 this command. Alerts live in $ANDON_STATE_DIR, else
@@ -720,7 +741,10 @@ class Parser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
-        self.exit(1, f"{self.prog}: {message}\n")
+        self.exit(
+            1,
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.\n",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -853,10 +877,19 @@ def main() -> int:
         return 1
 
 
+def sigterm_handler(signum: int, frame: Any) -> NoReturn:
+    # Translate SIGTERM into KeyboardInterrupt so a write under the lock
+    # cleans up the same way on either signal.
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             sys.stderr.write("\n")
             sys.stderr.flush()
