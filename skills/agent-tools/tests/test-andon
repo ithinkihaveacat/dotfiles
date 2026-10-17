@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+
+# Tests: skills/agent-tools/tests/test-andon
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/andon"
+
+if ! command -v uv >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+  echo "1..0 # SKIP uv or jq not installed"
+  exit 0
+fi
+
+TMP=$(mktemp -d)
+trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+export ANDON_STATE_DIR="$TMP/state"
+unset ANDON_LEVEL
+
+test_num=0
+ok() {
+  test_num=$((test_num + 1))
+  echo "ok $test_num - $1"
+}
+not_ok() {
+  test_num=$((test_num + 1))
+  echo "not ok $test_num - $1"
+  [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/# /'
+  return 0
+}
+detail=""
+
+echo "1..15"
+
+# 1: a pull from flags prints its ID on stdout and guidance on stderr
+id1=$("$BIN" pull --color yellow --kind stale_instruction \
+  --summary "deploy SKILL.md documents removed --fast flag" \
+  --details "deploy --fast: unknown option" \
+  --source ./skills/deploy/SKILL.md --resolution "Ran deploy --quick" 2>"$TMP/err")
+detail="$id1 / $(cat "$TMP/err")"
+if [[ "$id1" =~ ^ANDON-[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$ && "$(cat "$TMP/err")" == *"do not interrupt the user"* ]]; then
+  ok "pull prints an ID and yellow guidance"
+else
+  not_ok "pull prints an ID and yellow guidance" "$detail"
+fi
+
+# 2: a pull from stdin keeps the harness fields and answers in JSON
+response=$(printf '%s' '{"color":"red","kind":"stale_instruction","summary":"Second phrasing","details":"d",
+  "sources":["skills/deploy/SKILL.md"],"harness":"claude-code","conversation_id":"session-1",
+  "workspace_paths":["/work/app"],"step_idx":4}' | "$BIN" pull --json -)
+id2=$(jq -r .id <<<"$response")
+detail="$response"
+if [[ "$(jq -r .guidance <<<"$response")" == *"Stop work on the blocked path"* && "$(jq -r .recurrences <<<"$response")" == 2 ]]; then
+  ok "pull - reads JSON and answers with red guidance and recurrences"
+else
+  not_ok "pull - reads JSON and answers with red guidance and recurrences" "$detail"
+fi
+
+# 3: the same kind and sources share a fingerprint, however the path is spelled
+detail=$("$BIN" list --json)
+if [[ "$(jq -r '[.[].fingerprint] | unique | length' <<<"$detail")" == 1 && "$(jq -r '.[0].conversation_id' <<<"$detail")" == session-1 ]]; then
+  ok "sources normalize into one fingerprint group"
+else
+  not_ok "sources normalize into one fingerprint group" "$detail"
+fi
+
+# 4: unknown fields are refused with exit 1
+status=0
+printf '%s' '{"color":"yellow","kind":"other","summary":"s","details":"d","title":"x"}' |
+  "$BIN" pull - >/dev/null 2>"$TMP/err" || status=$?
+detail="status $status: $(cat "$TMP/err")"
+if [[ $status == 1 && "$(cat "$TMP/err")" == *"unknown field(s): title"* ]]; then
+  ok "pull refuses unknown fields"
+else
+  not_ok "pull refuses unknown fields" "$detail"
+fi
+
+# 5: show finds an alert by suffix and refuses a suffix that is too short
+status=0
+"$BIN" show "${id1: -4}" >"$TMP/out" 2>&1 || status=$?
+"$BIN" show "${id1: -2}" >/dev/null 2>"$TMP/err" && status=99
+detail="$(cat "$TMP/out") $(cat "$TMP/err")"
+if [[ $status == 0 && "$(cat "$TMP/out")" == *"$id1"* && "$(cat "$TMP/err")" == *"at least 4 characters"* ]]; then
+  ok "show resolves a 4-character suffix and refuses 2"
+else
+  not_ok "show resolves a 4-character suffix and refuses 2" "$detail"
+fi
+
+# 6: the fix prompt ends with the command that clears it, and offers the session
+prompt=$("$BIN" prompt "$id2")
+detail="$prompt"
+if [[ "$prompt" == *"andon resolve $id2 --all-matching"* && "$prompt" == *"claude -p --resume session-1 --fork-session"* && "$prompt" == *"Recurrences"* ]]; then
+  ok "prompt carries resolve and session follow-up commands"
+else
+  not_ok "prompt carries resolve and session follow-up commands" "$detail"
+fi
+
+# 7: resolve --all-matching closes the whole group
+"$BIN" resolve "$id1" --all-matching --note "Renamed the flag" 2>"$TMP/err"
+detail="$("$BIN" list --json --status all)"
+if [[ "$(jq -r '[.[] | select(.status == "resolved")] | length' <<<"$detail")" == 2 && "$(jq -r '.[0].resolution_note' <<<"$detail")" == "Renamed the flag" ]]; then
+  ok "resolve --all-matching closes every alert in the group"
+else
+  not_ok "resolve --all-matching closes every alert in the group" "$detail"
+fi
+
+# 8: reopen brings one back
+"$BIN" reopen "$id2" 2>/dev/null
+detail="$("$BIN" list --json)"
+if [[ "$(jq -r 'length' <<<"$detail")" == 1 && "$(jq -r '.[0].resolved_at' <<<"$detail")" == null ]]; then
+  ok "reopen restores an alert"
+else
+  not_ok "reopen restores an alert" "$detail"
+fi
+
+# 9: the level is saved, read back, overridden by ANDON_LEVEL, and reset
+levels="$("$BIN" level 5) $("$BIN" level) $(ANDON_LEVEL=2 "$BIN" level) $("$BIN" level --reset)"
+detail="$levels"
+if [[ "$levels" == "5 5 2 3" ]]; then
+  ok "level saves, reads, yields to ANDON_LEVEL and resets"
+else
+  not_ok "level saves, reads, yields to ANDON_LEVEL and resets" "$detail"
+fi
+
+# 10: a pull with no level records the default in force
+id3=$(ANDON_LEVEL=4 "$BIN" pull --color yellow --kind other --summary s --details d 2>/dev/null)
+detail="$("$BIN" show "$id3" --json)"
+if [[ "$(jq -r .level <<<"$detail")" == 4 ]]; then
+  ok "a pull records the level in force"
+else
+  not_ok "a pull records the level in force" "$detail"
+fi
+
+# 11: usage errors exit 1
+status=0
+"$BIN" level 9 >/dev/null 2>&1 || status=$?
+detail="status $status"
+if [[ $status == 1 ]]; then
+  ok "usage errors exit 1"
+else
+  not_ok "usage errors exit 1" "$detail"
+fi
+
+# 12: parallel pulls all land (the lock serializes writers)
+before=$("$BIN" list --json --status all | jq length)
+for n in $(seq 1 12); do
+  "$BIN" pull --color yellow --kind other --summary "parallel $n" --details d >/dev/null 2>&1 &
+done
+wait
+after=$("$BIN" list --json --status all | jq length)
+detail="before $before, after $after"
+if [[ $((after - before)) == 12 ]]; then
+  ok "twelve parallel pulls write twelve alerts"
+else
+  not_ok "twelve parallel pulls write twelve alerts" "$detail"
+fi
+
+# 13: a read-only store still reads, and a write fails with a hint
+chmod -R a-w "$ANDON_STATE_DIR"
+status=0
+listed=$("$BIN" list 2>/dev/null | wc -l | tr -d ' ')
+"$BIN" pull --color yellow --kind other --summary s --details d >/dev/null 2>"$TMP/err" || status=$?
+chmod -R u+w "$ANDON_STATE_DIR"
+detail="listed $listed, status $status: $(cat "$TMP/err")"
+if [[ $listed -gt 0 && $status == 1 && "$(cat "$TMP/err")" == *"set ANDON_STATE_DIR"* && "$(wc -l <"$TMP/err" | tr -d ' ')" == 1 ]]; then
+  ok "read-only store lists, and pull fails with a one-line hint"
+else
+  not_ok "read-only store lists, and pull fails with a one-line hint" "$detail"
+fi
+
+# 14: clear-resolved keeps only open alerts
+"$BIN" resolve "$id3" 2>/dev/null
+"$BIN" clear-resolved 2>/dev/null
+detail="$("$BIN" stats --json)"
+if [[ "$(jq -r '.total == .open' <<<"$detail")" == true && "$(jq -r '.by_status.resolved // 0' <<<"$detail")" == 0 ]]; then
+  ok "clear-resolved drops closed alerts"
+else
+  not_ok "clear-resolved drops closed alerts" "$detail"
+fi
+
+# 15: SIGTERM while waiting for the lock exits 130 with a bare newline
+if ! command -v python3 >/dev/null 2>&1; then
+  ok "SIGTERM exits 130 # SKIP python3 not installed"
+else
+  touch "$ANDON_STATE_DIR/events.jsonl.lock"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+time.sleep(6)' "$ANDON_STATE_DIR/events.jsonl.lock" &
+  holder=$!
+  sleep 0.5
+  "$BIN" pull --color yellow --kind other --summary s --details d >/dev/null 2>"$TMP/err" &
+  puller=$!
+  sleep 2
+  kill -TERM "$puller"
+  status=0
+  wait "$puller" || status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  leftovers=$(find "$ANDON_STATE_DIR" -name '.events.*.tmp' | wc -l | tr -d ' ')
+  detail="status $status, stderr $(od -c "$TMP/err" | head -2), leftovers $leftovers"
+  if [[ $status == 130 && "$(cat "$TMP/err")" == "" && $(wc -c <"$TMP/err") -eq 1 && $leftovers == 0 ]]; then
+    ok "SIGTERM while waiting for the lock exits 130 cleanly"
+  else
+    not_ok "SIGTERM while waiting for the lock exits 130 cleanly" "$detail"
+  fi
+fi
