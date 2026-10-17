@@ -6,9 +6,29 @@ uses the same `andon` CLI and alert store as the Claude Code plugin.
 
 ## Install
 
-Add this directory to `plugins` in your global
+For a checkout at `~/.dotfiles`, install without editing JSON by linking the
+plugin into OpenCode's auto-discovered global plugins directory:
+
+```sh
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
+ln -sn "$HOME/.dotfiles/skills/agent-tools/plugins/andon/opencode" \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/andon"
+```
+
+If the destination already exists, inspect it before running `ln`; do not
+force-replace an existing installation. The link leaves the source in this
+checkout, so the adapter can still find its shared CLI. No marketplace, package
+download or JSON edit is required.
+
+OpenCode V2 has `opencode plugin add` for npm and Git package specifications,
+but it does not accept local plugin directory paths. Auto-discovery is the local
+equivalent. See the [OpenCode plugin guide](https://opencode.ai/v2/docs/plugins)
+for package installation and discovery rules.
+
+Alternatively, add this directory to `plugins` in your global
 `~/.config/opencode/opencode.jsonc`, preserving existing entries. Replace the
-example path with your checkout's absolute path:
+example path with your checkout's absolute path. Use one installation route, not
+both:
 
 ```jsonc
 {
@@ -141,10 +161,11 @@ OPENCODE_TEST_BINARY="$(command -v opencode)" npm test
 ```
 
 The opt-in test starts a private loopback server with isolated home/config/data
-directories and a local fake model. It exercises package discovery, RPC, rule
-injection, direct tool visibility, alert attribution, levels and explicit
-permission denial. No real model credentials or API calls are used. Terminal
-dialogs are covered by controller tests and typechecking, not a visual UI test.
+directories and a local fake model. It exercises explicit configuration and
+symlink auto-discovery, RPC, rule injection, direct tool visibility, alert
+attribution, levels and explicit permission denial. No real model credentials or
+API calls are used. Terminal dialogs are covered by controller tests and
+typechecking, not a visual UI test.
 
 The development dependency override selects Solid 1.9.17 to avoid vulnerable
 serializer versions in older SDK dependencies. OpenCode still supplies its own
