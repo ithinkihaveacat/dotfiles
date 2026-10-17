@@ -814,16 +814,17 @@ session writes to one store, `${XDG_STATE_HOME:-~/.local/state}/andon`, through
 design.
 
 Install it once, from a terminal, at user scope. It then loads in terminal and
-desktop Code tab sessions alike (`/plugin` doesn't run in the desktop app):
+desktop Code tab sessions alike. The desktop app's + → Plugins menu manages
+plugins, but adding this local-folder marketplace needs the terminal:
 
 ```bash
 claude plugin install andon --marketplace ~/.dotfiles/skills/agent-tools/plugins
 ```
 
 The plugin is read from this folder, so `/reload-plugins` picks up edits. In a
-session, say "andon level 5" or run `/andon level 5` to raise the trigger level
-for that conversation. `/andon level 4 --save` changes the default for every
-session.
+session, start a message with "andon level 5" or run `/andon level 5` to set the
+trigger level for that conversation. `/andon level 4 --save` changes the default
+for every session.
 
 Triage with the CLI:
 

@@ -45,15 +45,15 @@ runs inside Claude Code (no Node, no npm packages) and is thin glue: every read
 and write goes through the Python CLI. Each piece of the design maps onto one
 hook:
 
-| Need                     | Hook                                                                                                                                                                                                                              |
-| :----------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Always-on rule           | `prompt.compose` adds an `andon:rule` system-prompt section, rendered for the level in force. It is added only to requests that offer the tool, so a subagent without the tool is never told to call it.                          |
-| Eager, pre-approved tool | `$.tool.register` with `isDeferred: false` registers `mcp__andon__pull`, and a `tool.check` hook allows it without a prompt.                                                                                                      |
-| Session attribution      | The `tool.call` handler stamps the session ID, `tool_use_id`, subagent ID, turn, model, workspace and transcript path itself, then writes one complete record. There is no second process and no `args_hash` pairing window.      |
-| Level override           | `prompt.submit` recognizes "andon level 5" in the user's own words, and `/andon level N` does the same. The level is held in host state, so it survives compaction and is re-rendered into the rule on every request.             |
-| Passive sensor           | A `tool.call` observer adds a one-line reminder to a tool result when a command fails after the agent read a skill's `SKILL.md`, when `--help` follows a failure, or when the same command fails twice. It never pulls by itself. |
-| Board                    | `/andon` opens a pane on the terminal and desktop surfaces with filters, recurrence badges, and Copy fix prompt / Resolve / Dismiss / Reopen buttons. The status line shows `andon: L3 · 2 open · 1 red`.                         |
-| One unit                 | Disabling the plugin removes the rule, tool, sensor, board and status line together.                                                                                                                                              |
+| Need                     | Hook                                                                                                                                                                                                                                            |
+| :----------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Always-on rule           | `prompt.compose` adds an `andon:rule` system-prompt section, rendered for the level in force. It is added only to requests that offer the tool, so a subagent without the tool is never told to call it.                                        |
+| Eager, pre-approved tool | `$.tool.register` with `isDeferred: false` registers `mcp__andon__pull`, and a `tool.check` hook turns an "ask" into "allow", so it never prompts. A deny from the user's rules or mode still stands.                                           |
+| Session attribution      | The `tool.call` handler stamps the session ID, `tool_use_id`, subagent ID, turn, model, workspace and transcript path itself, then writes one complete record. There is no second process and no `args_hash` pairing window.                    |
+| Level override           | A message that starts with "andon level 5" sets the level (one that only mentions a level doesn't), and so does `/andon level N`. The level is held in host state, so it survives compaction and is re-rendered into the rule on every request. |
+| Passive sensor           | A `tool.call` observer adds a one-line reminder to a tool result when a command fails after the agent read a skill's `SKILL.md`, when `--help` follows a failure, or when the same command fails twice. It never pulls by itself.               |
+| Board                    | `/andon` opens a pane on the terminal and desktop surfaces with filters, recurrence badges, and Copy fix prompt / Resolve / Dismiss / Reopen buttons. The status line shows `andon: L3 · 2 open · 1 red`.                                       |
+| One unit                 | Disabling the plugin removes the rule, tool, sensor, board and status line together.                                                                                                                                                            |
 
 The plugin finds the CLI at `../../../scripts/andon` (relative to `claude/`),
 falling back to `andon` on `PATH`. If uv is missing from the host's `PATH`, it
@@ -70,7 +70,8 @@ prove skills/agent-tools/tests/test-andon
 The repo has no TypeScript tooling of its own. The engine lays the API types in
 `.claude-plugin/types/` (ignored by Git) when it loads the plugin from a folder
 it watches, and the committed `tsconfig.json` extends them for an editor or
-`tsc`.
+`tsc`. On a fresh clone, `tsc -p` fails until a session has loaded the plugin
+from the folder once (for example with `--plugin-dir`).
 
 `claude --plugin-dir skills/agent-tools/plugins/andon/claude` loads the working
 copy for one session. An install from the folder marketplace (see the
@@ -82,6 +83,10 @@ picks up edits without a reinstall.
 - **Organization-managed installs:** the `prompt.compose` and `classic.*` hooks
   don't run for a plugin a person installs where an organization manages Claude
   Code. There, the rule has to come from a managed plugin or from `CLAUDE.md`.
+- **Local install only:** the plugin finds the CLI by its place in this
+  repository. An install from a GitHub-sourced marketplace copies only
+  `claude/`, and then needs `andon` on `PATH`; the folder install in the
+  agent-tools `SKILL.md` is the supported route.
 - **Plugin API version:** the function-hooks API is early access, and the plugin
   was written against Claude Code 2.1.299.
 

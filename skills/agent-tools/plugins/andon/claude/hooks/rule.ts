@@ -57,12 +57,13 @@ export function isLevel(value: unknown): value is number {
 }
 
 /**
- * Finds a level change in the person's own words ("andon level 5", "set
- * andon to level 2", "andon level default"): a number, 'default', or null.
+ * Finds a level change the person asked for: a message that starts with it
+ * ("andon level 5", "set andon level to 2", "andon level default"). A message
+ * that only talks about a level ("what does andon level 5 do?") is no request.
  */
 export function parseLevelRequest(text: string): number | "default" | null {
   const match =
-    /\bandon\b[^\n.]{0,20}?\blevel\s*(?:to\s*)?([1-5]|default|reset)\b/i.exec(
+    /^\s*(?:set |use |switch to )?andon\s+level\s+(?:to\s+)?([1-5]|default|reset)\b/i.exec(
       text
     );
   if (match === null) return null;
@@ -122,22 +123,24 @@ export function buildRule(level: number, isSessionLevel: boolean): string {
   lines.push(
     "Levels: 1 red only, 2 conservative, 3 standard, 4 proactive audit, " +
       "5 maximum coverage. The user changes the level for this conversation " +
-      'by saying so ("andon level 5") or with `/andon level 5`; this section ' +
+      'by starting a message with "andon level 5" or with `/andon level 5`; this section ' +
       "always shows the level in force, including after compaction."
   );
 
   return lines.join("\n");
 }
 
-/** Kept short: the rule carries the guidance (a long description is skimmed). */
-export function buildDescription(level: number): string {
+/**
+ * Kept short: the rule carries the guidance (a long description is skimmed),
+ * and the level in force, so the description never goes stale.
+ */
+export function buildDescription(): string {
   return (
     "Pull the Andon cord: report a defect in your own instructions, skills, " +
     "rules or tools (a contradiction, a stale flag or path, a misbehaving " +
     "tool, a loop you cannot break). Yellow: call it in parallel with your " +
     "workaround and continue. Red: you are blocked; stop and ask the user. " +
-    `Default trigger level: ${levelLabel(level)}; see "Andon cord" in your ` +
-    "instructions."
+    'See "Andon cord" in your instructions for when to pull.'
   );
 }
 

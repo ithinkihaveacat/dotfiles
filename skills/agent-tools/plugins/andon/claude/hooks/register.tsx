@@ -140,17 +140,50 @@ async function showStatus($: Engine): Promise<void> {
   $.ui.status(parts.join(" · "));
 }
 
+// Where the CLI keeps the store, from `stats --json`, and the store's files'
+// mtimes when last read: the timer runs the CLI only when they change.
+let stateDir: string | null = null;
+let seenStamps = "";
+
+async function storeChanged($: Engine): Promise<boolean> {
+  if (stateDir === null) return true;
+  const dir = stateDir;
+  const stamps = await Promise.all(
+    ["events.jsonl", "config.json"].map((name) =>
+      $.fs.stat(`${dir}/${name}`).then(
+        (stat) => String(stat.mtimeMs),
+        () => "-"
+      )
+    )
+  );
+  const key = stamps.join(",");
+  if (key === seenStamps) return false;
+  seenStamps = key;
+
+  return true;
+}
+
+async function isBoardOpen($: Engine): Promise<boolean> {
+  return (await $.ui.panes()).some((pane) => pane.id === PANE);
+}
+
 async function refreshCounts($: Engine): Promise<void> {
   const stats = await cliJson<{
     open: number;
     open_red: number;
     level: number;
+    state_dir?: string;
   }>($, ["stats", "--json"]);
   if (stats === null) return;
+  if (typeof stats.state_dir === "string") stateDir = stats.state_dir;
   const next: AndonCounts = { open: stats.open, red: stats.open_red };
   const was = await read($, counts);
-  if (was.open !== next.open || was.red !== next.red)
+  if (was.open !== next.open || was.red !== next.red) {
     await update($, counts, () => next);
+    // Another session's pull or resolve: keep an open board's rows in step
+    // with its header.
+    if (await isBoardOpen($)) await refreshBoard($);
+  }
   if (isLevel(stats.level) && stats.level !== (await read($, defaultLevel))) {
     await update($, defaultLevel, () => stats.level);
   }
@@ -240,7 +273,16 @@ async function pull(
       guidance: `The alert was not saved; mention the defect to the user at the end of your turn. ${FALLBACK_GUIDANCE[color] ?? ""}`
     };
   }
-  const response = JSON.parse(ran.stdout) as PullResponse;
+  let response: PullResponse;
+  try {
+    response = JSON.parse(ran.stdout) as PullResponse;
+  } catch {
+    // The CLI exited 0, so the alert is saved: say so, or the model pulls again.
+    return {
+      ok: true,
+      guidance: `The alert was saved, but its response was unreadable; do not pull again. ${FALLBACK_GUIDANCE[color] ?? ""}`
+    };
+  }
   const times =
     (response.recurrences ?? 1) > 1 ? ` (×${response.recurrences} open)` : "";
   $.ui.toast(
@@ -338,9 +380,14 @@ async function runCommand($: Engine, args: string): Promise<string> {
   const verb = words[0] ?? "board";
   if (verb === "board") {
     await refreshBoard($);
-    await $.ui.open({ id: PANE, title: "Andon" });
+    const opened = await $.ui.open({ id: PANE, title: "Andon" });
+    if (opened.isPlaced) return "Andon board opened.";
+    // No surface draws panes here (VS Code, -p): answer with the list instead.
+    const ran = await cli($, ["list"]);
 
-    return "Andon board opened.";
+    return ran.ok
+      ? ran.stdout.trimEnd() || "No open Andon alerts."
+      : `andon list failed: ${ran.error}`;
   }
   if (verb === "list" || verb === "stats") {
     const ran = await cli($, verb === "list" ? ["list"] : ["stats"]);
@@ -389,12 +436,11 @@ export const register: Register = (on) => {
 
   on("session.start", async ($, e, next) => {
     const started = await next(e);
-    const level = await cliJson<{ level: number }>($, ["level", "--json"]);
-    if (level !== null && isLevel(level.level))
-      await update($, defaultLevel, () => level.level);
+    // Awaited before the first prompt, so nothing here waits on the CLI: the
+    // counts and the default level arrive in the background.
     await $.tool.register({
       name: TOOL_NAME,
-      description: buildDescription(await read($, defaultLevel)),
+      description: buildDescription(),
       inputSchema: INPUT_SCHEMA,
       isDeferred: false
     });
@@ -403,8 +449,14 @@ export const register: Register = (on) => {
       description: "Andon board, alerts and trigger level",
       argumentHint: "[board|list|stats|level [N|default] [--save]]"
     });
-    await refreshCounts($);
-    $.clock.every(REFRESH_MS, () => quietly(refreshCounts($)));
+    quietly(refreshCounts($));
+    $.clock.every(REFRESH_MS, () =>
+      quietly(
+        storeChanged($).then((changed) =>
+          changed ? refreshCounts($) : undefined
+        )
+      )
+    );
 
     return started;
   });
@@ -428,10 +480,15 @@ export const register: Register = (on) => {
     };
   });
 
-  // A pull the user has to approve is a pull that will not happen.
-  on("tool.check", { tool: "mcp__andon__pull" }, () => ({
-    decision: "allow" as const
-  })).catch(($, e, next) => next(e));
+  // A pull the user has to approve is a pull that will not happen, so an
+  // 'ask' becomes 'allow'. A deny from the user's rules or mode stands.
+  on("tool.check", { tool: "mcp__andon__pull" }, async ($, e, next) => {
+    const verdict = await next(e);
+
+    return verdict.decision === "ask"
+      ? { ...verdict, decision: "allow" as const }
+      : verdict;
+  }).catch(($, e, next) => next(e));
 
   on("tool.call", { tool: "mcp__andon__pull" }, async ($, e) => {
     const response = await pull($, e as unknown as Record<string, unknown>);
@@ -449,7 +506,9 @@ export const register: Register = (on) => {
   // The sensor reads every tool call's outcome; it only ever adds a reminder.
   on("tool.call", async ($, e, next) => {
     const ran = await next(e);
-    if (ran.deny !== undefined) return ran;
+    // Main loop only: a subagent's tool list may lack the pull tool, and its
+    // failures are not the main loop's pattern.
+    if (ran.deny !== undefined || e.agentId !== undefined) return ran;
     const { level } = await activeLevel($);
     const reminder = sensor.observe({
       tool: e.tool,
@@ -463,8 +522,9 @@ export const register: Register = (on) => {
       : { ...ran, context: [...(ran.context ?? []), reminder] };
   }).catch(($, e, next) => next(e));
 
-  // "andon level 5" in the person's own words: held by the host, so it
-  // survives compaction, and rendered into the rule on every request.
+  // A message that starts "andon level 5" sets the level; one that only
+  // mentions a level does not. Held by the host, so it survives compaction,
+  // and rendered into the rule on every request.
   on("prompt.submit", async ($, e, next) => {
     if (e.command === undefined && e.isMeta !== true) {
       const wanted = parseLevelRequest(e.text);

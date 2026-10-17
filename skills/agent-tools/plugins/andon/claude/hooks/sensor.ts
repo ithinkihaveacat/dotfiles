@@ -14,7 +14,7 @@ export type Observation = {
 };
 
 const SKILL_FILE = /(?:^|\/)SKILL\.md$/;
-const HELP_PROBE = /(?:^|\s)(?:--help|-h|help)(?:\s|$)/;
+const HELP_PROBE = /(?:^|\s)(?:--help|-h)(?:\s|$)/;
 const MAX_NUDGES = 5;
 const MAX_DIRS = 20;
 

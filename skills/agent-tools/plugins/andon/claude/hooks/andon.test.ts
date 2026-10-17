@@ -69,12 +69,21 @@ type Options = {
   level?: number;
   run?: (argv: readonly string[]) => RunResult;
   registered?: { name: string; isDeferred?: unknown; description: string }[];
+  /** What the user's rules and mode decide for the pull tool. */
+  verdict?: "allow" | "ask" | "deny";
+  isPlaced?: boolean;
 };
 
 /** Answers every engine call the plugin makes, the CLI included. */
 function engine(
   on: On,
-  { level = 3, run = fakeCli(level), registered = [] }: Options = {}
+  {
+    level = 3,
+    run = fakeCli(level),
+    registered = [],
+    verdict = "ask",
+    isPlaced = true
+  }: Options = {}
 ): Run[] {
   const runs: Run[] = [];
   mock.clock(on);
@@ -93,7 +102,12 @@ function engine(
 
     return { value: { tool: `mcp__andon__${e.name}` } };
   });
-  on("ui.open", () => ({ value: { isPlaced: true } }));
+  on("ui.open", () => ({
+    value: isPlaced ? { isPlaced } : { isPlaced, reason: "no surface" }
+  }));
+  on("ui.panes", () => ({ value: [] }));
+  on("fs.stat", () => ({ deny: "not in tests" }));
+  on("tool.check", () => ({ decision: verdict }));
   on("command.register", ($, e) => ({ value: { command: e.name } }));
   on("process.run", ($, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin });
@@ -125,10 +139,17 @@ describe("the rule", () => {
 
   test("reads level changes in the person’s words", () => {
     expect(parseLevelRequest("andon level 5 please")).toBe(5);
-    expect(parseLevelRequest("Set Andon to level 2.")).toBe(2);
+    expect(parseLevelRequest("Set andon level to 2.")).toBe(2);
     expect(parseLevelRequest("andon level default")).toBe("default");
     expect(parseLevelRequest("raise the log level 5")).toBe(null);
     expect(parseLevelRequest("andon level 9")).toBe(null);
+  });
+
+  test("ignores a level that is only talked about", () => {
+    expect(parseLevelRequest("what does andon level 5 do?")).toBe(null);
+    expect(parseLevelRequest("should the default be andon level 4?")).toBe(
+      null
+    );
   });
 });
 
@@ -230,7 +251,8 @@ describe("the plugin", () => {
     await $.session.start(START);
     expect(registered).toHaveLength(1);
     expect(registered[0]?.isDeferred).toBe(false);
-    expect(registered[0]?.description).toContain("4 (proactive audit)");
+    // The rule carries the level, so the description cannot go stale.
+    expect(registered[0]?.description).not.toContain("proactive audit");
   });
 
   test("adds the rule only to requests that offer the tool", async ($, on) => {
@@ -283,7 +305,7 @@ describe("the plugin", () => {
       transcript_path: "/home/me/.claude/projects/app/session-1.jsonl"
     });
     const { decision } = await $.tool.check({ tool: TOOL, input: {} });
-    expect(decision).toBe("allow");
+    expect(decision).toBe("allow"); // the engine asked; the plugin lifts it
     const ran = await $.tool.call({
       tool: TOOL,
       color: "yellow",
@@ -370,5 +392,30 @@ describe("the plugin", () => {
       );
       await ui.unmount();
     }
+  });
+
+  test("a deny from the user's rules stands", async ($, on) => {
+    engine(on, { verdict: "deny" });
+    await $.session.start(START);
+    const { decision } = await $.tool.check({ tool: TOOL, input: {} });
+    expect(decision).toBe("deny");
+  });
+
+  test("/andon answers with the list where no pane can be drawn", async ($, on) => {
+    engine(on, {
+      isPlaced: false,
+      run: (argv) =>
+        argv.includes("list")
+          ? result(0, "e790  yellow L3  stale_instruction  deploy SKILL.md\n")
+          : fakeCli(3)(argv)
+    });
+    await $.session.start(START);
+    const ran = await $.command.run({
+      command: "andon",
+      args: "",
+      origin: { kind: "composer" },
+      presentation: { isFullscreen: false, columns: 80 }
+    });
+    expect(ran.text).toContain("e790  yellow");
   });
 });
