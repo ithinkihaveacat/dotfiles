@@ -39,7 +39,10 @@ Code plugin doesn't need one: it registers the tool in-process.
 
 ## The Claude Code plugin
 
-`claude/` is a function-hooks plugin. Each piece of the design maps onto one
+`claude/` is a function-hooks plugin. It is TypeScript, not Python, because
+Claude Code loads function hooks only from TypeScript or JavaScript modules. It
+runs inside Claude Code (no Node, no npm packages) and is thin glue: every read
+and write goes through the Python CLI. Each piece of the design maps onto one
 hook:
 
 | Need                     | Hook                                                                                                                                                                                                                              |
@@ -63,6 +66,11 @@ claude plugin validate skills/agent-tools/plugins/andon/claude
 claude plugin test skills/agent-tools/plugins/andon/claude
 prove skills/agent-tools/tests/test-andon
 ```
+
+The repo has no TypeScript tooling of its own. The engine lays the API types in
+`.claude-plugin/types/` (ignored by Git) when it loads the plugin from a folder
+it watches, and the committed `tsconfig.json` extends them for an editor or
+`tsc`.
 
 `claude --plugin-dir skills/agent-tools/plugins/andon/claude` loads the working
 copy for one session. An install from the folder marketplace (see the
