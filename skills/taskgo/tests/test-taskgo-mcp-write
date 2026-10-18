@@ -1729,6 +1729,103 @@ def edit_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     )
 
 
+def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
+    """Writes report findings on what they touched; handoff carries a guide."""
+    tracker = Tracker(tmp / "findings", seed)
+    call = caller(tg, server(tg, tracker))
+
+    def messages(got: dict) -> list[str]:
+        return [f"{f['severity']} {f['message']}" for f in got["findings"]]
+
+    ok, got = call("handoff", {"target": "alpha"})
+    tap.check("handoff carries the guide", ok and got["guide"] == tg.MCP_GUIDE, got)
+
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "f1",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA003",
+                    "field": "status",
+                    "value": "done",
+                },
+                {
+                    "op": "replace_section",
+                    "record": "TASK-AA003",
+                    "section": "Outcome",
+                    "text": "Met.",
+                    "expected_hash": None,
+                },
+            ],
+        },
+    )
+    found = ok and messages(got)
+    tap.check(
+        "completing a blocker reports the edge left on its held task",
+        ok
+        and any(
+            m.startswith("WARN beta/tasks/TASK-BB001") and "TASK-AA003 (done)" in m
+            for m in found
+        ),
+        got,
+    )
+    tap.check(
+        "changing a task without its STATUS.md prose reports a reminder",
+        ok
+        and any(m.startswith("INFO alpha/STATUS.md: Summary and Next") for m in found),
+        got,
+    )
+
+    ok, status = call("get_project_status", {"project": "alpha"})
+    summary = ok and next(
+        s["hash"] for s in status["sections"] if s["name"] == "Summary"
+    )
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "f2",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA001",
+                    "field": "status",
+                    "value": "in-progress",
+                },
+                {
+                    "op": "replace_section",
+                    "record": "alpha/STATUS.md",
+                    "section": "Summary",
+                    "text": "One is under way.",
+                    "expected_hash": summary,
+                },
+            ],
+        },
+    )
+    tap.check(
+        "a write that rewrites the Summary with its task has no reminder",
+        ok and not any("STATUS.md" in m for m in messages(got)),
+        got,
+    )
+
+    ok, got = call(
+        "create",
+        {"request_id": "f3", "project": "gamma", "title": "Add a new task"},
+    )
+    tap.check("creating a task leaves no findings", ok and got["findings"] == [], got)
+
+    ok, again = call(
+        "create",
+        {"request_id": "f3", "project": "gamma", "title": "Add a new task"},
+    )
+    tap.check(
+        "a replayed write reports findings too",
+        ok and again["replayed"] and again["findings"] == [],
+        again,
+    )
+
+
 def bypass_proxy_for_loopback() -> None:
     """Keeps loopback requests away from any proxy in the environment.
 
@@ -1766,6 +1863,7 @@ def main() -> None:
         fault_checks(tap, tg, seed, tmp, ttl)
         cache_checks(tap, tg, seed, tmp)
         edit_checks(tap, tg, seed, tmp)
+        findings_checks(tap, tg, seed, tmp)
         local_checks(tap, tg, seed, tmp)
     print(f"1..{tap.n}", flush=True)
     sys.exit(1 if tap.failed else 0)
