@@ -2704,12 +2704,27 @@ def markdown_finding(snap: Snapshot, rel: str) -> Finding | None:
         )
 
 
-def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Finding]:
+def audit_snapshot(
+    snap: Snapshot,
+    target_project: str | None = None,
+    markdown: bool = True,
+    rows: list[TaskRow] | None = None,
+    only: set[str] | None = None,
+) -> list[Finding]:
     """Single shared diagnostic engine for doctor and fix.
 
     Remediations write through SNAP, so they apply only to a writable one.
+    MARKDOWN false skips the formatting checks, the slowest, for callers
+    whose records were just formatted. ROWS are SNAP's task rows, when the
+    caller has parsed them. ONLY, what a write touched, limits the project
+    and task checks to those paths and to the tasks a touched task holds,
+    and skips the STATUS.md snapshot check: the write regenerated every
+    snapshot it affected.
     """
     findings: list[Finding] = []
+
+    def wanted(rel: str) -> bool:
+        return only is None or rel in only
 
     # 1. AGENTS.md check & remediation
     agents_file = "AGENTS.md"
@@ -2814,7 +2829,7 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
         )
 
     # 3. Duplicate global task IDs
-    all_rows = get_task_rows(snap)
+    all_rows = get_task_rows(snap) if rows is None else rows
     status_idx = {r.task_id: r.status for r in all_rows if r.task_id}
     seen_ids: dict[str, int] = {}
     for r in all_rows:
@@ -2838,6 +2853,8 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
         projects = list_projects(snap)
 
     for name in projects:
+        if only is not None and not any(p.startswith(f"{name}/") for p in only):
+            continue
         tasks_dir = f"{name}/tasks"
         status_file = f"{name}/STATUS.md"
 
@@ -2864,7 +2881,7 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
         # Check project README / PROJECT frontmatter syntax
         for doc_name in ("README.md", "PROJECT.md"):
             doc_rel = f"{name}/{doc_name}"
-            if snap.is_file(doc_rel):
+            if wanted(doc_rel) and snap.is_file(doc_rel):
                 doc_text = snap.read_text(doc_rel)
                 if re.match(r"^---\r?\n", doc_text):
                     try:
@@ -2904,7 +2921,7 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
                         )
 
         # Check tasks
-        for tf in snap.glob_md(tasks_dir):
+        for tf in filter(wanted, snap.glob_md(tasks_dir)):
             content = snap.read_text(tf)
             rel_path = tf
             tf_name = tf.rsplit("/", 1)[1]
@@ -3101,13 +3118,11 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
                     )
 
         # Check STATUS.md snapshot drift
-        if snap.is_file(status_file):
+        if wanted(status_file) and snap.is_file(status_file):
             current_status = snap.read_text(status_file)
-            rendered = render_status_file(
-                snap, name, all_rows=all_rows, index=status_idx
-            )
-            rendered = format_markdown(rendered)
-            if current_status != rendered:
+            if only is None and current_status != format_markdown(
+                render_status_file(snap, name, all_rows=all_rows, index=status_idx)
+            ):
 
                 def make_remediate_snapshot(p_name=name, p_status=status_file):
                     def remediate() -> list[str]:
@@ -3162,15 +3177,16 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
                 )
 
         # Check decisions ADRs
-        audit_project_adrs(snap, name, findings)
+        if only is None or any(p.startswith(f"{name}/decisions/") for p in only):
+            audit_project_adrs(snap, name, findings)
 
         # Check Markdown formatting of the project's records; free-form
         # documents are the owner's to format.
-        for mf in snap.walk_md(name):
+        for mf in snap.walk_md(name) if markdown else ():
             if is_record_file(mf) and (finding := markdown_finding(snap, mf)):
                 findings.append(finding)
 
-    if not target_project:
+    if not target_project and markdown:
         for rmf in ROOT_RECORDS:
             if snap.is_file(rmf) and (finding := markdown_finding(snap, rmf)):
                 findings.append(finding)
@@ -3196,8 +3212,14 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
     # human review.
     index = status_idx
     today = get_today(snap)
+    touched_ids = {
+        r.task_id for r in all_rows if only is not None and r.rel_path in only
+    }
     scoped_rows = [
-        r for r in all_rows if not target_project or r.project == target_project
+        r
+        for r in all_rows
+        if (not target_project or r.project == target_project)
+        and (only is None or r.rel_path in only or touched_ids & set(r.blocked_by))
     ]
     for row in scoped_rows:
         unknown = [dep for dep in row.blocked_by if dep not in index]
@@ -3321,6 +3343,8 @@ def audit_snapshot(snap: Snapshot, target_project: str | None = None) -> list[Fi
         if target_project and not any(
             r.task_id in cycle and r.project == target_project for r in scoped_rows
         ):
+            continue
+        if only is not None and not touched_ids & set(cycle):
             continue
         findings.append(
             Finding(
@@ -4058,6 +4082,8 @@ class ChangeSet:
     unformatted: set[str] = dataclass_field(default_factory=set)
     # What each edit_file did, in order, for the result.
     edits: list[AppliedEdit] = dataclass_field(default_factory=list)
+    # The task rows of the result, once the whole set has applied.
+    rows: list[TaskRow] | None = None
 
     def touch(self, rel: str) -> None:
         if rel not in self.before:
@@ -5075,7 +5101,7 @@ def apply_change_set(
         if cs.snap.is_file(rel):
             cs.snap.write_markdown(rel, cs.snap.read_text(rel))
     projects = validate_change_set(cs)
-    rows = get_task_rows(cs.snap)
+    rows = cs.rows = get_task_rows(cs.snap)
     index = {r.task_id: r.status for r in rows if r.task_id}
     for project in projects:
         if is_project(cs.snap, project):
@@ -6132,6 +6158,7 @@ def handoff_payload(
         "project": project,
         "task": task_record_json(snap, t.row) if t.row is not None else None,
         "note": note,
+        "guide": MCP_GUIDE,
         "findings": [{"severity": s, "message": m} for s, m in t.findings],
         "unverified_gates": unverified_gates(get_task_rows(snap, project)),
         "frontmatter": (
@@ -7655,7 +7682,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.13.0"
+MCP_SERVER_VERSION = "0.14.1"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -7740,6 +7767,44 @@ MCP_UNVERIFIED = (
     "its task. Run 'taskgo check' locally to poll them."
 )
 
+# The handoff payload's guide: the skill's rules that writes through the
+# server most often miss, in the server's terms. The skill's references stay
+# the specification; keep this a digest of them.
+MCP_GUIDE = f"""\
+Keeping the tracker through these tools. The taskgo skill is the full
+specification; these are the rules writes most often miss.
+
+Current truth, not a log. Files say what is true now; Git keeps the history.
+Rewrite STATUS.md Summary and Next (replace_section) to the new state instead
+of adding a paragraph per session, and keep a task's Findings to what is now
+known, not a dated account of each step. Never add frontmatter fields such as
+created or updated.
+
+Tasks. The title is an imperative verb phrase; Goal says what should be true
+once done, and Criteria the observable end condition. Before work that may
+span sessions, set status in-progress. blocked_by goes on the task that is
+held, never on its blocker; wait_for holds external gates (a date, b/123,
+gh:owner/repo#1, @person).
+
+Completing a task: set status done with an Outcome that gives a verdict
+against each criterion, then what shipped, with https URLs. Keep Problem,
+Cost, Goal, and Criteria as written; Outcome and Findings replace Sketch and
+Constraints; Next holds follow-ups.
+
+Before you stop: the task and STATUS.md Summary and Next say where things
+stand, so that a reader with nothing else can resume. Change the project
+README.md only if its identity, map, or standing rules changed.
+
+Attribution: pass conversation on every write, as <agent>://<session-id>
+with <agent> one of {", ".join(CANONICAL_AGENTS)} (claude for Claude Code).
+
+Where the skill names CLI steps: each write is one commit, so there is no
+checkpoint or commit step; STATUS.md task blocks are regenerated on every
+write, so there is no sync; --conv is the conversation argument; and in
+place of doctor, each write returns findings on what it touched. Repairs
+across many files (fix, renames) are the CLI's: report what needs one instead
+of working around it."""
+
 MCP_INSTRUCTIONS = f"""\
 This server reads and writes a taskgo control repository: a private Git
 repository of Markdown that tracks projects, tasks (TASK-XXXXX), decisions,
@@ -7752,18 +7817,94 @@ and ready tasks, and the task record. list_projects and list_tasks (state
 it read in as_of.commit; pass it as 'at' to keep several reads on the same
 commit. handoff.skills names the agent skills the project expects: activate
 them if your harness has a skill manager (adding one already active is
-harmless), otherwise ignore them.
+harmless), otherwise ignore them. Before your first write, read
+handoff.guide: how to keep the tracker current.
 
 create and apply_changes record progress: each call is one commit on main,
 or nothing. Edits name the section hash or blob SHA they replace, as read
 from get_task, get_project_status, or list_files, and are refused if it no
-longer holds; read again and retry. Pass a fresh request_id for each write
-and the same one when retrying it after an unclear outcome, so that it is
-recorded once.
+longer holds; read again and retry. Each write returns findings on the
+files and tasks it touched: advice, since the write has landed. Pass a
+fresh request_id for each write and the same one when retrying it after an
+unclear outcome, so that it is recorded once.
 
 {MCP_DATA_CARE}
 
 {MCP_UNVERIFIED}"""
+
+
+def status_prose(
+    snap: Snapshot, project: str, every: bool = False
+) -> list[tuple[str, str]] | None:
+    """PROJECT's STATUS.md Summary and Next texts in SNAP, or with EVERY all
+    its sections but the task snapshot; None without one."""
+    rel = f"{project}/STATUS.md"
+    if not snap.is_file(rel):
+        return None
+    return [
+        (s["name"], s["text"])
+        for s in record_sections(snap.read_text(rel), STATUS_SCHEMA)
+        if (s["name"] != "snapshot" if every else s["name"] in ("Summary", "Next"))
+    ]
+
+
+def write_findings(
+    snap: Snapshot,
+    parent: Snapshot | None,
+    paths: list[str],
+    rows: list[TaskRow] | None = None,
+) -> list[dict[str, str]]:
+    """What a write that changed PATHS, from PARENT to SNAP, leaves to check.
+
+    doctor's findings, without its formatting checks (the write formatted
+    its records), on the files the write touched or naming a task in them,
+    such as a blocker it resolved in any project; and, for each project
+    where it changed an existing task but not STATUS.md's Summary or Next,
+    a reminder. ROWS are SNAP's task rows, when the caller has them.
+    """
+    rows = get_task_rows(snap) if rows is None else rows
+    touched = set(paths)
+    # A STATUS.md the write only regenerated, because a task it changed
+    # holds one in another project, says nothing about the write.
+    if parent is not None:
+        touched -= {
+            rel
+            for rel in touched
+            if rel.endswith("/STATUS.md")
+            and not any(
+                p != rel and p.startswith(rel.removesuffix("STATUS.md"))
+                for p in touched
+            )
+            and status_prose(snap, rel.split("/", 1)[0], every=True)
+            == status_prose(parent, rel.split("/", 1)[0], every=True)
+        }
+    ids = {r.task_id for r in rows if r.task_id and r.rel_path in touched}
+    out = [
+        {"severity": f.severity, "message": f.message}
+        for f in audit_snapshot(snap, markdown=False, rows=rows, only=touched)
+        if f.severity != "PASS"
+        and (f.path in touched or any(i in f.message for i in ids))
+    ]
+    if parent is None:
+        return out
+    changed = {
+        p.split("/", 1)[0]
+        for p in touched
+        if p.partition("/")[2].startswith("tasks/") and parent.is_file(p)
+    }
+    for project in sorted(changed):
+        if status_prose(snap, project) == status_prose(parent, project):
+            out.append(
+                {
+                    "severity": "INFO",
+                    "message": (
+                        f"{project}/STATUS.md: Summary and Next are unchanged; "
+                        "if this write changed where the project stands or what "
+                        "comes next, rewrite them"
+                    ),
+                }
+            )
+    return out
 
 
 class McpToolError(Exception):
@@ -8389,8 +8530,10 @@ MCP_WRITE_PROPERTIES = {
     "conversation": {
         "type": "string",
         "description": (
-            "Your session URI, as <agent>://<id>: recorded in a Conversation: "
-            "trailer and in the conversations of every task the write touches."
+            "Your session URI, as <agent>://<id>, where <agent> is one of "
+            f"{', '.join(CANONICAL_AGENTS)} (claude for Claude Code) and <id> "
+            "your session ID: recorded in a Conversation: trailer and in the "
+            "conversations of every task the write touches."
         ),
     },
     "refs": {
@@ -8594,12 +8737,14 @@ MCP_TOOLS = [
         "sections}: sections.title is required; later changes name the record "
         "'$ref'.\n"
         "- set {record, field, value, expected?}: status, due, stale_after, or "
-        "title; expected guards the current value.\n"
+        "title; expected guards the current value. Setting status done needs "
+        "the task's Outcome, giving a verdict against each criterion.\n"
         "- add, remove {record, field, values}: blocked_by, wait_for, "
         "conversations; supersedes on decisions.\n"
         "- replace_section {record, section, text, expected_hash}: a task "
         "section or STATUS.md Summary or Next; expected_hash from get_task or "
-        "get_project_status, null if absent; text null removes it.\n"
+        "get_project_status, null if absent; text null removes it. Summary "
+        "and Next are rewritten to the current state, never appended to.\n"
         "- write_file {path, content, expected_blob?, executable?}: a whole "
         "project file outside tasks/, decisions/, and STATUS.md, or INBOX.md; "
         "without expected_blob the file must be new, and to overwrite one "
@@ -8612,7 +8757,8 @@ MCP_TOOLS = [
         "A record is a task ID, a '$ref', a decision path, or "
         "'<project>/STATUS.md'. The result must validate (known blockers, no "
         "cycles, an Outcome on done tasks); the affected STATUS.md blocks are "
-        f"regenerated.\n\n{MCP_DATA_CARE}",
+        "regenerated. The result lists findings on what the write touched.\n\n"
+        f"{MCP_DATA_CARE}",
         {
             "changes": {
                 "type": "array",
@@ -9419,6 +9565,7 @@ class McpServer:
                     "files": [],
                     "attempts": pushes,
                     "replayed": False,
+                    "findings": [],
                 }
             message = mcp_commit_message(cs, commit_args, rid, digest)
             sha = reader.commit(snap, cs, message)
@@ -9442,7 +9589,7 @@ class McpServer:
             if pushed:
                 reader.pushed(sha)
                 mcp_log(f"{label} attempt {pushes} pushed {sha[:12]} on {head[:12]}")
-                return self.landed(result)
+                return self.landed(result, cs)
             mcp_log(f"{label} attempt {pushes} push of {sha[:12]} refused: {why}")
             reader.forget()
             try:
@@ -9469,10 +9616,34 @@ class McpServer:
                     "was written. Retry with the same request_id"
                 )
 
-    def landed(self, result: dict[str, Any]) -> dict[str, Any]:
-        """RESULT, with as_of for its commit."""
-        snap, committed = self.reader.snapshot(result["commit"])
-        return {"as_of": McpRead(self.reader, snap, committed).as_of(), **result}
+    def landed(
+        self, result: dict[str, Any], cs: ChangeSet | None = None
+    ) -> dict[str, Any]:
+        """RESULT, with as_of for its commit and the findings it leaves.
+
+        CS, the change set this call committed, holds the commit's tree and
+        task rows, so its findings need no fresh read of the commit. The
+        write has landed, so a failure to compute its findings is logged
+        and reported as no findings, never as a failed write.
+        """
+        reader, sha = self.reader, result["commit"]
+        snap, committed = reader.snapshot(sha)
+        try:
+            paths = [f["path"] for f in result["files"]]
+            if cs is not None:
+                findings = write_findings(cs.snap, cs.snap.base, paths, cs.rows)
+            else:
+                rev = reader.git("rev-parse", "--verify", "-q", f"{sha}^")
+                parent = reader.snapshot(rev.stdout.strip())[0] if rev.stdout else None
+                findings = write_findings(snap, parent, paths)
+        except Exception as e:
+            mcp_log(f"findings for {sha[:12]} failed: {type(e).__name__}: {e}")
+            findings = []
+        return {
+            "as_of": McpRead(reader, snap, committed).as_of(),
+            **result,
+            "findings": findings,
+        }
 
     def recorded(self, sha: str, rid: str) -> dict[str, Any]:
         """The result of the write that made commit SHA, as far as the commit

@@ -10,20 +10,20 @@ One server serves one control repository.
 
 ## Tools
 
-| Tool                 | Returns                                                                                                                 | CLI equivalent          |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                               | `taskgo status --json`  |
-| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                      | `taskgo list --json`    |
-| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                          | the task file           |
-| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                               | `taskgo status PROJECT` |
-| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                 | `taskgo read --json`    |
-| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                             | `taskgo search --json`  |
-| `list_files`         | Files with blob SHAs, optionally under one directory                                                                    | `git ls-files -s`       |
-| `handoff`            | For a project or task: the note, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json` |
-| `get_task_history`   | Changes of one frontmatter field, following renames                                                                     | `taskgo history`        |
-| `create`             | Creates one task or decision as one commit, and returns its ID                                                          | `taskgo create`         |
-| `apply_changes`      | Applies a change set as one commit                                                                                      | `taskgo apply`, commit  |
-| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                           | `taskgo edit`, commit   |
+| Tool                 | Returns                                                                                                                          | CLI equivalent          |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                                        | `taskgo status --json`  |
+| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                               | `taskgo list --json`    |
+| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                                   | the task file           |
+| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                                        | `taskgo status PROJECT` |
+| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                          | `taskgo read --json`    |
+| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                                      | `taskgo search --json`  |
+| `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`       |
+| `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json` |
+| `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`        |
+| `create`             | Creates one task or decision as one commit, and returns its ID                                                                   | `taskgo create`         |
+| `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit  |
+| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit   |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
@@ -64,6 +64,11 @@ a task ID, and one round trip returns what the workflow reads before acting.
 
 - `note`: the short handoff note, as `taskgo handoff` prints it, with
   repository-relative paths and the data-care rule.
+- `guide`: how to keep the tracker through the server's tools: a digest of the
+  rules in this skill that writes most often miss (rewriting STATUS.md prose
+  instead of appending, completing a task, where `blocked_by` goes, the
+  `conversation` URI), and how the CLI steps the skill names map to the tools.
+  It is the same for every target; the skill stays the specification.
 - `findings` and `unverified_gates`: readiness and audit findings, and the
   project's unverified gates.
 - `frontmatter`: the project `README.md` frontmatter as YAML parses it, with no
@@ -113,6 +118,21 @@ nothing:
    head, so its preconditions are checked against what is now there. After five
    refused pushes, not counting a first push over a cached head, the write fails
    and nothing is written.
+
+A write that lands, or is recognized as a retry, returns `findings`: advice,
+never a refusal, since the commit is already on the branch. They are `doctor`'s
+findings at the commit, without its formatting checks, on the files the write
+touched or naming a task in them (such as a `blocked_by` edge it resolved in
+another project), and, for each project where the write changed an existing task
+but left `STATUS.md`'s Summary and Next as they were, an `INFO` reminder to
+rewrite them if the project's state or next steps changed. A `STATUS.md` whose
+task snapshot alone the write regenerated, because a task it changed holds one
+in another project, does not count as touched. A write that changes nothing
+returns none. The audit checks only what the write touched and the tasks a
+touched task holds, and reuses the change set's tree and task rows rather than
+reading the commit again. They stand in for running `taskgo doctor`, which a
+client without a checkout cannot; `taskgo apply` and `taskgo edit` are
+unchanged.
 
 Calls are serialized, so the server's own writes never race each other; pushes
 from CLI checkouts race with them on equal terms, through the remote's refusal

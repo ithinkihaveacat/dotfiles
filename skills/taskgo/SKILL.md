@@ -291,8 +291,9 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   agent handoff instructions for a project or task in the working tree (or at
   `--at REV`), warning on stderr about uncommitted state or missing scaffolding;
   the note ends with the project's skills and how to activate them; `--json`
-  inlines the onboarding files, the `skills` list, and active/ready queues in
-  one payload, matching the MCP `handoff` tool.
+  inlines the onboarding files, the `skills` list, a guide to keeping the
+  tracker through the MCP tools, and active/ready queues in one payload,
+  matching the MCP `handoff` tool.
 - `skills`: Print the skills a project's README frontmatter declares, one per
   line (`--json` for an array), for `skill --scope session add -`.
 - `read`: Print UTF-8 file slices (`--start-line`, `--end-line`, `-n` /
