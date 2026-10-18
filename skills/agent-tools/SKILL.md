@@ -813,9 +813,10 @@ session writes to one store, `${XDG_STATE_HOME:-~/.local/state}/andon`, through
 `scripts/andon`. See [plugins/andon/README.md](plugins/andon/README.md) for the
 design.
 
-Install it once, from a terminal, at user scope. It then loads in terminal and
-desktop Code tab sessions alike. The desktop app's + → Plugins menu manages
-plugins, but adding this local-folder marketplace needs the terminal:
+**Claude Code:** install it once, from a terminal, at user scope. It then loads
+in terminal and desktop Code tab sessions alike. The desktop app's + → Plugins
+menu manages plugins, but adding this local-folder marketplace needs the
+terminal:
 
 ```bash
 claude plugin install andon --marketplace ~/.dotfiles/skills/agent-tools/plugins
@@ -825,6 +826,23 @@ The plugin is read from this folder, so `/reload-plugins` picks up edits. In a
 session, start a message with "andon level 5" or run `/andon level 5` to set the
 trigger level for that conversation. `/andon level 4 --save` changes the default
 for every session.
+
+**OpenCode V2:** install from this checkout without editing JSON by linking it
+into the auto-discovered global plugins directory:
+
+```bash
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
+ln -sn "$HOME/.dotfiles/skills/agent-tools/plugins/andon/opencode" \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/andon"
+```
+
+If the destination already exists, inspect it first rather than replacing it.
+Restart OpenCode if it does not pick up the link automatically. OpenCode's
+`plugin add` command installs npm/Git packages, not local directories; the link
+keeps this adapter beside its shared CLI. See
+[OpenCode installation and usage](plugins/andon/opencode/README.md) for JSON
+configuration alternatives and remote connections. Both harnesses share the
+alert store and saved default level.
 
 Triage with the CLI:
 

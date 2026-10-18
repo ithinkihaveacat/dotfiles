@@ -24,6 +24,7 @@ plugins/
   andon/
     README.md                      this file
     claude/                        the Claude Code plugin
+    opencode/                      the OpenCode V2 server and terminal plugin
 ../scripts/andon                   the store and triage CLI, shared by every harness
 ```
 
@@ -89,6 +90,15 @@ picks up edits without a reinstall.
   agent-tools `SKILL.md` is the supported route.
 - **Plugin API version:** the function-hooks API is early access, and the plugin
   was written against Claude Code 2.1.299.
+
+## The OpenCode plugin
+
+`opencode/` provides an OpenCode V2 adapter over the same CLI and store, with a
+directly offered pull tool, an always-on rule, session levels, passive
+reminders, and a searchable terminal board. See
+[OpenCode installation and usage](opencode/README.md). The Claude adapter and
+shared store format are unchanged; differences and the deferred MCP boundary are
+recorded in [its changelog](opencode/CHANGELOG.md).
 
 ## Porting notes
 
