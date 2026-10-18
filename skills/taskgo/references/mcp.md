@@ -125,9 +125,14 @@ findings at the commit, without its formatting checks, on the files the write
 touched or naming a task in them (such as a `blocked_by` edge it resolved in
 another project), and, for each project where the write changed an existing task
 but left `STATUS.md`'s Summary and Next as they were, an `INFO` reminder to
-rewrite them if the project's state or next steps changed. A write that changes
-nothing returns none. They stand in for running `taskgo doctor`, which a client
-without a checkout cannot; `taskgo apply` and `taskgo edit` are unchanged.
+rewrite them if the project's state or next steps changed. A `STATUS.md` whose
+task snapshot alone the write regenerated, because a task it changed holds one
+in another project, does not count as touched. A write that changes nothing
+returns none. The audit checks only what the write touched and the tasks a
+touched task holds, and reuses the change set's tree and task rows rather than
+reading the commit again. They stand in for running `taskgo doctor`, which a
+client without a checkout cannot; `taskgo apply` and `taskgo edit` are
+unchanged.
 
 Calls are serialized, so the server's own writes never race each other; pushes
 from CLI checkouts race with them on equal terms, through the remote's refusal

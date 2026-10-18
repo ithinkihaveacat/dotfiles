@@ -1737,8 +1737,40 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
     def messages(got: dict) -> list[str]:
         return [f"{f['severity']} {f['message']}" for f in got["findings"]]
 
+    def section_hash(project: str, name: str) -> str | None:
+        ok, status = call("get_project_status", {"project": project})
+        return ok and next(s["hash"] for s in status["sections"] if s["name"] == name)
+
     ok, got = call("handoff", {"target": "alpha"})
     tap.check("handoff carries the guide", ok and got["guide"] == tg.MCP_GUIDE, got)
+
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "f0",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-BB002",
+                    "field": "status",
+                    "value": "in-progress",
+                },
+                {
+                    "op": "replace_section",
+                    "record": "beta/STATUS.md",
+                    "section": "Summary",
+                    "text": "Nothing is in progress.",
+                    "expected_hash": section_hash("beta", "Summary"),
+                },
+            ],
+        },
+    )
+    beta_prose = "WARN beta: STATUS prose says no task is in progress"
+    tap.check(
+        "STATUS.md prose that contradicts the write is reported",
+        ok and any(m.startswith(beta_prose) for m in messages(got)),
+        got,
+    )
 
     ok, got = call(
         "apply_changes",
@@ -1777,11 +1809,74 @@ def findings_checks(tap: Tap, tg, seed: Path, tmp: Path) -> None:
         and any(m.startswith("INFO alpha/STATUS.md: Summary and Next") for m in found),
         got,
     )
-
-    ok, status = call("get_project_status", {"project": "alpha"})
-    summary = ok and next(
-        s["hash"] for s in status["sections"] if s["name"] == "Summary"
+    tap.check(
+        "a STATUS.md the write only regenerated reports nothing",
+        ok and not any(m.startswith(beta_prose) for m in found),
+        got,
     )
+
+    ok, got = call(
+        "apply_changes",
+        {
+            "request_id": "f4",
+            "changes": [
+                {
+                    "op": "add",
+                    "record": "TASK-BB002",
+                    "field": "blocked_by",
+                    "values": ["TASK-AA004"],
+                }
+            ],
+        },
+    )
+    ok, got = ok and call(
+        "apply_changes",
+        {
+            "request_id": "f5",
+            "changes": [
+                {
+                    "op": "set",
+                    "record": "TASK-AA004",
+                    "field": "status",
+                    "value": "cancelled",
+                }
+            ],
+        },
+    )
+    found = ok and messages(got)
+    tap.check(
+        "cancelling a blocker reports the edge left on its held task",
+        ok
+        and any(
+            m.startswith("WARN beta/tasks/TASK-BB002") and "TASK-AA004 (cancelled)" in m
+            for m in found
+        )
+        and not any(m.startswith(beta_prose) for m in found),
+        got,
+    )
+
+    ok, got = call(
+        "edit_file",
+        {
+            "request_id": "f6",
+            "path": "alpha/tasks/TASK-AA002-two.md",
+            "old_string": "status: todo\n",
+            "new_string": "status: todo\ncreated: 2026-10-18\n",
+        },
+    )
+    tap.check(
+        "a frontmatter field outside the schema is reported",
+        ok
+        and any(
+            m.startswith(
+                "INFO alpha/tasks/TASK-AA002-two.md: frontmatter field 'created'"
+            )
+            for m in messages(got)
+        ),
+        got,
+    )
+
+    summary = section_hash("alpha", "Summary")
     ok, got = call(
         "apply_changes",
         {
