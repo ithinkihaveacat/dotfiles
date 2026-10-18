@@ -2705,15 +2705,26 @@ def markdown_finding(snap: Snapshot, rel: str) -> Finding | None:
 
 
 def audit_snapshot(
-    snap: Snapshot, target_project: str | None = None, markdown: bool = True
+    snap: Snapshot,
+    target_project: str | None = None,
+    markdown: bool = True,
+    rows: list[TaskRow] | None = None,
+    only: set[str] | None = None,
 ) -> list[Finding]:
     """Single shared diagnostic engine for doctor and fix.
 
     Remediations write through SNAP, so they apply only to a writable one.
     MARKDOWN false skips the formatting checks, the slowest, for callers
-    whose records were just formatted.
+    whose records were just formatted. ROWS are SNAP's task rows, when the
+    caller has parsed them. ONLY, what a write touched, limits the project
+    and task checks to those paths and to the tasks a touched task holds,
+    and skips the STATUS.md snapshot check: the write regenerated every
+    snapshot it affected.
     """
     findings: list[Finding] = []
+
+    def wanted(rel: str) -> bool:
+        return only is None or rel in only
 
     # 1. AGENTS.md check & remediation
     agents_file = "AGENTS.md"
@@ -2818,7 +2829,7 @@ def audit_snapshot(
         )
 
     # 3. Duplicate global task IDs
-    all_rows = get_task_rows(snap)
+    all_rows = get_task_rows(snap) if rows is None else rows
     status_idx = {r.task_id: r.status for r in all_rows if r.task_id}
     seen_ids: dict[str, int] = {}
     for r in all_rows:
@@ -2842,6 +2853,8 @@ def audit_snapshot(
         projects = list_projects(snap)
 
     for name in projects:
+        if only is not None and not any(p.startswith(f"{name}/") for p in only):
+            continue
         tasks_dir = f"{name}/tasks"
         status_file = f"{name}/STATUS.md"
 
@@ -2868,7 +2881,7 @@ def audit_snapshot(
         # Check project README / PROJECT frontmatter syntax
         for doc_name in ("README.md", "PROJECT.md"):
             doc_rel = f"{name}/{doc_name}"
-            if snap.is_file(doc_rel):
+            if wanted(doc_rel) and snap.is_file(doc_rel):
                 doc_text = snap.read_text(doc_rel)
                 if re.match(r"^---\r?\n", doc_text):
                     try:
@@ -2908,7 +2921,7 @@ def audit_snapshot(
                         )
 
         # Check tasks
-        for tf in snap.glob_md(tasks_dir):
+        for tf in filter(wanted, snap.glob_md(tasks_dir)):
             content = snap.read_text(tf)
             rel_path = tf
             tf_name = tf.rsplit("/", 1)[1]
@@ -3105,13 +3118,11 @@ def audit_snapshot(
                     )
 
         # Check STATUS.md snapshot drift
-        if snap.is_file(status_file):
+        if wanted(status_file) and snap.is_file(status_file):
             current_status = snap.read_text(status_file)
-            rendered = render_status_file(
-                snap, name, all_rows=all_rows, index=status_idx
-            )
-            rendered = format_markdown(rendered)
-            if current_status != rendered:
+            if only is None and current_status != format_markdown(
+                render_status_file(snap, name, all_rows=all_rows, index=status_idx)
+            ):
 
                 def make_remediate_snapshot(p_name=name, p_status=status_file):
                     def remediate() -> list[str]:
@@ -3166,7 +3177,8 @@ def audit_snapshot(
                 )
 
         # Check decisions ADRs
-        audit_project_adrs(snap, name, findings)
+        if only is None or any(p.startswith(f"{name}/decisions/") for p in only):
+            audit_project_adrs(snap, name, findings)
 
         # Check Markdown formatting of the project's records; free-form
         # documents are the owner's to format.
@@ -3200,8 +3212,14 @@ def audit_snapshot(
     # human review.
     index = status_idx
     today = get_today(snap)
+    touched_ids = {
+        r.task_id for r in all_rows if only is not None and r.rel_path in only
+    }
     scoped_rows = [
-        r for r in all_rows if not target_project or r.project == target_project
+        r
+        for r in all_rows
+        if (not target_project or r.project == target_project)
+        and (only is None or r.rel_path in only or touched_ids & set(r.blocked_by))
     ]
     for row in scoped_rows:
         unknown = [dep for dep in row.blocked_by if dep not in index]
@@ -3325,6 +3343,8 @@ def audit_snapshot(
         if target_project and not any(
             r.task_id in cycle and r.project == target_project for r in scoped_rows
         ):
+            continue
+        if only is not None and not touched_ids & set(cycle):
             continue
         findings.append(
             Finding(
@@ -4062,6 +4082,8 @@ class ChangeSet:
     unformatted: set[str] = dataclass_field(default_factory=set)
     # What each edit_file did, in order, for the result.
     edits: list[AppliedEdit] = dataclass_field(default_factory=list)
+    # The task rows of the result, once the whole set has applied.
+    rows: list[TaskRow] | None = None
 
     def touch(self, rel: str) -> None:
         if rel not in self.before:
@@ -5079,7 +5101,7 @@ def apply_change_set(
         if cs.snap.is_file(rel):
             cs.snap.write_markdown(rel, cs.snap.read_text(rel))
     projects = validate_change_set(cs)
-    rows = get_task_rows(cs.snap)
+    rows = cs.rows = get_task_rows(cs.snap)
     index = {r.task_id: r.status for r in rows if r.task_id}
     for project in projects:
         if is_project(cs.snap, project):
@@ -7660,7 +7682,7 @@ def cmd_commit(
 # Cloudflare Access authenticates callers in front of the server; McpGate
 # checks the Access JWT on every HTTP request before the SDK sees it.
 
-MCP_SERVER_VERSION = "0.14.0"
+MCP_SERVER_VERSION = "0.14.1"
 MCP_MAX_FILE_BYTES = READ_MAX_BYTES
 MCP_MAX_REQUEST_BYTES = 1024 * 1024
 MCP_FETCH_TIMEOUT = 60
@@ -7811,20 +7833,26 @@ unclear outcome, so that it is recorded once.
 {MCP_UNVERIFIED}"""
 
 
-def status_prose(snap: Snapshot, project: str) -> list[tuple[str, str]] | None:
-    """PROJECT's STATUS.md Summary and Next texts in SNAP; None without one."""
+def status_prose(
+    snap: Snapshot, project: str, every: bool = False
+) -> list[tuple[str, str]] | None:
+    """PROJECT's STATUS.md Summary and Next texts in SNAP, or with EVERY all
+    its sections but the task snapshot; None without one."""
     rel = f"{project}/STATUS.md"
     if not snap.is_file(rel):
         return None
     return [
         (s["name"], s["text"])
         for s in record_sections(snap.read_text(rel), STATUS_SCHEMA)
-        if s["name"] in ("Summary", "Next")
+        if (s["name"] != "snapshot" if every else s["name"] in ("Summary", "Next"))
     ]
 
 
 def write_findings(
-    snap: Snapshot, parent: Snapshot | None, paths: list[str]
+    snap: Snapshot,
+    parent: Snapshot | None,
+    paths: list[str],
+    rows: list[TaskRow] | None = None,
 ) -> list[dict[str, str]]:
     """What a write that changed PATHS, from PARENT to SNAP, leaves to check.
 
@@ -7832,40 +7860,40 @@ def write_findings(
     its records), on the files the write touched or naming a task in them,
     such as a blocker it resolved in any project; and, for each project
     where it changed an existing task but not STATUS.md's Summary or Next,
-    a reminder.
+    a reminder. ROWS are SNAP's task rows, when the caller has them.
     """
+    rows = get_task_rows(snap) if rows is None else rows
     touched = set(paths)
-    projects = {p.split("/", 1)[0] for p in touched if "/" in p}
-    projects &= set(list_projects(snap))
-    ids = {
-        r.task_id
-        for p in projects
-        for r in get_task_rows(snap, p)
-        if r.rel_path in touched
-    }
-    # Auditing every project costs about a second on a real tracker, so
-    # audit only those whose tasks mention a touched ID, as a blocker would.
-    projects |= {
-        rel.split("/", 1)[0]
-        for rel in get_task_files(snap)
-        if any(i in snap.read_text(rel) for i in ids)
-    }
-    # Each audit also makes the repository-wide checks: list those once.
-    found = {
-        (f.severity, f.message): None
-        for project in sorted(projects)
-        for f in audit_snapshot(snap, project, markdown=False)
+    # A STATUS.md the write only regenerated, because a task it changed
+    # holds one in another project, says nothing about the write.
+    if parent is not None:
+        touched -= {
+            rel
+            for rel in touched
+            if rel.endswith("/STATUS.md")
+            and not any(
+                p != rel and p.startswith(rel.removesuffix("STATUS.md"))
+                for p in touched
+            )
+            and status_prose(snap, rel.split("/", 1)[0], every=True)
+            == status_prose(parent, rel.split("/", 1)[0], every=True)
+        }
+    ids = {r.task_id for r in rows if r.task_id and r.rel_path in touched}
+    out = [
+        {"severity": f.severity, "message": f.message}
+        for f in audit_snapshot(snap, markdown=False, rows=rows, only=touched)
         if f.severity != "PASS"
         and (f.path in touched or any(i in f.message for i in ids))
-    }
-    out = [{"severity": s, "message": m} for s, m in found]
+    ]
     if parent is None:
         return out
-    for project in sorted(projects):
-        changed = any(
-            p.startswith(f"{project}/tasks/") and parent.is_file(p) for p in touched
-        )
-        if changed and status_prose(snap, project) == status_prose(parent, project):
+    changed = {
+        p.split("/", 1)[0]
+        for p in touched
+        if p.partition("/")[2].startswith("tasks/") and parent.is_file(p)
+    }
+    for project in sorted(changed):
+        if status_prose(snap, project) == status_prose(parent, project):
             out.append(
                 {
                     "severity": "INFO",
@@ -9561,7 +9589,7 @@ class McpServer:
             if pushed:
                 reader.pushed(sha)
                 mcp_log(f"{label} attempt {pushes} pushed {sha[:12]} on {head[:12]}")
-                return self.landed(result)
+                return self.landed(result, cs)
             mcp_log(f"{label} attempt {pushes} push of {sha[:12]} refused: {why}")
             reader.forget()
             try:
@@ -9588,19 +9616,26 @@ class McpServer:
                     "was written. Retry with the same request_id"
                 )
 
-    def landed(self, result: dict[str, Any]) -> dict[str, Any]:
+    def landed(
+        self, result: dict[str, Any], cs: ChangeSet | None = None
+    ) -> dict[str, Any]:
         """RESULT, with as_of for its commit and the findings it leaves.
 
-        The write has landed, so a failure to compute its findings is
-        logged and reported as no findings, never as a failed write.
+        CS, the change set this call committed, holds the commit's tree and
+        task rows, so its findings need no fresh read of the commit. The
+        write has landed, so a failure to compute its findings is logged
+        and reported as no findings, never as a failed write.
         """
         reader, sha = self.reader, result["commit"]
         snap, committed = reader.snapshot(sha)
         try:
-            rev = reader.git("rev-parse", "--verify", "-q", f"{sha}^").stdout.strip()
-            parent = reader.snapshot(rev)[0] if rev else None
             paths = [f["path"] for f in result["files"]]
-            findings = write_findings(snap, parent, paths)
+            if cs is not None:
+                findings = write_findings(cs.snap, cs.snap.base, paths, cs.rows)
+            else:
+                rev = reader.git("rev-parse", "--verify", "-q", f"{sha}^")
+                parent = reader.snapshot(rev.stdout.strip())[0] if rev.stdout else None
+                findings = write_findings(snap, parent, paths)
         except Exception as e:
             mcp_log(f"findings for {sha[:12]} failed: {type(e).__name__}: {e}")
             findings = []
