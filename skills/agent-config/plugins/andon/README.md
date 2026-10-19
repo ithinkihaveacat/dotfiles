@@ -25,6 +25,7 @@ plugins/
     README.md                      this file
     claude/                        the Claude Code plugin
     opencode/                      the OpenCode V2 server and terminal plugin
+    chatgpt/                       the local ChatGPT desktop plugin and MCP App board
 ../scripts/andon                   the store and triage CLI, shared by every harness
 ```
 
@@ -36,9 +37,9 @@ CLI commands; another harness can use either that interface or MCP.
 `andon mcp --stdio` exposes the shared operations through the MCP Python SDK,
 using Taskgo's SDK/server and separate-transport pattern. It needs no HTTP
 listener or hosted service. See [Andon MCP](../../references/andon-mcp.md) for
-tools, client configuration and attribution boundaries. This is the shared API
-only; it does not install a Codex adapter. The Claude Code plugin registers its
-tool in-process and does not need MCP.
+tools, client configuration and attribution boundaries. The optional MCP App
+board is served by the same server. The Claude Code plugin registers its tool
+in-process and does not need MCP.
 
 ## The Claude Code plugin
 
@@ -101,6 +102,15 @@ reminders, and a searchable terminal board. See
 [OpenCode installation and usage](opencode/README.md). The Claude adapter and
 shared store format are unchanged; differences and the deferred MCP boundary are
 recorded in [its changelog](opencode/CHANGELOG.md).
+
+## The ChatGPT desktop plugin
+
+`chatgpt/` packages the local MCP server and a live MCP App board with
+conversation-panel and global sidebar entrypoints. It refreshes the shared store
+while visible and exposes filters, recurrence counts, alert details, fix prompts
+and triage actions. It does not add always-on reporting rules, passive sensors
+or trusted conversation attribution. See
+[ChatGPT desktop installation and usage](chatgpt/README.md).
 
 ## Porting notes
 

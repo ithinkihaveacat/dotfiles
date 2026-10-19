@@ -10,7 +10,7 @@
 # ///
 """Exercise the real stdio protocol and shared CLI against temporary stores."""
 # unittest supplies the assertion API.
-# ruff: noqa: PT009
+# ruff: noqa: PT009, PT027
 
 import asyncio
 import contextlib
@@ -28,6 +28,7 @@ from pathlib import Path
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.shared.exceptions import MCPError
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "andon"
 REPORT = {
@@ -99,6 +100,7 @@ class AndonMcpTests(unittest.TestCase):
         self.assertEqual(
             set(tools),
             {
+                "board",
                 "pull",
                 "list",
                 "show",
@@ -115,6 +117,59 @@ class AndonMcpTests(unittest.TestCase):
         self.assertTrue(tools["show"].annotations.read_only_hint)
         self.assertNotIn("conversation_id", tools["pull"].input_schema["properties"])
         self.assertFalse(self.state.exists())
+
+    async def test_board_discovery_and_resource(self):
+        tools = {tool.name: tool for tool in (await self.client.list_tools()).tools}
+        board = tools["board"]
+        self.assertTrue(board.annotations.read_only_hint)
+        self.assertEqual(board.meta["ui"]["resourceUri"], "ui://andon/board")
+        self.assertEqual(
+            board.meta["openai/ui"]["entrypoints"],
+            [{"type": "thread"}, {"type": "global"}],
+        )
+        for tool in tools.values():
+            self.assertIn("app", tool.meta["ui"]["visibility"])
+            if tool.name != "board":
+                self.assertNotIn("resourceUri", tool.meta["ui"])
+        resources = (await self.client.list_resources()).resources
+        self.assertEqual([r.uri for r in resources], ["ui://andon/board"])
+        contents = (await self.client.read_resource(resources[0].uri)).contents
+        self.assertEqual(len(contents), 1)
+        self.assertEqual(contents[0].mime_type, "text/html;profile=mcp-app")
+        self.assertEqual(
+            contents[0].text,
+            (SCRIPT.parent.parent / "plugins/andon/chatgpt/board.html").read_text(),
+        )
+        self.assertEqual(contents[0].meta["ui"]["csp"]["connectDomains"], [])
+        self.assertFalse(self.state.exists(), "Opening the UI must not write state")
+
+    async def test_board_reads_shared_store_and_triage(self):
+        empty = await self.call("board")
+        self.assertEqual(empty["total"], 0)
+        self.assertEqual(empty["stats"]["open"], 0)
+        first = json.loads(self.cli("pull", "--json", "-", data=json.dumps(REPORT)))
+        second = await self.call("pull", {**REPORT, "color": "red"})
+        snapshot = await self.call("board")
+        self.assertEqual(snapshot["total"], 2)
+        self.assertEqual(snapshot["stats"]["open_red"], 1)
+        self.assertEqual(
+            {a["id"] for a in snapshot["alerts"]}, {first["id"], second["id"]}
+        )
+        self.assertTrue(all(a["recurrences"] == 2 for a in snapshot["alerts"]))
+        before = (self.state / "events.jsonl").read_bytes()
+        await self.call("board")
+        self.assertEqual((self.state / "events.jsonl").read_bytes(), before)
+        self.cli("resolve", first["id"])
+        await self.call("dismiss", {"id": second["id"]})
+        self.assertEqual((await self.call("board"))["total"], 0)
+        await self.call("reopen", {"id": first["id"]})
+        self.assertEqual((await self.call("board"))["alerts"][0]["id"], first["id"])
+
+    async def test_unknown_resource_is_rejected(self):
+        for uri in ("ui://andon/missing", SCRIPT.as_uri()):
+            with self.subTest(uri=uri), self.assertRaises(MCPError):
+                await self.client.read_resource(uri)
+        self.assertEqual((await self.call("board"))["total"], 0)
 
     async def test_pull_and_show_match_cli(self):
         receipt = await self.call("pull", REPORT)
@@ -184,6 +239,7 @@ class AndonMcpTests(unittest.TestCase):
             ("list", {"offset": -1}),
             ("list", {"status": "invalid"}),
             ("stats", {"extra": 1}),
+            ("board", {"extra": 1}),
         ):
             with self.subTest(name=name, args=args):
                 self.assertTrue((await self.client.call_tool(name, args)).is_error)

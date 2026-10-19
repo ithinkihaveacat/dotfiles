@@ -784,7 +784,12 @@ def cmd_clear_resolved(args: argparse.Namespace) -> int:
 
 # --- MCP: shared tools, separate transport ------------------------------------
 
-MCP_VERSION = "0.1.0"
+MCP_VERSION = "0.2.0"
+MCP_BOARD_URI = "ui://andon/board"
+MCP_BOARD_MIME = "text/html;profile=mcp-app"
+MCP_BOARD_PATH = (
+    Path(__file__).resolve().parents[1] / "plugins" / "andon" / "chatgpt" / "board.html"
+)
 MCP_INSTRUCTIONS = """\
 Andon records defects in an agent's instructions, skills, rules and tools.
 Use pull for reports: yellow means a safe workaround exists; continue working.
@@ -807,7 +812,7 @@ class McpTool:
     writes: bool = False
 
     def listing(self) -> dict[str, Any]:
-        return {
+        listing = {
             "name": self.name,
             "description": self.description,
             "inputSchema": {
@@ -822,7 +827,14 @@ class McpTool:
                 "idempotentHint": not self.writes,
                 "openWorldHint": False,
             },
+            "_meta": {"ui": {"visibility": ["model", "app"]}},
         }
+        if self.name == "board":
+            listing["_meta"]["ui"]["resourceUri"] = MCP_BOARD_URI
+            listing["_meta"]["openai/ui"] = {
+                "entrypoints": [{"type": "thread"}, {"type": "global"}],
+            }
+        return listing
 
 
 def mcp_pull(**fields: Any) -> dict[str, Any]:
@@ -845,6 +857,39 @@ def mcp_prompt(id: str) -> dict[str, Any]:
     return {"prompt": render_prompt(find_alert(load_alerts(), id))}
 
 
+def mcp_board() -> dict[str, Any]:
+    """Initial board data; subsequent UI reads use the ordinary MCP tools."""
+    return {**mcp_list(), "stats": alert_stats()}
+
+
+def mcp_board_resource(uri: str) -> dict[str, Any]:
+    """Serve one fixed local asset, never a caller-supplied filesystem path."""
+    if uri != MCP_BOARD_URI:
+        raise AndonError("unknown UI resource")
+    try:
+        html = MCP_BOARD_PATH.read_text(encoding="utf-8")
+    except OSError as err:
+        raise AndonError(
+            "Andon board asset unavailable; restore plugins/andon/chatgpt/board.html "
+            "beside the installed agent-config scripts directory"
+        ) from err
+    return {
+        "contents": [
+            {
+                "uri": MCP_BOARD_URI,
+                "mimeType": MCP_BOARD_MIME,
+                "text": html,
+                "_meta": {
+                    "ui": {
+                        "csp": {"connectDomains": [], "resourceDomains": []},
+                        "prefersBorder": True,
+                    },
+                },
+            }
+        ]
+    }
+
+
 MCP_LEVEL = {"type": "integer", "minimum": 1, "maximum": 5}
 MCP_ID = {
     "type": "string",
@@ -865,6 +910,15 @@ MCP_PULL_PROPERTIES = {
     "level": {**MCP_LEVEL, "description": "Defaults to the server's active default."},
 }
 MCP_TOOLS = [
+    McpTool(
+        "board",
+        "Open the live Andon alert board beside this conversation. "
+        "Shows shared alerts from all harnesses, with filters and triage actions. "
+        "Refreshes while visible; does not monitor or wake a closed conversation.",
+        {},
+        (),
+        mcp_board,
+    ),
     McpTool(
         "pull",
         "Report a defect in your instructions, skills, rules or tools. "
@@ -1011,12 +1065,32 @@ def mcp_sdk_server() -> Any:
         )
         return mcp_types.CallToolResult.model_validate(result)
 
+    async def list_resources(ctx: Any, params: Any) -> Any:
+        return mcp_types.ListResourcesResult(
+            resources=[
+                mcp_types.Resource(
+                    uri=MCP_BOARD_URI,
+                    name="Andon board",
+                    description="Live shared alert board and triage controls.",
+                    mime_type=MCP_BOARD_MIME,
+                )
+            ]
+        )
+
+    async def read_resource(ctx: Any, params: Any) -> Any:
+        result = await anyio.to_thread.run_sync(
+            mcp_board_resource, str(params.uri), limiter=limiter
+        )
+        return mcp_types.ReadResourceResult.model_validate(result)
+
     return Server(
         PROG,
         version=MCP_VERSION,
         instructions=MCP_INSTRUCTIONS,
         on_list_tools=list_tools,
         on_call_tool=call_tool,
+        on_list_resources=list_resources,
+        on_read_resource=read_resource,
     )
 
 

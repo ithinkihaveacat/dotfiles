@@ -1,0 +1,386 @@
+<!doctype html>
+<!-- Tests: skills/agent-config/tests/test-andon-panel -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Andon alerts</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; --bg: #fff; --fg: #202124; --muted: #60646c; --line: #dedfe3; --surface: #f5f6f8; --accent: #225bc4; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #191b20; --fg: #eee; --muted: #b0b4be; --line: #42454e; --surface: #262930; --accent: #9abbff; } }
+    :root[data-theme="dark"] { color-scheme: dark; --bg: #191b20; --fg: #eee; --muted: #b0b4be; --line: #42454e; --surface: #262930; --accent: #9abbff; }
+    :root[data-theme="light"] { color-scheme: light; --bg: #fff; --fg: #202124; --muted: #60646c; --line: #dedfe3; --surface: #f5f6f8; --accent: #225bc4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); }
+    h1 { margin: 0; font-size: 22px; } h2 { margin: 0 0 10px; font-size: 17px; }
+    p { margin: 8px 0; } button, select, textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; }
+    button { cursor: pointer; } button:hover { background: var(--surface); } button:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    header, .filters, .actions, nav { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    header { justify-content: space-between; } .muted { color: var(--muted); }
+    #connection { min-height: 21px; } #connection[data-error="true"] { color: light-dark(#a52323, #ffadad); }
+    .filters { margin: 14px 0; } .filters label { display: flex; gap: 6px; align-items: center; }
+    .board { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 1.4fr); gap: 18px; }
+    #alerts { max-height: 60vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+    .alert { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); padding: 12px; overflow-wrap: anywhere; }
+    .alert:last-child { border-bottom: 0; } .alert[aria-selected="true"] { background: var(--surface); box-shadow: inset 3px 0 var(--accent); }
+    .alert strong { display: block; font-weight: 600; } .meta { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .severity { display: inline-block; padding: 0 6px; border-radius: 4px; margin-right: 6px; background: #fff0c2; color: #694900; }
+    .severity.red { background: #fbe0df; color: #922523; }
+    #empty { padding: 12px; } nav { margin-top: 10px; justify-content: space-between; }
+    #detail { overflow-wrap: anywhere; min-width: 0; } #detail-body { max-height: 42vh; overflow-y: auto; }
+    dl { margin: 0; } dt { font-weight: 600; margin-top: 10px; } dd { margin: 2px 0 0; white-space: pre-wrap; }
+    #note, #fix-prompt { width: 100%; margin: 5px 0 10px; resize: vertical; } #fix-prompt { min-height: 160px; }
+    .actions { margin-top: 8px; } #action-status { min-height: 21px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 540px) { .board { grid-template-columns: 1fr; } #alerts { max-height: 34vh; } #detail-body { max-height: none; } }
+  </style>
+</head>
+<body>
+  <header><h1>Andon</h1><button id="refresh" type="button">Refresh</button></header>
+  <p id="counts" class="muted">Shared alerts across sessions</p>
+  <p id="connection" class="muted" role="status">Connecting…</p>
+  <div class="filters">
+    <label>Status <select id="status"><option value="open">Open</option><option value="all">All</option><option value="resolved">Resolved</option><option value="dismissed">Dismissed</option></select></label>
+    <label>Severity <select id="color"><option value="">All</option><option value="red">Red</option><option value="yellow">Yellow</option></select></label>
+  </div>
+  <main class="board">
+    <section aria-label="Alerts">
+      <div id="alerts" role="listbox" aria-label="Alerts, newest first"></div>
+      <p id="empty" class="muted" hidden>No matching alerts.</p>
+      <nav aria-label="Alert pages"><button id="previous" disabled type="button">Previous</button><span id="page" class="muted"></span><button id="next" disabled type="button">Next</button></nav>
+    </section>
+    <section id="detail" aria-label="Selected alert">
+      <p id="choose" class="muted">Select an alert to inspect it.</p>
+      <div id="selected" hidden>
+        <div id="detail-body"><h2 id="title"></h2><p id="identity" class="muted"></p><dl id="fields"></dl></div>
+        <label for="note">Triage note (optional)</label><textarea id="note" rows="2" placeholder="Reason for the status change"></textarea>
+        <div class="actions">
+          <button id="copy" type="button">Copy fix prompt</button>
+          <button id="resolve" type="button">Resolve</button>
+          <button id="dismiss" type="button">Dismiss</button>
+          <button id="reopen" type="button">Reopen</button>
+        </div>
+        <p id="action-status" role="status"></p>
+        <div id="prompt-fallback" hidden><label for="fix-prompt">Fix prompt — select and copy</label><textarea id="fix-prompt" readonly></textarea></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    "use strict";
+    // MCP Apps 2026-01-26 postMessage transport; no network or shell access.
+    const el = (id) => document.getElementById(id);
+    const pending = new Map();
+    const rows = new Map();
+    let requestId = 0;
+    let ready = false;
+    let stopped = false;
+    let polling = false;
+    let pollAgain = false;
+    let timer;
+    let revision = 0;
+    let offset = 0;
+    let nextOffset = null;
+    let selectedId = null;
+    let detailSignature = "";
+    let currentDetail = null;
+    let actionBusy = false;
+    let hasData = false;
+    const pageSize = 50;
+
+    function send(message) {
+      // The sandbox parent may have an opaque origin; validate source on receive.
+      window.parent.postMessage({ jsonrpc: "2.0", ...message }, "*");
+    }
+
+    function request(method, params) {
+      return new Promise((resolve, reject) => {
+        const id = ++requestId;
+        const timeout = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`${method} timed out. Refresh to check the latest state.`));
+        }, 15000);
+        pending.set(id, { resolve, reject, timeout });
+        send({ id, method, params });
+      });
+    }
+
+    function unpack(result) {
+      if (result?.isError) {
+        throw new Error(result.content?.find((item) => item.type === "text")?.text || "Andon rejected the request.");
+      }
+      if (result?.structuredContent) return result.structuredContent;
+      const text = result?.content?.find((item) => item.type === "text")?.text;
+      if (text) return JSON.parse(text);
+      throw new Error("Andon returned no data.");
+    }
+
+    async function tool(name, args = {}) {
+      return unpack(await request("tools/call", { name, arguments: args }));
+    }
+
+    function connection(message, error = false) {
+      el("connection").textContent = message;
+      el("connection").dataset.error = String(error);
+    }
+
+    function theme(context) {
+      if (context?.theme === "light" || context?.theme === "dark") {
+        document.documentElement.dataset.theme = context.theme;
+      }
+    }
+
+    function schedule() {
+      clearTimeout(timer);
+      if (ready && !stopped && !document.hidden) timer = setTimeout(refresh, 3000);
+    }
+
+    function setActions(status) {
+      for (const id of ["copy", "resolve", "dismiss", "reopen"]) {
+        el(id).disabled = actionBusy || !selectedId || (id === "reopen" ? status === "open" : id !== "copy" && status !== "open");
+      }
+    }
+
+    function renderDetail(alert) {
+      if (alert.id !== selectedId) return;
+      const signature = JSON.stringify(alert);
+      if (signature === detailSignature) return;
+      detailSignature = signature;
+      currentDetail = alert;
+      el("choose").hidden = true;
+      el("selected").hidden = false;
+      el("title").textContent = alert.summary;
+      el("identity").textContent = `${alert.color} · ${alert.status} · ${alert.kind} · level ${alert.level}`;
+      const fields = [
+        ["Details", alert.details], ["Workaround / decision needed", alert.resolution],
+        ["Proposed fix", alert.proposed_fix], ["Sources", alert.sources?.join("\n")],
+        ["Workspace", alert.workspace_paths?.join("\n")], ["Harness", alert.harness],
+        ["Open occurrences", alert.recurrences], ["Created", alert.created_at],
+        ["Updated", alert.updated_at], ["Resolution note", alert.resolution_note], ["ID", alert.id],
+      ];
+      const fragment = document.createDocumentFragment();
+      for (const [label, value] of fields) {
+        if (value === null || value === undefined || value === "") continue;
+        const dt = document.createElement("dt");
+        const dd = document.createElement("dd");
+        dt.textContent = label;
+        dd.textContent = String(value);
+        fragment.append(dt, dd);
+      }
+      const scroll = el("detail-body").scrollTop;
+      el("fields").replaceChildren(fragment);
+      el("detail-body").scrollTop = scroll;
+      setActions(alert.status);
+    }
+
+    async function select(id) {
+      if (actionBusy) return;
+      selectedId = id;
+      detailSignature = "";
+      el("note").value = "";
+      el("action-status").textContent = "";
+      el("prompt-fallback").hidden = true;
+      for (const [key, row] of rows) {
+        row.button.setAttribute("aria-selected", String(key === id));
+        row.button.tabIndex = key === id ? 0 : -1;
+      }
+      el("detail-body").scrollTop = 0;
+      renderDetail(rows.get(id).alert);
+      try {
+        renderDetail(await tool("show", { id }));
+      } catch (error) {
+        if (selectedId === id) el("action-status").textContent = error.message;
+      }
+    }
+
+    function render(data, stats) {
+      hasData = true;
+      if (stats) el("counts").textContent = `${stats.open} open · ${stats.open_red} red · ${stats.total} total`;
+      nextOffset = data.next_offset;
+      const list = el("alerts");
+      const scroll = list.scrollTop;
+      const focused = document.activeElement;
+      const live = new Set();
+      for (const [index, alert] of data.alerts.entries()) {
+        live.add(alert.id);
+        let row = rows.get(alert.id);
+        if (!row) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "alert";
+          button.setAttribute("role", "option");
+          const meta = document.createElement("span");
+          meta.className = "meta";
+          const badge = document.createElement("span");
+          const info = document.createElement("span");
+          const title = document.createElement("strong");
+          meta.append(badge, info);
+          button.append(meta, title);
+          button.addEventListener("click", () => select(alert.id));
+          row = { button, badge, info, title };
+          rows.set(alert.id, row);
+        }
+        row.alert = alert;
+        row.badge.className = `severity ${alert.color === "red" ? "red" : ""}`;
+        row.badge.textContent = alert.color;
+        row.info.textContent = `${alert.status} · ${alert.recurrences} open occurrence${alert.recurrences === 1 ? "" : "s"}`;
+        row.title.textContent = alert.summary;
+        row.button.setAttribute("aria-selected", String(alert.id === selectedId));
+        row.button.tabIndex = alert.id === selectedId || (!data.alerts.some((item) => item.id === selectedId) && index === 0) ? 0 : -1;
+        if (list.children[index] !== row.button) list.insertBefore(row.button, list.children[index] || null);
+        if (alert.id === selectedId) renderDetail(alert);
+      }
+      for (const [id, row] of rows) {
+        if (!live.has(id)) { row.button.remove(); rows.delete(id); }
+      }
+      // Moving an existing row can blur it in browsers without moveBefore().
+      if (focused && list.contains(focused) && document.activeElement !== focused) {
+        focused.focus({ preventScroll: true });
+      }
+      list.scrollTop = scroll;
+      el("empty").hidden = data.alerts.length > 0;
+      el("page").textContent = data.total ? `${offset + 1}–${offset + data.alerts.length} of ${data.total}` : "0 alerts";
+      el("previous").disabled = offset === 0;
+      el("next").disabled = nextOffset === null;
+    }
+
+    async function refresh() {
+      clearTimeout(timer);
+      if (!ready || stopped || document.hidden) return;
+      if (polling) { pollAgain = true; return; }
+      polling = true;
+      const currentRevision = revision;
+      try {
+        const args = { status: el("status").value, limit: pageSize, offset };
+        if (el("color").value) args.color = el("color").value;
+        // Drain both reads before scheduling another poll, including on error.
+        const results = await Promise.allSettled([tool("list", args), tool("stats")]);
+        const failed = results.find((result) => result.status === "rejected");
+        if (failed) throw failed.reason;
+        const [data, stats] = results.map((result) => result.value);
+        if (currentRevision !== revision || stopped) return;
+        if (offset && !data.alerts.length) { offset = 0; revision++; pollAgain = true; return; }
+        render(data, stats);
+        // Keep an inspected alert current even if a filter or new page excludes it.
+        if (selectedId && !rows.has(selectedId)) renderDetail(await tool("show", { id: selectedId }));
+        connection(document.hidden ? "Paused while hidden." : `Live · updated ${new Date().toLocaleTimeString()}`);
+      } catch (error) {
+        connection(`Refresh failed: ${error.message} Last successful data remains visible.`, true);
+      } finally {
+        polling = false;
+        if (pollAgain) { pollAgain = false; refresh(); } else schedule();
+      }
+    }
+
+    async function act(action) {
+      if (actionBusy || !selectedId) return;
+      const id = selectedId;
+      actionBusy = true;
+      setActions();
+      el("action-status").textContent = action === "copy" ? "Preparing prompt…" : "Saving…";
+      try {
+        if (action === "copy") {
+          const { prompt } = await tool("prompt", { id });
+          el("fix-prompt").value = prompt;
+          try {
+            await navigator.clipboard.writeText(prompt);
+            el("action-status").textContent = "Fix prompt copied.";
+          } catch {
+            el("prompt-fallback").hidden = false;
+            el("fix-prompt").focus();
+            el("fix-prompt").select();
+            el("action-status").textContent = "Clipboard unavailable. Copy the selected prompt below.";
+          }
+        } else {
+          await tool(action, { id, note: el("note").value });
+          el("note").value = "";
+          el("action-status").textContent = "Status saved.";
+          renderDetail(await tool("show", { id }));
+          await refresh();
+        }
+      } catch (error) {
+        el("action-status").textContent = `${error.message}${action === "copy" ? "" : " A timed-out change may have succeeded; refresh before retrying."}`;
+      } finally {
+        actionBusy = false;
+        setActions(currentDetail?.status);
+      }
+    }
+
+    window.addEventListener("message", (event) => {
+      if (event.source !== window.parent || !event.data || event.data.jsonrpc !== "2.0") return;
+      const message = event.data;
+      const waiter = pending.get(message.id);
+      if (waiter && !message.method) {
+        clearTimeout(waiter.timeout);
+        pending.delete(message.id);
+        if (message.error) waiter.reject(new Error(message.error.message || "Host request failed."));
+        else waiter.resolve(message.result);
+      } else if (message.method === "ui/notifications/tool-result" && !hasData && revision === 0) {
+        try {
+          const data = unpack(message.params);
+          if (Array.isArray(data.alerts) && data.stats) render(data, data.stats);
+        } catch (error) { connection(error.message, true); }
+      } else if (message.method === "ui/notifications/host-context-changed") {
+        theme(message.params);
+      } else if (message.method === "ui/resource-teardown") {
+        stopped = true;
+        clearTimeout(timer);
+        for (const waiter of pending.values()) { clearTimeout(waiter.timeout); waiter.reject(new Error("Panel closed.")); }
+        pending.clear();
+        send({ id: message.id, result: {} });
+      }
+    });
+
+    el("alerts").addEventListener("keydown", (event) => {
+      if (actionBusy || !["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+      const buttons = Array.from(el("alerts").children);
+      const index = buttons.indexOf(document.activeElement);
+      if (index < 0) return;
+      event.preventDefault();
+      const target = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+      buttons[target].focus();
+      buttons[target].click();
+    });
+    for (const id of ["status", "color"]) el(id).addEventListener("change", () => { offset = 0; revision++; refresh(); });
+    el("previous").addEventListener("click", () => { offset = Math.max(0, offset - pageSize); revision++; refresh(); });
+    el("next").addEventListener("click", () => { if (nextOffset !== null) { offset = nextOffset; revision++; refresh(); } });
+    el("refresh").addEventListener("click", () => ready ? refresh() : initialize());
+    for (const id of ["copy", "resolve", "dismiss", "reopen"]) el(id).addEventListener("click", () => act(id));
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) { clearTimeout(timer); connection("Paused while hidden."); } else refresh();
+    });
+    if (typeof ResizeObserver !== "undefined") {
+      let previousSize = "";
+      new ResizeObserver(() => {
+        if (!ready || stopped) return;
+        const width = Math.ceil(document.body.getBoundingClientRect().width);
+        const height = Math.ceil(document.body.scrollHeight);
+        const size = `${width}:${height}`;
+        if (size !== previousSize) {
+          previousSize = size;
+          send({ method: "ui/notifications/size-changed", params: { width, height } });
+        }
+      }).observe(document.body);
+    }
+
+    let initializing = false;
+    async function initialize() {
+      if (initializing || stopped) return;
+      initializing = true;
+      try {
+        const result = await request("ui/initialize", {
+          protocolVersion: "2026-01-26", appInfo: { name: "Andon", version: "0.1.0" },
+          appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+        });
+        if (result.protocolVersion !== "2026-01-26") throw new Error("Unsupported MCP Apps protocol version.");
+        theme(result.hostContext);
+        send({ method: "ui/notifications/initialized", params: {} });
+        ready = true;
+        await refresh();
+      } catch (error) { connection(`Connection failed: ${error.message}`, true); }
+      finally { initializing = false; }
+    }
+    initialize();
+  </script>
+</body>
+</html>

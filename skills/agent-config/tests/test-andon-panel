@@ -1,0 +1,209 @@
+#!/usr/bin/env -S node --test --test-reporter=tap
+// Mock the MCP host and browser primitives to exercise the shipped HTML directly.
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const { test } = require("node:test");
+
+const html = fs.readFileSync(path.join(__dirname, "../plugins/andon/chatgpt/board.html"), "utf8");
+const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const tick = () => new Promise(setImmediate);
+const sample = (id = "alert-one") => ({
+  id, summary: "<img src=x onerror=alert(1)>", color: "red", status: "open",
+  kind: "other", level: 3, details: "<script>untrusted</script>",
+  sources: ["instruction.md"], recurrences: 2, created_at: "2026-01-01T12:00:00Z",
+});
+
+function browser() {
+  const elements = new Map();
+  const listeners = new Map();
+  const documentListeners = new Map();
+  const requests = [];
+  const timers = new Map();
+  let timerId = 0;
+  let document;
+  class Element {
+    constructor(tag = "div") {
+      this.tagName = tag;
+      this.children = [];
+      this.attributes = {};
+      this.dataset = {};
+      this.events = new Map();
+      this.value = "";
+      this.scrollTop = 0;
+      this.hidden = false;
+      this.textContent = "";
+    }
+    append(...children) {
+      for (const child of children) {
+        if (child.tagName === "fragment") this.append(...child.children);
+        else { child.remove(); child.parent = this; this.children.push(child); }
+      }
+    }
+    insertBefore(child, before) {
+      child.remove();
+      child.parent = this;
+      const index = this.children.indexOf(before);
+      this.children.splice(index < 0 ? this.children.length : index, 0, child);
+    }
+    replaceChildren(...children) {
+      for (const child of [...this.children]) child.remove();
+      this.append(...children);
+    }
+    remove() {
+      if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1);
+      this.parent = null;
+    }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    contains(target) { return target === this || this.children.some((child) => child.contains(target)); }
+    addEventListener(name, callback) { this.events.set(name, callback); }
+    fire(name, event = {}) { return this.events.get(name)?.(event); }
+    click() { if (!this.disabled) return this.fire("click"); }
+    focus() { document.activeElement = this; }
+    select() { this.selected = true; }
+  }
+  for (const [, id] of html.matchAll(/id="([^"]+)"/g)) elements.set(id, new Element());
+  elements.get("status").value = "open";
+  document = {
+    hidden: false, documentElement: new Element(), activeElement: null,
+    getElementById: (id) => elements.get(id),
+    createElement: (tag) => new Element(tag),
+    createDocumentFragment: () => new Element("fragment"),
+    addEventListener: (name, callback) => documentListeners.set(name, callback),
+  };
+  const parent = { postMessage: (message) => requests.push(message) };
+  const window = { parent, addEventListener: (name, callback) => listeners.set(name, callback) };
+  vm.runInNewContext(script, {
+    document, window, navigator: {}, console,
+    setTimeout: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; },
+    clearTimeout: (id) => timers.delete(id),
+  });
+  const emit = (message, source = parent) => listeners.get("message")({ source, data: { jsonrpc: "2.0", ...message } });
+  const find = (method, name) => requests.find((item) => !item.replied && item.method === method && (!name || item.params.name === name));
+  const reply = (method, result, name) => {
+    const request = find(method, name);
+    assert.ok(request, `pending ${name || method}`);
+    request.replied = true;
+    emit({ id: request.id, result });
+    return request;
+  };
+  const tool = (name, value) => reply("tools/call", { structuredContent: value }, name);
+  const data = (alerts = [sample()], extra = {}) => {
+    tool("list", { alerts, total: alerts.length, next_offset: null, ...extra });
+    tool("stats", { open: 1, open_red: 1, total: 1 });
+  };
+  const start = async () => {
+    reply("ui/initialize", { protocolVersion: "2026-01-26", hostContext: { theme: "dark" } });
+    await tick();
+    data();
+    await tick();
+  };
+  const runTimer = (delay) => {
+    const entry = [...timers].find(([, item]) => item.delay === delay);
+    assert.ok(entry, `timer ${delay}`);
+    timers.delete(entry[0]);
+    entry[1].callback();
+  };
+  return { elements, document, requests, timers, emit, find, reply, tool, data, start, runTimer,
+    visibility: () => documentListeners.get("visibilitychange")() };
+}
+
+test("initialization precedes tools, rejects foreign messages, and renders alert text safely", async () => {
+  const b = browser();
+  assert.equal(b.requests.length, 1);
+  const initial = b.find("ui/initialize");
+  b.emit({ id: initial.id, result: { protocolVersion: "2026-01-26" } }, {});
+  await tick();
+  assert.equal(b.requests.length, 1);
+  await b.start();
+  assert.equal(b.requests[1].method, "ui/notifications/initialized");
+  assert.equal(b.document.documentElement.dataset.theme, "dark");
+  const row = b.elements.get("alerts").children[0];
+  assert.equal(row.children[1].textContent, sample().summary);
+  assert.equal(row.children[1].children.length, 0);
+  row.click();
+  b.tool("show", sample());
+  await tick();
+  assert.equal(b.elements.get("fields").children[1].textContent, sample().details);
+});
+
+test("polls preserve focused rows, note drafts and scroll; hiding pauses polling", async () => {
+  const b = browser();
+  await b.start();
+  const row = b.elements.get("alerts").children[0];
+  row.click();
+  b.tool("show", sample());
+  await tick();
+  row.focus();
+  b.elements.get("note").value = "A draft";
+  b.elements.get("alerts").scrollTop = 24;
+  b.runTimer(3000);
+  b.data();
+  await tick();
+  assert.equal(b.elements.get("alerts").children[0], row);
+  assert.equal(b.document.activeElement, row);
+  assert.equal(b.elements.get("note").value, "A draft");
+  assert.equal(b.elements.get("alerts").scrollTop, 24);
+  b.document.hidden = true;
+  b.visibility();
+  assert.equal([...b.timers.values()].some((item) => item.delay === 3000), false);
+  b.document.hidden = false;
+  b.visibility();
+  assert.ok(b.find("tools/call", "list"));
+});
+
+test("filter changes discard stale responses and start one replacement refresh", async () => {
+  const b = browser();
+  await b.start();
+  b.runTimer(3000);
+  b.elements.get("color").value = "yellow";
+  b.elements.get("color").fire("change");
+  assert.equal(b.requests.filter((item) => item.method === "tools/call" && !item.replied).length, 2);
+  b.data([{ ...sample("stale"), summary: "Stale response" }]);
+  await tick();
+  assert.equal(b.elements.get("alerts").children[0].children[1].textContent, sample().summary);
+  assert.equal(b.find("tools/call", "list").params.arguments.color, "yellow");
+  const yellow = { ...sample("yellow-alert"), color: "yellow", summary: "Current" };
+  b.data([yellow]);
+  await tick();
+  assert.equal(b.elements.get("alerts").children[0].children[1].textContent, "Current");
+});
+
+test("copy has a manual fallback and timed-out triage writes are never retried", async () => {
+  const b = browser();
+  await b.start();
+  b.elements.get("alerts").children[0].click();
+  b.tool("show", sample());
+  await tick();
+  b.elements.get("copy").click();
+  b.tool("prompt", { prompt: "Inspect and fix this alert." });
+  await tick();
+  assert.equal(b.elements.get("prompt-fallback").hidden, false);
+  assert.equal(b.elements.get("fix-prompt").value, "Inspect and fix this alert.");
+  assert.equal(b.elements.get("fix-prompt").selected, true);
+  b.elements.get("note").value = "Fixed source";
+  b.elements.get("resolve").click();
+  assert.equal(b.find("tools/call", "resolve").params.arguments.note, "Fixed source");
+  b.runTimer(15000);
+  await tick();
+  assert.match(b.elements.get("action-status").textContent, /may have succeeded/);
+  assert.equal(b.requests.filter((item) => item.params?.name === "resolve").length, 1);
+});
+
+test("pagination uses MCP offsets and teardown stops the refresh loop", async () => {
+  const b = browser();
+  b.reply("ui/initialize", { protocolVersion: "2026-01-26" });
+  await tick();
+  b.data([sample()], { total: 70, next_offset: 50 });
+  await tick();
+  b.elements.get("next").click();
+  assert.equal(b.find("tools/call", "list").params.arguments.offset, 50);
+  b.data([sample("second-page")], { total: 70 });
+  await tick();
+  b.emit({ id: 99, method: "ui/resource-teardown", params: {} });
+  assert.equal([...b.timers.values()].some((item) => item.delay === 3000), false);
+  assert.ok(b.requests.some((item) => item.id === 99 && item.result));
+  b.elements.get("refresh").click();
+  assert.equal(b.find("tools/call", "list"), undefined);
+});

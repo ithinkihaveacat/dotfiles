@@ -39,6 +39,7 @@ pass environment variables to choose a separate store.
 
 | Tool      | Arguments                                                                                                    | Result                                                                         |
 | --------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `board`   | None                                                                                                         | Initial open-alert page and `stats`, linked to the live MCP App UI.            |
 | `pull`    | Required: `color`, `kind`, `summary`, `details`. Optional: `sources`, `resolution`, `proposed_fix`, `level`. | Receipt with alert ID, fingerprint, recurrence count, level and guidance.      |
 | `list`    | Optional: `status`, `color`, `kind`, `level`, `session`, `workspace`, `limit`, `offset`.                     | `alerts`, matching `total`, and `next_offset` or null.                         |
 | `show`    | `id`                                                                                                         | Complete alert with recurrence count.                                          |
@@ -96,17 +97,41 @@ is not a host conversation ID. Those fields remain absent until a host adapter
 provides a reliable attribution mechanism. Existing CLI-based adapters can
 continue supplying their own attribution.
 
-MCP support alone does not inject the always-on rule, observe failures, manage
-conversation-level overrides or provide a board. Those remain host adapter
-responsibilities. Alert contents are reported evidence, not trusted
-instructions. No Codex integration is included here.
+MCP support alone does not inject the always-on rule, observe failures or manage
+conversation-level overrides. Those remain host adapter responsibilities. Alert
+contents are reported evidence, not trusted instructions.
+
+## ChatGPT desktop board
+
+The `board` tool advertises the `ui://andon/board` resource with the MCP Apps
+MIME type `text/html;profile=mcp-app`. Its OpenAI UI metadata declares both a
+conversation-panel (`thread`) and a global sidebar (`global`) entrypoint. Other
+tools return data without attaching the UI, so refresh and triage calls do not
+remount the panel. Clients without MCP Apps support can still use every tool's
+structured result.
+
+The self-contained HTML asset is served from `plugins/andon/chatgpt/board.html`,
+relative to the canonical agent-config directory. Resource reads accept only the
+advertised URI. The UI has no network dependencies and calls the shared tools
+through the MCP Apps host bridge. It refreshes every three seconds while
+visible, pauses while hidden, and reloads current data when shown again. Closing
+the panel stops refresh; this is not a background notification or chat-wakeup
+mechanism.
+
+See [ChatGPT desktop installation](../plugins/andon/chatgpt/README.md) for the
+local plugin package, marketplace and desktop verification steps. The package
+uses the installed `andon` command; it does not duplicate the shared backend or
+add host-specific rules, sensors or conversation attribution.
 
 ## Verify
 
 ```bash
 prove skills/agent-config/tests/test-andon skills/agent-config/tests/test-andon-mcp
+prove skills/agent-config/tests/test-andon-panel
 ```
 
 The MCP tests start real stdio subprocesses with temporary stores. They cover
 discovery, schema rejection, shared CLI/MCP reads and writes, recurrence counts,
-pagination, triage, store errors, missing dependencies, EOF and signal shutdown.
+pagination, triage, UI resource discovery, store errors, missing dependencies,
+EOF and signal shutdown. The panel tests need Node.js 18 or newer and exercise
+the shipped HTML against a simulated MCP host without third-party packages.

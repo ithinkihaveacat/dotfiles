@@ -398,6 +398,12 @@ store. This API does not install a harness adapter or inject the Andon rule. See
 [Andon MCP](references/andon-mcp.md) for client configuration, tools and
 attribution boundaries.
 
+**ChatGPT desktop:** the [local Andon plugin](plugins/andon/chatgpt/README.md)
+adds a live conversation panel and global sidebar board over that MCP interface.
+Install it from the included desktop marketplace after installing the shared
+CLI. The panel shows alerts across harnesses; the package does not inject
+always-on rules or supply conversation attribution.
+
 Triage with the CLI:
 
 ```bash
