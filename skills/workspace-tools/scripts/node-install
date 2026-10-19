@@ -8,6 +8,7 @@
 set -o errexit
 set -o errtrace
 set -o nounset
+set -o pipefail
 
 readonly DEFAULT_PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/node/versions"
 # The per-user default is a link beside the versions directory, so neither
@@ -148,7 +149,9 @@ resolve_version() {
     *) pattern="^v${input}$" ;;
   esac
 
-  list_versions | grep -E "$pattern" | tail -1 | tr -d 'v'
+  local versions
+  versions=$(list_versions) || return 1
+  printf '%s\n' "$versions" | { grep -E "$pattern" || true; } | tail -1 | tr -d 'v'
 }
 
 # Handle --help first so it works even without dependencies installed.
@@ -159,22 +162,34 @@ fi
 require curl
 require tar
 
-# Download and extract Node.js $1 into $2, removing the partial directory on
-# failure. Progress goes to stderr; only the caller prints to stdout.
+# Download and extract Node.js $1 into $2. It is extracted beside $2 and
+# renamed into place, so an interrupted run never leaves a partial $2 for a
+# later run to mistake for an installed version. Progress goes to stderr; only
+# the caller prints to stdout.
 install_version() {
-  local version=$1 target=$2 url
+  local version=$1 target=$2 url tmp
   url="https://nodejs.org/dist/v$version/node-v$version-$(get_platform).tar.gz"
-  mkdir -p "$target"
-  # shellcheck disable=SC2064 # expand $target now
-  trap "rm -rf '$target'" EXIT
+  mkdir -p "$(dirname "$target")"
+  tmp=$(mktemp -d "$(dirname "$target")/.node-v$version.XXXXXX")
+  # shellcheck disable=SC2064 # expand $tmp now
+  trap "rm -rf '$tmp'" EXIT
   echo "Downloading Node.js v$version for $(get_platform)..." >&2
-  curl -fL# "$url" | tar xz --strip-components=1 -C "$target"
+  curl -fL# "$url" | tar xz --strip-components=1 -C "$tmp"
+  # A concurrent run may have finished first; keep its copy.
+  if [[ -d "$target" ]]; then
+    rm -rf "$tmp"
+  else
+    mv "$tmp" "$target"
+  fi
   trap - EXIT
 }
 
 # Resolve VERSION_INPUT against PREFIX into VERSION, or exit with an error.
 resolve_or_exit() {
-  VERSION=$(resolve_version "$VERSION_INPUT" "$PREFIX")
+  if ! VERSION=$(resolve_version "$VERSION_INPUT" "$PREFIX"); then
+    echo "$(basename "$0"): failed to fetch the list of Node.js versions from https://nodejs.org/dist/" >&2
+    exit 1
+  fi
   if [[ -z "$VERSION" ]]; then
     echo "$(basename "$0"): no Node.js version matching '$VERSION_INPUT' found" >&2
     echo "Use '$(basename "$0") --list' to see available versions." >&2

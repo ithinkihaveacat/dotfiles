@@ -1143,6 +1143,14 @@ function packages_apt {
 
   comm -13 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$install_set" | tr ' ' '\n' | sed '/^$/d' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
 
+  # An installed nodejs that is too old is not in the list above (its name is
+  # installed), so upgrade it when the candidate is new enough, e.g. part way
+  # through a release upgrade; the npm feature then drops the per-user default
+  # in the same run.
+  if [ -n "$node_major" ] && [[ " $features " == *" base "* ]] && node_default_needed; then
+    x sudo apt-get -y install nodejs || echo "warning: nodejs upgrade failed"
+  fi
+
   if ! exists fd && exists fdfind; then
     xmkdir "$BINDIR"
     x ln -sf "$(which fdfind)" "$BINDIR/fd"
@@ -1236,7 +1244,9 @@ function feature_upgrades {
     fi
   fi
 
-  if [ -L "$NODE_DEFAULT_LINK" ] || node_default_needed; then
+  # Only an existing default is upgraded (or removed, if a package upgrade made
+  # it unnecessary); the npm feature is what creates one.
+  if [ -L "$NODE_DEFAULT_LINK" ]; then
     heading "node upgrade"
     sync_node_default upgrade || echo "warning: node upgrade failed" >&2
   fi
@@ -1474,12 +1484,16 @@ function node_default_needed {
   [ -z "$major" ] || [ "$major" -lt "$NODE_MIN_MAJOR" ]
 }
 
-# Print the major version the default link selects, or nothing.
+# Print the major version the default link selects, or nothing if there is no
+# link or it is dangling.
 function node_default_major {
   local target
+  [ -d "$NODE_DEFAULT_LINK/" ] || return 0
   target=$(readlink "$NODE_DEFAULT_LINK" 2>/dev/null) || return 0
   target=${target##*/node-v}
-  printf '%s\n' "${target%%.*}"
+  case $target in
+    [0-9]*) printf '%s\n' "${target%%.*}" ;;
+  esac
 }
 
 # Make the per-user default Node.js exist exactly when node_default_needed, on
@@ -1489,7 +1503,7 @@ function node_default_major {
 # global npm packages run under changes major version, they are rebuilt.
 # Ends with one "node:" line saying which Node.js is in use and why.
 function sync_node_default {
-  local mode=${1:-} distro before after
+  local mode=${1:-} distro before after current
   distro=$(deb_major nodejs installed)
   before=$(node_default_major)
 
@@ -1509,7 +1523,7 @@ function sync_node_default {
       echo "node: from the package manager (no per-user default on $PLATFORM)"
     fi
   else
-    if [ "$mode" = upgrade ] || [ "$before" != "$NODE_DEFAULT_MAJOR" ] || [ ! -d "$NODE_DEFAULT_LINK/" ]; then
+    if [ "$mode" = upgrade ] || [ "$before" != "$NODE_DEFAULT_MAJOR" ]; then
       if is_offline; then
         skip_offline "per-user default Node.js $NODE_DEFAULT_MAJOR"
       elif ! x "$SRCDIR/bin/node-install" --default "$NODE_DEFAULT_MAJOR" >/dev/null; then
@@ -1517,7 +1531,12 @@ function sync_node_default {
         return 1
       fi
     fi
-    echo "node: per-user default $(basename "$(readlink "$NODE_DEFAULT_LINK" 2>/dev/null || echo none)") (distribution nodejs ${distro:-not installed}; needs >= $NODE_MIN_MAJOR)"
+    if [ -n "$(node_default_major)" ]; then
+      current=$(basename "$(readlink "$NODE_DEFAULT_LINK")")
+    else
+      current="not installed"
+    fi
+    echo "node: per-user default $current (distribution nodejs ${distro:-not installed}; needs >= $NODE_MIN_MAJOR)"
   fi
 
   after=$(node_default_major)
@@ -1525,7 +1544,8 @@ function sync_node_default {
     export PATH="$NODE_DEFAULT_LINK/bin:$PATH"
   fi
   # Global packages run under the default when there is one, else the
-  # distribution's Node.js.
+  # system's Node.js (whose major version is unknown off Debian).
+  distro=${distro:-system}
   if [ "${before:-$distro}" != "${after:-$distro}" ]; then
     rebuild_npm_globals "${before:-$distro}" "${after:-$distro}"
   fi
@@ -1541,8 +1561,8 @@ function rebuild_npm_globals {
   [ -n "$cache" ] || cache="$HOME/.npm"
   [ ! -d "$cache/_npx" ] || x rm -rf "$cache/_npx"
   if [ -n "$(ls -A "$NPM_PREFIX/lib/node_modules" 2>/dev/null)" ]; then
-    echo "Node.js major version changed (${1:-none} -> ${2:-none}): rebuilding global npm packages"
-    x npm rebuild -g || echo "warning: npm rebuild -g failed" >&2
+    echo "Node.js major version changed ($1 -> $2): rebuilding global npm packages"
+    x npm rebuild -g --prefix "$NPM_PREFIX" || echo "warning: npm rebuild -g failed" >&2
   fi
 }
 
