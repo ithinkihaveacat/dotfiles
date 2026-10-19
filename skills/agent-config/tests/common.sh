@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 #
-# Shared setup and helpers for the workspace-tools tests.
+# Shared setup and helpers for the skill tests.
 #
 # The `skill` tests were split from one 2,000-line monolith into focused files
 # (test-skill-workspace, test-skill-reconcile, ...). Each of those files sources

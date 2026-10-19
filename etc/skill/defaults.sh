@@ -12,5 +12,6 @@ skill --scope defaults add --quiet \
   agent-tools \
   coding-standards \
   workspace-tools \
+  agent-config \
   technical-writing \
   taskgo
