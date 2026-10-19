@@ -45,8 +45,11 @@ Execution resolution never depends on the current working directory. Run
    state. Reading it directly answers status and next steps.
 1. **Commit Authority:** The `<!-- taskgo:allow-local-commits -->` marker in the
    control repo's `AGENTS.md` grants standing authority for guarded local
-   checkpoint commits (`create`, `checkpoint`, `fix`). Never rewrite artifact
-   history.
+   checkpoint commits (`create`, `checkpoint`, `commit`, `fix`). Restructuring
+   the guarded commands cannot express (such as moving a task between projects)
+   may use a plain `git commit`; ask first, or at least report it afterwards.
+   See [Commit Authority](references/workflows.md#commit-authority). Never
+   rewrite artifact history.
 1. **No Administrative Metadata:** Do not invent metadata fields like `created`,
    `updated`, or `blocked_since` in YAML frontmatter. Git owns administrative
    history. Do not duplicate `Project:`, `Task:`, or `Event:` trailers.

@@ -32,8 +32,8 @@ Check standing authority before starting (when reconstructible lifecycle history
 matters):
 
 1. **Committed `taskgo:allow-local-commits` marker present:** Authorized for
-   guarded `create`, `checkpoint`, and `fix` operations in this control repo
-   only.
+   guarded `create`, `checkpoint`, `commit`, and `fix` operations in this
+   control repo only.
 1. **Authorized:** Commit a meaningful `in-progress` transition before artifact
    work that may span sessions; commit completion with `Ref:` trailers for
    linked artifact commits. A small task completed atomically may go directly
@@ -42,6 +42,22 @@ matters):
 1. **Not authorized:** Keep changes uncommitted; state clearly that intermediate
    transitions will not be retained. Never create retrospective state commits
    that did not reflect reality at the time.
+
+#### Plain `git commit`
+
+Prefer the guarded commands; they enforce subject rules, sync `STATUS.md`, and
+add trailers. Some legitimate restructuring cannot be expressed through them
+(for example, `checkpoint` and `commit` refuse changes spanning more than one
+project, so moving a task or merging projects needs something else). For such
+operations, use a plain `git commit`. Work out what the change requires from the
+invariants in this skill rather than waiting for a documented procedure.
+
+Plain `git commit` is outside the standing marker, so tell the human: ask before
+committing when practical, and otherwise say clearly afterwards what you
+committed and why the guarded commands could not do it. Leave the tracker as
+coherent as a guarded commit would (`taskgo sync` and `taskgo doctor` clean for
+every affected project, only the affected paths staged, a Conventional Commits
+subject, and a `Conversation:` trailer).
 
 ### After Meaningful Work
 

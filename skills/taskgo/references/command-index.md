@@ -597,7 +597,7 @@ Usage: taskgo checkpoint [-h] [--all] [--path PATHS] [--body BODY]
                          [--ref REFS] [--conv CONV]
                          TASK_ID SUBJECT
 
-Commit an authorized tracker checkpoint for TASK_ID. Nonconforming subjects are rewritten as 'chore(<project>): <subject>' (truncated to 50 characters).
+Commit an authorized tracker checkpoint for TASK_ID. Nonconforming subjects are rewritten as 'chore(<project>): <subject>' (truncated to 50 characters). Staged paths must belong to TASK_ID's project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
 
 Arguments:
   TASK_ID               Target task ID
@@ -627,7 +627,7 @@ Examples:
 ```text
 Usage: taskgo commit [-h] [--body BODY] [--ref REFS] [--conv CONV] SUBJECT
 
-Commit a logical transition with automatic project status synchronization.
+Commit a logical transition with automatic project status synchronization. Staged changes must touch at most one project; changes spanning projects (such as moving a task) need a plain 'git commit'; see references/workflows.md.
 
 Arguments:
   SUBJECT               Conventional Commits subject line (rewritten when
