@@ -43,7 +43,10 @@
 
 import argparse
 import base64
+import contextlib
 import contextvars
+import errno
+import fcntl
 import hashlib
 import io
 import json
@@ -736,6 +739,591 @@ def run_git(
             )
         die(f"git {' '.join(args)} failed (exit {ret.returncode})")
     return ret
+
+
+_OFFLINE_FLAG: bool = False
+CLI_LOCK_TIMEOUT = 60.0
+GIT_NETWORK_TIMEOUT = 60.0
+
+
+def set_offline_flag(value: bool) -> None:
+    """Records an explicit --offline / --no-fetch CLI flag."""
+    global _OFFLINE_FLAG
+    _OFFLINE_FLAG = bool(value)
+
+
+def resolve_git_dir(root: Path) -> Path:
+    """Resolves the Git directory for ROOT (supporting worktree .git files)."""
+    dot_git = root / ".git"
+    if dot_git.is_dir():
+        return dot_git
+    if dot_git.is_file():
+        try:
+            text = dot_git.read_text(encoding="utf-8").strip()
+            if text.startswith("gitdir:"):
+                raw = text[len("gitdir:") :].strip()
+                p = Path(raw)
+                return p if p.is_absolute() else (root / p).resolve()
+        except OSError:
+            pass
+    return dot_git
+
+
+@contextlib.contextmanager
+def repo_lock(root: Path, *, mcp_mode: bool = False) -> Iterator[None]:
+    """Serializes taskgo operations on ROOT with an exclusive flock on <git-dir>/taskgo.lock.
+
+    The lock file is never unlinked on exit so concurrent waiters always contend
+    on the same inode. A re-entrancy environment variable (_TASKGO_LOCK_ROOT)
+    lets synchronous child processes or Git hooks spawned while holding the lock
+    proceed without deadlocking.
+    """
+    resolved_str = str(root.resolve())
+    if os.environ.get("_TASKGO_LOCK_ROOT") == resolved_str:
+        yield
+        return
+    git_dir = resolve_git_dir(root)
+    lock_path = git_dir / "taskgo.lock"
+    with contextlib.ExitStack() as stack:
+        try:
+            fh = stack.enter_context(open(lock_path, "a+", encoding="utf-8"))
+        except OSError as e:
+            if e.errno in (errno.EROFS, errno.EACCES, errno.ENOENT):
+                yield
+                return
+            raise
+        deadline = time.monotonic() + CLI_LOCK_TIMEOUT
+        acquired = False
+        prev_env = os.environ.get("_TASKGO_LOCK_ROOT")
+        try:
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        try:
+                            fh.seek(0)
+                            holder = fh.read().strip()
+                        except OSError:
+                            holder = ""
+                        holder_note = f" (held by {holder})" if holder else ""
+                        msg = (
+                            f"timed out after {CLI_LOCK_TIMEOUT:g}s waiting for "
+                            f"{display_path(lock_path)}{holder_note}"
+                        )
+                        if mcp_mode:
+                            raise McpToolError(msg) from None
+                        die_scoped(msg)
+                    time.sleep(0.05)
+            try:
+                fh.seek(0)
+                fh.truncate()
+                fh.write(f"pid={os.getpid()} cmd={_ACTIVE_COMMAND or 'mcp'}\n")
+                fh.flush()
+            except OSError:
+                pass
+            os.environ["_TASKGO_LOCK_ROOT"] = resolved_str
+            yield
+        finally:
+            if prev_env is None:
+                os.environ.pop("_TASKGO_LOCK_ROOT", None)
+            else:
+                os.environ["_TASKGO_LOCK_ROOT"] = prev_env
+            if acquired:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+
+
+def run_git_network(
+    args: list[str], cwd: Path, timeout_sec: float = GIT_NETWORK_TIMEOUT
+) -> subprocess.CompletedProcess:
+    """Runs a network Git command (fetch/push) with GIT_TERMINAL_PROMPT=0 and a timeout."""
+    cmd = ["git", *args]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+    )
+    _active_subprocesses.add(proc)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=1.0)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return subprocess.CompletedProcess(
+            cmd, 124, "", f"git {' '.join(args)} timed out after {timeout_sec:g}s"
+        )
+    finally:
+        _active_subprocesses.discard(proc)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
+
+
+def resolve_upstream(root: Path) -> tuple[str, str, str] | None:
+    """Returns (remote, remote_branch, upstream_ref) for the checked-out branch, or None."""
+    res = run_git(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        cwd=root,
+        check=False,
+    )
+    if res.returncode != 0:
+        return None
+    upstream = res.stdout.strip()
+    if "/" not in upstream:
+        return None
+    remote, branch = upstream.split("/", 1)
+    if not remote or not branch:
+        return None
+    url = run_git(["remote", "get-url", remote], cwd=root, check=False)
+    if url.returncode != 0:
+        return None
+    return remote, branch, upstream
+
+
+def ensure_clean_git_state(
+    root: Path,
+    *,
+    allow_sync_rebase_recovery: bool = False,
+    scope_project: str | None = None,
+) -> bool:
+    """Verifies the working tree is not in an unfinished git state or detached HEAD.
+
+    Returns True when normal remote sync may proceed, or False when
+    allow_sync_rebase_recovery permitted 'taskgo sync' to regenerate STATUS.md
+    locally during a manual rebase/merge recovery after 'UU' conflicts on the
+    target project were resolved.
+    """
+    git_dir = resolve_git_dir(root)
+    in_progress: str | None = None
+    for marker, label in (
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ):
+        if (git_dir / marker).exists():
+            in_progress = label
+            break
+
+    all_unmerged = sorted(
+        {
+            line.split("\t", 1)[1]
+            for line in run_git(
+                ["ls-files", "-u"], cwd=root, check=False
+            ).stdout.splitlines()
+            if "\t" in line
+        }
+    )
+    unmerged_cmd = ["ls-files", "-u"]
+    if allow_sync_rebase_recovery and scope_project:
+        unmerged_cmd.extend(["--", f"{scope_project}/"])
+    unmerged_paths = sorted(
+        {
+            line.split("\t", 1)[1]
+            for line in run_git(unmerged_cmd, cwd=root, check=False).stdout.splitlines()
+            if "\t" in line
+        }
+    )
+    if allow_sync_rebase_recovery:
+        # During manual rebase recovery ('git checkout --ours <proj>/STATUS.md &&
+        # taskgo sync <proj> && git add <proj>/STATUS.md'), STATUS.md remains in
+        # 'ls-files -u' until 'git add' runs after 'taskgo sync'. Allow sync when
+        # only STATUS.md is unmerged and its conflict markers have been cleared.
+        blocking_unmerged: list[str] = []
+        for rel in unmerged_paths:
+            if rel.endswith("/STATUS.md") and len(rel.split("/")) == 2:
+                try:
+                    txt = (root / rel).read_text(encoding="utf-8")
+                except OSError:
+                    txt = ""
+                if (
+                    "<<<<<<<" not in txt
+                    and "=======" not in txt
+                    and ">>>>>>>" not in txt
+                ):
+                    continue
+            blocking_unmerged.append(rel)
+        unmerged_paths = blocking_unmerged
+    if unmerged_paths:
+        die_scoped(
+            "repository has unmerged files; resolve conflicts and finish or abort "
+            f"the {in_progress or 'merge/rebase'} first"
+        )
+
+    if allow_sync_rebase_recovery and all_unmerged:
+        return False
+
+    if in_progress:
+        if allow_sync_rebase_recovery:
+            return False
+        die_scoped(
+            f"git {in_progress} is in progress in {display_path(root)}; "
+            f"finish ('git {in_progress} --continue') or abort ('git {in_progress} --abort') it first"
+        )
+
+    sym = run_git(["symbolic-ref", "--quiet", "HEAD"], cwd=root, check=False)
+    if sym.returncode != 0:
+        die_scoped(
+            f"HEAD is detached in {display_path(root)}; check out a branch first"
+        )
+    return True
+
+
+def fetch_remote(
+    root: Path, remote: str, *, local_commit_sha: str | None = None
+) -> None:
+    """Fetches REMOTE, exiting non-zero with an --offline hint on network/auth failure."""
+    res = run_git_network(
+        ["fetch", "--prune", "--quiet", "--no-tags", remote], cwd=root
+    )
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout).strip()
+        if "read-only file system" in detail.lower() or not os.access(
+            resolve_git_dir(root), os.W_OK
+        ):
+            return
+        msg = f"git fetch {remote} failed" + (f": {detail}" if detail else "")
+        if local_commit_sha:
+            die_scoped(
+                f"{msg} (your commit is saved locally at {local_commit_sha}; "
+                "retry or pass --offline)"
+            )
+        die_scoped(f"{msg} (pass --offline or AGENT_OFFLINE=1 to work offline)")
+
+
+_STATUS_BLOCK_RE = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.DOTALL)
+
+
+def reconcile_worktree(
+    root: Path,
+    upstream_ref: str,
+    *,
+    keep_local_commit_on_conflict: bool = False,
+) -> None:
+    """Reconciles the working tree with UPSTREAM_REF after fetching.
+
+    - If behind == 0: no-op (preserves staged index and avoids unnecessary churn).
+    - If behind > 0, ahead == 0, and dirty/staged/untracked files do not overlap
+      incoming changes: fast-forwards via 'git merge --ff-only --quiet'.
+    - Otherwise: runs 'git rebase --autostash --quiet' and rolls back atomically
+      on both Phase 1 (commit rebase conflict) and Phase 2 (autostash pop conflict).
+    """
+    counts = run_git(
+        ["rev-list", "--left-right", "--count", f"HEAD...{upstream_ref}"],
+        cwd=root,
+        check=False,
+    )
+    if counts.returncode != 0:
+        return
+    parts = counts.stdout.strip().split()
+    if len(parts) != 2:
+        return
+    ahead, behind = int(parts[0]), int(parts[1])
+    if behind == 0:
+        return
+
+    pre_head = run_git(["rev-parse", "--verify", "HEAD"], cwd=root).stdout.strip()
+    commit_note = (
+        f" (your commit remains on the local branch at {pre_head[:10]})"
+        if keep_local_commit_on_conflict
+        else ""
+    )
+
+    incoming = set(
+        filter(
+            None,
+            run_git(
+                ["diff", "-z", "--no-renames", "--name-only", f"HEAD..{upstream_ref}"],
+                cwd=root,
+                check=False,
+            ).stdout.split("\0"),
+        )
+    )
+    untracked = set(
+        filter(
+            None,
+            run_git(
+                ["ls-files", "-z", "--others", "--exclude-standard"],
+                cwd=root,
+                check=False,
+            ).stdout.split("\0"),
+        )
+    )
+    overwritten_untracked = sorted(incoming & untracked)
+    if overwritten_untracked:
+        files_str = ", ".join(overwritten_untracked)
+        die_scoped(
+            f"untracked working tree file(s) would be overwritten by upstream updates "
+            f"({files_str}){commit_note}; move, remove, or commit them first, "
+            "or pass --offline"
+        )
+
+    staged_paths = set(
+        filter(
+            None,
+            run_git(
+                ["diff", "-z", "--no-renames", "--cached", "--name-only"],
+                cwd=root,
+                check=False,
+            ).stdout.split("\0"),
+        )
+    )
+    unstaged_paths = set(
+        filter(
+            None,
+            run_git(
+                ["diff", "-z", "--no-renames", "--name-only"], cwd=root, check=False
+            ).stdout.split("\0"),
+        )
+    )
+
+    # Temporarily normalize unstaged <proj>/STATUS.md generated blocks to HEAD
+    # before reconciling so routine local 'taskgo update'/'taskgo sync' snapshot
+    # edits never cause false-positive autostash conflicts against upstream task
+    # commits in the same project.
+    saved_status: dict[str, str] = {}
+    for rel in sorted(unstaged_paths - staged_paths):
+        parts_rel = rel.split("/")
+        if len(parts_rel) == 2 and parts_rel[1] == "STATUS.md" and rel in incoming:
+            head_res = run_git(["show", f"HEAD:{rel}"], cwd=root, check=False)
+            if head_res.returncode != 0:
+                continue
+            m_head = _STATUS_BLOCK_RE.search(head_res.stdout)
+            try:
+                wt_text = (root / rel).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if m_head and _STATUS_BLOCK_RE.search(wt_text):
+                head_block = m_head.group(0)
+                restored = _STATUS_BLOCK_RE.sub(
+                    lambda _, b=head_block: b, wt_text, count=1
+                )
+                if restored != wt_text:
+                    saved_status[rel] = wt_text
+                    atomic_write(root / rel, restored)
+
+    if saved_status:
+        run_git(
+            ["update-index", "-q", "--refresh", "--", *saved_status.keys()],
+            cwd=root,
+            check=False,
+        )
+        unstaged_paths = set(
+            filter(
+                None,
+                run_git(
+                    ["diff", "-z", "--no-renames", "--name-only"],
+                    cwd=root,
+                    check=False,
+                ).stdout.split("\0"),
+            )
+        )
+
+    def restore_saved_status() -> None:
+        for rel, txt in saved_status.items():
+            atomic_write(root / rel, txt)
+
+    def resync_saved_status() -> None:
+        if not saved_status:
+            return
+        snap = FsSnapshot(root)
+        for rel in saved_status:
+            proj = rel.split("/", 1)[0]
+            if is_project(snap, proj):
+                sync_status(snap, proj)
+
+    dirty_tracked = staged_paths | unstaged_paths
+    if ahead == 0 and not (incoming & (dirty_tracked | untracked)):
+        ff = run_git(
+            ["merge", "--ff-only", "--quiet", upstream_ref],
+            cwd=root,
+            check=False,
+        )
+        if ff.returncode == 0:
+            resync_saved_status()
+            return
+
+    partially_staged = sorted(staged_paths & unstaged_paths)
+    if partially_staged:
+        restore_saved_status()
+        die_scoped(
+            f"cannot rebase with partially staged file(s) ({', '.join(partially_staged)})"
+            f"{commit_note}; stage or unstage them completely first, or pass --offline"
+        )
+
+    pre_stash_res = run_git(
+        ["rev-parse", "--verify", "--quiet", "refs/stash"], cwd=root, check=False
+    )
+    pre_stash = pre_stash_res.stdout.strip() if pre_stash_res.returncode == 0 else None
+    staged_only_paths = sorted(staged_paths - unstaged_paths)
+
+    def restage_paths() -> None:
+        if not staged_only_paths:
+            return
+        tracked = set(
+            filter(
+                None,
+                run_git(["ls-files", "-z"], cwd=root, check=False).stdout.split("\0"),
+            )
+        )
+        to_add = [p for p in staged_only_paths if p in tracked or (root / p).exists()]
+        if to_add:
+            run_git(["add", "--", *to_add], cwd=root, check=False)
+
+    rb = run_git(
+        ["rebase", "--autostash", "--quiet", upstream_ref],
+        cwd=root,
+        check=False,
+    )
+    git_dir = resolve_git_dir(root)
+    in_rebase = (git_dir / "rebase-merge").exists() or (
+        git_dir / "rebase-apply"
+    ).exists()
+    unmerged = [
+        line.split("\t", 1)[1]
+        for line in run_git(
+            ["ls-files", "-u"], cwd=root, check=False
+        ).stdout.splitlines()
+        if "\t" in line
+    ]
+    conflicted_files = sorted(set(unmerged))
+
+    if in_rebase:
+        run_git(["rebase", "--abort"], cwd=root, check=False)
+        restore_saved_status()
+        restage_paths()
+        files_note = f" in {', '.join(conflicted_files)}" if conflicted_files else ""
+        if keep_local_commit_on_conflict:
+            die_scoped(
+                f"remote advanced with conflicting changes{files_note}; rebase aborted"
+                f"{commit_note}. "
+                f"Run 'git -C {display_path(root)} pull --rebase --autostash' to resolve "
+                "or pass --offline to skip remote sync"
+            )
+        die_scoped(
+            f"remote advanced with conflicting changes{files_note}; rebase aborted "
+            "and working tree restored. "
+            f"Run 'git -C {display_path(root)} pull --rebase --autostash' to resolve "
+            "or pass --offline to skip remote sync"
+        )
+
+    if conflicted_files or rb.returncode != 0:
+        # Phase 2: rebase finished moving HEAD, but applying the autostash
+        # conflicted (leaving unmerged index entries and storing the stash at
+        # refs/stash@{0}, often with exit code 0) or failed for another reason.
+        cur_head = run_git(["rev-parse", "--verify", "HEAD"], cwd=root).stdout.strip()
+        post_stash_res = run_git(
+            ["rev-parse", "--verify", "--quiet", "refs/stash"], cwd=root, check=False
+        )
+        post_stash = (
+            post_stash_res.stdout.strip() if post_stash_res.returncode == 0 else None
+        )
+        stash_saved = bool(post_stash and post_stash != pre_stash)
+        if (
+            conflicted_files
+            or stash_saved
+            or (cur_head != pre_head and not dirty_tracked)
+        ):
+            run_git(["reset", "--hard", "-q", pre_head], cwd=root, check=False)
+        elif cur_head != pre_head:
+            run_git(["reset", "--mixed", "-q", pre_head], cwd=root, check=False)
+        if stash_saved:
+            run_git(["stash", "pop", "--quiet"], cwd=root, check=False)
+        restore_saved_status()
+        restage_paths()
+        files_note = f" in {', '.join(conflicted_files)}" if conflicted_files else ""
+        detail = (rb.stderr or rb.stdout).strip()
+        extra = f" ({detail})" if detail and not conflicted_files else ""
+        die_scoped(
+            f"local uncommitted changes conflict with upstream updates{files_note}{extra}; "
+            f"working tree restored to its pre-sync state{commit_note}. "
+            f"Commit or stash your changes or run 'git -C {display_path(root)} pull --rebase --autostash', "
+            "or pass --offline to work offline"
+        )
+
+    resync_saved_status()
+    restage_paths()
+
+
+def pre_sync_repo(
+    root: Path,
+    *,
+    pinned_rev: str | None = None,
+    allow_sync_rebase_recovery: bool = False,
+    scope_project: str | None = None,
+) -> None:
+    """Synchronizes ROOT with its upstream tracking branch before a CLI read or write."""
+    if pinned_rev is not None:
+        if (
+            resolve_commit(root, pinned_rev) is not None
+            or _is_offline()
+            or not os.access(root, os.W_OK)
+            or not os.access(resolve_git_dir(root), os.W_OK)
+        ):
+            return
+        up = resolve_upstream(root)
+        if up is not None:
+            fetch_remote(root, up[0])
+        return
+
+    can_sync = ensure_clean_git_state(
+        root,
+        allow_sync_rebase_recovery=allow_sync_rebase_recovery,
+        scope_project=scope_project,
+    )
+    if not can_sync or _is_offline():
+        return
+    if not os.access(root, os.W_OK) or not os.access(resolve_git_dir(root), os.W_OK):
+        return
+    up = resolve_upstream(root)
+    if up is None:
+        return
+    remote, _, upstream_ref = up
+    fetch_remote(root, remote)
+    reconcile_worktree(root, upstream_ref)
+
+
+def push_committed_write(root: Path) -> None:
+    """Pushes a newly committed CLI write to its upstream branch, retrying once on race."""
+    if _is_offline():
+        return
+    if not os.access(root, os.W_OK) or not os.access(resolve_git_dir(root), os.W_OK):
+        return
+    up = resolve_upstream(root)
+    if up is None:
+        return
+    remote, branch, upstream_ref = up
+    for attempt in range(2):
+        res = run_git_network(
+            ["push", "--no-verify", "--quiet", remote, f"HEAD:refs/heads/{branch}"],
+            cwd=root,
+        )
+        if res.returncode == 0:
+            return
+        if attempt == 0:
+            head_sha = run_git(
+                ["rev-parse", "--short=10", "HEAD"], cwd=root
+            ).stdout.strip()
+            fetch_remote(root, remote, local_commit_sha=head_sha)
+            reconcile_worktree(root, upstream_ref, keep_local_commit_on_conflict=True)
+            continue
+        detail = (res.stderr or res.stdout).strip()
+        head_sha = run_git(["rev-parse", "--short=10", "HEAD"], cwd=root).stdout.strip()
+        die_scoped(
+            f"git push {remote} {branch} failed: {detail or f'exit {res.returncode}'} "
+            f"(your commit is saved locally at {head_sha}; retry or pass --offline)"
+        )
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -3361,7 +3949,9 @@ def audit_snapshot(
 def cmd_id() -> None:
     """Allocate a unique task ID."""
     root = get_repo_root()
-    print(generate_task_id(FsSnapshot(root)))
+    with repo_lock(root):
+        pre_sync_repo(root)
+        print(generate_task_id(FsSnapshot(root)))
 
 
 def cmd_root() -> None:
@@ -3576,117 +4166,135 @@ def cmd_create(
     session = get_active_session(conv)
     conv_uri = f"{session[0]}://{session[1]}" if session else None
     root = get_repo_root()
-    snap = FsSnapshot(root)
-    if deps:
-        check_new_blockers(snap, None, deps, tuple(deps))
-    if snap.is_file(project_name):
-        die(
-            f"cannot create project '{project_name}': a file with this name already exists"
-        )
+    with repo_lock(root):
+        if not dry_run and not no_commit and has_commit_auth(root):
+            diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+            if diff_cached.returncode != 0:
+                die_scoped(
+                    "git index contains staged changes; unstage or commit them first "
+                    "(or pass --no-commit)"
+                )
+        pre_sync_repo(root)
+        if not dry_run and not no_commit and has_commit_auth(root):
+            diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+            if diff_cached.returncode != 0:
+                die_scoped(
+                    "git index contains staged changes; unstage or commit them first "
+                    "(or pass --no-commit)"
+                )
+        snap = FsSnapshot(root)
+        if deps:
+            check_new_blockers(snap, None, deps, tuple(deps))
+        if snap.is_file(project_name):
+            die(
+                f"cannot create project '{project_name}': a file with this name already exists"
+            )
 
-    task_id = generate_task_id(snap)
-    filename = f"{task_id}-{task_slug}.md"
-    rel_task_path = f"{project_name}/tasks/{filename}"
-    is_new_project = not is_project(snap, project_name)
+        task_id = generate_task_id(snap)
+        filename = f"{task_id}-{task_slug}.md"
+        rel_task_path = f"{project_name}/tasks/{filename}"
+        is_new_project = not is_project(snap, project_name)
 
-    if dry_run:
-        print(
-            _tagged(
-                "[INFO]  Dry run: would create task record and sync STATUS.md:",
-                sys.stderr,
-            ),
-            file=sys.stderr,
-        )
-        if is_new_project:
+        if dry_run:
             print(
                 _tagged(
-                    f"[INFO]    - Scaffolding: {project_name}/README.md, {project_name}/STATUS.md",
+                    "[INFO]  Dry run: would create task record and sync STATUS.md:",
                     sys.stderr,
                 ),
                 file=sys.stderr,
             )
-        print(
-            _tagged(
-                f"[INFO]    - Task file:   {rel_task_path} (status: {status})",
-                sys.stderr,
-            ),
-            file=sys.stderr,
+            if is_new_project:
+                print(
+                    _tagged(
+                        f"[INFO]    - Scaffolding: {project_name}/README.md, {project_name}/STATUS.md",
+                        sys.stderr,
+                    ),
+                    file=sys.stderr,
+                )
+            print(
+                _tagged(
+                    f"[INFO]    - Task file:   {rel_task_path} (status: {status})",
+                    sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+            prefix = f"{project_name}: create {task_id}"
+            remaining = 50 - len(prefix) - 3
+            if remaining > 5 and len(title) > remaining:
+                short_title = title[: remaining - 3].rstrip() + "..."
+                subject = f"{prefix} ({short_title})"
+            elif remaining > 5:
+                subject = f"{prefix} ({title})"
+            else:
+                subject = prefix
+            print(
+                _tagged(f"[INFO]    - Commit:      {subject}", sys.stderr),
+                file=sys.stderr,
+            )
+            print(f"{task_id}\t{rel_task_path}")
+            return
+
+        content = render_task_file(
+            task_id=task_id,
+            title=title,
+            status=status,
+            problem=problem,
+            cost=cost,
+            goal=goal,
+            criteria=criteria,
+            sketch=sketch,
+            constraints=constraints,
+            outcome=outcome,
+            findings=findings,
+            next_steps=next_steps,
+            conv=conv_uri,
+            wait_for=norm_wait_for or None,
+            due=due,
+            stale_after=stale_after,
+            blocked_by=deps or None,
+            conversations=extra_convs or None,
         )
-        prefix = f"{project_name}: create {task_id}"
-        remaining = 50 - len(prefix) - 3
-        if remaining > 5 and len(title) > remaining:
-            short_title = title[: remaining - 3].rstrip() + "..."
-            subject = f"{prefix} ({short_title})"
-        elif remaining > 5:
-            subject = f"{prefix} ({title})"
-        else:
-            subject = prefix
-        print(
-            _tagged(f"[INFO]    - Commit:      {subject}", sys.stderr), file=sys.stderr
-        )
+        create_task(snap, project_name, rel_task_path, content)
+
+        # Machine-readable output contract on stdout
         print(f"{task_id}\t{rel_task_path}")
-        return
 
-    content = render_task_file(
-        task_id=task_id,
-        title=title,
-        status=status,
-        problem=problem,
-        cost=cost,
-        goal=goal,
-        criteria=criteria,
-        sketch=sketch,
-        constraints=constraints,
-        outcome=outcome,
-        findings=findings,
-        next_steps=next_steps,
-        conv=conv_uri,
-        wait_for=norm_wait_for or None,
-        due=due,
-        stale_after=stale_after,
-        blocked_by=deps or None,
-        conversations=extra_convs or None,
-    )
-    create_task(snap, project_name, rel_task_path, content)
+        if no_commit:
+            return
 
-    # Machine-readable output contract on stdout
-    print(f"{task_id}\t{rel_task_path}")
+        if not has_commit_auth(root):
+            print(
+                _tagged(
+                    "[INFO]  Skipping commit: repository lacks authorized <!-- taskgo:allow-local-commits -->",
+                    sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+            return
 
-    if no_commit:
-        return
+        # Stage task file, STATUS.md, and optionally new scaffolding files
+        to_stage = [rel_task_path, f"{project_name}/STATUS.md"]
+        if is_new_project:
+            rel_readme = f"{project_name}/README.md"
+            if (root / rel_readme).is_file():
+                to_stage.append(rel_readme)
 
-    if not has_commit_auth(root):
+        run_git(["add", "--", *to_stage])
+
+        subject = conventional_subject(f"create {task_id}", project_name)
+
+        msg_lines = [subject, "", wrap_body(title)]
+        if conv_uri:
+            msg_lines.extend(["", f"Conversation: {conv_uri}"])
+        commit_msg = "\n".join(msg_lines) + "\n"
+
+        run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
+        push_committed_write(root)
+        commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
         print(
-            _tagged(
-                "[INFO]  Skipping commit: repository lacks authorized <!-- taskgo:allow-local-commits -->",
-                sys.stderr,
-            ),
+            _tagged(f"[INFO]  Committed new task: {commit_sha[:10]}", sys.stderr),
             file=sys.stderr,
         )
-        return
-
-    # Stage task file, STATUS.md, and optionally new scaffolding files
-    to_stage = [rel_task_path, f"{project_name}/STATUS.md"]
-    if is_new_project:
-        rel_readme = f"{project_name}/README.md"
-        if (root / rel_readme).is_file():
-            to_stage.append(rel_readme)
-
-    run_git(["add", "--", *to_stage])
-
-    subject = conventional_subject(f"create {task_id}", project_name)
-
-    msg_lines = [subject, "", wrap_body(title)]
-    if conv_uri:
-        msg_lines.extend(["", f"Conversation: {conv_uri}"])
-    commit_msg = "\n".join(msg_lines) + "\n"
-
-    run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
-    commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
-    print(
-        _tagged(f"[INFO]  Committed new task: {commit_sha[:10]}", sys.stderr),
-        file=sys.stderr,
-    )
 
 
 def edit_task_text(
@@ -3966,49 +4574,53 @@ def cmd_update(
             )
 
     root = get_repo_root()
-    target_path = resolve_target(root, query)
-    result = update_task(
-        FsSnapshot(root),
-        target_path.relative_to(root).as_posix(),
-        new_slug=new_slug,
-        fallback_id=query,
-        status=status,
-        title=title,
-        problem=problem,
-        cost=cost,
-        goal=goal,
-        criteria=criteria,
-        sketch=sketch,
-        constraints=constraints,
-        outcome=outcome,
-        findings=findings,
-        next_steps=next_steps,
-        conv=conv,
-        wait_for=wait_for,
-        due=due,
-        stale_after=stale_after,
-        expect_status=expect_status,
-        add_blocked_by=add_blocked_by,
-        remove_blocked_by=remove_blocked_by,
-        add_wait_for=add_wait_for,
-        remove_wait_for=remove_wait_for,
-        add_conversations=add_conversations,
-        remove_conversations=remove_conversations,
-    )
-    for warning in result.warnings:
-        print(_tagged(f"[WARN]  {warning}", sys.stderr), file=sys.stderr)
-    if result.renamed_from:
+    with repo_lock(root):
+        pre_sync_repo(root)
+        target_path = resolve_target(root, query)
+        result = update_task(
+            FsSnapshot(root),
+            target_path.relative_to(root).as_posix(),
+            new_slug=new_slug,
+            fallback_id=query,
+            status=status,
+            title=title,
+            problem=problem,
+            cost=cost,
+            goal=goal,
+            criteria=criteria,
+            sketch=sketch,
+            constraints=constraints,
+            outcome=outcome,
+            findings=findings,
+            next_steps=next_steps,
+            conv=conv,
+            wait_for=wait_for,
+            due=due,
+            stale_after=stale_after,
+            expect_status=expect_status,
+            add_blocked_by=add_blocked_by,
+            remove_blocked_by=remove_blocked_by,
+            add_wait_for=add_wait_for,
+            remove_wait_for=remove_wait_for,
+            add_conversations=add_conversations,
+            remove_conversations=remove_conversations,
+        )
+        for warning in result.warnings:
+            print(_tagged(f"[WARN]  {warning}", sys.stderr), file=sys.stderr)
+        if result.renamed_from:
+            print(
+                _tagged(
+                    f"[INFO]  Renamed {result.renamed_from} -> {result.rel_path}",
+                    sys.stderr,
+                ),
+                file=sys.stderr,
+            )
         print(
             _tagged(
-                f"[INFO]  Renamed {result.renamed_from} -> {result.rel_path}",
-                sys.stderr,
+                f"[INFO]  Updated {result.task_id} in {result.rel_path}", sys.stderr
             ),
             file=sys.stderr,
         )
-    print(
-        _tagged(f"[INFO]  Updated {result.task_id} in {result.rel_path}", sys.stderr),
-        file=sys.stderr,
-    )
 
 
 # ===========================================================================
@@ -5199,41 +5811,43 @@ def run_change_set(doc: Any, dry_run: bool = False) -> dict[str, Any] | None:
     A refused set exits, naming the change, with nothing written.
     """
     root = get_repo_root()
-    base = FsSnapshot(root)
-    try:
-        cs = apply_change_set(base, doc)
-    except ChangeSetError as e:
-        die_scoped(f"{e}; nothing changed")
-    diff = cs.snap.diff()
-    if dry_run:
-        import difflib
+    with repo_lock(root):
+        pre_sync_repo(root)
+        base = FsSnapshot(root)
+        try:
+            cs = apply_change_set(base, doc)
+        except ChangeSetError as e:
+            die_scoped(f"{e}; nothing changed")
+        diff = cs.snap.diff()
+        if dry_run:
+            import difflib
 
-        for rel, (before, after) in diff.items():
-            old_x, new_x = base.is_executable(rel), cs.snap.is_executable(rel)
-            if before is not None and after is not None and old_x != new_x:
-                modes = ("100755" if x else "100644" for x in (old_x, new_x))
-                old_mode, new_mode = modes
-                sys.stdout.write(
-                    f"mode {rel}\nold mode {old_mode}\nnew mode {new_mode}\n"
+            for rel, (before, after) in diff.items():
+                old_x, new_x = base.is_executable(rel), cs.snap.is_executable(rel)
+                if before is not None and after is not None and old_x != new_x:
+                    modes = ("100755" if x else "100644" for x in (old_x, new_x))
+                    old_mode, new_mode = modes
+                    sys.stdout.write(
+                        f"mode {rel}\nold mode {old_mode}\nnew mode {new_mode}\n"
+                    )
+                sys.stdout.writelines(
+                    difflib.unified_diff(
+                        (before or "").splitlines(keepends=True),
+                        (after or "").splitlines(keepends=True),
+                        "/dev/null" if before is None else f"a/{rel}",
+                        "/dev/null" if after is None else f"b/{rel}",
+                    )
                 )
-            sys.stdout.writelines(
-                difflib.unified_diff(
-                    (before or "").splitlines(keepends=True),
-                    (after or "").splitlines(keepends=True),
-                    "/dev/null" if before is None else f"a/{rel}",
-                    "/dev/null" if after is None else f"b/{rel}",
-                )
-            )
-        return None
-    result = change_set_result(cs)
-    for rel, (_, after) in diff.items():
-        if after is None:
-            base.delete(rel)
-            continue
-        base.write_text(rel, after)
-        if cs.snap.is_executable(rel) != base.is_executable(rel):
-            set_file_executable(base.path(rel), cs.snap.is_executable(rel))
-    return result
+            return None
+        result = change_set_result(cs)
+        for rel, (_, after) in diff.items():
+            if after is None:
+                base.delete(rel)
+                continue
+            base.write_text(rel, after)
+            if cs.snap.is_executable(rel) != base.is_executable(rel):
+                set_file_executable(base.path(rel), cs.snap.is_executable(rel))
+        return result
 
 
 def edit_arg_text(text: str | None, path: str | None, what: str) -> str:
@@ -5432,7 +6046,10 @@ def cmd_list(
     as_json: bool = False,
 ) -> None:
     """List tasks in the repository or a specific project."""
-    rows = select_task_rows(FsSnapshot(get_repo_root()), project, state)
+    root = get_repo_root()
+    with repo_lock(root):
+        pre_sync_repo(root)
+        rows = select_task_rows(FsSnapshot(root), project, state)
 
     if as_json:
         print(json.dumps([task_row_json(r) for r in rows], indent=2))
@@ -5617,8 +6234,11 @@ def audit_skills(snap: Snapshot, target_project: str | None = None) -> list[Find
 
 def cmd_skills(project: str, as_json: bool = False) -> None:
     """Print the skills a project declares, one per line."""
-    snap = FsSnapshot(get_repo_root())
-    skills = project_skills(snap, require_project(snap, project))
+    root = get_repo_root()
+    with repo_lock(root):
+        pre_sync_repo(root)
+        snap = FsSnapshot(root)
+        skills = project_skills(snap, require_project(snap, project))
     if as_json:
         print(json.dumps(skills))
         return
@@ -5632,27 +6252,29 @@ def cmd_info(
 ) -> None:
     """Show project metadata from README.md YAML frontmatter."""
     root = get_repo_root()
-    proj_dir = root / require_project(FsSnapshot(root), project)
+    with repo_lock(root):
+        pre_sync_repo(root)
+        proj_dir = root / require_project(FsSnapshot(root), project)
 
-    readme_file = proj_dir / "README.md"
-    if not readme_file.is_file() and (proj_dir / "PROJECT.md").is_file():
-        readme_file = proj_dir / "PROJECT.md"
+        readme_file = proj_dir / "README.md"
+        if not readme_file.is_file() and (proj_dir / "PROJECT.md").is_file():
+            readme_file = proj_dir / "PROJECT.md"
 
-    fm: dict[str, Any] = {}
-    if readme_file.is_file():
-        fm, _ = parse_frontmatter(readme_file.read_text(encoding="utf-8"))
+        fm: dict[str, Any] = {}
+        if readme_file.is_file():
+            fm, _ = parse_frontmatter(readme_file.read_text(encoding="utf-8"))
 
-    skills = _normalize_skill_list(fm.get("skills"))
+        skills = _normalize_skill_list(fm.get("skills"))
 
-    info: dict[str, Any] = {
-        "project": project,
-        "path": str(proj_dir),
-        "readme": str(readme_file) if readme_file.is_file() else None,
-        "skills": skills,
-    }
-    for k, v in fm.items():
-        if k not in info:
-            info[k] = _to_jsonable(v)
+        info: dict[str, Any] = {
+            "project": project,
+            "path": str(proj_dir),
+            "readme": str(readme_file) if readme_file.is_file() else None,
+            "skills": skills,
+        }
+        for k, v in fm.items():
+            if k not in info:
+                info[k] = _to_jsonable(v)
 
     if as_json:
         print(json.dumps(info, indent=2))
@@ -5720,57 +6342,59 @@ def cmd_status(
 ) -> None:
     """Show a task's, a project's, or the whole workspace's status."""
     root = get_repo_root()
-    snap = tree_snapshot(root, at)
-    name = (target or "").strip()
-    if name and ID_PATTERN.match(name.upper()):
-        try:
-            row = find_task_row(snap, name.upper())
-        except TaskgoError as e:
-            die_scoped(str(e))
-        if as_json:
-            committed = commit_time(root, snap.rev) if snap.rev else None
-            out = {
-                "as_of": snapshot_as_of(snap, committed),
-                **task_record_json(snap, row),
-            }
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+    with repo_lock(root):
+        pre_sync_repo(root, pinned_rev=at)
+        snap = tree_snapshot(root, at)
+        name = (target or "").strip()
+        if name and ID_PATTERN.match(name.upper()):
+            try:
+                row = find_task_row(snap, name.upper())
+            except TaskgoError as e:
+                die_scoped(str(e))
+            if as_json:
+                committed = commit_time(root, snap.rev) if snap.rev else None
+                out = {
+                    "as_of": snapshot_as_of(snap, committed),
+                    **task_record_json(snap, row),
+                }
+                print(json.dumps(out, indent=2, ensure_ascii=False))
+                return
+            title = row.title or row.task_id
+            print(f"{row.task_id} ({row.project}): {title}")
+            print(f"State: {task_state_line(snap, row)}")
+            print(f"Path: {row.rel_path}")
+            print()
+            print(snap.read_text(row.rel_path).rstrip())
             return
-        title = row.title or row.task_id
-        print(f"{row.task_id} ({row.project}): {title}")
-        print(f"State: {task_state_line(snap, row)}")
-        print(f"Path: {row.rel_path}")
-        print()
-        print(snap.read_text(row.rel_path).rstrip())
-        return
-    project = name or None
-    if project:
-        require_project(snap, project)
-        if as_json:
-            out = project_status_json(snap, project, with_tasks=True)
-            print(json.dumps(out, indent=2))
+        project = name or None
+        if project:
+            require_project(snap, project)
+            if as_json:
+                out = project_status_json(snap, project, with_tasks=True)
+                print(json.dumps(out, indent=2))
+                return
+            status_file = f"{project}/STATUS.md"
+            if snap.is_file(status_file):
+                print(snap.read_text(status_file).rstrip())
+            else:
+                print(render_status_file(snap, project).rstrip())
             return
-        status_file = f"{project}/STATUS.md"
-        if snap.is_file(status_file):
-            print(snap.read_text(status_file).rstrip())
-        else:
-            print(render_status_file(snap, project).rstrip())
-        return
 
-    # All projects
-    projects = list_projects(snap)
-    if as_json:
-        all_data = [project_status_json(snap, p) for p in projects]
-        print(json.dumps(all_data, indent=2))
-        return
+        # All projects
+        projects = list_projects(snap)
+        if as_json:
+            all_data = [project_status_json(snap, p) for p in projects]
+            print(json.dumps(all_data, indent=2))
+            return
 
-    for p in projects:
-        data = project_status_json(snap, p)
-        prog_str = ", ".join(data["in_progress"]) if data["in_progress"] else "none"
-        blk_str = ", ".join(data["blocked"]) if data["blocked"] else "none"
-        print(
-            f"{p}: in-progress=[{prog_str}] blocked=[{blk_str}] "
-            f"todo={data['todo_count']} done={data['done_count']}"
-        )
+        for p in projects:
+            data = project_status_json(snap, p)
+            prog_str = ", ".join(data["in_progress"]) if data["in_progress"] else "none"
+            blk_str = ", ".join(data["blocked"]) if data["blocked"] else "none"
+            print(
+                f"{p}: in-progress=[{prog_str}] blocked=[{blk_str}] "
+                f"todo={data['todo_count']} done={data['done_count']}"
+            )
 
 
 class TaskgoError(Exception):
@@ -6199,73 +6823,80 @@ def tree_snapshot(root: Path, at: str | None) -> TreeSnapshot:
 def cmd_handoff(target: str, at: str | None = None, as_json: bool = False) -> None:
     """Emit instructions handing a project or task to an agent."""
     root = get_repo_root()
-    snap = tree_snapshot(root, at)
-    try:
-        t = resolve_handoff(snap, target.strip())
-    except TaskgoError as e:
-        die_scoped(str(e))
+    with repo_lock(root):
+        pre_sync_repo(root, pinned_rev=at)
+        snap = tree_snapshot(root, at)
+        try:
+            t = resolve_handoff(snap, target.strip())
+        except TaskgoError as e:
+            die_scoped(str(e))
 
-    if at is None:
-        # A local agent reads the working tree, as the note does; an agent
-        # reading through the MCP server sees only what has been pushed.
-        shallow = run_git(
-            ["rev-parse", "--is-shallow-repository"], cwd=root, check=False
-        ).stdout.strip()
-        if shallow == "true":
-            t.findings.insert(0, ("WARN", "shallow clone: history may be incomplete"))
-        dirty = run_git(
-            ["status", "--porcelain", "--", t.project], cwd=root, check=False
-        ).stdout.strip()
-        if dirty:
-            t.findings.append(
-                (
-                    "WARN",
-                    (
-                        f"{t.project} has uncommitted changes; agents reading "
-                        "through MCP see only what is committed and pushed"
-                    ),
+        if at is None:
+            # A local agent reads the working tree, as the note does; an agent
+            # reading through the MCP server sees only what has been pushed.
+            shallow = run_git(
+                ["rev-parse", "--is-shallow-repository"], cwd=root, check=False
+            ).stdout.strip()
+            if shallow == "true":
+                t.findings.insert(
+                    0, ("WARN", "shallow clone: history may be incomplete")
                 )
-            )
+            dirty = run_git(
+                ["status", "--porcelain", "--", t.project], cwd=root, check=False
+            ).stdout.strip()
+            if dirty:
+                t.findings.append(
+                    (
+                        "WARN",
+                        (
+                            f"{t.project} has uncommitted changes; agents reading "
+                            "through MCP see only what is committed and pushed"
+                        ),
+                    )
+                )
 
-    if as_json:
-        committed = commit_time(root, snap.rev) if snap.rev else None
-        payload = handoff_payload(snap, t, snapshot_as_of(snap, committed))
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-        return
+        if as_json:
+            committed = commit_time(root, snap.rev) if snap.rev else None
+            payload = handoff_payload(snap, t, snapshot_as_of(snap, committed))
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
 
-    for severity, message in t.findings:
-        print(_tagged(f"[{severity}]  {message}", sys.stderr), file=sys.stderr)
-    if at is None:
-        print(t.note(snap, lambda rel: str((root / rel).resolve())))
-    else:
-        print(t.note(snap, lambda rel: rel))
+        for severity, message in t.findings:
+            print(_tagged(f"[{severity}]  {message}", sys.stderr), file=sys.stderr)
+        if at is None:
+            print(t.note(snap, lambda rel: str((root / rel).resolve())))
+        else:
+            print(t.note(snap, lambda rel: rel))
 
 
 def cmd_sync(
     project: str | None = None,
 ) -> None:
     """Update STATUS.md snapshot for a project or the workspace."""
-    snap = FsSnapshot(get_repo_root())
-    if project:
-        require_project(snap, project)
-        updated = sync_status(snap, project)
-        if updated:
+    root = get_repo_root()
+    with repo_lock(root):
+        pre_sync_repo(root, allow_sync_rebase_recovery=True, scope_project=project)
+        snap = FsSnapshot(root)
+        if project:
+            require_project(snap, project)
+            updated = sync_status(snap, project)
+            if updated:
+                print("updated")
+            else:
+                print("current")
+            return
+
+        projects = list_projects(snap)
+        all_rows = get_task_rows(snap)
+        index = {r.task_id: r.status for r in all_rows if r.task_id}
+        any_updated = False
+        for p in projects:
+            if sync_status(snap, p, all_rows=all_rows, index=index):
+                any_updated = True
+        if any_updated:
             print("updated")
         else:
             print("current")
-        return
-
-    projects = list_projects(snap)
-    all_rows = get_task_rows(snap)
-    index = {r.task_id: r.status for r in all_rows if r.task_id}
-    any_updated = False
-    for p in projects:
-        if sync_status(snap, p, all_rows=all_rows, index=index):
-            any_updated = True
-    if any_updated:
-        print("updated")
-    else:
-        print("current")
 
 
 def cmd_doctor(
@@ -6273,35 +6904,37 @@ def cmd_doctor(
 ) -> None:
     """Run mechanical health checks across the workspace or a project."""
     root = get_repo_root()
-    _, source = resolve_root_candidate()
+    with repo_lock(root):
+        pre_sync_repo(root)
+        _, source = resolve_root_candidate()
 
-    print(_tagged(f"{'[PASS]'.ljust(8)}Control repository"))
-    print(f"        Root: {display_path(root)}")
-    print(f"        Source: {source}")
+        print(_tagged(f"{'[PASS]'.ljust(8)}Control repository"))
+        print(f"        Root: {display_path(root)}")
+        print(f"        Source: {source}")
 
-    findings = audit_workspace(root, project)
+        findings = audit_workspace(root, project)
 
-    has_warn_or_fail = False
-    for f in findings:
-        prefix = f"[{f.severity}]".ljust(8)
-        print(_tagged(f"{prefix}{f.message}"))
-        if f.severity in ("WARN", "FAIL"):
-            has_warn_or_fail = True
+        has_warn_or_fail = False
+        for f in findings:
+            prefix = f"[{f.severity}]".ljust(8)
+            print(_tagged(f"{prefix}{f.message}"))
+            if f.severity in ("WARN", "FAIL"):
+                has_warn_or_fail = True
 
-    print(
-        _tagged(
-            """[INFO]  Agent semantic review
+        print(
+            _tagged(
+                """[INFO]  Agent semantic review
         Check STATUS Summary is rewritten current state (not a session log) and matches tasks/Next.
         Check active conversation ID ([<conversation-id>](<agent>://<conversation-id>)) is recorded in STATUS.md Summary or task Outcome.
         Check PLAN is current direction, not accumulated history.
         Check README/ADRs link to artifact or skill owners rather than copying their facts.
         Check private tracker material has not leaked to public/shared artifacts.
         After merges, check reconciled files express one coherent current state."""
+            )
         )
-    )
 
-    if has_warn_or_fail:
-        sys.exit(1)
+        if has_warn_or_fail:
+            sys.exit(1)
 
 
 def cmd_fix(
@@ -6311,146 +6944,158 @@ def cmd_fix(
 ) -> None:
     """Auto-heal IDs, statuses, and snapshot drift."""
     root = get_repo_root()
-    snap = FsSnapshot(root)
-    if project:
-        require_project(snap, project)
+    with repo_lock(root):
+        if not dry_run and not no_commit:
+            diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+            if diff_cached.returncode != 0:
+                die(
+                    "fix: git index contains staged changes; unstage or commit them first"
+                )
+        pre_sync_repo(root)
+        snap = FsSnapshot(root)
+        if project:
+            require_project(snap, project)
 
-    findings = audit_workspace(root, project)
-    fixable = [f for f in findings if f.remediation is not None]
+        findings = audit_workspace(root, project)
+        fixable = [f for f in findings if f.remediation is not None]
 
-    if not fixable:
-        unfixable = [f for f in findings if f.severity in ("WARN", "FAIL")]
-        if unfixable:
-            for f in unfixable:
+        if not fixable:
+            unfixable = [f for f in findings if f.severity in ("WARN", "FAIL")]
+            if unfixable:
+                for f in unfixable:
+                    print(
+                        _tagged(
+                            f"[{f.severity}]  Manual fix required: {f.message}",
+                            sys.stderr,
+                        ),
+                        file=sys.stderr,
+                    )
+            else:
                 print(
-                    _tagged(
-                        f"[{f.severity}]  Manual fix required: {f.message}", sys.stderr
-                    ),
+                    _tagged("[INFO]  Workspace is clean, no fixes needed.", sys.stderr),
                     file=sys.stderr,
                 )
-        else:
-            print(
-                _tagged("[INFO]  Workspace is clean, no fixes needed.", sys.stderr),
-                file=sys.stderr,
-            )
-        return
+            return
 
-    if dry_run:
-        print(
-            _tagged(
-                f"[INFO]  Dry run: {len(fixable)} repair(s) would be applied:",
-                sys.stderr,
-            ),
-            file=sys.stderr,
-        )
-        dry_run_files: set[str] = set()
-        for f in fixable:
-            print(_tagged(f"[INFO]    - {f.message}", sys.stderr), file=sys.stderr)
-            if f.path:
-                dry_run_files.add(f.path)
-        if dry_run_files:
-            print("\n".join(sorted(dry_run_files)))
-        return
-
-    # Invariant: assert clean Git index before mutating
-    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
-    if diff_cached.returncode != 0:
-        die("fix: git index contains staged changes; unstage or commit them first")
-
-    # Execute all remediations and collect explicitly touched paths (deduplicated)
-    touched_paths: set[str] = set()
-    executed_remediations = set()
-    for f in fixable:
-        if f.remediation in executed_remediations:
-            continue
-        executed_remediations.add(f.remediation)
-        res = f.remediation()
-        if res:
-            for p in res:
-                touched_paths.add(p)
-        elif f.path:
-            touched_paths.add(f.path)
-
-    # Re-run audit to verify convergence
-    post_findings = audit_workspace(root, project)
-    remaining_errors = [f for f in post_findings if f.severity in ("WARN", "FAIL")]
-    if remaining_errors:
-        for f in remaining_errors:
+        if dry_run:
             print(
                 _tagged(
-                    f"[{f.severity}]  Still open after fix: {f.message}", sys.stderr
+                    f"[INFO]  Dry run: {len(fixable)} repair(s) would be applied:",
+                    sys.stderr,
                 ),
                 file=sys.stderr,
             )
+            dry_run_files: set[str] = set()
+            for f in fixable:
+                print(_tagged(f"[INFO]    - {f.message}", sys.stderr), file=sys.stderr)
+                if f.path:
+                    dry_run_files.add(f.path)
+            if dry_run_files:
+                print("\n".join(sorted(dry_run_files)))
+            return
 
-    # Ensure all affected projects have their STATUS.md synchronized and included if modified
-    affected_projects: set[str] = set()
-    if project:
-        affected_projects.add(project)
-    for tp in touched_paths:
-        parts = tp.split("/")
-        if len(parts) > 1 and is_project(snap, parts[0]):
-            affected_projects.add(parts[0])
+        # Invariant: assert clean Git index before mutating
+        diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+        if diff_cached.returncode != 0:
+            die("fix: git index contains staged changes; unstage or commit them first")
 
-    for proj_name in affected_projects:
-        sync_status(snap, proj_name)
-        status_p = f"{proj_name}/STATUS.md"
-        if snap.is_file(status_p):
-            touched_paths.add(status_p)
+        # Execute all remediations and collect explicitly touched paths (deduplicated)
+        touched_paths: set[str] = set()
+        executed_remediations = set()
+        for f in fixable:
+            if f.remediation in executed_remediations:
+                continue
+            executed_remediations.add(f.remediation)
+            res = f.remediation()
+            if res:
+                for p in res:
+                    touched_paths.add(p)
+            elif f.path:
+                touched_paths.add(f.path)
 
-    # Keep the touched files that have modifications or were created/deleted
-    modified_files: list[str] = []
-    for rel in sorted(touched_paths, key=path_key):
-        st = run_git(["status", "--porcelain", "--", rel], check=False).stdout.strip()
-        if st and rel not in modified_files:
-            modified_files.append(rel)
+        # Re-run audit to verify convergence
+        post_findings = audit_workspace(root, project)
+        remaining_errors = [f for f in post_findings if f.severity in ("WARN", "FAIL")]
+        if remaining_errors:
+            for f in remaining_errors:
+                print(
+                    _tagged(
+                        f"[{f.severity}]  Still open after fix: {f.message}", sys.stderr
+                    ),
+                    file=sys.stderr,
+                )
 
-    if not modified_files:
-        print(
-            _tagged("[INFO]  Workspace is clean, no files changed.", sys.stderr),
-            file=sys.stderr,
-        )
-        return
+        # Ensure all affected projects have their STATUS.md synchronized and included if modified
+        affected_projects: set[str] = set()
+        if project:
+            affected_projects.add(project)
+        for tp in touched_paths:
+            parts = tp.split("/")
+            if len(parts) > 1 and is_project(snap, parts[0]):
+                affected_projects.add(parts[0])
 
-    if no_commit:
+        for proj_name in affected_projects:
+            sync_status(snap, proj_name)
+            status_p = f"{proj_name}/STATUS.md"
+            if snap.is_file(status_p):
+                touched_paths.add(status_p)
+
+        # Keep the touched files that have modifications or were created/deleted
+        modified_files: list[str] = []
+        for rel in sorted(touched_paths, key=path_key):
+            st = run_git(
+                ["status", "--porcelain", "--", rel], check=False
+            ).stdout.strip()
+            if st and rel not in modified_files:
+                modified_files.append(rel)
+
+        if not modified_files:
+            print(
+                _tagged("[INFO]  Workspace is clean, no files changed.", sys.stderr),
+                file=sys.stderr,
+            )
+            return
+
+        if no_commit:
+            print(
+                _tagged(
+                    f"[INFO]  Applied {len(modified_files)} repair(s) without commit (--no-commit).",
+                    sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+            print("\n".join(modified_files))
+            return
+
+        if not has_commit_auth(root):
+            print(
+                _tagged(
+                    f"[INFO]  Applied {len(modified_files)} repair(s) (commit skipped: no auth marker).",
+                    sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+            print("\n".join(modified_files))
+            return
+
+        run_git(["add", "--", *modified_files])
+        commit_msg = conventional_subject("fix metadata and status", project) + "\n"
+        run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
+        push_committed_write(root)
+        commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
+
         print(
             _tagged(
-                f"[INFO]  Applied {len(modified_files)} repair(s) without commit (--no-commit).",
+                f"[INFO]  Committed {len(modified_files)} fixed file(s): {commit_sha[:10]}",
                 sys.stderr,
             ),
             file=sys.stderr,
         )
-        print("\n".join(modified_files))
-        return
 
-    if not has_commit_auth(root):
-        print(
-            _tagged(
-                f"[INFO]  Applied {len(modified_files)} repair(s) (commit skipped: no auth marker).",
-                sys.stderr,
-            ),
-            file=sys.stderr,
-        )
-        print("\n".join(modified_files))
-        return
-
-    run_git(["add", "--", *modified_files])
-    commit_msg = conventional_subject("fix metadata and status", project) + "\n"
-    run_git(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
-    commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
-
-    print(
-        _tagged(
-            f"[INFO]  Committed {len(modified_files)} fixed file(s): {commit_sha[:10]}",
-            sys.stderr,
-        ),
-        file=sys.stderr,
-    )
-
-    # Machine-readable output contract on stdout
-    print(f"COMMIT_SHA: {commit_sha}")
-    print(f"MODIFIED: {','.join(modified_files)}")
-    print(f"SUMMARY: {commit_msg.strip()}")
+        # Machine-readable output contract on stdout
+        print(f"COMMIT_SHA: {commit_sha}")
+        print(f"MODIFIED: {','.join(modified_files)}")
+        print(f"SUMMARY: {commit_msg.strip()}")
 
 
 _BUG_URI_RE = re.compile(r"^b/(\d+)$", re.IGNORECASE)
@@ -6479,6 +7124,8 @@ class CheckTrigger:
 
 
 def _is_offline() -> bool:
+    if _OFFLINE_FLAG:
+        return True
     return os.environ.get("AGENT_OFFLINE", "").strip().lower() in {
         "1",
         "true",
@@ -6689,114 +7336,118 @@ def cmd_check(
 ) -> None:
     """Evaluate wait_for gates, due deadlines, and stale_after cutoffs."""
     root = get_repo_root()
-    snap = FsSnapshot(root)
-    if project:
-        require_project(snap, project)
+    with repo_lock(root):
+        pre_sync_repo(root)
+        snap = FsSnapshot(root)
+        if project:
+            require_project(snap, project)
 
-    today = get_today(snap)
-    rows = get_task_rows(snap, project)
-    probe_cache: dict[str, tuple[str, bool, datetime | None, str | None] | None] = {}
+        today = get_today(snap)
+        rows = get_task_rows(snap, project)
+        probe_cache: dict[
+            str, tuple[str, bool, datetime | None, str | None] | None
+        ] = {}
 
-    triggered_entries: list[tuple[TaskRow, str | None, list[CheckTrigger]]] = []
+        triggered_entries: list[tuple[TaskRow, str | None, list[CheckTrigger]]] = []
 
-    for row in rows:
-        if row.status in RESOLVED_STATES:
-            continue
-        if not (row.wait_for or row.due or row.stale_after):
-            continue
+        for row in rows:
+            if row.status in RESOLVED_STATES:
+                continue
+            if not (row.wait_for or row.due or row.stale_after):
+                continue
 
-        triggers: list[CheckTrigger] = []
-        watermark_cached: tuple[str | None, datetime | None] | None = None
+            triggers: list[CheckTrigger] = []
+            watermark_cached: tuple[str | None, datetime | None] | None = None
 
-        def get_wm(r: TaskRow = row) -> tuple[str | None, datetime | None]:
-            nonlocal watermark_cached
-            if watermark_cached is None:
-                watermark_cached = get_task_watermark(root, r)
-            return watermark_cached
+            def get_wm(r: TaskRow = row) -> tuple[str | None, datetime | None]:
+                nonlocal watermark_cached
+                if watermark_cached is None:
+                    watermark_cached = get_task_watermark(root, r)
+                return watermark_cached
 
-        for gate in row.wait_for:
-            gate_date = parse_iso_date(gate)
-            if gate_date is not None:
-                if today >= gate_date:
-                    triggers.append(
-                        CheckTrigger(
-                            kind="wait_for_elapsed",
-                            gate=gate,
-                            detail=f"wait_for date {gate_date.isoformat()} elapsed",
+            for gate in row.wait_for:
+                gate_date = parse_iso_date(gate)
+                if gate_date is not None:
+                    if today >= gate_date:
+                        triggers.append(
+                            CheckTrigger(
+                                kind="wait_for_elapsed",
+                                gate=gate,
+                                detail=f"wait_for date {gate_date.isoformat()} elapsed",
+                            )
                         )
-                    )
-                continue
+                    continue
 
-            if gate not in probe_cache:
-                probe_cache[gate] = poll_external_uri(gate)
-            polled = probe_cache[gate]
-            if polled is None:
-                continue
+                if gate not in probe_cache:
+                    probe_cache[gate] = poll_external_uri(gate)
+                polled = probe_cache[gate]
+                if polled is None:
+                    continue
 
-            up_status, is_terminal, mod_dt, mod_str = polled
-            if is_terminal:
-                triggers.append(
-                    CheckTrigger(
-                        kind="wait_for_resolved",
-                        gate=gate,
-                        detail=f"wait_for {gate} resolved ({up_status})",
-                        upstream_state=up_status,
-                        upstream_modified=mod_str,
-                    )
-                )
-            elif mod_dt is not None:
-                _, wm_dt = get_wm()
-                if wm_dt is None or mod_dt > wm_dt:
+                up_status, is_terminal, mod_dt, mod_str = polled
+                if is_terminal:
                     triggers.append(
                         CheckTrigger(
-                            kind="wait_for_activity",
+                            kind="wait_for_resolved",
                             gate=gate,
-                            detail=(
-                                f"wait_for {gate} updated ({up_status} at "
-                                f"{mod_str or mod_dt.isoformat()})"
-                            ),
+                            detail=f"wait_for {gate} resolved ({up_status})",
                             upstream_state=up_status,
-                            upstream_modified=mod_str or mod_dt.isoformat(),
+                            upstream_modified=mod_str,
                         )
                     )
+                elif mod_dt is not None:
+                    _, wm_dt = get_wm()
+                    if wm_dt is None or mod_dt > wm_dt:
+                        triggers.append(
+                            CheckTrigger(
+                                kind="wait_for_activity",
+                                gate=gate,
+                                detail=(
+                                    f"wait_for {gate} updated ({up_status} at "
+                                    f"{mod_str or mod_dt.isoformat()})"
+                                ),
+                                upstream_state=up_status,
+                                upstream_modified=mod_str or mod_dt.isoformat(),
+                            )
+                        )
 
-        if row.due is not None:
-            due_date = parse_iso_date(row.due)
-            if due_date is not None:
-                if today > due_date:
+            if row.due is not None:
+                due_date = parse_iso_date(row.due)
+                if due_date is not None:
+                    if today > due_date:
+                        triggers.append(
+                            CheckTrigger(
+                                kind="due_overdue",
+                                gate=due_date.isoformat(),
+                                detail=(
+                                    f"overdue (due {due_date.isoformat()}, "
+                                    f"{(today - due_date).days}d ago)"
+                                ),
+                            )
+                        )
+                    elif due_date <= today + timedelta(days=2):
+                        triggers.append(
+                            CheckTrigger(
+                                kind="due_soon",
+                                gate=due_date.isoformat(),
+                                detail=f"due soon (due {due_date.isoformat()}, within 48h)",
+                            )
+                        )
+
+            if row.stale_after is not None:
+                stale_date = parse_iso_date(row.stale_after)
+                if stale_date is not None and today > stale_date:
                     triggers.append(
                         CheckTrigger(
-                            kind="due_overdue",
-                            gate=due_date.isoformat(),
-                            detail=(
-                                f"overdue (due {due_date.isoformat()}, "
-                                f"{(today - due_date).days}d ago)"
-                            ),
-                        )
-                    )
-                elif due_date <= today + timedelta(days=2):
-                    triggers.append(
-                        CheckTrigger(
-                            kind="due_soon",
-                            gate=due_date.isoformat(),
-                            detail=f"due soon (due {due_date.isoformat()}, within 48h)",
+                            kind="stale",
+                            gate=stale_date.isoformat(),
+                            detail=f"stale task (stale_after {stale_date.isoformat()})",
                         )
                     )
 
-        if row.stale_after is not None:
-            stale_date = parse_iso_date(row.stale_after)
-            if stale_date is not None and today > stale_date:
-                triggers.append(
-                    CheckTrigger(
-                        kind="stale",
-                        gate=stale_date.isoformat(),
-                        detail=f"stale task (stale_after {stale_date.isoformat()})",
-                    )
-                )
-
-        if triggers:
-            wm_str, _ = get_wm()
-            triggered_entries.append((row, wm_str, triggers))
+            if triggers:
+                wm_str, _ = get_wm()
+                triggered_entries.append((row, wm_str, triggers))
 
     if not triggered_entries:
         return
@@ -6923,15 +7574,17 @@ def file_versions(
 def cmd_history(query: str, field: str = "status") -> None:
     """Show frontmatter field history across git revisions."""
     root = get_repo_root()
-    target_path = resolve_target(root, query, allow_deleted=True)
-    rel_path = str(target_path.relative_to(root))
+    with repo_lock(root):
+        pre_sync_repo(root)
+        target_path = resolve_target(root, query, allow_deleted=True)
+        rel_path = str(target_path.relative_to(root))
 
-    versions = file_versions(root, "HEAD", rel_path)
-    if not versions:
-        die(f"no git history for {rel_path}")
+        versions = file_versions(root, "HEAD", rel_path)
+        if not versions:
+            die(f"no git history for {rel_path}")
 
-    for change in field_history(versions, field):
-        print(format_field_change(change))
+        for change in field_history(versions, field):
+            print(format_field_change(change))
 
 
 # Most bytes of file content one read returns, from the CLI or the MCP server.
@@ -7030,28 +7683,30 @@ def cmd_read(
         rel = clean_rel_path(path)
     except TaskgoError:
         die_scoped(f"invalid path: {path!r}")
-    if at:
-        sha = resolve_commit(root, at)
-        if sha is None:
-            die_scoped(f"no commit {at} in the control repository")
-        snap = GitTreeSnapshot(root, sha)
-        blob = snap.blobs.get(rel)
-        if blob is None:
-            if snap.is_dir(rel):
+    with repo_lock(root):
+        pre_sync_repo(root, pinned_rev=at)
+        if at:
+            sha = resolve_commit(root, at)
+            if sha is None:
+                die_scoped(f"no commit {at} in the control repository")
+            snap = GitTreeSnapshot(root, sha)
+            blob = snap.blobs.get(rel)
+            if blob is None:
+                if snap.is_dir(rel):
+                    die_scoped(f"{rel} is a directory")
+                die_scoped(f"{rel} is not in commit {snap.rev[:12]}")
+            data = run_git(["cat-file", "blob", blob], cwd=root, text=False).stdout
+        else:
+            target = root / rel
+            if not target.resolve().is_relative_to(root.resolve()):
+                die_scoped(f"invalid path: {path!r}")
+            if target.is_dir():
                 die_scoped(f"{rel} is a directory")
-            die_scoped(f"{rel} is not in commit {snap.rev[:12]}")
-        data = run_git(["cat-file", "blob", blob], cwd=root, text=False).stdout
-    else:
-        target = root / rel
-        if not target.resolve().is_relative_to(root.resolve()):
-            die_scoped(f"invalid path: {path!r}")
-        if target.is_dir():
-            die_scoped(f"{rel} is a directory")
-        if not target.is_file():
-            die_scoped(f"{rel} does not exist")
-        data = target.read_bytes()
-        hashed = run_git(["hash-object", "--", rel], cwd=root, check=False)
-        blob = hashed.stdout.strip() if hashed.returncode == 0 else None
+            if not target.is_file():
+                die_scoped(f"{rel} does not exist")
+            data = target.read_bytes()
+            hashed = run_git(["hash-object", "--", rel], cwd=root, check=False)
+            blob = hashed.stdout.strip() if hashed.returncode == 0 else None
     try:
         result = read_slice(
             rel, blob, data, start_line, end_line, line_numbers=line_numbers
@@ -7150,6 +7805,7 @@ class SearchArgs:
     paths: list[str]
     at: str | None = None
     as_json: bool = False
+    offline: bool = False
 
 
 def search_path(path: Any) -> str:
@@ -7200,6 +7856,8 @@ def parse_search_args(
             break
         if cli and t in ("--json", "-j"):
             out.as_json = True
+        elif cli and t in ("--offline", "--no-fetch"):
+            out.offline = True
         elif cli and t == "--at":
             out.at = value(t)
         elif cli and t.startswith("--at="):
@@ -7371,20 +8029,24 @@ def cmd_search(tokens: list[str]) -> None:
         search = parse_search_args(tokens, cli=True)
     except TaskgoError as e:
         die_scoped(str(e), 2)
+    if search.offline:
+        set_offline_flag(True)
     root = get_repo_root()
-    if search.at:
-        rev = resolve_commit(root, search.at)
-        if rev is None:
-            die_scoped(f"no commit {search.at} in the control repository", 2)
-        known = set(GitTreeSnapshot(root, rev).blobs)
-    else:
-        rev = None
-        listed = run_git(["ls-files", "-z"], cwd=root).stdout
-        known = set(filter(None, listed.split("\0")))
-    try:
-        result, matched = run_search(root, search, rev, known)
-    except TaskgoError as e:
-        die_scoped(str(e), 2)
+    with repo_lock(root):
+        pre_sync_repo(root, pinned_rev=search.at)
+        if search.at:
+            rev = resolve_commit(root, search.at)
+            if rev is None:
+                die_scoped(f"no commit {search.at} in the control repository", 2)
+            known = set(GitTreeSnapshot(root, rev).blobs)
+        else:
+            rev = None
+            listed = run_git(["ls-files", "-z"], cwd=root).stdout
+            known = set(filter(None, listed.split("\0")))
+        try:
+            result, matched = run_search(root, search, rev, known)
+        except TaskgoError as e:
+            die_scoped(str(e), 2)
     if search.as_json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -7417,112 +8079,183 @@ def cmd_checkpoint(
     if not ID_PATTERN.match(task_id):
         die(f"checkpoint: invalid task ID: {task_id}")
 
-    if not has_commit_auth(root):
-        die(f"checkpoint: committed AGENTS.md must contain {COMMIT_AUTH}")
+    with repo_lock(root):
+        # Index must be empty before pre-sync (--autostash would unstage staged changes)
+        diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+        if diff_cached.returncode != 0:
+            die("checkpoint: index is not empty")
 
-    # Index must be empty
-    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
-    if diff_cached.returncode != 0:
-        die("checkpoint: index is not empty")
+        pre_sync_repo(root)
 
-    target_path = resolve_target(root, task_id)
-    rel_path = str(target_path.relative_to(root))
-    project_name = Path(rel_path).as_posix().split("/")[0]
-    snap = FsSnapshot(root)
-    require_project(snap, project_name)
-    status_rel = f"{project_name}/STATUS.md"
+        if not has_commit_auth(root):
+            die(f"checkpoint: committed AGENTS.md must contain {COMMIT_AUTH}")
 
-    requested = [rel_path, status_rel]
-    for p_arg in paths_list:
-        p_clean = p_arg.removeprefix("./")
-        if p_clean.startswith("/") or ".." in p_clean.split("/"):
-            die(f"checkpoint: unsafe path: {p_arg}")
-        if not p_clean.startswith(f"{project_name}/"):
-            die(f"checkpoint: path is outside project {project_name}: {p_arg}")
-        is_existing_file = (root / p_clean).is_file()
-        is_git_deleted = bool(
-            run_git(["status", "--porcelain", "--", p_clean]).stdout.strip()
+        target_path = resolve_target(root, task_id)
+        rel_path = str(target_path.relative_to(root))
+        project_name = Path(rel_path).as_posix().split("/")[0]
+        snap = FsSnapshot(root)
+        require_project(snap, project_name)
+        status_rel = f"{project_name}/STATUS.md"
+
+        requested = [rel_path, status_rel]
+        for p_arg in paths_list:
+            p_clean = p_arg.removeprefix("./")
+            if p_clean.startswith("/") or ".." in p_clean.split("/"):
+                die(f"checkpoint: unsafe path: {p_arg}")
+            if not p_clean.startswith(f"{project_name}/"):
+                die(f"checkpoint: path is outside project {project_name}: {p_arg}")
+            is_existing_file = (root / p_clean).is_file()
+            is_git_deleted = bool(
+                run_git(["status", "--porcelain", "--", p_clean]).stdout.strip()
+            )
+            if not is_existing_file and not is_git_deleted:
+                die(f"checkpoint: path not found: {p_arg}")
+            requested.append(p_clean)
+
+        # Synchronize status for project
+        sync_status(snap, project_name)
+
+        # Find project changes
+        diff_proj = [
+            f
+            for f in run_git(
+                ["diff", "-z", "--name-only", "--", f"{project_name}/"]
+            ).stdout.split("\0")
+            if f
+        ]
+        untracked_proj = [
+            f
+            for f in run_git(
+                [
+                    "ls-files",
+                    "-z",
+                    "--others",
+                    "--exclude-standard",
+                    "--",
+                    f"{project_name}/",
+                ]
+            ).stdout.split("\0")
+            if f
+        ]
+        all_changed = sorted(set(diff_proj + untracked_proj))
+
+        if all_files:
+            requested = sorted(set(requested + [c for c in all_changed if c]))
+
+        # Check that at least one project file has changes
+        has_changes = any(
+            bool(run_git(["status", "--porcelain", "--", req]).stdout.strip())
+            for req in requested
         )
-        if not is_existing_file and not is_git_deleted:
-            die(f"checkpoint: path not found: {p_arg}")
-        requested.append(p_clean)
+        if not has_changes:
+            die("checkpoint: no project changes detected to commit")
 
-    # Synchronize status for project
-    sync_status(snap, project_name)
-
-    # Find project changes
-    diff_proj = [
-        f
-        for f in run_git(
-            ["diff", "-z", "--name-only", "--", f"{project_name}/"]
-        ).stdout.split("\0")
-        if f
-    ]
-    untracked_proj = [
-        f
-        for f in run_git(
-            [
-                "ls-files",
-                "-z",
-                "--others",
-                "--exclude-standard",
-                "--",
-                f"{project_name}/",
-            ]
-        ).stdout.split("\0")
-        if f
-    ]
-    all_changed = sorted(set(diff_proj + untracked_proj))
-
-    if all_files:
-        requested = sorted(set(requested + [c for c in all_changed if c]))
-
-    # Check that at least one project file has changes
-    has_changes = any(
-        bool(run_git(["status", "--porcelain", "--", req]).stdout.strip())
-        for req in requested
-    )
-    if not has_changes:
-        die("checkpoint: no project changes detected to commit")
-
-    # Check for unlisted project changes
-    unlisted = [c for c in all_changed if c and c not in requested]
-    if unlisted:
-        suggested = " ".join(f"--path {p}" for p in unlisted)
-        print(
-            f"[HINT] To include unlisted project file(s), add --all or: {suggested}",
-            file=sys.stderr,
-        )
-        die(f"checkpoint: unlisted project change: {unlisted[0]}")
-
-    # Run doctor in-process
-    findings = audit_workspace(root, project_name)
-    if any(f.severity in ("WARN", "FAIL") for f in findings):
-        die("checkpoint: doctor found errors")
-
-    if session:
-        scheme, c_id = session
-        try:
-            t_content = target_path.read_text(encoding="utf-8")
-            t_data, t_body = parse_frontmatter_for_edit(t_content)
-            if update_task_conversation(t_data, scheme, c_id):
-                new_content = f"{dump_frontmatter(t_data)}{t_body}"
-                write_markdown(target_path, new_content)
-        except Exception as e:
+        # Check for unlisted project changes
+        unlisted = [c for c in all_changed if c and c not in requested]
+        if unlisted:
+            suggested = " ".join(f"--path {p}" for p in unlisted)
             print(
-                _tagged(
-                    f"[WARN]  Failed to update task frontmatter: {e}",
-                    sys.stderr,
-                ),
+                f"[HINT] To include unlisted project file(s), add --all or: {suggested}",
                 file=sys.stderr,
             )
+            die(f"checkpoint: unlisted project change: {unlisted[0]}")
 
-    # Stage requested files
-    try:
-        run_git(["add", "--", *requested])
-        cached_check = run_git(["diff", "--cached", "--quiet"], check=False)
-        if cached_check.returncode == 0:
-            die("checkpoint: nothing to commit")
+        # Run doctor in-process
+        findings = audit_workspace(root, project_name)
+        if any(f.severity in ("WARN", "FAIL") for f in findings):
+            die("checkpoint: doctor found errors")
+
+        if session:
+            scheme, c_id = session
+            try:
+                t_content = target_path.read_text(encoding="utf-8")
+                t_data, t_body = parse_frontmatter_for_edit(t_content)
+                if update_task_conversation(t_data, scheme, c_id):
+                    new_content = f"{dump_frontmatter(t_data)}{t_body}"
+                    write_markdown(target_path, new_content)
+            except Exception as e:
+                print(
+                    _tagged(
+                        f"[WARN]  Failed to update task frontmatter: {e}",
+                        sys.stderr,
+                    ),
+                    file=sys.stderr,
+                )
+
+        # Stage requested files
+        try:
+            run_git(["add", "--", *requested])
+            cached_check = run_git(["diff", "--cached", "--quiet"], check=False)
+            if cached_check.returncode == 0:
+                die("checkpoint: nothing to commit")
+
+            staged_files = [
+                f
+                for f in run_git(
+                    ["diff", "-z", "--cached", "--name-only"]
+                ).stdout.split("\0")
+                if f
+            ]
+            for sf in staged_files:
+                if sf and sf not in requested:
+                    die(f"checkpoint: refused staged path: {sf}")
+
+            subject = ensure_conventional_subject(subject, project_name)
+            wrapped_body = wrap_body(body)
+            if body and wrapped_body != body:
+                print(
+                    _tagged(
+                        "[WARN]  Rewrapped commit body to fit 72 characters", sys.stderr
+                    ),
+                    file=sys.stderr,
+                )
+            msg_lines = [subject]
+            if body:
+                msg_lines.extend(["", wrapped_body])
+            trailers = []
+            if conv_uri:
+                trailers.append(f"Conversation: {conv_uri}")
+            for r in refs_list:
+                trailers.append(f"Ref: {r}")
+            if trailers:
+                msg_lines.append("")
+                msg_lines.extend(trailers)
+            msg = "\n".join(msg_lines) + "\n"
+
+            run_git(
+                ["commit", "--no-verify", "--no-gpg-sign", "-F", "-"], input_data=msg
+            )
+        except BaseException:
+            run_git(["restore", "--staged", "--", *requested], check=False)
+            raise
+
+        push_committed_write(root)
+
+
+def cmd_commit(
+    subject: str,
+    body: str = "",
+    refs: list[str] | None = None,
+    conv: str | None = None,
+) -> None:
+    """Commit a logical transition with automatic project status synchronization."""
+    refs_list = refs or []
+    session = get_active_session(conv)
+    conv_uri = f"{session[0]}://{session[1]}" if session else None
+    root = get_repo_root()
+    with repo_lock(root):
+        diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+        if diff_cached.returncode == 0:
+            die("nothing staged")
+
+        pre_sync_repo(root)
+        snap = FsSnapshot(root)
+        if not has_commit_auth(root):
+            die(f"commit: committed AGENTS.md must contain {COMMIT_AUTH}")
+
+        diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
+        if diff_cached.returncode == 0:
+            die("nothing staged")
 
         staged_files = [
             f
@@ -7531,11 +8264,58 @@ def cmd_checkpoint(
             )
             if f
         ]
-        for sf in staged_files:
-            if sf and sf not in requested:
-                die(f"checkpoint: refused staged path: {sf}")
+        projects = {
+            f.split("/")[0]
+            for f in staged_files
+            if "/" in f and is_project(snap, f.split("/")[0])
+        }
+        if len(projects) > 1:
+            die("staged changes touch multiple projects")
 
-        subject = ensure_conventional_subject(subject, project_name)
+        if projects:
+            project_name = next(iter(projects))
+            require_project(snap, project_name)
+            findings = audit_workspace(root, project_name)
+            if any(f.severity in ("WARN", "FAIL") for f in findings):
+                die("doctor found errors")
+            if session:
+                scheme, c_id = session
+                for sf in staged_files:
+                    if "/tasks/" in sf and sf.endswith(".md"):
+                        p_sf = root / sf
+                        if p_sf.is_file():
+                            try:
+                                t_content = p_sf.read_text(encoding="utf-8")
+                                t_data, t_body = parse_frontmatter_for_edit(t_content)
+                                if update_task_conversation(t_data, scheme, c_id):
+                                    new_content = f"{dump_frontmatter(t_data)}{t_body}"
+                                    write_markdown(p_sf, new_content)
+                                    run_git(["add", sf])
+                            except Exception as e:
+                                print(
+                                    _tagged(
+                                        f"[WARN]  Failed to update task frontmatter: {e}",
+                                        sys.stderr,
+                                    ),
+                                    file=sys.stderr,
+                                )
+            status_porcelain = run_git(
+                ["status", "--porcelain", "--", f"{project_name}/STATUS.md"],
+                check=False,
+            ).stdout.strip()
+            if status_porcelain:
+                print(
+                    _tagged(
+                        f"[INFO]  Staging working-tree updates in {project_name}/STATUS.md",
+                        sys.stderr,
+                    ),
+                    file=sys.stderr,
+                )
+            if sync_status(snap, project_name):
+                run_git(["add", f"{project_name}/STATUS.md"])
+
+        project_for_scope = next(iter(projects)) if projects else None
+        subject = ensure_conventional_subject(subject, project_for_scope)
         wrapped_body = wrap_body(body)
         if body and wrapped_body != body:
             print(
@@ -7558,107 +8338,7 @@ def cmd_checkpoint(
         msg = "\n".join(msg_lines) + "\n"
 
         run_git(["commit", "--no-verify", "--no-gpg-sign", "-F", "-"], input_data=msg)
-    except BaseException:
-        run_git(["restore", "--staged", "--", *requested], check=False)
-        raise
-
-
-def cmd_commit(
-    subject: str,
-    body: str = "",
-    refs: list[str] | None = None,
-    conv: str | None = None,
-) -> None:
-    """Commit a logical transition with automatic project status synchronization."""
-    refs_list = refs or []
-    session = get_active_session(conv)
-    conv_uri = f"{session[0]}://{session[1]}" if session else None
-    root = get_repo_root()
-    snap = FsSnapshot(root)
-    if not has_commit_auth(root):
-        die(f"commit: committed AGENTS.md must contain {COMMIT_AUTH}")
-
-    diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
-    if diff_cached.returncode == 0:
-        die("nothing staged")
-
-    staged_files = [
-        f
-        for f in run_git(["diff", "-z", "--cached", "--name-only"]).stdout.split("\0")
-        if f
-    ]
-    projects = {
-        f.split("/")[0]
-        for f in staged_files
-        if "/" in f and is_project(snap, f.split("/")[0])
-    }
-    if len(projects) > 1:
-        die("staged changes touch multiple projects")
-
-    if projects:
-        project_name = next(iter(projects))
-        require_project(snap, project_name)
-        findings = audit_workspace(root, project_name)
-        if any(f.severity in ("WARN", "FAIL") for f in findings):
-            die("doctor found errors")
-        if session:
-            scheme, c_id = session
-            for sf in staged_files:
-                if "/tasks/" in sf and sf.endswith(".md"):
-                    p_sf = root / sf
-                    if p_sf.is_file():
-                        try:
-                            t_content = p_sf.read_text(encoding="utf-8")
-                            t_data, t_body = parse_frontmatter_for_edit(t_content)
-                            if update_task_conversation(t_data, scheme, c_id):
-                                new_content = f"{dump_frontmatter(t_data)}{t_body}"
-                                write_markdown(p_sf, new_content)
-                                run_git(["add", sf])
-                        except Exception as e:
-                            print(
-                                _tagged(
-                                    f"[WARN]  Failed to update task frontmatter: {e}",
-                                    sys.stderr,
-                                ),
-                                file=sys.stderr,
-                            )
-        status_porcelain = run_git(
-            ["status", "--porcelain", "--", f"{project_name}/STATUS.md"],
-            check=False,
-        ).stdout.strip()
-        if status_porcelain:
-            print(
-                _tagged(
-                    f"[INFO]  Staging working-tree updates in {project_name}/STATUS.md",
-                    sys.stderr,
-                ),
-                file=sys.stderr,
-            )
-        if sync_status(snap, project_name):
-            run_git(["add", f"{project_name}/STATUS.md"])
-
-    project_for_scope = next(iter(projects)) if projects else None
-    subject = ensure_conventional_subject(subject, project_for_scope)
-    wrapped_body = wrap_body(body)
-    if body and wrapped_body != body:
-        print(
-            _tagged("[WARN]  Rewrapped commit body to fit 72 characters", sys.stderr),
-            file=sys.stderr,
-        )
-    msg_lines = [subject]
-    if body:
-        msg_lines.extend(["", wrapped_body])
-    trailers = []
-    if conv_uri:
-        trailers.append(f"Conversation: {conv_uri}")
-    for r in refs_list:
-        trailers.append(f"Ref: {r}")
-    if trailers:
-        msg_lines.append("")
-        msg_lines.extend(trailers)
-    msg = "\n".join(msg_lines) + "\n"
-
-    run_git(["commit", "--no-verify", "--no-gpg-sign", "-F", "-"], input_data=msg)
+        push_committed_write(root)
 
 
 # ===========================================================================
@@ -8203,6 +8883,24 @@ class McpReader:
         parent = self.git("rev-parse", "--verify", f"{sha}^").stdout.strip()
         bare = self.git("rev-parse", "--is-bare-repository").stdout.strip() == "true"
         if not bare:
+            git_dir = resolve_git_dir(cfg.repo)
+            for marker, label in (
+                ("rebase-merge", "rebase"),
+                ("rebase-apply", "rebase"),
+                ("MERGE_HEAD", "merge"),
+                ("CHERRY_PICK_HEAD", "cherry-pick"),
+                ("REVERT_HEAD", "revert"),
+            ):
+                if (git_dir / marker).exists():
+                    raise McpToolError(
+                        f"the checkout has a git {label} in progress; finish or "
+                        "abort it first. Nothing was written"
+                    )
+            if self.git("ls-files", "-u").stdout.strip():
+                raise McpToolError(
+                    "the checkout has unmerged files; resolve conflicts first. "
+                    "Nothing was written"
+                )
             head = self.git("symbolic-ref", "--quiet", "HEAD").stdout.strip()
             if head != ref:
                 raise McpToolError(
@@ -9399,15 +10097,21 @@ class McpServer:
         event.args = mcp_log_args(args)
         with self.lock:
             try:
-                if tool.writes:
-                    result = self.write(tool, args)
-                    sha = result["as_of"]["commit"]
-                else:
-                    sha, stale = self.reader.resolve_for_read(args.get("at"))
-                    snap, committed = self.reader.snapshot(sha)
-                    result = tool.handler(
-                        McpRead(self.reader, snap, committed, stale), args
-                    )
+                lock_ctx = (
+                    repo_lock(self.reader.cfg.repo, mcp_mode=True)
+                    if self.reader.cfg.local
+                    else contextlib.nullcontext()
+                )
+                with lock_ctx:
+                    if tool.writes:
+                        result = self.write(tool, args)
+                        sha = result["as_of"]["commit"]
+                    else:
+                        sha, stale = self.reader.resolve_for_read(args.get("at"))
+                        snap, committed = self.reader.snapshot(sha)
+                        result = tool.handler(
+                            McpRead(self.reader, snap, committed, stale), args
+                        )
             except McpToolError as e:
                 event.fail("tool-error", mcp_log_reason(str(e)))
                 return mcp_tool_error(str(e))
@@ -10415,6 +11119,7 @@ Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
                   default (~/.projects); overrides TASKGO_ROOT. Must appear
                   before COMMAND.
+  --offline       Skip remote Git fetch and push (same as AGENT_OFFLINE=1)
   --help, -h      Display this help message and exit
 
 Environment:
@@ -10479,6 +11184,13 @@ def create_parser() -> argparse.ArgumentParser:
             "Control repository to operate on (default: ~/.projects, "
             "overridden by TASKGO_ROOT); must appear before COMMAND"
         ),
+    )
+    parser.add_argument(
+        "--offline",
+        "--no-fetch",
+        dest="offline",
+        action="store_true",
+        help="Skip remote Git fetch and push (same as AGENT_OFFLINE=1)",
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -11407,6 +12119,20 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
         help="Active conversation or session ID",
     )
 
+    seen_parsers: set[int] = set()
+    for sub_name, sub_p in subparsers.choices.items():
+        if sub_name in ("mcp", "search") or id(sub_p) in seen_parsers:
+            continue
+        seen_parsers.add(id(sub_p))
+        sub_p.add_argument(
+            "--offline",
+            "--no-fetch",
+            dest="sub_offline",
+            action="store_true",
+            default=False,
+            help=argparse.SUPPRESS,
+        )
+
     return parser
 
 
@@ -11417,7 +12143,11 @@ def search_command_split(argv: list[str]) -> tuple[list[str], list[str]] | None:
         a = argv[i]
         if a in ("--root", "-R"):
             i += 2
-        elif a.startswith("--root=") or (a.startswith("-R") and len(a) > 2):
+        elif (
+            a.startswith("--root=")
+            or (a.startswith("-R") and len(a) > 2)
+            or a in ("--offline", "--no-fetch")
+        ):
             i += 1
         else:
             break
@@ -11452,6 +12182,9 @@ def main(argv: list[str] | None = None) -> None:
     global _ACTIVE_COMMAND
     _ACTIVE_COMMAND = args.command
     set_explicit_root(getattr(args, "root", None))
+    set_offline_flag(
+        bool(getattr(args, "offline", False) or getattr(args, "sub_offline", False))
+    )
 
     if search is not None:
         cmd_search(search[1])

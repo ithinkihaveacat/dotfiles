@@ -64,6 +64,7 @@ Options:
   -R, --root DIR  Operate on the control repository at DIR instead of the
                   default (~/.projects); overrides TASKGO_ROOT. Must appear
                   before COMMAND.
+  --offline       Skip remote Git fetch and push (same as AGENT_OFFLINE=1)
   --help, -h      Display this help message and exit
 
 Environment:
