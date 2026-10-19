@@ -60,6 +60,18 @@ def register(api):
         "https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai",
     )
 
+    # Cloudflare: register the skills individually; do not install Cloudflare's
+    # agent plugin (cloudflare/skills). As reviewed at plugin version 1.0.2, it
+    # holds only standard skills/ directories, which these registrations load
+    # per session, and one remote MCP server (mcp.cloudflare.com), which the cf
+    # CLI covers (install.sh --with cloudflare installs cf). It has no hooks,
+    # commands, agents or binaries, so no skill needs generating as for
+    # build-brief. Revisit if the plugin's manifests (.claude-plugin/,
+    # .codex-plugin/) add a component that cf and these skills cannot replace:
+    #   gh api repos/cloudflare/skills/contents/.claude-plugin/plugin.json \
+    #     --jq .content | base64 -d
+    # Register other skills from the repository (wrangler, durable-objects,
+    # ...) the same way when needed.
     api.register_skill(
         "remote:cloudflare",
         "https://github.com/cloudflare/skills/tree/main/skills/cloudflare",
