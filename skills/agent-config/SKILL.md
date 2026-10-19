@@ -304,8 +304,8 @@ rules and tools (a contradiction, a stale flag or path, a misbehaving tool) as
 it works. The Claude Code plugin adds an always-on rule, a pre-approved
 `mcp__andon__pull` tool, a status-line count, and a `/andon` board. Every
 session writes to one store, `${XDG_STATE_HOME:-~/.local/state}/andon`, through
-`scripts/andon`. See [plugins/andon/README.md](plugins/andon/README.md) for the
-design.
+the `andon` CLI (`scripts/andon`, symlinked in `bin/`). See
+[plugins/andon/README.md](plugins/andon/README.md) for the design.
 
 **Claude Code:** install it once, from a terminal, at user scope. It then loads
 in terminal and desktop Code tab sessions alike. The desktop app's + → Plugins
@@ -342,18 +342,30 @@ Triage with the CLI:
 
 ```bash
 # Open alerts from every session, newest first, with recurrence counts
-scripts/andon list
+andon list
 
 # A Markdown fix prompt that ends with the command that resolves the alert
-scripts/andon prompt e790 | claude -p
+andon prompt e790 | claude -p
 
 # Close every alert that shares the fingerprint
-scripts/andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
+andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
 ```
 
 ______________________________________________________________________
 
 ## Usage Examples
+
+### Setting Up a Workspace (Recommended for new workspaces)
+
+Install the required hooks (`hook`, from the `workspace-tools` skill), the
+default skills, and the pre-approvals for their safe commands, as a fresh
+`git clone` does:
+
+```bash
+hook apply
+skill add --defaults
+permission apply
+```
 
 ### Targeted Discovery
 

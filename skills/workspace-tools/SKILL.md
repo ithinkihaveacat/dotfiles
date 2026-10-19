@@ -268,22 +268,6 @@ Adding a tool to the repository's own dependency files (`Gemfile`,
 `package.json`, `pyproject.toml`) is a repository change: suggest it rather than
 making it unasked.
 
-______________________________________________________________________
-
-## Usage Examples
-
-### Setting Up a Workspace (Recommended for new workspaces)
-
-Install the required hooks, then (with the `agent-config` skill's tools) the
-default skills and the pre-approvals for their safe commands, as a fresh
-`git clone` does:
-
-```bash
-hook apply
-skill add --defaults
-permission apply
-```
-
 ## Reference Material
 
 - **[Command Index](references/command-index.md)** — Detailed synopsis, options,
