@@ -3,14 +3,16 @@ name: agent-config
 description: >-
   Configures, governs and inspects coding agents: which skills each agent sees
   in a workspace, a single session, or user-wide, and the defaults every
-  workspace gets (skill); which commands and directories Claude Code, Codex, and
-  Antigravity may use, including the safe commands skills declare (permission).
-  Use when installing, removing, choosing, bundling, or auditing agent skills;
-  adding per-session or default skills; granting, restricting, or debugging
-  agent command or directory permissions; or writing a skill's
-  permissions/unsafe file.
+  workspace gets (skill); which commands and directories Claude Code, Codex,
+  and Antigravity may use, including the safe commands skills declare
+  (permission); and the defects agents report in their own instructions,
+  skills and tools (andon). Use when installing, removing, choosing, bundling,
+  or auditing agent skills; adding per-session or default skills; granting,
+  restricting, or debugging agent command or directory permissions; writing a
+  skill's permissions/unsafe file; or installing the Andon plugin for Claude
+  Code or OpenCode and triaging Andon alerts.
 compatibility: >-
-  Requires git and python3. Optional: uv, claude, codex, or agy.
+  Requires git and python3. Optional: uv, claude, codex, agy, or opencode.
 ---
 
 # Agent Config
@@ -29,6 +31,9 @@ they see, what they may do, and what they are told. It consists of:
    every detected local agent (workspace-local for Claude Code and Codex,
    user-wide for Antigravity), including pre-approving the safe commands
    declared by installed skills.
+1. **`andon`**: The Andon cord. Records and triages defects agents report in
+   their own instructions, skills, rules and tools, through harness plugins for
+   Claude Code and OpenCode (`plugins/andon`).
 
 For Git repositories, `skill add --defaults` and `permission apply` run
 automatically on `git clone` via the global template's post-checkout hook (with
@@ -286,6 +291,68 @@ See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 
+## Agent Plugins (`andon`)
+
+`plugins/` holds harness plugins, one directory per plugin with one subdirectory
+per agent harness. `plugins/.claude-plugin/marketplace.json` makes it a Claude
+Code marketplace.
+
+### andon
+
+The Andon cord lets an agent report defects in its own instructions, skills,
+rules and tools (a contradiction, a stale flag or path, a misbehaving tool) as
+it works. The Claude Code plugin adds an always-on rule, a pre-approved
+`mcp__andon__pull` tool, a status-line count, and a `/andon` board. Every
+session writes to one store, `${XDG_STATE_HOME:-~/.local/state}/andon`, through
+`scripts/andon`. See [plugins/andon/README.md](plugins/andon/README.md) for the
+design.
+
+**Claude Code:** install it once, from a terminal, at user scope. It then loads
+in terminal and desktop Code tab sessions alike. The desktop app's + → Plugins
+menu manages plugins, but adding this local-folder marketplace needs the
+terminal:
+
+```bash
+claude plugin install andon --marketplace ~/.dotfiles/skills/agent-config/plugins
+```
+
+The plugin is read from this folder, so `/reload-plugins` picks up edits. In a
+session, start a message with "andon level 5" or run `/andon level 5` to set the
+trigger level for that conversation. `/andon level 4 --save` changes the default
+for every session.
+
+**OpenCode V2:** install from this checkout without editing JSON by linking it
+into the auto-discovered global plugins directory:
+
+```bash
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
+ln -sn "$HOME/.dotfiles/skills/agent-config/plugins/andon/opencode" \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/andon"
+```
+
+If the destination already exists, inspect it first rather than replacing it.
+Restart OpenCode if it does not pick up the link automatically. OpenCode's
+`plugin add` command installs npm/Git packages, not local directories; the link
+keeps this adapter beside its shared CLI. See
+[OpenCode installation and usage](plugins/andon/opencode/README.md) for JSON
+configuration alternatives and remote connections. Both harnesses share the
+alert store and saved default level.
+
+Triage with the CLI:
+
+```bash
+# Open alerts from every session, newest first, with recurrence counts
+scripts/andon list
+
+# A Markdown fix prompt that ends with the command that resolves the alert
+scripts/andon prompt e790 | claude -p
+
+# Close every alert that shares the fingerprint
+scripts/andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
+```
+
+______________________________________________________________________
+
 ## Usage Examples
 
 ### Targeted Discovery
@@ -396,6 +463,8 @@ permission clean
 ## Reference Material
 
 - **[Command Index](references/command-index.md)** — Detailed synopsis, options,
-  and examples for `skill` and `permission`.
+  and examples for `skill`, `permission` and `andon`.
+- **[Andon plugin design](plugins/andon/README.md)** — How the Claude Code and
+  OpenCode adapters share the `andon` store.
 - **[The agent-config model](references/model.md)** — Scopes, link provenance,
   who seeds the defaults, and what `doctor` checks.

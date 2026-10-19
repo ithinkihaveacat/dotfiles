@@ -11,7 +11,7 @@ plugin into OpenCode's auto-discovered global plugins directory:
 
 ```sh
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
-ln -sn "$HOME/.dotfiles/skills/agent-tools/plugins/andon/opencode" \
+ln -sn "$HOME/.dotfiles/skills/agent-config/plugins/andon/opencode" \
   "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/andon"
 ```
 
@@ -33,7 +33,7 @@ both:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["/path/to/dotfiles/skills/agent-tools/plugins/andon/opencode"],
+  "plugins": ["/path/to/dotfiles/skills/agent-config/plugins/andon/opencode"],
 }
 ```
 
@@ -150,7 +150,7 @@ npm run format:check
 From the repository root, with that Node version active:
 
 ```sh
-prove skills/agent-tools/tests/test-andon-opencode skills/agent-tools/tests/test-andon
+prove skills/agent-config/tests/test-andon-opencode skills/agent-config/tests/test-andon
 ```
 
 The default tests use temporary stores and mocked host APIs, including actual

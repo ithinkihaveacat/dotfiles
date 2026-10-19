@@ -6,6 +6,7 @@
 
 - [skill](#skill)
 - [permission](#permission)
+- [andon](#andon)
 
 ## skill
 
@@ -144,6 +145,59 @@ Agents:
                      forbidden, and the most restrictive match wins. 'allow'
                      also runs the command outside the Codex sandbox without
                      prompting, a stronger grant than the other agents give.
+```
+
+<!-- /generated -->
+
+## andon
+
+The store and triage CLI behind the Andon plugin (`plugins/andon/claude`).
+Agents pull the cord through the plugin's native tool; people and fix sessions
+use this command to list, inspect, resolve and dismiss alerts.
+
+### Help
+
+<!-- generated: ../scripts/andon --help -->
+
+```text
+usage: andon [-h] COMMAND ...
+
+Record and triage Andon alerts: defects agents report in their own instructions, skills and tools.
+
+positional arguments:
+  COMMAND
+    pull            Pull the cord: record a new alert
+    list            List alerts, newest first
+    show            Show one alert in full
+    prompt          Print a Markdown fix prompt that ends by resolving the
+                    alert
+    resolve         Mark an alert resolved
+    dismiss         Mark an alert dismissed (not a real defect)
+    reopen          Reopen a resolved or dismissed alert
+    stats           Count alerts by status, color, kind, source and
+                    fingerprint
+    level           Print or set the default trigger level
+    clear-resolved  Delete every resolved and dismissed alert
+
+options:
+  -h, --help        show this help message and exit
+
+Examples:
+  andon list --color red
+  andon show e790
+  andon resolve e790 --all-matching --note "Fixed the script path in SKILL.md"
+
+  # Hand an alert to a fresh agent, which fixes the source and resolves it
+  andon prompt e790 | claude -p
+
+Agents pull the cord through their harness integration (a native tool), not
+this command. Alerts live in $ANDON_STATE_DIR, else
+${XDG_STATE_HOME:-~/.local/state}/andon. Reads never take the store's lock, so
+list, show, prompt and stats work from a read-only sandbox.
+
+Environment:
+  ANDON_STATE_DIR  Directory holding events.jsonl and config.json.
+  ANDON_LEVEL      Default trigger level (1-5); overrides 'andon level'.
 ```
 
 <!-- /generated -->
