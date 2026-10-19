@@ -30,3 +30,6 @@ unset d
 path_prepend "$HOME/.dotfiles/bin"
 
 export PATH
+
+# Turn off Cloudflare cf CLI telemetry, as fish/config.fish does.
+export CF_SEND_TELEMETRY=0

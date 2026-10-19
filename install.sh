@@ -87,6 +87,7 @@ FEATURES=(
   'uv|workstation cloud ci|Install uv if missing; prefetch what scripts fetch on first use'
   'vscode|workstation|Link VS Code settings'
   'npm|workstation|Set the npm global prefix; a per-user Node.js where the distribution'"'"'s is too old'
+  'cloudflare|-|Cloudflare'"'"'s cf CLI (beta) from npm, with its telemetry off'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
   'agents|workstation|Link agent context and hooks, and synchronize permissions'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
@@ -1251,6 +1252,12 @@ function feature_upgrades {
     sync_node_default upgrade || echo "warning: node upgrade failed" >&2
   fi
 
+  # Only packages a feature installed; the cloudflare feature installs cf.
+  if exists npm && [ -x "$NPM_PREFIX/bin/cf" ]; then
+    heading "npm upgrade"
+    x npm install -g --prefix "$NPM_PREFIX" cf@latest || echo "warning: cf upgrade failed" >&2
+  fi
+
   if exists uv; then
     heading "uv upgrade"
     # `uv self update` only works for the standalone installer; a uv provided
@@ -1577,6 +1584,40 @@ function feature_npm {
   x npm config set prefix "$NPM_PREFIX"
   # Global commands land here; the shells put it on PATH only if it exists.
   xmkdir "$NPM_PREFIX/bin"
+}
+
+# cloudflare: Cloudflare's cf CLI, a global npm package in the shared prefix
+# (kept current by the upgrades feature). Its guidance is the cf-cli skill,
+# added per session or workspace with 'skill add cf-cli', not installed here.
+# The workerd postinstall stays blocked: cf's local runtime (cf dev) is not
+# used, and it cannot run on some hosts (a Raspberry Pi 4's 39-bit VA).
+function feature_cloudflare {
+  local major
+
+  heading "cloudflare"
+
+  if ! exists npm; then
+    echo "$(basename "$0"): cloudflare: npm not found; run the npm feature first" >&2
+    return 1
+  fi
+  # cf requires Node.js 22.18 or later.
+  major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null) || major=0
+  if [ "${major:-0}" -lt 22 ]; then
+    echo "$(basename "$0"): cloudflare: cf needs Node.js 22 or later (found $(node --version 2>/dev/null || echo none))" >&2
+    return 1
+  fi
+
+  if ! exists cf; then
+    if is_offline; then
+      skip_offline "cloudflare"
+      return 0
+    fi
+    x npm install -g --prefix "$NPM_PREFIX" cf || return 1
+  fi
+
+  # The shells also set CF_SEND_TELEMETRY=0; this covers processes that do not
+  # start from them.
+  x env CF_SEND_TELEMETRY=0 cf cli telemetry disable >/dev/null
 }
 
 # Download installer script $1 and run it with the remaining arguments. Unlike

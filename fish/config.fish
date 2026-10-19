@@ -20,6 +20,9 @@ set -gx COMPOSE_AI_TOOLS true
 # (https://github.com/yschimke/skills/issues/108). Revert once fixed upstream.
 set -gx MODIFY_PATH 0
 
+# Turn off Cloudflare cf CLI telemetry. home/.bashrc sets it for 'ssh host cmd'.
+set -gx CF_SEND_TELEMETRY 0
+
 # personal config
 
 set -x GITROOT "git@github.com:ithinkihaveacat"
