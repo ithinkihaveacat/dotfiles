@@ -53,9 +53,10 @@ coding standards, planning award flights, and more.
 
 More specialised skills: [`android-testing`](skills/android-testing/) (system
 state and connectivity testing on phone and Wear OS),
-[`wear-widget`](skills/wear-widget/) (reverse-engineering widgets), and
-[`workspace-tools`](skills/workspace-tools/) (skill selection and agent tool
-permissions). Personal-workflow skills live here too:
+[`wear-widget`](skills/wear-widget/) (reverse-engineering widgets),
+[`agent-config`](skills/agent-config/) (skill selection, agent tool permissions
+and Andon alerts), and [`workspace-tools`](skills/workspace-tools/) (runtimes,
+`.envrc` blocks and git hooks). Personal-workflow skills live here too:
 [`agent-review`](skills/agent-review/), [`taskgo`](skills/taskgo/),
 [`technical-writing`](skills/technical-writing/), and
 [`travel`](skills/travel/).
@@ -215,7 +216,7 @@ envrc create uv        # layout uv (creates and activates .venv)
 Ruby builds need the `ruby-build` toolchain and its build dependencies, which
 install with `install.sh --with ruby`. The installers live in the
 `workspace-tools` skill; its
-[Runtime Versions](skills/workspace-tools/SKILL.md#runtime-versions-node-install-ruby-install-python-install)
+[Language Environments](skills/workspace-tools/SKILL.md#language-environments-node-install-ruby-install-python-install)
 section covers the full workflow, including diagnosing a project that runs on
 the wrong version.
 

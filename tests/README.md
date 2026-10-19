@@ -50,13 +50,13 @@ prove skills/coding-standards/tests/test-*
 You can run a single test file using `prove`:
 
 ```bash
-prove skills/workspace-tools/tests/test-permission
+prove skills/agent-config/tests/test-permission
 ```
 
 Or execute the test script directly:
 
 ```bash
-./skills/workspace-tools/tests/test-permission
+./skills/agent-config/tests/test-permission
 ```
 
 ## Offline & Isolated Environments
