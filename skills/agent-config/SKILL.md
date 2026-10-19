@@ -5,12 +5,14 @@ description: >-
   in a workspace, a single session, or user-wide, and the defaults every
   workspace gets (skill); which commands and directories Claude Code, Codex,
   and Antigravity may use, including the safe commands skills declare
-  (permission); and the defects agents report in their own instructions,
-  skills and tools (andon). Use when installing, removing, choosing, bundling,
-  or auditing agent skills; adding per-session or default skills; granting,
-  restricting, or debugging agent command or directory permissions; writing a
-  skill's permissions/unsafe file; or installing the Andon plugin for Claude
-  Code or OpenCode and triaging Andon alerts.
+  (permission); which MCP servers Claude Code, Codex and OpenCode connect to
+  (mcp); and the defects agents report in their own instructions, skills and
+  tools (andon). Use when installing, removing, choosing, bundling, or auditing
+  agent skills; adding per-session or default skills; granting, restricting,
+  or debugging agent command or directory permissions; writing a skill's
+  permissions/unsafe file; listing, adding, removing, or checking MCP servers
+  across agents; or installing the Andon plugin for Claude Code or OpenCode and
+  triaging Andon alerts.
 compatibility: >-
   Requires git and python3. Optional: uv, claude, codex, agy, or opencode.
 ---
@@ -31,6 +33,9 @@ they see, what they may do, and what they are told. It consists of:
    every detected local agent (workspace-local for Claude Code and Codex,
    user-wide for Antigravity), including pre-approving the safe commands
    declared by installed skills.
+1. **`mcp`**: The MCP server manager. Lists, adds, removes and checks the MCP
+   servers each installed agent (Claude Code, Codex, OpenCode) is configured
+   with, user-wide or for the workspace, through each agent's own CLI.
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code and OpenCode (`plugins/andon`).
@@ -291,6 +296,55 @@ See the [Command Index](references/command-index.md) for full help details.
 
 ______________________________________________________________________
 
+## Managing MCP Servers (`mcp`)
+
+The `mcp` tool (symlinked in `bin/`) gives one view of the MCP servers that
+Claude Code (`claude`), Codex (`codex`) and OpenCode (`opencode`) are configured
+with, and adds or removes a server across all of them at once. By default every
+command operates on each installed agent; use `--agent NAME` to scope to one.
+
+```bash
+mcp <command> [options] [arguments]
+```
+
+- **`list`** (alias: **`ls`**): One row per agent, scope and server, with the
+  transport and the command or URL. `--json` for scripts. Environment variables
+  and headers are listed by name only.
+- **`add NAME URL`** / **`add NAME -- COMMAND [ARG...]`**: Add a remote
+  (streamable HTTP) or local (stdio) server, with `--env KEY=VALUE` (stdio) or
+  `--header 'NAME: VALUE'` (remote), both repeatable. An agent that already has
+  the server in the scope is skipped. The values are written as given, so pass
+  secrets the way the agent expects them (for example OpenCode's `{env:NAME}`),
+  not as literals, if the config should not hold them.
+- **`remove NAME...`** (alias: **`rm`**): Remove servers from every agent that
+  has them in the scope.
+- **`doctor`**: Check that each config file parses, each stdio command resolves,
+  each URL is an absolute http(s) URL, and each agent's CLI is on `PATH`
+  (read-only; exits non-zero on problems).
+
+Scopes (`--scope`; `add` and `remove` default to `user`, `list` and `doctor`
+read both):
+
+- **`user`**: `mcpServers` in `~/.claude.json`, `~/.codex/config.toml`, and
+  `~/.config/opencode/opencode.json(c)`.
+- **`workspace`**: Claude Code's local scope (the repository's entry in
+  `~/.claude.json`, where `add` writes) and its shared `.mcp.json`; OpenCode's
+  `opencode.json(c)` or `.opencode/opencode.json(c)` at the repository root.
+  Codex has no workspace scope: `codex mcp` writes only to
+  `~/.codex/config.toml`.
+
+`add` and `remove` run each agent's own CLI (`claude mcp`, `codex mcp`,
+`opencode mcp add`), so the agents' own validation and file handling apply.
+OpenCode has no remove command, so `mcp remove` edits its config file and keeps
+the file's comments. `add` does not log in to servers that use OAuth; finish
+with the agent's own login (`/mcp` in Claude Code, `codex mcp login NAME`,
+`opencode mcp auth NAME`). `add` and `remove` are declared in
+`permissions/unsafe`, since they change which tools an agent has.
+
+See the [Command Index](references/command-index.md) for full help details.
+
+______________________________________________________________________
+
 ## Agent Plugins (`andon`)
 
 `plugins/` holds harness plugins, one directory per plugin with one subdirectory
@@ -462,6 +516,7 @@ permission list                           # list commands and paths
 ```bash
 skill doctor          # broken links and exclude drift (read-only)
 permission doctor     # missing pre-approvals (read-only)
+mcp doctor            # unparsable configs, missing commands, bad URLs
 skill add --defaults  # link the defaults and remove broken default links
 ```
 
@@ -481,7 +536,7 @@ permission clean
 ## Reference Material
 
 - **[Command Index](references/command-index.md)** — Detailed synopsis, options,
-  and examples for `skill`, `permission` and `andon`.
+  and examples for `skill`, `permission`, `mcp` and `andon`.
 - **[Andon plugin design](plugins/andon/README.md)** — How the Claude Code and
   OpenCode adapters share the `andon` store.
 - **[The agent-config model](references/model.md)** — Scopes, link provenance,

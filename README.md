@@ -54,10 +54,10 @@ coding standards, planning award flights, and more.
 More specialised skills: [`android-testing`](skills/android-testing/) (system
 state and connectivity testing on phone and Wear OS),
 [`wear-widget`](skills/wear-widget/) (reverse-engineering widgets),
-[`agent-config`](skills/agent-config/) (skill selection, agent tool permissions
-and Andon alerts), and [`workspace-tools`](skills/workspace-tools/) (runtimes,
-`.envrc` blocks and git hooks). Personal-workflow skills live here too:
-[`agent-review`](skills/agent-review/), [`taskgo`](skills/taskgo/),
+[`agent-config`](skills/agent-config/) (skill selection, agent tool permissions,
+MCP servers and Andon alerts), and [`workspace-tools`](skills/workspace-tools/)
+(runtimes, `.envrc` blocks and git hooks). Personal-workflow skills live here
+too: [`agent-review`](skills/agent-review/), [`taskgo`](skills/taskgo/),
 [`technical-writing`](skills/technical-writing/), and
 [`travel`](skills/travel/).
 

@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${TEST_DIR}/../scripts/mcp"
+
+echo "1..33"
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf -- "$TMPDIR"' EXIT
+TMPDIR=$(cd -P "$TMPDIR" && pwd)
+
+# Isolate PATH: mock agent CLIs log their working directory and arguments
+# instead of touching any real configuration.
+MOCK_BIN="${TMPDIR}/bin"
+mkdir -p "$MOCK_BIN"
+UV_PATH=$(type -p uv || echo "")
+for candidate in "$HOME/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
+  [[ -z "$UV_PATH" && -x "$candidate" ]] && UV_PATH="$candidate"
+done
+[[ -n "$UV_PATH" ]] && ln -sf "$UV_PATH" "$MOCK_BIN/uv"
+GIT_PATH=$(type -p git || echo "")
+[[ -n "$GIT_PATH" ]] && ln -sf "$GIT_PATH" "$MOCK_BIN/git"
+export MOCK_LOG="${TMPDIR}/calls.log"
+for agent in claude codex opencode; do
+  cat >"$MOCK_BIN/$agent" <<'EOF'
+#!/bin/sh
+printf '%s|%s|%s\n' "$(basename "$0")" "$(pwd -P)" "$*" >>"$MOCK_LOG"
+if [ -n "${MOCK_FAIL:-}" ]; then
+  echo "mock failure" >&2
+  exit 3
+fi
+EOF
+  chmod +x "$MOCK_BIN/$agent"
+done
+# Like codex for a server with OAuth: save the entry, then wait on a login.
+cat >>"$MOCK_BIN/codex" <<'EOF'
+if [ -n "${MOCK_CODEX_OAUTH:-}" ] && [ "$2" = add ]; then
+  printf '[mcp_servers.%s]\nurl = "%s"\n' "$3" "$5" >>"$CODEX_HOME/config.toml"
+  echo "Added global MCP server '$3'."
+  echo "Detected OAuth support. Starting OAuth flow..."
+  exec sleep 300
+fi
+EOF
+# A stdio server command that doctor can resolve.
+printf '#!/bin/sh\n' >"$MOCK_BIN/good-server"
+chmod +x "$MOCK_BIN/good-server"
+export PATH="$MOCK_BIN:/bin:/usr/bin"
+
+ORIGINAL_UV_CACHE="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+export HOME="${TMPDIR}/home"
+export UV_CACHE_DIR="$ORIGINAL_UV_CACHE"
+unset CLAUDE_CONFIG_DIR NO_COLOR FORCE_COLOR MOCK_FAIL
+export CODEX_HOME="${HOME}/.codex"
+export XDG_CONFIG_HOME="${HOME}/.config"
+mkdir -p "$HOME"
+
+WS="${TMPDIR}/ws"
+mkdir -p "$WS/sub"
+git -C "$WS" init -q
+
+write_fixtures() {
+  rm -rf "$CODEX_HOME" "$XDG_CONFIG_HOME/opencode" "$WS/.mcp.json" "$WS/opencode.json" "$WS/.opencode"
+  mkdir -p "$CODEX_HOME" "$XDG_CONFIG_HOME/opencode" "$WS/.opencode"
+  cat >"$HOME/.claude.json" <<EOF
+{
+  "mcpServers": {
+    "ctx": {"type": "http", "url": "https://mcp.example.com/ctx", "headers": {"Authorization": "Bearer sekrit-header"}},
+    "local-tool": {"type": "stdio", "command": "good-server", "args": ["--flag"], "env": {"API_KEY": "sekrit-env"}}
+  },
+  "projects": {
+    "$WS": {"mcpServers": {"wsonly": {"type": "stdio", "command": "good-server", "args": []}}}
+  }
+}
+EOF
+  printf '{"mcpServers": {"shared": {"command": "good-server"}}}\n' >"$WS/.mcp.json"
+  cat >"$CODEX_HOME/config.toml" <<'EOF'
+model = "o3"
+
+[mcp_servers.ctx]
+url = "https://mcp.example.com/ctx"
+bearer_token_env_var = "CTX_TOKEN"
+
+[mcp_servers.everything]
+command = "good-server"
+args = ["-y"]
+env = { LOG_LEVEL = "info" }
+EOF
+  cat >"$XDG_CONFIG_HOME/opencode/opencode.jsonc" <<'EOF'
+{
+  // user settings
+  "theme": "dark",
+  "mcp": {
+    "servers": {
+      // the docs server
+      "ctx": { "type": "remote", "url": "https://mcp.example.com/ctx" },
+      "middle": { "type": "local", "command": ["good-server"] },
+      "last": { "type": "local", "command": ["good-server", "x"], "environment": { "T": "{env:T}" } },
+    },
+  },
+}
+EOF
+  printf '{\n  "mcp": {\n    "servers": {\n      "only": {"type": "remote", "url": "https://only.example.com/mcp"}\n    }\n  }\n}\n' >"$WS/.opencode/opencode.json"
+  : >"$MOCK_LOG"
+}
+
+out="" err="" status=0
+run() {
+  status=0
+  out=$(cd "${RUN_DIR:-$WS}" && uv run --quiet "$SCRIPT" "$@" 2>"$TMPDIR/err") || status=$?
+  err=$(<"$TMPDIR/err")
+}
+
+n=0
+pass() {
+  n=$((n + 1))
+  echo "ok $n - $1"
+}
+fail() {
+  n=$((n + 1))
+  echo "not ok $n - $1"
+  printf 'status=%s\nout: %s\nerr: %s\ncalls: %s\n' "$status" "$out" "$err" "$(cat "$MOCK_LOG")" | sed 's/^/# /'
+}
+
+calls() { cat "$MOCK_LOG"; }
+
+write_fixtures
+
+# --- Help and usage ---------------------------------------------------------
+
+run
+if [[ $status -eq 0 && "$out" == *"Usage: mcp <command>"* ]]; then pass "[help] bare invocation prints help and exits 0"; else fail "[help] bare invocation prints help and exits 0"; fi
+
+run add -h
+if [[ $status -eq 0 && "$out" == *"Usage: mcp add [options] NAME URL"* ]]; then pass "[help] -h on a subcommand prints its help"; else fail "[help] -h on a subcommand prints its help"; fi
+
+run frobnicate
+if [[ $status -eq 1 && "$err" == *"unknown command"* ]]; then pass "[usage] unknown command exits 1"; else fail "[usage] unknown command exits 1"; fi
+
+run add
+if [[ $status -eq 1 && "$err" == *"Examples:"* && "$err" == *"--help"* ]]; then pass "[usage] add without arguments prints a short usage and exits 1"; else fail "[usage] add without arguments prints a short usage and exits 1"; fi
+
+run add "bad name" https://e.example.com
+if [[ $status -eq 1 && "$err" == *"invalid server name"* ]]; then pass "[usage] add refuses an invalid name"; else fail "[usage] add refuses an invalid name"; fi
+
+run add x --env A=1 https://e.example.com/mcp
+if [[ $status -eq 1 && "$err" == *"--env applies only"* && ! -s "$MOCK_LOG" ]]; then pass "[usage] add refuses --env for a remote server"; else fail "[usage] add refuses --env for a remote server"; fi
+
+run add x https://e.example.com/mcp -- good-server
+if [[ $status -eq 1 && "$err" == *"not both"* ]]; then pass "[usage] add refuses both URL and COMMAND"; else fail "[usage] add refuses both URL and COMMAND"; fi
+
+run list --agent nope
+if [[ $status -eq 1 && "$err" == *"unknown agent"* ]]; then pass "[usage] unknown agent exits 1"; else fail "[usage] unknown agent exits 1"; fi
+
+run list --scope session
+if [[ $status -eq 1 && "$err" == *"unknown scope"* ]]; then pass "[usage] unknown scope exits 1"; else fail "[usage] unknown scope exits 1"; fi
+
+# --- list -------------------------------------------------------------------
+
+RUN_DIR="$WS/sub" run list
+if [[ $status -eq 0 && "$out" == *"claude    user       ctx"* && "$out" == *"wsonly"* && "$out" == *"shared"* && "$out" == *"codex     user       everything"* && "$out" == *"opencode  workspace  only"* && "$out" == *"good-server x"* ]]; then pass "[list] shows every agent's user and workspace servers"; else fail "[list] shows every agent's user and workspace servers"; fi
+
+run list --json
+if [[ $status -eq 0 && "$out" == *"\"API_KEY\""* && "$out" == *"\"Authorization\""* && "$out" != *sekrit* ]]; then pass "[list] --json names env and headers without their values"; else fail "[list] --json names env and headers without their values"; fi
+
+run list --scope user --agent opencode
+if [[ $status -eq 0 && "$out" == *"middle"* && "$out" != *"only"* && "$out" != *"claude"* ]]; then pass "[list] --scope and --agent narrow the listing"; else fail "[list] --scope and --agent narrow the listing"; fi
+
+# --- add --------------------------------------------------------------------
+
+write_fixtures
+RUN_DIR="$WS/sub" run add docs https://docs.example.com/mcp
+if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp add -s user -t http docs https://docs.example.com/mcp"* && "$(calls)" == *"codex|$WS|mcp add docs --url https://docs.example.com/mcp"* && "$(calls)" == *"opencode|$WS|mcp add --global docs --url https://docs.example.com/mcp"* ]]; then pass "[add] remote server goes to every agent's user scope"; else fail "[add] remote server goes to every agent's user scope"; fi
+if [[ "$err" == *"claude: added docs (user)"* && "$err" == *"opencode: added docs (user)"* ]]; then pass "[add] reports each agent git-style on stderr"; else fail "[add] reports each agent git-style on stderr"; fi
+
+write_fixtures
+run add docs https://docs.example.com/mcp --header "X-Api-Key: abc"
+if [[ $status -eq 1 && "$err" == *"cannot set HTTP headers"* && ! -s "$MOCK_LOG" ]]; then pass "[add] a header codex cannot take changes no agent"; else fail "[add] a header codex cannot take changes no agent"; fi
+
+write_fixtures
+run add --agent opencode -H "X-Api-Key: a=b" docs https://docs.example.com/mcp
+if [[ $status -eq 0 && "$(calls)" == "opencode|$WS|mcp add --global docs --url https://docs.example.com/mcp --header X-Api-Key=a=b" ]]; then pass "[add] headers are passed to opencode as NAME=VALUE"; else fail "[add] headers are passed to opencode as NAME=VALUE"; fi
+
+write_fixtures
+RUN_DIR="$WS/sub" run add --scope workspace -e A=1 tool -- good-server --flag
+if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp add -s local tool --env A=1 -- good-server --flag"* && "$(calls)" == *"opencode|$WS|mcp add tool --env A=1 -- good-server --flag"* && "$(calls)" != *codex* && "$err" == *"codex: no workspace scope, skipped"* ]]; then pass "[add] workspace stdio server: claude local, opencode project, codex skipped"; else fail "[add] workspace stdio server: claude local, opencode project, codex skipped"; fi
+
+write_fixtures
+run add ctx https://mcp.example.com/ctx
+if [[ $status -eq 0 && ! -s "$MOCK_LOG" && "$err" == *"claude: ctx already in ~/.claude.json, skipped"* ]]; then pass "[add] skips agents that already have the server"; else fail "[add] skips agents that already have the server"; fi
+
+write_fixtures
+MOCK_FAIL=1 run add --agent codex newone https://n.example.com/mcp
+if [[ $status -eq 1 && "$err" == *"exited with status 3: mock failure"* ]]; then pass "[add] a failing agent CLI exits 1 with its message"; else fail "[add] a failing agent CLI exits 1 with its message"; fi
+
+write_fixtures
+MOCK_CODEX_OAUTH=1 run add --agent codex oauthy https://o.example.com/mcp
+if [[ $status -eq 0 && "$err" == *"codex mcp login oauthy"* && "$err" == *"codex: added oauthy (user)"* ]]; then pass "[add] codex's OAuth login is skipped once the server is saved"; else fail "[add] codex's OAuth login is skipped once the server is saved"; fi
+
+run add --agent codex --scope workspace x -- good-server
+if [[ $status -eq 1 && "$err" == *"codex has no workspace scope"* ]]; then pass "[add] --agent codex --scope workspace is refused"; else fail "[add] --agent codex --scope workspace is refused"; fi
+
+write_fixtures
+mkdir -p "$TMPDIR/nobin"
+ln -sf "$UV_PATH" "$TMPDIR/nobin/uv"
+status=0
+out=$(cd "$WS" && PATH="$TMPDIR/nobin:/bin:/usr/bin" "$UV_PATH" run --quiet "$SCRIPT" add --agent claude x -- good-server 2>"$TMPDIR/err") || status=$?
+err=$(<"$TMPDIR/err")
+if [[ $status -eq 127 && "$err" == *"claude not found"* ]]; then pass "[add] a missing agent CLI exits 127"; else fail "[add] a missing agent CLI exits 127"; fi
+
+# --- remove -----------------------------------------------------------------
+
+write_fixtures
+run remove ctx
+if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp remove -s user ctx"* && "$(calls)" == *"codex|$WS|mcp remove ctx"* ]]; then pass "[remove] runs claude and codex remove for the user scope"; else fail "[remove] runs claude and codex remove for the user scope"; fi
+OC_USER="$XDG_CONFIG_HOME/opencode/opencode.jsonc"
+if [[ "$(<"$OC_USER")" != *"\"ctx\""* && "$(<"$OC_USER")" == *"// user settings"* && "$(<"$OC_USER")" == *"\"middle\""* && "$err" == *"opencode: removed ctx from ~/.config/opencode/opencode.jsonc"* ]]; then pass "[remove] edits opencode's JSONC and keeps its comments"; else fail "[remove] edits opencode's JSONC and keeps its comments"; fi
+
+run rm --agent opencode last
+if [[ $status -eq 0 && "$(<"$OC_USER")" != *"\"last\""* ]]; then pass "[remove] removing the last member leaves valid JSONC"; else fail "[remove] removing the last member leaves valid JSONC"; fi
+run list --agent opencode --scope user --json
+if [[ $status -eq 0 && "$out" == *"\"middle\""* && "$out" != *"\"last\""* ]]; then pass "[remove] the edited file still parses"; else fail "[remove] the edited file still parses"; fi
+
+run rm --agent opencode --scope workspace only
+if [[ $status -eq 0 && "$(tr -d " \n" <"$WS/.opencode/opencode.json")" == "{\"mcp\":{\"servers\":{}}}" ]]; then pass "[remove] removing the only member leaves an empty servers object"; else fail "[remove] removing the only member leaves an empty servers object"; fi
+
+write_fixtures
+run remove --scope workspace shared wsonly
+if [[ $status -eq 0 && "$(calls)" == *"claude|$WS|mcp remove -s project shared"* && "$(calls)" == *"claude|$WS|mcp remove -s local wsonly"* ]]; then pass "[remove] claude workspace removal targets the scope that holds each server"; else fail "[remove] claude workspace removal targets the scope that holds each server"; fi
+
+run remove nothing-here
+if [[ $status -eq 1 && "$err" == *"nothing-here: not found in user scope"* ]]; then pass "[remove] a server no agent has exits 1"; else fail "[remove] a server no agent has exits 1"; fi
+
+# --- doctor -----------------------------------------------------------------
+
+write_fixtures
+run doctor
+if [[ $status -eq 0 && "$out" == *"[PASS]  claude: ~/.claude.json (user): 2 servers"* && "$out" == *"[PASS]  opencode: ~/.config/opencode/opencode.jsonc (user): 3 servers"* && "$out" != *"[WARN]"* ]]; then pass "[doctor] a healthy configuration passes and exits 0"; else fail "[doctor] a healthy configuration passes and exits 0"; fi
+
+cat >"$WS/opencode.json" <<'EOF'
+{
+  "mcp": {
+    "old": { "type": "local", "command": ["good-server"] },
+    "servers": {
+      "gone": { "type": "local", "command": ["no-such-server"] },
+      "bad": { "type": "remote", "url": "ftp://x" }
+    }
+  }
+}
+EOF
+run doctor --agent opencode --scope workspace
+if [[ $status -eq 1 && "$out" == *"[WARN]  opencode: gone (workspace): command no-such-server not found on PATH"* && "$out" == *"[FAIL]  opencode: bad (workspace): URL"* && "$out" == *"[WARN]  opencode: $WS/opencode.json: servers outside mcp.servers: old"* ]]; then pass "[doctor] flags missing commands, bad URLs and legacy entries; exits 1"; else fail "[doctor] flags missing commands, bad URLs and legacy entries; exits 1"; fi
+
+printf '{ "mcp": { "servers": { ' >"$WS/opencode.json"
+run doctor --agent opencode
+if [[ $status -eq 1 && "$out" == *"[FAIL]  opencode: cannot parse"* ]]; then pass "[doctor] an unparsable file is a failure"; else fail "[doctor] an unparsable file is a failure"; fi
+
+FORCE_COLOR=1 run doctor --agent opencode
+if [[ "$out" == *$'\e[31m[FAIL]\e[0m'* ]]; then pass "[doctor] FORCE_COLOR styles the tags"; else fail "[doctor] FORCE_COLOR styles the tags"; fi
