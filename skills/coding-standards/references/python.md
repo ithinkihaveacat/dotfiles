@@ -25,9 +25,9 @@ scripts/python-format --check file.py
 
 ### Implementation Details
 
-Under the hood, `python-format` uses `ruff` (run via `uvx` for version
-consistency) to perform both linting and formatting. If you need to run `ruff`
-manually or configure editor integration, you can use:
+Under the hood, `python-format` is a `uv run --script` script with `ruff` pinned
+in its inline PEP 723 metadata to perform both linting and formatting. If you
+need to run `ruff` manually or configure editor integration, you can use:
 
 ```bash
 uvx ruff check --fix file.py
@@ -61,14 +61,27 @@ Standalone scripts must follow these naming rules:
 These rules apply to new scripts and to scripts being significantly reworked.
 Renaming an existing script solely for style is not required.
 
-Use this pattern:
+Use this pattern (declaring any third-party packages or CLI tools in
+`dependencies`):
 
 ```python
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
+# dependencies = [
+#   "ruff==0.16.0",
+# ]
 # ///
 ```
+
+Prefer a `uv run --script` Python entrypoint with pinned `dependencies` over a
+shell script that wraps `uvx`. While `uvx` is convenient for ad-hoc interactive
+one-liners, it writes lockfiles under `$XDG_DATA_HOME/uv/tools` (or resolves
+against the package index on each `--isolated` run), which fails in sandboxes
+where `~/.local` is read-only or network access is blocked. By contrast,
+`uv run --script` caches its environment under
+`$XDG_CACHE_HOME/uv/environments-v2/` and verifies installed package metadata
+locally once synced via `uv sync --script`.
 
 This guidance applies to executable script entrypoints. It does not apply to
 ordinary Python modules, packages, libraries, or non-executable Python source

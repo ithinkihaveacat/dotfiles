@@ -1,40 +1,37 @@
-#!/usr/bin/env bash
-# bash 3.2+ compatible (macOS default). Do not use bash 4+ features
-# (declare -A, readarray, ${var,,}, |&).
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "shfmt-py==4.2.0",
+#     "shellcheck-py==0.11.0.1",
+# ]
+# ///
 
 # Tests: skills/coding-standards/tests/test-shell-format
 
-set -euo pipefail
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 # shfmt and shellcheck versions enforced across the repo. Both are native
-# binaries (Go and Haskell); the PyPI wrappers below only repackage the
-# official upstream releases so that uvx can fetch and cache them on any
-# machine with uv. The wrapper versions are pinned exactly, so bumping either
-# tool is always a deliberate, reviewed change. Note that shfmt-py's version
-# does not track shfmt's: 4.2.0 bundles shfmt v3.14.1.
-SHFMT_PY_VERSION="4.2.0"
-SHELLCHECK_PY_VERSION="0.11.0.1"
-SHFMT=(uvx --from "shfmt-py==$SHFMT_PY_VERSION" shfmt -i 2 -ci)
-SHELLCHECK=(uvx --from "shellcheck-py==$SHELLCHECK_PY_VERSION" shellcheck)
+# binaries (Go and Haskell); the PyPI wrappers in the PEP 723 metadata above
+# only repackage the official upstream releases so that uv can fetch and cache
+# them on any machine. The wrapper versions are pinned exactly, so bumping
+# either tool is always a deliberate, reviewed change. Note that shfmt-py's
+# version does not track shfmt's: 4.2.0 bundles shfmt v3.14.1.
+SHFMT = ["shfmt", "-i", "2", "-ci"]
+SHELLCHECK = ["shellcheck"]
 
-require() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo >&2 "$(basename "$0"): $1 not found"
-    exit 127
-  }
-}
+SCRIPT_NAME = os.path.basename(sys.argv[0])
 
-# Verify external dependencies. Deferred until after argument parsing so that
-# --help works even when dependencies are absent.
-check_deps() {
-  require uvx
-}
 
-SCRIPT_NAME=$(basename "$0")
-
-usage() {
-  cat <<EOF
-Usage: $SCRIPT_NAME [OPTION] [PATH...]
+def usage() -> None:
+    print(
+        f"""Usage: {SCRIPT_NAME} [OPTION] [PATH...]
 
 Format and lint shell scripts using shfmt and shellcheck.
 
@@ -53,186 +50,179 @@ Options:
 Examples:
 
 # Format and lint a file in place
-  $SCRIPT_NAME script.sh
+  {SCRIPT_NAME} script.sh
 
 # Format and lint in a directory recursively
-  $SCRIPT_NAME bin/
+  {SCRIPT_NAME} bin/
 
 # Check a file for issues without modifying it
-  $SCRIPT_NAME --check script.sh
+  {SCRIPT_NAME} --check script.sh
 
 # Format reading from stdin
-  $SCRIPT_NAME < script.sh
-EOF
-}
+  {SCRIPT_NAME} < script.sh"""
+    )
 
-CHECK_MODE=0
-PATHS=()
 
-for arg in "$@"; do
-  case "$arg" in
-    --help | -h)
-      usage
-      exit 0
-      ;;
-    --check)
-      CHECK_MODE=1
-      ;;
-    -*)
-      echo "$SCRIPT_NAME: unknown option: $arg" >&2
-      exit 1
-      ;;
-    *)
-      PATHS+=("$arg")
-      ;;
-  esac
-done
+def is_shell_script(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.suffix in (".sh", ".bash"):
+        return True
+    try:
+        with path.open("rb") as f:
+            first_line = f.readline().decode("utf-8", errors="replace").rstrip("\r\n")
+    except OSError:
+        return False
+    for prefix in ("bin/", "env "):
+        for shell in ("sh", "bash", "dash", "ksh"):
+            token = f"{prefix}{shell}"
+            if first_line.endswith(token) or f"{token} " in first_line:
+                return True
+    return False
 
-check_deps
 
-# Helper to check if a file is a shell script
-is_shell_script() {
-  local file="$1"
-  if [[ ! -f "$file" ]]; then
-    return 1
-  fi
-  # Check extension
-  if [[ "$file" == *.sh || "$file" == *.bash ]]; then
-    return 0
-  fi
-  # Check shebang
-  local first_line
-  if read -r first_line <"$file" 2>/dev/null; then
-    case "$first_line" in
-      *bin/sh | *bin/bash | *bin/dash | *bin/ksh | *bin/sh\ * | *bin/bash\ * | *bin/dash\ * | *bin/ksh\ *)
-        return 0
-        ;;
-      *env\ sh | *env\ bash | *env\ dash | *env\ ksh | *env\ sh\ * | *env\ bash\ * | *env\ dash\ * | *env\ ksh\ *)
-        return 0
-        ;;
-    esac
-  fi
-  return 1
-}
+def has_shebang(path: Path) -> bool:
+    try:
+        return any(line.startswith(b"#!") for line in path.read_bytes().splitlines())
+    except OSError:
+        return False
 
-# Run shfmt and shellcheck on a single file
-process_file() {
-  local file="$1"
-  if [ "$CHECK_MODE" -eq 1 ]; then
-    local failed=0
-    if ! "${SHFMT[@]}" -d "$file" >&2; then
-      echo "$SCRIPT_NAME: $file: needs formatting" >&2
-      failed=1
-    fi
 
-    if ! grep -q "^#\!" "$file"; then
-      if ! "${SHELLCHECK[@]}" -s bash "$file" >&2; then
-        failed=1
-      fi
-    elif ! "${SHELLCHECK[@]}" "$file" >&2; then
-      failed=1
-    fi
-    return "$failed"
-  else
-    if ! "${SHFMT[@]}" -w "$file"; then
-      echo "$SCRIPT_NAME: $file: failed to format" >&2
-      return 1
-    fi
+def process_file(path: Path, *, check_mode: bool) -> bool:
+    file_str = str(path)
+    sc_extra = [] if has_shebang(path) else ["-s", "bash"]
+    if check_mode:
+        failed = False
+        if (
+            subprocess.run(
+                [*SHFMT, "-d", file_str], stdout=sys.stderr, check=False
+            ).returncode
+            != 0
+        ):
+            print(f"{SCRIPT_NAME}: {file_str}: needs formatting", file=sys.stderr)
+            failed = True
+        if (
+            subprocess.run(
+                [*SHELLCHECK, *sc_extra, file_str], stdout=sys.stderr, check=False
+            ).returncode
+            != 0
+        ):
+            failed = True
+        return not failed
 
-    if ! grep -q "^#\!" "$file"; then
-      if ! "${SHELLCHECK[@]}" -s bash "$file"; then
-        return 1
-      fi
-    elif ! "${SHELLCHECK[@]}" "$file"; then
-      return 1
-    fi
-    return 0
-  fi
-}
+    if subprocess.run([*SHFMT, "-w", file_str], check=False).returncode != 0:
+        print(f"{SCRIPT_NAME}: {file_str}: failed to format", file=sys.stderr)
+        return False
+    sc_extra = [] if has_shebang(path) else ["-s", "bash"]
+    return (
+        subprocess.run([*SHELLCHECK, *sc_extra, file_str], check=False).returncode == 0
+    )
 
-# Recursively find and process shell scripts in a directory
-process_dir() {
-  local dir="$1"
-  local failed=0
 
-  while IFS= read -r file; do
-    if is_shell_script "$file"; then
-      if ! process_file "$file"; then
-        failed=1
-      fi
-    fi
-  done < <(find "$dir" -type f)
+def process_dir(directory: Path, *, check_mode: bool) -> bool:
+    failed = False
+    for root, _, filenames in os.walk(directory):
+        for name in filenames:
+            filepath = Path(root) / name
+            if is_shell_script(filepath) and not process_file(
+                filepath, check_mode=check_mode
+            ):
+                failed = True
+    return not failed
 
-  return "$failed"
-}
 
-if [ ${#PATHS[@]} -eq 0 ]; then
-  if [ -t 0 ]; then
-    usage
-    exit 1
-  fi
+def main() -> int:
+    check_mode = False
+    paths: list[str] = []
 
-  # Stdin mode
-  TMPFILE=$(mktemp "/tmp/shell-format.XXXXXX.sh")
-  trap 'rm -f "$TMPFILE" "${TMPFILE}.formatted"' EXIT
+    for arg in sys.argv[1:]:
+        if arg in ("--help", "-h"):
+            usage()
+            return 0
+        if arg == "--check":
+            check_mode = True
+        elif arg.startswith("-"):
+            print(f"{SCRIPT_NAME}: unknown option: {arg}", file=sys.stderr)
+            return 1
+        else:
+            paths.append(arg)
 
-  cat >"$TMPFILE"
+    if not paths:
+        if sys.stdin.isatty():
+            usage()
+            return 1
 
-  # We need to ensure shellcheck knows the shell dialect.
-  has_shebang=1
-  if ! grep -q "^#\!" "$TMPFILE"; then
-    has_shebang=0
-  fi
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpfile = Path(tmpdir) / "shell-format.sh"
+            tmpfile.write_bytes(sys.stdin.buffer.read())
+            sc_extra = [] if has_shebang(tmpfile) else ["-s", "bash"]
 
-  if [ "$CHECK_MODE" -eq 1 ]; then
-    if [ "$has_shebang" -eq 0 ]; then
-      "${SHFMT[@]}" -d "$TMPFILE" >&2 && "${SHELLCHECK[@]}" -s bash "$TMPFILE" >&2
-    else
-      "${SHFMT[@]}" -d "$TMPFILE" >&2 && "${SHELLCHECK[@]}" "$TMPFILE" >&2
-    fi
-    exit $?
-  else
-    if "${SHFMT[@]}" "$TMPFILE" >"${TMPFILE}.formatted"; then
-      if [ "$has_shebang" -eq 0 ]; then
-        shellcheck_cmd=("${SHELLCHECK[@]}" -s bash "${TMPFILE}.formatted")
-      else
-        shellcheck_cmd=("${SHELLCHECK[@]}" "${TMPFILE}.formatted")
-      fi
-      if "${shellcheck_cmd[@]}" >&2; then
-        cat "${TMPFILE}.formatted"
-        exit 0
-      else
-        exit 1
-      fi
-    else
-      exit 1
-    fi
-  fi
-else
-  # Path mode
-  for p in "${PATHS[@]}"; do
-    if [ ! -e "$p" ]; then
-      echo "$SCRIPT_NAME: $p: No such file or directory" >&2
-      exit 1
-    fi
-  done
+            if check_mode:
+                if (
+                    subprocess.run(
+                        [*SHFMT, "-d", str(tmpfile)], stdout=sys.stderr, check=False
+                    ).returncode
+                    != 0
+                ):
+                    return 1
+                return subprocess.run(
+                    [*SHELLCHECK, *sc_extra, str(tmpfile)],
+                    stdout=sys.stderr,
+                    check=False,
+                ).returncode
 
-  failed=0
-  for p in "${PATHS[@]}"; do
-    if [ -d "$p" ]; then
-      if ! process_dir "$p"; then
-        failed=1
-      fi
-    elif [ -f "$p" ]; then
-      if is_shell_script "$p"; then
-        if ! process_file "$p"; then
-          failed=1
-        fi
-      else
-        echo "$SCRIPT_NAME: $p: Not a recognized shell script" >&2
-        failed=1
-      fi
-    fi
-  done
-  exit "$failed"
-fi
+            formatted_file = Path(tmpdir) / "shell-format.formatted.sh"
+            with formatted_file.open("wb") as out_f:
+                if (
+                    subprocess.run(
+                        [*SHFMT, str(tmpfile)], stdout=out_f, check=False
+                    ).returncode
+                    != 0
+                ):
+                    return 1
+            if (
+                subprocess.run(
+                    [*SHELLCHECK, *sc_extra, str(formatted_file)],
+                    stdout=sys.stderr,
+                    check=False,
+                ).returncode
+                != 0
+            ):
+                return 1
+            sys.stdout.buffer.write(formatted_file.read_bytes())
+            return 0
+
+    for p in paths:
+        if not os.path.exists(p):
+            print(f"{SCRIPT_NAME}: {p}: No such file or directory", file=sys.stderr)
+            return 1
+
+    failed = 0
+    for p in paths:
+        path = Path(p)
+        if path.is_dir():
+            if not process_dir(path, check_mode=check_mode):
+                failed = 1
+        elif path.is_file():
+            if is_shell_script(path):
+                if not process_file(path, check_mode=check_mode):
+                    failed = 1
+            else:
+                print(
+                    f"{SCRIPT_NAME}: {p}: Not a recognized shell script",
+                    file=sys.stderr,
+                )
+                failed = 1
+    return failed
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)

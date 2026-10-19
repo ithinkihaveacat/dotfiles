@@ -1168,8 +1168,7 @@ function packages_apt {
   # Reported on every run and removed with --prune (see prune_apt_retired).
   #   sysstat, pcp: sysstat recommends pcp, which installs 6 heavyweight
   #     daemon services.
-  #   shfmt, shellcheck: now run by the formatter scripts via pinned uvx
-  #     (see feature_uv).
+  # shfmt, shellcheck: now run by the formatter scripts via uv (see feature_uv).
   #   npm: only where the distribution's nodejs is too old (see above); the
   #     nodejs package itself stays, since other packages depend on it.
   retired="sysstat pcp shellcheck shfmt"
@@ -1310,21 +1309,10 @@ function feature_upgrades {
 # Architecture note: uv is the preferred way to get tools, because it works the
 # same on macOS, Debian, CI runners, and cloud containers where brew and apt
 # often do not. Skills stay self-contained: a skill's scripts need only uv, and
-# fetch their own pinned tools through uvx (or `uv run --script` metadata) on
-# first use, so each tool version is pinned in exactly one place. install.sh
-# does not duplicate those installs; its uv feature only makes sure uv exists
-# and warms uv's cache ahead of time.
-
-# Bash wrappers that run pinned tools via uvx, each paired (after "|") with a
-# small valid input in printf %b notation. A wrapper is warmed by checking that
-# input, so it fetches exactly the versions it pins and the pins stay in the
-# wrapper; the input must pass, or later tools in the wrapper never run. Add a
-# wrapper here when it starts calling uvx. Scripts with a `uv run --script`
-# shebang need no entry: they are discovered below.
-UVX_WRAPPERS=(
-  'skills/coding-standards/scripts/python-format|x = 1'
-  'skills/coding-standards/scripts/shell-format|#!/bin/sh\ntrue'
-)
+# fetch their own pinned tools through `uv run --script` metadata on first use,
+# so each tool version is pinned in exactly one place. install.sh does not
+# duplicate those installs; its uv feature only makes sure uv exists and warms
+# uv's cache ahead of time.
 
 # Run a uv command quietly, reporting one git-style status line and, on
 # failure, the command's output (indented) so the cause is visible.
@@ -1379,21 +1367,16 @@ function feature_uv {
     fi
   fi
 
-  # Tools such as shellcheck and shfmt are deliberately not installed on PATH
-  # here: the scripts that need them run their own pinned versions via uvx, so
-  # a skill needs nothing but uv, and each tool version is pinned in exactly
-  # one place (the script). This feature only warms uv's cache for those
-  # scripts. For an ad-hoc run, use e.g. `uvx --from shellcheck-py==<pin> shellcheck`.
+  # Tools such as shellcheck, shfmt, and ruff are deliberately not installed on
+  # PATH here: the scripts that need them declare their own pinned versions in
+  # `uv run --script` metadata, so a skill needs nothing but uv, and each tool
+  # version is pinned in exactly one place (the script). This feature only
+  # warms uv's cache for those scripts.
 
   # Fetch what the repository's scripts need. With UV_OFFLINE, uv builds the
   # same environments from its cache alone, which checks offline readiness
   # (it writes to uv's cache, so it is not read-only).
-  local entry rel f first_line
-  for entry in "${UVX_WRAPPERS[@]}"; do
-    rel=${entry%%|*}
-    uv_item "$ok" "$bad" "$rel" "$SRCDIR/$rel" --check \
-      <<<"$(printf '%b' "${entry#*|}")" || failed=1
-  done
+  local f first_line
   # bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
   for f in "$SRCDIR"/bin/* "$SRCDIR"/skills/*/scripts/*; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -1825,6 +1808,12 @@ function feature_agents {
     if [ -d "$HOME/.projects" ]; then
       paths_to_approve+=("$HOME/.projects")
     fi
+
+    # Allow agent sandboxes to write uv tool state and Andon alert logs
+    # when ~/.local is otherwise mounted read-only.
+    xmkdir "$XDG_DATA_HOME/uv"
+    xmkdir "$XDG_STATE_HOME/andon"
+    paths_to_approve+=("$XDG_DATA_HOME/uv" "$XDG_STATE_HOME/andon")
 
     if [[ ${#paths_to_approve[@]} -gt 0 ]]; then
       x "$permission_tool" path add "${paths_to_approve[@]}" ||

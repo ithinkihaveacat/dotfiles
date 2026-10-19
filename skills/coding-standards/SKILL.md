@@ -7,8 +7,8 @@ description: >-
   writing, reviewing, formatting, or linting code, verifying CLI ergonomics,
   implementing caching and offline modes, or formatting git commit messages.
 compatibility: >-
-  Requires uv/uvx (runs pinned ruff, shfmt, shellcheck, and mdformat), plus jq,
-  xmllint, or java for the JSON, XML, and Kotlin formatters.
+  Requires uv (runs pinned ruff, shfmt, shellcheck, and mdformat via uv run
+  --script), plus jq, xmllint, or java for the JSON, XML, and Kotlin formatters.
 ---
 
 # Coding Standards

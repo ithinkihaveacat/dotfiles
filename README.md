@@ -404,10 +404,10 @@ the full test suite.
 ## Offline environments
 
 Tools managed by [uv](https://github.com/astral-sh/uv), meaning scripts with a
-`uv run --script` shebang and the formatters that run pinned tools via `uvx`
-(`ruff`, `shfmt`, `shellcheck`), download their dependencies on first use. To
-prepare a CI job or cloud agent environment that will later lose network access,
-run this once while online, e.g. from the environment's setup script:
+`uv run --script` shebang (including the `ruff`, `shfmt`/`shellcheck`, and
+`mdformat` formatters), download their dependencies on first use. To prepare a
+CI job or cloud agent environment that will later lose network access, run this
+once while online, e.g. from the environment's setup script:
 
 ```sh
 ./install.sh --only uv               # install uv; fetch everything into uv's cache
