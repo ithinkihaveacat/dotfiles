@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+# Tests: skills/workspace-tools/tests/test-node-install (node-install --default)
+#
+# Works only with exact versions that are already "installed" (empty
+# directories under a temporary XDG_DATA_HOME), which node-install resolves
+# without the network.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/node-install"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+export XDG_DATA_HOME="$TMP/data"
+VERSIONS="$XDG_DATA_HOME/node/versions"
+LINK="$XDG_DATA_HOME/node/default"
+mkdir -p "$VERSIONS/node-v22.1.0" "$VERSIONS/node-v24.2.0"
+
+# run ARGS...: stdout in $out, stderr in $err, exit status in $status.
+run() {
+  status=0
+  out=$("$BIN" "$@" 2>"$TMP/err") || status=$?
+  err=$(cat "$TMP/err")
+}
+
+n=0
+check() {
+  local desc=$1
+  shift
+  n=$((n + 1))
+  if "$@"; then
+    echo "ok $n - $desc"
+  else
+    echo "not ok $n - $desc (status $status)"
+    printf 'stdout: %s\nstderr: %s\n' "$out" "$err" | sed 's/^/# /'
+  fi
+}
+is() { [[ "$1" == "$2" ]]; }
+has() { [[ "$1" == *"$2"* ]]; }
+links_to() { [[ -L "$1" && "$(readlink "$1")" == "$2" ]]; }
+
+echo "1..13"
+
+run --default
+check "no default: fails" is "$status" 1
+check "no default: says so" has "$err" "no default Node.js version"
+
+run --default 24.2.0
+check "set: succeeds" is "$status" 0
+check "set: links relatively" links_to "$LINK" "versions/node-v24.2.0"
+check "set: prints the version's path" is "$out" "$VERSIONS/node-v24.2.0"
+check "set: reports the change on stderr" is "$err" "default: node-v24.2.0"
+
+run --default 24.2.0
+check "set again: succeeds quietly" is "$status:$err" "0:"
+
+run --default v22.1.0
+check "switch: reports the previous version" \
+  is "$err" "default: node-v22.1.0 (was node-v24.2.0)"
+
+run --default
+check "print: names the default's version" is "$out" "$VERSIONS/node-v22.1.0"
+
+run --installed
+check "--installed does not list the default" is "$out" $'v22.1.0\nv24.2.0'
+
+rm -rf "$VERSIONS/node-v22.1.0"
+run --default
+check "dangling default: fails naming the target" \
+  has "$status:$err" "1:node-install: default Node.js version is missing"
+
+rm "$LINK"
+mkdir "$LINK"
+run --default 24.2.0
+check "a real directory is never replaced" has "$status:$err" "1:node-install: refusing to replace"
+
+run --default 24 extra
+check "extra arguments are rejected" is "$status" 1

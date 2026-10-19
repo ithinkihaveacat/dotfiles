@@ -3,17 +3,24 @@
 # Installs a specific version of Node.js to a given prefix directory.
 # Based on https://github.com/wilmoore/nodejs-install
 
+# Tests: skills/workspace-tools/tests/test-node-install (--default)
+
 set -o errexit
 set -o errtrace
 set -o nounset
 
 readonly DEFAULT_PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/node/versions"
+# The per-user default is a link beside the versions directory, so neither
+# --installed nor direnv's 'use node' (which globs node-v*) mistakes it for a
+# version.
+readonly DEFAULT_LINK="${XDG_DATA_HOME:-$HOME/.local/share}/node/default"
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] VERSION [PREFIX]
        $(basename "$0") --list
        $(basename "$0") --installed
+       $(basename "$0") --default [VERSION]
 
 Downloads and installs a specific version of Node.js.
 
@@ -29,6 +36,11 @@ Arguments:
 Options:
   -l, --list       List all available remote Node.js versions
   -i, --installed  List all installed Node.js versions
+  --default [VERSION]
+                   Install VERSION if it is missing (succeeding if it is
+                   already installed) and make it the per-user default,
+                   \$XDG_DATA_HOME/node/default; print its path. Without
+                   VERSION, print the current default's path
   --help           Display this help message and exit
 
 Examples:
@@ -40,6 +52,14 @@ Examples:
 
   # List installed versions
   $(basename "$0") --installed
+
+  # Make the latest Node.js 24.x the default outside direnv workspaces
+  $(basename "$0") --default 24
+
+The default is for machines whose package manager has no recent enough
+Node.js: put \$XDG_DATA_HOME/node/default/bin on PATH to use it. Global npm
+packages are unaffected by switching it, provided npm's prefix (~/.npmrc) is
+outside the version directories.
 EOF
   exit 0
 }
@@ -107,7 +127,14 @@ list_installed() {
 # Returns the full version number (without 'v' prefix) or empty if not found.
 resolve_version() {
   local input="$1"
+  local prefix="${2:-}"
   local pattern
+
+  # An exact version that is already installed needs no network.
+  if [[ "$input" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && -n "$prefix" && -d "$prefix/node-v$input" ]]; then
+    echo "$input"
+    return
+  fi
 
   # Count dots to determine version specificity
   # Note: Use arithmetic expansion to handle macOS wc whitespace padding
@@ -132,7 +159,30 @@ fi
 require curl
 require tar
 
-# Handle --list and --installed before checking argument count
+# Download and extract Node.js $1 into $2, removing the partial directory on
+# failure. Progress goes to stderr; only the caller prints to stdout.
+install_version() {
+  local version=$1 target=$2 url
+  url="https://nodejs.org/dist/v$version/node-v$version-$(get_platform).tar.gz"
+  mkdir -p "$target"
+  # shellcheck disable=SC2064 # expand $target now
+  trap "rm -rf '$target'" EXIT
+  echo "Downloading Node.js v$version for $(get_platform)..." >&2
+  curl -fL# "$url" | tar xz --strip-components=1 -C "$target"
+  trap - EXIT
+}
+
+# Resolve VERSION_INPUT against PREFIX into VERSION, or exit with an error.
+resolve_or_exit() {
+  VERSION=$(resolve_version "$VERSION_INPUT" "$PREFIX")
+  if [[ -z "$VERSION" ]]; then
+    echo "$(basename "$0"): no Node.js version matching '$VERSION_INPUT' found" >&2
+    echo "Use '$(basename "$0") --list' to see available versions." >&2
+    exit 1
+  fi
+}
+
+# Handle --list, --installed and --default before checking argument count
 case "${1:-}" in
   -l | --list)
     list_versions
@@ -141,6 +191,44 @@ case "${1:-}" in
   -i | --installed)
     PREFIX="${2:-$DEFAULT_PREFIX}"
     list_installed "$PREFIX"
+    exit 0
+    ;;
+  --default)
+    if [[ $# -gt 2 ]]; then
+      echo "$(basename "$0"): --default takes at most one argument (VERSION)" >&2
+      exit 1
+    fi
+    if [[ $# -eq 1 ]]; then
+      if [[ ! -L "$DEFAULT_LINK" ]]; then
+        echo "$(basename "$0"): no default Node.js version ($DEFAULT_LINK does not exist)" >&2
+        exit 1
+      fi
+      if [[ ! -d "$DEFAULT_LINK/" ]]; then
+        echo "$(basename "$0"): default Node.js version is missing: $DEFAULT_LINK -> $(readlink "$DEFAULT_LINK")" >&2
+        exit 1
+      fi
+      echo "$(dirname "$DEFAULT_LINK")/$(readlink "$DEFAULT_LINK")"
+      exit 0
+    fi
+    if [[ -e "$DEFAULT_LINK" && ! -L "$DEFAULT_LINK" ]]; then
+      echo "$(basename "$0"): refusing to replace $DEFAULT_LINK: not a symbolic link" >&2
+      exit 1
+    fi
+    VERSION_INPUT=$(echo "$2" | tr -d 'vV')
+    PREFIX="$DEFAULT_PREFIX"
+    resolve_or_exit
+    TARGET="$PREFIX/node-v$VERSION"
+    if [[ ! -d "$TARGET" ]]; then
+      install_version "$VERSION" "$TARGET"
+    fi
+    # Relative, so the link names the version it selects.
+    new="$(basename "$PREFIX")/node-v$VERSION"
+    old=$(readlink "$DEFAULT_LINK" 2>/dev/null || true)
+    if [[ "$old" != "$new" ]]; then
+      ln -sfn "$new" "$DEFAULT_LINK"
+      echo "default: node-v$VERSION${old:+ (was $(basename "$old"))}" >&2
+    fi
+    echo "$TARGET"
     exit 0
     ;;
 esac
@@ -155,12 +243,7 @@ VERSION_INPUT=$(echo "$1" | tr -d 'vV')
 PREFIX="${2:-$DEFAULT_PREFIX}"
 
 # Resolve partial version to full version (e.g., "24" -> "24.1.0")
-VERSION=$(resolve_version "$VERSION_INPUT")
-if [[ -z "$VERSION" ]]; then
-  echo "$(basename "$0"): no Node.js version matching '$VERSION_INPUT' found" >&2
-  echo "Use '$(basename "$0") --list' to see available versions." >&2
-  exit 1
-fi
+resolve_or_exit
 
 TARGET="$PREFIX/node-v$VERSION"
 
@@ -170,25 +253,7 @@ if [[ -d "$TARGET" ]]; then
   exit 1
 fi
 
-# Build download URL
-DOWNLOAD_URL="https://nodejs.org/dist/v$VERSION/node-v$VERSION-$(get_platform).tar.gz"
-
-# Create target directory
-mkdir -p "$TARGET"
-
-# Clean up on failure
-cleanup() {
-  rm -rf "$TARGET"
-}
-trap cleanup EXIT
-
-# Download and extract
-echo "Downloading Node.js v$VERSION for $(get_platform)..."
-curl -fL# "$DOWNLOAD_URL" | tar xz --strip-components=1 -C "$TARGET"
-
-# Clear the trap on success
-trap - EXIT
+install_version "$VERSION" "$TARGET"
 
 echo "$TARGET"
-echo ""
 echo "Tip: use direnv to switch Node.js versions. See ~/.direnvrc for usage." >&2

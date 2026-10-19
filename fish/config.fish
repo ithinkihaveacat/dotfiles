@@ -127,6 +127,13 @@ mkdir -p $RUBY_VERSIONS
 set -x NODE_VERSIONS $XDG_DATA_HOME/node/versions
 mkdir -p $NODE_VERSIONS
 
+# Where the distribution's Node.js is too old, install.sh makes one of those
+# versions the per-user default ('node-install --default'); elsewhere this
+# directory does not exist. Added after npm/bin so that it comes first: npm/bin
+# holds global packages, which must never shadow node or npm.
+
+add_path $XDG_DATA_HOME/node/default/bin
+
 # golang
 
 # Special-case PATH for Ubuntu (package is golang-*-go)

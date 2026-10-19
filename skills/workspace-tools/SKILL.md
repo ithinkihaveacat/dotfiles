@@ -433,6 +433,11 @@ look for them:
   latest matching release (`22` → newest `22.x.x`) into `$NODE_VERSIONS`
   (`~/.local/share/node/versions`). Takes seconds. It exits non-zero when that
   exact version is already installed, so check `node-install --installed` first.
+  `node-install --default 24` instead succeeds either way and makes that version
+  the per-user default (`~/.local/share/node/default`, on `PATH` in fish and
+  bash when it exists); `install.sh` uses it only on Linux machines whose
+  distribution Node.js is too old, and removes it once that changes.
+  `node-install --default` alone prints the current default.
 - **`ruby-install VERSION`**: Compiles Ruby from source with `ruby-build` into
   `$RUBY_VERSIONS` (`~/.local/share/ruby/versions`). Takes minutes (over ten on
   a small machine) and is declared unsafe, so it always prompts. Run it in the

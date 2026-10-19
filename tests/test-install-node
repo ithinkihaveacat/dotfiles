@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+
+# Tests: tests/test-install-node (install.sh's per-user default Node.js: the
+# npm feature, the apt package set, and the upgrades feature)
+#
+# Runs a copy of install.sh from a minimal fake repository inside a temporary
+# HOME, with sudo, apt-get, apt-cache, dpkg-query, npm and node-install
+# replaced by stubs. The installed and candidate nodejs versions come from
+# FAKE_NODEJS and FAKE_CANDIDATE. Nothing on the host is touched, and nothing
+# reaches the network.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../install.sh"
+
+if [ "$(uname -s)" != Linux ]; then
+  echo "1..0 # SKIP the per-user default Node.js is Linux-only"
+  exit 0
+fi
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+HOME_DIR="$TMP/home"
+REPO="$HOME_DIR/.dotfiles"
+NODE_DIR="$HOME_DIR/.local/share/node"
+LINK="$NODE_DIR/default"
+mkdir -p "$REPO/bin"
+cp "$BIN" "$REPO/install.sh"
+
+# node-install --default VERSION: install FAKE_NODE_LATEST and point the link
+# at it, like the real one.
+cat >"$REPO/bin/node-install" <<'EOF'
+#!/bin/sh
+echo "node-install $*" >>"$CALLS"
+[ -z "${FAKE_NODE_INSTALL_FAIL:-}" ] || exit 1
+v=${FAKE_NODE_LATEST:-24.22.0}
+mkdir -p "$XDG_DATA_HOME/node/versions/node-v$v/bin"
+ln -sfn "versions/node-v$v" "$XDG_DATA_HOME/node/default"
+echo "$XDG_DATA_HOME/node/versions/node-v$v"
+EOF
+
+STUBS="$TMP/stubs"
+mkdir -p "$STUBS"
+for cmd in sudo apt-get npm; do
+  # shellcheck disable=SC2016 # expands in the generated stub
+  printf '#!/bin/sh\necho "%s $*" >>"$CALLS"\n' "$cmd" >"$STUBS/$cmd"
+done
+# dpkg-query: one package's status, or the installed-package list.
+cat >"$STUBS/dpkg-query" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *" nodejs")
+    [ -n "${FAKE_NODEJS:-}" ] || exit 1
+    printf 'install ok installed %s\n' "$FAKE_NODEJS"
+    ;;
+  *) printf '%b' "${FAKE_DPKG_LIST:-}" ;;
+esac
+EOF
+cat >"$STUBS/apt-cache" <<'EOF'
+#!/bin/sh
+printf 'nodejs:\n  Installed: (none)\n  Candidate: %s\n' "${FAKE_CANDIDATE:-(none)}"
+EOF
+chmod +x "$STUBS"/* "$REPO/bin/node-install"
+export CALLS="$TMP/calls"
+
+# run [ENV=VALUE...] -- ARGS...: output (stdout and stderr) in $output, exit
+# status in $status, recorded calls in $calls. Runs with a clean environment.
+run() {
+  local envs=()
+  while [ "$1" != -- ]; do
+    envs+=("$1")
+    shift
+  done
+  shift
+  : >"$CALLS"
+  status=0
+  output=$(env -i HOME="$HOME_DIR" PATH="$STUBS:/usr/bin:/bin" CALLS="$CALLS" \
+    ${envs[@]+"${envs[@]}"} "$REPO/install.sh" "$@" 2>&1 </dev/null) || status=$?
+  calls=$(cat "$CALLS")
+}
+
+# Start each scenario with no default and no global packages.
+reset() {
+  rm -rf "$NODE_DIR" "$HOME_DIR/.local/share/npm"
+}
+
+n=0
+check() {
+  local desc=$1
+  shift
+  n=$((n + 1))
+  if "$@"; then
+    echo "ok $n - $desc"
+  else
+    echo "not ok $n - $desc (status $status)"
+    printf '%s\n' "$output" | sed 's/^/# /'
+    printf 'calls:\n%s\n' "$calls" | sed 's/^/# /'
+  fi
+}
+is() { [[ "$1" == "$2" ]]; }
+has() { [[ "$1" == *"$2"* ]]; }
+lacks() { [[ "$1" != *"$2"* ]]; }
+links_to() { [[ -L "$1" && "$(readlink "$1")" == "$2" ]]; }
+absent() { [[ ! -e "$1" && ! -L "$1" ]]; }
+
+echo "1..22"
+
+# The distribution's Node.js is too old: make the per-user default.
+reset
+run FAKE_NODEJS=20.19.2+dfsg-1+deb13u3 -- --only npm
+check "old distribution nodejs: exits 0" is "$status" 0
+check "old distribution nodejs: installs the default" \
+  has "$calls" "node-install --default 24"
+check "old distribution nodejs: links the default" \
+  links_to "$LINK" "versions/node-v24.22.0"
+check "old distribution nodejs: says which Node.js and why" \
+  has "$output" "node: per-user default node-v24.22.0 (distribution nodejs 20; needs >= 22)"
+check "npm prefix is set" has "$calls" "npm config set prefix $HOME_DIR/.local/share/npm"
+check "npm bin directory is created" test -d "$HOME_DIR/.local/share/npm/bin"
+
+# A second run changes nothing and needs no network.
+run FAKE_NODEJS=20.19.2+dfsg-1+deb13u3 -- --only npm
+check "second run does not call node-install" lacks "$calls" "node-install"
+check "second run keeps the default" links_to "$LINK" "versions/node-v24.22.0"
+
+# No nodejs package at all also needs the default.
+reset
+run -- --only npm
+check "no distribution nodejs: installs the default" \
+  has "$calls" "node-install --default 24"
+
+# The distribution's Node.js becomes new enough (a release upgrade): the
+# default goes away, and nothing else is left on PATH's account.
+run FAKE_NODEJS=24.21.0+dfsg-1 -- --only npm
+check "new distribution nodejs: exits 0" is "$status" 0
+check "new distribution nodejs: removes the default" absent "$LINK"
+check "new distribution nodejs: reports the removal" has "$output" "removed: $LINK"
+check "new distribution nodejs: says which Node.js" \
+  has "$output" "node: distribution nodejs 24"
+check "new distribution nodejs: keeps installed versions" \
+  test -d "$NODE_DIR/versions/node-v24.22.0"
+
+# Offline, a missing default is reported, not fetched.
+reset
+run AGENT_OFFLINE=1 FAKE_NODEJS=20.19.2 -- --only npm
+check "offline: reports the skipped install" \
+  has "$output" "skipped: per-user default Node.js 24 (AGENT_OFFLINE is set)"
+check "offline: does not call node-install" lacks "$calls" "node-install"
+
+# A real directory where the link belongs is left alone, and fails the feature.
+reset
+mkdir -p "$LINK"
+run FAKE_NODEJS=20.19.2 -- --only npm
+check "a real default directory is refused" \
+  has "$output" "$LINK is not a link; leaving it alone"
+
+# A change of major version rebuilds global packages.
+reset
+mkdir -p "$NODE_DIR/versions/node-v22.1.0" "$HOME_DIR/.local/share/npm/lib/node_modules/demo"
+ln -s versions/node-v22.1.0 "$LINK"
+run FAKE_NODEJS=20.19.2 -- --only npm
+check "major change: moves the default to 24" links_to "$LINK" "versions/node-v24.22.0"
+check "major change: rebuilds global packages" has "$calls" "npm rebuild -g"
+
+# The daily upgrades move an existing default to the newest release.
+reset
+mkdir -p "$NODE_DIR/versions/node-v24.21.0"
+ln -s versions/node-v24.21.0 "$LINK"
+run FAKE_NODEJS=20.19.2 -- --only upgrades --force
+check "upgrades: updates the default" links_to "$LINK" "versions/node-v24.22.0"
+
+# The package step installs the distribution's Node.js only when it is new
+# enough, and otherwise reports Debian's npm as retired.
+reset
+run FAKE_CANDIDATE=24.21.0+dfsg-1 -- --only base
+check "new candidate: installs nodejs and npm" has "$calls" "nodejs npm"
+run FAKE_CANDIDATE=20.19.2+dfsg-1 FAKE_DPKG_LIST='npm\tinstall ok installed\n' -- --only base
+check "old candidate: reports npm as retired" \
+  has "$output" $'retired apt packages present (no longer managed by this script):\n  npm'

@@ -19,6 +19,14 @@
 path_prepend() { case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:$PATH";; esac; }
 
 path_prepend "$HOME/.local/bin"
+# npm's global prefix (~/.npmrc), then the per-user default Node.js, which
+# install.sh creates only where the distribution's is too old; as in fish, it
+# comes first so a global package can never shadow node or npm.
+for d in "${XDG_DATA_HOME:-$HOME/.local/share}/npm/bin" \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/node/default/bin"; do
+  if [ -d "$d" ]; then path_prepend "$d"; fi
+done
+unset d
 path_prepend "$HOME/.dotfiles/bin"
 
 export PATH

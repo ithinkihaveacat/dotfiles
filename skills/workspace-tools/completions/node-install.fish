@@ -2,3 +2,4 @@
 complete -c node-install -s h -l help -d 'Display help'
 complete -c node-install -s l -l list -d 'List available remote Node.js versions'
 complete -c node-install -s i -l installed -d 'List installed Node.js versions'
+complete -c node-install -l default -d 'Install a version and make it the per-user default'

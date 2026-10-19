@@ -64,3 +64,12 @@ def register(api):
         "remote:cloudflare",
         "https://github.com/cloudflare/skills/tree/main/skills/cloudflare",
     )
+
+    # Cloudflare's cf CLI (npm package "cf", Node.js >= 22). On a Raspberry Pi 4
+    # (39-bit virtual address space), `cf dev` and `--local` abort at startup
+    # because workerd assumes 48 bits (cloudflare/workerd#5020); API commands
+    # work.
+    api.register_skill(
+        "remote:cf-cli",
+        "https://github.com/cloudflare/skills/tree/main/skills/cf-cli",
+    )

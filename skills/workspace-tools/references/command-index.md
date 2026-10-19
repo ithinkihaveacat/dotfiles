@@ -324,6 +324,7 @@ The block below is `../scripts/node-install --help`, kept in sync by
 Usage: node-install [OPTIONS] VERSION [PREFIX]
        node-install --list
        node-install --installed
+       node-install --default [VERSION]
 
 Downloads and installs a specific version of Node.js.
 
@@ -339,6 +340,11 @@ Arguments:
 Options:
   -l, --list       List all available remote Node.js versions
   -i, --installed  List all installed Node.js versions
+  --default [VERSION]
+                   Install VERSION if it is missing (succeeding if it is
+                   already installed) and make it the per-user default,
+                   $XDG_DATA_HOME/node/default; print its path. Without
+                   VERSION, print the current default's path
   --help           Display this help message and exit
 
 Examples:
@@ -350,6 +356,14 @@ Examples:
 
   # List installed versions
   node-install --installed
+
+  # Make the latest Node.js 24.x the default outside direnv workspaces
+  node-install --default 24
+
+The default is for machines whose package manager has no recent enough
+Node.js: put $XDG_DATA_HOME/node/default/bin on PATH to use it. Global npm
+packages are unaffected by switching it, provided npm's prefix (~/.npmrc) is
+outside the version directories.
 ```
 
 <!-- /generated -->

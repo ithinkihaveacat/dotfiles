@@ -3,7 +3,8 @@
 # (declare -A, readarray, ${var,,}, |&).
 
 # Tests: tests/test-install-only (--only), tests/test-install-prune (--prune),
-# tests/test-install-profiles (--profile, --with, --without, --dry-run)
+# tests/test-install-profiles (--profile, --with, --without, --dry-run),
+# tests/test-install-node (the per-user default Node.js)
 
 # When piped from the network the caller picks the interpreter
 # (`curl ... | bash`), so the shebang above is bypassed. The body of this script
@@ -85,7 +86,7 @@ FEATURES=(
   'ruby|-|ruby-build and the dependencies for building Ruby'
   'uv|workstation cloud ci|Install uv if missing; prefetch what scripts fetch on first use'
   'vscode|workstation|Link VS Code settings'
-  'npm|workstation|Set the npm global prefix to ~/.local/share/npm'
+  'npm|workstation|Set the npm global prefix; a per-user Node.js where the distribution'"'"'s is too old'
   'skills|workstation cloud|Link skill and permission plugins; apply default skills'
   'agents|workstation|Link agent context and hooks, and synchronize permissions'
   'upgrades|workstation|Daily: upgrade packages, uv, ruby-build, Android and agent CLIs'
@@ -1105,7 +1106,7 @@ function packages_brew {
 
 # Install the packages of the package features in $1 (space-separated).
 function packages_apt {
-  local features=$1 install_set retired
+  local features=$1 install_set retired node_major
 
   heading "apt-get"
 
@@ -1127,6 +1128,19 @@ function packages_apt {
 
   install_set=$(packages_for apt "$features")
 
+  # Node.js comes from the distribution only when it is recent enough;
+  # otherwise the npm feature makes a per-user default (see sync_node_default)
+  # and the distribution's npm is retired below, so that nothing writes to the
+  # shared npm prefix with an old npm.
+  node_major=$(deb_major nodejs candidate)
+  if [ -n "$node_major" ] && [ "$node_major" -ge "$NODE_MIN_MAJOR" ]; then
+    if [[ " $features " == *" base "* ]]; then
+      install_set="$install_set nodejs npm"
+    fi
+  else
+    node_major=""
+  fi
+
   comm -13 <(dpkg-query -W -f='${binary:Package}\t${Status}\n' | awk '$2=="install" && $4=="installed" {print $1}' | sort) <(echo "$install_set" | tr ' ' '\n' | sed '/^$/d' | sort) | xargs -r sudo apt-get -y install || echo "warning: some package installations failed"
 
   if ! exists fd && exists fdfind; then
@@ -1147,7 +1161,10 @@ function packages_apt {
   #     daemon services.
   #   shfmt, shellcheck: now run by the formatter scripts via pinned uvx
   #     (see feature_uv).
+  #   npm: only where the distribution's nodejs is too old (see above); the
+  #     nodejs package itself stays, since other packages depend on it.
   retired="sysstat pcp shellcheck shfmt"
+  [ -n "$node_major" ] || retired="$retired npm"
   prune_apt_retired "$retired"
 }
 
@@ -1217,6 +1234,11 @@ function feature_upgrades {
       x sudo apt-get -y autoclean || echo "warning: apt-get autoclean failed, skipping" >&2
       x sudo apt-get -y clean || echo "warning: apt-get clean failed, skipping" >&2
     fi
+  fi
+
+  if [ -L "$NODE_DEFAULT_LINK" ] || node_default_needed; then
+    heading "node upgrade"
+    sync_node_default upgrade || echo "warning: node upgrade failed" >&2
   fi
 
   if exists uv; then
@@ -1409,14 +1431,132 @@ function feature_vscode {
   fi
 }
 
+# Node.js: Homebrew and most apt distributions package a current Node.js. Where
+# the distribution's is missing or older than NODE_MIN_MAJOR (Debian 13 ships
+# 20), an official nodejs.org build is the per-user default instead:
+# node-install keeps it in ~/.local/share/node/versions, and the link
+# ~/.local/share/node/default selects one. fish/config.fish and home/.bashrc
+# put the link's bin on PATH only when it exists. The decision rests on what
+# dpkg reports as installed, so a release upgrade that brings a new enough
+# nodejs removes the link on the next run, and nothing else is left behind:
+# global npm packages live in NPM_PREFIX (~/.npmrc), outside every version.
+#
+# Such a machine is often a Raspberry Pi: on a Pi 4 (39-bit virtual address
+# space) workerd, the local runtime behind Cloudflare's `cf dev` and `--local`,
+# aborts at startup (cloudflare/workerd#5020); cf's API commands are fine.
+NODE_MIN_MAJOR=22
+NODE_DEFAULT_MAJOR=24
+NODE_DEFAULT_LINK="$XDG_DATA_HOME/node/default"
+NPM_PREFIX="$HOME/.local/share/npm"
+
+# Print the major version of Debian package $1, as installed (when $2 is
+# "installed") or as apt would install it ("candidate"); print nothing if
+# there is none.
+function deb_major {
+  local version=""
+  if [ "$2" = installed ] && exists dpkg-query; then
+    version=$(dpkg-query -W -f='${Status} ${Version}\n' "$1" 2>/dev/null | awk '$3 == "installed" {print $4}') || true
+  elif [ "$2" = candidate ] && exists apt-cache; then
+    version=$(LC_ALL=C apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" {print $2}') || true
+  fi
+  version=${version#*:} # drop an epoch
+  case $version in
+    [0-9]*) printf '%s\n' "${version%%.*}" ;;
+  esac
+}
+
+# Returns success if this machine needs the per-user default Node.js: Linux
+# whose installed nodejs package is missing or older than NODE_MIN_MAJOR.
+function node_default_needed {
+  local major
+  [ "$PLATFORM" = linux ] || return 1
+  major=$(deb_major nodejs installed)
+  [ -z "$major" ] || [ "$major" -lt "$NODE_MIN_MAJOR" ]
+}
+
+# Print the major version the default link selects, or nothing.
+function node_default_major {
+  local target
+  target=$(readlink "$NODE_DEFAULT_LINK" 2>/dev/null) || return 0
+  target=${target##*/node-v}
+  printf '%s\n' "${target%%.*}"
+}
+
+# Make the per-user default Node.js exist exactly when node_default_needed, on
+# NODE_DEFAULT_MAJOR. The network is used only to create it or change its major
+# version, and, with "upgrade" ($1), to move it to the newest
+# NODE_DEFAULT_MAJOR release. When the Node.js that
+# global npm packages run under changes major version, they are rebuilt.
+# Ends with one "node:" line saying which Node.js is in use and why.
+function sync_node_default {
+  local mode=${1:-} distro before after
+  distro=$(deb_major nodejs installed)
+  before=$(node_default_major)
+
+  if [ -e "$NODE_DEFAULT_LINK" ] && [ ! -L "$NODE_DEFAULT_LINK" ]; then
+    echo "$(basename "$0"): $NODE_DEFAULT_LINK is not a link; leaving it alone" >&2
+    return 1
+  fi
+
+  if ! node_default_needed; then
+    if [ -L "$NODE_DEFAULT_LINK" ]; then
+      x rm "$NODE_DEFAULT_LINK"
+      echo "removed: $NODE_DEFAULT_LINK (no longer needed)" >&2
+    fi
+    if [ "$PLATFORM" = linux ]; then
+      echo "node: distribution nodejs $distro"
+    else
+      echo "node: from the package manager (no per-user default on $PLATFORM)"
+    fi
+  else
+    if [ "$mode" = upgrade ] || [ "$before" != "$NODE_DEFAULT_MAJOR" ] || [ ! -d "$NODE_DEFAULT_LINK/" ]; then
+      if is_offline; then
+        skip_offline "per-user default Node.js $NODE_DEFAULT_MAJOR"
+      elif ! x "$SRCDIR/bin/node-install" --default "$NODE_DEFAULT_MAJOR" >/dev/null; then
+        echo "$(basename "$0"): node-install --default $NODE_DEFAULT_MAJOR failed" >&2
+        return 1
+      fi
+    fi
+    echo "node: per-user default $(basename "$(readlink "$NODE_DEFAULT_LINK" 2>/dev/null || echo none)") (distribution nodejs ${distro:-not installed}; needs >= $NODE_MIN_MAJOR)"
+  fi
+
+  after=$(node_default_major)
+  if [ -n "$after" ]; then
+    export PATH="$NODE_DEFAULT_LINK/bin:$PATH"
+  fi
+  # Global packages run under the default when there is one, else the
+  # distribution's Node.js.
+  if [ "${before:-$distro}" != "${after:-$distro}" ]; then
+    rebuild_npm_globals "${before:-$distro}" "${after:-$distro}"
+  fi
+}
+
+# Rebuild global npm packages for a new Node.js major version ($1 -> $2), since
+# native addons are built for one, and drop npx's cache, which is not keyed by
+# Node.js version.
+function rebuild_npm_globals {
+  local cache
+  exists npm || return 0
+  cache=$(npm config get cache 2>/dev/null) || cache=""
+  [ -n "$cache" ] || cache="$HOME/.npm"
+  [ ! -d "$cache/_npx" ] || x rm -rf "$cache/_npx"
+  if [ -n "$(ls -A "$NPM_PREFIX/lib/node_modules" 2>/dev/null)" ]; then
+    echo "Node.js major version changed (${1:-none} -> ${2:-none}): rebuilding global npm packages"
+    x npm rebuild -g || echo "warning: npm rebuild -g failed" >&2
+  fi
+}
+
 function feature_npm {
+  heading "node"
+  sync_node_default
+
   exists npm || return 0
 
   heading "npm"
 
-  x npm config set prefix "$HOME/.local/share/npm"
-
-  # Packages are installed into $(npm config get prefix)
+  x npm config set prefix "$NPM_PREFIX"
+  # Global commands land here; the shells put it on PATH only if it exists.
+  xmkdir "$NPM_PREFIX/bin"
 }
 
 # Download installer script $1 and run it with the remaining arguments. Unlike
