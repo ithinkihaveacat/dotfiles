@@ -222,8 +222,8 @@ task to an isolated worker that cannot read the control repository, see
      Pipe the whole list: a skill that is already active is reported and
      skipped. The session scope leaves `.envrc` and repository files untouched;
      harness details (when the skills become usable, what to do when there is no
-     session directory) are the `skill` CLI's, in the `workspace-tools` skill
-     and its output.
+     session directory) are the `skill` CLI's, in the `agent-config` skill and
+     its output.
 - **CLI or MCP:** when the control repository is the session's workspace, use
   the CLI. Elsewhere, prefer the `taskgo` MCP tools when the harness has them
   (`handoff` returns the same note and files); otherwise the CLI with `--root`.

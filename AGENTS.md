@@ -87,8 +87,7 @@ in `skills/coding-standards/references/python.md`.
 directory for local agents by default. When adding or modifying a script (or
 subcommand) with destructive, irreversible, or otherwise prompt-worthy behavior,
 list it in that skill's `permissions/unsafe` file. The file format and semantics
-are documented in `skills/workspace-tools/SKILL.md` ("Safe-Command
-Declarations").
+are documented in `skills/agent-config/SKILL.md` ("Safe-Command Declarations").
 
 #### File Output
 
@@ -209,8 +208,8 @@ See these canonical sources for reference implementations:
   behavior, temporary-resource cleanup, and targeted tests
 - `skills/emumanager/scripts/emumanager` - a stateful Bash manager with explicit
   compatibility and process handling
-- `skills/workspace-tools/scripts/skill` - a substantial standalone Python CLI
-  with filesystem and network boundaries
+- `skills/agent-config/scripts/skill` - a substantial standalone Python CLI with
+  filesystem and network boundaries
 - `skills/apk/scripts/apk-unzip` - a small utility with an optional `--output`
 - `bin/macos-finder-reveal` - a focused, macOS-specific utility
 

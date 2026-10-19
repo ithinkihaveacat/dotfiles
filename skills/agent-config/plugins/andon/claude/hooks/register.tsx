@@ -64,7 +64,7 @@ function quietly(work: Promise<unknown>): void {
 type CliResult = { ok: boolean; stdout: string; error: string };
 
 /**
- * The skill's own CLI (this plugin is skills/agent-tools/plugins/andon/claude),
+ * The skill's own CLI (this plugin is skills/agent-config/plugins/andon/claude),
  * else `andon` on PATH for a copy installed away from the repository.
  */
 async function cliPath($: Engine): Promise<string> {

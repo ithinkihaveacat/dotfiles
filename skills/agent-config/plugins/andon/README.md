@@ -20,7 +20,7 @@ session.
 
 ```text
 plugins/
-  .claude-plugin/marketplace.json  the agent-tools marketplace (Claude Code)
+  .claude-plugin/marketplace.json  the agent-config marketplace (Claude Code)
   andon/
     README.md                      this file
     claude/                        the Claude Code plugin
@@ -63,9 +63,9 @@ runs the script with `python3`, since the CLI uses only the standard library.
 ### Develop
 
 ```bash
-claude plugin validate skills/agent-tools/plugins/andon/claude
-claude plugin test skills/agent-tools/plugins/andon/claude
-prove skills/agent-tools/tests/test-andon
+claude plugin validate skills/agent-config/plugins/andon/claude
+claude plugin test skills/agent-config/plugins/andon/claude
+prove skills/agent-config/tests/test-andon
 ```
 
 The repo has no TypeScript tooling of its own. The engine lays the API types in
@@ -74,9 +74,9 @@ it watches, and the committed `tsconfig.json` extends them for an editor or
 `tsc`. On a fresh clone, `tsc -p` fails until a session has loaded the plugin
 from the folder once (for example with `--plugin-dir`).
 
-`claude --plugin-dir skills/agent-tools/plugins/andon/claude` loads the working
+`claude --plugin-dir skills/agent-config/plugins/andon/claude` loads the working
 copy for one session. An install from the folder marketplace (see the
-agent-tools `SKILL.md`) also reads this folder directly, so `/reload-plugins`
+agent-config `SKILL.md`) also reads this folder directly, so `/reload-plugins`
 picks up edits without a reinstall.
 
 ### Limits
@@ -87,7 +87,7 @@ picks up edits without a reinstall.
 - **Local install only:** the plugin finds the CLI by its place in this
   repository. An install from a GitHub-sourced marketplace copies only
   `claude/`, and then needs `andon` on `PATH`; the folder install in the
-  agent-tools `SKILL.md` is the supported route.
+  agent-config `SKILL.md` is the supported route.
 - **Plugin API version:** the function-hooks API is early access, and the plugin
   was written against Claude Code 2.1.299.
 
