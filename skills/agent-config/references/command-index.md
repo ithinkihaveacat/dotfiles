@@ -151,9 +151,9 @@ Agents:
 
 ## andon
 
-The store and triage CLI behind the Andon plugin (`plugins/andon/claude`).
-Agents pull the cord through the plugin's native tool; people and fix sessions
-use this command to list, inspect, resolve and dismiss alerts.
+The shared store, triage CLI and stdio MCP server behind Andon. Agents can pull
+through a harness plugin or MCP; people and fix sessions can list, inspect,
+resolve and dismiss alerts. See [Andon MCP](andon-mcp.md) for the MCP interface.
 
 ### Help
 
@@ -178,6 +178,7 @@ positional arguments:
                     fingerprint
     level           Print or set the default trigger level
     clear-resolved  Delete every resolved and dismissed alert
+    mcp             Serve Andon tools over MCP (stdio only)
 
 options:
   -h, --help        show this help message and exit
@@ -189,6 +190,9 @@ Examples:
 
   # Hand an alert to a fresh agent, which fixes the source and resolves it
   andon prompt e790 | claude -p
+
+  # Serve tools to a local MCP client
+  andon mcp --stdio
 
 Agents pull the cord through their harness integration (a native tool), not
 this command. Alerts live in $ANDON_STATE_DIR, else

@@ -5,7 +5,7 @@ function __fish_andon_ids
     andon list --status all 2>/dev/null | string replace -r '^(\S+)\s+\S+\s+L\d\s+(.*)$' '$1\t$2'
 end
 
-set -l commands pull list show prompt resolve dismiss reopen stats level clear-resolved
+set -l commands pull list show prompt resolve dismiss reopen stats level clear-resolved mcp
 set -l colors yellow red
 set -l kinds skill_contradiction rule_conflict stale_instruction stuck_loop tool_anomaly environment_block other
 
@@ -22,6 +22,8 @@ complete -c andon -n "not __fish_seen_subcommand_from $commands" -a reopen -d 'R
 complete -c andon -n "not __fish_seen_subcommand_from $commands" -a stats -d 'Count alerts'
 complete -c andon -n "not __fish_seen_subcommand_from $commands" -a level -d 'Print or set the default trigger level'
 complete -c andon -n "not __fish_seen_subcommand_from $commands" -a clear-resolved -d 'Delete resolved and dismissed alerts'
+complete -c andon -n "not __fish_seen_subcommand_from $commands" -a mcp -d 'Serve Andon tools over MCP'
+complete -c andon -n "__fish_seen_subcommand_from mcp" -l stdio -d 'Use stdin/stdout (the default)'
 
 # pull
 complete -c andon -n "__fish_seen_subcommand_from pull" -l color -xa "$colors" -d Severity

@@ -28,15 +28,17 @@ plugins/
 ../scripts/andon                   the store and triage CLI, shared by every harness
 ```
 
-The store format and the `andon` CLI are the shared, harness-neutral half. Every
-integration writes through the CLI, so the lock, the fingerprint and the record
-shape live in one place. An integration for another harness goes beside
-`claude/` (for example `codex/` or `opencode/`) and calls the same CLI.
+The store format and the `andon` command are the shared, harness-neutral half.
+CLI commands and MCP tools call the same operations, so validation, locking,
+fingerprints and record shapes live in one place. The existing adapters invoke
+CLI commands; another harness can use either that interface or MCP.
 
-An MCP server is the likely next shared piece, for harnesses whose only tool
-extension point is MCP. It would be a thin wrapper over `andon pull --json -`,
-paired with that harness's post-tool hook for session attribution. The Claude
-Code plugin doesn't need one: it registers the tool in-process.
+`andon mcp --stdio` exposes the shared operations through the MCP Python SDK,
+using Taskgo's SDK/server and separate-transport pattern. It needs no HTTP
+listener or hosted service. See [Andon MCP](../../references/andon-mcp.md) for
+tools, client configuration and attribution boundaries. This is the shared API
+only; it does not install a Codex adapter. The Claude Code plugin registers its
+tool in-process and does not need MCP.
 
 ## The Claude Code plugin
 
@@ -106,5 +108,6 @@ The design was ported, not the mechanisms. Another harness needs the same five
 things: an always-on rule (not a skill), an eagerly loaded tool that doesn't
 prompt, session attribution, the shared store, and packaging as one unit. Where
 the harness's tools receive session context, write the full record in the tool
-handler, as this plugin does. Otherwise, write it with a null session from an
-MCP server, and stamp it from a post-tool hook matched only on the pull tool.
+handler, as this plugin does. Otherwise, MCP reports omit unavailable session
+fields. A future adapter must define reliable host attribution separately; MCP
+client identity is not a conversation ID.

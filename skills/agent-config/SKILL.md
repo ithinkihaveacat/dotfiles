@@ -338,6 +338,12 @@ keeps this adapter beside its shared CLI. See
 configuration alternatives and remote connections. Both harnesses share the
 alert store and saved default level.
 
+**MCP clients:** run `andon mcp --stdio` to expose reporting, inspection and
+triage tools over stdin/stdout. MCP and CLI calls use the same operations and
+store. This API does not install a harness adapter or inject the Andon rule. See
+[Andon MCP](references/andon-mcp.md) for client configuration, tools and
+attribution boundaries.
+
 Triage with the CLI:
 
 ```bash
