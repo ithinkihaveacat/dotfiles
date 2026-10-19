@@ -1,0 +1,1234 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+# Tests: skills/agent-config/tests/test-mcp
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urlparse
+
+import tomllib
+
+# Per-agent configuration locations (overridable for testing)
+CLAUDE_CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR")
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+OPENCODE_CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+)
+
+SCOPES = ("user", "workspace")
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+HEADER_RE = re.compile(r"^([A-Za-z0-9!#$%&'*+.^_`|~-]+):\s*(.*)$")
+CLI_TIMEOUT = 120
+
+
+def die(msg, code=1):
+    print(f"mcp: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def usage_error(cmd, msg):
+    prog = "mcp" + (f" {cmd}" if cmd else "")
+    print(f"{prog}: {msg}", file=sys.stderr)
+    print(f"Try '{prog} --help' for more information.", file=sys.stderr)
+    sys.exit(1)
+
+
+def use_color_for(stream) -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    force = os.environ.get("FORCE_COLOR")
+    if force and force != "0":
+        return True
+    return stream.isatty() if hasattr(stream, "isatty") else False
+
+
+def clean_p(path: Path | str) -> str:
+    """Formats a path for display, abbreviating $HOME as '~'."""
+    path = str(path)
+    home = str(Path.home())
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    return path
+
+
+def get_workspace_root() -> Path:
+    curr = Path.cwd().resolve()
+    for parent in [curr, *curr.parents]:
+        # .git may be a file (worktrees), so check existence, not is_dir.
+        if any((parent / m).exists() for m in (".git", ".hg", ".svn")):
+            return parent
+    return curr
+
+
+# ==============================================================================
+# JSONC: OpenCode configs may hold comments and trailing commas. The parser
+# keeps each object member's source span so that 'remove' can cut one member
+# out of the text and leave the rest of the file, comments included, as it was.
+# ==============================================================================
+
+
+class JsoncError(ValueError):
+    pass
+
+
+_TOKEN = re.compile(
+    r"""
+    (?P<ws>\s+)
+    |(?P<comment>//[^\n]*|/\*.*?\*/)
+    |(?P<str>"(?:[^"\\\n]|\\.)*")
+    |(?P<punct>[{}\[\]:,])
+    |(?P<atom>[^\s{}\[\]:,"/]+)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+@dataclass
+class Node:
+    value: object
+    start: int
+    end: int
+    members: list = field(default_factory=list)  # objects only
+
+
+@dataclass
+class Member:
+    key: str
+    key_start: int
+    value: Node
+    comma: tuple | None  # the token after the value, when it is a comma
+
+
+def _line_col(text: str, pos: int) -> str:
+    line = text.count("\n", 0, pos) + 1
+    col = pos - (text.rfind("\n", 0, pos) + 1) + 1
+    return f"line {line}, column {col}"
+
+
+class _JsoncParser:
+    def __init__(self, text: str):
+        self.text = text
+        self.tokens = []
+        pos = 0
+        while pos < len(text):
+            m = _TOKEN.match(text, pos)
+            if not m:
+                raise JsoncError(f"unexpected character at {_line_col(text, pos)}")
+            if m.lastgroup in ("str", "punct", "atom"):
+                self.tokens.append((m.lastgroup, m.start(), m.end(), m.group()))
+            pos = m.end()
+        self.i = 0
+
+    def _peek(self):
+        return self.tokens[self.i] if self.i < len(self.tokens) else None
+
+    def _next(self):
+        tok = self._peek()
+        if tok is None:
+            raise JsoncError("unexpected end of input")
+        self.i += 1
+        return tok
+
+    def _fail(self, tok, expected):
+        raise JsoncError(
+            f"expected {expected} at {_line_col(self.text, tok[1])}, found {tok[3]!r}"
+        )
+
+    def _scalar(self, tok) -> Node:
+        try:
+            return Node(json.loads(tok[3]), tok[1], tok[2])
+        except json.JSONDecodeError:
+            self._fail(tok, "a value")
+
+    def value(self) -> Node:
+        tok = self._next()
+        if tok[3] == "{":
+            return self._object(tok[1])
+        if tok[3] == "[":
+            return self._array(tok[1])
+        if tok[0] in ("str", "atom"):
+            return self._scalar(tok)
+        self._fail(tok, "a value")
+
+    def _object(self, start) -> Node:
+        members = []
+        while True:
+            tok = self._peek()
+            if tok is not None and tok[3] == "}":
+                self.i += 1
+                break
+            key = self._next()
+            if key[0] != "str":
+                self._fail(key, "a string key")
+            colon = self._next()
+            if colon[3] != ":":
+                self._fail(colon, "':'")
+            value = self.value()
+            sep = self._next()
+            if sep[3] not in (",", "}"):
+                self._fail(sep, "',' or '}'")
+            comma = sep if sep[3] == "," else None
+            members.append(Member(json.loads(key[3]), key[1], value, comma))
+            if sep[3] == "}":
+                tok = sep
+                break
+        node = Node({m.key: m.value.value for m in members}, start, tok[2])
+        node.members = members
+        return node
+
+    def _array(self, start) -> Node:
+        items = []
+        while True:
+            tok = self._peek()
+            if tok is not None and tok[3] == "]":
+                self.i += 1
+                break
+            items.append(self.value().value)
+            sep = self._next()
+            if sep[3] not in (",", "]"):
+                self._fail(sep, "',' or ']'")
+            if sep[3] == "]":
+                tok = sep
+                break
+        return Node(items, start, tok[2])
+
+
+def parse_jsonc(text: str) -> Node:
+    parser = _JsoncParser(text)
+    root = parser.value()
+    extra = parser._peek()
+    if extra is not None:
+        parser._fail(extra, "end of input")
+    return root
+
+
+def jsonc_member(node: Node, key: str) -> Member | None:
+    for m in node.members:
+        if m.key == key:
+            return m
+    return None
+
+
+def jsonc_remove_member(text: str, obj: Node, key: str) -> str:
+    """Returns text with obj's member KEY cut out, along with its comma and,
+    when the member sits on lines of its own, those lines."""
+    idx = next(i for i, m in enumerate(obj.members) if m.key == key)
+    m = obj.members[idx]
+    if m.comma is None and idx > 0:
+        # Last member: drop the comma that precedes it instead.
+        return text[: obj.members[idx - 1].comma[1]] + text[m.value.end :]
+    start = m.key_start
+    end = m.comma[2] if m.comma else m.value.end
+    line_start = text.rfind("\n", 0, start) + 1
+    if not text[line_start:start].strip():
+        start = line_start
+        line_end = text.find("\n", end)
+        if line_end != -1 and not text[end:line_end].strip():
+            end = line_end + 1
+    return text[:start] + text[end:]
+
+
+# ==============================================================================
+# Agent backends
+#
+# Each backend reads its agent's config files directly (list, doctor, and the
+# existence checks before add) and writes through the agent's own CLI, except
+# where that CLI has no matching command.
+# ==============================================================================
+
+
+@dataclass
+class Source:
+    """One config file (or one section of one) holding MCP servers."""
+
+    agent: str
+    scope: str
+    path: Path
+    label: str  # how the source is shown, e.g. '~/.claude.json [project ~/src/x]'
+    kind: str = ""  # backend-specific: which native scope the source is
+    servers: dict = field(default_factory=dict)  # name -> normalized entry
+    problems: list = field(default_factory=list)  # (severity, message, details)
+    error: str | None = None
+
+
+@dataclass
+class Spec:
+    name: str
+    url: str | None = None
+    command: list = field(default_factory=list)
+    env: list = field(default_factory=list)  # 'KEY=VALUE'
+    headers: list = field(default_factory=list)  # (name, value)
+
+
+def server_entry(transport, command=None, args=None, url=None, env=(), headers=()):
+    return {
+        "transport": transport,
+        "command": command,
+        "args": list(args or []),
+        "url": url,
+        "env": sorted(env),
+        "headers": sorted(headers),
+        "disabled": False,
+    }
+
+
+def run_cli(agent: str, argv: list[str], cwd: Path) -> None:
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=CLI_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"'{' '.join(argv[:3])}' timed out after {CLI_TIMEOUT}s"
+        ) from None
+    except OSError as e:
+        raise RuntimeError(f"cannot run {argv[0]}: {e}") from e
+    if proc.returncode != 0:
+        output = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+        detail = f": {output[-1]}" if output else ""
+        raise RuntimeError(
+            f"'{' '.join(argv[:3])}' exited with status {proc.returncode}{detail}"
+        )
+
+
+def write_atomic(path: Path, text: str) -> None:
+    mode = path.stat().st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+class Backend:
+    name = "?"
+    cli = "?"
+    display = "?"
+    scopes = SCOPES
+
+    def config_hint(self) -> str:
+        return ""
+
+    def detected(self) -> bool:
+        return shutil.which(self.cli) is not None
+
+    def sources(self, scope: str, ws: Path) -> list[Source]:
+        """Returns the existing sources for SCOPE (none for missing files)."""
+        return []
+
+    def unsupported(self, spec: Spec) -> str | None:
+        """Returns why SPEC cannot be added to this agent, or None."""
+        return None
+
+    def add(self, scope: str, ws: Path, spec: Spec) -> None:
+        raise NotImplementedError
+
+    def remove(self, source: Source, ws: Path, name: str) -> None:
+        raise NotImplementedError
+
+
+class ClaudeBackend(Backend):
+    """Claude Code. user: mcpServers in .claude.json. workspace: the
+    repository's projects[...] entry in .claude.json (Claude's 'local' scope,
+    where 'add' writes) and the shared .mcp.json (Claude's 'project' scope)."""
+
+    name = "claude"
+    cli = "claude"
+    display = "Claude Code"
+
+    def state_path(self) -> Path:
+        if CLAUDE_CONFIG_DIR:
+            return Path(CLAUDE_CONFIG_DIR) / ".claude.json"
+        return Path.home() / ".claude.json"
+
+    def config_hint(self) -> str:
+        return clean_p(self.state_path())
+
+    def detected(self) -> bool:
+        return super().detected() or self.state_path().exists()
+
+    @staticmethod
+    def _servers(src: Source, table) -> None:
+        if not isinstance(table, dict):
+            src.error = "mcpServers is not an object"
+            return
+        for name, e in table.items():
+            if not isinstance(e, dict):
+                src.problems.append(("FAIL", f"{name}: entry is not an object", []))
+                continue
+            transport = e.get("type", "stdio")
+            src.servers[name] = server_entry(
+                transport,
+                command=e.get("command"),
+                args=e.get("args"),
+                url=e.get("url"),
+                env=(e.get("env") or {}).keys(),
+                headers=(e.get("headers") or {}).keys(),
+            )
+
+    def _load_json(self, src: Source):
+        try:
+            return json.loads(src.path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            src.error = str(e)
+            return None
+
+    def sources(self, scope, ws):
+        out = []
+        state = self.state_path()
+        if scope == "user":
+            if state.exists():
+                src = Source(self.name, scope, state, clean_p(state), kind="user")
+                data = self._load_json(src)
+                if isinstance(data, dict):
+                    self._servers(src, data.get("mcpServers", {}))
+                elif data is not None:
+                    src.error = "top level is not an object"
+                out.append(src)
+            return out
+        if state.exists():
+            label = f"{clean_p(state)} [project {clean_p(ws)}]"
+            src = Source(self.name, scope, state, label, kind="local")
+            data = self._load_json(src)
+            if src.error:
+                out.append(src)
+            elif isinstance(data, dict):
+                project = (data.get("projects") or {}).get(str(ws))
+                if isinstance(project, dict) and "mcpServers" in project:
+                    self._servers(src, project["mcpServers"])
+                    out.append(src)
+        shared = ws / ".mcp.json"
+        if shared.exists():
+            src = Source(self.name, scope, shared, clean_p(shared), kind="project")
+            data = self._load_json(src)
+            if isinstance(data, dict):
+                self._servers(src, data.get("mcpServers", {}))
+            elif data is not None:
+                src.error = "top level is not an object"
+            out.append(src)
+        return out
+
+    def add(self, scope, ws, spec):
+        argv = ["claude", "mcp", "add", "-s", "user" if scope == "user" else "local"]
+        if spec.url:
+            argv += ["-t", "http", spec.name, spec.url]
+            for k, v in spec.headers:
+                argv += ["--header", f"{k}: {v}"]
+        else:
+            argv.append(spec.name)
+            for e in spec.env:
+                argv += ["--env", e]
+            argv += ["--", *spec.command]
+        run_cli(self.name, argv, ws)
+
+    def remove(self, source, ws, name):
+        run_cli(self.name, ["claude", "mcp", "remove", "-s", source.kind, name], ws)
+
+
+class CodexBackend(Backend):
+    """Codex. user: [mcp_servers.*] in $CODEX_HOME/config.toml. 'codex mcp'
+    writes only there, so Codex has no workspace scope here."""
+
+    name = "codex"
+    cli = "codex"
+    display = "Codex"
+    scopes = ("user",)
+
+    def config_path(self) -> Path:
+        return CODEX_HOME / "config.toml"
+
+    def config_hint(self) -> str:
+        return clean_p(self.config_path())
+
+    def detected(self) -> bool:
+        return super().detected() or CODEX_HOME.is_dir()
+
+    def sources(self, scope, ws):
+        path = self.config_path()
+        if scope != "user" or not path.exists():
+            return []
+        src = Source(self.name, scope, path, clean_p(path), kind="user")
+        try:
+            data = tomllib.loads(path.read_text())
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            src.error = str(e)
+            return [src]
+        table = data.get("mcp_servers", {})
+        if not isinstance(table, dict):
+            src.error = "mcp_servers is not a table"
+            return [src]
+        for name, e in table.items():
+            if not isinstance(e, dict):
+                src.problems.append(("FAIL", f"{name}: entry is not a table", []))
+                continue
+            headers = set((e.get("http_headers") or {}).keys())
+            headers |= set((e.get("env_http_headers") or {}).keys())
+            if e.get("bearer_token_env_var"):
+                headers.add("Authorization")
+            entry = server_entry(
+                "http" if "url" in e else "stdio",
+                command=e.get("command"),
+                args=e.get("args"),
+                url=e.get("url"),
+                env=(e.get("env") or {}).keys(),
+                headers=headers,
+            )
+            entry["disabled"] = e.get("enabled") is False
+            src.servers[name] = entry
+        return [src]
+
+    def unsupported(self, spec):
+        if spec.headers:
+            return "'codex mcp add' cannot set HTTP headers"
+        return None
+
+    def add(self, scope, ws, spec):
+        argv = ["codex", "mcp", "add", spec.name]
+        if not spec.url:
+            for e in spec.env:
+                argv += ["--env", e]
+            run_cli(self.name, [*argv, "--", *spec.command], ws)
+            return
+        # For a server that supports OAuth, 'codex mcp add' saves the entry and
+        # then waits on a browser login. Stop it there, as the other agents do
+        # not log in on add, and check the entry was saved.
+        argv += ["--url", spec.url]
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=ws,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except OSError as e:
+            raise RuntimeError(f"cannot run {argv[0]}: {e}") from e
+        lines, login = [], False
+        try:
+            for line in proc.stdout:
+                lines.append(line.strip())
+                if "OAuth flow" in line:
+                    login = True
+                    proc.terminate()
+                    break
+            proc.wait(timeout=CLI_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise RuntimeError(
+                f"'codex mcp add' timed out after {CLI_TIMEOUT}s"
+            ) from None
+        finally:
+            proc.stdout.close()
+        if not login and proc.returncode != 0:
+            detail = f": {lines[-1]}" if lines else ""
+            raise RuntimeError(
+                f"'codex mcp add' exited with status {proc.returncode}{detail}"
+            )
+        if login:
+            if not any(spec.name in s.servers for s in self.sources("user", ws)):
+                raise RuntimeError("'codex mcp add' stopped before saving the server")
+            print(
+                f"codex: {spec.name} needs a login: run 'codex mcp login {spec.name}'",
+                file=sys.stderr,
+            )
+
+    def remove(self, source, ws, name):
+        run_cli(self.name, ["codex", "mcp", "remove", name], ws)
+
+
+class OpenCodeBackend(Backend):
+    """OpenCode. user: mcp.servers in ~/.config/opencode/opencode.json(c).
+    workspace: opencode.json(c) or .opencode/opencode.json(c) at the
+    repository root. 'opencode mcp' has no remove command, so 'remove' edits
+    the file, keeping its comments and formatting."""
+
+    name = "opencode"
+    cli = "opencode"
+    display = "OpenCode"
+    FILES = ("opencode.json", "opencode.jsonc")
+
+    def candidate_paths(self, scope: str, ws: Path) -> list[Path]:
+        if scope == "user":
+            return [OPENCODE_CONFIG_DIR / f for f in self.FILES]
+        return [d / f for d in (ws, ws / ".opencode") for f in self.FILES]
+
+    def config_hint(self) -> str:
+        return clean_p(OPENCODE_CONFIG_DIR / "opencode.json")
+
+    def detected(self) -> bool:
+        return super().detected() or OPENCODE_CONFIG_DIR.is_dir()
+
+    def sources(self, scope, ws):
+        out = []
+        for path in self.candidate_paths(scope, ws):
+            if not path.exists():
+                continue
+            src = Source(self.name, scope, path, clean_p(path))
+            out.append(src)
+            try:
+                root = parse_jsonc(path.read_text())
+            except (OSError, JsoncError) as e:
+                src.error = str(e)
+                continue
+            if not isinstance(root.value, dict):
+                src.error = "top level is not an object"
+                continue
+            mcp = root.value.get("mcp", {})
+            if not isinstance(mcp, dict):
+                src.error = "mcp is not an object"
+                continue
+            legacy = [
+                k for k, v in mcp.items() if k != "servers" and isinstance(v, dict)
+            ]
+            if legacy:
+                src.problems.append(
+                    (
+                        "WARN",
+                        f"servers outside mcp.servers: {', '.join(sorted(legacy))}",
+                        ["OpenCode 2 reads MCP servers from mcp.servers only"],
+                    )
+                )
+            servers = mcp.get("servers", {})
+            if not isinstance(servers, dict):
+                src.error = "mcp.servers is not an object"
+                continue
+            for name, e in servers.items():
+                if not isinstance(e, dict):
+                    src.problems.append(("FAIL", f"{name}: entry is not an object", []))
+                    continue
+                kind = e.get("type")
+                if kind == "local":
+                    command = e.get("command")
+                    if isinstance(command, list) and command:
+                        argv0, args = command[0], command[1:]
+                    else:
+                        argv0, args = None, []
+                    entry = server_entry(
+                        "stdio",
+                        command=argv0,
+                        args=args,
+                        env=(e.get("environment") or {}).keys(),
+                    )
+                elif kind == "remote":
+                    entry = server_entry(
+                        "http",
+                        url=e.get("url"),
+                        headers=(e.get("headers") or {}).keys(),
+                    )
+                else:
+                    src.problems.append(
+                        (
+                            "FAIL",
+                            f"{name}: type must be 'local' or 'remote' (found {kind!r})",
+                            [],
+                        )
+                    )
+                    continue
+                entry["disabled"] = e.get("disabled") is True
+                src.servers[name] = entry
+        return out
+
+    def add(self, scope, ws, spec):
+        argv = ["opencode", "mcp", "add"]
+        if scope == "user":
+            argv.append("--global")
+        argv.append(spec.name)
+        if spec.url:
+            argv += ["--url", spec.url]
+            for k, v in spec.headers:
+                argv += ["--header", f"{k}={v}"]
+        else:
+            for e in spec.env:
+                argv += ["--env", e]
+            argv += ["--", *spec.command]
+        run_cli(self.name, argv, ws)
+
+    def remove(self, source, ws, name):
+        text = source.path.read_text()
+        root = parse_jsonc(text)
+        servers = jsonc_member(jsonc_member(root, "mcp").value, "servers").value
+        new_text = jsonc_remove_member(text, servers, name)
+        check = parse_jsonc(new_text).value
+        if name in check.get("mcp", {}).get("servers", {}):
+            raise RuntimeError(f"failed to remove '{name}' from {source.label}")
+        write_atomic(source.path, new_text)
+
+
+BACKENDS = [ClaudeBackend(), CodexBackend(), OpenCodeBackend()]
+
+
+def select_backends(agent: str | None, cmd: str) -> list[Backend]:
+    if agent:
+        matches = [b for b in BACKENDS if b.name == agent]
+        if not matches:
+            names = ", ".join(b.name for b in BACKENDS)
+            usage_error(cmd, f"unknown agent '{agent}' (expected one of: {names})")
+        return matches
+    return [b for b in BACKENDS if b.detected()]
+
+
+def scopes_for(scope: str | None) -> tuple:
+    return (scope,) if scope else SCOPES
+
+
+# ==============================================================================
+# Commands
+# ==============================================================================
+
+
+def describe(entry: dict) -> str:
+    if entry["transport"] == "stdio":
+        return " ".join([str(entry["command"] or "?"), *map(str, entry["args"])])
+    return str(entry["url"] or "?")
+
+
+def cmd_list(agent, scope, as_json):
+    ws = get_workspace_root()
+    rows = []
+    failed = False
+    for b in select_backends(agent, "list"):
+        for sc in scopes_for(scope):
+            if sc not in b.scopes:
+                continue
+            for src in b.sources(sc, ws):
+                if src.error:
+                    print(
+                        f"mcp list: {b.name}: cannot read {src.label}: {src.error}",
+                        file=sys.stderr,
+                    )
+                    failed = True
+                    continue
+                for name, entry in src.servers.items():
+                    rows.append(
+                        {
+                            "agent": b.name,
+                            "scope": sc,
+                            "name": name,
+                            "path": str(src.path),
+                            **entry,
+                        }
+                    )
+    if as_json:
+        print(json.dumps(rows, indent=2))
+    elif rows:
+        table = [("AGENT", "SCOPE", "NAME", "TRANSPORT", "TARGET")]
+        for r in rows:
+            target = describe(r) + (" (disabled)" if r["disabled"] else "")
+            table.append((r["agent"], r["scope"], r["name"], r["transport"], target))
+        widths = [max(len(row[i]) for row in table) for i in range(4)]
+        for row in table:
+            cells = [c.ljust(w) for c, w in zip(row[:4], widths, strict=True)]
+            print("  ".join([*cells, row[4]]))
+    sys.exit(1 if failed else 0)
+
+
+def parse_spec(name, positional, command, env, headers) -> Spec:
+    if not NAME_RE.match(name):
+        usage_error(
+            "add", f"invalid server name '{name}' (use letters, digits, '-' and '_')"
+        )
+    url = positional[0] if positional else None
+    if len(positional) > 1:
+        usage_error("add", f"unexpected argument '{positional[1]}'")
+    if url and command:
+        usage_error("add", "give either URL or '-- COMMAND', not both")
+    if not url and not command:
+        usage_error("add", f"'{name}' needs a URL or '-- COMMAND [ARG...]'")
+    if url:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            usage_error("add", f"'{url}' is not an http:// or https:// URL")
+        if env:
+            usage_error("add", "--env applies only to a stdio server ('-- COMMAND')")
+    elif headers:
+        usage_error("add", "--header applies only to a remote server (URL)")
+    for e in env:
+        if not ENV_RE.match(e):
+            usage_error("add", f"invalid --env '{e}' (expected KEY=VALUE)")
+    parsed_headers = []
+    for h in headers:
+        m = HEADER_RE.match(h)
+        if not m:
+            usage_error("add", f"invalid --header '{h}' (expected 'NAME: VALUE')")
+        parsed_headers.append((m.group(1), m.group(2)))
+    return Spec(name, url=url, command=command, env=env, headers=parsed_headers)
+
+
+def require_cli(b: Backend):
+    if shutil.which(b.cli) is None:
+        die(f"{b.cli} not found", 127)
+
+
+def write_targets(agent, scope, cmd) -> list[Backend]:
+    backends = select_backends(agent, cmd)
+    if agent:
+        b = backends[0]
+        if scope not in b.scopes:
+            usage_error(cmd, f"{b.name} has no {scope} scope")
+        require_cli(b)
+        return backends
+    targets = []
+    for b in backends:
+        if scope not in b.scopes:
+            print(f"{b.name}: no {scope} scope, skipped", file=sys.stderr)
+        elif shutil.which(b.cli) is None:
+            print(f"{b.name}: {b.cli} not found, skipped", file=sys.stderr)
+        else:
+            targets.append(b)
+    if not targets:
+        die(f"{cmd}: no agent to update (looked for claude, codex and opencode)")
+    return targets
+
+
+def read_or_die(b: Backend, scope: str, ws: Path, cmd: str) -> list[Source]:
+    sources = b.sources(scope, ws)
+    for src in sources:
+        if src.error:
+            die(f"{cmd}: {b.name}: cannot read {src.label}: {src.error}")
+    return sources
+
+
+def cmd_add(agent, scope, spec: Spec):
+    ws = get_workspace_root()
+    targets = write_targets(agent, scope, "add")
+    # Check every target before changing any, so that a spec one agent cannot
+    # take leaves all of them as they were.
+    plan = []
+    for b in targets:
+        reason = b.unsupported(spec)
+        if reason:
+            die(f"add: {b.name}: {reason}; use --agent to choose other agents")
+        sources = read_or_die(b, scope, ws, "add")
+        holder = next((s for s in sources if spec.name in s.servers), None)
+        if holder:
+            print(
+                f"{b.name}: {spec.name} already in {holder.label}, skipped "
+                "(remove it first to replace it)",
+                file=sys.stderr,
+            )
+        else:
+            plan.append(b)
+    failed = False
+    for b in plan:
+        try:
+            b.add(scope, ws, spec)
+        except RuntimeError as e:
+            print(f"mcp add: {b.name}: {e}", file=sys.stderr)
+            failed = True
+            continue
+        print(f"{b.name}: added {spec.name} ({scope})", file=sys.stderr)
+    sys.exit(1 if failed else 0)
+
+
+def cmd_remove(agent, scope, names):
+    ws = get_workspace_root()
+    targets = write_targets(agent, scope, "remove")
+    failed = False
+    for name in names:
+        found = False
+        for b in targets:
+            for src in read_or_die(b, scope, ws, "remove"):
+                if name not in src.servers:
+                    continue
+                found = True
+                try:
+                    b.remove(src, ws, name)
+                except (RuntimeError, OSError, JsoncError) as e:
+                    print(f"mcp remove: {b.name}: {e}", file=sys.stderr)
+                    failed = True
+                    continue
+                print(f"{b.name}: removed {name} from {src.label}", file=sys.stderr)
+        if not found:
+            print(f"mcp remove: {name}: not found in {scope} scope", file=sys.stderr)
+            failed = True
+    sys.exit(1 if failed else 0)
+
+
+def command_problem(entry: dict, ws: Path) -> str | None:
+    command = entry["command"]
+    if not command:
+        return "no command"
+    expanded = os.path.expanduser(os.path.expandvars(str(command)))
+    if "/" in expanded:
+        path = Path(expanded)
+        if not path.is_absolute():
+            path = ws / path
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            return f"command {command} is not an executable file"
+        return None
+    if shutil.which(expanded) is None:
+        return f"command {command} not found on PATH"
+    return None
+
+
+def url_problem(entry: dict) -> str | None:
+    url = entry["url"]
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return f"URL {url!r} is not an absolute http(s) URL"
+    return None
+
+
+def cmd_doctor(agent, scope, stream=sys.stdout):
+    ws = get_workspace_root()
+    use_color = use_color_for(stream)
+    colors = {"PASS": "32", "INFO": "36", "WARN": "33", "FAIL": "31"}
+    counts = {"WARN": 0, "FAIL": 0}
+
+    def report(status, message, details=()):
+        tag = f"[{status}]"
+        if use_color:
+            tag = f"\033[{colors[status]}m{tag}\033[0m"
+        print(f"{tag}  {message}", file=stream)
+        for d in details:
+            print(f"        {d}", file=stream)
+        if status in counts:
+            counts[status] += 1
+
+    backends = [b for b in BACKENDS if not agent or b.name == agent]
+    if agent and not backends:
+        names = ", ".join(b.name for b in BACKENDS)
+        usage_error("doctor", f"unknown agent '{agent}' (expected one of: {names})")
+    detected = [b for b in backends if b.detected()]
+    for b in backends:
+        if b not in detected:
+            report("INFO", f"{b.name}: not installed ({b.cli} not on PATH)")
+    if not detected:
+        report(
+            "WARN",
+            "No supported agent found",
+            ["Looked for claude, codex and opencode on PATH and in their config dirs"],
+        )
+
+    for b in detected:
+        if shutil.which(b.cli) is None:
+            report(
+                "WARN",
+                f"{b.name}: {b.cli} not on PATH",
+                ["mcp add and remove run it; install it or put it on PATH"],
+            )
+        found = False
+        for sc in scopes_for(scope):
+            if sc not in b.scopes:
+                continue
+            for src in b.sources(sc, ws):
+                found = True
+                if src.error:
+                    report(
+                        "FAIL",
+                        f"{b.name}: cannot parse {src.label}",
+                        [src.error, "Fix the file by hand; mcp does not rewrite it"],
+                    )
+                    continue
+                n = len(src.servers)
+                report(
+                    "PASS",
+                    f"{b.name}: {src.label} ({sc}): {n} server{'s' if n != 1 else ''}",
+                )
+                for severity, message, details in src.problems:
+                    report(severity, f"{b.name}: {src.label}: {message}", details)
+                for name, entry in src.servers.items():
+                    if entry["disabled"]:
+                        continue
+                    if entry["transport"] == "stdio":
+                        problem = command_problem(entry, ws)
+                        severity = "FAIL" if problem == "no command" else "WARN"
+                    else:
+                        problem = url_problem(entry)
+                        severity = "FAIL"
+                    if problem:
+                        report(severity, f"{b.name}: {name} ({sc}): {problem}")
+        if not found:
+            report("INFO", f"{b.name}: no MCP configuration (e.g. {b.config_hint()})")
+
+    total = counts["WARN"] + counts["FAIL"]
+    if total:
+        print(
+            f"mcp doctor: {counts['FAIL']} failure(s), {counts['WARN']} warning(s)",
+            file=stream,
+        )
+    sys.exit(1 if total else 0)
+
+
+# ==============================================================================
+# CLI
+# ==============================================================================
+
+HELP_MAIN = """Usage: mcp <command> [options] [arguments]
+
+Manage the MCP servers configured for each installed agent: Claude Code
+(claude), Codex (codex) and OpenCode (opencode).
+
+Commands:
+  list [--json]              List configured servers per agent and scope
+                             (alias: ls)
+  add NAME URL               Add a remote (streamable HTTP) server
+  add NAME -- COMMAND [ARG...]
+                             Add a local (stdio) server
+  remove NAME...             Remove servers from the scope (alias: rm)
+  doctor                     Check that each agent's MCP configuration is
+                             usable (read-only)
+
+Options:
+  --agent NAME               Operate on one agent (claude, codex or opencode);
+                             by default, every installed agent
+  --scope SCOPE              'user' or 'workspace'; add and remove default to
+                             'user', list and doctor read both
+  -e, --env KEY=VALUE        (add) Environment variable for a stdio server;
+                             repeatable
+  -H, --header 'NAME: VALUE' (add) HTTP header for a remote server; repeatable
+  --json                     (list) Print servers as a JSON array
+  -h, --help                 Display this help message and exit
+
+Scopes:
+  user       claude: mcpServers in ~/.claude.json; codex: ~/.codex/config.toml;
+             opencode: ~/.config/opencode/opencode.json(c)
+  workspace  claude: the repository's entry in ~/.claude.json (Claude's local
+             scope, where add writes) and .mcp.json (Claude's project scope);
+             opencode: opencode.json(c) or .opencode/opencode.json(c) at the
+             repository root; codex has no workspace scope
+
+Examples:
+  # Add a remote server for every installed agent
+  mcp add context7 https://mcp.context7.com/mcp
+
+  # Add a stdio server to Claude Code only, for this repository
+  mcp add --agent claude --scope workspace everything -- npx -y @modelcontextprotocol/server-everything
+
+  # Pass a token through from the environment at add time
+  mcp add api https://mcp.example.com/mcp --header "Authorization: Bearer $API_TOKEN"
+
+  # Name the servers some agent has but Codex lacks
+  mcp list --json | jq -r 'group_by(.name)[] | select(all(.agent != "codex")) | .[0].name'
+
+add and remove run each agent's own CLI (claude mcp, codex mcp, opencode mcp
+add); OpenCode has no remove command, so remove edits its config file and
+keeps the file's comments. add skips an agent that already has the server in
+the scope, and refuses before changing anything when an agent cannot take the
+server (codex mcp add cannot set headers). add does not log in to a remote
+server that uses OAuth; use the agent's own login (claude: /mcp, codex: codex
+mcp login NAME, opencode: opencode mcp auth NAME). --env and --header values
+are written as given; list shows only their names."""
+
+HELP_LIST = """Usage: mcp list [--agent NAME] [--scope SCOPE] [--json]
+
+List the MCP servers each installed agent has configured: agent, scope,
+name, transport (stdio, http or sse), and the command or URL. Environment
+variables and headers are listed by name only (in --json).
+
+Options:
+  --agent NAME   List one agent only (claude, codex or opencode)
+  --scope SCOPE  List one scope only ('user' or 'workspace'); default: both
+  --json         Print a JSON array of servers instead of a table
+  -h, --help     Display this help message and exit
+
+Examples:
+  mcp list
+  mcp list --scope workspace --json"""
+
+HELP_ADD = """Usage: mcp add [options] NAME URL
+       mcp add [options] NAME -- COMMAND [ARG...]
+
+Add an MCP server to every installed agent, or to the one named by --agent,
+by running that agent's own CLI.
+
+Arguments:
+  NAME     Server name: letters, digits, '-' and '_'
+  URL      An http:// or https:// URL, for a remote (streamable HTTP) server
+  COMMAND  The command (and its arguments) that starts a stdio server
+
+Options:
+  --agent NAME               Add to one agent only (claude, codex or opencode)
+  --scope SCOPE              'user' (default) or 'workspace'
+  -e, --env KEY=VALUE        Environment variable for a stdio server;
+                             repeatable
+  -H, --header 'NAME: VALUE' HTTP header for a remote server; repeatable
+  -h, --help                 Display this help message and exit
+
+Examples:
+  mcp add context7 https://mcp.context7.com/mcp
+  mcp add --env LOG_LEVEL=info everything -- npx -y @modelcontextprotocol/server-everything
+  mcp add --agent opencode --scope workspace docs https://docs.example.com/mcp
+
+An agent that already has NAME in the scope is skipped; remove the server first
+to replace it. Values are written as given, so a secret passed here ends up in
+the agent's config file."""
+
+HELP_REMOVE = """Usage: mcp remove [options] NAME...
+
+Remove MCP servers from every installed agent that has them in the scope.
+
+Arguments:
+  NAME...        The servers to remove
+
+Options:
+  --agent NAME   Remove from one agent only (claude, codex or opencode)
+  --scope SCOPE  'user' (default) or 'workspace'
+  -h, --help     Display this help message and exit
+
+Examples:
+  mcp remove context7
+  mcp rm --scope workspace --agent claude everything
+
+In the workspace scope, a Claude Code server is removed from whichever of the
+repository's ~/.claude.json entry and .mcp.json holds it. Exits 1 if any NAME
+is in no agent's config."""
+
+HELP_DOCTOR = """Usage: mcp doctor [--agent NAME] [--scope SCOPE]
+
+Check each installed agent's MCP configuration: that each config file parses,
+that each stdio server's command is an executable on PATH (or at its path),
+that each remote server's URL is an absolute http(s) URL, and that the agent's
+CLI, which add and remove run, is on PATH. Read-only; exits 1 on any warning
+or failure.
+
+Options:
+  --agent NAME   Check one agent only (claude, codex or opencode)
+  --scope SCOPE  Check one scope only ('user' or 'workspace'); default: both
+  -h, --help     Display this help message and exit
+
+Examples:
+  mcp doctor
+  mcp doctor --agent opencode --scope workspace"""
+
+HELP = {
+    "list": HELP_LIST,
+    "ls": HELP_LIST,
+    "add": HELP_ADD,
+    "remove": HELP_REMOVE,
+    "rm": HELP_REMOVE,
+    "doctor": HELP_DOCTOR,
+}
+
+# Options each command accepts; the value says whether it takes an argument.
+OPTIONS = {
+    "list": {"--agent": True, "--scope": True, "--json": False},
+    "add": {"--agent": True, "--scope": True, "--env": True, "--header": True},
+    "remove": {"--agent": True, "--scope": True},
+    "doctor": {"--agent": True, "--scope": True},
+}
+SHORT = {"-e": "--env", "-H": "--header"}
+
+
+def parse_args(cmd: str, args: list[str]):
+    allowed = OPTIONS[cmd]
+    opts = {"--env": [], "--header": []}
+    positional, command = [], []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            command = args[i + 1 :]
+            break
+        name, value = arg, None
+        if arg.startswith("--") and "=" in arg:
+            name, value = arg.split("=", 1)
+        name = SHORT.get(name, name)
+        if name.startswith("-") and name != "-":
+            if name not in allowed:
+                usage_error(cmd, f"unrecognized option '{arg}'")
+            if allowed[name]:
+                if value is None:
+                    if i + 1 >= len(args):
+                        usage_error(cmd, f"{name} requires a value")
+                    value = args[i + 1]
+                    i += 1
+                if name in ("--env", "--header"):
+                    opts[name].append(value)
+                else:
+                    opts[name] = value
+            else:
+                opts[name] = True
+        else:
+            positional.append(arg)
+        i += 1
+    scope = opts.get("--scope")
+    if scope is not None and scope not in SCOPES:
+        usage_error(cmd, f"unknown scope '{scope}' (expected 'user' or 'workspace')")
+    return opts, positional, command
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("--help", "-h", "help"):
+        topic = argv[1] if len(argv) > 1 else None
+        print(HELP.get(topic, HELP_MAIN))
+        sys.exit(0)
+
+    cmd = {"ls": "list", "rm": "remove"}.get(argv[0], argv[0])
+    if cmd not in OPTIONS:
+        usage_error(None, f"unknown command '{argv[0]}'")
+    rest = argv[1:]
+    before_dashes = rest[: rest.index("--")] if "--" in rest else rest
+    if "--help" in before_dashes or "-h" in before_dashes:
+        print(HELP[cmd])
+        sys.exit(0)
+
+    opts, positional, command = parse_args(cmd, rest)
+    agent = opts.get("--agent")
+    scope = opts.get("--scope")
+
+    if cmd in ("list", "doctor"):
+        if positional or command:
+            usage_error(cmd, f"unexpected argument '{(positional or command)[0]}'")
+        if cmd == "list":
+            cmd_list(agent, scope, bool(opts.get("--json")))
+        cmd_doctor(agent, scope)
+    if cmd == "add":
+        if not positional:
+            print(
+                "Usage: mcp add [options] NAME URL\n"
+                "       mcp add [options] NAME -- COMMAND [ARG...]\n\n"
+                "Add an MCP server to every installed agent.\n\n"
+                "Examples:\n"
+                "  mcp add context7 https://mcp.context7.com/mcp\n\n"
+                "Try 'mcp add --help' for more information.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        spec = parse_spec(
+            positional[0], positional[1:], command, opts["--env"], opts["--header"]
+        )
+        cmd_add(agent, scope or "user", spec)
+    if cmd == "remove":
+        if command:
+            usage_error(cmd, "unexpected '--'")
+        if not positional:
+            usage_error(cmd, "server name required")
+        cmd_remove(agent, scope or "user", positional)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
