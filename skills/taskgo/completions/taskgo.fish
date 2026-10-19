@@ -36,8 +36,10 @@ complete -f -c taskgo -n __fish_use_subcommand -a apply -d 'Apply a change set t
 complete -f -c taskgo -n __fish_use_subcommand -a edit -d 'Replace exact text in a file'
 complete -f -c taskgo -n __fish_use_subcommand -a list -d 'List tasks'
 complete -f -c taskgo -n __fish_use_subcommand -a info -d 'Show project metadata from README.md frontmatter'
+complete -f -c taskgo -n __fish_use_subcommand -a skills -d "List a project's required skills"
 complete -f -c taskgo -n __fish_use_subcommand -a status -d "Show a task's or project's status"
 complete -f -c taskgo -n __fish_use_subcommand -a handoff -d 'Print agent instructions for a project or task'
+complete -f -c taskgo -n __fish_use_subcommand -a dispatch -d 'Print agent instructions for a project or task'
 complete -f -c taskgo -n __fish_use_subcommand -a sync -d 'Update STATUS.md snapshot'
 complete -f -c taskgo -n __fish_use_subcommand -a check -d 'Sweep wait_for gates and date horizons'
 complete -f -c taskgo -n __fish_use_subcommand -a doctor -d 'Run mechanical checks (read-only)'
@@ -53,13 +55,15 @@ complete -f -c taskgo -n __fish_use_subcommand -a requests -d "Summarise the MCP
 
 # Global flags
 complete -c taskgo -n __fish_use_subcommand -l root -s R -r -d 'Control repository (default: ~/.projects)'
+complete -f -c taskgo -l offline -d 'Skip remote Git fetch and push (same as AGENT_OFFLINE=1)'
+complete -f -c taskgo -l no-fetch -d 'Skip remote Git fetch and push (same as --offline)'
 complete -c taskgo -f -s h -l help -d 'Display help message and exit'
 
 # Subcommand arguments (Projects)
-complete -f -c taskgo -n '__fish_seen_subcommand_from create list info status handoff handover sync check doctor fix' -a '(__fish_taskgo_projects)' -d Project
+complete -f -c taskgo -n '__fish_seen_subcommand_from create list info skills status handoff handover dispatch sync check doctor fix' -a '(__fish_taskgo_projects)' -d Project
 
 # Subcommand arguments (Task IDs for update / history / checkpoint)
-complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint status handoff handover' -a '(__fish_taskgo_tasks)' -d 'Task ID'
+complete -f -c taskgo -n '__fish_seen_subcommand_from update history checkpoint status handoff handover dispatch' -a '(__fish_taskgo_tasks)' -d 'Task ID'
 
 # create options
 complete -f -c taskgo -n '__fish_seen_subcommand_from create' -l slug -x -d 'Filename mnemonic (max 32 chars)'
@@ -125,8 +129,8 @@ complete -f -c taskgo -n '__fish_seen_subcommand_from edit' -s j -l json -d 'Emi
 
 # handoff options
 complete -x -c taskgo -n '__fish_seen_subcommand_from status' -l at -d 'Read commit REV instead of the working tree'
-complete -x -c taskgo -n '__fish_seen_subcommand_from handoff handover' -l at -d 'Read commit REV instead of the working tree'
-complete -f -c taskgo -n '__fish_seen_subcommand_from handoff handover' -s j -l json -d 'Output the full payload as JSON'
+complete -x -c taskgo -n '__fish_seen_subcommand_from handoff handover dispatch' -l at -d 'Read commit REV instead of the working tree'
+complete -f -c taskgo -n '__fish_seen_subcommand_from handoff handover dispatch' -s j -l json -d 'Output the full payload as JSON'
 
 # list options
 complete -f -c taskgo -n '__fish_seen_subcommand_from list' -s s -l state -l status -x -a 'todo in-progress blocked done cancelled ready' -d 'Filter by state'

@@ -314,6 +314,11 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   their owners wrote them.
 - `checkpoint`: Safe automatic-commit path requiring
   `taskgo:allow-local-commits`. Enforces 50-char subject limits.
+- Remote sync by default: CLI reads and writes serialize on
+  `<git-dir>/taskgo.lock`, fetch the upstream tracking branch (`@{u}`), and
+  fast-forward or rebase with `--autostash` when behind; commands that create a
+  commit (`create`, `checkpoint`, `commit`, `fix`) also push to the remote. Pass
+  `--offline` (or set `AGENT_OFFLINE=1`) to skip remote Git fetch and push.
 - `mcp`: Serve committed state to MCP clients and write their change sets as
   commits: by default from and to a remote, for cloud agents without a checkout
   of the control repository; with `--local`, on a checkout's own branch, for

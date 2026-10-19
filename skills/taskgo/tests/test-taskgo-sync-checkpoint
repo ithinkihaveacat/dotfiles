@@ -25,7 +25,7 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
 
-echo "1..13"
+echo "1..22"
 
 init_base_repo() {
   local target="${1:-$TEST_ROOT/repo}"
@@ -256,3 +256,178 @@ if ! ("$BIN" --root "$CHECKPOINT_REPO" checkpoint TASK-B2C3D 'example: revoked c
 else
   echo 'not ok 13 - checkpoint ignores a working-tree revocation'
 fi
+
+# ===========================================================================
+# Default remote sync (fetch/rebase/push, autostash rollback, and --offline)
+# ===========================================================================
+
+SYNC_REMOTE="$TEST_ROOT/sync-remote.git"
+SYNC_PEER="$TEST_ROOT/sync-peer"
+SYNC_LOCAL="$TEST_ROOT/sync-local"
+git init -q --bare "$SYNC_REMOTE"
+init_base_repo "$SYNC_PEER"
+printf '\n<!-- taskgo:allow-local-commits -->\n' >>"$SYNC_PEER/AGENTS.md"
+git -C "$SYNC_PEER" config user.name 'Taskgo Test'
+git -C "$SYNC_PEER" config user.email 'taskgo@example.com'
+("$BIN" --root "$SYNC_PEER" sync example) >/dev/null
+git -C "$SYNC_PEER" branch -M main
+git -C "$SYNC_PEER" remote add origin "$SYNC_REMOTE"
+git -C "$SYNC_PEER" add .
+git -C "$SYNC_PEER" commit -qm 'chore: seed remote'
+git -C "$SYNC_PEER" push -q -u origin main
+git --git-dir="$SYNC_REMOTE" symbolic-ref HEAD refs/heads/main
+
+git clone -q "$SYNC_REMOTE" "$SYNC_LOCAL"
+git -C "$SYNC_LOCAL" config user.name 'Taskgo Test'
+git -C "$SYNC_LOCAL" config user.email 'taskgo@example.com'
+
+# 14: CLI read (list/status) fetches and fast-forwards when remote advances
+PEER_CREATED=$("$BIN" --root "$SYNC_PEER" create example 'Remote task from peer' --slug peer-task)
+PEER_ID="${PEER_CREATED%%$'\t'*}"
+if ("$BIN" --root "$SYNC_LOCAL" list example) | grep -q "$PEER_ID" &&
+  [[ "$(git -C "$SYNC_LOCAL" rev-parse HEAD)" == "$(git --git-dir="$SYNC_REMOTE" rev-parse main)" ]]; then
+  echo 'ok 14 - CLI read fetches and fast-forwards when remote advances'
+else
+  echo 'not ok 14 - CLI read did not pull remote commit'
+fi
+
+# 15: Pre-sync preserves non-conflicting dirty working-tree edits across rebase (ahead > 0)
+printf '\nLocal committed note.\n' >>"$SYNC_LOCAL/INBOX.md"
+git -C "$SYNC_LOCAL" add INBOX.md
+git -C "$SYNC_LOCAL" commit -qm 'docs: local ahead commit'
+printf '\nLocal draft note.\n' >>"$SYNC_LOCAL/example/PLAN.md"
+PEER_CREATED2=$("$BIN" --root "$SYNC_PEER" create example 'Second remote task' --slug peer-two)
+PEER_ID2="${PEER_CREATED2%%$'\t'*}"
+if ("$BIN" --root "$SYNC_LOCAL" status example) >/dev/null &&
+  ("$BIN" --root "$SYNC_LOCAL" --offline list example) | grep -q "$PEER_ID2" &&
+  grep -q 'Local draft note.' "$SYNC_LOCAL/example/PLAN.md" &&
+  grep -q 'Local committed note.' "$SYNC_LOCAL/INBOX.md"; then
+  echo 'ok 15 - pre-sync preserves non-conflicting dirty working-tree edits'
+else
+  echo 'not ok 15 - pre-sync lost dirty working-tree edits or failed to pull'
+fi
+git -C "$SYNC_LOCAL" checkout -q -- example/PLAN.md
+git -C "$SYNC_LOCAL" push -q origin main
+git -C "$SYNC_PEER" pull -q --rebase origin main
+
+# 16: Phase 2 autostash pop conflict restores exact pre-sync working tree without conflict markers
+printf '# Plan\n\nLocal conflicting line.\n' >"$SYNC_LOCAL/example/PLAN.md"
+printf '# Plan\n\nUpstream conflicting line.\n' >"$SYNC_PEER/example/PLAN.md"
+git -C "$SYNC_PEER" add example/PLAN.md
+git -C "$SYNC_PEER" commit -qm 'docs(example): update plan upstream'
+git -C "$SYNC_PEER" push -q origin main
+PRE_CONFLICT_HEAD=$(git -C "$SYNC_LOCAL" rev-parse HEAD)
+if ! CONFLICT_ERR=$("$BIN" --root "$SYNC_LOCAL" list example 2>&1) &&
+  [[ "$CONFLICT_ERR" == *"conflict"* ]] &&
+  [[ "$(git -C "$SYNC_LOCAL" rev-parse HEAD)" == "$PRE_CONFLICT_HEAD" ]] &&
+  [[ -z "$(git -C "$SYNC_LOCAL" ls-files -u)" ]] &&
+  ! grep -q '<<<<<<<' "$SYNC_LOCAL/example/PLAN.md" &&
+  grep -q 'Local conflicting line.' "$SYNC_LOCAL/example/PLAN.md"; then
+  echo 'ok 16 - autostash conflict rolls back to exact pre-sync working tree'
+else
+  echo 'not ok 16 - autostash conflict left markers or moved HEAD'
+  printf '# err=%s\n' "$CONFLICT_ERR"
+fi
+git -C "$SYNC_LOCAL" checkout -q -- example/PLAN.md
+("$BIN" --root "$SYNC_LOCAL" status example) >/dev/null
+
+# 17: Phase 1 commit rebase conflict aborts rebase cleanly and restores HEAD
+printf '# Plan\n\nLocal committed conflict.\n' >"$SYNC_LOCAL/example/PLAN.md"
+git -C "$SYNC_LOCAL" add example/PLAN.md
+git -C "$SYNC_LOCAL" commit -qm 'docs(example): local plan commit'
+LOCAL_COMMIT_HEAD=$(git -C "$SYNC_LOCAL" rev-parse HEAD)
+printf '# Plan\n\nPeer committed conflict.\n' >"$SYNC_PEER/example/PLAN.md"
+git -C "$SYNC_PEER" add example/PLAN.md
+git -C "$SYNC_PEER" commit -qm 'docs(example): peer plan commit'
+git -C "$SYNC_PEER" push -q origin main
+if ! RB_ERR=$("$BIN" --root "$SYNC_LOCAL" status example 2>&1) &&
+  [[ "$RB_ERR" == *"rebase aborted"* ]] &&
+  [[ ! -d "$SYNC_LOCAL/.git/rebase-merge" ]] &&
+  [[ ! -d "$SYNC_LOCAL/.git/rebase-apply" ]] &&
+  [[ "$(git -C "$SYNC_LOCAL" rev-parse HEAD)" == "$LOCAL_COMMIT_HEAD" ]]; then
+  echo 'ok 17 - commit rebase conflict aborts cleanly and restores HEAD'
+else
+  echo 'not ok 17 - commit rebase conflict did not abort cleanly'
+  printf '# err=%s\n' "$RB_ERR"
+fi
+git -C "$SYNC_LOCAL" reset -q --hard origin/main
+
+# 18: Committing CLI commands push to remote and retry on non-fast-forward race
+("$BIN" --root "$SYNC_LOCAL" update TASK-A1B2C --status in-progress --offline) >/dev/null
+printf '\nPeer note.\n' >>"$SYNC_PEER/INBOX.md"
+git -C "$SYNC_PEER" add INBOX.md
+git -C "$SYNC_PEER" commit -qm 'docs: peer inbox note'
+git -C "$SYNC_PEER" push -q origin main
+if ("$BIN" --root "$SYNC_LOCAL" checkpoint TASK-A1B2C 'example: start task') >/dev/null 2>&1 &&
+  [[ "$(git -C "$SYNC_LOCAL" rev-parse HEAD)" == "$(git --git-dir="$SYNC_REMOTE" rev-parse main)" ]] &&
+  grep -q 'Peer note.' "$SYNC_LOCAL/INBOX.md"; then
+  echo 'ok 18 - checkpoint reconciles with advanced remote and pushes commit'
+else
+  echo 'not ok 18 - checkpoint did not reconcile and push to remote'
+fi
+
+# 19: --offline and AGENT_OFFLINE=1 skip remote fetch and push
+git -C "$SYNC_PEER" pull -q --rebase origin main
+printf '\nAnother peer note.\n' >>"$SYNC_PEER/INBOX.md"
+git -C "$SYNC_PEER" add INBOX.md
+git -C "$SYNC_PEER" commit -qm 'docs: second peer inbox note'
+git -C "$SYNC_PEER" push -q origin main
+REMOTE_HEAD_BEFORE=$(git --git-dir="$SYNC_REMOTE" rev-parse main)
+OFFLINE_CREATED=$(AGENT_OFFLINE=1 "$BIN" --root "$SYNC_LOCAL" create example 'Offline task' --slug offline-task)
+OFFLINE_ID="${OFFLINE_CREATED%%$'\t'*}"
+if [[ -n "$OFFLINE_ID" ]] &&
+  [[ "$(git --git-dir="$SYNC_REMOTE" rev-parse main)" == "$REMOTE_HEAD_BEFORE" ]] &&
+  ! grep -q 'Another peer note.' "$SYNC_LOCAL/INBOX.md" &&
+  ("$BIN" --root "$SYNC_LOCAL" --offline list example) | grep -q "$OFFLINE_ID"; then
+  echo 'ok 19 - --offline and AGENT_OFFLINE=1 skip remote fetch and push'
+else
+  echo 'not ok 19 - offline mode did not skip remote fetch and push'
+fi
+git -C "$SYNC_LOCAL" reset -q --hard origin/main
+
+# 20: Untracked file collision with upstream refuses cleanly without wiping dirty tracked edits
+printf '\nPrecious uncommitted edit.\n' >>"$SYNC_LOCAL/example/PLAN.md"
+printf 'Local untracked content.\n' >"$SYNC_LOCAL/example/untracked-collision.md"
+git -C "$SYNC_PEER" pull -q --rebase origin main
+printf 'Upstream tracked content.\n' >"$SYNC_PEER/example/untracked-collision.md"
+git -C "$SYNC_PEER" add example/untracked-collision.md
+git -C "$SYNC_PEER" commit -qm 'docs(example): add collision file upstream'
+git -C "$SYNC_PEER" push -q origin main
+if ! UNTRACKED_ERR=$("$BIN" --root "$SYNC_LOCAL" status example 2>&1) &&
+  [[ "$UNTRACKED_ERR" == *"untracked working tree file(s) would be overwritten"* ]] &&
+  grep -q 'Precious uncommitted edit.' "$SYNC_LOCAL/example/PLAN.md" &&
+  grep -q 'Local untracked content.' "$SYNC_LOCAL/example/untracked-collision.md"; then
+  echo 'ok 20 - untracked collision refuses cleanly without wiping dirty tracked edits'
+else
+  echo 'not ok 20 - untracked collision wiped dirty tracked edits or did not fail'
+  printf '# err=%s\n' "$UNTRACKED_ERR"
+fi
+rm -f "$SYNC_LOCAL/example/untracked-collision.md"
+git -C "$SYNC_LOCAL" checkout -q -- example/PLAN.md
+("$BIN" --root "$SYNC_LOCAL" status example) >/dev/null
+
+# 21: Unstaged STATUS.md generated block from local update reconciles cleanly with peer task commit in same project
+("$BIN" --root "$SYNC_LOCAL" update TASK-A1B2C --status todo --offline) >/dev/null
+git -C "$SYNC_PEER" pull -q --rebase origin main
+PEER_SAME_PROJ=$("$BIN" --root "$SYNC_PEER" create example 'Concurrent peer task in same project' --slug concurrent-peer)
+PEER_SAME_ID="${PEER_SAME_PROJ%%$'\t'*}"
+if CP_ERR=$("$BIN" --root "$SYNC_LOCAL" checkpoint TASK-A1B2C 'example: return task to todo' 2>&1) &&
+  ("$BIN" --root "$SYNC_LOCAL" --offline list example) | grep -q "$PEER_SAME_ID" &&
+  [[ "$(git -C "$SYNC_LOCAL" rev-parse HEAD)" == "$(git --git-dir="$SYNC_REMOTE" rev-parse main)" ]]; then
+  echo 'ok 21 - unstaged STATUS.md snapshot reconciles cleanly with peer task commit in same project'
+else
+  echo 'not ok 21 - unstaged STATUS.md snapshot conflicted against peer task commit'
+  printf '# err=%s\n' "$CP_ERR"
+fi
+
+# 22: Committing create refuses when staged changes exist in the index
+printf '\nStaged unrelated edit.\n' >>"$SYNC_LOCAL/INBOX.md"
+git -C "$SYNC_LOCAL" add INBOX.md
+if ! STAGED_CREATE_ERR=$("$BIN" --root "$SYNC_LOCAL" create example 'Should refuse staged index' --slug refuse-staged 2>&1) &&
+  [[ "$STAGED_CREATE_ERR" == *"git index contains staged changes"* ]]; then
+  echo 'ok 22 - committing create refuses when git index contains staged changes'
+else
+  echo 'not ok 22 - committing create allowed dirty git index'
+  printf '# err=%s\n' "$STAGED_CREATE_ERR"
+fi
+git -C "$SYNC_LOCAL" reset -q --hard origin/main
