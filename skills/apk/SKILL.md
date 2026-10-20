@@ -38,8 +38,8 @@ See `references/command-index.md` for detailed usage.
 
 - `scripts/apk-info`: The unified read-only APK metadata and file inspector.
   Supports subcommands (`package`, `manifest`, `version`, `libraries`, `tiles`,
-  `complications`, `launcher`, `file`, `doctor`). `apk-info doctor` (also
-  available as `apk-doctor`) checks tool dependencies and capability readiness.
+  `complications`, `launcher`, `file`, `doctor`). `apk-info doctor` checks tool
+  dependencies and capability readiness.
 
 ### Extraction & Decoding
 
