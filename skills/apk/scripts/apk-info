@@ -57,6 +57,7 @@ Commands:
   complications        List Wear OS complications data providers.
   launcher             Print the path of the launcher icon resource.
   file                 Extract and print the contents of a specific file from the APK.
+  doctor               Check environment health and dependencies for APK tools.
 
 Options:
   --help, -h           Display this help message and exit.
@@ -79,7 +80,7 @@ Usage: $SCRIPT_NAME COMMAND [ARGUMENTS]
 A unified tool for inspecting Android APK files and split-APK ZIP archives.
 
 Commands:
-  package, manifest, version, libraries, tiles, widgets, complications, launcher, file
+  package, manifest, version, libraries, tiles, widgets, complications, launcher, file, doctor
 
 Examples:
   $SCRIPT_NAME package app.apk
@@ -91,22 +92,24 @@ EOF
   exit 1
 }
 
-if [[ $# -lt 1 ]]; then
+if [[ "$SCRIPT_NAME" == "apk-doctor" ]]; then
+  COMMAND="doctor"
+elif [[ $# -lt 1 ]]; then
   usage_short
+else
+  case "$1" in
+    help | --help | -h)
+      if [[ -n "${2:-}" ]]; then
+        exec "$0" "$2" --help
+      fi
+      usage 0
+      ;;
+    *)
+      COMMAND="$1"
+      shift
+      ;;
+  esac
 fi
-
-case "$1" in
-  help | --help | -h)
-    if [[ -n "${2:-}" ]]; then
-      "$0" "$2" --help
-    fi
-    usage 0
-    ;;
-  *)
-    COMMAND="$1"
-    shift
-    ;;
-esac
 
 # Check dependencies
 require() {
@@ -116,8 +119,10 @@ require() {
   }
 }
 
-require apkanalyzer
-require unzip
+if [[ "$COMMAND" != "doctor" ]]; then
+  require apkanalyzer
+  require unzip
+fi
 
 # =============================================================================
 # COMMAND IMPLEMENTATIONS
@@ -629,6 +634,161 @@ EOF
       unzip -p "$BASEAPK" "$path"
     fi
   fi
+}
+
+usage_doctor() {
+  local cmd_synopsis="$SCRIPT_NAME doctor"
+  if [[ "$SCRIPT_NAME" == "apk-doctor" ]]; then
+    cmd_synopsis="$SCRIPT_NAME"
+  fi
+  cat <<EOF
+Usage: $cmd_synopsis
+
+Check environment health and dependencies for APK inspection tools.
+
+Inspects PATH for required and optional CLI binaries (apkanalyzer,
+unzip, apktool, baksmali, uv, xmllint, xpath, aapt/aapt2, jadx)
+and reports capability readiness.
+
+Read-only. Exits 0 if all required and recommended tools are available,
+or 1 if any tool is missing or needs attention.
+
+Options:
+  --help, -h  Display this help message and exit.
+
+Examples:
+  $cmd_synopsis
+EOF
+  exit "${1:-0}"
+}
+
+DOCTOR_STATUS=0
+
+use_color() {
+  if [[ -n "${NO_COLOR:-}" ]]; then
+    return 1
+  fi
+  if [[ -n "${FORCE_COLOR:-}" && "$FORCE_COLOR" != "0" ]]; then
+    return 0
+  fi
+  [[ -t 1 ]]
+}
+
+doctor_report() {
+  local tag="$1"
+  local text="$2"
+  shift 2
+
+  local tag_str="[$tag]"
+  if use_color; then
+    case "$tag" in
+      PASS) tag_str="\033[32m[PASS]\033[0m" ;;
+      INFO) tag_str="\033[36m[INFO]\033[0m" ;;
+      WARN) tag_str="\033[33m[WARN]\033[0m" ;;
+      FAIL) tag_str="\033[31m[FAIL]\033[0m" ;;
+    esac
+  fi
+
+  printf '%b  %s\n' "$tag_str" "$text"
+  while [[ $# -gt 0 ]]; do
+    printf '        %s\n' "$1"
+    shift
+  done
+
+  case "$tag" in
+    WARN | FAIL) DOCTOR_STATUS=1 ;;
+  esac
+}
+
+check_dep() {
+  local name="$1"
+  local severity="$2"
+  local used_by="$3"
+  local install_hint="$4"
+  local bin_path
+  bin_path=$(command -v "$name" 2>/dev/null) || bin_path=""
+
+  if [[ -n "$bin_path" ]]; then
+    doctor_report "PASS" "$name: $bin_path"
+  else
+    doctor_report "$severity" "$name: not found on PATH" \
+      "Used by: $used_by" \
+      "Install: $install_hint"
+  fi
+}
+
+cmd_doctor() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+    usage_doctor 0
+  fi
+
+  DOCTOR_STATUS=0
+
+  # Core dependencies
+  check_dep "apkanalyzer" "FAIL" \
+    "apk-info (manifest, package, version, libraries, tiles)" \
+    "Android Command Line Tools via Android SDK or sdkmanager 'cmdline-tools;latest'"
+
+  check_dep "unzip" "FAIL" \
+    "apk-unzip, split-APK ZIP archives, and bundle extraction" \
+    "sudo apt-get install unzip (Linux) or brew install unzip (macOS)"
+
+  # Decompilation & disassembly tools
+  check_dep "apktool" "WARN" \
+    "apk-decode, apk-launcher-icon-extract (full resource decoding)" \
+    "sudo apt-get install apktool (Debian/Ubuntu) or brew install apktool (macOS)"
+
+  check_dep "baksmali" "WARN" \
+    "apk-smali (DEX bytecode disassembly and evidence checks)" \
+    "see references/troubleshooting.md"
+
+  check_dep "uv" "WARN" \
+    "apk-smali (Python AST and bytecode query engine)" \
+    "$HOME/.dotfiles/install.sh (uv feature) or curl -LsSf https://astral.sh/uv/install.sh"
+
+  # Manifest formatting and parsing
+  check_dep "xmllint" "WARN" \
+    "apk-info manifest formatting and icon extraction" \
+    "sudo apt-get install libxml2-utils (Linux) or brew install libxml2 (macOS)"
+
+  check_dep "xpath" "INFO" \
+    "apk-info tiles, apk-info complications, apk-launcher-icon-extract" \
+    "sudo apt-get install libxml-xpath-perl (Linux) or cpan XML::XPath (macOS)"
+
+  # Android badging
+  local aapt_bin
+  aapt_bin=$(command -v aapt2 2>/dev/null || command -v aapt 2>/dev/null) || aapt_bin=""
+  if [[ -n "$aapt_bin" ]]; then
+    doctor_report "PASS" "$(basename "$aapt_bin"): $aapt_bin"
+  else
+    doctor_report "INFO" "aapt / aapt2: not found on PATH" \
+      "Used by: apk-info launcher" \
+      "Android SDK Build-Tools (add build-tools/<version> to PATH)"
+  fi
+
+  # Optional Java source decompiler
+  local jadx_bin
+  jadx_bin=$(command -v jadx 2>/dev/null) || jadx_bin=""
+  if [[ -n "$jadx_bin" ]]; then
+    doctor_report "PASS" "jadx: $jadx_bin"
+  else
+    doctor_report "INFO" "jadx: not found on PATH (optional for Java source decompilation)" \
+      "Used by: optional Java source reverse-engineering" \
+      "brew install jadx (macOS) or see references/bytecode-analysis.md"
+  fi
+
+  local cmd_label="$SCRIPT_NAME doctor"
+  if [[ "$SCRIPT_NAME" == "apk-doctor" ]]; then
+    cmd_label="$SCRIPT_NAME"
+  fi
+
+  echo ""
+  if [[ $DOCTOR_STATUS -eq 0 ]]; then
+    echo "$cmd_label: no problems found"
+  else
+    echo "$cmd_label: problems found (see above)"
+  fi
+  return "$DOCTOR_STATUS"
 }
 
 # =============================================================================

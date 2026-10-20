@@ -4,7 +4,7 @@
 complete -c apk-info -f
 
 # Subcommands list
-set -l subcommands package manifest version libraries tiles widgets complications launcher file
+set -l subcommands package manifest version libraries tiles widgets complications launcher file doctor
 
 # Complete subcommands
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a package -d "Print package name (application ID)"
@@ -16,12 +16,13 @@ complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a widget
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a complications -d "List Wear OS complications providers"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a launcher -d "Print launcher icon resource path"
 complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a file -d "Extract and print a specific file"
+complete -c apk-info -n "not __fish_seen_subcommand_from $subcommands" -a doctor -d "Check environment health and dependencies"
 
 # Top-level options
 complete -c apk-info -s h -l help -d "Display help"
 
-# Complete APK/ZIP files once a subcommand is present
-complete -c apk-info -n "__fish_seen_subcommand_from $subcommands" -F -a '(__fish_complete_suffix .apk .zip)'
+# Complete APK/ZIP files once a subcommand is present (except doctor)
+complete -c apk-info -n "__fish_seen_subcommand_from $subcommands; and not __fish_seen_subcommand_from doctor" -F -a '(__fish_complete_suffix .apk .zip)'
 
 # Subcommand-specific: version
 complete -c apk-info -n "__fish_seen_subcommand_from version" -l code -d "Print only the version code string"

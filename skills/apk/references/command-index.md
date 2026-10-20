@@ -62,6 +62,7 @@ Commands:
   complications        List Wear OS complications data providers.
   launcher             Print the path of the launcher icon resource.
   file                 Extract and print the contents of a specific file from the APK.
+  doctor               Check environment health and dependencies for APK tools.
 
 Options:
   --help, -h           Display this help message and exit.

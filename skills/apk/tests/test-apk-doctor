@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+# Tests: skills/apk/tests/test-apk-doctor
+#
+# Hermetic unit tests for 'apk-info doctor' and 'apk-doctor'.
+# Uses stubbed PATH directories to verify reporting of present, missing,
+# optional, and core dependencies, color handling, and exit codes.
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/apk-info"
+SYMLINK="$DIR/../../../bin/apk-doctor"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+TESTNUM=0
+RC=0
+OUT=""
+
+ok() {
+  TESTNUM=$((TESTNUM + 1))
+  echo "ok $TESTNUM - $1"
+}
+
+not_ok() {
+  TESTNUM=$((TESTNUM + 1))
+  echo "not ok $TESTNUM - $1"
+  if [[ -n "${2:-}" ]]; then
+    printf '%s\n' "$2" | sed 's/^/# /'
+  fi
+}
+
+run() {
+  local path_override="${1:-}"
+  shift
+  set +e
+  OUT=$(PATH="$path_override" "$@" 2>&1)
+  RC=$?
+  set -e
+}
+
+# --- Test 1-3: Help and usage ---
+run "$PATH" "$BIN" doctor --help
+if [[ $RC -eq 0 && "$OUT" == *"Usage: apk-info doctor"* && "$OUT" == *"Check environment health"* ]]; then
+  ok "apk-info doctor --help outputs usage and exits 0"
+else
+  not_ok "apk-info doctor --help outputs usage and exits 0" "$OUT"
+fi
+
+run "$PATH" "$SYMLINK" --help
+if [[ $RC -eq 0 && "$OUT" == *"Usage: apk-doctor"* && "$OUT" != *"Usage: apk-doctor doctor"* ]]; then
+  ok "apk-doctor --help outputs usage without redundant doctor and exits 0"
+else
+  not_ok "apk-doctor --help outputs usage without redundant doctor and exits 0" "$OUT"
+fi
+
+run "$PATH" "$BIN" help doctor
+if [[ $RC -eq 0 && "$OUT" == *"Usage: apk-info doctor"* ]]; then
+  ok "apk-info help doctor outputs usage and exits 0"
+else
+  not_ok "apk-info help doctor outputs usage and exits 0" "$OUT"
+fi
+
+# --- Setup mock environments ---
+MOCK_ALL="$TMP/mock_all"
+mkdir -p "$MOCK_ALL"
+for tool in apkanalyzer unzip apktool baksmali uv xmllint xpath aapt2 jadx; do
+  touch "$MOCK_ALL/$tool"
+  chmod +x "$MOCK_ALL/$tool"
+done
+
+# Basic system utilities needed for doctor and test assertions
+BASE_BIN="$TMP/base_bin"
+mkdir -p "$BASE_BIN"
+ln -s "$(command -v bash)" "$BASE_BIN/bash"
+ln -s "$(command -v env)" "$BASE_BIN/env"
+ln -s "$(command -v basename)" "$BASE_BIN/basename"
+ln -s "$(command -v cat)" "$BASE_BIN/cat"
+ln -s "$(command -v grep)" "$BASE_BIN/grep"
+ln -s "$(command -v sed)" "$BASE_BIN/sed"
+
+# --- Test 4: All tools present ---
+run "$MOCK_ALL:$BASE_BIN" "$BIN" doctor
+if [[ $RC -eq 0 && "$OUT" == *"[PASS]  apkanalyzer:"* && "$OUT" == *"[PASS]  apktool:"* &&
+  "$OUT" == *"apk-info doctor: no problems found"* ]]; then
+  ok "doctor exits 0 and reports PASS for all tools when present"
+else
+  not_ok "doctor exits 0 and reports PASS for all tools when present" "$OUT"
+fi
+
+# --- Test 5: apk-doctor invocation ---
+run "$MOCK_ALL:$BASE_BIN" "$SYMLINK"
+if [[ $RC -eq 0 && "$OUT" == *"apk-doctor: no problems found"* ]]; then
+  ok "apk-doctor executable runs doctor directly and exits 0"
+else
+  not_ok "apk-doctor executable runs doctor directly and exits 0" "$OUT"
+fi
+
+# --- Test 6: Missing core tool (apkanalyzer) emits [FAIL] and exits 1 ---
+MOCK_NO_APKANALYZER="$TMP/mock_no_apkanalyzer"
+mkdir -p "$MOCK_NO_APKANALYZER"
+for tool in unzip apktool baksmali uv xmllint xpath aapt2 jadx; do
+  touch "$MOCK_NO_APKANALYZER/$tool"
+  chmod +x "$MOCK_NO_APKANALYZER/$tool"
+done
+
+run "$MOCK_NO_APKANALYZER:$BASE_BIN" "$BIN" doctor
+if [[ $RC -eq 1 && "$OUT" == *"[FAIL]  apkanalyzer: not found on PATH"* &&
+  "$OUT" == *"Android Command Line Tools"* &&
+  "$OUT" == *"apk-info doctor: problems found"* ]]; then
+  ok "missing core tool apkanalyzer reports [FAIL] and exits 1"
+else
+  not_ok "missing core tool apkanalyzer reports [FAIL] and exits 1" "$OUT"
+fi
+
+# --- Test 7: Missing core tool (unzip) emits [FAIL] and exits 1 ---
+MOCK_NO_UNZIP="$TMP/mock_no_unzip"
+mkdir -p "$MOCK_NO_UNZIP"
+for tool in apkanalyzer apktool baksmali uv xmllint xpath aapt2 jadx; do
+  touch "$MOCK_NO_UNZIP/$tool"
+  chmod +x "$MOCK_NO_UNZIP/$tool"
+done
+
+run "$MOCK_NO_UNZIP:$BASE_BIN" "$BIN" doctor
+if [[ $RC -eq 1 && "$OUT" == *"[FAIL]  unzip: not found on PATH"* &&
+  "$OUT" == *"apk-info doctor: problems found"* ]]; then
+  ok "missing core tool unzip reports [FAIL] and exits 1"
+else
+  not_ok "missing core tool unzip reports [FAIL] and exits 1" "$OUT"
+fi
+
+# --- Test 8: Missing optional tool (apktool) emits [WARN] and exits 1 with remediation ---
+MOCK_NO_APKTOOL="$TMP/mock_no_apktool"
+mkdir -p "$MOCK_NO_APKTOOL"
+for tool in apkanalyzer unzip baksmali uv xmllint xpath aapt2 jadx; do
+  touch "$MOCK_NO_APKTOOL/$tool"
+  chmod +x "$MOCK_NO_APKTOOL/$tool"
+done
+
+run "$MOCK_NO_APKTOOL:$BASE_BIN" "$BIN" doctor
+if [[ $RC -eq 1 && "$OUT" == *"[WARN]  apktool: not found on PATH"* &&
+  "$OUT" == *"Used by: apk-decode, apk-launcher-icon-extract"* &&
+  "$OUT" == *"Install: sudo apt-get install apktool"* &&
+  "$OUT" == *"apk-info doctor: problems found"* ]]; then
+  ok "missing apktool reports [WARN], indented remediation, and exits 1"
+else
+  not_ok "missing apktool reports [WARN], indented remediation, and exits 1" "$OUT"
+fi
+
+# --- Test 9: Missing xpath emits [INFO] and does not fail doctor on its own ---
+MOCK_NO_XPATH="$TMP/mock_no_xpath"
+mkdir -p "$MOCK_NO_XPATH"
+for tool in apkanalyzer unzip apktool baksmali uv xmllint aapt2 jadx; do
+  touch "$MOCK_NO_XPATH/$tool"
+  chmod +x "$MOCK_NO_XPATH/$tool"
+done
+
+run "$MOCK_NO_XPATH:$BASE_BIN" "$BIN" doctor
+if [[ $RC -eq 0 && "$OUT" == *"[INFO]  xpath: not found on PATH"* &&
+  "$OUT" == *"apk-info doctor: no problems found"* ]]; then
+  ok "missing xpath reports [INFO] without failing doctor"
+else
+  not_ok "missing xpath reports [INFO] without failing doctor" "$OUT"
+fi
+
+# --- Test 10: aapt fallback when aapt2 is missing ---
+MOCK_AAPT_ONLY="$TMP/mock_aapt_only"
+mkdir -p "$MOCK_AAPT_ONLY"
+for tool in apkanalyzer unzip apktool baksmali uv xmllint xpath aapt jadx; do
+  touch "$MOCK_AAPT_ONLY/$tool"
+  chmod +x "$MOCK_AAPT_ONLY/$tool"
+done
+
+run "$MOCK_AAPT_ONLY:$BASE_BIN" "$BIN" doctor
+if [[ $RC -eq 0 && "$OUT" == *"[PASS]  aapt:"* && "$OUT" != *"[INFO]  aapt / aapt2: not found"* ]]; then
+  ok "doctor recognizes legacy aapt when aapt2 is absent"
+else
+  not_ok "doctor recognizes legacy aapt when aapt2 is absent" "$OUT"
+fi
+
+# --- Test 11: Tag formatting contract: all tags are 6 chars followed by 2 spaces ---
+run "$MOCK_NO_APKTOOL:$BASE_BIN" env NO_COLOR=1 "$BIN" doctor
+if printf '%s\n' "$OUT" | grep -E '^\[(PASS|WARN|INFO|FAIL)\]  ' >/dev/null; then
+  ok "doctor tags strictly adhere to 6-character tag and 2 trailing spaces"
+else
+  not_ok "doctor tags strictly adhere to 6-character tag and 2 trailing spaces" "$OUT"
+fi
+
+echo "1..$TESTNUM"
