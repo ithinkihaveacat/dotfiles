@@ -146,6 +146,7 @@ adb shell am broadcast \
   --ei type 1
 
 # Vertical carousel (--vertical, requires .emu/.exp/.dev renderer)
+adb shell input keyevent KEYCODE_WAKEUP
 adb shell am start -W -n com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity
 adb shell am broadcast \
   -p com.google.android.wearable.protolayout.renderer \

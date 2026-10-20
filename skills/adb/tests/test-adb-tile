@@ -11,7 +11,7 @@ LIST_BIN="$DIR/../scripts/adb-tiles"
 DUMP_BIN="$DIR/../scripts/adb-tile-dump"
 PKG_BIN="$DIR/../scripts/packagename"
 
-echo "1..51"
+echo "1..52"
 
 TMPDIR_TEST=$(mktemp -d)
 OUTPUT="$TMPDIR_TEST/output"
@@ -102,6 +102,15 @@ case "$*" in
       echo "09-28 18:42:01.000 E/AndroidRuntime( 4242): FATAL EXCEPTION: main"
       echo "09-28 18:42:01.000 E/AndroidRuntime( 4242): Process: ${MOCK_CRASH}, PID: 4242"
       echo "09-28 18:42:01.000 E/AndroidRuntime( 4242): java.lang.RuntimeException: boom"
+    fi
+    if [[ "${MOCK_SLEEPING:-0}" == "1" ]]; then
+      for _ in {1..50}; do
+        [[ -f "${MOCK_ADB_LOG}.tray_added" ]] && break
+        sleep 0.01
+      done
+      if [[ ! -f "${MOCK_ADB_LOG}.tray_awake" ]]; then
+        MOCK_RENDER_STAGE="content"
+      fi
     fi
     # MOCK_RENDER_STAGE: "content" stops after the content arrives (an
     # off-screen widget), "attached" after the container is attached.
@@ -267,7 +276,14 @@ QAPPWIDGET_EOF
     printf '    versionName=1.6.1.87.924797699\r\n'
     exit 0
     ;;
+  *"input keyevent KEYCODE_WAKEUP"*)
+    touch "${MOCK_ADB_LOG}.awake"
+    exit 0
+    ;;
   *"am start"*)
+    if [[ "${MOCK_SLEEPING:-0}" != "1" || -f "${MOCK_ADB_LOG}.awake" ]]; then
+      touch "${MOCK_ADB_LOG}.tray_awake"
+    fi
     echo "Starting: Intent { cmp=com.google.android.wearable.protolayout.renderer/com.google.android.clockwork.prototiles.renderer.experimental.WidgetTrayActivity }"
     exit 0
     ;;
@@ -316,6 +332,7 @@ QAPPWIDGET_EOF
       unanswered ADD_WIDGET
     fi
 
+    touch "${MOCK_ADB_LOG}.tray_added"
     echo 'Broadcasting: Intent { act=com.google.android.clockwork.prototiles.action.ADD_WIDGET }'
     echo 'Broadcast completed: result=-1, data="{"status":"OK","action":"ADD_WIDGET","widgetId":10001,"component":"com.example/.MyWidget","containerType":2,"containerTypeString":"SMALL"}"'
     exit 0
@@ -412,7 +429,7 @@ DEFAULT_TRAY="10001 SMALL com.example/.MyWidget"
 # Runs a command against the mock. MOCK_TRAY sets the initial tray contents.
 run_mock() {
   : >"$ADB_LOG"
-  rm -f "${ADB_LOG}".*_count
+  rm -f "${ADB_LOG}".*
   printf '%s\n' "${MOCK_TRAY-$DEFAULT_TRAY}" >"$TRAY_STATE"
   PATH="$MOCK_BIN:$PATH" MOCK_ADB_LOG="$ADB_LOG" MOCK_TRAY_STATE="$TRAY_STATE" \
     ADB_TILE_RETRY_DELAY="0.01" ADB_TILE_RENDER_DELAY="0.01" "$@"
@@ -1000,5 +1017,18 @@ if ! MOCK_CRASH=com.example run_mock "$ADD_BIN" com.example/.MyWidget >"$OUTPUT"
   echo "ok 51 - adb-tile-add SysUI mode detects provider crash during wait"
 else
   echo "not ok 51 - adb-tile-add SysUI mode missed provider crash"
+  report
+fi
+
+# Test 52: --vertical wakes sleeping/dozing display before launching WidgetTrayActivity
+if MOCK_SLEEPING=1 run_mock "$ADD_BIN" --vertical com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"Success: Tile is visible."* ]] &&
+  grep -Fq "shell input keyevent KEYCODE_WAKEUP" "$ADB_LOG" &&
+  MOCK_SLEEPING=1 MOCK_TRAY_READY_ATTEMPT=2 run_mock "$ADD_BIN" --vertical --no-show com.example/.MyWidget >"$OUTPUT" 2>&1 &&
+  [[ "$(<"$OUTPUT")" == *"Success: Tile is visible."* ]] &&
+  grep -Fq "shell input keyevent KEYCODE_WAKEUP" "$ADB_LOG"; then
+  echo "ok 52 - adb-tile-add --vertical wakes sleeping display before opening tray"
+else
+  echo "not ok 52 - adb-tile-add --vertical did not wake sleeping display before opening tray"
   report
 fi
