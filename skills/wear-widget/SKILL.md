@@ -9,7 +9,9 @@ description: >-
   Use when developing, testing, or reverse-engineering Wear OS tiles or widgets,
   inspecting tile/widget manifests, or auditing Wear OS surface integrations.
 compatibility: >-
-  Requires apkanalyzer and apktool. Optional: popper or adb for device automation.
+  Requires apkanalyzer. Optional: apktool (for full resource decoding or
+  apk-decode), baksmali (for apk-smali bytecode analysis), popper or adb for
+  device automation.
 ---
 
 # Wear OS Tiles & Widgets
