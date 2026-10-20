@@ -15,7 +15,7 @@ without modifying files (e.g. for lint checks).
 To format and lint a file in place:
 
 ```bash
-scripts/shell-format bin/emumanager
+scripts/shell-format bin/jetpack
 ```
 
 All reported `shellcheck` errors and warnings must be eliminated before
@@ -47,7 +47,7 @@ All Fish shell scripts, whether new or updated, _must_ be formatted by
 Example command:
 
 ```bash
-fish_indent -w skills/emumanager/completions/emumanager.fish
+fish_indent -w skills/jetpack/completions/jetpack.fish
 ```
 
 - `-w` edits files in-place.
@@ -269,9 +269,9 @@ must print a concise usage summary, one example, and a pointer to `--help` to
 error without an example or `--help` pointer, or exit `0`.
 
 > [!NOTE] Complex subcommand tools (Manager-pattern tools like `skill`, `hook`,
-> `jetpack`, `emumanager`) that show subcommand listings or help on bare
-> invocation are exempt. Simple tools whose zero-argument invocation is a valid
-> default action (e.g. reading from standard input or operating on the current
+> and `jetpack`) that show subcommand listings or help on bare invocation are
+> exempt. Simple tools whose zero-argument invocation is a valid default action
+> (e.g. reading from standard input or operating on the current
 > directory/connected device) are also exempt.
 
 To implement this pattern, define a `usage_short()` helper function that prints

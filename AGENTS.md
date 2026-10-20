@@ -160,8 +160,8 @@ prove tests/test-fish-completions
 
 ### Example
 
-If you modify `skills/emumanager/scripts/emumanager` to add a new subcommand or
-option, you must also update `skills/emumanager/completions/emumanager.fish` to
+If you modify `skills/jetpack/scripts/jetpack` to add a new subcommand or
+option, you must also update `skills/jetpack/completions/jetpack.fish` to
 include completions for the new functionality.
 
 ### Generated Command Index Blocks
@@ -206,8 +206,6 @@ See these canonical sources for reference implementations:
 
 - `skills/jetpack/scripts/jetpack` - a large Bash CLI with caching, offline
   behavior, temporary-resource cleanup, and targeted tests
-- `skills/emumanager/scripts/emumanager` - a stateful Bash manager with explicit
-  compatibility and process handling
 - `skills/agent-config/scripts/skill` - a substantial standalone Python CLI with
   filesystem and network boundaries
 - `skills/apk/scripts/apk-unzip` - a small utility with an optional `--output`

@@ -82,7 +82,7 @@ Examples:
   skill --scope session add jetpack
   skill --scope defaults add workspace-tools
   skill add --defaults
-  printf '%s\n' adb emumanager | skill --scope session add -
+  printf '%s\n' adb jetpack | skill --scope session add -
   skill list --json
 ```
 
