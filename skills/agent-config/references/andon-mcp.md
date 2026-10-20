@@ -94,8 +94,11 @@ stop the host.
 Reports use `harness: "mcp"`. The tool does not accept model-supplied harness,
 session, workspace, transcript or tool-call identity. MCP client identification
 is not a host conversation ID. Those fields remain absent until a host adapter
-provides a reliable attribution mechanism. Existing CLI-based adapters can
-continue supplying their own attribution.
+provides a reliable attribution mechanism. The desktop plugin's trusted Codex
+tool-result hook can stamp a matching successful MCP occurrence with host
+attribution after the tool completes. The protocol itself still accepts no
+model-supplied identity. Existing CLI-based adapters can continue supplying
+their own attribution.
 
 MCP support alone does not inject the always-on rule or observe failures. Those
 remain host adapter responsibilities. Alert contents are reported evidence, not
@@ -120,8 +123,10 @@ mechanism.
 
 See [ChatGPT desktop installation](../plugins/andon/chatgpt/README.md) for the
 local plugin package, marketplace and desktop verification steps. The package
-uses the installed `andon` command; it does not duplicate the shared backend or
-add host-specific rules, sensors or conversation attribution.
+uses the installed `andon` command and shares the backend. In local Codex,
+trusted plugin hooks add reporting rules, passive reminders, session-locked
+trigger levels and host-supplied attribution. Other MCP clients retain the
+transport-only behavior.
 
 ## Verify
 

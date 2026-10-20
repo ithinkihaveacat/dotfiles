@@ -11,8 +11,8 @@ description: >-
   agent skills; adding per-session or default skills; granting, restricting,
   or debugging agent command or directory permissions; writing a skill's
   permissions/unsafe file; listing, adding, removing, or checking MCP servers
-  across agents; or installing the Andon plugin for Claude Code or OpenCode and
-  triaging Andon alerts.
+  across agents; installing the Andon plugin for Claude Code, OpenCode or Codex;
+  or triaging Andon alerts.
 compatibility: >-
   Requires git and python3. Optional: uv, claude, codex, agy, or opencode.
 ---
@@ -38,7 +38,7 @@ they see, what they may do, and what they are told. It consists of:
    with, user-wide or for the workspace, through each agent's own CLI.
 1. **`andon`**: The Andon cord. Records and triages defects agents report in
    their own instructions, skills, rules and tools, through harness plugins for
-   Claude Code and OpenCode (`plugins/andon`).
+   Claude Code, OpenCode and local Codex (`plugins/andon`).
 
 For Git repositories, `skill add --defaults` and `permission apply` run
 automatically on `git clone` via the global template's post-checkout hook (with
@@ -398,11 +398,15 @@ store. This API does not install a harness adapter or inject the Andon rule. See
 [Andon MCP](references/andon-mcp.md) for client configuration, tools and
 attribution boundaries.
 
-**ChatGPT desktop:** the [local Andon plugin](plugins/andon/chatgpt/README.md)
-adds a live conversation panel and global sidebar board over that MCP interface.
-Install it from the included desktop marketplace after installing the shared
-CLI. The panel shows alerts across harnesses; the package does not inject
-always-on rules or supply conversation attribution.
+**ChatGPT desktop and Codex:** the
+[local Andon plugin](plugins/andon/chatgpt/README.md) adds a live conversation
+panel and global sidebar board over that MCP interface. Install it from the
+included desktop marketplace after installing the shared CLI. In local Codex,
+review and trust its hooks to activate the always-on reporting rule, passive
+failure reminders, session-locked trigger levels and host-supplied report
+attribution. The rule refreshes on each user turn and after compaction. The
+panel shows alerts across harnesses. Other MCP clients retain the board and
+tools without the Codex hooks.
 
 Triage with the CLI:
 

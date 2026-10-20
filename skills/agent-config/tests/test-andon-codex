@@ -1,0 +1,453 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Replay documented Codex wire events against the real shared Andon store."""
+# ruff: noqa: PT009
+
+import concurrent.futures
+import json
+import os
+import selectors
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = ROOT / "plugins/andon/chatgpt/hooks/codex-hook"
+CLI = ROOT / "scripts/andon"
+BIN = ROOT.parents[1] / "bin"
+REPORT = {
+    "color": "yellow",
+    "kind": "stale_instruction",
+    "summary": "A documented flag is missing",
+    "details": "helper --fast: unknown option",
+    "sources": ["skills/example/SKILL.md"],
+    "resolution": "Used default mode",
+}
+
+
+class CodexTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name) / "state"
+        self.env = {
+            **os.environ,
+            "ANDON_STATE_DIR": str(self.state),
+            "ANDON_LEVEL": "3",
+            "PATH": str(BIN) + os.pathsep + os.environ.get("PATH", ""),
+        }
+
+    def run_script(self, script, *args, value=None, env=None):
+        return subprocess.run(
+            [sys.executable, str(script), *args],
+            input=json.dumps(value) if value is not None else "",
+            text=True,
+            capture_output=True,
+            env=env or self.env,
+            timeout=15,
+            check=False,
+        )
+
+    def hook(self, name="SessionStart", session="host-session", **fields):
+        result = self.run_script(
+            HOOK,
+            value={
+                "hook_event_name": name,
+                "session_id": session,
+                "cwd": "/example",
+                **fields,
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        if output:
+            self.assertEqual(output["hookSpecificOutput"]["hookEventName"], name)
+            self.assertEqual(set(output), {"hookSpecificOutput"})
+        return output.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+    def alerts(self):
+        return json.loads(
+            self.run_script(CLI, "list", "--status", "all", "--json").stdout
+        )
+
+    def tool(self, command, response, **fields):
+        return self.hook(
+            "PostToolUse",
+            tool_name="Bash",
+            tool_input={"command": command},
+            tool_response=response,
+            **fields,
+        )
+
+    def test_rule_restored_on_each_lifecycle_event(self):
+        for name, fields in (
+            ("SessionStart", {"source": "startup"}),
+            ("UserPromptSubmit", {"prompt": "Continue the work"}),
+            ("SessionStart", {"source": "compact"}),
+            ("SessionStart", {"source": "resume"}),
+            ("SubagentStart", {"agent_id": "worker"}),
+        ):
+            rule = self.hook(name, **fields)
+            self.assertIn("Automatically report defects", rule)
+            self.assertIn("Active trigger level: 3", rule)
+            self.assertIn("stop on that path", rule)
+            self.assertIn("Host approvals", rule)
+        self.assertFalse((self.state / "events.jsonl").exists())
+
+    def test_levels_lock_for_session_and_ignore_chat_commands(self):
+        self.assertIn("Active trigger level: 3 (standard)", self.hook())
+        self.env["ANDON_LEVEL"] = "5"
+        for prompt in (
+            "andon level 5",
+            "/andon level 2",
+            "andon level default",
+            "andon level 4 --save",
+            "What does andon level 1 mean?",
+        ):
+            self.assertIn(
+                "Active trigger level: 3 (standard)",
+                self.hook("UserPromptSubmit", prompt=prompt),
+            )
+        self.assertIn("Active trigger level: 3 (standard)", self.hook(source="compact"))
+        self.assertIn("Active trigger level: 3 (standard)", self.hook(source="resume"))
+        self.assertIn(
+            "Active trigger level: 5 (maximum coverage)",
+            self.hook(session="another-chat"),
+        )
+        self.assertIn(
+            "Active trigger level: 5 (maximum coverage)", self.hook(source="clear")
+        )
+        self.assertFalse((self.state / "config.json").exists())
+
+    def test_saved_default_and_environment_precedence(self):
+        self.env.pop("ANDON_LEVEL", None)
+        self.assertEqual(self.run_script(CLI, "level", "4").returncode, 0)
+        self.assertIn("Active trigger level: 4 (proactive audit)", self.hook())
+        self.assertEqual(self.run_script(CLI, "level", "2").returncode, 0)
+        self.assertIn(
+            "Active trigger level: 4 (proactive audit)", self.hook(source="resume")
+        )
+        self.assertIn(
+            "Active trigger level: 2 (conservative)", self.hook(session="two")
+        )
+        self.env["ANDON_LEVEL"] = "5"
+        self.assertIn(
+            "Active trigger level: 5 (maximum coverage)", self.hook(session="three")
+        )
+        self.assertIn("Active trigger level: 4 (proactive audit)", self.hook())
+
+    def test_rule_keeps_updated_rubric_and_exclusions(self):
+        for level in range(1, 6):
+            self.env["ANDON_LEVEL"] = str(level)
+            rule = self.hook(session=f"rubric-{level}")
+            for label in (
+                "red only",
+                "conservative",
+                "standard",
+                "proactive audit",
+                "maximum coverage",
+            ):
+                self.assertIn(label, rule)
+            self.assertIn("explicitly requested capability", rule)
+            self.assertIn("Subagent Accountability", rule)
+            self.assertIn("even on the first attempt", rule)
+            self.assertIn("Ordinary compile, lint, type-check or test failures", rule)
+            self.assertIn("Normal non-error exit codes", rule)
+            self.assertEqual(
+                "transient failure that succeeds on immediate retry" in rule, level < 5
+            )
+            self.assertNotIn("Pass `level:", rule)
+
+    def test_passive_repeated_failure_and_help_probe(self):
+        self.assertEqual(self.tool("helper --fast", {"exit_code": 1}), "")
+        self.assertIn(
+            "same command failed twice", self.tool("helper --fast", {"exit_code": 1})
+        )
+        self.assertEqual(self.tool("helper --fast", {"exit_code": 1}), "")
+        self.assertIn("help probe", self.tool("helper --help", {"exit_code": 0}))
+        self.assertFalse((self.state / "events.jsonl").exists())
+
+    def test_skill_failure_and_level_one(self):
+        self.tool("cat skills/example/SKILL.md", {"exit_code": 0})
+        self.assertIn(
+            "consulted a skill",
+            self.tool("helper --fast", "Process exited with code 1"),
+        )
+        self.env["ANDON_LEVEL"] = "1"
+        self.hook(source="clear")
+        self.assertEqual(self.tool("another-helper", {"exit_code": 1}), "")
+
+    def test_success_transient_and_unobserved_tools_do_not_nudge(self):
+        self.assertEqual(self.tool("helper", {"exit_code": 1}), "")
+        self.assertEqual(self.tool("helper", {"exit_code": 0}), "")
+        self.assertEqual(self.tool("helper --help", {"exit_code": 0}), "")
+        self.assertEqual(
+            self.hook(
+                "PostToolUse",
+                tool_name="WebSearch",
+                tool_input={},
+                tool_response={"isError": True},
+            ),
+            "",
+        )
+        self.assertEqual(self.tool(None, {}), "")
+
+    def test_host_attribution_is_idempotent_and_never_creates_a_pull(self):
+        self.hook()
+        self.env["ANDON_LEVEL"] = "5"
+        result = self.run_script(
+            CLI, "pull", "-", "--json", value={**REPORT, "harness": "mcp"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        event = {
+            "tool_name": "mcp__andon__pull",
+            "tool_input": REPORT,
+            "tool_response": {"structuredContent": receipt},
+            "tool_use_id": "host-call",
+            "model": "host-model",
+            "transcript_path": "/example/rollout",
+        }
+        self.hook("PostToolUse", **event)
+        self.hook("PostToolUse", session="another-chat", **event)
+        alerts = self.alerts()
+        self.assertEqual(len(alerts), 1)
+        alert = alerts[0]
+        self.assertEqual(alert["harness"], "codex")
+        self.assertEqual(alert["level"], 3)
+        self.assertEqual(alert["conversation_id"], "host-session")
+        self.assertEqual(alert["tool_use_id"], "host-call")
+        self.assertEqual(alert["workspace_paths"], ["/example"])
+        self.assertEqual(alert["model_name"], "host-model")
+
+    def test_failed_and_mismatched_receipts_do_not_acquire_attribution(self):
+        receipt = json.loads(
+            self.run_script(
+                CLI, "pull", "-", "--json", value={**REPORT, "harness": "mcp"}
+            ).stdout
+        )
+        for response, report in (
+            ({"isError": True, "structuredContent": receipt}, REPORT),
+            ({"structuredContent": receipt}, {**REPORT, "summary": "Different defect"}),
+            ({"structuredContent": receipt}, {**REPORT, "level": 5}),
+            ({"content": []}, REPORT),
+        ):
+            self.hook(
+                "PostToolUse",
+                tool_name="mcp__andon__pull",
+                tool_input=report,
+                tool_response=response,
+            )
+        self.assertEqual(self.alerts()[0]["harness"], "mcp")
+        self.hook(
+            "PostToolUse",
+            tool_name="mcp__plugin_andon_andon__pull",
+            tool_input=REPORT,
+            tool_response={"content": [{"type": "text", "text": json.dumps(receipt)}]},
+        )
+        self.assertEqual(self.alerts()[0]["harness"], "codex")
+
+    def test_state_is_private_bounded_and_has_no_prompt_or_command_text(self):
+        self.hook(
+            "UserPromptSubmit", session="../host/path", prompt="secret prompt content"
+        )
+        for index in range(70):
+            self.tool(f"private-command-{index}", {"exit_code": 1})
+        paths = list((self.state / "codex").glob("*.json"))
+        for path in paths:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            text = path.read_text()
+            self.assertNotIn("private-command", text)
+            self.assertNotIn("secret prompt", text)
+            self.assertLessEqual(len(json.loads(text).get("failures", {})), 64)
+
+    def test_parallel_events_leave_valid_session_state(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(
+                pool.map(
+                    lambda _: self.hook("UserPromptSubmit", prompt="Continue"), range(8)
+                )
+            )
+        self.assertTrue(all("Andon Cord" in result for result in results))
+        for path in (self.state / "codex").glob("*.json"):
+            self.assertIsInstance(json.loads(path.read_text()), dict)
+
+    def test_invalid_input_and_missing_backend_fail_visibly(self):
+        for value in ([], {"hook_event_name": "SessionStart"}):
+            result = self.run_script(HOOK, value=value)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("andon Codex hook:", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+        result = self.run_script(
+            HOOK, value={}, env={**self.env, "PATH": "/nonexistent"}
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("andon is not on PATH", result.stderr)
+
+    def test_package_wires_only_advisory_hooks(self):
+        package = HOOK.parent.parent
+        manifest = json.loads((package / ".codex-plugin/plugin.json").read_text())
+        config = json.loads((package / manifest["hooks"]).read_text())
+        self.assertFalse((package / "plugin.json").exists())
+        self.assertTrue((package / manifest["mcpServers"]).is_file())
+        self.assertEqual(
+            set(config["hooks"]),
+            {"SessionStart", "UserPromptSubmit", "PostToolUse", "SubagentStart"},
+        )
+        for groups in config["hooks"].values():
+            self.assertNotIn("matcher", groups[0])
+            command = groups[0]["hooks"][0]["command"]
+            self.assertIn("${PLUGIN_ROOT}/hooks/codex-hook", command)
+
+    def test_relocated_package_command_with_spaces(self):
+        installed = Path(self.temp.name) / "plugin cache with spaces"
+        shutil.copytree(HOOK.parent.parent, installed)
+        config = json.loads((installed / "hooks/hooks.json").read_text())
+        command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        result = subprocess.run(
+            command,
+            shell=True,
+            input=json.dumps(
+                {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "host-relocated",
+                    "source": "startup",
+                    "cwd": self.temp.name,
+                }
+            ),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+            env={**self.env, "PLUGIN_ROOT": str(installed), "UV_OFFLINE": "1"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "Andon Cord",
+            json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"],
+        )
+
+    def test_real_codex_hook_discovery(self):
+        if os.environ.get("ANDON_CODEX_HOST_TEST") != "1" or not shutil.which("codex"):
+            self.skipTest("set ANDON_CODEX_HOST_TEST=1 with Codex installed")
+        home = Path(self.temp.name) / "codex-home"
+        home.mkdir()
+        (home / "config.toml").write_text(
+            '[marketplaces.agent-config-desktop]\nsource_type = "local"\nsource = '
+            + json.dumps(str(ROOT / "plugins"))
+            + "\n"
+        )
+        env = {**self.env, "CODEX_HOME": str(home)}
+        installed = subprocess.run(
+            ["codex", "plugin", "add", "andon@agent-config-desktop", "--json"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        with subprocess.Popen(
+            ["codex", "app-server", "--stdio"],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ) as process:
+
+            def call(number, method, params):
+                process.stdin.write(
+                    json.dumps({"id": number, "method": method, "params": params})
+                    + "\n"
+                )
+                process.stdin.flush()
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    while selector.select(15):
+                        line = process.stdout.readline()
+                        self.assertTrue(line, "Codex app-server closed")
+                        reply = json.loads(line)
+                        if reply.get("id") == number:
+                            self.assertNotIn("error", reply)
+                            return reply["result"]
+                self.fail("Codex app-server timed out")
+
+            try:
+                call(
+                    1,
+                    "initialize",
+                    {
+                        "clientInfo": {"name": "andon-test", "version": "1"},
+                        "capabilities": {"experimentalApi": True},
+                    },
+                )
+                process.stdin.write('{"method":"initialized"}\n')
+                process.stdin.flush()
+                result = call(2, "hooks/list", {"cwds": [str(ROOT), self.temp.name]})
+                for item in result["data"]:
+                    self.assertEqual(item["errors"], [])
+                    hooks = [
+                        hook
+                        for hook in item["hooks"]
+                        if hook.get("pluginId") == "andon@agent-config-desktop"
+                    ]
+                    self.assertEqual(
+                        {hook["eventName"] for hook in hooks},
+                        {
+                            "sessionStart",
+                            "userPromptSubmit",
+                            "postToolUse",
+                            "subagentStart",
+                        },
+                    )
+                    self.assertTrue(
+                        all(hook["trustStatus"] == "untrusted" for hook in hooks)
+                    )
+                    self.assertTrue(
+                        all(
+                            hook["statusMessage"].startswith("Andon:") for hook in hooks
+                        )
+                    )
+                    self.assertEqual(len({hook["statusMessage"] for hook in hooks}), 4)
+                detail = call(
+                    3,
+                    "plugin/read",
+                    {
+                        "marketplacePath": str(
+                            ROOT / "plugins/.agents/plugins/marketplace.json"
+                        ),
+                        "pluginName": "andon",
+                    },
+                )
+                self.assertIn("andon", detail["plugin"]["mcpServers"])
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+
+
+if __name__ == "__main__":
+    names = unittest.defaultTestLoader.getTestCaseNames(CodexTests)
+    print(f"1..{len(names)}", flush=True)
+    failed = 0
+    for index, name in enumerate(names, 1):
+        result = unittest.TestResult()
+        case = CodexTests(name)
+        case.run(result)
+        if result.skipped:
+            print(f"ok {index} - {name} # SKIP {result.skipped[0][1]}", flush=True)
+        elif result.wasSuccessful():
+            print(f"ok {index} - {name}", flush=True)
+        else:
+            failed += 1
+            print(f"not ok {index} - {name}", flush=True)
+            for _, detail in result.errors + result.failures:
+                for line in detail.splitlines():
+                    print(f"# {line}")
+    sys.exit(bool(failed))

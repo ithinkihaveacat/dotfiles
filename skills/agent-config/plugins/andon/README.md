@@ -102,13 +102,18 @@ passive reminders, and a searchable terminal board. See
 [OpenCode installation and usage](opencode/README.md). Differences and the
 deferred MCP boundary are recorded in [its changelog](opencode/CHANGELOG.md).
 
-## The ChatGPT desktop plugin
+## The ChatGPT desktop and Codex plugin
 
 `chatgpt/` packages the local MCP server and a live MCP App board with
 conversation-panel and global sidebar entrypoints. It refreshes the shared store
 while visible and exposes filters, recurrence counts, alert details, fix prompts
-and triage actions. It does not add always-on reporting rules, passive sensors
-or trusted conversation attribution. See
+and triage actions. Local Codex also loads its four command hooks after user
+trust review. They refresh the reporting rule as developer context on session
+start, user prompts and subagent start, including after compaction; persist
+session-locked trigger levels; add bounded passive failure reminders; and stamp
+successful MCP reports with host-supplied attribution after tool approval. The
+adapter loads the installed shared CLI as its backend. Other MCP clients retain
+the board and tools without these host hooks. See
 [ChatGPT desktop installation and usage](chatgpt/README.md).
 
 ## Porting notes
