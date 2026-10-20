@@ -473,6 +473,7 @@ function packages_of {
     services:brew) echo "hcloud openclaw/tap/gogcli" ;;
     media:brew) echo "imagemagick-full ffmpeg yt-dlp exiftool" ;;
     android:brew) echo "apktool bundletool scrcpy jadx pidcat" ;;
+    android:apt) echo "apktool scrcpy pidcat" ;;
     # JAVA_HOME is set in fish/config.fish; consult that for the current
     # value, how to override it for a single command, etc.
     android:cask) echo "temurin@17 temurin@21" ;;
