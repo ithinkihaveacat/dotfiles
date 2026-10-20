@@ -385,6 +385,8 @@ Arguments:
                         are recursively walked (ignoring hidden files, credential patterns,
                         and standard ignore lists like node_modules). Text files are inlined;
                         media files are attached directly or uploaded via the Gemini Files API.
+                        Symlinks and paths traversing symlinks are rejected for safety; resolve
+                        paths (e.g. via realpath) before passing.
 
 Input:
   stdin                 Optional. Context or reference material piped into the script.

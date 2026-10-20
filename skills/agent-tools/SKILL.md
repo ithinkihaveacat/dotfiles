@@ -180,6 +180,12 @@ and synthesis requiring external data or massive repository context.
    messages or constraints encountered. This prevents the Oracle from
    re-proposing the same dead ends and directs its reasoning toward genuinely
    novel solutions.
+1. **Symlinks and Canonical Paths:** Symlinks and paths traversing symlinks are
+   refused for safety. Passing a path with a symlinked component (such as
+   workspace `.agents/skills/*` paths) triggers an immediate exit 1 error rather
+   than silent omission. Always resolve paths to their canonical target before
+   passing them (e.g. `realpath .agents/skills/<skill>/...` or
+   `$(realpath <path>)`).
 1. **Planning Step:** The Oracle tool processes massive, expensive context
    payloads. Before executing a live Oracle request, formulate your prompt and
    target directories, and run the tool using the `--dry-run` flag:
@@ -197,6 +203,16 @@ and synthesis requiring external data or massive repository context.
 ```bash
 scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
 ```
+
+**Arguments:**
+
+- `PROMPT`: The specific question or task for the Oracle.
+- `FILE_OR_DIR`: Optional files or directories to include as context.
+  Directories are recursively walked (ignoring hidden files, credential
+  patterns, and standard ignore lists like `node_modules`; symlinks inside
+  directories are skipped). Symlinks and paths traversing symlinks passed as
+  direct arguments are rejected for safety; resolve paths (e.g. via `realpath`)
+  before passing.
 
 **Options:**
 
