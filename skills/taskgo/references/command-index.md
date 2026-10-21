@@ -24,6 +24,8 @@
 - [checkpoint](#checkpoint)
 - [commit](#commit)
 - [schema](#schema)
+- [mcp](#mcp)
+- [requests](#requests)
 
 ## Help
 

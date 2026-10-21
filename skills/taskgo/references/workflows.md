@@ -8,10 +8,12 @@ checks, session attribution, and task handoff protocols for `taskgo`.
 Before starting work, an agent must:
 
 1. Run `taskgo handoff <project|TASK_ID>` (or the MCP `handoff` tool) and read
-   what its note names: the root `AGENTS.md`, then project `README.md`,
-   `STATUS.md` (using its generated `### Decisions` block to identify active,
-   non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
-   direction matters.
+   the onboarding files (the plain note names `STATUS.md` and the task record
+   for a task, or `README.md`, `STATUS.md`, and `PLAN.md` for a project;
+   `--json` and the MCP `handoff` tool inline all of those alongside the root
+   `AGENTS.md`): the root `AGENTS.md`, then project `README.md`, `STATUS.md`
+   (using its generated `### Decisions` block to identify active, non-superseded
+   ADRs in `decisions/`), relevant tasks, and `PLAN.md` when direction matters.
 1. **Activate the project's skills**, as the note lists them, if the harness has
    a skill manager:
    ```bash
@@ -100,17 +102,19 @@ the project and what needs to be done next without referencing anything else.
 
 ## Session Attribution & Environment Variables
 
-When creating tasks or committing checkpoints (`--conv`), `taskgo` automatically
-detects the active session ID and agent scheme from runtime environment
-variables in priority order:
+When creating tasks or committing (`create`, `checkpoint`, `commit` with or
+without `--conv`), `taskgo` automatically detects the active session ID and
+agent scheme from runtime environment variables in priority order:
 
 1. `CLAUDE_CODE_SESSION_ID` / `CLAUDE_CODE_REMOTE_SESSION_ID` (`claude://`)
 1. `JETSKI_CONVERSATION_ID` (`jetski://`)
 1. `ANTIGRAVITY_CONVERSATION_ID` / `ANTIGRAVITY_SESSION` (`antigravity://`)
-1. `CODEX_SESSION_ID` (`codex://`)
+1. `CLAUDE_SESSION_ID` (`claude://`)
 1. `OPENCODE_SESSION_ID` (`opencode://`)
-1. Generic `AI_SESSION_ID` / `CONVERSATION_ID` paired with `AI_AGENT` platform
-   name
+1. `CODEX_SESSION_ID` (`codex://`)
+1. `INVOKER_INFO_ROOT_SESSION_ID` / `CONVERSATION_ID` paired with `AI_AGENT` or
+   `INVOKER_INFO_NAME` platform name (falling back to `conversation://` when no
+   canonical agent scheme is detected)
 
 To inspect session history or correlate commits with agent sessions, query Git:
 
@@ -137,7 +141,9 @@ project, title, and `Goal` from the task record in the working tree (or at
 with the command that activates them. The command writes the note to stdout and
 readiness findings to stderr. Repair `[WARN]` or `[FAIL]` findings before
 handing off. `--json` prints the payload the MCP `handoff` tool returns: the
-note with the files it names inlined, and the `skills` list.
+note with the onboarding files (`AGENTS.md`, `README.md`, `STATUS.md`,
+`PLAN.md`, and the task record) inlined, the `guide`, the `skills` list, and the
+active and ready task queues.
 
 When yielding after substantial work with a clear successor task, leave the
 tracker and artifact repositories handoff-ready and include the generated note

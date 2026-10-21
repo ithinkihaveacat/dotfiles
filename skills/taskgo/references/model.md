@@ -205,8 +205,9 @@ with `status: done`. They keep Problem, Cost, Goal, and Criteria, and add
 
 Context boundedness is achieved through `STATUS.md`:
 
-- `STATUS.md` projects active `In progress` and `Blocked` tasks alongside counts
-  (`Todo: N Done: M`).
+- `STATUS.md` projects active `In progress` and `Blocked` tasks, `Due soon`
+  tasks (open tasks due within 7 days), and active `Decisions` (when
+  `decisions/*.md` exist) alongside counts (`Todo: N Done: M`).
 - Completed tasks are summarized in `## Summary` prose rather than listed in the
   active task snapshot, preventing `STATUS.md` from bloating as milestones
   accumulate.
@@ -266,11 +267,14 @@ Parsing, validation, rendering, formatting, audit, and task edits read and write
 repository files only through a `Snapshot`, addressed by repository-relative
 POSIX paths:
 
-- **`FsSnapshot`:** The working tree. Reads and writes go straight to disk;
-  every CLI command uses it.
+- **`FsSnapshot`:** The working tree (`WorktreeSnapshot` extends it with
+  `HEAD`'s commit SHA and on-demand blob SHAs for `status` and `handoff`). Reads
+  and writes go straight to disk; CLI commands operating on the working tree use
+  it.
 - **`GitTreeSnapshot`:** One commit's tree, read with `git ls-tree` and
-  `git cat-file --batch`, without a checkout. It is read-only; writes raise
-  `ReadOnlySnapshotError`.
+  `git cat-file --batch`, without a checkout. Used by `taskgo mcp` and by CLI
+  reads passed `--at REV` (`status`, `handoff`, `read`, `search`). It is
+  read-only; writes raise `ReadOnlySnapshotError`.
 - **`OverlaySnapshot`:** Pending writes held in memory over either of the
   others. A [change set](#change-sets) is applied to one, so a refused change
   set writes nothing.
@@ -300,15 +304,15 @@ The file is a JSON object with one key, `changes`:
 ]}
 ```
 
-| Operation         | Keys                                                                          | Precondition                          |
-| ----------------- | ----------------------------------------------------------------------------- | ------------------------------------- |
-| `create`          | `kind` (`task` or `decision`), `project`, `ref`, `slug`, `fields`, `sections` | none; IDs and numbers are allocated   |
-| `set`             | `record`, `field`, `value`, `expected` (optional)                             | `expected`, when given                |
-| `add`, `remove`   | `record`, `field`, `values`                                                   | none; repeats and absences are no-ops |
-| `replace_section` | `record`, `section`, `text`, `expected_hash`                                  | the section's hash                    |
-| `write_file`      | `path`, `content`, `expected_blob` (optional), `executable` (optional)        | absent, or the file's Git blob SHA    |
-| `delete_file`     | `path`, `expected_blob`                                                       | the file's Git blob SHA               |
-| `edit_file`       | `path`, `old_string`, `new_string`, `replace_all`, `expected_blob` (optional) | `old_string` occurs; `expected_blob`  |
+| Operation         | Keys                                                                                     | Precondition                          |
+| ----------------- | ---------------------------------------------------------------------------------------- | ------------------------------------- |
+| `create`          | `kind` (`task` or `decision`), `project`, `ref`, `slug`, `fields` (optional), `sections` | none; IDs and numbers are allocated   |
+| `set`             | `record`, `field`, `value`, `expected` (optional)                                        | `expected`, when given                |
+| `add`, `remove`   | `record`, `field`, `values`                                                              | none; repeats and absences are no-ops |
+| `replace_section` | `record`, `section`, `text`, `expected_hash`                                             | the section's hash                    |
+| `write_file`      | `path`, `content`, `expected_blob` (optional), `executable` (optional)                   | absent, or the file's Git blob SHA    |
+| `delete_file`     | `path`, `expected_blob`                                                                  | the file's Git blob SHA               |
+| `edit_file`       | `path`, `old_string`, `new_string`, `replace_all` (optional), `expected_blob` (optional) | `old_string` occurs; `expected_blob`  |
 
 - **Records:** A task ID, a decision path, a project's `STATUS.md`, or `$name`
   for a record an earlier `create` named with `ref`. `$name` also works in
@@ -366,15 +370,16 @@ Other projects' date-driven refreshes stay with `taskgo sync`.
 A refusal names the change and its kind: `invalid` (malformed or disallowed),
 `precondition` (an expected value, hash, or blob that no longer holds), or
 `validation` (the whole set's result breaks a rule). Nothing is written. To read
-section hashes offline, run `taskgo mcp --stdio --no-fetch`, which serves the
-committed local branch.
+section hashes offline, use `taskgo status TASK_ID --json`,
+`taskgo handoff PROJECT|TASK_ID --json`, or `taskgo mcp --stdio --no-fetch`.
 
 ## Unified AuditEngine Architecture (`doctor`, `fix`, and `handoff`)
 
 To eliminate diagnostic and repair drift, `scripts/taskgo` uses a single shared
 `AuditEngine`: `audit_snapshot()` over a snapshot, wrapped by
-`audit_workspace()`, which adds the repository's shallow-clone check.
-Remediations write through the audited snapshot:
+`audit_workspace()`, which adds the repository's shallow-clone check and
+`audit_skills()` (checking declared project `skills` against the `skill` CLI
+catalog). Remediations write through the audited snapshot:
 
 - **`doctor` (Strictly Read-Only):** Runs the audit engine, renders findings
   with canonical 4-letter plain-ASCII tags (`[PASS]`, `[INFO]`, `[WARN]`,
@@ -438,12 +443,19 @@ Commands follow the fixed `tool [verb] [noun]` structure with clean,
 unhyphenated verbs:
 
 - `taskgo id`: Allocate unique `TASK-XXXXX` identifier.
+- `taskgo root`: Print the resolved control repository root.
 - `taskgo create PROJECT TITLE [--slug SLUG] [--status STATE] [--no-commit] [--dry-run]`:
   Create a structured task record. `--slug` names the file
   (`TASK-XXXXX-<slug>.md`); when omitted, the slug is derived from `TITLE` and
   shortened at word boundaries to 32 characters, with a warning.
+- `taskgo update TASK_ID [--slug SLUG] [--status STATE] [--expect-status STATE] [...]`:
+  Update task fields, status, scheduling gates/dates, or sections in-place.
 - `taskgo list [PROJECT] [--state STATE] [--json]`: List tasks in tabular or
   JSON format.
+- `taskgo info PROJECT [--json]`: Show project metadata from `README.md` YAML
+  frontmatter.
+- `taskgo skills PROJECT [--json]`: Print the agent skills a project's
+  `README.md` frontmatter declares.
 - `taskgo status [PROJECT|TASK_ID] [--at REV] [--json]`: Display a project's
   `STATUS.md`, a task's record with its derived state (ready, or what holds it),
   or a multi-project summary.
@@ -461,6 +473,9 @@ unhyphenated verbs:
 - `taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]`: Search tracked
   files with allowlisted `git grep` flags and bounded output.
 - `taskgo sync [PROJECT]`: Synchronize `STATUS.md` snapshot block.
+- `taskgo check [PROJECT] [--json]`: Evaluate `wait_for` gates, `due` deadlines,
+  and `stale_after` cutoffs against `today` and each task's Git commit
+  watermark.
 - `taskgo doctor [PROJECT]`: Diagnostic health check (read-only).
 - `taskgo fix [PROJECT] [--dry-run] [--no-commit]`: Auto-heal task metadata,
   status, and scaffolding.
@@ -469,6 +484,11 @@ unhyphenated verbs:
 - `taskgo checkpoint TASK_ID SUBJECT [...]`: Guarded checkpoint transition
   commit.
 - `taskgo commit SUBJECT [...]`: Commit logical transition.
+- `taskgo schema [--json]`: Display the declarative field and section schema for
+  tasks, decisions, and `STATUS.md`.
+- `taskgo mcp [...]`: Serve the control repository's committed state and
+  change-set writes over MCP.
+- `taskgo requests [...]`: Summarise the MCP server's request log.
 
 ## Root Landing Page (`README.md`)
 

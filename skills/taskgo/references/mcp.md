@@ -10,20 +10,20 @@ One server serves one control repository.
 
 ## Tools
 
-| Tool                 | Returns                                                                                                                          | CLI equivalent          |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                                        | `taskgo status --json`  |
-| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                               | `taskgo list --json`    |
-| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                                   | the task file           |
-| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                                        | `taskgo status PROJECT` |
-| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                          | `taskgo read --json`    |
-| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                                      | `taskgo search --json`  |
-| `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`       |
-| `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json` |
-| `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`        |
-| `create`             | Creates one task or decision as one commit, and returns its ID                                                                   | `taskgo create`         |
-| `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit  |
-| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit   |
+| Tool                 | Returns                                                                                                                          | CLI equivalent                 |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `list_projects`      | Projects with task counts and in-progress and blocked IDs                                                                        | `taskgo status --json`         |
+| `list_tasks`         | Task rows, by project and state (`ready` included)                                                                               | `taskgo list --json`           |
+| `get_task`           | One task: frontmatter, sections with hashes, unresolved dependencies, Markdown                                                   | `taskgo status TASK_ID --json` |
+| `get_project_status` | `STATUS.md`, its Summary and Next with hashes, the committed and a freshly computed block                                        | `taskgo status PROJECT`        |
+| `read_file`          | A UTF-8 file, whole or lines `start_line`..`end_line`, up to 256 KiB after a whole line                                          | `taskgo read --json`           |
+| `search_files`       | `git grep` lines and the files they name, up to 64 KiB; allowlisted options                                                      | `taskgo search --json`         |
+| `list_files`         | Files with blob SHAs, optionally under one directory                                                                             | `git ls-files -s`              |
+| `handoff`            | For a project or task: the note, a guide, findings, the files to read first verbatim, the skills, and the active and ready tasks | `taskgo handoff --json`        |
+| `get_task_history`   | Changes of one frontmatter field, following renames                                                                              | `taskgo history`               |
+| `create`             | Creates one task or decision as one commit, and returns its ID                                                                   | `taskgo create`                |
+| `apply_changes`      | Applies a change set as one commit                                                                                               | `taskgo apply`, commit         |
+| `edit_file`          | Replaces exact text in one file as one commit; reports lines and the new blob                                                    | `taskgo edit`, commit          |
 
 Each call fetches the branch (`main` by default) from the remote (`origin`),
 resolves it once, and reads only that commit, through a Git tree snapshot. It
@@ -193,20 +193,22 @@ git rebase --continue
 `--local` serves a checkout on the same machine, with no remote: typically a
 `--stdio` server pointed at the user's own control repository (`--root`), for
 agents working in other workspaces there, which have no clone of it and no
-tunnel to a hosted server. Reads see the local branch as it is, for every call,
+tunnel to a hosted server. Tool calls serialize with the CLI on
+`<git-dir>/taskgo.lock`. Reads see the local branch as it is, for every call,
 with no fetch and no cache. A write commits as above, through a temporary index,
 and then moves the local branch to the commit instead of pushing it,
 compare-and-swap style: the move is refused if the branch is no longer at the
 head the set was applied over (a commit from the CLI got there first), and the
 server then applies the set again over the new head, as after a refused push.
-Before moving, the server requires the checkout to have the branch checked out
-and no uncommitted change (staged, unstaged, or untracked) to any path the
-commit touches; other dirty paths do not matter. After moving, it brings the
-index and working tree from the old head to the new one for the touched paths
-only (`git read-tree -m -u`), which also removes files the commit deletes, so
-the checkout shows the commit as if it had been made there and the CLI goes on
-working with no rebase. The checkout is never pushed; that stays with the user.
-`--local` and `--no-fetch` exclude each other.
+Before moving, the server requires the checkout to have the branch checked out,
+no unfinished Git operation (`rebase`, `merge`, `cherry-pick`, `revert`) or
+unmerged files, and no uncommitted change (staged, unstaged, or untracked) to
+any path the commit touches; other dirty paths do not matter. After moving, it
+brings the index and working tree from the old head to the new one for the
+touched paths only (`git read-tree -m -u`), which also removes files the commit
+deletes, so the checkout shows the commit as if it had been made there and the
+CLI goes on working with no rebase. The checkout is never pushed; that stays
+with the user. `--local` and `--no-fetch` exclude each other.
 
 ## Transports
 
@@ -277,7 +279,7 @@ The record has the same fields, under the same names (`agent` for the
 - `version`: the server's version.
 
 ```json
-{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","args":{"project":"proj","state":"ready"},"outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.12.0"}
+{"ts":"2026-10-13T08:22:11.547Z","transport":"http","http":"POST","method":"tools/call","tool":"list_tasks","args":{"project":"proj","state":"ready"},"outcome":"ok","status":200,"ms":33,"bytes":1597,"commit":"af97eff1c9d2","agent":"Claude-User","caller":"3f9c0a1b2d","version":"0.14.1"}
 ```
 
 The request log is `--log FILE`, else `TASKGO_MCP_LOG`, else

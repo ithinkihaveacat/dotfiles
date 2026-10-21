@@ -87,8 +87,8 @@ stale_after: 2026-11-01
   tasks when `taskgo doctor` reports them (or re-plan if cancelled).
 - **`wait_for`** — External or temporal gates keeping a task off the ready
   frontier: ISO cool-down dates (`YYYY-MM-DD`, resolved once `today >= date`),
-  issue/CL URIs (`b/...`, `cl/...`, `gh:owner/repo#num`), or human handles
-  (`@reviewer`).
+  issue/CL URIs (`b/...`, `cl/...`, `gh:owner/repo#num`), human handles
+  (`@reviewer`), or `http(s)` URLs.
 - **`due`** — Committed completion deadline (`YYYY-MM-DD`). `taskgo doctor`
   emits `[FAIL]` when overdue (`due < today`) and `[INFO]` within 48 hours;
   `taskgo list --state ready` sorts approaching `due` dates first.
@@ -210,8 +210,9 @@ which file, repository, or skill owns each kind of fact.
     citation (`[<conversation-id>](<agent>://<conversation-id>)`). Rewrite it;
     never append a paragraph per session.
   - `<!-- taskgo:begin/end -->`: Mechanically maintained via `taskgo sync`
-    (projects `In progress`, `Blocked`, active `Decisions` when `decisions/*.md`
-    exist, and task state counts).
+    (projects `In progress`, `Blocked`, `Due soon` when open tasks are due
+    within 7 days, active `Decisions` when `decisions/*.md` exist, and task
+    state counts).
   - `## Next`: Immediate next actions.
 
 ## Agent Workflow
@@ -222,9 +223,11 @@ task to an isolated worker that cannot read the control repository, see
 **[Task Export](references/export.md)**.
 
 - **Before work:** run `taskgo handoff <project|TASK_ID>` and follow its note:
-  it names the files to read (`AGENTS.md`, the project `README.md`, `STATUS.md`,
-  `PLAN.md`, the task record) and the project's skills.
-  1. Read the files it names.
+  it names the entry-point files to read (`STATUS.md` and the task record for a
+  task; `README.md`, `STATUS.md`, and `PLAN.md` for a project) and the project's
+  skills (`--json` and the MCP `handoff` tool inline all of those plus the root
+  `AGENTS.md`).
+  1. Read `AGENTS.md`, the project `README.md`, and the files the note names.
   1. **Activate the project's skills** if your harness has a skill manager:
      ```bash
      taskgo skills <project> | skill --scope session add -
@@ -258,7 +261,7 @@ help details and subcommand options.
 ```text
 taskgo id
 taskgo root
-taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--constraints TEXT] [--no-commit] [--dry-run]
+taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--constraints TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT] [--no-commit] [--dry-run]
 taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--expect-status STATE] [--wait-for GATE] [--add-|--remove-blocked-by ID] [--add-|--remove-wait-for GATE] [--add-|--remove-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--constraints TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo apply CHANGES.json [--dry-run]
 taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [--replace-all] [--expected-blob SHA] [--dry-run] [--json]
@@ -277,7 +280,7 @@ taskgo search [--at REV] [--json] GREP_ARGS... [-- PATHS...]
 taskgo checkpoint TASK_ID SUBJECT [--conv ID] [--all] [--path PATH]... [--body TEXT] [--ref REF]...
 taskgo commit SUBJECT [--conv ID] [--body TEXT] [--ref REF]...
 taskgo schema [--json]
-taskgo mcp [--host HOST] [--port PORT] [--no-fetch | --local] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio] [--log FILE]
+taskgo mcp [--host HOST] [--port PORT] [--path PATH] [--remote REMOTE] [--branch BRANCH] [--no-fetch | --local] [--fetch-ttl SECS] [--auth access|none] [--access-team DOMAIN] [--access-aud TAG] [--stdio] [--log FILE]
 taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
 ```
 
@@ -346,6 +349,8 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   synopsis and options
 - **[Model & Architecture](references/model.md)**
 - **[Agent Workflows & Handoff](references/workflows.md)**
+- **[Task Export](references/export.md)** — Delegating tasks to isolated workers
+  without control repository access
 - **[Activity Reports](references/activity-reports.md)**
 - **[MCP Server](references/mcp.md)** — `taskgo mcp` tools, authentication,
   logging, and testing
