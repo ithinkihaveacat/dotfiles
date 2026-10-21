@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+#
+# Hermetic unit tests for emerson: argument handling, input validation,
+# multi-part response parsing, and truncation warnings.
+#
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/emerson"
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/shim"
+
+printf 'reference text\n' >"$WORK/in.txt"
+
+make_curl_shim() {
+  cat >"$WORK/shim/curl" <<EOF
+#!/bin/sh
+cat >/dev/null 2>&1
+$1
+EOF
+  chmod +x "$WORK/shim/curl"
+}
+
+TOTAL_TESTS=5
+echo "1..$TOTAL_TESTS"
+TEST_NUM=0
+LOG="$WORK/log"
+
+run_emerson() {
+  PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" "$@" <"$WORK/in.txt" >"$LOG" 2>&1
+}
+
+# 1. Missing prompt argument fails with exit 1
+TEST_NUM=$((TEST_NUM + 1))
+if PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" </dev/null >"$LOG" 2>&1; then
+  echo "not ok $TEST_NUM - emerson succeeded with no prompt argument"
+  sed 's/^/# /' "$LOG"
+elif grep -q "Usage: emerson PROMPT" "$LOG"; then
+  echo "ok $TEST_NUM - emerson reports missing prompt argument"
+else
+  echo "not ok $TEST_NUM - unexpected error on missing prompt"
+  sed 's/^/# /' "$LOG"
+fi
+
+# 2. Empty stdin input fails with exit 1
+TEST_NUM=$((TEST_NUM + 1))
+if PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" "prompt" </dev/null >"$LOG" 2>&1; then
+  echo "not ok $TEST_NUM - emerson succeeded with empty stdin"
+  sed 's/^/# /' "$LOG"
+elif grep -q "no input provided on stdin" "$LOG"; then
+  echo "ok $TEST_NUM - emerson reports empty stdin"
+else
+  echo "not ok $TEST_NUM - unexpected error on empty stdin"
+  sed 's/^/# /' "$LOG"
+fi
+
+# 3. Multiple content parts are concatenated together
+TEST_NUM=$((TEST_NUM + 1))
+make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"# Part 1\\\n\\\nBody text.\"},{\"text\":\"\\\n\\\n# Part 2\\\n\\\nMore text.\"}]},\"finishReason\":\"STOP\"}]}\n200"'
+if run_emerson "Explain topic"; then
+  if grep -q "Part 1" "$LOG" && grep -q "Part 2" "$LOG"; then
+    echo "ok $TEST_NUM - emerson concatenates multiple response text parts"
+  else
+    echo "not ok $TEST_NUM - multi-part text was not fully concatenated"
+    sed 's/^/# /' "$LOG"
+  fi
+else
+  echo "not ok $TEST_NUM - emerson failed on multi-part response"
+  sed 's/^/# /' "$LOG"
+fi
+
+# 4. Truncation warning on MAX_TOKENS finish reason
+TEST_NUM=$((TEST_NUM + 1))
+make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"# Incomplete\\\n\\\nCut off text\"}]},\"finishReason\":\"MAX_TOKENS\"}]}\n200"'
+if PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" "Explain topic" <"$WORK/in.txt" 2>"$WORK/err.log" >"$WORK/out.log"; then
+  if grep -q "warning: output was truncated (finish reason: MAX_TOKENS)" "$WORK/err.log" && grep -q "Incomplete" "$WORK/out.log"; then
+    echo "ok $TEST_NUM - emerson warns on MAX_TOKENS while preserving output"
+  else
+    echo "not ok $TEST_NUM - missing warning or output on MAX_TOKENS"
+    echo "# stderr:"
+    sed 's/^/# /' "$WORK/err.log"
+    echo "# stdout:"
+    sed 's/^/# /' "$WORK/out.log"
+  fi
+else
+  echo "not ok $TEST_NUM - emerson failed on MAX_TOKENS"
+  sed 's/^/# /' "$WORK/err.log"
+fi
+
+# 5. Empty text response with finish reason fails with clear error
+TEST_NUM=$((TEST_NUM + 1))
+make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"SAFETY\"}]}\n200"'
+if run_emerson "Explain topic"; then
+  echo "not ok $TEST_NUM - emerson succeeded on empty candidate parts"
+  sed 's/^/# /' "$LOG"
+elif grep -q "No response text received. Finish Reason: SAFETY" "$LOG"; then
+  echo "ok $TEST_NUM - emerson reports empty response with finish reason"
+else
+  echo "not ok $TEST_NUM - unexpected message for empty candidate"
+  sed 's/^/# /' "$LOG"
+fi

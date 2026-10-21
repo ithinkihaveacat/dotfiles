@@ -317,10 +317,12 @@ scripts/photo-smart-crop --ratio 1:1 input.jpg output.jpg
 
 ### Truncated or Incomplete Output
 
-**Cause:** Response exceeded token limits
+**Cause:** Response exceeded model token limits (`finishReason: MAX_TOKENS`)
 
-**Solution for emerson:** The script uses `maxOutputTokens: 8192`. For longer
-content:
+**Solution for emerson:** `emerson` leaves output tokens unconstrained so models
+can use their full native output token capacity (e.g. 32k tokens on
+`gemini-4-argon`). If an extraordinarily large output still produces a
+truncation warning:
 
 1. Break input into smaller chunks
 1. Process incrementally

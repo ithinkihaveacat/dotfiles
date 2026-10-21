@@ -638,7 +638,7 @@ PROMPT="Summarize the key points"
 
 # --rawfile avoids ARG_MAX limits on large inputs
 curl -s -X POST \
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent" \
   -H "x-goog-api-key: $GEMINI_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n \
@@ -652,8 +652,8 @@ curl -s -X POST \
           {text: ("\n\nTask/Question:\n" + $prompt)}
         ]
       }],
-      generationConfig: {temperature: 1.0, maxOutputTokens: 8192}
-    }')" | jq -r '.candidates[0].content.parts[0].text'
+      generationConfig: {temperature: 1.0}
+    }')" | jq -r '[.candidates[0].content.parts[]?.text // empty] | join("")'
 ```
 
 ______________________________________________________________________
@@ -1329,8 +1329,7 @@ Structure with reference material first, then task:
     }
   ],
   "generationConfig": {
-    "temperature": 1.0,
-    "maxOutputTokens": 8192
+    "temperature": 1.0
   }
 }
 ```
