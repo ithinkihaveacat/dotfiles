@@ -11,8 +11,7 @@ import {
   buildDescription,
   buildRule,
   isLevel,
-  levelLabel,
-  parseLevelRequest
+  levelLabel
 } from "./rule";
 import { createSensor } from "./sensor";
 
@@ -22,10 +21,6 @@ const PANE = "andon-board";
 const REFRESH_MS = 60_000;
 const CLI_TIMEOUT_MS = 15_000;
 
-const sessionLevel = atom(
-  { plugin: "andon", key: "sessionLevel" } as const,
-  null
-);
 const defaultLevel = atom(
   { plugin: "andon", key: "defaultLevel" } as const,
   DEFAULT_LEVEL
@@ -116,19 +111,13 @@ async function cliJson<T>($: Engine, args: string[]): Promise<T | null> {
 
 // --- Level, counts and the board ---------------------------------------------
 
-async function activeLevel(
-  $: Engine
-): Promise<{ level: number; isSession: boolean }> {
-  const chosen = await read($, sessionLevel);
-  if (isLevel(chosen)) return { level: chosen, isSession: true };
-
-  return { level: await read($, defaultLevel), isSession: false };
-}
+let levelLocked = false;
+let initialLoad: Promise<void> | null = null;
 
 async function showStatus($: Engine): Promise<void> {
-  const { level, isSession } = await activeLevel($);
+  const level = await read($, defaultLevel);
   const { open, red } = await read($, counts);
-  if (open === 0 && !isSession) {
+  if (open === 0 && level === DEFAULT_LEVEL) {
     $.ui.status(undefined);
 
     return;
@@ -148,8 +137,11 @@ let seenStamps = "";
 async function storeChanged($: Engine): Promise<boolean> {
   if (stateDir === null) return true;
   const dir = stateDir;
+  const files = levelLocked
+    ? ["events.jsonl"]
+    : ["events.jsonl", "config.json"];
   const stamps = await Promise.all(
-    ["events.jsonl", "config.json"].map((name) =>
+    files.map((name) =>
       $.fs.stat(`${dir}/${name}`).then(
         (stat) => String(stat.mtimeMs),
         () => "-"
@@ -184,10 +176,20 @@ async function refreshCounts($: Engine): Promise<void> {
     // with its header.
     if (await isBoardOpen($)) await refreshBoard($);
   }
-  if (isLevel(stats.level) && stats.level !== (await read($, defaultLevel))) {
-    await update($, defaultLevel, () => stats.level);
+  if (!levelLocked && isLevel(stats.level)) {
+    levelLocked = true;
+    if (stats.level !== (await read($, defaultLevel))) {
+      await update($, defaultLevel, () => stats.level);
+    }
   }
   await showStatus($);
+}
+
+async function ensureLockedLevel($: Engine): Promise<number> {
+  if (!levelLocked && initialLoad !== null) await initialLoad;
+  levelLocked = true;
+
+  return read($, defaultLevel);
 }
 
 async function refreshBoard($: Engine): Promise<void> {
@@ -218,11 +220,6 @@ async function refreshBoard($: Engine): Promise<void> {
   await update($, board, () => rows);
 }
 
-async function setSessionLevel($: Engine, level: number | null): Promise<void> {
-  await update($, sessionLevel, () => level);
-  await showStatus($);
-}
-
 // --- The pull tool -----------------------------------------------------------
 
 type PullResponse = {
@@ -247,12 +244,12 @@ async function pull(
   const fields: Record<string, unknown> = {};
   for (const key of MODEL_FIELDS)
     if (e[key] !== undefined) fields[key] = e[key];
-  const { level } = await activeLevel($);
+  const level = await ensureLockedLevel($);
   const cwd = await $.session.cwd();
   const root = await $.session.root();
   const payload = {
     ...fields,
-    level: isLevel(fields.level) ? fields.level : level,
+    level,
     harness: "claude-code",
     conversation_id: await $.session.id(),
     agent_id: typeof e.agentId === "string" ? e.agentId : undefined,
@@ -364,15 +361,14 @@ async function copyPrompt(
 // --- The /andon command ----------------------------------------------------
 
 const USAGE = [
-  "Usage: /andon [board|list|stats|level [N|default] [--save]]",
+  "Usage: /andon [board|list|stats|level [1-5|default|reset]]",
   "",
   "  /andon              open the Andon board",
   "  /andon list         list open alerts from every session",
   "  /andon stats        counts, top sources and top fingerprints",
   "  /andon level        show the trigger level in force",
-  "  /andon level 5      set the level for this conversation",
-  "  /andon level 4 --save   set the default for every session",
-  "  /andon level default    drop this conversation’s level"
+  "  /andon level 5      set the default level for new sessions",
+  "  /andon level reset  reset the default level to 3"
 ].join("\n");
 
 async function runCommand($: Engine, args: string): Promise<string> {
@@ -396,37 +392,25 @@ async function runCommand($: Engine, args: string): Promise<string> {
       ? ran.stdout.trimEnd() || "No open Andon alerts."
       : `andon ${verb} failed: ${ran.error}`;
   }
-  if (verb !== "level") return USAGE;
+  if (verb !== "level" || words.length > 2) return USAGE;
   const value = words[1];
-  const isSave = words.includes("--save");
   if (value === undefined) {
-    const { level, isSession } = await activeLevel($);
+    const level = await ensureLockedLevel($);
 
-    return `Andon level ${levelLabel(level)}${isSession ? " for this conversation" : ""}; default ${await read($, defaultLevel)}.`;
+    return `Andon level ${levelLabel(level)}.`;
   }
   if (value === "default" || value === "reset") {
-    if (isSave) {
-      const ran = await cli($, ["level", "--reset"]);
-      if (!ran.ok) return `andon level failed: ${ran.error}`;
-      await refreshCounts($);
-    }
-    await setSessionLevel($, null);
+    const ran = await cli($, ["level", "--reset"]);
+    if (!ran.ok) return `andon level failed: ${ran.error}`;
 
-    return `Andon level back to the default, ${levelLabel(await read($, defaultLevel))}.`;
+    return `Andon default level reset to ${levelLabel(DEFAULT_LEVEL)} (applies to new sessions).`;
   }
   const level = Number(value);
   if (!isLevel(level)) return USAGE;
-  if (isSave) {
-    const ran = await cli($, ["level", String(level)]);
-    if (!ran.ok) return `andon level failed: ${ran.error}`;
-    await update($, defaultLevel, () => level);
-    await setSessionLevel($, null);
+  const ran = await cli($, ["level", String(level)]);
+  if (!ran.ok) return `andon level failed: ${ran.error}`;
 
-    return `Andon default level set to ${levelLabel(level)} for every session.`;
-  }
-  await setSessionLevel($, level);
-
-  return `Andon level ${levelLabel(level)} for this conversation.`;
+  return `Andon default level set to ${levelLabel(level)} (applies to new sessions).`;
 }
 
 // --- Hooks -------------------------------------------------------------------
@@ -436,6 +420,8 @@ export const register: Register = (on) => {
 
   on("session.start", async ($, e, next) => {
     const started = await next(e);
+    levelLocked = false;
+    initialLoad = null;
     // Awaited before the first prompt, so nothing here waits on the CLI: the
     // counts and the default level arrive in the background.
     await $.tool.register({
@@ -447,9 +433,10 @@ export const register: Register = (on) => {
     await $.command.register({
       name: "andon",
       description: "Andon board, alerts and trigger level",
-      argumentHint: "[board|list|stats|level [N|default] [--save]]"
+      argumentHint: "[board|list|stats|level [1-5|default|reset]]"
     });
-    quietly(refreshCounts($));
+    initialLoad = refreshCounts($);
+    quietly(initialLoad);
     $.clock.every(REFRESH_MS, () =>
       quietly(
         storeChanged($).then((changed) =>
@@ -466,14 +453,14 @@ export const register: Register = (on) => {
   on("prompt.compose", async ($, e, next) => {
     const composed = await next(e);
     if (!e.tools.includes(TOOL)) return composed;
-    const { level, isSession } = await activeLevel($);
+    const level = await ensureLockedLevel($);
 
     return {
       sections: [
         ...composed.sections,
         {
           id: "andon:rule",
-          text: buildRule(level, isSession),
+          text: buildRule(level),
           scope: "session" as const
         }
       ]
@@ -509,7 +496,7 @@ export const register: Register = (on) => {
     // Main loop only: a subagent's tool list may lack the pull tool, and its
     // failures are not the main loop's pattern.
     if (ran.deny !== undefined || e.agentId !== undefined) return ran;
-    const { level } = await activeLevel($);
+    const level = await read($, defaultLevel);
     const reminder = sensor.observe({
       tool: e.tool,
       input: e as unknown as Record<string, unknown>,
@@ -520,22 +507,6 @@ export const register: Register = (on) => {
     return reminder === null
       ? ran
       : { ...ran, context: [...(ran.context ?? []), reminder] };
-  }).catch(($, e, next) => next(e));
-
-  // A message that starts "andon level 5" sets the level; one that only
-  // mentions a level does not. Held by the host, so it survives compaction,
-  // and rendered into the rule on every request.
-  on("prompt.submit", async ($, e, next) => {
-    if (e.command === undefined && e.isMeta !== true) {
-      const wanted = parseLevelRequest(e.text);
-      if (wanted !== null) {
-        await setSessionLevel($, wanted === "default" ? null : wanted);
-        const { level } = await activeLevel($);
-        $.ui.toast(`Andon level ${levelLabel(level)} for this conversation`);
-      }
-    }
-
-    return next(e);
   }).catch(($, e, next) => next(e));
 
   on("classic.SessionStart", async ($, e, next) => {
@@ -566,7 +537,7 @@ export const register: Register = (on) => {
     const chosen = await read($, filter);
     const sessionOnly = await read($, isSessionOnly);
     const { open, red } = await read($, counts);
-    const { level, isSession } = await activeLevel($);
+    const level = await read($, defaultLevel);
     const line = await read($, notice);
     const nowMs = await $.clock.now();
     const room = Math.max(1, Math.floor(((e.viewport?.rows ?? 30) - 6) / 4));
@@ -574,8 +545,7 @@ export const register: Register = (on) => {
     return (
       <Box flexDirection="column">
         <Text bold>
-          Andon · level {level}
-          {isSession ? " (this conversation)" : ""} · {open} open, {red} red
+          Andon · level {level} · {open} open, {red} red
         </Text>
         <Box flexDirection="row" gap={1}>
           {FILTERS.map((f) => (

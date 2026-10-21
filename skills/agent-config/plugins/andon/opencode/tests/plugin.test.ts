@@ -16,38 +16,23 @@ test("rule is injected on every primary request only when the tool is offered", 
   assert.deepEqual((await h.context("other", false)).system, []);
 });
 
-test("prompt-level overrides are isolated and survive plugin reload/compaction", async () => {
+test("session level is locked in on first context request and unaffected by later changes", async () => {
+  const h = await harness();
+  assert.match((await h.context("one")).system[0].text, /Active trigger level: 3/);
+  await h.rpc("command", { text: "level 5", sessionID: "one" });
+  await h.context("one", false); // auxiliary title/compaction request without tools
+  assert.match((await h.context("one")).system[0].text, /Active trigger level: 3/);
+  const snapOne = (await h.rpc("snapshot", { sessionID: "one" })) as { level: number; stats: { level: number } };
+  assert.equal(snapOne.level, 3);
+  assert.equal(snapOne.stats.level, 5);
+  assert.match((await h.context("two")).system[0].text, /Active trigger level: 5/);
+});
+
+test("chat prompts do not mutate the trigger level", async () => {
   const h = await harness();
   await h.emit("session:prompt", {
     sessionID: "one",
     prompt: { text: "andon level 5 please" }
-  });
-  assert.match((await h.context()).system[0].text, /Active trigger level: 5/);
-  assert.match(
-    (await h.context("two")).system[0].text,
-    /Active trigger level: 3/
-  );
-  h.cleanup();
-  const reloaded = await harness({ storage: h.storage });
-  assert.match(
-    (await reloaded.context()).system[0].text,
-    /Active trigger level: 5/
-  );
-  await reloaded.emit("session:prompt", {
-    sessionID: "one",
-    prompt: { text: "andon level default" }
-  });
-  assert.match(
-    (await reloaded.context()).system[0].text,
-    /Active trigger level: 3/
-  );
-});
-
-test("mentioning a level does not change it", async () => {
-  const h = await harness();
-  await h.emit("session:prompt", {
-    sessionID: "one",
-    prompt: { text: "what does andon level 5 do?" }
   });
   assert.match((await h.context()).system[0].text, /Active trigger level: 3/);
 });
@@ -159,25 +144,27 @@ test("cancellation propagates rather than returning ordinary failure guidance", 
   assert.equal(h.calls.filter((call) => call.args[0] === "pull").length, 0);
 });
 
-test("commands support session reset and shared saved defaults", async () => {
+test("commands inspect, update, and reset the shared default level", async () => {
   const h = await harness();
   await h.rpc("command", { text: "level 5", sessionID: "one" });
-  assert.match((await h.context()).system[0].text, /Active trigger level: 5/);
-  await h.rpc("command", { text: "level 4 --save", sessionID: "one" });
-  assert.match((await h.context()).system[0].text, /Active trigger level: 4/);
+  assert.match((await h.context("one")).system[0].text, /Active trigger level: 5/);
+  await h.rpc("command", { text: "level 4" });
   assert.match(
     (await h.context("two")).system[0].text,
     /Active trigger level: 4/
   );
-  await h.rpc("command", { text: "level default --save", sessionID: "one" });
-  assert.match((await h.context()).system[0].text, /Active trigger level: 3/);
+  await h.rpc("command", { text: "level reset" });
+  assert.match(
+    (await h.context("three")).system[0].text,
+    /Active trigger level: 3/
+  );
 });
 
 test("command dispatch rejects arbitrary CLI operations and extra arguments", async () => {
   const h = await harness();
   for (const text of [
     "clear-resolved",
-    "level 5 --save extra",
+    "level 5 --save",
     "level 5 --oops",
     "list --status all"
   ]) {
@@ -186,10 +173,6 @@ test("command dispatch rejects arbitrary CLI operations and extra arguments", as
       /^Usage:/
     );
   }
-  assert.match(
-    ((await h.rpc("command", { text: "level 5" })) as { text: string }).text,
-    /Open a session/
-  );
   assert.equal(h.calls.filter((call) => call.args[0] === "level").length, 0);
 });
 

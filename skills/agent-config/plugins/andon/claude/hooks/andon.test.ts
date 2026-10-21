@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "claude-code/testing";
 import type { On } from "claude-code";
 
-import { TOOL, buildRule, parseLevelRequest } from "./rule";
+import { INPUT_SCHEMA, TOOL, buildRule } from "./rule";
 import { createSensor } from "./sensor";
 
 type Run = { argv: readonly string[]; stdin?: string };
@@ -126,30 +126,20 @@ const START = {
 
 describe("the rule", () => {
   test("drops the do-not-pull list and self-filtering at level 5", () => {
-    expect(buildRule(3, false)).toContain("Do not pull for");
-    expect(buildRule(5, false)).not.toContain("Do not pull for");
-    expect(buildRule(5, false)).toContain("Do not self-filter");
+    expect(buildRule(3)).toContain("Do not pull for");
+    expect(buildRule(5)).not.toContain("Do not pull for");
+    expect(buildRule(5)).toContain("Do not self-filter");
   });
 
-  test("says when the level was set in conversation", () => {
-    expect(buildRule(4, true)).toContain(
-      "set by the user for this conversation"
-    );
-  });
-
-  test("reads level changes in the person’s words", () => {
-    expect(parseLevelRequest("andon level 5 please")).toBe(5);
-    expect(parseLevelRequest("Set andon level to 2.")).toBe(2);
-    expect(parseLevelRequest("andon level default")).toBe("default");
-    expect(parseLevelRequest("raise the log level 5")).toBe(null);
-    expect(parseLevelRequest("andon level 9")).toBe(null);
-  });
-
-  test("ignores a level that is only talked about", () => {
-    expect(parseLevelRequest("what does andon level 5 do?")).toBe(null);
-    expect(parseLevelRequest("should the default be andon level 4?")).toBe(
-      null
-    );
+  test("includes the full 1-5 trigger level rubric and omits level from INPUT_SCHEMA", () => {
+    const rule = buildRule(3);
+    expect(rule).toContain("Active trigger level: 3 (standard).");
+    expect(rule).toContain("- Level 1 (red only):");
+    expect(rule).toContain("- Level 2 (conservative):");
+    expect(rule).toContain("- Level 3 (standard):");
+    expect(rule).toContain("- Level 4 (proactive audit):");
+    expect(rule).toContain("- Level 5 (maximum coverage):");
+    expect("level" in INPUT_SCHEMA.properties).toBe(false);
   });
 });
 
@@ -274,16 +264,22 @@ describe("the plugin", () => {
     expect(without.sections.map((s) => s.id)).toEqual(["intro"]);
   });
 
-  test("a level set in conversation reaches the rule", async ($, on) => {
-    engine(on);
-    on("prompt.compose", () => ({ sections: [] }));
-    on("prompt.submit", ($, e) => ({ text: e.text }));
-    await $.session.start(START);
-    await $.prompt.submit({
-      text: "andon level 5 for this one",
-      wait: false,
-      origin: { kind: "composer" }
+  test("locks in the configured level for the session and /andon level updates the CLI default", async ($, on) => {
+    let statsLevel = 4;
+    const runs = engine(on, {
+      run: (argv) => {
+        if (argv.includes("stats")) {
+          return result(
+            0,
+            JSON.stringify({ open: 2, open_red: 0, level: statsLevel })
+          );
+        }
+        return fakeCli(statsLevel)(argv);
+      }
     });
+    on("prompt.compose", () => ({ sections: [] }));
+    await $.session.start(START);
+    statsLevel = 2;
     const composed = await $.prompt.compose({
       model: "m",
       promptModel: "m",
@@ -293,8 +289,18 @@ describe("the plugin", () => {
       tools: [TOOL]
     });
     expect(composed.sections[0]?.text).toContain(
-      "Active trigger level: 5 (maximum coverage), set by the user"
+      "Active trigger level: 4 (proactive audit)."
     );
+    const setOut = await $.command.run({
+      command: "andon",
+      args: "level 5",
+      origin: { kind: "composer" },
+      presentation: { isFullscreen: false, columns: 80 }
+    });
+    expect(setOut.text).toContain("5 (maximum coverage)");
+    expect(
+      runs.some((r) => r.argv.includes("level") && r.argv.includes("5"))
+    ).toBe(true);
   });
 
   test("a pull is allowed, stamped with the session and saved by the CLI", async ($, on) => {

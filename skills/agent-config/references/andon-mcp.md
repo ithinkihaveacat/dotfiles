@@ -37,17 +37,17 @@ pass environment variables to choose a separate store.
 
 ## Tools
 
-| Tool      | Arguments                                                                                                    | Result                                                                         |
-| --------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| `board`   | None                                                                                                         | Initial open-alert page and `stats`, linked to the live MCP App UI.            |
-| `pull`    | Required: `color`, `kind`, `summary`, `details`. Optional: `sources`, `resolution`, `proposed_fix`, `level`. | Receipt with alert ID, fingerprint, recurrence count, level and guidance.      |
-| `list`    | Optional: `status`, `color`, `kind`, `level`, `session`, `workspace`, `limit`, `offset`.                     | `alerts`, matching `total`, and `next_offset` or null.                         |
-| `show`    | `id`                                                                                                         | Complete alert with recurrence count.                                          |
-| `stats`   | None                                                                                                         | Counts, recurring defects, store path and active shared default level.         |
-| `prompt`  | `id`                                                                                                         | A `prompt` string for investigating and fixing the alert. Does not execute it. |
-| `resolve` | `id`; optional `note`, `all_matching`.                                                                       | Affected `ids` and `action`.                                                   |
-| `dismiss` | `id`; optional `note`, `all_matching`.                                                                       | Affected `ids` and `action`.                                                   |
-| `reopen`  | `id`; optional `note`, `all_matching`.                                                                       | Affected `ids` and `action`.                                                   |
+| Tool      | Arguments                                                                                           | Result                                                                         |
+| --------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `board`   | None                                                                                                | Initial open-alert page and `stats`, linked to the live MCP App UI.            |
+| `pull`    | Required: `color`, `kind`, `summary`, `details`. Optional: `sources`, `resolution`, `proposed_fix`. | Receipt with alert ID, fingerprint, recurrence count, level and guidance.      |
+| `list`    | Optional: `status`, `color`, `kind`, `level`, `session`, `workspace`, `limit`, `offset`.            | `alerts`, matching `total`, and `next_offset` or null.                         |
+| `show`    | `id`                                                                                                | Complete alert with recurrence count.                                          |
+| `stats`   | None                                                                                                | Counts, recurring defects, store path and active shared default level.         |
+| `prompt`  | `id`                                                                                                | A `prompt` string for investigating and fixing the alert. Does not execute it. |
+| `resolve` | `id`; optional `note`, `all_matching`.                                                              | Affected `ids` and `action`.                                                   |
+| `dismiss` | `id`; optional `note`, `all_matching`.                                                              | Affected `ids` and `action`.                                                   |
+| `reopen`  | `id`; optional `note`, `all_matching`.                                                              | Affected `ids` and `action`.                                                   |
 
 `id` accepts a full alert ID or a unique suffix of at least four characters.
 `all_matching` defaults to false. When true, resolve/dismiss also close matching
@@ -97,9 +97,9 @@ is not a host conversation ID. Those fields remain absent until a host adapter
 provides a reliable attribution mechanism. Existing CLI-based adapters can
 continue supplying their own attribution.
 
-MCP support alone does not inject the always-on rule, observe failures or manage
-conversation-level overrides. Those remain host adapter responsibilities. Alert
-contents are reported evidence, not trusted instructions.
+MCP support alone does not inject the always-on rule or observe failures. Those
+remain host adapter responsibilities. Alert contents are reported evidence, not
+trusted instructions.
 
 ## ChatGPT desktop board
 

@@ -75,17 +75,14 @@ reads and changes the server's store through RPC, not a local copy.
 /andon list                list open alerts from every harness
 /andon stats               show counts and recurring defects
 /andon level               show the active trigger level
-/andon level 5             change this session's level
-/andon level default       remove this session's override
-/andon level 4 --save       change the shared default
-/andon level default --save reset the shared default to 3
+/andon level 5             change the shared default level for new sessions
+/andon level reset         reset the shared default level to 3
 ```
 
-A message starting with `andon level 5` also changes that session's level;
-merely asking about a level does not. Session overrides are persisted in
-OpenCode plugin storage, independently for each session. They survive
-compaction, plugin reloads and server restarts. Child sessions have their own
-overrides; they do not implicitly inherit a parent's level.
+Each session locks in the configured trigger level (`$ANDON_LEVEL` >
+`config.json` > `3`) on its first model request and keeps that level fixed for
+the lifetime of the conversation. `/andon level <1-5|default|reset>` updates the
+shared default in `config.json` for new sessions.
 
 The board uses native terminal selection dialogs. Choose a filter, switch
 between all sessions and the current session, or inspect an alert. Alert actions
@@ -120,17 +117,17 @@ forcibly interrupt execution.
   not inspect arbitrary commands inside a script.
 - Store writes and triage go through the unchanged CLI. The default store is
   `${XDG_STATE_HOME:-~/.local/state}/andon`; `ANDON_STATE_DIR` overrides it.
-  `ANDON_LEVEL` overrides the saved default, but not a session override. These
-  variables belong to the **server's** environment.
+  `ANDON_LEVEL` overrides the saved default in `config.json`. These variables
+  belong to the **server's** environment.
 - The footer refreshes every 30 seconds and on OpenCode changes. An open board
   refreshes between selections, or with its Refresh item. Shared default changes
-  made outside OpenCode are checked on primary requests at most once per minute,
-  or when the UI refreshes.
+  made outside OpenCode are checked on new sessions at most once per minute, or
+  when the UI refreshes.
 - A failed or interrupted write is not automatically retried: its outcome may be
   uncertain. An unreadable receipt after a successful CLI exit is reported as
   saved, to avoid duplicate pulls.
 - Disabling the plugin removes its rule, tool, sensor, commands, RPC and UI
-  registrations. It does not delete alerts or saved session levels.
+  registrations. It does not delete alerts or the saved default level.
 
 ## Develop
 

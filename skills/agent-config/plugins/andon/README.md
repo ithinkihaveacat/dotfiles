@@ -49,15 +49,15 @@ runs inside Claude Code (no Node, no npm packages) and is thin glue: every read
 and write goes through the Python CLI. Each piece of the design maps onto one
 hook:
 
-| Need                     | Hook                                                                                                                                                                                                                                            |
-| :----------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Always-on rule           | `prompt.compose` adds an `andon:rule` system-prompt section, rendered for the level in force. It is added only to requests that offer the tool, so a subagent without the tool is never told to call it.                                        |
-| Eager, pre-approved tool | `$.tool.register` with `isDeferred: false` registers `mcp__andon__pull`, and a `tool.check` hook turns an "ask" into "allow", so it never prompts. A deny from the user's rules or mode still stands.                                           |
-| Session attribution      | The `tool.call` handler stamps the session ID, `tool_use_id`, subagent ID, turn, model, workspace and transcript path itself, then writes one complete record. There is no second process and no `args_hash` pairing window.                    |
-| Level override           | A message that starts with "andon level 5" sets the level (one that only mentions a level doesn't), and so does `/andon level N`. The level is held in host state, so it survives compaction and is re-rendered into the rule on every request. |
-| Passive sensor           | A `tool.call` observer adds a one-line reminder to a tool result when a command fails after the agent read a skill's `SKILL.md`, when `--help` follows a failure, or when the same command fails twice. It never pulls by itself.               |
-| Board                    | `/andon` opens a pane on the terminal and desktop surfaces with filters, recurrence badges, and Copy fix prompt / Resolve / Dismiss / Reopen buttons. The status line shows `andon: L3 · 2 open · 1 red`.                                       |
-| One unit                 | Disabling the plugin removes the rule, tool, sensor, board and status line together.                                                                                                                                                            |
+| Need                     | Hook                                                                                                                                                                                                                                              |
+| :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Always-on rule           | `prompt.compose` adds an `andon:rule` system-prompt section, rendered with the session's locked trigger level and the full 1–5 rubric. It is added only to requests that offer the tool, so a subagent without the tool is never told to call it. |
+| Eager, pre-approved tool | `$.tool.register` with `isDeferred: false` registers `mcp__andon__pull`, and a `tool.check` hook turns an "ask" into "allow", so it never prompts. A deny from the user's rules or mode still stands.                                             |
+| Session attribution      | The `tool.call` handler stamps the session ID, `tool_use_id`, subagent ID, turn, model, workspace, transcript path, and session level itself, then writes one complete record. There is no second process and no `args_hash` pairing window.      |
+| Trigger level            | Each session locks in the configured default level (`$ANDON_LEVEL` > `config.json` > `3`) at startup. `/andon level [1-5\|default\|reset]` inspects or updates the shared default for new sessions.                                               |
+| Passive sensor           | A `tool.call` observer adds a one-line reminder to a tool result when a command fails after the agent read a skill's `SKILL.md`, when `--help` follows a failure, or when the same command fails twice. It never pulls by itself.                 |
+| Board                    | `/andon` opens a pane on the terminal and desktop surfaces with filters, recurrence badges, and Copy fix prompt / Resolve / Dismiss / Reopen buttons. The status line shows `andon: L3 · 2 open · 1 red`.                                         |
+| One unit                 | Disabling the plugin removes the rule, tool, sensor, board and status line together.                                                                                                                                                              |
 
 The plugin finds the CLI at `../../../scripts/andon` (relative to `claude/`),
 falling back to `andon` on `PATH`. If uv is missing from the host's `PATH`, it
@@ -97,11 +97,10 @@ picks up edits without a reinstall.
 ## The OpenCode plugin
 
 `opencode/` provides an OpenCode V2 adapter over the same CLI and store, with a
-directly offered pull tool, an always-on rule, session levels, passive
-reminders, and a searchable terminal board. See
-[OpenCode installation and usage](opencode/README.md). The Claude adapter and
-shared store format are unchanged; differences and the deferred MCP boundary are
-recorded in [its changelog](opencode/CHANGELOG.md).
+directly offered pull tool, an always-on rule, session-locked trigger levels,
+passive reminders, and a searchable terminal board. See
+[OpenCode installation and usage](opencode/README.md). Differences and the
+deferred MCP boundary are recorded in [its changelog](opencode/CHANGELOG.md).
 
 ## The ChatGPT desktop plugin
 

@@ -10,14 +10,12 @@ import {
   INPUT_SCHEMA,
   isLevel,
   MODEL_FIELDS,
-  parseLevelRequest,
   TOOL
 } from "./rule.ts";
 import { createSensor, shellFailed } from "./sensor.ts";
 import type { Alert, Stats } from "./types.ts";
 
-const USAGE = "Usage: /andon [board|list|stats|level [1-5|default] [--save]]";
-const LEVEL_KEY = (sessionID: string) => `level/${sessionID}`;
+const USAGE = "Usage: /andon [board|list|stats|level [1-5|default|reset]]";
 const guidance = (color: unknown) =>
   color === "red"
     ? "Stop on the blocked path and explain the blocker and decision needed to the user."
@@ -33,6 +31,7 @@ export async function setup(
   let checkedAt = 0;
   let notify = async () => {};
   const sensors = new Map<string, ReturnType<typeof createSensor>>();
+  const sessionLevels = new Map<string, number>();
   const offered = new Set<string>();
   const models = new Map<string, string>();
   const pendingReminders = new Map<string, string>();
@@ -48,20 +47,18 @@ export async function setup(
     }
   }
 
-  async function activeLevel(sessionID?: string) {
+  async function sessionLevel(sessionID?: string): Promise<number> {
+    if (sessionID && sessionLevels.has(sessionID)) {
+      return sessionLevels.get(sessionID)!;
+    }
     await refreshDefault();
-    const chosen = sessionID
-      ? await ctx.storage.get(LEVEL_KEY(sessionID))
-      : undefined;
-    return {
-      level: isLevel(chosen) ? chosen : defaultLevel,
-      sessionOverride: isLevel(chosen)
-    };
-  }
-
-  async function setLevel(sessionID: string, level: number | "default") {
-    if (level === "default") await ctx.storage.remove(LEVEL_KEY(sessionID));
-    else await ctx.storage.set(LEVEL_KEY(sessionID), level);
+    if (sessionID) {
+      if (sessionLevels.size >= 128) {
+        sessionLevels.delete(sessionLevels.keys().next().value!);
+      }
+      sessionLevels.set(sessionID, defaultLevel);
+    }
+    return defaultLevel;
   }
 
   async function command(text: string, sessionID?: string): Promise<string> {
@@ -73,35 +70,25 @@ export async function setup(
         "No matching Andon alerts."
       );
     }
-    if (verb !== "level") return USAGE;
+    if (verb !== "level" || words.length > 2) return USAGE;
     if (words.length === 1) {
-      const active = await activeLevel(sessionID);
-      return `Andon level ${active.level}${active.sessionOverride ? " for this conversation" : " (default)"}.`;
+      await refreshDefault(true);
+      const locked = sessionID ? sessionLevels.get(sessionID) : undefined;
+      return locked !== undefined && locked !== defaultLevel
+        ? `Andon level ${locked} for this session (default ${defaultLevel}).`
+        : `Andon level ${defaultLevel}.`;
     }
     const value =
       words[1] === "default" || words[1] === "reset"
         ? "default"
         : Number(words[1]);
-    if (
-      (value !== "default" && !isLevel(value)) ||
-      words.length > 3 ||
-      (words.length === 3 && words[2] !== "--save")
-    )
-      return USAGE;
-    if (words[2] === "--save") {
-      await cli(
-        value === "default" ? ["level", "--reset"] : ["level", String(value)]
-      );
-      await refreshDefault(true); // Respect ANDON_LEVEL even after a saved change.
-      if (sessionID) await setLevel(sessionID, "default");
-    } else {
-      if (!sessionID)
-        return "Open a session to change its Andon level, or use --save to change the default.";
-      await setLevel(sessionID, value);
-    }
+    if (value !== "default" && !isLevel(value)) return USAGE;
+    await cli(
+      value === "default" ? ["level", "--reset"] : ["level", String(value)]
+    );
+    await refreshDefault(true); // Respect ANDON_LEVEL even after a saved change.
     await notify().catch(() => {});
-    const active = await activeLevel(sessionID);
-    return `Andon level ${active.level}${active.sessionOverride ? " for this conversation" : " (default)"}.`;
+    return `Andon level ${defaultLevel} (applies to new sessions).`;
   }
 
   async function pull(input: unknown, context: ToolContext) {
@@ -121,7 +108,7 @@ export async function setup(
     let saved: string;
     try {
       const session = await ctx.session.get({ sessionID: context.sessionID });
-      const active = await activeLevel(context.sessionID);
+      const level = await sessionLevel(context.sessionID);
       const model =
         models.get(context.sessionID) ??
         (session.model
@@ -131,7 +118,7 @@ export async function setup(
         ["pull", "--json", "-"],
         {
           ...fields,
-          level: isLevel(fields.level) ? fields.level : active.level,
+          level,
           harness: "opencode",
           conversation_id: context.sessionID,
           agent_id: session.parentID ? context.sessionID : undefined,
@@ -192,23 +179,17 @@ export async function setup(
       const oldest = offered.values().next().value!;
       offered.delete(oldest);
       sensors.delete(oldest);
+      sessionLevels.delete(oldest);
       models.delete(oldest);
       pendingReminders.delete(oldest);
     }
     offered.add(event.sessionID);
     models.set(event.sessionID, `${event.model.providerID}/${event.model.id}`);
-    const active = await activeLevel(event.sessionID);
+    const level = await sessionLevel(event.sessionID);
     event.system.push({
       type: "text",
-      text: buildRule(active.level, active.sessionOverride)
+      text: buildRule(level)
     });
-  });
-  await ctx.session.hook("prompt", async (event) => {
-    const level = parseLevelRequest(event.prompt.text ?? "");
-    if (level !== null) {
-      await setLevel(event.sessionID, level);
-      await notify().catch(() => {});
-    }
   });
   await ctx.tool.hook("execute.after", async (event) => {
     if (!offered.has(event.sessionID)) return;
@@ -224,7 +205,7 @@ export async function setup(
         failed:
           event.status === "error" ||
           (event.status === "completed" && shellFailed(event.result)),
-        level: (await activeLevel(event.sessionID)).level
+        level: await sessionLevel(event.sessionID)
       });
       if (!reminder) return;
       if (event.status === "error") {
@@ -263,7 +244,7 @@ export async function setup(
   });
   const rpc = await ctx.rpc.register(Andon, {
     snapshot: async (input, request) => {
-      const { sessionID } = input as { sessionID?: string };
+      const { sessionID } = (input ?? {}) as { sessionID?: string };
       const stats = await cliJson<Stats>(
         cli,
         ["stats", "--json"],
@@ -278,7 +259,8 @@ export async function setup(
           request.signal
         ),
         stats,
-        ...(await activeLevel(sessionID))
+        level:
+          (sessionID ? sessionLevels.get(sessionID) : undefined) ?? defaultLevel
       };
     },
     command: async (input) => {
@@ -316,6 +298,7 @@ export async function setup(
   await refreshDefault();
   return () => {
     sensors.clear();
+    sessionLevels.clear();
     offered.clear();
     models.clear();
     pendingReminders.clear();

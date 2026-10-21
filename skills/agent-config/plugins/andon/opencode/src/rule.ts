@@ -23,20 +23,11 @@ export function isLevel(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 5;
 }
 
-export function parseLevelRequest(text: string): number | "default" | null {
-  const match =
-    /^\s*(?:set |use |switch to )?andon\s+level\s+(?:to\s+)?([1-5]|default|reset)\b/i.exec(
-      text
-    );
-  if (!match) return null;
-  return /^[1-5]$/.test(match[1]) ? Number(match[1]) : "default";
-}
-
-export function buildRule(level: number, sessionOverride: boolean): string {
+export function buildRule(level: number): string {
   return [
     "# Andon cord",
     `Your instructions, skills, rules, tool descriptions and helper scripts can be wrong. Report defects with \`${TOOL}\` so their source can be fixed for later sessions.`,
-    `Active trigger level: ${level}${sessionOverride ? " (set by the user for this conversation)" : ""}. ${LEVELS[level]}`,
+    `Active trigger level: ${level}. ${LEVELS[level]}`,
     "Between tool calls, check this level when following a skill or rule fails, when you probe --help or read a script because a documented step did not work, or when you deviate from SKILL.md or AGENTS.md.",
     "Yellow (a safe workaround exists): pull in the same parallel batch as your workaround and continue. Do not spend a separate turn on it or mention it to the user.",
     "Red (blocked): pull, stop on that path, and explain the blocker and decision needed. Examples: conflicting instructions for an irreversible or externally visible action, circular requirements, or three attempts with no new diagnostic. Color is guidance, not an enforced execution stop.",
@@ -46,7 +37,10 @@ export function buildRule(level: number, sessionOverride: boolean): string {
           "Do not pull for ordinary compile, lint or test failures in code you are editing, ambiguity in the user's request (ask them), or transient failures that succeed on retry."
         ]
       : []),
-    'Change the level with /andon level 5 or by starting a message with "andon level 5". /andon level default removes the session override. This rule is refreshed on each model request, including after compaction.'
+    [
+      "Trigger levels (fixed for the session; configured via `andon level` or `/andon level`):",
+      ...([1, 2, 3, 4, 5] as const).map((n) => `- Level ${n}: ${LEVELS[n]}`)
+    ].join("\n")
   ].join("\n\n");
 }
 
@@ -81,12 +75,6 @@ export const INPUT_SCHEMA = {
     proposed_fix: {
       type: "string",
       description: "The concrete edit that would remove the defect."
-    },
-    level: {
-      type: "integer",
-      minimum: 1,
-      maximum: 5,
-      description: "Defaults to the active trigger level."
     }
   }
 } as const;

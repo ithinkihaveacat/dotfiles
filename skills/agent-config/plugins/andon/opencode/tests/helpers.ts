@@ -23,7 +23,6 @@ export type RpcHandler = (
 export async function harness(
   options: {
     cli?: Cli;
-    storage?: Map<string, unknown>;
     deny?: boolean;
     brokenEvents?: boolean;
   } = {}
@@ -33,7 +32,6 @@ export async function harness(
   const tools = new Map<string, Info>();
   const calls: { args: string[]; input?: unknown }[] = [];
   const permissions: unknown[] = [];
-  const storage = options.storage ?? new Map<string, unknown>();
   let handlers: Record<string, RpcHandler> = {};
   let defaultLevel = 3;
   let notifications = 0;
@@ -70,15 +68,6 @@ export async function harness(
   const ctx = {
     options: {},
     location: { directory: "/plugin/location" },
-    storage: {
-      get: async (key: string) => storage.get(key),
-      set: async (key: string, value: unknown) => {
-        storage.set(key, value);
-      },
-      remove: async (key: string) => {
-        storage.delete(key);
-      }
-    },
     permission: {
       hook: hook("permission"),
       assert: async (permission: unknown) => {
@@ -192,7 +181,6 @@ export async function harness(
     tools,
     calls,
     permissions,
-    storage,
     emit,
     context,
     pull,

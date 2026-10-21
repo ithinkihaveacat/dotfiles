@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildRule, INPUT_SCHEMA, parseLevelRequest } from "../src/rule.ts";
+import { buildRule, INPUT_SCHEMA } from "../src/rule.ts";
 import { INPUT_SCHEMA as CLAUDE_INPUT_SCHEMA } from "../../claude/hooks/rule.ts";
 import { createSensor, shellFailed } from "../src/sensor.ts";
 
-test("pull payload stays compatible with the untouched Claude adapter", () => {
+test("pull payload stays compatible with the Claude adapter and omits level", () => {
   assert.deepEqual(INPUT_SCHEMA.required, CLAUDE_INPUT_SCHEMA.required);
   assert.deepEqual(
     Object.keys(INPUT_SCHEMA.properties),
     Object.keys(CLAUDE_INPUT_SCHEMA.properties)
   );
+  assert.equal("level" in INPUT_SCHEMA.properties, false);
   assert.deepEqual(
     INPUT_SCHEMA.properties.kind.enum,
     CLAUDE_INPUT_SCHEMA.properties.kind.enum
@@ -24,14 +25,18 @@ test("pull payload stays compatible with the untouched Claude adapter", () => {
   );
 });
 
-test("levels and level requests keep the existing vocabulary", () => {
-  assert.equal(parseLevelRequest("Set andon level to 2."), 2);
-  assert.equal(parseLevelRequest("andon level reset"), "default");
-  assert.equal(parseLevelRequest("What does andon level 5 do?"), null);
-  assert.equal(parseLevelRequest("andon level 9"), null);
-  assert.match(buildRule(3, false), /Do not pull for/);
-  assert.doesNotMatch(buildRule(5, true), /Do not pull for/);
-  assert.match(buildRule(5, true), /do not self-filter/);
+test("buildRule includes the full 1-5 rubric and adjusts level 5 guidance", () => {
+  const rule3 = buildRule(3);
+  assert.match(rule3, /Active trigger level: 3\./);
+  assert.match(rule3, /Do not pull for/);
+  assert.match(rule3, /- Level 1:/);
+  assert.match(rule3, /- Level 2:/);
+  assert.match(rule3, /- Level 3:/);
+  assert.match(rule3, /- Level 4:/);
+  assert.match(rule3, /- Level 5:/);
+  const rule5 = buildRule(5);
+  assert.doesNotMatch(rule5, /Do not pull for/);
+  assert.match(rule5, /do not self-filter/);
 });
 
 test("shell exits use metadata or a trailing status, not guessed error words", () => {

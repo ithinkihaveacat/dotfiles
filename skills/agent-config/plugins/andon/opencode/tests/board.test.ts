@@ -21,8 +21,7 @@ const alert: Alert = {
 const snapshot: Snapshot = {
   alerts: [alert],
   stats: { open: 1, open_red: 0, level: 3 },
-  level: 3,
-  sessionOverride: false
+  level: 3
 };
 
 test("board filters before grouping and does not hide closed status differences", () => {

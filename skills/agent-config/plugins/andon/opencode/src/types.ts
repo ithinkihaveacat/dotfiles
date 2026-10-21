@@ -21,7 +21,6 @@ export type Snapshot = {
   alerts: Alert[];
   stats: Stats;
   level: number;
-  sessionOverride: boolean;
 };
 
 export type TextResponse = { text: string };

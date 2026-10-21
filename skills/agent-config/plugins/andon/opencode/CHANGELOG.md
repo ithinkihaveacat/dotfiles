@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- Add an OpenCode V2 adapter with a direct pull tool, per-request rule,
-  session-level overrides, passive reminders, terminal board and status footer.
-- Keep the Claude adapter, CLI, store format and shared default-level config
-  unchanged. Alerts from both harnesses participate in the same recurrence
-  groups and triage operations.
+- Add an OpenCode V2 adapter with a direct pull tool, per-request rule with the
+  full 1–5 trigger rubric, session-fixed trigger level, passive reminders,
+  terminal board and status footer.
+- Share the CLI, store format and saved default-level config with the Claude
+  adapter. Alerts from both harnesses participate in the same recurrence groups
+  and triage operations.
 
 ## Compatibility notes for a later Claude session
 
@@ -22,8 +23,9 @@
   not record a transcript path or synthetic turn index. The CLI's
   Claude-specific follow-up command remains unchanged; OpenCode reports have no
   generated session-resume command yet.
-- Session overrides are independent per OpenCode session. The shared saved
-  default still applies across harnesses, subject to `ANDON_LEVEL`.
+- Each session locks in the shared saved default level (subject to
+  `ANDON_LEVEL`) on its first request; `/andon level` updates the shared
+  default.
 
 ## Future MCP boundary
 

@@ -26,9 +26,7 @@ export type AndonCounts = { open: number; red: number };
 declare module "claude-code" {
   interface PluginState {
     andon: {
-      /** The level set in this conversation; null follows the default. */
-      sessionLevel: number | null;
-      /** The persistent default: ANDON_LEVEL, else `andon level`, else 3. */
+      /** The trigger level locked for this session: ANDON_LEVEL, else `andon level`, else 3. */
       defaultLevel: number;
       /** From the classic hook envelope; tool calls do not carry it. */
       transcriptPath: string | null;

@@ -56,28 +56,12 @@ export function isLevel(value: unknown): value is number {
   );
 }
 
-/**
- * Finds a level change the person asked for: a message that starts with it
- * ("andon level 5", "set andon level to 2", "andon level default"). A message
- * that only talks about a level ("what does andon level 5 do?") is no request.
- */
-export function parseLevelRequest(text: string): number | "default" | null {
-  const match =
-    /^\s*(?:set |use |switch to )?andon\s+level\s+(?:to\s+)?([1-5]|default|reset)\b/i.exec(
-      text
-    );
-  if (match === null) return null;
-  const value = match[1]!.toLowerCase();
-
-  return value === "default" || value === "reset" ? "default" : Number(value);
-}
-
 export function levelLabel(level: number): string {
   return `${level} (${LEVELS[level]?.name ?? "unknown"})`;
 }
 
 /** The system prompt section, rendered for the level in force. */
-export function buildRule(level: number, isSessionLevel: boolean): string {
+export function buildRule(level: number): string {
   const lines = [
     "# Andon cord",
     "",
@@ -86,9 +70,7 @@ export function buildRule(level: number, isSessionLevel: boolean): string {
       `\`${TOOL}\` tool, so the defect is fixed at its source instead of ` +
       "being rediscovered by every later session.",
     "",
-    `Active trigger level: ${levelLabel(level)}` +
-      (isSessionLevel ? ", set by the user for this conversation. " : ". ") +
-      LEVELS[level]!.when,
+    `Active trigger level: ${levelLabel(level)}. ${LEVELS[level]!.when}`,
     "",
     "Between tool calls — whenever a command or tool fails after you followed " +
       "a skill or rule, you run `--help` or read a script because a documented " +
@@ -121,10 +103,10 @@ export function buildRule(level: number, isSessionLevel: boolean): string {
     );
   }
   lines.push(
-    "Levels: 1 red only, 2 conservative, 3 standard, 4 proactive audit, " +
-      "5 maximum coverage. The user changes the level for this conversation " +
-      'by starting a message with "andon level 5" or with `/andon level 5`; this section ' +
-      "always shows the level in force, including after compaction."
+    "Trigger levels (fixed for the session; configured via `andon level` or `/andon level`):",
+    ...([1, 2, 3, 4, 5] as const).map(
+      (n) => `- Level ${levelLabel(n)}: ${LEVELS[n]!.when}`
+    )
   );
 
   return lines.join("\n");
@@ -180,13 +162,6 @@ export const INPUT_SCHEMA = {
     proposed_fix: {
       type: "string",
       description: "The concrete edit that would remove the defect."
-    },
-    level: {
-      type: "integer",
-      minimum: 1,
-      maximum: 5,
-      description:
-        "The trigger level you pulled at; defaults to the active level."
     }
   }
 } as const;

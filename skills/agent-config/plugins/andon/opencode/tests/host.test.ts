@@ -146,8 +146,7 @@ for (const installation of ["configured", "symlinked"]) {
             XDG_DATA_HOME: join(directory, "data"),
             XDG_STATE_HOME: join(directory, "state"),
             XDG_CACHE_HOME: join(directory, "cache"),
-            ANDON_STATE_DIR: join(directory, "andon"),
-            ANDON_LEVEL: "3"
+            ANDON_STATE_DIR: join(directory, "andon")
           },
           stdio: ["ignore", "pipe", "pipe"]
         }
@@ -221,7 +220,6 @@ for (const installation of ["configured", "symlinked"]) {
           { location }
         )) as Snapshot;
         assert.equal(after.level, 5);
-        assert.equal(after.sessionOverride, true);
         await assert.rejects(
           rpc.transition(
             { id: "invalid", verb: "clear-resolved" },
@@ -275,6 +273,11 @@ for (const installation of ["configured", "symlinked"]) {
         )) as Snapshot;
         assert.equal(
           fromCommand.level,
+          5,
+          "existing session must keep its locked trigger level"
+        );
+        assert.equal(
+          fromCommand.stats.level,
           2,
           "server-side slash commands must parse their arguments"
         );

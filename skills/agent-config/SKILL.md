@@ -370,10 +370,10 @@ terminal:
 claude plugin install andon --marketplace ~/.dotfiles/skills/agent-config/plugins
 ```
 
-The plugin is read from this folder, so `/reload-plugins` picks up edits. In a
-session, start a message with "andon level 5" or run `/andon level 5` to set the
-trigger level for that conversation. `/andon level 4 --save` changes the default
-for every session.
+The plugin is read from this folder, so `/reload-plugins` picks up edits. Each
+session locks in the configured trigger level (`$ANDON_LEVEL` > `config.json` >
+`3`); run `/andon level 5` (or `andon level 5`) to change the shared default
+level for new sessions, or `/andon level reset` to reset it to 3.
 
 **OpenCode V2:** install from this checkout without editing JSON by linking it
 into the auto-discovered global plugins directory:

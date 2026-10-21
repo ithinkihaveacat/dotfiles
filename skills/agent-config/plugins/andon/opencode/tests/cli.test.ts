@@ -55,7 +55,7 @@ test("saved defaults still yield to ANDON_LEVEL", async () =>
       env: { ...process.env, ANDON_STATE_DIR: directory, ANDON_LEVEL: "2" }
     });
     const h = await harness({ cli });
-    await h.rpc("command", { text: "level 5 --save", sessionID: "one" });
+    await h.rpc("command", { text: "level 5", sessionID: "one" });
     assert.match((await h.context()).system[0].text, /Active trigger level: 2/);
     assert.equal(
       JSON.parse(await readFile(join(directory, "config.json"), "utf8")).level,
