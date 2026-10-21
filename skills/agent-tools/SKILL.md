@@ -197,6 +197,13 @@ and synthesis requiring external data or massive repository context.
    exclude files, or tweak the prompt — unless the user has already specified
    the context and approved the run, in which case proceed directly with the
    live command (without `--dry-run`).
+1. **Sandbox Bypass and Network Access:** Dry-run invocations (`--dry-run`) work
+   when network access is unavailable (though saving the payload emits a warning
+   if the state directory is read-only). Live invocations require network access
+   to `generativelanguage.googleapis.com` and write access to
+   `~/.local/state/oracle/` to save request payloads and answers. In a sandboxed
+   environment that restricts network access or filesystem writes, bypassing the
+   sandbox (`BypassSandbox: true`) is necessary for live invocations.
 
 **Warning:** Output can be detailed and lengthy.
 
@@ -228,8 +235,12 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
   requires precise calculations, complex mathematics, data analysis on provided
   files, or programmatic logic. The model will write and execute Python code in
   a sandboxed environment.
+- `--dry-run`: Output a summary of the payload (resolved files, sizes, and
+  prompt) without calling the Gemini API.
+- `--serialize` / `--no-serialize`: Save request payload and answer to files in
+  the state directory (`~/.local/state/oracle/`) (default: on).
 
-**Environment:** `GEMINI_API_KEY` (Required)
+**Environment:** `GEMINI_API_KEY` (Required), `ORACLE_STATE_DIR` (Optional)
 
 **Exit codes:** 0 success, 1 error
 
