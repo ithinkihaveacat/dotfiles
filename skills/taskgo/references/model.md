@@ -326,7 +326,9 @@ The file is a JSON object with one key, `changes`:
   `STATUS.md` Summary or Next. `expected_hash` is the hash `get_task` or
   `get_project_status` reports, or null when the section is absent; a null
   `text` removes an optional section. A new section goes where the schema orders
-  it. Text that would add or remove any other section is refused.
+  it. Supply the section body only: omit its `## Heading` or `**Label:**`, which
+  the tool adds. Text that duplicates a section or adds or removes any other
+  section is refused.
 - **Files:** `write_file` writes project assets: any file in an existing project
   outside `tasks/`, `decisions/`, and `STATUS.md`, and `INBOX.md`. It refuses
   `.git*` paths, `..`, symbolic links, more than 256 KiB, non-UTF-8 content, and

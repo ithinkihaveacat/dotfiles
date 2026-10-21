@@ -134,6 +134,12 @@ reading the commit again. They stand in for running `taskgo doctor`, which a
 client without a checkout cannot; `taskgo apply` and `taskgo edit` are
 unchanged.
 
+Tool failures return `isError: true` with the diagnostic in both
+`content[0].text` and `structuredContent.error.message`. Change-set refusals
+name the failing change and operation; section validation also names the section
+and explains the body-only text contract. Read either diagnostic before changing
+arguments; removing valid conversation attribution does not fix section text.
+
 Calls are serialized, so the server's own writes never race each other; pushes
 from CLI checkouts race with them on equal terms, through the remote's refusal
 of a non-fast-forward push.
