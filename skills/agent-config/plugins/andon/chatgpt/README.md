@@ -11,6 +11,12 @@ visible, supports severity and status filters, shows recurrence counts, and
 offers alert details, fix prompts and Resolve / Dismiss / Reopen actions. It
 does not need a model turn to refresh.
 
+The board stacks its list and inspector in narrow panels and uses two columns
+when space permits. Secondary alert metadata is collapsed beneath the main
+details. An inspected alert stays available after filtering or triage removes it
+from the results; a notice explains that it is outside the current results.
+Empty results use the full panel width. Light and dark themes follow the host.
+
 ## Install
 
 Use a local ChatGPT Work or Codex chat with local plugin support. Install this
