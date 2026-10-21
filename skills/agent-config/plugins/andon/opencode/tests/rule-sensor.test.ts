@@ -27,16 +27,17 @@ test("pull payload stays compatible with the Claude adapter and omits level", ()
 
 test("buildRule includes the full 1-5 rubric and adjusts level 5 guidance", () => {
   const rule3 = buildRule(3);
-  assert.match(rule3, /Active trigger level: 3\./);
-  assert.match(rule3, /Do not pull for/);
-  assert.match(rule3, /- Level 1:/);
-  assert.match(rule3, /- Level 2:/);
-  assert.match(rule3, /- Level 3:/);
-  assert.match(rule3, /- Level 4:/);
-  assert.match(rule3, /- Level 5:/);
+  assert.match(rule3, /Active trigger level: 3 \(standard\)\./);
+  assert.match(rule3, /## Not a Harness Defect \(Do Not Pull\)/);
+  assert.match(rule3, /At Levels 1–4, a transient failure/);
+  assert.match(rule3, /- \*\*Level 1 \(red only\):\*\*/);
+  assert.match(rule3, /- \*\*Level 2 \(conservative\):\*\*/);
+  assert.match(rule3, /- \*\*Level 3 \(standard\):\*\*/);
+  assert.match(rule3, /- \*\*Level 4 \(proactive audit\):\*\*/);
+  assert.match(rule3, /- \*\*Level 5 \(maximum coverage\):\*\*/);
   const rule5 = buildRule(5);
-  assert.doesNotMatch(rule5, /Do not pull for/);
-  assert.match(rule5, /do not self-filter/);
+  assert.doesNotMatch(rule5, /At Levels 1–4, a transient failure/);
+  assert.match(rule5, /Do not self-filter/);
 });
 
 test("shell exits use metadata or a trailing status, not guessed error words", () => {

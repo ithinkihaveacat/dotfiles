@@ -125,20 +125,21 @@ const START = {
 } as const;
 
 describe("the rule", () => {
-  test("drops the do-not-pull list and self-filtering at level 5", () => {
-    expect(buildRule(3)).toContain("Do not pull for");
-    expect(buildRule(5)).not.toContain("Do not pull for");
+  test("drops the transient-retry exclusion and self-filtering at level 5", () => {
+    expect(buildRule(3)).toContain("## Not a Harness Defect (Do Not Pull)");
+    expect(buildRule(3)).toContain("At Levels 1–4, a transient failure");
+    expect(buildRule(5)).not.toContain("At Levels 1–4, a transient failure");
     expect(buildRule(5)).toContain("Do not self-filter");
   });
 
   test("includes the full 1-5 trigger level rubric and omits level from INPUT_SCHEMA", () => {
     const rule = buildRule(3);
     expect(rule).toContain("Active trigger level: 3 (standard).");
-    expect(rule).toContain("- Level 1 (red only):");
-    expect(rule).toContain("- Level 2 (conservative):");
-    expect(rule).toContain("- Level 3 (standard):");
-    expect(rule).toContain("- Level 4 (proactive audit):");
-    expect(rule).toContain("- Level 5 (maximum coverage):");
+    expect(rule).toContain("- **Level 1 (red only):**");
+    expect(rule).toContain("- **Level 2 (conservative):**");
+    expect(rule).toContain("- **Level 3 (standard):**");
+    expect(rule).toContain("- **Level 4 (proactive audit):**");
+    expect(rule).toContain("- **Level 5 (maximum coverage):**");
     expect("level" in INPUT_SCHEMA.properties).toBe(false);
   });
 });
