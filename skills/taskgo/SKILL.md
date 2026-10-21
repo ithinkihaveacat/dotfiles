@@ -30,6 +30,14 @@ Execution resolution never depends on the current working directory. Run
 1. **Optimal (`$PATH`):** `taskgo <command>`
 1. **Dynamic anchor:** `<skill-dir>/scripts/taskgo <command>`
 
+Read-only commands (`status`, `list`, `handoff`, `doctor`, `read`, `search`,
+etc.) work when the repository is mounted read-only. Mutating commands
+(`create`, `update`, `apply`, `edit`, `sync`, `fix`, `checkpoint`, `commit`)
+require write access to the working tree, and commands that stage or commit
+changes (`create`, `checkpoint`, `commit`, `fix`) also require write access to
+`.git/`. In a sandboxed environment that restricts filesystem or `.git/` writes,
+bypassing the sandbox may be necessary for those operations.
+
 ## Core Invariants
 
 1. **Current Truth:** `HEAD` describes current belief. Git owns administrative
@@ -130,7 +138,9 @@ conversations:
 ```
 
 Use Cost when it adds useful prioritization context. Problem may appear without
-Cost; the rationale may already be clear in Problem or Goal.
+Cost; the rationale may already be clear in Problem or Goal. Multi-session
+`in-progress` or `blocked` tasks may add `## Findings` and `## Next` to record
+current discoveries and remaining work for handoff.
 
 ### Completed Task Template
 
@@ -248,8 +258,8 @@ help details and subcommand options.
 ```text
 taskgo id
 taskgo root
-taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--no-commit] [--dry-run]
-taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--expect-status STATE] [--wait-for GATE] [--add-|--remove-blocked-by ID] [--add-|--remove-wait-for GATE] [--add-|--remove-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
+taskgo create PROJECT TITLE [--slug SLUG] [--conv ID] [--status STATE] [--wait-for GATE] [--add-blocked-by ID] [--add-wait-for GATE] [--add-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--constraints TEXT] [--no-commit] [--dry-run]
+taskgo update TASK_ID [--slug SLUG] [--conv ID] [--status STATE] [--expect-status STATE] [--wait-for GATE] [--add-|--remove-blocked-by ID] [--add-|--remove-wait-for GATE] [--add-|--remove-conversation URI] [--due YYYY-MM-DD] [--stale-after YYYY-MM-DD] [--title TITLE] [--problem TEXT] [--cost TEXT] [--goal TEXT] [--criteria TEXT] [--sketch TEXT] [--constraints TEXT] [--outcome TEXT] [--findings TEXT] [--next TEXT]
 taskgo apply CHANGES.json [--dry-run]
 taskgo edit PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) [--replace-all] [--expected-blob SHA] [--dry-run] [--json]
 taskgo list [PROJECT] [--state STATE] [--json]
@@ -314,11 +324,12 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   their owners wrote them.
 - `checkpoint`: Safe automatic-commit path requiring
   `taskgo:allow-local-commits`. Enforces 50-char subject limits.
-- Remote sync by default: CLI reads and writes serialize on
-  `<git-dir>/taskgo.lock`, fetch the upstream tracking branch (`@{u}`), and
-  fast-forward or rebase with `--autostash` when behind; commands that create a
-  commit (`create`, `checkpoint`, `commit`, `fix`) also push to the remote. Pass
-  `--offline` (or set `AGENT_OFFLINE=1`) to skip remote Git fetch and push.
+- Remote sync by default: when the repository and `.git/` are writable, CLI
+  reads and writes serialize on `<git-dir>/taskgo.lock`, fetch the upstream
+  tracking branch (`@{u}`), and fast-forward or rebase with `--autostash` when
+  behind; commands that create a commit (`create`, `checkpoint`, `commit`,
+  `fix`) also push to the remote. Pass `--offline` (or set `AGENT_OFFLINE=1`) to
+  skip remote Git fetch and push.
 - `mcp`: Serve committed state to MCP clients and write their change sets as
   commits: by default from and to a remote, for cloud agents without a checkout
   of the control repository; with `--local`, on a checkout's own branch, for
