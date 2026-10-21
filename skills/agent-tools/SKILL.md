@@ -453,7 +453,7 @@ scripts/gh-markdown https://github.com/owner/repo/actions/runs/12345678
 
 Gathers the very latest, authoritative, up-to-date context for deep research on
 various technical subjects (e.g., `gemini-api`, `mcp`, `home-assistant`) or
-arbitrary GitHub directories. Run `context catalog` to see all available
+arbitrary GitHub directories. Run `scripts/context catalog` to see all available
 entries. This script should be your first tool for gathering background
 knowledge or the latest documentation for an unfamiliar domain. Supports passing
 a full GitHub URL as a target (e.g.,

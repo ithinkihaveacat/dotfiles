@@ -727,10 +727,10 @@ ______________________________________________________________________
 
 ## context
 
-Generate aggregated context for various topics (e.g., `gemini-api`,
-`gemini-cli`) by fetching data from GitHub or local execution. Run
-`scripts/context --list` to see all available topics. Outputs XML format
-suitable for `emerson`.
+Generate aggregated context for a specific catalog entry (e.g., `gemini-api`,
+`mcp`), a GitHub URL, or a local directory. Run `scripts/context catalog` to see
+all available entries. Outputs structured Markdown format suitable for
+`emerson`.
 
 **Note:** The output is often extremely large. Agents should **not** consume
 this output directly. Instead, pipe it to `emerson` for analysis, or redirect it
@@ -776,26 +776,26 @@ options:
 ### Examples
 
 ```bash
-# List available topics
-scripts/context --list
+# List available catalog entries
+scripts/context catalog
 
 # Gather context for Gemini API
-scripts/context gemini-api > gemini-context.xml
+scripts/context show gemini-api > gemini-context.md
 
 # Pipe context directly to analysis
-scripts/context gemini-cli | scripts/emerson "How do commands work?"
+scripts/context show gemini-api | scripts/emerson "How do tools work?"
 
 # Combine with other tools
-scripts/context mcp | grep "protocol"
+scripts/context show mcp | grep "protocol"
 ```
 
 ### Exit Codes
 
-| Code | Description                         |
-| ---- | ----------------------------------- |
-| 0    | Success                             |
-| 1    | General error (unknown topic, etc.) |
-| 127  | Missing required dependency         |
+| Code | Description                                 |
+| ---- | ------------------------------------------- |
+| 0    | Success                                     |
+| 1    | General error (unknown catalog entry, etc.) |
+| 127  | Missing required dependency                 |
 
 ______________________________________________________________________
 
