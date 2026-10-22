@@ -59,8 +59,8 @@ relevant reference guide:
   "why", context, and permanent history behind changes.
 - **[PR Descriptions](references/pr-descriptions.md)** — Summarizing intent,
   justifying trade-offs, and guiding reviewers through diffs.
-- **[Comments](references/comments.md)** — Writing direct, concise, and factual
-  code review or issue comments.
+- **[Comments](references/comments.md)** — Writing collegial, understated, and
+  empirically grounded code review and issue tracker comments.
 - **[TODO Items](references/todos.md)** — Capturing tasks with Goal, Criteria,
   and Sketch fields without hardening into premature plans.
 - **[Getting Started Guides](references/getting-started-guides.md)** — Building
