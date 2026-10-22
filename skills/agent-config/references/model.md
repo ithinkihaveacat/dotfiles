@@ -63,16 +63,18 @@ link.
 - **Defaults** are set by `etc/skill/defaults.sh` in this repo and each overlay
   (`~/.private`, `~/.corp`), run by `install.sh`, so private skill names stay
   out of this repo and the launch path never edits the defaults.
-- **Workspaces**: the clone hook (`post-checkout`) and the `codex`/`agy`
-  wrappers run `skill add --defaults`. Outside a repository or plugin-recognized
-  workspace, that is a no-op unless the directory already has a skill folder.
+- **Workspaces**: the `codex` and `agy` wrappers run `skill add --defaults`.
+  Outside a repository or plugin-recognized workspace, that is a no-op unless
+  the directory already has a skill folder.
 - **Claude sessions**: the `claude` wrapper creates a fresh session directory
   and runs `skill --scope session add --defaults`, so a wrapped Claude always
   sees the current defaults and the workspace is left alone.
 
 Each `skill` run costs about half a second, so each launch makes one call:
 `add --defaults` ends with the error checks of `doctor` and fails if any remain
-(`AGENT_PREFLIGHT_SKIP=1` launches anyway).
+(`AGENT_PREFLIGHT_SKIP=1` launches anyway). Inside a Git repository (other than
+`~`), `_agent_preflight` also runs `hook apply --quiet` so the repository's Git
+hooks match `AGENT_REQUIRED_HOOKS` before the session starts.
 
 ## Launchers and per-session skills
 

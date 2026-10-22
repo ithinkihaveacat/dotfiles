@@ -1,4 +1,5 @@
 complete -c hook -f
+complete -c hook -s C -l directory -x -a '(__fish_complete_directories)' -d 'Run as if hook was started in DIR'
 complete -c hook -s S -l source-dir -x -a '(__fish_complete_directories)' -d 'Source directory containing hook profiles'
 
 complete -c hook -n __fish_use_subcommand -a apply -d 'Synchronize hooks to match AGENT_REQUIRED_HOOKS'
@@ -18,6 +19,7 @@ complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a node -d 'pret
 complete -c hook -n '__fish_seen_subcommand_from add remove rm' -a gerrit -d 'Gerrit Change-Id trailer'
 
 complete -c hook -n '__fish_seen_subcommand_from add apply' -l copy -d 'Copy the hook source instead of installing a trampoline'
+complete -c hook -n '__fish_seen_subcommand_from apply' -s q -l quiet -d 'Suppress informational output'
 complete -c hook -n '__fish_seen_subcommand_from add remove rm' -l external -r -d 'Operate on an external sub-hook (HOOK-NAME:KEY)'
 complete -c hook -n '__fish_seen_subcommand_from clean' -l all -d 'Delete the entire hooks directory (requires --force)'
 complete -c hook -n '__fish_seen_subcommand_from clean' -l force -d 'Confirm the deletion'

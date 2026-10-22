@@ -1758,8 +1758,8 @@ function feature_skills {
   done
 
   # Skills are intentionally NOT installed globally. The defaults are linked
-  # into each repo by its clone hook and into each wrapped agent's session at
-  # launch (`skill add --defaults`), and others with `skill add ...`, using
+  # into each wrapped agent's workspace or session at launch
+  # (`skill add --defaults`), and others with `skill add ...`, using
   # ~/.dotfiles/skills (plus .private and .corp overlays) as the source.
   # Keeping ~/.agents/skills and ~/.claude/skills empty prevents every project
   # from seeing every skill.

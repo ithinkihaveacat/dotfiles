@@ -33,10 +33,6 @@ that `envrc` blocks activate per directory, together with a workspace-local
 place for the project's packages and command-line tools; see
 [Language Environments](#language-environments-node-install-ruby-install-python-install).
 
-For Git repositories, `hook apply` runs automatically on `git clone` via the
-global template's post-checkout hook, together with `skill add --defaults` and
-`permission apply` from the `agent-config` skill.
-
 ## Gotchas
 
 - **Agent shells usually do not load direnv.** A command run in the workspace
@@ -70,12 +66,16 @@ hook [options] <command> [arguments]
 
 ### Options
 
+- **`-C DIR`** (alias: **`--directory DIR`**): Run as if started in `DIR`
+  instead of the current working directory.
 - **`--source-dir DIR`** (alias: **`-S DIR`**): Override the hook source
   directory (default: bundled `resources/hooks/` or `$HOOK_SOURCE_DIR`).
 - **`--copy`**: Copy hook sources rather than installing trampolines (for
   machines with no persistent dotfiles/skill tree).
 - **`--external`**: Make `add`/`remove` operate on an external sub-hook (see
   below) rather than a profile.
+- **`--quiet`** (alias: **`-q`**): Suppress informational messages during `add`,
+  `apply`, `remove`, and `clean`; errors are still printed.
 - **`--all`**: Delete all hooks during `clean` (requires `--force`).
 - **`--force`**: Confirm deletion for `clean --all`.
 

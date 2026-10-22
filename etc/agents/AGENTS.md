@@ -10,11 +10,13 @@ instructions > activated skills > general training knowledge.
   a task. When a task touches a skill's domain—or when in doubt—read its
   `SKILL.md` and follow its prescribed workflow and scripts rather than
   inventing an ad-hoc approach.
-- **Load session-specific skills when relevant**: If a task involves a
-  specialized domain, tool, or internal system not covered by your currently
-  loaded skills, check the curated `skill catalog` and load matching skills for
-  the session (`skill --scope session add <NAME>`), or use available
-  skill-search tools in work environments with internal skill registries.
+- **Load session-specific skills when relevant**: Default skills cover only
+  baseline workflows. When working on a repository, stack, or tool not covered
+  by your currently active skills, check `skill catalog --json` (preferably via
+  a subagent to keep the catalog output out of your main context), load matching
+  skills for the session (`skill --scope session add <NAME>...`), and read their
+  `SKILL.md` files before proceeding (or use available skill-search tools in
+  work environments with internal skill registries).
 - **Common skill triggers**:
   - **Android & Wear OS devices**: Use the relevant device skill's exact `adb`
     commands and scripts (e.g., for screenshots or UI interaction).
@@ -25,8 +27,10 @@ instructions > activated skills > general training knowledge.
     package/CLI tool is missing, activate `workspace-tools` and install it into
     the workspace rather than user- or system-wide.
   - **Version control & commits**: Format commit messages according to the
-    active VCS/standards skill. Local git hooks strictly enforce subject-line
-    length and body-wrapping limits and will reject non-compliant commits.
+    active VCS/standards skill. Ensure the workspace commit hooks are installed
+    (`hook apply` or `hook -C <repo> apply`) before committing in a repository.
+    Local git hooks strictly enforce subject-line length and body-wrapping
+    limits and will reject non-compliant commits.
 
 ## Command Safety and Bounded Search
 

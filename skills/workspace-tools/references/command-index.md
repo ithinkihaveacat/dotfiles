@@ -60,6 +60,9 @@ Commands:
                     place
 
 Options:
+  -C DIR, --directory DIR
+                    Run as if started in DIR instead of the current working
+                    directory
   --source-dir DIR, -S DIR
                     Source directory containing hook profiles
                     (default: bundled resources/hooks, or $HOOK_SOURCE_DIR)
@@ -67,6 +70,8 @@ Options:
                     trampoline to it, for a machine with no dotfiles tree
   --external        add/remove: operate on an external sub-hook rather than
                     a profile
+  --quiet, -q       add/apply/remove/clean: suppress informational messages;
+                    errors are still printed
   --all             clean: delete the entire hooks directory, including
                     third-party hooks; requires --force
   --force           clean --all: confirm the deletion

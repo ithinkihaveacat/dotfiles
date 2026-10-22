@@ -19,7 +19,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 # flip the styled/unstyled assertions.
 unset NO_COLOR FORCE_COLOR
 
-echo "1..57"
+echo "1..60"
 
 # Test 1: --help exits zero and documents every command
 if out=$("$REAL_BIN" --help 2>&1) &&
@@ -507,8 +507,8 @@ else
 fi
 
 # Test 34: 'apply' does not re-fetch an already-current gerrit profile, so
-# running it from the post-checkout hook on every checkout doesn't hit the
-# network (and doesn't fail offline) once the profile is installed.
+# repeated 'apply' runs do not hit the network (and do not fail offline) once
+# the profile is installed.
 REFETCH_REPO=$(new_repo refetch)
 REFETCH_STUB="$WORK/refetch-stub"
 mkdir -p "$REFETCH_STUB"
@@ -808,4 +808,86 @@ if (cd "$EXT_REPO" && "$BIN" add --copy --external pre-push:90-check "$EXT_SRC")
   echo "ok 57 - add --copy --external installs a copy that list still sees"
 else
   echo "not ok 57 - add --copy --external did not install a copy"
+fi
+
+# Test 58: doctor warns on and apply removes a retired init.templatedir
+# post-checkout hook, while leaving a foreign post-checkout hook alone
+RETIRED_REPO=$(new_repo retired)
+cat >"$RETIRED_REPO/.git/hooks/post-checkout" <<'EOF'
+#!/bin/sh
+# Installed via init.templatedir in ~/.gitconfig. Runs on every checkout,
+hook apply
+skill apply
+permission apply
+EOF
+chmod +x "$RETIRED_REPO/.git/hooks/post-checkout"
+doc_out=$(cd "$RETIRED_REPO" && AGENT_REQUIRED_HOOKS='' "$BIN" doctor 2>&1)
+doc_rc=$?
+(cd "$RETIRED_REPO" && AGENT_REQUIRED_HOOKS='' "$BIN" apply) >/dev/null 2>&1
+removed_retired=no
+[ ! -e "$RETIRED_REPO/.git/hooks/post-checkout" ] && removed_retired=yes
+printf '#!/bin/sh\necho custom\n' >"$RETIRED_REPO/.git/hooks/post-checkout"
+chmod +x "$RETIRED_REPO/.git/hooks/post-checkout"
+(cd "$RETIRED_REPO" && AGENT_REQUIRED_HOOKS='' "$BIN" apply) >/dev/null 2>&1
+if [ "$doc_rc" -ne 0 ] &&
+  [[ $doc_out == *"[WARN]"*"post-checkout: retired init.templatedir hook"* ]] &&
+  [ "$removed_retired" = yes ] &&
+  [ -x "$RETIRED_REPO/.git/hooks/post-checkout" ]; then
+  echo "ok 58 - doctor flags and apply removes a retired init.templatedir post-checkout hook"
+else
+  echo "not ok 58 - retired post-checkout template handling failed (rc=$doc_rc, removed=$removed_retired): $doc_out"
+fi
+
+# Test 59: -C/--directory and --quiet work together: --quiet suppresses
+# informational messages on first install while keeping errors visible, and a
+# repeated apply is silent even without --quiet
+QUIET_REPO=$(new_repo quiet)
+q_first=$("$BIN" -C "$QUIET_REPO" apply --quiet 2>&1)
+q_repeat=$("$BIN" --directory="$QUIET_REPO" apply 2>&1)
+q_err_rc=0
+q_err=$(AGENT_REQUIRED_HOOKS=no-such-profile "$BIN" -C "$QUIET_REPO" apply --quiet 2>&1) || q_err_rc=$?
+if [ -z "$q_first" ] && [ -z "$q_repeat" ] &&
+  [ -x "$QUIET_REPO/.git/hooks/commit-msg.d/10-agent" ] &&
+  [ "$q_err_rc" -ne 0 ] && [[ $q_err == *"unknown profile"* ]] &&
+  ! "$BIN" -C "$QUIET_REPO" list --quiet >/dev/null 2>&1; then
+  echo "ok 59 - -C/--directory and --quiet silence informational output and repeated apply is a silent no-op"
+else
+  echo "not ok 59 - -C/--directory, --quiet or repeated apply behaviour wrong (first='$q_first' repeat='$q_repeat' err='$q_err')"
+fi
+
+# Test 60: etc/agents/agy/hooks/PreToolUse ignores non-commit commands, safely
+# handles non-git directories and ~, and lazily installs 10-agent on git commit
+# (via workspacePaths, 'cd <repo> && git commit', and 'git -C <repo> commit')
+PRE_HOOK="$DIR/../../../etc/agents/agy/hooks/PreToolUse"
+PRE_WS=$(new_repo pre-ws)
+PRE_SUB=$(new_repo pre-sub)
+PRE_GITC=$(new_repo pre-gitc)
+PRE_CLONE=$(new_repo pre-clone)
+PRE_PLAIN="$WORK/pre-plain"
+mkdir -p "$PRE_PLAIN"
+
+out_clone=$(printf '{"workspacePaths":["%s"],"toolCall":{"name":"run_command","args":{"CommandLine":"git clone https://example.com/r.git"}}}' "$PRE_CLONE" |
+  PATH="$DF/bin:$PATH" "$PRE_HOOK")
+out_plain=$(printf '{"workspacePaths":["%s"],"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -m test"}}}' "$PRE_PLAIN" |
+  PATH="$DF/bin:$PATH" "$PRE_HOOK")
+out_ws=$(printf '{"workspacePaths":["%s"],"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -m test"}}}' "$PRE_WS" |
+  PATH="$DF/bin:$PATH" "$PRE_HOOK")
+out_cd=$(printf '{"workspacePaths":["%s"],"toolCall":{"name":"run_command","args":{"CommandLine":"cd %s && git commit -m test"}}}' "$PRE_PLAIN" "$PRE_SUB" |
+  PATH="$DF/bin:$PATH" "$PRE_HOOK")
+out_gitc=$(printf '{"workspacePaths":["%s"],"toolCall":{"name":"run_command","args":{"CommandLine":"git -C %s commit -m test"}}}' "$PRE_PLAIN" "$PRE_GITC" |
+  PATH="$DF/bin:$PATH" "$PRE_HOOK")
+
+if [ "$out_clone" = '{"decision":"allow"}' ] &&
+  [ "$out_plain" = '{"decision":"allow"}' ] &&
+  [ "$out_ws" = '{"decision":"allow"}' ] &&
+  [ "$out_cd" = '{"decision":"allow"}' ] &&
+  [ "$out_gitc" = '{"decision":"allow"}' ] &&
+  [ ! -e "$PRE_CLONE/.git/hooks/commit-msg.d/10-agent" ] &&
+  [ ! -e "$PRE_PLAIN/.git" ] &&
+  [ -x "$PRE_WS/.git/hooks/commit-msg.d/10-agent" ] &&
+  [ -x "$PRE_SUB/.git/hooks/commit-msg.d/10-agent" ] &&
+  [ -x "$PRE_GITC/.git/hooks/commit-msg.d/10-agent" ]; then
+  echo "ok 60 - PreToolUse lazily installs 10-agent on git commit and ignores non-commit or non-git calls"
+else
+  echo "not ok 60 - PreToolUse behaviour wrong (clone='$out_clone' plain='$out_plain' ws='$out_ws' cd='$out_cd' gitc='$out_gitc')"
 fi

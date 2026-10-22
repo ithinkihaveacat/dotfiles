@@ -40,9 +40,9 @@ they see, what they may do, and what they are told. It consists of:
    their own instructions, skills, rules and tools, through harness plugins for
    Claude Code, OpenCode and local Codex (`plugins/andon`).
 
-For Git repositories, `skill add --defaults` and `permission apply` run
-automatically on `git clone` via the global template's post-checkout hook (with
-`hook apply` from the `workspace-tools` skill).
+The `claude`, `codex`, and `agy` launch wrappers run `skill add --defaults`
+automatically when starting an agent (in the session scope for `claude`, and in
+the workspace scope for `codex` and `agy`).
 
 ______________________________________________________________________
 
@@ -428,8 +428,7 @@ ______________________________________________________________________
 ### Setting Up a Workspace (Recommended for new workspaces)
 
 Install the required hooks (`hook`, from the `workspace-tools` skill), the
-default skills, and the pre-approvals for their safe commands, as a fresh
-`git clone` does:
+default skills, and the pre-approvals for their safe commands:
 
 ```bash
 hook apply

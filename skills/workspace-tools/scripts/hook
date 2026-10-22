@@ -65,6 +65,9 @@ Commands:
                     place
 
 Options:
+  -C DIR, --directory DIR
+                    Run as if started in DIR instead of the current working
+                    directory
   --source-dir DIR, -S DIR
                     Source directory containing hook profiles
                     (default: bundled resources/hooks, or \$HOOK_SOURCE_DIR)
@@ -72,6 +75,8 @@ Options:
                     trampoline to it, for a machine with no dotfiles tree
   --external        add/remove: operate on an external sub-hook rather than
                     a profile
+  --quiet, -q       add/apply/remove/clean: suppress informational messages;
+                    errors are still printed
   --all             clean: delete the entire hooks directory, including
                     third-party hooks; requires --force
   --force           clean --all: confirm the deletion
@@ -119,7 +124,13 @@ die() {
   exit 1
 }
 
+info() {
+  [ "$quiet_mode" = yes ] && return 0
+  echo "$SCRIPT_NAME $cmd: $*" >&2
+}
+
 SOURCE_DIR_OVERRIDE=""
+WORK_DIR_OVERRIDE=""
 SOURCE_ROOT=""
 
 resolve_source_root() {
@@ -423,6 +434,25 @@ is_managed_subhook() {
   return 1
 }
 
+# Repositories cloned before init.templatedir was retired carry a copy of the
+# old global post-checkout template at .git/hooks/post-checkout. Every version
+# of that template opened with this comment line.
+RETIRED_TEMPLATE_MARKER="# Installed via init.templatedir in ~/.gitconfig."
+
+is_retired_template_hook() {
+  local n=0 line
+  [ -f "$1" ] || return 1
+  while [ "$n" -lt "$MARKER_SCAN_LINES" ] && IFS= read -r line; do
+    n=$((n + 1))
+    case "$line" in
+      "$RETIRED_TEMPLATE_MARKER"*)
+        return 0
+        ;;
+    esac
+  done <"$1"
+  return 1
+}
+
 abs_path() {
   local dir base
   dir=$(dirname "$1")
@@ -451,7 +481,7 @@ install_multiplexer() {
     if [ -e "$subdir/$LEGACY_KEY" ]; then
       die "refusing to overwrite $subdir/$LEGACY_KEY with the unmanaged hook at $dst"
     fi
-    echo "$SCRIPT_NAME $cmd: moving existing unmanaged hook to $subdir/$LEGACY_KEY" >&2
+    info "moving existing unmanaged hook to $subdir/$LEGACY_KEY"
     mv "$dst" "$subdir/$LEGACY_KEY"
   fi
 
@@ -473,7 +503,7 @@ install_subhook() { # install_subhook HOOK_NAME KEY SOURCE [COPY]
     trampoline_content "$(abs_path "$src")" >"$subdir/$key"
   fi
   chmod +x "$subdir/$key"
-  echo "$SCRIPT_NAME $cmd: installed $key to $subdir/$key" >&2
+  info "installed $key to $subdir/$key"
 }
 
 remove_subhook() { # remove_subhook HOOK_NAME KEY
@@ -490,7 +520,7 @@ remove_subhook() { # remove_subhook HOOK_NAME KEY
   is_managed_subhook "$subdir/$key" || return 0
 
   rm -f "$subdir/$key"
-  echo "$SCRIPT_NAME $cmd: removed $subdir/$key" >&2
+  info "removed $subdir/$key"
 
   # Tear the multiplexer down only once nothing of ours is left under it, and
   # only if it is ours to tear down. A 00-legacy hook displaced on install is
@@ -501,12 +531,12 @@ remove_subhook() { # remove_subhook HOOK_NAME KEY
     rmdir "$subdir"
     if is_managed_multiplexer "$dst"; then
       rm -f "$dst"
-      echo "$SCRIPT_NAME $cmd: removed the now-empty multiplexer at $dst" >&2
+      info "removed the now-empty multiplexer at $dst"
     fi
   elif [ "$remaining" -eq 1 ] && [ -e "$subdir/$LEGACY_KEY" ] && is_managed_multiplexer "$dst"; then
     mv "$subdir/$LEGACY_KEY" "$dst"
     rmdir "$subdir"
-    echo "$SCRIPT_NAME $cmd: restored the pre-existing hook at $dst" >&2
+    info "restored the pre-existing hook at $dst"
   fi
 }
 
@@ -602,15 +632,19 @@ add_profile() {
     name="${pair%%:*}"
     key="${pair#*:}"
     if src=$(profile_source "$profile" "$name"); then
+      if [ "$cmd" = apply ] && [ "$copy_mode" = no ] &&
+        [ "$(subhook_state "$name" "$key")" = ok ] &&
+        [ "$(trampoline_target "$HOOKS_DIR/$name.d/$key")" = "$(abs_path "$src")" ]; then
+        continue
+      fi
       install_subhook "$name" "$key" "$src"
     else
       # A downloaded hook has no source here to track, so it is copied. Skip
       # the download when sync ('apply') finds the installed copy is already
       # current (the same snapshot doctor treats as self-contained via
-      # subhook_state): 'apply' runs from the post-checkout hook, so
-      # re-fetching on every checkout would add a network round-trip and break
-      # offline checkouts for no reason. Explicit 'add' re-fetches to allow
-      # updating.
+      # subhook_state), so repeated 'apply' runs do not add a network
+      # round-trip or fail offline once the profile is installed. Explicit
+      # 'add' re-fetches to allow updating.
       if [ "$cmd" = apply ] && [ "$(subhook_state "$name" "$key")" = ok ]; then
         continue
       fi
@@ -742,8 +776,13 @@ cmd_apply() {
     fi
   done
 
+  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
+    rm -f "$HOOKS_DIR/post-checkout"
+    info "removed retired template hook at $HOOKS_DIR/post-checkout"
+  fi
+
   if [ -z "$wanted" ]; then
-    echo "$SCRIPT_NAME apply: AGENT_REQUIRED_HOOKS is empty; no hooks to install" >&2
+    info "AGENT_REQUIRED_HOOKS is empty; no hooks to install"
   fi
 }
 
@@ -873,6 +912,12 @@ cmd_doctor() {
     esac
   done < <(external_subhooks)
 
+  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
+    report WARN "post-checkout: retired init.templatedir hook is still installed"
+    printf '        run '\''%s apply'\'' to remove it\n' "$SCRIPT_NAME"
+    rc=1
+  fi
+
   return "$rc"
 }
 
@@ -886,7 +931,7 @@ cmd_clean() {
       exit 1
     fi
     rm -rf "$HOOKS_DIR"
-    echo "$SCRIPT_NAME clean: removed $HOOKS_DIR" >&2
+    info "removed $HOOKS_DIR"
     return 0
   fi
 
@@ -895,16 +940,41 @@ cmd_clean() {
       remove_profile "$profile"
     fi
   done
+
+  if is_retired_template_hook "$HOOKS_DIR/post-checkout"; then
+    rm -f "$HOOKS_DIR/post-checkout"
+    info "removed retired template hook at $HOOKS_DIR/post-checkout"
+  fi
 }
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+quiet_mode=no
+
 # Parse leading global options before command, if any
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help | -h) usage ;;
+    --quiet | -q)
+      quiet_mode=yes
+      shift
+      ;;
+    --directory | -C)
+      shift
+      [ "$#" -gt 0 ] || die "missing argument for -C/--directory"
+      WORK_DIR_OVERRIDE="$1"
+      shift
+      ;;
+    --directory=*)
+      WORK_DIR_OVERRIDE="${1#*=}"
+      shift
+      ;;
+    -C*)
+      WORK_DIR_OVERRIDE="${1#-C}"
+      shift
+      ;;
     --source-dir)
       shift
       [ "$#" -gt 0 ] || die "missing argument for --source-dir"
@@ -953,6 +1023,10 @@ args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help | -h) usage ;;
+    --quiet | -q)
+      quiet_mode=yes
+      shift
+      ;;
     --copy)
       copy_mode=yes
       shift
@@ -1005,6 +1079,10 @@ done
 # like 'list --force' or 'doctor --all' would otherwise succeed while
 # silently ignoring the option.
 case "$cmd" in
+  add | apply | remove | rm | clean) ;;
+  *) [ "$quiet_mode" = no ] || die "does not accept --quiet" ;;
+esac
+case "$cmd" in
   add | apply) ;;
   *) [ "$copy_mode" = no ] || die "does not accept --copy" ;;
 esac
@@ -1023,6 +1101,10 @@ case "$cmd" in
 esac
 
 resolve_source_root
+
+if [ -n "$WORK_DIR_OVERRIDE" ]; then
+  cd "$WORK_DIR_OVERRIDE" 2>/dev/null || die "cannot change to directory: $WORK_DIR_OVERRIDE"
+fi
 
 require git
 
