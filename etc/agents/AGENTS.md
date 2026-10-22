@@ -11,12 +11,11 @@ instructions > activated skills > general training knowledge.
   `SKILL.md` and follow its prescribed workflow and scripts rather than
   inventing an ad-hoc approach.
 - **Load session-specific skills when relevant**: Default skills cover only
-  baseline workflows. When working on a repository, stack, or tool not covered
-  by your currently active skills, check `skill catalog --json` (preferably via
-  a subagent to keep the catalog output out of your main context), load matching
-  skills for the session (`skill --scope session add <NAME>...`), and read their
-  `SKILL.md` files before proceeding (or use available skill-search tools in
-  work environments with internal skill registries).
+  baseline workflows. Whenever work touches—or later shifts to—a repository or
+  technology stack not covered by active skills, delegate a subagent to check
+  `skill catalog --json` and activate matching skills with
+  `skill --scope session add <NAME>...` (or use other skill-search tools if
+  available).
 - **Common skill triggers**:
   - **Android & Wear OS devices**: Use the relevant device skill's exact `adb`
     commands and scripts (e.g., for screenshots or UI interaction).
