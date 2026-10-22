@@ -61,8 +61,8 @@ boundaries around what you have verified:
 - **Open with appreciation:** Acknowledge the maintainer's time (*"Thanks for
   checking!"*, *"Thanks for looking into this."*).
 - **Declare blind spots upfront:** State what you have not tested or cannot
-  access (*"I'm less familiar with the auth middleware, but..."*). Bounding
-  what you do not know increases trust in what you have verified.
+  access (*"I'm less familiar with the auth middleware, but..."*). Bounding what
+  you do not know increases trust in what you have verified.
 - **Use clarifying questions for incomplete fixes:** Rather than declaring a
   proposed fix inadequate, ask questions that surface the unaddressed path
   (*"Just so I understand—this validates static configs at startup, right? How
@@ -87,8 +87,8 @@ or wire protocols carries high migration churn:
 - **Concede and narrow scope promptly:** If further testing shows a narrower
   reproduction scope (e.g., test harnesses rather than production), update the
   thread promptly and suggest lowering priority.
-- **Confirm fixes:** When a maintainer lands a fix, verify it and reply to
-  close the loop.
+- **Confirm fixes:** When a maintainer lands a fix, verify it and reply to close
+  the loop.
 
 ## Code Review Comments
 
@@ -213,8 +213,8 @@ Before submitting a technical comment, verify that:
 - [ ] **Tone:** Phrasing is calm, collegial, and understated, free of alarmist
   or hyperbolic labels (*"blocker"*, *"completely broken"*, *"unacceptable"*).
 - [ ] **Severity:** Impact is shown through a factual causal chain (trigger
-  $\\rightarrow$ mechanism $\\rightarrow$ symptom $\\rightarrow$ cost) rather than
-  adjectives.
+  $\\rightarrow$ mechanism $\\rightarrow$ symptom $\\rightarrow$ cost) rather
+  than adjectives.
 - [ ] **Framing:** Critiques of incomplete fixes open with clarifying questions
   and offer pragmatic trade-offs rather than ultimatums.
 - [ ] **Pushback:** Replies to *"works for me"* explain why the maintainer's
