@@ -76,7 +76,48 @@ from ruamel.yaml.representer import Representer, RoundTripRepresenter
 BEGIN = "<!-- taskgo:begin -->"
 END = "<!-- taskgo:end -->"
 CANONICAL_URL = "https://github.com/ithinkihaveacat/dotfiles/tree/main/skills/taskgo"
-COMMIT_AUTH = "<!-- taskgo:allow-local-commits -->"
+AGENTS_DECL_RE = re.compile(
+    r"(follows|structured|maintained|according to).*taskgo",
+    re.IGNORECASE,
+)
+CANONICAL_AGENTS_MD = f"""\
+# Agent Instructions
+
+This repository follows taskgo:
+<{CANONICAL_URL}>.
+
+## Standing Rules
+
+- **Project and task onboarding:** When work touches a `taskgo` project or task
+  (`<project>` or `TASK-XXXXX`), run `taskgo handoff <project|TASK-ID>`, read
+  the files it names, and activate the project's declared skills with
+  `taskgo skills <project> | skill --scope session add -`. When work extends to
+  other repositories or technology stacks not covered by active skills, discover
+  and add session skills via `skill catalog --json`.
+- **Declaring skills:** A project's required skills are declared in the
+  `skills:` list in `<project>/README.md` YAML frontmatter (`taskgo doctor`
+  validates the names) and activated per session (`skill --scope session add`),
+  rather than added to the control repository's workspace skills.
+- **Environments and constraints:** Before running build, test, or operational
+  commands, check `<project>/README.md` (including `**Target Environment:**`,
+  scope, map, and standing constraints) and the root `README.md` (when present)
+  for environment rules.
+- **Session continuity:** In this control repository, always cite the active
+  globally unique conversation/session ID without abbreviation as
+  `[<conversation-id>](<agent>://<conversation-id>)` (or
+  `conversation://<conversation-id>`) in `STATUS.md` `## Summary` and task
+  records. Pass `--conv <conversation-id>` to task- and commit-recording
+  subcommands (`taskgo create`, `taskgo update`, `taskgo checkpoint`,
+  `taskgo commit`) to record it in frontmatter and commit trailers; subcommands
+  like `taskgo sync`, `taskgo status`, `taskgo check`, and `taskgo doctor` do
+  not take `--conv`.
+- **Data segregation and paths:** Keep private tracker notes, `Conversation:`
+  trailers, and session links strictly inside this control repository—never in
+  commits, PRs, or files of external artifact repositories. Within tracker
+  files, use relative Markdown links (no `file://`) and `$HOME`-relative paths
+  (`~/...`) for local checkouts.
+"""
+_FORMATTED_AGENTS_MD: str | None = None
 ID_PATTERN = re.compile(r"^TASK-[0-9A-F]{5}$")
 ID_IN_TEXT = re.compile(r"\bTASK-[0-9A-F]{5}\b")
 WRAP_WIDTH = 80
@@ -2937,16 +2978,31 @@ def build_status_block(
     return "\n".join(lines)
 
 
+def canonical_agents_md() -> str:
+    """Returns CANONICAL_AGENTS_MD normalized through format_markdown()."""
+    global _FORMATTED_AGENTS_MD
+    if _FORMATTED_AGENTS_MD is None:
+        _FORMATTED_AGENTS_MD = format_markdown(CANONICAL_AGENTS_MD)
+    return _FORMATTED_AGENTS_MD
+
+
+def has_taskgo_declaration(text: str) -> bool:
+    """True when AGENTS.md text declares that the repository follows taskgo with CANONICAL_URL."""
+    return bool(AGENTS_DECL_RE.search(text)) and CANONICAL_URL in text
+
+
 def has_commit_auth(root: Path) -> bool:
-    """Check if the repository grants local commit authority in both HEAD and working tree."""
-    has_head = run_git(["rev-parse", "HEAD"], check=False).returncode == 0
+    """True when AGENTS.md in both HEAD (if any) and the working tree declares taskgo."""
+    has_head = run_git(["rev-parse", "HEAD"], cwd=root, check=False).returncode == 0
     if has_head:
-        show_agents = run_git(["show", "HEAD:AGENTS.md"], check=False)
-        if show_agents.returncode != 0 or COMMIT_AUTH not in show_agents.stdout:
+        show_agents = run_git(["show", "HEAD:AGENTS.md"], cwd=root, check=False)
+        if show_agents.returncode != 0 or not has_taskgo_declaration(
+            show_agents.stdout
+        ):
             return False
     agents_path = root / "AGENTS.md"
-    return agents_path.is_file() and COMMIT_AUTH in agents_path.read_text(
-        encoding="utf-8"
+    return agents_path.is_file() and has_taskgo_declaration(
+        agents_path.read_text(encoding="utf-8")
     )
 
 
@@ -3314,58 +3370,28 @@ def audit_snapshot(
     def wanted(rel: str) -> bool:
         return only is None or rel in only
 
-    # 1. AGENTS.md check & remediation
-    agents_file = "AGENTS.md"
-    if not snap.is_file(agents_file):
+    if only is None:
+        # 1. AGENTS.md check & remediation
+        agents_file = "AGENTS.md"
 
-        def remediate_missing_agents() -> list[str]:
-            # Tracking repos include commit authorization by default so agents can maintain tracker state.
-            snap.write_markdown(
-                agents_file,
-                f"# Agent instructions\n\nThis repository follows taskgo: <{CANONICAL_URL}>.\n\n{COMMIT_AUTH}\n",
-            )
+        def remediate_agents() -> list[str]:
+            snap.write_markdown(agents_file, CANONICAL_AGENTS_MD)
             return [agents_file]
 
-        findings.append(
-            Finding(
-                category="root",
-                severity="WARN",
-                message="missing AGENTS.md",
-                path=agents_file,
-                remediation=remediate_missing_agents,
-            )
-        )
-    else:
-        agents_txt = snap.read_text(agents_file)
-        needs_decl = not re.search(
-            r"(follows|structured|maintained|according to).*taskgo",
-            agents_txt,
-            re.IGNORECASE,
-        )
-        needs_url = CANONICAL_URL not in agents_txt
-        needs_auth = COMMIT_AUTH not in agents_txt
-
-        if needs_decl or needs_url or needs_auth:
-
-            def remediate_agents() -> list[str]:
-                cur = snap.read_text(agents_file)
-                has_decl = bool(
-                    re.search(
-                        r"(follows|structured|maintained|according to).*taskgo",
-                        cur,
-                        re.IGNORECASE,
-                    )
+        if not snap.is_file(agents_file):
+            findings.append(
+                Finding(
+                    category="root",
+                    severity="WARN",
+                    message="missing AGENTS.md",
+                    path=agents_file,
+                    remediation=remediate_agents,
                 )
-                if not has_decl:
-                    cur = (
-                        f"This repository follows taskgo: <{CANONICAL_URL}>.\n\n" + cur
-                    )
-                elif CANONICAL_URL not in cur:
-                    cur += f"\nCanonical URL: <{CANONICAL_URL}>\n"
-                if COMMIT_AUTH not in cur:
-                    cur = cur.rstrip() + f"\n\n{COMMIT_AUTH}\n"
-                snap.write_markdown(agents_file, cur)
-                return [agents_file]
+            )
+        else:
+            agents_txt = snap.read_text(agents_file)
+            needs_decl = not AGENTS_DECL_RE.search(agents_txt)
+            needs_url = CANONICAL_URL not in agents_txt
 
             if needs_decl:
                 findings.append(
@@ -3387,34 +3413,39 @@ def audit_snapshot(
                         remediation=remediate_agents,
                     )
                 )
-            if needs_auth:
+            if (
+                not needs_decl
+                and not needs_url
+                and not target_project
+                and agents_txt != canonical_agents_md()
+            ):
                 findings.append(
                     Finding(
                         category="root",
                         severity="INFO",
-                        message=f"AGENTS.md: missing {COMMIT_AUTH}",
+                        message="AGENTS.md: differs from canonical taskgo template (run fix)",
                         path=agents_file,
                         remediation=remediate_agents,
                     )
                 )
 
-    # 2. INBOX.md check & remediation
-    inbox_file = "INBOX.md"
-    if not snap.is_file(inbox_file):
+        # 2. INBOX.md check & remediation
+        inbox_file = "INBOX.md"
+        if not snap.is_file(inbox_file):
 
-        def remediate_missing_inbox() -> list[str]:
-            snap.write_markdown(inbox_file, "# Inbox\n")
-            return [inbox_file]
+            def remediate_missing_inbox() -> list[str]:
+                snap.write_markdown(inbox_file, "# Inbox\n")
+                return [inbox_file]
 
-        findings.append(
-            Finding(
-                category="root",
-                severity="WARN",
-                message="missing INBOX.md",
-                path=inbox_file,
-                remediation=remediate_missing_inbox,
+            findings.append(
+                Finding(
+                    category="root",
+                    severity="WARN",
+                    message="missing INBOX.md",
+                    path=inbox_file,
+                    remediation=remediate_missing_inbox,
+                )
             )
-        )
 
     # 3. Duplicate global task IDs
     all_rows = get_task_rows(snap) if rows is None else rows
@@ -3775,8 +3806,13 @@ def audit_snapshot(
                 findings.append(finding)
 
     if not target_project and markdown:
+        already_flagged = {f.path for f in findings if f.path}
         for rmf in ROOT_RECORDS:
-            if snap.is_file(rmf) and (finding := markdown_finding(snap, rmf)):
+            if (
+                rmf not in already_flagged
+                and snap.is_file(rmf)
+                and (finding := markdown_finding(snap, rmf))
+            ):
                 findings.append(finding)
 
     # The zone decides "today" for every project, so check it on every run.
@@ -4265,7 +4301,7 @@ def cmd_create(
         if not has_commit_auth(root):
             print(
                 _tagged(
-                    "[INFO]  Skipping commit: repository lacks authorized <!-- taskgo:allow-local-commits -->",
+                    "[INFO]  Skipping commit: AGENTS.md lacks committed taskgo declaration",
                     sys.stderr,
                 ),
                 file=sys.stderr,
@@ -7071,7 +7107,7 @@ def cmd_fix(
         if not has_commit_auth(root):
             print(
                 _tagged(
-                    f"[INFO]  Applied {len(modified_files)} repair(s) (commit skipped: no auth marker).",
+                    f"[INFO]  Applied {len(modified_files)} repair(s) (commit skipped: AGENTS.md lacks committed taskgo declaration).",
                     sys.stderr,
                 ),
                 file=sys.stderr,
@@ -8089,7 +8125,9 @@ def cmd_checkpoint(
         pre_sync_repo(root)
 
         if not has_commit_auth(root):
-            die(f"checkpoint: committed AGENTS.md must contain {COMMIT_AUTH}")
+            die(
+                f"checkpoint: committed AGENTS.md must declare taskgo ({CANONICAL_URL})"
+            )
 
         target_path = resolve_target(root, task_id)
         rel_path = str(target_path.relative_to(root))
@@ -8252,7 +8290,7 @@ def cmd_commit(
         pre_sync_repo(root)
         snap = FsSnapshot(root)
         if not has_commit_auth(root):
-            die(f"commit: committed AGENTS.md must contain {COMMIT_AUTH}")
+            die(f"commit: committed AGENTS.md must declare taskgo ({CANONICAL_URL})")
 
         diff_cached = run_git(["diff", "--cached", "--quiet"], check=False)
         if diff_cached.returncode == 0:
@@ -10244,15 +10282,15 @@ class McpServer:
         mine: set[str] = set()
         while True:
             snap, committed = reader.snapshot(head)
-            if not snap.is_file("AGENTS.md") or COMMIT_AUTH not in snap.read_text(
-                "AGENTS.md"
+            if not snap.is_file("AGENTS.md") or not has_taskgo_declaration(
+                snap.read_text("AGENTS.md")
             ):
                 if not fetched:
-                    head, fetched = refetch("no commit authority"), True
+                    head, fetched = refetch("no taskgo declaration"), True
                     continue
                 raise McpToolError(
-                    f"writes are refused: AGENTS.md at {head[:12]} does not carry "
-                    f"{COMMIT_AUTH}"
+                    f"writes are refused: AGENTS.md at {head[:12]} does not declare "
+                    f"taskgo ({CANONICAL_URL})"
                 )
             try:
                 cs = apply_change_set(snap, doc, commit_args.conversation)
@@ -11763,7 +11801,7 @@ task file's Git commit watermark, emitting nothing when no tasks trigger.""",
             change set on the head and pushes it to REMOTE without force,
             retrying on a moved head a few times; with a cached head, the
             push alone checks that the head has not moved. Writes need the
-            commit-authority marker in AGENTS.md, a commit identity
+            taskgo declaration in AGENTS.md, a commit identity
             (user.name and user.email), and a remote: with --no-fetch the
             server only reads. With --local, for a checkout on this machine,
             there is no remote: reads see the local BRANCH as it is, and a

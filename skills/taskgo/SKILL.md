@@ -51,13 +51,14 @@ bypassing the sandbox may be necessary for those operations.
    monospace text.
 1. **STATUS.md:** This is the self-contained projection of current operational
    state. Reading it directly answers status and next steps.
-1. **Commit Authority:** The `<!-- taskgo:allow-local-commits -->` marker in the
-   control repo's `AGENTS.md` grants standing authority for guarded local
-   checkpoint commits (`create`, `checkpoint`, `commit`, `fix`). Restructuring
-   the guarded commands cannot express (such as moving a task between projects)
-   may use a plain `git commit`; ask first, or at least report it afterwards.
-   See [Commit Authority](references/workflows.md#commit-authority). Never
-   rewrite artifact history.
+1. **Commit Authority:** The `taskgo` declaration in the control repository's
+   committed `AGENTS.md` (maintained by `taskgo fix`) grants standing authority
+   for guarded tracker commits (`create`, `checkpoint`, `commit`, `fix`, and
+   `mcp` writes). Restructuring the guarded commands cannot express (such as
+   moving a task between projects) may use a plain `git commit`; ask first, or
+   at least report it afterwards. See
+   [Commit Authority](references/workflows.md#commit-authority). Never rewrite
+   artifact history.
 1. **No Administrative Metadata:** Do not invent metadata fields like `created`,
    `updated`, or `blocked_since` in YAML frontmatter. Git owns administrative
    history. Do not duplicate `Project:`, `Task:`, or `Event:` trailers.
@@ -233,10 +234,10 @@ task to an isolated worker that cannot read the control repository, see
      taskgo skills <project> | skill --scope session add -
      ```
      Pipe the whole list: a skill that is already active is reported and
-     skipped. The session scope leaves `.envrc` and repository files untouched;
-     harness details (when the skills become usable, what to do when there is no
-     session directory) are the `skill` CLI's, in the `agent-config` skill and
-     its output.
+     skipped. The session scope leaves workspace skill links and repository
+     files untouched; harness details (when the skills become usable, what to do
+     when there is no session directory) are the `skill` CLI's, in the
+     `agent-config` skill and its output.
 - **CLI or MCP:** when the control repository is the session's workspace, use
   the CLI. Elsewhere, prefer the `taskgo` MCP tools when the harness has them
   (`handoff` returns the same note and files); otherwise the CLI with `--root`.
@@ -320,13 +321,14 @@ taskgo requests [--log FILE] [--days N] [--gap SECS] [--json]
   0 on match, 1 on no match, and 2 on error, matching `search_files`.
 - `schema`: The declarative field and section schema for tasks, decisions, and
   `STATUS.md`. `--json` is the conformance form for other implementations.
-- `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, format the
-  Markdown of tracker records (root `AGENTS.md`, `INBOX.md`, and `README.md`;
-  each project's `README.md`, `PROJECT.md`, `STATUS.md`, `tasks/`, and
-  `decisions/`), and commit repairs by default. Other documents are left as
-  their owners wrote them.
-- `checkpoint`: Safe automatic-commit path requiring
-  `taskgo:allow-local-commits`. Enforces 50-char subject limits.
+- `fix`: Auto-heal IDs, normalize status aliases, generate STATUS, synchronize
+  root `AGENTS.md` with the canonical `taskgo` template, format the Markdown of
+  tracker records (root `AGENTS.md`, `INBOX.md`, and `README.md`; each project's
+  `README.md`, `PROJECT.md`, `STATUS.md`, `tasks/`, and `decisions/`), and
+  commit repairs by default. Other documents are left as their owners wrote
+  them.
+- `checkpoint`: Safe automatic-commit path requiring the `taskgo` declaration in
+  committed `AGENTS.md`. Enforces 50-char subject limits.
 - Remote sync by default: when the repository and `.git/` are writable, CLI
   reads and writes serialize on `<git-dir>/taskgo.lock`, fetch the upstream
   tracking branch (`@{u}`), and fast-forward or rebase with `--autostash` when

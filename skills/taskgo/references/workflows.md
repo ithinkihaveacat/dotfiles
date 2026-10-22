@@ -21,29 +21,27 @@ Before starting work, an agent must:
    ```
    Pipe the whole list; the `skill` CLI reports and skips a skill the workspace
    already links, and says when the new ones become usable. The session scope
-   leaves `.envrc` and repository files untouched. If `skill --scope session`
-   reports that the session has no directory of its own, ask before adding the
-   skills to the workspace instead. Without a skill manager, read each skill's
-   `SKILL.md` directly.
+   leaves workspace skill links and repository files untouched. If
+   `skill --scope session` reports that the session has no directory of its own,
+   ask before adding the skills to the workspace instead. Without a skill
+   manager, read each skill's `SKILL.md` directly.
 1. Inspect linked artifact repos under their own instructions, and check
    `<project>/scripts/` before writing new scratch helpers.
 
 ### Commit Authority
 
-Check standing authority before starting (when reconstructible lifecycle history
-matters):
+A control repository whose committed `AGENTS.md` declares `taskgo` (maintained
+by `taskgo fix`) grants standing authority for guarded `create`, `checkpoint`,
+`commit`, `fix`, and `mcp` write operations in the control repository:
 
-1. **Committed `taskgo:allow-local-commits` marker present:** Authorized for
-   guarded `create`, `checkpoint`, `commit`, and `fix` operations in this
-   control repo only.
-1. **Authorized:** Commit a meaningful `in-progress` transition before artifact
-   work that may span sessions; commit completion with `Ref:` trailers for
-   linked artifact commits. A small task completed atomically may go directly
-   `todo` -> `done`. Pass `--conv <conversation-id>` or verify `conversations`
-   frontmatter and `STATUS.md` cite the full active session identifier.
-1. **Not authorized:** Keep changes uncommitted; state clearly that intermediate
-   transitions will not be retained. Never create retrospective state commits
-   that did not reflect reality at the time.
+1. Commit a meaningful `in-progress` transition before artifact work that may
+   span sessions; commit completion with `Ref:` trailers for linked artifact
+   commits. A small task completed atomically may go directly `todo` -> `done`.
+   Pass `--conv <conversation-id>` or verify `conversations` frontmatter and
+   `STATUS.md` cite the full active session identifier.
+1. When `--no-commit` is requested (or before a brand-new repository's initial
+   `AGENTS.md` is committed), keep changes uncommitted; never create
+   retrospective state commits that did not reflect reality at the time.
 
 #### Plain `git commit`
 
@@ -54,8 +52,8 @@ project, so moving a task or merging projects needs something else). For such
 operations, use a plain `git commit`. Work out what the change requires from the
 invariants in this skill rather than waiting for a documented procedure.
 
-Plain `git commit` is outside the standing marker, so tell the human: ask before
-committing when practical, and otherwise say clearly afterwards what you
+Plain `git commit` is outside the guarded commands, so tell the human: ask
+before committing when practical, and otherwise say clearly afterwards what you
 committed and why the guarded commands could not do it. Leave the tracker as
 coherent as a guarded commit would (`taskgo sync` and `taskgo doctor` clean for
 every affected project, only the affected paths staged, a Conventional Commits

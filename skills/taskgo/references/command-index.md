@@ -688,7 +688,7 @@ last fetched head, marked stale in as_of. Each write commits one
 change set on the head and pushes it to REMOTE without force,
 retrying on a moved head a few times; with a cached head, the
 push alone checks that the head has not moved. Writes need the
-commit-authority marker in AGENTS.md, a commit identity
+taskgo declaration in AGENTS.md, a commit identity
 (user.name and user.email), and a remote: with --no-fetch the
 server only reads. With --local, for a checkout on this machine,
 there is no remote: reads see the local BRANCH as it is, and a

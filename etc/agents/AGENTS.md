@@ -31,6 +31,18 @@ instructions > activated skills > general training knowledge.
     Local git hooks strictly enforce subject-line length and body-wrapping
     limits and will reject non-compliant commits.
 
+## Path and Link Portability
+
+- **Committed files and distributable artifacts**: When writing or editing
+  committed repository files, documentation, or artifacts intended for
+  distribution, use repository-relative paths for internal links (no `file://`
+  scheme) and canonical web URLs (`https://` or `http://`) for external
+  references—never host-specific `file://` links or absolute local paths that
+  break across machines.
+- **Conversation output**: In regular chat responses, use machine-specific
+  `file://` links when referencing local files, directories, or code symbols so
+  they are clickable in the user's environment.
+
 ## Command Safety and Bounded Search
 
 - **No unbounded searches**: Never run broad `find`, `grep`, or recursive file

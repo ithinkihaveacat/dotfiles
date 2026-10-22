@@ -55,7 +55,7 @@ repositories**:
 ### Standard Directory Structure
 
 ```text
-AGENTS.md                 # taskgo declaration + repository instructions
+AGENTS.md                 # canonical taskgo declaration + standing rules (managed by taskgo fix)
 INBOX.md                  # zero-ceremony capture; no schema
 <id>/
   README.md               # identity, map, standing rules (optional YAML frontmatter: skills, etc.)

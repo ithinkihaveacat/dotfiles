@@ -160,9 +160,8 @@ from the changes), an optional body, and the trailers the caller asks for:
 task the write touches, and `Ref:` for each reference. After those, every commit
 carries `Request-Id:`, the write's `request_id`, and `Request-Digest:`, the
 first 16 hex digits of the SHA-256 of its other arguments as sorted JSON. Writes
-are refused unless `AGENTS.md` at the head carries
-`<!-- taskgo:allow-local-commits -->`, and a server started with `--no-fetch`
-does not write.
+are refused unless `AGENTS.md` at the head declares `taskgo`, and a server
+started with `--no-fetch` does not write.
 
 Every write takes a `request_id`. The server keeps, in memory, the digest of the
 request's arguments and each commit it built for it, for a day. A request whose
