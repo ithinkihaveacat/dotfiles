@@ -120,7 +120,7 @@ export function buildRule(level: number): string {
     "",
     "## Trigger Sensitivity Levels (`1`–`5`)",
     "",
-    `Active trigger level: ${levelLabel(level)}. ${LEVELS[level]!.when}`,
+    `Active trigger level: ${levelLabel(level)}.`,
     "",
     "The trigger level is fixed for the session (`$ANDON_LEVEL` > " +
       "`~/.local/state/andon/config.json` via `andon level` or `/andon level` > default " +
@@ -138,12 +138,8 @@ export function buildRule(level: number): string {
       "matches) or routine sandbox escalations when network or write access is required " +
       "(unless a skill falsely claimed sandbox compatibility).",
     "- Ambiguity in the user's request — ask the user directly.",
-    ...(level < 5
-      ? [
-          "- At Levels 1–4, a transient failure that succeeds on immediate retry with " +
-            "identical arguments."
-        ]
-      : [])
+    "- At Levels 1–4, a transient failure that succeeds on immediate retry with " +
+      "identical arguments."
   ];
 
   return lines.join("\n");

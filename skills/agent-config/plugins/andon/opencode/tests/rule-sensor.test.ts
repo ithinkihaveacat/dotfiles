@@ -25,7 +25,7 @@ test("pull payload stays compatible with the Claude adapter and omits level", ()
   );
 });
 
-test("buildRule includes the full 1-5 rubric and adjusts level 5 guidance", () => {
+test("buildRule includes the full 1-5 rubric and keeps static text across levels", () => {
   const rule3 = buildRule(3);
   assert.match(rule3, /Active trigger level: 3 \(standard\)\./);
   assert.match(rule3, /## Not a Harness Defect \(Do Not Pull\)/);
@@ -36,8 +36,18 @@ test("buildRule includes the full 1-5 rubric and adjusts level 5 guidance", () =
   assert.match(rule3, /- \*\*Level 4 \(proactive audit\):\*\*/);
   assert.match(rule3, /- \*\*Level 5 \(maximum coverage\):\*\*/);
   const rule5 = buildRule(5);
-  assert.doesNotMatch(rule5, /At Levels 1–4, a transient failure/);
-  assert.match(rule5, /Do not self-filter/);
+  assert.match(rule5, /At Levels 1–4, a transient failure/);
+  assert.doesNotMatch(
+    rule5,
+    /Active trigger level: 5 \(maximum coverage\)\. Do not self-filter/
+  );
+  assert.equal(
+    rule3.replace(
+      "Active trigger level: 3 (standard).",
+      "Active trigger level: 5 (maximum coverage)."
+    ),
+    rule5
+  );
 });
 
 test("shell exits use metadata or a trailing status, not guessed error words", () => {

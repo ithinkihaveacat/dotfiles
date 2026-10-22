@@ -125,11 +125,20 @@ const START = {
 } as const;
 
 describe("the rule", () => {
-  test("drops the transient-retry exclusion and self-filtering at level 5", () => {
+  test("keeps the rule text static across levels except for the active level line", () => {
     expect(buildRule(3)).toContain("## Not a Harness Defect (Do Not Pull)");
     expect(buildRule(3)).toContain("At Levels 1–4, a transient failure");
-    expect(buildRule(5)).not.toContain("At Levels 1–4, a transient failure");
-    expect(buildRule(5)).toContain("Do not self-filter");
+    expect(buildRule(5)).toContain("At Levels 1–4, a transient failure");
+    expect(buildRule(5)).toContain("Active trigger level: 5 (maximum coverage).");
+    expect(buildRule(5)).not.toContain(
+      "Active trigger level: 5 (maximum coverage). Do not self-filter"
+    );
+    expect(
+      buildRule(3).replace(
+        "Active trigger level: 3 (standard).",
+        "Active trigger level: 5 (maximum coverage)."
+      )
+    ).toBe(buildRule(5));
   });
 
   test("includes the full 1-5 trigger level rubric and omits level from INPUT_SCHEMA", () => {
