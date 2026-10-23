@@ -303,28 +303,60 @@ if [[ "$phone_uid" != "0" ]]; then
   exit 1
 fi
 
-# 1. Enable WearableService on the phone via GMSCore flag override (no stub APK required)
-adb -s "$PHONE_SERIAL" shell 'am broadcast -a "com.google.android.gms.phenotype.FLAG_OVERRIDE" \
-  --es package "com.google.android.gms.wearable" \
-  --es user "*" \
-  --esa flags "may_run_without_wearable_app" \
-  --esa values "true" \
-  --esa types "boolean"' >/dev/null
+# 1. Enable WearableService on the phone via GMSCore flag override (no stub APK required).
+# Wait for the asynchronous flag override transaction to commit to phenotype.db before
+# force-stopping GMSCore so a cold/wiped boot does not abort the SQLite write.
+enable_phone_wearable_service() {
+  # shellcheck disable=SC2016
+  adb -s "$PHONE_SERIAL" shell '
+    am startservice -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null 2>&1 || true
+    for i in $(seq 1 25); do
+      if (( i == 1 || i % 5 == 0 )); then
+        am broadcast -a com.google.android.gms.phenotype.FLAG_OVERRIDE \
+          -p com.google.android.gms \
+          --es package com.google.android.gms.wearable \
+          --es user "*" \
+          --esa flags may_run_without_wearable_app \
+          --esa values true \
+          --esa types boolean \
+          --ez commit true >/dev/null 2>&1 || true
+      fi
+      if [[ -f /data/data/com.google.android.gms/databases/phenotype.db ]]; then
+        cnt=$(sqlite3 /data/data/com.google.android.gms/databases/phenotype.db \
+          "SELECT (SELECT COUNT(*) FROM flag_overrides WHERE name='\''may_run_without_wearable_app'\'' AND active=1) + (SELECT COUNT(*) FROM FlagOverrides WHERE name='\''may_run_without_wearable_app'\'' AND boolVal=1);" 2>/dev/null || echo 0)
+        pending=$(sqlite3 /data/data/com.google.android.gms/databases/phenotype.db \
+          "SELECT COUNT(*) FROM flag_overrides_to_commit;" 2>/dev/null || echo 0)
+        case "$cnt" in
+          [1-9]*)
+            if [[ "$pending" == "0" ]]; then
+              break
+            fi
+            ;;
+        esac
+      fi
+      sleep 0.2
+    done
+    am force-stop com.google.android.gms
+    am startservice -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null
+  '
+}
 
-adb -s "$PHONE_SERIAL" shell am force-stop com.google.android.gms
-adb -s "$PHONE_SERIAL" shell am startservice \
-  -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null
+enable_phone_wearable_service
 
 # 2. Wait for GMSCore to initialize connectionconfig.db on the phone
 db_path="/data/data/com.google.android.gms/databases/connectionconfig.db"
 db_ready=0
-for _ in $(seq 1 45); do
+for db_attempt in $(seq 1 45); do
   if adb -s "$PHONE_SERIAL" shell "test -f $db_path" >/dev/null 2>&1; then
     db_ready=1
     break
   fi
-  adb -s "$PHONE_SERIAL" shell am startservice \
-    -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null 2>&1 || true
+  if ((db_attempt % 10 == 0)); then
+    enable_phone_wearable_service
+  else
+    adb -s "$PHONE_SERIAL" shell am startservice \
+      -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null 2>&1 || true
+  fi
   sleep 1
 done
 
@@ -333,17 +365,69 @@ if [[ "$db_ready" -ne 1 ]]; then
   exit 1
 fi
 
-# 3. Seed the server TCP listener row as GMSCore's Linux UID and restart WearableService
-# shellcheck disable=SC2016 # $GMS_UID is evaluated inside the remote adb shell
-adb -s "$PHONE_SERIAL" shell '
-  GMS_UID=$(stat -c %U /data/data/com.google.android.gms)
-  su "$GMS_UID" sqlite3 /data/data/com.google.android.gms/databases/connectionconfig.db \
-    "INSERT OR REPLACE INTO connectionConfigurations (name, pairedBtAddress, connectionType, role, connectionEnabled) VALUES ('\''server'\'', '\''NULL_STRING'\'', 2, 2, 1);"
-  am force-stop com.google.android.gms
-  am startservice -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null
-'
+# 3. Inspect watch state: if GMS data was cleared on the watch without rebooting,
+# reboot the watch guest so WearServices recreates the default 'network' client config.
+# Also read any existing watch cloud network ID so a freshly wiped phone can adopt it
+# instead of failing the handshake with 'Wear_Transport: Error: networkid mismatch'.
+adb -s "$WATCH_SERIAL" shell cmd activity broadcast \
+  -a com.google.android.gms.wearable.EMULATOR --es operation get-pairing-status >/dev/null 2>&1 || true
 
-# 4. Bridge TCP port and dismiss watch tutorial / keyguard overlays
+watch_csm=$(adb -s "$WATCH_SERIAL" shell dumpsys activity service WearableService ConnectionServiceManager 2>/dev/null | tr -d '\r' || true)
+if [[ -n "$watch_csm" && "$watch_csm" == *"Connection Configurations:"* &&
+  "$watch_csm" != *"Name=network"* && "$watch_csm" != *"name=network"* ]]; then
+  adb -s "$WATCH_SERIAL" reboot
+  adb -s "$WATCH_SERIAL" wait-for-device
+  for _ in $(seq 1 60); do
+    [[ "$(get_prop "$WATCH_SERIAL" sys.boot_completed)" == "1" ]] && break
+    sleep 1
+  done
+  adb -s "$WATCH_SERIAL" shell cmd activity broadcast \
+    -a com.google.android.gms.wearable.EMULATOR --es operation get-pairing-status >/dev/null 2>&1 || true
+fi
+
+watch_net_id=$(adb -s "$WATCH_SERIAL" shell dumpsys activity service WearableService CloudNodeAdapter 2>/dev/null |
+  tr -d '\r' | sed -n 's/^[[:space:]]*cloud network id: \([0-9][0-9]*\)$/\1/p' | head -n 1)
+
+# 4. Seed the server TCP listener row as GMSCore's Linux UID, align network_id if
+# the watch is already enrolled in a cloud network, and restart WearableService.
+sync_phone_server_and_network() {
+  local target_net_id="${1:-}"
+  # shellcheck disable=SC2016 # $GMS_UID and $prefs_* are evaluated inside the remote adb shell
+  adb -s "$PHONE_SERIAL" shell "
+    am force-stop com.google.android.gms
+    GMS_UID=\$(stat -c %U /data/data/com.google.android.gms)
+    su \"\$GMS_UID\" sqlite3 /data/data/com.google.android.gms/databases/connectionconfig.db \
+      \"DELETE FROM connectionConfigurations WHERE connectionType = 2; INSERT INTO connectionConfigurations (name, pairedBtAddress, connectionType, role, connectionEnabled) VALUES ('server', 'NULL_STRING', 2, 2, 1);\"
+    if [[ -n '$target_net_id' ]]; then
+      prefs_dir=/data/data/com.google.android.gms/shared_prefs
+      prefs_file=\"\$prefs_dir/wearable.xml\"
+      mkdir -p \"\$prefs_dir\"
+      if [[ -f \"\$prefs_file\" ]]; then
+        grep -q 'name=\"network_id\"' \"\$prefs_file\" &&
+          sed -i 's|<string name=\"network_id\">[^<]*</string>|<string name=\"network_id\">$target_net_id</string>|' \"\$prefs_file\" ||
+          sed -i 's|</map>|    <string name=\"network_id\">$target_net_id</string>\n</map>|' \"\$prefs_file\"
+        grep -q 'name=\"network_server_assigned\"' \"\$prefs_file\" &&
+          sed -i 's|<boolean name=\"network_server_assigned\" value=\"[^\"]*\" />|<boolean name=\"network_server_assigned\" value=\"true\" />|' \"\$prefs_file\" ||
+          sed -i 's|</map>|    <boolean name=\"network_server_assigned\" value=\"true\" />\n</map>|' \"\$prefs_file\"
+      else
+        printf '%s\n' \"<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\" '<map>' '    <boolean name=\"network_server_assigned\" value=\"true\" />' '    <string name=\"network_id\">$target_net_id</string>' '</map>' >\"\$prefs_file\"
+      fi
+      chown \"\$GMS_UID:\$GMS_UID\" \"\$prefs_file\"
+      chmod 660 \"\$prefs_file\"
+    fi
+    am startservice -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null
+    for _ in \$(seq 1 25); do
+      ss -tln 2>/dev/null | grep -q ':5601 ' && break
+      grep -qi ':15E1 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null && break
+      sleep 0.2
+    done
+  "
+}
+
+sync_phone_server_and_network "$watch_net_id"
+
+# 5. Bridge TCP port and dismiss watch tutorial / keyguard overlays
+adb -s "$PHONE_SERIAL" logcat -c >/dev/null 2>&1 || true
 adb -s "$PHONE_SERIAL" forward "tcp:$PORT" tcp:5601 >/dev/null
 adb -s "$WATCH_SERIAL" reverse tcp:5601 "tcp:$PORT" >/dev/null
 
@@ -353,7 +437,7 @@ adb -s "$WATCH_SERIAL" shell '
   cmd activity broadcast -a com.google.android.gms.wearable.EMULATOR --es operation refresh-emulator-connection >/dev/null
 '
 
-# 5. Poll get-pairing-status until both phone and watch report an active connected peer
+# 6. Poll get-pairing-status until both phone and watch report an active connected peer
 paired=0
 for attempt in $(seq 1 30); do
   p_out=$(adb -s "$PHONE_SERIAL" shell cmd activity broadcast \
@@ -366,7 +450,15 @@ for attempt in $(seq 1 30); do
     break
   fi
 
-  if ((attempt % 5 == 0)); then
+  mismatch_line=$(adb -s "$PHONE_SERIAL" logcat -d -s Wear_Transport:W 2>/dev/null |
+    tr -d '\r' | grep "Error: networkid mismatch" | tail -n 1 || true)
+  if [[ "$mismatch_line" =~ actual[[:space:]]networkId[[:space:]]is[[:space:]]([0-9]+) ]]; then
+    actual_net_id="${BASH_REMATCH[1]}"
+    adb -s "$PHONE_SERIAL" logcat -c >/dev/null 2>&1 || true
+    sync_phone_server_and_network "$actual_net_id"
+    adb -s "$WATCH_SERIAL" shell cmd activity broadcast \
+      -a com.google.android.gms.wearable.EMULATOR --es operation refresh-emulator-connection >/dev/null 2>&1 || true
+  elif ((attempt % 5 == 0)); then
     adb -s "$WATCH_SERIAL" shell cmd activity broadcast \
       -a com.google.android.gms.wearable.EMULATOR --es operation refresh-emulator-connection >/dev/null 2>&1 || true
   fi
