@@ -2,117 +2,145 @@
 name: android-testing
 description: >-
   Workflows and ADB commands for testing Android and Wear OS applications. Covers
-  system state simulation (Doze mode, battery levels, network failover, Bluetooth
-  proxy), location and sensor spoofing, health permissions, UI automation guidelines,
-  and Wear OS watch faces and complications. Use when testing Android or Wear OS
-  apps, simulating edge cases, debugging device connectivity, or automating UI
-  test procedures.
-compatibility: Requires adb and a connected Android phone or Wear OS device/emulator.
+  simulating devices without hardware (off-device @Preview rendering, standalone
+  watch bootstrapping, paired phone-watch emulator Data Layer bridging), network
+  and power state simulation (Doze mode, battery levels, Wi-Fi failover, Bluetooth
+  proxy), UI/display and physical input simulation (themes, font scale, rotary
+  crown, Wear OS 7+ one-handed gestures), location and synthetic health sensors,
+  permissions, watch faces and complications, and UI automation guidelines. Use
+  when testing Android or Wear OS apps, simulating edge cases, debugging device
+  connectivity, or automating UI test procedures.
+compatibility: Requires adb and a connected Android phone or Wear OS device/emulator (or a host JVM @Preview renderer for off-device UI verification).
 ---
 
 # Android & Wear OS Testing Guide
 
-This skill provides comprehensive workflows, guidelines, and ADB commands to
-test Android applications reliably across mobile phones and Wear OS devices. It
-focuses on triggering system state changes, validating real-time
-synchronization, implementing robust UI automation, and simulating complex edge
-cases (Doze mode, data layer disconnection, and Fused Location spoofing limits).
+This skill provides workflows, decision rules, and ADB commands to test Android
+applications reliably across mobile phones and Wear OS devices—from fast
+off-device `@Preview` checks and headless emulator pairing to system state
+simulation, synthetic sensors, and non-flaky UI automation.
 
-## Procedural Workflows & Testing Recipes
+## Quick-Start Workflows & Recipes
 
-### 1. Power & Doze Mode Simulation
+### 1. Simulating Devices Without Hardware
 
-Test how applications handle background execution, power constraints, and Doze
-mode transitions:
+Choose the lightest simulation tier that covers the behavior under test (see
+**[Simulating Devices Without Hardware](references/simulating-devices.md)** for
+the full decision boundary and GMSCore architecture):
+
+- **Off-Device Host-JVM `@Preview` Rendering (No Emulator Needed)**: For layout,
+  circular watch bezel clipping (`id:wearos_small_round` /
+  `id:wearos_large_round`), font scale, locales, Wear Tiles (`TilePreviewData`),
+  Remote Compose (`.rc`), and ATF accessibility checks, render previews directly
+  on the host JVM (e.g., via `compose-preview` or Robolectric) before booting an
+  emulator.
+- **Standalone Watch Bootstrapping (No Companion Phone)**: Bypass OOBE, the OEM
+  setup wizard, and tutorial overlays on a fresh watch or emulator (`adb root`
+  required for `pm disable`):
+  ```bash
+  adb shell settings put global device_provisioned 1
+  adb shell settings put secure user_setup_complete 1
+  adb shell pm disable com.google.android.wearable.setupwizard
+  adb shell dumpsys battery unplug
+  adb shell input keyevent KEYCODE_WAKEUP
+  adb shell wm dismiss-keyguard
+  adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE
+  adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
+  adb shell input keyevent KEYCODE_HOME
+  ```
+- **Paired Phone & Wear OS Emulator Bridging (Data Layer API)**: Bridge a
+  running `google_apis` / `google_apis_ps16k` (`userdebug`) phone emulator and a
+  Wear OS emulator over TCP port `5601` using the workspace `adb-wear-pair`
+  helper if available (or follow the manual sequence in
+  **[Simulating Devices Without Hardware](references/simulating-devices.md#paired-phone--wear-os-emulator-bridging)**):
+  ```bash
+  # Pair auto-detected phone and watch emulators over TCP port 5601
+  adb-wear-pair
+
+  # Inspect pairing state on one or both emulators ([PASS] Connected / [WARN] Disconnected / [FAIL] Unpaired)
+  adb-wear-pair --status
+  ```
+
+### 2. Network & Power State Simulation
+
+Test background execution, Doze mode, battery levels, and radio isolation (see
+**[Network & Power States](references/network-and-power.md)**):
 
 ```bash
-# Force device into Doze (Idle) mode
+# Force / exit Doze (Idle) mode
 adb shell dumpsys deviceidle force-idle
-
-# Exit Doze mode
 adb shell dumpsys deviceidle unforce
 
-# Simulate low battery level (5%)
+# Simulate low battery (5%) and restore default hardware state
 adb shell dumpsys battery unplug
 adb shell dumpsys battery set level 5
-
-# Reset battery state to default hardware behavior
 adb shell dumpsys battery reset
-```
 
-### 2. Connectivity & Network Edge Cases
-
-Simulate network isolation and diagnose Bluetooth proxy / Wi-Fi fallback:
-
-```bash
-# Isolate device (disable Bluetooth and Wi-Fi simultaneously)
+# Isolate device (disable Bluetooth and Wi-Fi) and restore connectivity
 adb shell svc bluetooth disable
 adb shell svc wifi disable
-
-# Restore connectivity
 adb shell svc bluetooth enable
 adb shell svc wifi enable
-
-# Direct Wi-Fi credential injection (bypasses stale watch credentials)
-adb shell 'cmd wifi connect-network "<SSID>" wpa2 <PASSWORD>'
 ```
 
 > [!NOTE] **Wear OS Wi-Fi Delay:** Wear OS delays activating Wi-Fi for 45–60
 > seconds after Bluetooth disconnection to conserve power. Wait at least 60
 > seconds before evaluating Wi-Fi fallback.
 
-### 3. Standalone Watch Setup & Tutorial Bypass
+### 3. Synthetic Sensors & One-Handed Gestures
 
-Bootstrap fresh watches or emulators into a usable standalone state for APK
-sideloading and testing without pairing a companion phone (requires `adb root`;
-see
-**[Watch Faces & Complications](references/watch-faces-and-complications.md#standalone-watch-bootstrapping--setup-bypass)**
-for background):
+Simulate biometric exercise data and physical Wear OS 7+ hand gestures without
+physical movement (see
+**[Location & Sensors](references/location-and-sensors.md)** and
+**[UI, Display & Physical Inputs](references/ui-and-inputs.md)**):
 
 ```bash
-# 1. Mark device provisioned and user setup complete (AOSP platform flags)
-adb shell settings put global device_provisioned 1
-adb shell settings put secure user_setup_complete 1
+# Enable Wear Health Services synthetic sensor mode and start a simulated run
+adb shell am broadcast -a "whs.USE_SYNTHETIC_PROVIDERS" com.google.android.wearable.healthservices
+adb shell am broadcast -a "whs.synthetic.user.START_RUNNING" com.google.android.wearable.healthservices
+adb shell am broadcast -a "whs.synthetic.user.STOP_EXERCISE" com.google.android.wearable.healthservices
 
-# 2. Disable OEM Setup Wizard (bypasses pairing lock screen)
-# Wear OS / Pixel Watch:
-adb shell pm disable com.google.android.wearable.setupwizard
-# Samsung Galaxy Watch:
-adb shell pm disable com.samsung.android.wearable.setupwizard
-
-# 3. Wake up, dismiss keyguard, and bypass tutorial overlays
-adb shell input keyevent KEYCODE_WAKEUP
-adb shell wm dismiss-keyguard
-adb shell am broadcast -a com.google.android.clockwork.action.TEST_MODE
-adb shell am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP
-adb shell input keyevent KEYCODE_HOME
+# Bypass off-body check and inject a Wear OS 7+ Double Pinch (PrimaryAction)
+adb shell cmd IWearGestureService override-constraints offbody-state
+adb shell cmd IWearGestureService gesture DoublePinch
 ```
 
 ## How to Approach Testing
 
-1. **Review Requirements:** Identify the specific device form factor, API level
-   (API 30–36+), and subsystem under test.
-1. **Apply Capabilities:** Use standard ADB commands or workspace device
-   automation tools to simulate state changes.
+1. **Pick the Simulation Tier:** Use host-JVM `@Preview` rendering for pure UI,
+   layout, Tile, and accessibility checks; boot a single emulator for OS
+   services and sensors; pair phone and watch emulators when testing Wearable
+   Data Layer synchronization.
+1. **Apply Capabilities:** Use workspace `adb-*` helper scripts where available
+   or standard `adb` commands to drive state changes and capture evidence.
 1. **Consult References:** Load the dedicated reference documents below for
    in-depth guidelines, sensor schemas, and platform quirks.
 
 ## Reference Material
 
-- **[UI Automation Guidelines](references/ui-automation-guidelines.md)** —
-  "Behave Like a Real User" and "Visual Timeline" policies for robust, non-flaky
-  UI test automation.
-- **[System States & Connectivity](references/system-states-and-connectivity.md)**
-  — Bluetooth proxy bandwidth limits, Wi-Fi failovers, Doze mode, and battery
-  simulation.
+- **[Simulating Devices Without Hardware](references/simulating-devices.md)** —
+  Off-device host-JVM `@Preview` rendering boundaries, emulator image selection,
+  standalone watch OOBE bypass, and headless phone–watch emulator Data Layer
+  bridging (`adb-wear-pair`).
+- **[Network & Power States](references/network-and-power.md)** — Bluetooth
+  companion proxy bandwidth limits, 60-second Wi-Fi handoff delays, direct WPA2
+  credential injection, dual bugreports, Doze mode, and battery simulation.
+- **[UI, Display & Physical Inputs](references/ui-and-inputs.md)** — Dynamic
+  color themes (API 36+), font scale, display density (DPI), rotary crown and
+  wrist keyevents, and Wear OS 7+ One-Handed Gestures (`IWearGestureService`).
 - **[Location & Sensors](references/location-and-sensors.md)** — Fused Location
-  Provider rules, Mock Location App requirements, Wear Health Services synthetic
-  data, and One-Handed Gestures (Double-Pinch) simulation.
+  Provider anti-spoofing rules, Mock Location App requirements, and Wear Health
+  Services (`whs.*`) synthetic exercise and biometric data.
 - **[Permissions & OS Behavior](references/permissions-and-os-behavior.md)** —
-  Foreground Service types, API 30–36 changes, and Wear OS granular health
-  permissions.
+  Wear OS 5 vs. 6 granular health permissions, Foreground Service types, Watch
+  Face Push permission limits, `FLAG_STOPPED` de-isolation, locale switching,
+  and cloud backup/restore (`bmgr`).
 - **[Watch Faces & Complications](references/watch-faces-and-complications.md)**
-  — Watch face and complication updates via `DEBUG_SYSUI`, ambient mode
-  simulation, and standalone watch bootstrapping.
+  — Forcing complication updates via `DEBUG_SYSUI` (`adb-complication-update`)
+  and simulating ambient mode (`cmd wearable_sensing set-ambient-mode`).
+- **[UI Automation Guidelines](references/ui-automation-guidelines.md)** —
+  "Behave Like a Real User" and "Visual Timeline" policies, awake/demo mode
+  setup, companion app onboarding, and real-time sync verification.
 - **[Testability Patterns](references/testability-patterns.md)** — App-side
-  debug receivers, data seeding, OOBE race conditions, and standby buckets.
+  debug broadcast receivers, data seeding, OOBE race conditions, and standby
+  buckets.

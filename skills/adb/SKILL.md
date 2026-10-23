@@ -51,6 +51,10 @@ selection.
 - **Inspect Wear OS Data Layer:**
   `adb exec-out dumpsys activity service WearableService`
 
+- **Pair Phone & Wear OS Emulators (Data Layer Bridge):**
+  `scripts/adb-wear-pair` (or `scripts/adb-wear-pair --status` to inspect
+  pairing state)
+
 - **Package Information:** `scripts/packagename tiles PACKAGE_NAME`
   `scripts/packagename services PACKAGE_NAME`
 
@@ -143,6 +147,9 @@ on userdebug builds); user builds cannot export.
 ### System & Dumpsys
 
 - `scripts/adb-battery-stats`: Display battery-related information and settings.
+- `scripts/adb-wear-pair`: Headlessly pair a running phone emulator
+  (`google_apis` / `google_apis_ps16k` `userdebug`) with a Wear OS emulator over
+  TCP port `5601`, or inspect current pairing status (`--status`).
 
 ### Display & Demo Mode
 

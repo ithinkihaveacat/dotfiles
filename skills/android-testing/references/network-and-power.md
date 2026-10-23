@@ -1,4 +1,4 @@
-# System States & Connectivity
+# Network & Power States
 
 Android and Wear OS applications must handle volatile network connections,
 device handoffs, and strict operating system power management states gracefully.
@@ -90,6 +90,10 @@ use the raw Android `svc` power and network services:
   adb shell svc wifi enable
   ```
 
+*(For setting up a paired phone + Wear OS emulator Data Layer transport over TCP
+port `5601`, see
+**[Simulating Devices Without Hardware](simulating-devices.md#paired-phone--wear-os-emulator-bridging)**.)*
+
 ______________________________________________________________________
 
 ## Power & Doze Mode
@@ -120,95 +124,3 @@ Samsung Galaxy Watches transition to ambient/dim mode aggressively (typically
 within 5–10 seconds of user inactivity). When performing manual UI verifications
 or capturing visual assets, capture validation media immediately after
 rendering, or wake the device beforehand using `input keyevent KEYCODE_WAKEUP`.
-
-______________________________________________________________________
-
-## UI, Accessibility & Display
-
-Ensure your application's layouts and text scale gracefully across different
-form factors and configurations.
-
-- **Dynamic Color Themes (API 36+)**: Test how your app's UI adapts to different
-  Material 3 system color palettes (e.g., indigo, lemongrass, porcelain) via the
-  `theme_customization_overlay_packages` secure setting (or a workspace helper
-  such as `adb-theme set lemongrass` if available):
-  ```bash
-  adb shell settings put secure theme_customization_overlay_packages \
-    '{"android.theme.customization.color_source":"preset","android.theme.customization.system_palette":"#DDEB78","android.theme.customization.theme_style":"EXPRESSIVE"}'
-  ```
-- **Increase Font Scale (e.g., 1.3x)**:
-  ```bash
-  adb shell settings put system font_scale 1.3
-  ```
-- **Reset Font Scale**:
-  ```bash
-  adb shell settings put system font_scale 1.0
-  ```
-- **Change Display Density (DPI)**:
-  ```bash
-  adb shell wm density 250
-  ```
-- **Reset Display Density**:
-  ```bash
-  adb shell wm density reset
-  ```
-- **Toggle Theater Mode On (Screen Off, No Waking)**:
-  ```bash
-  adb shell settings put global theater_mode_on 1
-  ```
-
-______________________________________________________________________
-
-## Physical Inputs & Gestures
-
-Simulate physical Wear OS interactions using `keyevent`.
-
-- **Rotary Crown / Bezel Scroll**:
-  ```bash
-  adb shell input keyevent 260 # Scroll Up
-  adb shell input keyevent 261 # Scroll Down
-  ```
-- **Wrist Gestures**:
-  ```bash
-  adb shell input keyevent 264 # Flick Out (Accessibility/System navigation)
-  adb shell input keyevent 265 # Flick In
-  ```
-- **Hardware Buttons**:
-  ```bash
-  adb shell input keyevent KEYCODE_HOME # (3) Home Button
-  adb shell input keyevent KEYCODE_BACK # (4) Back Swipe / Button
-  ```
-
-______________________________________________________________________
-
-## Language & Localization
-
-Test localized strings without diving into the UI settings.
-
-- **Change Language (e.g., French)**: _(Note: The device UI will briefly restart
-  to apply the locale change)_
-  ```bash
-  adb shell setprop persist.sys.locale fr-FR
-  adb shell setprop ctl.restart zygote
-  ```
-
-______________________________________________________________________
-
-## Cloud Backup & Restore (Wear 4+)
-
-Wear OS 4+ supports cloud backup and restore (up to 25 MB per app). If the
-backup exceeds 25 MB, **no data** is backed up.
-
-- **Simulate Backup**: Force a backup using the local transport.
-  ```bash
-  adb shell bmgr backupnow <your.package.name>
-  ```
-- **Simulate Restore**:
-  ```bash
-  adb shell bmgr restore <your.package.name>
-  ```
-- **Wipe Data to Test Restore Flow**: Clear the app's data before restoring to
-  verify the fresh install + restore experience.
-  ```bash
-  adb shell pm clear <your.package.name>
-  ```

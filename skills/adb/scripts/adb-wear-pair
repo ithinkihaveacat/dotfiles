@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+
+# Targets Bash version 3.2.57(1)-release
+# Tests: skills/adb/tests/test-adb-wear-pair
+
+set -euo pipefail
+
+trap '{ echo >&2; } 2>/dev/null; exit 130' INT TERM
+
+# Status-tag colors are an enhancement only: plain-ASCII tags are always
+# emitted when stdout is not a TTY or NO_COLOR is set (https://no-color.org);
+# FORCE_COLOR!=0 forces styling for testing and piped-but-interactive use.
+case "${NO_COLOR:+set}" in
+  set) C_RESET="" C_GREEN="" C_YELLOW="" C_RED="" C_CYAN="" ;;
+  *)
+    if [[ -n ${FORCE_COLOR:-} && $FORCE_COLOR != 0 || -t 1 ]]; then
+      C_RESET=$'\033[0m'
+      C_GREEN=$'\033[32m'
+      C_YELLOW=$'\033[33m'
+      C_RED=$'\033[31m'
+      C_CYAN=$'\033[36m'
+    else
+      C_RESET="" C_GREEN="" C_YELLOW="" C_RED="" C_CYAN=""
+    fi
+    ;;
+esac
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Headlessly pairs a running Android phone emulator with a Wear OS watch emulator
+over TCP, bridging the Wearable Data Layer API without requiring the companion
+app.
+
+By default, the script auto-detects one connected phone and one connected watch.
+If multiple devices of the same form factor are connected, specify the serials
+explicitly.
+
+Options:
+  -p, --phone SERIAL  Target phone emulator serial (requires userdebug image).
+  -w, --watch SERIAL  Target Wear OS emulator serial.
+  --port PORT         TCP port to bridge on the host (default: 5601).
+  --status            Display current pairing status instead of pairing.
+  -v, --verbose       Include verbose dumpsys output during status checks.
+  -h, --help          Display this help message and exit.
+
+Environment:
+  ANDROID_PHONE_SERIAL  Serial number of the phone emulator.
+  ANDROID_WATCH_SERIAL  Serial number of the watch emulator.
+                        Command-line options take precedence when both are set.
+
+Examples:
+  $(basename "$0")
+  $(basename "$0") --status
+  $(basename "$0") -p emulator-5554 -w emulator-5556
+EOF
+  exit 0
+}
+
+PHONE_SERIAL="${ANDROID_PHONE_SERIAL:-}"
+WATCH_SERIAL="${ANDROID_WATCH_SERIAL:-}"
+PORT="5601"
+STATUS_ONLY=0
+VERBOSE=0
+PHONE_EXPLICIT=0
+WATCH_EXPLICIT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      ;;
+    -p | --phone)
+      if [[ -z "${2:-}" || "$2" == -* ]]; then
+        echo "$(basename "$0"): $1 option requires a device serial" >&2
+        exit 1
+      fi
+      PHONE_SERIAL="$2"
+      PHONE_EXPLICIT=1
+      shift 2
+      ;;
+    -w | --watch)
+      if [[ -z "${2:-}" || "$2" == -* ]]; then
+        echo "$(basename "$0"): $1 option requires a device serial" >&2
+        exit 1
+      fi
+      WATCH_SERIAL="$2"
+      WATCH_EXPLICIT=1
+      shift 2
+      ;;
+    --port)
+      if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+$ ]] || ((10#$2 < 1 || 10#$2 > 65535)); then
+        echo "$(basename "$0"): --port requires an integer between 1 and 65535" >&2
+        exit 1
+      fi
+      PORT="$2"
+      shift 2
+      ;;
+    --status)
+      STATUS_ONLY=1
+      shift
+      ;;
+    -v | --verbose)
+      VERBOSE=1
+      shift
+      ;;
+    -*)
+      echo "$(basename "$0"): unknown option: $1" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+    *)
+      echo "$(basename "$0"): unexpected argument: $1" >&2
+      echo "Try '$(basename "$0") --help' for more information." >&2
+      exit 1
+      ;;
+  esac
+done
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo >&2 "$(basename "$0"): $1 not found"
+    exit 127
+  }
+}
+
+require adb
+
+tag_pass="${C_GREEN}[PASS]${C_RESET}"
+tag_warn="${C_YELLOW}[WARN]${C_RESET}"
+tag_fail="${C_RED}[FAIL]${C_RESET}"
+tag_info="${C_CYAN}[INFO]${C_RESET}"
+
+get_prop() {
+  local serial="$1"
+  local prop="$2"
+  adb -s "$serial" exec-out getprop "$prop" 2>/dev/null | tr -d '\r\n'
+}
+
+check_device_online() {
+  local serial="$1"
+  local label="$2"
+  local state
+  state=$(adb -s "$serial" get-state 2>/dev/null | tr -d '\r\n' || true)
+  if [[ "$state" != "device" ]]; then
+    echo "$(basename "$0"): $label '$serial' is not available" >&2
+    exit 1
+  fi
+}
+
+# Auto-detect phone and watch devices when not explicitly set
+PHONE_CANDIDATES=()
+WATCH_CANDIDATES=()
+
+if [[ -z "$PHONE_SERIAL" || -z "$WATCH_SERIAL" ]]; then
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" == "List of devices"* || "$line" == \** ]] && continue
+    dev_serial=$(awk '{print $1}' <<<"$line")
+    dev_state=$(awk '{print $2}' <<<"$line")
+    [[ "$dev_state" == "device" ]] || continue
+    chars=$(get_prop "$dev_serial" ro.build.characteristics)
+    if [[ "$chars" == *watch* ]]; then
+      WATCH_CANDIDATES+=("$dev_serial")
+    else
+      PHONE_CANDIDATES+=("$dev_serial")
+    fi
+  done < <(adb devices)
+fi
+
+check_node_status() {
+  local role_label="$1"
+  local serial="$2"
+  local raw local_node="" peer_line="" peer_connected=""
+  local rc=0
+
+  raw=$(adb -s "$serial" shell cmd activity broadcast \
+    -a com.google.android.gms.wearable.EMULATOR \
+    --es operation get-pairing-status 2>/dev/null | tr -d '\r' || true)
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ Local:\[([^]]*)\] ]]; then
+      local_node="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ Peer:\[([^]]*)\] ]]; then
+      peer_line="${BASH_REMATCH[1]}"
+    fi
+  done <<<"$raw"
+
+  if [[ -n "$local_node" ]]; then
+    printf '%s  %s (%s): Local:[%s]\n' "$tag_info" "$role_label" "$serial" "$local_node"
+  else
+    printf '%s  %s (%s): WearableService did not return a local node ID\n' "$tag_fail" "$role_label" "$serial"
+    rc=1
+  fi
+
+  if [[ -n "$peer_line" ]]; then
+    IFS=',' read -r _ peer_connected _ <<<"$peer_line"
+    if [[ "$peer_connected" == "true" ]]; then
+      printf '%s  %s (%s): Peer:[%s] (Paired, Connected)\n' \
+        "$tag_pass" "$role_label" "$serial" "$peer_line"
+    else
+      printf '%s  %s (%s): Peer:[%s] (Paired, Disconnected)\n' \
+        "$tag_warn" "$role_label" "$serial" "$peer_line"
+      rc=1
+    fi
+  else
+    printf '%s  %s (%s): Unpaired (No peer node recorded)\n' "$tag_fail" "$role_label" "$serial"
+    rc=1
+  fi
+
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    echo "        --- ConnectionServiceManager ($serial) ---"
+    adb -s "$serial" shell dumpsys activity service WearableService ConnectionServiceManager 2>/dev/null |
+      tr -d '\r' | sed 's/^/        /' || true
+  fi
+
+  return "$rc"
+}
+
+if [[ "$STATUS_ONLY" -eq 1 ]]; then
+  if [[ "$PHONE_EXPLICIT" -eq 0 && "$WATCH_EXPLICIT" -eq 0 ]]; then
+    if [[ -z "$PHONE_SERIAL" ]]; then
+      if [[ ${#PHONE_CANDIDATES[@]} -eq 1 ]]; then
+        PHONE_SERIAL="${PHONE_CANDIDATES[0]}"
+      elif [[ ${#PHONE_CANDIDATES[@]} -gt 1 ]]; then
+        echo "$(basename "$0"): multiple phone devices connected; specify --phone SERIAL" >&2
+        exit 1
+      fi
+    fi
+    if [[ -z "$WATCH_SERIAL" ]]; then
+      if [[ ${#WATCH_CANDIDATES[@]} -eq 1 ]]; then
+        WATCH_SERIAL="${WATCH_CANDIDATES[0]}"
+      elif [[ ${#WATCH_CANDIDATES[@]} -gt 1 ]]; then
+        echo "$(basename "$0"): multiple watch devices connected; specify --watch SERIAL" >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  if [[ -z "$PHONE_SERIAL" && -z "$WATCH_SERIAL" ]]; then
+    echo "$(basename "$0"): no connected Android or Wear OS devices found" >&2
+    exit 1
+  fi
+
+  status_rc=0
+  if [[ -n "$PHONE_SERIAL" && ("$PHONE_EXPLICIT" -eq 1 || "$WATCH_EXPLICIT" -eq 0) ]]; then
+    check_device_online "$PHONE_SERIAL" "phone"
+    check_node_status "Phone" "$PHONE_SERIAL" || status_rc=1
+  fi
+  if [[ -n "$WATCH_SERIAL" && ("$WATCH_EXPLICIT" -eq 1 || "$PHONE_EXPLICIT" -eq 0) ]]; then
+    check_device_online "$WATCH_SERIAL" "watch"
+    check_node_status "Watch" "$WATCH_SERIAL" || status_rc=1
+  fi
+  exit "$status_rc"
+fi
+
+# Pairing mode requires both a phone and a watch emulator
+if [[ -z "$PHONE_SERIAL" ]]; then
+  if [[ ${#PHONE_CANDIDATES[@]} -eq 1 ]]; then
+    PHONE_SERIAL="${PHONE_CANDIDATES[0]}"
+  elif [[ ${#PHONE_CANDIDATES[@]} -eq 0 ]]; then
+    echo "$(basename "$0"): no phone device connected (start a phone emulator or pass --phone SERIAL)" >&2
+    exit 1
+  else
+    echo "$(basename "$0"): multiple phone devices connected; specify --phone SERIAL" >&2
+    exit 1
+  fi
+fi
+
+if [[ -z "$WATCH_SERIAL" ]]; then
+  if [[ ${#WATCH_CANDIDATES[@]} -eq 1 ]]; then
+    WATCH_SERIAL="${WATCH_CANDIDATES[0]}"
+  elif [[ ${#WATCH_CANDIDATES[@]} -eq 0 ]]; then
+    echo "$(basename "$0"): no watch device connected (start a Wear OS emulator or pass --watch SERIAL)" >&2
+    exit 1
+  else
+    echo "$(basename "$0"): multiple watch devices connected; specify --watch SERIAL" >&2
+    exit 1
+  fi
+fi
+
+check_device_online "$PHONE_SERIAL" "phone"
+check_device_online "$WATCH_SERIAL" "watch"
+
+# Elevate phone adbd to root and verify root access (requires userdebug image)
+root_out=$(adb -s "$PHONE_SERIAL" root 2>&1 || true)
+adb -s "$PHONE_SERIAL" wait-for-device
+
+phone_uid=""
+if [[ "$root_out" != *"cannot run as root"* ]]; then
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    phone_uid=$(adb -s "$PHONE_SERIAL" exec-out id -u 2>/dev/null | tr -d '\r\n' || true)
+    [[ "$phone_uid" == "0" ]] && break
+    build_type_check=$(get_prop "$PHONE_SERIAL" ro.build.type)
+    [[ "$build_type_check" == "user" ]] && break
+    sleep 1
+  done
+fi
+
+if [[ "$phone_uid" != "0" ]]; then
+  build_type=$(get_prop "$PHONE_SERIAL" ro.build.type)
+  echo "$(basename "$0"): phone '$PHONE_SERIAL' refused 'adb root' (ro.build.type=${build_type:-unknown}); use a 'google_apis' or 'google_apis_ps16k' userdebug image instead of 'google_apis_playstore'" >&2
+  exit 1
+fi
+
+# 1. Enable WearableService on the phone via GMSCore flag override (no stub APK required)
+adb -s "$PHONE_SERIAL" shell 'am broadcast -a "com.google.android.gms.phenotype.FLAG_OVERRIDE" \
+  --es package "com.google.android.gms.wearable" \
+  --es user "*" \
+  --esa flags "may_run_without_wearable_app" \
+  --esa values "true" \
+  --esa types "boolean"' >/dev/null
+
+adb -s "$PHONE_SERIAL" shell am force-stop com.google.android.gms
+adb -s "$PHONE_SERIAL" shell am startservice \
+  -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null
+
+# 2. Wait for GMSCore to initialize connectionconfig.db on the phone
+db_path="/data/data/com.google.android.gms/databases/connectionconfig.db"
+db_ready=0
+for _ in $(seq 1 45); do
+  if adb -s "$PHONE_SERIAL" shell "test -f $db_path" >/dev/null 2>&1; then
+    db_ready=1
+    break
+  fi
+  adb -s "$PHONE_SERIAL" shell am startservice \
+    -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null 2>&1 || true
+  sleep 1
+done
+
+if [[ "$db_ready" -ne 1 ]]; then
+  echo "$(basename "$0"): timed out waiting for GMSCore to create $db_path on '$PHONE_SERIAL'" >&2
+  exit 1
+fi
+
+# 3. Seed the server TCP listener row as GMSCore's Linux UID and restart WearableService
+# shellcheck disable=SC2016 # $GMS_UID is evaluated inside the remote adb shell
+adb -s "$PHONE_SERIAL" shell '
+  GMS_UID=$(stat -c %U /data/data/com.google.android.gms)
+  su "$GMS_UID" sqlite3 /data/data/com.google.android.gms/databases/connectionconfig.db \
+    "INSERT OR REPLACE INTO connectionConfigurations (name, pairedBtAddress, connectionType, role, connectionEnabled) VALUES ('\''server'\'', '\''NULL_STRING'\'', 2, 2, 1);"
+  am force-stop com.google.android.gms
+  am startservice -a com.google.android.gms.wearable.BIND -p com.google.android.gms >/dev/null
+'
+
+# 4. Bridge TCP port and dismiss watch tutorial / keyguard overlays
+adb -s "$PHONE_SERIAL" forward "tcp:$PORT" tcp:5601 >/dev/null
+adb -s "$WATCH_SERIAL" reverse tcp:5601 "tcp:$PORT" >/dev/null
+
+adb -s "$WATCH_SERIAL" shell '
+  am broadcast -a com.google.android.clockwork.action.TUTORIAL_SKIP >/dev/null 2>&1 || true
+  wm dismiss-keyguard >/dev/null 2>&1 || true
+  cmd activity broadcast -a com.google.android.gms.wearable.EMULATOR --es operation refresh-emulator-connection >/dev/null
+'
+
+# 5. Poll get-pairing-status until both phone and watch report an active connected peer
+paired=0
+for attempt in $(seq 1 30); do
+  p_out=$(adb -s "$PHONE_SERIAL" shell cmd activity broadcast \
+    -a com.google.android.gms.wearable.EMULATOR --es operation get-pairing-status 2>/dev/null | tr -d '\r' || true)
+  w_out=$(adb -s "$WATCH_SERIAL" shell cmd activity broadcast \
+    -a com.google.android.gms.wearable.EMULATOR --es operation get-pairing-status 2>/dev/null | tr -d '\r' || true)
+
+  if [[ "$p_out" == *"Peer:["*",true,"* && "$w_out" == *"Peer:["*",true,"* ]]; then
+    paired=1
+    break
+  fi
+
+  if ((attempt % 5 == 0)); then
+    adb -s "$WATCH_SERIAL" shell cmd activity broadcast \
+      -a com.google.android.gms.wearable.EMULATOR --es operation refresh-emulator-connection >/dev/null 2>&1 || true
+  fi
+  sleep 2
+done
+
+if [[ "$paired" -ne 1 ]]; then
+  echo "$(basename "$0"): timed out waiting for '$PHONE_SERIAL' and '$WATCH_SERIAL' to pair over port $PORT" >&2
+  check_node_status "Phone" "$PHONE_SERIAL" || true
+  check_node_status "Watch" "$WATCH_SERIAL" || true
+  exit 1
+fi
+
+check_node_status "Phone" "$PHONE_SERIAL"
+check_node_status "Watch" "$WATCH_SERIAL"

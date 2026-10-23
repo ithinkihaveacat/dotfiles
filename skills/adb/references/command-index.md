@@ -619,6 +619,58 @@ adb exec-out dumpsys battery
 adb exec-out dumpsys settings | awk -v _match="match" '$2 ~ "name:(" _match ")"'
 ```
 
+### `scripts/adb-wear-pair`
+
+**Purpose**: Headlessly pair a running Android phone emulator with a Wear OS
+watch emulator over TCP port `5601`, or query current pairing state
+(`--status`). **Dependencies**: `adb`
+
+<!-- generated: ../scripts/adb-wear-pair --help -->
+
+```text
+Usage: adb-wear-pair [OPTIONS]
+
+Headlessly pairs a running Android phone emulator with a Wear OS watch emulator
+over TCP, bridging the Wearable Data Layer API without requiring the companion
+app.
+
+By default, the script auto-detects one connected phone and one connected watch.
+If multiple devices of the same form factor are connected, specify the serials
+explicitly.
+
+Options:
+  -p, --phone SERIAL  Target phone emulator serial (requires userdebug image).
+  -w, --watch SERIAL  Target Wear OS emulator serial.
+  --port PORT         TCP port to bridge on the host (default: 5601).
+  --status            Display current pairing status instead of pairing.
+  -v, --verbose       Include verbose dumpsys output during status checks.
+  -h, --help          Display this help message and exit.
+
+Environment:
+  ANDROID_PHONE_SERIAL  Serial number of the phone emulator.
+  ANDROID_WATCH_SERIAL  Serial number of the watch emulator.
+                        Command-line options take precedence when both are set.
+
+Examples:
+  adb-wear-pair
+  adb-wear-pair --status
+  adb-wear-pair -p emulator-5554 -w emulator-5556
+```
+
+<!-- /generated -->
+
+**Raw Command**:
+
+```bash
+# Query pairing status on an emulator
+adb -s SERIAL shell cmd activity broadcast \
+  -a com.google.android.gms.wearable.EMULATOR --es operation get-pairing-status
+
+# Refresh emulator TCP connection
+adb -s WATCH_SERIAL shell cmd activity broadcast \
+  -a com.google.android.gms.wearable.EMULATOR --es operation refresh-emulator-connection
+```
+
 ## Display & Demo Mode
 
 ### `scripts/adb-demo`

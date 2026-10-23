@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+
+# Tests: skills/adb/tests/test-adb-wear-pair
+
+set -euo pipefail
+
+unset NO_COLOR FORCE_COLOR ANDROID_PHONE_SERIAL ANDROID_WATCH_SERIAL
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+BIN="$DIR/../scripts/adb-wear-pair"
+
+TMPDIR_TEST=$(mktemp -d)
+MOCK_BIN="$TMPDIR_TEST/bin"
+ADB_LOG="$TMPDIR_TEST/adb.log"
+mkdir -p "$MOCK_BIN"
+trap 'rm -rf "$TMPDIR_TEST"' EXIT
+
+cat <<'EOF' >"$MOCK_BIN/adb"
+#!/usr/bin/env bash
+echo "$*" >>"$MOCK_ADB_LOG"
+
+serial=""
+if [[ "${1:-}" == "-s" ]]; then
+  serial="$2"
+  shift 2
+fi
+
+case "${1:-}" in
+  devices)
+    echo "List of devices attached"
+    if [[ "${MOCK_DEVICES:-both}" == "both" ]]; then
+      echo "emulator-5554	device"
+      echo "emulator-5556	device"
+    elif [[ "${MOCK_DEVICES:-}" == "watch-only" ]]; then
+      echo "emulator-5556	device"
+    elif [[ "${MOCK_DEVICES:-}" == "none" ]]; then
+      :
+    fi
+    exit 0
+    ;;
+  get-state)
+    echo "device"
+    exit 0
+    ;;
+  root | wait-for-device | forward | reverse)
+    exit 0
+    ;;
+  exec-out)
+    shift
+    case "${1:-}" in
+      getprop)
+        case "${2:-}" in
+          ro.build.characteristics)
+            if [[ "$serial" == "emulator-5556" ]]; then
+              echo "nosdcard,watch"
+            else
+              echo "emulator"
+            fi
+            ;;
+          ro.build.type)
+            echo "${MOCK_BUILD_TYPE:-userdebug}"
+            ;;
+        esac
+        ;;
+      id)
+        if [[ "${MOCK_ROOT_UID:-0}" == "0" ]]; then
+          echo "0"
+        else
+          echo "2000"
+        fi
+        ;;
+    esac
+    exit 0
+    ;;
+  shell)
+    shift
+    cmd="$*"
+    if [[ "$cmd" == *"get-pairing-status"* ]]; then
+      if [[ "$serial" == "emulator-5554" ]]; then
+        echo 'Broadcasting: Intent { act=com.google.android.gms.wearable.EMULATOR }'
+        case "${MOCK_STATUS_PHONE:-connected}" in
+          connected)
+            printf 'Broadcast completed: result=1, data="Local:[585efd19]\nPeer:[6c5e1337,true,true]\n"\n'
+            ;;
+          disconnected)
+            printf 'Broadcast completed: result=1, data="Local:[585efd19]\nPeer:[6c5e1337,false,false]\n"\n'
+            ;;
+          unpaired)
+            printf 'Broadcast completed: result=1, data="Local:[585efd19]\n"\n'
+            ;;
+        esac
+      else
+        echo 'Broadcasting: Intent { act=com.google.android.gms.wearable.EMULATOR }'
+        case "${MOCK_STATUS_WATCH:-connected}" in
+          connected)
+            printf 'Broadcast completed: result=1, data="Local:[6c5e1337]\nPeer:[585efd19,true,true]\n"\n'
+            ;;
+          disconnected)
+            printf 'Broadcast completed: result=1, data="Local:[6c5e1337]\nPeer:[585efd19,false,false]\n"\n'
+            ;;
+          unpaired)
+            printf 'Broadcast completed: result=1, data="Local:[6c5e1337]\n"\n'
+            ;;
+        esac
+      fi
+    elif [[ "$cmd" == *"ConnectionServiceManager"* ]]; then
+      echo "ConnectionConfiguration: PeerNodeId=585efd19"
+    fi
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$MOCK_BIN/adb"
+
+export PATH="$MOCK_BIN:$PATH"
+export MOCK_ADB_LOG="$ADB_LOG"
+
+test_num=0
+failed=0
+
+ok() {
+  test_num=$((test_num + 1))
+  echo "ok $test_num - $1"
+}
+
+not_ok() {
+  test_num=$((test_num + 1))
+  failed=1
+  echo "not ok $test_num - $1"
+  shift
+  for line in "$@"; do
+    echo "#   $line"
+  done
+}
+
+# Test 1: --help exits 0 and shows usage
+if out=$("$BIN" --help 2>&1) && [[ "$out" == *"Usage: adb-wear-pair"* ]]; then
+  ok "--help prints usage and exits 0"
+else
+  not_ok "--help prints usage and exits 0" "$out"
+fi
+
+# Test 2: --status when both phone and watch are connected and paired
+: >"$ADB_LOG"
+if out=$("$BIN" --status 2>&1); then
+  if [[ "$out" == *"[PASS]  Phone (emulator-5554): Peer:[6c5e1337,true,true] (Paired, Connected)"* &&
+    "$out" == *"[PASS]  Watch (emulator-5556): Peer:[585efd19,true,true] (Paired, Connected)"* ]]; then
+    ok "--status reports [PASS] for connected phone and watch"
+  else
+    not_ok "--status reports [PASS] for connected phone and watch" "$out"
+  fi
+else
+  not_ok "--status exits 0 when connected" "$out"
+fi
+
+# Test 3: --status when only watch emulator is running and previously paired (disconnected)
+status=0
+out=$(MOCK_DEVICES=watch-only MOCK_STATUS_WATCH=disconnected "$BIN" --status 2>&1) || status=$?
+if [[ "$status" -eq 1 && "$out" == *"[WARN]  Watch (emulator-5556): Peer:[585efd19,false,false] (Paired, Disconnected)"* ]]; then
+  ok "--status on single running watch emulator reports [WARN] when peer is disconnected"
+else
+  not_ok "--status on single running watch emulator reports [WARN] when peer is disconnected" "status=$status" "$out"
+fi
+
+# Test 4: --status when watch is unpaired
+status=0
+out=$(MOCK_DEVICES=watch-only MOCK_STATUS_WATCH=unpaired "$BIN" --status 2>&1) || status=$?
+if [[ "$status" -eq 1 && "$out" == *"[FAIL]  Watch (emulator-5556): Unpaired (No peer node recorded)"* ]]; then
+  ok "--status reports [FAIL] when device is unpaired"
+else
+  not_ok "--status reports [FAIL] when device is unpaired" "status=$status" "$out"
+fi
+
+# Test 5: FORCE_COLOR=1 and NO_COLOR=1 tag styling
+out_color=$(FORCE_COLOR=1 "$BIN" --status 2>&1)
+out_nocolor=$(NO_COLOR=1 FORCE_COLOR=1 "$BIN" --status 2>&1)
+if [[ "$out_color" == *$'\033[32m[PASS]\033[0m'* && "$out_nocolor" != *$'\033['* ]]; then
+  ok "FORCE_COLOR and NO_COLOR control status tag SGR styling"
+else
+  not_ok "FORCE_COLOR and NO_COLOR control status tag SGR styling" "$out_color" "$out_nocolor"
+fi
+
+# Test 6: Pairing fails fast when phone refuses adb root (e.g. playstore user build)
+status=0
+out=$(MOCK_ROOT_UID=2000 MOCK_BUILD_TYPE=user "$BIN" 2>&1) || status=$?
+if [[ "$status" -eq 1 && "$out" == *"refused 'adb root' (ro.build.type=user)"* ]]; then
+  ok "pairing fails fast when phone image refuses adb root"
+else
+  not_ok "pairing fails fast when phone image refuses adb root" "status=$status" "$out"
+fi
+
+# Test 7: Full pairing sequence auto-detects devices, seeds SQLite, bridges port, and verifies status
+: >"$ADB_LOG"
+if out=$("$BIN" --port 5605 2>&1); then
+  log_content=$(cat "$ADB_LOG")
+  if [[ "$log_content" == *"may_run_without_wearable_app"* &&
+    "$log_content" == *"forward tcp:5605 tcp:5601"* &&
+    "$log_content" == *"reverse tcp:5601 tcp:5605"* &&
+    "$out" == *"[PASS]  Phone (emulator-5554)"* &&
+    "$out" == *"[PASS]  Watch (emulator-5556)"* ]]; then
+    ok "full pairing sequence configures GMSCore, forwards port, and verifies status"
+  else
+    not_ok "full pairing sequence configures GMSCore, forwards port, and verifies status" "$out" "$log_content"
+  fi
+else
+  not_ok "full pairing sequence exits 0" "$out"
+fi
+
+echo "1..$test_num"
+exit "$failed"

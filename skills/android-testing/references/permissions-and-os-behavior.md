@@ -1,8 +1,9 @@
 # Permissions & OS Behavior
 
-Testing permissions on Wear OS and modern Android versions requires
-understanding both baseline Android security changes and Wear-specific quirks
-(such as cross-device requesting and granular health siloing).
+Testing permissions and system lifecycle behavior on Wear OS and modern Android
+versions requires understanding both baseline Android security changes and
+Wear-specific quirks (such as granular health siloing, Foreground Service
+restrictions, package stopped state, localization, and cloud backup).
 
 ______________________________________________________________________
 
@@ -110,3 +111,38 @@ widgets:
 ```bash
 adb shell monkey -p <package_name> -c android.intent.category.LAUNCHER 1
 ```
+
+______________________________________________________________________
+
+## Language & Localization
+
+Test localized strings across system and app locales without navigating the
+Settings UI:
+
+- **Change System Language (e.g., French)** _(requires `adb root`; the device UI
+  briefly restarts to apply the locale change)_:
+  ```bash
+  adb shell setprop persist.sys.locale fr-FR
+  adb shell setprop ctl.restart zygote
+  ```
+
+______________________________________________________________________
+
+## Cloud Backup & Restore (Wear OS 4+)
+
+Wear OS 4+ supports cloud backup and restore (up to 25 MB per app). If the
+backup exceeds 25 MB, **no data** is backed up.
+
+- **Simulate Backup**: Force a backup using the local transport:
+  ```bash
+  adb shell bmgr backupnow <your.package.name>
+  ```
+- **Simulate Restore**:
+  ```bash
+  adb shell bmgr restore <your.package.name>
+  ```
+- **Wipe Data to Test Restore Flow**: Clear the app's data before restoring to
+  verify the fresh install + restore experience:
+  ```bash
+  adb shell pm clear <your.package.name>
+  ```
