@@ -442,6 +442,13 @@ function is_codex_agent {
   [ "$path" != "/usr/bin/codex" ] && [ "$path" != "/bin/codex" ]
 }
 
+# Returns success if the OpenCode agent is found, either on PATH or in its
+# standalone install directory.
+function is_opencode_agent {
+  exists opencode && return 0
+  [ -x "$HOME/.opencode/bin/opencode" ]
+}
+
 PACKAGE_STAMP="$XDG_CACHE_HOME/dotfiles/last_package_update"
 
 # Returns success (0) if the stamp file exists and was modified within the last
@@ -1831,12 +1838,23 @@ function feature_agents {
       xmkdir "$HOME/.claude"
       x ln -sf "$agents_context" "$HOME/.claude/CLAUDE.md"
     fi
+    if is_opencode_agent; then
+      xmkdir "$XDG_CONFIG_HOME/opencode"
+      x ln -sf "$agents_context" "$XDG_CONFIG_HOME/opencode/AGENTS.md"
+    fi
   fi
 
   if exists agy; then
     xmkdir "$HOME/.gemini/config"
     link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
     link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
+  fi
+
+  if is_opencode_agent; then
+    xmkdir "$XDG_CONFIG_HOME/opencode/plugins"
+    link_overlay_path \
+      "etc/agents/opencode/plugins/ensure-commit-hooks.ts" \
+      "$XDG_CONFIG_HOME/opencode/plugins/ensure-commit-hooks.ts"
   fi
 
   if exists claude; then

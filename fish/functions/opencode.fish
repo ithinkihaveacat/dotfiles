@@ -1,4 +1,5 @@
 function opencode --description 'Run opencode from ~/.opencode/bin or PATH'
+    _agent_preflight opencode; or return
     if test -x $HOME/.opencode/bin/opencode
         $HOME/.opencode/bin/opencode $argv
     else if type -q -f opencode

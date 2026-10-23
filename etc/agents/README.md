@@ -16,8 +16,11 @@ etc/agents/
 │   ├── hooks.json
 │   ├── hooks/         # PreToolUse, SessionStart
 │   └── statusline.sh
-└── claude/            # Claude Code adapters
-    └── statusline.sh
+├── claude/            # Claude Code adapters
+│   └── statusline.sh
+└── opencode/          # OpenCode adapters
+    └── plugins/
+        └── ensure-commit-hooks.ts
 ```
 
 - **Top level: shared by every agent.** `AGENTS.md` is written once and linked
@@ -29,6 +32,9 @@ etc/agents/
   accepts a silent exit (Claude Code) runs it directly. Keeping the reply in a
   wrapper means no agent's decision format can leak into another: Claude Code,
   for example, reads an `allow` decision as "skip the permission prompt".
+  OpenCode exposes hooks through a plugin API rather than a command manifest, so
+  `opencode/plugins/ensure-commit-hooks.ts` is a thin adapter that forwards its
+  shell command and working directory to the same script.
 - **`<agent>/`: adapters for one agent.** These are the files only that agent
   understands: its hook manifest, wrappers that adapt shared hooks to its API,
   and its status line script.
@@ -44,24 +50,25 @@ applied.
 What each agent receives, and where it comes from. "Manual" means the setting is
 configured by hand, as described in the script's header.
 
-| Concern                 | Source                                                       | Claude Code                     | Codex                               | Antigravity                         | OpenCode            |
-| ----------------------- | ------------------------------------------------------------ | ------------------------------- | ----------------------------------- | ----------------------------------- | ------------------- |
-| Global instructions     | `AGENTS.md`, linked by `install.sh`                          | `~/.claude/CLAUDE.md`           | `~/.codex/AGENTS.md`                | `~/.gemini/GEMINI.md`               | Not linked          |
-| Launch wrapper          | `fish/functions/<agent>.fish`                                | Session directory and preflight | Sandbox defaults and preflight      | Preflight                           | Locates binary only |
-| Preflight               | `fish/functions/_agent_preflight.fish`                       | Session-scope default skills    | Workspace default skills, git hooks | Workspace default skills, git hooks | None                |
-| Commit-hook safety net  | `hooks/ensure-commit-hooks`                                  | `~/.claude/settings.json`       | None                                | `agy/hooks/PreToolUse`              | None                |
-| Status line             | `<agent>/statusline.sh`                                      | Manual                          | None                                | Manual                              | None                |
-| Skills                  | `skill` ([agent-config](../../skills/agent-config/SKILL.md)) | Workspace, session, user        | Workspace, user                     | Workspace, session, user            | Not targeted        |
-| Command permissions     | `permission` (agent-config)                                  | Yes                             | Yes                                 | Yes                                 | No                  |
-| MCP servers             | `mcp` (agent-config)                                         | Yes                             | Yes                                 | No                                  | Yes                 |
-| Andon plugin            | [`plugins/andon/`](../../skills/agent-config/plugins/andon/) | `claude/`                       | `chatgpt/`                          | No                                  | `opencode/`         |
-| Directory pre-approvals | `permission path add`, run by `install.sh`                   | Yes                             | Yes                                 | Yes                                 | No                  |
+| Concern                 | Source                                                       | Claude Code                     | Codex                               | Antigravity                         | OpenCode                            |
+| ----------------------- | ------------------------------------------------------------ | ------------------------------- | ----------------------------------- | ----------------------------------- | ----------------------------------- |
+| Global instructions     | `AGENTS.md`, linked by `install.sh`                          | `~/.claude/CLAUDE.md`           | `~/.codex/AGENTS.md`                | `~/.gemini/GEMINI.md`               | `~/.config/opencode/AGENTS.md`      |
+| Launch wrapper          | `fish/functions/<agent>.fish`                                | Session directory and preflight | Sandbox defaults and preflight      | Preflight                           | Preflight                           |
+| Preflight               | `fish/functions/_agent_preflight.fish`                       | Session-scope default skills    | Workspace default skills, git hooks | Workspace default skills, git hooks | Workspace default skills, git hooks |
+| Commit-hook safety net  | `hooks/ensure-commit-hooks`                                  | `~/.claude/settings.json`       | None                                | `agy/hooks/PreToolUse`              | `plugins/ensure-commit-hooks.ts`    |
+| Status line             | `<agent>/statusline.sh`                                      | Manual                          | None                                | Manual                              | None                                |
+| Skills                  | `skill` ([agent-config](../../skills/agent-config/SKILL.md)) | Workspace, session, user        | Workspace, user                     | Workspace, session, user            | Workspace                           |
+| Command permissions     | `permission` (agent-config)                                  | Yes                             | Yes                                 | Yes                                 | No                                  |
+| MCP servers             | `mcp` (agent-config)                                         | Yes                             | Yes                                 | No                                  | Yes                                 |
+| Andon plugin            | [`plugins/andon/`](../../skills/agent-config/plugins/andon/) | `claude/`                       | `chatgpt/`                          | No                                  | `opencode/`                         |
+| Directory pre-approvals | `permission path add`, run by `install.sh`                   | Yes                             | Yes                                 | Yes                                 | No                                  |
 
 Codex reads skills from the shared `.agents/skills` directory and has no session
 scope (see
 [the agent-config model](../../skills/agent-config/references/model.md#launchers-and-per-session-skills)).
-`skill` has no OpenCode backend; OpenCode sees linked skills only if it reads
-one of the shared directories itself. The Codex Andon plugin lives in `chatgpt/`
+OpenCode reads the same shared directory (and `.claude/skills`) directly, so
+workspace links work there, but `skill` has no OpenCode backend: there is no
+session scope and no user scope. The Codex Andon plugin lives in `chatgpt/`
 because it also serves the ChatGPT desktop app.
 
 ## Adding an agent
@@ -76,8 +83,8 @@ because it also serves the ChatGPT desktop app.
    [Overlay-aware paths](../../README.md#overlay-aware-paths) table for each.
 1. **Shared hooks:** if the agent has a pre-tool hook, run
    `hooks/ensure-commit-hooks` from it, wrapping it if the agent requires a
-   reply, and extend that script's payload parsing if the agent's JSON shape
-   differs.
+   reply (or adapting it in the agent's plugin, as OpenCode does), and extend
+   that script's payload parsing if the agent's JSON shape differs.
 1. **Tools:** add a backend to `skill`, `permission` or `mcp` in
    `skills/agent-config/scripts/` where the agent has the matching feature.
 1. **Matrix:** add the agent's column above.

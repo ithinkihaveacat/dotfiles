@@ -127,22 +127,23 @@ the last overlay to provide a given filename wins.
 
 ### Overlay-aware paths
 
-| Path                                   | Mechanism                           | Notes                                                                                        |
-| -------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------- |
-| `home/.*`                              | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                               |
-| `etc/agents/AGENTS.md`                 | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/` (gated on their respective binaries)    |
-| `etc/agents/agy/hooks.json`            | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks.json` (gated on `agy`)                                  |
-| `etc/agents/agy/hooks`                 | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                       |
-| `etc/agents/hooks/ensure-commit-hooks` | `overlay_path`                      | Registered as a `PreToolUse` hook in `~/.claude/settings.json` (gated on `claude`)           |
-| `etc/shpool/config.toml`               | `link_overlay_path`                 |                                                                                              |
-| `etc/starship/starship.toml`           | `link_overlay_path`                 |                                                                                              |
-| `etc/ghostty/config`                   | `link_overlay_path`                 |                                                                                              |
-| `etc/bat/config`                       | `link_overlay_path`                 |                                                                                              |
-| `etc/code/`                            | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                            |
-| `etc/macos/KeyBindings`                | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                     |
-| `etc/macos/Solarized.clr`              | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                |
-| `etc/skill/defaults.sh`                | run by `install.sh`                 | Adds or removes default skills with `skill --scope defaults`                                 |
-| `skills/*/`                            | `skill` catalog source              | Not linked globally; added per workspace via `skill add` (see [Agent skills](#agent-skills)) |
+| Path                                                 | Mechanism                           | Notes                                                                                           |
+| ---------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `home/.*`                                            | `link_home_dotfiles` (all overlays) | Last overlay wins per filename                                                                  |
+| `etc/agents/AGENTS.md`                               | `overlay_path` (highest wins)       | Symlinked to `~/.codex/`, `~/.gemini/`, `~/.claude/`, `~/.config/opencode/` (gated on binaries) |
+| `etc/agents/agy/hooks.json`                          | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks.json` (gated on `agy`)                                     |
+| `etc/agents/agy/hooks`                               | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                          |
+| `etc/agents/hooks/ensure-commit-hooks`               | `overlay_path`                      | Registered as a `PreToolUse` hook in `~/.claude/settings.json` (gated on `claude`)              |
+| `etc/agents/opencode/plugins/ensure-commit-hooks.ts` | `link_overlay_path`                 | Symlinked to `~/.config/opencode/plugins/` (gated on `opencode`)                                |
+| `etc/shpool/config.toml`                             | `link_overlay_path`                 |                                                                                                 |
+| `etc/starship/starship.toml`                         | `link_overlay_path`                 |                                                                                                 |
+| `etc/ghostty/config`                                 | `link_overlay_path`                 |                                                                                                 |
+| `etc/bat/config`                                     | `link_overlay_path`                 |                                                                                                 |
+| `etc/code/`                                          | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                               |
+| `etc/macos/KeyBindings`                              | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                        |
+| `etc/macos/Solarized.clr`                            | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                   |
+| `etc/skill/defaults.sh`                              | run by `install.sh`                 | Adds or removes default skills with `skill --scope defaults`                                    |
+| `skills/*/`                                          | `skill` catalog source              | Not linked globally; added per workspace via `skill add` (see [Agent skills](#agent-skills))    |
 
 ### Per-overlay `update` hooks
 

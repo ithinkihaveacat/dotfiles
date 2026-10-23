@@ -63,9 +63,9 @@ link.
 - **Defaults** are set by `etc/skill/defaults.sh` in this repo and each overlay
   (`~/.private`, `~/.corp`), run by `install.sh`, so private skill names stay
   out of this repo and the launch path never edits the defaults.
-- **Workspaces**: the `codex` and `agy` wrappers run `skill add --defaults`.
-  Outside a repository or plugin-recognized workspace, that is a no-op unless
-  the directory already has a skill folder.
+- **Workspaces**: the `codex`, `agy` and `opencode` wrappers run
+  `skill add --defaults`. Outside a repository or plugin-recognized workspace,
+  that is a no-op unless the directory already has a skill folder.
 - **Claude sessions**: the `claude` wrapper creates a fresh session directory
   and runs `skill --scope session add --defaults`, so a wrapped Claude always
   sees the current defaults and the workspace is left alone.
@@ -77,12 +77,14 @@ Each `skill` run costs about half a second, so each launch makes one call:
 hooks match `AGENT_REQUIRED_HOOKS` before the session starts.
 
 That misses repositories cloned or entered mid-session, and sessions not started
-by a wrapper (such as the Claude desktop app). As a safety net, a `PreToolUse`
-hook, `etc/agents/hooks/ensure-commit-hooks`, runs
+by a wrapper (such as the Claude and OpenCode desktop apps). As a safety net, a
+`PreToolUse` hook, `etc/agents/hooks/ensure-commit-hooks`, runs
 `hook -C <repo> apply --quiet` just before a shell tool call that runs
 `git commit`. Claude Code runs it from `~/.claude/settings.json`, where
 `install.sh` registers it; Antigravity runs it through
-`etc/agents/agy/hooks/PreToolUse`. It never blocks a tool call.
+`etc/agents/agy/hooks/PreToolUse`; OpenCode runs it through its shell hook
+plugin, `etc/agents/opencode/plugins/ensure-commit-hooks.ts`, linked into
+`~/.config/opencode/plugins/`. It never blocks a tool call.
 
 ## Launchers and per-session skills
 
@@ -107,6 +109,7 @@ these:
 | `claude remote-control` (a server for remote use) | No             | It rejects `--add-dir`, and one server hosts many sessions, so no directory belongs to one of them. The launcher seeds the workspace instead, which all its sessions share. |
 | Antigravity (`agy`, the app)                      | Yes            | `brain/<id>` is the session's own directory, found from `ANTIGRAVITY_CONVERSATION_ID` or `-C`. Picked up the next turn.                                                     |
 | Codex                                             | No             | `skill` has no Codex session directory: none is known that Codex reads skills from and that `skill` could find from `CODEX_SESSION_ID`.                                     |
+| OpenCode                                          | No             | It reads the shared `.agents/skills` workspace source, and has no per-session directory that `skill` could target.                                                          |
 | A nested agent (e.g. `codex exec` inside Claude)  | No             | It inherits its parent's binding, which `skill` refuses so the child cannot write into the parent's session.                                                                |
 
 Where session skills are unavailable, `skill --scope session` fails naming
