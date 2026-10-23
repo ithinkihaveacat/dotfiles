@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-
 SKILL_CONTENT = """---
 name: build-brief
 description: >-
@@ -24,11 +23,61 @@ description: >-
 - `build-brief` is a small CLI that sits in front of `gradle` or `./gradlew`,
   keeps the full raw Gradle log on disk, and cuts terminal output down to the
   parts that usually matter.
-- If `build-brief` is not installed on macOS or Linux, install it with:
+
+## Availability & Agent Guidelines
+
+- Check whether `build-brief` is installed before invoking it:
+
+  ```bash
+  command -v build-brief >/dev/null 2>&1
+  ```
+
+- **When `build-brief` is installed:** Prefer wrapping Gradle commands with
+  `build-brief gradle ...` for PATH Gradle and `build-brief ./gradlew ...` for
+  the project wrapper.
+- **When `build-brief` is not installed:**
+  - In automated agent sessions, do **not** run curl installers unprompted. Fall
+    back directly to `./gradlew` or `gradle` (e.g. `./gradlew assembleDebug`,
+    `./gradlew test`).
+  - To install `build-brief` on a workstation or when explicitly requested, follow
+    the installation instructions below.
+
+## Installation
+
+Install `build-brief` using any of the following methods:
+
+- **Shell script installer (macOS & Linux):**
 
   ```bash
   curl -fsSL https://bb.staticvar.dev/install.sh | bash
+  # or: wget -qO- https://bb.staticvar.dev/install.sh | bash
   ```
+
+  Installs to `~/.local/bin` (or `/usr/local/bin` if writable). Ensure
+  `~/.local/bin` is in your `$PATH`.
+
+- **Homebrew / Linuxbrew:**
+
+  ```bash
+  brew tap static-var/tap
+  brew install static-var/tap/build-brief
+  ```
+
+- **Go install (from source):**
+
+  ```bash
+  go install github.com/static-var/build-brief/cmd/build-brief@latest
+  # or clone and build:
+  git clone https://github.com/static-var/build-brief.git
+  cd build-brief && go build -o ~/.local/bin/build-brief ./cmd/build-brief
+  ```
+
+- **Prebuilt release binary:**
+  Download the platform release archive from
+  <https://github.com/static-var/build-brief/releases/latest> and extract the
+  `build-brief` executable into a directory on `$PATH`.
+
+## Usage
 
 - For simple commands, use `build-brief test`, `build-brief build`, or
   `build-brief :app:assembleDebug`.
