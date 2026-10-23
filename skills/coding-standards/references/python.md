@@ -109,7 +109,9 @@ Rationale:
 
 If `uv` has trouble running in a constrained environment because of sandbox,
 cache, or network restrictions, treat that as an environment problem to solve
-with permissions or configuration. Do not change the script to depend on a
+with permissions or configuration (for example, run
+`~/.dotfiles/install.sh --only uv --force` with network access to invalidate and
+rebuild cached script environments). Do not change the script to depend on a
 specific Python executable merely to work around those constraints.
 
 ### CLI Argument Parsing

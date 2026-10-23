@@ -158,7 +158,8 @@ OPTIONS:
                 Run only these features, in their usual order. Cannot be
                 combined with --profile or --with
   -n, --dry-run Print the features that would run, one per line, and exit
-  --force       Replace existing real files with links, and run the daily
+  --force       Replace existing real files with links, rebuild uv script
+                environments from fresh package metadata, and run the daily
                 upgrades even if they ran in the last 24 hours
   --prune       Remove brew packages that no feature installs, and apt packages
                 this script has retired (keeping any that other installed
@@ -187,6 +188,7 @@ EXAMPLES:
   $(basename "$0") --without upgrades # Skip the daily upgrades
   $(basename "$0") --profile cloud    # From a cloud environment's setup script
   $(basename "$0") --only uv          # Prepare a CI job for offline use
+  $(basename "$0") --only uv --force  # Rebuild uv script caches from scratch
   UV_OFFLINE=1 $(basename "$0") --only uv  # Check it is ready, without the network
   $(basename "$0") --profile cloud --with android -n  # Preview a selection
 
@@ -1383,25 +1385,39 @@ function feature_uv {
 
   # Fetch what the repository's scripts need. With UV_OFFLINE, uv builds the
   # same environments from its cache alone, which checks offline readiness
-  # (it writes to uv's cache, so it is not read-only).
-  local f first_line
+  # (it writes to uv's cache, so it is not read-only). With --force (online),
+  # drop cached script virtualenvs and pass --refresh --reinstall so index
+  # metadata and wheel caches are revalidated and reconstructed from scratch.
+  local src f first_line label
+  local sync_args=(sync --script)
+  if [ "$FORCE" = 1 ] && [ "$offline" = 0 ]; then
+    x rm -rf "${UV_CACHE_DIR:-$XDG_CACHE_HOME/uv}/environments-v2"
+    sync_args=(sync --refresh --reinstall --script)
+  fi
   # bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
-  for f in "$SRCDIR"/bin/* "$SRCDIR"/skills/*/scripts/*; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    first_line=""
-    read -r first_line <"$f" 2>/dev/null || true
-    case "$first_line" in
-      '#!/usr/bin/env -S uv run'*)
-        uv_item "$ok" "$bad" "${f#"$SRCDIR"/}" uv sync --script "$f" </dev/null || failed=1
-        ;;
-    esac
+  for src in "${SRCDIRS[@]}"; do
+    for f in "$src"/bin/* "$src"/skills/*/scripts/* "$src"/skills/*/plugins/*/scripts/*; do
+      [ -f "$f" ] && [ ! -L "$f" ] || continue
+      first_line=""
+      read -r first_line <"$f" 2>/dev/null || true
+      case "$first_line" in
+        '#!/usr/bin/env -S uv run'*)
+          if [ "$src" = "$SRCDIR" ]; then
+            label="${f#"$SRCDIR"/}"
+          else
+            label="${src#"$DSTDIR"/}/${f#"$src"/}"
+          fi
+          uv_item "$ok" "$bad" "$label" uv "${sync_args[@]}" "$f" </dev/null || failed=1
+          ;;
+      esac
+    done
   done
 
   if [ "$failed" != 0 ]; then
     if [ "$offline" = 1 ]; then
       echo "warning: some uv items are not available offline; re-run '$(basename "$0") --only uv' with network access" >&2
     else
-      echo "warning: some uv items failed to install or fetch" >&2
+      echo "warning: some uv items failed to install or fetch (try '$(basename "$0") --only uv --force' to rebuild the cache)" >&2
     fi
     return 1
   fi

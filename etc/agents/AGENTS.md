@@ -24,7 +24,10 @@ instructions > activated skills > general training knowledge.
     Markdown style rules).
   - **Runtimes & CLI tools**: When a Node.js, Ruby, or Python runtime or
     package/CLI tool is missing, activate `workspace-tools` and install it into
-    the workspace rather than user- or system-wide.
+    the workspace rather than user- or system-wide. If a `uv run --script`
+    helper fails to resolve cached dependencies in a sandbox, run
+    `~/.dotfiles/install.sh --only uv --force` (with network access) to rebuild
+    the script cache rather than changing the script's shebang.
   - **Version control & commits**: Format commit messages according to the
     active VCS/standards skill. Ensure the workspace commit hooks are installed
     (`hook apply` or `hook -C <repo> apply`) before committing in a repository.
