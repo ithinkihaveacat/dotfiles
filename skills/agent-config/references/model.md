@@ -76,6 +76,14 @@ Each `skill` run costs about half a second, so each launch makes one call:
 `~`), `_agent_preflight` also runs `hook apply --quiet` so the repository's Git
 hooks match `AGENT_REQUIRED_HOOKS` before the session starts.
 
+That misses repositories cloned or entered mid-session, and sessions not started
+by a wrapper (such as the Claude desktop app). As a safety net, a `PreToolUse`
+hook, `etc/agents/hooks/ensure-commit-hooks`, runs
+`hook -C <repo> apply --quiet` just before a shell tool call that runs
+`git commit`. Claude Code runs it from `~/.claude/settings.json`, where
+`install.sh` registers it; Antigravity runs it through
+`etc/agents/agy/hooks/PreToolUse`. It never blocks a tool call.
+
 ## Launchers and per-session skills
 
 Skills for one session only (`--scope session`) are a feature of the launcher,

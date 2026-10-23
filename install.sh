@@ -1765,6 +1765,52 @@ function feature_skills {
   # from seeing every skill.
 }
 
+# Register an overlay script as a Claude Code PreToolUse command hook in
+# ~/.claude/settings.json, leaving every other setting and hook in place. The
+# file is rewritten only when no hook for MATCHER already runs the script.
+function register_claude_pretooluse_hook {
+  local rel=$1
+  local matcher=$2
+  local settings="$HOME/.claude/settings.json"
+  local cmd tmp
+
+  cmd=$(overlay_path "$rel") || return 0
+  if ! exists jq; then
+    echo "warning: jq not found; Claude Code hook $rel not registered" >&2
+    return 0
+  fi
+
+  xmkdir "$HOME/.claude"
+  if [ ! -s "$settings" ]; then
+    (umask 077 && echo '{}' >"$settings")
+  fi
+  if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+    echo "warning: $settings is not a JSON object; Claude Code hook $rel not registered" >&2
+    return 0
+  fi
+
+  if jq -e --arg cmd "$cmd" --arg matcher "$matcher" \
+    'any(.hooks.PreToolUse[]?; .matcher == $matcher and any(.hooks[]?; .command == $cmd))' \
+    "$settings" >/dev/null; then
+    return 0
+  fi
+
+  # Drop stale registrations of the same script (another matcher), then add.
+  tmp="$settings.tmp.$$"
+  if (umask 077 && jq --arg cmd "$cmd" --arg matcher "$matcher" '
+    .hooks.PreToolUse = (
+      ((.hooks.PreToolUse // [])
+        | map(.hooks |= map(select(.command != $cmd)))
+        | map(select((.hooks // []) | length > 0)))
+      + [{matcher: $matcher, hooks: [{type: "command", command: $cmd, timeout: 5}]}]
+    )' "$settings" >"$tmp") && x mv "$tmp" "$settings"; then
+    echo "registered Claude Code PreToolUse hook: $cmd" >&2
+  else
+    rm -f "$tmp"
+    echo "warning: failed to register Claude Code hook in $settings" >&2
+  fi
+}
+
 function feature_agents {
   local agents_context
 
@@ -1791,6 +1837,10 @@ function feature_agents {
     xmkdir "$HOME/.gemini/config"
     link_overlay_path "etc/agents/agy/hooks.json" "$HOME/.gemini/config/hooks.json"
     link_overlay_path "etc/agents/agy/hooks" "$HOME/.gemini/config/hooks"
+  fi
+
+  if exists claude; then
+    register_claude_pretooluse_hook "etc/agents/hooks/ensure-commit-hooks" Bash
   fi
 
   heading "agent permissions"
