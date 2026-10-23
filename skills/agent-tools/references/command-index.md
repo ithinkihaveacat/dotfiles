@@ -397,6 +397,10 @@ Options:
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL         Gemini model to use (default: gemini-4-argon).
+  --request-timeout SECONDS
+                        Abandon and retry an API request with no response after
+                        SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
+                        1k input tokens).
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
@@ -405,6 +409,8 @@ Options:
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
   GEMINI_MODEL          Optional. Default model if --model is not given.
+  ORACLE_REQUEST_TIMEOUT
+                        Optional. Default for --request-timeout.
   AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
   ORACLE_STATE_DIR      Optional. State directory for serialized payloads and answers
                         (default: ${XDG_STATE_HOME:-~/.local/state}/oracle).

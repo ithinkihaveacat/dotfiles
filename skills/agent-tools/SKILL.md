@@ -237,10 +237,14 @@ scripts/oracle [OPTIONS] "PROMPT" [FILE_OR_DIR ...]
   a sandboxed environment.
 - `--dry-run`: Output a summary of the payload (resolved files, sizes, and
   prompt) without calling the Gemini API.
+- `--request-timeout SECONDS`: Abandon and retry an API request with no response
+  after `SECONDS`; `0` waits indefinitely (env `ORACLE_REQUEST_TIMEOUT`). The
+  default is 180 s plus 1 s per 1k input tokens.
 - `--serialize` / `--no-serialize`: Save request payload and answer to files in
   the state directory (`~/.local/state/oracle/`) (default: on).
 
-**Environment:** `GEMINI_API_KEY` (Required), `ORACLE_STATE_DIR` (Optional)
+**Environment:** `GEMINI_API_KEY` (Required), `ORACLE_REQUEST_TIMEOUT`
+(Optional), `ORACLE_STATE_DIR` (Optional)
 
 **Exit codes:** 0 success, 1 error
 

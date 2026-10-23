@@ -12,7 +12,7 @@ WORK=$(cd "$(mktemp -d)" && pwd -P)
 export ORACLE_STATE_DIR="$WORK/state"
 trap 'rm -rf "$OUTPUT" "$WORK"' EXIT
 
-echo "1..15"
+echo "1..17"
 
 # Test 1: oracle --help outputs valid help and exits 0
 if "$BIN" --help >"$OUTPUT" 2>&1; then
@@ -240,7 +240,7 @@ else
 fi
 
 # Test 14: Text-only invocation reaches API generation path and does not exit prematurely
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+if [[ -z "${GEMINI_API_KEY:-}" || "${AGENT_OFFLINE:-}" == "1" ]]; then
   echo "ok 14 # SKIP GEMINI_API_KEY not set (offline test mode)"
 else
   TEXT_NOTE="$WORK/note.txt"
@@ -278,4 +278,123 @@ if env AGENT_TELEMETRY_JSON="$TEL_FMT" "$BIN" --dry-run "Test native markdown fo
 else
   echo "not ok 15 - Dry run with native markdown format failed"
   sed 's/^/# /' "$OUTPUT"
+fi
+
+# Test 16: Request timeout bound scales with input tokens and rejects malformed --request-timeout
+cat >"$WORK/timeout_unit.py" <<'PYEOF'
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+stripped = "\n".join(
+    line
+    for line in source.splitlines()
+    if not line.startswith(("from google", "import httpx"))
+)
+ns = {"__name__": "oracle_helpers", "types": type("types", (), {"Part": object})}
+exec(compile(stripped, "oracle", "exec"), ns)
+
+bound = ns["request_timeout"]
+approx = ns["approx_tokens"]
+
+
+class FakePart:
+    def __init__(self, text=None):
+        self.text = text
+
+
+assert bound(0) == 180.0, bound(0)
+assert bound(240_000) == 420.0, bound(240_000)
+assert bound(240_000, 30) == 30.0, bound(240_000, 30)
+assert bound(240_000, 0) is None, bound(240_000, 0)
+assert approx("abcd" * 100) == 101
+# Binary parts (text=None) do not inflate the token estimate
+assert approx([FakePart("abcd" * 100), FakePart(None)]) == 101
+print("OK")
+PYEOF
+
+UNIT_OUT="$WORK/timeout_unit.out"
+PYTHONDONTWRITEBYTECODE=1 uv run --quiet --script "$WORK/timeout_unit.py" \
+  "$BIN" >"$UNIT_OUT" 2>&1 || true
+
+if grep -q "^OK$" "$UNIT_OUT" &&
+  ! "$BIN" --dry-run --request-timeout soon "prompt" >"$OUTPUT" 2>&1 &&
+  grep -q "oracle: error: --request-timeout: invalid number of seconds: 'soon'" "$OUTPUT"; then
+  echo "ok 16 - Scales request timeout with input and rejects a malformed --request-timeout"
+else
+  echo "not ok 16 - Request timeout bound or --request-timeout validation failed"
+  sed 's/^/# /' "$UNIT_OUT" "$OUTPUT"
+fi
+
+# Test 17: A stalled streaming request is abandoned after --request-timeout, logged, and retried
+STALL_PORT_FILE="$WORK/stall.port"
+STALL_POSTS="$WORK/stall.posts"
+cat >"$WORK/stall.py" <<'PYEOF'
+import http.server
+import sys
+import time
+
+
+class StallThenRecover(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open(sys.argv[2], "a") as f:
+            f.write("post\n")
+        with open(sys.argv[2]) as f:
+            count = sum(1 for _ in f)
+        if count == 1:
+            time.sleep(3600)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        payload = (
+            b'data: {"candidates": [{"content": {"parts": [{"text":'
+            b' "Recovered oracle answer"}], "role": "model"}}],'
+            b' "usageMetadata": {"promptTokenCount": 12,'
+            b' "candidatesTokenCount": 3}}\r\n\r\n'
+        )
+        self.wfile.write(payload)
+        self.wfile.flush()
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StallThenRecover)
+server.daemon_threads = True
+with open(sys.argv[1], "w") as f:
+    f.write(str(server.server_address[1]))
+server.serve_forever()
+PYEOF
+python3 "$WORK/stall.py" "$STALL_PORT_FILE" "$STALL_POSTS" &
+STALL_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -s "$STALL_PORT_FILE" ]] && break
+  sleep 0.5
+done
+STALL_TEL="$WORK/stall_telemetry.json"
+stall_status=0
+GEMINI_API_KEY=stub \
+  GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:$(cat "$STALL_PORT_FILE" 2>/dev/null)" \
+  AGENT_TELEMETRY_JSON="$STALL_TEL" \
+  "$BIN" --request-timeout 1 "Summarize" >"$OUTPUT" 2>&1 || stall_status=$?
+kill "$STALL_PID" 2>/dev/null || true
+wait "$STALL_PID" 2>/dev/null || true
+stall_posts=$(wc -l <"$STALL_POSTS" 2>/dev/null | tr -d ' ' || echo 0)
+if [[ $stall_status -eq 0 && "$stall_posts" -eq 2 ]] &&
+  grep -q "warning: API request timed out after 1s" "$OUTPUT" &&
+  grep -q "Recovered oracle answer" "$OUTPUT" &&
+  grep -q '"timeout_seconds": 1.0' "$STALL_TEL"; then
+  echo "ok 17 - Abandons a stalled streaming request, logs it, and retries to completion"
+else
+  echo "not ok 17 - Stalled streaming request was not timed out and retried (exit $stall_status, $stall_posts posts)"
+  sed 's/^/# /' "$OUTPUT"
+  if [[ -f "$STALL_TEL" ]]; then
+    sed 's/^/# /' "$STALL_TEL"
+  fi
 fi

@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "google-genai",
+#     "httpx",
 # ]
 # [tool.uv.sources]
 # google-genai = { index = "pypi" }
@@ -27,6 +28,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -214,6 +216,47 @@ def extract_retry_delay(exc: Exception) -> float | None:
     return None
 
 
+# A response to a large prompt with thinking on can take minutes, so a request
+# is given a floor plus time in proportion to its input before it is abandoned.
+REQUEST_TIMEOUT_FLOOR = 180.0
+REQUEST_SECONDS_PER_1K_TOKENS = 1.0
+
+
+def request_timeout(estimate: int, override: int | None = None) -> float | None:
+    """Seconds to wait for one API response, or None for no limit.
+
+    An explicit override wins, and 0 disables the limit. Otherwise the bound
+    scales with the estimated input tokens: 180 s, plus 1 s per 1k tokens.
+    """
+    if override is not None:
+        return float(override) if override > 0 else None
+    return REQUEST_TIMEOUT_FLOOR + REQUEST_SECONDS_PER_1K_TOKENS * estimate / 1000
+
+
+def approx_tokens(message) -> int:
+    """Rough input-token count of a prompt or part list: about 4 bytes per token."""
+    if isinstance(message, str):
+        size = len(message.encode("utf-8"))
+    else:
+        size = 0
+        for part in message:
+            text = getattr(part, "text", None)
+            if isinstance(text, str):
+                size += len(text.encode("utf-8"))
+            elif isinstance(part, str):
+                size += len(part.encode("utf-8"))
+    return size // 4 + 1
+
+
+def format_tokens(n: float) -> str:
+    """Formats a token count compactly (e.g. 950, 94.2k, 1.25M)."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return f"{n:.0f}"
+
+
 def is_text_file(path: Path) -> bool:
     ext = path.suffix.lower()
     if ext in TEXT_EXTENSIONS:
@@ -367,6 +410,10 @@ Options:
   --code                Enable Code Execution for Python.
   --dry-run             Output a summary of the payload (resolved files, sizes, and prompt) without calling the Gemini API.
   --model MODEL         Gemini model to use (default: gemini-4-argon).
+  --request-timeout SECONDS
+                        Abandon and retry an API request with no response after
+                        SECONDS; 0 waits indefinitely. (default: 180, plus 1 per
+                        1k input tokens).
   --serialize           Save the request payload and the answer to files in the state
                         directory (~/.local/state/oracle/). (Default: on).
   --no-serialize        Disable saving the payload and answer to the state directory.
@@ -375,6 +422,8 @@ Options:
 Environment:
   GEMINI_API_KEY        Required. Your Gemini API key.
   GEMINI_MODEL          Optional. Default model if --model is not given.
+  ORACLE_REQUEST_TIMEOUT
+                        Optional. Default for --request-timeout.
   AGENT_TELEMETRY_JSON  Optional. Destination path for structured JSON execution telemetry.
   ORACLE_STATE_DIR      Optional. State directory for serialized payloads and answers
                         (default: ${{XDG_STATE_HOME:-~/.local/state}}/oracle).
@@ -405,6 +454,7 @@ def main():
     media_files_to_upload = []
     total_text_size = 0
     answer_chunks = []
+    request_timeouts = []
     telemetry_status = "Failed"
     telemetry_error = None
 
@@ -414,6 +464,7 @@ def main():
     dry_run = False
     serialize = True
     model_id = os.environ.get("GEMINI_MODEL", "gemini-4-argon")
+    raw_request_timeout = os.environ.get("ORACLE_REQUEST_TIMEOUT") or None
     parts: list[types.Part] = []
     manifest_str = ""
     formatted_docs: list[str] = []
@@ -448,6 +499,7 @@ def main():
                 "text_bytes": total_text_size,
                 "media_bytes": sum(s for _, _, s in media_files_to_inline)
                 + sum(s for _, _, s in media_files_to_upload),
+                "request_timeouts": request_timeouts,
                 "session_id": str(session_id),
             }
             if error_msg:
@@ -496,9 +548,36 @@ def main():
                     sys.exit(1)
                 model_id = argv[i + 1]
                 i += 1
+            elif arg == "--request-timeout":
+                if i + 1 >= len(argv):
+                    print(
+                        f"{os.path.basename(sys.argv[0])}: error: --request-timeout requires an argument",
+                        file=sys.stderr,
+                    )
+                    telemetry_status = "Error"
+                    telemetry_error = "--request-timeout requires an argument"
+                    sys.exit(1)
+                raw_request_timeout = argv[i + 1]
+                i += 1
             else:
                 args.append(arg)
             i += 1
+
+        request_timeout_override: int | None = None
+        if raw_request_timeout is not None:
+            if not raw_request_timeout.isdigit():
+                err = (
+                    "--request-timeout: invalid number of seconds:"
+                    f" {raw_request_timeout!r}"
+                )
+                print(
+                    f"{os.path.basename(sys.argv[0])}: error: {err}",
+                    file=sys.stderr,
+                )
+                telemetry_status = "Error"
+                telemetry_error = err
+                sys.exit(1)
+            request_timeout_override = int(raw_request_timeout)
 
         if not args:
             print(
@@ -846,6 +925,11 @@ def main():
                 file=sys.stderr,
             )
 
+        upload_timeout = request_timeout(0, request_timeout_override)
+        upload_http_options = types.HttpOptions(
+            timeout=int(upload_timeout * 1000) if upload_timeout else None
+        )
+
         async def upload_all(
             items: list[tuple[Path, str, int]],
         ) -> list[tuple[Path, types.File]]:
@@ -859,7 +943,10 @@ def main():
                 )
                 uf = await client.aio.files.upload(
                     file=str(path),
-                    config=types.UploadFileConfig(mime_type=mime_type),
+                    config=types.UploadFileConfig(
+                        mime_type=mime_type,
+                        http_options=upload_http_options,
+                    ),
                 )
                 return (path, uf)
 
@@ -912,8 +999,16 @@ def main():
         max_retry_seconds = 300.0
 
         current_backoff = initial_backoff
-        retry_start = time.monotonic()
+        attempt = 0
+        # The retry budget runs from the first failure, so a request that
+        # stalled for minutes does not spend it before the first retry.
+        retry_start: float | None = None
         in_thought = False
+        estimate = approx_tokens(system_instruction) + approx_tokens(parts)
+        timeout_sec = request_timeout(estimate, request_timeout_override)
+        http_options = types.HttpOptions(
+            timeout=int(timeout_sec * 1000) if timeout_sec else None
+        )
 
         while True:
             try:
@@ -927,6 +1022,7 @@ def main():
                             thinking_level="high", include_thoughts=True
                         ),
                         temperature=1.0,
+                        http_options=http_options,
                     ),
                 )
 
@@ -980,17 +1076,62 @@ def main():
                     print("\033[0m\n", end="", file=sys.stderr, flush=True)
                     in_thought = False
 
+                timed_out = isinstance(e, httpx.TimeoutException)
                 delay = extract_retry_delay(e)
                 # Retry 429 only if a deterministic retry delay is provided (transient rate limit).
                 # Hard quota errors (plan/billing limits without a retry window) fail immediately.
-                is_retryable = isinstance(e, genai_errors.APIError) and (
-                    (e.code == 429 and delay is not None)
-                    or e.code in (500, 502, 503, 504)
+                is_retryable = timed_out or (
+                    isinstance(e, genai_errors.APIError)
+                    and (
+                        (e.code == 429 and delay is not None)
+                        or e.code in (500, 502, 503, 504)
+                    )
                 )
                 if not is_retryable or answer_chunks:
+                    if timed_out and timeout_sec:
+                        raise RuntimeError(
+                            f"API request timed out after {timeout_sec:.0f}s"
+                            f" ({attempt + 1} attempt(s) for"
+                            f" ~{format_tokens(estimate)} input tokens);"
+                            " see --request-timeout"
+                        ) from e
                     raise
 
+                if retry_start is None:
+                    retry_start = time.monotonic()
                 elapsed = time.monotonic() - retry_start
+
+                if timed_out:
+                    event = {
+                        "attempt": attempt + 1,
+                        "estimated_tokens": estimate,
+                        "timeout_seconds": timeout_sec,
+                    }
+                    request_timeouts.append(event)
+                    sleep_sec = current_backoff
+                    current_backoff = min(
+                        current_backoff * backoff_multiplier, max_backoff
+                    )
+                    if elapsed + sleep_sec > max_retry_seconds:
+                        event["action"] = "failed: retries exhausted"
+                        raise RuntimeError(
+                            f"API request timed out after {timeout_sec:.0f}s"
+                            f" ({attempt + 1} attempt(s) for"
+                            f" ~{format_tokens(estimate)} input tokens);"
+                            " see --request-timeout"
+                        ) from e
+                    event["action"] = f"retried after {sleep_sec:.1f}s"
+                    attempt += 1
+                    print(
+                        f"\n{os.path.basename(sys.argv[0])}: warning: API request"
+                        f" timed out after {timeout_sec:.0f}s"
+                        f" (~{format_tokens(estimate)} input tokens)."
+                        f" Retrying in {sleep_sec:.1f}s with backoff...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(sleep_sec)
+                    continue
+
                 if delay is not None:
                     sleep_sec = delay + 1.0
                     wait_desc = f"Retrying in {sleep_sec:.1f}s (quota reset)..."
@@ -1004,6 +1145,7 @@ def main():
                 if elapsed + sleep_sec > max_retry_seconds:
                     raise
 
+                attempt += 1
                 msg = getattr(e, "message", getattr(e, "status", "Unknown"))
                 print(
                     f"\n{os.path.basename(sys.argv[0])}: warning: API error {getattr(e, 'code', 'error')} ({msg}). {wait_desc}",
@@ -1053,7 +1195,12 @@ def main():
             for _, uf in uploaded_files:
                 try:
                     print(f"Cleaning up {uf.name}...", file=sys.stderr)
-                    client.files.delete(name=uf.name)
+                    client.files.delete(
+                        name=uf.name,
+                        config=types.DeleteFileConfig(
+                            http_options=types.HttpOptions(timeout=30_000)
+                        ),
+                    )
                 except Exception as e:
                     print(
                         f"{os.path.basename(sys.argv[0])}: warning: failed to delete {uf.name}: {e}",
