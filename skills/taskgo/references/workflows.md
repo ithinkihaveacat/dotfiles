@@ -9,11 +9,12 @@ Before starting work, an agent must:
 
 1. Run `taskgo handoff <project|TASK_ID>` (or the MCP `handoff` tool) and read
    the onboarding files (the plain note names `STATUS.md` and the task record
-   for a task, or `README.md`, `STATUS.md`, and `PLAN.md` for a project;
-   `--json` and the MCP `handoff` tool inline all of those alongside the root
-   `AGENTS.md`): the root `AGENTS.md`, then project `README.md`, `STATUS.md`
-   (using its generated `### Decisions` block to identify active, non-superseded
-   ADRs in `decisions/`), relevant tasks, and `PLAN.md` when direction matters.
+   for an unfinished task, or `README.md`, `STATUS.md`, and `PLAN.md` for a
+   project; `--json` and the MCP `handoff` tool inline all of those alongside
+   the root `AGENTS.md`): the root `AGENTS.md`, then project `README.md`,
+   `STATUS.md` (using its generated `### Decisions` block to identify active,
+   non-superseded ADRs in `decisions/`), relevant tasks, and `PLAN.md` when
+   direction matters.
 1. **Activate the project's skills**, as the note lists them, if the harness has
    a skill manager:
    ```bash

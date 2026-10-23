@@ -224,10 +224,10 @@ task to an isolated worker that cannot read the control repository, see
 **[Task Export](references/export.md)**.
 
 - **Before work:** run `taskgo handoff <project|TASK_ID>` and follow its note:
-  it names the entry-point files to read (`STATUS.md` and the task record for a
-  task; `README.md`, `STATUS.md`, and `PLAN.md` for a project) and the project's
-  skills (`--json` and the MCP `handoff` tool inline all of those plus the root
-  `AGENTS.md`).
+  it names the entry-point files to read (`STATUS.md` and the task record for an
+  unfinished task; `README.md`, `STATUS.md`, and `PLAN.md` for a project) and
+  the project's skills (`--json` and the MCP `handoff` tool inline all of those
+  plus the root `AGENTS.md`).
   1. Read `AGENTS.md`, the project `README.md`, and the files the note names.
   1. **Activate the project's skills** if your harness has a skill manager:
      ```bash
