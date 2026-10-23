@@ -293,9 +293,22 @@ adb -s "$PHONE" shell "
   GMS_UID=\$(stat -c %U /data/data/com.google.android.gms)
   su \"\$GMS_UID\" sqlite3 /data/data/com.google.android.gms/databases/connectionconfig.db \
     \"DELETE FROM connectionConfigurations WHERE connectionType = 2; INSERT INTO connectionConfigurations (name, pairedBtAddress, connectionType, role, connectionEnabled) VALUES ('server', 'NULL_STRING', 2, 2, 1);\"
-  if [ -n '$WATCH_NET_ID' ] && [ -f /data/data/com.google.android.gms/shared_prefs/wearable.xml ]; then
-    sed -i 's|<string name=\"network_id\">[^<]*</string>|<string name=\"network_id\">$WATCH_NET_ID</string>|' \
-      /data/data/com.google.android.gms/shared_prefs/wearable.xml
+  if [ -n '$WATCH_NET_ID' ]; then
+    prefs_dir=/data/data/com.google.android.gms/shared_prefs
+    prefs_file=\"\$prefs_dir/wearable.xml\"
+    mkdir -p \"\$prefs_dir\"
+    if [ -f \"\$prefs_file\" ]; then
+      grep -q 'name=\"network_id\"' \"\$prefs_file\" &&
+        sed -i 's|<string name=\"network_id\">[^<]*</string>|<string name=\"network_id\">$WATCH_NET_ID</string>|' \"\$prefs_file\" ||
+        sed -i 's|</map>|    <string name=\"network_id\">$WATCH_NET_ID</string>\n</map>|' \"\$prefs_file\"
+      grep -q 'name=\"network_server_assigned\"' \"\$prefs_file\" &&
+        sed -i 's|<boolean name=\"network_server_assigned\" value=\"[^\"]*\" />|<boolean name=\"network_server_assigned\" value=\"true\" />|' \"\$prefs_file\" ||
+        sed -i 's|</map>|    <boolean name=\"network_server_assigned\" value=\"true\" />\n</map>|' \"\$prefs_file\"
+    else
+      printf '%s\n' \"<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\" '<map>' '    <boolean name=\"network_server_assigned\" value=\"true\" />' '    <string name=\"network_id\">$WATCH_NET_ID</string>' '</map>' >\"\$prefs_file\"
+    fi
+    chown \"\$GMS_UID:\$GMS_UID\" \"\$prefs_file\"
+    chmod 660 \"\$prefs_file\"
   fi
   am startservice -a com.google.android.gms.wearable.BIND -p com.google.android.gms
 "
