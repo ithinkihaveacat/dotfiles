@@ -29,6 +29,31 @@ done
 unset d
 path_prepend "$HOME/.dotfiles/bin"
 
+# Android SDK location and tools (matches fish/config.fish)
+if [ -z "${ANDROID_HOME-}" ]; then
+  if [ -d "${XDG_DATA_HOME:-$HOME/.local/share}/android-sdk" ]; then
+    export ANDROID_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/android-sdk"
+  elif [ -d "$HOME/Android/Sdk" ]; then
+    export ANDROID_HOME="$HOME/Android/Sdk"
+  fi
+fi
+
+if [ -n "${ANDROID_HOME-}" ]; then
+  path_prepend "$ANDROID_HOME/platform-tools"
+  path_prepend "$ANDROID_HOME/cmdline-tools/latest/bin"
+  path_prepend "$ANDROID_HOME/emulator"
+  for _bt in "$ANDROID_HOME"/build-tools/*; do
+    if [ -d "$_bt" ]; then
+      _LATEST_BT="$_bt"
+    fi
+  done
+  if [ -n "${_LATEST_BT-}" ]; then
+    path_prepend "$_LATEST_BT"
+    unset _LATEST_BT
+  fi
+  unset _bt
+fi
+
 export PATH
 
 # Turn off Cloudflare cf CLI telemetry, as fish/config.fish does.
