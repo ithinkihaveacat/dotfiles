@@ -18,14 +18,42 @@ test("rule is injected on every primary request only when the tool is offered", 
 
 test("session level is locked in on first context request and unaffected by later changes", async () => {
   const h = await harness();
-  assert.match((await h.context("one")).system[0].text, /Active trigger level: 3/);
+  assert.match(
+    (await h.context("one")).system[0].text,
+    /Active trigger level: 3/
+  );
   await h.rpc("command", { text: "level 5", sessionID: "one" });
   await h.context("one", false); // auxiliary title/compaction request without tools
-  assert.match((await h.context("one")).system[0].text, /Active trigger level: 3/);
-  const snapOne = (await h.rpc("snapshot", { sessionID: "one" })) as { level: number; stats: { level: number } };
+  assert.match(
+    (await h.context("one")).system[0].text,
+    /Active trigger level: 3/
+  );
+  const snapOne = (await h.rpc("snapshot", { sessionID: "one" })) as {
+    level: number;
+    stats: { level: number };
+  };
   assert.equal(snapOne.level, 3);
   assert.equal(snapOne.stats.level, 5);
-  assert.match((await h.context("two")).system[0].text, /Active trigger level: 5/);
+  assert.match(
+    (await h.context("two")).system[0].text,
+    /Active trigger level: 5/
+  );
+});
+
+test("a failed level read does not lock the fallback level", async () => {
+  const h = await harness({ statsFailures: 1, level: 5 });
+  assert.match(
+    (await h.context("one")).system[0].text,
+    /Active trigger level: 3/
+  );
+  const snapshot = (await h.rpc("snapshot", { sessionID: "one" })) as {
+    level: number;
+  };
+  assert.equal(snapshot.level, 5);
+  assert.match(
+    (await h.context("one")).system[0].text,
+    /Active trigger level: 5/
+  );
 });
 
 test("chat prompts do not mutate the trigger level", async () => {
@@ -147,7 +175,10 @@ test("cancellation propagates rather than returning ordinary failure guidance", 
 test("commands inspect, update, and reset the shared default level", async () => {
   const h = await harness();
   await h.rpc("command", { text: "level 5", sessionID: "one" });
-  assert.match((await h.context("one")).system[0].text, /Active trigger level: 5/);
+  assert.match(
+    (await h.context("one")).system[0].text,
+    /Active trigger level: 5/
+  );
   await h.rpc("command", { text: "level 4" });
   assert.match(
     (await h.context("two")).system[0].text,

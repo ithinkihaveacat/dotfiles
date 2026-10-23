@@ -6,6 +6,11 @@ uses the same `andon` CLI and alert store as the Claude Code plugin.
 
 ## Install
 
+In this dotfiles checkout, `install.sh` links this directory into
+`${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/andon` when OpenCode is
+detected. The commands below are the manual equivalent for installs without the
+dotfiles.
+
 For a checkout at `~/.dotfiles`, install without editing JSON by linking the
 plugin into OpenCode's auto-discovered global plugins directory:
 
@@ -123,6 +128,9 @@ forcibly interrupt execution.
   refreshes between selections, or with its Refresh item. Shared default changes
   made outside OpenCode are checked on new sessions at most once per minute, or
   when the UI refreshes.
+- Fix prompts for OpenCode alerts use `opencode run --session <id> --fork` and
+  connect to the local shared service; add `--server <url>` when the session
+  lives on a remote server.
 - A failed or interrupted write is not automatically retried: its outcome may be
   uncertain. An unreadable receipt after a successful CLI exit is reported as
   saved, to avoid duplicate pulls.

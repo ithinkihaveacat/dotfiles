@@ -25,6 +25,8 @@ export async function harness(
     cli?: Cli;
     deny?: boolean;
     brokenEvents?: boolean;
+    statsFailures?: number;
+    level?: number;
   } = {}
 ) {
   type Hook = (event: never) => Promise<void> | void;
@@ -33,7 +35,8 @@ export async function harness(
   const calls: { args: string[]; input?: unknown }[] = [];
   const permissions: unknown[] = [];
   let handlers: Record<string, RpcHandler> = {};
-  let defaultLevel = 3;
+  let defaultLevel = options.level ?? 3;
+  let statsFailures = options.statsFailures ?? 0;
   let notifications = 0;
   let getSessionFails = false;
   const synthetic: unknown[] = [];
@@ -52,8 +55,13 @@ export async function harness(
     options.cli ??
     (async (args, input) => {
       calls.push({ args, input });
-      if (args[0] === "stats")
+      if (args[0] === "stats") {
+        if (statsFailures > 0) {
+          statsFailures--;
+          throw new Error("stats unavailable");
+        }
         return JSON.stringify({ open: 1, open_red: 0, level: defaultLevel });
+      }
       if (args[0] === "list")
         return args.includes("--json") ? "[]" : "abcd yellow Removed flag";
       if (args[0] === "pull") return JSON.stringify(receipt);

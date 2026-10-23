@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildRule, INPUT_SCHEMA } from "../src/rule.ts";
-import { INPUT_SCHEMA as CLAUDE_INPUT_SCHEMA } from "../../claude/hooks/rule.ts";
+import { buildRule, INPUT_SCHEMA, TOOL } from "../src/rule.ts";
+import {
+  buildRule as CLAUDE_BUILD_RULE,
+  INPUT_SCHEMA as CLAUDE_INPUT_SCHEMA,
+  TOOL as CLAUDE_TOOL
+} from "../../claude/hooks/rule.ts";
 import { createSensor, shellFailed } from "../src/sensor.ts";
 
 test("pull payload stays compatible with the Claude adapter and omits level", () => {
@@ -23,6 +27,28 @@ test("pull payload stays compatible with the Claude adapter and omits level", ()
     INPUT_SCHEMA.properties.summary.maxLength,
     CLAUDE_INPUT_SCHEMA.properties.summary.maxLength
   );
+  for (const key of [
+    "color",
+    "summary",
+    "details",
+    "sources",
+    "resolution",
+    "proposed_fix"
+  ] as const) {
+    assert.equal(
+      INPUT_SCHEMA.properties[key].description,
+      CLAUDE_INPUT_SCHEMA.properties[key].description
+    );
+  }
+});
+
+test("OpenCode and Claude render the same rule apart from the tool name", () => {
+  for (const level of [1, 2, 3, 4, 5] as const) {
+    assert.equal(
+      buildRule(level),
+      CLAUDE_BUILD_RULE(level).replaceAll(CLAUDE_TOOL, TOOL)
+    );
+  }
 });
 
 test("buildRule includes the full 1-5 rubric and keeps static text across levels", () => {
@@ -52,12 +78,24 @@ test("buildRule includes the full 1-5 rubric and keeps static text across levels
 
 test("shell exits use metadata or a trailing status, not guessed error words", () => {
   assert.equal(shellFailed({ metadata: { exitCode: 1 } }), true);
+  assert.equal(shellFailed({ metadata: { exit: 1 } }), true);
+  assert.equal(shellFailed({ metadata: { exit: 0 } }), false);
   assert.equal(
     shellFailed({ metadata: { exit_code: 0 }, content: "Exited with code 1" }),
     false
   );
   assert.equal(
     shellFailed({ content: "actual output\nExited with code 2\n" }),
+    true
+  );
+  assert.equal(
+    shellFailed({ content: "\x1b[31mExited with code 2\x1b[0m" }),
+    true
+  );
+  assert.equal(
+    shellFailed({
+      content: "coloured output\n\x1b[31mExited with code 1\x1b[0m"
+    }),
     true
   );
   assert.equal(

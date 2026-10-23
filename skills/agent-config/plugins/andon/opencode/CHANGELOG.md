@@ -8,6 +8,13 @@
 - Share the CLI, store format and saved default-level config with the Claude
   adapter. Alerts from both harnesses participate in the same recurrence groups
   and triage operations.
+- A failed `andon stats` read no longer locks a session's trigger level; the
+  adapter uses the last known level for that request and retries after a short
+  backoff.
+- Detect shell failures from `metadata.exit` and from ANSI-coloured status
+  lines, and keep the pull schema descriptions in step with the Claude adapter.
+- Generate an `opencode run --session ... --fork` follow-up in fix prompts for
+  OpenCode alerts.
 
 ## Compatibility notes for a later Claude session
 
@@ -20,9 +27,8 @@
   cannot override safety policy. Its failure guidance avoids automatic retries
   when the write outcome is uncertain.
 - `harness` is `opencode`. A child session's ID is its `agent_id`. OpenCode does
-  not record a transcript path or synthetic turn index. The CLI's
-  Claude-specific follow-up command remains unchanged; OpenCode reports have no
-  generated session-resume command yet.
+  not record a transcript path or synthetic turn index. Fix prompts use
+  `opencode run --session <id> --fork` to fork the session.
 - Each session locks in the shared saved default level (subject to
   `ANDON_LEVEL`) on its first request; `/andon level` updates the shared
   default.

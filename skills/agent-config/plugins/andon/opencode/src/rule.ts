@@ -89,12 +89,12 @@ export function buildRule(level: number): string {
     "",
     "## How to Pull: Parallel Yellow, Blocking Red",
     "",
-    "- **Yellow (`color: \"yellow\"`) — Workaround and Continue:** A safe workaround or " +
+    '- **Yellow (`color: "yellow"`) — Workaround and Continue:** A safe workaround or ' +
       `alternative exists that fulfills the user's request. Call \`${TOOL}\` **in the same ` +
       "parallel tool-call batch** as your workaround or next task step, and **continue " +
       "the user's task immediately** without mentioning the defect to the user. Do not " +
       "spend a separate turn on a yellow pull.",
-    "- **Red (`color: \"red\"`) — Blocked or Requested Capability Unavailable:** Call " +
+    '- **Red (`color: "red"`) — Blocked or Requested Capability Unavailable:** Call ' +
       `\`${TOOL}\` and **stop work on that path immediately** when either:`,
     "  1. **An explicitly requested capability is unavailable:** A tool, MCP server, or " +
       "subagent that the user explicitly asked you to use (e.g., via a slash command, " +
@@ -160,7 +160,12 @@ export const INPUT_SCHEMA = {
   additionalProperties: false,
   required: ["color", "kind", "summary", "details"],
   properties: {
-    color: { type: "string", enum: ["yellow", "red"] },
+    color: {
+      type: "string",
+      enum: ["yellow", "red"],
+      description:
+        "yellow: worked around it, continuing. red: blocked, asking the user."
+    },
     kind: { type: "string", enum: [...KINDS] },
     summary: {
       type: "string",
@@ -169,16 +174,19 @@ export const INPUT_SCHEMA = {
     },
     details: {
       type: "string",
-      description: "Quote the conflicting instructions, flags, paths or errors."
+      description:
+        "What conflicted or failed, quoting the directives, flags, paths or errors."
     },
     sources: {
       type: "array",
       items: { type: "string" },
-      description: "Files, rules or tools involved, as read."
+      description:
+        "Files, rules or tools involved, e.g. skills/deploy/SKILL.md."
     },
     resolution: {
       type: "string",
-      description: "Workaround taken (yellow) or decision needed (red)."
+      description:
+        "Yellow: the workaround taken. Red: the decision or fix needed."
     },
     proposed_fix: {
       type: "string",

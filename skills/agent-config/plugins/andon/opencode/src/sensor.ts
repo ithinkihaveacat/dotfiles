@@ -81,7 +81,10 @@ export function shellFailed(result: {
   content?: unknown;
   metadata?: Record<string, unknown>;
 }): boolean {
-  const code = result.metadata?.exitCode ?? result.metadata?.exit_code;
+  const code =
+    result.metadata?.exitCode ??
+    result.metadata?.exit_code ??
+    result.metadata?.exit;
   if (typeof code === "number") return code !== 0;
   const text =
     typeof result.content === "string"
@@ -92,7 +95,12 @@ export function shellFailed(result: {
             .map((item) => item.text)
             .join("\n")
         : "";
+  // Strip terminal colour/control sequences before looking for the status line.
+  const plain = text.replace(
+    /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g,
+    ""
+  );
   // Match the shell tool's trailing status line, not arbitrary output containing "error".
-  const match = /(?:^|\n)Exited with code (\d+)\s*$/.exec(text);
+  const match = /(?:^|\n)Exited with code (\d+)\s*$/.exec(plain);
   return match !== null && Number(match[1]) !== 0;
 }

@@ -69,7 +69,9 @@ scope (see
 OpenCode reads the same shared directory (and `.claude/skills`) directly, so
 workspace links work there, but `skill` has no OpenCode backend: there is no
 session scope and no user scope. The Codex Andon plugin lives in `chatgpt/`
-because it also serves the ChatGPT desktop app.
+because it also serves the ChatGPT desktop app. `install.sh` links the OpenCode
+Andon adapter from `skills/agent-config/plugins/andon/opencode` into
+`~/.config/opencode/plugins/andon`; that plugin's README covers manual installs.
 
 ## Adding an agent
 

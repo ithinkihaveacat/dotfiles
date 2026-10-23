@@ -135,6 +135,7 @@ the last overlay to provide a given filename wins.
 | `etc/agents/agy/hooks`                               | `link_overlay_path`                 | Symlinked to `~/.gemini/config/hooks` (gated on `agy`)                                          |
 | `etc/agents/hooks/ensure-commit-hooks`               | `overlay_path`                      | Registered as a `PreToolUse` hook in `~/.claude/settings.json` (gated on `claude`)              |
 | `etc/agents/opencode/plugins/ensure-commit-hooks.ts` | `link_overlay_path`                 | Symlinked to `~/.config/opencode/plugins/` (gated on `opencode`)                                |
+| `skills/agent-config/plugins/andon/opencode`         | `link_overlay_path`                 | Symlinked to `~/.config/opencode/plugins/andon` (gated on `opencode`)                           |
 | `etc/shpool/config.toml`                             | `link_overlay_path`                 |                                                                                                 |
 | `etc/starship/starship.toml`                         | `link_overlay_path`                 |                                                                                                 |
 | `etc/ghostty/config`                                 | `link_overlay_path`                 |                                                                                                 |

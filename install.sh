@@ -1819,7 +1819,7 @@ function register_claude_pretooluse_hook {
 }
 
 function feature_agents {
-  local agents_context
+  local agents_context andon_plugins
 
   heading "agents"
 
@@ -1855,6 +1855,12 @@ function feature_agents {
     link_overlay_path \
       "etc/agents/opencode/plugins/ensure-commit-hooks.ts" \
       "$XDG_CONFIG_HOME/opencode/plugins/ensure-commit-hooks.ts"
+    andon_plugins="$XDG_CONFIG_HOME/opencode/plugins/andon"
+    if [ -e "$andon_plugins" ] && [ ! -L "$andon_plugins" ]; then
+      echo "warning: $andon_plugins exists and is not a symlink; leaving it in place" >&2
+    else
+      link_overlay_path "skills/agent-config/plugins/andon/opencode" "$andon_plugins"
+    fi
   fi
 
   if exists claude; then

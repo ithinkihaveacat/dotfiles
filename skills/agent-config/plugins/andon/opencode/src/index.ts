@@ -28,6 +28,7 @@ export async function setup(
   })
 ) {
   let defaultLevel = DEFAULT_LEVEL;
+  let levelVerified = false;
   let checkedAt = 0;
   let notify = async () => {};
   const sensors = new Map<string, ReturnType<typeof createSensor>>();
@@ -36,23 +37,35 @@ export async function setup(
   const models = new Map<string, string>();
   const pendingReminders = new Map<string, string>();
 
-  async function refreshDefault(force = false) {
-    if (!force && Date.now() - checkedAt < 60_000) return;
-    checkedAt = Date.now();
+  const LEVEL_TTL_MS = 60_000;
+  const LEVEL_RETRY_MS = 5_000;
+
+  async function refreshDefault(force = false): Promise<boolean> {
+    const now = Date.now();
+    const ttl = levelVerified ? LEVEL_TTL_MS : LEVEL_RETRY_MS;
+    if (!force && now - checkedAt < ttl) return levelVerified;
+    checkedAt = now;
     try {
       const stats = await cliJson<Stats>(cli, ["stats", "--json"]);
-      if (isLevel(stats.level)) defaultLevel = stats.level;
+      if (isLevel(stats.level)) {
+        defaultLevel = stats.level;
+        levelVerified = true;
+      }
     } catch {
-      /* A broken store must not prevent loading the reporting tool. */
+      /*
+       * Keep the last known level. A failed read must not lock the fallback
+       * for the session; the caller retries after LEVEL_RETRY_MS.
+       */
     }
+    return levelVerified;
   }
 
   async function sessionLevel(sessionID?: string): Promise<number> {
     if (sessionID && sessionLevels.has(sessionID)) {
       return sessionLevels.get(sessionID)!;
     }
-    await refreshDefault();
-    if (sessionID) {
+    const verified = await refreshDefault();
+    if (sessionID && verified) {
       if (sessionLevels.size >= 128) {
         sessionLevels.delete(sessionLevels.keys().next().value!);
       }
@@ -250,7 +263,10 @@ export async function setup(
         ["stats", "--json"],
         request.signal
       );
-      defaultLevel = isLevel(stats.level) ? stats.level : defaultLevel;
+      if (isLevel(stats.level)) {
+        defaultLevel = stats.level;
+        levelVerified = true;
+      }
       checkedAt = Date.now();
       return {
         alerts: await cliJson<Alert[]>(
