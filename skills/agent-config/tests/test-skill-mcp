@@ -1,0 +1,419 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "anyio==4.15.1",
+#     "mcp==2.3.0",
+#     "mcp-types==2.3.0",
+# ]
+# ///
+"""Exercise 'skill mcp' over the real stdio protocol against a fixture repo."""
+# unittest supplies the assertion API.
+# ruff: noqa: PT009, PT027
+
+import asyncio
+import contextlib
+import hashlib
+import inspect
+import os
+import subprocess
+import sys
+import tempfile
+import traceback
+import unittest
+from pathlib import Path
+from typing import Any
+
+import mcp_types as types
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.shared.exceptions import MCPError
+from pydantic import TypeAdapter
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "skill"
+ANY = TypeAdapter(dict)
+# A request whose params pass through as written: the extension's methods
+# have no model in mcp_types.
+RawRequest = types.Request[dict[str, Any], str]
+UV_DIRS = {
+    var: subprocess.run(
+        ["uv", *cmd], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    for var, cmd in (
+        ("UV_CACHE_DIR", ["cache", "dir"]),
+        ("UV_PYTHON_INSTALL_DIR", ["python", "dir"]),
+    )
+}
+
+
+def git(cwd, *args):
+    subprocess.run(
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+    )
+
+
+def blob(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def write_skill(root: Path, name: str, body: str, files=None):
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: >-\n  The {name} skill, for testing.\n"
+        f"metadata:\n  version: '1'\n---\n\n{body}\n"
+    )
+    for rel, text in (files or {}).items():
+        (d / rel).parent.mkdir(parents=True, exist_ok=True)
+        (d / rel).write_text(text)
+
+
+class SkillMcpTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.home = self.tmp / "home"
+        self.repo = self.home / "skills-repo"
+        skills = self.repo / "skills"
+        write_skill(
+            skills,
+            "alpha",
+            "See references/notes.md.",
+            {
+                "references/notes.md": "Prefers window seats.\nLikes trains.\n",
+                "scripts/run": "#!/bin/sh\necho alpha\n",
+                "data/private.jsonl": "{}\n",
+            },
+        )
+        write_skill(
+            skills, "beta", "Big skill.", {"references/big.md": "x" * 40_000 + "\n"}
+        )
+        (skills / ".gitignore").write_text("data/\n")
+        git(self.repo, "init", "-q")
+        git(self.repo, "config", "user.email", "test@example.com")
+        git(self.repo, "config", "user.name", "Test")
+        git(self.repo, "config", "commit.gpgsign", "false")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "init")
+        write_skill(self.home / ".corp" / "skills", "gamma", "Employer.")
+        self.config = self.tmp / "mcp.toml"
+        self.config.write_text(
+            'sources = ["~/skills-repo/skills"]\n\n[scopes]\n'
+            'all = ["alpha", "beta"]\none = ["alpha"]\n'
+        )
+        self.env = {
+            **os.environ,
+            # The isolated HOME must not hide uv's caches and Pythons.
+            **UV_DIRS,
+            "HOME": str(self.home),
+            "SKILL_MCP_CONFIG": str(self.config),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
+
+    async def run_test(self, method):
+        self.setUp()
+        try:
+            if "client" in inspect.signature(method).parameters:
+                async with contextlib.AsyncExitStack() as stack:
+                    errlog = stack.enter_context(tempfile.TemporaryFile(mode="w+"))  # noqa: SIM115 -- ExitStack owns cleanup
+                    streams = await stack.enter_async_context(
+                        stdio_client(
+                            StdioServerParameters(
+                                command=str(SCRIPT), args=["mcp", "all"], env=self.env
+                            ),
+                            errlog=errlog,
+                        )
+                    )
+                    client = await stack.enter_async_context(
+                        ClientSession(*streams, read_timeout_seconds=30)
+                    )
+                    self.initialized = await client.initialize()
+                    await method(client)
+            else:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+        finally:
+            self.tearDown()
+
+    def cli(self, *args):
+        return subprocess.run(
+            [str(SCRIPT), "mcp", *args],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    async def tool(self, client, name, args, error=False):
+        result = await client.call_tool(name, args)
+        self.assertEqual(result.is_error, error, result.content)
+        return result.content[0].text
+
+    async def rpc(self, client, method, params):
+        return await client.send_request(RawRequest(method=method, params=params), ANY)
+
+    def test_list_scopes(self):
+        out = self.cli("--list")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        rows = [line.split("\t")[:2] for line in out.stdout.splitlines()]
+        self.assertEqual(rows, [["all", "alpha"], ["all", "beta"], ["one", "alpha"]])
+
+    def test_corp_never_served(self):
+        self.config.write_text(
+            'sources = ["~/.corp/skills"]\n\n[scopes]\nall = ["gamma"]\n'
+        )
+        out = self.cli("--list")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("never served", out.stderr)
+        # Nor through a link that points there.
+        link = self.repo / "skills" / "gamma"
+        link.symlink_to(self.home / ".corp" / "skills" / "gamma")
+        self.config.write_text(
+            'sources = ["~/skills-repo/skills"]\n\n[scopes]\nall = ["gamma"]\n'
+        )
+        out = self.cli("--list")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("never served", out.stderr)
+
+    def test_unknown_scope_and_name_mismatch(self):
+        out = self.cli("--list", "--config", str(self.tmp / "missing.toml"))
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("no configuration", out.stderr)
+        skill_md = self.repo / "skills" / "beta" / "SKILL.md"
+        skill_md.write_text(skill_md.read_text().replace("name: beta", "name: other"))
+        out = self.cli("--list")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("names itself 'other'", out.stderr)
+
+    def test_help(self):
+        out = self.cli("--help")
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("SEP-2640", out.stdout)
+        out = subprocess.run(
+            [str(SCRIPT), "--scope", "user", "mcp"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(out.returncode, 2)
+
+    async def test_discovery(self, client):
+        caps = self.initialized.capabilities
+        self.assertEqual(
+            caps.experimental,
+            {"io.modelcontextprotocol/skills": {"directoryRead": True}},
+        )
+        self.assertIsNotNone(caps.resources)
+        self.assertIn("alpha (skill://alpha/SKILL.md)", self.initialized.instructions)
+        self.assertIn("load_skill", self.initialized.instructions)
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+        self.assertEqual(set(tools), {"load_skill", "read_file", "search", "edit_file"})
+        self.assertIn("The beta skill", tools["load_skill"].description)
+        self.assertTrue(tools["read_file"].annotations.read_only_hint)
+        self.assertFalse(tools["edit_file"].annotations.read_only_hint)
+
+    async def test_load_skill(self, client):
+        small = await self.tool(client, "load_skill", {"name": "alpha"})
+        self.assertIn("See references/notes.md.", small)
+        self.assertIn("## skill://alpha/references/notes.md", small)
+        self.assertIn("echo alpha", small)
+        self.assertNotIn("data/private.jsonl", small)
+        big = await self.tool(client, "load_skill", {"name": "beta"})
+        self.assertIn("- skill://beta/references/big.md (40001 bytes", big)
+        self.assertNotIn("xxxx", big)
+        await self.tool(client, "load_skill", {"name": "gamma"}, error=True)
+
+    async def test_read_and_search(self, client):
+        text = await self.tool(
+            client, "read_file", {"uri": "skill://alpha/scripts/run"}
+        )
+        data = (self.repo / "skills/alpha/scripts/run").read_bytes()
+        self.assertTrue(
+            text.startswith(f"skill://alpha/scripts/run (blob {blob(data)})")
+        )
+        self.assertIn("echo alpha", text)
+        self.assertIn(
+            "# Skill alpha", await self.tool(client, "read_file", {"uri": "alpha"})
+        )
+        for bad in (
+            "alpha/../beta/SKILL.md",
+            "alpha/data/private.jsonl",
+            "/etc/passwd",
+        ):
+            await self.tool(client, "read_file", {"uri": bad}, error=True)
+        found = await self.tool(client, "search", {"pattern": "TRAINS"})
+        self.assertEqual(found, "skill://alpha/references/notes.md:2: Likes trains.")
+        found = await self.tool(
+            client, "search", {"pattern": "TRAINS", "ignore_case": False}
+        )
+        self.assertEqual(found, "no matches")
+
+    async def test_edit_file(self, client):
+        path = self.repo / "skills/alpha/references/notes.md"
+        uri = "skill://alpha/references/notes.md"
+        args = {
+            "uri": uri,
+            "old_string": "Likes trains.",
+            "new_string": "Likes trains, but not ferries.",
+            "expected_blob": blob(path.read_bytes()),
+            "summary": "Recorded a food preference.",
+        }
+        stale = {**args, "expected_blob": "0" * 40}
+        self.assertIn(
+            "read it again", await self.tool(client, "edit_file", stale, error=True)
+        )
+        out = await self.tool(client, "edit_file", args)
+        self.assertIn(f"it is now blob {blob(path.read_bytes())}", out)
+        self.assertIn("not ferries", path.read_text())
+        log = (
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "-C",
+                    str(self.repo),
+                    "log",
+                    "-1",
+                    "--format=%s%n%b",
+                    "--name-only",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        ).stdout
+        self.assertIn("docs(alpha): update references/notes.md", log)
+        self.assertIn("Recorded a food preference.", log)
+        self.assertIn("skills/alpha/references/notes.md", log)
+        # The same edit again no longer matches the file's blob.
+        await self.tool(client, "edit_file", args, error=True)
+
+    async def test_edit_refusals(self, client):
+        path = self.repo / "skills/alpha/references/notes.md"
+        base = {
+            "uri": "skill://alpha/references/notes.md",
+            "old_string": "Likes trains.",
+            "expected_blob": blob(path.read_bytes()),
+        }
+        for new in (
+            "Passport: 123456789",
+            "Passport expires 2031-04-30",
+            "Born 14 March 2012",
+            "DOB: 14/03/2012",
+            "Date of birth: March 14, 2012",
+        ):
+            with self.subTest(new=new):
+                out = await self.tool(
+                    client, "edit_file", {**base, "new_string": new}, error=True
+                )
+                self.assertIn("refused", out)
+        # Month and year are fine.
+        await self.tool(client, "edit_file", {**base, "new_string": "Born March 2012"})
+        # A file with uncommitted changes is left alone.
+        path.write_text(path.read_text() + "draft\n")
+        dirty = {
+            **base,
+            "old_string": "Prefers",
+            "new_string": "Always prefers",
+            "expected_blob": blob(path.read_bytes()),
+        }
+        out = await self.tool(client, "edit_file", dirty, error=True)
+        self.assertIn("uncommitted", out)
+
+    async def test_resources(self, client):
+        uris = [str(r.uri) for r in (await client.list_resources()).resources]
+        self.assertIn("skill://alpha/SKILL.md", uris)
+        self.assertIn("skill://alpha/scripts/run", uris)
+        self.assertNotIn("skill://alpha/data/private.jsonl", uris)
+        read = await client.read_resource("skill://alpha/references/notes.md")
+        self.assertIn("window seats", read.contents[0].text)
+        with self.assertRaises(MCPError) as err:
+            await client.read_resource("skill://alpha/missing.md")
+        self.assertEqual(err.exception.error.code, -32602)
+
+    async def test_skills_list_and_get(self, client):
+        listing = await self.rpc(client, "skills/list", {})
+        entries = {e["uri"]: e for e in listing["skills"]}
+        self.assertEqual(
+            set(entries), {"skill://alpha/SKILL.md", "skill://beta/SKILL.md"}
+        )
+        alpha = entries["skill://alpha/SKILL.md"]
+        self.assertEqual(
+            alpha["frontmatter"],
+            {
+                "name": "alpha",
+                "description": "The alpha skill, for testing.",
+                "metadata": {"version": "1"},
+            },
+        )
+        files = {r["uri"]: r for r in alpha["resources"]}
+        self.assertEqual(
+            set(files),
+            {
+                "skill://alpha/SKILL.md",
+                "skill://alpha/references/notes.md",
+                "skill://alpha/scripts/run",
+            },
+        )
+        data = (self.repo / "skills/alpha/SKILL.md").read_bytes()
+        self.assertEqual(
+            files["skill://alpha/SKILL.md"],
+            {
+                "uri": "skill://alpha/SKILL.md",
+                "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            },
+        )
+        got = await self.rpc(client, "skills/get", {"uri": "skill://alpha/SKILL.md"})
+        self.assertEqual(got["skill"], alpha)
+        for uri in ("skill://gamma/SKILL.md", "skill://alpha/references/notes.md"):
+            with self.subTest(uri=uri), self.assertRaises(MCPError) as err:
+                await self.rpc(client, "skills/get", {"uri": uri})
+            self.assertEqual(err.exception.error.code, -32602)
+
+    async def test_directory_read(self, client):
+        root = await self.rpc(
+            client, "resources/directory/read", {"uri": "skill://alpha"}
+        )
+        children = {r["uri"]: r.get("mimeType") for r in root["resources"]}
+        self.assertEqual(
+            children,
+            {
+                "skill://alpha/SKILL.md": "text/markdown",
+                "skill://alpha/references": "inode/directory",
+                "skill://alpha/scripts": "inode/directory",
+            },
+        )
+        sub = await self.rpc(
+            client, "resources/directory/read", {"uri": "skill://alpha/references"}
+        )
+        self.assertEqual(
+            [r["uri"] for r in sub["resources"]], ["skill://alpha/references/notes.md"]
+        )
+        with self.assertRaises(MCPError):
+            await self.rpc(
+                client, "resources/directory/read", {"uri": "skill://alpha/data"}
+            )
+
+
+if __name__ == "__main__":
+    names = sorted(name for name in dir(SkillMcpTests) if name.startswith("test_"))
+    print(f"1..{len(names)}", flush=True)
+    failures = 0
+    for number, name in enumerate(names, 1):
+        case = SkillMcpTests()
+        try:
+            asyncio.run(case.run_test(getattr(case, name)))
+        except Exception:
+            failures += 1
+            print(f"not ok {number} - {name}", flush=True)
+            for line in traceback.format_exc().splitlines():
+                print(f"# {line}")
+        else:
+            print(f"ok {number} - {name}", flush=True)
+    sys.exit(1 if failures else 0)

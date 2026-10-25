@@ -1,0 +1,976 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "anyio==4.15.1",
+#     "mcp==2.3.0",
+#     "mcp-types==2.3.0",
+#     "pyyaml==6.0.3",
+#     "starlette==1.7.0",
+#     "uvicorn==0.54.0",
+# ]
+# ///
+# Tests: skills/agent-config/tests/test-skill-mcp
+"""The 'skill mcp' server, run by 'skill mcp' so that 'skill' itself needs no
+third-party packages."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import hashlib
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import textwrap
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, NoReturn
+
+import tomllib
+
+PROG = "skill mcp"
+VERSION = "1"
+EXTENSION = "io.modelcontextprotocol/skills"
+DEFAULT_CONFIG = "~/.private/config/skill/mcp.toml"
+DEFAULT_PORT = 8790
+# load_skill returns every text file of a skill up to this total size, and
+# only SKILL.md plus an index beyond it.
+WHOLE_SKILL_BYTES = 32 * 1024
+SEARCH_MAX_MATCHES = 200
+LIST_TTL_MS = 60_000
+SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+class SkillError(Exception):
+    """A request that cannot be served, reported to the caller as is."""
+
+
+def die(msg: str, code: int = 1) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# --- Skills ------------------------------------------------------------------
+
+
+def git_blob(data: bytes) -> str:
+    """The SHA-1 git gives DATA as a blob, so edits can name what they replace."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def parse_frontmatter(text: str) -> dict[str, Any]:
+    """SKILL.md's YAML frontmatter as JSON-safe values, or {} if it has none."""
+    import yaml
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), 0)
+    if not end:
+        return {}
+    data = yaml.safe_load("\n".join(lines[1:end])) or {}
+    if not isinstance(data, dict):
+        return {}
+    # YAML dates and the like have no JSON form; the listing carries text.
+    return json.loads(json.dumps(data, default=str))
+
+
+def is_text(data: bytes) -> bool:
+    if b"\0" in data:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def mime_type(rel: str) -> str:
+    suffix = Path(rel).suffix.lower()
+    return {
+        ".md": "text/markdown",
+        ".json": "application/json",
+        ".jsonl": "application/jsonl",
+        ".toml": "application/toml",
+        ".yaml": "application/yaml",
+        ".yml": "application/yaml",
+        ".py": "text/x-python",
+        ".sh": "text/x-shellscript",
+        ".fish": "text/x-fish",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml",
+        ".pdf": "application/pdf",
+    }.get(suffix, "text/plain")
+
+
+@dataclass
+class Skill:
+    name: str
+    root: Path
+    description: str = ""
+    # The git work tree holding the skill, or None if it is not in one.
+    repo: Path | None = None
+
+    def uri(self, rel: str = "SKILL.md") -> str:
+        return f"skill://{self.name}/{rel}" if rel else f"skill://{self.name}"
+
+    def files(self) -> list[str]:
+        """The skill's files, relative and '/'-separated: in a git work tree,
+        those git tracks (so caches and ignored data are never served);
+        otherwise every file outside a dot-directory."""
+        if self.repo is not None:
+            proc = run_git(self.root, "ls-files", "-z", "--", ".")
+            if proc.returncode == 0:
+                found = [p for p in proc.stdout.split("\0") if p]
+                return sorted(p for p in found if (self.root / p).is_file())
+        found = []
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            base = Path(dirpath).relative_to(self.root)
+            for f in filenames:
+                if not f.startswith("."):
+                    found.append((base / f).as_posix())
+        return sorted(found)
+
+    def read(self, rel: str) -> bytes:
+        return (self.root / rel).read_bytes()
+
+    def entry(self) -> dict[str, Any]:
+        """The skill's SEP-2640 entry: URI, verbatim frontmatter, and every
+        file with its digest and size."""
+        resources = []
+        for rel in self.files():
+            data = self.read(rel)
+            resources.append(
+                {
+                    "uri": self.uri(rel),
+                    "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+                    "size": len(data),
+                }
+            )
+        frontmatter = parse_frontmatter(self.read("SKILL.md").decode("utf-8"))
+        return {"uri": self.uri(), "frontmatter": frontmatter, "resources": resources}
+
+
+def under(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def forbidden(path: Path) -> bool:
+    """Employer content is never served, wherever a link points from."""
+    corp = Path("~/.corp").expanduser()
+    return ".corp" in path.parts or under(path, corp.resolve())
+
+
+def load_skill_dir(name: str, sources: list[Path]) -> Skill:
+    for src in sources:
+        candidate = src / name
+        if not (candidate / "SKILL.md").is_file():
+            continue
+        root = candidate.resolve()
+        if forbidden(root):
+            raise SkillError(
+                f"skill '{name}' resolves to {root}, which is never served"
+            )
+        text = (root / "SKILL.md").read_text(encoding="utf-8")
+        meta = parse_frontmatter(text)
+        if meta.get("name") != name:
+            raise SkillError(
+                f"{root}/SKILL.md names itself '{meta.get('name')}', not '{name}'"
+            )
+        top = run_git(root, "rev-parse", "--show-toplevel")
+        repo = Path(top.stdout.strip()) if top.returncode == 0 else None
+        return Skill(name, root, str(meta.get("description") or ""), repo)
+    raise SkillError(f"skill '{name}' not found in {', '.join(map(str, sources))}")
+
+
+@dataclass
+class Config:
+    path: Path
+    sources: list[Path]
+    scopes: dict[str, list[str]]
+
+
+def load_config(path: Path) -> Config:
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        raise SkillError(f"no configuration at {path}") from None
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise SkillError(f"cannot read {path}: {e}") from None
+    sources = data.get("sources")
+    scopes = data.get("scopes")
+    if not isinstance(sources, list) or not all(isinstance(s, str) for s in sources):
+        raise SkillError(f"{path}: 'sources' must be a list of directories")
+    if not isinstance(scopes, dict) or not scopes:
+        raise SkillError(f"{path}: '[scopes]' must map each scope to skill names")
+    dirs = []
+    for s in sources:
+        d = Path(s).expanduser()
+        if not d.is_absolute():
+            d = path.parent / d
+        if forbidden(d.resolve()):
+            raise SkillError(f"{path}: source {s} is never served")
+        dirs.append(d)
+    for scope, names in scopes.items():
+        if not SCOPE_RE.match(scope):
+            raise SkillError(
+                f"{path}: scope '{scope}' must be lowercase letters, digits and dashes"
+            )
+        if not isinstance(names, list) or not all(
+            isinstance(n, str) and NAME_RE.match(n) for n in names
+        ):
+            raise SkillError(f"{path}: scope '{scope}' must list skill names")
+    return Config(path, dirs, {k: list(v) for k, v in scopes.items()})
+
+
+@dataclass
+class Catalog:
+    """The skills one scope serves, by name."""
+
+    scope: str
+    skills: dict[str, Skill] = field(default_factory=dict)
+    push: bool = False
+
+    @classmethod
+    def build(cls, cfg: Config, scope: str, push: bool = False) -> Catalog:
+        if scope not in cfg.scopes:
+            raise SkillError(
+                f"no scope '{scope}' in {cfg.path} (scopes: {', '.join(sorted(cfg.scopes))})"
+            )
+        cat = cls(scope, push=push)
+        for name in cfg.scopes[scope]:
+            cat.skills[name] = load_skill_dir(name, cfg.sources)
+        return cat
+
+    def skill(self, name: str) -> Skill:
+        skill = self.skills.get(name)
+        if skill is None:
+            raise SkillError(
+                f"no skill '{name}' here (skills: {', '.join(sorted(self.skills)) or 'none'})"
+            )
+        return skill
+
+    def locate(self, ref: str) -> tuple[Skill, str]:
+        """A file reference, as skill://NAME/PATH or NAME/PATH, as the skill
+        and the file's relative path. Only files the skill serves resolve."""
+        rest = ref.removeprefix("skill://").strip("/")
+        name, _, rel = rest.partition("/")
+        skill = self.skill(name)
+        rel = rel or "SKILL.md"
+        if rel not in skill.files():
+            raise SkillError(f"no file {skill.uri(rel)}")
+        return skill, rel
+
+    def directory(self, ref: str) -> tuple[Skill, str]:
+        rest = ref.removeprefix("skill://").strip("/")
+        name, _, rel = rest.partition("/")
+        skill = self.skill(name)
+        if rel and not any(f.startswith(rel + "/") for f in skill.files()):
+            raise SkillError(f"no directory {skill.uri(rel)}")
+        return skill, rel
+
+
+# --- Tool layer -----------------------------------------------------------------
+
+DOB_WORDS = re.compile(r"\b(born|birth|dob|d\.o\.b)", re.IGNORECASE)
+PASSPORT_WORDS = re.compile(r"\bpassport", re.IGNORECASE)
+PASSPORT_NUMBER = re.compile(r"\b[A-Z]{0,2}\d{6,9}\b")
+MONTH = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+FULL_DATE = re.compile(
+    r"\b\d{4}-\d{1,2}-\d{1,2}\b"
+    r"|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b"
+    rf"|\b\d{{1,2}}(st|nd|rd|th)?\s+(of\s+)?{MONTH}\s+\d{{4}}\b"
+    rf"|\b{MONTH}\s+\d{{1,2}}(st|nd|rd|th)?,?\s+\d{{4}}\b",
+    re.IGNORECASE,
+)
+
+
+def privacy_refusal(old: str, new: str) -> str | None:
+    """Why NEW may not be written, if a line it adds looks like a passport
+    number or expiry date, or a full date of birth."""
+    before = set(old.splitlines())
+    for line in new.splitlines():
+        if line in before:
+            continue
+        if PASSPORT_WORDS.search(line) and (
+            PASSPORT_NUMBER.search(line) or FULL_DATE.search(line)
+        ):
+            return "it looks like a passport number or expiry date"
+        if DOB_WORDS.search(line) and FULL_DATE.search(line):
+            return "it looks like a full date of birth (record the month and year only)"
+    return None
+
+
+def file_index(skill: Skill) -> str:
+    lines = []
+    for rel in skill.files():
+        data = skill.read(rel)
+        lines.append(f"- {skill.uri(rel)} ({len(data)} bytes, blob {git_blob(data)})")
+    return "\n".join(lines)
+
+
+def tool_load_skill(cat: Catalog, args: dict[str, Any]) -> str:
+    skill = cat.skill(str(args.get("name", "")))
+    files = skill.files()
+    texts = {}
+    for rel in files:
+        data = skill.read(rel)
+        if is_text(data):
+            texts[rel] = data
+    whole = sum(len(d) for d in texts.values()) <= WHOLE_SKILL_BYTES
+    out = [
+        f"# Skill {skill.name} ({skill.uri()})",
+        "",
+        (
+            "Follow the instructions below. Relative paths in them resolve "
+            f"against {skill.uri('')}/; read those files with read_file."
+        ),
+        "",
+        f"## {skill.uri()}",
+        "",
+        skill.read("SKILL.md").decode("utf-8"),
+        "",
+        "## Files",
+        "",
+        file_index(skill),
+    ]
+    if whole:
+        for rel in files:
+            if rel == "SKILL.md" or rel not in texts:
+                continue
+            out += ["", f"## {skill.uri(rel)}", "", texts[rel].decode("utf-8")]
+    return "\n".join(out)
+
+
+def tool_read_file(cat: Catalog, args: dict[str, Any]) -> str:
+    ref = str(args.get("uri", "")).strip()
+    if "/" not in ref.removeprefix("skill://").strip("/"):
+        # A bare skill name reads as loading the skill.
+        return tool_load_skill(cat, {"name": ref.removeprefix("skill://").strip("/")})
+    skill, rel = cat.locate(ref)
+    data = skill.read(rel)
+    if not is_text(data):
+        raise SkillError(f"{skill.uri(rel)} is binary; read it as a resource")
+    return f"{skill.uri(rel)} (blob {git_blob(data)})\n\n{data.decode('utf-8')}"
+
+
+def tool_search(cat: Catalog, args: dict[str, Any]) -> str:
+    pattern = str(args.get("pattern", ""))
+    if not pattern:
+        raise SkillError("pattern is required")
+    flags = re.IGNORECASE if args.get("ignore_case", True) else 0
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error as e:
+        raise SkillError(f"invalid pattern: {e}") from None
+    names = [args["skill"]] if args.get("skill") else sorted(cat.skills)
+    matches = []
+    for name in names:
+        skill = cat.skill(name)
+        for rel in skill.files():
+            data = skill.read(rel)
+            if not is_text(data):
+                continue
+            for n, line in enumerate(data.decode("utf-8").splitlines(), 1):
+                if regex.search(line):
+                    matches.append(f"{skill.uri(rel)}:{n}: {line}")
+                    if len(matches) >= SEARCH_MAX_MATCHES:
+                        matches.append(f"(stopped at {SEARCH_MAX_MATCHES} matches)")
+                        return "\n".join(matches)
+    return "\n".join(matches) if matches else "no matches"
+
+
+def tool_edit_file(cat: Catalog, args: dict[str, Any]) -> str:
+    skill, rel = cat.locate(str(args.get("uri", "")))
+    old = args.get("old_string")
+    new = args.get("new_string")
+    expected = str(args.get("expected_blob", ""))
+    if not isinstance(old, str) or not old or not isinstance(new, str):
+        raise SkillError("old_string (non-empty) and new_string are required")
+    if old == new:
+        raise SkillError("old_string and new_string are the same")
+    if skill.repo is None:
+        raise SkillError(
+            f"{skill.uri()} is not in a git work tree, so it cannot be edited"
+        )
+    path = skill.root / rel
+    data = path.read_bytes()
+    blob = git_blob(data)
+    if blob != expected:
+        raise SkillError(
+            f"{skill.uri(rel)} is now blob {blob}, not {expected or '(none given)'}; "
+            "read it again and retry"
+        )
+    if run_git(skill.root, "diff", "--quiet", "HEAD", "--", rel).returncode != 0:
+        raise SkillError(f"{skill.uri(rel)} has uncommitted changes on the server")
+    text = data.decode("utf-8")
+    count = text.count(old)
+    if count == 0:
+        raise SkillError(f"old_string not found in {skill.uri(rel)}")
+    if count > 1 and not args.get("replace_all"):
+        raise SkillError(
+            f"old_string occurs {count} times in {skill.uri(rel)}; "
+            "add context to make it unique, or pass replace_all"
+        )
+    reason = privacy_refusal(old, new)
+    if reason:
+        raise SkillError(
+            f"refused: {reason}. These skills must not store passport numbers or "
+            "expiry dates, or exact dates of birth."
+        )
+    updated = (
+        text.replace(old, new) if args.get("replace_all") else text.replace(old, new, 1)
+    )
+    tmp = path.with_name(f".{path.name}.skill-mcp.{os.getpid()}")
+    tmp.write_text(updated, encoding="utf-8")
+    os.replace(tmp, path)
+    subject = f"docs({skill.name}): update {rel}"
+    if len(subject) > 50:
+        subject = f"docs({skill.name}): update {Path(rel).name}"
+    if len(subject) > 50:
+        subject = f"docs({skill.name}): update a file"
+    message = subject
+    summary = str(args.get("summary") or "").strip()
+    if summary:
+        message += "\n\n" + textwrap.fill(summary, 72)
+    commit = run_git(skill.root, "commit", "--quiet", "-m", message, "--", rel)
+    if commit.returncode != 0:
+        path.write_bytes(data)
+        raise SkillError(
+            f"git commit failed, so the edit was undone: {(commit.stderr or commit.stdout).strip()}"
+        )
+    sha = run_git(skill.root, "rev-parse", "--short", "HEAD").stdout.strip()
+    note = ""
+    if cat.push:
+        push = run_git(skill.root, "push", "--quiet")
+        note = (
+            "; pushed"
+            if push.returncode == 0
+            else f"; push failed: {push.stderr.strip()}"
+        )
+    new_blob = git_blob(path.read_bytes())
+    return f"Edited {skill.uri(rel)} in commit {sha}{note}; it is now blob {new_blob}."
+
+
+TOOLS: dict[str, Any] = {
+    "load_skill": tool_load_skill,
+    "read_file": tool_read_file,
+    "search": tool_search,
+    "edit_file": tool_edit_file,
+}
+
+
+def skill_lines(cat: Catalog) -> str:
+    return "\n".join(
+        f"- {s.name} ({s.uri()}): {s.description}" for s in cat.skills.values()
+    )
+
+
+def instructions(cat: Catalog) -> str:
+    return (
+        "This server holds Agent Skills: the user's own instructions and "
+        "reference material for agents. When a request touches one of the "
+        "skills below, call load_skill with its name before answering, and "
+        "follow what it says. Read further files with read_file. When you "
+        "learn a lasting fact that belongs in a skill (a preference, a "
+        "correction), record it there with edit_file rather than in notes "
+        "elsewhere.\n\nSkills:\n" + skill_lines(cat)
+    )
+
+
+def tool_listing(cat: Catalog) -> list[dict[str, Any]]:
+    uri_prop = {
+        "type": "string",
+        "description": "A file, as skill://SKILL/PATH (or SKILL/PATH).",
+    }
+    return [
+        {
+            "name": "load_skill",
+            "description": (
+                "Load a skill: its SKILL.md instructions and an index of its "
+                "files (the whole skill when it is small). Call this first "
+                "whenever a request touches one of these skills:\n" + skill_lines(cat)
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "enum": sorted(cat.skills)},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "read_file",
+            "description": (
+                "Read one file of a skill, such as a reference that SKILL.md "
+                "points to. The reply starts with the file's blob, which "
+                "edit_file needs."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"uri": uri_prop},
+                "required": ["uri"],
+                "additionalProperties": False,
+            },
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "search",
+            "description": (
+                "Search the skills' text files with a regular expression "
+                "(case-insensitive by default). Returns skill:// URIs with "
+                "line numbers."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "skill": {"type": "string", "enum": sorted(cat.skills)},
+                    "ignore_case": {"type": "boolean", "default": True},
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "edit_file",
+            "description": (
+                "Replace exact text in a skill file and commit the change. "
+                "expected_blob is the blob read_file or load_skill reported; "
+                "the edit is refused if the file has changed since. Never "
+                "store passport numbers or expiry dates, or exact dates of "
+                "birth."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri": uri_prop,
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "expected_blob": {"type": "string"},
+                    "replace_all": {"type": "boolean", "default": False},
+                    "summary": {
+                        "type": "string",
+                        "description": "Why the change was made, for the commit message.",
+                    },
+                },
+                "required": ["uri", "old_string", "new_string", "expected_blob"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "openWorldHint": False,
+            },
+        },
+    ]
+
+
+# --- MCP server ---------------------------------------------------------------
+
+
+def sdk_server(cat: Catalog) -> Any:
+    import anyio
+    import mcp_types as types
+    from mcp.server.lowlevel import Server
+    from mcp.shared.exceptions import MCPError
+
+    # Keep file and git work off the event loop, one request at a time.
+    limiter = anyio.CapacityLimiter(1)
+
+    def invalid(e: Exception) -> MCPError:
+        return MCPError(code=types.INVALID_PARAMS, message=str(e))
+
+    async def run(fn: Any, *args: Any) -> Any:
+        return await anyio.to_thread.run_sync(fn, *args, limiter=limiter)
+
+    async def list_tools(ctx: Any, params: Any) -> Any:
+        return types.ListToolsResult(
+            tools=[types.Tool.model_validate(t) for t in tool_listing(cat)]
+        )
+
+    async def call_tool(ctx: Any, params: Any) -> Any:
+        fn = TOOLS.get(params.name)
+        if fn is None:
+            raise MCPError(
+                code=types.INVALID_PARAMS, message=f"unknown tool: {params.name}"
+            )
+        try:
+            text = await run(fn, cat, params.arguments or {})
+        except (SkillError, OSError, UnicodeDecodeError) as e:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(e))], is_error=True
+            )
+        return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
+
+    def resource(skill: Skill, rel: str) -> types.Resource:
+        data = skill.read(rel)
+        if rel == "SKILL.md":
+            return types.Resource(
+                uri=skill.uri(rel),
+                name=skill.name,
+                description=skill.description,
+                mime_type="text/markdown",
+                size=len(data),
+            )
+        return types.Resource(
+            uri=skill.uri(rel), name=rel, mime_type=mime_type(rel), size=len(data)
+        )
+
+    def all_resources() -> list[types.Resource]:
+        return [
+            resource(skill, rel)
+            for skill in cat.skills.values()
+            for rel in skill.files()
+        ]
+
+    async def list_resources(ctx: Any, params: Any) -> Any:
+        return types.ListResourcesResult(resources=await run(all_resources))
+
+    def read(uri: str) -> types.ReadResourceResult:
+        import base64
+
+        skill, rel = cat.locate(uri)
+        data = skill.read(rel)
+        if is_text(data):
+            contents = types.TextResourceContents(
+                uri=uri, mime_type=mime_type(rel), text=data.decode("utf-8")
+            )
+        else:
+            contents = types.BlobResourceContents(
+                uri=uri, mime_type=mime_type(rel), blob=base64.b64encode(data).decode()
+            )
+        return types.ReadResourceResult(contents=[contents])
+
+    async def read_resource(ctx: Any, params: Any) -> Any:
+        try:
+            return await run(read, str(params.uri))
+        except SkillError as e:
+            raise invalid(e) from None
+
+    class SkillsGetParams(types.RequestParams):
+        uri: str
+
+    class DirectoryReadParams(types.PaginatedRequestParams):
+        uri: str
+
+    def list_entries() -> dict[str, Any]:
+        return {
+            "skills": [s.entry() for s in cat.skills.values()],
+            "ttlMs": LIST_TTL_MS,
+            "cacheScope": "private",
+        }
+
+    def get_entry(uri: str) -> dict[str, Any]:
+        rest = uri.removeprefix("skill://")
+        name, _, rel = rest.partition("/")
+        if (
+            not uri.startswith("skill://")
+            or rel != "SKILL.md"
+            or name not in cat.skills
+        ):
+            raise SkillError(f"not a skill this server serves: {uri}")
+        return {"skill": cat.skills[name].entry()}
+
+    def directory(uri: str) -> dict[str, Any]:
+        skill, rel = cat.directory(uri)
+        prefix = rel + "/" if rel else ""
+        children: dict[str, dict[str, Any]] = {}
+        for f in skill.files():
+            if not f.startswith(prefix):
+                continue
+            head, sep, _ = f[len(prefix) :].partition("/")
+            if sep:
+                children.setdefault(
+                    head,
+                    {
+                        "uri": skill.uri(prefix + head),
+                        "name": head,
+                        "mimeType": "inode/directory",
+                    },
+                )
+            else:
+                children[head] = resource(skill, f).model_dump(
+                    by_alias=True, mode="json", exclude_none=True
+                )
+        return {"resources": [children[k] for k in sorted(children)]}
+
+    async def skills_list(ctx: Any, params: Any) -> Any:
+        return await run(list_entries)
+
+    async def skills_get(ctx: Any, params: Any) -> Any:
+        try:
+            return await run(get_entry, params.uri)
+        except SkillError as e:
+            raise invalid(e) from None
+
+    async def directory_read(ctx: Any, params: Any) -> Any:
+        try:
+            return await run(directory, params.uri)
+        except SkillError as e:
+            raise invalid(e) from None
+
+    class SkillServer(Server):
+        """Also advertises the extension under 'experimental': before
+        2026-07-28 the capabilities have no 'extensions' field, and the SDK
+        drops it from the handshake."""
+
+        def get_capabilities(
+            self,
+            notification_options: Any = None,
+            experimental_capabilities: Any = None,
+            extensions: Any = None,
+            *,
+            protocol_version: str | None = None,
+        ) -> Any:
+            return super().get_capabilities(
+                notification_options,
+                experimental_capabilities or dict(self.extensions),
+                extensions,
+                protocol_version=protocol_version,
+            )
+
+    sdk = SkillServer(
+        "skill",
+        version=VERSION,
+        title=f"Skills ({cat.scope})",
+        instructions=instructions(cat),
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+        on_list_resources=list_resources,
+        on_read_resource=read_resource,
+    )
+    sdk.add_request_handler("skills/list", types.PaginatedRequestParams, skills_list)
+    sdk.add_request_handler("skills/get", SkillsGetParams, skills_get)
+    sdk.add_request_handler(
+        "resources/directory/read", DirectoryReadParams, directory_read
+    )
+    sdk.extensions = {EXTENSION: {"directoryRead": True}}
+    return sdk
+
+
+def serve_stdio(cat: Catalog) -> None:
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    async def serve() -> None:
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        interrupted = False
+
+        def stop() -> None:
+            nonlocal interrupted
+            if not interrupted and task is not None:
+                interrupted = True
+                task.cancel()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop)
+        try:
+            sdk = sdk_server(cat)
+            async with stdio_server() as (read, write):
+                await sdk.run(read, write, sdk.create_initialization_options())
+        except asyncio.CancelledError:
+            if interrupted:
+                raise KeyboardInterrupt from None
+            raise
+        finally:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
+
+    anyio.run(serve)
+
+
+def serve_http(
+    cats: list[Catalog], host: str, port: int, allow_hosts: list[str]
+) -> None:
+    import uvicorn
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.applications import Starlette
+
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    hosts += [h if ":" in h else f"{h}:*" for h in allow_hosts] + allow_hosts
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+    )
+    servers = [sdk_server(cat) for cat in cats]
+    routes = []
+    for cat, sdk in zip(cats, servers, strict=True):
+        app = sdk.streamable_http_app(
+            streamable_http_path=f"/mcp/{cat.scope}",
+            stateless_http=True,
+            json_response=True,
+            transport_security=security,
+        )
+        routes += app.routes
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Any) -> Any:
+        async with contextlib.AsyncExitStack() as stack:
+            for sdk in servers:
+                await stack.enter_async_context(sdk.session_manager.run())
+            yield
+
+    print(
+        f"{PROG}: serving {', '.join(f'/mcp/{c.scope}' for c in cats)} "
+        f"on http://{host}:{port}",
+        file=sys.stderr,
+    )
+    uvicorn.run(
+        Starlette(routes=routes, lifespan=lifespan),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        server_header=False,
+    )
+
+
+# --- Command line -------------------------------------------------------------
+
+EPILOG = f"""\
+Configuration:
+  A TOML file names the directories skills are found in and the skills each
+  scope serves. Nothing under ~/.corp is ever served.
+
+    sources = ["~/.private/skills", "~/.dotfiles/skills"]
+
+    [scopes]
+    profile = ["personal-profile"]
+    all = ["personal-profile", "personal-network", "travel"]
+
+Environment:
+  SKILL_MCP_CONFIG  Configuration file (default: {DEFAULT_CONFIG})
+
+Examples:
+  skill mcp --list
+  skill mcp profile
+  skill mcp --http --allow-host skills.example.com
+  claude mcp add skills -- skill mcp all
+
+Each scope is one MCP server: over stdio, the SCOPE argument; over HTTP, every
+scope at /mcp/SCOPE. Its tools (load_skill, read_file, search, edit_file) work
+with any client; it also implements the MCP Skills Extension (SEP-2640:
+skills/list, skills/get, resources/directory/read, and a skill:// resource for
+every file). edit_file commits each edit in the skill's git work tree. The HTTP
+server listens on loopback only and does no authentication of its own: put it
+behind an authenticating proxy, such as Cloudflare Tunnel with Access."""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Serve agent skills over MCP, as tools and as SEP-2640 skills.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "scope",
+        nargs="?",
+        default="all",
+        metavar="SCOPE",
+        help="scope to serve over stdio (default: all)",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="serve every scope over streamable HTTP at /mcp/SCOPE",
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="HTTP address (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"HTTP port (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="also accept requests addressed to HOST, such as a tunnel's hostname",
+    )
+    parser.add_argument("--config", metavar="FILE", help="configuration file")
+    parser.add_argument(
+        "--push", action="store_true", help="push after each edit's commit"
+    )
+    parser.add_argument(
+        "--list", action="store_true", help="print each scope's skills and exit"
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    cfg_path = Path(
+        args.config or os.environ.get("SKILL_MCP_CONFIG") or DEFAULT_CONFIG
+    ).expanduser()
+    try:
+        cfg = load_config(cfg_path)
+        if args.list:
+            for scope in sorted(cfg.scopes):
+                cat = Catalog.build(cfg, scope)
+                for skill in cat.skills.values():
+                    print(f"{scope}\t{skill.name}\t{skill.root}")
+            return 0
+        if args.http:
+            if args.host not in LOOPBACK:
+                die(f"--http serves loopback only, not {args.host}")
+            cats = [Catalog.build(cfg, s, args.push) for s in sorted(cfg.scopes)]
+            serve_http(cats, args.host, args.port, args.allow_host)
+        else:
+            serve_stdio(Catalog.build(cfg, args.scope, args.push))
+    except SkillError as e:
+        die(str(e))
+    return 0
+
+
+def sigterm_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)

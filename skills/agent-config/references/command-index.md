@@ -56,6 +56,8 @@ Commands:
                   sizes for scripts/, references/ and tests/)
   resolve NAME    Print the source path 'add NAME' would symlink to
   show/info NAME  Show details and metadata of a skill
+  mcp [SCOPE]     Serve skills over MCP, to agents that cannot read them from
+                  disk; see 'skill mcp --help'
 
 Options:
   -C, --directory DIR  Run as if started in DIR instead of the current directory

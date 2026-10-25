@@ -139,6 +139,15 @@ skill <command> [arguments]
   profile — the discovery primitive described in
   [Choosing Skills (Workspace vs. Session)](#choosing-skills-workspace-vs-session).
 - **`resolve NAME`**: Print the source path a skill name would resolve to.
+- **`mcp [SCOPE]`**: Serve skills over MCP to agents that cannot read them from
+  disk (claude.ai, the mobile apps, cloud sessions). A TOML file
+  (`SKILL_MCP_CONFIG`) maps each scope to skill names; nothing under `~/.corp`
+  is served. Over stdio it serves one scope; with `--http`, every scope at
+  `/mcp/SCOPE` on loopback, for an authenticating proxy to front. Its tools
+  (`load_skill`, `read_file`, `search`, `edit_file`, which commits each edit)
+  work with any client, and it implements the MCP Skills Extension (SEP-2640).
+  Connect it only where the same skills are not installed locally, so each skill
+  is not offered twice. See `skill mcp --help`.
 
 ### Choosing Skills (Workspace vs. Session)
 

@@ -44,6 +44,7 @@ complete -f -c skill -n __fish_use_subcommand -a bundle -d 'Package skills into 
 complete -f -c skill -n __fish_use_subcommand -a doctor -d 'Check skill links and the catalog'
 complete -f -c skill -n __fish_use_subcommand -a show -d 'Show details and metadata of a skill (alias: info)'
 complete -f -c skill -n __fish_use_subcommand -a info -d 'Show details and metadata of a skill'
+complete -f -c skill -n __fish_use_subcommand -a mcp -d 'Serve skills over MCP'
 
 # list
 complete -c skill -f -n '__fish_seen_subcommand_from list' -l json -d 'Emit JSON (name, origin, path)'
@@ -83,6 +84,19 @@ complete -c skill -f -n '__fish_seen_subcommand_from update' -a '(__fish_skill_c
 complete -c skill -f -n '__fish_seen_subcommand_from update' -a '(__fish_skill_managed_skills)' -d 'Managed skill'
 complete -c skill -f -n '__fish_seen_subcommand_from update' -l all -d 'Update every managed skill'
 complete -c skill -f -n '__fish_seen_subcommand_from update' -l catalog -d 'Refresh the whole metadata index'
+
+# mcp
+function __fish_skill_mcp_scopes
+    skill mcp --list 2>/dev/null | string replace -r '\t.*' '' | sort -u
+end
+complete -c skill -f -n '__fish_seen_subcommand_from mcp' -a '(__fish_skill_mcp_scopes)' -d Scope
+complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l http -d 'Serve every scope over HTTP at /mcp/SCOPE'
+complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l host -x -d 'HTTP address'
+complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l port -x -d 'HTTP port'
+complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l allow-host -x -d 'Also accept requests addressed to HOST'
+complete -c skill -n '__fish_seen_subcommand_from mcp' -l config -r -F -d 'Configuration file'
+complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l push -d 'Push after each edit commit'
+complete -c skill -f -n '__fish_seen_subcommand_from mcp' -l list -d "Print each scope's skills and exit"
 
 # Complete flags
 complete -c skill -f -s h -l help -d 'Display help message and exit'
