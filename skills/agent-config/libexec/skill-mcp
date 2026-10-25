@@ -24,6 +24,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import textwrap
@@ -135,22 +136,36 @@ class Skill:
     def files(self) -> list[str]:
         """The skill's files, relative and '/'-separated: in a git work tree,
         those git tracks (so caches and ignored data are never served);
-        otherwise every file outside a dot-directory."""
+        otherwise every file outside a dot-directory or __pycache__.
+        Symbolic links are never served, since they can point anywhere."""
         if self.repo is not None:
             proc = run_git(self.root, "ls-files", "-z", "--", ".")
             if proc.returncode == 0:
                 found = [p for p in proc.stdout.split("\0") if p]
-                return sorted(p for p in found if (self.root / p).is_file())
+                return sorted(p for p in found if self.servable(p))
         found = []
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            dirnames[:] = sorted(
+                d for d in dirnames if not d.startswith(".") and d != "__pycache__"
+            )
             base = Path(dirpath).relative_to(self.root)
             for f in filenames:
-                if not f.startswith("."):
-                    found.append((base / f).as_posix())
+                rel = (base / f).as_posix()
+                if not f.startswith(".") and self.servable(rel):
+                    found.append(rel)
         return sorted(found)
 
+    def servable(self, rel: str) -> bool:
+        """Whether REL is a regular file that stays inside the skill."""
+        path = self.root / rel
+        if path.is_symlink() or not path.is_file():
+            return False
+        real = path.resolve()
+        return under(real, self.root) and not forbidden(real)
+
     def read(self, rel: str) -> bytes:
+        if not self.servable(rel):
+            raise SkillError(f"{self.uri(rel)} is not a file this skill serves")
         return (self.root / rel).read_bytes()
 
     def entry(self) -> dict[str, Any]:
@@ -399,8 +414,10 @@ def tool_search(cat: Catalog, args: dict[str, Any]) -> str:
                 if regex.search(line):
                     matches.append(f"{skill.uri(rel)}:{n}: {line}")
                     if len(matches) >= SEARCH_MAX_MATCHES:
-                        matches.append(f"(stopped at {SEARCH_MAX_MATCHES} matches)")
-                        return "\n".join(matches)
+                        return "\n".join(matches) + (
+                            f"\n\nShowing the first {SEARCH_MAX_MATCHES} matches; "
+                            "narrow the pattern or name a skill to see the rest."
+                        )
     return "\n".join(matches) if matches else "no matches"
 
 
@@ -445,9 +462,16 @@ def tool_edit_file(cat: Catalog, args: dict[str, Any]) -> str:
     updated = (
         text.replace(old, new) if args.get("replace_all") else text.replace(old, new, 1)
     )
+    # Write beside the file and rename over it, keeping its mode: an
+    # executable script must stay executable.
+    mode = stat.S_IMODE(path.stat().st_mode)
     tmp = path.with_name(f".{path.name}.skill-mcp.{os.getpid()}")
-    tmp.write_text(updated, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(updated, encoding="utf-8")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
     subject = f"docs({skill.name}): update {rel}"
     if len(subject) > 50:
         subject = f"docs({skill.name}): update {Path(rel).name}"
@@ -882,9 +906,14 @@ Each scope is one MCP server: over stdio, the SCOPE argument; over HTTP, every
 scope at /mcp/SCOPE. Its tools (load_skill, read_file, search, edit_file) work
 with any client; it also implements the MCP Skills Extension (SEP-2640:
 skills/list, skills/get, resources/directory/read, and a skill:// resource for
-every file). edit_file commits each edit in the skill's git work tree. The HTTP
-server listens on loopback only and does no authentication of its own: put it
-behind an authenticating proxy, such as Cloudflare Tunnel with Access."""
+every file). A skill in a git work tree serves the files git tracks; symbolic
+links are never served. edit_file commits each edit in that work tree.
+
+The HTTP server listens on loopback only and does no authentication of its
+own: put it behind an authenticating proxy, such as Cloudflare Tunnel with
+Access. --allow-host admits the proxy's hostname; requests from browser pages
+are still accepted only from loopback origins, so clients must connect from a
+server, as hosted connectors do."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -897,7 +926,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "scope",
         nargs="?",
-        default="all",
         metavar="SCOPE",
         help="scope to serve over stdio (default: all)",
     )
@@ -945,13 +973,15 @@ def main() -> int:
                 for skill in cat.skills.values():
                     print(f"{scope}\t{skill.name}\t{skill.root}")
             return 0
+        if args.http and args.scope is not None:
+            die("--http serves every scope; drop the SCOPE argument")
         if args.http:
             if args.host not in LOOPBACK:
                 die(f"--http serves loopback only, not {args.host}")
             cats = [Catalog.build(cfg, s, args.push) for s in sorted(cfg.scopes)]
             serve_http(cats, args.host, args.port, args.allow_host)
         else:
-            serve_stdio(Catalog.build(cfg, args.scope, args.push))
+            serve_stdio(Catalog.build(cfg, args.scope or "all", args.push))
     except SkillError as e:
         die(str(e))
     return 0

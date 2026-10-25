@@ -1413,7 +1413,8 @@ function feature_uv {
   fi
   # bin/ holds symlinks to most skill scripts; skip them to avoid duplicates.
   for src in "${SRCDIRS[@]}"; do
-    for f in "$src"/bin/* "$src"/skills/*/scripts/* "$src"/skills/*/plugins/*/scripts/*; do
+    for f in "$src"/bin/* "$src"/skills/*/scripts/* "$src"/skills/*/plugins/*/scripts/* \
+      "$src"/skills/*/libexec/*; do
       [ -f "$f" ] && [ ! -L "$f" ] || continue
       first_line=""
       read -r first_line <"$f" 2>/dev/null || true

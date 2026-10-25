@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import inspect
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -24,9 +25,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import mcp_types as types
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from pydantic import TypeAdapter
 
@@ -88,13 +91,19 @@ class SkillMcpTests(unittest.TestCase):
             skills, "beta", "Big skill.", {"references/big.md": "x" * 40_000 + "\n"}
         )
         (skills / ".gitignore").write_text("data/\n")
+        (skills / "alpha/scripts/run").chmod(0o755)
+        write_skill(self.home / ".corp" / "skills", "gamma", "Employer.")
+        # Tracked links out of the skill, which must never be served.
+        (skills / "alpha/references/hosts.md").symlink_to("/etc/hosts")
+        (skills / "alpha/references/corp.md").symlink_to(
+            self.home / ".corp/skills/gamma/SKILL.md"
+        )
         git(self.repo, "init", "-q")
         git(self.repo, "config", "user.email", "test@example.com")
         git(self.repo, "config", "user.name", "Test")
         git(self.repo, "config", "commit.gpgsign", "false")
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-q", "-m", "init")
-        write_skill(self.home / ".corp" / "skills", "gamma", "Employer.")
         self.config = self.tmp / "mcp.toml"
         self.config.write_text(
             'sources = ["~/skills-repo/skills"]\n\n[scopes]\n'
@@ -201,6 +210,68 @@ class SkillMcpTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(out.returncode, 2)
+        out = self.cli("--http", "one")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("drop the SCOPE argument", out.stderr)
+
+    async def test_http(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+        args = ["mcp", "--http", "--port", str(port), "--allow-host", "skills.test"]
+        with tempfile.TemporaryFile() as errlog:
+            server = await asyncio.create_subprocess_exec(
+                str(SCRIPT), *args, env=self.env, stderr=errlog
+            )
+            try:
+                async with httpx2.AsyncClient() as http:
+                    for _ in range(100):
+                        try:
+                            await http.get(base + "/")
+                            break
+                        except httpx2.TransportError:
+                            await asyncio.sleep(0.2)
+                    for scope, names in (
+                        ("one", ["alpha"]),
+                        ("all", ["alpha", "beta"]),
+                    ):
+                        async with (
+                            streamable_http_client(f"{base}/mcp/{scope}") as streams,
+                            ClientSession(*streams[:2]) as client,
+                        ):
+                            init = await client.initialize()
+                            self.assertIn(
+                                "io.modelcontextprotocol/skills",
+                                init.capabilities.experimental,
+                            )
+                            tools = {
+                                t.name: t for t in (await client.list_tools()).tools
+                            }
+                            schema = tools["load_skill"].input_schema
+                            self.assertEqual(
+                                schema["properties"]["name"]["enum"], names
+                            )
+                            text = await self.tool(
+                                client, "load_skill", {"name": "alpha"}
+                            )
+                            self.assertIn("Prefers window seats.", text)
+                    ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+                    headers = {"accept": "application/json, text/event-stream"}
+
+                    async def status(path, host=None):
+                        extra = {"host": host} if host else {}
+                        reply = await http.post(
+                            base + path, json=ping, headers={**headers, **extra}
+                        )
+                        return reply.status_code
+
+                    self.assertEqual(await status("/mcp/nope"), 404)
+                    self.assertEqual(await status("/mcp/all", "evil.example"), 421)
+                    self.assertNotEqual(await status("/mcp/all", "skills.test"), 421)
+            finally:
+                server.terminate()
+                await server.wait()
 
     async def test_discovery(self, client):
         caps = self.initialized.capabilities
@@ -292,6 +363,48 @@ class SkillMcpTests(unittest.TestCase):
         self.assertIn("skills/alpha/references/notes.md", log)
         # The same edit again no longer matches the file's blob.
         await self.tool(client, "edit_file", args, error=True)
+
+    async def test_edit_keeps_mode(self, client):
+        path = self.repo / "skills/alpha/scripts/run"
+        args = {
+            "uri": "skill://alpha/scripts/run",
+            "old_string": "echo alpha",
+            "new_string": "echo ALPHA",
+            "expected_blob": blob(path.read_bytes()),
+        }
+        await self.tool(client, "edit_file", args)
+        self.assertTrue(os.access(path, os.X_OK))
+        staged = (
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "-C",
+                    str(self.repo),
+                    "ls-files",
+                    "-s",
+                    "skills/alpha/scripts/run",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        ).stdout
+        self.assertTrue(staged.startswith("100755 "), staged)
+        leftovers = list(path.parent.glob(".*skill-mcp*"))
+        self.assertEqual(leftovers, [])
+
+    async def test_symlinks_not_served(self, client):
+        uris = [str(r.uri) for r in (await client.list_resources()).resources]
+        for name in ("hosts.md", "corp.md"):
+            uri = f"skill://alpha/references/{name}"
+            with self.subTest(uri=uri):
+                self.assertNotIn(uri, uris)
+                await self.tool(client, "read_file", {"uri": uri}, error=True)
+                with self.assertRaises(MCPError):
+                    await client.read_resource(uri)
+        found = await self.tool(client, "search", {"pattern": "localhost|Employer"})
+        self.assertEqual(found, "no matches")
 
     async def test_edit_refusals(self, client):
         path = self.repo / "skills/alpha/references/notes.md"
