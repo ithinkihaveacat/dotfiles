@@ -451,6 +451,18 @@ function is_opencode_agent {
   [ -x "$HOME/.opencode/bin/opencode" ]
 }
 
+# Print the OpenCode executable to run. The standalone installer puts the
+# binary in ~/.opencode/bin, which the fish wrapper adds to its own lookup but
+# a non-interactive bash (install.sh) does not have on PATH.
+function opencode_bin {
+  local path
+  if path=$(type -P opencode); then
+    printf '%s\n' "$path"
+  else
+    printf '%s\n' "$HOME/.opencode/bin/opencode"
+  fi
+}
+
 PACKAGE_STAMP="$XDG_CACHE_HOME/dotfiles/last_package_update"
 
 # Returns success (0) if the stamp file exists and was modified within the last
@@ -1298,7 +1310,7 @@ function feature_upgrades {
       compose-preview update || echo "warning: compose-preview update failed" >&2
   fi
 
-  if exists agy || exists claude || is_codex_agent; then
+  if exists agy || exists claude || is_codex_agent || is_opencode_agent; then
     heading "agent CLIs upgrade"
   fi
   if exists agy; then
@@ -1309,6 +1321,11 @@ function feature_upgrades {
   fi
   if is_codex_agent; then
     x codex update || echo "warning: codex update failed" >&2
+  fi
+  if is_opencode_agent; then
+    # `opencode upgrade` keeps the installed channel (the standalone
+    # installer's v2 build here) and reuses its own curl installer.
+    x "$(opencode_bin)" upgrade || echo "warning: opencode upgrade failed" >&2
   fi
 }
 
