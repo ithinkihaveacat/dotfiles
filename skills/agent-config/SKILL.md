@@ -143,11 +143,16 @@ skill <command> [arguments]
   disk (claude.ai, the mobile apps, cloud sessions). A TOML file
   (`SKILL_MCP_CONFIG`) maps each scope to skill names; nothing under `~/.corp`
   is served. Over stdio it serves one scope; with `--http`, every scope at
-  `/mcp/SCOPE` on loopback, for an authenticating proxy to front. Its tools
-  (`load_skill`, `read_file`, `search`, `edit_file`, which commits each edit)
-  work with any client, and it implements the MCP Skills Extension (SEP-2640).
-  Connect it only where the same skills are not installed locally, so each skill
-  is not offered twice. See `skill mcp --help`.
+  `/mcp/SCOPE` and an unauthenticated `GET /up` for a proxy's health check.
+  Without `--access-team` and `--access-aud` the HTTP server binds loopback
+  only, for a local client or an authenticating proxy to front. With both (or
+  `SKILL_MCP_ACCESS_TEAM` and `SKILL_MCP_ACCESS_AUD`), it may bind another
+  address and requires a `Cf-Access-Jwt-Assertion` header on every other
+  request, checked against the team's certificates. Its tools (`load_skill`,
+  `read_file`, `search`, `edit_file`, which commits each edit) work with any
+  client, and it implements the MCP Skills Extension (SEP-2640). Connect it only
+  where the same skills are not installed locally, so each skill is not offered
+  twice. See `skill mcp --help`.
 
 ### Choosing Skills (Workspace vs. Session)
 

@@ -1,0 +1,292 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
+#     "pycparser==3.0",
+# ]
+# ///
+"""Checks the Access JWT gate and health check of 'skill mcp' against locally
+signed tokens.
+
+Usage: test-skill-mcp-auth
+
+Serves a JWKS with a throwaway RSA key on a loopback port and starts
+'skill mcp --http' on a throwaway skills directory, trusting that JWKS (team
+'test.invalid', audience 'test-aud'). Then checks a valid token, bad ones, and
+none, the unauthenticated health check, and that the server refuses to bind a
+non-loopback address without Access settings. Prints TAP.
+"""
+
+import base64
+import http.server
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+CLI = Path(__file__).resolve().parents[1] / "scripts" / "skill"
+TEAM, AUD = "test.invalid", "test-aud"
+
+
+def bypass_proxy_for_loopback() -> None:
+    """Keeps loopback requests away from any proxy in the environment.
+
+    A proxy set for the session (an agent sandbox sets one) would otherwise
+    receive the requests meant for the servers this script starts on
+    127.0.0.1, including the server's own JWKS fetch, and answer them itself.
+    """
+    for var in ("no_proxy", "NO_PROXY"):
+        hosts = [h for h in os.environ.get(var, "").split(",") if h]
+        hosts += [h for h in ("127.0.0.1", "localhost") if h not in hosts]
+        os.environ[var] = ",".join(hosts)
+
+
+def b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def jwk(key, kid: str) -> dict:
+    n = key.public_key().public_numbers()
+    return {
+        "kid": kid,
+        "kty": "RSA",
+        "alg": "RS256",
+        "use": "sig",
+        "n": b64(n.n.to_bytes((n.n.bit_length() + 7) // 8, "big")),
+        "e": b64(n.e.to_bytes(3, "big")),
+    }
+
+
+def token(key, kid: str, alg: str = "RS256", **claims) -> str:
+    now = int(time.time())
+    body = {
+        "iss": f"https://{TEAM}",
+        "aud": [AUD],
+        "email": "test@example.com",
+        "iat": now,
+        "nbf": now,
+        "exp": now + 300,
+        **claims,
+    }
+    head = b64(json.dumps({"alg": alg, "kid": kid, "typ": "JWT"}).encode())
+    payload = b64(json.dumps(body).encode())
+    if alg == "none":
+        return f"{head}.{payload}."
+    sig = key.sign(f"{head}.{payload}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    return f"{head}.{payload}.{b64(sig)}"
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def request(
+    url: str, tok: str | None = None, method: str = "POST", host: str | None = None
+) -> tuple[int, str]:
+    headers = {
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
+    }
+    if tok:
+        headers["cf-access-jwt-assertion"] = tok
+    if host:
+        headers["host"] = host
+    data = None
+    if method == "POST":
+        data = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
+    req = urllib.request.Request(url, data, headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def wait_for(proc: subprocess.Popen, port: int, log: Path) -> None:
+    for _ in range(300):
+        if proc.poll() is not None:
+            sys.exit(f"test-skill-mcp-auth: server exited: {log.read_text()}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return
+        except OSError:
+            time.sleep(0.1)
+    proc.kill()
+    sys.exit(f"test-skill-mcp-auth: server did not start on port {port}")
+
+
+def write_config(root: Path) -> Path:
+    skills = root / "skills"
+    profile = skills / "profile"
+    profile.mkdir(parents=True)
+    (profile / "SKILL.md").write_text(
+        "---\nname: profile\ndescription: A profile, for testing.\n---\n\nHello.\n"
+    )
+    config = root / "mcp.toml"
+    config.write_text(f'sources = ["{skills}"]\n\n[scopes]\nprofile = ["profile"]\n')
+    return config
+
+
+def main() -> None:
+    bypass_proxy_for_loopback()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwks = json.dumps({"keys": [jwk(key, "k1")]}).encode()
+
+    class Certs(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(jwks)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Certs)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    certs = f"http://127.0.0.1:{httpd.server_address[1]}/certs"
+
+    now = int(time.time())
+    # Name, token, status, and what the refusal says.
+    cases = [
+        ("valid token", token(key, "k1"), 200, ""),
+        ("audience in a list of several", token(key, "k1", aud=["x", AUD]), 200, ""),
+        ("no token", None, 401, "token required"),
+        ("malformed token", "not.a.jwt", 403, ""),
+        ("unsigned token", token(key, "k1", alg="none"), 403, ""),
+        ("wrong audience", token(key, "k1", aud=["other"]), 403, "another application"),
+        ("expired", token(key, "k1", exp=now - 600), 403, "expired"),
+        ("not yet valid", token(key, "k1", nbf=now + 600), 403, ""),
+        ("no expiry", token(key, "k1", exp=None), 403, ""),
+        (
+            "wrong issuer",
+            token(key, "k1", iss="https://evil.invalid"),
+            403,
+            "another team",
+        ),
+        ("forged signature", token(other, "k1"), 403, ""),
+        ("unknown key", token(key, "k2"), 403, ""),
+    ]
+
+    failed = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = write_config(root)
+        env = dict(
+            os.environ,
+            SKILL_MCP_CONFIG=str(config),
+            SKILL_MCP_ACCESS_CERTS_URL=certs,
+        )
+        log = root / "access.log"
+        port = free_port()
+        proc = subprocess.Popen(
+            [
+                str(CLI),
+                "mcp",
+                "--http",
+                "--port",
+                str(port),
+                "--access-team",
+                TEAM,
+                "--access-aud",
+                AUD,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=log.open("w"),
+            env=env,
+        )
+        base = f"http://127.0.0.1:{port}"
+        try:
+            wait_for(proc, port, log)
+            print(f"1..{len(cases) + 8}", flush=True)
+            for n, (name, tok, want, says) in enumerate(cases, 1):
+                got, body = request(f"{base}/mcp/profile", tok)
+                ok = got == want and says in body
+                failed += not ok
+                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+                if not ok:
+                    print(f"# {body!r}")
+
+            n = len(cases)
+            checks = [
+                ("health check needs no token", "/up", "GET", None, None, 200, "ok"),
+                ("health check accepts HEAD", "/up", "HEAD", None, None, 200, ""),
+                ("GET needs a token", "/mcp/profile", "GET", None, None, 401, ""),
+                ("an unknown path needs a token", "/nope", "POST", None, None, 401, ""),
+                (
+                    "a valid token still respects the host allowlist",
+                    "/mcp/profile",
+                    "POST",
+                    token(key, "k1"),
+                    "evil.example",
+                    421,
+                    "",
+                ),
+            ]
+            for name, path, method, tok, host, want, says in checks:
+                n += 1
+                got, body = request(f"{base}{path}", tok, method, host)
+                ok = got == want and says in body
+                failed += not ok
+                print(f"{'ok' if ok else 'not ok'} {n} - {name}: {got} (want {want})")
+                if not ok:
+                    print(f"# {body!r}")
+        finally:
+            proc.terminate()
+            proc.wait()
+
+        # Without Access, HTTP stays on loopback; Access flags need --http and
+        # both values.
+        for name, cmd, says in (
+            (
+                "refuses a non-loopback bind without Access",
+                ["--http", "--host", "0.0.0.0"],
+                "loopback only",
+            ),
+            (
+                "needs both Access values",
+                ["--http", "--access-team", TEAM],
+                "both --access-team and --access-aud",
+            ),
+            (
+                "Access flags apply only to --http",
+                ["--access-team", TEAM, "--access-aud", AUD],
+                "apply only to --http",
+            ),
+        ):
+            n += 1
+            res = subprocess.run(
+                [str(CLI), "mcp", *cmd],
+                capture_output=True,
+                text=True,
+                env=dict(env, SKILL_MCP_CONFIG=str(config)),
+                timeout=60,
+                check=False,
+            )
+            ok = res.returncode == 1 and says in res.stderr
+            failed += not ok
+            print(f"{'ok' if ok else 'not ok'} {n} - {name}: {res.returncode} (want 1)")
+            if not ok:
+                print(f"# {res.stderr!r}")
+
+    httpd.shutdown()
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

@@ -2,9 +2,13 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#     "PyJWT==2.15.1",
 #     "anyio==4.15.1",
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
 #     "mcp==2.3.0",
 #     "mcp-types==2.3.0",
+#     "pycparser==3.0",
 #     "pyyaml==6.0.3",
 #     "starlette==1.7.0",
 #     "uvicorn==0.54.0",
@@ -47,6 +51,9 @@ LIST_TTL_MS = 60_000
 SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
+ACCESS_HEADER = "cf-access-jwt-assertion"
+HEALTH_PATH = "/up"
+CERTS_TTL = 3600
 
 
 class SkillError(Exception):
@@ -846,8 +853,118 @@ def serve_stdio(cat: Catalog) -> None:
     anyio.run(serve)
 
 
+# --- HTTP --------------------------------------------------------------------
+
+
+class AccessError(Exception):
+    """A request without a usable Cloudflare Access token."""
+
+
+class AccessVerifier:
+    """Checks Cloudflare Access JWTs (Cf-Access-Jwt-Assertion): RS256
+    signature against the team's certificates, issuer, audience, and expiry."""
+
+    def __init__(self, team: str, audience: str, certs_url: str | None = None):
+        import jwt  # Only the HTTP server with Access needs it.
+
+        self.jwt = jwt
+        self.team, self.audience = team, audience
+        self.jwks = jwt.PyJWKClient(
+            certs_url or f"https://{team}/cdn-cgi/access/certs",
+            cache_keys=True,
+            lifespan=CERTS_TTL,
+            # Cloudflare refuses urllib's default user agent.
+            headers={"User-Agent": f"skill-mcp/{VERSION}"},
+            timeout=10,
+        )
+
+    def verify(self, token: str) -> dict[str, Any]:
+        jwt = self.jwt
+        try:
+            key = self.jwks.get_signing_key_from_jwt(token)
+            return jwt.decode(
+                token,
+                key.key,
+                algorithms=["RS256"],
+                audience=self.audience,
+                issuer=f"https://{self.team}",
+                leeway=60,
+                options={"require": ["exp", "iss", "aud"]},
+            )
+        except jwt.ExpiredSignatureError:
+            raise AccessError("Access token expired") from None
+        except jwt.InvalidAudienceError:
+            raise AccessError("Access token for another application") from None
+        except jwt.InvalidIssuerError:
+            raise AccessError("Access token from another team") from None
+        except jwt.PyJWKClientError as e:
+            raise AccessError(f"Access token key not usable: {e}") from None
+        except jwt.PyJWTError as e:
+            raise AccessError(f"Access token refused: {e}") from None
+
+
+async def asgi_reply(
+    send: Any,
+    status: int,
+    text: str,
+    extra: tuple[tuple[str, str], ...] = (),
+) -> None:
+    data = text.encode()
+    headers = [
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(data)).encode()),
+    ]
+    headers += [(k.encode(), v.encode()) for k, v in extra]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": data})
+
+
+class AccessGate:
+    """ASGI, in front of the MCP app: the unauthenticated health check, and
+    the Access JWT check that a proxy's Host header bypass would otherwise
+    skip. The SDK sees only requests that pass."""
+
+    def __init__(self, app: Any, verifier: AccessVerifier | None):
+        self.app = app
+        self.verifier = verifier
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope["path"] == HEALTH_PATH and scope["method"] in ("GET", "HEAD"):
+            # Polled by the proxy, so reachable without a token, and reads
+            # nothing.
+            await asgi_reply(send, 200, "ok")
+            return
+        if self.verifier is not None:
+            headers = {
+                k.decode("latin-1").lower(): v.decode("latin-1")
+                for k, v in scope["headers"]
+            }
+            token = headers.get(ACCESS_HEADER)
+            if not token:
+                await asgi_reply(
+                    send,
+                    401,
+                    "Cloudflare Access token required",
+                    extra=(("www-authenticate", "Bearer"),),
+                )
+                return
+            try:
+                self.verifier.verify(token)
+            except AccessError as e:
+                await asgi_reply(send, 403, str(e))
+                return
+        await self.app(scope, receive, send)
+
+
 def serve_http(
-    cats: list[Catalog], host: str, port: int, allow_hosts: list[str]
+    cats: list[Catalog],
+    host: str,
+    port: int,
+    allow_hosts: list[str],
+    verifier: AccessVerifier | None,
 ) -> None:
     import uvicorn
     from mcp.server.transport_security import TransportSecuritySettings
@@ -878,13 +995,15 @@ def serve_http(
                 await stack.enter_async_context(sdk.session_manager.run())
             yield
 
+    auth = f"Access {verifier.team}" if verifier else "no authentication"
     print(
         f"{PROG}: serving {', '.join(f'/mcp/{c.scope}' for c in cats)} "
-        f"on http://{host}:{port}",
+        f"on http://{host}:{port} ({auth})",
         file=sys.stderr,
     )
+    app = Starlette(routes=routes, lifespan=lifespan)
     uvicorn.run(
-        Starlette(routes=routes, lifespan=lifespan),
+        AccessGate(app, verifier),
         host=host,
         port=port,
         log_level="warning",
@@ -907,12 +1026,18 @@ Configuration:
     all = ["personal-profile", "personal-network", "travel"]
 
 Environment:
-  SKILL_MCP_CONFIG  Configuration file (default: {DEFAULT_CONFIG})
+  SKILL_MCP_CONFIG           Configuration file (default: {DEFAULT_CONFIG})
+  SKILL_MCP_ACCESS_TEAM      Cloudflare Access team domain
+  SKILL_MCP_ACCESS_AUD       Cloudflare Access application audience tag
+  SKILL_MCP_ACCESS_CERTS_URL Team certificate URL, for testing (default:
+                             https://TEAM/cdn-cgi/access/certs)
 
 Examples:
   skill mcp --list
   skill mcp profile
   skill mcp --http --allow-host skills.example.com
+  skill mcp --http --allow-host skills.example.com \\
+    --access-team example.cloudflareaccess.com --access-aud AUD
   claude mcp add skills -- skill mcp all
 
 Each scope is one MCP server: over stdio, the SCOPE argument; over HTTP, every
@@ -922,11 +1047,14 @@ skills/list, skills/get, resources/directory/read, and a skill:// resource for
 every file). A skill in a git work tree serves the files git tracks; symbolic
 links are never served. edit_file commits each edit in that work tree.
 
-The HTTP server listens on loopback only and does no authentication of its
-own: put it behind an authenticating proxy, such as Cloudflare Tunnel with
-Access. --allow-host admits the proxy's hostname; requests from browser pages
-are still accepted only from loopback origins, so clients must connect from a
-server, as hosted connectors do."""
+The HTTP server serves GET /up without a token for a proxy's health check.
+Without --access-team and --access-aud it listens on loopback only and does no
+authentication of its own. With both, it may bind another --host and requires
+the Cf-Access-Jwt-Assertion header on every other request, checking the token
+against the team's certificates, issuer, audience, and expiry. --allow-host
+admits the proxy's hostname; requests from browser pages are still accepted
+only from loopback origins, so clients must connect from a server, as hosted
+connectors do."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -963,6 +1091,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="HOST",
         help="also accept requests addressed to HOST, such as a tunnel's hostname",
     )
+    parser.add_argument(
+        "--access-team",
+        metavar="HOST",
+        help="Cloudflare Access team domain (default: SKILL_MCP_ACCESS_TEAM)",
+    )
+    parser.add_argument(
+        "--access-aud",
+        metavar="AUD",
+        help="Cloudflare Access application audience tag "
+        "(default: SKILL_MCP_ACCESS_AUD)",
+    )
     parser.add_argument("--config", metavar="FILE", help="configuration file")
     parser.add_argument(
         "--push", action="store_true", help="push after each edit's commit"
@@ -988,12 +1127,28 @@ def main() -> int:
             return 0
         if args.http and args.scope is not None:
             die("--http serves every scope; drop the SCOPE argument")
+        team = args.access_team or os.environ.get("SKILL_MCP_ACCESS_TEAM")
+        audience = args.access_aud or os.environ.get("SKILL_MCP_ACCESS_AUD")
+        if bool(team) != bool(audience):
+            die(
+                "Access needs both --access-team and --access-aud "
+                "(or SKILL_MCP_ACCESS_TEAM and SKILL_MCP_ACCESS_AUD)"
+            )
         if args.http:
-            if args.host not in LOOPBACK:
-                die(f"--http serves loopback only, not {args.host}")
+            verifier = None
+            if team:
+                verifier = AccessVerifier(
+                    team,
+                    audience,
+                    os.environ.get("SKILL_MCP_ACCESS_CERTS_URL") or None,
+                )
+            elif args.host not in LOOPBACK:
+                die(f"--http without Access serves loopback only, not {args.host}")
             cats = [Catalog.build(cfg, s, args.push) for s in sorted(cfg.scopes)]
-            serve_http(cats, args.host, args.port, args.allow_host)
+            serve_http(cats, args.host, args.port, args.allow_host, verifier)
         else:
+            if team:
+                die("--access-team and --access-aud apply only to --http")
             serve_stdio(Catalog.build(cfg, args.scope or "all", args.push))
     except SkillError as e:
         die(str(e))
