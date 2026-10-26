@@ -16,7 +16,8 @@ function claude --description 'Run claude with a per-session directory for scrat
     set -l resuming
     set -l forking
     set -l n (count $argv)
-    for i in (seq $n)
+    # BSD seq counts down, so 'seq 0' yields "1 0": iterate only with arguments.
+    test $n -gt 0; and for i in (seq $n)
         set -l next
         test $i -lt $n; and set next $argv[(math $i + 1)]
         switch $argv[$i]

@@ -19,7 +19,10 @@ function _agent_preflight --description 'Seed default skills and synchronize git
         echo "$label: skill check skipped (AGENT_PREFLIGHT_SKIP set)" >&2
         return 0
     end
-    if not skill $argv[2..-1] add --quiet --defaults
+    # 'skill' is a 'uv run --script' helper, and uv inspects any active virtual
+    # environment, so a project venv whose interpreter is gone (e.g. after a
+    # Homebrew Python upgrade) would otherwise block the launch.
+    if not env -u VIRTUAL_ENV skill $argv[2..-1] add --quiet --defaults
         echo "$label: to launch anyway: AGENT_PREFLIGHT_SKIP=1 $label" >&2
         return 1
     end
