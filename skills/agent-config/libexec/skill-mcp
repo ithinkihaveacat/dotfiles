@@ -209,15 +209,23 @@ def load_skill_dir(name: str, sources: list[Path]) -> Skill:
             raise SkillError(
                 f"skill '{name}' resolves to {root}, which is never served"
             )
-        text = (root / "SKILL.md").read_text(encoding="utf-8")
-        meta = parse_frontmatter(text)
+        skill = Skill(name, root)
+        # Its description is published before any file is read, so SKILL.md
+        # must pass the same test as every file the skill serves.
+        if not skill.servable("SKILL.md"):
+            raise SkillError(
+                f"{root}/SKILL.md is a symbolic link or leaves the skill, "
+                "so it is never served"
+            )
+        meta = parse_frontmatter(skill.read("SKILL.md").decode("utf-8"))
         if meta.get("name") != name:
             raise SkillError(
                 f"{root}/SKILL.md names itself '{meta.get('name')}', not '{name}'"
             )
         top = run_git(root, "rev-parse", "--show-toplevel")
-        repo = Path(top.stdout.strip()) if top.returncode == 0 else None
-        return Skill(name, root, str(meta.get("description") or ""), repo)
+        skill.repo = Path(top.stdout.strip()) if top.returncode == 0 else None
+        skill.description = str(meta.get("description") or "")
+        return skill
     raise SkillError(f"skill '{name}' not found in {', '.join(map(str, sources))}")
 
 
@@ -748,7 +756,12 @@ def sdk_server(cat: Catalog) -> Any:
         return {"resources": [children[k] for k in sorted(children)]}
 
     async def skills_list(ctx: Any, params: Any) -> Any:
-        return await run(list_entries)
+        # A skill changed on disk since startup (SKILL.md now a link, say)
+        # fails the listing with its reason rather than an opaque error.
+        try:
+            return await run(list_entries)
+        except (SkillError, OSError, UnicodeDecodeError) as e:
+            raise MCPError(code=types.INTERNAL_ERROR, message=str(e)) from None
 
     async def skills_get(ctx: Any, params: Any) -> Any:
         try:

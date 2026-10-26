@@ -3,8 +3,10 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "anyio==4.15.1",
+#     "httpx2==2.13.1",
 #     "mcp==2.3.0",
 #     "mcp-types==2.3.0",
+#     "pydantic==2.13.5",
 # ]
 # ///
 """Exercise 'skill mcp' over the real stdio protocol against a fixture repo."""
@@ -88,7 +90,13 @@ class SkillMcpTests(unittest.TestCase):
             },
         )
         write_skill(
-            skills, "beta", "Big skill.", {"references/big.md": "x" * 40_000 + "\n"}
+            skills,
+            "beta",
+            "Big skill.",
+            {
+                "references/big.md": "x" * 40_000 + "\n",
+                "references/many.md": "".join(f"row {n}\n" for n in range(250)),
+            },
         )
         (skills / ".gitignore").write_text("data/\n")
         (skills / "alpha/scripts/run").chmod(0o755)
@@ -189,6 +197,25 @@ class SkillMcpTests(unittest.TestCase):
         self.assertEqual(out.returncode, 1)
         self.assertIn("never served", out.stderr)
 
+    def test_symlinked_skill_md_refused(self):
+        skill_md = self.repo / "skills/beta/SKILL.md"
+        skill_md.unlink()
+        skill_md.symlink_to(self.home / ".corp/skills/gamma/SKILL.md")
+        out = self.cli("--list")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("never served", out.stderr)
+        self.assertNotIn("Employer", out.stdout + out.stderr)
+
+    async def test_search_truncation(self, client):
+        found = await self.tool(client, "search", {"pattern": "^row", "skill": "beta"})
+        lines = found.splitlines()
+        self.assertEqual(
+            len([line for line in lines if ":" in line and "row" in line]), 200
+        )
+        self.assertTrue(
+            lines[-1].startswith("Showing the first 200 matches"), lines[-1]
+        )
+
     def test_unknown_scope_and_name_mismatch(self):
         out = self.cli("--list", "--config", str(self.tmp / "missing.toml"))
         self.assertEqual(out.returncode, 1)
@@ -227,11 +254,16 @@ class SkillMcpTests(unittest.TestCase):
             try:
                 async with httpx2.AsyncClient() as http:
                     for _ in range(100):
+                        if server.returncode is not None:
+                            errlog.seek(0)
+                            self.fail(f"server exited: {errlog.read().decode()}")
                         try:
                             await http.get(base + "/")
                             break
                         except httpx2.TransportError:
                             await asyncio.sleep(0.2)
+                    else:
+                        self.fail(f"server not listening on {base}")
                     for scope, names in (
                         ("one", ["alpha"]),
                         ("all", ["alpha", "beta"]),
@@ -270,8 +302,13 @@ class SkillMcpTests(unittest.TestCase):
                     self.assertEqual(await status("/mcp/all", "evil.example"), 421)
                     self.assertNotEqual(await status("/mcp/all", "skills.test"), 421)
             finally:
-                server.terminate()
-                await server.wait()
+                if server.returncode is None:
+                    server.terminate()
+                    try:
+                        await asyncio.wait_for(server.wait(), 10)
+                    except TimeoutError:
+                        server.kill()
+                        await server.wait()
 
     async def test_discovery(self, client):
         caps = self.initialized.capabilities
