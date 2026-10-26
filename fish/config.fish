@@ -201,16 +201,6 @@ set -x PYTHONPYCACHEPREFIX $XDG_CACHE_HOME/cpython/pycache
 set -x UV_COMPILE_BYTECODE 1
 set -x UV_EXCLUDE_NEWER "7 days"
 
-# Force uv to use its own managed/hermetic Python installations instead of system ones.
-# On macOS, official Python.org installers (which land in /Library/Frameworks/Python.framework)
-# do not install root certificates by default, leaving Python's SSL context without any trusted
-# CA bundle. This causes all HTTPS requests made via Python's built-in urllib or standard ssl
-# library to fail with: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed.
-# By default, uv will search for and use system-installed Pythons if they satisfy version
-# requirements (e.g., >=3.11). Forcing 'managed' ensures uv uses hermetic Python builds that
-# have working root certificates out of the box, avoiding SSL validation failures in user scripts.
-set -x UV_PYTHON_PREFERENCE managed
-
 _load_overlay $HOME/.private
 _load_overlay $HOME/.corp
 

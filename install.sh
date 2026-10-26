@@ -841,6 +841,11 @@ function feature_links {
     link_overlay_path "etc/ghostty/config" "$XDG_CONFIG_HOME/ghostty/config"
   fi
 
+  # Not gated on uv: the uv feature installs it later in the same run.
+  heading "uv"
+  xmkdir "$XDG_CONFIG_HOME/uv"
+  link_overlay_path "etc/uv/uv.toml" "$XDG_CONFIG_HOME/uv/uv.toml"
+
   if exists bat || exists batcat; then
     heading "bat"
     xmkdir "$XDG_CONFIG_HOME/bat"

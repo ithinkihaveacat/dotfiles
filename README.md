@@ -140,6 +140,7 @@ the last overlay to provide a given filename wins.
 | `etc/starship/starship.toml`                         | `link_overlay_path`                 |                                                                                                 |
 | `etc/ghostty/config`                                 | `link_overlay_path`                 |                                                                                                 |
 | `etc/bat/config`                                     | `link_overlay_path`                 |                                                                                                 |
+| `etc/uv/uv.toml`                                     | `link_overlay_path`                 | Restricts uv to its own Python builds (`only-managed`)                                          |
 | `etc/code/`                                          | `link_overlay_files`                | VS Code `settings.json`, `keybindings.json`, etc.                                               |
 | `etc/macos/KeyBindings`                              | `overlay_path`                      | rsync'd (not symlinked) due to macOS bug                                                        |
 | `etc/macos/Solarized.clr`                            | `overlay_path`                      | Copied to `~/Library/Colors/`                                                                   |
