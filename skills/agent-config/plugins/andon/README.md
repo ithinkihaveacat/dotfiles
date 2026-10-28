@@ -53,7 +53,7 @@ hook:
 | :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Always-on rule           | `prompt.compose` adds an `andon:rule` system-prompt section, rendered with the session's locked trigger level and the full 1–5 rubric. It is added only to requests that offer the tool, so a subagent without the tool is never told to call it. |
 | Eager, pre-approved tool | `$.tool.register` with `isDeferred: false` registers `mcp__andon__pull`, and a `tool.check` hook turns an "ask" into "allow", so it never prompts. A deny from the user's rules or mode still stands.                                             |
-| Session attribution      | The `tool.call` handler stamps the session ID, `tool_use_id`, subagent ID, turn, model, workspace, transcript path, and session level itself, then writes one complete record. There is no second process and no `args_hash` pairing window.      |
+| Session attribution      | The `tool.call` handler stamps the session ID, `tool_use_id`, subagent ID, turn, model, workspace, and session level itself, then writes one complete record. There is no second process and no `args_hash` pairing window.                       |
 | Trigger level            | Each session locks in the configured default level (`$ANDON_LEVEL` > `config.json` > `3`) at startup. `/andon level [1-5\|default\|reset]` inspects or updates the shared default for new sessions.                                               |
 | Passive sensor           | A `tool.call` observer adds a one-line reminder to a tool result when a command fails after the agent read a skill's `SKILL.md`, when `--help` follows a failure, or when the same command fails twice. It never pulls by itself.                 |
 | Board                    | `/andon` opens a pane on the terminal and desktop surfaces with filters, recurrence badges, and Copy fix prompt / Resolve / Dismiss / Reopen buttons. The status line shows `andon: L3 · 2 open · 1 red`.                                         |
@@ -84,9 +84,9 @@ picks up edits without a reinstall.
 
 ### Limits
 
-- **Organization-managed installs:** the `prompt.compose` and `classic.*` hooks
-  don't run for a plugin a person installs where an organization manages Claude
-  Code. There, the rule has to come from a managed plugin or from `CLAUDE.md`.
+- **Organization-managed installs:** the `prompt.compose` hook doesn't run for a
+  plugin a person installs where an organization manages Claude Code. There, the
+  rule has to come from a managed plugin or from `CLAUDE.md`.
 - **Local install only:** the plugin finds the CLI by its place in this
   repository. An install from a GitHub-sourced marketplace copies only
   `claude/`, and then needs `andon` on `PATH`; the folder install in the

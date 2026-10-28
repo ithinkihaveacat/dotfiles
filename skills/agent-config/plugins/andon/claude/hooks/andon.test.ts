@@ -96,7 +96,6 @@ function engine(
   on("fs.exists", () => ({ value: true }));
   on("ui.status", () => ({ value: undefined }));
   on("ui.toast", () => ({ value: undefined }));
-  on("classic.SessionStart", () => ({}));
   on("tool.register", ($, e) => {
     registered.push(e);
 
@@ -316,10 +315,6 @@ describe("the plugin", () => {
   test("a pull is allowed, stamped with the session and saved by the CLI", async ($, on) => {
     const runs = engine(on);
     await $.session.start(START);
-    await $.classic.SessionStart({
-      source: "startup",
-      transcript_path: "/home/me/.claude/projects/app/session-1.jsonl"
-    });
     const { decision } = await $.tool.check({ tool: TOOL, input: {} });
     expect(decision).toBe("allow"); // the engine asked; the plugin lifts it
     const ran = await $.tool.call({
@@ -340,10 +335,10 @@ describe("the plugin", () => {
         step_idx: 7,
         level: 3,
         model_name: "claude-opus-5-5",
-        workspace_paths: ["/work/app"],
-        transcript_path: "/home/me/.claude/projects/app/session-1.jsonl"
+        workspace_paths: ["/work/app"]
       })
     );
+    expect(sent).not.toHaveProperty("transcript_path");
     expect(JSON.stringify(ran.result)).toContain("do not interrupt the user");
   });
 
