@@ -275,9 +275,14 @@ describe("the plugin", () => {
 
   test("locks in the configured level for the session and /andon level updates the CLI default", async ($, on) => {
     let statsLevel = 4;
+    let statsRead = () => {};
+    const isStatsRead = new Promise<void>((resolve) => {
+      statsRead = resolve;
+    });
     const runs = engine(on, {
       run: (argv) => {
         if (argv.includes("stats")) {
+          statsRead();
           return result(
             0,
             JSON.stringify({ open: 2, open_red: 0, level: statsLevel })
@@ -288,6 +293,9 @@ describe("the plugin", () => {
     });
     on("prompt.compose", () => ({ sections: [] }));
     await $.session.start(START);
+    // The startup read runs in the background; change the default only after
+    // it, so the test shows the session keeps the level it started with.
+    await isStatsRead;
     statsLevel = 2;
     const composed = await $.prompt.compose({
       model: "m",
