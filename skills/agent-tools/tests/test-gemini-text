@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+#
+# Hermetic unit tests for libexec/gemini-text, the helper the migrated wrappers
+# use. A stub `gemini-api` stands in for the CLI, so nothing here touches the
+# network or needs a key.
+#
+# This is the guard on *our* half of the contract: the request body additions we
+# depend on (`store: false`), the response path we extract (`.steps[]`), and the
+# exit codes we translate. The CLI's half is covered by test-gemini-cli-contract.
+#
+
+set -u
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+HELPER="$DIR/../libexec/gemini-text"
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/shim"
+
+ARGS_FILE="$WORK/args"
+STDIN_FILE="$WORK/stdin"
+RESPONSE_FILE="$WORK/response.json"
+STDERR_FILE="$WORK/stub-stderr"
+
+cat >"$WORK/shim/gemini-api" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$STUB_ARGS"
+cat >"$STUB_STDIN"
+if [ -s "$STUB_STDERR" ]; then
+  cat "$STUB_STDERR" >&2
+fi
+cat "$STUB_RESPONSE"
+exit "${STUB_EXIT:-0}"
+SHIM
+chmod +x "$WORK/shim/gemini-api"
+
+TOTAL_TESTS=11
+echo "1..$TOTAL_TESTS"
+TEST_NUM=0
+
+OUT="$WORK/out"
+ERR="$WORK/err"
+
+# run [--exit N] [--stderr TEXT] -- HELPER_ARGS...
+run_helper() {
+  local exit_code=0
+  if [[ "$1" == "--exit" ]]; then
+    exit_code="$2"
+    shift 2
+  fi
+  if [[ "$1" == "--stderr" ]]; then
+    printf '%s' "$2" >"$STDERR_FILE"
+    shift 2
+  else
+    : >"$STDERR_FILE"
+  fi
+
+  PATH="$WORK/shim:$PATH" \
+    STUB_ARGS="$ARGS_FILE" \
+    STUB_STDIN="$STDIN_FILE" \
+    STUB_RESPONSE="$RESPONSE_FILE" \
+    STUB_STDERR="$STDERR_FILE" \
+    STUB_EXIT="$exit_code" \
+    "$HELPER" "$@" >"$OUT" 2>"$ERR"
+}
+
+ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+not_ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  sed 's/^/# /' "$ERR"
+  sed 's/^/# stdout: /' "$OUT"
+}
+
+# The value following FLAG in the argv the stub received.
+arg_value() {
+  awk -v flag="$1" '$0 == flag { getline; print; exit }' "$ARGS_FILE"
+}
+
+args_has() {
+  grep -Fxq -- "$1" "$ARGS_FILE"
+}
+
+response() {
+  printf '%s' "$1" >"$RESPONSE_FILE"
+}
+
+# 1. Text comes back from a single model_output step.
+response '{"status":"completed","steps":[{"type":"thought"},{"type":"model_output","content":[{"type":"text","text":"hello"}]}]}'
+if run_helper --model m "prompt" && [[ "$(cat "$OUT")" == "hello" ]]; then
+  ok "returns the text of a model_output step"
+else
+  not_ok "did not return the model_output text"
+fi
+
+# 2. Multiple text parts and steps concatenate in order.
+response '{"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"# Part 1\n"},{"type":"text","text":"body\n"}]},{"type":"model_output","content":[{"type":"text","text":"# Part 2"}]}]}'
+if run_helper --model m "prompt" && [[ "$(cat "$OUT")" == "# Part 1
+body
+# Part 2" ]]; then
+  ok "concatenates text across parts and steps"
+else
+  not_ok "text parts were not concatenated"
+fi
+
+# 3. store:false is forced even when the caller does not ask for it.
+response '{"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"x"}]}]}'
+if run_helper --model m "prompt"; then
+  body=$(arg_value --body)
+  if [[ "$(printf '%s' "$body" | jq -r '.store')" == "false" ]]; then
+    ok "forces store: false into the request body"
+  else
+    not_ok "request body did not carry store: false: $body"
+  fi
+else
+  not_ok "helper failed while checking store"
+fi
+
+# 4. Caller-supplied body keys survive the merge.
+response '{"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"x"}]}]}'
+if run_helper --model m --body '{"generation_config":{"thinking_level":"high"},"response_format":{"type":"text"}}' "prompt"; then
+  body=$(arg_value --body)
+  if [[ "$(printf '%s' "$body" | jq -r '.generation_config.thinking_level')" == "high" ]] &&
+    [[ "$(printf '%s' "$body" | jq -r '.response_format.type')" == "text" ]]; then
+    ok "preserves caller body keys while merging"
+  else
+    not_ok "caller body keys were lost: $body"
+  fi
+else
+  not_ok "helper failed while merging the body"
+fi
+
+# 5. --context sends the file before the prompt, via --stdin.
+printf 'reference text\n' >"$WORK/context.txt"
+response '{"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"x"}]}]}'
+if run_helper --model m --context "$WORK/context.txt" "the prompt"; then
+  if args_has --stdin && [[ "$(cat "$STDIN_FILE")" == "reference text" ]] &&
+    [[ "$(arg_value --model)" == "m" ]] && [[ "$(sed -n '2p' "$ARGS_FILE")" == "the prompt" ]]; then
+    ok "sends --context on stdin ahead of the prompt"
+  else
+    not_ok "context was not sent as expected"
+  fi
+else
+  not_ok "helper failed with --context"
+fi
+
+# 6. Without --context nothing is piped, so a wrapper run from a terminal cannot
+#    hang waiting for stdin.
+response '{"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"x"}]}]}'
+if run_helper --model m "prompt"; then
+  if ! args_has --stdin && [[ ! -s "$STDIN_FILE" ]]; then
+    ok "does not open stdin without --context"
+  else
+    not_ok "stdin was opened without --context"
+  fi
+else
+  not_ok "helper failed without --context"
+fi
+
+# 7. A non-completed interaction is reported, but its text is still printed.
+response '{"status":"incomplete","steps":[{"type":"model_output","content":[{"type":"text","text":"cut off"}]}]}'
+if run_helper --model m "prompt" && grep -q "warning: interaction finished as 'incomplete'" "$ERR" &&
+  [[ "$(cat "$OUT")" == "cut off" ]]; then
+  ok "warns on a non-completed interaction while printing its text"
+else
+  not_ok "missing warning or text for a non-completed interaction"
+fi
+
+# 8. A response with no text fails rather than printing nothing.
+response '{"status":"completed","steps":[{"type":"model_output","content":[]}]}'
+if run_helper --model m "prompt"; then
+  not_ok "succeeded on a response with no text"
+elif grep -q "no text in response" "$ERR"; then
+  ok "fails loudly when the response has no text"
+else
+  not_ok "unexpected failure message for an empty response"
+fi
+
+# 9. The legacy `.outputs` shape is a hard failure, not a silent empty answer.
+#    The published fixtures use it; the live service does not.
+response '{"status":"completed","outputs":[{"type":"text","text":"legacy"}]}'
+if run_helper --model m "prompt"; then
+  not_ok "accepted the legacy .outputs response shape"
+elif grep -q "no text in response" "$ERR"; then
+  ok "rejects the legacy .outputs response shape loudly"
+else
+  not_ok "unexpected failure message for the legacy shape"
+fi
+
+# 10. A failed CLI is reported once, with a non-zero status.
+response '{}'
+if run_helper --exit 3 --stderr 'Error (authentication_error): API key not valid' --model m "prompt"; then
+  not_ok "succeeded when the CLI failed"
+elif grep -q "authentication_error" "$ERR" && grep -q "gemini-api failed" "$ERR" && [[ ! -s "$OUT" ]]; then
+  ok "propagates a CLI failure with its diagnostic and no output"
+else
+  not_ok "CLI failure was not propagated cleanly"
+fi
+
+# 11. Missing gemini-api is a dependency error (127), distinct from a failed
+#     request, so callers can say "install it" rather than "the API is down".
+if PATH="/usr/bin:/bin" "$HELPER" --model m "prompt" >"$OUT" 2>"$ERR"; then
+  not_ok "succeeded without gemini-api installed"
+else
+  rc=$?
+  if [[ $rc -eq 127 ]] && grep -q "gemini-api not found" "$ERR"; then
+    ok "reports a missing gemini-api as exit 127"
+  else
+    not_ok "missing gemini-api was not reported as exit 127 (got $rc)"
+  fi
+fi

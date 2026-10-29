@@ -606,7 +606,7 @@ Usage: emerson [OPTIONS] "PROMPT" < INPUT_FILE
 Generates an essay-length answer (approx. 3000 words) to the PROMPT based
 strictly on the text provided via standard input. Operates as a closed-book,
 sandboxed analyst with zero external search, treating the input as the sole
-source of truth to prevent hallucination. Uses the Gemini Pro model by
+source of truth to prevent hallucination. Uses the gemini-4-argon model by
 default.
 
 Arguments:
@@ -620,7 +620,8 @@ Options:
   --model MODEL  Gemini model to use (default: gemini-4-argon)
 
 Environment:
-  GEMINI_API_KEY   Required. Your Gemini API key.
+  GEMINI_API_KEY   Optional. Read by gemini-api; a key stored with
+                   "gemini-api configure" is also accepted.
   GEMINI_MODEL     Optional. Default model if --model is not given.
 
 Exit Codes:
@@ -674,27 +675,27 @@ response (wrapped to 80 columns).
 <!-- generated: ../scripts/pascal --help -->
 
 ```text
-Usage: pascal [OPTIONS] [-] PROMPT
+Usage: pascal [-] "QUESTION"
 
-Asks a question to the Gemini Flash model and prints a short, paragraph-style
-response (wrapped to 80 columns).
+Ask a question and print a short, paragraph-style answer wrapped to 80 columns.
+Uses the gemini-flash-latest model by default.
 
 Arguments:
-  -           Read context from stdin and include it with the question.
-              Without a leading '-', stdin is ignored.
-  PROMPT      The question to ask.
+  -           Read additional context from stdin.
+  QUESTION    The question to answer.
 
 Options:
   --help         Display this help message and exit
   --model MODEL  Gemini model to use (default: gemini-flash-latest)
 
 Environment:
-  GEMINI_API_KEY  Required. Your Gemini API key.
-  GEMINI_MODEL    Optional. Default model if --model is not given.
+  GEMINI_API_KEY   Optional. Read by gemini-api; a key stored with
+                   "gemini-api configure" is also accepted.
+  GEMINI_MODEL     Optional. Default model if --model is not given.
 
 Exit Codes:
   0    Success
-  1    General error (usage, API error)
+  1    General error (usage, no input, API error)
   127  Missing required dependency
 
 Examples:
@@ -818,7 +819,8 @@ a boolean result via exit code.
 Usage: satisfies PROMPT
 
 Evaluates if the input from stdin satisfies the PROMPT.
-Returns true (exit 0) or false (exit 1).
+Returns true (exit 0) or false (exit 1). Uses the gemini-flash-lite-latest
+model by default.
 
 Arguments:
   PROMPT      The condition or question to evaluate (e.g., "mentions Elvis")
@@ -829,12 +831,15 @@ Options:
   -v, --verbose  Output "true" or "false" to stderr
 
 Environment:
-  GEMINI_API_KEY     Required. Your Gemini API key.
+  GEMINI_API_KEY     Optional. Read by gemini-api; a key stored with
+                     "gemini-api configure" is also accepted.
   GEMINI_MODEL       Optional. Default model if --model is not given.
 
 Exit Codes:
   0  True (satisfies prompt)
   1  False (does not satisfy prompt)
+  2  Error (no input, API or transport failure, unparseable response)
+  127  Missing required dependency
 
 Examples:
   cat file.txt | satisfies "mentions Elvis"

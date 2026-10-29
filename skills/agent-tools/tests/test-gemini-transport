@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 #
-# Tests how the scripts that call the Gemini API report a failed request. They
-# share one copy-pasted block, so every case below runs against all nine rather
-# than a representative: a script that drifts out of the pattern is exactly what
-# this is meant to catch.
+# Tests how the scripts that call the Gemini API report a failed request.
+#
+# Two transports are in play:
+#
+#   - curl, for the scripts that still speak generateContent directly;
+#   - the gemini-api CLI (through libexec/gemini-text), for the migrated
+#     wrappers.
 #
 # The distinction under test is the one in
 # skills/coding-standards/references/caching.md ("A Declared Offline Mode Is Not
 # an Absent Network"): a request that never reached a server, one the server
 # answered with an error, and one whose body did not finish arriving are three
-# different facts and must read differently. None of these tools caches, so none
-# carries an offline switch -- there would be nothing for it to serve.
+# different facts and must read differently. On the CLI path the CLI owns that
+# classification, so what matters here is that the wrapper propagates it and
+# never turns a failure into an answer -- in particular, `satisfies` must not
+# report a failed request as "false" (exit 1).
 #
-# Hermetic by construction: a stub 'curl' ahead of the real one on PATH forces
-# each transport outcome, and stub 'magick'/'base64' stand in for the image
+# Hermetic by construction: stub 'curl'/'gemini-api' ahead of the real ones on
+# PATH force each outcome, and stub 'magick'/'base64' stand in for the image
 # pipeline, so nothing here depends on the machine's network, on ImageMagick
 # being installed, or on GEMINI_API_KEY being real.
 
@@ -21,6 +26,7 @@ set -u
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ROOT="$DIR/../../.."
+export PATH="$DIR/../scripts:$ROOT/bin:$PATH"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -45,10 +51,7 @@ SHIM
 chmod +x "$WORK/shim/magick"
 
 # script:argv... -- the arguments that get each one as far as its request block.
-TOOLS=(
-  "skills/agent-tools/scripts/emerson|summarise"
-  "skills/agent-tools/scripts/pascal|2+2"
-  "skills/agent-tools/scripts/satisfies|is a greeting"
+CURL_TOOLS=(
   "skills/agent-tools/scripts/token-count|"
   "skills/agent-tools/scripts/screenshot-describe|$WORK/img.png"
   "skills/agent-tools/scripts/photo-smart-crop|$WORK/img.png|$WORK/out.jpg"
@@ -56,7 +59,21 @@ TOOLS=(
   "bin/uihierarchy-compare|$WORK/ui.xml|$WORK/ui.xml"
 )
 
-echo "1..$((${#TOOLS[@]} * 3))"
+# script|argv|exit code a failure must produce. `satisfies` returns 1 for a
+# legitimate "false", so its failures must be 2 -- otherwise an outage reads as
+# a negative answer.
+CLI_TOOLS=(
+  "skills/agent-tools/scripts/emerson|summarise|1"
+  "skills/agent-tools/scripts/pascal|2+2|1"
+  "skills/agent-tools/scripts/satisfies|is a greeting|2"
+)
+
+TOTAL=$((${#CURL_TOOLS[@]} * 3 + ${#CLI_TOOLS[@]} * 2))
+echo "1..$TOTAL"
+
+LOG="$WORK/log"
+ERR="$WORK/err"
+OUT="$WORK/out"
 
 make_curl_shim() {
   cat >"$WORK/shim/curl" <<EOF
@@ -68,15 +85,37 @@ EOF
   chmod +x "$WORK/shim/curl"
 }
 
-TEST_NUM=0
-LOG="$WORK/log"
-
-run_tool() {
-  # shellcheck disable=SC2086
-  PATH="$WORK/shim:$PATH" GEMINI_API_KEY=unused "$@" <"$WORK/in.txt" >"$LOG" 2>&1
+# make_gemini_shim MESSAGE EXIT -- a failing `gemini-api` that behaves like the
+# CLI: diagnostic on stderr, nothing on stdout.
+make_gemini_shim() {
+  cat >"$WORK/shim/gemini-api" <<EOF
+#!/bin/sh
+cat >/dev/null 2>&1
+printf '%s\n' "$1" >&2
+exit $2
+EOF
+  chmod +x "$WORK/shim/gemini-api"
 }
 
-for entry in "${TOOLS[@]}"; do
+TEST_NUM=0
+
+pass() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+fail() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  sed 's/^/# /' "$LOG" 2>/dev/null
+}
+
+# run_tool BIN ARGS... -- run with the stubs first on PATH, stdin from in.txt.
+run_tool() {
+  PATH="$WORK/shim:$PATH" GEMINI_API_KEY=unused "$@" <"$WORK/in.txt" >"$OUT" 2>"$ERR"
+}
+
+for entry in "${CURL_TOOLS[@]}"; do
   IFS='|' read -r script arg1 arg2 <<<"$entry"
   name=$(basename "$script")
 
@@ -87,43 +126,77 @@ for entry in "${TOOLS[@]}"; do
   # 1. No response at all is the network, not the API. Without this the failed
   #    curl took the script down under `set -e` before any handler ran, and the
   #    caller saw exit 6 and no output whatsoever.
-  TEST_NUM=$((TEST_NUM + 1))
   make_curl_shim "exit 6"
   if run_tool "$@"; then
-    echo "not ok $TEST_NUM - $name succeeded against an unreachable host"
-    sed 's/^/# /' "$LOG"
-  elif grep -q "could not reach" "$LOG"; then
-    echo "ok $TEST_NUM - $name reports an unreachable host as a transport failure"
+    cp "$ERR" "$LOG"
+    fail "$name succeeded against an unreachable host"
+  elif grep -q "could not reach" "$ERR"; then
+    pass "$name reports an unreachable host as a transport failure"
   else
-    echo "not ok $TEST_NUM - $name did not report the transport failure"
-    sed 's/^/# /' "$LOG"
+    cp "$ERR" "$LOG"
+    fail "$name did not report the transport failure"
   fi
 
   # 2. A response carrying an API error keeps its status and the API's message.
-  TEST_NUM=$((TEST_NUM + 1))
   make_curl_shim 'printf "{\"error\":{\"message\":\"quota exceeded\"}}\n429"'
   if run_tool "$@"; then
-    echo "not ok $TEST_NUM - $name succeeded on an API error"
-    sed 's/^/# /' "$LOG"
-  elif grep -q "HTTP 429" "$LOG" && grep -q "quota exceeded" "$LOG"; then
-    echo "ok $TEST_NUM - $name reports an API error with its status and message"
+    cp "$ERR" "$LOG"
+    fail "$name succeeded on an API error"
+  elif grep -q "HTTP 429" "$ERR" && grep -q "quota exceeded" "$ERR"; then
+    pass "$name reports an API error with its status and message"
   else
-    echo "not ok $TEST_NUM - $name did not report the API error legibly"
-    sed 's/^/# /' "$LOG"
+    cp "$ERR" "$LOG"
+    fail "$name did not report the API error legibly"
   fi
 
   # 3. A 200 whose body was cut short is a transport failure, not the model
   #    declining to answer -- which is how it read before, since the truncated
   #    body simply parsed to no text.
-  TEST_NUM=$((TEST_NUM + 1))
   make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"par\n200"; exit 18'
   if run_tool "$@"; then
-    echo "not ok $TEST_NUM - $name succeeded on a truncated body"
-    sed 's/^/# /' "$LOG"
-  elif grep -q "did not finish transferring" "$LOG"; then
-    echo "ok $TEST_NUM - $name reports a truncated 200 as a transport failure"
+    cp "$ERR" "$LOG"
+    fail "$name succeeded on a truncated body"
+  elif grep -q "did not finish transferring" "$ERR"; then
+    pass "$name reports a truncated 200 as a transport failure"
   else
-    echo "not ok $TEST_NUM - $name misreported a truncated 200"
-    sed 's/^/# /' "$LOG"
+    cp "$ERR" "$LOG"
+    fail "$name misreported a truncated 200"
+  fi
+done
+
+for entry in "${CLI_TOOLS[@]}"; do
+  IFS='|' read -r script arg expected <<<"$entry"
+  name=$(basename "$script")
+  set -- "$ROOT/$script" "$arg"
+
+  # 1. A transport failure keeps its diagnostic and is never mistaken for an
+  #    answer.
+  make_gemini_shim \
+    "Error (network_error): could not reach https://generativelanguage.googleapis.com/v1beta/interactions (network unreachable, DNS failure, or blocked egress)" 1
+  run_tool "$@"
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
+    cp "$ERR" "$LOG"
+    fail "$name succeeded when the CLI could not reach the API"
+  elif [[ $rc -ne $expected ]] || [[ -s "$OUT" ]] || ! grep -q "could not reach" "$ERR"; then
+    cp "$ERR" "$LOG"
+    fail "$name reported a transport failure as exit $rc (expected $expected) or printed output"
+  else
+    pass "$name reports a CLI transport failure as exit $expected with no output"
+  fi
+
+  # 2. An authentication failure is a failure, not "false". This is the case
+  #    that silently misreports a boolean tool when a key expires.
+  make_gemini_shim "Error (authentication_error): API key not valid. Please pass a valid API key." 3
+  run_tool "$@"
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
+    cp "$ERR" "$LOG"
+    fail "$name succeeded on an authentication failure"
+  elif [[ $rc -ne $expected ]] || ! grep -q "API key not valid" "$ERR"; then
+    cp "$ERR" "$LOG"
+    fail "$name reported an authentication failure as exit $rc (expected $expected)"
+  else
+    pass "$name does not mistake an authentication failure for a result"
   fi
 done

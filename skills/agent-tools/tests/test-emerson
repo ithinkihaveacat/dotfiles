@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 #
-# Hermetic unit tests for emerson: argument handling, input validation,
-# multi-part response parsing, and truncation warnings.
+# Hermetic unit tests for emerson: argument handling, stdin validation, and the
+# system instruction/body it hands to `gemini-text`.
+#
+# The transport itself is covered by test-gemini-text (helper logic) and
+# test-gemini-cli-contract (the CLI's behaviour). This file only checks that
+# emerson asks for the right thing and reports failures.
 #
 
 set -u
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 BIN="$DIR/../scripts/emerson"
+export PATH="$DIR/../scripts:$DIR/../../../bin:$PATH"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -15,90 +20,133 @@ mkdir -p "$WORK/shim"
 
 printf 'reference text\n' >"$WORK/in.txt"
 
-make_curl_shim() {
-  cat >"$WORK/shim/curl" <<EOF
-#!/bin/sh
-cat >/dev/null 2>&1
-$1
-EOF
-  chmod +x "$WORK/shim/curl"
-}
+ARGS_FILE="$WORK/args"
+STDIN_FILE="$WORK/stdin"
 
-TOTAL_TESTS=5
+cat >"$WORK/shim/gemini-text" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$STUB_ARGS"
+context=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--context" ] && context=$a
+  prev=$a
+done
+if [ -n "$context" ]; then
+  cat "$context"
+else
+  cat
+fi >"$STUB_STDIN"
+printf '%s\n' "${STUB_TEXT:-# Stub Heading
+
+Stub body.}"
+exit "${STUB_EXIT:-0}"
+SHIM
+chmod +x "$WORK/shim/gemini-text"
+
+TOTAL_TESTS=6
 echo "1..$TOTAL_TESTS"
 TEST_NUM=0
 LOG="$WORK/log"
+ERR="$WORK/err"
+OUT="$WORK/out"
 
+# run [--exit N] -- ARGS...
 run_emerson() {
-  PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" "$@" <"$WORK/in.txt" >"$LOG" 2>&1
+  local exit_code=0
+  if [[ "$1" == "--exit" ]]; then
+    exit_code="$2"
+    shift 2
+  fi
+  PATH="$WORK/shim:$PATH" \
+    STUB_ARGS="$ARGS_FILE" \
+    STUB_STDIN="$STDIN_FILE" \
+    STUB_EXIT="$exit_code" \
+    "$BIN" "$@" <"$WORK/in.txt" >"$OUT" 2>"$ERR"
 }
 
-# 1. Missing prompt argument fails with exit 1
-TEST_NUM=$((TEST_NUM + 1))
-if PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" </dev/null >"$LOG" 2>&1; then
-  echo "not ok $TEST_NUM - emerson succeeded with no prompt argument"
-  sed 's/^/# /' "$LOG"
+ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "ok $TEST_NUM - $1"
+}
+
+not_ok() {
+  TEST_NUM=$((TEST_NUM + 1))
+  echo "not ok $TEST_NUM - $1"
+  sed 's/^/# /' "$ERR"
+  sed 's/^/# stdout: /' "$OUT"
+}
+
+arg_value() {
+  awk -v flag="$1" '$0 == flag { getline; print; exit }' "$ARGS_FILE"
+}
+
+# 1. Missing prompt argument fails with exit 1.
+if PATH="$WORK/shim:$PATH" "$BIN" </dev/null >"$LOG" 2>&1; then
+  not_ok "emerson succeeded with no prompt argument"
 elif grep -q "Usage: emerson PROMPT" "$LOG"; then
-  echo "ok $TEST_NUM - emerson reports missing prompt argument"
+  ok "emerson reports a missing prompt argument"
 else
-  echo "not ok $TEST_NUM - unexpected error on missing prompt"
-  sed 's/^/# /' "$LOG"
+  not_ok "unexpected error on missing prompt"
 fi
 
-# 2. Empty stdin input fails with exit 1
-TEST_NUM=$((TEST_NUM + 1))
-if PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" "prompt" </dev/null >"$LOG" 2>&1; then
-  echo "not ok $TEST_NUM - emerson succeeded with empty stdin"
-  sed 's/^/# /' "$LOG"
+# 2. Empty stdin fails with exit 1.
+if PATH="$WORK/shim:$PATH" "$BIN" "prompt" </dev/null >"$LOG" 2>&1; then
+  not_ok "emerson succeeded with empty stdin"
 elif grep -q "no input provided on stdin" "$LOG"; then
-  echo "ok $TEST_NUM - emerson reports empty stdin"
+  ok "emerson reports empty stdin"
 else
-  echo "not ok $TEST_NUM - unexpected error on empty stdin"
-  sed 's/^/# /' "$LOG"
+  not_ok "unexpected error on empty stdin"
 fi
 
-# 3. Multiple content parts are concatenated together
-TEST_NUM=$((TEST_NUM + 1))
-make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"# Part 1\\\n\\\nBody text.\"},{\"text\":\"\\\n\\\n# Part 2\\\n\\\nMore text.\"}]},\"finishReason\":\"STOP\"}]}\n200"'
+# 3. The reference material is labelled and sent as context, with the question
+#    last: the prompt was tuned against that order.
 if run_emerson "Explain topic"; then
-  if grep -q "Part 1" "$LOG" && grep -q "Part 2" "$LOG"; then
-    echo "ok $TEST_NUM - emerson concatenates multiple response text parts"
+  if [[ -n "$(arg_value --context)" ]] &&
+    grep -q "Reference Material:" "$STDIN_FILE" &&
+    grep -q "reference text" "$STDIN_FILE" &&
+    [[ "$(tail -n 2 "$ARGS_FILE")" == "Task/Question:
+Explain topic" ]]; then
+    ok "sends labelled reference material as context before the question"
   else
-    echo "not ok $TEST_NUM - multi-part text was not fully concatenated"
-    sed 's/^/# /' "$LOG"
+    not_ok "context or prompt were not shaped as expected"
   fi
 else
-  echo "not ok $TEST_NUM - emerson failed on multi-part response"
-  sed 's/^/# /' "$LOG"
+  not_ok "emerson failed while checking the request shape"
 fi
 
-# 4. Truncation warning on MAX_TOKENS finish reason
-TEST_NUM=$((TEST_NUM + 1))
-make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"# Incomplete\\\n\\\nCut off text\"}]},\"finishReason\":\"MAX_TOKENS\"}]}\n200"'
-if PATH="$WORK/shim:$PATH" GEMINI_API_KEY=dummy "$BIN" "Explain topic" <"$WORK/in.txt" 2>"$WORK/err.log" >"$WORK/out.log"; then
-  if grep -q "warning: output was truncated (finish reason: MAX_TOKENS)" "$WORK/err.log" && grep -q "Incomplete" "$WORK/out.log"; then
-    echo "ok $TEST_NUM - emerson warns on MAX_TOKENS while preserving output"
+# 4. The model defaults to gemini-4-argon and --model overrides it.
+if run_emerson "Explain topic" && [[ "$(arg_value --model)" == "gemini-4-argon" ]]; then
+  if run_emerson --model other "Explain topic" && [[ "$(arg_value --model)" == "other" ]]; then
+    ok "defaults to gemini-4-argon and honours --model"
   else
-    echo "not ok $TEST_NUM - missing warning or output on MAX_TOKENS"
-    echo "# stderr:"
-    sed 's/^/# /' "$WORK/err.log"
-    echo "# stdout:"
-    sed 's/^/# /' "$WORK/out.log"
+    not_ok "--model was not forwarded"
   fi
 else
-  echo "not ok $TEST_NUM - emerson failed on MAX_TOKENS"
-  sed 's/^/# /' "$WORK/err.log"
+  not_ok "default model was not forwarded"
 fi
 
-# 5. Empty text response with finish reason fails with clear error
-TEST_NUM=$((TEST_NUM + 1))
-make_curl_shim 'printf "{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"SAFETY\"}]}\n200"'
+# 5. High thinking and the tuned temperature travel in the body, and the system
+#    instruction is the essay prompt rather than empty.
 if run_emerson "Explain topic"; then
-  echo "not ok $TEST_NUM - emerson succeeded on empty candidate parts"
-  sed 's/^/# /' "$LOG"
-elif grep -q "No response text received. Finish Reason: SAFETY" "$LOG"; then
-  echo "ok $TEST_NUM - emerson reports empty response with finish reason"
+  body=$(arg_value --body)
+  system=$(arg_value --system)
+  if jq -e '.generation_config.temperature == 1' <<<"$body" >/dev/null &&
+    jq -e '.generation_config.thinking_level == "high"' <<<"$body" >/dev/null &&
+    [[ "$system" == *"elite technical analyst"* ]]; then
+    ok "sends the essay system instruction and thinking configuration"
+  else
+    not_ok "system instruction or generation config missing: $body"
+  fi
 else
-  echo "not ok $TEST_NUM - unexpected message for empty candidate"
-  sed 's/^/# /' "$LOG"
+  not_ok "emerson failed while checking the system instruction"
+fi
+
+# 6. A failed generation exits 1 and prints nothing to stdout.
+if run_emerson --exit 3 "Explain topic"; then
+  not_ok "emerson succeeded when gemini-text failed"
+elif [[ ! -s "$OUT" ]]; then
+  ok "propagates a generation failure without emitting output"
+else
+  not_ok "emerson printed output despite a failed generation"
 fi

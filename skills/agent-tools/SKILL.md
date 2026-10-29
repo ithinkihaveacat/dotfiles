@@ -9,8 +9,10 @@ description: >-
   extracting receipts, gathering domain context, automating Android apps, refactoring
   multi-file repositories with Caxton, or performing deep research with Oracle.
 compatibility: >-
-  Requires curl, jq, and uv. Image tools also need base64 and magick (ImageMagick).
-  Needs a Gemini API key (GEMINI_API_KEY) and network access to generativelanguage.googleapis.com.
+  Requires curl, jq, and uv, plus the pinned gemini-api CLI (see "Gemini API
+  CLI"). Image tools also need base64 and magick (ImageMagick). Needs a Gemini
+  API key (GEMINI_API_KEY, or one stored by `gemini-api configure`) and network
+  access to generativelanguage.googleapis.com.
 ---
 
 # Agent Tools
@@ -30,21 +32,93 @@ this skill directory. They encapsulate API boilerplate and formatting logic:
 **When to inspect script source:** If a script lacks a specific parameter or
 fails due to a local dependency, inspect the script in `scripts/`. They
 demonstrate correct API schemas, request structures, and retry behaviors that
-you can adapt for custom calls.
+you can adapt for custom calls. `emerson`, `pascal` and `satisfies` delegate
+their HTTP work to `gemini-api`; inspect `libexec/gemini-text` and the sections
+below instead of expecting a `curl` call in those scripts.
+
+## Gemini API CLI
+
+Three wrappers (`emerson`, `pascal`, `satisfies`) do not call the API
+themselves: they hand the request to `gemini-api`, Google's beta CLI for the
+Gemini **Interactions** API (`v1beta/interactions`, not the older
+`generateContent` endpoint the other scripts still use). The CLI owns request
+construction, authentication, streaming, and error classification; the wrappers
+keep their own interfaces (stdin, `--model`, exit codes) and share
+`libexec/gemini-text`, which adds `store: false` and extracts the answer.
+
+### Install the pinned release
+
+The skill is tested against **v0.4.4**. `tests/test-gemini-cli-contract` fails
+when the installed version differs, because that test encodes the flag and
+response shapes the wrappers depend on. Install it on `PATH`:
+
+```bash
+VERSION=0.4.4
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) asset=gemini-api_Linux_x86_64.tar.gz ;;
+  Linux-aarch64 | Linux-arm64) asset=gemini-api_Linux_arm64.tar.gz ;;
+  Darwin-x86_64) asset=gemini-api_Darwin_x86_64.tar.gz ;;
+  Darwin-arm64) asset=gemini-api_Darwin_arm64.tar.gz ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+work=$(mktemp -d)
+base="https://github.com/google-gemini/gemini-api-cli/releases/download/v$VERSION"
+curl -fsSL -o "$work/$asset" "$base/$asset"
+curl -fsSL -o "$work/checksums.txt" "$base/checksums.txt"
+(cd "$work" && grep " $asset\$" checksums.txt | sha256sum -c -) ||
+  (cd "$work" && grep " $asset\$" checksums.txt | shasum -a 256 -c -)
+tar -xzf "$work/$asset" -C "$HOME/.local/bin" gemini-api
+"$HOME/.local/bin/gemini-api" version
+```
+
+`go install github.com/google-gemini/gemini-api-cli/cmd/gemini-api@v0.4.4` also
+works on a machine with Go 1.26 or later.
+
+With `GEMINI_API_KEY` exported, `gemini-api whoami` shows which credential is in
+use; `gemini-api configure` can store a key in the OS keychain instead of the
+environment.
+
+### Upgrading
+
+`gemini-api` is beta: flags, request bodies, and response shapes may change
+between releases, and upstream does not accept pull requests, so we pin rather
+than track. To upgrade, install the new release, then run:
+
+```bash
+prove -v skills/agent-tools/tests/test-gemini-cli-contract \
+  skills/agent-tools/tests/test-gemini-text \
+  skills/agent-tools/tests/test-gemini-api-live
+```
+
+Review each failure against the release notes, adapt `libexec/gemini-text` and
+the wrappers, update `references/gemini-api-cli.md` and the `VERSION` above, and
+only then bump `tests/fixtures/gemini-api-version`. Do not bump the pin to make
+the test pass.
+
+### What we rely on
+
+Recorded in `references/gemini-api-cli.md`, with the friction found while
+migrating and the recommendations to pass upstream. In short:
+`generate --stream=false --output-format json` returns the interaction as JSON;
+the answer is `.steps[].content[].text`; `store: false` is **not** the default
+for `generate`; exit codes are 1 (runtime), 2 (usage), 3 (authentication).
 
 ## Quick Start
 
-**Environment:** AI commands require a Gemini API key (reads from
-`GEMINI_API_KEY`). Scripts will report clear errors if no key is found.
-`gh-markdown` optionally accepts a `--token` for GitHub API access.
+**Environment:** AI commands require a Gemini API key, read from
+`GEMINI_API_KEY`. The wrappers that run on `gemini-api` (`emerson`, `pascal`,
+`satisfies`) also accept a key stored with `gemini-api configure`. Scripts
+report clear errors if no key is found. `gh-markdown` optionally accepts a
+`--token` for GitHub API access.
 
 **Model selection:** Every Gemini-backed script accepts `--model MODEL` and
 honors the `GEMINI_MODEL` environment variable (`--model` wins; each script's
 built-in default applies when neither is set). Defaults vary per tool and are
 tuned for its task; only override when you have a reason.
 
-**Dependencies:** `curl`, `jq`, `uv` (all tools); `base64`, `magick` (image
-tools only)
+**Dependencies:** `curl`, `jq`, `uv` (all tools); `gemini-api` (`emerson`,
+`pascal`, `satisfies` — see [Gemini API CLI](#gemini-api-cli)); `base64`,
+`magick` (image tools only)
 
 ```bash
 # Gather context and analyze
@@ -612,6 +686,8 @@ background material.
 scripts/emerson "PROMPT" < input.txt
 ```
 
+**Transport:** `gemini-api` (see [Gemini API CLI](#gemini-api-cli)).
+
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
 ### pascal
@@ -625,6 +701,8 @@ scripts/pascal [-] "QUESTION"
 
 **Input:** Optional context via stdin. Pass `-` as the first argument to read
 it; without `-`, stdin is ignored.
+
+**Transport:** `gemini-api` (see [Gemini API CLI](#gemini-api-cli)).
 
 **Exit codes:** 0 success, 1 error, 127 missing dependency
 
@@ -652,8 +730,13 @@ echo "text" | scripts/satisfies [-v|--verbose] "CONDITION"
 
 **Options:** `-v, --verbose` (output "true" or "false" to stderr)
 
-**Exit codes:** 0 true (satisfies), 1 false (does not satisfy), 127 missing
-dependency
+**Transport:** `gemini-api` (see [Gemini API CLI](#gemini-api-cli)).
+
+**Exit codes:** 0 true (satisfies), 1 false (does not satisfy), 2 error (no
+input, API or transport failure, unparseable response), 127 missing dependency.
+Exit 2 was added with the `gemini-api` migration: a failed request used to be
+indistinguishable from a legitimate "false". Both are non-zero, so the
+`if ...; then` idiom is unaffected.
 
 **Examples:**
 
@@ -841,15 +924,22 @@ Base64 budget, default: 300), `-n, --dry-run` (preview changes).
 ## Safety Notes
 
 - Scripts require network access to the Gemini API
-- Requires a Gemini API key (reads from `GEMINI_API_KEY`)
+- Requires a Gemini API key (reads from `GEMINI_API_KEY`, or from the store
+  managed by `gemini-api configure` for the wrappers that use it)
 - API calls may incur usage costs
 - Large images increase request size and latency
-- Scripts do not store or log input data
+- Scripts do not store or log input data. The `gemini-api` wrappers send
+  `store: false` so the service does not retain the interaction; do not remove
+  that override from `libexec/gemini-text` without reading
+  [references/gemini-api-cli.md](references/gemini-api-cli.md).
 
 ## Reference Material
 
 - **Command Reference**: Detailed documentation for each script. See
   [references/command-index.md](references/command-index.md).
+- **Gemini API CLI**: The contract we rely on, the friction found while
+  migrating, and recommendations to pass upstream. See
+  [references/gemini-api-cli.md](references/gemini-api-cli.md).
 - **Troubleshooting**: Common issues and solutions. See
   [references/troubleshooting.md](references/troubleshooting.md).
 - **Agent Function Notation (AFN)**: A notation for describing agent behaviour
