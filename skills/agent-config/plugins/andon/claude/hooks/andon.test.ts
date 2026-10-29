@@ -96,7 +96,6 @@ function engine(
   on("fs.exists", () => ({ value: true }));
   on("ui.status", () => ({ value: undefined }));
   on("ui.toast", () => ({ value: undefined }));
-  on("classic.SessionStart", () => ({}));
   on("tool.register", ($, e) => {
     registered.push(e);
 
@@ -276,9 +275,14 @@ describe("the plugin", () => {
 
   test("locks in the configured level for the session and /andon level updates the CLI default", async ($, on) => {
     let statsLevel = 4;
+    let statsRead = () => {};
+    const isStatsRead = new Promise<void>((resolve) => {
+      statsRead = resolve;
+    });
     const runs = engine(on, {
       run: (argv) => {
         if (argv.includes("stats")) {
+          statsRead();
           return result(
             0,
             JSON.stringify({ open: 2, open_red: 0, level: statsLevel })
@@ -289,6 +293,9 @@ describe("the plugin", () => {
     });
     on("prompt.compose", () => ({ sections: [] }));
     await $.session.start(START);
+    // The startup read runs in the background; change the default only after
+    // it, so the test shows the session keeps the level it started with.
+    await isStatsRead;
     statsLevel = 2;
     const composed = await $.prompt.compose({
       model: "m",
@@ -316,10 +323,6 @@ describe("the plugin", () => {
   test("a pull is allowed, stamped with the session and saved by the CLI", async ($, on) => {
     const runs = engine(on);
     await $.session.start(START);
-    await $.classic.SessionStart({
-      source: "startup",
-      transcript_path: "/home/me/.claude/projects/app/session-1.jsonl"
-    });
     const { decision } = await $.tool.check({ tool: TOOL, input: {} });
     expect(decision).toBe("allow"); // the engine asked; the plugin lifts it
     const ran = await $.tool.call({
@@ -340,10 +343,10 @@ describe("the plugin", () => {
         step_idx: 7,
         level: 3,
         model_name: "claude-opus-5-5",
-        workspace_paths: ["/work/app"],
-        transcript_path: "/home/me/.claude/projects/app/session-1.jsonl"
+        workspace_paths: ["/work/app"]
       })
     );
+    expect(sent).not.toHaveProperty("transcript_path");
     expect(JSON.stringify(ran.result)).toContain("do not interrupt the user");
   });
 

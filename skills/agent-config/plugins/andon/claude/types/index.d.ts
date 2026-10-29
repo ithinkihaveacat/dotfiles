@@ -28,8 +28,6 @@ declare module "claude-code" {
     andon: {
       /** The trigger level locked for this session: ANDON_LEVEL, else `andon level`, else 3. */
       defaultLevel: number;
-      /** From the classic hook envelope; tool calls do not carry it. */
-      transcriptPath: string | null;
       counts: AndonCounts;
       board: AndonAlert[];
       filter: AndonFilter;

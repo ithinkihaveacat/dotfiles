@@ -25,10 +25,6 @@ const defaultLevel = atom(
   { plugin: "andon", key: "defaultLevel" } as const,
   DEFAULT_LEVEL
 );
-const transcriptPath = atom(
-  { plugin: "andon", key: "transcriptPath" } as const,
-  null
-);
 const counts = atom({ plugin: "andon", key: "counts" } as const, {
   open: 0,
   red: 0
@@ -255,7 +251,6 @@ async function pull(
     agent_id: typeof e.agentId === "string" ? e.agentId : undefined,
     tool_use_id: typeof e.tool_use_id === "string" ? e.tool_use_id : undefined,
     step_idx: await $.session.turns(),
-    transcript_path: (await read($, transcriptPath)) ?? undefined,
     workspace_paths: root === cwd ? [cwd] : [cwd, root],
     model_name: await $.session.model()
   };
@@ -507,24 +502,6 @@ export const register: Register = (on) => {
     return reminder === null
       ? ran
       : { ...ran, context: [...(ran.context ?? []), reminder] };
-  }).catch(($, e, next) => next(e));
-
-  on("classic.SessionStart", async ($, e, next) => {
-    if (e.transcript_path)
-      await update($, transcriptPath, () => e.transcript_path);
-
-    return next(e);
-  }).catch(($, e, next) => next(e));
-
-  on("classic.UserPromptSubmit", async ($, e, next) => {
-    if (
-      e.transcript_path &&
-      e.transcript_path !== (await read($, transcriptPath))
-    ) {
-      await update($, transcriptPath, () => e.transcript_path);
-    }
-
-    return next(e);
   }).catch(($, e, next) => next(e));
 
   on("command.run", { command: "andon" }, async ($, e) => ({
