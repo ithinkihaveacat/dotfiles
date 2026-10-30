@@ -15,6 +15,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -45,6 +46,7 @@ BACKOFF_START = 6.0
 BACKOFF_ATTEMPTS = 5
 BACKOFF_TOTAL = 300.0
 PUSH_ATTEMPTS = 3
+GIT_TIMEOUT = 120.0  # seconds for a fetch or push; ls-remote gets 30
 
 KEYS = ("url", "hash", "title", "notes", "tags", "time", "shared", "toread", "meta")
 MAX_TAGS = 100
@@ -88,10 +90,11 @@ class NetworkError(Error):
 
 
 class GateError(Error):
-    def __init__(self, endpoint: str, at: float):
+    def __init__(self, endpoint: str, at: float, refused: bool = False):
         wait = max(0, int(at - time.time()) + 1)
+        why = "rate limited by Pinboard (HTTP 429); it " if refused else ""
         super().__init__(
-            f"{endpoint} is limited to once every {int(GATES[endpoint] // 60)} min; "
+            f"{endpoint}: {why}allows one call every {int(GATES[endpoint] // 60)} min; "
             f"next allowed at {iso(at)} (in {wait}s)"
         )
         self.retry_after = wait
@@ -248,9 +251,15 @@ def check_record(record: Any) -> str | None:
     return None
 
 
+# Limits from the v1 API's argument types (https://pinboard.in/api/): a title
+# is up to 255 characters, text up to 65536, a tag up to 255 with no commas or
+# whitespace, and a bookmark has up to 100 tags. Pinboard refuses an empty
+# title ("must provide title"), though some old bookmarks have one.
 def validate_fields(title: str, notes: str, tags: list[str]) -> None:
     if not title.strip():
-        raise Error("the title is empty")
+        raise Error(
+            "the title is empty, and Pinboard requires one; give one with --title"
+        )
     if len(title) > MAX_TITLE:
         raise Error(
             f"the title is {len(title)} characters; Pinboard allows {MAX_TITLE}"
@@ -298,9 +307,14 @@ class LocalState:
     def __init__(self, path: Path | None):
         self.path = path
         self.data: dict[str, Any] = {}
-        if path is not None:
+        self.reload()
+
+    def reload(self) -> None:
+        """Re-reads the file, as another process may have saved it since."""
+        self.data = {}
+        if self.path is not None:
             try:
-                loaded = json.loads(path.read_text())
+                loaded = json.loads(self.path.read_text())
                 if isinstance(loaded, dict):
                     self.data = loaded
             except (OSError, ValueError):
@@ -392,6 +406,9 @@ class Api:
         while True:
             self._gate(endpoint)
             status, body = self._request(endpoint, params or {}, timeout)
+            if status == 429 and endpoint in GATES:
+                # Retrying within the endpoint's own window cannot succeed.
+                raise GateError(endpoint, self.local.next_allowed(endpoint), True)
             if status == 429:
                 attempts += 1
                 if (
@@ -452,15 +469,21 @@ class Repo:
         self.path = path
         self._git_dir: Path | None = None
 
-    def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        proc = subprocess.run(
-            ["git", "-C", str(self.path), *args],
-            capture_output=True,
-            text=True,
-            env=GIT_ENV,
-            stdin=subprocess.DEVNULL,
-            check=False,
-        )
+    def run(
+        self, *args: str, check: bool = True, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(self.path), *args],
+                capture_output=True,
+                text=True,
+                env=GIT_ENV,
+                stdin=subprocess.DEVNULL,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise Error(f"git {args[0]} timed out after {timeout:.0f}s") from None
         if check and proc.returncode != 0:
             message = proc.stderr.strip() or proc.stdout.strip()
             raise Error(f"git {args[0]} failed in {self.path}: {message}")
@@ -518,13 +541,22 @@ class Repo:
         return int(ahead), int(behind)
 
     def push(self) -> tuple[bool, str]:
-        proc = self.run(
-            "push", "-q", "origin", f"HEAD:refs/heads/{self.branch()}", check=False
-        )
+        try:
+            proc = self.run(
+                "push",
+                "-q",
+                "origin",
+                f"HEAD:refs/heads/{self.branch()}",
+                check=False,
+                timeout=GIT_TIMEOUT,
+            )
+        except Error as e:
+            # Whether it landed is unknown; the next fetch shows it either way.
+            return False, str(e)
         return proc.returncode == 0, proc.stderr.strip()
 
     def fetch(self) -> None:
-        self.run("fetch", "-q", "origin")
+        self.run("fetch", "-q", "origin", timeout=GIT_TIMEOUT)
 
     def last_commit_time(self, grep: str | None = None) -> float | None:
         if not self.has_head():
@@ -553,7 +585,7 @@ def locked(repo: Repo) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def catch_up(repo: Repo) -> None:
+def catch_up(repo: Repo, local: LocalState) -> None:
     """Brings the clone level with its remote before a write."""
     changes = repo.dirty()
     if changes:
@@ -587,6 +619,11 @@ def catch_up(repo: Repo) -> None:
         dropped = repo.out("log", "--format=%h %s", f"{upstream}..HEAD").splitlines()
         repo.run("reset", "-q", "--hard", upstream)
         # Safe: the mirror never writes back, so these only made it fresher.
+        # A dropped sync may have recorded Pinboard's update_time, so forget
+        # it: otherwise the next sync could skip posts/all and stay stale.
+        local.data.pop("update_time", None)
+        local.data.pop("last_sync", None)
+        local.save()
         warn(
             "dropped unpushed mirror commits that conflict with the remote "
             f"({'; '.join(dropped)}); the next sync restores anything they held"
@@ -650,41 +687,121 @@ class Scan:
 def scan_mirror(root: Path) -> Scan:
     scan = Scan()
     for path in sorted((root / "bookmarks").glob("*.jsonl")):
-        scan.files += 1
-        rel = path.relative_to(root)
+        rel = str(path.relative_to(root))
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
+            scan.files += 1
             scan.errors.append(f"{rel}: {e}")
             continue
-        previous: tuple[str, str] | None = None
-        for number, line in enumerate(lines, 1):
-            try:
-                record = json.loads(line)
-            except ValueError:
-                scan.errors.append(f"{rel}:{number}: not JSON")
-                continue
-            problem = check_record(record)
-            if problem:
-                scan.errors.append(f"{rel}:{number}: {problem}")
-                continue
-            if record["url"] in scan.records:
-                scan.duplicates.append(record["url"])
-            scan.records[record["url"]] = record
-            key = (record["time"], record["url"])
-            if record["time"][:4] != path.stem or (
-                previous is not None and key < previous
-            ):
-                scan.misplaced.append(f"{rel}:{number}")
-            previous = key
+        scan_file(scan, rel, text)
     return scan
 
 
+def scan_file(scan: Scan, rel: str, text: str) -> None:
+    """Adds one year's file, as text, to SCAN."""
+    scan.files += 1
+    stem = Path(rel).stem
+    previous: tuple[str, str] | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            scan.errors.append(f"{rel}:{number}: not JSON")
+            continue
+        problem = check_record(record)
+        if problem:
+            scan.errors.append(f"{rel}:{number}: {problem}")
+            continue
+        if record["url"] in scan.records:
+            scan.duplicates.append(record["url"])
+        scan.records[record["url"]] = record
+        key = (record["time"], record["url"])
+        if record["time"][:4] != stem or (previous is not None and key < previous):
+            scan.misplaced.append(f"{rel}:{number}")
+        previous = key
+
+
 def load_mirror(root: Path) -> dict[str, dict[str, Any]]:
-    scan = scan_mirror(root)
+    return scan_records(scan_mirror(root), str(root))
+
+
+def committed_tree(repo: Repo) -> str:
+    """The id of the last commit's bookmarks/ tree, or "" before the first."""
+    proc = repo.run("rev-parse", "-q", "--verify", "HEAD:bookmarks", check=False)
+    return proc.stdout.strip()
+
+
+def load_committed(repo: Repo, tree: str | None = None) -> dict[str, dict[str, Any]]:
+    """The bookmarks in the last commit. Reads use this rather than the files,
+    so they never see a sync half-written."""
+    tree = committed_tree(repo) if tree is None else tree
+    if not tree:
+        return {}
+    blobs = []
+    for entry in repo.out("ls-tree", "-z", tree).split("\0"):
+        meta, _, name = entry.partition("\t")
+        if name.endswith(".jsonl") and meta.split()[1:2] == ["blob"]:
+            blobs.append((name, meta.split()[2]))
+    blobs.sort()
+    proc = subprocess.run(
+        ["git", "-C", str(repo.path), "cat-file", "--batch"],
+        input="".join(f"{sha}\n" for _, sha in blobs).encode(),
+        capture_output=True,
+        env=GIT_ENV,
+        check=False,
+    )
+    if proc.returncode:
+        raise Error(f"cannot read the mirror's last commit: {proc.stderr.decode()}")
+    scan, data, pos = Scan(), proc.stdout, 0
+    for name, _ in blobs:
+        item = batch_item(data, pos)
+        if item is None:
+            raise Error(
+                f"cannot read bookmarks/{name} from the mirror's last commit; "
+                "run 'pinboard doctor'"
+            )
+        body, pos = item
+        try:
+            scan_file(scan, f"bookmarks/{name}", body.decode("utf-8"))
+        except UnicodeDecodeError as e:
+            scan.files += 1
+            scan.errors.append(f"bookmarks/{name}: {e}")
+    return scan_records(scan, f"{repo.path} (HEAD)")
+
+
+def batch_item(data: bytes, pos: int) -> tuple[bytes, int] | None:
+    """The blob at POS in 'git cat-file --batch' output and the position after
+    it, or None for a missing object or a truncated response."""
+    end = data.find(b"\n", pos)
+    header = data[pos:end].split() if end >= 0 else []
+    if len(header) != 3 or header[1] != b"blob" or not header[2].isdigit():
+        return None
+    size = int(header[2])
+    body = data[end + 1 : end + 1 + size]
+    if len(body) != size:
+        return None
+    return body, end + 1 + size + 1
+
+
+def committed_state(repo: Repo) -> dict[str, Any]:
+    """state.json as of the last commit."""
+    proc = repo.run("show", "HEAD:state.json", check=False)
+    if proc.returncode:
+        return {}
+    try:
+        state = json.loads(proc.stdout)
+    except ValueError:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def scan_records(scan: Scan, where: str) -> dict[str, dict[str, Any]]:
     if scan.errors or scan.duplicates:
         first = (scan.errors + [f"duplicate {u}" for u in scan.duplicates])[0]
-        raise Error(f"the mirror at {root} is damaged ({first}); run 'pinboard doctor'")
+        raise Error(
+            f"the mirror at {where} is damaged ({first}); run 'pinboard doctor'"
+        )
     return scan.records
 
 
@@ -756,10 +873,11 @@ class Context:
         self.repo = Repo(Path(raw).expanduser())
         token = os.environ.get(TOKEN_ENV, "").strip()
         if token:
-            _secrets.extend([token, urllib.parse.quote(token, safe="")])
             secret = token.partition(":")[2]
+            texts = [token, urllib.parse.quote(token, safe="")]
             if len(secret) >= 8:
-                _secrets.append(secret)
+                texts.append(secret)
+            _secrets.extend(t for t in texts if t not in _secrets)
         local_path = (
             self.repo.git_dir / "pinboard" / "local.json"
             if self.repo.is_clone()
@@ -794,10 +912,15 @@ class Context:
 
     def freshness(self) -> dict[str, Any]:
         synced = self.synced_at()
-        state = read_state(self.repo.path) if self.repo.is_clone() else {}
+        state = committed_state(self.repo) if self.repo.is_clone() else {}
+        times = [
+            t
+            for t in (state.get("update_time"), self.local.data.get("update_time"))
+            if isinstance(t, str) and t
+        ]
         return {
             "synced": iso(synced) if synced else None,
-            "update_time": state.get("update_time"),
+            "update_time": max(times) if times else None,
         }
 
     def announce_freshness(self) -> None:
@@ -889,8 +1012,9 @@ def run_sync(
     ctx.api.require_online()
     report = SyncReport()
     with locked(repo):
+        ctx.local.reload()
         if not dry_run:
-            catch_up(repo)
+            catch_up(repo, ctx.local)
         mirror = load_mirror(repo.path)
         state = read_state(repo.path)
         update = ctx.api.call("posts/update")
@@ -984,7 +1108,8 @@ def run_add(
     repo = ctx.require_clone()
     ctx.api.require_online()
     with locked(repo):
-        catch_up(repo)
+        ctx.local.reload()
+        catch_up(repo, ctx.local)
         try:
             code = ctx.api.add(params)
         except NetworkError as e:
@@ -993,7 +1118,11 @@ def run_add(
                 raise Error(
                     f"{e}; Pinboard does not have the bookmark, so it was not added"
                 ) from None
-            code = "done"
+            # Without a response, a bookmark that differs from the request
+            # was already there and was left alone.
+            fields = ("title", "notes", "tags", "shared", "toread")
+            same = all(live[k] == record[k] for k in fields)
+            code = "done" if same else "item already exists"
         if code not in ("done", "item already exists"):
             raise Error(f"posts/add: {code}")
         live = ctx.api.get(record["url"])
@@ -1065,8 +1194,9 @@ def run_update(
     repo = ctx.require_clone()
     ctx.api.require_online()
     with locked(repo):
+        ctx.local.reload()
         if not dry_run:
-            catch_up(repo)
+            catch_up(repo, ctx.local)
         current = ctx.api.get(url)
         if current is None:
             raise Error(f"Pinboard has no bookmark for {url}")
@@ -1196,22 +1326,26 @@ def cmd_history(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def run_restore(
-    ctx: Context, url: str, dry_run: bool = False
+    ctx: Context, url: str, dry_run: bool = False, title: str | None = None
 ) -> tuple[dict[str, Any], str, Outcome | None]:
     """Re-adds the last mirrored version of a deleted bookmark; returns (record, result, outcome)."""
     repo = ctx.require_clone()
-    if url in load_mirror(repo.path):
+    if url in load_committed(repo):
         raise Error(f"{url} is in the mirror; there is nothing to restore")
     last = next(
         (v.record for v in run_history(repo, url) if v.record is not None), None
     )
     if last is None:
         raise Error(f"the mirror's history has no version of {url}")
+    if title is not None:
+        last = {**last, "title": title}
+    validate_fields(last["title"], last["notes"], last["tags"])
     if dry_run:
         return last, "dry-run", None
     ctx.api.require_online()
     with locked(repo):
-        catch_up(repo)
+        ctx.local.reload()
+        catch_up(repo, ctx.local)
         live = ctx.api.get(url)
         result = "present"
         if live is None:
@@ -1236,7 +1370,7 @@ def run_restore(
 
 
 def cmd_restore(ctx: Context, args: argparse.Namespace) -> int:
-    record, result, outcome = run_restore(ctx, args.url, args.dry_run)
+    record, result, outcome = run_restore(ctx, args.url, args.dry_run, args.title)
     if args.dry_run:
         params = post_params(record, replace=False, keep_time=True)
         note(
@@ -1253,18 +1387,25 @@ def cmd_restore(ctx: Context, args: argparse.Namespace) -> int:
     return report_outcome(outcome, "mirror update")
 
 
-def cmd_suggest(ctx: Context, args: argparse.Namespace) -> int:
+def run_suggest(ctx: Context, url: str) -> dict[str, list[str]]:
+    """Pinboard's popular and recommended tags for URL (a live call)."""
     if ctx.repo.is_clone():
         with locked(ctx.repo):
-            data = ctx.api.call("posts/suggest", {"url": args.url})
+            ctx.local.reload()
+            data = ctx.api.call("posts/suggest", {"url": url})
     else:
-        data = ctx.api.call("posts/suggest", {"url": args.url})
+        data = ctx.api.call("posts/suggest", {"url": url})
     result: dict[str, list[str]] = {"popular": [], "recommended": []}
     for item in data if isinstance(data, list) else []:
         if isinstance(item, dict):
             for key in result:
                 if isinstance(item.get(key), list):
                     result[key] = [str(t) for t in item[key]]
+    return result
+
+
+def cmd_suggest(ctx: Context, args: argparse.Namespace) -> int:
+    result = run_suggest(ctx, args.url)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -1298,8 +1439,9 @@ def run_search(
     tags: list[str],
     limit: int,
     cursor: str | None,
+    keep: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Bookmarks matching every term and tag, newest first, and the next page's cursor."""
+    """Bookmarks matching every term and tag (and KEEP), newest first, and the next page's cursor."""
     words = [t.casefold() for t in terms if t.strip()]
     wanted = {t.casefold() for t in tags}
     after = decode_cursor(cursor) if cursor else None
@@ -1310,6 +1452,8 @@ def run_search(
         if after is not None and (record["time"], record["url"]) >= after:
             continue
         if wanted and not wanted <= {t.casefold() for t in record["tags"]}:
+            continue
+        if keep is not None and not keep(record):
             continue
         haystack = "\n".join(
             [record["title"], record["notes"], " ".join(record["tags"]), record["url"]]
@@ -1353,7 +1497,7 @@ def cmd_search(ctx: Context, args: argparse.Namespace) -> int:
         raise Error("--limit must be at least 1", 2)
     repo = ctx.require_clone()
     try:
-        records = load_mirror(repo.path)
+        records = load_committed(repo)
         page, cursor = run_search(
             records,
             args.terms,
@@ -1380,7 +1524,7 @@ def cmd_search(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def cmd_get(ctx: Context, args: argparse.Namespace) -> int:
-    records = load_mirror(ctx.require_clone().path)
+    records = load_committed(ctx.require_clone())
     record = records.get(args.url)
     if args.json:
         print(
@@ -1409,7 +1553,7 @@ def tag_counts(records: dict[str, dict[str, Any]]) -> list[tuple[str, int]]:
 
 
 def cmd_tags(ctx: Context, args: argparse.Namespace) -> int:
-    counts = tag_counts(load_mirror(ctx.require_clone().path))
+    counts = tag_counts(load_committed(ctx.require_clone()))
     if args.json:
         result = {
             "tags": [{"tag": t, "count": n} for t, n in counts],
@@ -1436,6 +1580,43 @@ def use_color(stream: Any) -> bool:
     if force and force != "0":
         return True
     return stream.isatty()
+
+
+@dataclass
+class Drift:
+    ahead: int  # commits not on origin
+    behind: str  # "" when level, else a count or "some" (not yet fetched)
+    ahead_note: str = ""
+    behind_note: str = ""
+
+
+def origin_drift(repo: Repo, add: Callable[..., None]) -> Drift:
+    """How the clone differs from origin, asking it with ls-remote so that
+    nothing local changes; falls back to the last fetch when offline or when
+    origin cannot be reached."""
+    stale = " (as of the last fetch)"
+    ahead, behind = repo.ahead_behind()
+    fallback = Drift(ahead, str(behind or ""), stale, stale)
+    if env_true("AGENT_OFFLINE"):
+        return fallback
+    try:
+        proc = repo.run(
+            "ls-remote", "origin", f"refs/heads/{repo.branch()}", timeout=30
+        )
+    except Error as e:
+        add("WARN", "Reach", "cannot reach origin", redact(str(e)))
+        return fallback
+    tip = proc.stdout.split()[0] if proc.stdout.strip() else ""
+    if not tip:
+        return Drift(count_commits(repo, "HEAD"), "")
+    if repo.run("cat-file", "-e", f"{tip}^{{commit}}", check=False).returncode:
+        return Drift(ahead, "some", stale, "")
+    behind = count_commits(repo, f"HEAD..{tip}")
+    return Drift(count_commits(repo, f"{tip}..HEAD"), str(behind or ""))
+
+
+def count_commits(repo: Repo, spec: str) -> int:
+    return int(repo.out("rev-list", "--count", spec))
 
 
 def run_doctor(ctx: Context) -> list[dict[str, Any]]:
@@ -1546,16 +1727,26 @@ def run_doctor(ctx: Context) -> list[dict[str, Any]]:
     else:
         add("PASS", "Working tree", "clean")
     if remote and repo.has_head():
-        ahead, _ = repo.ahead_behind()
-        if ahead:
+        drift = origin_drift(repo, add)
+        if drift.behind:
+            add(
+                "WARN",
+                "Pull",
+                f"origin has {drift.behind} commit(s) this clone lacks"
+                f"{drift.behind_note}; reads miss them",
+                "The next sync or write brings them in.",
+            )
+        else:
+            add("PASS", "Pull", f"level with origin{drift.behind_note}")
+        if drift.ahead:
             add(
                 "WARN",
                 "Push",
-                f"{ahead} commit(s) not on origin",
+                f"{drift.ahead} commit(s) not on origin{drift.ahead_note}",
                 "The next sync or write pushes them.",
             )
         else:
-            add("PASS", "Push", "nothing unpushed (as of the last fetch)")
+            add("PASS", "Push", f"nothing unpushed{drift.ahead_note}")
 
     synced = ctx.synced_at()
     if synced is None:
@@ -1665,6 +1856,7 @@ Commands:
   history URL       List the mirror's versions of a bookmark
   suggest URL       Ask Pinboard for tag suggestions
   doctor            Check the token, the clone and the mirror (read-only)
+  mcp               Serve the mirror to agents over MCP
 
 Options:
   --repo DIR   The mirror clone (default: $PINBOARD_REPO, else ~/.pinboard);
@@ -1867,6 +2059,11 @@ def build_parser() -> Parser:
     )
     p.add_argument("url", metavar="URL", help="The deleted bookmark's exact URL")
     p.add_argument(
+        "--title",
+        metavar="TEXT",
+        help="Restore with this title (needed when the recorded one is empty)",
+    )
+    p.add_argument(
         "--dry-run", action="store_true", help="Show the request without sending it"
     )
     p.set_defaults(func=cmd_restore)
@@ -1893,8 +2090,8 @@ def build_parser() -> Parser:
     p = command(
         "doctor",
         "Check the token, the clone and its remote, the mirror files, unpushed\n"
-        "commits, freshness and rate limits. Read-only; makes no API call. Exits 1 on\n"
-        "any WARN or FAIL.",
+        "commits, freshness and rate limits. Read-only: makes no API call and asks\n"
+        "origin for its branch head without fetching. Exits 1 on any WARN or FAIL.",
         "  pinboard doctor\n  pinboard doctor --json",
     )
     p.add_argument("--json", action="store_true", help="Print JSON")
@@ -1902,8 +2099,39 @@ def build_parser() -> Parser:
     return parser
 
 
+def mcp_args(argv: list[str]) -> list[str] | None:
+    """The arguments for the MCP server, if ARGV runs 'mcp', with any --repo."""
+    rest = list(argv)
+    repo: list[str] = []
+    if rest[:1] == ["--repo"] and len(rest) > 1:
+        repo, rest = rest[:2], rest[2:]
+    elif rest[:1] and rest[0].startswith("--repo="):
+        repo, rest = ["--repo", rest[0].partition("=")[2]], rest[1:]
+    if rest[:1] != ["mcp"]:
+        return None
+    return repo + rest[1:]
+
+
+def exec_mcp(args: list[str]) -> int:
+    """Hands over to the MCP server, which carries its own dependencies so that
+    every other command stays free of them."""
+    server = Path(__file__).resolve().parent.parent / "libexec" / "pinboard-mcp"
+    uv = shutil.which("uv")
+    if uv is None:
+        print(f"{PROG} mcp: uv not found", file=sys.stderr)
+        return 127
+    try:
+        os.execv(uv, [uv, "run", "--quiet", "--script", str(server), *args])
+    except OSError as e:
+        print(f"{PROG} mcp: cannot run {server}: {e.strerror or e}", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str]) -> int:
     global _command
+    server_args = mcp_args(argv)
+    if server_args is not None:
+        return exec_mcp(server_args)
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.help or not args.command:

@@ -138,6 +138,11 @@ specific non-zero values:
   (guarded against write errors) so the TTY-echoed `^C` doesn't mangle the next
   shell prompt, and no stack trace or crash dump. A unified handler that always
   exits `130` is acceptable.
+- Long-running servers (an HTTP or MCP server, a daemon) are the exception to
+  `130` / `143`: a signal is how a supervisor or client asks them to stop, so
+  they finish or abandon in-flight work within a bounded time and exit `0`,
+  without the newline. A server that does not stop promptly on a signal is a
+  bug, whatever its exit status.
 
 ## Output Format Defaults
 

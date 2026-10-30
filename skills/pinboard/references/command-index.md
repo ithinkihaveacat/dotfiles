@@ -15,6 +15,7 @@
 - [history](#history)
 - [suggest](#suggest)
 - [doctor](#doctor)
+- [mcp](#mcp)
 
 ## Help
 
@@ -41,6 +42,7 @@ Commands:
   history URL       List the mirror's versions of a bookmark
   suggest URL       Ask Pinboard for tag suggestions
   doctor            Check the token, the clone and the mirror (read-only)
+  mcp               Serve the mirror to agents over MCP
 
 Options:
   --repo DIR   The mirror clone (default: $PINBOARD_REPO, else ~/.pinboard);
@@ -243,17 +245,19 @@ Examples:
 <!-- generated: ../scripts/pinboard restore --help -->
 
 ```text
-Usage: pinboard restore [-h] [--dry-run] URL
+Usage: pinboard restore [-h] [--title TEXT] [--dry-run] URL
 
 Re-add a bookmark deleted from Pinboard, as the mirror last recorded it,
 keeping its original date. Refuses if the mirror still has URL.
 
 Arguments:
-  URL         The deleted bookmark's exact URL
+  URL           The deleted bookmark's exact URL
 
 Options:
-  -h, --help  Display this help message and exit
-  --dry-run   Show the request without sending it
+  -h, --help    Display this help message and exit
+  --title TEXT  Restore with this title (needed when the recorded one is
+                empty)
+  --dry-run     Show the request without sending it
 
 Examples:
   pinboard history https://example.com/post
@@ -316,8 +320,8 @@ Examples:
 Usage: pinboard doctor [-h] [--json]
 
 Check the token, the clone and its remote, the mirror files, unpushed
-commits, freshness and rate limits. Read-only; makes no API call. Exits 1 on
-any WARN or FAIL.
+commits, freshness and rate limits. Read-only: makes no API call and asks
+origin for its branch head without fetching. Exits 1 on any WARN or FAIL.
 
 Options:
   -h, --help  Display this help message and exit
@@ -326,6 +330,74 @@ Options:
 Examples:
   pinboard doctor
   pinboard doctor --json
+```
+
+<!-- /generated -->
+
+## mcp
+
+<!-- generated: ../scripts/pinboard mcp --help -->
+
+```text
+Usage: pinboard mcp [-h] [--repo DIR] [--http] [--host HOST] [--port PORT]
+                    [--allow-host HOST] [--access-team HOST]
+                    [--access-aud AUD] [--sync-every HOURS] [--log FILE]
+
+Serve the Pinboard mirror to agents over MCP: search it, and add
+or update bookmarks through the API.
+
+Options:
+  -h, --help          Display this help message and exit
+  --repo DIR          The mirror clone (default: $PINBOARD_REPO, else
+                      ~/.pinboard)
+  --http              Serve streamable HTTP at /mcp, not stdio
+  --host HOST         HTTP address (default: 127.0.0.1)
+  --port PORT         HTTP port (default: 8791)
+  --allow-host HOST   Also accept requests addressed to HOST, such as a
+                      tunnel's hostname
+  --access-team HOST  Cloudflare Access team domain (default:
+                      PINBOARD_MCP_ACCESS_TEAM)
+  --access-aud AUD    Cloudflare Access application audience tag (default:
+                      PINBOARD_MCP_ACCESS_AUD)
+  --sync-every HOURS  With --http, sync when the last sync is this old
+                      (default: 24; 0 never syncs on its own)
+  --log FILE          Request log (default: $PINBOARD_MCP_LOG)
+
+Tools:
+  search_bookmarks, get_bookmark, list_tags   read the mirror; never the API
+  suggest_tags                                a live Pinboard call
+  add_bookmark, update_bookmark               write to Pinboard, then the mirror
+  sync                                        bring the mirror up to date
+
+Environment:
+  PINBOARD_API_TOKEN            API token, as for every pinboard command
+  PINBOARD_REPO                 The mirror clone, if --repo is not given
+  PINBOARD_MCP_LOG              Request log (default:
+                                $XDG_STATE_HOME/pinboard/mcp.jsonl, else
+                                ~/.local/state/pinboard/mcp.jsonl)
+  PINBOARD_MCP_ACCESS_TEAM      Cloudflare Access team domain
+  PINBOARD_MCP_ACCESS_AUD       Cloudflare Access application audience tag
+  PINBOARD_MCP_ACCESS_CERTS_URL Team certificate URL, for testing (default:
+                                https://TEAM/cdn-cgi/access/certs)
+
+Examples:
+  claude mcp add pinboard -- pinboard mcp
+  pinboard mcp --http
+  pinboard mcp --http --host 0.0.0.0 --allow-host pinboard.example.com \
+    --access-team example.cloudflareaccess.com --access-aud AUD
+
+Over stdio the server never syncs on its own; call the sync tool, or run
+'pinboard sync'. Over HTTP (at /mcp) it also syncs whenever the last sync
+is older than --sync-every hours: at startup, then checking hourly, so a
+refused or failed run is retried an hour later. Each tool call and scheduled
+sync is appended to the request log, rotated at 8 MiB with four old files kept.
+
+The HTTP server serves GET /up without a token for a proxy's health check.
+Without --access-team and --access-aud it listens on loopback only and does no
+authentication of its own. With both, it may bind another --host and requires
+the Cf-Access-Jwt-Assertion header on every other request, checking the token
+against the team's certificates, issuer, audience, and expiry. --allow-host
+admits the proxy's hostname.
 ```
 
 <!-- /generated -->

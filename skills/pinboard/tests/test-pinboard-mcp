@@ -1,0 +1,758 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "anyio==4.15.1",
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
+#     "httpx2==2.13.1",
+#     "mcp==2.3.0",
+#     "mcp-types==2.3.0",
+#     "pycparser==3.0",
+#     "pydantic==2.13.5",
+# ]
+# ///
+"""Exercise 'pinboard mcp' over stdio and streamable HTTP against a fake
+Pinboard API served from this process, a local bare remote and a temporary
+clone. No network access. Prints TAP."""
+# unittest supplies the assertion API.
+# ruff: noqa: PT009
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import inspect
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+import httpx2
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "fixtures"))
+from fake_pinboard import API, FAKE, TOKEN  # noqa: E402
+
+BIN = HERE.parent / "scripts" / "pinboard"
+TEAM, AUD = "test.invalid", "test-aud"
+OLD = "2020-03-04T05:06:07Z"
+STALE = time.time() - 3 * 86400
+
+
+def bypass_proxy_for_loopback() -> None:
+    """Keeps loopback requests (the fake API, the server, its JWKS fetch)
+    away from any proxy an agent sandbox sets."""
+    for var in ("no_proxy", "NO_PROXY"):
+        hosts = [h for h in os.environ.get(var, "").split(",") if h]
+        hosts += [h for h in ("127.0.0.1", "localhost") if h not in hosts]
+        os.environ[var] = ",".join(hosts)
+
+
+def b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def jwk(key: Any, kid: str) -> dict[str, str]:
+    n = key.public_key().public_numbers()
+    return {
+        "kid": kid,
+        "kty": "RSA",
+        "alg": "RS256",
+        "use": "sig",
+        "n": b64(n.n.to_bytes((n.n.bit_length() + 7) // 8, "big")),
+        "e": b64(n.e.to_bytes(3, "big")),
+    }
+
+
+def jwt(key: Any, **claims: Any) -> str:
+    now = int(time.time())
+    body = {
+        "iss": f"https://{TEAM}",
+        "aud": [AUD],
+        "iat": now,
+        "nbf": now,
+        "exp": now + 300,
+        **claims,
+    }
+    head = b64(json.dumps({"alg": "RS256", "kid": "k1", "typ": "JWT"}).encode())
+    payload = b64(json.dumps(body).encode())
+    sig = key.sign(f"{head}.{payload}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    return f"{head}.{payload}.{b64(sig)}"
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class PinboardMcpTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.remote = self.tmp / "remote.git"
+        self.clone = self.tmp / "clone"
+        self.log = self.tmp / "state" / "mcp.jsonl"
+        self.env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("PINBOARD_", "GIT_"))
+            and k not in ("AGENT_OFFLINE", "XDG_STATE_HOME")
+        }
+        self.env.update(
+            PINBOARD_API_URL=API,
+            PINBOARD_API_TOKEN=TOKEN,
+            PINBOARD_TIME_SCALE="0.0001",
+            PINBOARD_REPO=str(self.clone),
+            PINBOARD_MCP_LOG=str(self.log),
+            GIT_CONFIG_GLOBAL=str(self.tmp / "gitconfig"),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_AUTHOR_NAME="Pinboard Test",
+            GIT_AUTHOR_EMAIL="pinboard@example.com",
+            GIT_COMMITTER_NAME="Pinboard Test",
+            GIT_COMMITTER_EMAIL="pinboard@example.com",
+        )
+        (self.tmp / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
+        self.errlog = (self.tmp / "stdio.log").open("w")
+        with FAKE.lock:
+            FAKE.posts.clear()
+            FAKE.calls.clear()
+            FAKE.reset_knobs()
+            FAKE.put(
+                "https://example.com/rust",
+                "Async Rust",
+                "2024-05-01T10:00:00Z",
+                "Notes on async. " * 30,
+                "rust programming",
+            )
+            FAKE.put(
+                "https://example.com/kotlin",
+                "Kotlin coroutines",
+                "2025-02-01T10:00:00Z",
+                "",
+                "kotlin programming",
+                toread="yes",
+            )
+            FAKE.put(
+                "https://example.com/lemon",
+                "Lemon tart",
+                "2025-06-01T10:00:00Z",
+                "",
+                "recipes",
+                shared="yes",
+            )
+        self.git("init", "-q", "--bare", str(self.remote))
+        self.git("clone", "-q", str(self.remote), str(self.clone))
+        self.pb("sync", env={"GIT_COMMITTER_DATE": OLD})
+
+    def tearDown(self) -> None:
+        self.errlog.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # Helpers.
+
+    def git(self, *args: str) -> str:
+        proc = subprocess.run(
+            ["git", *args], capture_output=True, text=True, env=self.env, check=True
+        )
+        return proc.stdout.strip()
+
+    def pb(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+        proc = subprocess.run(
+            [str(BIN), *args],
+            capture_output=True,
+            text=True,
+            env={**self.env, **(env or {})},
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+        if args[0] == "sync" and proc.returncode:
+            self.fail(f"pinboard sync failed: {proc.stderr}")
+        return proc
+
+    def calls(self) -> int:
+        with FAKE.lock:
+            return len(FAKE.calls)
+
+    def records(self) -> list[dict[str, Any]]:
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def make_stale(self) -> None:
+        """The mirror as it is after the server was down for three days."""
+        local = self.clone / ".git" / "pinboard" / "local.json"
+        data = json.loads(local.read_text())
+        data["last_sync"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(STALE))
+        local.write_text(json.dumps(data))
+
+    async def tool(self, client: ClientSession, name: str, args=None, error=False):
+        result = await client.call_tool(name, args or {})
+        self.assertEqual(result.is_error, error, result.content)
+        data = json.loads(result.content[0].text)
+        self.assertEqual(result.structured_content, data)
+        return data
+
+    @contextlib.asynccontextmanager
+    async def http_server(self, *args: str, env: dict | None = None):
+        port = free_port()
+        errlog = self.tmp / f"server-{port}.log"
+        with errlog.open("w") as err:
+            proc = await asyncio.create_subprocess_exec(
+                str(BIN),
+                "mcp",
+                "--http",
+                "--port",
+                str(port),
+                *args,
+                env={**self.env, **(env or {})},
+                stderr=err,
+            )
+        base = f"http://127.0.0.1:{port}"
+        try:
+            async with httpx2.AsyncClient() as http:
+                for _ in range(300):
+                    if proc.returncode is not None:
+                        self.fail(f"server exited: {errlog.read_text()}")
+                    try:
+                        await http.get(base + "/up")
+                        break
+                    except httpx2.TransportError:
+                        await asyncio.sleep(0.1)
+                else:
+                    self.fail(f"server not listening on {base}")
+            yield base
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                await proc.wait()
+
+    async def run_test(self, method) -> None:
+        self.setUp()
+        try:
+            if "client" in inspect.signature(method).parameters:
+                async with contextlib.AsyncExitStack() as stack:
+                    errlog = stack.enter_context(tempfile.TemporaryFile(mode="w+"))  # noqa: SIM115 -- ExitStack owns cleanup
+                    streams = await stack.enter_async_context(
+                        stdio_client(
+                            StdioServerParameters(
+                                command=str(BIN), args=["mcp"], env=self.env
+                            ),
+                            errlog=errlog,
+                        )
+                    )
+                    client = await stack.enter_async_context(
+                        ClientSession(*streams, read_timeout_seconds=60)
+                    )
+                    await client.initialize()
+                    await method(client)
+            else:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+        finally:
+            self.tearDown()
+
+    # Tests.
+
+    async def test_tools(self, client):
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+        self.assertEqual(
+            set(tools),
+            {
+                "search_bookmarks",
+                "get_bookmark",
+                "list_tags",
+                "suggest_tags",
+                "add_bookmark",
+                "update_bookmark",
+                "sync",
+            },
+        )
+        for name in ("search_bookmarks", "get_bookmark", "list_tags"):
+            self.assertTrue(tools[name].annotations.read_only_hint, name)
+        for name in ("add_bookmark", "update_bookmark", "sync"):
+            self.assertFalse(tools[name].annotations.read_only_hint, name)
+            self.assertFalse(tools[name].annotations.destructive_hint, name)
+        for tool in tools.values():
+            self.assertNotIn("full-text", (tool.description or "").lower())
+
+    async def test_reads_make_no_api_call(self, client):
+        before = self.calls()
+        found = await self.tool(client, "search_bookmarks", {"query": "async rust"})
+        self.assertEqual(
+            [b["url"] for b in found["bookmarks"]], ["https://example.com/rust"]
+        )
+        rust = found["bookmarks"][0]
+        self.assertTrue(rust["notes_truncated"])
+        self.assertTrue(rust["private"])
+        self.assertNotIn("shared", rust)
+        self.assertEqual(found["mirror"]["synced_at"][:4], time.strftime("%Y"))
+        self.assertTrue(found["mirror"]["pinboard_changed_at"])
+
+        def urls(result):
+            return [b["url"].rsplit("/", 1)[1] for b in result["bookmarks"]]
+
+        found = await self.tool(client, "search_bookmarks", {"tags": ["programming"]})
+        self.assertEqual(urls(found), ["kotlin", "rust"])
+        found = await self.tool(client, "search_bookmarks", {"since": "2025"})
+        self.assertEqual(urls(found), ["lemon", "kotlin"])
+        found = await self.tool(
+            client, "search_bookmarks", {"since": "2024-05", "until": "2025-02-01"}
+        )
+        self.assertEqual(urls(found), ["kotlin", "rust"])
+        found = await self.tool(client, "search_bookmarks", {"toread": True})
+        self.assertEqual(urls(found), ["kotlin"])
+        found = await self.tool(client, "search_bookmarks", {"private": False})
+        self.assertEqual(urls(found), ["lemon"])
+        page = await self.tool(client, "search_bookmarks", {"limit": 2})
+        self.assertEqual(urls(page), ["lemon", "kotlin"])
+        page = await self.tool(
+            client, "search_bookmarks", {"limit": 2, "cursor": page["next_cursor"]}
+        )
+        self.assertEqual((urls(page), page["next_cursor"]), (["rust"], None))
+        bad = await self.tool(
+            client, "search_bookmarks", {"since": "last week"}, error=True
+        )
+        self.assertEqual(bad["error"], "invalid_argument")
+
+        got = await self.tool(
+            client, "get_bookmark", {"url": "https://example.com/rust"}
+        )
+        self.assertEqual(len(got["bookmark"]["notes"]), len("Notes on async. " * 30))
+        self.assertIn("mirror", got)
+        got = await self.tool(
+            client, "get_bookmark", {"url": "https://example.com/no"}, error=True
+        )
+        self.assertEqual(got["error"], "not_found")
+        self.assertIn("synced_at", got["mirror"])
+        tags = await self.tool(client, "list_tags", {"match": "PROG"})
+        self.assertEqual(tags["tags"], [{"tag": "programming", "count": 2}])
+        self.assertIn("synced_at", tags["mirror"])
+        self.assertEqual(self.calls(), before, "a read called the Pinboard API")
+
+    async def test_reads_ignore_a_sync_in_progress(self, client):
+        """Reads see the last commit, never a sync's files half-written."""
+        files = sorted((self.clone / "bookmarks").glob("*.jsonl"))
+        self.assertGreater(len(files), 1)
+        before = await self.tool(client, "search_bookmarks", {})
+        # A bookmark caught between two year files, mid-write.
+        files[0].write_text(files[0].read_text() + files[-1].read_text())
+        during = await self.tool(client, "search_bookmarks", {})
+        self.assertEqual(during["bookmarks"], before["bookmarks"])
+
+    async def test_writes_show_in_next_search(self, client):
+        added = await self.tool(
+            client,
+            "add_bookmark",
+            {
+                "url": "https://example.org/new?a=1&b=2",
+                "title": "Secret title",
+                "notes": "Secret notes",
+                "tags": ["web", "later"],
+            },
+        )
+        self.assertTrue(added["created"])
+        self.assertTrue(added["bookmark"]["private"])
+        self.assertEqual(added["mirror_commit"]["state"], "pushed")
+        with FAKE.lock:
+            self.assertEqual(
+                FAKE.posts["https://example.org/new?a=1&b=2"]["shared"], "no"
+            )
+        found = await self.tool(client, "search_bookmarks", {"query": "secret"})
+        self.assertEqual(
+            found["bookmarks"][0]["url"], "https://example.org/new?a=1&b=2"
+        )
+
+        again = await self.tool(
+            client,
+            "add_bookmark",
+            {"url": "https://example.org/new?a=1&b=2", "title": "Other"},
+        )
+        self.assertFalse(again["created"])
+        self.assertEqual(again["bookmark"]["title"], "Secret title")
+
+        updated = await self.tool(
+            client,
+            "update_bookmark",
+            {
+                "url": "https://example.com/rust",
+                "add_tags": ["later"],
+                "remove_tags": ["programming"],
+                "private": False,
+            },
+        )
+        self.assertTrue(updated["changed"])
+        self.assertEqual(updated["bookmark"]["tags"], ["rust", "later"])
+        self.assertEqual(updated["bookmark"]["time"], "2024-05-01T10:00:00Z")
+        replaced = await self.tool(
+            client,
+            "update_bookmark",
+            {"url": "https://example.com/rust", "tags": ["x"]},
+        )
+        self.assertEqual(replaced["bookmark"]["tags"], ["x"])
+        found = await self.tool(client, "search_bookmarks", {"tags": ["x"]})
+        self.assertEqual(len(found["bookmarks"]), 1)
+        self.assertFalse(found["bookmarks"][0]["private"])
+        missing = await self.tool(
+            client, "update_bookmark", {"url": "https://example.com/gone"}, error=True
+        )
+        self.assertEqual(missing["error"], "failed")
+
+        # A following sync finds the mirror already level with Pinboard.
+        commits = self.git("-C", str(self.clone), "rev-list", "--count", "HEAD")
+        synced = await self.tool(client, "sync")
+        self.assertEqual(
+            (synced["added"], synced["updated"], synced["deleted"]), (0, 0, 0)
+        )
+        self.assertEqual(
+            self.git("-C", str(self.clone), "rev-list", "--count", "HEAD"), commits
+        )
+
+        log = self.log.read_text()
+        for secret in ("Secret", "Other", "a=1", TOKEN, TOKEN.partition(":")[2]):
+            self.assertNotIn(secret, log)
+        records = self.records()
+        add = next(r for r in records if r["tool"] == "add_bookmark")
+        self.assertEqual(
+            {k: add[k] for k in ("transport", "outcome", "host")},
+            {"transport": "stdio", "outcome": "ok", "host": "example.org"},
+        )
+        self.assertIsInstance(add["ms"], int)
+        search = next(r for r in records if r["tool"] == "search_bookmarks")
+        self.assertRegex(search["search"], r"^[0-9a-f]{16}$")
+        self.assertNotIn("host", search)
+        self.assertIn(
+            {"error": "failed", "outcome": "error"},
+            [{k: r.get(k) for k in ("error", "outcome")} for r in records],
+        )
+
+    async def test_sync_gate(self):
+        env = {"PINBOARD_TIME_SCALE": "0.01"}  # posts/all once every 3 s
+        await asyncio.sleep(3.2)
+        async with (
+            stdio_client(
+                StdioServerParameters(
+                    command=str(BIN), args=["mcp"], env={**self.env, **env}
+                ),
+                errlog=self.errlog,
+            ) as streams,
+            ClientSession(*streams, read_timeout_seconds=60) as client,
+        ):
+            await client.initialize()
+            with FAKE.lock:
+                FAKE.put("https://example.com/one", "One", "2026-01-01T00:00:00Z")
+            first = await self.tool(client, "sync")
+            self.assertEqual(first["added"], 1)
+            with FAKE.lock:
+                FAKE.put("https://example.com/two", "Two", "2026-01-02T00:00:00Z")
+            refused = await self.tool(client, "sync", error=True)
+            self.assertEqual(refused["error"], "rate_limited")
+            self.assertIsInstance(refused["retry_after"], int)
+            self.assertGreater(refused["retry_after"], 0)
+            record = self.records()[-1]
+            self.assertEqual(
+                (record["outcome"], record["error"]), ("refused", "rate_limited")
+            )
+
+    async def test_one_sync_at_a_time(self, client):
+        with FAKE.lock:
+            FAKE.all_delay = 2.0
+            FAKE.put("https://example.com/one", "One", "2026-01-01T00:00:00Z")
+        results = await asyncio.gather(
+            client.call_tool("sync", {}), client.call_tool("sync", {})
+        )
+        outcomes = sorted(
+            (r.is_error, json.loads(r.content[0].text).get("error")) for r in results
+        )
+        self.assertEqual(outcomes, [(False, None), (True, "sync_running")])
+        with FAKE.lock:
+            self.assertEqual(FAKE.count("posts/all"), 2)  # setup's sync, and one
+
+    async def test_sync_concurrent_with_write(self, client):
+        with FAKE.lock:
+            FAKE.all_delay = 1.5
+            FAKE.put("https://example.com/from-app", "From app", "2026-01-01T00:00:00Z")
+        started = time.time()
+        # The add starts while the sync holds the clone's lock in posts/all.
+        sync = asyncio.create_task(self.tool(client, "sync"))
+        await asyncio.sleep(0.3)
+        added = await self.tool(
+            client,
+            "add_bookmark",
+            {"url": "https://example.com/from-agent", "title": "From agent"},
+        )
+        await sync
+        self.assertTrue(added["created"])
+        for url in ("https://example.com/from-app", "https://example.com/from-agent"):
+            got = await self.tool(client, "get_bookmark", {"url": url})
+            self.assertIsNotNone(got["bookmark"], url)
+        tree = self.git(
+            "--git-dir",
+            str(self.remote),
+            "grep",
+            "-c",
+            "example.com/from-",
+            "main",
+            "--",
+        )
+        self.assertEqual(
+            sum(int(line.rsplit(":", 1)[1]) for line in tree.splitlines()), 2
+        )
+        self.assertEqual(
+            self.git(
+                "--git-dir", str(self.remote), "rev-list", "--merges", "--count", "main"
+            ),
+            "0",
+        )
+        self.assertEqual(self.git("-C", str(self.clone), "status", "--porcelain"), "")
+        # The write, which waited for the sync, kept the sync's gate time and
+        # watermark rather than saving the state it read before waiting.
+        local = json.loads((self.clone / ".git/pinboard/local.json").read_text())
+        self.assertGreaterEqual(local["gates"]["posts/all"], started)
+        self.assertGreaterEqual(
+            local["last_sync"],
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(started))),
+        )
+
+    async def test_http_access(self):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        jwks = json.dumps({"keys": [jwk(key, "k1")]}).encode()
+
+        class Certs(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(jwks)
+
+            def log_message(self, *args):
+                pass
+
+        certs = ThreadingHTTPServer(("127.0.0.1", 0), Certs)
+        threading.Thread(target=certs.serve_forever, daemon=True).start()
+        env = {
+            "PINBOARD_MCP_ACCESS_CERTS_URL": f"http://127.0.0.1:{certs.server_address[1]}/certs"
+        }
+        ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        headers = {"accept": "application/json, text/event-stream"}
+        try:
+            async with (
+                self.http_server(
+                    "--access-team",
+                    TEAM,
+                    "--access-aud",
+                    AUD,
+                    "--sync-every",
+                    "0",
+                    env=env,
+                ) as base,
+                httpx2.AsyncClient() as http,
+            ):
+                before = self.calls()
+                up = await http.get(base + "/up")
+                self.assertEqual((up.status_code, up.text), (200, "ok"))
+                now = int(time.time())
+                for name, token, status in (
+                    ("missing", None, 401),
+                    ("expired", jwt(key, exp=now - 600), 403),
+                    ("wrong audience", jwt(key, aud=["other"]), 403),
+                    ("valid", jwt(key), 200),
+                ):
+                    with self.subTest(token=name):
+                        h = dict(headers)
+                        if token:
+                            h["cf-access-jwt-assertion"] = token
+                        got = await http.post(base + "/mcp", json=ping, headers=h)
+                        self.assertEqual(got.status_code, status, got.text)
+                async with (
+                    httpx2.AsyncClient(
+                        headers={"cf-access-jwt-assertion": jwt(key)}
+                    ) as authed,
+                    streamable_http_client(
+                        base + "/mcp", http_client=authed
+                    ) as streams,
+                    ClientSession(*streams[:2]) as client,
+                ):
+                    init = await client.initialize()
+                    self.assertIn("mirror", init.instructions)
+                    self.assertNotIn("on that schedule", init.instructions)
+                    found = await self.tool(
+                        client, "search_bookmarks", {"query": "lemon"}
+                    )
+                    self.assertEqual(len(found["bookmarks"]), 1)
+                self.assertEqual(self.calls(), before)
+                self.assertEqual(self.records()[-1]["transport"], "http")
+        finally:
+            certs.shutdown()
+
+    def test_command_line(self):
+        def run(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [str(BIN), "mcp", *args],
+                capture_output=True,
+                text=True,
+                env=self.env,
+                timeout=60,
+                check=False,
+            )
+
+        for args, says in (
+            (["--http", "--host", "0.0.0.0"], "loopback only"),
+            (["--http", "--access-team", TEAM], "both --access-team and --access-aud"),
+            (["--access-team", TEAM, "--access-aud", AUD], "apply only to --http"),
+            (["--sync-every", "1"], "applies only to --http"),
+            (["--repo", str(self.tmp / "none")], "no mirror at"),
+            (["--port", "nope"], "Try 'pinboard mcp --help'"),
+        ):
+            with self.subTest(args=args):
+                res = run(*args)
+                self.assertEqual(res.returncode, 1, res.stderr)
+                self.assertIn(says, res.stderr)
+        res = run("--help")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("--sync-every", res.stdout)
+
+    def test_signals_exit_0(self):
+        """SIGTERM stops either transport with status 0, a stdio server even
+        while its client holds stdin open."""
+
+        def stop(*args: str, stdin: Any = None) -> int:
+            proc = subprocess.Popen(
+                [str(BIN), "mcp", *args],
+                stdin=stdin,
+                stdout=subprocess.DEVNULL,
+                stderr=self.errlog,
+                env=self.env,
+            )
+            try:
+                time.sleep(8)  # Started and serving.
+                proc.send_signal(signal.SIGTERM)
+                return proc.wait(timeout=30)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+        port = str(free_port())
+        self.assertEqual(stop("--http", "--port", port, "--sync-every", "0"), 0)
+        self.assertEqual(stop(stdin=subprocess.PIPE), 0)
+
+    async def test_scheduler_catches_up_after_restart(self):
+        self.make_stale()
+        with FAKE.lock:
+            FAKE.put(
+                "https://example.com/while-down", "While down", "2026-01-01T00:00:00Z"
+            )
+
+        # A stdio server never schedules, however stale the mirror.
+        before = self.calls()
+        async with (
+            stdio_client(
+                StdioServerParameters(command=str(BIN), args=["mcp"], env=self.env),
+                errlog=self.errlog,
+            ) as streams,
+            ClientSession(*streams, read_timeout_seconds=60) as client,
+        ):
+            await client.initialize()
+            await asyncio.sleep(1.5)
+        self.assertEqual(self.calls(), before)
+
+        async def schedule_runs() -> list[dict[str, Any]]:
+            return [r for r in self.records() if r["transport"] == "schedule"]
+
+        async with self.http_server():
+            for _ in range(100):
+                if await schedule_runs():
+                    break
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(1.0)  # several ticks: it must not run again
+        runs = await schedule_runs()
+        self.assertEqual(
+            [(r["tool"], r["outcome"], r["result"]) for r in runs],
+            [("sync", "ok", "+1 ~0 -0")],
+        )
+        with FAKE.lock:
+            updates = FAKE.count("posts/update")
+
+        # Restarted within the interval: nothing is due.
+        async with self.http_server():
+            await asyncio.sleep(1.5)
+        self.assertEqual(len(await schedule_runs()), 1)
+        with FAKE.lock:
+            self.assertEqual(FAKE.count("posts/update"), updates)
+
+        # A failed run is logged and retried at a later tick (here, with an
+        # interval of about a second, every few milliseconds).
+        with FAKE.lock:
+            FAKE.put("https://example.com/later", "Later", "2026-01-02T00:00:00Z")
+            FAKE.all_mode = "error"
+        async with self.http_server("--sync-every", "0.0003"):
+            for _ in range(100):
+                if len(await schedule_runs()) >= 3:
+                    break
+                await asyncio.sleep(0.1)
+        failures = [r for r in await schedule_runs() if r["outcome"] != "ok"]
+        self.assertGreaterEqual(len(failures), 2)
+        self.assertEqual(failures[0]["error"], "failed")
+
+    def fill_log(self) -> None:
+        """A log one record short of rotation, and three older files."""
+        self.log.parent.mkdir(parents=True, exist_ok=True)
+        self.log.write_text("x" * (8 * 1024 * 1024 - 10) + "\n")
+        for i in range(2, 5):
+            Path(f"{self.log}.{i}").write_text(f"old {i}\n")
+
+    def rotated(self) -> tuple[int, str, bool]:
+        return (
+            Path(f"{self.log}.1").stat().st_size,
+            Path(f"{self.log}.4").read_text(),
+            Path(f"{self.log}.5").exists(),
+        )
+
+    async def test_log_rotation(self, client):
+        self.fill_log()
+        await self.tool(client, "list_tags")
+        self.assertEqual(self.rotated(), (8 * 1024 * 1024 - 9, "old 3\n", False))
+        self.assertEqual([r["tool"] for r in self.records()], ["list_tags"])
+
+
+if __name__ == "__main__":
+    bypass_proxy_for_loopback()
+    names = sorted(
+        name
+        for name in dir(PinboardMcpTests)
+        if name.startswith("test_") and (name in sys.argv[1:] or not sys.argv[1:])
+    )
+    print(f"1..{len(names)}", flush=True)
+    failures = 0
+    for number, name in enumerate(names, 1):
+        case = PinboardMcpTests()
+        try:
+            asyncio.run(case.run_test(getattr(case, name)))
+        except Exception:
+            failures += 1
+            print(f"not ok {number} - {name}", flush=True)
+            for line in traceback.format_exc().splitlines():
+                print(f"# {line}")
+        else:
+            print(f"ok {number} - {name}", flush=True)
+    sys.exit(1 if failures else 0)

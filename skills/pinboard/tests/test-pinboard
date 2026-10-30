@@ -8,169 +8,22 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
-import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "fixtures"))
+from fake_pinboard import API, FAKE, SERVER, TOKEN  # noqa: E402
+
 BIN = HERE.parent / "scripts" / "pinboard"
-TOKEN = "testuser:0123456789ABCDEF0123"
 YEAR = time.strftime("%Y", time.gmtime())
 
-
-class Fake:
-    """A Pinboard v1 API with knobs for failure cases."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.posts: dict[str, dict[str, str]] = {}
-        self.tick = 0
-        self.update_time = ""
-        self.calls: list[tuple[str, dict[str, str]]] = []
-        self.reset_knobs()
-
-    def reset_knobs(self) -> None:
-        self.all_mode = ""  # empty, malformed, truncated, error
-        self.hidden: set[str] = set()  # omitted from posts/all only
-        self.get_error = False
-        self.rate_limit = 0
-        self.add_mode = ""  # vanish-after (apply, no response), vanish-before
-
-    def put(
-        self, url, title, time_, notes="", tags="", shared="no", toread="no"
-    ) -> None:
-        post = {
-            "href": url,
-            "description": title,
-            "extended": notes,
-            "hash": hashlib.md5(url.encode()).hexdigest(),
-            "time": time_,
-            "shared": shared,
-            "toread": toread,
-            "tags": tags,
-        }
-        post["meta"] = hashlib.md5(
-            json.dumps(post, sort_keys=True).encode()
-        ).hexdigest()
-        self.posts[url] = post
-        self.touch()
-
-    def delete(self, url) -> None:
-        del self.posts[url]
-        self.touch()
-
-    def touch(self) -> None:
-        # Pinboard's update_time has one-second resolution; count instead.
-        self.tick += 1
-        self.update_time = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(1767225600 + self.tick)
-        )
-
-    def count(self, endpoint: str) -> int:
-        return sum(1 for e, _ in self.calls if e == endpoint)
-
-
-FAKE = Fake()
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args) -> None:
-        pass
-
-    def send(self, status: int, body) -> None:
-        data = body if isinstance(body, bytes) else json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "text/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self) -> None:
-        parts = urllib.parse.urlsplit(self.path)
-        endpoint = parts.path.removeprefix("/v1/")
-        q = {
-            k: v[0]
-            for k, v in urllib.parse.parse_qs(
-                parts.query, keep_blank_values=True
-            ).items()
-        }
-        if q.pop("auth_token", None) != TOKEN:
-            return self.send(401, b"")
-        with FAKE.lock:
-            FAKE.calls.append((endpoint, q))
-            if FAKE.rate_limit:
-                FAKE.rate_limit -= 1
-                return self.send(429, b"")
-            if endpoint == "posts/update":
-                return self.send(200, {"update_time": FAKE.update_time})
-            if endpoint == "posts/all":
-                if FAKE.all_mode == "error":
-                    return self.send(500, b"")
-                if FAKE.all_mode == "empty":
-                    return self.send(200, [])
-                posts = [p for u, p in FAKE.posts.items() if u not in FAKE.hidden]
-                posts.sort(key=lambda p: p["time"], reverse=True)
-                if FAKE.all_mode == "malformed":
-                    posts = [dict(posts[0]), *posts[1:]]
-                    del posts[0]["href"]
-                body = json.dumps(posts).encode()
-                if FAKE.all_mode == "truncated":
-                    body = body[: len(body) // 2]
-                return self.send(200, body)
-            if endpoint == "posts/get":
-                if FAKE.get_error:
-                    return self.send(500, b"")
-                post = FAKE.posts.get(q.get("url", ""))
-                return self.send(
-                    200,
-                    {
-                        "date": FAKE.update_time,
-                        "user": "testuser",
-                        "posts": [post] if post else [],
-                    },
-                )
-            if endpoint == "posts/add":
-                if FAKE.add_mode == "vanish-before":
-                    FAKE.add_mode = ""
-                    return
-                url = q["url"]
-                if url in FAKE.posts and q.get("replace") == "no":
-                    return self.send(200, {"result_code": "item already exists"})
-                stamp = q.get("dt") or time.strftime(
-                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                )
-                FAKE.put(
-                    url,
-                    q["description"],
-                    stamp,
-                    q.get("extended", ""),
-                    q.get("tags", ""),
-                    q.get("shared", "yes"),
-                    q.get("toread", "no"),
-                )
-                if FAKE.add_mode == "vanish-after":
-                    FAKE.add_mode = ""
-                    return
-                return self.send(200, {"result_code": "done"})
-            if endpoint == "posts/suggest":
-                return self.send(
-                    200, [{"popular": ["web"]}, {"recommended": ["reading", "web"]}]
-                )
-        self.send(404, b"")
-
-
-SERVER = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-threading.Thread(target=SERVER.serve_forever, daemon=True).start()
-API = f"http://127.0.0.1:{SERVER.server_address[1]}/v1/"
 
 TMP = Path(tempfile.mkdtemp())
 REMOTE = TMP / "remote.git"
@@ -664,6 +517,35 @@ def main() -> None:
     h = head(A)
     p = pb(A, "sync")
     ok(p.returncode == 0 and head(A) == h, "a sync after writes is a no-op", diag(p))
+    FAKE.put("https://example.com/untitled", "", "2020-05-01T10:00:00Z")
+    pb(A, "sync")
+    p = pb(A, "update", "https://example.com/untitled", "--add-tag", "x")
+    p2 = pb(
+        A, "update", "https://example.com/untitled", "--add-tag", "x", "--title", "T"
+    )
+    ok(
+        p.returncode == 1
+        and "give one with --title" in p.stderr
+        and p2.returncode == 0,
+        "an untitled bookmark needs --title to be updated",
+        diag(p) + diag(p2),
+    )
+    FAKE.put("https://example.com/untitled-gone", "", "2020-05-02T10:00:00Z")
+    pb(A, "sync")
+    FAKE.delete("https://example.com/untitled-gone")
+    pb(A, "sync")
+    p = pb(A, "restore", "https://example.com/untitled-gone")
+    p2 = pb(A, "restore", "https://example.com/untitled-gone", "--title", "Found")
+    ok(
+        p.returncode == 1
+        and "--title" in p.stderr
+        and p2.returncode == 0
+        and FAKE.posts["https://example.com/untitled-gone"]["description"] == "Found"
+        and FAKE.posts["https://example.com/untitled-gone"]["time"]
+        == "2020-05-02T10:00:00Z",
+        "restore takes --title for a bookmark recorded without one",
+        diag(p) + diag(p2),
+    )
     p = pb(A, "update", "https://example.com/nope", "--add-tag", "x")
     ok(
         p.returncode == 1 and "no bookmark" in p.stderr,
@@ -684,6 +566,13 @@ def main() -> None:
         p.returncode == 0
         and "https://example.org/timeout" in {r["url"] for r in lines(A)},
         "add re-reads after a lost response",
+        diag(p),
+    )
+    FAKE.add_mode = "vanish-before"
+    p = pb(A, "add", "https://example.com/post/5", "--title", "Not the title")
+    ok(
+        p.returncode == 0 and "left unchanged" in p.stderr and "added" not in p.stderr,
+        "a lost add finding a different bookmark reports it unchanged",
         diag(p),
     )
     FAKE.add_mode = "vanish-before"
@@ -713,6 +602,18 @@ def main() -> None:
     ok(
         p.returncode == 1 and "after 5 attempts" in p.stderr,
         "429 gives up after 5 attempts",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+    FAKE.rate_limit, FAKE.rate_limit_only = 10, "posts/all"
+    alls = FAKE.count("posts/all")
+    p = pb(A, "sync", "--full")
+    ok(
+        p.returncode == 1
+        and "rate limited by Pinboard (HTTP 429)" in p.stderr
+        and "waiting" not in p.stderr
+        and FAKE.count("posts/all") == alls + 1,
+        "a 429 on posts/all waits for its gate rather than retrying",
         diag(p),
     )
     FAKE.reset_knobs()
@@ -885,6 +786,65 @@ def main() -> None:
         git("--git-dir", str(REMOTE), "rev-list", "--merges", "--count", "main") == "0",
         "remote history is linear (no merges, nothing forced)",
     )
+    pb(C, "sync")
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    FAKE.put("https://example.net/x-dropped", "Dropped", stamp)
+    seen = FAKE.update_time
+    hook(B, "exit 1\n")
+    p = pb(B, "sync")
+    (B / ".git" / "hooks" / "pre-push").unlink()
+    p2 = pb(C, "add", "https://example.net/y-dropped", "--title", "Same second")
+    # Pinboard's update_time has one-second resolution: C's write can leave
+    # it where B's unpushed sync saw it.
+    FAKE.tick -= 1
+    FAKE.update_time = seen
+    p3 = pb(B, "sync")
+    tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
+    ok(
+        p.returncode == 1
+        and p2.returncode == 0
+        and p3.returncode == 0
+        and "dropped" in p3.stderr
+        and "example.net/x-dropped" in tree
+        and "example.net/y-dropped" in tree,
+        "a dropped sync does not leave its watermark behind",
+        diag(p3),
+    )
+    refs = git("-C", str(C), "for-each-ref")
+    fetch_head = (C / ".git" / "FETCH_HEAD").read_text()
+    p = pb(C, "doctor")
+    ok(
+        p.returncode == 1
+        and "[WARN]  Pull: origin has some commit(s)" in p.stdout
+        and git("-C", str(C), "for-each-ref") == refs
+        and (C / ".git" / "FETCH_HEAD").read_text() == fetch_head,
+        "doctor reports a clone behind origin without fetching",
+        diag(p),
+    )
+    git("-C", str(C), "fetch", "-q")
+    p = pb(C, "doctor")
+    ok(
+        "[WARN]  Pull: origin has 1 commit(s)" in p.stdout,
+        "doctor counts the commits once fetched",
+        diag(p),
+    )
+    files = sorted((C / "bookmarks").glob("*.jsonl"))
+    saved = files[0].read_text()
+    files[0].write_text(saved + files[-1].read_text())
+    p = pb(C, "search", "Same", "second")
+    files[0].write_text(saved)
+    ok(
+        p.returncode == 0 and "damaged" not in p.stderr,
+        "CLI reads ignore files a sync has half written",
+        diag(p),
+    )
+    pb(C, "sync")
+    p = pb(C, "doctor")
+    ok(
+        "[PASS]  Pull" in p.stdout,
+        "doctor passes a clone level with origin",
+        diag(p),
+    )
     (B / "bookmarks" / f"{YEAR}.jsonl").write_text("{}\n")
     p = pb(B, "add", "https://example.net/b6", "--title", "B6")
     p2 = pb(B, "doctor")
@@ -894,6 +854,35 @@ def main() -> None:
         and p2.returncode == 1
         and "[WARN]  Working tree" in p2.stdout,
         "a dirty tree blocks writes",
+        diag(p),
+    )
+
+    damaged = TMP / "damaged"
+    git("clone", "-q", str(REMOTE), str(damaged))
+    line = json.dumps(
+        {
+            "url": "https://example.org/old",
+            "hash": "0" * 32,
+            "title": "Old",
+            "notes": "",
+            "tags": [],
+            "time": "1999-01-01T00:00:00Z",
+            "shared": False,
+            "toread": False,
+            "meta": "0" * 32,
+        }
+    )
+    (damaged / "bookmarks" / "1999.jsonl").write_text(line + "\n")
+    git("-C", str(damaged), "add", "-A")
+    git("-C", str(damaged), "commit", "-q", "-m", "old")
+    blob = git("-C", str(damaged), "rev-parse", "HEAD:bookmarks/1999.jsonl")
+    (damaged / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+    p = pb(damaged, "search", "Old")
+    ok(
+        p.returncode == 2
+        and "cannot read bookmarks/1999.jsonl" in p.stderr
+        and "Traceback" not in p.stderr,
+        "a missing object in the last commit is a clean error",
         diag(p),
     )
 

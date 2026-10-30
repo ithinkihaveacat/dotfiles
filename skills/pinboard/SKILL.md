@@ -28,12 +28,14 @@ Run it as `pinboard` when `bin/` is on `PATH`, otherwise as
   clone is fine, and the first `pinboard sync` imports every bookmark and pushes
   `main`.
 - `pinboard doctor` checks the token, the clone, the files and freshness without
-  calling the API.
+  calling the API. It asks `origin` for its branch head, without fetching, to
+  report commits this clone lacks.
 
 ## Reading
 
 Reads never call the API, so they are as fresh as the last sync; each says when
-that was (on stderr, or as `mirror.synced` with `--json`).
+that was (on stderr, or as `mirror.synced` with `--json`). They read the clone's
+last commit, so a sync in progress never shows half done.
 
 ```bash
 pinboard search kotlin coroutines          # every term must match
@@ -64,7 +66,8 @@ pinboard suggest https://example.com/post   # live tag suggestions
 - `update` reads the bookmark live, changes only the given fields and keeps its
   date. `--tags` replaces every tag; `--add-tag` and `--remove-tag` change some.
 - `restore` re-adds the last version the mirror recorded, with its original
-  date.
+  date; `--title` supplies a title when the recorded one is empty, which
+  Pinboard refuses.
 - `--dry-run` on `add`, `update`, `restore` and `sync` shows what would be sent
   or changed.
 
@@ -84,14 +87,46 @@ without confirming.
 ## Rate Limits and Failures
 
 - The client waits 3 s between calls, gates `posts/all` to once every 5 minutes,
-  and backs off on HTTP 429 (doubling, at most 5 attempts). A write that loses
-  its response is re-read, never re-sent.
+  and backs off on HTTP 429 (doubling, at most 5 attempts). A 429 on `posts/all`
+  or `posts/recent` is not retried: it reports when the gate next allows a call.
+  A write that loses its response is re-read, never re-sent; if the bookmark
+  then differs from the request, `add` reports it as already there.
 - `AGENT_OFFLINE=1` refuses every API call; reads, `history` and `doctor` still
   work.
-- Git writes never force-push. A rejected push is re-applied on the new remote
-  head; a commit that still cannot be pushed is reported (exit 1) and pushed by
-  the next write or sync.
+- Git writes never force-push. A write whose push is rejected is re-applied on
+  the new remote head; a sync's commit is not (its `posts/all` is gated), so it
+  stays unpushed and the next run pushes it. A commit that cannot be pushed is
+  reported (exit 1). Fetches and pushes time out after 2 minutes.
 - Writes refuse while the clone has uncommitted changes.
+
+## MCP Server
+
+`pinboard mcp` serves the same mirror to agents that cannot run the CLI, over
+stdio or, with `--http`, Streamable HTTP at `/mcp`:
+
+```bash
+claude mcp add pinboard -- pinboard mcp      # a local agent, over stdio
+pinboard mcp --http                          # loopback only, no authentication
+```
+
+- Tools: `search_bookmarks` (words, tags, dates, to-read, private, paged),
+  `get_bookmark` and `list_tags` read the mirror and never call the API;
+  `suggest_tags` is live; `add_bookmark`, `update_bookmark` and `sync` write.
+  `get_bookmark` reports a URL the mirror lacks as `not_found`. There is no
+  delete. Bookmarks are shown with `private` (the inverse of Pinboard's
+  `shared`), and every read says when the mirror last synced.
+- Writes behave as `add` and `update` do, and take the same lock on the clone,
+  so the server and the CLI can share one mirror. `sync` runs one at a time and
+  refuses inside the `posts/all` window with `retry_after` in seconds.
+- Over HTTP the server also syncs whenever the last sync is older than
+  `--sync-every` hours (24 by default), checking at startup and then hourly. A
+  stdio server never syncs on its own.
+- Hosted behind Cloudflare Access, `--access-team` and `--access-aud` make it
+  check the `Cf-Access-Jwt-Assertion` token on every request but `GET /up`;
+  without them it binds loopback only.
+- Each call is logged to `~/.local/state/pinboard/mcp.jsonl` (or `--log`),
+  rotated at 8 MiB: the tool, outcome and duration, the host of a written URL
+  and a hash of search text, never titles, notes or the token.
 
 ## Reference
 

@@ -1,0 +1,1183 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "PyJWT==2.15.1",
+#     "anyio==4.15.1",
+#     "cffi==2.1.1",
+#     "cryptography==50.0.2",
+#     "mcp==2.3.0",
+#     "mcp-types==2.3.0",
+#     "pycparser==3.0",
+#     "starlette==1.7.0",
+#     "uvicorn==0.54.0",
+# ]
+# ///
+# Tests: skills/pinboard/tests/test-pinboard-mcp
+"""The 'pinboard mcp' server, run by 'pinboard mcp' so that 'pinboard' itself
+needs no third-party packages."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import datetime
+import fcntl
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import signal
+import sys
+import threading
+import time
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from typing import Any, NoReturn
+
+
+def load_cli() -> Any:
+    """The pinboard CLI as a module: its mirror, API client, lock and guard."""
+    path = Path(__file__).resolve().parent.parent / "scripts" / "pinboard"
+    loader = SourceFileLoader("pinboard_cli", str(path))
+    spec = importlib.util.spec_from_loader("pinboard_cli", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["pinboard_cli"] = module
+    loader.exec_module(module)
+    return module
+
+
+pb = load_cli()
+
+PROG = "pinboard mcp"
+VERSION = "1"
+DEFAULT_PORT = 8791
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+ACCESS_HEADER = "cf-access-jwt-assertion"
+HEALTH_PATH = "/up"
+MCP_PATH = "/mcp"
+CERTS_TTL = 3600
+LOG_ENV = "PINBOARD_MCP_LOG"
+LOG_ROTATE_BYTES = 8 * 1024 * 1024
+LOG_ROTATED = 4  # FILE.1 (newest) to FILE.4
+DEFAULT_SYNC_HOURS = 24.0
+# The scheduler checks whether a sync is due this often (or at every
+# interval, if that is shorter), so a refused or failed run waits this long.
+SCHEDULER_TICK = 3600.0
+SEARCH_LIMIT = 20
+SEARCH_MAX = 100
+TAGS_LIMIT = 100
+TAGS_MAX = 2000
+DATE_RE = re.compile(r"^\d{4}(-\d{2}(-\d{2})?)?$")
+# Error codes that mean "not now" rather than "failed".
+REFUSALS = ("rate_limited", "sync_running", "sync_refused")
+
+
+def die(msg: str, code: int = 1) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log_line(msg: str) -> None:
+    print(pb.redact(f"{PROG}: {msg}"), file=sys.stderr, flush=True)
+
+
+# --- Request log -------------------------------------------------------------
+
+
+class RequestLog:
+    """A JSON record per tool call or scheduled sync, appended to a file that
+    is rotated by size, and a line on stderr. Records name the tool, the
+    outcome and the duration; for writes, only the URL's host; for searches,
+    a hash of the search text. Never titles, notes or the token.
+
+    Logging never fails a request: a record the file cannot take is dropped
+    there, with one warning. Several servers may share one file; each append
+    and rotation holds an exclusive lock on it."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.warned = False
+        self.lock = threading.Lock()
+
+    def emit(self, record: dict[str, Any]) -> None:
+        parts = [f"{k}={record[k]}" for k in record if k != "ts"]
+        log_line(" ".join(parts))
+        if self.path is None:
+            return
+        line = json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n"
+        try:
+            with self.lock:
+                self.append(line.encode())
+        except OSError as e:
+            if not self.warned:
+                self.warned = True
+                log_line(
+                    f"cannot use the request log {self.path}: {e}; logging to stderr only"
+                )
+
+    def append(self, data: bytes) -> None:
+        assert self.path is not None
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Another server may rotate the file between the open and the lock;
+        # then the lock is on a rotated file, so open the new one.
+        for _ in range(3):
+            with open(self.path, "ab") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                st = os.fstat(fh.fileno())
+                try:
+                    current = os.stat(self.path).st_ino == st.st_ino
+                except FileNotFoundError:
+                    current = False
+                if not current:
+                    continue
+                if st.st_size and st.st_size + len(data) > LOG_ROTATE_BYTES:
+                    for i in range(LOG_ROTATED - 1, 0, -1):
+                        older = Path(f"{self.path}.{i}")
+                        if older.exists():
+                            os.replace(older, f"{self.path}.{i + 1}")
+                    os.replace(self.path, f"{self.path}.1")
+                    with open(self.path, "ab") as fresh:
+                        fresh.write(data)
+                else:
+                    fh.write(data)
+                return
+        raise OSError(f"{self.path} kept being rotated")
+
+
+def default_log() -> Path:
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    return Path(state) / "pinboard" / "mcp.jsonl"
+
+
+def search_hash(args: dict[str, Any]) -> str | None:
+    text = json.dumps(
+        [args.get("query") or "", args.get("tags") or []], ensure_ascii=False
+    )
+    if text == '["", []]':
+        return None
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+# --- Tools -------------------------------------------------------------------
+
+
+class ToolError(Exception):
+    """A call that cannot be served, reported to the model as structured JSON."""
+
+    def __init__(self, code: str, message: str, **extra: Any):
+        super().__init__(message)
+        self.code = code
+        self.extra = extra
+
+    def payload(self) -> dict[str, Any]:
+        return {"error": self.code, "message": pb.redact(str(self)), **self.extra}
+
+
+def as_tool_error(e: Exception) -> ToolError:
+    if isinstance(e, ToolError):
+        return e
+    if isinstance(e, pb.GateError):
+        return ToolError("rate_limited", str(e), retry_after=e.retry_after)
+    if isinstance(e, pb.GuardError):
+        return ToolError("sync_refused", str(e))
+    if isinstance(e, pb.NetworkError):
+        return ToolError("network", str(e))
+    if isinstance(e, pb.Error):
+        return ToolError("failed", str(e))
+    if isinstance(e, OSError):
+        return ToolError("failed", f"{type(e).__name__}: {e}")
+    raise e
+
+
+def view(record: dict[str, Any], full: bool) -> dict[str, Any]:
+    """A mirror record as tools show it: 'private' rather than 'shared', and
+    without Pinboard's hashes."""
+    out = {
+        "url": record["url"],
+        "title": record["title"],
+        "notes": record["notes"],
+        "tags": record["tags"],
+        "time": record["time"],
+        "private": not record["shared"],
+        "toread": record["toread"],
+    }
+    if not full and len(out["notes"]) > pb.NOTES_PREVIEW:
+        out["notes"] = out["notes"][: pb.NOTES_PREVIEW] + "…"
+        out["notes_truncated"] = True
+    return out
+
+
+def outcome_view(outcome: Any) -> dict[str, Any]:
+    if outcome is None:
+        return {"state": "unchanged"}
+    out = {"state": outcome.state}
+    if outcome.state == "unpushed":
+        out["warning"] = (
+            "committed in the mirror but not pushed; the next write or sync pushes it"
+        )
+    return out
+
+
+def text_arg(args: dict[str, Any], name: str, required: bool = False) -> str | None:
+    value = args.get(name)
+    if value is None:
+        if required:
+            raise ToolError("invalid_argument", f"{name} is required")
+        return None
+    if not isinstance(value, str):
+        raise ToolError("invalid_argument", f"{name} must be a string")
+    if required and not value.strip():
+        raise ToolError("invalid_argument", f"{name} must not be empty")
+    return value
+
+
+def bool_arg(args: dict[str, Any], name: str) -> bool | None:
+    value = args.get(name)
+    if value is not None and not isinstance(value, bool):
+        raise ToolError("invalid_argument", f"{name} must be true or false")
+    return value
+
+
+def tags_arg(args: dict[str, Any], name: str) -> list[str] | None:
+    value = args.get(name)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
+        raise ToolError("invalid_argument", f"{name} must be a list of tags")
+    return pb.split_tags(" ".join(value))
+
+
+def int_arg(args: dict[str, Any], name: str, default: int, most: int) -> int:
+    value = args.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ToolError("invalid_argument", f"{name} must be a positive integer")
+    return min(value, most)
+
+
+def date_arg(args: dict[str, Any], name: str) -> str | None:
+    value = text_arg(args, name)
+    if value is None or value == "":
+        return None
+    if not DATE_RE.match(value):
+        raise ToolError(
+            "invalid_argument", f"{name} must be YYYY, YYYY-MM or YYYY-MM-DD"
+        )
+    return value
+
+
+class Service:
+    """The tools, over one mirror clone. Reads use the last commit alone, so
+    they never see a sync half-written; writes and syncs hold the CLI's lock
+    on the clone, as 'pinboard' itself does, so they also wait for any CLI
+    command running there."""
+
+    def __init__(self, repo_arg: str | None, log: RequestLog, sync_hours: float):
+        self.repo_arg = repo_arg
+        self.log = log
+        self.sync_hours = sync_hours
+        self.sync_lock = threading.Lock()
+        self.cache_lock = threading.Lock()
+        self.active = 0  # tool calls and scheduled syncs running now
+        self.active_lock = threading.Lock()
+        self.cache: tuple[Any, dict[str, Any]] | None = None
+
+    def context(self) -> Any:
+        # A fresh context per call: other processes change the clone and its
+        # local state.
+        return pb.Context(self.repo_arg)
+
+    def records(self, ctx: Any) -> dict[str, dict[str, Any]]:
+        """The bookmarks in the clone's last commit, parsed again only when
+        a commit changed them."""
+        repo = ctx.require_clone()
+        tree = pb.committed_tree(repo)
+        with self.cache_lock:
+            if self.cache is not None and self.cache[0] == tree:
+                return self.cache[1]
+        records = pb.load_committed(repo, tree)
+        with self.cache_lock:
+            self.cache = (tree, records)
+        return records
+
+    @staticmethod
+    def mirror(ctx: Any) -> dict[str, Any]:
+        fresh = ctx.freshness()
+        return {
+            "synced_at": fresh["synced"],
+            "pinboard_changed_at": fresh["update_time"],
+        }
+
+    # Reads: never the API.
+
+    def search_bookmarks(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = text_arg(args, "query") or ""
+        tags = tags_arg(args, "tags") or []
+        since, until = date_arg(args, "since"), date_arg(args, "until")
+        toread, private = bool_arg(args, "toread"), bool_arg(args, "private")
+        limit = int_arg(args, "limit", SEARCH_LIMIT, SEARCH_MAX)
+        cursor = text_arg(args, "cursor") or None
+
+        def keep(record: dict[str, Any]) -> bool:
+            stamp = record["time"]
+            if since and stamp < since:
+                return False
+            if until and stamp[: len(until)] > until:
+                return False
+            if toread is not None and record["toread"] != toread:
+                return False
+            return private is None or record["shared"] != private
+
+        ctx = self.context()
+        try:
+            page, next_cursor = pb.run_search(
+                self.records(ctx), query.split(), tags, limit, cursor, keep
+            )
+        except pb.Error as e:
+            if str(e).startswith("bad cursor"):
+                raise ToolError("invalid_argument", str(e)) from None
+            raise
+        return {
+            "bookmarks": [view(r, full=False) for r in page],
+            "next_cursor": next_cursor,
+            "mirror": self.mirror(ctx),
+        }
+
+    def get_bookmark(self, args: dict[str, Any]) -> dict[str, Any]:
+        url = text_arg(args, "url", required=True)
+        ctx = self.context()
+        record = self.records(ctx).get(url)
+        mirror = self.mirror(ctx)
+        if record is None:
+            raise ToolError(
+                "not_found",
+                f"{url} is not in the mirror. If it was bookmarked in Pinboard "
+                "since the last sync, call sync and try again.",
+                mirror=mirror,
+            )
+        return {"bookmark": view(record, full=True), "mirror": mirror}
+
+    def list_tags(self, args: dict[str, Any]) -> dict[str, Any]:
+        match = (text_arg(args, "match") or "").casefold()
+        limit = int_arg(args, "limit", TAGS_LIMIT, TAGS_MAX)
+        ctx = self.context()
+        counts = [
+            (t, n) for t, n in pb.tag_counts(self.records(ctx)) if match in t.casefold()
+        ]
+        return {
+            "tags": [{"tag": t, "count": n} for t, n in counts[:limit]],
+            "total_tags": len(counts),
+            "mirror": self.mirror(ctx),
+        }
+
+    # Live calls and writes.
+
+    def suggest_tags(self, args: dict[str, Any]) -> dict[str, Any]:
+        url = text_arg(args, "url", required=True)
+        return pb.run_suggest(self.context(), url)
+
+    def add_bookmark(self, args: dict[str, Any]) -> dict[str, Any]:
+        private = bool_arg(args, "private")
+        record = {
+            "url": text_arg(args, "url", required=True),
+            "title": text_arg(args, "title", required=True),
+            "notes": text_arg(args, "notes") or "",
+            "tags": tags_arg(args, "tags") or [],
+            "time": "",
+            "shared": private is False,
+            "toread": bool(bool_arg(args, "toread")),
+        }
+        ctx = self.context()
+        live, created, outcome = pb.run_add(ctx, record)
+        out: dict[str, Any] = {"bookmark": view(live, full=True), "created": created}
+        if not created:
+            out["message"] = (
+                "Pinboard already has this URL, so it was left unchanged; "
+                "use update_bookmark to change it."
+            )
+        out["mirror_commit"] = outcome_view(outcome)
+        out["mirror"] = self.mirror(ctx)
+        return out
+
+    def update_bookmark(self, args: dict[str, Any]) -> dict[str, Any]:
+        url = text_arg(args, "url", required=True)
+        tags = tags_arg(args, "tags")
+        private = bool_arg(args, "private")
+        edits = argparse.Namespace(
+            title=text_arg(args, "title"),
+            notes=text_arg(args, "notes"),
+            tags=None if tags is None else [" ".join(tags)],
+            add_tag=tags_arg(args, "add_tags"),
+            remove_tag=tags_arg(args, "remove_tags"),
+            shared=None if private is None else not private,
+            toread=bool_arg(args, "toread"),
+        )
+        ctx = self.context()
+        before, after, outcome = pb.run_update(
+            ctx, url, lambda current: pb.apply_edits(current, edits)
+        )
+        return {
+            "bookmark": view(after, full=True),
+            "changed": not pb.same_content(before, after),
+            "mirror_commit": outcome_view(outcome),
+            "mirror": self.mirror(ctx),
+        }
+
+    def sync(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.sync_lock.acquire(blocking=False):
+            raise ToolError(
+                "sync_running",
+                "a sync is already running; its result will be in the mirror shortly",
+            )
+        try:
+            ctx = self.context()
+            report = pb.run_sync(ctx)
+        finally:
+            self.sync_lock.release()
+        return {
+            "pinboard_changed": not report.skipped,
+            "added": len(report.added),
+            "updated": len(report.changed),
+            "deleted": len(report.deleted),
+            "total": report.total,
+            "mirror_commit": outcome_view(report.outcome),
+            "mirror": self.mirror(ctx),
+        }
+
+    # Dispatch and logging.
+
+    READS = ("search_bookmarks", "get_bookmark", "list_tags")
+    TOOLS = (*READS, "suggest_tags", "add_bookmark", "update_bookmark", "sync")
+
+    def call(
+        self, name: str, args: dict[str, Any], transport: str
+    ) -> tuple[dict[str, Any], bool]:
+        """Runs tool NAME and logs it; returns its payload and whether it failed."""
+        start = time.monotonic()
+        record: dict[str, Any] = {
+            "ts": datetime.datetime.now(datetime.UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            "transport": transport,
+            "tool": name,
+        }
+        url = args.get("url")
+        if name in ("add_bookmark", "update_bookmark", "suggest_tags") and isinstance(
+            url, str
+        ):
+            record["host"] = pb.host_of(url)
+        if name == "search_bookmarks":
+            digest = search_hash(args)
+            if digest:
+                record["search"] = digest
+        failed = False
+        with self.active_lock:
+            self.active += 1
+        try:
+            payload = getattr(self, name)(args)
+            record["outcome"] = "ok"
+            if name == "sync":
+                record["result"] = (
+                    f"+{payload['added']} ~{payload['updated']} -{payload['deleted']}"
+                    if payload["pinboard_changed"]
+                    else "unchanged"
+                )
+        except Exception as e:
+            err = as_tool_error(e)
+            payload, failed = err.payload(), True
+            record["outcome"] = "refused" if err.code in REFUSALS else "error"
+            record["error"] = err.code
+            if "retry_after" in err.extra:
+                record["retry_after"] = err.extra["retry_after"]
+        finally:
+            with self.active_lock:
+                self.active -= 1
+        record["ms"] = int((time.monotonic() - start) * 1000)
+        self.log.emit(record)
+        return payload, failed
+
+    def busy(self) -> bool:
+        with self.active_lock:
+            return self.active > 0
+
+
+# --- Scheduled syncs ---------------------------------------------------------
+
+
+class Scheduler:
+    """Syncs when the last sync is older than the interval: at startup, so a
+    restart catches up, then at every tick. Only the HTTP server runs it.
+
+    The thread is not a daemon: a sync holds the clone's lock and writes Git
+    objects, so shutdown waits for a running one rather than cutting it off
+    and leaving the clone dirty."""
+
+    def __init__(self, svc: Service, hours: float):
+        self.svc = svc
+        self.every = hours * 3600
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(target=self.run, name="sync")
+
+    def due(self) -> bool:
+        synced = self.svc.context().synced_at()
+        return synced is None or time.time() - synced >= self.every
+
+    def run(self) -> None:
+        tick = min(self.every, SCHEDULER_TICK) * pb.time_scale()
+        while not self.stopping.is_set():
+            try:
+                if self.due():
+                    self.svc.call("sync", {}, "schedule")
+            except Exception as e:
+                log_line(f"scheduler: {type(e).__name__}: {e}")
+            self.stopping.wait(max(tick, 0.05))
+
+    def start(self) -> None:
+        log_line(f"syncing when the last sync is {self.every / 3600:g} h old")
+        self.thread.start()
+
+    def stop(self) -> None:
+        """Stops the loop, waiting for a running sync to finish."""
+        self.stopping.set()
+        if self.thread.is_alive():
+            self.thread.join()
+
+
+# --- MCP server --------------------------------------------------------------
+
+
+def instructions(svc: Service, scheduled: bool) -> str:
+    lag = (
+        f"up to {svc.sync_hours:g} hours, as the server syncs on that schedule"
+        if scheduled
+        else "until someone syncs it"
+    )
+    return (
+        "This server searches and edits the user's Pinboard bookmarks.\n\n"
+        "search_bookmarks, get_bookmark and list_tags read a Git mirror of "
+        "the account, not Pinboard itself. Search matches words in each "
+        "bookmark's title, notes, tags and URL; it does not search the text of "
+        "the bookmarked pages. Bookmarks added or changed in Pinboard's own "
+        f"website, apps or bookmarklet reach the mirror only by a sync, so it "
+        f"can lag behind Pinboard by {lag}. Every result gives the mirror's "
+        "last sync (mirror.synced_at); call sync first when the user needs "
+        "something saved in the last day.\n\n"
+        "add_bookmark and update_bookmark change Pinboard, then the mirror, so "
+        "the next search sees them. New bookmarks are private unless private is "
+        "false. update_bookmark's tags replaces every tag; use add_tags and "
+        "remove_tags to change some. There is no way to delete a bookmark here."
+    )
+
+
+def tool_listing() -> list[dict[str, Any]]:
+    url = {"type": "string", "description": "The bookmark's exact URL."}
+    tags = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Tags, without spaces or commas.",
+    }
+    read = {"readOnlyHint": True, "openWorldHint": False}
+    write = {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+    return [
+        {
+            "name": "search_bookmarks",
+            "description": (
+                "Search the user's bookmarks in the mirror, newest first. Every "
+                "word of query must appear (case-insensitively) in the title, "
+                "notes, tags or URL; the pages themselves are not searched. "
+                "Filters narrow by tags, date saved, to-read and private. Notes "
+                "are truncated; get_bookmark returns them in full. Pass "
+                "next_cursor back as cursor for the next page."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Words that must all match; empty for all.",
+                    },
+                    "tags": {**tags, "description": "Only bookmarks with every tag."},
+                    "since": {
+                        "type": "string",
+                        "description": "Saved on or after: YYYY, YYYY-MM or YYYY-MM-DD (UTC).",
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "Saved on or before: YYYY, YYYY-MM or YYYY-MM-DD (UTC).",
+                    },
+                    "toread": {
+                        "type": "boolean",
+                        "description": "Only to-read (true) or read (false) bookmarks.",
+                    },
+                    "private": {
+                        "type": "boolean",
+                        "description": "Only private (true) or public (false) bookmarks.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": SEARCH_MAX,
+                        "default": SEARCH_LIMIT,
+                    },
+                    "cursor": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            "annotations": {**read, "title": "Search bookmarks"},
+        },
+        {
+            "name": "get_bookmark",
+            "description": "One bookmark from the mirror by exact URL, with its notes in full.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"url": url},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            "annotations": {**read, "title": "Get a bookmark"},
+        },
+        {
+            "name": "list_tags",
+            "description": (
+                "The tags in the mirror with how many bookmarks have each, most "
+                "used first. match keeps tags containing it."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "match": {"type": "string"},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": TAGS_MAX,
+                        "default": TAGS_LIMIT,
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "annotations": {**read, "title": "List tags"},
+        },
+        {
+            "name": "suggest_tags",
+            "description": (
+                "Ask Pinboard for popular and recommended tags for a URL (a live "
+                "call). Prefer tags the user already uses (list_tags)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": True,
+                "openWorldHint": True,
+                "title": "Suggest tags",
+            },
+        },
+        {
+            "name": "add_bookmark",
+            "description": (
+                "Save a new bookmark to Pinboard, private unless private is "
+                "false. It never replaces an existing bookmark: if Pinboard has "
+                "the URL already, that bookmark is returned unchanged with "
+                "created false."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "title": {
+                        "type": "string",
+                        "description": "At most 255 characters.",
+                    },
+                    "notes": {"type": "string"},
+                    "tags": tags,
+                    "private": {"type": "boolean", "default": True},
+                    "toread": {"type": "boolean", "default": False},
+                },
+                "required": ["url", "title"],
+                "additionalProperties": False,
+            },
+            "annotations": {**write, "title": "Add a bookmark"},
+        },
+        {
+            "name": "update_bookmark",
+            "description": (
+                "Change an existing bookmark in Pinboard, keeping its date. Only "
+                "the fields given change. tags replaces every tag; add_tags and "
+                "remove_tags change some."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": url,
+                    "title": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "tags": {**tags, "description": "Replaces every tag."},
+                    "add_tags": tags,
+                    "remove_tags": tags,
+                    "private": {"type": "boolean"},
+                    "toread": {"type": "boolean"},
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            "annotations": {**write, "title": "Update a bookmark"},
+        },
+        {
+            "name": "sync",
+            "description": (
+                "Bring the mirror up to date with Pinboard. Cheap when nothing "
+                "changed; otherwise it downloads every bookmark, which Pinboard "
+                "allows once every 5 minutes (a refusal gives retry_after in "
+                "seconds). One sync runs at a time."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": True,
+                "title": "Sync the mirror",
+            },
+        },
+    ]
+
+
+def sdk_server(svc: Service, transport: str, scheduled: bool) -> Any:
+    import anyio
+    import mcp_types as types
+    from mcp.server.lowlevel import Server
+    from mcp.shared.exceptions import MCPError
+
+    # Reads share the parsed mirror; writes and syncs each wait for the
+    # clone's lock in their own thread, so a sync never holds up a search.
+    reads = anyio.CapacityLimiter(4)
+
+    async def list_tools(ctx: Any, params: Any) -> Any:
+        return types.ListToolsResult(
+            tools=[types.Tool.model_validate(t) for t in tool_listing()]
+        )
+
+    async def call_tool(ctx: Any, params: Any) -> Any:
+        if params.name not in Service.TOOLS:
+            raise MCPError(
+                code=types.INVALID_PARAMS, message=f"unknown tool: {params.name}"
+            )
+        limiter = reads if params.name in Service.READS else None
+        payload, failed = await anyio.to_thread.run_sync(
+            svc.call, params.name, params.arguments or {}, transport, limiter=limiter
+        )
+        text = json.dumps(payload, ensure_ascii=False)
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=text)],
+            structured_content=payload,
+            is_error=failed,
+        )
+
+    return Server(
+        "pinboard",
+        version=VERSION,
+        title="Pinboard",
+        instructions=instructions(svc, scheduled),
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
+
+
+def exit_when_idle(svc: Service) -> None:
+    """Ends a stdio server after a signal. The SDK reads stdin in a thread
+    that cancellation cannot interrupt, so a clean shutdown waits for stdin
+    to close; instead, exit once no tool call is running, so that no write or
+    commit is cut off."""
+    time.sleep(1)  # A shutdown that can finish cleanly does so first.
+    while svc.busy():
+        time.sleep(0.1)
+    os._exit(0)
+
+
+def serve_stdio(svc: Service) -> None:
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    async def serve() -> None:
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        interrupted = False
+
+        def stop() -> None:
+            nonlocal interrupted
+            if not interrupted and task is not None:
+                interrupted = True
+                task.cancel()
+                threading.Thread(
+                    target=exit_when_idle, args=(svc,), name="exit", daemon=True
+                ).start()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop)
+        try:
+            sdk = sdk_server(svc, "stdio", scheduled=False)
+            async with stdio_server() as (read, write):
+                await sdk.run(read, write, sdk.create_initialization_options())
+        except asyncio.CancelledError:
+            if not interrupted:
+                raise
+        finally:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
+
+    anyio.run(serve)
+
+
+# --- HTTP --------------------------------------------------------------------
+
+
+class AccessError(Exception):
+    """A request without a usable Cloudflare Access token."""
+
+
+class AccessVerifier:
+    """Checks Cloudflare Access JWTs (Cf-Access-Jwt-Assertion): RS256
+    signature against the team's certificates, issuer, audience, and expiry."""
+
+    def __init__(self, team: str, audience: str, certs_url: str | None = None):
+        import jwt  # Only the HTTP server with Access needs it.
+
+        self.jwt = jwt
+        self.team, self.audience = team, audience
+        self.jwks = jwt.PyJWKClient(
+            certs_url or f"https://{team}/cdn-cgi/access/certs",
+            cache_keys=True,
+            lifespan=CERTS_TTL,
+            # Cloudflare refuses urllib's default user agent.
+            headers={"User-Agent": f"pinboard-mcp/{VERSION}"},
+            timeout=10,
+        )
+
+    def verify(self, token: str) -> dict[str, Any]:
+        jwt = self.jwt
+        try:
+            key = self.jwks.get_signing_key_from_jwt(token)
+            return jwt.decode(
+                token,
+                key.key,
+                algorithms=["RS256"],
+                audience=self.audience,
+                issuer=f"https://{self.team}",
+                leeway=60,
+                options={"require": ["exp", "iss", "aud"]},
+            )
+        except jwt.ExpiredSignatureError:
+            raise AccessError("Access token expired") from None
+        except jwt.InvalidAudienceError:
+            raise AccessError("Access token for another application") from None
+        except jwt.InvalidIssuerError:
+            raise AccessError("Access token from another team") from None
+        except jwt.PyJWKClientError as e:
+            raise AccessError(f"Access token key not usable: {e}") from None
+        except jwt.PyJWTError as e:
+            raise AccessError(f"Access token refused: {e}") from None
+
+
+async def asgi_reply(
+    send: Any, status: int, text: str, extra: tuple[tuple[str, str], ...] = ()
+) -> None:
+    data = text.encode()
+    headers = [
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(data)).encode()),
+    ]
+    headers += [(k.encode(), v.encode()) for k, v in extra]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": data})
+
+
+class AccessGate:
+    """ASGI, in front of the MCP app: the unauthenticated health check, and
+    the Access JWT check that a proxy's Host header bypass would otherwise
+    skip. The SDK sees only requests that pass."""
+
+    def __init__(self, app: Any, verifier: AccessVerifier | None):
+        self.app = app
+        self.verifier = verifier
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope["path"] == HEALTH_PATH and scope["method"] in ("GET", "HEAD"):
+            # Polled by the proxy, so reachable without a token, and reads
+            # nothing.
+            await asgi_reply(send, 200, "ok")
+            return
+        if self.verifier is not None:
+            headers = {
+                k.decode("latin-1").lower(): v.decode("latin-1")
+                for k, v in scope["headers"]
+            }
+            token = headers.get(ACCESS_HEADER)
+            if not token:
+                await asgi_reply(
+                    send,
+                    401,
+                    "Cloudflare Access token required",
+                    extra=(("www-authenticate", "Bearer"),),
+                )
+                return
+            try:
+                self.verifier.verify(token)
+            except AccessError as e:
+                await asgi_reply(send, 403, str(e))
+                return
+        await self.app(scope, receive, send)
+
+
+def serve_http(
+    svc: Service,
+    host: str,
+    port: int,
+    allow_hosts: list[str],
+    verifier: AccessVerifier | None,
+) -> None:
+    import uvicorn
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.applications import Starlette
+
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    hosts += [h if ":" in h else f"{h}:*" for h in allow_hosts] + allow_hosts
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+    )
+    scheduled = svc.sync_hours > 0
+    sdk = sdk_server(svc, "http", scheduled)
+    mcp_app = sdk.streamable_http_app(
+        streamable_http_path=MCP_PATH,
+        stateless_http=True,
+        json_response=True,
+        transport_security=security,
+    )
+    scheduler = Scheduler(svc, svc.sync_hours) if scheduled else None
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Any) -> Any:
+        async with sdk.session_manager.run():
+            if scheduler is not None:
+                scheduler.start()
+            try:
+                yield
+            finally:
+                if scheduler is not None:
+                    await asyncio.to_thread(scheduler.stop)
+
+    auth = f"Access {verifier.team}" if verifier else "no authentication"
+    log_line(f"serving {MCP_PATH} on http://{host}:{port} ({auth})")
+    app = Starlette(routes=mcp_app.routes, lifespan=lifespan)
+    uvicorn.run(
+        AccessGate(app, verifier),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        server_header=False,
+    )
+
+
+# --- Command line ------------------------------------------------------------
+
+EPILOG = f"""\
+Tools:
+  search_bookmarks, get_bookmark, list_tags   read the mirror; never the API
+  suggest_tags                                a live Pinboard call
+  add_bookmark, update_bookmark               write to Pinboard, then the mirror
+  sync                                        bring the mirror up to date
+
+Environment:
+  PINBOARD_API_TOKEN            API token, as for every pinboard command
+  PINBOARD_REPO                 The mirror clone, if --repo is not given
+  PINBOARD_MCP_LOG              Request log (default:
+                                $XDG_STATE_HOME/pinboard/mcp.jsonl, else
+                                ~/.local/state/pinboard/mcp.jsonl)
+  PINBOARD_MCP_ACCESS_TEAM      Cloudflare Access team domain
+  PINBOARD_MCP_ACCESS_AUD       Cloudflare Access application audience tag
+  PINBOARD_MCP_ACCESS_CERTS_URL Team certificate URL, for testing (default:
+                                https://TEAM/cdn-cgi/access/certs)
+
+Examples:
+  claude mcp add pinboard -- pinboard mcp
+  pinboard mcp --http
+  pinboard mcp --http --host 0.0.0.0 --allow-host pinboard.example.com \\
+    --access-team example.cloudflareaccess.com --access-aud AUD
+
+Over stdio the server never syncs on its own; call the sync tool, or run
+'pinboard sync'. Over HTTP (at {MCP_PATH}) it also syncs whenever the last sync
+is older than --sync-every hours: at startup, then checking hourly, so a
+refused or failed run is retried an hour later. Each tool call and scheduled
+sync is appended to the request log, rotated at 8 MiB with four old files kept.
+
+The HTTP server serves GET {HEALTH_PATH} without a token for a proxy's health check.
+Without --access-team and --access-aud it listens on loopback only and does no
+authentication of its own. With both, it may bind another --host and requires
+the Cf-Access-Jwt-Assertion header on every other request, checking the token
+against the team's certificates, issuer, audience, and expiry. --allow-host
+admits the proxy's hostname."""
+
+
+class Parser(argparse.ArgumentParser):
+    """The house help layout and usage exit status (1), as the other pinboard
+    commands have them."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    def format_help(self) -> str:
+        return (
+            super()
+            .format_help()
+            .replace("usage:", "Usage:", 1)
+            .replace("options:", "Options:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(
+        prog=PROG,
+        description="Serve the Pinboard mirror to agents over MCP: search it, and add\n"
+        "or update bookmarks through the API.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--repo",
+        metavar="DIR",
+        help="The mirror clone (default: $PINBOARD_REPO, else ~/.pinboard)",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help=f"Serve streamable HTTP at {MCP_PATH}, not stdio",
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="HTTP address (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"HTTP port (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="Also accept requests addressed to HOST, such as a tunnel's hostname",
+    )
+    parser.add_argument(
+        "--access-team",
+        metavar="HOST",
+        help="Cloudflare Access team domain (default: PINBOARD_MCP_ACCESS_TEAM)",
+    )
+    parser.add_argument(
+        "--access-aud",
+        metavar="AUD",
+        help="Cloudflare Access application audience tag "
+        "(default: PINBOARD_MCP_ACCESS_AUD)",
+    )
+    parser.add_argument(
+        "--sync-every",
+        type=float,
+        metavar="HOURS",
+        help=f"With --http, sync when the last sync is this old "
+        f"(default: {DEFAULT_SYNC_HOURS:g}; 0 never syncs on its own)",
+    )
+    parser.add_argument(
+        "--log", metavar="FILE", help=f"Request log (default: ${LOG_ENV})"
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    team = args.access_team or os.environ.get("PINBOARD_MCP_ACCESS_TEAM")
+    audience = args.access_aud or os.environ.get("PINBOARD_MCP_ACCESS_AUD")
+    if bool(team) != bool(audience):
+        die(
+            "Access needs both --access-team and --access-aud "
+            "(or PINBOARD_MCP_ACCESS_TEAM and PINBOARD_MCP_ACCESS_AUD)"
+        )
+    if not args.http:
+        if args.access_team or args.access_aud:
+            die("--access-team and --access-aud apply only to --http")
+        if args.sync_every is not None:
+            die("--sync-every applies only to --http; over stdio, call the sync tool")
+    hours = DEFAULT_SYNC_HOURS if args.sync_every is None else args.sync_every
+    if hours < 0:
+        die("--sync-every must be 0 or more")
+    verifier = None
+    if args.http:
+        if team:
+            verifier = AccessVerifier(
+                team, audience, os.environ.get("PINBOARD_MCP_ACCESS_CERTS_URL") or None
+            )
+        elif args.host not in LOOPBACK:
+            die(f"--http without Access serves loopback only, not {args.host}")
+
+    try:
+        ctx = pb.Context(args.repo)
+        ctx.require_clone()
+    except pb.Error as e:
+        die(str(e))
+    if not os.environ.get(pb.TOKEN_ENV, "").strip():
+        log_line(
+            f"{pb.TOKEN_ENV} is not set; reads work, but writes and sync will fail"
+        )
+    log_path = Path(args.log or os.environ.get(LOG_ENV) or default_log()).expanduser()
+    svc = Service(args.repo, RequestLog(log_path), hours if args.http else 0)
+    if args.http:
+        serve_http(svc, args.host, args.port, args.allow_host, verifier)
+    else:
+        serve_stdio(svc)
+    return 0
+
+
+def sigterm_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # A server stops on a signal as asked, so it exits 0, not 130.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        sys.exit(0)
