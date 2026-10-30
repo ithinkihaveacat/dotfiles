@@ -250,9 +250,15 @@ def check_record(record: Any) -> str | None:
     return None
 
 
+# Limits from the v1 API's argument types (https://pinboard.in/api/): a title
+# is up to 255 characters, text up to 65536, a tag up to 255 with no commas or
+# whitespace, and a bookmark has up to 100 tags. Pinboard refuses an empty
+# title ("must provide title"), though some old bookmarks have one.
 def validate_fields(title: str, notes: str, tags: list[str]) -> None:
     if not title.strip():
-        raise Error("the title is empty")
+        raise Error(
+            "the title is empty, and Pinboard requires one; give one with --title"
+        )
     if len(title) > MAX_TITLE:
         raise Error(
             f"the title is {len(title)} characters; Pinboard allows {MAX_TITLE}"
@@ -462,15 +468,21 @@ class Repo:
         self.path = path
         self._git_dir: Path | None = None
 
-    def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        proc = subprocess.run(
-            ["git", "-C", str(self.path), *args],
-            capture_output=True,
-            text=True,
-            env=GIT_ENV,
-            stdin=subprocess.DEVNULL,
-            check=False,
-        )
+    def run(
+        self, *args: str, check: bool = True, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(self.path), *args],
+                capture_output=True,
+                text=True,
+                env=GIT_ENV,
+                stdin=subprocess.DEVNULL,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise Error(f"git {args[0]} timed out after {timeout:.0f}s") from None
         if check and proc.returncode != 0:
             message = proc.stderr.strip() or proc.stdout.strip()
             raise Error(f"git {args[0]} failed in {self.path}: {message}")
@@ -704,6 +716,59 @@ def load_mirror(root: Path) -> dict[str, dict[str, Any]]:
     return scan_records(scan_mirror(root), str(root))
 
 
+def committed_tree(repo: Repo) -> str:
+    """The id of the last commit's bookmarks/ tree, or "" before the first."""
+    proc = repo.run("rev-parse", "-q", "--verify", "HEAD:bookmarks", check=False)
+    return proc.stdout.strip()
+
+
+def load_committed(repo: Repo, tree: str | None = None) -> dict[str, dict[str, Any]]:
+    """The bookmarks in the last commit. Reads use this rather than the files,
+    so they never see a sync half-written."""
+    tree = committed_tree(repo) if tree is None else tree
+    if not tree:
+        return {}
+    blobs = []
+    for entry in repo.out("ls-tree", "-z", tree).split("\0"):
+        meta, _, name = entry.partition("\t")
+        if name.endswith(".jsonl") and meta.split()[1:2] == ["blob"]:
+            blobs.append((name, meta.split()[2]))
+    blobs.sort()
+    proc = subprocess.run(
+        ["git", "-C", str(repo.path), "cat-file", "--batch"],
+        input="".join(f"{sha}\n" for _, sha in blobs).encode(),
+        capture_output=True,
+        env=GIT_ENV,
+        check=False,
+    )
+    if proc.returncode:
+        raise Error(f"cannot read the mirror's last commit: {proc.stderr.decode()}")
+    scan, data, pos = Scan(), proc.stdout, 0
+    for name, _ in blobs:
+        header_end = data.index(b"\n", pos)
+        size = int(data[pos:header_end].split()[2])
+        body = data[header_end + 1 : header_end + 1 + size]
+        pos = header_end + 1 + size + 1
+        try:
+            scan_file(scan, f"bookmarks/{name}", body.decode("utf-8"))
+        except UnicodeDecodeError as e:
+            scan.files += 1
+            scan.errors.append(f"bookmarks/{name}: {e}")
+    return scan_records(scan, f"{repo.path} (HEAD)")
+
+
+def committed_state(repo: Repo) -> dict[str, Any]:
+    """state.json as of the last commit."""
+    proc = repo.run("show", "HEAD:state.json", check=False)
+    if proc.returncode:
+        return {}
+    try:
+        state = json.loads(proc.stdout)
+    except ValueError:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
 def scan_records(scan: Scan, where: str) -> dict[str, dict[str, Any]]:
     if scan.errors or scan.duplicates:
         first = (scan.errors + [f"duplicate {u}" for u in scan.duplicates])[0]
@@ -820,7 +885,7 @@ class Context:
 
     def freshness(self) -> dict[str, Any]:
         synced = self.synced_at()
-        state = read_state(self.repo.path) if self.repo.is_clone() else {}
+        state = committed_state(self.repo) if self.repo.is_clone() else {}
         times = [
             t
             for t in (state.get("update_time"), self.local.data.get("update_time"))
@@ -1238,13 +1303,14 @@ def run_restore(
 ) -> tuple[dict[str, Any], str, Outcome | None]:
     """Re-adds the last mirrored version of a deleted bookmark; returns (record, result, outcome)."""
     repo = ctx.require_clone()
-    if url in load_mirror(repo.path):
+    if url in load_committed(repo):
         raise Error(f"{url} is in the mirror; there is nothing to restore")
     last = next(
         (v.record for v in run_history(repo, url) if v.record is not None), None
     )
     if last is None:
         raise Error(f"the mirror's history has no version of {url}")
+    validate_fields(last["title"], last["notes"], last["tags"])
     if dry_run:
         return last, "dry-run", None
     ctx.api.require_online()
@@ -1402,7 +1468,7 @@ def cmd_search(ctx: Context, args: argparse.Namespace) -> int:
         raise Error("--limit must be at least 1", 2)
     repo = ctx.require_clone()
     try:
-        records = load_mirror(repo.path)
+        records = load_committed(repo)
         page, cursor = run_search(
             records,
             args.terms,
@@ -1429,7 +1495,7 @@ def cmd_search(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def cmd_get(ctx: Context, args: argparse.Namespace) -> int:
-    records = load_mirror(ctx.require_clone().path)
+    records = load_committed(ctx.require_clone())
     record = records.get(args.url)
     if args.json:
         print(
@@ -1458,7 +1524,7 @@ def tag_counts(records: dict[str, dict[str, Any]]) -> list[tuple[str, int]]:
 
 
 def cmd_tags(ctx: Context, args: argparse.Namespace) -> int:
-    counts = tag_counts(load_mirror(ctx.require_clone().path))
+    counts = tag_counts(load_committed(ctx.require_clone()))
     if args.json:
         result = {
             "tags": [{"tag": t, "count": n} for t, n in counts],
@@ -1485,6 +1551,43 @@ def use_color(stream: Any) -> bool:
     if force and force != "0":
         return True
     return stream.isatty()
+
+
+@dataclass
+class Drift:
+    ahead: int  # commits not on origin
+    behind: str  # "" when level, else a count or "some" (not yet fetched)
+    ahead_note: str = ""
+    behind_note: str = ""
+
+
+def origin_drift(repo: Repo, add: Callable[..., None]) -> Drift:
+    """How the clone differs from origin, asking it with ls-remote so that
+    nothing local changes; falls back to the last fetch when offline or when
+    origin cannot be reached."""
+    stale = " (as of the last fetch)"
+    ahead, behind = repo.ahead_behind()
+    fallback = Drift(ahead, str(behind or ""), stale, stale)
+    if env_true("AGENT_OFFLINE"):
+        return fallback
+    try:
+        proc = repo.run(
+            "ls-remote", "origin", f"refs/heads/{repo.branch()}", timeout=30
+        )
+    except Error as e:
+        add("WARN", "Remote", "cannot reach origin", redact(str(e)))
+        return fallback
+    tip = proc.stdout.split()[0] if proc.stdout.strip() else ""
+    if not tip:
+        return Drift(count_commits(repo, "HEAD"), "")
+    if repo.run("cat-file", "-e", f"{tip}^{{commit}}", check=False).returncode:
+        return Drift(ahead, "some", stale, "")
+    behind = count_commits(repo, f"HEAD..{tip}")
+    return Drift(count_commits(repo, f"{tip}..HEAD"), str(behind or ""))
+
+
+def count_commits(repo: Repo, spec: str) -> int:
+    return int(repo.out("rev-list", "--count", spec))
 
 
 def run_doctor(ctx: Context) -> list[dict[str, Any]]:
@@ -1595,37 +1698,26 @@ def run_doctor(ctx: Context) -> list[dict[str, Any]]:
     else:
         add("PASS", "Working tree", "clean")
     if remote and repo.has_head():
-        fetched = False
-        if not env_true("AGENT_OFFLINE"):
-            proc = repo.run("fetch", "-q", "origin", check=False)
-            fetched = proc.returncode == 0
-            if not fetched:
-                add(
-                    "WARN",
-                    "Fetch",
-                    "cannot fetch origin",
-                    *redact(proc.stderr.strip()).splitlines()[:3],
-                )
-        ahead, behind = repo.ahead_behind()
-        since = "" if fetched else " (as of the last fetch)"
-        if behind:
+        drift = origin_drift(repo, add)
+        if drift.behind:
             add(
                 "WARN",
                 "Pull",
-                f"{behind} commit(s) on origin not in this clone{since}; reads miss them",
+                f"origin has {drift.behind} commit(s) this clone lacks"
+                f"{drift.behind_note}; reads miss them",
                 "The next sync or write brings them in.",
             )
         else:
-            add("PASS", "Pull", f"level with origin{since}")
-        if ahead:
+            add("PASS", "Pull", f"level with origin{drift.behind_note}")
+        if drift.ahead:
             add(
                 "WARN",
                 "Push",
-                f"{ahead} commit(s) not on origin",
+                f"{drift.ahead} commit(s) not on origin{drift.ahead_note}",
                 "The next sync or write pushes them.",
             )
         else:
-            add("PASS", "Push", f"nothing unpushed{since}")
+            add("PASS", "Push", f"nothing unpushed{drift.ahead_note}")
 
     synced = ctx.synced_at()
     if synced is None:
@@ -1964,8 +2056,8 @@ def build_parser() -> Parser:
     p = command(
         "doctor",
         "Check the token, the clone and its remote, the mirror files, unpushed\n"
-        "commits, freshness and rate limits. Read-only; makes no API call. Exits 1 on\n"
-        "any WARN or FAIL.",
+        "commits, freshness and rate limits. Read-only: makes no API call and asks\n"
+        "origin for its branch head without fetching. Exits 1 on any WARN or FAIL.",
         "  pinboard doctor\n  pinboard doctor --json",
     )
     p.add_argument("--json", action="store_true", help="Print JSON")

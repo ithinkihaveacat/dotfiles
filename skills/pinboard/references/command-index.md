@@ -318,8 +318,8 @@ Examples:
 Usage: pinboard doctor [-h] [--json]
 
 Check the token, the clone and its remote, the mirror files, unpushed
-commits, freshness and rate limits. Read-only; makes no API call. Exits 1 on
-any WARN or FAIL.
+commits, freshness and rate limits. Read-only: makes no API call and asks
+origin for its branch head without fetching. Exits 1 on any WARN or FAIL.
 
 Options:
   -h, --help  Display this help message and exit

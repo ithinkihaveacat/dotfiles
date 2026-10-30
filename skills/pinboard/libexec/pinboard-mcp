@@ -30,7 +30,6 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -272,37 +271,6 @@ def date_arg(args: dict[str, Any], name: str) -> str | None:
     return value
 
 
-def load_tree(repo: Any, tree: str) -> dict[str, dict[str, Any]]:
-    """The bookmarks in TREE, a commit's bookmarks/ directory."""
-    listing = repo.out("ls-tree", "-z", tree).split("\0")
-    blobs = []
-    for entry in listing:
-        meta, _, name = entry.partition("\t")
-        if name.endswith(".jsonl") and meta.split()[1:2] == ["blob"]:
-            blobs.append((name, meta.split()[2]))
-    proc = subprocess.run(
-        ["git", "-C", str(repo.path), "cat-file", "--batch"],
-        input="".join(f"{sha}\n" for _, sha in sorted(blobs)).encode(),
-        capture_output=True,
-        env=pb.GIT_ENV,
-        check=False,
-    )
-    if proc.returncode:
-        raise pb.Error(f"cannot read the mirror's last commit: {proc.stderr.decode()}")
-    scan, data, pos = pb.Scan(), proc.stdout, 0
-    for name, _ in sorted(blobs):
-        header_end = data.index(b"\n", pos)
-        size = int(data[pos:header_end].split()[2])
-        body = data[header_end + 1 : header_end + 1 + size]
-        pos = header_end + 1 + size + 1
-        try:
-            pb.scan_file(scan, f"bookmarks/{name}", body.decode("utf-8"))
-        except UnicodeDecodeError as e:
-            scan.files += 1
-            scan.errors.append(f"bookmarks/{name}: {e}")
-    return pb.scan_records(scan, f"{repo.path} (HEAD)")
-
-
 class Service:
     """The tools, over one mirror clone. Reads use the last commit alone, so
     they never see a sync half-written; writes and syncs hold the CLI's lock
@@ -328,12 +296,11 @@ class Service:
         """The bookmarks in the clone's last commit, parsed again only when
         a commit changed them."""
         repo = ctx.require_clone()
-        proc = repo.run("rev-parse", "-q", "--verify", "HEAD:bookmarks", check=False)
-        tree = proc.stdout.strip()
+        tree = pb.committed_tree(repo)
         with self.cache_lock:
             if self.cache is not None and self.cache[0] == tree:
                 return self.cache[1]
-        records = load_tree(repo, tree) if tree else {}
+        records = pb.load_committed(repo, tree)
         with self.cache_lock:
             self.cache = (tree, records)
         return records

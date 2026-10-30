@@ -28,12 +28,14 @@ Run it as `pinboard` when `bin/` is on `PATH`, otherwise as
   clone is fine, and the first `pinboard sync` imports every bookmark and pushes
   `main`.
 - `pinboard doctor` checks the token, the clone, the files and freshness without
-  calling the API. It fetches `origin` to report commits this clone lacks.
+  calling the API. It asks `origin` for its branch head, without fetching, to
+  report commits this clone lacks.
 
 ## Reading
 
 Reads never call the API, so they are as fresh as the last sync; each says when
-that was (on stderr, or as `mirror.synced` with `--json`).
+that was (on stderr, or as `mirror.synced` with `--json`). They read the clone's
+last commit, so a sync in progress never shows half done.
 
 ```bash
 pinboard search kotlin coroutines          # every term must match
@@ -108,9 +110,8 @@ pinboard mcp --http                          # loopback only, no authentication
 - Tools: `search_bookmarks` (words, tags, dates, to-read, private, paged),
   `get_bookmark` and `list_tags` read the mirror and never call the API;
   `suggest_tags` is live; `add_bookmark`, `update_bookmark` and `sync` write.
-  Reads use the clone's last commit, so a sync in progress never shows half
-  done, and `get_bookmark` reports a URL the mirror lacks as `not_found`. There
-  is no delete. Bookmarks are shown with `private` (the inverse of Pinboard's
+  `get_bookmark` reports a URL the mirror lacks as `not_found`. There is no
+  delete. Bookmarks are shown with `private` (the inverse of Pinboard's
   `shared`), and every read says when the mirror last synced.
 - Writes behave as `add` and `update` do, and take the same lock on the clone,
   so the server and the CLI can share one mirror. `sync` runs one at a time and
