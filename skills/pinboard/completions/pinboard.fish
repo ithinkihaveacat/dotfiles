@@ -58,7 +58,7 @@ complete -f -c pinboard -n '__fish_pinboard_using_command search' -l tag -x -d '
 complete -f -c pinboard -n '__fish_pinboard_using_command search' -l limit -x -d 'Results per page'
 complete -f -c pinboard -n '__fish_pinboard_using_command search' -l cursor -x -d 'Continue from a previous page'
 complete -f -c pinboard -n '__fish_pinboard_using_command search get tags history suggest doctor' -l json -d 'Print JSON'
-complete -f -c pinboard -n '__fish_pinboard_using_command add update' -l title -x -d Title
+complete -f -c pinboard -n '__fish_pinboard_using_command add update restore' -l title -x -d Title
 complete -f -c pinboard -n '__fish_pinboard_using_command add update' -l notes -x -d Notes
 complete -f -c pinboard -n '__fish_pinboard_using_command add update' -l tags -x -d 'Tags, separated by spaces or commas'
 complete -f -c pinboard -n '__fish_pinboard_using_command add update' -l public -d 'Make it public'

@@ -245,17 +245,19 @@ Examples:
 <!-- generated: ../scripts/pinboard restore --help -->
 
 ```text
-Usage: pinboard restore [-h] [--dry-run] URL
+Usage: pinboard restore [-h] [--title TEXT] [--dry-run] URL
 
 Re-add a bookmark deleted from Pinboard, as the mirror last recorded it,
 keeping its original date. Refuses if the mirror still has URL.
 
 Arguments:
-  URL         The deleted bookmark's exact URL
+  URL           The deleted bookmark's exact URL
 
 Options:
-  -h, --help  Display this help message and exit
-  --dry-run   Show the request without sending it
+  -h, --help    Display this help message and exit
+  --title TEXT  Restore with this title (needed when the recorded one is
+                empty)
+  --dry-run     Show the request without sending it
 
 Examples:
   pinboard history https://example.com/post

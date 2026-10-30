@@ -46,6 +46,7 @@ BACKOFF_START = 6.0
 BACKOFF_ATTEMPTS = 5
 BACKOFF_TOTAL = 300.0
 PUSH_ATTEMPTS = 3
+GIT_TIMEOUT = 120.0  # seconds for a fetch or push; ls-remote gets 30
 
 KEYS = ("url", "hash", "title", "notes", "tags", "time", "shared", "toread", "meta")
 MAX_TAGS = 100
@@ -540,13 +541,22 @@ class Repo:
         return int(ahead), int(behind)
 
     def push(self) -> tuple[bool, str]:
-        proc = self.run(
-            "push", "-q", "origin", f"HEAD:refs/heads/{self.branch()}", check=False
-        )
+        try:
+            proc = self.run(
+                "push",
+                "-q",
+                "origin",
+                f"HEAD:refs/heads/{self.branch()}",
+                check=False,
+                timeout=GIT_TIMEOUT,
+            )
+        except Error as e:
+            # Whether it landed is unknown; the next fetch shows it either way.
+            return False, str(e)
         return proc.returncode == 0, proc.stderr.strip()
 
     def fetch(self) -> None:
-        self.run("fetch", "-q", "origin")
+        self.run("fetch", "-q", "origin", timeout=GIT_TIMEOUT)
 
     def last_commit_time(self, grep: str | None = None) -> float | None:
         if not self.has_head():
@@ -745,16 +755,33 @@ def load_committed(repo: Repo, tree: str | None = None) -> dict[str, dict[str, A
         raise Error(f"cannot read the mirror's last commit: {proc.stderr.decode()}")
     scan, data, pos = Scan(), proc.stdout, 0
     for name, _ in blobs:
-        header_end = data.index(b"\n", pos)
-        size = int(data[pos:header_end].split()[2])
-        body = data[header_end + 1 : header_end + 1 + size]
-        pos = header_end + 1 + size + 1
+        item = batch_item(data, pos)
+        if item is None:
+            raise Error(
+                f"cannot read bookmarks/{name} from the mirror's last commit; "
+                "run 'pinboard doctor'"
+            )
+        body, pos = item
         try:
             scan_file(scan, f"bookmarks/{name}", body.decode("utf-8"))
         except UnicodeDecodeError as e:
             scan.files += 1
             scan.errors.append(f"bookmarks/{name}: {e}")
     return scan_records(scan, f"{repo.path} (HEAD)")
+
+
+def batch_item(data: bytes, pos: int) -> tuple[bytes, int] | None:
+    """The blob at POS in 'git cat-file --batch' output and the position after
+    it, or None for a missing object or a truncated response."""
+    end = data.find(b"\n", pos)
+    header = data[pos:end].split() if end >= 0 else []
+    if len(header) != 3 or header[1] != b"blob" or not header[2].isdigit():
+        return None
+    size = int(header[2])
+    body = data[end + 1 : end + 1 + size]
+    if len(body) != size:
+        return None
+    return body, end + 1 + size + 1
 
 
 def committed_state(repo: Repo) -> dict[str, Any]:
@@ -1299,7 +1326,7 @@ def cmd_history(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def run_restore(
-    ctx: Context, url: str, dry_run: bool = False
+    ctx: Context, url: str, dry_run: bool = False, title: str | None = None
 ) -> tuple[dict[str, Any], str, Outcome | None]:
     """Re-adds the last mirrored version of a deleted bookmark; returns (record, result, outcome)."""
     repo = ctx.require_clone()
@@ -1310,6 +1337,8 @@ def run_restore(
     )
     if last is None:
         raise Error(f"the mirror's history has no version of {url}")
+    if title is not None:
+        last = {**last, "title": title}
     validate_fields(last["title"], last["notes"], last["tags"])
     if dry_run:
         return last, "dry-run", None
@@ -1341,7 +1370,7 @@ def run_restore(
 
 
 def cmd_restore(ctx: Context, args: argparse.Namespace) -> int:
-    record, result, outcome = run_restore(ctx, args.url, args.dry_run)
+    record, result, outcome = run_restore(ctx, args.url, args.dry_run, args.title)
     if args.dry_run:
         params = post_params(record, replace=False, keep_time=True)
         note(
@@ -1575,7 +1604,7 @@ def origin_drift(repo: Repo, add: Callable[..., None]) -> Drift:
             "ls-remote", "origin", f"refs/heads/{repo.branch()}", timeout=30
         )
     except Error as e:
-        add("WARN", "Remote", "cannot reach origin", redact(str(e)))
+        add("WARN", "Reach", "cannot reach origin", redact(str(e)))
         return fallback
     tip = proc.stdout.split()[0] if proc.stdout.strip() else ""
     if not tip:
@@ -2029,6 +2058,11 @@ def build_parser() -> Parser:
         "  pinboard history https://example.com/post\n  pinboard restore https://example.com/post",
     )
     p.add_argument("url", metavar="URL", help="The deleted bookmark's exact URL")
+    p.add_argument(
+        "--title",
+        metavar="TEXT",
+        help="Restore with this title (needed when the recorded one is empty)",
+    )
     p.add_argument(
         "--dry-run", action="store_true", help="Show the request without sending it"
     )

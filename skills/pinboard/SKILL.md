@@ -66,7 +66,8 @@ pinboard suggest https://example.com/post   # live tag suggestions
 - `update` reads the bookmark live, changes only the given fields and keeps its
   date. `--tags` replaces every tag; `--add-tag` and `--remove-tag` change some.
 - `restore` re-adds the last version the mirror recorded, with its original
-  date.
+  date; `--title` supplies a title when the recorded one is empty, which
+  Pinboard refuses.
 - `--dry-run` on `add`, `update`, `restore` and `sync` shows what would be sent
   or changed.
 
@@ -92,9 +93,10 @@ without confirming.
   then differs from the request, `add` reports it as already there.
 - `AGENT_OFFLINE=1` refuses every API call; reads, `history` and `doctor` still
   work.
-- Git writes never force-push. A rejected push is re-applied on the new remote
-  head; a commit that still cannot be pushed is reported (exit 1) and pushed by
-  the next write or sync.
+- Git writes never force-push. A write whose push is rejected is re-applied on
+  the new remote head; a sync's commit is not (its `posts/all` is gated), so it
+  stays unpushed and the next run pushes it. A commit that cannot be pushed is
+  reported (exit 1). Fetches and pushes time out after 2 minutes.
 - Writes refuse while the clone has uncommitted changes.
 
 ## MCP Server
