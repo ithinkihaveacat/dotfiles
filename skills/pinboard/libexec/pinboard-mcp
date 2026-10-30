@@ -282,6 +282,8 @@ class Service:
         self.sync_hours = sync_hours
         self.sync_lock = threading.Lock()
         self.cache_lock = threading.Lock()
+        self.active = 0  # tool calls and scheduled syncs running now
+        self.active_lock = threading.Lock()
         self.cache: tuple[Any, dict[str, Any]] | None = None
 
     def context(self) -> Any:
@@ -475,6 +477,8 @@ class Service:
             if digest:
                 record["search"] = digest
         failed = False
+        with self.active_lock:
+            self.active += 1
         try:
             payload = getattr(self, name)(args)
             record["outcome"] = "ok"
@@ -491,9 +495,16 @@ class Service:
             record["error"] = err.code
             if "retry_after" in err.extra:
                 record["retry_after"] = err.extra["retry_after"]
+        finally:
+            with self.active_lock:
+                self.active -= 1
         record["ms"] = int((time.monotonic() - start) * 1000)
         self.log.emit(record)
         return payload, failed
+
+    def busy(self) -> bool:
+        with self.active_lock:
+            return self.active > 0
 
 
 # --- Scheduled syncs ---------------------------------------------------------
@@ -501,13 +512,17 @@ class Service:
 
 class Scheduler:
     """Syncs when the last sync is older than the interval: at startup, so a
-    restart catches up, then at every tick. Only the HTTP server runs it."""
+    restart catches up, then at every tick. Only the HTTP server runs it.
+
+    The thread is not a daemon: a sync holds the clone's lock and writes Git
+    objects, so shutdown waits for a running one rather than cutting it off
+    and leaving the clone dirty."""
 
     def __init__(self, svc: Service, hours: float):
         self.svc = svc
         self.every = hours * 3600
         self.stopping = threading.Event()
-        self.thread = threading.Thread(target=self.run, name="sync", daemon=True)
+        self.thread = threading.Thread(target=self.run, name="sync")
 
     def due(self) -> bool:
         synced = self.svc.context().synced_at()
@@ -528,7 +543,10 @@ class Scheduler:
         self.thread.start()
 
     def stop(self) -> None:
+        """Stops the loop, waiting for a running sync to finish."""
         self.stopping.set()
+        if self.thread.is_alive():
+            self.thread.join()
 
 
 # --- MCP server --------------------------------------------------------------
@@ -783,6 +801,22 @@ def sdk_server(svc: Service, transport: str, scheduled: bool) -> Any:
     )
 
 
+def exit_when_idle(svc: Service) -> None:
+    """Ends a stdio server after a signal. The SDK reads stdin in a thread
+    that cancellation cannot interrupt, so a clean shutdown waits for stdin
+    to close; instead, exit once no tool call is running, so that no write or
+    commit is cut off."""
+    time.sleep(1)  # A shutdown that can finish cleanly does so first.
+    while svc.busy():
+        time.sleep(0.1)
+    try:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(130)
+
+
 def serve_stdio(svc: Service) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
@@ -797,6 +831,9 @@ def serve_stdio(svc: Service) -> None:
             if not interrupted and task is not None:
                 interrupted = True
                 task.cancel()
+                threading.Thread(
+                    target=exit_when_idle, args=(svc,), name="exit", daemon=True
+                ).start()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop)
@@ -955,12 +992,14 @@ def serve_http(
                 yield
             finally:
                 if scheduler is not None:
-                    scheduler.stop()
+                    await asyncio.to_thread(scheduler.stop)
 
     auth = f"Access {verifier.team}" if verifier else "no authentication"
     log_line(f"serving {MCP_PATH} on http://{host}:{port} ({auth})")
     app = Starlette(routes=mcp_app.routes, lifespan=lifespan)
-    uvicorn.run(
+    # uvicorn.run() would swallow the KeyboardInterrupt that a signal turns
+    # into after a graceful shutdown; Server.run() lets it reach the exit 130.
+    config = uvicorn.Config(
         AccessGate(app, verifier),
         host=host,
         port=port,
@@ -968,6 +1007,7 @@ def serve_http(
         access_log=False,
         server_header=False,
     )
+    uvicorn.Server(config).run()
 
 
 # --- Command line ------------------------------------------------------------
@@ -1011,7 +1051,16 @@ admits the proxy's hostname."""
 
 
 class Parser(argparse.ArgumentParser):
-    """The house help layout, as the other pinboard commands print it."""
+    """The house help layout and usage exit status (1), as the other pinboard
+    commands have them."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     def format_help(self) -> str:
         return (
