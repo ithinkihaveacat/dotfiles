@@ -1,0 +1,908 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+# TAP tests for scripts/pinboard against a fake Pinboard API served from this
+# process, a local bare remote and temporary clones. No network access.
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+BIN = HERE.parent / "scripts" / "pinboard"
+TOKEN = "testuser:0123456789ABCDEF0123"
+YEAR = time.strftime("%Y", time.gmtime())
+
+
+class Fake:
+    """A Pinboard v1 API with knobs for failure cases."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.posts: dict[str, dict[str, str]] = {}
+        self.tick = 0
+        self.update_time = ""
+        self.calls: list[tuple[str, dict[str, str]]] = []
+        self.reset_knobs()
+
+    def reset_knobs(self) -> None:
+        self.all_mode = ""  # empty, malformed, truncated, error
+        self.hidden: set[str] = set()  # omitted from posts/all only
+        self.get_error = False
+        self.rate_limit = 0
+        self.add_mode = ""  # vanish-after (apply, no response), vanish-before
+
+    def put(
+        self, url, title, time_, notes="", tags="", shared="no", toread="no"
+    ) -> None:
+        post = {
+            "href": url,
+            "description": title,
+            "extended": notes,
+            "hash": hashlib.md5(url.encode()).hexdigest(),
+            "time": time_,
+            "shared": shared,
+            "toread": toread,
+            "tags": tags,
+        }
+        post["meta"] = hashlib.md5(
+            json.dumps(post, sort_keys=True).encode()
+        ).hexdigest()
+        self.posts[url] = post
+        self.touch()
+
+    def delete(self, url) -> None:
+        del self.posts[url]
+        self.touch()
+
+    def touch(self) -> None:
+        # Pinboard's update_time has one-second resolution; count instead.
+        self.tick += 1
+        self.update_time = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(1767225600 + self.tick)
+        )
+
+    def count(self, endpoint: str) -> int:
+        return sum(1 for e, _ in self.calls if e == endpoint)
+
+
+FAKE = Fake()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args) -> None:
+        pass
+
+    def send(self, status: int, body) -> None:
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:
+        parts = urllib.parse.urlsplit(self.path)
+        endpoint = parts.path.removeprefix("/v1/")
+        q = {
+            k: v[0]
+            for k, v in urllib.parse.parse_qs(
+                parts.query, keep_blank_values=True
+            ).items()
+        }
+        if q.pop("auth_token", None) != TOKEN:
+            return self.send(401, b"")
+        with FAKE.lock:
+            FAKE.calls.append((endpoint, q))
+            if FAKE.rate_limit:
+                FAKE.rate_limit -= 1
+                return self.send(429, b"")
+            if endpoint == "posts/update":
+                return self.send(200, {"update_time": FAKE.update_time})
+            if endpoint == "posts/all":
+                if FAKE.all_mode == "error":
+                    return self.send(500, b"")
+                if FAKE.all_mode == "empty":
+                    return self.send(200, [])
+                posts = [p for u, p in FAKE.posts.items() if u not in FAKE.hidden]
+                posts.sort(key=lambda p: p["time"], reverse=True)
+                if FAKE.all_mode == "malformed":
+                    posts = [dict(posts[0]), *posts[1:]]
+                    del posts[0]["href"]
+                body = json.dumps(posts).encode()
+                if FAKE.all_mode == "truncated":
+                    body = body[: len(body) // 2]
+                return self.send(200, body)
+            if endpoint == "posts/get":
+                if FAKE.get_error:
+                    return self.send(500, b"")
+                post = FAKE.posts.get(q.get("url", ""))
+                return self.send(
+                    200,
+                    {
+                        "date": FAKE.update_time,
+                        "user": "testuser",
+                        "posts": [post] if post else [],
+                    },
+                )
+            if endpoint == "posts/add":
+                if FAKE.add_mode == "vanish-before":
+                    FAKE.add_mode = ""
+                    return
+                url = q["url"]
+                if url in FAKE.posts and q.get("replace") == "no":
+                    return self.send(200, {"result_code": "item already exists"})
+                stamp = q.get("dt") or time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                )
+                FAKE.put(
+                    url,
+                    q["description"],
+                    stamp,
+                    q.get("extended", ""),
+                    q.get("tags", ""),
+                    q.get("shared", "yes"),
+                    q.get("toread", "no"),
+                )
+                if FAKE.add_mode == "vanish-after":
+                    FAKE.add_mode = ""
+                    return
+                return self.send(200, {"result_code": "done"})
+            if endpoint == "posts/suggest":
+                return self.send(
+                    200, [{"popular": ["web"]}, {"recommended": ["reading", "web"]}]
+                )
+        self.send(404, b"")
+
+
+SERVER = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+threading.Thread(target=SERVER.serve_forever, daemon=True).start()
+API = f"http://127.0.0.1:{SERVER.server_address[1]}/v1/"
+
+TMP = Path(tempfile.mkdtemp())
+REMOTE = TMP / "remote.git"
+A = TMP / "a"
+B = TMP / "b"
+C = TMP / "c"
+
+ENV = {
+    k: v
+    for k, v in os.environ.items()
+    if not k.startswith(("PINBOARD_", "GIT_"))
+    and k not in ("AGENT_OFFLINE", "NO_COLOR", "FORCE_COLOR")
+}
+ENV.update(
+    PINBOARD_API_URL=API,
+    PINBOARD_API_TOKEN=TOKEN,
+    PINBOARD_TIME_SCALE="0.0001",
+    GIT_CONFIG_GLOBAL=str(TMP / "gitconfig"),
+    GIT_CONFIG_NOSYSTEM="1",
+    GIT_AUTHOR_NAME="Pinboard Test",
+    GIT_AUTHOR_EMAIL="pinboard@example.com",
+    GIT_COMMITTER_NAME="Pinboard Test",
+    GIT_COMMITTER_EMAIL="pinboard@example.com",
+)
+(TMP / "gitconfig").write_text(
+    "[init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n"
+)
+
+n = 0
+failed = 0
+
+
+def ok(cond: bool, desc: str, diag: str = "") -> None:
+    global n, failed
+    n += 1
+    print(f"{'ok' if cond else 'not ok'} {n} - {desc}")
+    if not cond:
+        failed += 1
+        for line in diag.splitlines()[-15:]:
+            print(f"# {line}")
+
+
+def pb(
+    repo: Path | None, *args: str, env: dict | None = None
+) -> subprocess.CompletedProcess[str]:
+    cmd = [str(BIN)] + (["--repo", str(repo)] if repo else []) + list(args)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env={**ENV, **(env or {})},
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def git(*args: str, cwd: Path | None = None) -> str:
+    proc = subprocess.run(
+        ["git", *args], capture_output=True, text=True, env=ENV, cwd=cwd, check=False
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr)
+    return proc.stdout.strip()
+
+
+def diag(proc: subprocess.CompletedProcess[str]) -> str:
+    return f"exit {proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+
+
+def lines(repo: Path) -> list[dict]:
+    out = []
+    for path in sorted((repo / "bookmarks").glob("*.jsonl")):
+        out += [json.loads(line) for line in path.read_text().splitlines()]
+    return out
+
+
+def head(repo: Path) -> str:
+    return git("-C", str(repo), "rev-parse", "HEAD")
+
+
+def remote_head() -> str:
+    return git("--git-dir", str(REMOTE), "rev-parse", "main")
+
+
+def commits(repo: Path) -> int:
+    return int(git("-C", str(repo), "rev-list", "--count", "HEAD"))
+
+
+def seed() -> None:
+    topics = ["rust", "python", "sqlite"]
+    for i in range(30):
+        day = time.strftime("%Y-%m-%dT10:00:00Z", time.gmtime(1709280000 + i * 86400))
+        notes = ("Lemon tart notes. " * 20) if i == 0 else f"notes {i}"
+        FAKE.put(
+            f"https://example.com/post/{i}",
+            f"Post {i} about {topics[i % 3].title()}",
+            day,
+            notes,
+            f"{topics[i % 3]} common",
+        )
+    FAKE.put(
+        "https://example.com/new-year-eve",
+        "Eve",
+        "2025-12-31T23:59:59Z",
+        tags="boundary",
+    )
+    FAKE.put(
+        "https://example.com/new-year",
+        "New year",
+        "2026-01-01T00:00:00Z",
+        tags="boundary",
+    )
+    FAKE.put(
+        "https://example.com/a?x=1&y=2#frag",
+        "Ampersand and fragment",
+        "2024-06-01T00:00:00Z",
+    )
+    FAKE.put("https://example.com/with space/page", "Spaces", "2024-06-02T00:00:00Z")
+    FAKE.put(
+        "https://example.com/café/ü?q=日本",
+        "Non-ASCII",
+        "2024-06-03T00:00:00Z",
+        tags="unicode",
+    )
+
+
+def main() -> None:
+    seed()
+    total = len(FAKE.posts)
+    git("init", "-q", "--bare", "-b", "main", str(REMOTE))
+    git("clone", "-q", str(REMOTE), str(A))
+
+    # --- Help and doctor ---
+    p = pb(None, "--help")
+    ok(
+        p.returncode == 0 and p.stdout.startswith("Usage: pinboard"),
+        "--help prints usage",
+        diag(p),
+    )
+    p = pb(None)
+    ok(
+        p.returncode == 0 and "Commands:" in p.stdout,
+        "bare invocation prints help",
+        diag(p),
+    )
+    p = pb(TMP / "missing", "doctor")
+    ok(
+        p.returncode == 1 and "[FAIL]  Clone" in p.stdout,
+        "doctor fails without a clone",
+        diag(p),
+    )
+    p = pb(TMP / "missing", "search", "x")
+    ok(p.returncode == 2, "search exits 2 on an error", diag(p))
+
+    # --- First sync ---
+    p = pb(A, "sync")
+    recs = lines(A)
+    ok(
+        p.returncode == 0 and len(recs) == total,
+        f"first sync imports all {total} bookmarks",
+        diag(p),
+    )
+    msg = git("-C", str(A), "log", "-1", "--format=%s%n%b")
+    ok(
+        msg.startswith(f"sync: +{total} ~0 -0") and "Initial import" in msg,
+        "first sync commit message",
+        msg,
+    )
+    ok(remote_head() == head(A), "first sync creates and pushes main")
+    eve = (A / "bookmarks" / "2025.jsonl").read_text()
+    new = (A / "bookmarks" / "2026.jsonl").read_text()
+    ok(
+        "new-year-eve" in eve
+        and '"https://example.com/new-year"' in new
+        and "new-year-eve" not in new,
+        "year boundary",
+    )
+    text = (A / "bookmarks" / "2024.jsonl").read_text()
+    ok(
+        '"https://example.com/café/ü?q=日本"' in text
+        and '"https://example.com/a?x=1&y=2#frag"' in text
+        and '"https://example.com/with space/page"' in text,
+        "URLs with &, #, spaces and non-ASCII kept verbatim",
+    )
+    first = json.loads(text.splitlines()[0])
+    ok(
+        list(first)
+        == [
+            "url",
+            "hash",
+            "title",
+            "notes",
+            "tags",
+            "time",
+            "shared",
+            "toread",
+            "meta",
+        ],
+        "fixed key order",
+    )
+    ok(
+        json.loads((A / "state.json").read_text())
+        == {"format": 1, "update_time": FAKE.update_time},
+        "state.json",
+    )
+    ok(
+        (A / "README.md").exists() and (A / ".gitattributes").exists(),
+        "README and .gitattributes written",
+    )
+
+    # --- No-op syncs ---
+    before, alls = commits(A), FAKE.count("posts/all")
+    p = pb(A, "sync")
+    ok(
+        p.returncode == 0 and commits(A) == before and FAKE.count("posts/all") == alls,
+        "unchanged sync skips posts/all",
+        diag(p),
+    )
+    p = pb(A, "sync", "--full")
+    ok(
+        p.returncode == 0
+        and commits(A) == before
+        and FAKE.count("posts/all") == alls + 1,
+        "full sync with no change commits nothing",
+        diag(p),
+    )
+
+    # --- Reads ---
+    calls, h = len(FAKE.calls), head(A)
+    p = pb(A, "search", "post", "RUST")
+    ok(
+        p.returncode == 0
+        and p.stdout.count("example.com/post/") == 10
+        and "Python" not in p.stdout,
+        "search ANDs terms case-insensitively",
+        diag(p),
+    )
+    p = pb(A, "search", "zzznomatch")
+    ok(p.returncode == 1 and p.stdout == "", "search exits 1 on no match", diag(p))
+    p = pb(A, "search", "--limit", "0", "x")
+    ok(p.returncode == 2, "search exits 2 on a usage error", diag(p))
+    p = pb(A, "search", "--json", "--limit", "5", "post")
+    page1 = json.loads(p.stdout)
+    times = [r["time"] for r in page1["bookmarks"]]
+    ok(
+        len(times) == 5
+        and times == sorted(times, reverse=True)
+        and page1["next_cursor"],
+        "search pages newest first",
+        diag(p),
+    )
+    p = pb(
+        A, "search", "--json", "--limit", "5", "--cursor", page1["next_cursor"], "post"
+    )
+    page2 = json.loads(p.stdout)
+    urls1 = {r["url"] for r in page1["bookmarks"]}
+    ok(
+        not urls1 & {r["url"] for r in page2["bookmarks"]}
+        and page2["bookmarks"][0]["time"] <= times[-1],
+        "cursor continues without overlap",
+        diag(p),
+    )
+    p = pb(A, "search", "--json", "lemon")
+    hit = json.loads(p.stdout)["bookmarks"][0]
+    ok(
+        hit.get("notes_truncated")
+        and len(hit["notes"]) <= 201
+        and page1["mirror"]["synced"],
+        "search truncates notes and reports freshness",
+        diag(p),
+    )
+    p = pb(A, "get", "--json", "https://example.com/post/0")
+    ok(
+        len(json.loads(p.stdout)["bookmark"]["notes"]) > 300,
+        "get returns notes in full",
+        diag(p),
+    )
+    p = pb(A, "get", "https://example.com/café/ü?q=日本")
+    ok(
+        p.returncode == 0 and "Non-ASCII" in p.stdout and "mirror synced" in p.stderr,
+        "get finds a non-ASCII URL",
+        diag(p),
+    )
+    p = pb(A, "get", "https://example.com/nope")
+    ok(p.returncode == 1, "get exits 1 when absent", diag(p))
+    p = pb(A, "search", "--tag", "boundary")
+    ok(
+        p.returncode == 0
+        and "Eve" in p.stdout
+        and "New year" in p.stdout
+        and "Post" not in p.stdout,
+        "search --tag",
+        diag(p),
+    )
+    p = pb(A, "tags", "--json")
+    tags = {t["tag"]: t["count"] for t in json.loads(p.stdout)["tags"]}
+    ok(tags.get("common") == 30 and tags.get("rust") == 10, "tags counts", diag(p))
+    ok(
+        len(FAKE.calls) == calls
+        and head(A) == h
+        and not git("-C", str(A), "status", "--porcelain"),
+        "reads make no API call and no change",
+    )
+
+    # --- Deletion guard ---
+    FAKE.delete("https://example.com/post/29")
+    p = pb(A, "sync")
+    ok(
+        p.returncode == 0
+        and len(lines(A)) == total - 1
+        and git("-C", str(A), "log", "-1", "--format=%s") == "sync: +0 ~0 -1",
+        "one confirmed deletion is applied",
+        diag(p),
+    )
+    FAKE.hidden = {"https://example.com/post/28"}
+    p = pb(A, "sync", "--full")
+    ok(
+        p.returncode == 0
+        and "kept https://example.com/post/28" in p.stderr
+        and len(lines(A)) == total - 1,
+        "a bookmark posts/get still finds is kept",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+    gets = FAKE.count("posts/get")
+    for i in range(10, 20):
+        FAKE.delete(f"https://example.com/post/{i}")
+    p = pb(A, "sync")
+    ok(
+        p.returncode == 0
+        and len(lines(A)) == total - 11
+        and FAKE.count("posts/get") == gets + 10,
+        "ten deletions, each confirmed",
+        diag(p),
+    )
+
+    def refused(desc: str, *args: str) -> None:
+        h, state = head(A), (A / "state.json").read_text()
+        p = pb(A, "sync", "--full", *args)
+        ok(
+            p.returncode == 1
+            and head(A) == h
+            and (A / "state.json").read_text() == state
+            and not git("-C", str(A), "status", "--porcelain"),
+            desc,
+            diag(p),
+        )
+
+    FAKE.hidden = {f"https://example.com/post/{i}" for i in range(10)} | {
+        "https://example.com/new-year"
+    }
+    refused("eleven missing: refused, nothing changed")
+    p = pb(A, "doctor")
+    ok(
+        p.returncode == 1 and "[WARN]  Guard" in p.stdout,
+        "doctor reports the refusal",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+    for mode in ("empty", "malformed", "truncated", "error"):
+        FAKE.all_mode = mode
+        refused(f"{mode} posts/all response refused")
+    FAKE.reset_knobs()
+    FAKE.hidden = {"https://example.com/post/1"}
+    FAKE.get_error = True
+    refused("a failed confirmation aborts the sync")
+    FAKE.reset_knobs()
+    FAKE.hidden = {f"https://example.com/post/{i}" for i in range(10)} | {
+        "https://example.com/new-year"
+    }
+    h = head(A)
+    p = pb(A, "sync", "--full", "--dry-run")
+    ok(
+        p.returncode == 1 and head(A) == h,
+        "dry run is refused by the guard too",
+        diag(p),
+    )
+    p = pb(A, "sync", "--full", "--force")
+    ok(
+        p.returncode == 0 and len(lines(A)) == total - 22 and head(A) != h,
+        "--force deletes eleven",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+    p = pb(A, "sync", "--full")
+    ok(
+        p.returncode == 0 and len(lines(A)) == total - 11,
+        "hidden bookmarks return on the next sync",
+        diag(p),
+    )
+    FAKE.put("https://example.com/fresh", "Fresh", f"{YEAR}-02-02T00:00:00Z")
+    h = head(A)
+    p = pb(A, "sync", "--dry-run")
+    ok(
+        p.returncode == 0 and "+1 ~0 -0" in p.stderr and head(A) == h,
+        "sync --dry-run changes nothing",
+        diag(p),
+    )
+    p = pb(A, "sync")
+    ok(
+        p.returncode == 0 and head(A) == remote_head() and head(A) != h,
+        "sync picks up an addition",
+        diag(p),
+    )
+    p = pb(A, "doctor")
+    ok(
+        p.returncode == 0 and "[FAIL]" not in p.stdout and "[WARN]" not in p.stdout,
+        "doctor passes after a good sync",
+        diag(p),
+    )
+
+    # --- Writes ---
+    calls = len(FAKE.calls)
+    p = pb(A, "add", "https://example.org/x", "--title", "X", "--dry-run")
+    ok(
+        p.returncode == 0 and len(FAKE.calls) == calls and "replace" in p.stderr,
+        "add --dry-run calls nothing",
+        diag(p),
+    )
+    p = pb(
+        A,
+        "add",
+        "https://example.org/new page?a=1&b=2",
+        "--title",
+        "New",
+        "--tags",
+        "one,two three",
+    )
+    params = [q for e, q in FAKE.calls if e == "posts/add"][-1]
+    ok(
+        p.returncode == 0
+        and params["replace"] == "no"
+        and params["shared"] == "no"
+        and params["tags"] == "one two three",
+        "add sends replace=no, shared=no",
+        diag(p),
+    )
+    rec = {r["url"]: r for r in lines(A)}.get("https://example.org/new page?a=1&b=2")
+    ok(
+        rec is not None and rec["meta"] and head(A) == remote_head(),
+        "add is read back, committed and pushed",
+        diag(p),
+    )
+    ok(
+        git("-C", str(A), "log", "-1", "--format=%s") == "add: example.org",
+        "add commit subject",
+    )
+    p = pb(A, "add", "https://example.com/post/1", "--title", "Overwrite?")
+    ok(
+        p.returncode == 0
+        and "already in Pinboard" in p.stderr
+        and FAKE.posts["https://example.com/post/1"]["description"]
+        == "Post 1 about Python",
+        "add never replaces",
+        diag(p),
+    )
+    p = pb(
+        A,
+        "update",
+        "https://example.com/post/2",
+        "--add-tag",
+        "later",
+        "--remove-tag",
+        "common",
+        "--public",
+    )
+    post = FAKE.posts["https://example.com/post/2"]
+    ok(
+        p.returncode == 0
+        and post["tags"] == "sqlite later"
+        and post["shared"] == "yes"
+        and post["time"].startswith("2024-03-03"),
+        "update changes tags and flags, keeps dt",
+        diag(p),
+    )
+    p = pb(
+        A,
+        "update",
+        "https://example.com/post/2",
+        "--tags",
+        "a b",
+        "--notes",
+        "new notes",
+    )
+    rec = {r["url"]: r for r in lines(A)}["https://example.com/post/2"]
+    ok(
+        p.returncode == 0 and rec["tags"] == ["a", "b"] and rec["notes"] == "new notes",
+        "update --tags replaces, mirror patched",
+        diag(p),
+    )
+    h = head(A)
+    p = pb(A, "sync")
+    ok(p.returncode == 0 and head(A) == h, "a sync after writes is a no-op", diag(p))
+    p = pb(A, "update", "https://example.com/nope", "--add-tag", "x")
+    ok(
+        p.returncode == 1 and "no bookmark" in p.stderr,
+        "update of a missing bookmark fails",
+        diag(p),
+    )
+    calls = len(FAKE.calls)
+    p = pb(A, "add", "https://example.org/y", "--title", "Y", "--tags", "x" * 256)
+    p2 = pb(A, "add", "https://example.org/y", "--title", "T" * 256)
+    ok(
+        p.returncode == 1 and p2.returncode == 1 and len(FAKE.calls) == calls,
+        "documented limits are validated before any call",
+        diag(p),
+    )
+    FAKE.add_mode = "vanish-after"
+    p = pb(A, "add", "https://example.org/timeout", "--title", "Timeout")
+    ok(
+        p.returncode == 0
+        and "https://example.org/timeout" in {r["url"] for r in lines(A)},
+        "add re-reads after a lost response",
+        diag(p),
+    )
+    FAKE.add_mode = "vanish-before"
+    adds = FAKE.count("posts/add")
+    p = pb(A, "update", "https://example.com/post/3", "--title", "Changed")
+    ok(
+        p.returncode == 1
+        and "earlier version" in p.stderr
+        and FAKE.count("posts/add") == adds + 1,
+        "update is not retried blindly after a lost request",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+
+    # --- Rate limits, offline, redaction ---
+    FAKE.rate_limit = 2
+    p = pb(A, "suggest", "https://example.com/post/4")
+    ok(
+        p.returncode == 0
+        and p.stderr.count("HTTP 429") == 2
+        and "recommended: reading web" in p.stdout,
+        "429 backs off and retries",
+        diag(p),
+    )
+    FAKE.rate_limit = 10
+    p = pb(A, "suggest", "https://example.com/post/4")
+    ok(
+        p.returncode == 1 and "after 5 attempts" in p.stderr,
+        "429 gives up after 5 attempts",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+    calls = len(FAKE.calls)
+    p = pb(A, "sync", env={"AGENT_OFFLINE": "1"})
+    p2 = pb(A, "search", "post", env={"AGENT_OFFLINE": "1"})
+    ok(
+        p.returncode == 1
+        and "AGENT_OFFLINE" in p.stderr
+        and p2.returncode == 0
+        and len(FAKE.calls) == calls,
+        "AGENT_OFFLINE refuses API calls; reads still work",
+        diag(p),
+    )
+    p2 = pb(A, "sync", "--full", env={"PINBOARD_TIME_SCALE": "1"})
+    ok(
+        p2.returncode == 1 and "next allowed" in p2.stderr,
+        "posts/all is gated to once every 5 minutes",
+        diag(p2),
+    )
+    p = pb(
+        A,
+        "suggest",
+        "https://example.com/x",
+        env={"PINBOARD_API_URL": "http://127.0.0.1:9/v1/"},
+    )
+    ok(
+        p.returncode == 1
+        and "no response" in p.stderr
+        and TOKEN not in p.stderr
+        and TOKEN.split(":")[1] not in p.stderr,
+        "network errors carry no token",
+        diag(p),
+    )
+    p = pb(
+        A,
+        "suggest",
+        "https://example.com/x",
+        env={"PINBOARD_API_TOKEN": "testuser:WRONGWRONGWRONG"},
+    )
+    ok(
+        p.returncode == 1 and "401" in p.stderr and "WRONGWRONG" not in p.stderr,
+        "a rejected token is reported without echoing it",
+        diag(p),
+    )
+
+    # --- History and restore ---
+    gone = "https://example.com/café/ü?q=日本"
+    FAKE.delete(gone)
+    pb(A, "sync")
+    p = pb(A, "history", "--json", gone)
+    versions = json.loads(p.stdout)
+    ok(
+        p.returncode == 0 and [v["status"] for v in versions] == ["deleted", "added"],
+        "history lists the deletion and the import",
+        diag(p),
+    )
+    p = pb(A, "restore", gone, "--dry-run")
+    ok(
+        p.returncode == 0 and gone not in FAKE.posts,
+        "restore --dry-run sends nothing",
+        diag(p),
+    )
+    p = pb(A, "restore", gone)
+    restored = FAKE.posts.get(gone, {})
+    ok(
+        p.returncode == 0
+        and restored.get("time") == "2024-06-03T00:00:00Z"
+        and restored.get("tags") == "unicode",
+        "restore re-adds with the original date",
+        diag(p),
+    )
+    ok(
+        gone in {r["url"] for r in lines(A)}
+        and git("-C", str(A), "log", "-1", "--format=%s") == "restore: example.com",
+        "restore patches the mirror",
+    )
+    p = pb(A, "restore", gone)
+    ok(
+        p.returncode == 1 and "nothing to restore" in p.stderr,
+        "restore refuses a bookmark the mirror has",
+        diag(p),
+    )
+
+    # --- Concurrency against the bare remote ---
+    git("clone", "-q", str(REMOTE), str(B))
+    git("clone", "-q", str(REMOTE), str(C))
+    procs = [
+        subprocess.Popen(
+            [str(BIN), "--repo", str(repo), "add", url, "--title", "Concurrent"],
+            env=ENV,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for repo, url in ((B, "https://example.net/b"), (C, "https://example.net/c"))
+    ]
+    results = [(*proc.communicate(), proc.returncode) for proc in procs]
+    tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
+    ok(
+        all(r[2] == 0 for r in results)
+        and "example.net/b" in tree
+        and "example.net/c" in tree,
+        "two concurrent adds both land",
+        "\n".join(r[1] for r in results),
+    )
+
+    def hook(repo: Path, body: str) -> Path:
+        path = repo / ".git" / "hooks" / "pre-push"
+        path.write_text(
+            "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n" + body
+        )
+        path.chmod(0o755)
+        return path
+
+    pb(B, "sync")
+    pb(C, "sync")
+    marker = TMP / "once-c"
+    h = hook(
+        B,
+        f'[ -e "{marker}" ] || {{ touch "{marker}"; "{BIN}" --repo "{C}" add https://example.net/race --title Race >/dev/null 2>&1; }}\n',
+    )
+    p = pb(B, "add", "https://example.net/b2", "--title", "B2")
+    tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
+    ok(
+        p.returncode == 0
+        and "push rejected" in p.stderr
+        and "example.net/race" in tree
+        and "example.net/b2" in tree,
+        "a rejected push is re-applied on the new head",
+        diag(p),
+    )
+    marker2 = TMP / "once-sync"
+    hook(
+        B,
+        f'[ -e "{marker2}" ] || {{ touch "{marker2}"; "{BIN}" --repo "{C}" sync --full >/dev/null 2>&1; }}\n',
+    )
+    p = pb(B, "add", "https://example.net/b3", "--title", "B3")
+    tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
+    log = git("--git-dir", str(REMOTE), "log", "-3", "--format=%s", "main")
+    ok(
+        p.returncode == 0
+        and tree.count("example.net/b3") == 1
+        and log.startswith("sync:"),
+        "an add racing a sync converges without a second commit",
+        diag(p) + "\n" + log,
+    )
+    hook(B, "exit 1\n")
+    p = pb(B, "add", "https://example.net/b4", "--title", "B4")
+    ok(
+        p.returncode == 1 and "not pushed" in p.stderr,
+        "an unpushable commit is reported",
+        diag(p),
+    )
+    p = pb(B, "doctor")
+    ok(
+        p.returncode == 1 and "[WARN]  Push" in p.stdout,
+        "doctor reports unpushed commits",
+        diag(p),
+    )
+    h.unlink()
+    p = pb(B, "add", "https://example.net/b5", "--title", "B5")
+    tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
+    ok(
+        p.returncode == 0 and "example.net/b4" in tree and "example.net/b5" in tree,
+        "the next write pushes the earlier commit",
+        diag(p),
+    )
+    ok(
+        git("--git-dir", str(REMOTE), "rev-list", "--merges", "--count", "main") == "0",
+        "remote history is linear (no merges, nothing forced)",
+    )
+    (B / "bookmarks" / f"{YEAR}.jsonl").write_text("{}\n")
+    p = pb(B, "add", "https://example.net/b6", "--title", "B6")
+    p2 = pb(B, "doctor")
+    ok(
+        p.returncode == 1
+        and "uncommitted changes" in p.stderr
+        and p2.returncode == 1
+        and "[WARN]  Working tree" in p2.stdout,
+        "a dirty tree blocks writes",
+        diag(p),
+    )
+
+    print(f"1..{n}")
+
+
+try:
+    main()
+finally:
+    SERVER.shutdown()
+    shutil.rmtree(TMP, ignore_errors=True)
+sys.exit(1 if failed else 0)

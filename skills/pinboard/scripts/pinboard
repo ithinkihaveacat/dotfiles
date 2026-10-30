@@ -1,0 +1,1941 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+# Tests: tests/test-pinboard
+
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import datetime
+import fcntl
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+PROG = "pinboard"
+FORMAT = 1
+DEFAULT_API_URL = "https://api.pinboard.in/v1/"
+DEFAULT_REPO = "~/.pinboard"
+TOKEN_ENV = "PINBOARD_API_TOKEN"
+
+# A sync deletes at most this many bookmarks without --force, each confirmed
+# absent with posts/get first.
+DELETE_LIMIT = 10
+
+# Minimum seconds between calls: "any" applies to every endpoint.
+GATES = {"any": 3.0, "posts/recent": 60.0, "posts/all": 300.0}
+BACKOFF_START = 6.0
+BACKOFF_ATTEMPTS = 5
+BACKOFF_TOTAL = 300.0
+PUSH_ATTEMPTS = 3
+
+KEYS = ("url", "hash", "title", "notes", "tags", "time", "shared", "toread", "meta")
+MAX_TAGS = 100
+MAX_TAG = 255
+MAX_TITLE = 255
+MAX_NOTES = 65536
+NOTES_PREVIEW = 200
+STALE_AFTER = 48 * 3600
+TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+
+MIRROR_README = """\
+# Pinboard mirror
+
+A mirror of a Pinboard account, written by the `pinboard` CLI. Pinboard is
+authoritative: nothing in this repository is ever sent back to Pinboard, and the
+next sync replaces any hand edits.
+
+- `bookmarks/YYYY.jsonl`: one bookmark per line, filed by year of creation
+  (UTC), oldest first.
+- `state.json`: the mirror format, and Pinboard's `update_time` at the last full
+  sync.
+"""
+MIRROR_GITATTRIBUTES = "* text=auto eol=lf\n"
+
+_command = ""
+_secrets: list[str] = []
+
+
+class Error(Exception):
+    """A failure reported as `pinboard COMMAND: message`."""
+
+    def __init__(self, message: str, code: int = 1):
+        super().__init__(message)
+        self.code = code
+
+
+class NetworkError(Error):
+    """A request that got no complete HTTP response."""
+
+
+class GateError(Error):
+    def __init__(self, endpoint: str, at: float):
+        wait = max(0, int(at - time.time()) + 1)
+        super().__init__(
+            f"{endpoint} is limited to once every {int(GATES[endpoint] // 60)} min; "
+            f"next allowed at {iso(at)} (in {wait}s)"
+        )
+        self.retry_after = wait
+
+
+class GuardError(Error):
+    """A sync the deletion guard stopped; nothing was committed."""
+
+
+# --- Output ------------------------------------------------------------------
+
+
+def redact(text: str) -> str:
+    for secret in _secrets:
+        text = text.replace(secret, "REDACTED")
+    return text
+
+
+def note(message: str) -> None:
+    print(redact(f"{PROG}: {message}"), file=sys.stderr)
+
+
+def warn(message: str) -> None:
+    prefix = f"{PROG} {_command}" if _command else PROG
+    print(redact(f"{prefix}: warning: {message}"), file=sys.stderr)
+
+
+def env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def time_scale() -> float:
+    # Test hook: scales every wait (gates and backoff); never set it otherwise.
+    try:
+        return max(0.0, float(os.environ.get("PINBOARD_TIME_SCALE", "1")))
+    except ValueError:
+        return 1.0
+
+
+def iso(ts: float) -> str:
+    return datetime.datetime.fromtimestamp(ts, datetime.UTC).strftime(TIME_FORMAT)
+
+
+def parse_iso(text: str) -> float:
+    return (
+        datetime.datetime.strptime(text, TIME_FORMAT)
+        .replace(tzinfo=datetime.UTC)
+        .timestamp()
+    )
+
+
+def ago(ts: float) -> str:
+    secs = max(0, int(time.time() - ts))
+    if secs < 120:
+        return f"{secs} s ago"
+    if secs < 7200:
+        return f"{secs // 60} min ago"
+    if secs < 172800:
+        return f"{secs // 3600} h ago"
+    return f"{secs // 86400} d ago"
+
+
+def host_of(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).hostname or url
+    except ValueError:
+        return url
+
+
+def subject(verb: str, url: str) -> str:
+    text = f"{verb}: {host_of(url)}"
+    return text if len(text) <= 50 else text[:49] + "…"
+
+
+# --- Records -----------------------------------------------------------------
+
+
+def split_tags(text: str) -> list[str]:
+    tags: list[str] = []
+    for tag in re.split(r"[\s,]+", text):
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def post_problem(post: Any) -> str | None:
+    if not isinstance(post, dict):
+        return "not an object"
+    for key in (
+        "href",
+        "description",
+        "extended",
+        "hash",
+        "time",
+        "tags",
+        "shared",
+        "toread",
+    ):
+        if not isinstance(post.get(key), str):
+            return f"missing or non-string {key!r}"
+    if not post["href"]:
+        return "empty href"
+    for key in ("shared", "toread"):
+        if post[key] not in ("yes", "no"):
+            return f"{key!r} is {post[key]!r}"
+    if not isinstance(post.get("meta", ""), str):
+        return "non-string 'meta'"
+    try:
+        parse_iso(post["time"])
+    except ValueError:
+        return f"bad time {post['time']!r}"
+    return None
+
+
+def record_from_api(post: Any) -> dict[str, Any]:
+    """Converts a Pinboard post to a mirror record, or raises ValueError."""
+    problem = post_problem(post)
+    if problem:
+        raise ValueError(problem)
+    stamp = iso(parse_iso(post["time"]))
+    return {
+        "url": post["href"],
+        "hash": post["hash"],
+        "title": post["description"],
+        "notes": post["extended"],
+        "tags": post["tags"].split(),
+        "time": stamp,
+        "shared": post["shared"] == "yes",
+        "toread": post["toread"] == "yes",
+        "meta": post.get("meta", ""),
+    }
+
+
+def dump(record: dict[str, Any]) -> str:
+    return json.dumps({k: record[k] for k in KEYS}, ensure_ascii=False)
+
+
+def url_prefix(url: str) -> str:
+    """The start of a record's line, as written by dump()."""
+    return '{"url": ' + json.dumps(url, ensure_ascii=False) + ", "
+
+
+def check_record(record: Any) -> str | None:
+    if not isinstance(record, dict) or list(record) != list(KEYS):
+        return "keys differ from " + ", ".join(KEYS)
+    types = {"tags": list, "shared": bool, "toread": bool}
+    for key in KEYS:
+        if not isinstance(record[key], types.get(key, str)):
+            return f"{key!r} has the wrong type"
+    try:
+        parse_iso(record["time"])
+    except ValueError:
+        return f"bad time {record['time']!r}"
+    return None
+
+
+def validate_fields(title: str, notes: str, tags: list[str]) -> None:
+    if not title.strip():
+        raise Error("the title is empty")
+    if len(title) > MAX_TITLE:
+        raise Error(
+            f"the title is {len(title)} characters; Pinboard allows {MAX_TITLE}"
+        )
+    if len(notes) > MAX_NOTES:
+        raise Error(
+            f"the notes are {len(notes)} characters; Pinboard allows {MAX_NOTES}"
+        )
+    if len(tags) > MAX_TAGS:
+        raise Error(f"{len(tags)} tags; Pinboard allows {MAX_TAGS}")
+    for tag in tags:
+        if len(tag) > MAX_TAG or re.search(r"[\s,]", tag):
+            raise Error(
+                f"bad tag {tag!r}: at most {MAX_TAG} characters, no spaces or commas"
+            )
+
+
+def post_params(
+    record: dict[str, Any], replace: bool, keep_time: bool
+) -> dict[str, str]:
+    params = {
+        "url": record["url"],
+        "description": record["title"],
+        "extended": record["notes"],
+        "tags": " ".join(record["tags"]),
+        "shared": "yes" if record["shared"] else "no",
+        "toread": "yes" if record["toread"] else "no",
+        "replace": "yes" if replace else "no",
+    }
+    if keep_time:
+        params["dt"] = record["time"]
+    return params
+
+
+def same_content(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return all(a[k] == b[k] for k in ("title", "notes", "tags", "shared", "toread"))
+
+
+# --- Local, uncommitted state ------------------------------------------------
+
+
+class LocalState:
+    """Gate times, the last sync check and the last guard refusal, per clone."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.data: dict[str, Any] = {}
+        if path is not None:
+            try:
+                loaded = json.loads(path.read_text())
+                if isinstance(loaded, dict):
+                    self.data = loaded
+            except (OSError, ValueError):
+                pass
+
+    def gate(self, name: str) -> float:
+        value = self.data.get("gates", {}).get(name, 0)
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
+    def set_gate(self, name: str, ts: float) -> None:
+        self.data.setdefault("gates", {})[name] = ts
+
+    def next_allowed(self, endpoint: str) -> float:
+        return self.gate(endpoint) + GATES[endpoint] * time_scale()
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True) + "\n")
+            os.replace(tmp, self.path)
+        except OSError as e:
+            warn(f"cannot save {self.path}: {e.strerror}")
+
+
+# --- API client --------------------------------------------------------------
+
+
+class Api:
+    def __init__(self, token: str, base: str, local: LocalState):
+        self.token = token
+        self.base = base if base.endswith("/") else base + "/"
+        self.local = local
+
+    def require_online(self) -> None:
+        if env_true("AGENT_OFFLINE"):
+            raise Error("needs the Pinboard API, and AGENT_OFFLINE is set")
+        if not self.token:
+            raise Error(
+                f"{TOKEN_ENV} is not set (find it at https://pinboard.in/settings/password)"
+            )
+
+    def _gate(self, endpoint: str) -> None:
+        scale = time_scale()
+        wait = self.local.gate("any") + GATES["any"] * scale - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        if endpoint in GATES and self.local.next_allowed(endpoint) > time.time():
+            raise GateError(endpoint, self.local.next_allowed(endpoint))
+        now = time.time()
+        self.local.set_gate("any", now)
+        if endpoint in GATES:
+            self.local.set_gate(endpoint, now)
+        self.local.save()
+
+    def _request(
+        self, endpoint: str, params: dict[str, str], timeout: float
+    ) -> tuple[int, bytes]:
+        query = urllib.parse.urlencode(
+            {**params, "auth_token": self.token, "format": "json"},
+            quote_via=urllib.parse.quote,
+        )
+        req = urllib.request.Request(
+            f"{self.base}{endpoint}?{query}",
+            headers={"User-Agent": "pinboard-mirror/1"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, b""
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            reason = getattr(e, "reason", None) or e
+            # Never carry the exception itself: its text may include the URL.
+            raise NetworkError(redact(f"{endpoint}: no response ({reason})")) from None
+        except Exception as e:  # http.client.IncompleteRead and friends
+            raise NetworkError(
+                redact(f"{endpoint}: incomplete response ({type(e).__name__})")
+            ) from None
+
+    def call(
+        self, endpoint: str, params: dict[str, str] | None = None, timeout: float = 30
+    ) -> Any:
+        self.require_online()
+        attempts, waited = 0, 0.0
+        delay = BACKOFF_START * time_scale()
+        while True:
+            self._gate(endpoint)
+            status, body = self._request(endpoint, params or {}, timeout)
+            if status == 429:
+                attempts += 1
+                if (
+                    attempts >= BACKOFF_ATTEMPTS
+                    or waited + delay > BACKOFF_TOTAL * time_scale()
+                ):
+                    raise Error(
+                        f"{endpoint}: rate limited (HTTP 429) after {attempts} attempts"
+                    )
+                note(f"{endpoint}: rate limited (HTTP 429); waiting {delay:.0f}s")
+                time.sleep(delay)
+                waited += delay
+                delay *= 2
+                continue
+            if status == 401:
+                raise Error(f"{endpoint}: token rejected (HTTP 401); check {TOKEN_ENV}")
+            if status != 200:
+                raise Error(f"{endpoint}: HTTP {status}")
+            try:
+                return json.loads(body)
+            except ValueError:
+                raise Error(f"{endpoint}: the response is not JSON") from None
+
+    def get(self, url: str) -> dict[str, Any] | None:
+        """The live bookmark for URL, with its meta signature, or None."""
+        data = self.call("posts/get", {"url": url, "meta": "yes"})
+        posts = data.get("posts") if isinstance(data, dict) else None
+        if not isinstance(posts, list):
+            raise Error("posts/get: unexpected response")
+        try:
+            records = [record_from_api(p) for p in posts]
+        except ValueError as e:
+            raise Error(f"posts/get: malformed bookmark ({e})") from None
+        for record in records:
+            if record["url"] == url:
+                return record
+        return records[0] if len(records) == 1 else None
+
+    def add(self, params: dict[str, str]) -> str:
+        data = self.call("posts/add", params)
+        code = data.get("result_code") if isinstance(data, dict) else None
+        if not isinstance(code, str):
+            raise Error("posts/add: unexpected response")
+        return code
+
+
+# --- Repository --------------------------------------------------------------
+
+
+@dataclass
+class Outcome:
+    state: str  # unchanged, committed, pushed, unpushed
+    detail: str = ""
+
+
+class Repo:
+    def __init__(self, path: Path):
+        self.path = path
+        self._git_dir: Path | None = None
+
+    def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        proc = subprocess.run(
+            ["git", "-C", str(self.path), *args],
+            capture_output=True,
+            text=True,
+            env=GIT_ENV,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        if check and proc.returncode != 0:
+            message = proc.stderr.strip() or proc.stdout.strip()
+            raise Error(f"git {args[0]} failed in {self.path}: {message}")
+        return proc
+
+    def out(self, *args: str) -> str:
+        return self.run(*args).stdout.strip()
+
+    def is_clone(self) -> bool:
+        if not self.path.is_dir():
+            return False
+        proc = self.run("rev-parse", "--show-toplevel", check=False)
+        return (
+            proc.returncode == 0
+            and Path(proc.stdout.strip()).resolve() == self.path.resolve()
+        )
+
+    @property
+    def git_dir(self) -> Path:
+        if self._git_dir is None:
+            self._git_dir = Path(self.out("rev-parse", "--absolute-git-dir"))
+        return self._git_dir
+
+    def branch(self) -> str:
+        proc = self.run("symbolic-ref", "--short", "HEAD", check=False)
+        return proc.stdout.strip() if proc.returncode == 0 else "main"
+
+    def has_head(self) -> bool:
+        return (
+            self.run("rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
+        )
+
+    def remote_url(self) -> str | None:
+        proc = self.run("config", "--get", "remote.origin.url", check=False)
+        return proc.stdout.strip() or None
+
+    def upstream(self) -> str | None:
+        ref = f"refs/remotes/origin/{self.branch()}"
+        if self.run("rev-parse", "--verify", "-q", ref, check=False).returncode == 0:
+            return ref
+        return None
+
+    def dirty(self) -> list[str]:
+        return [line for line in self.out("status", "--porcelain").splitlines() if line]
+
+    def ahead_behind(self) -> tuple[int, int]:
+        upstream = self.upstream()
+        if not self.has_head():
+            return 0, 0
+        if upstream is None:
+            return int(self.out("rev-list", "--count", "HEAD")), 0
+        ahead, behind = self.out(
+            "rev-list", "--left-right", "--count", f"HEAD...{upstream}"
+        ).split()
+        return int(ahead), int(behind)
+
+    def push(self) -> tuple[bool, str]:
+        proc = self.run(
+            "push", "-q", "origin", f"HEAD:refs/heads/{self.branch()}", check=False
+        )
+        return proc.returncode == 0, proc.stderr.strip()
+
+    def fetch(self) -> None:
+        self.run("fetch", "-q", "origin")
+
+    def last_commit_time(self, grep: str | None = None) -> float | None:
+        if not self.has_head():
+            return None
+        args = ["log", "-1", "--format=%ct"]
+        if grep:
+            args.append(f"--grep={grep}")
+        text = self.out(*args)
+        return float(text) if text else None
+
+
+@contextlib.contextmanager
+def locked(repo: Repo) -> Iterator[None]:
+    """Serialises API calls and Git writes between pinboard processes on a clone."""
+    path = repo.git_dir / "pinboard" / "lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            note("waiting for another pinboard command on this mirror")
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def catch_up(repo: Repo) -> None:
+    """Brings the clone level with its remote before a write."""
+    changes = repo.dirty()
+    if changes:
+        raise Error(
+            f"{repo.path} has uncommitted changes (an interrupted run, or a hand edit); "
+            f"inspect them with 'git -C {repo.path} status' and commit or discard them"
+        )
+    if repo.remote_url() is None:
+        return
+    repo.fetch()
+    upstream = repo.upstream()
+    if upstream is None:
+        return
+    if not repo.has_head():
+        repo.run("checkout", "-q", "-B", repo.branch(), upstream)
+        return
+    ahead, behind = repo.ahead_behind()
+    if behind and not ahead:
+        repo.run("merge", "-q", "--ff-only", upstream)
+    elif ahead and not behind:
+        ok, message = repo.push()
+        if not ok:
+            warn(f"cannot push {ahead} earlier commit(s): {message}")
+    elif ahead and behind:
+        if repo.run("rebase", "-q", upstream, check=False).returncode == 0:
+            ok, message = repo.push()
+            if not ok:
+                warn(f"cannot push {ahead} earlier commit(s): {message}")
+            return
+        repo.run("rebase", "--abort", check=False)
+        dropped = repo.out("log", "--format=%h %s", f"{upstream}..HEAD").splitlines()
+        repo.run("reset", "-q", "--hard", upstream)
+        # Safe: the mirror never writes back, so these only made it fresher.
+        warn(
+            "dropped unpushed mirror commits that conflict with the remote "
+            f"({'; '.join(dropped)}); the next sync restores anything they held"
+        )
+
+
+def commit_change(
+    repo: Repo, apply: Callable[[], None], message: str, body: str, retry: bool
+) -> Outcome:
+    """Writes, commits and pushes one change, re-applying it after a rejected push."""
+    for attempt in range(1, PUSH_ATTEMPTS + 1):
+        apply()
+        repo.run("add", "-A")
+        if repo.run("diff", "--cached", "--quiet", check=False).returncode == 0:
+            return Outcome("unchanged")
+        args = ["commit", "-q", "--no-gpg-sign", "-m", message]
+        if body:
+            args += ["-m", body]
+        repo.run(*args)
+        if repo.remote_url() is None:
+            return Outcome("committed", "no remote named origin")
+        ok, error = repo.push()
+        if ok:
+            return Outcome("pushed")
+        if not retry or attempt == PUSH_ATTEMPTS:
+            return Outcome("unpushed", error)
+        note(
+            f"push rejected; re-applying on the new remote head ({attempt}/{PUSH_ATTEMPTS})"
+        )
+        repo.fetch()
+        upstream = repo.upstream()
+        if upstream is None:
+            return Outcome("unpushed", error)
+        repo.run("reset", "-q", "--hard", upstream)
+    return Outcome("unpushed")
+
+
+def report_outcome(outcome: Outcome, what: str) -> int:
+    if outcome.state == "unpushed":
+        warn(f"{what} committed in the mirror but not pushed: {outcome.detail}")
+        return 1
+    if outcome.state == "committed":
+        note(f"{what} committed ({outcome.detail})")
+    elif outcome.state == "pushed":
+        note(f"{what} committed and pushed")
+    return 0
+
+
+# --- Mirror files ------------------------------------------------------------
+
+
+@dataclass
+class Scan:
+    records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    files: int = 0
+    errors: list[str] = field(default_factory=list)
+    duplicates: list[str] = field(default_factory=list)
+    misplaced: list[str] = field(default_factory=list)
+
+
+def scan_mirror(root: Path) -> Scan:
+    scan = Scan()
+    for path in sorted((root / "bookmarks").glob("*.jsonl")):
+        scan.files += 1
+        rel = path.relative_to(root)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as e:
+            scan.errors.append(f"{rel}: {e}")
+            continue
+        previous: tuple[str, str] | None = None
+        for number, line in enumerate(lines, 1):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                scan.errors.append(f"{rel}:{number}: not JSON")
+                continue
+            problem = check_record(record)
+            if problem:
+                scan.errors.append(f"{rel}:{number}: {problem}")
+                continue
+            if record["url"] in scan.records:
+                scan.duplicates.append(record["url"])
+            scan.records[record["url"]] = record
+            key = (record["time"], record["url"])
+            if record["time"][:4] != path.stem or (
+                previous is not None and key < previous
+            ):
+                scan.misplaced.append(f"{rel}:{number}")
+            previous = key
+    return scan
+
+
+def load_mirror(root: Path) -> dict[str, dict[str, Any]]:
+    scan = scan_mirror(root)
+    if scan.errors or scan.duplicates:
+        first = (scan.errors + [f"duplicate {u}" for u in scan.duplicates])[0]
+        raise Error(f"the mirror at {root} is damaged ({first}); run 'pinboard doctor'")
+    return scan.records
+
+
+def read_state(root: Path) -> dict[str, Any]:
+    try:
+        state = json.loads((root / "state.json").read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise Error(f"cannot read {root / 'state.json'}: {e}") from None
+    return state if isinstance(state, dict) else {}
+
+
+def write_if_changed(path: Path, content: str) -> None:
+    try:
+        if path.read_text(encoding="utf-8") == content:
+            return
+    except (OSError, UnicodeDecodeError):
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+    os.replace(tmp, path)
+
+
+def write_mirror(
+    root: Path, records: dict[str, dict[str, Any]], update_time: str | None = None
+) -> None:
+    by_year: dict[str, list[dict[str, Any]]] = {}
+    for record in records.values():
+        by_year.setdefault(record["time"][:4], []).append(record)
+    for year, items in by_year.items():
+        items.sort(key=lambda r: (r["time"], r["url"]))
+        write_if_changed(
+            root / "bookmarks" / f"{year}.jsonl", "".join(dump(r) + "\n" for r in items)
+        )
+    for path in (root / "bookmarks").glob("*.jsonl"):
+        if path.stem not in by_year:
+            path.unlink()
+    state = read_state(root)
+    state["format"] = FORMAT
+    if update_time is not None:
+        state["update_time"] = update_time
+    write_if_changed(
+        root / "state.json", json.dumps(state, indent=2, sort_keys=True) + "\n"
+    )
+    write_if_changed(root / "README.md", MIRROR_README)
+    write_if_changed(root / ".gitattributes", MIRROR_GITATTRIBUTES)
+
+
+def patch_mirror(repo: Repo, record: dict[str, Any], verb: str) -> Outcome:
+    def apply() -> None:
+        records = load_mirror(repo.path)
+        records[record["url"]] = record
+        write_mirror(repo.path, records)
+
+    return commit_change(
+        repo, apply, subject(verb, record["url"]), record["url"], retry=True
+    )
+
+
+# --- Context -----------------------------------------------------------------
+
+
+class Context:
+    def __init__(self, repo_arg: str | None):
+        raw = repo_arg or os.environ.get("PINBOARD_REPO") or DEFAULT_REPO
+        self.repo = Repo(Path(raw).expanduser())
+        token = os.environ.get(TOKEN_ENV, "").strip()
+        if token:
+            _secrets.extend([token, urllib.parse.quote(token, safe="")])
+            secret = token.partition(":")[2]
+            if len(secret) >= 8:
+                _secrets.append(secret)
+        local_path = (
+            self.repo.git_dir / "pinboard" / "local.json"
+            if self.repo.is_clone()
+            else None
+        )
+        self.local = LocalState(local_path)
+        self.api = Api(
+            token, os.environ.get("PINBOARD_API_URL") or DEFAULT_API_URL, self.local
+        )
+
+    def require_clone(self) -> Repo:
+        if not self.repo.is_clone():
+            raise Error(
+                f"no mirror at {self.repo.path}; clone the mirror repository there "
+                f"('git clone URL {self.repo.path}'), or set PINBOARD_REPO or --repo"
+            )
+        if not self.repo.has_head() and self.repo.branch() != "main":
+            self.repo.run("symbolic-ref", "HEAD", "refs/heads/main")
+        return self.repo
+
+    def synced_at(self) -> float | None:
+        """When the mirror was last known to match Pinboard."""
+        times = []
+        if isinstance(self.local.data.get("last_sync"), str):
+            with contextlib.suppress(ValueError):
+                times.append(parse_iso(self.local.data["last_sync"]))
+        if self.repo.is_clone():
+            commit = self.repo.last_commit_time("^sync:")
+            if commit is not None:
+                times.append(commit)
+        return max(times) if times else None
+
+    def freshness(self) -> dict[str, Any]:
+        synced = self.synced_at()
+        state = read_state(self.repo.path) if self.repo.is_clone() else {}
+        return {
+            "synced": iso(synced) if synced else None,
+            "update_time": state.get("update_time"),
+        }
+
+    def announce_freshness(self) -> None:
+        synced = self.synced_at()
+        if synced is None:
+            note("the mirror has never been synced; run 'pinboard sync'")
+        else:
+            note(f"mirror synced {ago(synced)} ({iso(synced)})")
+
+
+# --- Commands: sync ----------------------------------------------------------
+
+
+@dataclass
+class SyncReport:
+    added: list[str] = field(default_factory=list)
+    changed: list[str] = field(default_factory=list)
+    deleted: list[str] = field(default_factory=list)
+    kept: list[str] = field(default_factory=list)
+    total: int = 0
+    skipped: bool = False
+    outcome: Outcome | None = None
+
+
+def parse_all(data: Any, mirror_size: int) -> dict[str, dict[str, Any]]:
+    if not isinstance(data, list):
+        raise GuardError("posts/all: the response is not a list of bookmarks")
+    if not data and mirror_size:
+        raise GuardError(
+            f"posts/all returned no bookmarks, but the mirror holds {mirror_size}"
+        )
+    records: dict[str, dict[str, Any]] = {}
+    for index, post in enumerate(data):
+        try:
+            record = record_from_api(post)
+        except ValueError as e:
+            raise GuardError(
+                f"posts/all: malformed bookmark at index {index} ({e})"
+            ) from None
+        if record["url"] in records:
+            raise GuardError(f"posts/all: {record['url']} appears twice")
+        records[record["url"]] = record
+    return records
+
+
+def sync_body(report: SyncReport, first: bool) -> str:
+    if first:
+        return f"Initial import of {report.total} bookmarks."
+    changes = len(report.added) + len(report.changed) + len(report.deleted)
+    if changes > 50:
+        return f"{changes} changes; {report.total} bookmarks."
+    lines = [f"+ {u}" for u in report.added] + [f"~ {u}" for u in report.changed]
+    lines += [f"- {u}" for u in report.deleted]
+    return "\n".join(lines)
+
+
+def guard_deletions(
+    ctx: Context,
+    mirror: dict[str, Any],
+    records: dict[str, Any],
+    force: bool,
+    report: SyncReport,
+) -> None:
+    """Confirms each bookmark missing from posts/all, keeping any Pinboard still has."""
+    missing = sorted(set(mirror) - set(records))
+    if len(missing) > DELETE_LIMIT and not force:
+        raise GuardError(
+            f"{len(missing)} bookmarks would be deleted, more than {DELETE_LIMIT}; "
+            "nothing was changed (check Pinboard, then use --force if they are really gone)"
+        )
+    for url in missing:
+        live = None
+        if not force:
+            try:
+                live = ctx.api.get(url)
+            except Error as e:
+                raise GuardError(f"cannot confirm the deletion of {url}: {e}") from None
+        if live is None:
+            report.deleted.append(url)
+        else:
+            records[live["url"]] = live
+            report.kept.append(url)
+
+
+def run_sync(
+    ctx: Context, force: bool = False, full: bool = False, dry_run: bool = False
+) -> SyncReport:
+    repo = ctx.require_clone()
+    ctx.api.require_online()
+    report = SyncReport()
+    with locked(repo):
+        if not dry_run:
+            catch_up(repo)
+        mirror = load_mirror(repo.path)
+        state = read_state(repo.path)
+        update = ctx.api.call("posts/update")
+        update_time = update.get("update_time") if isinstance(update, dict) else None
+        if not isinstance(update_time, str):
+            raise Error("posts/update: unexpected response")
+        # A sync that finds nothing new keeps its watermark uncommitted, so
+        # writes (which move update_time) never cost a commit of their own.
+        known = max(
+            str(state.get("update_time") or ""),
+            str(ctx.local.data.get("update_time") or ""),
+        )
+        if not full and mirror and known == update_time:
+            report.skipped = True
+            report.total = len(mirror)
+            if not dry_run:
+                ctx.local.data["last_sync"] = iso(time.time())
+                ctx.local.save()
+            return report
+        try:
+            records = parse_all(
+                ctx.api.call("posts/all", {"meta": "1"}, timeout=180), len(mirror)
+            )
+            guard_deletions(ctx, mirror, records, force, report)
+        except GuardError as e:
+            if not dry_run:
+                ctx.local.data["last_refusal"] = {
+                    "time": iso(time.time()),
+                    "reason": str(e),
+                }
+                ctx.local.save()
+            raise
+        for url, record in records.items():
+            if url not in mirror:
+                report.added.append(url)
+            elif mirror[url] != record:
+                report.changed.append(url)
+        report.total = len(records)
+        if dry_run:
+            return report
+        body = sync_body(report, first=not mirror)
+        message = (
+            f"sync: +{len(report.added)} ~{len(report.changed)} -{len(report.deleted)}"
+        )
+        changes = report.added or report.changed or report.deleted or not mirror
+        report.outcome = commit_change(
+            repo,
+            lambda: write_mirror(repo.path, records, update_time if changes else None),
+            message,
+            body,
+            retry=False,
+        )
+        ctx.local.data["last_sync"] = iso(time.time())
+        ctx.local.data["update_time"] = update_time
+        ctx.local.save()
+    return report
+
+
+def cmd_sync(ctx: Context, args: argparse.Namespace) -> int:
+    report = run_sync(ctx, force=args.force, full=args.full, dry_run=args.dry_run)
+    if report.skipped:
+        note(f"no change in Pinboard since the last sync ({report.total} bookmarks)")
+        return 0
+    for url in report.kept:
+        note(f"kept {url}: missing from posts/all, but posts/get still finds it")
+    summary = f"+{len(report.added)} ~{len(report.changed)} -{len(report.deleted)} ({report.total} bookmarks)"
+    if args.dry_run:
+        for url in report.deleted:
+            note(f"would delete {url}")
+        note(f"dry run: {summary}")
+        return 0
+    for url in report.deleted:
+        note(f"deleted {url}")
+    if report.outcome is None or report.outcome.state == "unchanged":
+        note(f"mirror already matches Pinboard ({report.total} bookmarks)")
+        return 0
+    return report_outcome(report.outcome, f"sync {summary}")
+
+
+# --- Commands: writes --------------------------------------------------------
+
+
+def run_add(
+    ctx: Context, record: dict[str, Any], dry_run: bool = False
+) -> tuple[dict[str, Any] | None, bool, Outcome | None]:
+    """Adds a bookmark without replacing an existing one; returns (record, created, outcome)."""
+    validate_fields(record["title"], record["notes"], record["tags"])
+    params = post_params(record, replace=False, keep_time=False)
+    if dry_run:
+        return None, False, None
+    repo = ctx.require_clone()
+    ctx.api.require_online()
+    with locked(repo):
+        catch_up(repo)
+        try:
+            code = ctx.api.add(params)
+        except NetworkError as e:
+            live = ctx.api.get(record["url"])
+            if live is None:
+                raise Error(
+                    f"{e}; Pinboard does not have the bookmark, so it was not added"
+                ) from None
+            code = "done"
+        if code not in ("done", "item already exists"):
+            raise Error(f"posts/add: {code}")
+        live = ctx.api.get(record["url"])
+        if live is None:
+            raise Error(
+                "posts/add succeeded, but posts/get cannot find the bookmark; try 'pinboard sync' later"
+            )
+        outcome = patch_mirror(repo, live, "add")
+    return live, code == "done", outcome
+
+
+def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
+    record = {
+        "url": args.url,
+        "title": args.title,
+        "notes": args.notes or "",
+        "tags": split_tags(" ".join(args.tags or [])),
+        "time": "",
+        "shared": args.public,
+        "toread": args.toread,
+    }
+    if args.dry_run:
+        run_add(ctx, record, dry_run=True)
+        params = post_params(record, replace=False, keep_time=False)
+        note(
+            "dry run: would call posts/add with "
+            + json.dumps(params, ensure_ascii=False)
+        )
+        return 0
+    live, created, outcome = run_add(ctx, record)
+    assert live is not None
+    assert outcome is not None
+    if created:
+        note(f"added {live['url']}")
+    else:
+        note(f"already in Pinboard, left unchanged: {live['url']}")
+    print_record(live, full=True)
+    return report_outcome(outcome, "mirror update")
+
+
+def apply_edits(current: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    new = dict(current)
+    if args.title is not None:
+        new["title"] = args.title
+    if args.notes is not None:
+        new["notes"] = args.notes
+    tags = list(current["tags"])
+    if args.tags is not None:
+        tags = split_tags(" ".join(args.tags))
+    for tag in split_tags(" ".join(args.add_tag or [])):
+        if tag not in tags:
+            tags.append(tag)
+    remove = set(split_tags(" ".join(args.remove_tag or [])))
+    new["tags"] = [t for t in tags if t not in remove]
+    if args.shared is not None:
+        new["shared"] = args.shared
+    if args.toread is not None:
+        new["toread"] = args.toread
+    return new
+
+
+def run_update(
+    ctx: Context,
+    url: str,
+    edit: Callable[[dict[str, Any]], dict[str, Any]],
+    dry_run: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any], Outcome | None]:
+    """Changes a live bookmark, keeping its date; returns (before, after, outcome)."""
+    repo = ctx.require_clone()
+    ctx.api.require_online()
+    with locked(repo):
+        if not dry_run:
+            catch_up(repo)
+        current = ctx.api.get(url)
+        if current is None:
+            raise Error(f"Pinboard has no bookmark for {url}")
+        wanted = edit(current)
+        validate_fields(wanted["title"], wanted["notes"], wanted["tags"])
+        if dry_run:
+            return current, wanted, None
+        if not same_content(current, wanted):
+            try:
+                code = ctx.api.add(post_params(wanted, replace=True, keep_time=True))
+            except NetworkError as e:
+                after = ctx.api.get(url)
+                if after is None or not same_content(after, wanted):
+                    raise Error(
+                        f"{e}; Pinboard still has the earlier version"
+                    ) from None
+                code = "done"
+            if code != "done":
+                raise Error(f"posts/add: {code}")
+        after = ctx.api.get(current["url"])
+        if after is None:
+            raise Error(
+                "posts/get cannot find the bookmark after the update; try 'pinboard sync' later"
+            )
+        outcome = patch_mirror(repo, after, "update")
+    return current, after, outcome
+
+
+def cmd_update(ctx: Context, args: argparse.Namespace) -> int:
+    before, after, outcome = run_update(
+        ctx, args.url, lambda c: apply_edits(c, args), args.dry_run
+    )
+    if args.dry_run:
+        if same_content(before, after):
+            note("dry run: no change")
+        else:
+            params = post_params(after, replace=True, keep_time=True)
+            note(
+                "dry run: would call posts/add with "
+                + json.dumps(params, ensure_ascii=False)
+            )
+        return 0
+    assert outcome is not None
+    note(f"{'unchanged' if same_content(before, after) else 'updated'} {after['url']}")
+    print_record(after, full=True)
+    return report_outcome(outcome, "mirror update")
+
+
+@dataclass
+class Version:
+    commit: str
+    date: str
+    subject: str
+    status: str  # added, changed, deleted
+    record: dict[str, Any] | None
+
+
+def run_history(repo: Repo, url: str) -> list[Version]:
+    """Versions of URL's line in the mirror, newest first."""
+    if not repo.has_head():
+        return []
+    prefix = url_prefix(url)
+    proc = repo.run(
+        "log",
+        "-p",
+        "-U0",
+        "--no-color",
+        "--no-renames",
+        "--format=%x00%H%x00%cI%x00%s",
+        "--",
+        "bookmarks/",
+    )
+    versions: list[Version] = []
+    current: dict[str, Any] | None = None
+
+    def finish() -> None:
+        if current and (current["plus"] or current["minus"]):
+            if current["plus"]:
+                status = "changed" if current["minus"] else "added"
+                record = current["plus"][-1]
+            else:
+                status, record = "deleted", None
+            versions.append(
+                Version(
+                    current["commit"],
+                    current["date"],
+                    current["subject"],
+                    status,
+                    record,
+                )
+            )
+
+    for line in proc.stdout.splitlines():
+        if line.startswith("\x00"):
+            finish()
+            _, commit, date, subj = line.split("\x00", 3)
+            current = {
+                "commit": commit,
+                "date": date,
+                "subject": subj,
+                "plus": [],
+                "minus": [],
+            }
+        elif current is not None and line[1:].startswith(prefix):
+            if line[0] == "+":
+                current["plus"].append(json.loads(line[1:]))
+            elif line[0] == "-":
+                current["minus"].append(line)
+    finish()
+    return versions
+
+
+def cmd_history(ctx: Context, args: argparse.Namespace) -> int:
+    versions = run_history(ctx.require_clone(), args.url)
+    if args.json:
+        print(json.dumps([v.__dict__ for v in versions], ensure_ascii=False, indent=2))
+    else:
+        for v in versions:
+            title = v.record["title"] if v.record else ""
+            print(
+                f"{v.date[:10]}  {v.commit[:10]}  {v.status:<7}  {v.subject}  {title}".rstrip()
+            )
+    if not versions:
+        note(f"no history for {args.url}")
+        return 1
+    return 0
+
+
+def run_restore(
+    ctx: Context, url: str, dry_run: bool = False
+) -> tuple[dict[str, Any], str, Outcome | None]:
+    """Re-adds the last mirrored version of a deleted bookmark; returns (record, result, outcome)."""
+    repo = ctx.require_clone()
+    if url in load_mirror(repo.path):
+        raise Error(f"{url} is in the mirror; there is nothing to restore")
+    last = next(
+        (v.record for v in run_history(repo, url) if v.record is not None), None
+    )
+    if last is None:
+        raise Error(f"the mirror's history has no version of {url}")
+    if dry_run:
+        return last, "dry-run", None
+    ctx.api.require_online()
+    with locked(repo):
+        catch_up(repo)
+        live = ctx.api.get(url)
+        result = "present"
+        if live is None:
+            try:
+                code = ctx.api.add(post_params(last, replace=False, keep_time=True))
+            except NetworkError as e:
+                if ctx.api.get(url) is None:
+                    raise Error(
+                        f"{e}; Pinboard does not have the bookmark, so it was not restored"
+                    ) from None
+                code = "done"
+            if code not in ("done", "item already exists"):
+                raise Error(f"posts/add: {code}")
+            result = "restored" if code == "done" else "present"
+            live = ctx.api.get(url)
+            if live is None:
+                raise Error(
+                    "posts/add succeeded, but posts/get cannot find the bookmark; try 'pinboard sync' later"
+                )
+        outcome = patch_mirror(repo, live, "restore")
+    return live, result, outcome
+
+
+def cmd_restore(ctx: Context, args: argparse.Namespace) -> int:
+    record, result, outcome = run_restore(ctx, args.url, args.dry_run)
+    if args.dry_run:
+        params = post_params(record, replace=False, keep_time=True)
+        note(
+            "dry run: would call posts/add with "
+            + json.dumps(params, ensure_ascii=False)
+        )
+        return 0
+    assert outcome is not None
+    if result == "restored":
+        note(f"restored {record['url']}")
+    else:
+        note(f"Pinboard already has {record['url']}; refreshed the mirror")
+    print_record(record, full=True)
+    return report_outcome(outcome, "mirror update")
+
+
+def cmd_suggest(ctx: Context, args: argparse.Namespace) -> int:
+    if ctx.repo.is_clone():
+        with locked(ctx.repo):
+            data = ctx.api.call("posts/suggest", {"url": args.url})
+    else:
+        data = ctx.api.call("posts/suggest", {"url": args.url})
+    result: dict[str, list[str]] = {"popular": [], "recommended": []}
+    for item in data if isinstance(data, list) else []:
+        if isinstance(item, dict):
+            for key in result:
+                if isinstance(item.get(key), list):
+                    result[key] = [str(t) for t in item[key]]
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        for key, tags in result.items():
+            print(f"{key}: {' '.join(tags)}")
+    return 0
+
+
+# --- Commands: reads ---------------------------------------------------------
+
+
+def encode_cursor(record: dict[str, Any]) -> str:
+    raw = json.dumps([record["time"], record["url"]], ensure_ascii=False).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_cursor(text: str) -> tuple[str, str]:
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+        stamp, url = json.loads(raw)
+        if isinstance(stamp, str) and isinstance(url, str):
+            return stamp, url
+    except (ValueError, TypeError):
+        pass
+    raise Error(f"bad cursor {text!r}")
+
+
+def run_search(
+    records: dict[str, dict[str, Any]],
+    terms: list[str],
+    tags: list[str],
+    limit: int,
+    cursor: str | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Bookmarks matching every term and tag, newest first, and the next page's cursor."""
+    words = [t.casefold() for t in terms if t.strip()]
+    wanted = {t.casefold() for t in tags}
+    after = decode_cursor(cursor) if cursor else None
+    matches = []
+    for record in sorted(
+        records.values(), key=lambda r: (r["time"], r["url"]), reverse=True
+    ):
+        if after is not None and (record["time"], record["url"]) >= after:
+            continue
+        if wanted and not wanted <= {t.casefold() for t in record["tags"]}:
+            continue
+        haystack = "\n".join(
+            [record["title"], record["notes"], " ".join(record["tags"]), record["url"]]
+        ).casefold()
+        if all(w in haystack for w in words):
+            matches.append(record)
+            if len(matches) > limit:
+                break
+    page = matches[:limit]
+    return page, encode_cursor(page[-1]) if len(matches) > limit else None
+
+
+def preview(record: dict[str, Any]) -> dict[str, Any]:
+    out = dict(record)
+    if len(out["notes"]) > NOTES_PREVIEW:
+        out["notes"] = out["notes"][:NOTES_PREVIEW] + "…"
+        out["notes_truncated"] = True
+    return out
+
+
+def print_record(record: dict[str, Any], full: bool) -> None:
+    flags = [
+        f
+        for f, on in (("public", record["shared"]), ("to-read", record["toread"]))
+        if on
+    ]
+    print(f"{record['time'][:10]}  {record['title']}")
+    print(f"  {record['url']}")
+    if record["tags"]:
+        print(f"  tags: {' '.join(record['tags'])}")
+    if flags:
+        print(f"  {', '.join(flags)}")
+    notes = record["notes"] if full else preview(record)["notes"]
+    if notes:
+        for line in notes.splitlines():
+            print(f"  | {line}")
+
+
+def cmd_search(ctx: Context, args: argparse.Namespace) -> int:
+    if args.limit < 1:
+        raise Error("--limit must be at least 1", 2)
+    repo = ctx.require_clone()
+    try:
+        records = load_mirror(repo.path)
+        page, cursor = run_search(
+            records,
+            args.terms,
+            split_tags(" ".join(args.tag or [])),
+            args.limit,
+            args.cursor,
+        )
+    except Error as e:
+        raise Error(str(e), 2) from None
+    if args.json:
+        result = {
+            "bookmarks": [preview(r) for r in page],
+            "next_cursor": cursor,
+            "mirror": ctx.freshness(),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        ctx.announce_freshness()
+        for record in page:
+            print_record(record, full=False)
+        if cursor:
+            note(f"more results: add --cursor {cursor}")
+    return 0 if page else 1
+
+
+def cmd_get(ctx: Context, args: argparse.Namespace) -> int:
+    records = load_mirror(ctx.require_clone().path)
+    record = records.get(args.url)
+    if args.json:
+        print(
+            json.dumps(
+                {"bookmark": record, "mirror": ctx.freshness()},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        ctx.announce_freshness()
+        if record:
+            print_record(record, full=True)
+    if record is None:
+        note(f"{args.url} is not in the mirror")
+        return 1
+    return 0
+
+
+def tag_counts(records: dict[str, dict[str, Any]]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for record in records.values():
+        for tag in record["tags"]:
+            counts[tag] = counts.get(tag, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
+def cmd_tags(ctx: Context, args: argparse.Namespace) -> int:
+    counts = tag_counts(load_mirror(ctx.require_clone().path))
+    if args.json:
+        result = {
+            "tags": [{"tag": t, "count": n} for t, n in counts],
+            "mirror": ctx.freshness(),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        ctx.announce_freshness()
+        for tag, count in counts:
+            print(f"{count:>6}  {tag}")
+    return 0
+
+
+# --- Commands: doctor --------------------------------------------------------
+
+
+COLORS = {"PASS": "32", "WARN": "33", "FAIL": "31", "INFO": "36"}
+
+
+def use_color(stream: Any) -> bool:
+    if "NO_COLOR" in os.environ:
+        return False
+    force = os.environ.get("FORCE_COLOR", "")
+    if force and force != "0":
+        return True
+    return stream.isatty()
+
+
+def run_doctor(ctx: Context) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+
+    def add(status: str, check: str, message: str, *detail: str) -> None:
+        findings.append(
+            {
+                "status": status,
+                "check": check,
+                "message": message,
+                "detail": list(detail),
+            }
+        )
+
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if not token:
+        add(
+            "FAIL",
+            "Token",
+            f"{TOKEN_ENV} is not set",
+            "Find it at https://pinboard.in/settings/password",
+        )
+    elif not re.fullmatch(r"[^:\s]+:[0-9A-Za-z]+", token):
+        add("WARN", "Token", f"{TOKEN_ENV} does not look like USER:TOKEN")
+    else:
+        add("PASS", "Token", f"{TOKEN_ENV} is set")
+    if env_true("AGENT_OFFLINE"):
+        add(
+            "INFO",
+            "Offline",
+            "AGENT_OFFLINE is set; sync, add, update and restore will refuse",
+        )
+
+    repo = ctx.repo
+    if not repo.is_clone():
+        add(
+            "FAIL",
+            "Clone",
+            f"no Git clone at {repo.path}",
+            f"Clone the mirror repository: git clone URL {repo.path}",
+        )
+        return findings
+    add("PASS", "Clone", str(repo.path))
+    remote = repo.remote_url()
+    if remote:
+        add("PASS", "Remote", f"origin is {remote}")
+    else:
+        add("WARN", "Remote", "no remote named origin; commits stay local")
+
+    scan = scan_mirror(repo.path)
+    if scan.errors:
+        add(
+            "FAIL",
+            "Bookmarks",
+            f"{len(scan.errors)} unreadable line(s)",
+            *scan.errors[:5],
+        )
+    else:
+        add("PASS", "Bookmarks", f"{len(scan.records)} in {scan.files} file(s)")
+    if scan.duplicates:
+        add(
+            "FAIL",
+            "Duplicates",
+            f"{len(scan.duplicates)} URL(s) appear more than once",
+            *scan.duplicates[:5],
+        )
+    if scan.misplaced:
+        add(
+            "WARN",
+            "Ordering",
+            f"{len(scan.misplaced)} line(s) out of order or in the wrong year's file",
+            *scan.misplaced[:5],
+            "The next write or sync rewrites the files in order.",
+        )
+    try:
+        state = read_state(repo.path)
+        if not state:
+            add(
+                "WARN",
+                "State",
+                "no state.json; the mirror has never been synced",
+                "Run: pinboard sync",
+            )
+        elif state.get("format") != FORMAT:
+            add(
+                "FAIL",
+                "State",
+                f"state.json format is {state.get('format')!r}; this CLI writes {FORMAT}",
+            )
+        else:
+            add(
+                "PASS",
+                "State",
+                f"format {FORMAT}, Pinboard update_time {state.get('update_time')}",
+            )
+    except Error as e:
+        add("FAIL", "State", str(e))
+
+    dirty = repo.dirty()
+    if dirty:
+        add(
+            "WARN",
+            "Working tree",
+            f"{len(dirty)} uncommitted change(s); writes will refuse",
+            *dirty[:5],
+        )
+    else:
+        add("PASS", "Working tree", "clean")
+    if remote and repo.has_head():
+        ahead, _ = repo.ahead_behind()
+        if ahead:
+            add(
+                "WARN",
+                "Push",
+                f"{ahead} commit(s) not on origin",
+                "The next sync or write pushes them.",
+            )
+        else:
+            add("PASS", "Push", "nothing unpushed (as of the last fetch)")
+
+    synced = ctx.synced_at()
+    if synced is None:
+        add("WARN", "Freshness", "never synced", "Run: pinboard sync")
+    elif time.time() - synced > STALE_AFTER:
+        add(
+            "WARN",
+            "Freshness",
+            f"last synced {ago(synced)} ({iso(synced)})",
+            "Run: pinboard sync",
+        )
+    else:
+        add("PASS", "Freshness", f"last synced {ago(synced)} ({iso(synced)})")
+
+    refusal = ctx.local.data.get("last_refusal")
+    if isinstance(refusal, dict) and isinstance(refusal.get("time"), str):
+        try:
+            refused = parse_iso(refusal["time"])
+        except ValueError:
+            refused = 0
+        if synced is None or refused >= synced:
+            add(
+                "WARN",
+                "Guard",
+                f"the last sync was refused at {refusal['time']}",
+                str(refusal.get("reason")),
+            )
+        else:
+            add(
+                "INFO",
+                "Guard",
+                f"a sync was refused at {refusal['time']}; a later sync succeeded",
+            )
+
+    next_all = ctx.local.next_allowed("posts/all")
+    if next_all > time.time():
+        add("INFO", "Rate limit", f"posts/all next allowed at {iso(next_all)}")
+    else:
+        add("INFO", "Rate limit", "posts/all allowed now")
+    return findings
+
+
+def cmd_doctor(ctx: Context, args: argparse.Namespace) -> int:
+    findings = run_doctor(ctx)
+    ok = not any(f["status"] in ("WARN", "FAIL") for f in findings)
+    if args.json:
+        print(
+            json.dumps({"ok": ok, "findings": findings}, ensure_ascii=False, indent=2)
+        )
+        return 0 if ok else 1
+    color = use_color(sys.stdout)
+    for f in findings:
+        tag = f"[{f['status']}]"
+        if color:
+            tag = f"\x1b[{COLORS[f['status']]}m{tag}\x1b[0m"
+        print(f"{tag}  {f['check']}: {f['message']}")
+        for line in f["detail"]:
+            print(f"        {line}")
+    print("No problems found." if ok else "Problems found.")
+    return 0 if ok else 1
+
+
+# --- Argument parsing --------------------------------------------------------
+
+
+class Parser(argparse.ArgumentParser):
+    usage_code = 1
+
+    def format_help(self) -> str:
+        return (
+            super()
+            .format_help()
+            .replace("usage:", "Usage:", 1)
+            .replace("positional arguments:", "Arguments:", 1)
+            .replace("options:", "Options:", 1)
+            .replace(
+                "show this help message and exit",
+                "Display this help message and exit",
+                1,
+            )
+        )
+
+    def error(self, message: str) -> None:  # type: ignore[override]
+        self.print_usage(sys.stderr)
+        print(
+            f"{self.prog}: {message}\nTry '{self.prog} --help' for more information.",
+            file=sys.stderr,
+        )
+        sys.exit(self.usage_code)
+
+
+HELP = """\
+Usage: pinboard [--repo DIR] COMMAND [OPTIONS]
+
+Keep a Git mirror of a Pinboard account, search it, and change bookmarks
+through the Pinboard API. Pinboard stays authoritative: the mirror is never
+written back.
+
+Commands:
+  sync              Bring the mirror up to date with Pinboard
+  search [TERM...]  Search the mirror (every term must match)
+  get URL           Show one bookmark from the mirror
+  tags              List tags in the mirror, most used first
+  add URL           Add a bookmark (private, never replacing one)
+  update URL        Change a bookmark's title, notes, tags or flags
+  restore URL       Re-add a deleted bookmark from the mirror's history
+  history URL       List the mirror's versions of a bookmark
+  suggest URL       Ask Pinboard for tag suggestions
+  doctor            Check the token, the clone and the mirror (read-only)
+
+Options:
+  --repo DIR   The mirror clone (default: $PINBOARD_REPO, else ~/.pinboard);
+               must appear before COMMAND
+  -h, --help   Display this help message and exit
+
+Environment:
+  PINBOARD_API_TOKEN  API token, USER:HEX, from https://pinboard.in/settings/password
+  PINBOARD_REPO       The mirror clone, if --repo is not given
+  PINBOARD_API_URL    API base URL (default: https://api.pinboard.in/v1/)
+  AGENT_OFFLINE       Refuse every API call; search, get, tags, history and
+                      doctor still work from the mirror
+
+Examples:
+  pinboard sync
+  pinboard search rust async --tag programming
+  pinboard add https://example.com/post --title "A post" --tags "reading web"
+  pinboard update https://example.com/post --add-tag later --remove-tag reading
+
+Reads never call the API, so results are as fresh as the last sync; search,
+get and tags say when that was. sync calls posts/update, then posts/all only
+if Pinboard changed, and refuses to delete more than 10 bookmarks at once.
+"""
+
+
+def build_parser() -> Parser:
+    fmt = argparse.RawDescriptionHelpFormatter
+    parser = Parser(prog=PROG, add_help=False)
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("--repo", metavar="DIR")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND", parser_class=Parser)
+
+    def command(name: str, description: str, examples: str) -> Parser:
+        p = sub.add_parser(
+            name,
+            prog=f"{PROG} {name}",
+            description=description,
+            epilog="Examples:\n" + examples,
+            formatter_class=fmt,
+        )
+        return p
+
+    p = command(
+        "sync",
+        "Bring the mirror up to date with Pinboard. Calls posts/update and, only if\n"
+        "Pinboard changed, posts/all (allowed once every 5 minutes); commits and pushes\n"
+        "the result. The deletion guard refuses an empty or malformed response, refuses\n"
+        "to delete more than 10 bookmarks, and confirms each deletion with posts/get.",
+        "  pinboard sync\n  pinboard sync --dry-run\n  pinboard sync --full",
+    )
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="Fetch posts/all even if posts/update reports no change",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete any number of missing bookmarks without confirming each (an empty "
+        "or malformed response is still refused)",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="Fetch and report, but change nothing"
+    )
+    p.set_defaults(func=cmd_sync)
+
+    p = command(
+        "search",
+        "Search the mirror: every TERM must appear, case-insensitively, in the title,\n"
+        "notes, tags or URL. Newest first; notes are truncated (use get for all of\n"
+        "them). Exits 1 if nothing matches and 2 on an error.",
+        "  pinboard search sqlite\n  pinboard search --tag recipes lemon\n"
+        "  pinboard search --json --limit 50 kotlin coroutines",
+    )
+    p.usage_code = 2
+    p.add_argument("terms", nargs="*", metavar="TERM", help="Words that must all match")
+    p.add_argument(
+        "--tag",
+        action="append",
+        metavar="TAG",
+        help="Only bookmarks with TAG (repeatable)",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Results per page (default: 20)",
+    )
+    p.add_argument("--cursor", metavar="CURSOR", help="Continue from a previous page")
+    p.add_argument("--json", action="store_true", help="Print JSON")
+    p.set_defaults(func=cmd_search)
+
+    p = command(
+        "get",
+        "Show one bookmark from the mirror, with its notes in full. Exits 1 if the\n"
+        "mirror does not have it.",
+        "  pinboard get https://example.com/post\n  pinboard get --json https://example.com/post",
+    )
+    p.add_argument("url", metavar="URL", help="The bookmark's exact URL")
+    p.add_argument("--json", action="store_true", help="Print JSON")
+    p.set_defaults(func=cmd_get)
+
+    p = command(
+        "tags",
+        "List the tags in the mirror with their counts, most used first.",
+        "  pinboard tags | head\n  pinboard tags --json",
+    )
+    p.add_argument("--json", action="store_true", help="Print JSON")
+    p.set_defaults(func=cmd_tags)
+
+    def bookmark_fields(p: Parser, for_update: bool) -> None:
+        p.add_argument(
+            "--title",
+            metavar="TITLE",
+            required=not for_update,
+            help="Title (at most 255 characters)",
+        )
+        p.add_argument(
+            "--notes", metavar="TEXT", help="Notes (at most 65,536 characters)"
+        )
+        p.add_argument(
+            "--tags",
+            action="append",
+            metavar="TAGS",
+            help="Tags, separated by spaces or commas"
+            + ("; replaces all tags" if for_update else ""),
+        )
+
+    p = command(
+        "add",
+        "Add a bookmark through the API, private unless --public. It never replaces an\n"
+        "existing bookmark: if Pinboard already has URL, it is shown unchanged. The\n"
+        "bookmark is then read back and committed to the mirror.",
+        '  pinboard add https://example.com/post --title "A post"\n'
+        '  pinboard add https://example.com/post --title "A post" --tags "web reading" --toread\n'
+        '  pinboard add https://example.com/post --title "A post" --dry-run',
+    )
+    p.add_argument("url", metavar="URL", help="The URL to bookmark")
+    bookmark_fields(p, for_update=False)
+    p.add_argument("--public", action="store_true", help="Make the bookmark public")
+    p.add_argument("--toread", action="store_true", help="Mark it to read")
+    p.add_argument(
+        "--dry-run", action="store_true", help="Show the request without sending it"
+    )
+    p.set_defaults(func=cmd_add)
+
+    p = command(
+        "update",
+        "Change a bookmark. Reads it live from Pinboard, changes only the given fields,\n"
+        "keeps its date, then reads it back and commits it to the mirror.",
+        "  pinboard update https://example.com/post --add-tag later\n"
+        '  pinboard update https://example.com/post --tags "web rust" --private\n'
+        '  pinboard update https://example.com/post --title "Better title" --dry-run',
+    )
+    p.add_argument("url", metavar="URL", help="The bookmark's exact URL")
+    bookmark_fields(p, for_update=True)
+    p.add_argument(
+        "--add-tag", action="append", metavar="TAG", help="Add TAG (repeatable)"
+    )
+    p.add_argument(
+        "--remove-tag", action="append", metavar="TAG", help="Remove TAG (repeatable)"
+    )
+    shared = p.add_mutually_exclusive_group()
+    shared.add_argument(
+        "--public",
+        dest="shared",
+        action="store_const",
+        const=True,
+        help="Make it public",
+    )
+    shared.add_argument(
+        "--private",
+        dest="shared",
+        action="store_const",
+        const=False,
+        help="Make it private",
+    )
+    toread = p.add_mutually_exclusive_group()
+    toread.add_argument(
+        "--toread",
+        dest="toread",
+        action="store_const",
+        const=True,
+        help="Mark it to read",
+    )
+    toread.add_argument(
+        "--read", dest="toread", action="store_const", const=False, help="Mark it read"
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="Show the change without sending it"
+    )
+    p.set_defaults(func=cmd_update)
+
+    p = command(
+        "restore",
+        "Re-add a bookmark deleted from Pinboard, as the mirror last recorded it,\n"
+        "keeping its original date. Refuses if the mirror still has URL.",
+        "  pinboard history https://example.com/post\n  pinboard restore https://example.com/post",
+    )
+    p.add_argument("url", metavar="URL", help="The deleted bookmark's exact URL")
+    p.add_argument(
+        "--dry-run", action="store_true", help="Show the request without sending it"
+    )
+    p.set_defaults(func=cmd_restore)
+
+    p = command(
+        "history",
+        "List the versions of a bookmark recorded in the mirror's Git history, newest\n"
+        "first. Exits 1 if there are none.",
+        "  pinboard history https://example.com/post\n  pinboard history --json https://example.com/post",
+    )
+    p.add_argument("url", metavar="URL", help="The bookmark's exact URL")
+    p.add_argument("--json", action="store_true", help="Print JSON")
+    p.set_defaults(func=cmd_history)
+
+    p = command(
+        "suggest",
+        "Ask Pinboard for popular and recommended tags for URL (a live API call).",
+        "  pinboard suggest https://example.com/post",
+    )
+    p.add_argument("url", metavar="URL", help="The URL to suggest tags for")
+    p.add_argument("--json", action="store_true", help="Print JSON")
+    p.set_defaults(func=cmd_suggest)
+
+    p = command(
+        "doctor",
+        "Check the token, the clone and its remote, the mirror files, unpushed\n"
+        "commits, freshness and rate limits. Read-only; makes no API call. Exits 1 on\n"
+        "any WARN or FAIL.",
+        "  pinboard doctor\n  pinboard doctor --json",
+    )
+    p.add_argument("--json", action="store_true", help="Print JSON")
+    p.set_defaults(func=cmd_doctor)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    global _command
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.help or not args.command:
+        print(HELP, end="")
+        return 0
+    _command = args.command
+    try:
+        ctx = Context(args.repo)
+        return args.func(ctx, args)
+    except Error as e:
+        print(redact(f"{PROG} {_command}: {e}"), file=sys.stderr)
+        return 2 if _command == "search" else e.code
+
+
+def sigterm_handler(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(130)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
