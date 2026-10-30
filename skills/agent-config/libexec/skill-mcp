@@ -21,7 +21,6 @@ third-party packages."""
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import hashlib
 import json
@@ -33,7 +32,6 @@ import subprocess
 import sys
 import textwrap
 import threading
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
@@ -638,21 +636,26 @@ def tool_listing(cat: Catalog) -> list[dict[str, Any]]:
 # --- MCP server ---------------------------------------------------------------
 
 
+# Held by each request while it runs, and by a stdio server stopping.
+REQUEST_LOCK = threading.Lock()
+
+
 def sdk_server(cat: Catalog) -> Any:
     import anyio
     import mcp_types as types
     from mcp.server.lowlevel import Server
     from mcp.shared.exceptions import MCPError
 
-    # Keep file and git work off the event loop, one request at a time.
-    limiter = anyio.CapacityLimiter(1)
-
     def invalid(e: Exception) -> MCPError:
         return MCPError(code=types.INVALID_PARAMS, message=str(e))
 
+    def locked(fn: Any, *args: Any) -> Any:
+        with REQUEST_LOCK:
+            return fn(*args)
+
     async def run(fn: Any, *args: Any) -> Any:
-        with RUNNING:
-            return await anyio.to_thread.run_sync(fn, *args, limiter=limiter)
+        # Keep file and git work off the event loop, one request at a time.
+        return await anyio.to_thread.run_sync(locked, fn, *args)
 
     async def list_tools(ctx: Any, params: Any) -> Any:
         return types.ListToolsResult(
@@ -824,71 +827,25 @@ def sdk_server(cat: Catalog) -> Any:
     return sdk
 
 
-class Running:
-    """Counts the requests running in worker threads, so that a stdio server
-    stopped by a signal exits only between them."""
-
-    def __init__(self) -> None:
-        self.count = 0
-        self.lock = threading.Lock()
-
-    def __enter__(self) -> None:
-        with self.lock:
-            self.count += 1
-
-    def __exit__(self, *exc: object) -> None:
-        with self.lock:
-            self.count -= 1
-
-    def busy(self) -> bool:
-        with self.lock:
-            return self.count > 0
-
-
-RUNNING = Running()
-
-
-def exit_when_idle() -> None:
-    """Ends a stdio server after a signal. The SDK reads stdin in a thread
-    that cancellation cannot interrupt, so a clean shutdown waits for stdin
-    to close; instead, exit once no request is running, so that no edit or
-    commit is cut off."""
-    time.sleep(1)  # A shutdown that can finish cleanly does so first.
-    while RUNNING.busy():
-        time.sleep(0.1)
-    os._exit(0)
-
-
 def serve_stdio(cat: Catalog) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
+    def stop(signum: int, frame: Any) -> None:
+        """The SDK reads stdin in a thread that nothing can interrupt, so a
+        clean shutdown would wait for the client to close stdin; instead,
+        exit 0 once no request is running, so that no edit or commit is cut
+        off."""
+        REQUEST_LOCK.acquire()  # Held until exit: no request starts after this.
+        os._exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, stop)
+
     async def serve() -> None:
-        loop = asyncio.get_running_loop()
-        task = asyncio.current_task()
-        interrupted = False
-
-        def stop() -> None:
-            nonlocal interrupted
-            if not interrupted and task is not None:
-                interrupted = True
-                task.cancel()
-                threading.Thread(
-                    target=exit_when_idle, name="exit", daemon=True
-                ).start()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop)
-        try:
-            sdk = sdk_server(cat)
-            async with stdio_server() as (read, write):
-                await sdk.run(read, write, sdk.create_initialization_options())
-        except asyncio.CancelledError:
-            if not interrupted:
-                raise
-        finally:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+        sdk = sdk_server(cat)
+        async with stdio_server() as (read, write):
+            await sdk.run(read, write, sdk.create_initialization_options())
 
     anyio.run(serve)
 

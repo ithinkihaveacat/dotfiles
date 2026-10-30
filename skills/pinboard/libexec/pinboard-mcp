@@ -501,10 +501,6 @@ class Service:
         self.log.emit(record)
         return payload, failed
 
-    def busy(self) -> bool:
-        with self.active_lock:
-            return self.active > 0
-
 
 # --- Scheduled syncs ---------------------------------------------------------
 
@@ -800,47 +796,28 @@ def sdk_server(svc: Service, transport: str, scheduled: bool) -> Any:
     )
 
 
-def exit_when_idle(svc: Service) -> None:
-    """Ends a stdio server after a signal. The SDK reads stdin in a thread
-    that cancellation cannot interrupt, so a clean shutdown waits for stdin
-    to close; instead, exit once no tool call is running, so that no write or
-    commit is cut off."""
-    time.sleep(1)  # A shutdown that can finish cleanly does so first.
-    while svc.busy():
-        time.sleep(0.1)
-    os._exit(0)
-
-
 def serve_stdio(svc: Service) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
+    def stop(signum: int, frame: Any) -> None:
+        """The SDK reads stdin in a thread that nothing can interrupt, so a
+        clean shutdown would wait for the client to close stdin; instead,
+        exit 0 once no tool call is running, so that no write or commit is
+        cut off."""
+        while True:
+            with svc.active_lock:
+                if not svc.active:
+                    os._exit(0)  # Under the lock: no call starts after this.
+            time.sleep(0.1)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, stop)
+
     async def serve() -> None:
-        loop = asyncio.get_running_loop()
-        task = asyncio.current_task()
-        interrupted = False
-
-        def stop() -> None:
-            nonlocal interrupted
-            if not interrupted and task is not None:
-                interrupted = True
-                task.cancel()
-                threading.Thread(
-                    target=exit_when_idle, args=(svc,), name="exit", daemon=True
-                ).start()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop)
-        try:
-            sdk = sdk_server(svc, "stdio", scheduled=False)
-            async with stdio_server() as (read, write):
-                await sdk.run(read, write, sdk.create_initialization_options())
-        except asyncio.CancelledError:
-            if not interrupted:
-                raise
-        finally:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+        sdk = sdk_server(svc, "stdio", scheduled=False)
+        async with stdio_server() as (read, write):
+            await sdk.run(read, write, sdk.create_initialization_options())
 
     anyio.run(serve)
 
