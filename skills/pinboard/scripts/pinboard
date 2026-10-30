@@ -15,6 +15,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -298,9 +299,14 @@ class LocalState:
     def __init__(self, path: Path | None):
         self.path = path
         self.data: dict[str, Any] = {}
-        if path is not None:
+        self.reload()
+
+    def reload(self) -> None:
+        """Re-reads the file, as another process may have saved it since."""
+        self.data = {}
+        if self.path is not None:
             try:
-                loaded = json.loads(path.read_text())
+                loaded = json.loads(self.path.read_text())
                 if isinstance(loaded, dict):
                     self.data = loaded
             except (OSError, ValueError):
@@ -756,10 +762,11 @@ class Context:
         self.repo = Repo(Path(raw).expanduser())
         token = os.environ.get(TOKEN_ENV, "").strip()
         if token:
-            _secrets.extend([token, urllib.parse.quote(token, safe="")])
             secret = token.partition(":")[2]
+            texts = [token, urllib.parse.quote(token, safe="")]
             if len(secret) >= 8:
-                _secrets.append(secret)
+                texts.append(secret)
+            _secrets.extend(t for t in texts if t not in _secrets)
         local_path = (
             self.repo.git_dir / "pinboard" / "local.json"
             if self.repo.is_clone()
@@ -795,9 +802,14 @@ class Context:
     def freshness(self) -> dict[str, Any]:
         synced = self.synced_at()
         state = read_state(self.repo.path) if self.repo.is_clone() else {}
+        times = [
+            t
+            for t in (state.get("update_time"), self.local.data.get("update_time"))
+            if isinstance(t, str) and t
+        ]
         return {
             "synced": iso(synced) if synced else None,
-            "update_time": state.get("update_time"),
+            "update_time": max(times) if times else None,
         }
 
     def announce_freshness(self) -> None:
@@ -889,6 +901,7 @@ def run_sync(
     ctx.api.require_online()
     report = SyncReport()
     with locked(repo):
+        ctx.local.reload()
         if not dry_run:
             catch_up(repo)
         mirror = load_mirror(repo.path)
@@ -984,6 +997,7 @@ def run_add(
     repo = ctx.require_clone()
     ctx.api.require_online()
     with locked(repo):
+        ctx.local.reload()
         catch_up(repo)
         try:
             code = ctx.api.add(params)
@@ -1065,6 +1079,7 @@ def run_update(
     repo = ctx.require_clone()
     ctx.api.require_online()
     with locked(repo):
+        ctx.local.reload()
         if not dry_run:
             catch_up(repo)
         current = ctx.api.get(url)
@@ -1211,6 +1226,7 @@ def run_restore(
         return last, "dry-run", None
     ctx.api.require_online()
     with locked(repo):
+        ctx.local.reload()
         catch_up(repo)
         live = ctx.api.get(url)
         result = "present"
@@ -1253,18 +1269,25 @@ def cmd_restore(ctx: Context, args: argparse.Namespace) -> int:
     return report_outcome(outcome, "mirror update")
 
 
-def cmd_suggest(ctx: Context, args: argparse.Namespace) -> int:
+def run_suggest(ctx: Context, url: str) -> dict[str, list[str]]:
+    """Pinboard's popular and recommended tags for URL (a live call)."""
     if ctx.repo.is_clone():
         with locked(ctx.repo):
-            data = ctx.api.call("posts/suggest", {"url": args.url})
+            ctx.local.reload()
+            data = ctx.api.call("posts/suggest", {"url": url})
     else:
-        data = ctx.api.call("posts/suggest", {"url": args.url})
+        data = ctx.api.call("posts/suggest", {"url": url})
     result: dict[str, list[str]] = {"popular": [], "recommended": []}
     for item in data if isinstance(data, list) else []:
         if isinstance(item, dict):
             for key in result:
                 if isinstance(item.get(key), list):
                     result[key] = [str(t) for t in item[key]]
+    return result
+
+
+def cmd_suggest(ctx: Context, args: argparse.Namespace) -> int:
+    result = run_suggest(ctx, args.url)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -1298,8 +1321,9 @@ def run_search(
     tags: list[str],
     limit: int,
     cursor: str | None,
+    keep: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Bookmarks matching every term and tag, newest first, and the next page's cursor."""
+    """Bookmarks matching every term and tag (and KEEP), newest first, and the next page's cursor."""
     words = [t.casefold() for t in terms if t.strip()]
     wanted = {t.casefold() for t in tags}
     after = decode_cursor(cursor) if cursor else None
@@ -1310,6 +1334,8 @@ def run_search(
         if after is not None and (record["time"], record["url"]) >= after:
             continue
         if wanted and not wanted <= {t.casefold() for t in record["tags"]}:
+            continue
+        if keep is not None and not keep(record):
             continue
         haystack = "\n".join(
             [record["title"], record["notes"], " ".join(record["tags"]), record["url"]]
@@ -1665,6 +1691,7 @@ Commands:
   history URL       List the mirror's versions of a bookmark
   suggest URL       Ask Pinboard for tag suggestions
   doctor            Check the token, the clone and the mirror (read-only)
+  mcp               Serve the mirror to agents over MCP
 
 Options:
   --repo DIR   The mirror clone (default: $PINBOARD_REPO, else ~/.pinboard);
@@ -1902,8 +1929,39 @@ def build_parser() -> Parser:
     return parser
 
 
+def mcp_args(argv: list[str]) -> list[str] | None:
+    """The arguments for the MCP server, if ARGV runs 'mcp', with any --repo."""
+    rest = list(argv)
+    repo: list[str] = []
+    if rest[:1] == ["--repo"] and len(rest) > 1:
+        repo, rest = rest[:2], rest[2:]
+    elif rest[:1] and rest[0].startswith("--repo="):
+        repo, rest = ["--repo", rest[0].partition("=")[2]], rest[1:]
+    if rest[:1] != ["mcp"]:
+        return None
+    return repo + rest[1:]
+
+
+def exec_mcp(args: list[str]) -> int:
+    """Hands over to the MCP server, which carries its own dependencies so that
+    every other command stays free of them."""
+    server = Path(__file__).resolve().parent.parent / "libexec" / "pinboard-mcp"
+    uv = shutil.which("uv")
+    if uv is None:
+        print(f"{PROG} mcp: uv not found", file=sys.stderr)
+        return 127
+    try:
+        os.execv(uv, [uv, "run", "--quiet", "--script", str(server), *args])
+    except OSError as e:
+        print(f"{PROG} mcp: cannot run {server}: {e.strerror or e}", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str]) -> int:
     global _command
+    server_args = mcp_args(argv)
+    if server_args is not None:
+        return exec_mcp(server_args)
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.help or not args.command:

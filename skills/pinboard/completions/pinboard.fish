@@ -44,6 +44,7 @@ complete -f -c pinboard -n __fish_pinboard_needs_command -a restore -d 'Re-add a
 complete -f -c pinboard -n __fish_pinboard_needs_command -a history -d "List a bookmark's versions"
 complete -f -c pinboard -n __fish_pinboard_needs_command -a suggest -d 'Ask Pinboard for tag suggestions'
 complete -f -c pinboard -n __fish_pinboard_needs_command -a doctor -d 'Check the token, clone and mirror'
+complete -f -c pinboard -n __fish_pinboard_needs_command -a mcp -d 'Serve the mirror to agents over MCP'
 
 # Global options
 complete -c pinboard -n __fish_pinboard_needs_command -l repo -x -a '(__fish_complete_directories)' -d 'The mirror clone'
@@ -66,3 +67,11 @@ complete -f -c pinboard -n '__fish_pinboard_using_command update' -l private -d 
 complete -f -c pinboard -n '__fish_pinboard_using_command update' -l read -d 'Mark it read'
 complete -f -c pinboard -n '__fish_pinboard_using_command update' -l add-tag -x -d 'Add a tag'
 complete -f -c pinboard -n '__fish_pinboard_using_command update' -l remove-tag -x -d 'Remove a tag'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l http -d 'Serve streamable HTTP, not stdio'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l host -x -d 'HTTP address'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l port -x -d 'HTTP port'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l allow-host -x -d 'Also accept requests addressed to HOST'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l access-team -x -d 'Cloudflare Access team domain'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l access-aud -x -d 'Cloudflare Access audience tag'
+complete -f -c pinboard -n '__fish_pinboard_using_command mcp' -l sync-every -x -d 'Sync when the last sync is this many hours old'
+complete -c pinboard -n '__fish_pinboard_using_command mcp' -l log -r -F -d 'Request log'

@@ -93,6 +93,34 @@ without confirming.
   the next write or sync.
 - Writes refuse while the clone has uncommitted changes.
 
+## MCP Server
+
+`pinboard mcp` serves the same mirror to agents that cannot run the CLI, over
+stdio or, with `--http`, Streamable HTTP at `/mcp`:
+
+```bash
+claude mcp add pinboard -- pinboard mcp      # a local agent, over stdio
+pinboard mcp --http                          # loopback only, no authentication
+```
+
+- Tools: `search_bookmarks` (words, tags, dates, to-read, private, paged),
+  `get_bookmark` and `list_tags` read the mirror and never call the API;
+  `suggest_tags` is live; `add_bookmark`, `update_bookmark` and `sync` write.
+  There is no delete. Bookmarks are shown with `private` (the inverse of
+  Pinboard's `shared`), and every read says when the mirror last synced.
+- Writes behave as `add` and `update` do, and take the same lock on the clone,
+  so the server and the CLI can share one mirror. `sync` runs one at a time and
+  refuses inside the `posts/all` window with `retry_after` in seconds.
+- Over HTTP the server also syncs whenever the last sync is older than
+  `--sync-every` hours (24 by default), checking at startup and then hourly. A
+  stdio server never syncs on its own.
+- Hosted behind Cloudflare Access, `--access-team` and `--access-aud` make it
+  check the `Cf-Access-Jwt-Assertion` token on every request but `GET /up`;
+  without them it binds loopback only.
+- Each call is logged to `~/.local/state/pinboard/mcp.jsonl` (or `--log`),
+  rotated at 8 MiB: the tool, outcome and duration, the host of a written URL
+  and a hash of search text, never titles, notes or the token.
+
 ## Reference
 
 - [Command Index](references/command-index.md): every command's `--help`.
