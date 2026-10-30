@@ -30,6 +30,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -271,10 +272,42 @@ def date_arg(args: dict[str, Any], name: str) -> str | None:
     return value
 
 
+def load_tree(repo: Any, tree: str) -> dict[str, dict[str, Any]]:
+    """The bookmarks in TREE, a commit's bookmarks/ directory."""
+    listing = repo.out("ls-tree", "-z", tree).split("\0")
+    blobs = []
+    for entry in listing:
+        meta, _, name = entry.partition("\t")
+        if name.endswith(".jsonl") and meta.split()[1:2] == ["blob"]:
+            blobs.append((name, meta.split()[2]))
+    proc = subprocess.run(
+        ["git", "-C", str(repo.path), "cat-file", "--batch"],
+        input="".join(f"{sha}\n" for _, sha in sorted(blobs)).encode(),
+        capture_output=True,
+        env=pb.GIT_ENV,
+        check=False,
+    )
+    if proc.returncode:
+        raise pb.Error(f"cannot read the mirror's last commit: {proc.stderr.decode()}")
+    scan, data, pos = pb.Scan(), proc.stdout, 0
+    for name, _ in sorted(blobs):
+        header_end = data.index(b"\n", pos)
+        size = int(data[pos:header_end].split()[2])
+        body = data[header_end + 1 : header_end + 1 + size]
+        pos = header_end + 1 + size + 1
+        try:
+            pb.scan_file(scan, f"bookmarks/{name}", body.decode("utf-8"))
+        except UnicodeDecodeError as e:
+            scan.files += 1
+            scan.errors.append(f"bookmarks/{name}: {e}")
+    return pb.scan_records(scan, f"{repo.path} (HEAD)")
+
+
 class Service:
-    """The tools, over one mirror clone. Reads use the files alone; writes
-    and syncs hold the CLI's lock on the clone, as 'pinboard' itself does, so
-    they also wait for any CLI command running there."""
+    """The tools, over one mirror clone. Reads use the last commit alone, so
+    they never see a sync half-written; writes and syncs hold the CLI's lock
+    on the clone, as 'pinboard' itself does, so they also wait for any CLI
+    command running there."""
 
     def __init__(self, repo_arg: str | None, log: RequestLog, sync_hours: float):
         self.repo_arg = repo_arg
@@ -292,19 +325,17 @@ class Service:
         return pb.Context(self.repo_arg)
 
     def records(self, ctx: Any) -> dict[str, dict[str, Any]]:
-        """The mirror's bookmarks, parsed again only when a file changed."""
+        """The bookmarks in the clone's last commit, parsed again only when
+        a commit changed them."""
         repo = ctx.require_clone()
-        key = []
-        for path in sorted((repo.path / "bookmarks").glob("*.jsonl")):
-            with contextlib.suppress(OSError):
-                st = path.stat()
-                key.append((path.name, st.st_ino, st.st_mtime_ns, st.st_size))
+        proc = repo.run("rev-parse", "-q", "--verify", "HEAD:bookmarks", check=False)
+        tree = proc.stdout.strip()
         with self.cache_lock:
-            if self.cache is not None and self.cache[0] == key:
+            if self.cache is not None and self.cache[0] == tree:
                 return self.cache[1]
-        records = pb.load_mirror(repo.path)
+        records = load_tree(repo, tree) if tree else {}
         with self.cache_lock:
-            self.cache = (key, records)
+            self.cache = (tree, records)
         return records
 
     @staticmethod
@@ -354,14 +385,15 @@ class Service:
         url = text_arg(args, "url", required=True)
         ctx = self.context()
         record = self.records(ctx).get(url)
-        out: dict[str, Any] = {"bookmark": view(record, full=True) if record else None}
+        mirror = self.mirror(ctx)
         if record is None:
-            out["message"] = (
-                "Not in the mirror. If it was bookmarked in Pinboard since the "
-                "last sync, call sync and try again."
+            raise ToolError(
+                "not_found",
+                f"{url} is not in the mirror. If it was bookmarked in Pinboard "
+                "since the last sync, call sync and try again.",
+                mirror=mirror,
             )
-        out["mirror"] = self.mirror(ctx)
-        return out
+        return {"bookmark": view(record, full=True), "mirror": mirror}
 
     def list_tags(self, args: dict[str, Any]) -> dict[str, Any]:
         match = (text_arg(args, "match") or "").casefold()

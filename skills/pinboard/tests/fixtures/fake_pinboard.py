@@ -29,6 +29,7 @@ class Fake:
         self.hidden: set[str] = set()  # omitted from posts/all only
         self.get_error = False
         self.rate_limit = 0
+        self.rate_limit_only = ""  # an endpoint, to rate limit only that one
         self.add_mode = ""  # vanish-after (apply, no response), vanish-before
 
     def put(
@@ -95,7 +96,7 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(FAKE.all_delay)
         with FAKE.lock:
             FAKE.calls.append((endpoint, q))
-            if FAKE.rate_limit:
+            if FAKE.rate_limit and FAKE.rate_limit_only in ("", endpoint):
                 FAKE.rate_limit -= 1
                 return self.send(429, b"")
             if endpoint == "posts/update":

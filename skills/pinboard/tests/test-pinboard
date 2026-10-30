@@ -540,6 +540,13 @@ def main() -> None:
         diag(p),
     )
     FAKE.add_mode = "vanish-before"
+    p = pb(A, "add", "https://example.com/post/5", "--title", "Not the title")
+    ok(
+        p.returncode == 0 and "left unchanged" in p.stderr and "added" not in p.stderr,
+        "a lost add finding a different bookmark reports it unchanged",
+        diag(p),
+    )
+    FAKE.add_mode = "vanish-before"
     adds = FAKE.count("posts/add")
     p = pb(A, "update", "https://example.com/post/3", "--title", "Changed")
     ok(
@@ -566,6 +573,18 @@ def main() -> None:
     ok(
         p.returncode == 1 and "after 5 attempts" in p.stderr,
         "429 gives up after 5 attempts",
+        diag(p),
+    )
+    FAKE.reset_knobs()
+    FAKE.rate_limit, FAKE.rate_limit_only = 10, "posts/all"
+    alls = FAKE.count("posts/all")
+    p = pb(A, "sync", "--full")
+    ok(
+        p.returncode == 1
+        and "rate limited by Pinboard (HTTP 429)" in p.stderr
+        and "waiting" not in p.stderr
+        and FAKE.count("posts/all") == alls + 1,
+        "a 429 on posts/all waits for its gate rather than retrying",
         diag(p),
     )
     FAKE.reset_knobs()
@@ -737,6 +756,43 @@ def main() -> None:
     ok(
         git("--git-dir", str(REMOTE), "rev-list", "--merges", "--count", "main") == "0",
         "remote history is linear (no merges, nothing forced)",
+    )
+    pb(C, "sync")
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    FAKE.put("https://example.net/x-dropped", "Dropped", stamp)
+    seen = FAKE.update_time
+    hook(B, "exit 1\n")
+    p = pb(B, "sync")
+    (B / ".git" / "hooks" / "pre-push").unlink()
+    p2 = pb(C, "add", "https://example.net/y-dropped", "--title", "Same second")
+    # Pinboard's update_time has one-second resolution: C's write can leave
+    # it where B's unpushed sync saw it.
+    FAKE.tick -= 1
+    FAKE.update_time = seen
+    p3 = pb(B, "sync")
+    tree = git("--git-dir", str(REMOTE), "show", f"main:bookmarks/{YEAR}.jsonl")
+    ok(
+        p.returncode == 1
+        and p2.returncode == 0
+        and p3.returncode == 0
+        and "dropped" in p3.stderr
+        and "example.net/x-dropped" in tree
+        and "example.net/y-dropped" in tree,
+        "a dropped sync does not leave its watermark behind",
+        diag(p3),
+    )
+    p = pb(C, "doctor")
+    ok(
+        p.returncode == 1 and "[WARN]  Pull" in p.stdout,
+        "doctor fetches and reports a clone behind origin",
+        diag(p),
+    )
+    pb(C, "sync")
+    p = pb(C, "doctor")
+    ok(
+        "[PASS]  Pull" in p.stdout,
+        "doctor passes a clone level with origin",
+        diag(p),
     )
     (B / "bookmarks" / f"{YEAR}.jsonl").write_text("{}\n")
     p = pb(B, "add", "https://example.net/b6", "--title", "B6")

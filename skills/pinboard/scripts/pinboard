@@ -89,10 +89,11 @@ class NetworkError(Error):
 
 
 class GateError(Error):
-    def __init__(self, endpoint: str, at: float):
+    def __init__(self, endpoint: str, at: float, refused: bool = False):
         wait = max(0, int(at - time.time()) + 1)
+        why = "rate limited by Pinboard (HTTP 429); it " if refused else ""
         super().__init__(
-            f"{endpoint} is limited to once every {int(GATES[endpoint] // 60)} min; "
+            f"{endpoint}: {why}allows one call every {int(GATES[endpoint] // 60)} min; "
             f"next allowed at {iso(at)} (in {wait}s)"
         )
         self.retry_after = wait
@@ -398,6 +399,9 @@ class Api:
         while True:
             self._gate(endpoint)
             status, body = self._request(endpoint, params or {}, timeout)
+            if status == 429 and endpoint in GATES:
+                # Retrying within the endpoint's own window cannot succeed.
+                raise GateError(endpoint, self.local.next_allowed(endpoint), True)
             if status == 429:
                 attempts += 1
                 if (
@@ -559,7 +563,7 @@ def locked(repo: Repo) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def catch_up(repo: Repo) -> None:
+def catch_up(repo: Repo, local: LocalState) -> None:
     """Brings the clone level with its remote before a write."""
     changes = repo.dirty()
     if changes:
@@ -593,6 +597,11 @@ def catch_up(repo: Repo) -> None:
         dropped = repo.out("log", "--format=%h %s", f"{upstream}..HEAD").splitlines()
         repo.run("reset", "-q", "--hard", upstream)
         # Safe: the mirror never writes back, so these only made it fresher.
+        # A dropped sync may have recorded Pinboard's update_time, so forget
+        # it: otherwise the next sync could skip posts/all and stay stale.
+        local.data.pop("update_time", None)
+        local.data.pop("last_sync", None)
+        local.save()
         warn(
             "dropped unpushed mirror commits that conflict with the remote "
             f"({'; '.join(dropped)}); the next sync restores anything they held"
@@ -656,41 +665,51 @@ class Scan:
 def scan_mirror(root: Path) -> Scan:
     scan = Scan()
     for path in sorted((root / "bookmarks").glob("*.jsonl")):
-        scan.files += 1
-        rel = path.relative_to(root)
+        rel = str(path.relative_to(root))
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
+            scan.files += 1
             scan.errors.append(f"{rel}: {e}")
             continue
-        previous: tuple[str, str] | None = None
-        for number, line in enumerate(lines, 1):
-            try:
-                record = json.loads(line)
-            except ValueError:
-                scan.errors.append(f"{rel}:{number}: not JSON")
-                continue
-            problem = check_record(record)
-            if problem:
-                scan.errors.append(f"{rel}:{number}: {problem}")
-                continue
-            if record["url"] in scan.records:
-                scan.duplicates.append(record["url"])
-            scan.records[record["url"]] = record
-            key = (record["time"], record["url"])
-            if record["time"][:4] != path.stem or (
-                previous is not None and key < previous
-            ):
-                scan.misplaced.append(f"{rel}:{number}")
-            previous = key
+        scan_file(scan, rel, text)
     return scan
 
 
+def scan_file(scan: Scan, rel: str, text: str) -> None:
+    """Adds one year's file, as text, to SCAN."""
+    scan.files += 1
+    stem = Path(rel).stem
+    previous: tuple[str, str] | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            scan.errors.append(f"{rel}:{number}: not JSON")
+            continue
+        problem = check_record(record)
+        if problem:
+            scan.errors.append(f"{rel}:{number}: {problem}")
+            continue
+        if record["url"] in scan.records:
+            scan.duplicates.append(record["url"])
+        scan.records[record["url"]] = record
+        key = (record["time"], record["url"])
+        if record["time"][:4] != stem or (previous is not None and key < previous):
+            scan.misplaced.append(f"{rel}:{number}")
+        previous = key
+
+
 def load_mirror(root: Path) -> dict[str, dict[str, Any]]:
-    scan = scan_mirror(root)
+    return scan_records(scan_mirror(root), str(root))
+
+
+def scan_records(scan: Scan, where: str) -> dict[str, dict[str, Any]]:
     if scan.errors or scan.duplicates:
         first = (scan.errors + [f"duplicate {u}" for u in scan.duplicates])[0]
-        raise Error(f"the mirror at {root} is damaged ({first}); run 'pinboard doctor'")
+        raise Error(
+            f"the mirror at {where} is damaged ({first}); run 'pinboard doctor'"
+        )
     return scan.records
 
 
@@ -903,7 +922,7 @@ def run_sync(
     with locked(repo):
         ctx.local.reload()
         if not dry_run:
-            catch_up(repo)
+            catch_up(repo, ctx.local)
         mirror = load_mirror(repo.path)
         state = read_state(repo.path)
         update = ctx.api.call("posts/update")
@@ -998,7 +1017,7 @@ def run_add(
     ctx.api.require_online()
     with locked(repo):
         ctx.local.reload()
-        catch_up(repo)
+        catch_up(repo, ctx.local)
         try:
             code = ctx.api.add(params)
         except NetworkError as e:
@@ -1007,7 +1026,11 @@ def run_add(
                 raise Error(
                     f"{e}; Pinboard does not have the bookmark, so it was not added"
                 ) from None
-            code = "done"
+            # Without a response, a bookmark that differs from the request
+            # was already there and was left alone.
+            fields = ("title", "notes", "tags", "shared", "toread")
+            same = all(live[k] == record[k] for k in fields)
+            code = "done" if same else "item already exists"
         if code not in ("done", "item already exists"):
             raise Error(f"posts/add: {code}")
         live = ctx.api.get(record["url"])
@@ -1081,7 +1104,7 @@ def run_update(
     with locked(repo):
         ctx.local.reload()
         if not dry_run:
-            catch_up(repo)
+            catch_up(repo, ctx.local)
         current = ctx.api.get(url)
         if current is None:
             raise Error(f"Pinboard has no bookmark for {url}")
@@ -1227,7 +1250,7 @@ def run_restore(
     ctx.api.require_online()
     with locked(repo):
         ctx.local.reload()
-        catch_up(repo)
+        catch_up(repo, ctx.local)
         live = ctx.api.get(url)
         result = "present"
         if live is None:
@@ -1572,7 +1595,28 @@ def run_doctor(ctx: Context) -> list[dict[str, Any]]:
     else:
         add("PASS", "Working tree", "clean")
     if remote and repo.has_head():
-        ahead, _ = repo.ahead_behind()
+        fetched = False
+        if not env_true("AGENT_OFFLINE"):
+            proc = repo.run("fetch", "-q", "origin", check=False)
+            fetched = proc.returncode == 0
+            if not fetched:
+                add(
+                    "WARN",
+                    "Fetch",
+                    "cannot fetch origin",
+                    *redact(proc.stderr.strip()).splitlines()[:3],
+                )
+        ahead, behind = repo.ahead_behind()
+        since = "" if fetched else " (as of the last fetch)"
+        if behind:
+            add(
+                "WARN",
+                "Pull",
+                f"{behind} commit(s) on origin not in this clone{since}; reads miss them",
+                "The next sync or write brings them in.",
+            )
+        else:
+            add("PASS", "Pull", f"level with origin{since}")
         if ahead:
             add(
                 "WARN",
@@ -1581,7 +1625,7 @@ def run_doctor(ctx: Context) -> list[dict[str, Any]]:
                 "The next sync or write pushes them.",
             )
         else:
-            add("PASS", "Push", "nothing unpushed (as of the last fetch)")
+            add("PASS", "Push", f"nothing unpushed{since}")
 
     synced = ctx.synced_at()
     if synced is None:
