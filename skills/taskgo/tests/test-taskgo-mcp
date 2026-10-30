@@ -25,7 +25,7 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 export TASKGO_MCP_LOG="$TEST_ROOT/mcp-requests.jsonl"
 
-echo "1..11"
+echo "1..12"
 
 init_base_repo() {
   local target="${1:-$TEST_ROOT/repo}"
@@ -532,4 +532,45 @@ if [[ "$SKILLS_SHAPE" == *"[WARN]  proj/README.md: skills must be a list of skil
 else
   echo 'not ok 11 - doctor reports a skills value that is not a list of skill names'
   printf '# %s\n' "$SKILLS_SHAPE" "$SKILLS_SPEC"
+fi
+
+# A server stops on SIGINT or SIGTERM with status 0 within a few seconds, over
+# HTTP and over --stdio, the stdio one while its client holds stdin open.
+MCP_SIGNALS=$(
+  "$MCP_PY" -c '
+import json, signal, socket, subprocess, sys, time
+bin_, repo, branch, log = sys.argv[1:]
+init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
+s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+common = [bin_, "--root", repo, "mcp", "--no-fetch", "--branch", branch, "--log", log]
+for transport, extra in (("stdio", ["--stdio"]), ("http", ["--auth", "none", "--port", str(port)])):
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        proc = subprocess.Popen(common + extra, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            if transport == "stdio":
+                proc.stdin.write((json.dumps(init) + "\n").encode())
+                proc.stdin.flush()
+                assert b"serverInfo" in proc.stdout.readline(), transport
+            else:
+                for _ in range(150):
+                    try:
+                        socket.create_connection(("127.0.0.1", port), 1).close()
+                        break
+                    except OSError:
+                        time.sleep(0.2)
+            proc.send_signal(sig)
+            print(transport, sig.name, proc.wait(timeout=10))
+        except Exception as e:
+            print(transport, sig.name, repr(e))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+' "$BIN" "$TREE_REPO" "$(git -C "$TREE_REPO" branch --show-current)" "$TEST_ROOT/mcp-signals.jsonl" 2>&1
+) || true
+if [[ $MCP_SIGNALS == $'stdio SIGINT 0\nstdio SIGTERM 0\nhttp SIGINT 0\nhttp SIGTERM 0' ]]; then
+  echo 'ok 12 - mcp exits 0 on SIGINT and SIGTERM over both transports'
+else
+  echo 'not ok 12 - mcp exits 0 on SIGINT and SIGTERM over both transports'
+  printf '# %s\n' "$MCP_SIGNALS"
 fi

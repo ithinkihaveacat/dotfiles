@@ -27,8 +27,9 @@ alone; imports of MCP dependencies are deferred until server mode.
 
 Stdio is the default, so `andon mcp` is equivalent. Stdout carries MCP messages
 only; diagnostics go to stderr. Closing stdin ends the server. SIGINT and
-SIGTERM shut it down with exit status 130. No HTTP listener, authentication
-service or public tunnel is involved.
+SIGTERM stop it within a few seconds, even while the client holds stdin open,
+once no request is in flight, with exit status 0. No HTTP listener,
+authentication service or public tunnel is involved.
 
 The server reads `ANDON_STATE_DIR` and `ANDON_LEVEL` from its own environment.
 Without overrides it uses `${XDG_STATE_HOME:-~/.local/state}/andon` and the

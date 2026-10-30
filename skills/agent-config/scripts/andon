@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import fcntl
 import hashlib
@@ -25,6 +24,7 @@ import secrets
 import signal
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -1047,15 +1047,23 @@ def mcp_call_tool(name: str, arguments: Any) -> dict[str, Any]:
     }
 
 
+# Held by each request while it runs, and by the server stopping.
+MCP_REQUEST_LOCK = threading.Lock()
+
+
+def mcp_locked(fn: Any, *args: Any) -> Any:
+    """Runs a request in a worker thread, off the event loop, one at a time in
+    this process. Existing file locks still coordinate with the CLI and other
+    servers."""
+    with MCP_REQUEST_LOCK:
+        return fn(*args)
+
+
 def mcp_sdk_server() -> Any:
     """The SDK owns protocol handling; this server can later use HTTP too."""
     import anyio
     import mcp_types
     from mcp.server.lowlevel import Server
-
-    # Keep store operations off the event loop, and serialize this process's
-    # requests. Existing file locks still coordinate with CLI and other servers.
-    limiter = anyio.CapacityLimiter(1)
 
     async def list_tools(ctx: Any, params: Any) -> Any:
         return mcp_types.ListToolsResult(
@@ -1064,10 +1072,10 @@ def mcp_sdk_server() -> Any:
 
     async def call_tool(ctx: Any, params: Any) -> Any:
         result = await anyio.to_thread.run_sync(
+            mcp_locked,
             mcp_call_tool,
             params.name,
             params.arguments if params.arguments is not None else {},
-            limiter=limiter,
         )
         return mcp_types.CallToolResult.model_validate(result)
 
@@ -1085,7 +1093,7 @@ def mcp_sdk_server() -> Any:
 
     async def read_resource(ctx: Any, params: Any) -> Any:
         result = await anyio.to_thread.run_sync(
-            mcp_board_resource, str(params.uri), limiter=limiter
+            mcp_locked, mcp_board_resource, str(params.uri)
         )
         return mcp_types.ReadResourceResult.model_validate(result)
 
@@ -1111,31 +1119,21 @@ def cmd_mcp(args: argparse.Namespace) -> int:
             "MCP dependencies unavailable; run with 'uv run --script andon mcp --stdio'"
         ) from err
 
+    def stop(signum: int, frame: Any) -> None:
+        """The SDK reads stdin in a thread that nothing can interrupt, so a
+        clean shutdown would wait for the client to close stdin; instead,
+        exit 0 once no request is running, so that no store write is cut
+        off."""
+        MCP_REQUEST_LOCK.acquire()  # Held until exit: no request starts after this.
+        os._exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, stop)
+
     async def serve() -> None:
-        loop = asyncio.get_running_loop()
-        task = asyncio.current_task()
-        interrupted = False
-
-        def stop() -> None:
-            nonlocal interrupted
-            if interrupted:
-                return
-            interrupted = True
-            task.cancel()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop)
-        try:
-            sdk = mcp_sdk_server()
-            async with stdio_server() as (read, write):
-                await sdk.run(read, write, sdk.create_initialization_options())
-        except asyncio.CancelledError:
-            if interrupted:
-                raise KeyboardInterrupt from None
-            raise
-        finally:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+        sdk = mcp_sdk_server()
+        async with stdio_server() as (read, write):
+            await sdk.run(read, write, sdk.create_initialization_options())
 
     anyio.run(serve)
     return 0

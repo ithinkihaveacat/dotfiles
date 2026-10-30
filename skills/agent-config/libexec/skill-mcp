@@ -21,7 +21,6 @@ third-party packages."""
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import hashlib
 import json
@@ -32,6 +31,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
@@ -636,20 +636,26 @@ def tool_listing(cat: Catalog) -> list[dict[str, Any]]:
 # --- MCP server ---------------------------------------------------------------
 
 
+# Held by each request while it runs, and by a stdio server stopping.
+REQUEST_LOCK = threading.Lock()
+
+
 def sdk_server(cat: Catalog) -> Any:
     import anyio
     import mcp_types as types
     from mcp.server.lowlevel import Server
     from mcp.shared.exceptions import MCPError
 
-    # Keep file and git work off the event loop, one request at a time.
-    limiter = anyio.CapacityLimiter(1)
-
     def invalid(e: Exception) -> MCPError:
         return MCPError(code=types.INVALID_PARAMS, message=str(e))
 
+    def locked(fn: Any, *args: Any) -> Any:
+        with REQUEST_LOCK:
+            return fn(*args)
+
     async def run(fn: Any, *args: Any) -> Any:
-        return await anyio.to_thread.run_sync(fn, *args, limiter=limiter)
+        # Keep file and git work off the event loop, one request at a time.
+        return await anyio.to_thread.run_sync(locked, fn, *args)
 
     async def list_tools(ctx: Any, params: Any) -> Any:
         return types.ListToolsResult(
@@ -825,30 +831,21 @@ def serve_stdio(cat: Catalog) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
+    def stop(signum: int, frame: Any) -> None:
+        """The SDK reads stdin in a thread that nothing can interrupt, so a
+        clean shutdown would wait for the client to close stdin; instead,
+        exit 0 once no request is running, so that no edit or commit is cut
+        off."""
+        REQUEST_LOCK.acquire()  # Held until exit: no request starts after this.
+        os._exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, stop)
+
     async def serve() -> None:
-        loop = asyncio.get_running_loop()
-        task = asyncio.current_task()
-        interrupted = False
-
-        def stop() -> None:
-            nonlocal interrupted
-            if not interrupted and task is not None:
-                interrupted = True
-                task.cancel()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop)
-        try:
-            sdk = sdk_server(cat)
-            async with stdio_server() as (read, write):
-                await sdk.run(read, write, sdk.create_initialization_options())
-        except asyncio.CancelledError:
-            if interrupted:
-                raise KeyboardInterrupt from None
-            raise
-        finally:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+        sdk = sdk_server(cat)
+        async with stdio_server() as (read, write):
+            await sdk.run(read, write, sdk.create_initialization_options())
 
     anyio.run(serve)
 
@@ -1164,11 +1161,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        # A server stops on a signal as asked, so it exits 0, not 130.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        try:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
-        except Exception:
-            pass
-        sys.exit(130)
+        sys.exit(0)
