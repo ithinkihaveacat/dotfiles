@@ -32,6 +32,8 @@ import stat
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
@@ -649,7 +651,8 @@ def sdk_server(cat: Catalog) -> Any:
         return MCPError(code=types.INVALID_PARAMS, message=str(e))
 
     async def run(fn: Any, *args: Any) -> Any:
-        return await anyio.to_thread.run_sync(fn, *args, limiter=limiter)
+        with RUNNING:
+            return await anyio.to_thread.run_sync(fn, *args, limiter=limiter)
 
     async def list_tools(ctx: Any, params: Any) -> Any:
         return types.ListToolsResult(
@@ -821,6 +824,41 @@ def sdk_server(cat: Catalog) -> Any:
     return sdk
 
 
+class Running:
+    """Counts the requests running in worker threads, so that a stdio server
+    stopped by a signal exits only between them."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.lock = threading.Lock()
+
+    def __enter__(self) -> None:
+        with self.lock:
+            self.count += 1
+
+    def __exit__(self, *exc: object) -> None:
+        with self.lock:
+            self.count -= 1
+
+    def busy(self) -> bool:
+        with self.lock:
+            return self.count > 0
+
+
+RUNNING = Running()
+
+
+def exit_when_idle() -> None:
+    """Ends a stdio server after a signal. The SDK reads stdin in a thread
+    that cancellation cannot interrupt, so a clean shutdown waits for stdin
+    to close; instead, exit once no request is running, so that no edit or
+    commit is cut off."""
+    time.sleep(1)  # A shutdown that can finish cleanly does so first.
+    while RUNNING.busy():
+        time.sleep(0.1)
+    os._exit(0)
+
+
 def serve_stdio(cat: Catalog) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
@@ -835,6 +873,9 @@ def serve_stdio(cat: Catalog) -> None:
             if not interrupted and task is not None:
                 interrupted = True
                 task.cancel()
+                threading.Thread(
+                    target=exit_when_idle, name="exit", daemon=True
+                ).start()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop)
@@ -843,9 +884,8 @@ def serve_stdio(cat: Catalog) -> None:
             async with stdio_server() as (read, write):
                 await sdk.run(read, write, sdk.create_initialization_options())
         except asyncio.CancelledError:
-            if interrupted:
-                raise KeyboardInterrupt from None
-            raise
+            if not interrupted:
+                raise
         finally:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
@@ -1164,11 +1204,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        # A server stops on a signal as asked, so it exits 0, not 130.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        try:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
-        except Exception:
-            pass
-        sys.exit(130)
+        sys.exit(0)

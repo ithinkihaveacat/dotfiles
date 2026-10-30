@@ -17,11 +17,14 @@ import asyncio
 import contextlib
 import hashlib
 import inspect
+import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import unittest
 from pathlib import Path
@@ -322,6 +325,57 @@ class SkillMcpTests(unittest.TestCase):
                     except TimeoutError:
                         server.kill()
                         await server.wait()
+
+    def test_signals_exit_0(self):
+        """SIGINT and SIGTERM stop either transport with status 0 within a few
+        seconds, a stdio server even while its client holds stdin open."""
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        init = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "0"},
+            },
+        }
+        for args in (["all"], ["--http", "--port", str(port)]):
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with (
+                    self.subTest(args=args[0], signal=sig.name),
+                    tempfile.TemporaryFile() as errlog,
+                    subprocess.Popen(
+                        [str(SCRIPT), "mcp", *args],
+                        env=self.env,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=errlog,
+                    ) as proc,
+                ):
+                    try:
+                        if args[0] == "all":
+                            proc.stdin.write((json.dumps(init) + "\n").encode())
+                            proc.stdin.flush()
+                            self.assertIn(b'"serverInfo"', proc.stdout.readline())
+                        else:
+                            for _ in range(150):
+                                with contextlib.suppress(OSError):
+                                    socket.create_connection(
+                                        ("127.0.0.1", port), timeout=1
+                                    ).close()
+                                    break
+                                time.sleep(0.2)
+                            else:
+                                self.fail("server not listening")
+                        proc.send_signal(sig)
+                        self.assertEqual(proc.wait(timeout=10), 0)
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
 
     async def test_discovery(self, client):
         caps = self.initialized.capabilities

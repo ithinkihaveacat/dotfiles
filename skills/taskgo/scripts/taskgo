@@ -10509,16 +10509,51 @@ def mcp_sdk_server(server: McpServer) -> Any:
     return sdk
 
 
+def mcp_exit_when_idle(server: McpServer) -> None:
+    """Ends a stdio server after a signal. The SDK reads stdin in a thread
+    that cancellation cannot interrupt, so a clean shutdown waits for stdin
+    to close; instead, exit between tool calls, so that no write or push is
+    cut off."""
+    time.sleep(1)  # A shutdown that can finish cleanly does so first.
+    server.lock.acquire()  # Held until exit: no call starts after this.
+    os._exit(0)
+
+
 def mcp_serve_stdio(server: McpServer) -> None:
     """Newline-delimited JSON-RPC on stdin and stdout, for one local client."""
+    import asyncio
+    import threading
+
     import anyio
     from mcp.server.stdio import stdio_server
 
     sdk = mcp_sdk_server(server)
 
     async def serve() -> None:
-        async with stdio_server() as (read, write):
-            await sdk.run(read, write, sdk.create_initialization_options())
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        interrupted = False
+
+        def stop() -> None:
+            nonlocal interrupted
+            if not interrupted and task is not None:
+                interrupted = True
+                task.cancel()
+                threading.Thread(
+                    target=mcp_exit_when_idle, args=(server,), name="exit", daemon=True
+                ).start()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop)
+        try:
+            async with stdio_server() as (read, write):
+                await sdk.run(read, write, sdk.create_initialization_options())
+        except asyncio.CancelledError:
+            if not interrupted:
+                raise
+        finally:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
 
     anyio.run(serve)
 
@@ -11047,10 +11082,25 @@ def cmd_mcp(
     log_path = Path(log or os.environ.get(MCP_LOG_ENV) or mcp_log_default())
     # Only the HTTP server has a page to keep records in memory for.
     server = McpServer(cfg, McpLog(log_path.expanduser(), 0 if stdio else MCP_LOG_RING))
-    if stdio:
-        mcp_serve_stdio(server)
-    else:
-        mcp_serve_http(server, cfg, host, port, path)
+    # A server stops on a signal as asked, so it exits 0, not 130 or 143:
+    # the CLI's handlers exit at once, so either signal raises
+    # KeyboardInterrupt here instead. Uvicorn finishes the requests in flight
+    # before passing a signal on, and the stdio server installs its own.
+    signal.signal(signal.SIGINT, mcp_signal_handler)
+    signal.signal(signal.SIGTERM, mcp_signal_handler)
+    try:
+        if stdio:
+            mcp_serve_stdio(server)
+        else:
+            mcp_serve_http(server, cfg, host, port, path)
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        reap_subprocesses()
+
+
+def mcp_signal_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
 
 
 def cmd_requests(

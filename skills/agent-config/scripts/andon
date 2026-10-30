@@ -25,6 +25,8 @@ import secrets
 import signal
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -1047,6 +1049,41 @@ def mcp_call_tool(name: str, arguments: Any) -> dict[str, Any]:
     }
 
 
+class Running:
+    """Counts the requests running in worker threads, so that a stdio server
+    stopped by a signal exits only between them."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.lock = threading.Lock()
+
+    def __enter__(self) -> None:
+        with self.lock:
+            self.count += 1
+
+    def __exit__(self, *exc: object) -> None:
+        with self.lock:
+            self.count -= 1
+
+    def busy(self) -> bool:
+        with self.lock:
+            return self.count > 0
+
+
+MCP_RUNNING = Running()
+
+
+def mcp_exit_when_idle() -> None:
+    """Ends the server after a signal. The SDK reads stdin in a thread that
+    cancellation cannot interrupt, so a clean shutdown waits for stdin to
+    close; instead, exit once no request is running, so that no store write
+    is cut off."""
+    time.sleep(1)  # A shutdown that can finish cleanly does so first.
+    while MCP_RUNNING.busy():
+        time.sleep(0.1)
+    os._exit(0)
+
+
 def mcp_sdk_server() -> Any:
     """The SDK owns protocol handling; this server can later use HTTP too."""
     import anyio
@@ -1063,12 +1100,13 @@ def mcp_sdk_server() -> Any:
         )
 
     async def call_tool(ctx: Any, params: Any) -> Any:
-        result = await anyio.to_thread.run_sync(
-            mcp_call_tool,
-            params.name,
-            params.arguments if params.arguments is not None else {},
-            limiter=limiter,
-        )
+        with MCP_RUNNING:
+            result = await anyio.to_thread.run_sync(
+                mcp_call_tool,
+                params.name,
+                params.arguments if params.arguments is not None else {},
+                limiter=limiter,
+            )
         return mcp_types.CallToolResult.model_validate(result)
 
     async def list_resources(ctx: Any, params: Any) -> Any:
@@ -1084,9 +1122,10 @@ def mcp_sdk_server() -> Any:
         )
 
     async def read_resource(ctx: Any, params: Any) -> Any:
-        result = await anyio.to_thread.run_sync(
-            mcp_board_resource, str(params.uri), limiter=limiter
-        )
+        with MCP_RUNNING:
+            result = await anyio.to_thread.run_sync(
+                mcp_board_resource, str(params.uri), limiter=limiter
+            )
         return mcp_types.ReadResourceResult.model_validate(result)
 
     return Server(
@@ -1122,6 +1161,9 @@ def cmd_mcp(args: argparse.Namespace) -> int:
                 return
             interrupted = True
             task.cancel()
+            threading.Thread(
+                target=mcp_exit_when_idle, name="exit", daemon=True
+            ).start()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop)
@@ -1130,14 +1172,18 @@ def cmd_mcp(args: argparse.Namespace) -> int:
             async with stdio_server() as (read, write):
                 await sdk.run(read, write, sdk.create_initialization_options())
         except asyncio.CancelledError:
-            if interrupted:
-                raise KeyboardInterrupt from None
-            raise
+            if not interrupted:
+                raise
         finally:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
 
-    anyio.run(serve)
+    try:
+        anyio.run(serve)
+    except KeyboardInterrupt:
+        # A signal before the loop's handlers are in place. A server stops on
+        # a signal as asked, so it exits 0, not 130.
+        pass
     return 0
 
 
