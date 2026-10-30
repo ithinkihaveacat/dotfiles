@@ -394,6 +394,9 @@ if __name__ == "__main__":
    abruptly at exit and **do not run cleanup**. If your threads require clean
    teardown, do not use `daemon=True`; instead, use an explicit stop `Event` and
    `join()` them during main thread cleanup.
+1. **Servers:** A long-running server exits `0` after a signal-requested
+   shutdown, not `130` (see "Exit Codes" in `cli-tools.md`), so its signal path
+   returns normally instead of exiting from the interrupt handler.
 
 ## Extensibility and Plugins
 
