@@ -401,3 +401,41 @@ admits the proxy's hostname.
 ```
 
 <!-- /generated -->
+
+## audit
+
+<!-- generated: ../libexec/pinboard-audit --help -->
+
+```text
+Usage: pinboard audit [-h] [--repo DIR] {plan,check,apply,status,verify,bump} ...
+
+Resumable link-rot audit over the Pinboard mirror.
+
+Commands:
+  plan     Freeze a work list from the mirror
+  check    Check planned URLs over HTTP
+  apply    Apply verdict tags through the API
+  status   Show pass progress
+  verify   Check the mirror agrees with the journal
+  bump     Move a cohort tag after a complete pass
+
+Options:
+  --state DIR       Audit state root (default: ~/.local/state/pinboard/audit)
+  --pass ID         Pass identifier (default: the current year)
+  --limit N         Stop after N URLs (check, apply)
+  --jobs N          Concurrent checks (default 8)
+  --timeout SEC     Per-request timeout (default 15)
+  --commit-every N  Commit the mirror every N writes (default 20)
+  --dry-run         Change nothing
+  --json            Print JSON (status, verify)
+
+Examples:
+  pinboard audit plan --year 2026
+  pinboard audit check --limit 50
+  pinboard audit apply --limit 50
+  pinboard audit status
+  pinboard audit verify
+  pinboard audit bump --old .checked:2026 --new .checked:2027
+```
+
+<!-- /generated -->

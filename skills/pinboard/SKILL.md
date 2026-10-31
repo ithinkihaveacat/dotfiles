@@ -84,6 +84,40 @@ confirms each deletion with `posts/get`, keeping any bookmark Pinboard still
 has. A refused sync changes nothing; check Pinboard, then `--force` deletes
 without confirming.
 
+## Auditing
+
+`pinboard audit` checks bookmarks for link rot and records the verdict as tags.
+It is resumable: state lives under `~/.local/state/pinboard/audit/<pass>/`, not
+in the mirror.
+
+```bash
+pinboard audit plan --year 2026        # freeze a work list from the mirror
+pinboard audit check --jobs 8          # HTTP checks, appending to the journal
+pinboard audit apply --limit 50        # write .status:*.checked:* through the API
+pinboard audit status                  # progress and verdict counts
+pinboard audit verify                  # the mirror agrees with the journal
+```
+
+- Verdicts: `.status:ok` (loads and matches), `.status:moved` (redirects to
+  matching content), `.status:changed` (loads, but not the saved page),
+  `.status:dead` (404/410/DNS/refused), `.status:blocked` (auth wall, rate
+  limit, timeout, TLS). The cohort tag is `.checked:YYYY`, pinned when the pass
+  is planned. Tags are private because `.`-prefixed tags are owner-only; see
+  decision 004 in the dotfiles tracker.
+- `plan` writes `manifest.json`, `plan.jsonl` and `journal.jsonl` once; `--tag`
+  and `--year` narrow the pass. `--force` replaces an existing pass.
+- Every `apply` write is journaled as `intent` before the API call and `done`
+  after it, with fsync. Resume resolves the one ambiguous `intent` with a single
+  `posts/get`; completed writes are never repeated. A half-written mirror update
+  is discarded and rebuilt from the journal.
+- A complete later pass can move the whole cohort in one call with
+  `pinboard audit bump --old .checked:2026 --new .checked:2027`; it refuses
+  unless every planned URL is applied. Partial passes should write the cohort
+  tag per bookmark instead.
+- `check` uses a title-similarity heuristic and parking-page markers, not the
+  original page bytes; `changed` and `blocked` are deliberately conservative.
+  Review the first small pass before running the full account.
+
 ## Rate Limits and Failures
 
 - The client waits 3 s between calls, gates `posts/all` to once every 5 minutes,
