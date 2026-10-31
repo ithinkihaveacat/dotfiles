@@ -291,6 +291,61 @@ Error: something went wrong
 For the missing-required-argument case, see "Help Flags, Missing Arguments, and
 Pagers" above. The bash patterns implementing this style live in `shell.md`.
 
+## Script Self-Containment and Sibling Files
+
+The default is **one executable file per tool**. A script may import the
+standard library, but it must not depend on a sibling file at runtime unless an
+exception below applies. `uv run --script` reads dependencies from the one file
+it runs, so splitting a launcher and a helper creates a second environment, a
+second thing to keep in sync, and a path relationship that breaks when the file
+is copied, hardlinked, or moved.
+
+Fold a feature into the existing script when:
+
+- the helper needs no dependencies the parent does not already declare;
+- it is reached only through the parent's subcommand;
+- keeping it separate would require sibling-path resolution.
+
+A separate file is acceptable only when at least one is true:
+
+1. **Materially different dependency set.** A subcommand needs a heavy
+   third-party stack (an MCP SDK, a web framework) that the common path should
+   not install or import. Put it in `scripts/<tool>-<role>` with its own PEP 723
+   header. This is the reason the MCP servers are separate files.
+1. **A genuinely different process lifecycle** that also needs different
+   dependencies (a long-running server or daemon, not a one-shot command). The
+   lifecycle alone is not enough; a subcommand can fork or exec.
+1. **A reusable executable that other tools call by name** and that has its own
+   CLI, tests, and documentation. It belongs in `scripts/`, not in a hidden
+   helper directory.
+
+Do not use `libexec/`. Put every executable in `scripts/`; if it is an
+implementation detail rather than a user command, add its bare name to the
+skill's `permissions/unsafe` so `permission apply` does not pre-approve it.
+
+If a separate file is unavoidable:
+
+- Locate it from the parent's resolved path (`Path(__file__).resolve()`), never
+  from a hardcoded number of `..` segments.
+- Resolve the skill root by a sentinel (`SKILL.md`) rather than by depth, so
+  moving the file within the tree does not break it.
+- Offer an environment override (for example `<TOOL>_SKILL_DIR`) for a copy or
+  an unusual install, and fail with a message that names it.
+- Test the symlinked entry point, a symlinked parent directory, a moved file,
+  and a copied file (which should fail clearly, not mysteriously).
+- Hardlinks and copies have no discoverable relationship to the original tree;
+  document that they are unsupported unless the override is set.
+
+Dependencies: prefer the standard library. Add a third-party package only when
+the alternative is materially worse, pin it in the PEP 723 header, and keep it
+out of the dependency-free common path. `install.sh` pre-installing packages
+does not remove the per-script environment cost (creation, import time, CI
+surface); it only removes the download.
+
+A shell script cannot rely on `$0` or `dirname "$0"` alone. Resolve symlinks
+first (see `shell.md`), then derive the directory with `pwd -P`; in bash use
+`BASH_SOURCE[0]` when the script may be sourced.
+
 ## Not Applicable
 
 Treated as not applicable to this repo's personal utility scripts, per

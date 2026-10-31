@@ -70,6 +70,14 @@ tools: clean command structures (`tool [verb] [noun]`), dual output streams
 (`stdout` for data, `stderr` for diagnostics), deterministic exit codes, and
 `--help` formatting. See **[references/cli-tools.md](references/cli-tools.md)**.
 
+### Script Self-Containment
+
+Tools are one executable file by default. Split a script only when its
+dependency set is materially different; keep the split file in `scripts/` (never
+`libexec/`); and resolve any unavoidable sibling from the script's real path, a
+sentinel root, and an environment override. See
+**[references/cli-tools.md](references/cli-tools.md#script-self-containment-and-sibling-files)**.
+
 ### Caching and Offline Mode
 
 Cross-cutting conventions for tools that fetch remote resources over the
